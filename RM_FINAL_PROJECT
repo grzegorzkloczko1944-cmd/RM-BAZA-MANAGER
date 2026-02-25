@@ -1,0 +1,679 @@
+# transfer.py
+# Inventor project transfer: IAM -> Pack&Go (shell verb like PPM) -> copy extras -> zip local RYSUNKI -> report
+# Requirements: Windows, Python 3.10+, pywin32 (pip install pywin32)
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sys
+import time
+import zipfile
+import unicodedata
+from dataclasses import dataclass, asdict
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import tkinter as tk
+from tkinter import filedialog, messagebox
+
+import logging
+
+
+# =========================
+# CONFIG
+# =========================
+
+RYSUNKI_PREFIX = "RYSUNKI"  # foldery zaczynające się od tego prefiksu
+
+EXTENSIONS_TO_COPY = {
+    ".dxf", ".dwf", ".pdf", ".xlsx", ".csv", ".jpg", ".bmp"
+}
+
+def detect_inventor_public_root() -> Path:
+    base = Path(r"C:\Users\Public\Documents\Autodesk")
+    # spróbuj znaleźć najwyższą zainstalowaną wersję Inventora
+    # np. "Inventor 2013", "Inventor 2015"...
+    candidates = sorted([p for p in base.glob("Inventor *") if p.is_dir()], reverse=True)
+    if candidates:
+        return candidates[0]
+    return base / "Inventor 2015"  # fallback
+
+# Monitor zakończenia Pack&Go
+POLL_SECONDS = 2
+STABILIZATION_SECONDS = 12  # ile sekund brak zmian, żeby uznać "skończone"
+LOCK_TEST_SAMPLES = 10      # ile plików próbować otworzyć do odczytu
+
+# Bezpieczeństwo
+FAIL_IF_DEST_EXISTS = True  # jeśli PROJEKT_X już istnieje -> STOP (True) / dopisz _01 (False)
+DRY_RUN = False             # True = nic nie kopiuje/usuwa, tylko raportuje co by zrobił
+
+# Pack&Go shell verb targets (PL/EN)
+PACKGO_TARGETS = [
+    "pack and go",
+    "spakuj i przenies",
+]
+
+
+# =========================
+# DATA STRUCTURES
+# =========================
+
+@dataclass
+class CopyStats:
+    files: int = 0
+    bytes: int = 0
+    by_ext: Dict[str, int] = None
+
+    def __post_init__(self):
+        if self.by_ext is None:
+            self.by_ext = {}
+
+    def add_file(self, path: Path):
+        self.files += 1
+        try:
+            sz = path.stat().st_size
+        except OSError:
+            sz = 0
+        self.bytes += sz
+        ext = path.suffix.lower()
+        self.by_ext[ext] = self.by_ext.get(ext, 0) + 1
+
+
+@dataclass
+class RunReport:
+    timestamp_start: str
+    timestamp_end: str = ""
+    user: str = ""
+    python_exe: str = ""
+    source_iam: str = ""
+    source_root: str = ""
+    source_ipj: str = ""
+    server_project_dir: str = ""
+
+    packngo_detected_files: int = 0
+    packngo_detected_bytes: int = 0
+
+    copied_rysunki_dirs: List[str] = None
+    copied_rysunki_stats: CopyStats = None
+
+    copied_root_files_stats: CopyStats = None
+    copied_templates_stats: CopyStats = None
+    copied_design_data_stats: CopyStats = None
+
+    local_zip_path: str = ""
+    local_zip_bytes: int = 0
+    local_zip_entries: int = 0
+    deleted_local_rysunki_dirs: List[str] = None
+
+    errors: List[str] = None
+    warnings: List[str] = None
+
+    def __post_init__(self):
+        if self.copied_rysunki_dirs is None:
+            self.copied_rysunki_dirs = []
+        if self.copied_rysunki_stats is None:
+            self.copied_rysunki_stats = CopyStats()
+        if self.copied_root_files_stats is None:
+            self.copied_root_files_stats = CopyStats()
+        if self.copied_templates_stats is None:
+            self.copied_templates_stats = CopyStats()
+        if self.copied_design_data_stats is None:
+            self.copied_design_data_stats = CopyStats()
+        if self.deleted_local_rysunki_dirs is None:
+            self.deleted_local_rysunki_dirs = []
+        if self.errors is None:
+            self.errors = []
+        if self.warnings is None:
+            self.warnings = []
+
+
+# =========================
+# HELPERS
+# =========================
+
+def now_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def human_bytes(n: int) -> str:
+    step = 1024.0
+    units = ["B", "KB", "MB", "GB", "TB"]
+    x = float(n)
+    for u in units:
+        if x < step or u == units[-1]:
+            return f"{x:.2f} {u}"
+        x /= step
+    return f"{n} B"
+
+
+def setup_logging(log_path: Path) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        handlers=[
+            logging.FileHandler(log_path, encoding="utf-8"),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
+
+
+def pick_iam_file() -> Path:
+    root = tk.Tk()
+    root.withdraw()
+    path = filedialog.askopenfilename(
+        title="Wybierz plik IAM (złożenie) w katalogu głównym projektu",
+        filetypes=[("Inventor Assembly", "*.iam"), ("All files", "*.*")]
+    )
+    root.destroy()
+    if not path:
+        raise RuntimeError("Nie wybrano pliku IAM.")
+    return Path(path)
+
+
+def pick_server_root_dir() -> Path:
+    root = tk.Tk()
+    root.withdraw()
+    path = filedialog.askdirectory(
+        title="Wybierz katalog docelowy (na serwerze / dysku sieciowym) - ROOT"
+    )
+    root.destroy()
+    if not path:
+        raise RuntimeError("Nie wybrano katalogu docelowego.")
+    return Path(path)
+
+
+def confirm_yes_no(title: str, msg: str) -> bool:
+    root = tk.Tk()
+    root.withdraw()
+    res = messagebox.askyesno(title, msg)
+    root.destroy()
+    return bool(res)
+
+
+def info_box(title: str, msg: str) -> None:
+    root = tk.Tk()
+    root.withdraw()
+    messagebox.showinfo(title, msg)
+    root.destroy()
+
+
+def error_box(title: str, msg: str) -> None:
+    root = tk.Tk()
+    root.withdraw()
+    messagebox.showerror(title, msg)
+    root.destroy()
+
+
+def find_ipj_for_iam(iam_path: Path) -> Path:
+    ipj = iam_path.with_suffix(".ipj")
+    if not ipj.exists():
+        raise FileNotFoundError(f"Nie znaleziono pliku IPJ: {ipj}")
+    return ipj
+
+
+def ensure_server_project_dir(server_root: Path, project_name: str) -> Path:
+    dest = server_root / project_name
+    if dest.exists():
+        if FAIL_IF_DEST_EXISTS:
+            raise FileExistsError(f"Katalog projektu już istnieje: {dest}")
+        i = 1
+        while True:
+            cand = server_root / f"{project_name}_{i:02d}"
+            if not cand.exists():
+                dest = cand
+                break
+            i += 1
+
+    if not DRY_RUN:
+        dest.mkdir(parents=True, exist_ok=False)
+    return dest
+
+
+def try_open_read(path: Path) -> bool:
+    try:
+        with open(path, "rb"):
+            return True
+    except Exception:
+        return False
+
+
+# =========================
+# PACK & GO via SHELL VERB (PPM)
+# =========================
+
+def _normalize_verb_name(s: str) -> str:
+    s = s.replace("&", "").replace("...", "").replace("…", "").strip().lower()
+    s = "".join(
+        c for c in unicodedata.normalize("NFKD", s)
+        if not unicodedata.combining(c)
+    )
+    s = " ".join(s.split())
+    return s
+
+
+def invoke_pack_and_go_via_shell(iam_path: Path) -> bool:
+    """
+    Uruchamia Pack&Go dokładnie tak jak PPM w Explorerze, używając shell verb.
+    Działa, jeśli w systemie jest zarejestrowany wpis menu (u Ciebie jest: 'Spakuj i przenieś').
+    """
+    import win32com.client  # pywin32
+
+    shell = win32com.client.Dispatch("Shell.Application")
+    folder = shell.Namespace(str(iam_path.parent))
+    item = folder.ParseName(iam_path.name)
+    if item is None:
+        raise RuntimeError(f"Shell nie widzi pliku: {iam_path}")
+
+    verbs = item.Verbs()
+
+    # Debug: wypisz wszystkie verby
+    logging.info("Dostępne pozycje menu (verby) dla pliku IAM:")
+    verb_names: List[str] = []
+    for i in range(verbs.Count):
+        v = verbs.Item(i)
+        name = str(v.Name)
+        verb_names.append(name)
+        logging.info(f"  - {name}")
+
+    # Szukaj Pack&Go (PL/EN)
+    for i in range(verbs.Count):
+        v = verbs.Item(i)
+        raw = str(v.Name)
+        norm = _normalize_verb_name(raw)
+
+        if any(t in norm for t in PACKGO_TARGETS):
+            logging.info(f"Uruchamiam verb: '{raw}'")
+            v.DoIt()
+            return True
+
+    return False
+
+
+def run_pack_and_go_ui(iam_path: Path, ipj_path: Path, server_project_dir: Path, report: RunReport) -> None:
+    logging.info("Pack&Go: próba uruchomienia jak PPM (shell verb).")
+
+    ok = False
+    try:
+        ok = invoke_pack_and_go_via_shell(iam_path)
+    except Exception as e:
+        report.warnings.append(f"Shell verb Pack&Go failed: {e}")
+        logging.warning(f"Shell verb Pack&Go failed: {e}")
+
+    if ok:
+        info_box(
+            "Pack and Go",
+            "Uruchomiłem Pack and Go jak z PPM.\n\n"
+            "Sprawdź ustawienia w oknie Pack and Go:\n"
+            f"- Folder docelowy: {server_project_dir}\n"
+            f"- IPJ: {ipj_path}\n"
+            "- ✔ Uwzględniaj połączone pliki\n"
+            "- ✔ Zbierz grupy robocze\n"
+            "- ✔ Kopiuj do jednego katalogu\n"
+            "- ✖ Tylko pliki modelu / Pomiń biblioteki / Pomiń style / Pomiń szablony\n\n"
+            "Zatwierdź. Skrypt sam wykryje zakończenie i przejdzie dalej."
+        )
+        return
+
+    report.warnings.append("Nie znalazłem 'Pack and Go / Spakuj i przenieś' w menu powłoki dla pliku IAM.")
+    info_box(
+        "Pack and Go",
+        "Nie znalazłem 'Pack and Go / Spakuj i przenieś' w menu kontekstowym (shell verb).\n"
+        "Uruchom Pack and Go ręcznie z PPM na pliku IAM.\n\n"
+        f"Folder docelowy: {server_project_dir}\n"
+        f"IPJ: {ipj_path}\n\n"
+        "Skrypt sam wykryje zakończenie i pójdzie dalej.\n"
+        "W logu są wypisane wszystkie pozycje menu (verby) – można dopasować nazwę."
+    )
+
+
+# =========================
+# MONITOR
+# =========================
+
+def snapshot_dir(dest: Path) -> Tuple[int, int]:
+    """
+    Snapshot liczby plików i bajtów w katalogu docelowym Pack&Go.
+    UWAGA: log jest lokalny, więc nie rośnie w tym folderze i nie psuje monitora.
+    """
+    files = 0
+    bytes_ = 0
+    for p in dest.rglob("*"):
+        if p.is_file():
+            files += 1
+            try:
+                bytes_ += p.stat().st_size
+            except OSError:
+                pass
+    return files, bytes_
+
+
+def wait_until_stable(dest: Path, report: RunReport) -> None:
+    logging.info(f"Monitor: czekam na stabilizację w {dest}")
+
+    # 1) Najpierw czekamy aż Pack&Go w ogóle zacznie coś tworzyć
+    while True:
+        files, bytes_ = snapshot_dir(dest)
+        if files > 0 or bytes_ > 0:
+            logging.info(f"Monitor: wykryto start kopiowania (files={files}, bytes={bytes_})")
+            break
+        time.sleep(POLL_SECONDS)
+
+    # 2) Potem standardowa stabilizacja
+    stable_for = 0
+    prev_files, prev_bytes = snapshot_dir(dest)
+    logging.info(f"Monitor: start snapshot: files={prev_files}, bytes={prev_bytes}")
+
+    while True:
+        time.sleep(POLL_SECONDS)
+        cur_files, cur_bytes = snapshot_dir(dest)
+
+        changed = (cur_files != prev_files) or (cur_bytes != prev_bytes)
+        if changed:
+            stable_for = 0
+            prev_files, prev_bytes = cur_files, cur_bytes
+            logging.info(f"Monitor: zmiana: files={cur_files}, bytes={cur_bytes}")
+            continue
+
+        stable_for += POLL_SECONDS
+        logging.info(f"Monitor: brak zmian od {stable_for}s (files={cur_files}, bytes={cur_bytes})")
+
+        if stable_for >= STABILIZATION_SECONDS:
+            all_files = [p for p in dest.rglob("*") if p.is_file()]
+            sample = all_files[:LOCK_TEST_SAMPLES]
+            locked = [p for p in sample if not try_open_read(p)]
+            if locked:
+                stable_for = 0
+                logging.info(f"Monitor: wykryto blokady ({len(locked)}). Czekam dalej.")
+                continue
+
+            report.packngo_detected_files = cur_files
+            report.packngo_detected_bytes = cur_bytes
+            logging.info("Monitor: stabilne i bez blokad -> uznaję zakończenie.")
+            return
+
+
+# =========================
+# COPY ENGINE
+# =========================
+
+def safe_copy_file(src: Path, dst: Path, stats: CopyStats) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if DRY_RUN:
+        stats.add_file(src)
+        logging.info(f"[DRY] copy file: {src} -> {dst}")
+        return
+    shutil.copy2(src, dst)
+    stats.add_file(src)
+
+
+def safe_copy_tree(src_dir: Path, dst_dir: Path, stats: CopyStats) -> None:
+    if DRY_RUN:
+        for f in src_dir.rglob("*"):
+            if f.is_file():
+                stats.add_file(f)
+        logging.info(f"[DRY] copy tree: {src_dir} -> {dst_dir}")
+        return
+
+    shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+    for f in src_dir.rglob("*"):
+        if f.is_file():
+            stats.add_file(f)
+
+
+def copy_rysunki_dirs(source_root: Path, server_project_dir: Path, report: RunReport) -> None:
+    rysunki_dirs = [p for p in source_root.iterdir() if p.is_dir() and _normalize_verb_name(p.name).startswith(_normalize_verb_name(RYSUNKI_PREFIX))]
+    for d in rysunki_dirs:
+        dst = server_project_dir / d.name
+        logging.info(f"Kopiuję folder RYSUNKI*: {d.name}")
+        report.copied_rysunki_dirs.append(d.name)
+        safe_copy_tree(d, dst, report.copied_rysunki_stats)
+
+
+def copy_root_selected_extensions(source_root: Path, server_project_dir: Path, report: RunReport) -> None:
+    for p in source_root.iterdir():
+        if p.is_file() and p.suffix.lower() in EXTENSIONS_TO_COPY:
+            dst = server_project_dir / p.name
+            logging.info(f"Kopiuję plik: {p.name}")
+            safe_copy_file(p, dst, report.copied_root_files_stats)
+
+
+def copy_templates_and_design_data(server_project_dir: Path, report: RunReport) -> None:
+    inv_root = detect_inventor_public_root()
+    templates_src = inv_root / TEMPLATES_DIRNAME
+    design_src = inv_root / DESIGN_DATA_DIRNAME
+
+    templates_dst = server_project_dir / "TEMPLATES"
+    design_dst = server_project_dir / "DESIGN_DATA"
+
+    if templates_src.exists():
+        logging.info("Kopiuję TEMPLATES...")
+        safe_copy_tree(templates_src, templates_dst, report.copied_templates_stats)
+    else:
+        report.warnings.append(f"Brak katalogu TEMPLATES: {templates_src}")
+        logging.warning(f"Brak katalogu TEMPLATES: {templates_src}")
+
+    if design_src.exists():
+        logging.info("Kopiuję DESIGN DATA...")
+        safe_copy_tree(design_src, design_dst, report.copied_design_data_stats)
+    else:
+        report.warnings.append(f"Brak katalogu DESIGN DATA: {design_src}")
+        logging.warning(f"Brak katalogu DESIGN DATA: {design_src}")
+
+
+# =========================
+# ZIP ENGINE (LOCAL)
+# =========================
+
+def zip_local_rysunki_and_cleanup(source_root: Path, project_name: str, report: RunReport) -> None:
+    rysunki_dirs = [p for p in source_root.iterdir() if p.is_dir() and _normalize_verb_name(p.name).startswith(_normalize_verb_name(RYSUNKI_PREFIX))]
+    if not rysunki_dirs:
+        logging.info("Brak lokalnych folderów RYSUNKI* do spakowania.")
+        return
+
+    zip_name = f"{project_name}_RYSUNKI_{datetime.now().strftime('%Y-%m-%d')}.zip"
+    zip_path = source_root / zip_name
+
+    logging.info(f"Tworzę ZIP: {zip_path}")
+
+    if DRY_RUN:
+        report.local_zip_path = str(zip_path)
+        report.local_zip_entries = sum(len([f for f in d.rglob('*') if f.is_file()]) for d in rysunki_dirs)
+        report.local_zip_bytes = 0
+        logging.info(f"[DRY] zip entries would be: {report.local_zip_entries}")
+        return
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for d in rysunki_dirs:
+            for f in d.rglob("*"):
+                if f.is_file():
+                    arcname = f.relative_to(source_root)  # RYSUNKI.../...
+                    zf.write(f, arcname=str(arcname))
+
+    try:
+        zip_bytes = zip_path.stat().st_size
+    except OSError:
+        zip_bytes = 0
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        namelist = zf.namelist()
+
+    if zip_bytes <= 0 or len(namelist) == 0:
+        report.errors.append("ZIP walidacja nieudana (pusty lub 0B). NIE kasuję folderów RYSUNKI.")
+        logging.error("ZIP walidacja nieudana. NIE kasuję folderów RYSUNKI.")
+        return
+
+    for d in rysunki_dirs:
+        logging.info(f"Kasuję lokalny folder po ZIP: {d}")
+        shutil.rmtree(d)
+        report.deleted_local_rysunki_dirs.append(d.name)
+
+    report.local_zip_path = str(zip_path)
+    report.local_zip_bytes = zip_bytes
+    report.local_zip_entries = len(namelist)
+
+
+# =========================
+# REPORT ENGINE
+# =========================
+
+def write_reports(server_project_dir: Path, report: RunReport) -> Tuple[Path, Path]:
+    rap_dir = server_project_dir / "RAPORT"
+    if not DRY_RUN:
+        rap_dir.mkdir(parents=True, exist_ok=True)
+
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    txt_path = rap_dir / f"RAPORT_{stamp}.txt"
+    json_path = rap_dir / f"RAPORT_{stamp}.json"
+
+    report.timestamp_end = now_str()
+
+    lines = []
+    lines.append(f"START: {report.timestamp_start}")
+    lines.append(f"END:   {report.timestamp_end}")
+    lines.append(f"USER:  {report.user}")
+    lines.append(f"PYTHON: {report.python_exe}")
+    lines.append("")
+    lines.append(f"SOURCE IAM:  {report.source_iam}")
+    lines.append(f"SOURCE ROOT: {report.source_root}")
+    lines.append(f"SOURCE IPJ:  {report.source_ipj}")
+    lines.append(f"DEST DIR:    {report.server_project_dir}")
+    lines.append("")
+    lines.append(f"PACK&GO detected: {report.packngo_detected_files} files, {human_bytes(report.packngo_detected_bytes)}")
+    lines.append("")
+    lines.append(f"Copied RYSUNKI dirs: {', '.join(report.copied_rysunki_dirs) if report.copied_rysunki_dirs else '(none)'}")
+    lines.append(f"RYSUNKI copy stats: {report.copied_rysunki_stats.files} files, {human_bytes(report.copied_rysunki_stats.bytes)}")
+    lines.append("")
+    lines.append("Root selected extensions copy stats:")
+    lines.append(f"  files: {report.copied_root_files_stats.files}, bytes: {human_bytes(report.copied_root_files_stats.bytes)}")
+    if report.copied_root_files_stats.by_ext:
+        lines.append(f"  by ext: {report.copied_root_files_stats.by_ext}")
+    lines.append("")
+    lines.append("TEMPLATES copy stats:")
+    lines.append(f"  files: {report.copied_templates_stats.files}, bytes: {human_bytes(report.copied_templates_stats.bytes)}")
+    lines.append("")
+    lines.append("DESIGN_DATA copy stats:")
+    lines.append(f"  files: {report.copied_design_data_stats.files}, bytes: {human_bytes(report.copied_design_data_stats.bytes)}")
+    lines.append("")
+    lines.append(f"Local ZIP: {report.local_zip_path or '(none)'}")
+    if report.local_zip_path:
+        lines.append(f"  entries: {report.local_zip_entries}")
+        lines.append(f"  size:    {human_bytes(report.local_zip_bytes)}")
+    lines.append(f"Deleted local RYSUNKI dirs: {', '.join(report.deleted_local_rysunki_dirs) if report.deleted_local_rysunki_dirs else '(none)'}")
+    lines.append("")
+    if report.warnings:
+        lines.append("WARNINGS:")
+        lines.extend([f"- {w}" for w in report.warnings])
+        lines.append("")
+    if report.errors:
+        lines.append("ERRORS:")
+        lines.extend([f"- {e}" for e in report.errors])
+        lines.append("")
+
+    txt_content = "\n".join(lines)
+
+    if DRY_RUN:
+        logging.info("[DRY] Would write reports:\n" + txt_content)
+        return txt_path, json_path
+
+    txt_path.write_text(txt_content, encoding="utf-8")
+
+    def conv(obj):
+        if isinstance(obj, CopyStats):
+            return {"files": obj.files, "bytes": obj.bytes, "by_ext": obj.by_ext}
+        if isinstance(obj, Path):
+            return str(obj)
+        raise TypeError(f"Unserializable: {type(obj)}")
+
+    json_path.write_text(json.dumps(asdict(report), ensure_ascii=False, indent=2, default=conv), encoding="utf-8")
+    logging.info(f"Raport zapisany: {txt_path}")
+    logging.info(f"Raport zapisany: {json_path}")
+    return txt_path, json_path
+
+
+# =========================
+# MAIN
+# =========================
+
+def main():
+    report = RunReport(timestamp_start=now_str())
+    report.user = os.getlogin() if hasattr(os, "getlogin") else ""
+    report.python_exe = sys.executable
+
+    local_log_path = None
+
+    try:
+        iam_path = pick_iam_file()
+        if iam_path.suffix.lower() != ".iam":
+            raise ValueError("Wybrany plik nie ma rozszerzenia .iam")
+
+        source_root = iam_path.parent
+        project_name = iam_path.stem
+
+        ipj_path = find_ipj_for_iam(iam_path)
+
+        server_root = pick_server_root_dir()
+
+        # Ostrzeż jeśli to nie wygląda na UNC (opcjonalnie)
+        if not str(server_root).startswith("\\\\"):
+            if not confirm_yes_no("Uwaga", f"Wybrana ścieżka nie wygląda na UNC (\\\\SERWER\\...):\n{server_root}\n\nKontynuować?"):
+                raise RuntimeError("Przerwano - wybierz ścieżkę UNC (\\\\SERWER\\...).")
+
+        server_project_dir = ensure_server_project_dir(server_root, project_name)
+
+        # LOG LOKALNY (żeby monitor nie wariował przez rosnący transfer.log)
+        local_log_path = Path(os.getenv("TEMP", str(Path.home()))) / f"transfer_{project_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        setup_logging(local_log_path)
+
+        logging.info("=== START TRANSFER ===")
+        logging.info(f"DRY_RUN={DRY_RUN} | FAIL_IF_DEST_EXISTS={FAIL_IF_DEST_EXISTS}")
+        logging.info(f"IAM: {iam_path}")
+        logging.info(f"IPJ: {ipj_path}")
+        logging.info(f"LOCAL ROOT: {source_root}")
+        logging.info(f"SERVER PROJECT DIR: {server_project_dir}")
+
+        report.source_iam = str(iam_path)
+        report.source_root = str(source_root)
+        report.source_ipj = str(ipj_path)
+        report.server_project_dir = str(server_project_dir)
+
+        # 1) Pack&Go (shell verb like PPM)
+        run_pack_and_go_ui(iam_path, ipj_path, server_project_dir, report)
+
+        # 2) Monitor zakończenia Pack&Go
+        wait_until_stable(server_project_dir, report)
+
+        # 3) Copy extras
+        copy_rysunki_dirs(source_root, server_project_dir, report)
+        copy_root_selected_extensions(source_root, server_project_dir, report)
+        copy_templates_and_design_data(server_project_dir, report)
+
+        # 4) ZIP local RYSUNKI + cleanup
+        zip_local_rysunki_and_cleanup(source_root, project_name, report)
+
+        # 5) Reports
+        txt_path, json_path = write_reports(server_project_dir, report)
+
+        # 6) Copy log to server root (after monitor is done)
+        if local_log_path and not DRY_RUN:
+            dst_log = Path(report.server_project_dir) / "transfer.log"
+            shutil.copy2(local_log_path, dst_log)
+            logging.info(f"Log skopiowany na serwer: {dst_log}")
+
+        logging.info("=== DONE ===")
+        info_box("Gotowe", f"Transfer zakończony.\nRaport:\n{txt_path}\n{json_path}")
+
+    except Exception as e:
+        try:
+            logging.exception("Błąd krytyczny")
+        except Exception:
+            pass
+        error_box("Błąd", str(e))
+        raise
+
+
+if __name__ == "__main__":
+    main()
