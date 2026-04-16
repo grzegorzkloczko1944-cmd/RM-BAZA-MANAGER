@@ -26,6 +26,7 @@ import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 import importlib
+import calendar as cal_module  # Built-in calendar for date picker
 
 # Plotly for charts
 try:
@@ -1163,6 +1164,232 @@ class RMManagerGUI:
         # Neither format worked
         return (False, f"Nieprawidłowy format daty: '{date_str}'. Użyj formatu: DD-MM-YYYY lub YYYY-MM-DD")
 
+    def open_calendar_picker(self, entry_widget, initial_date=None):
+        """Otwórz okno z kalendarzem (czysty tkinter, bez zewnętrznych bibliotek)
+        
+        Args:
+            entry_widget: Widget Entry, do którego zostanie wstawiona wybrana data
+            initial_date: Początkowa data (DD-MM-YYYY lub datetime), domyślnie dzisiaj
+        """
+        # Ustal początkową datę
+        if initial_date:
+            if isinstance(initial_date, str):
+                try:
+                    initial_dt = self.parse_date_ddmmyyyy(initial_date)
+                except Exception:
+                    initial_dt = datetime.now()
+            elif isinstance(initial_date, datetime):
+                initial_dt = initial_date
+            else:
+                initial_dt = datetime.now()
+        else:
+            current_val = entry_widget.get().strip()
+            if current_val:
+                try:
+                    initial_dt = self.parse_date_ddmmyyyy(current_val)
+                except Exception:
+                    try:
+                        initial_dt = datetime.strptime(current_val, '%Y-%m-%d')
+                    except Exception:
+                        initial_dt = datetime.now()
+            else:
+                initial_dt = datetime.now()
+
+        cal_window = tk.Toplevel(self.root)
+        cal_window.title("📅 Wybierz datę")
+        cal_window.resizable(False, False)
+        cal_window.transient(self.root)
+        cal_window.grab_set()
+
+        # Stan kalendarza
+        state = {'year': initial_dt.year, 'month': initial_dt.month, 'selected_day': initial_dt.day}
+        DAY_NAMES = ['Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So', 'Nd']
+        MONTH_NAMES = [
+            '', 'Styczeń', 'Luty', 'Marzec', 'Kwiecień', 'Maj', 'Czerwiec',
+            'Lipiec', 'Sierpień', 'Wrzesień', 'Październik', 'Listopad', 'Grudzień'
+        ]
+
+        # ── Nagłówek z nawigacją ──
+        nav_frame = tk.Frame(cal_window, bg=self.COLOR_BLUE, pady=6)
+        nav_frame.pack(fill=tk.X)
+
+        btn_prev_year = tk.Button(nav_frame, text="«", font=("Arial", 12, "bold"),
+                                  bg=self.COLOR_BLUE, fg="white", bd=0, padx=8,
+                                  activebackground="#1a5276", activeforeground="white")
+        btn_prev_year.pack(side=tk.LEFT, padx=2)
+
+        btn_prev = tk.Button(nav_frame, text="‹", font=("Arial", 14, "bold"),
+                             bg=self.COLOR_BLUE, fg="white", bd=0, padx=8,
+                             activebackground="#1a5276", activeforeground="white")
+        btn_prev.pack(side=tk.LEFT, padx=2)
+
+        month_label = tk.Label(nav_frame, text="", font=("Arial", 11, "bold"),
+                               bg=self.COLOR_BLUE, fg="white")
+        month_label.pack(side=tk.LEFT, expand=True)
+
+        btn_next = tk.Button(nav_frame, text="›", font=("Arial", 14, "bold"),
+                             bg=self.COLOR_BLUE, fg="white", bd=0, padx=8,
+                             activebackground="#1a5276", activeforeground="white")
+        btn_next.pack(side=tk.RIGHT, padx=2)
+
+        btn_next_year = tk.Button(nav_frame, text="»", font=("Arial", 12, "bold"),
+                                  bg=self.COLOR_BLUE, fg="white", bd=0, padx=8,
+                                  activebackground="#1a5276", activeforeground="white")
+        btn_next_year.pack(side=tk.RIGHT, padx=2)
+
+        # ── Siatka dni ──
+        grid_frame = tk.Frame(cal_window, bg="white", padx=5, pady=5)
+        grid_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Nagłówki dni tygodnia
+        for col, name in enumerate(DAY_NAMES):
+            fg_color = "#e74c3c" if col >= 5 else "#2c3e50"
+            tk.Label(grid_frame, text=name, font=("Arial", 9, "bold"),
+                     bg="white", fg=fg_color, width=4).grid(row=0, column=col, pady=(2, 4))
+
+        # Przyciski dni (6 wierszy x 7 kolumn)
+        day_buttons = []
+        for r in range(6):
+            row_btns = []
+            for c in range(7):
+                btn = tk.Button(grid_frame, text="", width=4, font=("Arial", 9),
+                                bd=1, relief=tk.FLAT, bg="white",
+                                activebackground=self.COLOR_GREEN, activeforeground="white")
+                btn.grid(row=r + 1, column=c, padx=1, pady=1)
+                row_btns.append(btn)
+            day_buttons.append(row_btns)
+
+        def fill_calendar():
+            """Wypełnij siatkę dniami aktualnego miesiąca"""
+            y, m = state['year'], state['month']
+            month_label.config(text=f"{MONTH_NAMES[m]} {y}")
+
+            # Pierwszy dzień miesiąca i liczba dni
+            first_weekday, num_days = cal_module.monthrange(y, m)
+            # cal_module.monthrange: first_weekday 0=Monday
+
+            today = datetime.now()
+
+            day = 1
+            for r in range(6):
+                for c in range(7):
+                    btn = day_buttons[r][c]
+                    cell_index = r * 7 + c
+                    if cell_index < first_weekday or day > num_days:
+                        btn.config(text="", state=tk.DISABLED, bg="white", relief=tk.FLAT)
+                    else:
+                        d = day
+                        is_weekend = c >= 5
+                        is_today = (d == today.day and m == today.month and y == today.year)
+                        is_selected = (d == state['selected_day'] and m == initial_dt.month and y == initial_dt.year)
+
+                        if is_selected:
+                            bg = self.COLOR_GREEN
+                            fg = "white"
+                        elif is_today:
+                            bg = "#d5f5e3"
+                            fg = "#27ae60"
+                        elif is_weekend:
+                            bg = "#fdf2f2"
+                            fg = "#e74c3c"
+                        else:
+                            bg = "white"
+                            fg = "#2c3e50"
+
+                        btn.config(text=str(d), state=tk.NORMAL, bg=bg, fg=fg, relief=tk.RIDGE,
+                                   command=lambda dd=d: select_day(dd))
+                        day += 1
+
+        def select_day(d):
+            state['selected_day'] = d
+            # od razu wstaw datę
+            selected_date = f"{d:02d}-{state['month']:02d}-{state['year']}"
+            _set_entry_value(selected_date)
+            cal_window.destroy()
+
+        def prev_month():
+            if state['month'] == 1:
+                state['month'] = 12
+                state['year'] -= 1
+            else:
+                state['month'] -= 1
+            state['selected_day'] = 0
+            fill_calendar()
+
+        def next_month():
+            if state['month'] == 12:
+                state['month'] = 1
+                state['year'] += 1
+            else:
+                state['month'] += 1
+            state['selected_day'] = 0
+            fill_calendar()
+
+        def prev_year():
+            state['year'] -= 1
+            state['selected_day'] = 0
+            fill_calendar()
+
+        def next_year():
+            state['year'] += 1
+            state['selected_day'] = 0
+            fill_calendar()
+
+        btn_prev.config(command=prev_month)
+        btn_next.config(command=next_month)
+        btn_prev_year.config(command=prev_year)
+        btn_next_year.config(command=next_year)
+
+        def _set_entry_value(date_str):
+            original_state = str(entry_widget.cget('state'))
+            if original_state in ('readonly', 'disabled'):
+                entry_widget.config(state='normal')
+            entry_widget.delete(0, tk.END)
+            entry_widget.insert(0, date_str)
+            if original_state in ('readonly', 'disabled'):
+                entry_widget.config(state=original_state)
+
+        # ── Przyciski dolne ──
+        btn_frame = tk.Frame(cal_window, bg="white")
+        btn_frame.pack(fill=tk.X, padx=8, pady=(2, 8))
+
+        tk.Button(
+            btn_frame, text="📅 Dziś", command=lambda: (
+                _set_entry_value(datetime.now().strftime('%d-%m-%Y')),
+                cal_window.destroy()
+            ),
+            bg=self.COLOR_BLUE, fg="white", font=self.FONT_SMALL, padx=8, pady=3
+        ).pack(side=tk.LEFT, padx=3)
+
+        tk.Button(
+            btn_frame, text="🗑️ Wyczyść", command=lambda: (
+                _set_entry_value(''),
+                cal_window.destroy()
+            ),
+            bg=self.COLOR_ORANGE, fg="white", font=self.FONT_SMALL, padx=8, pady=3
+        ).pack(side=tk.LEFT, padx=3)
+
+        tk.Button(
+            btn_frame, text="❌ Anuluj", command=cal_window.destroy,
+            bg="#95a5a6", fg="white", font=self.FONT_SMALL, padx=8, pady=3
+        ).pack(side=tk.LEFT, padx=3)
+
+        # Keyboard shortcuts
+        cal_window.bind('<Escape>', lambda e: cal_window.destroy())
+        cal_window.bind('<Left>', lambda e: prev_month())
+        cal_window.bind('<Right>', lambda e: next_month())
+        # Mouse wheel: scroll months
+        cal_window.bind('<MouseWheel>', lambda e: prev_month() if e.delta > 0 else next_month())
+        cal_window.bind('<Button-4>', lambda e: prev_month())   # Linux scroll up
+        cal_window.bind('<Button-5>', lambda e: next_month())   # Linux scroll down
+
+        # Wypełnij i wyśrodkuj
+        fill_calendar()
+        cal_window.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (cal_window.winfo_width() // 2)
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (cal_window.winfo_height() // 2)
+        cal_window.geometry(f'+{x}+{y}')
+
     def _update_lock_buttons_state(self):
         """Aktualizuje stan przycisków lock i etykietę statusu"""
         if not hasattr(self, 'btn_acquire_lock'):
@@ -1176,6 +1403,7 @@ class RMManagerGUI:
             self.lock_status_label.config(text="🔓 Wolny", fg="#95a5a6")
             self.btn_acquire_lock.config(state=tk.DISABLED)
             self.btn_force_lock.config(state=tk.DISABLED)
+            self.btn_cancel_lock.config(state=tk.DISABLED)
             self.btn_release_lock.config(state=tk.DISABLED)
             return
 
@@ -1184,6 +1412,7 @@ class RMManagerGUI:
             self.lock_status_label.config(text="🟢 ZABLOKOWANY", fg="#27ae60")
             self.btn_acquire_lock.config(state=tk.DISABLED)
             self.btn_force_lock.config(state=tk.DISABLED)
+            self.btn_cancel_lock.config(state=tk.NORMAL)
             self.btn_release_lock.config(state=tk.NORMAL)
         else:
             # Nie mamy locka - sprawdź czy ktoś inny ma
@@ -1195,6 +1424,7 @@ class RMManagerGUI:
                 self.lock_status_label.config(text="🔓 Wolny", fg="#95a5a6")
             self.btn_acquire_lock.config(state=tk.NORMAL)
             self.btn_force_lock.config(state=tk.NORMAL)
+            self.btn_cancel_lock.config(state=tk.DISABLED)
             self.btn_release_lock.config(state=tk.DISABLED)
 
     def acquire_lock(self):
@@ -1229,6 +1459,7 @@ class RMManagerGUI:
             self.have_lock = True
             self.current_lock_id = lock_id
             self.read_only_mode = False
+            self._snapshot_stage_dates()  # Snapshot dat do cofnięcia przy Anuluj
             self.status_bar.config(
                 text=f"🟢 Lock przejęty dla projektu {self.selected_project_id}",
                 fg="#27ae60"
@@ -1292,6 +1523,7 @@ class RMManagerGUI:
             self.have_lock = True
             self.current_lock_id = lock_id
             self.read_only_mode = False
+            self._snapshot_stage_dates()  # Snapshot dat do cofnięcia przy Anuluj
             self.status_bar.config(
                 text=f"⚡ Lock wymuszony dla projektu {self.selected_project_id}",
                 fg="#9b59b6"
@@ -1304,6 +1536,93 @@ class RMManagerGUI:
 
         except Exception as e:
             messagebox.showerror("Błąd", f"Nie udało się wymusić przejęcia locka:\n{e}", parent=self.root)
+
+    def _snapshot_stage_dates(self):
+        """Zapisz snapshot wszystkich dat stage_schedule dla bieżącego projektu.
+        Używane do przywracania przy Anuluj."""
+        self._dates_snapshot = None
+        try:
+            _pdb = self.get_project_db_path(self.selected_project_id)
+            con = rmm._open_rm_connection(_pdb, row_factory=False)
+            rows = con.execute("""
+                SELECT ps.stage_code, ss.template_start, ss.template_end
+                FROM stage_schedule ss
+                JOIN project_stages ps ON ss.project_stage_id = ps.id
+                WHERE ps.project_id = ?
+            """, (self.selected_project_id,)).fetchall()
+            con.close()
+            self._dates_snapshot = {row[0]: (row[1], row[2]) for row in rows}
+            print(f"📸 Snapshot dat zapisany ({len(self._dates_snapshot)} etapów)")
+        except Exception as e:
+            print(f"⚠️ Nie udało się zapisać snapshotu dat: {e}")
+
+    def _restore_stage_dates_from_snapshot(self):
+        """Przywróć daty z snapshotu (cofnięcie wszystkich zmian)."""
+        if not self._dates_snapshot:
+            print("⚠️ Brak snapshotu dat do przywrócenia")
+            return False
+        try:
+            _pdb = self.get_project_db_path(self.selected_project_id)
+            con = rmm._open_rm_connection(_pdb, row_factory=False)
+            for stage_code, (t_start, t_end) in self._dates_snapshot.items():
+                con.execute("""
+                    UPDATE stage_schedule
+                    SET template_start = ?, template_end = ?
+                    WHERE project_stage_id = (
+                        SELECT id FROM project_stages
+                        WHERE project_id = ? AND stage_code = ?
+                    )
+                """, (t_start, t_end, self.selected_project_id, stage_code))
+            con.commit()
+            con.close()
+            rmm.recalculate_forecast(_pdb, self.selected_project_id)
+            print(f"♻️ Przywrócono daty z snapshotu ({len(self._dates_snapshot)} etapów)")
+            self._dates_snapshot = None
+            return True
+        except Exception as e:
+            print(f"🔥 Błąd przywracania snapshotu: {e}")
+            return False
+
+    def cancel_lock(self):
+        """Anuluj lock - cofnij WSZYSTKIE zmiany dat i zwolnij lock (przycisk ✖ Anuluj)"""
+        if not self.have_lock or not self.selected_project_id:
+            return
+
+        if not messagebox.askyesno(
+            "Potwierdź anulowanie",
+            f"Czy na pewno anulować WSZYSTKIE zmiany w projekcie {self.selected_project_id}?\n\n"
+            "♻️ Daty etapów zostaną przywrócone do stanu\n"
+            "sprzed przejęcia locka (także z wykresu).\n\n"
+            "⚠️ Tej operacji nie można cofnąć!",
+            icon='warning',
+            parent=self.root
+        ):
+            return
+
+        try:
+            # Przywróć daty ze snapshotu PRZED zwolnieniem locka
+            restored = self._restore_stage_dates_from_snapshot()
+
+            # Zwolnij lock
+            self.lock_manager.release_project_lock(self.selected_project_id)
+            self._locked_project_id = None
+            self.have_lock = False
+            self.current_lock_id = None
+            self.read_only_mode = True
+
+            msg = "✖ Anulowano - daty przywrócone" if restored else "✖ Lock anulowany"
+            self.status_bar.config(
+                text=f"{msg} dla projektu {self.selected_project_id}",
+                fg="#f39c12"
+            )
+            self._update_lock_buttons_state()
+            self.load_project_stages()
+            self.refresh_timeline()
+            self._refresh_combo_lock_info()
+            print(f"✖ Lock anulowany (daty przywrócone={restored}): projekt {self.selected_project_id}")
+
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Nie udało się anulować locka:\n{e}", parent=self.root)
 
     def release_lock(self):
         """Zwolnij lock projektu (przycisk 🔒 Zwolnij Lock)"""
@@ -1980,6 +2299,22 @@ class RMManagerGUI:
         )
         self.btn_force_lock.pack(side=tk.LEFT, padx=(0, 3), pady=10)
 
+        # Przycisk Anuluj (zwolnij lock bez zapisywania zmian)
+        self.btn_cancel_lock = tk.Button(
+            self.top_frame,
+            text="✖ Anuluj",
+            command=self.cancel_lock,
+            bg="#f39c12",
+            fg="white",
+            font=("Arial", 9, "bold"),
+            padx=8,
+            pady=5,
+            relief=tk.RAISED,
+            bd=2,
+            state=tk.DISABLED
+        )
+        self.btn_cancel_lock.pack(side=tk.LEFT, padx=(0, 3), pady=10)
+
         # Zdejmij Lock button
         self.btn_release_lock = tk.Button(
             self.top_frame,
@@ -2195,6 +2530,7 @@ class RMManagerGUI:
         
         # Tabs
         tab_control = ttk.Notebook(right_frame)
+        self.tab_control = tab_control
         
         # Tab 1: Oś czasu (interaktywny)
         self.timeline_tab = ttk.Frame(tab_control)
@@ -2921,6 +3257,7 @@ class RMManagerGUI:
         self.refresh_timeline()
         self.refresh_dashboard()
         self.refresh_history()
+        self.create_embedded_gantt_chart(preserve_view=False)
         
         # Sprawdź alarmy dla tego projektu
         self.check_alarms()
@@ -3115,6 +3452,7 @@ class RMManagerGUI:
             # Dezaktywuj przyciski Lock
             self.btn_acquire_lock.config(state=tk.DISABLED)
             self.btn_force_lock.config(state=tk.DISABLED)
+            self.btn_cancel_lock.config(state=tk.DISABLED)
             
             # Ustaw ścieżkę do backupu (żeby get_project_db_path zwracała backup)
             self.backup_db_path = str(backup_file)
@@ -5723,6 +6061,7 @@ class RMManagerGUI:
                     pady=2
                 )
                 stage_frame.pack(fill=tk.X, padx=5, pady=5)
+                stage_frame._stage_code = stage_code
                 
                 # ── NAGŁÓWEK z przyciskami akcji (notatki) ──
                 header_row = tk.Frame(stage_frame, bg=bg_color)
@@ -5883,6 +6222,20 @@ class RMManagerGUI:
                     if not self.have_lock:
                         milestone_entry.config(state='readonly')
                     
+                    # Przycisk kalendarza
+                    cal_btn = tk.Button(
+                        row1,
+                        text="📅",
+                        command=lambda me=milestone_entry: self.open_calendar_picker(me),
+                        bg="#3498db",
+                        fg="white",
+                        font=self.FONT_SMALL,
+                        padx=4,
+                        pady=1,
+                        state=tk.NORMAL if self.have_lock else tk.DISABLED
+                    )
+                    cal_btn.pack(side=tk.LEFT, padx=2)
+                    
                     # Zapisz referencję (tylko jedna data dla milestone)
                     self.timeline_entries[stage_code] = (milestone_entry, milestone_entry)
                     
@@ -5986,6 +6339,20 @@ class RMManagerGUI:
                 if not self.have_lock:
                     template_start.config(state='readonly')
                 
+                # Przycisk kalendarza dla daty rozpoczęcia
+                cal_start_btn = tk.Button(
+                    row1,
+                    text="📅",
+                    command=lambda ts=template_start: self.open_calendar_picker(ts),
+                    bg="#3498db",
+                    fg="white",
+                    font=self.FONT_SMALL,
+                    padx=3,
+                    pady=1,
+                    state=tk.NORMAL if self.have_lock else tk.DISABLED
+                )
+                cal_start_btn.pack(side=tk.LEFT, padx=1)
+                
                 tk.Label(row1, text="→", bg=bg_color).pack(side=tk.LEFT, padx=2)
                 
                 template_end = tk.Entry(row1, width=12, font=self.FONT_DEFAULT,
@@ -5995,6 +6362,20 @@ class RMManagerGUI:
                 template_end.pack(side=tk.LEFT, padx=2)
                 if not self.have_lock:
                     template_end.config(state='readonly')
+                
+                # Przycisk kalendarza dla daty zakończenia
+                cal_end_btn = tk.Button(
+                    row1,
+                    text="📅",
+                    command=lambda te=template_end: self.open_calendar_picker(te),
+                    bg="#3498db",
+                    fg="white",
+                    font=self.FONT_SMALL,
+                    padx=3,
+                    pady=1,
+                    state=tk.NORMAL if self.have_lock else tk.DISABLED
+                )
+                cal_end_btn.pack(side=tk.LEFT, padx=1)
                 
                 # Zapisz referencje do Entry widgets
                 self.timeline_entries[stage_code] = (template_start, template_end)
@@ -6226,6 +6607,20 @@ class RMManagerGUI:
                         sub_entry.pack(side=tk.LEFT, padx=2)
                         if not self.have_lock:
                             sub_entry.config(state='readonly')
+                        
+                        # Przycisk kalendarza
+                        sub_cal_btn = tk.Button(
+                            sub_row,
+                            text="📅",
+                            command=lambda se=sub_entry: self.open_calendar_picker(se),
+                            bg="#3498db",
+                            fg="white",
+                            font=self.FONT_SMALL,
+                            padx=3,
+                            pady=1,
+                            state=tk.NORMAL if self.have_lock else tk.DISABLED
+                        )
+                        sub_cal_btn.pack(side=tk.LEFT, padx=1)
                         
                         self.timeline_entries[sub_code] = (sub_entry, sub_entry)
                         
@@ -7108,6 +7503,25 @@ class RMManagerGUI:
         except Exception as e:
             messagebox.showerror("❌ Błąd", f"Błąd zapisu szablonów: {e}")
     
+    def _scroll_timeline_to_stage(self, stage_code):
+        """Przewiń oś czasu do danego etapu"""
+        try:
+            self.timeline_frame.update_idletasks()
+            self.timeline_canvas.configure(scrollregion=self.timeline_canvas.bbox("all"))
+            for widget in self.timeline_frame.winfo_children():
+                if isinstance(widget, tk.LabelFrame) and getattr(widget, '_stage_code', None) == stage_code:
+                    widget_y = widget.winfo_y()
+                    scroll_region = self.timeline_canvas.bbox("all")
+                    if scroll_region:
+                        total_height = scroll_region[3]
+                        canvas_height = self.timeline_canvas.winfo_height()
+                        if total_height > canvas_height:
+                            fraction = max(0.0, min(1.0, widget_y / total_height))
+                            self.timeline_canvas.yview_moveto(fraction)
+                    return
+        except Exception:
+            pass
+
     def refresh_dashboard(self):
         """Odśwież dashboard"""
         if not self.selected_project_id:
@@ -9346,24 +9760,84 @@ class RMManagerGUI:
                 ).grid(row=row, column=0, sticky="ew", padx=1, pady=1)
                 
                 # Szablon Start - konwersja z ISO do DD-MM-YYYY
-                template_start = tk.Entry(scrollable_frame, width=12, font=self.FONT_DEFAULT)
+                col_idx = 1
+                cell_frame = tk.Frame(scrollable_frame)
+                cell_frame.grid(row=row, column=col_idx, padx=1, pady=1)
+                
+                template_start = tk.Entry(cell_frame, width=12, font=self.FONT_DEFAULT)
                 template_start.insert(0, self.format_date_ddmmyyyy(fc.get('template_start')) or '')
-                template_start.grid(row=row, column=1, padx=1, pady=1)
+                template_start.pack(side=tk.LEFT, padx=1)
+                
+                tk.Button(
+                    cell_frame,
+                    text="📅",
+                    command=lambda e=template_start: self.open_calendar_picker(e),
+                    bg="#3498db",
+                    fg="white",
+                    font=("Arial", 7),
+                    padx=2,
+                    pady=0
+                ).pack(side=tk.LEFT)
                 
                 # Szablon Koniec
-                template_end = tk.Entry(scrollable_frame, width=12, font=self.FONT_DEFAULT)
+                col_idx = 2
+                cell_frame = tk.Frame(scrollable_frame)
+                cell_frame.grid(row=row, column=col_idx, padx=1, pady=1)
+                
+                template_end = tk.Entry(cell_frame, width=12, font=self.FONT_DEFAULT)
                 template_end.insert(0, self.format_date_ddmmyyyy(fc.get('template_end')) or '')
-                template_end.grid(row=row, column=2, padx=1, pady=1)
+                template_end.pack(side=tk.LEFT, padx=1)
+                
+                tk.Button(
+                    cell_frame,
+                    text="📅",
+                    command=lambda e=template_end: self.open_calendar_picker(e),
+                    bg="#3498db",
+                    fg="white",
+                    font=("Arial", 7),
+                    padx=2,
+                    pady=0
+                ).pack(side=tk.LEFT)
                 
                 # Prognoza Start
-                forecast_start = tk.Entry(scrollable_frame, width=12, font=self.FONT_DEFAULT)
+                col_idx = 3
+                cell_frame = tk.Frame(scrollable_frame)
+                cell_frame.grid(row=row, column=col_idx, padx=1, pady=1)
+                
+                forecast_start = tk.Entry(cell_frame, width=12, font=self.FONT_DEFAULT)
                 forecast_start.insert(0, self.format_date_ddmmyyyy(fc.get('forecast_start')) or '')
-                forecast_start.grid(row=row, column=3, padx=1, pady=1)
+                forecast_start.pack(side=tk.LEFT, padx=1)
+                
+                tk.Button(
+                    cell_frame,
+                    text="📅",
+                    command=lambda e=forecast_start: self.open_calendar_picker(e),
+                    bg="#3498db",
+                    fg="white",
+                    font=("Arial", 7),
+                    padx=2,
+                    pady=0
+                ).pack(side=tk.LEFT)
                 
                 # Prognoza Koniec
-                forecast_end = tk.Entry(scrollable_frame, width=12, font=self.FONT_DEFAULT)
+                col_idx = 4
+                cell_frame = tk.Frame(scrollable_frame)
+                cell_frame.grid(row=row, column=col_idx, padx=1, pady=1)
+                
+                forecast_end = tk.Entry(cell_frame, width=12, font=self.FONT_DEFAULT)
                 forecast_end.insert(0, self.format_date_ddmmyyyy(fc.get('forecast_end')) or '')
-                forecast_end.grid(row=row, column=4, padx=1, pady=1)
+                forecast_end.pack(side=tk.LEFT, padx=1)
+                
+                tk.Button(
+                    cell_frame,
+                    text="📅",
+                    command=lambda e=forecast_end: self.open_calendar_picker(e),
+                    bg="#3498db",
+                    fg="white",
+                    font=("Arial", 7),
+                    padx=2,
+                    pady=0
+                ).pack(side=tk.LEFT)
                 
                 # Zapisz referencje
                 self.date_entries[stage_code] = {
@@ -12709,8 +13183,12 @@ class RMManagerGUI:
             self.chart_status.config(text="❌ Błąd porównania", fg=self.COLOR_RED)
             messagebox.showerror("Błąd porównania", f"Nie można utworzyć porównania:\n{e}")
 
-    def create_embedded_gantt_chart(self):
-        """Utwórz wbudowany wykres Gantta używając matplotlib"""
+    def create_embedded_gantt_chart(self, preserve_view=False):
+        """Utwórz wbudowany wykres Gantta używając matplotlib
+        
+        Args:
+            preserve_view: Jeśli True, zachowa aktualne ustawienia zoom/pan
+        """
         from datetime import datetime, timedelta
         
         if not MATPLOTLIB_AVAILABLE:
@@ -12720,6 +13198,20 @@ class RMManagerGUI:
         if not self.selected_project_id:
             messagebox.showwarning("Brak projektu", "Wybierz projekt najpierw!")
             return
+
+        # ===== ZAPISZ WIDOK PRZED ODŚWIEŻENIEM =====
+        saved_xlim = None
+        saved_ylim = None
+        if preserve_view and hasattr(self, '_chart_metadata') and self._chart_metadata:
+            try:
+                ax = self._chart_metadata.get('ax')
+                if ax:
+                    # Zapisz jako tuple (kopia wartości, nie referencja)
+                    saved_xlim = tuple(ax.get_xlim())
+                    saved_ylim = tuple(ax.get_ylim())
+                    print(f"📊 Zapisano widok: xlim={saved_xlim}, ylim={saved_ylim}")
+            except Exception as e:
+                print(f"⚠️ Błąd zapisu widoku: {e}")  # Ignoruj błędy - wykres będzie z domyślnym widokiem
 
         try:
             self.chart_status.config(text="🔄 Tworzenie wbudowanego wykresu...", fg=self.COLOR_BLUE)
@@ -12868,14 +13360,26 @@ class RMManagerGUI:
                 return
             
             # Usuń stary canvas jeśli istnieje
-            if self.matplotlib_canvas:
-                self.matplotlib_canvas.get_tk_widget().destroy()
-            if self.matplotlib_toolbar:
-                self.matplotlib_toolbar.destroy()
+            # Przy preserve_view: reużyj istniejący figure+canvas (bez flashu)
+            reuse_canvas = False
+            if preserve_view and self.matplotlib_canvas and saved_xlim and saved_ylim:
+                try:
+                    fig = self.matplotlib_canvas.figure
+                    fig.clear()
+                    ax = fig.add_subplot(111)
+                    reuse_canvas = True
+                except Exception:
+                    reuse_canvas = False
             
-            # Utwórz nowy wykres
-            fig = Figure(figsize=(12, 8), dpi=100)
-            ax = fig.add_subplot(111)
+            if not reuse_canvas:
+                if self.matplotlib_canvas:
+                    self.matplotlib_canvas.get_tk_widget().destroy()
+                if self.matplotlib_toolbar:
+                    self.matplotlib_toolbar.destroy()
+                
+                # Utwórz nowy wykres
+                fig = Figure(figsize=(12, 8), dpi=100)
+                ax = fig.add_subplot(111)
             
             # Grupuj dane per task
             tasks = {}
@@ -12927,38 +13431,88 @@ class RMManagerGUI:
                     )
                     ax.add_patch(rect)
                     
-                    # Dodaj tekst z datami (tylko dla dłuższych pasków)
-                    if duration > 7:
-                        text_date = item['start'].strftime('%m/%d')
+                    # Dodaj tekst z datami
+                    if True:
+                        dur_days = int((item['end'] - item['start']).days)
+                        if item['type'] == 'Milestone':
+                            text_date = item['start'].strftime('%d/%m')
+                        else:
+                            text_date = f"{item['start'].strftime('%d/%m')}-{dur_days}-{item['end'].strftime('%d/%m')}"
+                        
+                        if item['type'] == 'Prognoza' or item['type'] == 'Milestone':
+                            # Prognoza/Milestone: tekst NAD paskiem, kolorem paska
+                            text_y = y_pos + y_offset + height + 0.05
+                            text_va = 'bottom'
+                            text_color = item['color']
+                        elif item['type'] == 'Rzeczywiste':
+                            # Rzeczywiste: tekst POD paskiem, kolorem paska
+                            text_y = y_pos + y_offset - 0.05
+                            text_va = 'top'
+                            text_color = item['color']
+                        else:
+                            # Szablon: tekst na środku paska, ciemnoszary
+                            text_y = y_pos + y_offset + height/2
+                            text_va = 'center'
+                            text_color = '#444444'
+                        
                         ax.text(
                             mdates.date2num(item['start']) + duration/2, 
-                            y_pos + y_offset + height/2,
+                            text_y,
                             text_date,
-                            ha='center', va='center',
-                            fontsize=8, color='white', weight='bold'
+                            ha='center', va=text_va,
+                            fontsize=8, color=text_color, weight='bold',
+                            clip_on=False
                         )
                 
                 y_pos += 1
             
             # Formatowanie osi
-            ax.set_ylim(-0.5, len(y_labels) - 0.5)
+            # Nie ustawiaj domyślnych limitów jeśli przywracamy zapisany widok (zapobiega "migotaniu")
+            if not (saved_xlim and saved_ylim):
+                ax.set_ylim(-0.5, len(y_labels) - 0.5)
+            else:
+                # Przywracanie widoku - ustaw od razu zapisane limity
+                ax.set_ylim(saved_ylim)
+            
             ax.set_yticks(range(len(y_labels)))
             ax.set_yticklabels(y_labels)
             
             # Oś X - daty
-            if all_dates:
+            # Nie ustawiaj domyślnych limitów jeśli przywracamy zapisany widok (zapobiega "migotaniu")
+            if all_dates and not (saved_xlim and saved_ylim):
                 min_date = min(all_dates)
                 max_date = max(all_dates)
                 ax.set_xlim(mdates.date2num(min_date - timedelta(days=5)), 
                            mdates.date2num(max_date + timedelta(days=5)))
+            elif saved_xlim:
+                # Przywracanie widoku - ustaw od razu zapisane limity
+                ax.set_xlim(saved_xlim)
             
             # Formatowanie dat na osi X
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-            ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
-            fig.autofmt_xdate()  # Obróć etykiety dat
+            # Główna oś: tygodnie (poniedziałki)
+            ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=mdates.MO))
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('W%W\n%d/%m'))
+            # Pomocnicza oś: dni
+            ax.xaxis.set_minor_locator(mdates.DayLocator())
+            ax.xaxis.set_minor_formatter(mdates.DateFormatter('%d'))
+            ax.tick_params(axis='x', which='major', labelsize=8, pad=12)
+            ax.tick_params(axis='x', which='minor', labelsize=6, labelcolor='#888888')
+            fig.autofmt_xdate(rotation=0, ha='center')  # Bez rotacji dla czytelności
+            
+            # Zaznacz weekendy (sobota/niedziela) szarym tłem
+            xlim = ax.get_xlim()
+            x_start = mdates.num2date(xlim[0]).replace(tzinfo=None)
+            x_end = mdates.num2date(xlim[1]).replace(tzinfo=None)
+            current = x_start.replace(hour=0, minute=0, second=0, microsecond=0)
+            while current <= x_end:
+                if current.weekday() in (5, 6):  # Sobota=5, Niedziela=6
+                    ax.axvspan(mdates.date2num(current), mdates.date2num(current + timedelta(days=1)),
+                              facecolor='#e0e0e0', alpha=0.4, zorder=0)
+                current += timedelta(days=1)
             
             # Siatka i styling
-            ax.grid(True, alpha=0.3)
+            ax.grid(True, which='major', alpha=0.4, linewidth=0.8)
+            ax.grid(True, which='minor', alpha=0.15, linewidth=0.3)
             ax.set_xlabel('Data', fontweight='bold')
             ax.set_ylabel('Etapy', fontweight='bold') 
             ax.set_title(f'Timeline {self.project_names.get(self.selected_project_id, f"Projekt {self.selected_project_id}")} {self._get_project_status_text(self.selected_project_id)}', fontweight='bold', pad=20)
@@ -12971,19 +13525,100 @@ class RMManagerGUI:
                 Line2D([0], [0], color='#3498db', lw=8, label='Prognoza'),
                 Line2D([0], [0], color='#2ecc71', lw=8, label='Milestone')
             ]
-            ax.legend(handles=legend_elements, loc='upper right')
+            ax.legend(handles=legend_elements, loc='upper center', bbox_to_anchor=(0.5, -0.08),
+                      ncol=4, fontsize=8, frameon=False)
             
-            # Utwórz canvas i toolbar
-            self.matplotlib_canvas = FigureCanvasTkAgg(fig, self.embedded_chart_frame)
-            self.matplotlib_canvas.draw()
-            self.matplotlib_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            if reuse_canvas:
+                # ===== REUSE: Przywróć widok i przerysuj bez tworzenia nowego widgetu =====
+                if saved_xlim and saved_ylim:
+                    ax.set_xlim(saved_xlim)
+                    ax.set_ylim(saved_ylim)
+                self.matplotlib_canvas.draw_idle()
+                # Zaktualizuj toolbar home
+                try:
+                    self.matplotlib_toolbar.update()
+                    self.matplotlib_toolbar.push_current()
+                except Exception:
+                    pass
+            else:
+                # ===== NOWY CANVAS: Utwórz od zera =====
+                self.matplotlib_canvas = FigureCanvasTkAgg(fig, self.embedded_chart_frame)
+                self.matplotlib_canvas.draw()
+                self.matplotlib_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+                
+                # Toolbar z narzędziami (zoom, pan, save)
+                self.matplotlib_toolbar = NavigationToolbar2Tk(self.matplotlib_canvas, self.embedded_chart_frame)
+                self.matplotlib_toolbar.update()
+                
+                # Nadpisz przycisk Home w toolbarze - reset widoku wykresu
+                # Przyciski toolbar są bindowane do metod w momencie tworzenia,
+                # więc samo nadpisanie self.home nie działa. Trzeba podmienić command na widgecie.
+                home_replaced = False
+                # Metoda 1: matplotlib 3.x trzyma przyciski w _buttons dict
+                if hasattr(self.matplotlib_toolbar, '_buttons'):
+                    for name, btn in self.matplotlib_toolbar._buttons.items():
+                        if name.lower() == 'home':
+                            btn.config(command=self._reset_chart_view)
+                            home_replaced = True
+                            break
+                # Metoda 2: przeszukaj children toolbara - pierwszy Button to Home
+                if not home_replaced:
+                    for child in self.matplotlib_toolbar.winfo_children():
+                        try:
+                            if isinstance(child, tk.Button):
+                                child.config(command=self._reset_chart_view)
+                                home_replaced = True
+                                break
+                        except Exception:
+                            pass
+                
+                # Legenda nawigacji pod toolbarem
+                if hasattr(self, '_chart_nav_legend') and self._chart_nav_legend:
+                    self._chart_nav_legend.destroy()
+                self._chart_nav_legend = tk.Label(
+                    self.embedded_chart_frame,
+                    text="🖱 Scroll: góra/dół  |  Shift+Scroll: lewo/prawo  |  Ctrl+Scroll: zoom czasu (X)  |  Ctrl+Shift+Scroll: zoom pionu (Y)  |  Shift+LMB: pan  |  🏠 Home: reset",
+                    font=("Arial", 10), fg="black", bg="#f0f0f0",
+                    relief=tk.GROOVE, padx=8, pady=3
+                )
+                self._chart_nav_legend.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(0, 2))
             
-            # Toolbar z narzędziami (zoom, pan, save)
-            self.matplotlib_toolbar = NavigationToolbar2Tk(self.matplotlib_canvas, self.embedded_chart_frame)
-            self.matplotlib_toolbar.update()
+            # ===== INTERAKTYWNA EDYCJA DAT - DRAG & RESIZE =====
+            # Zapisz metadane o paskach dla drag & resize
+            self._chart_metadata = {
+                'y_labels': y_labels,
+                'tasks': tasks,
+                'gantt_data': gantt_data,
+                'y_positions': {task: idx for idx, task in enumerate(y_labels)},
+                'stage_names_reverse': {v: k for k, v in stage_names.items()},  # display_name -> code
+                'ax': ax,  # Referencja do axes
+                'fig': fig  # Referencja do figure
+            }
+            
+            # Stan drag & resize
+            self._drag_state = {
+                'active': False,
+                'stage_code': None,
+                'edge': None,  # 'start' lub 'end'
+                'original_date': None,
+                'bar_item': None,
+                'preview_line': None
+            }
+            
+            # Event handlers dla drag & resize
+            self.matplotlib_canvas.mpl_connect('button_press_event', self._on_chart_press)
+            self.matplotlib_canvas.mpl_connect('button_release_event', self._on_chart_release)
+            self.matplotlib_canvas.mpl_connect('motion_notify_event', self._on_chart_motion)
+            
+            # Double-click handler dla dialogu edycji dat
+            self._dblclick_cid = self.matplotlib_canvas.mpl_connect('button_press_event', self._on_chart_dblclick)
+            
+            # Pan & Zoom handlers (nawigacja wykresem)
+            self.matplotlib_canvas.mpl_connect('scroll_event', self._on_chart_scroll)
+            self._pan_state = {'active': False, 'start_x': None, 'start_xlim': None, 'start_y': None, 'start_ylim': None}
             
             self.chart_status.config(
-                text=f"✅ Wbudowany wykres utworzony ({len(gantt_data)} okresów)",
+                text=f"✅ Wykres utworzony ({len(gantt_data)} okresów) - przeciągnij krawędzie szablonu aby zmienić daty",
                 fg=self.COLOR_GREEN
             )
             
@@ -12992,6 +13627,41 @@ class RMManagerGUI:
             traceback.print_exc()
             self.chart_status.config(text="❌ Błąd wbudowanego wykresu", fg=self.COLOR_RED)
             messagebox.showerror("Błąd wykresu", f"Nie można utworzyć wbudowanego wykresu:\n{e}")
+
+    def _reset_chart_view(self):
+        """Reset widoku wykresu do domyślnego (dopasowanie do danych)"""
+        if not hasattr(self, '_chart_metadata') or not self._chart_metadata:
+            return
+        try:
+            ax = self._chart_metadata['ax']
+            gantt_data = self._chart_metadata.get('gantt_data', [])
+            y_labels = self._chart_metadata.get('y_labels', [])
+            
+            # Oblicz zakres dat z danych
+            all_dates = []
+            for item in gantt_data:
+                if item.get('start'):
+                    all_dates.append(item['start'])
+                if item.get('end'):
+                    all_dates.append(item['end'])
+            
+            if all_dates:
+                import matplotlib.dates as mdates
+                min_date = min(all_dates)
+                max_date = max(all_dates)
+                ax.set_xlim(mdates.date2num(min_date - timedelta(days=5)),
+                           mdates.date2num(max_date + timedelta(days=5)))
+            
+            if y_labels:
+                ax.set_ylim(-0.5, len(y_labels) - 0.5)
+            
+            self.matplotlib_canvas.draw_idle()
+            self.status_bar.config(
+                text="🏠 Widok wykresu zresetowany",
+                fg=self.COLOR_GREEN
+            )
+        except Exception as e:
+            print(f"⚠️ Błąd resetu widoku: {e}")
 
     def save_embedded_chart(self):
         """Zapisz wbudowany wykres matplotlib do pliku"""
@@ -13047,6 +13717,929 @@ class RMManagerGUI:
                 
         except Exception as e:
             messagebox.showerror("Błąd", f"Nie można zapisać wykresu:\n{e}")
+
+    def _find_bar_at_position(self, x_data, y_data, tolerance_days=3):
+        """
+        Znajdź pasek szablonu pod kursorem i określ czy kursor jest nad krawędzią
+        
+        Args:
+            x_data: Pozycja X w jednostkach daty (matplotlib date num)
+            y_data: Pozycja Y (indeks etapu)
+            tolerance_days: Tolerancja w dniach dla detekcji krawędzi
+            
+        Returns:
+            (stage_code, edge, bar_item) gdzie:
+            - stage_code: kod etapu lub None
+            - edge: 'start', 'end' lub None (None = środek paska)
+            - bar_item: słownik z danymi paska
+        """
+        if not hasattr(self, '_chart_metadata'):
+            return None, None, None
+        
+        # Znajdź etap na podstawie Y
+        y_idx = round(y_data)
+        if y_idx < 0 or y_idx >= len(self._chart_metadata['y_labels']):
+            return None, None, None
+        
+        task_name = self._chart_metadata['y_labels'][y_idx]
+        display_name = task_name.replace('[M] ', '').replace('⭕ ', '')
+        stage_code = self._chart_metadata['stage_names_reverse'].get(display_name)
+        
+        if not stage_code:
+            return None, None, None
+        
+        # Znajdź paski dla tego etapu
+        items = self._chart_metadata['tasks'].get(task_name, [])
+        
+        # Konwertuj x_data (matplotlib date num) na datetime
+        import matplotlib.dates as mdates
+        x_datetime = mdates.num2date(x_data).replace(tzinfo=None)
+        
+        # Szukaj paska szablonu lub milestone
+        for item in items:
+            if item['type'] not in ('Szablon', 'Milestone') or item['start'] is None:
+                continue
+            
+            # Milestone: tolerancja na kliknięcie w punkt (± tolerance_days)
+            if item['type'] == 'Milestone':
+                if abs(x_datetime - item['start']) <= timedelta(days=tolerance_days):
+                    return stage_code, 'move', item  # Milestone zawsze w trybie move
+                continue
+            
+            # Sprawdź czy kursor jest w zakresie paska
+            if item['start'] <= x_datetime <= item['end']:
+                # Tolerancja proporcjonalna: max 25% długości paska z każdej strony,
+                # ale nie więcej niż tolerance_days i nie mniej niż 0.5 dnia
+                bar_duration = (item['end'] - item['start']).total_seconds() / 86400.0
+                edge_tol = max(0.5, min(tolerance_days, bar_duration * 0.25))
+                edge_tolerance = timedelta(days=edge_tol)
+                
+                if abs(x_datetime - item['start']) <= edge_tolerance:
+                    return stage_code, 'start', item
+                elif abs(x_datetime - item['end']) <= edge_tolerance:
+                    return stage_code, 'end', item
+                else:
+                    return stage_code, None, item  # Środek paska
+        
+        return None, None, None
+
+    def _on_chart_motion(self, event):
+        """Obsługa ruchu myszy - zmiana kursora, preview drag, pan wykresu"""
+        if not hasattr(self, '_chart_metadata'):
+            return
+        
+        # ── PAN: przesuwanie wykresu (Shift+LMB) ──
+        if hasattr(self, '_pan_state') and self._pan_state.get('active'):
+            if event.x is None or event.y is None:
+                return
+            ax = self._chart_metadata['ax']
+            
+            # Przelicz przesunięcie pikselowe na współrzędne danych
+            # (pixel coords są stabilne - nie zmieniają się przy przesuwaniu)
+            old_xlim = self._pan_state['start_xlim']
+            old_ylim = self._pan_state['start_ylim']
+            
+            # Rozmiar osi w pikselach
+            bbox = ax.get_window_extent()
+            
+            # Przesunięcie w pikselach
+            dpx = event.x - self._pan_state['start_px']
+            dpy = event.y - self._pan_state['start_py']
+            
+            # Zamiana pikseli na jednostki danych
+            dx_data = dpx * (old_xlim[1] - old_xlim[0]) / bbox.width
+            dy_data = dpy * (old_ylim[1] - old_ylim[0]) / bbox.height
+            
+            ax.set_xlim(old_xlim[0] - dx_data, old_xlim[1] - dx_data)
+            ax.set_ylim(old_ylim[0] - dy_data, old_ylim[1] - dy_data)
+            
+            self.matplotlib_canvas.draw_idle()
+            return
+        
+        if event.inaxes is None:
+            return
+        
+        # Bez locka nie pokazuj kursora edycji (chyba że drag jest aktywny)
+        if not self.have_lock and not self._drag_state.get('active'):
+            self.matplotlib_canvas.get_tk_widget().config(cursor='')
+            return
+        
+        # Jeśli trwa drag - aktualizuj preview
+        if self._drag_state['active']:
+            import matplotlib.dates as mdates
+            
+            # Nowa data pod kursorem
+            new_date = mdates.num2date(event.xdata).replace(tzinfo=None)
+            edge = self._drag_state['edge']
+            bar_item = self._drag_state['bar_item']
+            
+            # Aktualizuj linię preview
+            ax = self._chart_metadata['ax']
+            
+            # Usuń stare linie preview
+            if self._drag_state['preview_line']:
+                try:
+                    if isinstance(self._drag_state['preview_line'], list):
+                        for line in self._drag_state['preview_line']:
+                            line.remove()
+                    else:
+                        self._drag_state['preview_line'].remove()
+                except Exception:
+                    pass
+            
+            if edge == 'move':
+                # Tryb przesuwania - pokaż dwie linie (nowy początek i nowy koniec)
+                anchor = self._drag_state['drag_anchor_x']
+                delta = new_date - anchor
+                new_start = bar_item['start'] + delta
+                new_end = bar_item['end'] + delta
+                
+                line1 = ax.axvline(x=mdates.date2num(new_start), color='#e67e22', linewidth=2, linestyle='--', alpha=0.7, zorder=1000)
+                line2 = ax.axvline(x=mdates.date2num(new_end), color='#e67e22', linewidth=2, linestyle='--', alpha=0.7, zorder=1000)
+                self._drag_state['preview_line'] = [line1, line2]
+                
+                duration = (bar_item['end'] - bar_item['start']).days
+                self.status_bar.config(
+                    text=f"🖱️ Przesuwanie: {self._drag_state['stage_code']} → {new_start.strftime('%d-%m-%Y')} — {new_end.strftime('%d-%m-%Y')} ({duration}d)",
+                    fg=self.COLOR_BLUE
+                )
+            else:
+                # Tryb resize - jedna linia
+                self._drag_state['preview_line'] = ax.axvline(
+                    x=mdates.date2num(new_date),
+                    color='red',
+                    linewidth=2,
+                    linestyle='--',
+                    alpha=0.7,
+                    zorder=1000
+                )
+                edge_label = "Początek" if edge == 'start' else "Koniec"
+                self.status_bar.config(
+                    text=f"🖱️ Przeciąganie: {self._drag_state['stage_code']} - {edge_label} → {new_date.strftime('%d-%m-%Y')}",
+                    fg=self.COLOR_BLUE
+                )
+            
+            # Odśwież canvas
+            self.matplotlib_canvas.draw_idle()
+            return
+        
+        # Normalne hover - zmiana kursora przy krawędziach
+        stage_code, edge, bar_item = self._find_bar_at_position(event.xdata, event.ydata)
+        
+        if edge in ['start', 'end']:
+            # Kursor nad krawędzią - resize cursor
+            self.matplotlib_canvas.get_tk_widget().config(cursor='sb_h_double_arrow')
+            edge_label = "początek" if edge == 'start' else "koniec"
+            self.status_bar.config(
+                text=f"🖱️ Przeciągnij aby zmienić {edge_label} szablonu: {stage_code}",
+                fg=self.COLOR_BLUE
+            )
+        elif bar_item and bar_item['type'] == 'Szablon':
+            # Kursor nad środkiem paska - move cursor
+            self.matplotlib_canvas.get_tk_widget().config(cursor='fleur')
+            self.status_bar.config(
+                text=f"🖱️ Przeciągnij aby przesunąć cały etap: {stage_code}",
+                fg=self.COLOR_BLUE
+            )
+        elif bar_item and bar_item['type'] == 'Milestone':
+            # Milestone - move cursor
+            self.matplotlib_canvas.get_tk_widget().config(cursor='fleur')
+            self.status_bar.config(
+                text=f"🖱️ Przeciągnij aby przesunąć milestone: {stage_code}",
+                fg=self.COLOR_BLUE
+            )
+        else:
+            # Kursor poza paskami
+            self.matplotlib_canvas.get_tk_widget().config(cursor='')
+            if not self._drag_state['active']:
+                self.status_bar.config(
+                    text=f"✅ Wykres gotowy | Shift+mysz: przesuwanie | Ctrl+scroll: zoom czasu | Scroll: zoom pion | 🏠 reset widoku",
+                    fg=self.COLOR_GREEN
+                )
+
+    def _on_chart_scroll(self, event):
+        """Obsługa scrolla na wykresie:
+        - Scroll: pan góra/dół (Y)
+        - Shift+scroll: pan lewo/prawo (X)
+        - Ctrl+scroll: zoom osi czasu (X)
+        - Ctrl+Shift+scroll: zoom pionu (Y)
+        """
+        if event.inaxes is None or not hasattr(self, '_chart_metadata'):
+            return
+        
+        ax = self._chart_metadata['ax']
+        
+        # Kierunek: scroll up = zoom in, scroll down = zoom out
+        if event.button == 'up':
+            scale_factor = 0.85  # zoom in
+        elif event.button == 'down':
+            scale_factor = 1.15  # zoom out
+        else:
+            return
+        
+        has_ctrl = event.key == 'control' or (event.key and 'ctrl' in event.key)
+        has_shift = event.key == 'shift' or (event.key and 'shift' in event.key)
+        
+        if has_ctrl and has_shift:
+            # Ctrl+Shift+scroll: zoom pionu (Y) - centrowany na pozycji kursora
+            ylim = ax.get_ylim()
+            y_center = event.ydata
+            new_height = (ylim[1] - ylim[0]) * scale_factor
+            ax.set_ylim(y_center - new_height * (y_center - ylim[0]) / (ylim[1] - ylim[0]),
+                        y_center + new_height * (ylim[1] - y_center) / (ylim[1] - ylim[0]))
+            self.matplotlib_canvas.draw_idle()
+        elif has_ctrl:
+            # Ctrl+scroll: zoom osi czasu (X) - centrowany na pozycji kursora
+            xlim = ax.get_xlim()
+            x_center = event.xdata
+            new_width = (xlim[1] - xlim[0]) * scale_factor
+            ax.set_xlim(x_center - new_width * (x_center - xlim[0]) / (xlim[1] - xlim[0]),
+                        x_center + new_width * (xlim[1] - x_center) / (xlim[1] - xlim[0]))
+            self.matplotlib_canvas.draw_idle()
+        elif has_shift:
+            # Shift+scroll: pan osi czasu (przesuwanie w lewo/prawo)
+            xlim = ax.get_xlim()
+            x_range = xlim[1] - xlim[0]
+            shift = x_range * 0.1 * (1 if event.button == 'down' else -1)
+            ax.set_xlim(xlim[0] + shift, xlim[1] + shift)
+            self.matplotlib_canvas.draw_idle()
+        else:
+            # Scroll bez modyfikatora: pan góra/dół (Y)
+            ylim = ax.get_ylim()
+            y_range = ylim[1] - ylim[0]
+            shift = y_range * 0.1 * (1 if event.button == 'up' else -1)
+            ax.set_ylim(ylim[0] + shift, ylim[1] + shift)
+            self.matplotlib_canvas.draw_idle()
+
+    def _on_chart_dblclick(self, event):
+        """Obsługa podwójnego kliknięcia - otwórz dialog edycji dat"""
+        if event.dblclick != True or event.inaxes is None or not hasattr(self, '_chart_metadata'):
+            return
+        
+        # Sprawdź lock
+        if not self.have_lock:
+            self.status_bar.config(
+                text=f"🔒 Edycja wykresu wymaga przejęcia locka",
+                fg=self.COLOR_RED
+            )
+            return
+        
+        # Sprawdź uprawnienia
+        if not self._has_permission('can_edit_dates'):
+            self.status_bar.config(
+                text=f"🚫 Brak uprawnień do edycji dat (rola: {self.current_user_role})",
+                fg=self.COLOR_RED
+            )
+            return
+        
+        stage_code, edge, bar_item = self._find_bar_at_position(event.xdata, event.ydata)
+        
+        if not stage_code or not bar_item:
+            return
+        
+        if bar_item['type'] not in ('Szablon', 'Milestone'):
+            return
+        
+        # Zablokuj drag z tego kliknięcia
+        self._drag_state['active'] = False
+        
+        self._open_stage_edit_dialog(stage_code)
+
+    def _open_stage_edit_dialog(self, stage_code):
+        """Dialog edycji dat szablonu i prognozy dla pojedynczego etapu"""
+        try:
+            forecast = rmm.recalculate_forecast(
+                self.get_project_db_path(self.selected_project_id), self.selected_project_id
+            )
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Nie można załadować dat:\n{e}")
+            return
+        
+        if stage_code not in forecast:
+            messagebox.showerror("Błąd", f"Nie znaleziono etapu {stage_code} w prognozie")
+            return
+        
+        fc = forecast[stage_code]
+        project_name = self.project_names.get(self.selected_project_id, f"Projekt {self.selected_project_id}")
+        
+        # Status etapu
+        if fc.get('is_actual'):
+            status_text = "✔️ Zakończony"
+            status_color = self.COLOR_GREEN
+        elif fc.get('is_active'):
+            # Oblicz ile dni trwa
+            try:
+                from datetime import datetime as _dt
+                fs = fc.get('forecast_start')
+                if fs:
+                    start_dt = _dt.fromisoformat(fs)
+                    days_active = (_dt.now() - start_dt).days
+                    status_text = f"● TRWA ({days_active} dni)"
+                else:
+                    status_text = "● TRWA"
+            except Exception:
+                status_text = "● TRWA"
+            status_color = self.COLOR_BLUE
+        else:
+            status_text = "○ Nieaktywny"
+            status_color = 'gray'
+        
+        # Odchylenie
+        variance = fc.get('variance_days', 0)
+        if variance > 0:
+            var_text = f"+{variance} dni"
+            var_color = self.COLOR_RED
+        elif variance < 0:
+            var_text = f"{variance} dni"
+            var_color = self.COLOR_GREEN
+        else:
+            var_text = "0 dni"
+            var_color = 'gray'
+        
+        dialog = tk.Toplevel(self.root)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.title(f"Edycja dat etapu - {stage_code} - {project_name}")
+        dialog.resizable(True, True)
+        
+        # Rozmiar i pozycja
+        w, h = 900, 280
+        x = (dialog.winfo_screenwidth() // 2) - (w // 2)
+        y = (dialog.winfo_screenheight() // 2) - (h // 2)
+        dialog.geometry(f"{w}x{h}+{x}+{y}")
+        
+        # ===== HEADER (jak główne okno) =====
+        header_frame = tk.Frame(dialog, bg=self.COLOR_TOPBAR, height=50)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
+        
+        tk.Label(
+            header_frame,
+            text=f"📅 EDYCJA DAT SZABLONU I PROGNOZY",
+            bg=self.COLOR_TOPBAR, fg="white",
+            font=("Arial", 13, "bold"),
+            padx=15
+        ).pack(side=tk.LEFT, fill=tk.Y)
+        
+        # ===== INFO BAR =====
+        info_frame = tk.Frame(dialog, bg="#ecf0f1", pady=6)
+        info_frame.pack(fill=tk.X)
+        
+        tk.Label(
+            info_frame, text=f"  Projekt: {project_name}",
+            bg="#ecf0f1", font=self.FONT_BOLD, fg=self.COLOR_TEXT_DARK, anchor='w'
+        ).pack(side=tk.LEFT, padx=10)
+        
+        tk.Label(
+            info_frame, text=f"Etap: {stage_code}",
+            bg="#ecf0f1", font=self.FONT_BOLD, fg=self.COLOR_BLUE, anchor='w'
+        ).pack(side=tk.LEFT, padx=15)
+        
+        tk.Label(
+            info_frame, text=status_text,
+            bg="#ecf0f1", font=self.FONT_BOLD, fg=status_color
+        ).pack(side=tk.LEFT, padx=15)
+        
+        tk.Label(
+            info_frame, text=f"Odchylenie: {var_text}",
+            bg="#ecf0f1", font=self.FONT_BOLD, fg=var_color
+        ).pack(side=tk.LEFT, padx=15)
+        
+        # ===== TABELA DAT =====
+        table_frame = tk.Frame(dialog, padx=15, pady=15)
+        table_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Konfiguracja kolumn - równomierne rozłożenie
+        for col in range(4):
+            table_frame.columnconfigure(col, weight=1)
+        
+        # Nagłówki
+        headers = [
+            ("Szablon Start", self.COLOR_TOPBAR),
+            ("Szablon Koniec", self.COLOR_TOPBAR),
+            ("Prognoza Start", "#7f8c8d"),
+            ("Prognoza Koniec", "#7f8c8d"),
+        ]
+        for col, (header_text, bg_color) in enumerate(headers):
+            tk.Label(
+                table_frame, text=header_text,
+                font=self.FONT_BOLD, bg=bg_color, fg="white",
+                relief=tk.RAISED, padx=12, pady=6
+            ).grid(row=0, column=col, sticky="ew", padx=2, pady=(0, 5))
+        
+        # Szablon Start - edytowalny
+        template_start_entry = tk.Entry(
+            table_frame, width=16, font=("Arial", 12),
+            justify='center', relief=tk.SOLID, bd=1
+        )
+        template_start_entry.insert(0, self.format_date_ddmmyyyy(fc.get('template_start')) or '')
+        template_start_entry.grid(row=1, column=0, padx=2, pady=2, sticky="ew")
+        
+        # Szablon Koniec - edytowalny
+        template_end_entry = tk.Entry(
+            table_frame, width=16, font=("Arial", 12),
+            justify='center', relief=tk.SOLID, bd=1
+        )
+        template_end_entry.insert(0, self.format_date_ddmmyyyy(fc.get('template_end')) or '')
+        template_end_entry.grid(row=1, column=1, padx=2, pady=2, sticky="ew")
+        
+        # Prognoza Start - nieedytowalna
+        fs_text = self.format_date_ddmmyyyy(fc.get('forecast_start')) or '—'
+        tk.Label(
+            table_frame, text=fs_text,
+            font=("Arial", 12), bg="#f0f0f0", fg="#555555",
+            relief=tk.SUNKEN, padx=8, pady=4
+        ).grid(row=1, column=2, padx=2, pady=2, sticky="ew")
+        
+        # Prognoza Koniec - nieedytowalna
+        fe_text = self.format_date_ddmmyyyy(fc.get('forecast_end')) or '—'
+        tk.Label(
+            table_frame, text=fe_text,
+            font=("Arial", 12), bg="#f0f0f0", fg="#555555",
+            relief=tk.SUNKEN, padx=8, pady=4
+        ).grid(row=1, column=3, padx=2, pady=2, sticky="ew")
+        
+        template_start_entry.focus()
+        template_start_entry.select_range(0, tk.END)
+        
+        # ===== PRZYCISKI (jak główne okno) =====
+        btn_frame = tk.Frame(dialog, bg="#ecf0f1", pady=8)
+        btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        
+        def save():
+            ts = template_start_entry.get().strip()
+            te = template_end_entry.get().strip()
+            
+            valid_s, ts_iso = self.validate_and_convert_date(ts)
+            if not valid_s:
+                messagebox.showerror("Błąd walidacji", ts_iso, parent=dialog)
+                return
+            valid_e, te_iso = self.validate_and_convert_date(te)
+            if not valid_e:
+                messagebox.showerror("Błąd walidacji", te_iso, parent=dialog)
+                return
+            
+            if ts_iso and te_iso and te_iso < ts_iso:
+                messagebox.showerror("Błąd logiczny",
+                    f"Data końcowa ({te}) nie może być wcześniejsza\nniż data początkowa ({ts})!",
+                    parent=dialog)
+                return
+            
+            try:
+                _pdb = self.get_project_db_path(self.selected_project_id)
+                con = rmm._open_rm_connection(_pdb, row_factory=False)
+                con.execute("""
+                    UPDATE stage_schedule
+                    SET template_start = ?, template_end = ?
+                    WHERE project_stage_id = (
+                        SELECT id FROM project_stages
+                        WHERE project_id = ? AND stage_code = ?
+                    )
+                """, (ts_iso, te_iso, self.selected_project_id, stage_code))
+                con.commit()
+                con.close()
+                
+                rmm.recalculate_forecast(_pdb, self.selected_project_id)
+                dialog.destroy()
+                self.create_embedded_gantt_chart(preserve_view=True)
+                
+                self.status_bar.config(
+                    text=f"✅ Zaktualizowano {stage_code}: {ts} — {te}",
+                    fg=self.COLOR_GREEN
+                )
+            except Exception as e:
+                messagebox.showerror("Błąd", f"Nie można zapisać dat:\n{e}", parent=dialog)
+        
+        tk.Button(
+            btn_frame, text="💾 OK", command=save,
+            bg=self.COLOR_GREEN, fg="white",
+            font=self.FONT_BOLD, padx=25, pady=6,
+            relief=tk.RAISED, cursor='hand2'
+        ).pack(side=tk.LEFT, padx=(15, 5))
+        
+        tk.Button(
+            btn_frame, text="❌ Anuluj", command=dialog.destroy,
+            bg=self.COLOR_RED, fg="white",
+            font=self.FONT_BOLD, padx=25, pady=6,
+            relief=tk.RAISED, cursor='hand2'
+        ).pack(side=tk.LEFT, padx=5)
+        
+        def go_to_timeline():
+            dialog.destroy()
+            # Przełącz na zakładkę Oś czasu
+            try:
+                self.tab_control.select(self.timeline_tab)
+            except Exception:
+                pass
+            # Odśwież oś czasu i przewiń do etapu
+            self.refresh_timeline()
+            self.root.after(200, lambda: self._scroll_timeline_to_stage(stage_code))
+        
+        tk.Button(
+            btn_frame, text="📅 Oś czasu", command=go_to_timeline,
+            bg=self.COLOR_BLUE, fg="white",
+            font=self.FONT_BOLD, padx=25, pady=6,
+            relief=tk.RAISED, cursor='hand2'
+        ).pack(side=tk.LEFT, padx=15)
+        
+        tk.Label(
+            btn_frame, text="Format dat: DD-MM-YYYY (np. 01-04-2026)",
+            font=self.FONT_SMALL, fg="gray", bg="#ecf0f1"
+        ).pack(side=tk.RIGHT, padx=15)
+        
+        dialog.bind('<Return>', lambda e: save())
+        dialog.bind('<Escape>', lambda e: dialog.destroy())
+
+    def _on_chart_press(self, event):
+        """Obsługa kliknięcia - rozpoczęcie drag, pan (Shift+LMB) lub otwarcie dialogu"""
+        # Ignoruj podwójne kliknięcia - obsługuje je _on_chart_dblclick
+        if event.dblclick:
+            return
+        if event.inaxes is None or not hasattr(self, '_chart_metadata'):
+            return
+        
+        # Shift + lewy przycisk => PAN (dostępny zawsze, bez locka)
+        if event.button == 1 and event.key == 'shift':
+            if not hasattr(self, '_pan_state'):
+                self._pan_state = {}
+            self._pan_state['active'] = True
+            self._pan_state['start_px'] = event.x   # pixel coords - stabilne
+            self._pan_state['start_py'] = event.y
+            ax = self._chart_metadata['ax']
+            self._pan_state['start_xlim'] = ax.get_xlim()
+            self._pan_state['start_ylim'] = ax.get_ylim()
+            self.matplotlib_canvas.get_tk_widget().config(cursor='fleur')
+            return
+        
+        # Sprawdź lock (tylko lewy przycisk bez Shift = edycja pasków)
+        if not self.have_lock:
+            self.status_bar.config(
+                text=f"🔒 Edycja wymaga locka | Shift+mysz: przesuwanie | Ctrl+scroll: zoom",
+                fg=self.COLOR_RED
+            )
+            return
+        
+        # Sprawdź uprawnienia
+        if not self._has_permission('can_edit_dates'):
+            self.status_bar.config(
+                text=f"🚫 Brak uprawnień do edycji dat (rola: {self.current_user_role})",
+                fg=self.COLOR_RED
+            )
+            return
+        
+        stage_code, edge, bar_item = self._find_bar_at_position(event.xdata, event.ydata)
+        
+        if not stage_code or not bar_item:
+            return
+        
+        if bar_item['type'] not in ('Szablon', 'Milestone'):
+            self.status_bar.config(
+                text=f"ℹ️ Można edytować tylko paski szablonu i milestone",
+                fg=self.COLOR_BLUE
+            )
+            return
+        
+        # Milestone zawsze w trybie move
+        if bar_item['type'] == 'Milestone':
+            edge = 'move'
+        
+        if edge in ['start', 'end']:
+            # Kliknięto krawędź - rozpocznij resize
+            self._drag_state['active'] = True
+            self._drag_state['stage_code'] = stage_code
+            self._drag_state['edge'] = edge
+            self._drag_state['original_date'] = bar_item[edge]
+            self._drag_state['bar_item'] = bar_item
+            self._drag_state['drag_anchor_x'] = None
+            
+            edge_label = "początek" if edge == 'start' else "koniec"
+            self.status_bar.config(
+                text=f"🖱️ Przeciąganie {edge_label} szablonu: {stage_code}...",
+                fg=self.COLOR_BLUE
+            )
+        else:
+            # Kliknięto środek - rozpocznij przesuwanie całego przedziału
+            import matplotlib.dates as mdates
+            self._drag_state['active'] = True
+            self._drag_state['stage_code'] = stage_code
+            self._drag_state['edge'] = 'move'  # Tryb przesuwania
+            self._drag_state['bar_item'] = bar_item
+            self._drag_state['original_date'] = bar_item['start']
+            # Zapamiętaj punkt chwytu (offset od początku paska)
+            self._drag_state['drag_anchor_x'] = mdates.num2date(event.xdata).replace(tzinfo=None)
+            
+            self.status_bar.config(
+                text=f"🖱️ Przesuwanie całego etapu: {stage_code}...",
+                fg=self.COLOR_BLUE
+            )
+
+    def _on_chart_release(self, event):
+        """Obsługa puszczenia przycisku myszy - zapisz nową datę lub zakończ pan"""
+        # Zakończ pan
+        if hasattr(self, '_pan_state') and self._pan_state.get('active'):
+            self._pan_state['active'] = False
+            self.matplotlib_canvas.get_tk_widget().config(cursor='')
+            return
+        
+        if not self._drag_state['active']:
+            return
+        
+        try:
+            # Usuń linie preview
+            if self._drag_state['preview_line']:
+                try:
+                    if isinstance(self._drag_state['preview_line'], list):
+                        for line in self._drag_state['preview_line']:
+                            line.remove()
+                    else:
+                        self._drag_state['preview_line'].remove()
+                except Exception:
+                    pass
+                self._drag_state['preview_line'] = None
+            
+            # Jeśli puszczono poza wykresem, anuluj
+            if event.inaxes is None or event.xdata is None:
+                self.status_bar.config(
+                    text="⚠️ Przeciąganie anulowane (puszczono poza wykresem)",
+                    fg=self.COLOR_RED
+                )
+                self._drag_state['active'] = False
+                self.matplotlib_canvas.draw_idle()
+                return
+            
+            # Pobierz nową datę
+            import matplotlib.dates as mdates
+            new_date = mdates.num2date(event.xdata).replace(tzinfo=None)
+            
+            stage_code = self._drag_state['stage_code']
+            edge = self._drag_state['edge']
+            bar_item = self._drag_state['bar_item']
+            
+            _pdb = self.get_project_db_path(self.selected_project_id)
+            
+            if edge == 'move':
+                # ===== TRYB PRZESUWANIA CAŁEGO PRZEDZIAŁU =====
+                anchor = self._drag_state['drag_anchor_x']
+                delta = new_date - anchor
+                new_start = bar_item['start'] + delta
+                new_end = bar_item['end'] + delta
+                
+                new_start_iso = new_start.strftime('%Y-%m-%d')
+                new_end_iso = new_end.strftime('%Y-%m-%d')
+                
+                con = rmm._open_rm_connection(_pdb, row_factory=False)
+                con.execute("""
+                    UPDATE stage_schedule
+                    SET template_start = ?, template_end = ?
+                    WHERE project_stage_id = (
+                        SELECT id FROM project_stages
+                        WHERE project_id = ? AND stage_code = ?
+                    )
+                """, (new_start_iso, new_end_iso, self.selected_project_id, stage_code))
+                con.commit()
+                con.close()
+                
+                rmm.recalculate_forecast(_pdb, self.selected_project_id)
+                self.create_embedded_gantt_chart(preserve_view=True)
+                
+                duration = (bar_item['end'] - bar_item['start']).days
+                if bar_item['type'] == 'Milestone':
+                    self.status_bar.config(
+                        text=f"✅ Przesunięto milestone {stage_code}: {new_start.strftime('%d-%m-%Y')}",
+                        fg=self.COLOR_GREEN
+                    )
+                else:
+                    self.status_bar.config(
+                        text=f"✅ Przesunięto {stage_code}: {new_start.strftime('%d-%m-%Y')} — {new_end.strftime('%d-%m-%Y')} ({duration}d)",
+                        fg=self.COLOR_GREEN
+                    )
+            
+            else:
+                # ===== TRYB RESIZE KRAWĘDZI =====
+                if edge == 'end':
+                    if new_date < bar_item['start']:
+                        messagebox.showerror(
+                            "❌ Błąd walidacji",
+                            f"Data końca ({new_date.strftime('%d-%m-%Y')}) nie może być wcześniejsza\n"
+                            f"niż data początku ({bar_item['start'].strftime('%d-%m-%Y')})!"
+                        )
+                        self._drag_state['active'] = False
+                        self.matplotlib_canvas.draw_idle()
+                        return
+                else:  # edge == 'start'
+                    if new_date > bar_item['end']:
+                        messagebox.showerror(
+                            "❌ Błąd walidacji",
+                            f"Data początku ({new_date.strftime('%d-%m-%Y')}) nie może być późniejsza\n"
+                            f"niż data końca ({bar_item['end'].strftime('%d-%m-%Y')})!"
+                        )
+                        self._drag_state['active'] = False
+                        self.matplotlib_canvas.draw_idle()
+                        return
+                
+                date_iso = new_date.strftime('%Y-%m-%d')
+                field_db = 'template_start' if edge == 'start' else 'template_end'
+                
+                con = rmm._open_rm_connection(_pdb, row_factory=False)
+                con.execute(f"""
+                    UPDATE stage_schedule
+                    SET {field_db} = ?
+                    WHERE project_stage_id = (
+                        SELECT id FROM project_stages
+                        WHERE project_id = ? AND stage_code = ?
+                    )
+                """, (date_iso, self.selected_project_id, stage_code))
+                con.commit()
+                con.close()
+                
+                rmm.recalculate_forecast(_pdb, self.selected_project_id)
+                self.create_embedded_gantt_chart(preserve_view=True)
+                
+                edge_label = "początek" if edge == 'start' else "koniec"
+                self.status_bar.config(
+                    text=f"✅ Zaktualizowano {edge_label} szablonu: {stage_code} → {new_date.strftime('%d-%m-%Y')}",
+                    fg=self.COLOR_GREEN
+                )
+            
+        except Exception as e:
+            messagebox.showerror("❌ Błąd", f"Nie można zapisać daty:\n{e}")
+        
+        finally:
+            # Reset stanu drag
+            self._drag_state['active'] = False
+            self._drag_state['stage_code'] = None
+            self._drag_state['edge'] = None
+            self._drag_state['original_date'] = None
+            self._drag_state['bar_item'] = None
+            self._drag_state['drag_anchor_x'] = None
+            self.matplotlib_canvas.draw_idle()
+
+    def edit_single_date_dialog(self, stage_code: str, field: str, current_bar_data: dict):
+        """
+        Dialog edycji pojedynczej daty szablonu po kliknięciu na wykresie
+        
+        Args:
+            stage_code: Kod etapu (np. 'PROJEKT')
+            field: 'start' lub 'end'
+            current_bar_data: Słownik z danymi paska (start, end, type, color)
+        """
+        # Pobierz aktualną wartość
+        current_value = current_bar_data[field]
+        field_label = "Początek" if field == 'start' else "Koniec"
+        
+        # Okno dialogowe
+        dialog = tk.Toplevel(self.root)
+        dialog.transient(self.root)
+        dialog.title(f"Edytuj datę szablonu - {stage_code}")
+        dialog.geometry("400x200")
+        dialog.resizable(False, False)
+        
+        # Wyśrodkuj okno
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Header
+        tk.Label(
+            dialog,
+            text=f"📅 EDYCJA DATY SZABLONU",
+            bg=self.COLOR_TOPBAR,
+            fg="white",
+            font=("Arial", 11, "bold"),
+            pady=10
+        ).pack(fill=tk.X)
+        
+        # Frame główny
+        main_frame = tk.Frame(dialog, padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Info
+        tk.Label(
+            main_frame,
+            text=f"Etap: {stage_code}",
+            font=self.FONT_BOLD,
+            anchor='w'
+        ).pack(fill=tk.X, pady=(0, 5))
+        
+        tk.Label(
+            main_frame,
+            text=f"Pole: {field_label} szablonu",
+            font=self.FONT_DEFAULT,
+            anchor='w',
+            fg='gray'
+        ).pack(fill=tk.X, pady=(0, 10))
+        
+        # Entry z datą
+        tk.Label(
+            main_frame,
+            text="Nowa data (DD-MM-YYYY):",
+            font=self.FONT_DEFAULT,
+            anchor='w'
+        ).pack(fill=tk.X)
+        
+        # Frame dla Entry + przycisk kalendarza
+        date_input_frame = tk.Frame(main_frame)
+        date_input_frame.pack(fill=tk.X, pady=(5, 15))
+        
+        date_entry = tk.Entry(date_input_frame, font=("Arial", 12), width=20)
+        date_entry.insert(0, current_value.strftime('%d-%m-%Y'))
+        date_entry.pack(side=tk.LEFT, padx=(0, 5))
+        date_entry.focus()
+        date_entry.select_range(0, tk.END)
+        
+        # Przycisk kalendarza
+        tk.Button(
+            date_input_frame,
+            text="📅 Kalendarz",
+            command=lambda: self.open_calendar_picker(date_entry),
+            bg="#3498db",
+            fg="white",
+            font=self.FONT_SMALL,
+            padx=8,
+            pady=5
+        ).pack(side=tk.LEFT)
+        
+        # Przyciski
+        btn_frame = tk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X)
+        
+        def save_single_date():
+            """Zapisz zmienioną datę"""
+            new_date_str = date_entry.get().strip()
+            
+            # Walidacja i konwersja DD-MM-YYYY → YYYY-MM-DD (ISO)
+            valid, date_iso = self.validate_and_convert_date(new_date_str)
+            if not valid:
+                messagebox.showerror("❌ Błąd walidacji", date_iso, parent=dialog)
+                return
+            
+            try:
+                _pdb = self.get_project_db_path(self.selected_project_id)
+                con = rmm._open_rm_connection(_pdb, row_factory=False)
+                
+                # UPDATE tylko jednego pola (template_start lub template_end)
+                field_db = 'template_start' if field == 'start' else 'template_end'
+                
+                con.execute(f"""
+                    UPDATE stage_schedule
+                    SET {field_db} = ?
+                    WHERE project_stage_id = (
+                        SELECT id FROM project_stages
+                        WHERE project_id = ? AND stage_code = ?
+                    )
+                """, (date_iso, self.selected_project_id, stage_code))
+                
+                con.commit()
+                con.close()
+                
+                # Przelicz prognozę
+                rmm.recalculate_forecast(_pdb, self.selected_project_id)
+                
+                # Zamknij dialog
+                dialog.destroy()
+                
+                # Odśwież wykres (zachowaj widok zoom/pan)
+                self.create_embedded_gantt_chart(preserve_view=True)
+                
+                self.status_bar.config(
+                    text=f"✅ Zaktualizowano {field_label.lower()} szablonu dla {stage_code}: {new_date_str}",
+                    fg=self.COLOR_GREEN
+                )
+                
+            except Exception as e:
+                messagebox.showerror("❌ Błąd", f"Nie można zapisać daty:\n{e}", parent=dialog)
+        
+        def cancel_dialog():
+            dialog.destroy()
+        
+        # Enter = zapisz, Escape = anuluj
+        dialog.bind('<Return>', lambda e: save_single_date())
+        dialog.bind('<Escape>', lambda e: cancel_dialog())
+        
+        tk.Button(
+            btn_frame,
+            text="💾 Zapisz",
+            command=save_single_date,
+            bg=self.COLOR_GREEN,
+            fg="white",
+            font=self.FONT_BOLD,
+            padx=15,
+            pady=5,
+            width=10
+        ).pack(side=tk.LEFT, padx=5)
+        
+        tk.Button(
+            btn_frame,
+            text="❌ Anuluj",
+            command=cancel_dialog,
+            bg=self.COLOR_RED,
+            fg="white",
+            font=self.FONT_BOLD,
+            padx=15,
+            pady=5,
+            width=10
+        ).pack(side=tk.LEFT, padx=5)
 
     def test_transport_components(self):
         """Test komponentów transport - sprawdź czy nie ma duplikacji"""
@@ -14803,9 +16396,26 @@ class RMManagerGUI:
         
         # Data płatności
         tk.Label(dialog, text="Data płatności:", font=self.FONT_DEFAULT).grid(row=2, column=0, sticky='e', padx=10, pady=10)
-        date_entry = tk.Entry(dialog, width=20, font=self.FONT_DEFAULT)
-        date_entry.grid(row=2, column=1, sticky='w', padx=10, pady=10)
+        
+        # Frame dla daty + przycisk kalendarza
+        date_frame = tk.Frame(dialog)
+        date_frame.grid(row=2, column=1, sticky='w', padx=10, pady=10)
+        
+        date_entry = tk.Entry(date_frame, width=20, font=self.FONT_DEFAULT)
+        date_entry.pack(side=tk.LEFT, padx=(0, 5))
         date_entry.insert(0, datetime.now().strftime('%Y-%m-%d'))
+        
+        # Przycisk kalendarza
+        tk.Button(
+            date_frame,
+            text="📅",
+            command=lambda: self.open_calendar_picker(date_entry),
+            bg="#3498db",
+            fg="white",
+            font=("Arial", 8),
+            padx=4,
+            pady=2
+        ).pack(side=tk.LEFT)
         
         tk.Label(dialog, text="(YYYY-MM-DD)", font=self.FONT_SMALL, fg="gray").grid(row=3, column=1, sticky='w', padx=10)
         
@@ -14954,10 +16564,27 @@ class RMManagerGUI:
         
         tk.Label(dialog, text=f"Transza: {percentage}%", font=("Arial", 12, "bold")).grid(row=0, column=0, columnspan=2, pady=10)
         
+        # Frame dla daty + przycisk kalendarza
+        date_frame = tk.Frame(dialog)
+        date_frame.grid(row=1, column=1, sticky='w', padx=10, pady=10)
+        
         tk.Label(dialog, text="Nowa data płatności:", font=self.FONT_DEFAULT).grid(row=1, column=0, sticky='e', padx=10, pady=10)
-        date_entry = tk.Entry(dialog, width=20, font=self.FONT_DEFAULT)
-        date_entry.grid(row=1, column=1, sticky='w', padx=10, pady=10)
+        
+        date_entry = tk.Entry(date_frame, width=20, font=self.FONT_DEFAULT)
+        date_entry.pack(side=tk.LEFT, padx=(0, 5))
         date_entry.insert(0, current_date if current_date != "---" else datetime.now().strftime('%Y-%m-%d'))
+        
+        # Przycisk kalendarza
+        tk.Button(
+            date_frame,
+            text="📅",
+            command=lambda: self.open_calendar_picker(date_entry),
+            bg="#3498db",
+            fg="white",
+            font=("Arial", 8),
+            padx=4,
+            pady=2
+        ).pack(side=tk.LEFT)
         
         tk.Label(dialog, text="(YYYY-MM-DD)", font=self.FONT_SMALL, fg="gray").grid(row=2, column=1, sticky='w', padx=10)
         
