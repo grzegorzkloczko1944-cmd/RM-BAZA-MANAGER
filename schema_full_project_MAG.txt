@@ -1,0 +1,158 @@
+SCHEMA RAPORT
+PLIK: Z:/FoldeR/projects_MAG/project_MAG_14.sqlite
+
+
+#################################################################
+TABELA: items
+#################################################################
+
+--- KOLUMNY ---
+id | INTEGER | PK
+project_id | INTEGER
+source | TEXT
+src_doc | TEXT
+src_row | INTEGER
+src_uid | TEXT
+src_pos | TEXT
+src_drawing_no | TEXT
+src_name | TEXT
+src_desc | TEXT
+src_qty | INTEGER
+src_material_text | TEXT
+src_supplier_text | TEXT
+norm_drawing_no | TEXT
+norm_name_key | TEXT
+work_drawing_no | TEXT
+work_name | TEXT
+work_desc | TEXT
+work_qty | REAL
+order_qty | REAL
+delivered_qty | REAL
+delivered_updated_at | TEXT
+supplier_id | INTEGER
+drawing_over | INTEGER
+name_over | INTEGER
+desc_over | INTEGER
+order_qty_over | INTEGER
+supplier_over | INTEGER
+mat_over | INTEGER
+class_auto | TEXT
+class_manual | TEXT
+class_effective | TEXT
+mat_auto_text | TEXT
+mat_manual_text | TEXT
+mat_effective_text | TEXT
+mat_grade | TEXT
+thickness_mm | REAL
+thickness_src | TEXT
+has_dxf | INTEGER
+has_dwf | INTEGER
+has_idw | INTEGER
+has_stp | INTEGER
+has_stl | INTEGER
+alarm_date | TEXT
+alarm_offset | INTEGER
+alarm_unit | TEXT
+deadline_date | TEXT
+ordered_at | TEXT
+ordered_flag | INTEGER
+price_pln | REAL
+status | TEXT
+notes | TEXT
+is_manual | INTEGER
+dwf_biblioteka | INTEGER
+is_hidden | INTEGER
+min_qty | REAL
+rank | INTEGER
+created_at | TEXT
+updated_at | TEXT
+sync_error | TEXT
+sync_hash | TEXT
+sync_last_at | TEXT
+sync_status | TEXT
+
+--- ILOŚĆ REKORDÓW ---
+0
+
+--- CREATE SQL ---
+CREATE TABLE items (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        project_id INTEGER,
+                        source TEXT,
+                        src_doc TEXT,
+                        src_row INTEGER,
+                        src_uid TEXT,
+                        src_pos TEXT,
+                        src_drawing_no TEXT,
+                        src_name TEXT,
+                        src_desc TEXT,
+                        src_qty INTEGER,
+                        src_material_text TEXT,
+                        src_supplier_text TEXT,
+                        norm_drawing_no TEXT,
+                        norm_name_key TEXT,
+                        work_drawing_no TEXT,
+                        work_name TEXT,
+                        work_desc TEXT,
+                        work_qty REAL,
+                        order_qty REAL,
+                        delivered_qty REAL,
+                        delivered_updated_at TEXT,
+                        supplier_id INTEGER,
+                        drawing_over INTEGER,
+                        name_over INTEGER,
+                        desc_over INTEGER,
+                        order_qty_over INTEGER,
+                        supplier_over INTEGER,
+                        mat_over INTEGER,
+                        class_auto TEXT,
+                        class_manual TEXT,
+                        class_effective TEXT,
+                        mat_auto_text TEXT,
+                        mat_manual_text TEXT,
+                        mat_effective_text TEXT,
+                        mat_grade TEXT,
+                        thickness_mm REAL,
+                        thickness_src TEXT,
+                        has_dxf INTEGER,
+                        has_dwf INTEGER,
+                        has_idw INTEGER,
+                        has_stp INTEGER,
+                        has_stl INTEGER,
+                        alarm_date TEXT,
+                        alarm_offset INTEGER,
+                        alarm_unit TEXT,
+                        deadline_date TEXT,
+                        ordered_at TEXT,
+                        ordered_flag INTEGER,
+                        price_pln REAL,
+                        status TEXT,
+                        notes TEXT,
+                        is_manual INTEGER,
+                        dwf_biblioteka INTEGER,
+                        is_hidden INTEGER,
+                        min_qty REAL,
+                        rank INTEGER,
+                        created_at TEXT,
+                        updated_at TEXT,
+                        sync_error TEXT,
+                        sync_hash TEXT,
+                        sync_last_at TEXT,
+                        sync_status TEXT
+                    )
+
+
+#################################################################
+TABELA: sqlite_sequence
+#################################################################
+
+--- KOLUMNY ---
+name | 
+seq | 
+
+--- ILOŚĆ REKORDÓW ---
+0
+
+--- CREATE SQL ---
+CREATE TABLE sqlite_sequence(name,seq)
+

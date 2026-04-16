@@ -1,0 +1,298 @@
+SCHEMA RAPORT
+PLIK: Z:/FoldeR/master.sqlite
+
+
+#################################################################
+TABELA: doc_counters
+#################################################################
+
+--- KOLUMNY ---
+id | INTEGER | PK
+doc_type | TEXT | NOT NULL
+counter | INTEGER | NOT NULL | DEFAULT 0
+prefix | TEXT
+updated_at | TEXT | DEFAULT CURRENT_TIMESTAMP
+
+--- INDEKSY ---
+sqlite_autoindex_doc_counters_1
+
+--- ILOŚĆ REKORDÓW ---
+0
+
+--- CREATE SQL ---
+CREATE TABLE doc_counters (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  doc_type          TEXT NOT NULL UNIQUE,
+  counter           INTEGER NOT NULL DEFAULT 0,
+  prefix            TEXT,
+  updated_at        TEXT DEFAULT CURRENT_TIMESTAMP
+)
+
+
+#################################################################
+TABELA: migration_info
+#################################################################
+
+--- KOLUMNY ---
+migrated_at | TEXT | NOT NULL
+source_db | TEXT | NOT NULL
+migration_version | TEXT | NOT NULL | DEFAULT '1.0'
+notes | TEXT
+
+--- ILOŚĆ REKORDÓW ---
+1
+
+--- CREATE SQL ---
+CREATE TABLE migration_info (
+  migrated_at       TEXT NOT NULL,
+  source_db         TEXT NOT NULL,
+  migration_version TEXT NOT NULL DEFAULT '1.0',
+  notes             TEXT
+)
+
+
+#################################################################
+TABELA: project_status_history
+#################################################################
+
+--- KOLUMNY ---
+id | INTEGER | PK
+project_id | INTEGER | NOT NULL
+old_status | TEXT
+new_status | TEXT | NOT NULL
+changed_at | TEXT | NOT NULL | DEFAULT datetime('now')
+changed_by | TEXT
+notes | TEXT
+
+--- FOREIGN KEYS ---
+project_id -> projects(project_id)
+
+--- INDEKSY ---
+idx_status_history_project
+
+--- ILOŚĆ REKORDÓW ---
+25
+
+--- CREATE SQL ---
+CREATE TABLE project_status_history (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id     INTEGER NOT NULL,
+                old_status     TEXT,
+                new_status     TEXT NOT NULL,
+                changed_at     TEXT NOT NULL DEFAULT (datetime('now')),
+                changed_by     TEXT,
+                notes          TEXT,
+                FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+            )
+
+
+#################################################################
+TABELA: projects
+#################################################################
+
+--- KOLUMNY ---
+project_id | INTEGER | PK
+name | TEXT | NOT NULL
+path | TEXT
+active | INTEGER | NOT NULL | DEFAULT 1
+created_at | TEXT | NOT NULL | DEFAULT datetime('now')
+project_type | TEXT | NOT NULL | DEFAULT 'MACHINE'
+started_at | TEXT
+expected_delivery | TEXT
+completed_at | TEXT
+designer | TEXT
+status | TEXT | NOT NULL | DEFAULT 'W_REALIZACJI'
+status_changed_at | TEXT
+sat | TEXT
+fat | TEXT
+
+--- INDEKSY ---
+idx_projects_active
+
+--- ILOŚĆ REKORDÓW ---
+14
+
+--- CREATE SQL ---
+CREATE TABLE projects (
+  project_id    INTEGER PRIMARY KEY,
+  name          TEXT NOT NULL,
+  path          TEXT,
+  active        INTEGER NOT NULL DEFAULT 1,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+, project_type TEXT NOT NULL DEFAULT 'MACHINE', started_at TEXT, expected_delivery TEXT, completed_at TEXT, designer TEXT, status TEXT NOT NULL DEFAULT 'W_REALIZACJI', status_changed_at TEXT, sat TEXT, fat TEXT)
+
+
+#################################################################
+TABELA: settings
+#################################################################
+
+--- KOLUMNY ---
+key | TEXT | PK
+value | TEXT
+updated_at | TEXT
+
+--- INDEKSY ---
+sqlite_autoindex_settings_1
+
+--- ILOŚĆ REKORDÓW ---
+2
+
+--- CREATE SQL ---
+CREATE TABLE settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at TEXT
+                )
+
+
+#################################################################
+TABELA: sqlite_sequence
+#################################################################
+
+--- KOLUMNY ---
+name | 
+seq | 
+
+--- ILOŚĆ REKORDÓW ---
+3
+
+--- CREATE SQL ---
+CREATE TABLE sqlite_sequence(name,seq)
+
+
+#################################################################
+TABELA: suppliers
+#################################################################
+
+--- KOLUMNY ---
+supplier_id | INTEGER | PK
+name | TEXT | NOT NULL
+is_active | INTEGER | NOT NULL | DEFAULT 1
+email | TEXT
+phone | TEXT
+lead_time_days | INTEGER
+notes | TEXT
+updated_at | TEXT
+contact_info | TEXT
+phone_default | TEXT
+email_default | TEXT
+
+--- INDEKSY ---
+idx_suppliers_active
+sqlite_autoindex_suppliers_1
+
+--- ILOŚĆ REKORDÓW ---
+51
+
+--- CREATE SQL ---
+CREATE TABLE suppliers (
+  supplier_id       INTEGER PRIMARY KEY,
+  name              TEXT NOT NULL UNIQUE,
+  is_active         INTEGER NOT NULL DEFAULT 1,
+  email             TEXT,
+  phone             TEXT,
+  lead_time_days    INTEGER,
+  notes             TEXT,
+  updated_at        TEXT,
+  contact_info      TEXT,
+  phone_default     TEXT,
+  email_default     TEXT
+)
+
+
+#################################################################
+TABELA: user_changes_log
+#################################################################
+
+--- KOLUMNY ---
+change_id | INTEGER | PK
+action | TEXT | NOT NULL
+user_id | INTEGER
+username | TEXT
+display_name | TEXT
+role | TEXT
+changed_by | TEXT
+timestamp | TEXT | NOT NULL
+details | TEXT
+
+--- ILOŚĆ REKORDÓW ---
+40
+
+--- CREATE SQL ---
+CREATE TABLE user_changes_log (
+                    change_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action TEXT NOT NULL,
+                    user_id INTEGER,
+                    username TEXT,
+                    display_name TEXT,
+                    role TEXT,
+                    changed_by TEXT,
+                    timestamp TEXT NOT NULL,
+                    details TEXT
+                )
+
+
+#################################################################
+TABELA: user_col_widths
+#################################################################
+
+--- KOLUMNY ---
+user_id | INTEGER | PK | NOT NULL
+view_key | TEXT | PK | NOT NULL
+col_name | TEXT | PK | NOT NULL
+width_px | INTEGER | NOT NULL
+updated_at | TEXT | DEFAULT CURRENT_TIMESTAMP
+
+--- FOREIGN KEYS ---
+user_id -> users(id)
+
+--- INDEKSY ---
+sqlite_autoindex_user_col_widths_1
+
+--- ILOŚĆ REKORDÓW ---
+89
+
+--- CREATE SQL ---
+CREATE TABLE user_col_widths (
+  user_id       INTEGER NOT NULL,
+  view_key      TEXT NOT NULL,
+  col_name      TEXT NOT NULL,
+  width_px      INTEGER NOT NULL,
+  updated_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(user_id, view_key, col_name),
+  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+)
+
+
+#################################################################
+TABELA: users
+#################################################################
+
+--- KOLUMNY ---
+id | INTEGER | PK
+username | TEXT | NOT NULL
+display_name | TEXT
+role | TEXT | DEFAULT 'USER'
+password_hash | TEXT
+is_active | INTEGER | NOT NULL | DEFAULT 1
+created_at | TEXT | DEFAULT CURRENT_TIMESTAMP
+
+--- INDEKSY ---
+idx_users_active
+idx_users_username
+sqlite_autoindex_users_1
+
+--- ILOŚĆ REKORDÓW ---
+10
+
+--- CREATE SQL ---
+CREATE TABLE users (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  username          TEXT NOT NULL UNIQUE,
+  display_name      TEXT,
+  role              TEXT DEFAULT 'USER',
+  password_hash     TEXT,
+  is_active         INTEGER NOT NULL DEFAULT 1,
+  created_at        TEXT DEFAULT CURRENT_TIMESTAMP
+)
+

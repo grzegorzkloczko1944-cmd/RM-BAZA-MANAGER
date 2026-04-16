@@ -1,0 +1,13 @@
+{
+    "master_db_path": "Y:/RM_BAZA/master.sqlite",
+    "rm_db_path": "rm_manager.sqlite",
+    "rm_projects_dir": "Y:/RM_MANAGER",
+    "backup_dir": "Y:/RM_MANAGER/backups",
+    "_comment": "RM_MANAGER configuration file - edit paths as needed",
+    
+    "_sms_comment": "=== SMS Configuration (SMSAPI.pl) ===",
+    "sms_enabled": false,
+    "sms_api_token": "",
+    "sms_sender_name": "RM_MANAGER",
+    "sms_default_country_code": "48"
+}
