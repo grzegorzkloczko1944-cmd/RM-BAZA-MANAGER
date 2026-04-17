@@ -5828,6 +5828,15 @@ def get_active_alarms(project_db_path: str, project_id: int = None,
     con = _open_rm_connection(project_db_path)
     
     try:
+        # Sprawdź czy tabela stage_alarms istnieje (może nie być w starszych bazach)
+        table_check = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='stage_alarms'"
+        ).fetchone()
+        
+        if not table_check:
+            # Tabela nie istnieje - zwróć pustą listę (starsza baza projektu)
+            return []
+        
         query = "SELECT * FROM stage_alarms WHERE is_active = 1"
         params = []
         
