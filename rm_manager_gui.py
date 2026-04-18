@@ -7018,6 +7018,19 @@ class RMManagerGUI:
             self.refresh_all()
             print(f"💾 Refresh zakończony")
             
+            # Odśwież wykresy jeśli otwarte
+            if self.matplotlib_canvas:
+                try:
+                    self.create_embedded_gantt_chart(preserve_view=True)
+                except Exception:
+                    pass
+            if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+                try:
+                    self._create_multi_project_chart_window(
+                        self._mp_chart_meta['project_ids'], preserve_view=True)
+                except Exception:
+                    pass
+            
             self.status_bar.config(text=f"✅ Zapisano szablon dla {stage_code}", fg=self.COLOR_GREEN)
             print(f"💾 Status bar ustawiony - KONIEC")
             
@@ -7147,6 +7160,19 @@ class RMManagerGUI:
             # Odśwież widoki
             print(f"   🔄 Odświeżam widoki...")
             self.refresh_all()
+            
+            # Odśwież wykresy jeśli otwarte
+            if self.matplotlib_canvas:
+                try:
+                    self.create_embedded_gantt_chart(preserve_view=True)
+                except Exception:
+                    pass
+            if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+                try:
+                    self._create_multi_project_chart_window(
+                        self._mp_chart_meta['project_ids'], preserve_view=True)
+                except Exception:
+                    pass
             
             print(f"   ✅ Sukces - milestone {stage_code} zapisany z datą {milestone_date_iso}")
             self.status_bar.config(text=f"✅ Zapisano datę milestone {stage_code}", fg=self.COLOR_GREEN)
@@ -13290,6 +13316,9 @@ class RMManagerGUI:
         # Inicjalizuj filtry typów per projekt: {pid: {'Szablon': True, ...}}
         if not hasattr(self, '_mp_proj_type_filters') or not preserve_view:
             self._mp_proj_type_filters = {}
+        # ON/OFF nadpisania per-projekt (True = filtr projektu niezależny od globalnego)
+        if not hasattr(self, '_mp_proj_filter_override') or not preserve_view:
+            self._mp_proj_filter_override = {}
         # Wybrany (zaznaczony/locked) projekt w multi-Gantt
         if not hasattr(self, '_mp_selected_pid') or not preserve_view:
             self._mp_selected_pid = None
@@ -13355,27 +13384,35 @@ class RMManagerGUI:
                 
                 # --- SZABLON ---
                 proj_tf = self._mp_proj_type_filters.get(pid, {})
-                if has_template and self._mp_type_filters.get('Szablon', True) and proj_tf.get('Szablon', True):
-                    tpl_start = datetime.strptime(template_start[:10], '%Y-%m-%d')
-                    tpl_end = datetime.strptime(template_end[:10], '%Y-%m-%d')
-                    tpl_start, tpl_end = self._ensure_min_1day_dt(tpl_start, tpl_end)
-                    all_gantt_data.append({
-                        'task': row_label,
-                        'y_pos': y_pos,
-                        'start': tpl_start,
-                        'end': tpl_end,
-                        'type': 'Szablon',
-                        'color': stage_color,
-                        'alpha': 0.35,
-                        'height': 0.8,
-                        'y_offset': -0.1,
-                        'project_id': pid,
-                        'stage_code': stage_code,
-                    })
-                    all_dates.extend([tpl_start, tpl_end])
+                override = self._mp_proj_filter_override.get(pid, False)
+                if has_template:
+                    show = proj_tf.get('Szablon', True) if override else (
+                        self._mp_type_filters.get('Szablon', True) and proj_tf.get('Szablon', True))
+                    if show:
+                        tpl_start = datetime.strptime(template_start[:10], '%Y-%m-%d')
+                        tpl_end = datetime.strptime(template_end[:10], '%Y-%m-%d')
+                        tpl_start, tpl_end = self._ensure_min_1day_dt(tpl_start, tpl_end)
+                        all_gantt_data.append({
+                            'task': row_label,
+                            'y_pos': y_pos,
+                            'start': tpl_start,
+                            'end': tpl_end,
+                            'type': 'Szablon',
+                            'color': stage_color,
+                            'alpha': 0.35,
+                            'height': 0.8,
+                            'y_offset': -0.1,
+                            'project_id': pid,
+                            'stage_code': stage_code,
+                        })
+                        all_dates.extend([tpl_start, tpl_end])
                 
                 # --- RZECZYWISTE ---
-                if self._mp_type_filters.get('Rzeczywiste', True) and proj_tf.get('Rzeczywiste', True):
+                if override:
+                    show_rz = proj_tf.get('Rzeczywiste', True)
+                else:
+                    show_rz = self._mp_type_filters.get('Rzeczywiste', True) and proj_tf.get('Rzeczywiste', True)
+                if show_rz:
                     for period in stage.get('actual_periods', []):
                         if period.get('started_at'):
                             start_date = datetime.strptime(period['started_at'][:10], '%Y-%m-%d')
@@ -13400,24 +13437,27 @@ class RMManagerGUI:
                             all_dates.extend([start_date, end_date])
                 
                 # --- PROGNOZA ---
-                if has_forecast and self._mp_type_filters.get('Prognoza', True) and proj_tf.get('Prognoza', True):
-                    fc_start = datetime.strptime(stage['forecast_start'][:10], '%Y-%m-%d')
-                    fc_end = datetime.strptime(stage['forecast_end'][:10], '%Y-%m-%d')
-                    fc_start, fc_end = self._ensure_min_1day_dt(fc_start, fc_end)
-                    all_gantt_data.append({
-                        'task': row_label,
-                        'y_pos': y_pos,
-                        'start': fc_start,
-                        'end': fc_end,
-                        'type': 'Prognoza',
-                        'color': stage_color,
-                        'alpha': 0.55,
-                        'height': 0.25,
-                        'y_offset': 0.18,
-                        'project_id': pid,
-                        'stage_code': stage_code,
-                    })
-                    all_dates.extend([fc_start, fc_end])
+                if has_forecast:
+                    show_pr = proj_tf.get('Prognoza', True) if override else (
+                        self._mp_type_filters.get('Prognoza', True) and proj_tf.get('Prognoza', True))
+                    if show_pr:
+                        fc_start = datetime.strptime(stage['forecast_start'][:10], '%Y-%m-%d')
+                        fc_end = datetime.strptime(stage['forecast_end'][:10], '%Y-%m-%d')
+                        fc_start, fc_end = self._ensure_min_1day_dt(fc_start, fc_end)
+                        all_gantt_data.append({
+                            'task': row_label,
+                            'y_pos': y_pos,
+                            'start': fc_start,
+                            'end': fc_end,
+                            'type': 'Prognoza',
+                            'color': stage_color,
+                            'alpha': 0.55,
+                            'height': 0.25,
+                            'y_offset': 0.18,
+                            'project_id': pid,
+                            'stage_code': stage_code,
+                        })
+                        all_dates.extend([fc_start, fc_end])
                 
                 y_pos += 1
             
@@ -13454,14 +13494,35 @@ class RMManagerGUI:
             except Exception:
                 pass
         
+        # Próba reużycia istniejącego canvas/figure (bez migania)
+        reuse_canvas = False
+        if preserve_view and hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+            try:
+                _old_canvas = self._mp_chart_meta.get('canvas')
+                _old_fig = self._mp_chart_meta.get('fig')
+                if _old_canvas and _old_fig and _old_canvas.get_tk_widget().winfo_exists():
+                    reuse_canvas = True
+            except Exception:
+                reuse_canvas = False
+        
         # Reuse istniejącego okna jeśli jest otwarte
         reuse = False
         if hasattr(self, '_mp_chart_window') and self._mp_chart_window:
             try:
                 if self._mp_chart_window.winfo_exists():
-                    # Wyczyść tylko chart_frame (nie filtry i top_bar)
-                    for child in self._mp_chart_frame.winfo_children():
-                        child.destroy()
+                    if not reuse_canvas:
+                        # Zamknij starą figurę matplotlib (memory leak prevention)
+                        if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+                            try:
+                                import matplotlib.pyplot as plt
+                                old_fig = self._mp_chart_meta.get('fig')
+                                if old_fig:
+                                    plt.close(old_fig)
+                            except Exception:
+                                pass
+                        # Wyczyść chart_frame tylko gdy nie reużywamy canvas
+                        for child in self._mp_chart_frame.winfo_children():
+                            child.destroy()
                     reuse = True
             except Exception:
                 pass
@@ -13493,7 +13554,7 @@ class RMManagerGUI:
             
             # Legenda nawigacji
             tk.Label(top_bar,
-                     text="🖱 Scroll: zoom pionu  |  Shift+Scroll: lewo/prawo  |  Ctrl+Scroll: zoom czasu (X)  |  Ctrl+Shift+Scroll: góra/dół  |  Shift+LMB: pan  |  🏠 Home: reset",
+                     text="🖱 Scroll: góra/dół  |  Shift+Scroll: lewo/prawo  |  Ctrl+Scroll: zoom czasu (X)  |  Ctrl+Shift+Scroll: zoom pionu (Y)  |  Shift+LMB: pan  |  🏠 Home: reset",
                      font=("Arial", 9), fg="black", bg=self.COLOR_TOPBAR
             ).pack(side=tk.RIGHT, padx=10)
             
@@ -13509,113 +13570,125 @@ class RMManagerGUI:
             self._mp_chart_frame = tk.Frame(self._mp_chart_window)
             self._mp_chart_frame.pack(fill=tk.BOTH, expand=True)
         
-        # ===== Odśwież panel filtrów =====
-        for child in self._mp_filter_frame.winfo_children():
-            child.destroy()
+        # ===== Odśwież panel filtrów (pomiń gdy reuse_canvas — widgety OK) =====
+        if not reuse_canvas:
+            for child in self._mp_filter_frame.winfo_children():
+                child.destroy()
         
         # Callback odświeżania po zmianie filtra
         def _on_filter_change():
             self._create_multi_project_chart_window(project_ids, preserve_view=True)
         
-        # Rząd 1: Typy pasków (Szablon / Rzeczywiste / Prognoza) + przycisk Przerysuj
-        type_row = tk.Frame(self._mp_filter_frame, bg="#f8f8f8")
-        type_row.pack(fill=tk.X, padx=5, pady=(3, 0))
-        
-        tk.Button(type_row, text="🔄 Przerysuj", command=_on_filter_change,
-                  bg=self.COLOR_GREEN, fg="white", font=("Arial", 9, "bold"),
-                  padx=8, pady=1, relief=tk.RAISED, cursor='hand2'
-        ).pack(side=tk.LEFT, padx=(0, 10))
-        
-        tk.Label(type_row, text="Typ:", font=("Arial", 9, "bold"), bg="#f8f8f8"
-                ).pack(side=tk.LEFT, padx=(0, 5))
-        
-        type_colors = {'Szablon': '#95a5a6', 'Rzeczywiste': '#27ae60', 'Prognoza': '#3498db'}
-        self._mp_type_vars = {}
-        for ttype, tcolor in type_colors.items():
-            var = tk.BooleanVar(value=self._mp_type_filters.get(ttype, True))
-            self._mp_type_vars[ttype] = var
+        if not reuse_canvas:
+            # Rząd 1: Typy pasków (Szablon / Rzeczywiste / Prognoza) + przycisk Przerysuj
+            type_row = tk.Frame(self._mp_filter_frame, bg="#f8f8f8")
+            type_row.pack(fill=tk.X, padx=5, pady=(3, 0))
             
-            def _make_type_cb(tt, v):
-                def cb():
-                    self._mp_type_filters[tt] = v.get()
-                return cb
+            tk.Button(type_row, text="🔄 Przerysuj", command=_on_filter_change,
+                      bg=self.COLOR_GREEN, fg="white", font=("Arial", 9, "bold"),
+                      padx=8, pady=1, relief=tk.RAISED, cursor='hand2'
+            ).pack(side=tk.LEFT, padx=(0, 10))
             
-            cb = tk.Checkbutton(type_row, text=ttype, variable=var,
-                               command=_make_type_cb(ttype, var),
-                               font=("Arial", 9), bg="#f8f8f8",
-                               fg=tcolor, selectcolor="white",
-                               activebackground="#f8f8f8")
-            cb.pack(side=tk.LEFT, padx=4)
-        
-        # Separator
-        ttk.Separator(self._mp_filter_frame, orient='horizontal').pack(fill=tk.X, padx=5, pady=2)
-        
-        # Rząd 2: Etapy (z kolorami)
-        stage_row = tk.Frame(self._mp_filter_frame, bg="#f8f8f8")
-        stage_row.pack(fill=tk.X, padx=5, pady=(0, 3))
-        
-        tk.Label(stage_row, text="Etapy:", font=("Arial", 9, "bold"), bg="#f8f8f8"
-                ).pack(side=tk.LEFT, padx=(0, 5))
-        
-        # Zaznacz / Odznacz wszystko
-        def _select_all_stages():
-            for sc in self._mp_stage_filters:
-                self._mp_stage_filters[sc] = True
-            for v in self._mp_stage_vars.values():
-                v.set(True)
-        
-        def _deselect_all_stages():
-            for sc in self._mp_stage_filters:
-                self._mp_stage_filters[sc] = False
-            for v in self._mp_stage_vars.values():
-                v.set(False)
-        
-        tk.Button(stage_row, text="✅", command=_select_all_stages,
-                  font=("Arial", 8), padx=2, pady=0, relief=tk.FLAT,
-                  bg="#f8f8f8").pack(side=tk.LEFT)
-        tk.Button(stage_row, text="❌", command=_deselect_all_stages,
-                  font=("Arial", 8), padx=2, pady=0, relief=tk.FLAT,
-                  bg="#f8f8f8").pack(side=tk.LEFT, padx=(0, 5))
-        
-        self._mp_stage_vars = {}
-        
-        # Posortuj etapy w kolejności z STAGE_DEFINITIONS
-        stage_order = list(stage_defs.keys())
-        sorted_stages = sorted(encountered_stages, key=lambda sc: stage_order.index(sc) if sc in stage_order else 999)
-        
-        for sc in sorted_stages:
-            sd = stage_defs.get(sc, {})
-            sname = sd.get('display_name', sc)
-            scolor = sd.get('color', '#95a5a6')
-            is_ms = sd.get('is_milestone', False)
+            tk.Label(type_row, text="Typ:", font=("Arial", 9, "bold"), bg="#f8f8f8"
+                    ).pack(side=tk.LEFT, padx=(0, 5))
             
-            var = tk.BooleanVar(value=self._mp_stage_filters.get(sc, True))
-            self._mp_stage_vars[sc] = var
+            type_colors = {'Szablon': '#95a5a6', 'Rzeczywiste': '#27ae60', 'Prognoza': '#3498db'}
+            self._mp_type_vars = {}
+            for ttype, tcolor in type_colors.items():
+                var = tk.BooleanVar(value=self._mp_type_filters.get(ttype, True))
+                self._mp_type_vars[ttype] = var
+                
+                def _make_type_cb(tt, v):
+                    def cb():
+                        self._mp_type_filters[tt] = v.get()
+                        _on_filter_change()
+                    return cb
+                
+                cb = tk.Checkbutton(type_row, text=ttype, variable=var,
+                                   command=_make_type_cb(ttype, var),
+                                   font=("Arial", 9), bg="#f8f8f8",
+                                   fg=tcolor, selectcolor="white",
+                                   activebackground="#f8f8f8")
+                cb.pack(side=tk.LEFT, padx=4)
             
-            def _make_stage_cb(stage_code, v):
-                def cb():
-                    self._mp_stage_filters[stage_code] = v.get()
-                return cb
+            # Separator
+            ttk.Separator(self._mp_filter_frame, orient='horizontal').pack(fill=tk.X, padx=5, pady=2)
             
-            # Kontener z kolorowym kwadratem + checkbutton
-            frame = tk.Frame(stage_row, bg="#f8f8f8")
-            frame.pack(side=tk.LEFT, padx=2)
+            # Rząd 2: Etapy (z kolorami)
+            stage_row = tk.Frame(self._mp_filter_frame, bg="#f8f8f8")
+            stage_row.pack(fill=tk.X, padx=5, pady=(0, 3))
             
-            # Kolorowy kwadrat
-            color_lbl = tk.Label(frame, text="  ", bg=scolor, width=2,
-                                 relief=tk.SOLID, bd=1)
-            color_lbl.pack(side=tk.LEFT, padx=(0, 1))
+            tk.Label(stage_row, text="Etapy:", font=("Arial", 9, "bold"), bg="#f8f8f8"
+                    ).pack(side=tk.LEFT, padx=(0, 5))
             
-            label_text = f"{'[M] ' if is_ms else ''}{sname}"
-            cb = tk.Checkbutton(frame, text=label_text, variable=var,
-                               command=_make_stage_cb(sc, var),
-                               font=("Arial", 8), bg="#f8f8f8",
-                               selectcolor="white", activebackground="#f8f8f8")
-            cb.pack(side=tk.LEFT)
+            # Zaznacz / Odznacz wszystko
+            def _select_all_stages():
+                for sc in self._mp_stage_filters:
+                    self._mp_stage_filters[sc] = True
+                for v in self._mp_stage_vars.values():
+                    v.set(True)
+                _on_filter_change()
+            
+            def _deselect_all_stages():
+                for sc in self._mp_stage_filters:
+                    self._mp_stage_filters[sc] = False
+                for v in self._mp_stage_vars.values():
+                    v.set(False)
+                _on_filter_change()
+            
+            tk.Button(stage_row, text="✅", command=_select_all_stages,
+                      font=("Arial", 8), padx=2, pady=0, relief=tk.FLAT,
+                      bg="#f8f8f8").pack(side=tk.LEFT)
+            tk.Button(stage_row, text="❌", command=_deselect_all_stages,
+                      font=("Arial", 8), padx=2, pady=0, relief=tk.FLAT,
+                      bg="#f8f8f8").pack(side=tk.LEFT, padx=(0, 5))
+            
+            self._mp_stage_vars = {}
+            
+            # Posortuj etapy w kolejności z STAGE_DEFINITIONS
+            stage_order = list(stage_defs.keys())
+            sorted_stages = sorted(encountered_stages, key=lambda sc: stage_order.index(sc) if sc in stage_order else 999)
+            
+            for sc in sorted_stages:
+                sd = stage_defs.get(sc, {})
+                sname = sd.get('display_name', sc)
+                scolor = sd.get('color', '#95a5a6')
+                is_ms = sd.get('is_milestone', False)
+                
+                var = tk.BooleanVar(value=self._mp_stage_filters.get(sc, True))
+                self._mp_stage_vars[sc] = var
+                
+                def _make_stage_cb(stage_code, v):
+                    def cb():
+                        self._mp_stage_filters[stage_code] = v.get()
+                        _on_filter_change()
+                    return cb
+                
+                # Kontener z kolorowym kwadratem + checkbutton
+                frame = tk.Frame(stage_row, bg="#f8f8f8")
+                frame.pack(side=tk.LEFT, padx=2)
+                
+                # Kolorowy kwadrat
+                color_lbl = tk.Label(frame, text="  ", bg=scolor, width=2,
+                                     relief=tk.SOLID, bd=1)
+                color_lbl.pack(side=tk.LEFT, padx=(0, 1))
+                
+                label_text = f"{'[M] ' if is_ms else ''}{sname}"
+                cb = tk.Checkbutton(frame, text=label_text, variable=var,
+                                   command=_make_stage_cb(sc, var),
+                                   font=("Arial", 8), bg="#f8f8f8",
+                                   selectcolor="white", activebackground="#f8f8f8")
+                cb.pack(side=tk.LEFT)
         
         # ===== Rysuj wykres =====
-        fig = Figure(figsize=(14, max(6, len(y_labels) * 0.4)), dpi=100)
-        ax = fig.add_subplot(111)
+        if reuse_canvas:
+            fig = self._mp_chart_meta['fig']
+            fig.clear()
+            ax = fig.add_subplot(111)
+            mp_canvas = self._mp_chart_meta['canvas']
+        else:
+            fig = Figure(figsize=(14, max(6, len(y_labels) * 0.4)), dpi=100)
+            ax = fig.add_subplot(111)
         
         # Rysuj paski
         for item in all_gantt_data:
@@ -13729,75 +13802,93 @@ class RMManagerGUI:
         
         fig.subplots_adjust(left=0.08, right=0.99, top=0.95, bottom=0.12)
         
-        # ===== Canvas i statyczny prawy panel =====
-        # Prawy panel — info o wybranym projekcie + lock + filtr per-projekt
-        self._mp_right_panel = tk.Frame(self._mp_chart_frame, bg="#f0f0f0", width=170,
-                                         relief=tk.GROOVE, bd=1)
-        self._mp_right_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 2), pady=2)
-        self._mp_right_panel.pack_propagate(False)
-        self._mp_build_right_panel(project_ids)
-        
-        mp_canvas = FigureCanvasTkAgg(fig, self._mp_chart_frame)
-        mp_canvas.draw()
-        mp_canvas.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # Dopasuj marginesy przy resize okna
-        def _on_mp_canvas_configure(event):
-            try:
-                w = event.width
-                left_frac = max(0.05, min(0.10, 100.0 / max(w, 1)))
-                fig.subplots_adjust(left=left_frac, right=0.99, top=0.95, bottom=0.12)
+        if reuse_canvas:
+            # Reuse: odśwież figurę i przywróć widok
+            if saved_xlim:
+                ax.set_xlim(saved_xlim)
+            mp_canvas.draw()
+            
+            # Zaktualizuj metadane (nowe ax, dane)
+            self._mp_chart_meta.update({
+                'ax': ax,
+                'y_labels': y_labels,
+                'gantt_data': all_gantt_data,
+                'y_positions': {lbl: idx for idx, lbl in enumerate(y_labels)},
+                'stage_defs': stage_defs,
+                'all_dates': all_dates,
+                'y_to_pid': y_to_pid,
+                'project_separators': project_separators,
+            })
+        else:
+            # ===== Canvas i statyczny prawy panel =====
+            # Prawy panel — info o wybranym projekcie + lock + filtr per-projekt
+            self._mp_right_panel = tk.Frame(self._mp_chart_frame, bg="#f0f0f0", width=170,
+                                             relief=tk.GROOVE, bd=1)
+            self._mp_right_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 2), pady=2)
+            self._mp_right_panel.pack_propagate(False)
+            self._mp_build_right_panel(project_ids)
+            
+            mp_canvas = FigureCanvasTkAgg(fig, self._mp_chart_frame)
+            mp_canvas.draw()
+            mp_canvas.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            
+            # Dopasuj marginesy przy resize okna
+            def _on_mp_canvas_configure(event):
+                try:
+                    w = event.width
+                    left_frac = max(0.05, min(0.10, 100.0 / max(w, 1)))
+                    fig.subplots_adjust(left=left_frac, right=0.99, top=0.95, bottom=0.12)
+                    mp_canvas.draw_idle()
+                except Exception:
+                    pass
+            
+            # WAŻNE: add='+' żeby NIE nadpisać wewnętrznego handlera matplotlib
+            mp_canvas.get_tk_widget().bind('<Configure>', _on_mp_canvas_configure, add='+')
+            
+            # Toolbar matplotlib usunięty — nawigacja przez custom handlery (scroll/pan/zoom)
+            # Home = reset_view, Save = top bar "Zapisz PNG"
+            
+            # Przywróć zapisany widok (tylko oś X - daty; oś Y zawsze pełna)
+            if saved_xlim:
+                ax.set_xlim(saved_xlim)
                 mp_canvas.draw_idle()
-            except Exception:
-                pass
-        
-        # WAŻNE: add='+' żeby NIE nadpisać wewnętrznego handlera matplotlib
-        mp_canvas.get_tk_widget().bind('<Configure>', _on_mp_canvas_configure, add='+')
-        
-        # Toolbar matplotlib usunięty — nawigacja przez custom handlery (scroll/pan/zoom)
-        # Home = reset_view, Save = top bar "Zapisz PNG"
-        
-        # Przywróć zapisany widok (tylko oś X - daty; oś Y zawsze pełna)
-        if saved_xlim:
-            ax.set_xlim(saved_xlim)
-            mp_canvas.draw_idle()
-        
-        # ===== Metadane (do edycji pasków) =====
-        self._mp_chart_meta = {
-            'ax': ax,
-            'fig': fig,
-            'canvas': mp_canvas,
-            'toolbar': None,
-            'y_labels': y_labels,
-            'gantt_data': all_gantt_data,
-            'y_positions': {lbl: idx for idx, lbl in enumerate(y_labels)},
-            'stage_defs': stage_defs,
-            'project_ids': project_ids,
-            'all_dates': all_dates,
-            'y_to_pid': y_to_pid,
-            'project_separators': project_separators,
-        }
-        
-        self._mp_drag_state = {
-            'active': False, 'stage_code': None, 'project_id': None,
-            'edge': None, 'original_date': None, 'bar_item': None, 'preview_line': None,
-            'drag_anchor_x': None,
-        }
-        self._mp_pan_state = {'active': False}
-        
-        # Event handlers
-        mp_canvas.mpl_connect('button_press_event', self._mp_on_press)
-        mp_canvas.mpl_connect('button_release_event', self._mp_on_release)
-        mp_canvas.mpl_connect('motion_notify_event', self._mp_on_motion)
-        mp_canvas.mpl_connect('button_press_event', self._mp_on_dblclick)
-        # scroll: obsługiwany na poziomie Tk (nie mpl_connect) — niezawodny na Linux
-        
-        # Tk-level scroll + focus — omija bind_all z głównego okna
-        canvas_widget = mp_canvas.get_tk_widget()
-        canvas_widget.bind('<Enter>', lambda e: canvas_widget.focus_set())
-        canvas_widget.bind('<Button-4>', lambda e: (self._mp_on_scroll_tk(e, 'up'), 'break')[-1])
-        canvas_widget.bind('<Button-5>', lambda e: (self._mp_on_scroll_tk(e, 'down'), 'break')[-1])
-        canvas_widget.bind('<MouseWheel>', lambda e: (self._mp_on_scroll_tk(e, 'up' if e.delta > 0 else 'down'), 'break')[-1])
+            
+            # ===== Metadane (do edycji pasków) =====
+            self._mp_chart_meta = {
+                'ax': ax,
+                'fig': fig,
+                'canvas': mp_canvas,
+                'toolbar': None,
+                'y_labels': y_labels,
+                'gantt_data': all_gantt_data,
+                'y_positions': {lbl: idx for idx, lbl in enumerate(y_labels)},
+                'stage_defs': stage_defs,
+                'project_ids': project_ids,
+                'all_dates': all_dates,
+                'y_to_pid': y_to_pid,
+                'project_separators': project_separators,
+            }
+            
+            self._mp_drag_state = {
+                'active': False, 'stage_code': None, 'project_id': None,
+                'edge': None, 'original_date': None, 'bar_item': None, 'preview_line': None,
+                'drag_anchor_x': None,
+            }
+            self._mp_pan_state = {'active': False}
+            
+            # Event handlers
+            mp_canvas.mpl_connect('button_press_event', self._mp_on_press)
+            mp_canvas.mpl_connect('button_release_event', self._mp_on_release)
+            mp_canvas.mpl_connect('motion_notify_event', self._mp_on_motion)
+            mp_canvas.mpl_connect('button_press_event', self._mp_on_dblclick)
+            
+            # Scroll — Windows: <MouseWheel> z modyfikatorami (Button-4/5 to Linux)
+            canvas_widget = mp_canvas.get_tk_widget()
+            canvas_widget.bind('<Enter>', lambda e: canvas_widget.focus_set())
+            canvas_widget.bind('<Control-Shift-MouseWheel>', lambda e: (self._mp_scroll_action('zoom_y', 'up' if e.delta > 0 else 'down', e), 'break')[-1])
+            canvas_widget.bind('<Control-MouseWheel>', lambda e: (self._mp_scroll_action('zoom_x', 'up' if e.delta > 0 else 'down', e), 'break')[-1])
+            canvas_widget.bind('<Shift-MouseWheel>', lambda e: (self._mp_scroll_action('pan_x', 'up' if e.delta > 0 else 'down'), 'break')[-1])
+            canvas_widget.bind('<MouseWheel>', lambda e: (self._mp_scroll_action('pan_y', 'up' if e.delta > 0 else 'down'), 'break')[-1])
         
         self._mp_status.config(text=f"✅ Wykres: {len(project_ids)} projektów, {len(all_gantt_data)} pasków")
     
@@ -13821,12 +13912,13 @@ class RMManagerGUI:
         except Exception as e:
             print(f"⚠️ MP reset view: {e}")
     
-    def _mp_on_scroll_tk(self, tk_event, direction):
-        """Obsługa scrolla na wykresie — czysto Tk-level (niezawodne na Linux):
-        - Scroll: zoom pionu (Y)
-        - Shift+scroll: pan lewo/prawo (X)
-        - Ctrl+scroll: zoom czasu (X)
-        - Ctrl+Shift+scroll: pan góra/dół (Y)
+    def _mp_scroll_action(self, action, direction, tk_event=None):
+        """Wykonaj akcję scrolla — wywoływana z dedykowanych Tk bindingów.
+        Identyczna logika jak _on_chart_scroll w Wykresie wbudowanym:
+        - pan_y: Scroll → pan góra/dół (Y)
+        - pan_x: Shift+Scroll → pan lewo/prawo (X)
+        - zoom_x: Ctrl+Scroll → zoom czasu (X)
+        - zoom_y: Ctrl+Shift+Scroll → zoom pionu (Y)
         """
         if not hasattr(self, '_mp_chart_meta') or not self._mp_chart_meta:
             return
@@ -13835,52 +13927,51 @@ class RMManagerGUI:
         
         scale_factor = 0.85 if direction == 'up' else 1.15
         
-        # Modyfikatory z Tk state (bitmaski) — 100% niezawodne
-        has_shift = bool(tk_event.state & 0x1)
-        has_ctrl = bool(tk_event.state & 0x4)
-        
-        # Konwersja Tk pikseli na współrzędne danych (do centrowania zoom)
-        x_data, y_data = None, None
-        try:
-            widget = canvas.get_tk_widget()
-            # Tk: y=0 u góry; matplotlib display: y=0 u dołu
-            x_display = tk_event.x
-            y_display = widget.winfo_height() - tk_event.y
-            inv = ax.transData.inverted()
-            x_data, y_data = inv.transform((x_display, y_display))
-        except Exception:
-            pass
-        
-        if has_ctrl and has_shift:
-            # Ctrl+Shift+scroll: pan góra/dół (Y)
+        if action == 'zoom_y':
+            # Ctrl+Shift+scroll: zoom pionu (Y) - centrowany na środku widoku
             ylim = ax.get_ylim()
-            y_range = ylim[1] - ylim[0]
-            shift = y_range * 0.1 * (1 if direction == 'up' else -1)
-            ax.set_ylim(ylim[0] + shift, ylim[1] + shift)
-        elif has_ctrl and x_data is not None:
-            # Ctrl+scroll: zoom osi czasu (X) - centrowany na pozycji kursora
+            y_center = (ylim[0] + ylim[1]) / 2
+            # Spróbuj centrować na kursorze
+            if tk_event:
+                try:
+                    widget = canvas.get_tk_widget()
+                    y_display = widget.winfo_height() - tk_event.y
+                    _, y_center = ax.transData.inverted().transform((0, y_display))
+                except Exception:
+                    pass
+            new_height = (ylim[1] - ylim[0]) * scale_factor
+            ax.set_ylim(y_center - new_height * (y_center - ylim[0]) / (ylim[1] - ylim[0]),
+                        y_center + new_height * (ylim[1] - y_center) / (ylim[1] - ylim[0]))
+        
+        elif action == 'zoom_x':
+            # Ctrl+scroll: zoom osi czasu (X) - centrowany na kursorze
             xlim = ax.get_xlim()
+            x_center = (xlim[0] + xlim[1]) / 2
+            if tk_event:
+                try:
+                    widget = canvas.get_tk_widget()
+                    y_display = widget.winfo_height() - tk_event.y
+                    x_center, _ = ax.transData.inverted().transform((tk_event.x, y_display))
+                except Exception:
+                    pass
             new_width = (xlim[1] - xlim[0]) * scale_factor
-            ax.set_xlim(x_data - new_width * (x_data - xlim[0]) / (xlim[1] - xlim[0]),
-                        x_data + new_width * (xlim[1] - x_data) / (xlim[1] - xlim[0]))
-        elif has_shift:
-            # Shift+scroll: pan osi czasu (przesuwanie w lewo/prawo)
+            ax.set_xlim(x_center - new_width * (x_center - xlim[0]) / (xlim[1] - xlim[0]),
+                        x_center + new_width * (xlim[1] - x_center) / (xlim[1] - xlim[0]))
+        
+        elif action == 'pan_x':
+            # Shift+scroll: pan lewo/prawo
             xlim = ax.get_xlim()
             x_range = xlim[1] - xlim[0]
             shift = x_range * 0.1 * (1 if direction == 'down' else -1)
             ax.set_xlim(xlim[0] + shift, xlim[1] + shift)
-        else:
-            # Scroll bez modyfikatora: zoom pionu (Y) - centrowany na pozycji kursora
+        
+        else:  # pan_y
+            # Scroll: pan góra/dół
             ylim = ax.get_ylim()
-            if y_data is not None:
-                new_height = (ylim[1] - ylim[0]) * scale_factor
-                ax.set_ylim(y_data - new_height * (y_data - ylim[0]) / (ylim[1] - ylim[0]),
-                            y_data + new_height * (ylim[1] - y_data) / (ylim[1] - ylim[0]))
-            else:
-                # Fallback: zoom wycentrowany na środku
-                center = (ylim[0] + ylim[1]) / 2
-                half = (ylim[1] - ylim[0]) / 2 * scale_factor
-                ax.set_ylim(center - half, center + half)
+            y_range = ylim[1] - ylim[0]
+            shift = y_range * 0.1 * (1 if direction == 'up' else -1)
+            ax.set_ylim(ylim[0] + shift, ylim[1] + shift)
+        
         canvas.draw_idle()
     
     # ---- Multi-project: edycja pasków ----
@@ -14161,6 +14252,8 @@ class RMManagerGUI:
                 except Exception:
                     pass
                 self._mp_drag_state['preview_line'] = None
+                # Natychmiastowe odświeżenie żeby linia zniknęła
+                self._mp_chart_meta['canvas'].draw_idle()
             
             # Jeśli puszczono poza wykresem, anuluj
             if event.inaxes is None or event.xdata is None:
@@ -14265,8 +14358,28 @@ class RMManagerGUI:
                     fg=self.COLOR_GREEN
                 )
             
+            # Wyłącz drag PRZED odświeżeniem (draw() przetwarza Tk eventy
+            # i _mp_on_motion narysowałby nową linię preview)
+            self._mp_drag_state['active'] = False
+            self._mp_drag_state['preview_line'] = None
+            self._mp_chart_meta['canvas'].get_tk_widget().config(cursor='')
+            
             # Odśwież wykres (zachowaj widok)
             self._create_multi_project_chart_window(self._mp_chart_meta['project_ids'], preserve_view=True)
+            
+            # Odśwież wykres wbudowany jeśli otwarty i dotyczy tego samego projektu
+            if self.selected_project_id == pid and self.matplotlib_canvas:
+                try:
+                    self.create_embedded_gantt_chart(preserve_view=True)
+                except Exception:
+                    pass
+            
+            # Odśwież timeline w głównym oknie (entry widgety)
+            if self.selected_project_id == pid and self.timeline_entries:
+                try:
+                    self.refresh_timeline()
+                except Exception:
+                    pass
             
         except Exception as e:
             import traceback
@@ -14335,6 +14448,14 @@ class RMManagerGUI:
                 parent=self._mp_chart_window
             ):
                 return
+            # Odśwież formularz główny przed zwolnieniem (żeby save_all_templates
+            # nie nadpisał zmian z multi-Gantt starymi danymi)
+            old_lock_pid = self._locked_project_id
+            if self.selected_project_id == old_lock_pid and self.timeline_entries:
+                try:
+                    self.refresh_timeline()
+                except Exception:
+                    pass
             self._release_current_lock()
         
         # Przejmij lock
@@ -14377,7 +14498,33 @@ class RMManagerGUI:
         pname = self.project_names.get(pid, f"Projekt {pid}")
         
         if self.have_lock and self._locked_project_id == pid:
-            self._release_current_lock()
+            # Multi-Gantt zapisuje zmiany do DB na bieżąco (w _mp_on_release),
+            # więc pomijamy save_all_templates() które nadpisałoby DB starymi
+            # datami z formularza głównego UI. Wywołujemy logikę _release_current_lock
+            # bez save_all_templates().
+            
+            # Backup projektu przed zwolnieniem locka
+            if self._locked_project_id is not None and self.backup_manager:
+                try:
+                    print(f"📦 Backup projektu {self._locked_project_id} przed zwolnieniem locka...")
+                    self.backup_manager.backup_project(self._locked_project_id, skip_checkpoint=True)
+                    print(f"✅ Backup projektu {self._locked_project_id} zakończony")
+                except Exception as e:
+                    print(f"⚠️ Błąd backupu projektu (niegroźne): {e}")
+            
+            # Zwolnij lock
+            self.lock_manager.release_project_lock(self._locked_project_id)
+            print(f"🔓 Lock project {self._locked_project_id} zwolniony")
+            self._locked_project_id = None
+            self.have_lock = False
+            self.current_lock_id = None
+            
+            # Odśwież formularz główny z DB (żeby miał aktualne daty)
+            if self.selected_project_id == pid and self.timeline_entries:
+                try:
+                    self.refresh_timeline()
+                except Exception:
+                    pass
         
         self._mp_selected_pid = None
         self._update_lock_buttons_state()
@@ -14407,7 +14554,26 @@ class RMManagerGUI:
             if hasattr(self, '_dates_snapshot') and self._dates_snapshot:
                 self._restore_stage_dates_from_snapshot()
             self.selected_project_id = old_pid
-            self._release_current_lock()
+            
+            # Zwalniamy lock BEZ save_all_templates() — snapshot już przywrócił dane,
+            # a save_all_templates nadpisałby je starymi z formularza głównego
+            if self._locked_project_id is not None and self.backup_manager:
+                try:
+                    self.backup_manager.backup_project(self._locked_project_id, skip_checkpoint=True)
+                except Exception:
+                    pass
+            self.lock_manager.release_project_lock(self._locked_project_id)
+            print(f"🔓 Lock project {self._locked_project_id} zwolniony (anulowano)")
+            self._locked_project_id = None
+            self.have_lock = False
+            self.current_lock_id = None
+            
+            # Odśwież formularz główny
+            if self.selected_project_id == pid and self.timeline_entries:
+                try:
+                    self.refresh_timeline()
+                except Exception:
+                    pass
         
         self._mp_selected_pid = None
         self._update_lock_buttons_state()
@@ -14480,9 +14646,37 @@ class RMManagerGUI:
                   bg="#7f8c8d", fg="white", font=("Arial", 8),
                   padx=5, pady=1, cursor='hand2').pack(fill=tk.X, pady=(3, 0))
         
+        # === Filtr per-projekt (S/R/P) z przełącznikiem ON/OFF ===
         ttk.Separator(panel, orient='horizontal').pack(fill=tk.X, padx=5, pady=5)
         
-        # === Filtr per-projekt (S/R/P) ===
+        def _on_proj_filter_change():
+            self._create_multi_project_chart_window(
+                self._mp_chart_meta['project_ids'], preserve_view=True)
+        
+        # Przełącznik ON/OFF: niezależność od filtra globalnego
+        if pid not in self._mp_proj_filter_override:
+            self._mp_proj_filter_override[pid] = False
+        
+        override_var = tk.BooleanVar(value=self._mp_proj_filter_override.get(pid, False))
+        
+        def _on_override_change():
+            self._mp_proj_filter_override[pid] = override_var.get()
+            _on_proj_filter_change()
+        
+        override_frame = tk.Frame(panel, bg="#f0f0f0")
+        override_frame.pack(fill=tk.X, padx=5, pady=(0, 3))
+        tk.Checkbutton(override_frame, text="Własny filtr", variable=override_var,
+                      command=_on_override_change,
+                      font=("Arial", 9, "bold"), bg="#f0f0f0",
+                      fg="#e67e22", selectcolor="white",
+                      activebackground="#f0f0f0",
+                      anchor='w').pack(fill=tk.X)
+        
+        is_override = self._mp_proj_filter_override.get(pid, False)
+        if is_override:
+            tk.Label(panel, text="☁ pomija filtr globalny",
+                     font=("Arial", 7), bg="#f0f0f0", fg="#e67e22").pack(anchor='w', padx=10)
+        
         tk.Label(panel, text="Filtr projektu:", font=("Arial", 9, "bold"),
                  bg="#f0f0f0").pack(anchor='w', padx=5)
         
@@ -14495,10 +14689,6 @@ class RMManagerGUI:
             ('Rzeczywiste', '#27ae60'),
             ('Prognoza', '#3498db'),
         ]
-        
-        def _on_proj_filter_change():
-            self._create_multi_project_chart_window(
-                self._mp_chart_meta['project_ids'], preserve_view=True)
         
         for ttype, tcolor in type_info:
             var = tk.BooleanVar(value=proj_filters.get(ttype, True))
@@ -15592,6 +15782,14 @@ class RMManagerGUI:
                 dialog.destroy()
                 self.create_embedded_gantt_chart(preserve_view=True)
                 
+                # Odśwież multi-Gantt jeśli jest otwarty
+                if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+                    try:
+                        self._create_multi_project_chart_window(
+                            self._mp_chart_meta['project_ids'], preserve_view=True)
+                    except Exception:
+                        pass
+                
                 self.status_bar.config(
                     text=f"✅ Zaktualizowano {stage_code}: {ts} — {te}",
                     fg=self.COLOR_GREEN
@@ -15791,6 +15989,14 @@ class RMManagerGUI:
                 rmm.recalculate_forecast(_pdb, self.selected_project_id)
                 self.create_embedded_gantt_chart(preserve_view=True)
                 
+                # Odśwież multi-Gantt jeśli otwarty
+                if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+                    try:
+                        self._create_multi_project_chart_window(
+                            self._mp_chart_meta['project_ids'], preserve_view=True)
+                    except Exception:
+                        pass
+                
                 duration = (bar_item['end'] - bar_item['start']).days
                 if bar_item['type'] == 'Milestone':
                     self.status_bar.config(
@@ -15843,6 +16049,14 @@ class RMManagerGUI:
                 
                 rmm.recalculate_forecast(_pdb, self.selected_project_id)
                 self.create_embedded_gantt_chart(preserve_view=True)
+                
+                # Odśwież multi-Gantt jeśli otwarty
+                if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+                    try:
+                        self._create_multi_project_chart_window(
+                            self._mp_chart_meta['project_ids'], preserve_view=True)
+                    except Exception:
+                        pass
                 
                 edge_label = "początek" if edge == 'start' else "koniec"
                 self.status_bar.config(
@@ -15990,6 +16204,14 @@ class RMManagerGUI:
                 
                 # Odśwież wykres (zachowaj widok zoom/pan)
                 self.create_embedded_gantt_chart(preserve_view=True)
+                
+                # Odśwież multi-Gantt jeśli otwarty
+                if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+                    try:
+                        self._create_multi_project_chart_window(
+                            self._mp_chart_meta['project_ids'], preserve_view=True)
+                    except Exception:
+                        pass
                 
                 self.status_bar.config(
                     text=f"✅ Zaktualizowano {field_label.lower()} szablonu dla {stage_code}: {new_date_str}",
