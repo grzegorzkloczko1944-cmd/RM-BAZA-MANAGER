@@ -57,6 +57,9 @@ except ImportError:
 import rm_manager as rmm
 from rm_manager import ProjectStatus
 
+# Kolejność etapów na wykresach (od góry do dołu)
+STAGE_ORDER = {code: idx for idx, (code, _, _, _) in enumerate(rmm.STAGE_DEFINITIONS)}
+
 # Przeładuj moduł aby mieć najnowsze funkcje
 try:
     importlib.reload(rmm)
@@ -2346,6 +2349,20 @@ class RMManagerGUI:
             text="⏰ Alarmy",
             command=_open_alarms,
             bg="#e67e22",
+            fg="white",
+            font=self.FONT_BOLD,
+            padx=12,
+            pady=5,
+            relief=tk.RAISED,
+            bd=2
+        ).pack(side=tk.LEFT, padx=(0, 3), pady=10)
+
+        # Przycisk MULTI-PROJEKT
+        tk.Button(
+            self.top_frame,
+            text="📊 Multi-projekt",
+            command=self.open_multi_project_chart,
+            bg="#8e44ad",
             fg="white",
             font=self.FONT_BOLD,
             padx=12,
@@ -7024,7 +7041,7 @@ class RMManagerGUI:
                     self.create_embedded_gantt_chart(preserve_view=True)
                 except Exception:
                     pass
-            if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+            if self._is_mp_chart_open():
                 try:
                     self._create_multi_project_chart_window(
                         self._mp_chart_meta['project_ids'], preserve_view=True)
@@ -7167,7 +7184,7 @@ class RMManagerGUI:
                     self.create_embedded_gantt_chart(preserve_view=True)
                 except Exception:
                     pass
-            if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+            if self._is_mp_chart_open():
                 try:
                     self._create_multi_project_chart_window(
                         self._mp_chart_meta['project_ids'], preserve_view=True)
@@ -12535,6 +12552,9 @@ class RMManagerGUI:
                 self.chart_status.config(text="Brak danych do wykresu", fg=self.COLOR_RED)
                 return
             
+            # Sortuj etapy wg ustalonej kolejności
+            timeline.sort(key=lambda s: STAGE_ORDER.get(s['stage_code'], 999))
+            
             # DEBUG: Sprawdź zawartość timeline
             print("=== DEBUG TIMELINE ===")
             for i, stage in enumerate(timeline):
@@ -13377,6 +13397,9 @@ class RMManagerGUI:
             if not timeline:
                 continue
             
+            # Sortuj etapy wg ustalonej kolejności
+            timeline.sort(key=lambda s: STAGE_ORDER.get(s['stage_code'], 999))
+            
             # Dodaj nagłówek projektu jako separator
             project_start_y = y_pos
             
@@ -13579,6 +13602,11 @@ class RMManagerGUI:
             tk.Button(top_bar, text="🏠 Reset widoku",
                       command=lambda: self._mp_reset_view(),
                       bg="#7f8c8d", fg="white", font=("Arial", 10),
+                      padx=10, pady=3).pack(side=tk.LEFT, padx=5)
+            
+            tk.Button(top_bar, text="📋 Projekty",
+                      command=lambda: self._mp_select_projects_dialog(),
+                      bg="#8e44ad", fg="white", font=("Arial", 10, "bold"),
                       padx=10, pady=3).pack(side=tk.LEFT, padx=5)
             
             # Legenda nawigacji
@@ -13787,12 +13815,29 @@ class RMManagerGUI:
         # Dziś - linia pioniowa
         today_num = mdates.date2num(datetime.now())
         ax.axvline(x=today_num, color='red', linewidth=1.5, linestyle='--', alpha=0.7, zorder=5)
-        ax.text(today_num, len(y_labels) - 0.2, ' DZIŚ', color='red', fontsize=8, 
-                fontweight='bold', va='top', ha='left', zorder=5)
+        ax.text(today_num, -0.3, ' DZIŚ', color='red', fontsize=8, 
+                fontweight='bold', va='bottom', ha='left', zorder=5)
         
         # Separatory między projektami
         for sep in project_separators[:-1]:  # Nie rysuj po ostatnim
             ax.axhline(y=sep['y'], color='#333333', linewidth=1.5, linestyle='-', alpha=0.6, zorder=3)
+        
+        # Znaki wodne z nazwą projektu na tle każdej sekcji
+        for sep in project_separators:
+            watermark_text = f"{sep['pid']}  {sep['label']}"
+            ax.text(
+                0.5, sep['y_center'],
+                watermark_text,
+                transform=ax.get_yaxis_transform(),
+                fontsize=24,
+                fontweight='bold',
+                color='#000000',
+                alpha=0.12,
+                ha='center',
+                va='center',
+                zorder=0,
+                rotation=0,
+            )
         
         # Mapuj y_pos -> project_id (do identyfikacji kliknięcia)
         y_to_pid = {}
@@ -13805,6 +13850,7 @@ class RMManagerGUI:
         # Etykiety Y - pokaż tylko nazwę etapu (bez nazwy projektu)
         short_labels = [lbl.split(' | ')[-1] if ' | ' in lbl else lbl for lbl in y_labels]
         ax.set_yticklabels(short_labels, fontsize=8)
+        ax.invert_yaxis()  # Pierwszy etap na górze (przed saved restore)
         
         # Wizualizacja wybranego/locked projektu — czerwone + bold etykiety
         locked_pid = self._mp_selected_pid
@@ -13876,6 +13922,8 @@ class RMManagerGUI:
             # Reuse: odśwież figurę i przywróć widok
             if saved_xlim:
                 ax.set_xlim(saved_xlim)
+            if saved_ylim:
+                ax.set_ylim(saved_ylim)
             mp_canvas.draw()
             
             # Zaktualizuj metadane (nowe ax, dane)
@@ -13918,9 +13966,12 @@ class RMManagerGUI:
             # Toolbar matplotlib usunięty — nawigacja przez custom handlery (scroll/pan/zoom)
             # Home = reset_view, Save = top bar "Zapisz PNG"
             
-            # Przywróć zapisany widok (tylko oś X - daty; oś Y zawsze pełna)
+            # Przywróć zapisany widok
             if saved_xlim:
                 ax.set_xlim(saved_xlim)
+            if saved_ylim:
+                ax.set_ylim(saved_ylim)
+            if saved_xlim or saved_ylim:
                 mp_canvas.draw_idle()
             
             # ===== Metadane (do edycji pasków) =====
@@ -13962,6 +14013,82 @@ class RMManagerGUI:
         
         self._mp_status.config(text=f"✅ Wykres: {len(project_ids)} projektów, {len(all_gantt_data)} pasków")
     
+    def _mp_select_projects_dialog(self):
+        """Dialog wyboru projektów — zmiana zestawu projektów w otwartym oknie MP"""
+        if not self.projects:
+            return
+        
+        current_ids = set(self._mp_chart_meta.get('project_ids', [])) if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta else set()
+        
+        sel_dialog = tk.Toplevel(self._mp_chart_window)
+        sel_dialog.title("📋 Wybór projektów")
+        sel_dialog.geometry("500x600")
+        sel_dialog.transient(self._mp_chart_window)
+        sel_dialog.grab_set()
+        
+        # Centruj na oknie MP
+        sel_dialog.update_idletasks()
+        try:
+            px = self._mp_chart_window.winfo_rootx()
+            py = self._mp_chart_window.winfo_rooty()
+            pw = self._mp_chart_window.winfo_width()
+            ph = self._mp_chart_window.winfo_height()
+            x = px + (pw // 2) - 250
+            y = py + (ph // 2) - 300
+            sel_dialog.geometry(f"500x600+{x}+{y}")
+        except Exception:
+            pass
+        
+        tk.Label(sel_dialog, text="Wybierz projekty do wyświetlenia:",
+                 font=("Arial", 12, "bold"), pady=10).pack()
+        
+        outer = tk.Frame(sel_dialog)
+        outer.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        canvas_sel = tk.Canvas(outer)
+        scrollbar = tk.Scrollbar(outer, orient="vertical", command=canvas_sel.yview)
+        inner = tk.Frame(canvas_sel)
+        inner.bind("<Configure>", lambda e: canvas_sel.configure(scrollregion=canvas_sel.bbox("all")))
+        canvas_sel.create_window((0, 0), window=inner, anchor="nw")
+        canvas_sel.configure(yscrollcommand=scrollbar.set)
+        canvas_sel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        check_vars = {}
+        for pid in self.projects:
+            pname = self.project_names.get(pid, f"Projekt {pid}")
+            var = tk.BooleanVar(value=(pid in current_ids))
+            check_vars[pid] = var
+            tk.Checkbutton(inner, text=f"{pname}", variable=var,
+                          font=("Arial", 10), anchor="w").pack(fill=tk.X, padx=5)
+        
+        btn_frame = tk.Frame(sel_dialog, pady=10)
+        btn_frame.pack(fill=tk.X, padx=10)
+        
+        def select_all():
+            for v in check_vars.values():
+                v.set(True)
+        def deselect_all():
+            for v in check_vars.values():
+                v.set(False)
+        
+        tk.Button(btn_frame, text="✅ Zaznacz wszystko", command=select_all,
+                  font=("Arial", 9)).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="❌ Odznacz wszystko", command=deselect_all,
+                  font=("Arial", 9)).pack(side=tk.LEFT, padx=5)
+        
+        def on_ok():
+            selected = [pid for pid, var in check_vars.items() if var.get()]
+            sel_dialog.destroy()
+            if selected:
+                self._create_multi_project_chart_window(selected)
+            else:
+                messagebox.showwarning("Brak wyboru", "Nie wybrano żadnych projektów.",
+                                       parent=self._mp_chart_window)
+        
+        tk.Button(btn_frame, text="📊 Zastosuj", command=on_ok,
+                  bg=self.COLOR_GREEN, fg="white", font=("Arial", 11, "bold"),
+                  padx=20, pady=5).pack(side=tk.RIGHT, padx=5)
+    
     # ---- Multi-project: nawigacja ----
     
     def _mp_reset_view(self):
@@ -13978,6 +14105,7 @@ class RMManagerGUI:
                             mdates.date2num(max(all_dates) + timedelta(days=30)))
             if y_labels:
                 ax.set_ylim(-0.5, len(y_labels) - 0.5)
+                ax.invert_yaxis()
             self._mp_chart_meta['canvas'].draw_idle()
         except Exception as e:
             print(f"⚠️ MP reset view: {e}")
@@ -14059,6 +14187,7 @@ class RMManagerGUI:
         
         row_label = labels[y_idx]
         x_datetime = mdates.num2date(x_data).replace(tzinfo=None)
+        stage_defs = self._mp_chart_meta.get('stage_defs', {})
         
         for item in self._mp_chart_meta['gantt_data']:
             if item['task'] != row_label or item['type'] not in ('Szablon', 'Milestone'):
@@ -14066,7 +14195,11 @@ class RMManagerGUI:
             if item['start'] is None:
                 continue
             
-            if item['type'] == 'Milestone':
+            # Milestone (type='Milestone' lub is_milestone w stage_defs) → tylko move
+            sc = item.get('stage_code', '')
+            is_ms = item['type'] == 'Milestone' or stage_defs.get(sc, {}).get('is_milestone', False)
+            
+            if is_ms:
                 if abs(x_datetime - item['start']) <= timedelta(days=tolerance_days):
                     return item['project_id'], item['stage_code'], 'move', item
                 continue
@@ -14083,6 +14216,59 @@ class RMManagerGUI:
                     return item['project_id'], item['stage_code'], None, item
         
         return None, None, None, None
+    
+    def _mp_find_any_bar(self, x_data, y_data, tolerance_days=3):
+        """Znajdź dowolny pasek (Szablon/Milestone/Rzeczywiste/Prognoza) pod kursorem"""
+        if not hasattr(self, '_mp_chart_meta'):
+            return None, None, None
+        
+        import matplotlib.dates as mdates
+        y_idx = round(y_data)
+        labels = self._mp_chart_meta['y_labels']
+        if y_idx < 0 or y_idx >= len(labels):
+            return None, None, None
+        
+        row_label = labels[y_idx]
+        x_datetime = mdates.num2date(x_data).replace(tzinfo=None)
+        
+        # Szukaj trafienia — zbierz wszystkie paski na tym wierszu
+        # i zwróć najlepsze trafienie (priorytet: dokładne > tolerancja)
+        best_hit = None
+        best_dist = None
+        
+        for item in self._mp_chart_meta['gantt_data']:
+            if item['task'] != row_label:
+                continue
+            if item['start'] is None:
+                continue
+            
+            bar_start = item['start']
+            bar_end = item['end']
+            # Dodaj 1 dzień do end (pasek rysowany jest do końca dnia end)
+            bar_end_ext = bar_end + timedelta(days=1)
+            
+            # Milestone/1-dniowe - tolerancja
+            if item['type'] == 'Milestone' or (bar_end - bar_start).days <= 1:
+                dist = abs((x_datetime - bar_start).total_seconds())
+                tol = tolerance_days * 86400
+                if dist <= tol:
+                    if best_dist is None or dist < best_dist:
+                        best_hit = (item['project_id'], item['stage_code'], item)
+                        best_dist = dist
+                continue
+            
+            # Normalny pasek — sprawdź czy kursor mieści się w zakresie
+            if bar_start <= x_datetime <= bar_end_ext:
+                # Oblicz odległość od środka (bliżej środka = lepsze trafienie)
+                mid = bar_start + (bar_end_ext - bar_start) / 2
+                dist = abs((x_datetime - mid).total_seconds())
+                if best_dist is None or dist < best_dist:
+                    best_hit = (item['project_id'], item['stage_code'], item)
+                    best_dist = dist
+        
+        if best_hit:
+            return best_hit
+        return None, None, None
     
     def _mp_on_press(self, event):
         """Obsługa kliknięcia - rozpoczęcie drag, pan (Shift+LMB)"""
@@ -14137,18 +14323,16 @@ class RMManagerGUI:
             )
             return
         
-        # Milestone zawsze w trybie move
-        if bar_item['type'] == 'Milestone':
+        # Milestone zawsze w trybie move (niezależnie od type)
+        stage_defs = self._mp_chart_meta.get('stage_defs', {})
+        is_ms = bar_item['type'] == 'Milestone' or stage_defs.get(stage_code, {}).get('is_milestone', False)
+        if is_ms:
             edge = 'move'
         
-        # Milestone = 1 dzień, nie można rozciągać
-        stage_defs = self._mp_chart_meta.get('stage_defs', {})
-        if stage_defs.get(stage_code, {}).get('is_milestone', False):
-            if edge in ('start', 'end'):
-                self._mp_status.config(text=f"ℹ️ Milestone {stage_code} — nie można rozciągać (1 dzień)", fg=self.COLOR_ORANGE)
-                return
-        
         import matplotlib.dates as mdates
+        
+        # Zapamiętaj pikselową pozycję startu (do minimalnego progu ruchu)
+        self._mp_drag_start_px = event.x
         
         if edge in ('start', 'end'):
             # Kliknięto krawędź - rozpocznij resize
@@ -14201,11 +14385,30 @@ class RMManagerGUI:
             return
         
         if event.inaxes is None:
+            self._mp_cancel_hover_timer()
             return
         
-        # Bez locka nie pokazuj kursora edycji (chyba że drag jest aktywny)
+        # Bez locka — hover info dostępny, ale nie pokazuj kursora edycji
         if not self.have_lock and not self._mp_drag_state.get('active'):
-            canvas.get_tk_widget().config(cursor='')
+            # Sprawdź czy najeżdżamy na dowolny pasek (podgląd)
+            pid_h, sc_h, bar_h = self._mp_find_any_bar(event.xdata, event.ydata)
+            if pid_h and bar_h and sc_h:
+                pname = self.project_names.get(pid_h, f"Projekt {pid_h}")
+                canvas.get_tk_widget().config(cursor='question_arrow')
+                self._mp_status.config(
+                    text=f"ℹ️ {pname} | {sc_h} — przytrzymaj aby zobaczyć szczegóły",
+                    fg=self.COLOR_BLUE
+                )
+                hover_key = (pid_h, sc_h)
+                if getattr(self, '_mp_hover_key', None) != hover_key:
+                    self._mp_cancel_hover_timer()
+                    self._mp_hover_key = hover_key
+                    self._mp_hover_timer = canvas.get_tk_widget().after(
+                        800, lambda p=pid_h, sc=sc_h: self._mp_show_stage_info_popup(p, sc)
+                    )
+            else:
+                self._mp_cancel_hover_timer()
+                canvas.get_tk_widget().config(cursor='')
             return
         
         # ── DRAG PREVIEW ──
@@ -14266,11 +14469,45 @@ class RMManagerGUI:
         pid, stage_code, edge, bar_item = self._mp_find_bar(event.xdata, event.ydata)
         
         if pid and pid != self._locked_project_id:
-            # Pasek innego projektu - brak interakcji
-            canvas.get_tk_widget().config(cursor='')
+            # Pasek innego projektu - pokaż info kursor + hover timer do podglądu
+            canvas.get_tk_widget().config(cursor='question_arrow')
+            if stage_code:
+                pname = self.project_names.get(pid, f"Projekt {pid}")
+                self._mp_status.config(
+                    text=f"ℹ️ {pname} | {stage_code} — przytrzymaj aby zobaczyć szczegóły",
+                    fg=self.COLOR_BLUE
+                )
+                # Użyj _mp_find_any_bar do wykrywania dowolnego paska
+                pid_any, sc_any, bar_any = self._mp_find_any_bar(event.xdata, event.ydata)
+                if pid_any and sc_any:
+                    hover_key = (pid_any, sc_any)
+                    if getattr(self, '_mp_hover_key', None) != hover_key:
+                        self._mp_cancel_hover_timer()
+                        self._mp_hover_key = hover_key
+                        self._mp_hover_timer = canvas.get_tk_widget().after(
+                            800, lambda p=pid_any, sc=sc_any: self._mp_show_stage_info_popup(p, sc)
+                        )
+                else:
+                    self._mp_cancel_hover_timer()
+            else:
+                self._mp_cancel_hover_timer()
             return
         
-        if edge in ('start', 'end'):
+        # Milestone (from stage_defs) → zawsze fleur (move)
+        self._mp_cancel_hover_timer()
+        stage_defs = self._mp_chart_meta.get('stage_defs', {})
+        is_ms = (bar_item and (
+            bar_item.get('type') == 'Milestone' or
+            stage_defs.get(stage_code or '', {}).get('is_milestone', False)
+        ))
+        
+        if is_ms and bar_item:
+            canvas.get_tk_widget().config(cursor='fleur')
+            self._mp_status.config(
+                text=f"🖱️ Przeciągnij aby przesunąć milestone: {stage_code}",
+                fg=self.COLOR_BLUE
+            )
+        elif edge in ('start', 'end'):
             canvas.get_tk_widget().config(cursor='sb_h_double_arrow')
             edge_label = "początek" if edge == 'start' else "koniec"
             self._mp_status.config(
@@ -14297,6 +14534,303 @@ class RMManagerGUI:
                     fg=self.COLOR_GREEN
                 )
     
+    def _is_mp_chart_open(self):
+        """Sprawdź czy okno multi-projekt jest otwarte i widoczne"""
+        try:
+            return (hasattr(self, '_mp_chart_window') and 
+                    self._mp_chart_window and 
+                    self._mp_chart_window.winfo_exists() and
+                    hasattr(self, '_mp_chart_meta') and 
+                    self._mp_chart_meta)
+        except Exception:
+            return False
+    
+    def _mp_cancel_hover_timer(self):
+        """Anuluj timer hover podglądu i zamknij popup jeśli otwarty"""
+        timer = getattr(self, '_mp_hover_timer', None)
+        if timer and hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+            try:
+                self._mp_chart_meta['canvas'].get_tk_widget().after_cancel(timer)
+            except Exception:
+                pass
+        self._mp_hover_timer = None
+        self._mp_hover_key = None
+        # Zamknij popup jeśli otwarty
+        old_popup = getattr(self, '_mp_info_popup', None)
+        if old_popup:
+            try:
+                old_popup.destroy()
+            except Exception:
+                pass
+            self._mp_info_popup = None
+    
+    def _mp_show_stage_info_popup(self, pid, stage_code):
+        """Pokaż okno informacyjne (read-only) o etapie innego projektu"""
+        self._mp_hover_timer = None
+        self._mp_hover_key = None
+        
+        # Zamknij poprzedni popup jeśli istnieje
+        old_popup = getattr(self, '_mp_info_popup', None)
+        if old_popup:
+            try:
+                old_popup.destroy()
+            except Exception:
+                pass
+            self._mp_info_popup = None
+        
+        try:
+            project_db = self.get_project_db_path(pid)
+            forecast = rmm.recalculate_forecast(project_db, pid)
+        except Exception:
+            return
+        
+        if stage_code not in forecast:
+            return
+        
+        fc = forecast[stage_code]
+        project_name = self.project_names.get(pid, f"Projekt {pid}")
+        
+        # Status etapu
+        if fc.get('is_actual'):
+            status_text = "✔️ Zakończony"
+            status_color = self.COLOR_GREEN
+        elif fc.get('is_active'):
+            try:
+                fs = fc.get('forecast_start')
+                if fs:
+                    start_dt = datetime.fromisoformat(fs)
+                    days_active = (datetime.now() - start_dt).days
+                    status_text = f"● TRWA ({days_active} dni)"
+                else:
+                    status_text = "● TRWA"
+            except Exception:
+                status_text = "● TRWA"
+            status_color = self.COLOR_BLUE
+        else:
+            status_text = "○ Nieaktywny"
+            status_color = 'gray'
+        
+        # Odchylenie
+        variance = fc.get('variance_days', 0)
+        if variance > 0:
+            var_text = f"+{variance} dni"
+            var_color = self.COLOR_RED
+        elif variance < 0:
+            var_text = f"{variance} dni"
+            var_color = self.COLOR_GREEN
+        else:
+            var_text = "0 dni"
+            var_color = 'gray'
+        
+        parent = self._mp_chart_window
+        popup = tk.Toplevel(parent)
+        popup.transient(parent)
+        popup.overrideredirect(False)
+        popup.title(f"ℹ️ {stage_code} — {project_name} (READ-ONLY)")
+        popup.resizable(True, True)
+        self._mp_info_popup = popup
+        
+        # Rozmiar i pozycja — obok kursora
+        w, h = 750, 380
+        try:
+            mx = parent.winfo_pointerx()
+            my = parent.winfo_pointery()
+            x = mx + 20
+            y = my + 10
+            # Nie wyjedź poza ekran
+            sw = popup.winfo_screenwidth()
+            sh = popup.winfo_screenheight()
+            if x + w > sw:
+                x = mx - w - 20
+            if y + h > sh:
+                y = my - h - 10
+        except Exception:
+            x = (popup.winfo_screenwidth() // 2) - (w // 2)
+            y = (popup.winfo_screenheight() // 2) - (h // 2)
+        popup.geometry(f"{w}x{h}+{x}+{y}")
+        
+        # ===== HEADER =====
+        header_frame = tk.Frame(popup, bg="#7f8c8d", height=40)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
+        
+        tk.Label(
+            header_frame,
+            text=f"ℹ️ PODGLĄD ETAPU (READ-ONLY)",
+            bg="#7f8c8d", fg="white",
+            font=("Arial", 11, "bold"),
+            padx=10
+        ).pack(side=tk.LEFT, fill=tk.Y)
+        
+        tk.Button(
+            header_frame, text="✕", command=popup.destroy,
+            bg="#e74c3c", fg="white", font=("Arial", 10, "bold"),
+            padx=8, pady=2, relief=tk.FLAT, cursor='hand2'
+        ).pack(side=tk.RIGHT, padx=5, pady=5)
+        
+        # ===== INFO BAR =====
+        info_frame = tk.Frame(popup, bg="#ecf0f1", pady=6)
+        info_frame.pack(fill=tk.X)
+        
+        tk.Label(
+            info_frame, text=f"  Projekt: {project_name}",
+            bg="#ecf0f1", font=self.FONT_BOLD, fg=self.COLOR_TEXT_DARK, anchor='w'
+        ).pack(side=tk.LEFT, padx=10)
+        
+        tk.Label(
+            info_frame, text=f"Etap: {stage_code}",
+            bg="#ecf0f1", font=self.FONT_BOLD, fg=self.COLOR_BLUE, anchor='w'
+        ).pack(side=tk.LEFT, padx=15)
+        
+        tk.Label(
+            info_frame, text=status_text,
+            bg="#ecf0f1", font=self.FONT_BOLD, fg=status_color
+        ).pack(side=tk.LEFT, padx=15)
+        
+        tk.Label(
+            info_frame, text=f"Odchylenie: {var_text}",
+            bg="#ecf0f1", font=self.FONT_BOLD, fg=var_color
+        ).pack(side=tk.LEFT, padx=15)
+        
+        # ===== TABELA DAT (read-only) =====
+        table_frame = tk.Frame(popup, padx=15, pady=10)
+        table_frame.pack(fill=tk.X)
+        
+        for col in range(4):
+            table_frame.columnconfigure(col, weight=1)
+        
+        headers = [
+            ("Szablon Start", self.COLOR_TOPBAR),
+            ("Szablon Koniec", self.COLOR_TOPBAR),
+            ("Prognoza Start", "#7f8c8d"),
+            ("Prognoza Koniec", "#7f8c8d"),
+        ]
+        for col, (header_text, bg_color) in enumerate(headers):
+            tk.Label(
+                table_frame, text=header_text,
+                font=self.FONT_BOLD, bg=bg_color, fg="white",
+                relief=tk.RAISED, padx=12, pady=4
+            ).grid(row=0, column=col, sticky="ew", padx=2, pady=(0, 3))
+        
+        dates = [
+            self.format_date_ddmmyyyy(fc.get('template_start')) or '—',
+            self.format_date_ddmmyyyy(fc.get('template_end')) or '—',
+            self.format_date_ddmmyyyy(fc.get('forecast_start')) or '—',
+            self.format_date_ddmmyyyy(fc.get('forecast_end')) or '—',
+        ]
+        for col, dt in enumerate(dates):
+            tk.Label(
+                table_frame, text=dt,
+                font=("Arial", 11), bg="#f0f0f0", fg="#333",
+                relief=tk.SUNKEN, padx=8, pady=4
+            ).grid(row=1, column=col, padx=2, pady=2, sticky="ew")
+        
+        # ===== PRACOWNICY =====
+        staff_frame = tk.Frame(popup, padx=15, pady=3)
+        staff_frame.pack(fill=tk.X)
+        
+        try:
+            assigned_staff = rmm.get_stage_assigned_staff(
+                project_db, self.rm_master_db_path, pid, stage_code
+            )
+            staff_count = len(assigned_staff)
+        except Exception:
+            assigned_staff = []
+            staff_count = 0
+        
+        staff_label = f"👷 Pracownicy ({staff_count}):" if staff_count > 0 else "👷 Pracownicy: brak"
+        tk.Label(
+            staff_frame, text=staff_label,
+            font=self.FONT_BOLD, fg=self.COLOR_GREEN if staff_count > 0 else "gray"
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        
+        if staff_count > 0:
+            staff_info = []
+            for s in assigned_staff:
+                name = s['employee_name']
+                category = s['category']
+                preferred = rmm.STAGE_TO_PREFERRED_CATEGORY.get(stage_code, [])
+                if category not in preferred:
+                    staff_info.append(f"⚠️ {name} ({category})")
+                else:
+                    staff_info.append(f"👤 {name} ({category})")
+            tk.Label(
+                staff_frame, text=", ".join(staff_info),
+                font=self.FONT_SMALL, fg="gray",
+                wraplength=550, justify=tk.LEFT
+            ).pack(side=tk.LEFT, padx=3)
+        
+        # ===== NOTATKI =====
+        notes_frame = tk.Frame(popup, padx=15, pady=3)
+        notes_frame.pack(fill=tk.X)
+        
+        try:
+            notes_stats = rmm.get_topic_stats(project_db, pid, stage_code)
+            topic_count = notes_stats['total_topics']
+            notes_count = notes_stats['total_notes']
+            alarms_count = notes_stats['active_alarms']
+        except Exception:
+            topic_count = 0
+            notes_count = 0
+            alarms_count = 0
+        
+        notes_text = "📝 Notatki: brak"
+        if topic_count > 0 or notes_count > 0:
+            notes_text = f"📝 {topic_count} tematów, {notes_count} notatek"
+        if alarms_count > 0:
+            notes_text += f" ⏰ {alarms_count} alarmów"
+        
+        tk.Label(
+            notes_frame, text=notes_text,
+            font=self.FONT_BOLD, fg=self.COLOR_PURPLE if topic_count > 0 else "gray"
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        
+        # Podgląd tematów
+        if topic_count > 0:
+            try:
+                topics_preview = rmm.get_topics(project_db, pid, stage_code)[:3]
+                for tp in topics_preview:
+                    pri_icon = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(tp['priority'], "⚪")
+                    title_text = tp['title'][:50]
+                    if len(tp['title']) > 50:
+                        title_text += "…"
+                    tk.Label(
+                        notes_frame,
+                        text=f" {pri_icon} #{tp['topic_number']} {title_text} ",
+                        bg="#f0f4ff", fg="#2c3e50",
+                        font=("Arial", 8), padx=3, pady=1
+                    ).pack(side=tk.LEFT, padx=2)
+            except Exception:
+                pass
+        
+        # ===== OKRESY =====
+        periods = fc.get('actual_periods', [])
+        if periods:
+            per_frame = tk.Frame(popup, padx=15, pady=3)
+            per_frame.pack(fill=tk.X)
+            
+            tk.Label(
+                per_frame, text=f"📊 Okresy ({len(periods)}):",
+                font=self.FONT_BOLD, fg=self.COLOR_TEXT_DARK
+            ).pack(side=tk.LEFT, padx=(0, 8))
+            
+            periods_text = ""
+            for i, p in enumerate(periods, 1):
+                status = "TRWA" if p['ended_at'] is None else "✓"
+                start_fmt = self.format_datetime(p['started_at'])
+                end_fmt = self.format_datetime(p['ended_at']) if p['ended_at'] else 'TRWA'
+                periods_text += f"#{i}: {start_fmt} → {end_fmt} ({status})  "
+            
+            tk.Label(
+                per_frame, text=periods_text,
+                font=self.FONT_SMALL, fg="gray",
+                wraplength=600, justify=tk.LEFT
+            ).pack(side=tk.LEFT, padx=3)
+        
+        # Zamknij Escape
+        popup.bind('<Escape>', lambda e: popup.destroy())
+        popup.focus_set()
+    
     def _mp_on_release(self, event):
         """Obsługa puszczenia przycisku myszy - zapisz nową datę lub zakończ pan"""
         # Zakończ pan
@@ -14306,6 +14840,20 @@ class RMManagerGUI:
             return
         
         if not self._mp_drag_state.get('active'):
+            return
+        
+        # Minimalny próg ruchu - zapobiegaj przypadkowym przesunięciom przy dwukliku
+        start_px = getattr(self, '_mp_drag_start_px', None)
+        if start_px is not None and event.x is not None and abs(event.x - start_px) < 5:
+            # Mysz się nie ruszyła — anuluj drag (prawdopodobnie dwuklik)
+            self._mp_drag_state['active'] = False
+            self._mp_drag_state['stage_code'] = None
+            self._mp_drag_state['edge'] = None
+            self._mp_drag_state['original_date'] = None
+            self._mp_drag_state['bar_item'] = None
+            self._mp_drag_state['drag_anchor_x'] = None
+            self._mp_drag_state['preview_line'] = None
+            self._mp_chart_meta['canvas'].get_tk_widget().config(cursor='')
             return
         
         import matplotlib.dates as mdates
@@ -14335,7 +14883,9 @@ class RMManagerGUI:
                 self._mp_chart_meta['canvas'].draw_idle()
                 return
             
-            new_date = mdates.num2date(event.xdata).replace(tzinfo=None, hour=0, minute=0, second=0)
+            new_date_raw = mdates.num2date(event.xdata).replace(tzinfo=None)
+            # Zaokrąglij do najbliższego dnia (nie floor!)
+            new_date = (new_date_raw + timedelta(hours=12)).replace(hour=0, minute=0, second=0)
             bar = self._mp_drag_state['bar_item']
             edge = self._mp_drag_state['edge']
             stage_code = self._mp_drag_state['stage_code']
@@ -14346,9 +14896,14 @@ class RMManagerGUI:
             if edge == 'move':
                 # ===== TRYB PRZESUWANIA CAŁEGO PRZEDZIAŁU =====
                 anchor = self._mp_drag_state.get('drag_anchor_x')
-                delta = new_date - anchor
+                # Zaokrąglij anchor do dnia (tak samo jak new_date)
+                anchor_day = (anchor + timedelta(hours=12)).replace(hour=0, minute=0, second=0)
+                delta = new_date - anchor_day
                 new_start = bar['start'] + delta
                 new_end = bar['end'] + delta
+                # Upewnij się, że wynik jest midnight
+                new_start = new_start.replace(hour=0, minute=0, second=0)
+                new_end = new_end.replace(hour=0, minute=0, second=0)
                 
                 # Milestone: obie daty = ta sama (1 dzień)
                 stage_defs = self._mp_chart_meta.get('stage_defs', {})
@@ -14491,6 +15046,13 @@ class RMManagerGUI:
         
         # --- Mamy lock na ten projekt → edycja etapu ---
         if self._mp_selected_pid == clicked_pid and self.have_lock and self._locked_project_id == clicked_pid:
+            # Anuluj wszelki drag (pierwsze kliknięcie mogło go rozpocząć)
+            self._mp_drag_state.update({
+                'active': False, 'stage_code': None, 'edge': None,
+                'original_date': None, 'bar_item': None, 'drag_anchor_x': None,
+                'preview_line': None,
+            })
+            
             pid, stage_code, edge, bar_item = self._mp_find_bar(event.xdata, event.ydata)
             if not stage_code or not bar_item:
                 return
@@ -14498,9 +15060,8 @@ class RMManagerGUI:
                 self._mp_status.config(text="ℹ️ Edycja tylko pasków szablonu", fg=self.COLOR_ORANGE)
                 return
             
-            self._mp_drag_state['active'] = False
             self.selected_project_id = clicked_pid
-            self._open_stage_edit_dialog(stage_code)
+            self._open_stage_edit_dialog(stage_code, parent=self._mp_chart_window)
             # Po zamknięciu dialogu — odśwież
             self._mp_chart_window.after(500, lambda: self._create_multi_project_chart_window(
                 self._mp_chart_meta['project_ids'], preserve_view=True))
@@ -14874,6 +15435,9 @@ class RMManagerGUI:
                 self.chart_status.config(text="Brak danych do wykresu", fg=self.COLOR_RED)
                 return
             
+            # Sortuj etapy wg ustalonej kolejności
+            timeline.sort(key=lambda s: STAGE_ORDER.get(s['stage_code'], 999))
+            
             # Pobierz nazwy etapów z bazy
             con = rmm._open_rm_connection(project_db)
             stage_names = {}
@@ -14913,6 +15477,7 @@ class RMManagerGUI:
                     print(f"⭕ [matplotlib] Milestone {stage_code} bez daty - pusty wiersz")
                     gantt_data.append({
                         'task': f"⭕ {stage_name}",
+                        'stage_code': stage_code,
                         'start': None,
                         'end': None,
                         'type': 'Milestone',
@@ -14931,6 +15496,7 @@ class RMManagerGUI:
                             start_date, end_date = self._ensure_min_1day_dt(start_date, end_date)
                             gantt_data.append({
                                 'task': f"[M] {stage_name}",
+                                'stage_code': stage_code,
                                 'start': start_date,
                                 'end': end_date,
                                 'type': 'Milestone',
@@ -14944,6 +15510,7 @@ class RMManagerGUI:
                         tpl_start, tpl_end = self._ensure_min_1day_dt(tpl_start, tpl_end)
                         gantt_data.append({
                             'task': f"[M] {stage_name}",
+                            'stage_code': stage_code,
                             'start': tpl_start,
                             'end': tpl_end,
                             'type': 'Milestone',
@@ -14961,6 +15528,7 @@ class RMManagerGUI:
                     tpl_start, tpl_end = self._ensure_min_1day_dt(tpl_start, tpl_end)
                     gantt_data.append({
                         'task': stage_name,
+                        'stage_code': stage_code,
                         'start': tpl_start,
                         'end': tpl_end,
                         'type': 'Szablon',
@@ -14980,6 +15548,7 @@ class RMManagerGUI:
                         
                         gantt_data.append({
                             'task': stage_name,
+                            'stage_code': stage_code,
                             'start': start_date,
                             'end': end_date,
                             'type': 'Rzeczywiste',
@@ -14995,7 +15564,8 @@ class RMManagerGUI:
                     forecast_start, forecast_end = self._ensure_min_1day_dt(forecast_start, forecast_end)
                     
                     gantt_data.append({
-                        'task': stage_name, 
+                        'task': stage_name,
+                        'stage_code': stage_code,
                         'start': forecast_start,
                         'end': forecast_end,
                         'type': 'Prognoza',
@@ -15030,22 +15600,23 @@ class RMManagerGUI:
                 fig = Figure(figsize=(12, 8), dpi=100)
                 ax = fig.add_subplot(111)
             
-            # Grupuj dane per task
-            tasks = {}
+            # Grupuj dane per task (zachowaj kolejność z timeline)
+            from collections import OrderedDict
+            tasks = OrderedDict()
             for item in gantt_data:
-                task = item['task']
-                if task not in tasks:
-                    tasks[task] = []
-                tasks[task].append(item)
+                key = item['stage_code']
+                if key not in tasks:
+                    tasks[key] = {'label': item['task'], 'items': []}
+                tasks[key]['items'].append(item)
             
             # Rysuj paski Gantt
             y_pos = 0
             y_labels = []
             
-            for task, items in tasks.items():
-                y_labels.append(task)
+            for stage_key, task_group in tasks.items():
+                y_labels.append(task_group['label'])
                 
-                for item in items:
+                for item in task_group['items']:
                     # Placeholder milestone (bez daty) → tylko nazwa na osi Y, bez paska
                     if item['start'] is None:
                         continue
@@ -15119,8 +15690,9 @@ class RMManagerGUI:
             # Nie ustawiaj domyślnych limitów jeśli przywracamy zapisany widok (zapobiega "migotaniu")
             if not (saved_xlim and saved_ylim):
                 ax.set_ylim(-0.5, len(y_labels) - 0.5)
+                ax.invert_yaxis()  # Pierwszy etap na górze
             else:
-                # Przywracanie widoku - ustaw od razu zapisane limity
+                # Przywracanie widoku - ustaw od razu zapisane limity (już odwrócone)
                 ax.set_ylim(saved_ylim)
             
             ax.set_yticks(range(len(y_labels)))
@@ -15176,6 +15748,12 @@ class RMManagerGUI:
             ]
             ax.legend(handles=legend_elements, loc='upper center', bbox_to_anchor=(0.5, -0.08),
                       ncol=4, fontsize=8, frameon=False)
+            
+            # Dziś - pionowa czerwona linia
+            today_num = mdates.date2num(datetime.now())
+            ax.axvline(x=today_num, color='red', linewidth=1.5, linestyle='--', alpha=0.7, zorder=5)
+            ax.text(today_num, -0.3, ' DZIŚ', color='red', fontsize=8,
+                    fontweight='bold', va='bottom', ha='left', zorder=5)
             
             if reuse_canvas:
                 # ===== REUSE: Przywróć widok i przerysuj bez tworzenia nowego widgetu =====
@@ -15240,6 +15818,7 @@ class RMManagerGUI:
                 'gantt_data': gantt_data,
                 'y_positions': {task: idx for idx, task in enumerate(y_labels)},
                 'stage_names_reverse': {v: k for k, v in stage_names.items()},  # display_name -> code
+                'y_to_stage_code': [key for key in tasks.keys()],  # index -> stage_code
                 'ax': ax,  # Referencja do axes
                 'fig': fig  # Referencja do figure
             }
@@ -15303,6 +15882,7 @@ class RMManagerGUI:
             
             if y_labels:
                 ax.set_ylim(-0.5, len(y_labels) - 0.5)
+                ax.invert_yaxis()
             
             self.matplotlib_canvas.draw_idle()
             self.status_bar.config(
@@ -15391,14 +15971,21 @@ class RMManagerGUI:
             return None, None, None
         
         task_name = self._chart_metadata['y_labels'][y_idx]
-        display_name = task_name.replace('[M] ', '').replace('⭕ ', '')
-        stage_code = self._chart_metadata['stage_names_reverse'].get(display_name)
+        
+        # Pobierz stage_code z mapy y_to_stage_code
+        y_to_sc = self._chart_metadata.get('y_to_stage_code', [])
+        if y_idx < len(y_to_sc):
+            stage_code = y_to_sc[y_idx]
+        else:
+            display_name = task_name.replace('[M] ', '').replace('⭕ ', '')
+            stage_code = self._chart_metadata['stage_names_reverse'].get(display_name)
         
         if not stage_code:
             return None, None, None
         
         # Znajdź paski dla tego etapu
-        items = self._chart_metadata['tasks'].get(task_name, [])
+        task_group = self._chart_metadata['tasks'].get(stage_code)
+        items = task_group['items'] if task_group else []
         
         # Konwertuj x_data (matplotlib date num) na datetime
         import matplotlib.dates as mdates
@@ -15654,8 +16241,10 @@ class RMManagerGUI:
         
         self._open_stage_edit_dialog(stage_code)
 
-    def _open_stage_edit_dialog(self, stage_code):
+    def _open_stage_edit_dialog(self, stage_code, parent=None):
         """Dialog edycji dat szablonu i prognozy dla pojedynczego etapu"""
+        if parent is None:
+            parent = self.root
         try:
             forecast = rmm.recalculate_forecast(
                 self.get_project_db_path(self.selected_project_id), self.selected_project_id
@@ -15705,16 +16294,25 @@ class RMManagerGUI:
             var_text = "0 dni"
             var_color = 'gray'
         
-        dialog = tk.Toplevel(self.root)
-        dialog.transient(self.root)
-        dialog.grab_set()
+        dialog = tk.Toplevel(parent)
+        dialog.transient(parent)
+        dialog.focus_set()
         dialog.title(f"Edycja dat etapu - {stage_code} - {project_name}")
         dialog.resizable(True, True)
         
-        # Rozmiar i pozycja
-        w, h = 900, 280
-        x = (dialog.winfo_screenwidth() // 2) - (w // 2)
-        y = (dialog.winfo_screenheight() // 2) - (h // 2)
+        # Rozmiar i pozycja - centruj na rodzicu (wykresie)
+        w, h = 900, 420
+        dialog.update_idletasks()
+        try:
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            x = px + (pw // 2) - (w // 2)
+            y = py + (ph // 2) - (h // 2)
+        except Exception:
+            x = (dialog.winfo_screenwidth() // 2) - (w // 2)
+            y = (dialog.winfo_screenheight() // 2) - (h // 2)
         dialog.geometry(f"{w}x{h}+{x}+{y}")
         
         # ===== HEADER (jak główne okno) =====
@@ -15811,6 +16409,136 @@ class RMManagerGUI:
         template_start_entry.focus()
         template_start_entry.select_range(0, tk.END)
         
+        # ===== SEKCJA PRACOWNIKÓW =====
+        staff_frame = tk.Frame(dialog, padx=15, pady=5)
+        staff_frame.pack(fill=tk.X)
+        
+        # Pobierz przypisanych pracowników
+        try:
+            assigned_staff = rmm.get_stage_assigned_staff(
+                self.get_project_db_path(self.selected_project_id),
+                self.rm_master_db_path,
+                self.selected_project_id,
+                stage_code
+            )
+            staff_count = len(assigned_staff)
+        except Exception:
+            assigned_staff = []
+            staff_count = 0
+        
+        staff_btn_text = f"👷 Pracownicy ({staff_count})" if staff_count > 0 else "👷 Pracownicy"
+        staff_btn_bg = self.COLOR_GREEN if staff_count > 0 else "#95a5a6"
+        
+        def open_staff():
+            self.assign_staff_dialog(stage_code)
+        
+        tk.Button(
+            staff_frame,
+            text=staff_btn_text,
+            command=open_staff,
+            bg=staff_btn_bg,
+            fg="white",
+            font=self.FONT_BOLD,
+            padx=10,
+            pady=3,
+            cursor='hand2'
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Wyświetl listę przypisanych pracowników
+        if staff_count > 0:
+            staff_info = []
+            for s in assigned_staff:
+                name = s['employee_name']
+                category = s['category']
+                preferred = rmm.STAGE_TO_PREFERRED_CATEGORY.get(stage_code, [])
+                if category not in preferred:
+                    staff_info.append(f"⚠️ {name} ({category})")
+                else:
+                    staff_info.append(f"👤 {name} ({category})")
+            
+            tk.Label(
+                staff_frame,
+                text=", ".join(staff_info),
+                font=self.FONT_SMALL,
+                fg="gray",
+                wraplength=600,
+                justify=tk.LEFT
+            ).pack(side=tk.LEFT, padx=5)
+        
+        # ===== SEKCJA NOTATEK =====
+        notes_frame = tk.Frame(dialog, padx=15, pady=5)
+        notes_frame.pack(fill=tk.X)
+        
+        # Pobierz statystyki notatek
+        try:
+            notes_stats = rmm.get_topic_stats(
+                self.get_project_db_path(self.selected_project_id),
+                self.selected_project_id,
+                stage_code
+            )
+            topic_count = notes_stats['total_topics']
+            notes_count = notes_stats['total_notes']
+            alarms_count = notes_stats['active_alarms']
+        except Exception:
+            topic_count = 0
+            notes_count = 0
+            alarms_count = 0
+        
+        notes_btn_text = "📝"
+        if topic_count > 0 or notes_count > 0:
+            notes_btn_text = f"📝 {topic_count}T/{notes_count}N"
+        if alarms_count > 0:
+            notes_btn_text += f" ⏰{alarms_count}"
+        
+        def open_notes():
+            self.show_notes_window(stage_code)
+        
+        tk.Button(
+            notes_frame,
+            text=notes_btn_text,
+            command=open_notes,
+            bg=self.COLOR_PURPLE if topic_count > 0 else "#95a5a6",
+            fg="white",
+            font=self.FONT_BOLD,
+            padx=10,
+            pady=3,
+            cursor='hand2'
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Podgląd 2 pierwszych tematów
+        if topic_count > 0:
+            try:
+                _db_path = self.get_project_db_path(self.selected_project_id)
+                topics_preview = rmm.get_topics(_db_path, self.selected_project_id, stage_code)[:2]
+                for tp in topics_preview:
+                    pri_icon = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(tp['priority'], "⚪")
+                    title_text = tp['title'][:60]
+                    if len(tp['title']) > 60:
+                        title_text += "…"
+                    topic_lbl = tk.Label(
+                        notes_frame,
+                        text=f" {pri_icon} #{tp['topic_number']} {title_text} ",
+                        bg="#f0f4ff",
+                        fg="#2c3e50",
+                        font=("Arial", 8),
+                        cursor="hand2",
+                        padx=4,
+                        pady=1,
+                        relief=tk.FLAT
+                    )
+                    topic_lbl.pack(side=tk.LEFT, padx=2)
+                    topic_lbl.bind("<Button-1>", lambda e, sc=stage_code: open_notes())
+            except Exception:
+                pass
+            
+            if topic_count > 0 or notes_count > 0:
+                tk.Label(
+                    notes_frame,
+                    text=f"({topic_count} tematów, {notes_count} notatek)",
+                    font=("Arial", 8),
+                    fg="gray"
+                ).pack(side=tk.LEFT, padx=5)
+        
         # ===== PRZYCISKI (jak główne okno) =====
         btn_frame = tk.Frame(dialog, bg="#ecf0f1", pady=8)
         btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
@@ -15853,7 +16581,7 @@ class RMManagerGUI:
                 self.create_embedded_gantt_chart(preserve_view=True)
                 
                 # Odśwież multi-Gantt jeśli jest otwarty
-                if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+                if self._is_mp_chart_open():
                     try:
                         self._create_multi_project_chart_window(
                             self._mp_chart_meta['project_ids'], preserve_view=True)
@@ -16026,7 +16754,9 @@ class RMManagerGUI:
             
             # Pobierz nową datę
             import matplotlib.dates as mdates
-            new_date = mdates.num2date(event.xdata).replace(tzinfo=None)
+            new_date_raw = mdates.num2date(event.xdata).replace(tzinfo=None)
+            # Zaokrąglij do najbliższego dnia (nie floor!)
+            new_date = (new_date_raw + timedelta(hours=12)).replace(hour=0, minute=0, second=0)
             
             stage_code = self._drag_state['stage_code']
             edge = self._drag_state['edge']
@@ -16037,9 +16767,14 @@ class RMManagerGUI:
             if edge == 'move':
                 # ===== TRYB PRZESUWANIA CAŁEGO PRZEDZIAŁU =====
                 anchor = self._drag_state['drag_anchor_x']
-                delta = new_date - anchor
+                # Zaokrąglij anchor do dnia (tak samo jak new_date)
+                anchor_day = (anchor + timedelta(hours=12)).replace(hour=0, minute=0, second=0)
+                delta = new_date - anchor_day
                 new_start = bar_item['start'] + delta
                 new_end = bar_item['end'] + delta
+                # Upewnij się, że wynik jest midnight
+                new_start = new_start.replace(hour=0, minute=0, second=0)
+                new_end = new_end.replace(hour=0, minute=0, second=0)
                 
                 new_start_iso = new_start.strftime('%Y-%m-%d')
                 new_end_iso = new_end.strftime('%Y-%m-%d')
@@ -16060,7 +16795,7 @@ class RMManagerGUI:
                 self.create_embedded_gantt_chart(preserve_view=True)
                 
                 # Odśwież multi-Gantt jeśli otwarty
-                if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+                if self._is_mp_chart_open():
                     try:
                         self._create_multi_project_chart_window(
                             self._mp_chart_meta['project_ids'], preserve_view=True)
@@ -16121,7 +16856,7 @@ class RMManagerGUI:
                 self.create_embedded_gantt_chart(preserve_view=True)
                 
                 # Odśwież multi-Gantt jeśli otwarty
-                if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+                if self._is_mp_chart_open():
                     try:
                         self._create_multi_project_chart_window(
                             self._mp_chart_meta['project_ids'], preserve_view=True)
@@ -16276,7 +17011,7 @@ class RMManagerGUI:
                 self.create_embedded_gantt_chart(preserve_view=True)
                 
                 # Odśwież multi-Gantt jeśli otwarty
-                if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+                if self._is_mp_chart_open():
                     try:
                         self._create_multi_project_chart_window(
                             self._mp_chart_meta['project_ids'], preserve_view=True)
@@ -16514,6 +17249,7 @@ class RMManagerGUI:
             for project_id in selected_projects:
                 project_db = self.get_project_db_path(project_id)
                 timeline = rmm.get_stage_timeline(project_db, project_id)
+                timeline.sort(key=lambda s: STAGE_ORDER.get(s['stage_code'], 999))
                 
                 con = rmm._open_rm_connection(project_db)
                 stage_info = {}
