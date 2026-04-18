@@ -13319,9 +13319,33 @@ class RMManagerGUI:
         # ON/OFF nadpisania per-projekt (True = filtr projektu niezależny od globalnego)
         if not hasattr(self, '_mp_proj_filter_override') or not preserve_view:
             self._mp_proj_filter_override = {}
+        # Filtr konstruktora (employee_id, None = wszyscy)
+        if not hasattr(self, '_mp_employee_filter') or not preserve_view:
+            self._mp_employee_filter = None
         # Wybrany (zaznaczony/locked) projekt w multi-Gantt
         if not hasattr(self, '_mp_selected_pid') or not preserve_view:
             self._mp_selected_pid = None
+        
+        # Przeładuj moduł rm_manager jeśli brak nowej funkcji (hotfix dla live session)
+        if not hasattr(rmm, 'get_project_staff'):
+            import importlib
+            importlib.reload(rmm)
+        
+        # Zbierz wszystkich pracowników (konstruktorów) z wszystkich projektów
+        all_employees = {}  # {employee_id: employee_name}
+        project_employees = {}  # {pid: set(employee_ids)}
+        
+        for pid in project_ids:
+            try:
+                project_db = self.get_project_db_path(pid)
+                staff = rmm.get_project_staff(project_db, self.rm_master_db_path, pid)
+                emp_ids = set()
+                for s in staff:
+                    all_employees[s['employee_id']] = s['employee_name']
+                    emp_ids.add(s['employee_id'])
+                project_employees[pid] = emp_ids
+            except Exception as e:
+                project_employees[pid] = set()
         
         # Zbierz dane z każdego projektu
         all_gantt_data = []  # lista słowników z danymi pasków
@@ -13333,6 +13357,11 @@ class RMManagerGUI:
         
         for pid in project_ids:
             pname = self.project_names.get(pid, f"Projekt {pid}")
+            
+            # Filtr konstruktora - pomiń projekt jeśli nie ma wybranego konstruktora
+            if self._mp_employee_filter is not None:
+                if pid not in project_employees or self._mp_employee_filter not in project_employees[pid]:
+                    continue
             
             # Domyślne per-projekt filtry typów
             if pid not in self._mp_proj_type_filters:
@@ -13611,7 +13640,48 @@ class RMManagerGUI:
                                    activebackground="#f8f8f8")
                 cb.pack(side=tk.LEFT, padx=4)
             
-            # Separator
+            # Dodaj separator pionowy
+            ttk.Separator(type_row, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=2)
+            
+            # Konstruktor w tym samym wierszu
+            tk.Label(type_row, text="Konstruktor:", font=("Arial", 9, "bold"), bg="#f8f8f8"
+                    ).pack(side=tk.LEFT, padx=(0, 5))
+            
+            # Lista konstruktorów: "Wszyscy" + lista pracowników
+            employee_list = ["Wszyscy"] + [all_employees[eid] for eid in sorted(all_employees.keys(), key=lambda e: all_employees[e])]
+            employee_ids_map = {all_employees[eid]: eid for eid in all_employees}  # name -> id
+            
+            # Znajdź aktualny wybór
+            current_selection = "Wszyscy"
+            if self._mp_employee_filter is not None and self._mp_employee_filter in all_employees:
+                current_selection = all_employees[self._mp_employee_filter]
+            
+            employee_var = tk.StringVar(value=current_selection)
+            employee_combo = ttk.Combobox(type_row, textvariable=employee_var,
+                                         values=employee_list, state='readonly',
+                                         width=20, font=("Arial", 9))
+            employee_combo.pack(side=tk.LEFT, padx=5)
+            
+            def _on_employee_change(event=None):
+                selected = employee_var.get()
+                if selected == "Wszyscy":
+                    self._mp_employee_filter = None
+                else:
+                    self._mp_employee_filter = employee_ids_map.get(selected)
+                _on_filter_change()
+            
+            employee_combo.bind("<<ComboboxSelected>>", _on_employee_change)
+            
+            # Informacja o liczbie projektów po filtrowaniu
+            if self._mp_employee_filter is not None:
+                filtered_count = sum(1 for pid in project_ids 
+                                   if pid in project_employees and self._mp_employee_filter in project_employees[pid])
+                tk.Label(type_row, 
+                        text=f"({filtered_count}/{len(project_ids)} projektów)",
+                        font=("Arial", 9), fg=self.COLOR_BLUE, bg="#f8f8f8"
+                ).pack(side=tk.LEFT, padx=5)
+            
+            # Separator poziomy (przed etapami)
             ttk.Separator(self._mp_filter_frame, orient='horizontal').pack(fill=tk.X, padx=5, pady=2)
             
             # Rząd 2: Etapy (z kolorami)

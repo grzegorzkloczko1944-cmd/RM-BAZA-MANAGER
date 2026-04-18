@@ -4885,6 +4885,75 @@ def get_all_stage_staff_for_project(project_db_path: str, rm_master_db_path: str
         con.close()
 
 
+def get_project_staff(project_db_path: str, rm_master_db_path: str,
+                     project_id: int) -> List[Dict]:
+    """Pobierz unikalną listę pracowników przypisanych do projektu (ze wszystkich etapów).
+    
+    Returns:
+        Lista dict z kluczami:
+        - employee_id
+        - employee_name
+        - category
+    """
+    import json
+    
+    con = _open_rm_connection(project_db_path)
+    
+    try:
+        # Pobierz wszystkich pracowników ze wszystkich etapów
+        rows = con.execute("""
+            SELECT assigned_staff
+            FROM project_stages
+            WHERE project_id = ? AND assigned_staff IS NOT NULL AND assigned_staff != ''
+        """, (project_id,)).fetchall()
+        
+        # Zbierz unikalne employee_id
+        employee_ids = set()
+        for row in rows:
+            try:
+                assigned = json.loads(row['assigned_staff'])
+                for staff in assigned:
+                    emp_id = staff.get('employee_id')
+                    if emp_id:
+                        employee_ids.add(emp_id)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        
+    finally:
+        con.close()
+    
+    if not employee_ids:
+        return []
+    
+    # Upewnij się że tabela employees istnieje
+    ensure_list_tables(rm_master_db_path)
+    
+    # Pobierz szczegóły z master DB (tylko kategoria "Konstrukcja")
+    con_master = _open_rm_connection(rm_master_db_path)
+    
+    try:
+        placeholders = ','.join('?' * len(employee_ids))
+        employees = con_master.execute(f"""
+            SELECT id, name, category
+            FROM employees
+            WHERE id IN ({placeholders})
+              AND category = 'Konstrukcja'
+            ORDER BY name
+        """, list(employee_ids)).fetchall()
+        
+        return [
+            {
+                'employee_id': e['id'],
+                'employee_name': e['name'],
+                'category': e['category']
+            }
+            for e in employees
+        ]
+        
+    finally:
+        con_master.close()
+
+
 # ============================================================================
 # SYSTEM NOTATEK - Tematy, notatki, alarmy
 # ============================================================================
