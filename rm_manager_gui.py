@@ -12600,18 +12600,11 @@ class RMManagerGUI:
                     print(f"🚫 Pomijam etap {stage_code} - brak danych")
                     continue
                 
-                # Milestone bez ustawionej daty → pokaż nazwę ale bez pasków
+                # Milestone bez ustawionej daty → pomiń (nie zaśmiecaj wykresu)
                 is_ms = stage_milestones.get(stage_code, False)
                 ms_has_date = has_actual or has_template or has_forecast
                 if is_ms and not ms_has_date:
-                    print(f"⭕ Milestone {stage_code} bez daty - pusty wiersz")
-                    gantt_data.append({
-                        'Task': f"⭕ {stage_name}",
-                        'Start': None,
-                        'Finish': None,
-                        'Resource': "Milestone (brak daty)",
-                        'Complete': 0
-                    })
+                    print(f"⭕ Milestone {stage_code} bez daty - pomijam")
                     continue
                 
                 print(f"✅ Pokazuję etap {stage_code} (szablon={has_template}, prognoza={has_forecast}, rzeczywiste={has_actual})")
@@ -13051,20 +13044,11 @@ class RMManagerGUI:
                         print(f"🚫 [multi] Projekt {project_id}, pomijam etap {stage_code} - brak danych")
                         continue
                     
-                    # Milestone bez ustawionej daty → pokaż nazwę ale bez pasków
+                    # Milestone bez ustawionej daty → pomiń (nie zaśmiecaj wykresu)
                     is_ms = stage_milestones.get(stage_code, False)
                     ms_has_date = has_actual or has_template or has_forecast
                     if is_ms and not ms_has_date:
-                        print(f"⭕ [multi] Milestone {stage_code} bez daty - pusty wiersz")
-                        gantt_data.append({
-                            'Task': f"{project_label}: ⭕ {stage_name}",
-                            'Start': None,
-                            'Finish': None,
-                            'Resource': f"{project_name} (Milestone)",
-                            'Project': project_id,
-                            'Color': '#bdc3c7',
-                            'Type': 'Milestone'
-                        })
+                        print(f"⭕ [multi] Milestone {stage_code} bez daty - pomijam")
                         continue
                     
                     # Dla milestone z datą → actual LUB template
@@ -13851,6 +13835,10 @@ class RMManagerGUI:
                 has_actual = any(p.get('started_at') for p in stage.get('actual_periods', []))
                 
                 if not has_template and not has_forecast and not has_actual:
+                    continue
+                
+                # Milestone bez ustawionej daty → pomiń (nie zaśmiecaj wykresu)
+                if is_ms and not has_actual and not has_template:
                     continue
                 
                 encountered_stages.add(stage_code)
@@ -15901,19 +15889,11 @@ class RMManagerGUI:
                     print(f"🚫 [matplotlib] Pomijam etap {stage_code} - brak danych")
                     continue
                 
-                # Milestone bez ustawionej daty → pokaż nazwę ale bez pasków
+                # Milestone bez ustawionej daty → pomiń (nie zaśmiecaj wykresu)
                 is_ms = stage_milestones.get(stage_code, False)
                 ms_has_date = has_actual or has_template or has_forecast
                 if is_ms and not ms_has_date:
-                    print(f"⭕ [matplotlib] Milestone {stage_code} bez daty - pusty wiersz")
-                    gantt_data.append({
-                        'task': f"⭕ {stage_name}",
-                        'stage_code': stage_code,
-                        'start': None,
-                        'end': None,
-                        'type': 'Milestone',
-                        'color': '#bdc3c7'
-                    })
+                    print(f"⭕ [matplotlib] Milestone {stage_code} bez daty - pomijam")
                     continue
                 
                 # Dla milestone z datą → actual LUB template (bez sztucznej prognozy)
