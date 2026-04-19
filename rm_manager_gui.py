@@ -1472,6 +1472,7 @@ class RMManagerGUI:
             self.load_project_stages()  # Odśwież panel etapów (enable/disable)
             self.refresh_timeline()  # Odśwież aby włączyć edycję pól
             self._refresh_combo_lock_info()  # Odśwież combo projektów (pokaż lock)
+            self._sync_mp_chart_lock_state()  # Synchronizuj Multi-project chart
             print(f"✅ Lock przejęty: projekt {self.selected_project_id}, lock_id={lock_id}")
 
         except Exception as e:
@@ -1536,6 +1537,7 @@ class RMManagerGUI:
             self.load_project_stages()  # Odśwież panel etapów (enable/disable)
             self.refresh_timeline()  # Odśwież aby włączyć edycję pól
             self._refresh_combo_lock_info()  # Odśwież combo projektów (pokaż lock)
+            self._sync_mp_chart_lock_state()  # Synchronizuj Multi-project chart
             print(f"⚡ Lock wymuszony: projekt {self.selected_project_id}, lock_id={lock_id}")
 
         except Exception as e:
@@ -1623,6 +1625,7 @@ class RMManagerGUI:
             self.load_project_stages()
             self.refresh_timeline()
             self._refresh_combo_lock_info()
+            self._sync_mp_chart_lock_state()  # Synchronizuj Multi-project chart
             print(f"✖ Lock anulowany (daty przywrócone={restored}): projekt {self.selected_project_id}")
 
         except Exception as e:
@@ -1669,6 +1672,7 @@ class RMManagerGUI:
             self.load_project_stages()  # Odśwież panel etapów (disable)
             self.refresh_timeline()  # Odśwież aby zablokować edycję pól
             self._refresh_combo_lock_info()  # Odśwież combo projektów (usuń lock)
+            self._sync_mp_chart_lock_state()  # Synchronizuj Multi-project chart
             print(f"🔓 Lock zwolniony: projekt {self.selected_project_id}")
 
         except Exception as e:
@@ -1685,6 +1689,7 @@ class RMManagerGUI:
         self.load_project_stages()  # Odśwież panel etapów (disable)
         self.refresh_timeline()  # Odśwież aby zablokować edycję pól
         self._refresh_combo_lock_info()  # Odśwież combo projektów (pokaż nowy lock)
+        self._sync_mp_chart_lock_state()  # Synchronizuj Multi-project chart
         self.status_bar.config(
             text=f"⚠️ Utracono lock projektu {self.selected_project_id} - tryb READ-ONLY",
             fg="#e74c3c"
@@ -13230,30 +13235,286 @@ class RMManagerGUI:
 
     def open_multi_project_chart(self):
         """Otwórz wykres Gantta z wieloma projektami w osobnym oknie"""
-        from datetime import datetime, timedelta
-        
         if not MATPLOTLIB_AVAILABLE:
             messagebox.showerror("Błąd", "Matplotlib nie jest zainstalowane.")
             return
-        
         if not self.projects:
             messagebox.showwarning("Brak projektów", "Brak załadowanych projektów.")
             return
         
-        # ===== Okno wyboru projektów =====
-        sel_dialog = tk.Toplevel(self.root)
-        sel_dialog.title("📊 Multi-projekt Gantt — wybór projektów")
-        sel_dialog.geometry("500x600")
-        sel_dialog.transient(self.root)
-        sel_dialog.grab_set()
+        current_ids = set()
+        if self.selected_project_id:
+            current_ids.add(self.selected_project_id)
+        self._open_project_selector(parent=self.root, current_ids=current_ids)
+
+    def _mp_select_projects_dialog(self):
+        """Dialog wyboru projektów — zmiana zestawu projektów w otwartym oknie MP"""
+        if not self.projects:
+            return
+        current_ids = set(self._mp_chart_meta.get('project_ids', [])) if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta else set()
+        pinned = getattr(self, '_mp_pinned_projects', set())
+        self._open_project_selector(parent=self._mp_chart_window, current_ids=current_ids, pinned_ids=pinned)
+
+    def _open_project_selector(self, parent, current_ids=None, pinned_ids=None):
+        """Profesjonalny dialog wyboru projektów z filtrami statusu, czasu i pinowaniem.
         
-        tk.Label(sel_dialog, text="Wybierz projekty do wyświetlenia:",
-                 font=("Arial", 12, "bold"), pady=10).pack()
+        Args:
+            parent: okno rodzic
+            current_ids: set z aktualnie zaznaczonymi project_id
+            pinned_ids: set z przypiętymi project_id (nie reagują na filtry)
+        """
+        from datetime import datetime, timedelta
+        import os
         
-        # Checkbutton frame z scrollem
-        outer = tk.Frame(sel_dialog)
-        outer.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        canvas_sel = tk.Canvas(outer)
+        if current_ids is None:
+            current_ids = set()
+        if pinned_ids is None:
+            pinned_ids = set()
+        
+        sel = tk.Toplevel(parent)
+        sel.title("📊 Wybór projektów — Multi-projekt Gantt")
+        sel.transient(parent)
+        sel.grab_set()
+        
+        w, h = 750, 720
+        sel.update_idletasks()
+        try:
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            x = px + (pw // 2) - (w // 2)
+            y = py + (ph // 2) - (h // 2)
+        except Exception:
+            x = (sel.winfo_screenwidth() // 2) - (w // 2)
+            y = (sel.winfo_screenheight() // 2) - (h // 2)
+        sel.geometry(f"{w}x{h}+{x}+{y}")
+        sel.minsize(650, 550)
+        
+        # ===== Zbierz dane o projektach (jednorazowo) =====
+        proj_info = {}  # pid -> {name, status, health, variance, forecast_end, is_paused, is_finished}
+        for pid in self.projects:
+            pname = self.project_names.get(pid, f"Projekt {pid}")
+            info = {'name': pname, 'status': 'UNKNOWN', 'health': 'UNKNOWN',
+                    'variance': 0, 'forecast_end': None, 'is_paused': False, 'is_finished': False,
+                    'has_db': False}
+            try:
+                pdb = self.get_project_db_path(pid)
+                if os.path.exists(pdb):
+                    info['has_db'] = True
+                    info['is_finished'] = rmm.is_milestone_set(pdb, pid, 'ZAKONCZONY')
+                    info['is_paused'] = rmm.is_project_paused(pdb, pid)
+                    ps = rmm.get_project_status(self.master_db_path, pid)
+                    info['status'] = ps  # ProjectStatus enum
+                    try:
+                        summary = rmm.get_project_status_summary(pdb, pid)
+                        info['health'] = summary.get('status', 'UNKNOWN')  # DELAYED/AT_RISK/ON_TRACK
+                        info['variance'] = summary.get('overall_variance_days', 0)
+                        info['forecast_end'] = summary.get('completion_forecast')
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            proj_info[pid] = info
+        
+        # ===== FILTRY — górna sekcja =====
+        filter_frame = tk.LabelFrame(sel, text="🔍 Filtry", font=("Arial", 10, "bold"),
+                                      padx=8, pady=5)
+        filter_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        
+        # --- Wiersz 1: Filtry statusu ---
+        row1 = tk.Frame(filter_frame)
+        row1.pack(fill=tk.X, pady=2)
+        tk.Label(row1, text="Status:", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(0, 5))
+        
+        status_filters = {}
+        status_defs = [
+            ('active', '🔄 Aktywne', True),
+            ('paused', '⏸ Wstrzymane', False),
+            ('finished', '🏁 Zakończone', False),
+            ('new', '🆕 Nowe', False),
+        ]
+        for key, label, default in status_defs:
+            var = tk.BooleanVar(value=default)
+            status_filters[key] = var
+            tk.Checkbutton(row1, text=label, variable=var, font=("Arial", 9),
+                          command=lambda: apply_filters()).pack(side=tk.LEFT, padx=3)
+        
+        # --- Wiersz 2: Filtry zdrowia (variance) ---
+        row2 = tk.Frame(filter_frame)
+        row2.pack(fill=tk.X, pady=2)
+        tk.Label(row2, text="Terminowość:", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(0, 5))
+        
+        health_filters = {}
+        health_defs = [
+            ('on_track', '✅ W terminie', True),
+            ('at_risk', '⚠️ Zagrożone', True),
+            ('delayed', '🔴 Opóźnione', True),
+        ]
+        for key, label, default in health_defs:
+            var = tk.BooleanVar(value=default)
+            health_filters[key] = var
+            tk.Checkbutton(row2, text=label, variable=var, font=("Arial", 9),
+                          command=lambda: apply_filters()).pack(side=tk.LEFT, padx=3)
+        
+        # --- Wiersz 3: Filtry czasowe ---
+        row3 = tk.Frame(filter_frame)
+        row3.pack(fill=tk.X, pady=2)
+        tk.Label(row3, text="Okres:", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(0, 5))
+        
+        time_filter_var = tk.StringVar(value='all')
+        time_options = [
+            ('all', 'Wszystkie'),
+            ('q_current', 'Bieżący kwartał'),
+            ('q_next', 'Następny kwartał'),
+            ('h_current', 'Bieżące półrocze'),
+            ('year_current', 'Bieżący rok'),
+            ('custom', 'Zakres dat...'),
+        ]
+        time_menu = tk.OptionMenu(row3, time_filter_var, *[k for k, _ in time_options],
+                                   command=lambda _: on_time_filter_change())
+        time_menu.config(font=("Arial", 9), width=18)
+        time_menu.pack(side=tk.LEFT, padx=3)
+        # Ustaw etykiety menu
+        menu = time_menu['menu']
+        menu.delete(0, tk.END)
+        for key, label in time_options:
+            menu.add_command(label=label, command=lambda k=key: (time_filter_var.set(k), on_time_filter_change()))
+        
+        # Custom date range
+        date_frame = tk.Frame(row3)
+        date_frame.pack(side=tk.LEFT, padx=5)
+        tk.Label(date_frame, text="Od:", font=("Arial", 8)).pack(side=tk.LEFT)
+        date_from_var = tk.StringVar()
+        date_from_entry = tk.Entry(date_frame, textvariable=date_from_var, width=10, font=("Arial", 9))
+        date_from_entry.pack(side=tk.LEFT, padx=2)
+        tk.Label(date_frame, text="Do:", font=("Arial", 8)).pack(side=tk.LEFT)
+        date_to_var = tk.StringVar()
+        date_to_entry = tk.Entry(date_frame, textvariable=date_to_var, width=10, font=("Arial", 9))
+        date_to_entry.pack(side=tk.LEFT, padx=2)
+        tk.Button(date_frame, text="🔍", font=("Arial", 8),
+                  command=lambda: apply_filters()).pack(side=tk.LEFT, padx=2)
+        date_frame.pack_forget()  # Ukryj — pokaż tylko gdy custom
+        
+        def on_time_filter_change():
+            if time_filter_var.get() == 'custom':
+                date_frame.pack(side=tk.LEFT, padx=5)
+            else:
+                date_frame.pack_forget()
+            apply_filters()
+        
+        def get_time_range():
+            """Zwróć (date_from, date_to) na podstawie wybranego filtra czasowego"""
+            now = datetime.now()
+            tf = time_filter_var.get()
+            if tf == 'all':
+                return None, None
+            elif tf == 'q_current':
+                q_start_month = ((now.month - 1) // 3) * 3 + 1
+                d_from = datetime(now.year, q_start_month, 1)
+                q_end_month = q_start_month + 2
+                if q_end_month == 12:
+                    d_to = datetime(now.year + 1, 1, 1) - timedelta(days=1)
+                else:
+                    d_to = datetime(now.year, q_end_month + 1, 1) - timedelta(days=1)
+                return d_from, d_to
+            elif tf == 'q_next':
+                q_start_month = ((now.month - 1) // 3) * 3 + 4
+                y = now.year
+                if q_start_month > 12:
+                    q_start_month -= 12
+                    y += 1
+                d_from = datetime(y, q_start_month, 1)
+                q_end_month = q_start_month + 2
+                if q_end_month > 12:
+                    d_to = datetime(y + 1, q_end_month - 12 + 1, 1) - timedelta(days=1)
+                else:
+                    d_to = datetime(y, q_end_month + 1, 1) - timedelta(days=1)
+                return d_from, d_to
+            elif tf == 'h_current':
+                if now.month <= 6:
+                    return datetime(now.year, 1, 1), datetime(now.year, 6, 30)
+                else:
+                    return datetime(now.year, 7, 1), datetime(now.year, 12, 31)
+            elif tf == 'year_current':
+                return datetime(now.year, 1, 1), datetime(now.year, 12, 31)
+            elif tf == 'custom':
+                try:
+                    d_from = datetime.strptime(date_from_var.get().strip(), '%Y-%m-%d') if date_from_var.get().strip() else None
+                except ValueError:
+                    d_from = None
+                try:
+                    d_to = datetime.strptime(date_to_var.get().strip(), '%Y-%m-%d') if date_to_var.get().strip() else None
+                except ValueError:
+                    d_to = None
+                return d_from, d_to
+            return None, None
+        
+        def project_in_time_range(pid, d_from, d_to):
+            """Sprawdź czy projekt ma aktywność w podanym przedziale czasowym"""
+            info = proj_info[pid]
+            fe = info.get('forecast_end')
+            if not fe:
+                return True  # Brak danych — pokaż
+            try:
+                fe_dt = datetime.strptime(fe[:10], '%Y-%m-%d') if isinstance(fe, str) else fe
+            except Exception:
+                return True
+            # Projekt się kwalifikuje jeśli jego forecast_end wypada po d_from
+            # i nie zaczął się po d_to (przybliżenie — nie mamy global start)
+            if d_from and fe_dt < d_from:
+                return False
+            # Forecast_end po d_to → prawdopodobnie aktywny w tym przedziale
+            return True
+        
+        # --- Wiersz 4: Akcje filtrów ---
+        row4 = tk.Frame(filter_frame)
+        row4.pack(fill=tk.X, pady=(4, 2))
+        
+        def clear_filters(event=None):
+            """Resetuj filtry — pokaż wszystko (wszystkie checkboxy ON)"""
+            for var in status_filters.values():
+                var.set(True)
+            for var in health_filters.values():
+                var.set(True)
+            time_filter_var.set('all')
+            date_frame.pack_forget()
+            date_from_var.set('')
+            date_to_var.set('')
+            apply_filters()
+        
+        def show_all_projects(event=None):
+            """Pokaż wszystkie projekty (widoczne bez zmiany zaznaczenia)"""
+            for pid in self.projects:
+                row_widgets[pid].pack(fill=tk.X)
+            inner.update_idletasks()
+            canvas_sel.configure(scrollregion=canvas_sel.bbox("all"))
+            update_count()
+        
+        tk.Button(row4, text="🧹 Wyczyść filtry (Ctrl+Del)", font=("Arial", 9),
+                  command=clear_filters).pack(side=tk.LEFT, padx=3)
+        tk.Button(row4, text="👁 Pokaż wszystkie (Ctrl+Shift+A)", font=("Arial", 9),
+                  command=show_all_projects).pack(side=tk.LEFT, padx=3)
+        
+        # ===== LISTA PROJEKTÓW =====
+        list_frame = tk.Frame(sel)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Header
+        hdr = tk.Frame(list_frame, bg="#ecf0f1")
+        hdr.pack(fill=tk.X)
+        tk.Label(hdr, text="☑", width=3, font=("Arial", 8, "bold"), bg="#ecf0f1").pack(side=tk.LEFT)
+        tk.Label(hdr, text="📌", width=3, font=("Arial", 8), bg="#ecf0f1").pack(side=tk.LEFT)
+        tk.Label(hdr, text="Projekt", width=30, font=("Arial", 9, "bold"), bg="#ecf0f1", anchor="w").pack(side=tk.LEFT, padx=5)
+        tk.Label(hdr, text="Status", width=12, font=("Arial", 9, "bold"), bg="#ecf0f1").pack(side=tk.LEFT)
+        tk.Label(hdr, text="Terminowość", width=12, font=("Arial", 9, "bold"), bg="#ecf0f1").pack(side=tk.LEFT)
+        tk.Label(hdr, text="Odchylenie", width=10, font=("Arial", 9, "bold"), bg="#ecf0f1").pack(side=tk.LEFT)
+        tk.Label(hdr, text="Koniec (prognoza)", width=14, font=("Arial", 9, "bold"), bg="#ecf0f1").pack(side=tk.LEFT)
+        
+        # Scrollable list
+        outer = tk.Frame(list_frame)
+        outer.pack(fill=tk.BOTH, expand=True)
+        canvas_sel = tk.Canvas(outer, highlightthickness=0)
         scrollbar = tk.Scrollbar(outer, orient="vertical", command=canvas_sel.yview)
         inner = tk.Frame(canvas_sel)
         inner.bind("<Configure>", lambda e: canvas_sel.configure(scrollregion=canvas_sel.bbox("all")))
@@ -13261,42 +13522,214 @@ class RMManagerGUI:
         canvas_sel.configure(yscrollcommand=scrollbar.set)
         canvas_sel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # mousewheel scroll
+        canvas_sel.bind_all("<MouseWheel>", lambda e: canvas_sel.yview_scroll(-1 if e.delta > 0 else 1, "units"))
         
-        check_vars = {}
+        check_vars = {}   # pid -> BooleanVar (zaznaczenie)
+        pin_vars = {}      # pid -> BooleanVar (przypięcie)
+        row_widgets = {}   # pid -> frame
+        
+        def status_text(info):
+            if info['is_finished']:
+                return "🏁 Zakończony"
+            if info['is_paused']:
+                return "⏸ Wstrzymany"
+            ps = info['status']
+            if ps == ProjectStatus.NEW:
+                return "🆕 Nowy"
+            if ps == ProjectStatus.ACCEPTED:
+                return "✅ Przyjęty"
+            return "🔄 Aktywny"
+        
+        def health_text(info):
+            h = info['health']
+            if h == 'DELAYED':
+                return "🔴 Opóźniony"
+            elif h == 'AT_RISK':
+                return "⚠️ Zagrożony"
+            elif h == 'ON_TRACK':
+                return "✅ W terminie"
+            return "—"
+        
+        def variance_text(info):
+            v = info['variance']
+            if v > 0:
+                return f"+{v}d"
+            elif v < 0:
+                return f"{v}d"
+            return "0d"
+        
+        def variance_color(info):
+            v = info['variance']
+            if v > 10:
+                return '#e74c3c'
+            elif v > 5:
+                return '#e67e22'
+            elif v < 0:
+                return '#27ae60'
+            return '#333333'
+        
+        def forecast_text(info):
+            fe = info.get('forecast_end')
+            if not fe:
+                return "—"
+            try:
+                dt = datetime.strptime(fe[:10], '%Y-%m-%d') if isinstance(fe, str) else fe
+                return dt.strftime('%d-%m-%Y')
+            except Exception:
+                return str(fe)[:10]
+        
+        no_db_pids = set()  # projekty bez pliku bazy danych
+        
         for pid in self.projects:
-            pname = self.project_names.get(pid, f"Projekt {pid}")
-            var = tk.BooleanVar(value=(pid == self.selected_project_id))
-            check_vars[pid] = var
-            tk.Checkbutton(inner, text=f"{pname}", variable=var,
-                          font=("Arial", 10), anchor="w").pack(fill=tk.X, padx=5)
+            info = proj_info[pid]
+            has_db = info.get('has_db', False)
+            row = tk.Frame(inner, pady=1)
+            row.pack(fill=tk.X)
+            
+            if has_db:
+                cv = tk.BooleanVar(value=(pid in current_ids))
+                check_vars[pid] = cv
+                tk.Checkbutton(row, variable=cv, width=1).pack(side=tk.LEFT, padx=(2, 0))
+                
+                pv = tk.BooleanVar(value=(pid in pinned_ids))
+                pin_vars[pid] = pv
+                tk.Checkbutton(row, variable=pv, text="📌", indicatoron=0,
+                              font=("Arial", 8), width=3, selectcolor="#f1c40f",
+                              command=lambda: apply_filters()).pack(side=tk.LEFT)
+            else:
+                # Projekt bez bazy — disabled, nie do zaznaczenia
+                no_db_pids.add(pid)
+                cv = tk.BooleanVar(value=False)
+                check_vars[pid] = cv
+                cb = tk.Checkbutton(row, variable=cv, width=1, state='disabled')
+                cb.pack(side=tk.LEFT, padx=(2, 0))
+                pv = tk.BooleanVar(value=False)
+                pin_vars[pid] = pv
+                tk.Label(row, text="  ⛔", font=("Arial", 8), width=3, fg="#bdc3c7").pack(side=tk.LEFT)
+                row.configure(bg="#f5f5f5")
+            
+            name_fg = "#333" if has_db else "#aaaaaa"
+            name_lbl = info['name'] if has_db else f"{info['name']}  (brak bazy danych)"
+            tk.Label(row, text=name_lbl, font=("Arial", 9), anchor="w",
+                    width=30, fg=name_fg).pack(side=tk.LEFT, padx=5)
+            tk.Label(row, text=status_text(info) if has_db else "⛔ Brak danych",
+                    font=("Arial", 8), width=12, fg="#333" if has_db else "#bdc3c7").pack(side=tk.LEFT)
+            tk.Label(row, text=health_text(info) if has_db else "—",
+                    font=("Arial", 8), width=12, fg="#333" if has_db else "#bdc3c7").pack(side=tk.LEFT)
+            tk.Label(row, text=variance_text(info) if has_db else "—",
+                    font=("Arial", 8, "bold"),
+                    fg=variance_color(info) if has_db else "#bdc3c7", width=10).pack(side=tk.LEFT)
+            tk.Label(row, text=forecast_text(info) if has_db else "—",
+                    font=("Arial", 8), width=14, fg="#333" if has_db else "#bdc3c7").pack(side=tk.LEFT)
+            
+            row_widgets[pid] = row
         
-        # Przyciski Zaznacz/Odznacz wszystko + OK
-        btn_frame = tk.Frame(sel_dialog, pady=10)
-        btn_frame.pack(fill=tk.X, padx=10)
+        # ===== LOGIKA FILTRÓW =====
+        def matches_status_filter(pid):
+            info = proj_info[pid]
+            if info['is_finished']:
+                return status_filters['finished'].get()
+            if info['is_paused']:
+                return status_filters['paused'].get()
+            if info['status'] == ProjectStatus.NEW:
+                return status_filters['new'].get()
+            return status_filters['active'].get()
         
-        def select_all():
-            for v in check_vars.values():
-                v.set(True)
-        def deselect_all():
-            for v in check_vars.values():
-                v.set(False)
+        def matches_health_filter(pid):
+            info = proj_info[pid]
+            h = info['health']
+            if h == 'DELAYED':
+                return health_filters['delayed'].get()
+            elif h == 'AT_RISK':
+                return health_filters['at_risk'].get()
+            elif h == 'ON_TRACK':
+                return health_filters['on_track'].get()
+            return True  # UNKNOWN → zawsze pokaż
         
-        tk.Button(btn_frame, text="✅ Zaznacz wszystko", command=select_all,
-                  font=("Arial", 9)).pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_frame, text="❌ Odznacz wszystko", command=deselect_all,
-                  font=("Arial", 9)).pack(side=tk.LEFT, padx=5)
+        def apply_filters():
+            """Zastosuj filtry — pokaz/ukryj projekty, zaznacz/odznacz wg filtrów.
+            Przypięte (📌) zawsze widoczne i zaznaczone."""
+            d_from, d_to = get_time_range()
+            
+            for pid in self.projects:
+                # Projekty bez bazy — zawsze widoczne, zawsze odznaczone
+                if pid in no_db_pids:
+                    row_widgets[pid].pack(fill=tk.X)
+                    check_vars[pid].set(False)
+                    continue
+                
+                is_pinned = pin_vars[pid].get()
+                row = row_widgets[pid]
+                
+                if is_pinned:
+                    row.pack(fill=tk.X)
+                    check_vars[pid].set(True)
+                    continue
+                
+                visible = (matches_status_filter(pid) and
+                           matches_health_filter(pid) and
+                           (d_from is None or project_in_time_range(pid, d_from, d_to)))
+                
+                if visible:
+                    row.pack(fill=tk.X)
+                    check_vars[pid].set(True)
+                else:
+                    row.pack_forget()
+                    check_vars[pid].set(False)
+            
+            # Odśwież scroll region
+            inner.update_idletasks()
+            canvas_sel.configure(scrollregion=canvas_sel.bbox("all"))
+            
+            # Pokaż ile zaznaczono
+            count = sum(1 for v in check_vars.values() if v.get())
+            count_label.config(text=f"Zaznaczono: {count} / {len(self.projects)} projektów")
         
+        # ===== DOLNA BELKA — przyciski =====
+        bottom = tk.Frame(sel, pady=8)
+        bottom.pack(fill=tk.X, padx=10)
+        
+        # Lewa strona — zaznacz/odznacz + licznik
+        left_btns = tk.Frame(bottom)
+        left_btns.pack(side=tk.LEFT)
+        
+        tk.Button(left_btns, text="✅ Zaznacz widoczne", font=("Arial", 9),
+                  command=lambda: [v.set(True) for pid, v in check_vars.items() if row_widgets[pid].winfo_ismapped()] or update_count()
+        ).pack(side=tk.LEFT, padx=3)
+        
+        tk.Button(left_btns, text="❌ Odznacz widoczne", font=("Arial", 9),
+                  command=lambda: [v.set(False) for pid, v in check_vars.items() if row_widgets[pid].winfo_ismapped() and not pin_vars[pid].get()] or update_count()
+        ).pack(side=tk.LEFT, padx=3)
+        
+        count_label = tk.Label(bottom, text="", font=("Arial", 9, "bold"), fg="#2c3e50")
+        count_label.pack(side=tk.LEFT, padx=15)
+        
+        def update_count():
+            count = sum(1 for v in check_vars.values() if v.get())
+            count_label.config(text=f"Zaznaczono: {count} / {len(self.projects)} projektów")
+        
+        # Prawa strona — Generuj
         def on_ok():
             selected = [pid for pid, var in check_vars.items() if var.get()]
-            sel_dialog.destroy()
+            # Zapamiętaj przypięte
+            self._mp_pinned_projects = {pid for pid, var in pin_vars.items() if var.get()}
+            sel.destroy()
             if selected:
                 self._create_multi_project_chart_window(selected)
             else:
-                messagebox.showwarning("Brak wyboru", "Nie wybrano żadnych projektów.")
+                messagebox.showwarning("Brak wyboru", "Nie wybrano żadnych projektów.", parent=parent)
         
-        tk.Button(btn_frame, text="📊 Generuj wykres", command=on_ok,
+        tk.Button(bottom, text="📊 Generuj wykres", command=on_ok,
                   bg=self.COLOR_GREEN, fg="white", font=("Arial", 11, "bold"),
                   padx=20, pady=5).pack(side=tk.RIGHT, padx=5)
+        
+        # Keyboard shortcuts
+        sel.bind('<Control-Delete>', clear_filters)
+        sel.bind('<Control-Shift-A>', show_all_projects)
+        
+        # Inicjalizuj widok
+        update_count()
     
     def _create_multi_project_chart_window(self, project_ids, preserve_view=False):
         """Rysuje multi-project Gantt w osobnym oknie.
@@ -13443,7 +13876,10 @@ class RMManagerGUI:
                     if show:
                         tpl_start = datetime.strptime(template_start[:10], '%Y-%m-%d')
                         tpl_end = datetime.strptime(template_end[:10], '%Y-%m-%d')
-                        tpl_start, tpl_end = self._ensure_min_1day_dt(tpl_start, tpl_end)
+                        if is_ms:
+                            tpl_end = tpl_start + timedelta(days=1)
+                        else:
+                            tpl_start, tpl_end = self._ensure_min_1day_dt(tpl_start, tpl_end)
                         all_gantt_data.append({
                             'task': row_label,
                             'y_pos': y_pos,
@@ -13472,7 +13908,10 @@ class RMManagerGUI:
                                 (period.get('ended_at') or datetime.now().strftime('%Y-%m-%d'))[:10],
                                 '%Y-%m-%d'
                             )
-                            start_date, end_date = self._ensure_min_1day_dt(start_date, end_date)
+                            if is_ms:
+                                end_date = start_date + timedelta(days=1)
+                            else:
+                                start_date, end_date = self._ensure_min_1day_dt(start_date, end_date)
                             all_gantt_data.append({
                                 'task': row_label,
                                 'y_pos': y_pos,
@@ -13495,7 +13934,10 @@ class RMManagerGUI:
                     if show_pr:
                         fc_start = datetime.strptime(stage['forecast_start'][:10], '%Y-%m-%d')
                         fc_end = datetime.strptime(stage['forecast_end'][:10], '%Y-%m-%d')
-                        fc_start, fc_end = self._ensure_min_1day_dt(fc_start, fc_end)
+                        if is_ms:
+                            fc_end = fc_start + timedelta(days=1)
+                        else:
+                            fc_start, fc_end = self._ensure_min_1day_dt(fc_start, fc_end)
                         all_gantt_data.append({
                             'task': row_label,
                             'y_pos': y_pos,
@@ -14013,82 +14455,6 @@ class RMManagerGUI:
         
         self._mp_status.config(text=f"✅ Wykres: {len(project_ids)} projektów, {len(all_gantt_data)} pasków")
     
-    def _mp_select_projects_dialog(self):
-        """Dialog wyboru projektów — zmiana zestawu projektów w otwartym oknie MP"""
-        if not self.projects:
-            return
-        
-        current_ids = set(self._mp_chart_meta.get('project_ids', [])) if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta else set()
-        
-        sel_dialog = tk.Toplevel(self._mp_chart_window)
-        sel_dialog.title("📋 Wybór projektów")
-        sel_dialog.geometry("500x600")
-        sel_dialog.transient(self._mp_chart_window)
-        sel_dialog.grab_set()
-        
-        # Centruj na oknie MP
-        sel_dialog.update_idletasks()
-        try:
-            px = self._mp_chart_window.winfo_rootx()
-            py = self._mp_chart_window.winfo_rooty()
-            pw = self._mp_chart_window.winfo_width()
-            ph = self._mp_chart_window.winfo_height()
-            x = px + (pw // 2) - 250
-            y = py + (ph // 2) - 300
-            sel_dialog.geometry(f"500x600+{x}+{y}")
-        except Exception:
-            pass
-        
-        tk.Label(sel_dialog, text="Wybierz projekty do wyświetlenia:",
-                 font=("Arial", 12, "bold"), pady=10).pack()
-        
-        outer = tk.Frame(sel_dialog)
-        outer.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        canvas_sel = tk.Canvas(outer)
-        scrollbar = tk.Scrollbar(outer, orient="vertical", command=canvas_sel.yview)
-        inner = tk.Frame(canvas_sel)
-        inner.bind("<Configure>", lambda e: canvas_sel.configure(scrollregion=canvas_sel.bbox("all")))
-        canvas_sel.create_window((0, 0), window=inner, anchor="nw")
-        canvas_sel.configure(yscrollcommand=scrollbar.set)
-        canvas_sel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        check_vars = {}
-        for pid in self.projects:
-            pname = self.project_names.get(pid, f"Projekt {pid}")
-            var = tk.BooleanVar(value=(pid in current_ids))
-            check_vars[pid] = var
-            tk.Checkbutton(inner, text=f"{pname}", variable=var,
-                          font=("Arial", 10), anchor="w").pack(fill=tk.X, padx=5)
-        
-        btn_frame = tk.Frame(sel_dialog, pady=10)
-        btn_frame.pack(fill=tk.X, padx=10)
-        
-        def select_all():
-            for v in check_vars.values():
-                v.set(True)
-        def deselect_all():
-            for v in check_vars.values():
-                v.set(False)
-        
-        tk.Button(btn_frame, text="✅ Zaznacz wszystko", command=select_all,
-                  font=("Arial", 9)).pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_frame, text="❌ Odznacz wszystko", command=deselect_all,
-                  font=("Arial", 9)).pack(side=tk.LEFT, padx=5)
-        
-        def on_ok():
-            selected = [pid for pid, var in check_vars.items() if var.get()]
-            sel_dialog.destroy()
-            if selected:
-                self._create_multi_project_chart_window(selected)
-            else:
-                messagebox.showwarning("Brak wyboru", "Nie wybrano żadnych projektów.",
-                                       parent=self._mp_chart_window)
-        
-        tk.Button(btn_frame, text="📊 Zastosuj", command=on_ok,
-                  bg=self.COLOR_GREEN, fg="white", font=("Arial", 11, "bold"),
-                  padx=20, pady=5).pack(side=tk.RIGHT, padx=5)
-    
     # ---- Multi-project: nawigacja ----
     
     def _mp_reset_view(self):
@@ -14477,18 +14843,13 @@ class RMManagerGUI:
                     text=f"ℹ️ {pname} | {stage_code} — przytrzymaj aby zobaczyć szczegóły",
                     fg=self.COLOR_BLUE
                 )
-                # Użyj _mp_find_any_bar do wykrywania dowolnego paska
-                pid_any, sc_any, bar_any = self._mp_find_any_bar(event.xdata, event.ydata)
-                if pid_any and sc_any:
-                    hover_key = (pid_any, sc_any)
-                    if getattr(self, '_mp_hover_key', None) != hover_key:
-                        self._mp_cancel_hover_timer()
-                        self._mp_hover_key = hover_key
-                        self._mp_hover_timer = canvas.get_tk_widget().after(
-                            800, lambda p=pid_any, sc=sc_any: self._mp_show_stage_info_popup(p, sc)
-                        )
-                else:
+                hover_key = (pid, stage_code)
+                if getattr(self, '_mp_hover_key', None) != hover_key:
                     self._mp_cancel_hover_timer()
+                    self._mp_hover_key = hover_key
+                    self._mp_hover_timer = canvas.get_tk_widget().after(
+                        800, lambda p=pid, sc=stage_code: self._mp_show_stage_info_popup(p, sc)
+                    )
             else:
                 self._mp_cancel_hover_timer()
             return
@@ -14527,12 +14888,29 @@ class RMManagerGUI:
                 fg=self.COLOR_BLUE
             )
         else:
-            canvas.get_tk_widget().config(cursor='')
-            if not self._mp_drag_state.get('active'):
+            # Fallback: sprawdź Rzeczywiste/Prognoza dla hover podglądu
+            pid_any, sc_any, bar_any = self._mp_find_any_bar(event.xdata, event.ydata)
+            if pid_any and sc_any and bar_any:
+                pname = self.project_names.get(pid_any, f"Projekt {pid_any}")
+                bar_type = bar_any.get('type', '')
+                canvas.get_tk_widget().config(cursor='question_arrow')
                 self._mp_status.config(
-                    text=f"✅ Wykres gotowy | Shift+mysz: przesuwanie | Ctrl+scroll: zoom czasu | Scroll: góra/dół | 🏠 reset widoku",
-                    fg=self.COLOR_GREEN
+                    text=f"ℹ️ {pname} | {sc_any} ({bar_type}) — przytrzymaj aby zobaczyć szczegóły",
+                    fg=self.COLOR_BLUE
                 )
+                hover_key = (pid_any, sc_any)
+                if getattr(self, '_mp_hover_key', None) != hover_key:
+                    self._mp_hover_key = hover_key
+                    self._mp_hover_timer = canvas.get_tk_widget().after(
+                        800, lambda p=pid_any, sc=sc_any: self._mp_show_stage_info_popup(p, sc)
+                    )
+            else:
+                canvas.get_tk_widget().config(cursor='')
+                if not self._mp_drag_state.get('active'):
+                    self._mp_status.config(
+                        text=f"✅ Wykres gotowy | Shift+mysz: przesuwanie | Ctrl+scroll: zoom czasu | Scroll: góra/dół | 🏠 reset widoku",
+                        fg=self.COLOR_GREEN
+                    )
     
     def _is_mp_chart_open(self):
         """Sprawdź czy okno multi-projekt jest otwarte i widoczne"""
@@ -14544,6 +14922,38 @@ class RMManagerGUI:
                     self._mp_chart_meta)
         except Exception:
             return False
+    
+    def _sync_mp_chart_lock_state(self):
+        """Synchronizuj stan locka z głównej aplikacji do Multi-project chart.
+        Wywoływane po acquire/release/cancel locka z głównego okna."""
+        if not self._is_mp_chart_open():
+            return
+        try:
+            pid = self.selected_project_id
+            project_ids = self._mp_chart_meta.get('project_ids', [])
+            if pid not in project_ids:
+                return
+            
+            if self.have_lock and self._locked_project_id == pid:
+                # Lock przejęty — zaznacz projekt na multi-chart
+                self._mp_selected_pid = pid
+                pname = self.project_names.get(pid, f"Projekt {pid}")
+                self._mp_status.config(
+                    text=f"🔒 Locked: {pname} — dwuklik na pasek = edycja etapu",
+                    fg=self.COLOR_GREEN
+                )
+            else:
+                # Lock zwolniony — odznacz projekt na multi-chart
+                self._mp_selected_pid = None
+                self._mp_status.config(
+                    text=f"🔓 Dwuklik na projekt = przejmij lock",
+                    fg="#7f8c8d"
+                )
+            
+            self._mp_build_right_panel(project_ids)
+            self._create_multi_project_chart_window(project_ids, preserve_view=True)
+        except Exception as e:
+            print(f"⚠️ _sync_mp_chart_lock_state: {e}")
     
     def _mp_cancel_hover_timer(self):
         """Anuluj timer hover podglądu i zamknij popup jeśli otwarty"""
@@ -15094,11 +15504,30 @@ class RMManagerGUI:
         if success:
             self._mp_selected_pid = pid
             self.selected_project_id = pid
+            self.read_only_mode = False
             self._snapshot_stage_dates()  # Snapshot dat do cofnięcia przy Anuluj
             self._mp_status.config(
                 text=f"🔒 Locked: {pname} — dwuklik na pasek = edycja etapu",
                 fg=self.COLOR_GREEN
             )
+            # Synchronizuj główną aplikację: combo, lock status, oś czasu
+            try:
+                idx = self.projects.index(pid)
+                self.project_combo.current(idx)
+            except (ValueError, AttributeError):
+                pass
+            self._update_lock_buttons_state()
+            self._refresh_combo_lock_info()
+            self.load_project_stages()
+            self.refresh_timeline()
+            try:
+                self.refresh_dashboard()
+            except Exception:
+                pass
+            try:
+                self.create_embedded_gantt_chart(preserve_view=False)
+            except Exception:
+                pass
         else:
             # Sprawdź kto ma lock
             owner = self.lock_manager.get_project_lock_owner(pid)
@@ -15159,6 +15588,7 @@ class RMManagerGUI:
         
         self._mp_selected_pid = None
         self._update_lock_buttons_state()
+        self._refresh_combo_lock_info()
         self._mp_status.config(text=f"🔓 Zwolniono: {pname}", fg="#7f8c8d")
         self._mp_build_right_panel(self._mp_chart_meta['project_ids'])
         self._create_multi_project_chart_window(self._mp_chart_meta['project_ids'], preserve_view=True)
@@ -15208,6 +15638,7 @@ class RMManagerGUI:
         
         self._mp_selected_pid = None
         self._update_lock_buttons_state()
+        self._refresh_combo_lock_info()
         self._mp_status.config(text=f"✖ Anulowano: {pname}", fg=self.COLOR_ORANGE)
         self._mp_build_right_panel(self._mp_chart_meta['project_ids'])
         self._create_multi_project_chart_window(self._mp_chart_meta['project_ids'], preserve_view=True)
