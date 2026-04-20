@@ -3243,12 +3243,34 @@ class MainWindow(tk.Tk):
         self.suppliers_map = {sid: name for sid, name in suppliers}
         
         # Zaktualizuj wartości w filtrze dostawców
+        # 🔍 Filtruj dostawców - pokaż tylko tych, którzy występują w aktualnym projekcie
         try:
+            # Pobierz unikalne supplier_id z items dla bieżącego projektu
+            project_supplier_ids = set()
+            if self.current_project_id and self.db_manager and self.db_manager.project_con:
+                try:
+                    # Pobierz unikalne supplier_id z tabeli items dla bieżącego projektu
+                    proj_cursor = self.db_manager.project_con.execute(
+                        "SELECT DISTINCT supplier_id FROM items WHERE supplier_id IS NOT NULL"
+                    )
+                    project_supplier_ids = {row[0] for row in proj_cursor.fetchall()}
+                except Exception as proj_e:
+                    print(f"⚠️  Nie udało się pobrać dostawców z projektu: {proj_e}")
+                    # Przy błędzie - pokaż wszystkich dostawców (fallback)
+                    project_supplier_ids = set(self.suppliers_map.keys())
+            
+            # Jeśli nie ma projektu lub błąd - pokaż wszystkich
+            if not project_supplier_ids:
+                project_supplier_ids = set(self.suppliers_map.keys())
+            
+            # Filtruj listę dostawców - tylko ci z aktualnego projektu
             supplier_filter_values = [FILTER_SUPPLIER_ALL] + [
                 name for sid, name in sorted(suppliers, key=lambda x: x[1].lower())
-                if name != SUPPLIER_EMPTY
+                if sid in project_supplier_ids and name != SUPPLIER_EMPTY
             ]
             self.cmb_filter_supplier['values'] = supplier_filter_values
+            
+            print(f"✅ Filtr dostawców: {len(supplier_filter_values)-1} z {len(suppliers)} (projekt: {self.current_project_id})")
         except Exception as e:
             print(f"⚠️  Nie udało się zaktualizować filtra dostawców: {e}")
         
@@ -16271,12 +16293,34 @@ class MainWindow(tk.Tk):
                 self.suppliers_map[sid] = name
             
             # Zaktualizuj wartości w filtrze dostawców
+            # 🔍 Filtruj dostawców - pokaż tylko tych, którzy występują w aktualnym projekcie
             try:
+                # Pobierz unikalne supplier_id z items dla bieżącego projektu
+                project_supplier_ids = set()
+                if self.current_project_id and self.db_manager and self.db_manager.project_con:
+                    try:
+                        # Pobierz unikalne supplier_id z tabeli items dla bieżącego projektu
+                        proj_cursor = self.db_manager.project_con.execute(
+                            "SELECT DISTINCT supplier_id FROM items WHERE supplier_id IS NOT NULL"
+                        )
+                        project_supplier_ids = {row[0] for row in proj_cursor.fetchall()}
+                    except Exception as proj_e:
+                        print(f"⚠️  Nie udało się pobrać dostawców z projektu: {proj_e}")
+                        # Przy błędzie - pokaż wszystkich dostawców (fallback)
+                        project_supplier_ids = set(self.suppliers_map.keys())
+                
+                # Jeśli nie ma projektu lub błąd - pokaż wszystkich
+                if not project_supplier_ids:
+                    project_supplier_ids = set(self.suppliers_map.keys())
+                
+                # Filtruj listę dostawców - tylko ci z aktualnego projektu
                 supplier_filter_values = [FILTER_SUPPLIER_ALL] + [
                     name for sid, name in sorted(self.suppliers_map.items(), key=lambda x: x[1].lower())
-                    if name != SUPPLIER_EMPTY
+                    if sid in project_supplier_ids and name != SUPPLIER_EMPTY
                 ]
                 self.cmb_filter_supplier['values'] = supplier_filter_values
+                
+                print(f"✅ Filtr dostawców: {len(supplier_filter_values)-1} z {len(self.suppliers_map)} (projekt: {self.current_project_id})")
             except Exception as e:
                 print(f"⚠️  Nie udało się zaktualizować filtra dostawców: {e}")
             
