@@ -3119,6 +3119,16 @@ class RMManagerGUI:
             
             self.projects.sort(key=sort_key)
             
+            # Jednorazowa migracja JSON → stage_staff_assignments (idempotentna)
+            try:
+                result = rmm.sync_staff_json_to_table(self.rm_manager_dir, self.projects)
+                if result['synced'] > 0:
+                    print(f"✅ Migracja staff JSON→tabela: zsynchronizowano {result['synced']} wpisów")
+                if result['errors']:
+                    print(f"⚠️ Migracja staff — błędy: {result['errors']}")
+            except Exception as e:
+                print(f"⚠️ Migracja staff JSON→tabela pominięta: {e}")
+            
             combo_values = []
             is_stub = getattr(self.lock_manager, '_STUB', False)
             for pid in self.projects:
@@ -21254,7 +21264,7 @@ Kod: {unlock_code}
             if not messagebox.askyesno("Potwierdzenie",
                     f"Zastosować zmiany optymalizacji?\n\n"
                     f"Zmienione zostaną daty template w {len(result['changes'])} projektach.\n"
-                    f"Operacja jest odwracalna (historia w zakładce Historia).",
+                    f"Operację można cofnąć przyciskiem ↩ Cofnij.",
                     parent=dlg):
                 return
             try:
@@ -21270,8 +21280,34 @@ Kod: {unlock_code}
                     msg += f"\n\n⚠️ Błędy:\n" + "\n".join(apply_result['errors'])
                 messagebox.showinfo("Zastosowano", msg, parent=dlg)
                 btn_apply.configure(state=tk.DISABLED)
+                # Zapamiętaj snapshoty do cofania
+                if apply_result.get('snapshots'):
+                    btn_undo._snapshots = apply_result['snapshots']
+                    btn_undo.configure(state=tk.NORMAL)
             except Exception as e:
                 messagebox.showerror("Błąd", f"Nie udało się zastosować:\n{e}", parent=dlg)
+
+        def _undo_result():
+            snapshots = getattr(btn_undo, '_snapshots', None)
+            if not snapshots:
+                return
+            if not messagebox.askyesno("Cofnij optymalizację",
+                    f"Przywrócić daty sprzed optymalizacji w {len(snapshots)} projektach?",
+                    parent=dlg):
+                return
+            try:
+                undo_res = rm_optimizer.undo_optimization(
+                    rm_manager_dir=self.rm_projects_dir,
+                    snapshots=snapshots,
+                )
+                msg = f"↩ Cofnięto: {undo_res['restored_projects']} projektów."
+                if undo_res.get('errors'):
+                    msg += f"\n\n⚠️ Błędy:\n" + "\n".join(undo_res['errors'])
+                messagebox.showinfo("Cofnięto", msg, parent=dlg)
+                btn_undo.configure(state=tk.DISABLED)
+                btn_undo._snapshots = None
+            except Exception as e:
+                messagebox.showerror("Błąd", f"Nie udało się cofnąć:\n{e}", parent=dlg)
 
         btn_frame = tk.Frame(bottom)
         btn_frame.pack(fill=tk.X, pady=(0, 5))
@@ -21284,6 +21320,11 @@ Kod: {unlock_code}
                               bg=self.COLOR_BLUE, fg="white", font=("Arial", 11, "bold"),
                               padx=20, pady=6, state=tk.DISABLED)
         btn_apply.pack(side=tk.LEFT, padx=5)
+
+        btn_undo = tk.Button(btn_frame, text="↩ Cofnij optymalizację", command=_undo_result,
+                             bg="#e67e22", fg="white", font=("Arial", 11, "bold"),
+                             padx=20, pady=6, state=tk.DISABLED)
+        btn_undo.pack(side=tk.LEFT, padx=5)
 
         result_text.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
 
@@ -22004,53 +22045,74 @@ Kod: {unlock_code}
                 if staff:
                     lines.append("")
                     lines.append(f"  PRACOWNICY (staff assignments):")
+                    import json as _json
+
+                    # Zbierz etapy z tabeli stage_staff_assignments
+                    ssa_by_stage = {}  # {stage_code: [(eid, p_start, p_end, role)]}
                     try:
                         ssa_rows = con.execute("""
                             SELECT ps.stage_code, ssa.employee_id,
-                                   ssa.planned_start, ssa.planned_end,
-                                   ssa.actual_start, ssa.actual_end, ssa.role
+                                   ssa.planned_start, ssa.planned_end, ssa.role
                             FROM stage_staff_assignments ssa
                             JOIN project_stages ps ON ssa.project_stage_id = ps.id
                             WHERE ps.project_id = ?
                             ORDER BY ps.sequence, ssa.id
                         """, (pid,)).fetchall()
-                        if ssa_rows:
-                            lines.append(f"  {'Etap':<25} {'Pracownik':<35} {'Plan.start':<12} {'Plan.end':<12} {'Rola'}")
-                            lines.append(f"  {'─'*25} {'─'*35} {'─'*12} {'─'*12} {'─'*10}")
-                            for sr in ssa_rows:
-                                sc = sr['stage_code']
-                                ename = emp_name(sr['employee_id'])
-                                p_start = (sr['planned_start'] or '')[:10]
-                                p_end = (sr['planned_end'] or '')[:10]
-                                role = sr['role'] or ''
-                                lines.append(f"  {sc:<25} {ename:<35} {p_start:<12} {p_end:<12} {role}")
-                        else:
-                            # Fallback: JSON z project_stages
-                            import json
-                            ps_rows = con.execute("""
-                                SELECT stage_code, assigned_staff
-                                FROM project_stages WHERE project_id = ?
-                                ORDER BY sequence
-                            """, (pid,)).fetchall()
-                            has_any = False
-                            for pr in ps_rows:
-                                try:
-                                    staff_json = json.loads(pr['assigned_staff'] or '[]')
-                                    if staff_json:
-                                        if not has_any:
-                                            lines.append(f"  {'Etap':<25} {'Pracownik':<35} (z JSON legacy)")
-                                            lines.append(f"  {'─'*25} {'─'*35}")
-                                            has_any = True
-                                        for s in staff_json:
-                                            if isinstance(s, dict) and 'employee_id' in s:
-                                                ename = emp_name(s['employee_id'])
-                                                lines.append(f"  {pr['stage_code']:<25} {ename:<35}")
-                                except (json.JSONDecodeError, TypeError):
-                                    pass
-                            if not has_any:
-                                lines.append("  (brak przypisań)")
+                        for sr in ssa_rows:
+                            sc = sr['stage_code']
+                            ssa_by_stage.setdefault(sc, []).append(
+                                (sr['employee_id'], sr['planned_start'], sr['planned_end'], sr['role']))
                     except sqlite3.OperationalError:
-                        lines.append("  (tabela stage_staff_assignments nie istnieje)")
+                        pass  # stara baza bez tabeli
+
+                    # Zbierz etapy z JSON (fallback per-etap)
+                    json_by_stage = {}  # {stage_code: [eid]}
+                    try:
+                        ps_rows = con.execute("""
+                            SELECT stage_code, assigned_staff
+                            FROM project_stages WHERE project_id = ?
+                            ORDER BY sequence
+                        """, (pid,)).fetchall()
+                        for pr in ps_rows:
+                            try:
+                                staff_json = _json.loads(pr['assigned_staff'] or '[]')
+                                eids = [s['employee_id'] for s in staff_json
+                                        if isinstance(s, dict) and 'employee_id' in s]
+                                if eids:
+                                    json_by_stage[pr['stage_code']] = eids
+                            except (_json.JSONDecodeError, TypeError):
+                                pass
+                    except Exception:
+                        pass
+
+                    # Połącz: tabela ma priorytet, JSON jako fallback per-etap
+                    all_stages_ordered = []
+                    try:
+                        all_stages_ordered = [r['stage_code'] for r in con.execute(
+                            "SELECT stage_code FROM project_stages WHERE project_id = ? ORDER BY sequence",
+                            (pid,)).fetchall()]
+                    except Exception:
+                        all_stages_ordered = list(set(list(ssa_by_stage.keys()) + list(json_by_stage.keys())))
+
+                    has_any = False
+                    for sc in all_stages_ordered:
+                        if sc in ssa_by_stage:
+                            if not has_any:
+                                lines.append(f"  {'Etap':<25} {'Pracownik':<35} {'Plan.start':<12} {'Plan.end':<12} {'Rola'}")
+                                lines.append(f"  {'─'*25} {'─'*35} {'─'*12} {'─'*12} {'─'*10}")
+                                has_any = True
+                            for eid, ps, pe, role in ssa_by_stage[sc]:
+                                lines.append(f"  {sc:<25} {emp_name(eid):<35} {(ps or '')[:10]:<12} {(pe or '')[:10]:<12} {role or ''}")
+                        elif sc in json_by_stage:
+                            if not has_any:
+                                lines.append(f"  {'Etap':<25} {'Pracownik':<35} {'Plan.start':<12} {'Plan.end':<12} {'Rola'}")
+                                lines.append(f"  {'─'*25} {'─'*35} {'─'*12} {'─'*12} {'─'*10}")
+                                has_any = True
+                            for eid in json_by_stage[sc]:
+                                lines.append(f"  {sc:<25} {emp_name(eid):<35} {'(JSON)':<12} {'(JSON)':<12}")
+
+                    if not has_any:
+                        lines.append("  (brak przypisań)")
 
                 # --- ZALEŻNOŚCI (dependencies) ---
                 if deps:

@@ -4935,6 +4935,31 @@ def add_staff_to_stage(project_db_path: str, rm_master_db_path: str,
             SET assigned_staff = ?
             WHERE id = ?
         """, (json.dumps(assigned_staff), stage_id))
+
+        # Sync: wstaw też do stage_staff_assignments (jeśli tabela istnieje)
+        try:
+            # Pobierz daty template dla planned_start/planned_end
+            ss_row = con.execute("""
+                SELECT template_start, template_end
+                FROM stage_schedule WHERE project_stage_id = ?
+            """, (stage_id,)).fetchone()
+            p_start = ss_row['template_start'] if ss_row else None
+            p_end = ss_row['template_end'] if ss_row else None
+
+            existing = con.execute("""
+                SELECT id FROM stage_staff_assignments
+                WHERE project_stage_id = ? AND employee_id = ?
+            """, (stage_id, employee_id)).fetchone()
+            if not existing:
+                con.execute("""
+                    INSERT INTO stage_staff_assignments
+                        (project_stage_id, employee_id, planned_start, planned_end,
+                         assigned_by)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (stage_id, employee_id, p_start, p_end,
+                      assigned_by or 'System'))
+        except sqlite3.OperationalError:
+            pass  # stara baza bez tabeli
         
         con.commit()
         return True
@@ -4978,14 +5003,24 @@ def remove_staff_from_stage(project_db_path: str, project_id: int,
         except (json.JSONDecodeError, TypeError):
             assigned_staff = []
         
-        # Usuń pracownika
-        assigned_staff = [s for s in assigned_staff if s['employee_id'] != employee_id]
+        # Usuń pracownika (int cast na wypadek mieszanych typów w JSON)
+        assigned_staff = [s for s in assigned_staff
+                          if int(s.get('employee_id', -1)) != int(employee_id)]
         
         con.execute("""
             UPDATE project_stages
             SET assigned_staff = ?
             WHERE id = ?
         """, (json.dumps(assigned_staff), stage_id))
+
+        # Sync: usuń też z stage_staff_assignments (jeśli tabela istnieje)
+        try:
+            con.execute("""
+                DELETE FROM stage_staff_assignments
+                WHERE project_stage_id = ? AND employee_id = ?
+            """, (stage_id, employee_id))
+        except sqlite3.OperationalError:
+            pass  # stara baza bez tabeli
         
         con.commit()
         return True
@@ -4997,7 +5032,12 @@ def remove_staff_from_stage(project_db_path: str, project_id: int,
 def get_stage_assigned_staff(project_db_path: str, rm_master_db_path: str,
                             project_id: int, stage_code: str) -> List[Dict]:
     """Pobierz listę pracowników przypisanych do etapu.
-    
+
+    Merguje oba źródła: JSON (project_stages.assigned_staff) + tabela
+    (stage_staff_assignments).  Dzięki temu wpisy istniejące tylko w tabeli
+    (np. po starym usunięciu z JSON bez sync) również zostają zwrócone i mogą
+    być usunięte z poziomu dialogu.
+
     Returns:
         Lista dict z kluczami:
         - employee_id
@@ -5007,51 +5047,75 @@ def get_stage_assigned_staff(project_db_path: str, rm_master_db_path: str,
         - assigned_by
     """
     import json
-    
+
     con = _open_rm_connection(project_db_path)
-    
+
+    # Zbierz employee_ids z obu źródeł
+    json_staff = []   # [{employee_id, assigned_at, assigned_by}, ...]
+    table_eids = set()
+
     try:
         row = con.execute("""
-            SELECT assigned_staff
+            SELECT id, assigned_staff
             FROM project_stages
             WHERE project_id = ? AND stage_code = ?
         """, (project_id, stage_code)).fetchone()
-        
-        if not row or not row['assigned_staff']:
-            return []
-        
-        try:
-            assigned_staff = json.loads(row['assigned_staff'])
-        except (json.JSONDecodeError, TypeError):
-            return []
-        
+
+        if row:
+            stage_id = row['id']
+            try:
+                json_staff = json.loads(row['assigned_staff'] or '[]')
+            except (json.JSONDecodeError, TypeError):
+                json_staff = []
+
+            # Zbierz z tabeli stage_staff_assignments
+            try:
+                ssa_rows = con.execute("""
+                    SELECT employee_id, assigned_by
+                    FROM stage_staff_assignments
+                    WHERE project_stage_id = ?
+                """, (stage_id,)).fetchall()
+                table_eids = {r['employee_id'] for r in ssa_rows}
+            except Exception:
+                pass  # stara baza bez tabeli
     finally:
         con.close()
-    
-    # Teraz pobierz szczegóły pracowników z master
-    if not assigned_staff:
+
+    # Zbierz unikalne employee_ids (JSON + tabela)
+    json_eid_set = set()
+    for s in json_staff:
+        if isinstance(s, dict) and 'employee_id' in s:
+            json_eid_set.add(s['employee_id'])
+
+    all_eids = json_eid_set | table_eids
+    if not all_eids:
         return []
-    
+
+    # Pobierz szczegóły pracowników z master
     con_master = _open_rm_connection(rm_master_db_path)
-    
+
     try:
-        employee_ids = [s['employee_id'] for s in assigned_staff]
-        placeholders = ','.join('?' * len(employee_ids))
-        
+        placeholders = ','.join('?' * len(all_eids))
         employees = con_master.execute(f"""
             SELECT id, name, category
             FROM employees
             WHERE id IN ({placeholders})
-        """, employee_ids).fetchall()
-        
-        # Mapuj employee_id → dane
-        employee_map = {e['id']: {'name': e['name'], 'category': e['category']} for e in employees}
-        
-        # Połącz dane
+        """, list(all_eids)).fetchall()
+
+        employee_map = {e['id']: {'name': e['name'], 'category': e['category']}
+                        for e in employees}
+
+        # Buduj wynik — priorytet danych z JSON (ma assigned_at), dopełnienie z tabeli
         result = []
-        for staff in assigned_staff:
+        seen = set()
+
+        # Najpierw wpisy z JSON (zachowaj kolejność)
+        for staff in json_staff:
+            if not isinstance(staff, dict) or 'employee_id' not in staff:
+                continue
             emp_id = staff['employee_id']
-            if emp_id in employee_map:
+            if emp_id in employee_map and emp_id not in seen:
+                seen.add(emp_id)
                 result.append({
                     'employee_id': emp_id,
                     'employee_name': employee_map[emp_id]['name'],
@@ -5059,9 +5123,20 @@ def get_stage_assigned_staff(project_db_path: str, rm_master_db_path: str,
                     'assigned_at': staff.get('assigned_at'),
                     'assigned_by': staff.get('assigned_by')
                 })
-        
+
+        # Dopełnij wpisami z tabeli, których nie było w JSON
+        for eid in sorted(table_eids - seen):
+            if eid in employee_map:
+                result.append({
+                    'employee_id': eid,
+                    'employee_name': employee_map[eid]['name'],
+                    'category': employee_map[eid]['category'],
+                    'assigned_at': None,
+                    'assigned_by': None
+                })
+
         return result
-        
+
     finally:
         con_master.close()
 
@@ -8240,6 +8315,85 @@ def get_optimization_runs(rm_master_db_path: str, limit: int = 20) -> List[Dict]
 # OPTYMALIZATOR — pobieranie danych wielu projektów (dla solvera)
 # ============================================================================
 
+
+def sync_staff_json_to_table(rm_manager_dir: str, project_ids: List[int]) -> Dict:
+    """Jednorazowa migracja: synchronizuj assigned_staff JSON → stage_staff_assignments.
+
+    Dla każdego etapu: jeśli pracownik jest w JSON ale nie w tabeli, dodaj wpis.
+    Nie usuwa nadmiarowych wpisów z tabeli.
+
+    Returns:
+        {'synced': int, 'skipped': int, 'errors': list}
+    """
+    import json as _json
+
+    synced = 0
+    skipped = 0
+    errors = []
+
+    for pid in project_ids:
+        db_path = get_project_db_path(rm_manager_dir, pid)
+        if not Path(db_path).exists():
+            continue
+
+        con = _open_rm_connection(db_path)
+        try:
+            # Sprawdź czy obie tabele istnieją
+            has_ps = con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='project_stages'"
+            ).fetchone()
+            has_ssa = con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='stage_staff_assignments'"
+            ).fetchone()
+            if not has_ps or not has_ssa:
+                skipped += 1
+                continue
+
+            rows = con.execute("""
+                SELECT ps.id AS ps_id, ps.stage_code, ps.assigned_staff,
+                       ss.template_start, ss.template_end
+                FROM project_stages ps
+                LEFT JOIN stage_schedule ss ON ss.project_stage_id = ps.id
+                WHERE ps.project_id = ?
+            """, (pid,)).fetchall()
+
+            for row in rows:
+                try:
+                    staff_json = _json.loads(row['assigned_staff'] or '[]')
+                except (_json.JSONDecodeError, TypeError):
+                    continue
+
+                for entry in staff_json:
+                    if not isinstance(entry, dict) or 'employee_id' not in entry:
+                        continue
+                    eid = entry['employee_id']
+                    # Sprawdź czy już jest w tabeli
+                    existing = con.execute("""
+                        SELECT id FROM stage_staff_assignments
+                        WHERE project_stage_id = ? AND employee_id = ?
+                    """, (row['ps_id'], eid)).fetchone()
+                    if existing:
+                        continue
+                    # Wstaw
+                    con.execute("""
+                        INSERT INTO stage_staff_assignments
+                            (project_stage_id, employee_id, planned_start, planned_end,
+                             assigned_by)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (row['ps_id'], eid,
+                          row['template_start'], row['template_end'],
+                          'migration'))
+                    synced += 1
+
+            _rm_safe_commit(con)
+        except Exception as e:
+            errors.append(f"pid={pid}: {e}")
+        finally:
+            con.close()
+
+    return {'synced': synced, 'skipped': skipped, 'errors': errors}
+
+
 def get_projects_scheduling_data(rm_manager_dir: str, rm_master_db_path: str,
                                  project_ids: List[int]) -> Dict:
     """Pobierz wszystkie dane potrzebne do optymalizacji dla podanych projektów.
@@ -8343,10 +8497,10 @@ def get_projects_scheduling_data(rm_manager_dir: str, rm_master_db_path: str,
             except sqlite3.OperationalError:
                 pass  # Stara baza bez tabeli
 
-            # Fallback: jeśli nowa tabela pusta, czytaj z JSON
-            if not staff_map:
-                for row in rows:
-                    sc = row['stage_code']
+            # Fallback per-etap: jeśli etap nie ma wpisów w nowej tabeli, czytaj z JSON
+            for row in rows:
+                sc = row['stage_code']
+                if sc not in staff_map or not staff_map[sc]:
                     assigned = []
                     try:
                         staff_json = json.loads(row['assigned_staff'] or '[]')
@@ -8354,7 +8508,8 @@ def get_projects_scheduling_data(rm_manager_dir: str, rm_master_db_path: str,
                                     if isinstance(s, dict) and 'employee_id' in s]
                     except (json.JSONDecodeError, TypeError):
                         pass
-                    staff_map[sc] = assigned
+                    if assigned:
+                        staff_map[sc] = assigned
 
             deps_rows = con.execute("""
                 SELECT predecessor_stage_code, successor_stage_code,
@@ -8376,12 +8531,18 @@ def get_projects_scheduling_data(rm_manager_dir: str, rm_master_db_path: str,
                 sc = ar['stage_code']
                 if sc in stages:
                     if ar['ended_at']:
-                        stages[sc]['is_actual'] = True
-                        stages[sc]['actual_start'] = ar['started_at']
-                        stages[sc]['actual_end'] = ar['ended_at']
+                        # Zakończony okres — ustaw is_actual TYLKO gdy etap
+                        # nie jest już oznaczony jako aktywny (przerywane etapy)
+                        if not stages[sc].get('is_active'):
+                            stages[sc]['is_actual'] = True
+                            stages[sc]['actual_start'] = ar['started_at']
+                            stages[sc]['actual_end'] = ar['ended_at']
                     elif ar['started_at'] and not ar['ended_at']:
+                        # Aktywny okres — ZAWSZE wygrywa nad zakończonym
                         stages[sc]['is_active'] = True
                         stages[sc]['actual_start'] = ar['started_at']
+                        stages[sc].pop('is_actual', None)
+                        stages[sc].pop('actual_end', None)
 
         finally:
             con.close()
@@ -8451,6 +8612,87 @@ def apply_optimization_result(rm_manager_dir: str, project_id: int,
             except sqlite3.OperationalError:
                 pass  # stara baza bez tabeli
 
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+
+
+def snapshot_before_optimization(rm_manager_dir: str, project_id: int,
+                                  stage_codes: list) -> Dict:
+    """Zapisz snapshot dat template i staff przed optymalizacją (do cofania).
+
+    Returns:
+        {'stage_code': {'template_start', 'template_end',
+                        'staff': [{'id', 'planned_start', 'planned_end'}]}}
+    """
+    db_path = get_project_db_path(rm_manager_dir, project_id)
+    con = _open_rm_connection(db_path)
+    snapshot = {}
+    try:
+        for sc in stage_codes:
+            row = con.execute("""
+                SELECT ps.id AS ps_id, ss.template_start, ss.template_end
+                FROM project_stages ps
+                LEFT JOIN stage_schedule ss ON ss.project_stage_id = ps.id
+                WHERE ps.project_id = ? AND ps.stage_code = ?
+            """, (project_id, sc)).fetchone()
+            if not row:
+                continue
+            entry = {
+                'template_start': row['template_start'],
+                'template_end': row['template_end'],
+                'staff': [],
+            }
+            try:
+                staff_rows = con.execute("""
+                    SELECT id, planned_start, planned_end
+                    FROM stage_staff_assignments
+                    WHERE project_stage_id = ? AND actual_start IS NULL
+                """, (row['ps_id'],)).fetchall()
+                entry['staff'] = [{'id': r['id'],
+                                   'planned_start': r['planned_start'],
+                                   'planned_end': r['planned_end']} for r in staff_rows]
+            except sqlite3.OperationalError:
+                pass
+            snapshot[sc] = entry
+    finally:
+        con.close()
+    return snapshot
+
+
+def restore_optimization_snapshot(rm_manager_dir: str, project_id: int,
+                                   snapshot: Dict):
+    """Przywróć daty sprzed optymalizacji z snapshotu.
+
+    snapshot: {stage_code: {'template_start', 'template_end',
+                            'staff': [{'id', 'planned_start', 'planned_end'}]}}
+    """
+    db_path = get_project_db_path(rm_manager_dir, project_id)
+    con = _open_rm_connection(db_path)
+    try:
+        for sc, entry in snapshot.items():
+            row = con.execute("""
+                SELECT ps.id AS ps_id, ss.id AS ss_id
+                FROM project_stages ps
+                LEFT JOIN stage_schedule ss ON ss.project_stage_id = ps.id
+                WHERE ps.project_id = ? AND ps.stage_code = ?
+            """, (project_id, sc)).fetchone()
+            if not row:
+                continue
+            if row['ss_id']:
+                con.execute("""
+                    UPDATE stage_schedule SET template_start = ?, template_end = ?
+                    WHERE id = ?
+                """, (entry['template_start'], entry['template_end'], row['ss_id']))
+            for sa in entry.get('staff', []):
+                try:
+                    con.execute("""
+                        UPDATE stage_staff_assignments
+                        SET planned_start = ?, planned_end = ?
+                        WHERE id = ?
+                    """, (sa['planned_start'], sa['planned_end'], sa['id']))
+                except sqlite3.OperationalError:
+                    pass
         _rm_safe_commit(con)
     finally:
         con.close()

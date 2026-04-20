@@ -576,36 +576,71 @@ class ProductionOptimizer:
                         continue
 
                     if max_par == 1:
-                        # NoOverlap — wyłącz zamrożone interwały (optional z presence=False)
-                        # jeśli obie strony frozen → solver nie może naprawić konfliktu
-                        intervals = []
-                        for pid, sc in stage_keys:
-                            key = (pid, sc)
-                            if key not in self._start_vars:
-                                continue
-                            dur = self._duration_vars.get(key, 1)
-                            is_target = key in self._target_keys
-                            if is_target:
-                                interval = self.model.NewIntervalVar(
-                                    self._start_vars[key], dur, self._end_vars[key],
-                                    f'iv_{eid}_{pid}_{sc}'
-                                )
-                            else:
-                                # Frozen → optional interval, wymuszony presence = True,
-                                # ale pomijamy go jeśli nie ma zmiennych
-                                pres = self.model.NewConstant(1)
-                                interval = self.model.NewOptionalIntervalVar(
-                                    self._start_vars[key], dur, self._end_vars[key],
-                                    pres, f'iv_{eid}_{pid}_{sc}'
-                                )
-                            intervals.append((interval, is_target))
-                        # NoOverlap: dodajemy pary target-vs-frozen i target-vs-target
-                        # Pomijamy frozen-vs-frozen (ich dat nie zmienimy)
-                        target_intervals = [iv for iv, is_t in intervals if is_t]
-                        frozen_intervals = [iv for iv, is_t in intervals if not is_t]
-                        all_relevant = target_intervals + frozen_intervals
-                        if len(target_intervals) > 0 and len(all_relevant) > 1:
-                            self.model.AddNoOverlap(all_relevant)
+                        # Sprawdź czy zamrożone interwały już się nakładają
+                        frozen_keys = [(p, s) for p, s in stage_keys
+                                       if (p, s) not in self._target_keys]
+                        frozen_overlap = self._max_frozen_overlap(frozen_keys)
+
+                        if frozen_overlap > max_par:
+                            # Frozen nakładają się — globalny NoOverlap byłby sprzeczny.
+                            # Strategia: (a) NoOverlap wśród targetów,
+                            #            (b) każdy target omija każdy frozen pairwise.
+                            target_here = [(p, s) for p, s in stage_keys
+                                           if (p, s) in self._target_keys]
+                            frozen_here = [(p, s) for p, s in stage_keys
+                                           if (p, s) not in self._target_keys
+                                           and (p, s) in self._frozen_values]
+                            if len(target_here) > 1:
+                                t_ivs = []
+                                for p, s in target_here:
+                                    k = (p, s)
+                                    d = self._duration_vars.get(k, 1)
+                                    t_ivs.append(self.model.NewIntervalVar(
+                                        self._start_vars[k], d, self._end_vars[k],
+                                        f'iv_{eid}_{p}_{s}'))
+                                self.model.AddNoOverlap(t_ivs)
+                            for p_t, s_t in target_here:
+                                k_t = (p_t, s_t)
+                                for p_f, s_f in frozen_here:
+                                    f_s, f_e = self._frozen_values[(p_f, s_f)]
+                                    b = self.model.NewBoolVar(
+                                        f'xavd_{eid}_{p_t}_{s_t}_{p_f}')
+                                    self.model.Add(
+                                        self._end_vars[k_t] <= f_s
+                                    ).OnlyEnforceIf(b)
+                                    self.model.Add(
+                                        self._start_vars[k_t] >= f_e
+                                    ).OnlyEnforceIf(b.Not())
+                            print(f"⚠️  exclusive_person(eid={eid}, cat={cat}): "
+                                  f"frozen overlap={frozen_overlap}, "
+                                  f"NoOverlap wśród {len(target_here)} targetów + "
+                                  f"{len(frozen_here)} unikań frozen")
+                        else:
+                            # Normalnie: NoOverlap z frozen jako stałe blokady
+                            intervals = []
+                            for pid, sc in stage_keys:
+                                key = (pid, sc)
+                                if key not in self._start_vars:
+                                    continue
+                                dur = self._duration_vars.get(key, 1)
+                                is_target = key in self._target_keys
+                                if is_target:
+                                    interval = self.model.NewIntervalVar(
+                                        self._start_vars[key], dur, self._end_vars[key],
+                                        f'iv_{eid}_{pid}_{sc}'
+                                    )
+                                else:
+                                    pres = self.model.NewConstant(1)
+                                    interval = self.model.NewOptionalIntervalVar(
+                                        self._start_vars[key], dur, self._end_vars[key],
+                                        pres, f'iv_{eid}_{pid}_{sc}'
+                                    )
+                                intervals.append((interval, is_target))
+                            target_intervals = [iv for iv, is_t in intervals if is_t]
+                            frozen_intervals = [iv for iv, is_t in intervals if not is_t]
+                            all_relevant = target_intervals + frozen_intervals
+                            if len(target_intervals) > 0 and len(all_relevant) > 1:
+                                self.model.AddNoOverlap(all_relevant)
                     else:
                         intervals = []
                         demands = []
@@ -768,10 +803,48 @@ class ProductionOptimizer:
             # Sprawdź frozen overlap
             frozen_overlap = self._max_frozen_overlap(
                 [(p, s) for p, s in stage_keys if (p, s) not in self._target_keys])
+
             if frozen_overlap > 1:
-                print(f"⚠️  Pomijam person_excl(eid={eid}, {sc}): "
-                      f"frozen overlap={frozen_overlap}")
-                skipped_frozen += 1
+                # Frozen nakładają się — globalny NoOverlap byłby sprzeczny.
+                # Dodajemy: (a) NoOverlap wśród targetów,
+                #           (b) każdy target omija każdy frozen pairwise.
+                target_here = [(p, s) for p, s in stage_keys
+                               if (p, s) in self._target_keys]
+                frozen_here = [(p, s) for p, s in stage_keys
+                               if (p, s) not in self._target_keys
+                               and (p, s) in self._frozen_values]
+
+                if target_here:
+                    if len(target_here) > 1:
+                        t_ivs = []
+                        for p, s in target_here:
+                            k = (p, s)
+                            d = self._duration_vars.get(k, 1)
+                            t_ivs.append(self.model.NewIntervalVar(
+                                self._start_vars[k], d, self._end_vars[k],
+                                f'pex_{eid}_{p}_{s}'))
+                        self.model.AddNoOverlap(t_ivs)
+                        constraints_added += 1
+
+                    for p_t, s_t in target_here:
+                        k_t = (p_t, s_t)
+                        for p_f, s_f in frozen_here:
+                            f_s, f_e = self._frozen_values[(p_f, s_f)]
+                            b = self.model.NewBoolVar(
+                                f'pavd_{eid}_{p_t}_{s_t}_{p_f}')
+                            self.model.Add(
+                                self._end_vars[k_t] <= f_s
+                            ).OnlyEnforceIf(b)
+                            self.model.Add(
+                                self._start_vars[k_t] >= f_e
+                            ).OnlyEnforceIf(b.Not())
+
+                    print(f"⚠️  person_excl(eid={eid}, {sc}): "
+                          f"frozen overlap={frozen_overlap}, "
+                          f"NoOverlap wśród {len(target_here)} targetów + "
+                          f"{len(frozen_here)} unikań frozen")
+                else:
+                    skipped_frozen += 1
                 continue
 
             intervals = []
@@ -1170,13 +1243,15 @@ def apply_optimization(rm_manager_dir: str, rm_master_db_path: str,
         user: kto stosuje
     
     Returns:
-        {'applied_projects': int, 'applied_stages': int, 'errors': list}
+        {'applied_projects': int, 'applied_stages': int, 'errors': list,
+         'snapshots': {pid: snapshot_dict}}
     """
     import rm_manager
 
     applied_projects = 0
     applied_stages = 0
     errors = []
+    snapshots = {}
 
     for pid, stage_changes in changes.items():
         pid = int(pid)
@@ -1185,6 +1260,10 @@ def apply_optimization(rm_manager_dir: str, rm_master_db_path: str,
             stage_dates[sc] = (info['new_start'], info['new_end'])
 
         try:
+            # Snapshot przed zmianą — do cofania
+            snapshots[pid] = rm_manager.snapshot_before_optimization(
+                rm_manager_dir, pid, list(stage_dates.keys()))
+
             rm_manager.apply_optimization_result(rm_manager_dir, pid, stage_dates)
             # Przelicz prognozę po zmianie szablonów — synchronizacja template ↔ forecast
             try:
@@ -1208,7 +1287,36 @@ def apply_optimization(rm_manager_dir: str, rm_master_db_path: str,
         'applied_projects': applied_projects,
         'applied_stages': applied_stages,
         'errors': errors,
+        'snapshots': snapshots,
     }
+
+
+def undo_optimization(rm_manager_dir: str, snapshots: Dict) -> Dict:
+    """Cofnij optymalizację — przywróć daty sprzed zastosowania.
+
+    Args:
+        snapshots: {pid: {stage_code: {template_start, template_end, staff: [...]}}}
+
+    Returns:
+        {'restored_projects': int, 'errors': list}
+    """
+    import rm_manager
+
+    restored = 0
+    errors = []
+    for pid, snapshot in snapshots.items():
+        pid = int(pid)
+        try:
+            rm_manager.restore_optimization_snapshot(rm_manager_dir, pid, snapshot)
+            try:
+                db_path = rm_manager.get_project_db_path(rm_manager_dir, pid)
+                rm_manager.recalculate_forecast(db_path, pid)
+            except Exception:
+                pass
+            restored += 1
+        except Exception as e:
+            errors.append(f"Projekt {pid}: {e}")
+    return {'restored_projects': restored, 'errors': errors}
 
 
 def check_ortools_available() -> bool:
