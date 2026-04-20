@@ -3794,9 +3794,12 @@ class RMManagerGUI:
         for seq, stage_code in enumerate(DEFAULT_STAGE_SEQUENCE, 1):
             # 🔵 Punkty kontrolne (sub-milestones) NIE dostają domyślnych dat
             is_sub_milestone = stage_code in _CHILD_MILESTONE_CODES
+            # ⭕ Etapy opcjonalne: POPRAWKI i ZAKONCZONY (prognoza) startują bez dat.
+            # Aktywują się dopiero gdy użytkownik wpisze datę lub kliknie PROJEKT ZAKOŃCZONY.
+            is_optional_stage = stage_code in ('POPRAWKI', 'ZAKONCZONY')
             
-            if is_sub_milestone:
-                # Punkty kontrolne - bez dat (użytkownik wypełni ręcznie)
+            if is_sub_milestone or is_optional_stage:
+                # Bez dat - użytkownik aktywuje ręcznie
                 stages_config.append({
                     'code': stage_code,
                     'sequence': seq
@@ -3812,8 +3815,6 @@ class RMManagerGUI:
                     duration_days = 21
                 elif stage_code == 'ELEKTROMONTAZ':
                     duration_days = 14
-                elif stage_code == 'ZAKONCZONY':
-                    duration_days = 1
                 
                 end_date = current_date + timedelta(days=duration_days)
                 
@@ -5356,7 +5357,25 @@ class RMManagerGUI:
             is_suspended = rmm.is_project_paused(self.get_project_db_path(self.selected_project_id), self.selected_project_id)
             is_finished  = 'ZAKONCZONY' in active_codes
             
-            print(f"📋 load_project_stages: active_codes={active_codes}, is_suspended={is_suspended}, is_finished={is_finished}")
+            # Pobierz zakończone etapy (wszystkie actual_periods mają ended_at)
+            con_completed = rmm._open_rm_connection(self.get_project_db_path(self.selected_project_id))
+            cursor_completed = con_completed.execute("""
+                SELECT DISTINCT ps.stage_code
+                FROM project_stages ps
+                WHERE ps.project_id = ?
+                  AND EXISTS (
+                      SELECT 1 FROM stage_actual_periods sap
+                      WHERE sap.project_stage_id = ps.id AND sap.ended_at IS NOT NULL
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM stage_actual_periods sap
+                      WHERE sap.project_stage_id = ps.id AND sap.ended_at IS NULL
+                  )
+            """, (self.selected_project_id,))
+            completed_codes = [row['stage_code'] for row in cursor_completed.fetchall()]
+            con_completed.close()
+            
+            print(f"📋 load_project_stages: active_codes={active_codes}, completed_codes={completed_codes}, is_suspended={is_suspended}, is_finished={is_finished}")
             print(f"📋 ui_rules: przyjety_enabled={ui_rules['przyjety_enabled']}, pause_enabled={ui_rules['pause_enabled']}")
             
             # 🛡️ DYNAMICZNA WALIDACJA: ZAKOŃCZONY tylko jeśli brak aktywnych etapów (tylko regularne etapy, nie milestones, nie WSTRZYMANY)
@@ -5471,8 +5490,14 @@ class RMManagerGUI:
 
                 display_name = stage['display_name']
                 is_active = stage_code in active_codes
-                # Tło dla aktywnych etapów
-                bg_color = self.COLOR_LIGHT_BLUE if is_active else "white"
+                is_completed = stage_code in completed_codes
+                # Tło: zakończone=zielony, aktywne=niebieski, nieaktywne=biały
+                if is_completed and not is_active:
+                    bg_color = "#d5f4e6"  # Jasny zielony dla zakończonych
+                elif is_active:
+                    bg_color = self.COLOR_LIGHT_BLUE  # Niebieski dla aktywnych
+                else:
+                    bg_color = "white"  # Biały dla nieaktywnych
 
                 frame = tk.LabelFrame(
                     self.stages_frame,
@@ -6088,8 +6113,14 @@ class RMManagerGUI:
                 variance = fc.get('variance_days', 0)
                 variance_str = f"+{variance}" if variance > 0 else str(variance)
                 variance_icon = "⚠️" if variance > 0 else "✅"
-                # Tło dla aktywnych etapów
-                bg_color = self.COLOR_LIGHT_BLUE if fc.get('is_active') else "white"
+                # Tło: zakończone=zielony, aktywne=niebieski, nieaktywne=biały
+                is_completed = fc.get('is_actual') and not fc.get('is_active')
+                if is_completed:
+                    bg_color = "#d5f4e6"  # Jasny zielony dla zakończonych
+                elif fc.get('is_active'):
+                    bg_color = self.COLOR_LIGHT_BLUE  # Niebieski dla aktywnych
+                else:
+                    bg_color = "white"  # Biały dla nieaktywnych
                 
                 # Frame dla etapu/milestone
                 stage_frame = tk.LabelFrame(
@@ -6211,14 +6242,18 @@ class RMManagerGUI:
                                     relief=tk.FLAT
                                 )
                                 topic_lbl.pack(side=tk.RIGHT, padx=2)
-                                topic_lbl.bind("<Button-1>", lambda e, sc=stage_code, idx=tidx: self.show_notes_window(sc, idx))
+                                # Bind z return "break" aby zatrzymać propagację eventu
+                                def open_topic_notes(event, sc=stage_code, idx=tidx):
+                                    self.show_notes_window(sc, idx)
+                                    return "break"  # Zatrzymaj propagację - nie trigger innych handlerów
+                                topic_lbl.bind("<Button-1>", open_topic_notes)
                     except Exception:
                         pass
                     
                     tk.Label(
                         header_row,
                         text=f"({topic_count} tematów, {notes_count} notatek)",
-                        bg="white",
+                        bg=bg_color,
                         fg="gray",
                         font=("Arial", 8)
                     ).pack(side=tk.RIGHT, padx=5)
@@ -6233,13 +6268,13 @@ class RMManagerGUI:
                         print(f"    forecast_start: '{fc.get('forecast_start')}'")
                         print(f"    forecast_end: '{fc.get('forecast_end')}'")
                     
-                    row1 = tk.Frame(stage_frame, bg="white")
+                    row1 = tk.Frame(stage_frame, bg=bg_color)
                     row1.pack(fill=tk.X, pady=3)
                     
                     tk.Label(
                         row1, 
                         text="Zdarzenie:", 
-                        bg="white", 
+                        bg=bg_color, 
                         font=self.FONT_BOLD,
                         width=12,
                         anchor="w"
@@ -6297,32 +6332,33 @@ class RMManagerGUI:
                     )
                     save_btn.pack(side=tk.LEFT, padx=10)
                     
-                    # Prognoza (tylko do odczytu)
-                    row2 = tk.Frame(stage_frame, bg="white")
-                    row2.pack(fill=tk.X, pady=3)
-                    
-                    tk.Label(
-                        row2, 
-                        text="Prognoza:", 
-                        bg="white", 
-                        font=self.FONT_BOLD,
-                        width=12,
-                        anchor="w"
-                    ).pack(side=tk.LEFT, padx=(0, 5))
-                    
-                    forecast_date_fmt = self.format_date_ddmmyyyy(fc.get('forecast_start')) or 'N/A'
-                    
-                    tk.Label(
-                        row2,
-                        text=f"📅 {forecast_date_fmt}",
-                        bg="white",
-                        font=self.FONT_DEFAULT,
-                        fg=self.COLOR_PURPLE
-                    ).pack(side=tk.LEFT, padx=2)
+                    # Prognoza (tylko do odczytu) - tylko dla ZAKONCZONY
+                    if stage_code == 'ZAKONCZONY':
+                        row2 = tk.Frame(stage_frame, bg=bg_color)
+                        row2.pack(fill=tk.X, pady=3)
+                        
+                        tk.Label(
+                            row2, 
+                            text="Prognoza:", 
+                            bg=bg_color, 
+                            font=self.FONT_BOLD,
+                            width=12,
+                            anchor="w"
+                        ).pack(side=tk.LEFT, padx=(0, 5))
+                        
+                        forecast_date_fmt = self.format_date_ddmmyyyy(fc.get('forecast_start')) or 'N/A'
+                        
+                        tk.Label(
+                            row2,
+                            text=f"📅 {forecast_date_fmt}",
+                            bg=bg_color,
+                            font=self.FONT_DEFAULT,
+                            fg=self.COLOR_PURPLE
+                        ).pack(side=tk.LEFT, padx=2)
                     
                     # Przyciski załączników dla milestone'ów
                     if stage_code in ('PRZYJETY', 'ZAKONCZONY'):
-                        att_row = tk.Frame(stage_frame, bg="white")
+                        att_row = tk.Frame(stage_frame, bg=bg_color)
                         att_row.pack(fill=tk.X, pady=(5, 0))
                         
                         if stage_code == 'PRZYJETY':
@@ -6624,13 +6660,13 @@ class RMManagerGUI:
                         sub_info = stage_data.get(sub_code, {'display_name': sub_code, 'is_milestone': True})
                         sub_display = sub_info['display_name']
                         
-                        sub_row = tk.Frame(stage_frame, bg="#f8f9fa")
+                        sub_row = tk.Frame(stage_frame, bg=bg_color)
                         sub_row.pack(fill=tk.X, pady=2, padx=(10, 0))
                         
                         tk.Label(
                             sub_row,
                             text=f"📌 {sub_display}:",
-                            bg="#f8f9fa",
+                            bg=bg_color,
                             font=self.FONT_BOLD,
                             width=22,
                             anchor="w"
@@ -6686,7 +6722,7 @@ class RMManagerGUI:
                         tk.Label(
                             sub_row, 
                             text=checkbox_icon, 
-                            bg="#f8f9fa", 
+                            bg=bg_color, 
                             font=self.FONT_SMALL,
                             width=2,
                             anchor="center"
@@ -6722,7 +6758,7 @@ class RMManagerGUI:
                                 tk.Label(
                                     sub_row, 
                                     text="👷", 
-                                    bg="#f8f9fa",
+                                    bg=bg_color,
                                     width=2,
                                     anchor="center"
                                 ).pack(side=tk.LEFT, padx=(6, 2))
@@ -6806,7 +6842,7 @@ class RMManagerGUI:
                             tk.Label(
                                 sub_row, 
                                 text="🚛", 
-                                bg="#f8f9fa",
+                                bg=bg_color,
                                 width=2,
                                 anchor="center"
                             ).pack(side=tk.LEFT, padx=(6, 2))
@@ -13251,9 +13287,8 @@ class RMManagerGUI:
             messagebox.showwarning("Brak projektów", "Brak załadowanych projektów.")
             return
         
+        # Przy pierwszym otwarciu - bez żadnych zaznaczonych projektów
         current_ids = set()
-        if self.selected_project_id:
-            current_ids.add(self.selected_project_id)
         self._open_project_selector(parent=self.root, current_ids=current_ids)
 
     def _mp_select_projects_dialog(self):
@@ -13282,7 +13317,7 @@ class RMManagerGUI:
         dlg.transient(parent)
         dlg.grab_set()
         
-        w, h = 620, 650
+        w, h = 620, 800
         dlg.update_idletasks()
         try:
             px = parent.winfo_rootx()
@@ -13903,12 +13938,16 @@ class RMManagerGUI:
             apply_filters()
         
         def show_all_projects(event=None):
-            """Pokaż wszystkie projekty (widoczne bez zmiany zaznaczenia)"""
-            for pid in self.projects:
-                row_widgets[pid].pack(fill=tk.X)
-            inner.update_idletasks()
-            canvas_sel.configure(scrollregion=canvas_sel.bbox("all"))
-            update_count()
+            """Pokaż wszystkie projekty — włącz wszystkie filtry i zastosuj"""
+            for var in status_filters.values():
+                var.set(True)
+            for var in health_filters.values():
+                var.set(True)
+            time_filter_var.set('all')
+            date_frame.pack_forget()
+            date_from_var.set('')
+            date_to_var.set('')
+            apply_filters()
         
         tk.Button(row4, text="🧹 Wyczyść filtry (Ctrl+Del)", font=("Arial", 9),
                   command=clear_filters).pack(side=tk.LEFT, padx=3)
@@ -13919,16 +13958,177 @@ class RMManagerGUI:
         list_frame = tk.Frame(sel)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
-        # Header
+        # Header - z sortowaniem
         hdr = tk.Frame(list_frame, bg="#ecf0f1")
         hdr.pack(fill=tk.X)
         tk.Label(hdr, text="☑", width=3, font=("Arial", 8, "bold"), bg="#ecf0f1").pack(side=tk.LEFT)
         tk.Label(hdr, text="📌", width=3, font=("Arial", 8), bg="#ecf0f1").pack(side=tk.LEFT)
-        tk.Label(hdr, text="Projekt", width=30, font=("Arial", 9, "bold"), bg="#ecf0f1", anchor="w").pack(side=tk.LEFT, padx=5)
-        tk.Label(hdr, text="Status", width=12, font=("Arial", 9, "bold"), bg="#ecf0f1").pack(side=tk.LEFT)
-        tk.Label(hdr, text="Terminowość", width=12, font=("Arial", 9, "bold"), bg="#ecf0f1").pack(side=tk.LEFT)
-        tk.Label(hdr, text="Odchylenie", width=10, font=("Arial", 9, "bold"), bg="#ecf0f1").pack(side=tk.LEFT)
-        tk.Label(hdr, text="Koniec (prognoza)", width=14, font=("Arial", 9, "bold"), bg="#ecf0f1").pack(side=tk.LEFT)
+        
+        # Stan sortowania: (kolumna, kierunek) — 'asc' lub 'desc'
+        # Domyślnie malejąco (Z-A) dla kolumny 'name'
+        sort_state = {'column': 'name', 'direction': 'desc'}
+        header_buttons = {}  # kolumna -> button widget
+        
+        def update_header_labels():
+            """Aktualizuj etykiety nagłówków z ikonami sortowania"""
+            for col, btn in header_buttons.items():
+                if col == sort_state['column']:
+                    arrow = "▼" if sort_state['direction'] == 'desc' else "▲"
+                    bg_color = "#d5dbdb"
+                else:
+                    arrow = ""
+                    bg_color = "#ecf0f1"
+                
+                col_names = {
+                    'name': 'Projekt',
+                    'status': 'Status',
+                    'health': 'Terminowość',
+                    'variance': 'Odchylenie',
+                    'forecast': 'Koniec (prognoza)'
+                }
+                label_text = f"{col_names[col]} {arrow}".strip()
+                btn.config(text=label_text, bg=bg_color)
+        
+        def sort_projects(column):
+            """Sortuj projekty według wybranej kolumny - tylko widoczne"""
+            # Przełącz kierunek jeśli ta sama kolumna
+            if sort_state['column'] == column:
+                sort_state['direction'] = 'desc' if sort_state['direction'] == 'asc' else 'asc'
+            else:
+                sort_state['column'] = column
+                sort_state['direction'] = 'asc'
+            
+            # Przygotuj listę (pid, wartość_sortowania)
+            def get_sort_value(pid, col):
+                info = proj_info[pid]
+                if col == 'name':
+                    return info['name'].lower()
+                elif col == 'status':
+                    # Kolejność: Aktywny, Przyjęty, Nowy, Wstrzymany, Zakończony
+                    if info['is_finished']:
+                        return 5
+                    if info['is_paused']:
+                        return 4
+                    ps = info['status']
+                    if ps == ProjectStatus.NEW:
+                        return 3
+                    if ps == ProjectStatus.ACCEPTED:
+                        return 2
+                    return 1  # Aktywny
+                elif col == 'health':
+                    h = info['health']
+                    health_order = {'DELAYED': 3, 'AT_RISK': 2, 'ON_TRACK': 1, 'UNKNOWN': 4}
+                    return health_order.get(h, 4)
+                elif col == 'variance':
+                    return info.get('variance', 0)
+                elif col == 'forecast':
+                    fe = info.get('forecast_end')
+                    if not fe:
+                        return datetime(2099, 12, 31)  # Na końcu
+                    try:
+                        return datetime.strptime(fe[:10], '%Y-%m-%d') if isinstance(fe, str) else fe
+                    except Exception:
+                        return datetime(2099, 12, 31)
+                return 0
+            
+            # Pobierz tylko widoczne projekty (te które są zapakowane)
+            visible_pids = []
+            for pid, widget in row_widgets.items():
+                if widget.winfo_ismapped():
+                    visible_pids.append(pid)
+            
+            # Sortuj tylko widoczne
+            sorted_pids = sorted(visible_pids, 
+                                key=lambda pid: get_sort_value(pid, column),
+                                reverse=(sort_state['direction'] == 'desc'))
+            
+            # Przepakuj widgety w nowej kolejności (tylko widoczne)
+            for pid in sorted_pids:
+                row_widgets[pid].pack_forget()
+            for pid in sorted_pids:
+                row_widgets[pid].pack(fill=tk.X)
+            
+            # Odśwież scroll region
+            inner.update_idletasks()
+            canvas_sel.configure(scrollregion=canvas_sel.bbox("all"))
+            
+            # Aktualizuj nagłówki
+            update_header_labels()
+        
+        def reapply_current_sort():
+            """Ponownie zastosuj aktualne sortowanie do widocznych projektów bez zmiany kierunku"""
+            # Pobierz tylko widoczne projekty
+            visible_pids = []
+            for pid, widget in row_widgets.items():
+                if widget.winfo_ismapped():
+                    visible_pids.append(pid)
+            
+            if not visible_pids:
+                return
+            
+            # Funkcja pobierania wartości sortowania
+            def get_sort_value(pid, col):
+                info = proj_info[pid]
+                if col == 'name':
+                    return info['name'].lower()
+                elif col == 'status':
+                    if info['is_finished']:
+                        return 5
+                    if info['is_paused']:
+                        return 4
+                    ps = info['status']
+                    if ps == ProjectStatus.NEW:
+                        return 3
+                    if ps == ProjectStatus.ACCEPTED:
+                        return 2
+                    return 1
+                elif col == 'health':
+                    h = info['health']
+                    health_order = {'DELAYED': 3, 'AT_RISK': 2, 'ON_TRACK': 1, 'UNKNOWN': 4}
+                    return health_order.get(h, 4)
+                elif col == 'variance':
+                    return info.get('variance', 0)
+                elif col == 'forecast':
+                    fe = info.get('forecast_end')
+                    if not fe:
+                        return datetime(2099, 12, 31)
+                    try:
+                        return datetime.strptime(fe[:10], '%Y-%m-%d') if isinstance(fe, str) else fe
+                    except Exception:
+                        return datetime(2099, 12, 31)
+                return 0
+            
+            # Sortuj według aktualnej kolumny i kierunku
+            sorted_pids = sorted(visible_pids, 
+                                key=lambda pid: get_sort_value(pid, sort_state['column']),
+                                reverse=(sort_state['direction'] == 'desc'))
+            
+            # Przepakuj w nowej kolejności
+            for pid in sorted_pids:
+                row_widgets[pid].pack_forget()
+            for pid in sorted_pids:
+                row_widgets[pid].pack(fill=tk.X)
+            
+            # Odśwież scroll region
+            inner.update_idletasks()
+            canvas_sel.configure(scrollregion=canvas_sel.bbox("all"))
+        
+        # Przyciski nagłówków z sortowaniem
+        for col, label, width in [
+            ('name', 'Projekt', 30),
+            ('status', 'Status', 12),
+            ('health', 'Terminowość', 12),
+            ('variance', 'Odchylenie', 10),
+            ('forecast', 'Koniec (prognoza)', 14)
+        ]:
+            btn = tk.Button(hdr, text=label, width=width, font=("Arial", 9, "bold"),
+                          bg="#ecf0f1", relief=tk.FLAT, anchor="w" if col == 'name' else "center",
+                          cursor="hand2", activebackground="#bdc3c7",
+                          command=lambda c=col: sort_projects(c))
+            btn.pack(side=tk.LEFT, padx=5 if col == 'name' else 0)
+            header_buttons[col] = btn
+        
+        update_header_labels()
         
         # Scrollable list
         outer = tk.Frame(list_frame)
@@ -14077,18 +14277,23 @@ class RMManagerGUI:
             Przypięte (📌) zawsze widoczne i zaznaczone."""
             d_from, d_to = get_time_range()
             
+            # Najpierw ukryj wszystkie
+            for pid in self.projects:
+                row_widgets[pid].pack_forget()
+            
+            # Zbierz projekty które powinny być widoczne
+            visible_pids = []
             for pid in self.projects:
                 # Projekty bez bazy — zawsze widoczne, zawsze odznaczone
                 if pid in no_db_pids:
-                    row_widgets[pid].pack(fill=tk.X)
+                    visible_pids.append(pid)
                     check_vars[pid].set(False)
                     continue
                 
                 is_pinned = pin_vars[pid].get()
-                row = row_widgets[pid]
                 
                 if is_pinned:
-                    row.pack(fill=tk.X)
+                    visible_pids.append(pid)
                     check_vars[pid].set(True)
                     continue
                 
@@ -14097,11 +14302,17 @@ class RMManagerGUI:
                            (d_from is None or project_in_time_range(pid, d_from, d_to)))
                 
                 if visible:
-                    row.pack(fill=tk.X)
-                    check_vars[pid].set(True)
+                    visible_pids.append(pid)
+                    # NIE zaznaczaj automatycznie - user sam wybiera
+                    # Pozostaw obecny stan checkboxa
                 else:
-                    row.pack_forget()
-                    check_vars[pid].set(False)
+                    # Projekty niewidoczne - odznacz tylko jeśli NIE są w current_ids
+                    if pid not in current_ids:
+                        check_vars[pid].set(False)
+            
+            # Zapakuj widoczne projekty
+            for pid in visible_pids:
+                row_widgets[pid].pack(fill=tk.X)
             
             # Odśwież scroll region
             inner.update_idletasks()
@@ -14110,6 +14321,9 @@ class RMManagerGUI:
             # Pokaż ile zaznaczono
             count = sum(1 for v in check_vars.values() if v.get())
             count_label.config(text=f"Zaznaczono: {count} / {len(self.projects)} projektów")
+            
+            # Ponownie zastosuj sortowanie do widocznych projektów
+            reapply_current_sort()
         
         # ===== DOLNA BELKA — przyciski =====
         bottom = tk.Frame(sel, pady=8)
@@ -14153,7 +14367,10 @@ class RMManagerGUI:
         sel.bind('<Control-Delete>', clear_filters)
         sel.bind('<Control-Shift-A>', show_all_projects)
         
-        # Inicjalizuj widok
+        # Inicjalizuj widok - zastosuj filtry aby automatycznie zaznaczyć projekty zgodne z filtrami
+        apply_filters()
+        # Posortuj początkowo według nazwy projektu
+        sort_projects('name')
         update_count()
     
     def _create_multi_project_chart_window(self, project_ids, preserve_view=False):
@@ -17492,7 +17709,11 @@ class RMManagerGUI:
                         relief=tk.FLAT
                     )
                     topic_lbl.pack(side=tk.LEFT, padx=2)
-                    topic_lbl.bind("<Button-1>", lambda e, sc=stage_code: open_notes())
+                    # Bind z return "break" aby zatrzymać propagację eventu
+                    def open_topic_handler(event, sc=stage_code):
+                        open_notes()
+                        return "break"
+                    topic_lbl.bind("<Button-1>", open_topic_handler)
             except Exception:
                 pass
             

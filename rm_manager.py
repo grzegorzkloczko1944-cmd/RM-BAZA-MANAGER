@@ -152,7 +152,7 @@ STAGE_DEFINITIONS = [
     ('ODBIOR_3', 'Odbiór 3', '#196f3d', 1),        # MILESTONE informacyjny
     ('POPRAWKI', 'Poprawki', '#95a5a6', 0),
     # 🚫 WSTRZYMANY usunięty - to nie etap, to overlay/pauza!
-    ('ZAKONCZONY', 'Zakończony', '#2c3e50', 1),     # MILESTONE - zakończenie projektu
+    ('ZAKONCZONY', 'Zapłacony', '#2c3e50', 1),     # MILESTONE - zakończenie projektu
 ]
 
 # Priorytety statusów (do determine_display_status)
@@ -3420,6 +3420,22 @@ def recalculate_forecast(rm_db_path: str, project_id: int) -> Dict:
             continue
         
         # C. Etap jeszcze nie rozpoczęty - oblicz forecast
+        
+        # ⭕ OPCJONALNE ETAPY: brak template_start i brak actuals → forecast = None
+        # Etap nie jest zaplanowany przez użytkownika — nie pojawia się na wykresach.
+        if not template.get('template_start') and not periods:
+            forecast[stage_code] = {
+                "template_start": None,
+                "template_end": None,
+                "forecast_start": None,
+                "forecast_end": None,
+                "actual_periods": periods,
+                "is_active": False,
+                "is_actual": False,
+                "variance_days": 0
+            }
+            continue
+        
         # Znajdź ograniczenia z zależności
         constraints = []
         
@@ -3430,6 +3446,9 @@ def recalculate_forecast(rm_db_path: str, project_id: int) -> Dict:
             pred_code = dep['predecessor_stage_code']
             pred = forecast.get(pred_code)
             if not pred:
+                continue
+            # Porzed poprzednik bez forecastu (opcjonalny, nieaktywowany) — pomiń
+            if not pred.get('forecast_end') or not pred.get('forecast_start'):
                 continue
             
             if dep['dependency_type'] == 'FS':
