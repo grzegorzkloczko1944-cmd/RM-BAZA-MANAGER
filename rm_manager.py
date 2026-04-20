@@ -502,6 +502,112 @@ def ensure_rm_master_tables(master_db_path: str):
         VALUES ('default_recipients', '[]')
     """)
 
+    # ============================================================================
+    # OPTYMALIZATOR PRODUKCJI (2026-04-19)
+    # ============================================================================
+    # Ograniczenia zasobów — reguły biznesowe typu "konstruktor pracuje nad 1 projektem"
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS resource_constraints (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            constraint_type TEXT NOT NULL CHECK (constraint_type IN (
+                'exclusive_person',
+                'max_concurrent_category',
+                'max_concurrent_stage'
+            )),
+            category TEXT,
+            stage_code TEXT,
+            max_parallel INTEGER NOT NULL DEFAULT 1,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            description TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_by TEXT,
+            modified_at DATETIME,
+            modified_by TEXT
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_res_constraints_type ON resource_constraints(constraint_type)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_res_constraints_active ON resource_constraints(is_active)")
+
+    # Dostępność pracowników — urlopy, L4, delegacje
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS employee_availability (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER NOT NULL,
+            date_from DATE NOT NULL,
+            date_to DATE NOT NULL,
+            reason TEXT NOT NULL CHECK (reason IN (
+                'URLOP', 'L4', 'DELEGACJA', 'SZKOLENIE', 'INNE'
+            )),
+            notes TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_by TEXT,
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+            CHECK (date_to >= date_from)
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_emp_avail_employee ON employee_availability(employee_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_emp_avail_dates ON employee_availability(date_from, date_to)")
+
+    # Dni wolne / kalendarz firmy
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS company_calendar (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date DATE NOT NULL UNIQUE,
+            day_type TEXT NOT NULL CHECK (day_type IN (
+                'HOLIDAY', 'COMPANY_DAY_OFF', 'SATURDAY_WORK'
+            )),
+            description TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_by TEXT
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_company_calendar_date ON company_calendar(date)")
+
+    # Wyniki optymalizacji — historia uruchomień
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS optimization_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_mode TEXT NOT NULL CHECK (run_mode IN ('fit_projects', 'optimize_all')),
+            project_ids_json TEXT NOT NULL,
+            date_range_start DATE,
+            date_range_end DATE,
+            constraints_snapshot TEXT,
+            result_json TEXT,
+            score_before REAL,
+            score_after REAL,
+            solver_status TEXT,
+            solver_time_ms INTEGER,
+            applied INTEGER NOT NULL DEFAULT 0,
+            applied_at DATETIME,
+            applied_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_by TEXT
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_opt_runs_mode ON optimization_runs(run_mode)")
+
+    # Domyślne ograniczenia zasobów (jeśli tabela pusta)
+    existing_constraints = con.execute("SELECT COUNT(*) FROM resource_constraints").fetchone()[0]
+    if existing_constraints == 0:
+        _default_constraints = [
+            ('exclusive_person', 'Konstrukcja', None, 1,
+             'Konstruktor pracuje nad jednym projektem jednocześnie'),
+            ('exclusive_person', 'Serwis', 'URUCHOMIENIE', 1,
+             'Serwisant nie może uruchamiać dwóch maszyn jednocześnie'),
+            ('exclusive_person', 'Serwis', 'ODBIORY', 1,
+             'Serwisant nie może prowadzić dwóch odbiorów jednocześnie'),
+            ('exclusive_person', 'Montaż', None, 1,
+             'Monter nie może montować dwóch maszyn jednocześnie'),
+            ('exclusive_person', 'Elektromontaż', None, 1,
+             'Elektromonter nie może montować dwóch maszyn jednocześnie'),
+        ]
+        con.executemany("""
+            INSERT INTO resource_constraints
+                (constraint_type, category, stage_code, max_parallel, description)
+            VALUES (?, ?, ?, ?, ?)
+        """, _default_constraints)
+        print(f"✅ Master: wstawiono {len(_default_constraints)} domyślnych ograniczeń zasobów")
+
     con.commit()
     con.close()
     print(f"✅ RM_MANAGER master baza zainicjalizowana: {master_db_path}")
@@ -650,6 +756,74 @@ def update_stage_definitions(master_db_path: str):
     return added
 
 
+def _migrate_assigned_staff_json_to_table(con: sqlite3.Connection):
+    """Migracja: przenieś dane z JSON project_stages.assigned_staff → stage_staff_assignments.
+    
+    Wywoływane z ensure_project_tables(). Bezpieczne — nie nadpisuje istniejących wpisów.
+    Używa planned_start/planned_end z stage_schedule (template dates).
+    """
+    import json
+
+    # Sprawdź czy tabela docelowa istnieje (powinna — wywołane po CREATE TABLE)
+    try:
+        con.execute("SELECT 1 FROM stage_staff_assignments LIMIT 1")
+    except sqlite3.OperationalError:
+        return  # Tabela jeszcze nie istnieje
+
+    # Pobierz etapy z JSON assigned_staff
+    rows = con.execute("""
+        SELECT ps.id AS ps_id, ps.stage_code, ps.assigned_staff,
+               ss.template_start, ss.template_end
+        FROM project_stages ps
+        LEFT JOIN stage_schedule ss ON ss.project_stage_id = ps.id
+        WHERE ps.assigned_staff IS NOT NULL AND ps.assigned_staff != '' AND ps.assigned_staff != '[]'
+    """).fetchall()
+
+    migrated = 0
+    for row in rows:
+        try:
+            staff_list = json.loads(row['assigned_staff'])
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        for staff in staff_list:
+            if not isinstance(staff, dict):
+                continue
+            emp_id = staff.get('employee_id')
+            if not emp_id:
+                continue
+
+            # Sprawdź czy już nie istnieje w nowej tabeli
+            exists = con.execute("""
+                SELECT 1 FROM stage_staff_assignments
+                WHERE project_stage_id = ? AND employee_id = ?
+            """, (row['ps_id'], emp_id)).fetchone()
+
+            if exists:
+                continue
+
+            try:
+                con.execute("""
+                    INSERT INTO stage_staff_assignments
+                        (project_stage_id, employee_id, planned_start, planned_end,
+                         assigned_at, assigned_by)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    row['ps_id'],
+                    emp_id,
+                    row['template_start'],   # planned_start = template_start etapu
+                    row['template_end'],     # planned_end = template_end etapu
+                    staff.get('assigned_at'),
+                    staff.get('assigned_by'),
+                ))
+                migrated += 1
+            except sqlite3.IntegrityError:
+                pass  # duplikat — pomijamy
+
+    if migrated > 0:
+        print(f"    ↳ Migracja: przeniesiono {migrated} przypisań pracowników do stage_staff_assignments")
+
+
 def ensure_project_tables(project_db_path: str):
     """Tworzy tabele w rm_manager_project_X.sqlite (PER-PROJEKT):
     - stage_definitions  (kopia – dla niezależności JOINów w jednej bazie)
@@ -788,15 +962,30 @@ def ensure_project_tables(project_db_path: str):
     con.execute("CREATE INDEX IF NOT EXISTS idx_dependencies_succ ON stage_dependencies(successor_stage_code)")
     
     # UNIQUE constraint na kombinację project_id + predecessor + successor + type
-    # (zapobiega duplikatom zależności)
+    # Najpierw deduplikacja istniejących wpisów, potem tworzenie indeksu
     try:
         con.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_dependencies_unique 
             ON stage_dependencies(project_id, predecessor_stage_code, successor_stage_code, dependency_type)
         """)
     except sqlite3.IntegrityError:
-        # Duplikaty już istnieją w bazie - pomiń (deduplikacja w can_start_stage poradzi sobie z tym)
-        pass
+        # Duplikaty istnieją — usuwamy je, potem tworzymy indeks
+        try:
+            con.execute("""
+                DELETE FROM stage_dependencies
+                WHERE id NOT IN (
+                    SELECT MIN(id) FROM stage_dependencies
+                    GROUP BY project_id, predecessor_stage_code, successor_stage_code, dependency_type
+                )
+            """)
+            con.commit()
+            con.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_dependencies_unique 
+                ON stage_dependencies(project_id, predecessor_stage_code, successor_stage_code, dependency_type)
+            """)
+            print("✅ Deduplikacja stage_dependencies + UNIQUE index utworzony")
+        except Exception as e:
+            print(f"⚠️  Nie udało się deduplikować stage_dependencies: {e}")
 
     # project_events - eventy projektu (PRZYJĘTY, ZAKOŃCZONY, WSTRZYMANY, WZNOWIONY)
     con.execute("""
@@ -970,6 +1159,34 @@ def ensure_project_tables(project_db_path: str):
         con.commit()
     except Exception:
         pass
+
+    # ============================================================================
+    # STAGE STAFF ASSIGNMENTS — przypisania pracowników z datami (2026-04-19)
+    # ============================================================================
+    # Zastępuje JSON w project_stages.assigned_staff
+    # Pracownik przypisany na czas aktywności (planned_start..planned_end)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS stage_staff_assignments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_stage_id INTEGER NOT NULL,
+            employee_id INTEGER NOT NULL,
+            planned_start DATE,
+            planned_end DATE,
+            actual_start DATETIME,
+            actual_end DATETIME,
+            role TEXT,
+            assigned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            assigned_by TEXT,
+            FOREIGN KEY (project_stage_id) REFERENCES project_stages(id) ON DELETE CASCADE,
+            UNIQUE(project_stage_id, employee_id)
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_ssa_stage ON stage_staff_assignments(project_stage_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_ssa_employee ON stage_staff_assignments(employee_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_ssa_dates ON stage_staff_assignments(planned_start, planned_end)")
+
+    # Migracja: przenieś istniejące dane z JSON assigned_staff → nowa tabela
+    _migrate_assigned_staff_json_to_table(con)
 
     con.commit()
     con.close()
@@ -4849,6 +5066,319 @@ def get_stage_assigned_staff(project_db_path: str, rm_master_db_path: str,
         con_master.close()
 
 
+# ============================================================================
+# STAGE STAFF ASSIGNMENTS — nowa architektura z datami (2026-04-19)
+# ============================================================================
+
+def add_staff_assignment(project_db_path: str, rm_master_db_path: str,
+                         project_id: int, stage_code: str, employee_id: int,
+                         planned_start: str = None, planned_end: str = None,
+                         role: str = None, assigned_by: str = None) -> int:
+    """Przypisz pracownika do etapu z określonym zakresem dat.
+    
+    Zapisuje w tabeli stage_staff_assignments (nowa architektura).
+    Jednocześnie aktualizuje JSON w project_stages.assigned_staff (compat).
+    
+    Args:
+        planned_start: Data rozpoczęcia pracy (ISO). None = template_start etapu.
+        planned_end: Data zakończenia pracy (ISO). None = template_end etapu.
+        role: Opcjonalna rola ('lead', 'support', itp.)
+    
+    Returns:
+        ID przypisania
+    """
+    import json
+
+    # Walidacja pracownika
+    con_master = _open_rm_connection(rm_master_db_path)
+    employee = con_master.execute("SELECT id, name FROM employees WHERE id = ?", (employee_id,)).fetchone()
+    con_master.close()
+    if not employee:
+        raise ValueError(f"Pracownik ID={employee_id} nie istnieje")
+
+    con = _open_rm_connection(project_db_path)
+    try:
+        # Znajdź project_stage i daty template
+        row = con.execute("""
+            SELECT ps.id AS ps_id, ps.assigned_staff,
+                   ss.template_start, ss.template_end
+            FROM project_stages ps
+            LEFT JOIN stage_schedule ss ON ss.project_stage_id = ps.id
+            WHERE ps.project_id = ? AND ps.stage_code = ?
+        """, (project_id, stage_code)).fetchone()
+
+        if not row:
+            raise ValueError(f"Etap {stage_code} nie istnieje dla projektu {project_id}")
+
+        ps_id = row['ps_id']
+        p_start = planned_start or row['template_start']
+        p_end = planned_end or row['template_end']
+
+        # Wstaw do nowej tabeli
+        try:
+            cursor = con.execute("""
+                INSERT INTO stage_staff_assignments
+                    (project_stage_id, employee_id, planned_start, planned_end,
+                     role, assigned_by)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (ps_id, employee_id, p_start, p_end, role, assigned_by or 'System'))
+            assignment_id = cursor.lastrowid
+        except sqlite3.IntegrityError:
+            # Już przypisany — zaktualizuj daty
+            con.execute("""
+                UPDATE stage_staff_assignments
+                SET planned_start = ?, planned_end = ?, role = ?,
+                    assigned_by = ?, assigned_at = CURRENT_TIMESTAMP
+                WHERE project_stage_id = ? AND employee_id = ?
+            """, (p_start, p_end, role, assigned_by, ps_id, employee_id))
+            r = con.execute("""
+                SELECT id FROM stage_staff_assignments
+                WHERE project_stage_id = ? AND employee_id = ?
+            """, (ps_id, employee_id)).fetchone()
+            assignment_id = r['id'] if r else 0
+
+        # Compat: zaktualizuj JSON w project_stages.assigned_staff
+        try:
+            staff_json = json.loads(row['assigned_staff'] or '[]')
+        except (json.JSONDecodeError, TypeError):
+            staff_json = []
+
+        if not any(s.get('employee_id') == employee_id for s in staff_json):
+            staff_json.append({
+                'employee_id': employee_id,
+                'assigned_at': get_timestamp_now(),
+                'assigned_by': assigned_by or 'System',
+            })
+            con.execute("UPDATE project_stages SET assigned_staff = ? WHERE id = ?",
+                        (json.dumps(staff_json), ps_id))
+
+        _rm_safe_commit(con)
+        return assignment_id
+
+    finally:
+        con.close()
+
+
+def update_staff_assignment_dates(project_db_path: str, assignment_id: int,
+                                  planned_start: str = None, planned_end: str = None):
+    """Zaktualizuj daty przypisania pracownika."""
+    con = _open_rm_connection(project_db_path)
+    try:
+        sets, params = [], []
+        if planned_start is not None:
+            sets.append("planned_start = ?")
+            params.append(planned_start)
+        if planned_end is not None:
+            sets.append("planned_end = ?")
+            params.append(planned_end)
+        if not sets:
+            return
+        params.append(assignment_id)
+        con.execute(f"UPDATE stage_staff_assignments SET {', '.join(sets)} WHERE id = ?", params)
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+
+
+def remove_staff_assignment(project_db_path: str, project_id: int,
+                            stage_code: str, employee_id: int) -> bool:
+    """Usuń przypisanie pracownika (nowa tabela + compat JSON)."""
+    import json
+
+    con = _open_rm_connection(project_db_path)
+    try:
+        row = con.execute("""
+            SELECT ps.id AS ps_id, ps.assigned_staff
+            FROM project_stages ps
+            WHERE ps.project_id = ? AND ps.stage_code = ?
+        """, (project_id, stage_code)).fetchone()
+        if not row:
+            return False
+
+        ps_id = row['ps_id']
+
+        # Nowa tabela
+        con.execute("""
+            DELETE FROM stage_staff_assignments
+            WHERE project_stage_id = ? AND employee_id = ?
+        """, (ps_id, employee_id))
+
+        # Compat JSON
+        try:
+            staff_json = json.loads(row['assigned_staff'] or '[]')
+            staff_json = [s for s in staff_json if s.get('employee_id') != employee_id]
+            con.execute("UPDATE project_stages SET assigned_staff = ? WHERE id = ?",
+                        (json.dumps(staff_json), ps_id))
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        _rm_safe_commit(con)
+        return True
+    finally:
+        con.close()
+
+
+def get_staff_assignments(project_db_path: str, rm_master_db_path: str,
+                          project_id: int, stage_code: str = None) -> List[Dict]:
+    """Pobierz przypisania pracowników z nowymi datami.
+    
+    Args:
+        stage_code: None = wszystkie etapy projektu
+    
+    Returns:
+        Lista dict: employee_id, employee_name, category, stage_code,
+                    planned_start, planned_end, actual_start, actual_end, role
+    """
+    con = _open_rm_connection(project_db_path)
+    try:
+        if stage_code:
+            rows = con.execute("""
+                SELECT ssa.*, ps.stage_code
+                FROM stage_staff_assignments ssa
+                JOIN project_stages ps ON ssa.project_stage_id = ps.id
+                WHERE ps.project_id = ? AND ps.stage_code = ?
+                ORDER BY ssa.planned_start
+            """, (project_id, stage_code)).fetchall()
+        else:
+            rows = con.execute("""
+                SELECT ssa.*, ps.stage_code
+                FROM stage_staff_assignments ssa
+                JOIN project_stages ps ON ssa.project_stage_id = ps.id
+                WHERE ps.project_id = ?
+                ORDER BY ps.sequence, ssa.planned_start
+            """, (project_id,)).fetchall()
+    finally:
+        con.close()
+
+    if not rows:
+        return []
+
+    # Pobierz dane pracowników z master
+    emp_ids = list({r['employee_id'] for r in rows})
+    con_master = _open_rm_connection(rm_master_db_path)
+    try:
+        placeholders = ','.join('?' * len(emp_ids))
+        emps = con_master.execute(f"""
+            SELECT id, name, category FROM employees WHERE id IN ({placeholders})
+        """, emp_ids).fetchall()
+        emp_map = {e['id']: {'name': e['name'], 'category': e['category']} for e in emps}
+    finally:
+        con_master.close()
+
+    result = []
+    for r in rows:
+        eid = r['employee_id']
+        emp_info = emp_map.get(eid, {'name': f'ID={eid}', 'category': '?'})
+        result.append({
+            'id': r['id'],
+            'employee_id': eid,
+            'employee_name': emp_info['name'],
+            'category': emp_info['category'],
+            'stage_code': r['stage_code'],
+            'planned_start': r['planned_start'],
+            'planned_end': r['planned_end'],
+            'actual_start': r['actual_start'],
+            'actual_end': r['actual_end'],
+            'role': r['role'],
+            'assigned_at': r['assigned_at'],
+            'assigned_by': r['assigned_by'],
+        })
+
+    return result
+
+
+def get_employee_schedule(rm_master_db_path: str, rm_manager_dir: str,
+                          employee_id: int, project_ids: List[int],
+                          date_from: str = None, date_to: str = None) -> List[Dict]:
+    """Pobierz harmonogram pracownika z wielu projektów.
+    
+    Zwraca listę okresów kiedy pracownik jest zaplanowany.
+    Kluczowe dla optymalizatora — widzi obciążenie pracownika.
+    
+    Returns:
+        Lista dict: project_id, stage_code, planned_start, planned_end, actual_start, actual_end
+    """
+    result = []
+    for pid in project_ids:
+        db_path = get_project_db_path(rm_manager_dir, pid)
+        if not Path(db_path).exists():
+            continue
+        con = _open_rm_connection(db_path)
+        try:
+            clauses = ["ssa.employee_id = ?"]
+            params = [employee_id]
+            if date_from:
+                clauses.append("(ssa.planned_end >= ? OR ssa.planned_end IS NULL)")
+                params.append(date_from)
+            if date_to:
+                clauses.append("(ssa.planned_start <= ? OR ssa.planned_start IS NULL)")
+                params.append(date_to)
+            where = " AND ".join(clauses)
+
+            rows = con.execute(f"""
+                SELECT ps.project_id, ps.stage_code,
+                       ssa.planned_start, ssa.planned_end,
+                       ssa.actual_start, ssa.actual_end, ssa.role
+                FROM stage_staff_assignments ssa
+                JOIN project_stages ps ON ssa.project_stage_id = ps.id
+                WHERE {where}
+                ORDER BY ssa.planned_start
+            """, params).fetchall()
+
+            for r in rows:
+                result.append({
+                    'project_id': r['project_id'],
+                    'stage_code': r['stage_code'],
+                    'planned_start': r['planned_start'],
+                    'planned_end': r['planned_end'],
+                    'actual_start': r['actual_start'],
+                    'actual_end': r['actual_end'],
+                    'role': r['role'],
+                })
+        except sqlite3.OperationalError:
+            pass  # Stara baza bez tabeli
+        finally:
+            con.close()
+
+    return result
+
+
+def start_staff_actual(project_db_path: str, project_id: int,
+                       stage_code: str, employee_id: int,
+                       started_by: str = None):
+    """Oznacz faktyczny start pracy pracownika na etapie."""
+    con = _open_rm_connection(project_db_path)
+    try:
+        con.execute("""
+            UPDATE stage_staff_assignments
+            SET actual_start = CURRENT_TIMESTAMP
+            WHERE project_stage_id = (
+                SELECT id FROM project_stages WHERE project_id = ? AND stage_code = ?
+            ) AND employee_id = ? AND actual_start IS NULL
+        """, (project_id, stage_code, employee_id))
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+
+
+def end_staff_actual(project_db_path: str, project_id: int,
+                     stage_code: str, employee_id: int,
+                     ended_by: str = None):
+    """Oznacz faktyczne zakończenie pracy pracownika na etapie."""
+    con = _open_rm_connection(project_db_path)
+    try:
+        con.execute("""
+            UPDATE stage_staff_assignments
+            SET actual_end = CURRENT_TIMESTAMP
+            WHERE project_stage_id = (
+                SELECT id FROM project_stages WHERE project_id = ? AND stage_code = ?
+            ) AND employee_id = ? AND actual_end IS NULL
+        """, (project_id, stage_code, employee_id))
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+
+
 def get_all_stage_staff_for_project(project_db_path: str, rm_master_db_path: str,
                                    project_id: int) -> Dict[str, List[Dict]]:
     """Pobierz przypisania pracowników dla wszystkich etapów projektu.
@@ -7414,4 +7944,514 @@ def send_custom_sms(rm_db_path: str, project_id: int, message: str,
             return {'success': 0, 'message': 'Wysyłka nie powiodła się', 'errors': ['Zwrócono False']}
     except Exception as e:
         return {'success': 0, 'message': str(e), 'errors': [str(e)]}
+
+
+# ============================================================================
+# OPTYMALIZATOR PRODUKCJI — CRUD ograniczeń zasobów (2026-04-19)
+# ============================================================================
+
+def get_resource_constraints(rm_master_db_path: str, active_only: bool = True) -> List[Dict]:
+    """Pobierz ograniczenia zasobów."""
+    ensure_rm_master_tables(rm_master_db_path)
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        where = "WHERE is_active = 1" if active_only else ""
+        rows = con.execute(f"""
+            SELECT * FROM resource_constraints {where}
+            ORDER BY constraint_type, category, stage_code
+        """).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def save_resource_constraint(rm_master_db_path: str, data: Dict, user: str = None) -> int:
+    """Dodaj lub zaktualizuj ograniczenie zasobu.
+    
+    data keys: id (opt), constraint_type, category, stage_code, max_parallel, description, is_active
+    """
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        if data.get('id'):
+            con.execute("""
+                UPDATE resource_constraints
+                SET constraint_type = ?, category = ?, stage_code = ?,
+                    max_parallel = ?, description = ?, is_active = ?,
+                    modified_at = CURRENT_TIMESTAMP, modified_by = ?
+                WHERE id = ?
+            """, (data['constraint_type'], data.get('category'),
+                  data.get('stage_code'), data.get('max_parallel', 1),
+                  data.get('description'), data.get('is_active', 1),
+                  user, data['id']))
+            _rm_safe_commit(con)
+            return data['id']
+        else:
+            cursor = con.execute("""
+                INSERT INTO resource_constraints
+                    (constraint_type, category, stage_code, max_parallel,
+                     description, is_active, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (data['constraint_type'], data.get('category'),
+                  data.get('stage_code'), data.get('max_parallel', 1),
+                  data.get('description'), data.get('is_active', 1),
+                  user))
+            _rm_safe_commit(con)
+            return cursor.lastrowid
+    finally:
+        con.close()
+
+
+def delete_resource_constraint(rm_master_db_path: str, constraint_id: int):
+    """Usuń ograniczenie zasobu."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        con.execute("DELETE FROM resource_constraints WHERE id = ?", (constraint_id,))
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+
+
+# ============================================================================
+# OPTYMALIZATOR — dostępność pracowników
+# ============================================================================
+
+def get_employee_availability(rm_master_db_path: str, employee_id: int = None,
+                              date_from: str = None, date_to: str = None) -> List[Dict]:
+    """Pobierz okresy niedostępności pracowników.
+    
+    Filtruje po employee_id i/lub po zakresie dat (overlap).
+    """
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        clauses, params = [], []
+        if employee_id is not None:
+            clauses.append("ea.employee_id = ?")
+            params.append(employee_id)
+        if date_from:
+            clauses.append("ea.date_to >= ?")
+            params.append(date_from)
+        if date_to:
+            clauses.append("ea.date_from <= ?")
+            params.append(date_to)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = con.execute(f"""
+            SELECT ea.*, e.name AS employee_name, e.category AS employee_category
+            FROM employee_availability ea
+            JOIN employees e ON ea.employee_id = e.id
+            {where}
+            ORDER BY ea.date_from
+        """, params).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def save_employee_availability(rm_master_db_path: str, data: Dict, user: str = None) -> int:
+    """Dodaj lub zaktualizuj okres niedostępności.
+    
+    data keys: id (opt), employee_id, date_from, date_to, reason, notes
+    """
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        if data.get('id'):
+            con.execute("""
+                UPDATE employee_availability
+                SET employee_id = ?, date_from = ?, date_to = ?, reason = ?, notes = ?
+                WHERE id = ?
+            """, (data['employee_id'], data['date_from'], data['date_to'],
+                  data['reason'], data.get('notes'), data['id']))
+            _rm_safe_commit(con)
+            return data['id']
+        else:
+            cursor = con.execute("""
+                INSERT INTO employee_availability
+                    (employee_id, date_from, date_to, reason, notes, created_by)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (data['employee_id'], data['date_from'], data['date_to'],
+                  data['reason'], data.get('notes'), user))
+            _rm_safe_commit(con)
+            return cursor.lastrowid
+    finally:
+        con.close()
+
+
+def delete_employee_availability(rm_master_db_path: str, avail_id: int):
+    """Usuń okres niedostępności."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        con.execute("DELETE FROM employee_availability WHERE id = ?", (avail_id,))
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+
+
+# ============================================================================
+# OPTYMALIZATOR — kalendarz firmowy
+# ============================================================================
+
+def get_company_calendar(rm_master_db_path: str, date_from: str = None,
+                         date_to: str = None) -> List[Dict]:
+    """Pobierz dni firmowe (wolne, święta, soboty pracujące)."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        clauses, params = [], []
+        if date_from:
+            clauses.append("date >= ?")
+            params.append(date_from)
+        if date_to:
+            clauses.append("date <= ?")
+            params.append(date_to)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = con.execute(f"""
+            SELECT * FROM company_calendar {where} ORDER BY date
+        """, params).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def save_company_calendar_day(rm_master_db_path: str, date: str, day_type: str,
+                              description: str = None, user: str = None) -> int:
+    """Dodaj lub nadpisz dzień w kalendarzu firmowym."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        cursor = con.execute("""
+            INSERT OR REPLACE INTO company_calendar (date, day_type, description, created_by)
+            VALUES (?, ?, ?, ?)
+        """, (date, day_type, description, user))
+        _rm_safe_commit(con)
+        return cursor.lastrowid
+    finally:
+        con.close()
+
+
+def delete_company_calendar_day(rm_master_db_path: str, date: str):
+    """Usuń dzień z kalendarza firmowego."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        con.execute("DELETE FROM company_calendar WHERE date = ?", (date,))
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+
+
+def get_working_days(rm_master_db_path: str, date_from: str, date_to: str) -> List[str]:
+    """Zwróć listę dni roboczych w podanym przedziale.
+    
+    Uwzględnia:
+    - Weekendy (sob/ndz = wolne, chyba że SATURDAY_WORK)
+    - Święta i dni wolne z company_calendar
+    """
+    cal_entries = {}
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        rows = con.execute("""
+            SELECT date, day_type FROM company_calendar
+            WHERE date >= ? AND date <= ?
+        """, (date_from, date_to)).fetchall()
+        for r in rows:
+            cal_entries[r['date']] = r['day_type']
+    finally:
+        con.close()
+
+    start = datetime.fromisoformat(date_from).date() if isinstance(date_from, str) else date_from
+    end = datetime.fromisoformat(date_to).date() if isinstance(date_to, str) else date_to
+
+    working = []
+    current = start
+    while current <= end:
+        iso = current.isoformat()
+        wd = current.weekday()  # 0=Mon .. 6=Sun
+
+        if iso in cal_entries:
+            ct = cal_entries[iso]
+            if ct == 'SATURDAY_WORK':
+                working.append(iso)
+            # HOLIDAY / COMPANY_DAY_OFF → wolne
+        elif wd < 5:
+            # Pon-Pt → roboczy
+            working.append(iso)
+        # Sob/Ndz bez wpisu → wolne
+
+        current += timedelta(days=1)
+
+    return working
+
+
+def save_optimization_run(rm_master_db_path: str, data: Dict, user: str = None) -> int:
+    """Zapisz wynik optymalizacji."""
+    import json
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        cursor = con.execute("""
+            INSERT INTO optimization_runs
+                (run_mode, project_ids_json, date_range_start, date_range_end,
+                 constraints_snapshot, result_json, score_before, score_after,
+                 solver_status, solver_time_ms, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            data['run_mode'],
+            json.dumps(data['project_ids']),
+            data.get('date_range_start'),
+            data.get('date_range_end'),
+            json.dumps(data.get('constraints_snapshot', {})),
+            json.dumps(data.get('result', {})),
+            data.get('score_before'),
+            data.get('score_after'),
+            data.get('solver_status'),
+            data.get('solver_time_ms'),
+            user
+        ))
+        _rm_safe_commit(con)
+        return cursor.lastrowid
+    finally:
+        con.close()
+
+
+def mark_optimization_applied(rm_master_db_path: str, run_id: int, user: str = None):
+    """Oznacz zapis optymalizacji jako zastosowany."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        con.execute("""
+            UPDATE optimization_runs
+            SET applied = 1, applied_at = CURRENT_TIMESTAMP, applied_by = ?
+            WHERE id = ?
+        """, (user, run_id))
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+
+
+def get_optimization_runs(rm_master_db_path: str, limit: int = 20) -> List[Dict]:
+    """Pobierz historię optymalizacji."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        rows = con.execute("""
+            SELECT * FROM optimization_runs
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+# ============================================================================
+# OPTYMALIZATOR — pobieranie danych wielu projektów (dla solvera)
+# ============================================================================
+
+def get_projects_scheduling_data(rm_manager_dir: str, rm_master_db_path: str,
+                                 project_ids: List[int]) -> Dict:
+    """Pobierz wszystkie dane potrzebne do optymalizacji dla podanych projektów.
+    
+    Returns:
+        {
+            'projects': {
+                pid: {
+                    'stages': {stage_code: {template_start, template_end, duration_days, is_actual, is_active}},
+                    'dependencies': [(pred, succ, type, lag)],
+                    'staff': {stage_code: [employee_id, ...]},
+                    'forecast': {stage_code: {forecast_start, forecast_end, ...}},
+                }
+            },
+            'employees': {eid: {name, category, is_active}},
+            'constraints': [...],
+            'availability': [...],
+            'calendar': [...]
+        }
+    """
+    import json
+
+    employees_list = get_employees(rm_master_db_path, active_only=False)
+    employees = {e['id']: e for e in employees_list}
+
+    constraints = get_resource_constraints(rm_master_db_path, active_only=True)
+    availability = get_employee_availability(rm_master_db_path)
+    calendar = get_company_calendar(rm_master_db_path)
+
+    projects = {}
+    for pid in project_ids:
+        db_path = get_project_db_path(rm_manager_dir, pid)
+        print(f"⚡ scheduling_data: pid={pid}, db_path={db_path}, exists={Path(db_path).exists()}")
+        if not Path(db_path).exists():
+            continue
+
+        con = _open_rm_connection(db_path)
+        try:
+            # Sprawdź czy tabela project_stages istnieje
+            tbl_check = con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='project_stages'"
+            ).fetchone()
+            if not tbl_check:
+                print(f"⚡ scheduling_data: pid={pid} — brak tabeli project_stages, pomijam")
+                continue
+
+            rows = con.execute("""
+                SELECT ps.stage_code, ps.assigned_staff, ps.sequence,
+                       ss.template_start, ss.template_end
+                FROM project_stages ps
+                LEFT JOIN stage_schedule ss ON ss.project_stage_id = ps.id
+                JOIN stage_definitions sd ON ps.stage_code = sd.code
+                WHERE ps.project_id = ? AND ps.stage_code != 'WSTRZYMANY'
+                ORDER BY ps.sequence
+            """, (pid,)).fetchall()
+
+            stages = {}
+            staff_map = {}
+            staff_dates = {}  # {stage_code: [{employee_id, planned_start, planned_end}]}
+            for row in rows:
+                sc = row['stage_code']
+                t_start = row['template_start']
+                t_end = row['template_end']
+
+                duration = 5
+                if t_start and t_end:
+                    try:
+                        d0 = datetime.fromisoformat(t_start)
+                        d1 = datetime.fromisoformat(t_end)
+                        duration = max(1, (d1 - d0).days)
+                    except (ValueError, TypeError):
+                        pass
+
+                stages[sc] = {
+                    'template_start': t_start,
+                    'template_end': t_end,
+                    'duration_days': duration,
+                    'sequence': row['sequence'],
+                }
+
+            # Przypisania z nowej tabeli (z datami)
+            try:
+                ssa_rows = con.execute("""
+                    SELECT ps.stage_code, ssa.employee_id,
+                           ssa.planned_start, ssa.planned_end
+                    FROM stage_staff_assignments ssa
+                    JOIN project_stages ps ON ssa.project_stage_id = ps.id
+                    WHERE ps.project_id = ?
+                """, (pid,)).fetchall()
+                for sr in ssa_rows:
+                    sc = sr['stage_code']
+                    if sc not in staff_map:
+                        staff_map[sc] = []
+                        staff_dates[sc] = []
+                    staff_map[sc].append(sr['employee_id'])
+                    staff_dates[sc].append({
+                        'employee_id': sr['employee_id'],
+                        'planned_start': sr['planned_start'],
+                        'planned_end': sr['planned_end'],
+                    })
+            except sqlite3.OperationalError:
+                pass  # Stara baza bez tabeli
+
+            # Fallback: jeśli nowa tabela pusta, czytaj z JSON
+            if not staff_map:
+                for row in rows:
+                    sc = row['stage_code']
+                    assigned = []
+                    try:
+                        staff_json = json.loads(row['assigned_staff'] or '[]')
+                        assigned = [s['employee_id'] for s in staff_json
+                                    if isinstance(s, dict) and 'employee_id' in s]
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    staff_map[sc] = assigned
+
+            deps_rows = con.execute("""
+                SELECT predecessor_stage_code, successor_stage_code,
+                       dependency_type, lag_days
+                FROM stage_dependencies WHERE project_id = ?
+            """, (pid,)).fetchall()
+            dependencies = [(r['predecessor_stage_code'], r['successor_stage_code'],
+                             r['dependency_type'], r['lag_days'])
+                            for r in deps_rows]
+
+            actuals_rows = con.execute("""
+                SELECT ps.stage_code, sap.started_at, sap.ended_at
+                FROM stage_actual_periods sap
+                JOIN project_stages ps ON sap.project_stage_id = ps.id
+                WHERE ps.project_id = ?
+            """, (pid,)).fetchall()
+
+            for ar in actuals_rows:
+                sc = ar['stage_code']
+                if sc in stages:
+                    if ar['ended_at']:
+                        stages[sc]['is_actual'] = True
+                        stages[sc]['actual_start'] = ar['started_at']
+                        stages[sc]['actual_end'] = ar['ended_at']
+                    elif ar['started_at'] and not ar['ended_at']:
+                        stages[sc]['is_active'] = True
+                        stages[sc]['actual_start'] = ar['started_at']
+
+        finally:
+            con.close()
+
+        try:
+            forecast = recalculate_forecast(db_path, pid)
+        except Exception:
+            forecast = {}
+
+        projects[pid] = {
+            'stages': stages,
+            'dependencies': dependencies,
+            'staff': staff_map,
+            'staff_dates': staff_dates,
+            'forecast': forecast,
+        }
+
+    return {
+        'projects': projects,
+        'employees': employees,
+        'constraints': constraints,
+        'availability': availability,
+        'calendar': calendar,
+    }
+
+
+def apply_optimization_result(rm_manager_dir: str, project_id: int,
+                              stage_dates: Dict[str, Tuple[str, str]]):
+    """Zastosuj wynik optymalizacji — nadpisz template_start/template_end
+    + aktualizuj planned_start/planned_end w stage_staff_assignments.
+    
+    stage_dates: {stage_code: (new_start_iso, new_end_iso)}
+    """
+    db_path = get_project_db_path(rm_manager_dir, project_id)
+    con = _open_rm_connection(db_path)
+    try:
+        for stage_code, (new_start, new_end) in stage_dates.items():
+            row = con.execute("""
+                SELECT ps.id AS ps_id, ss.id AS ss_id
+                FROM project_stages ps
+                LEFT JOIN stage_schedule ss ON ss.project_stage_id = ps.id
+                WHERE ps.project_id = ? AND ps.stage_code = ?
+            """, (project_id, stage_code)).fetchone()
+
+            if not row:
+                continue
+
+            if row['ss_id']:
+                con.execute("""
+                    UPDATE stage_schedule SET template_start = ?, template_end = ?
+                    WHERE id = ?
+                """, (new_start, new_end, row['ss_id']))
+            else:
+                con.execute("""
+                    INSERT INTO stage_schedule (project_stage_id, template_start, template_end)
+                    VALUES (?, ?, ?)
+                """, (row['ps_id'], new_start, new_end))
+
+            # Zaktualizuj daty przypisań pracowników
+            try:
+                con.execute("""
+                    UPDATE stage_staff_assignments
+                    SET planned_start = ?, planned_end = ?
+                    WHERE project_stage_id = ?
+                      AND actual_start IS NULL
+                """, (new_start, new_end, row['ps_id']))
+            except sqlite3.OperationalError:
+                pass  # stara baza bez tabeli
+
+        _rm_safe_commit(con)
+    finally:
+        con.close()
 

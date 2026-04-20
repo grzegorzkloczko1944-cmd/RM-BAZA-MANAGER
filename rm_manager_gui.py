@@ -2203,6 +2203,10 @@ class RMManagerGUI:
         tools_menu.add_separator()
         tools_menu.add_command(label="🔍 Diagnostyka projektów", command=self.diagnose_projects)
         tools_menu.add_command(label="🎯 Diagnostyka milestone'ów", command=self.diagnose_milestones)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="⚡ Optymalizator produkcji...", command=self.optimizer_dialog)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="🐛 DEBUG — Zrzut danych projektów", command=self.debug_dump_dialog)
 
         # Users menu
         users_menu = tk.Menu(menubar, tearoff=0)
@@ -13239,6 +13243,416 @@ class RMManagerGUI:
         pinned = getattr(self, '_mp_pinned_projects', set())
         self._open_project_selector(parent=self._mp_chart_window, current_ids=current_ids, pinned_ids=pinned)
 
+    # ---- Multi-project: filtr pracowników ----
+
+    def _mp_employees_filter_dialog(self, project_ids):
+        """Okno dialogowe filtrowania wykresu wg pracowników.
+        
+        Funkcje:
+        - Multi-select pracowników (z checkboxami grupowanymi wg kategorii)
+        - Tryby: pokaż etapy wybranych / bez pracowników / tylko z pracownikami / podświetlenie
+        - Podsumowanie: ile etapów/projektów pasuje
+        - Szybkie predefiniowane filtry
+        """
+        parent = getattr(self, '_mp_chart_window', self.root) or self.root
+        
+        dlg = tk.Toplevel(parent)
+        dlg.title("👷 Filtr pracowników — Multi-projekt Gantt")
+        dlg.transient(parent)
+        dlg.grab_set()
+        
+        w, h = 620, 650
+        dlg.update_idletasks()
+        try:
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            x = px + (pw // 2) - (w // 2)
+            y = py + (ph // 2) - (h // 2)
+        except Exception:
+            x = (dlg.winfo_screenwidth() // 2) - (w // 2)
+            y = (dlg.winfo_screenheight() // 2) - (h // 2)
+        dlg.geometry(f"{w}x{h}+{x}+{y}")
+        dlg.minsize(500, 450)
+        
+        # Pobierz dane (już zebrane w _create_multi_project_chart_window)
+        all_employees = getattr(self, '_mp_all_employees', {})
+        project_employees = getattr(self, '_mp_project_employees', {})
+        stage_employees = getattr(self, '_mp_stage_employees', {})
+        
+        # Jeśli brak danych — pobierz z bazy
+        if not all_employees:
+            all_emp_ids = set()
+            for pid in project_ids:
+                try:
+                    project_db = self.get_project_db_path(pid)
+                    stage_staff_map = rmm.get_all_stage_staff_for_project(
+                        project_db, self.rm_master_db_path, pid)
+                    for sc, staff_list in stage_staff_map.items():
+                        for s in staff_list:
+                            eid = s.get('employee_id')
+                            if eid:
+                                all_emp_ids.add(eid)
+                except Exception:
+                    pass
+            if all_emp_ids:
+                try:
+                    rmm.ensure_list_tables(self.rm_master_db_path)
+                    con_master = rmm._open_rm_connection(self.rm_master_db_path)
+                    placeholders = ','.join('?' * len(all_emp_ids))
+                    rows = con_master.execute(f"""
+                        SELECT id, name, category FROM employees
+                        WHERE id IN ({placeholders})
+                        ORDER BY category, name
+                    """, list(all_emp_ids)).fetchall()
+                    con_master.close()
+                    for r in rows:
+                        all_employees[r['id']] = {'name': r['name'], 'category': r['category'] or ''}
+                except Exception:
+                    pass
+        
+        # Aktualna konfiguracja
+        cfg = self._mp_employee_filter_cfg
+        current_sel = set(cfg.get('selected_ids', set()))
+        current_mode = cfg.get('mode', 'show_selected')
+        
+        # ===== TRYB FILTROWANIA — górna sekcja =====
+        mode_frame = tk.LabelFrame(dlg, text="🔧 Tryb filtrowania", font=("Arial", 10, "bold"),
+                                    padx=10, pady=5)
+        mode_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        
+        # Banner aktualnego statusu
+        _cfg_active = bool(current_sel) or current_mode in ('show_unassigned', 'show_assigned_only')
+        status_banner = tk.Frame(mode_frame, bg='#d35400' if _cfg_active else '#bdc3c7', pady=3, padx=8)
+        status_banner.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(status_banner, 
+                text=f"{'🟢 FILTR AKTYWNY' if _cfg_active else '⚪ FILTR WYŁĄCZONY — wykres pokazuje wszystko'}",
+                font=("Arial", 10, "bold"), 
+                fg='white' if _cfg_active else '#333333',
+                bg='#d35400' if _cfg_active else '#bdc3c7'
+        ).pack(side=tk.LEFT)
+        
+        mode_var = tk.StringVar(value=current_mode)
+        
+        mode_defs = [
+            ('show_selected', '🔍 Etapy wybranych pracowników',
+             'Pokazuje TYLKO etapy z wybranym pracownikiem. Wymaga zaznaczenia pracowników poniżej.',
+             True),  # True = wymaga zaznaczonych pracowników
+            ('show_unassigned', '⚠️ Etapy BEZ przypisanych pracowników',
+             'Pokazuje TYLKO etapy do których NIKT nie jest przypisany. Nie wymaga zaznaczania pracowników.',
+             False),
+            ('show_assigned_only', '✅ Tylko etapy Z przypisanymi pracownikami',
+             'Ukrywa etapy bez pracowników — zostają te, do których ktokolwiek jest przypisany. Nie wymaga zaznaczania.',
+             False),
+            ('highlight', '🔦 Podświetlenie (pokaż wszystko + wyróżnij)',
+             'Pokazuje WSZYSTKIE etapy, ale wyróżnia czerwoną ramką te z wybranym pracownikiem. Wymaga zaznaczenia.',
+             True),
+        ]
+        
+        def _on_mode_change_no_summary():
+            """Aktualizuj wizualia trybów (bez wywoływania update_summary — unika rekurencji)."""
+            mode = mode_var.get()
+            for mk, mf, need_label in _mode_widgets:
+                if mk == mode:
+                    mf.config(bg='#eaf2e3', relief=tk.SOLID, bd=1)
+                    for child in mf.winfo_children():
+                        try:
+                            child.config(bg='#eaf2e3')
+                        except Exception:
+                            pass
+                        for grandchild in child.winfo_children():
+                            try:
+                                grandchild.config(bg='#eaf2e3')
+                            except Exception:
+                                pass
+                else:
+                    default_bg = mode_frame.cget('bg')
+                    mf.config(bg=default_bg, relief=tk.FLAT, bd=0)
+                    for child in mf.winfo_children():
+                        try:
+                            child.config(bg=default_bg)
+                        except Exception:
+                            pass
+                        for grandchild in child.winfo_children():
+                            try:
+                                grandchild.config(bg=default_bg)
+                            except Exception:
+                                pass
+        
+        def _on_mode_change():
+            """Aktualizuj UI gdy zmieni się tryb — pokaż/ukryj info o wymaganiach."""
+            _on_mode_change_no_summary()
+            update_summary()
+        
+        _mode_widgets = []  # (mode_key, frame, need_label)
+        
+        for mode_key, mode_label, mode_desc, needs_emp in mode_defs:
+            rb_container = tk.Frame(mode_frame, padx=4, pady=2)
+            rb_container.pack(fill=tk.X, pady=1)
+            if mode_key == current_mode:
+                rb_container.config(bg='#eaf2e3', relief=tk.SOLID, bd=1)
+            
+            rb_frame = tk.Frame(rb_container, bg=rb_container.cget('bg'))
+            rb_frame.pack(fill=tk.X)
+            tk.Radiobutton(rb_frame, text=mode_label, variable=mode_var, value=mode_key,
+                          font=("Arial", 9, "bold"), anchor='w',
+                          bg=rb_container.cget('bg'), activebackground='#eaf2e3',
+                          command=_on_mode_change).pack(side=tk.LEFT)
+            
+            desc_frame = tk.Frame(rb_container, bg=rb_container.cget('bg'))
+            desc_frame.pack(fill=tk.X)
+            tk.Label(desc_frame, text=f"    {mode_desc}", font=("Arial", 8), fg="#666",
+                    anchor='w', bg=rb_container.cget('bg'), wraplength=550, justify='left'
+            ).pack(side=tk.LEFT, fill=tk.X)
+            
+            need_label = tk.Label(rb_container, text="", font=("Arial", 8), anchor='w',
+                                   bg=rb_container.cget('bg'))
+            need_label.pack(fill=tk.X)
+            if needs_emp:
+                need_label.config(text="    ↳ Zaznacz pracowników poniżej", fg='#888')
+            else:
+                need_label.config(text="    ↳ Działa bez zaznaczania pracowników ✓", fg='#27ae60')
+            
+            _mode_widgets.append((mode_key, rb_container, need_label))
+        
+        # ===== LISTA PRACOWNIKÓW — główna sekcja =====
+        list_frame = tk.LabelFrame(dlg, text="👥 Pracownicy (wybierz jednego lub więcej)",
+                                    font=("Arial", 10, "bold"), padx=5, pady=5)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Przyciski szybkiego wyboru
+        quick_row = tk.Frame(list_frame)
+        quick_row.pack(fill=tk.X, pady=(0, 5))
+        
+        def select_all_emp():
+            for v in check_vars.values():
+                v.set(True)
+            update_summary()
+        
+        def deselect_all_emp():
+            for v in check_vars.values():
+                v.set(False)
+            update_summary()
+        
+        def select_category(cat):
+            for eid, info in all_employees.items():
+                if info['category'] == cat:
+                    check_vars[eid].set(True)
+            update_summary()
+        
+        tk.Button(quick_row, text="✅ Wszyscy", font=("Arial", 8), command=select_all_emp
+                 ).pack(side=tk.LEFT, padx=2)
+        tk.Button(quick_row, text="❌ Żaden", font=("Arial", 8), command=deselect_all_emp
+                 ).pack(side=tk.LEFT, padx=2)
+        
+        # Przyciski kategorii
+        categories_present = sorted(set(info['category'] for info in all_employees.values() if info['category']))
+        if categories_present:
+            ttk.Separator(quick_row, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=5)
+            tk.Label(quick_row, text="Kategoria:", font=("Arial", 8, "bold")).pack(side=tk.LEFT, padx=(0, 3))
+            for cat in categories_present:
+                tk.Button(quick_row, text=cat, font=("Arial", 7),
+                          command=lambda c=cat: select_category(c)
+                ).pack(side=tk.LEFT, padx=1)
+        
+        # Scrollable list grouped by category
+        outer = tk.Frame(list_frame)
+        outer.pack(fill=tk.BOTH, expand=True)
+        canvas_emp = tk.Canvas(outer, highlightthickness=0)
+        scrollbar = tk.Scrollbar(outer, orient="vertical", command=canvas_emp.yview)
+        inner = tk.Frame(canvas_emp)
+        inner.bind("<Configure>", lambda e: canvas_emp.configure(scrollregion=canvas_emp.bbox("all")))
+        canvas_emp.create_window((0, 0), window=inner, anchor="nw")
+        canvas_emp.configure(yscrollcommand=scrollbar.set)
+        canvas_emp.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        def _on_emp_mousewheel(event):
+            canvas_emp.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            return 'break'
+        canvas_emp.bind('<MouseWheel>', _on_emp_mousewheel)
+        inner.bind('<MouseWheel>', _on_emp_mousewheel)
+        
+        check_vars = {}  # employee_id -> BooleanVar
+        
+        # Grupuj wg kategorii
+        by_cat = {}
+        for eid, info in all_employees.items():
+            cat = info['category'] or '(brak kategorii)'
+            by_cat.setdefault(cat, []).append((eid, info['name']))
+        
+        # Policz w ilu etapach/projektach pracownik uczestniczy
+        emp_stage_count = {}  # eid -> count
+        emp_project_count = {}   # eid -> set(pids)
+        for (pid, sc), eids in stage_employees.items():
+            for eid in eids:
+                emp_stage_count[eid] = emp_stage_count.get(eid, 0) + 1
+                emp_project_count.setdefault(eid, set()).add(pid)
+        
+        cat_colors = {
+            'Konstrukcja': '#2c3e50', 'Montaż': '#e67e22', 'Elektromontaż': '#3498db',
+            'Serwis': '#27ae60', 'Logistyka': '#8e44ad', 'Magazyn': '#795548',
+            'Elektroprojekt': '#1abc9c', 'Programowanie': '#e74c3c', 'Sprzedaż': '#f39c12',
+        }
+        
+        for cat in sorted(by_cat.keys()):
+            employees_in_cat = sorted(by_cat[cat], key=lambda x: x[1])
+            cat_color = cat_colors.get(cat, '#333333')
+            
+            # Nagłówek kategorii
+            cat_frame = tk.Frame(inner, bg='#ecf0f1', pady=2)
+            cat_frame.pack(fill=tk.X, pady=(4, 0))
+            tk.Label(cat_frame, text=f"▸ {cat} ({len(employees_in_cat)})",
+                    font=("Arial", 9, "bold"), fg=cat_color, bg='#ecf0f1'
+            ).pack(side=tk.LEFT, padx=5)
+            
+            for eid, ename in employees_in_cat:
+                row = tk.Frame(inner, pady=0)
+                row.pack(fill=tk.X, padx=(15, 0))
+                
+                var = tk.BooleanVar(value=(eid in current_sel))
+                check_vars[eid] = var
+                
+                stage_cnt = emp_stage_count.get(eid, 0)
+                proj_cnt = len(emp_project_count.get(eid, set()))
+                
+                cb = tk.Checkbutton(row, variable=var, command=lambda: update_summary())
+                cb.pack(side=tk.LEFT)
+                tk.Label(row, text=ename, font=("Arial", 9), anchor='w', width=25
+                        ).pack(side=tk.LEFT, padx=(0, 5))
+                tk.Label(row, text=f"{stage_cnt} etapów  |  {proj_cnt} projektów",
+                        font=("Arial", 8), fg='#888888'
+                ).pack(side=tk.LEFT)
+                
+                row.bind('<MouseWheel>', _on_emp_mousewheel)
+        
+        # ===== PODSUMOWANIE + STATYSTYKI =====
+        summary_frame = tk.Frame(dlg, bg='#eee', relief=tk.SUNKEN, bd=1)
+        summary_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
+        
+        summary_label = tk.Label(summary_frame, text="", font=("Arial", 9), bg='#eee',
+                                  anchor='w', padx=10, pady=3)
+        summary_label.pack(fill=tk.X)
+        
+        def update_summary():
+            selected = {eid for eid, v in check_vars.items() if v.get()}
+            mode = mode_var.get()
+            needs_emp = mode in ('show_selected', 'highlight')
+            is_active = bool(selected) or mode in ('show_unassigned', 'show_assigned_only')
+            
+            # Policz statystyki
+            matching_stages = 0
+            matching_projects = set()
+            unassigned_stages = 0
+            assigned_stages = 0
+            total_stages = 0
+            
+            for (pid, sc), eids in stage_employees.items():
+                total_stages += 1
+                if eids:
+                    assigned_stages += 1
+                else:
+                    unassigned_stages += 1
+                if selected & eids:
+                    matching_stages += 1
+                    matching_projects.add(pid)
+            
+            names = [all_employees[eid]['name'] for eid in selected if eid in all_employees]
+            
+            if not is_active:
+                txt = "⚪ FILTR NIEAKTYWNY — wybierz tryb lub zaznacz pracowników"
+                summary_label.config(text=txt, fg='#999')
+            elif mode == 'show_selected':
+                if not selected:
+                    txt = "⚠️ UWAGA: Zaznacz pracowników poniżej, aby filtr zadziałał!"
+                    summary_label.config(text=txt, fg='#e74c3c')
+                else:
+                    txt = f"🟢 AKTYWNY | Wybranych: {len(names)} | Pasujące: {matching_stages} etapów w {len(matching_projects)} projektach"
+                    summary_label.config(text=txt, fg='#27ae60')
+            elif mode == 'show_unassigned':
+                txt = f"🟢 AKTYWNY | Etapy BEZ pracowników: {unassigned_stages} z {total_stages}"
+                summary_label.config(text=txt, fg='#27ae60')
+            elif mode == 'show_assigned_only':
+                txt = f"🟢 AKTYWNY | Etapy Z pracownikami: {assigned_stages} z {total_stages}"
+                summary_label.config(text=txt, fg='#27ae60')
+            elif mode == 'highlight':
+                if not selected:
+                    txt = "⚠️ UWAGA: Zaznacz pracowników, aby podświetlenie zadziałało!"
+                    summary_label.config(text=txt, fg='#e74c3c')
+                else:
+                    txt = f"🟢 AKTYWNY | Podświetlenie: {matching_stages} etapów (czerwona ramka)"
+                    summary_label.config(text=txt, fg='#27ae60')
+            else:
+                txt = f"Wybranych: {len(names)}"
+                summary_label.config(text=txt, fg='#2c3e50')
+            
+            # Zaktualizuj banner statusu na górze
+            try:
+                if is_active:
+                    status_banner.config(bg='#d35400')
+                    for w in status_banner.winfo_children():
+                        w.config(text='🟢 FILTR AKTYWNY', bg='#d35400', fg='white')
+                else:
+                    status_banner.config(bg='#bdc3c7')
+                    for w in status_banner.winfo_children():
+                        w.config(text='⚪ FILTR WYŁĄCZONY — wykres pokazuje wszystko', bg='#bdc3c7', fg='#333333')
+            except Exception:
+                pass
+            
+            # Zaktualizuj podświetlenie aktywnego trybu
+            _on_mode_change_no_summary()
+        
+        update_summary()
+        
+        # ===== PRZYCISKI — dolna belka =====
+        bottom = tk.Frame(dlg, pady=8)
+        bottom.pack(fill=tk.X, padx=10)
+        
+        def on_apply():
+            selected = {eid for eid, v in check_vars.items() if v.get()}
+            mode = mode_var.get()
+            
+            self._mp_employee_filter_cfg = {
+                'selected_ids': selected,
+                'mode': mode,
+            }
+            # Legacy compat
+            if len(selected) == 1:
+                self._mp_employee_filter = next(iter(selected))
+            elif not selected:
+                self._mp_employee_filter = None
+            else:
+                self._mp_employee_filter = None
+            
+            dlg.destroy()
+            
+            # Odśwież wykres
+            if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+                pids = self._mp_chart_meta.get('project_ids', project_ids)
+                self._create_multi_project_chart_window(pids, preserve_view=True)
+        
+        def on_clear():
+            self._mp_employee_filter_cfg = {'selected_ids': set(), 'mode': 'show_selected'}
+            self._mp_employee_filter = None
+            dlg.destroy()
+            if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+                pids = self._mp_chart_meta.get('project_ids', project_ids)
+                self._create_multi_project_chart_window(pids, preserve_view=True)
+        
+        tk.Button(bottom, text="🧹 Wyczyść filtr", command=on_clear,
+                  font=("Arial", 10), padx=10, pady=3
+        ).pack(side=tk.LEFT, padx=5)
+        
+        tk.Button(bottom, text="✅ Zastosuj", command=on_apply,
+                  bg=self.COLOR_GREEN, fg="white", font=("Arial", 11, "bold"),
+                  padx=20, pady=5
+        ).pack(side=tk.RIGHT, padx=5)
+        
+        tk.Button(bottom, text="Anuluj", command=dlg.destroy,
+                  font=("Arial", 10), padx=10, pady=3
+        ).pack(side=tk.RIGHT, padx=5)
+
     def _open_project_selector(self, parent, current_ids=None, pinned_ids=None):
         """Profesjonalny dialog wyboru projektów z filtrami statusu, czasu i pinowaniem.
         
@@ -13507,7 +13921,13 @@ class RMManagerGUI:
         canvas_sel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         # mousewheel scroll
-        canvas_sel.bind_all("<MouseWheel>", lambda e: canvas_sel.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+        def _on_mousewheel_sel(event):
+            try:
+                canvas_sel.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            except tk.TclError:
+                pass
+        canvas_sel.bind_all("<MouseWheel>", _on_mousewheel_sel)
+        sel.bind("<Destroy>", lambda e: canvas_sel.unbind_all("<MouseWheel>") if e.widget == sel else None, add='+')
         
         check_vars = {}   # pid -> BooleanVar (zaznaczenie)
         pin_vars = {}      # pid -> BooleanVar (przypięcie)
@@ -13756,9 +14176,14 @@ class RMManagerGUI:
         # ON/OFF nadpisania per-projekt (True = filtr projektu niezależny od globalnego)
         if not hasattr(self, '_mp_proj_filter_override') or not preserve_view:
             self._mp_proj_filter_override = {}
-        # Filtr konstruktora (employee_id, None = wszyscy)
+        # Filtr pracowników — rozszerzony (dict)
         if not hasattr(self, '_mp_employee_filter') or not preserve_view:
-            self._mp_employee_filter = None
+            self._mp_employee_filter = None  # legacy — zachowaj kompatybilność
+        if not hasattr(self, '_mp_employee_filter_cfg') or not preserve_view:
+            self._mp_employee_filter_cfg = {
+                'selected_ids': set(),     # wybrani employee_id (pusty = wszyscy)
+                'mode': 'show_selected',   # show_selected / show_unassigned / show_assigned_only / highlight
+            }
         # Wybrany (zaznaczony/locked) projekt w multi-Gantt
         if not hasattr(self, '_mp_selected_pid') or not preserve_view:
             self._mp_selected_pid = None
@@ -13768,21 +14193,54 @@ class RMManagerGUI:
             import importlib
             importlib.reload(rmm)
         
-        # Zbierz wszystkich pracowników (konstruktorów) z wszystkich projektów
-        all_employees = {}  # {employee_id: employee_name}
+        # Zbierz WSZYSTKICH pracowników (wszystkie kategorie) z wszystkich projektów
+        all_employees = {}  # {employee_id: {'name': ..., 'category': ...}}
         project_employees = {}  # {pid: set(employee_ids)}
+        stage_employees = {}  # {(pid, stage_code): set(employee_ids)}
         
         for pid in project_ids:
             try:
                 project_db = self.get_project_db_path(pid)
-                staff = rmm.get_project_staff(project_db, self.rm_master_db_path, pid)
-                emp_ids = set()
-                for s in staff:
-                    all_employees[s['employee_id']] = s['employee_name']
-                    emp_ids.add(s['employee_id'])
-                project_employees[pid] = emp_ids
+                # Pobierz przypisania per etap
+                stage_staff_map = rmm.get_all_stage_staff_for_project(project_db, self.rm_master_db_path, pid)
+                emp_ids_project = set()
+                for sc, staff_list in stage_staff_map.items():
+                    stage_emp_ids = set()
+                    for s in staff_list:
+                        eid = s.get('employee_id')
+                        if eid:
+                            stage_emp_ids.add(eid)
+                            emp_ids_project.add(eid)
+                    if stage_emp_ids:
+                        stage_employees[(pid, sc)] = stage_emp_ids
+                project_employees[pid] = emp_ids_project
             except Exception as e:
                 project_employees[pid] = set()
+        
+        # Pobierz szczegóły pracowników z master DB (wszystkie kategorie)
+        all_emp_ids = set()
+        for ids in project_employees.values():
+            all_emp_ids |= ids
+        if all_emp_ids:
+            try:
+                rmm.ensure_list_tables(self.rm_master_db_path)
+                con_master = rmm._open_rm_connection(self.rm_master_db_path)
+                placeholders = ','.join('?' * len(all_emp_ids))
+                rows = con_master.execute(f"""
+                    SELECT id, name, category FROM employees
+                    WHERE id IN ({placeholders})
+                    ORDER BY category, name
+                """, list(all_emp_ids)).fetchall()
+                con_master.close()
+                for r in rows:
+                    all_employees[r['id']] = {'name': r['name'], 'category': r['category'] or ''}
+            except Exception:
+                pass
+        
+        # Przechowaj dane do użycia w dialogu
+        self._mp_all_employees = all_employees
+        self._mp_project_employees = project_employees
+        self._mp_stage_employees = stage_employees
         
         # Zbierz dane z każdego projektu
         all_gantt_data = []  # lista słowników z danymi pasków
@@ -13795,10 +14253,18 @@ class RMManagerGUI:
         for pid in project_ids:
             pname = self.project_names.get(pid, f"Projekt {pid}")
             
-            # Filtr konstruktora - pomiń projekt jeśli nie ma wybranego konstruktora
-            if self._mp_employee_filter is not None:
-                if pid not in project_employees or self._mp_employee_filter not in project_employees[pid]:
+            # Filtr pracowników — na poziomie projektu
+            emp_cfg = self._mp_employee_filter_cfg
+            sel_ids = emp_cfg.get('selected_ids', set())
+            emp_mode = emp_cfg.get('mode', 'show_selected')
+            _emp_filter_active = bool(sel_ids) or emp_mode in ('show_unassigned', 'show_assigned_only')
+            
+            if sel_ids and emp_mode == 'show_selected':
+                # Pokaż projekt tylko gdy ma choć jednego z wybranych pracowników
+                if pid not in project_employees or not (sel_ids & project_employees[pid]):
                     continue
+            # show_unassigned i show_assigned_only — NIE filtruj na poziomie projektu,
+            # bo decyzja zapada per-etap (projekt może mieć etapy z i bez pracowników)
             
             # Domyślne per-projekt filtry typów
             if pid not in self._mp_proj_type_filters:
@@ -13851,9 +14317,35 @@ class RMManagerGUI:
                 if not self._mp_stage_filters.get(stage_code, True):
                     continue
                 
+                # ===== Filtr pracowników — na poziomie etapu =====
+                stage_emp_ids = stage_employees.get((pid, stage_code), set())
+                has_staff = len(stage_emp_ids) > 0
+                
+                if _emp_filter_active:
+                    if emp_mode == 'show_selected' and sel_ids:
+                        # Pokaż tylko etapy z wybranym pracownikiem
+                        if not (sel_ids & stage_emp_ids):
+                            continue
+                    elif emp_mode == 'show_unassigned':
+                        # Pokaż tylko etapy BEZ przypisanych pracowników
+                        if has_staff:
+                            continue
+                    elif emp_mode == 'show_assigned_only':
+                        # Pokaż tylko etapy z jakimkolwiek przypisanym pracownikiem
+                        if not has_staff:
+                            continue
+                    # 'highlight' — nie filtruj, podświetlenie handle'owane przy rysowaniu
+                
                 # Label: "nazwa_projektu | etap"
                 row_label = f"{pname} | {stage_name}"
                 y_labels.append(row_label)
+                
+                # Info o pracownikach dla tej pozycji (do highlight)
+                _emp_highlight = (sel_ids and emp_mode == 'highlight' and 
+                                  bool(sel_ids & stage_emp_ids))
+                _emp_names_for_row = [all_employees[eid]['name'] 
+                                      for eid in stage_emp_ids 
+                                      if eid in all_employees]
                 
                 # --- SZABLON ---
                 proj_tf = self._mp_proj_type_filters.get(pid, {})
@@ -13880,6 +14372,8 @@ class RMManagerGUI:
                             'y_offset': -0.1,
                             'project_id': pid,
                             'stage_code': stage_code,
+                            'highlight_emp': _emp_highlight,
+                            'staff_names': _emp_names_for_row,
                         })
                         all_dates.extend([tpl_start, tpl_end])
                 
@@ -13912,6 +14406,8 @@ class RMManagerGUI:
                                 'y_offset': 0.05,
                                 'project_id': pid,
                                 'stage_code': stage_code,
+                                'highlight_emp': _emp_highlight,
+                                'staff_names': _emp_names_for_row,
                             })
                             all_dates.extend([start_date, end_date])
                 
@@ -13938,6 +14434,8 @@ class RMManagerGUI:
                             'y_offset': 0.18,
                             'project_id': pid,
                             'stage_code': stage_code,
+                            'highlight_emp': _emp_highlight,
+                            'staff_names': _emp_names_for_row,
                         })
                         all_dates.extend([fc_start, fc_end])
                 
@@ -14039,6 +14537,11 @@ class RMManagerGUI:
                       bg="#8e44ad", fg="white", font=("Arial", 10, "bold"),
                       padx=10, pady=3).pack(side=tk.LEFT, padx=5)
             
+            tk.Button(top_bar, text="👷 Pracownicy",
+                      command=lambda: self._mp_employees_filter_dialog(project_ids),
+                      bg="#d35400", fg="white", font=("Arial", 10, "bold"),
+                      padx=10, pady=3).pack(side=tk.LEFT, padx=5)
+            
             # Legenda nawigacji
             tk.Label(top_bar,
                      text="🖱 Scroll: góra/dół  |  Shift+Scroll: lewo/prawo  |  Ctrl+Scroll: zoom czasu (X)  |  Ctrl+Shift+Scroll: zoom pionu (Y)  |  Shift+LMB: pan  |  🏠 Home: reset",
@@ -14101,43 +14604,62 @@ class RMManagerGUI:
             # Dodaj separator pionowy
             ttk.Separator(type_row, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=2)
             
-            # Konstruktor w tym samym wierszu
-            tk.Label(type_row, text="Konstruktor:", font=("Arial", 9, "bold"), bg="#f8f8f8"
-                    ).pack(side=tk.LEFT, padx=(0, 5))
+            # Podsumowanie filtra pracowników — czytelny status AKTYWNY / NIEAKTYWNY
+            emp_cfg = self._mp_employee_filter_cfg
+            sel_ids_display = emp_cfg.get('selected_ids', set())
+            emp_mode_display = emp_cfg.get('mode', 'show_selected')
             
-            # Lista konstruktorów: "Wszyscy" + lista pracowników
-            employee_list = ["Wszyscy"] + [all_employees[eid] for eid in sorted(all_employees.keys(), key=lambda e: all_employees[e])]
-            employee_ids_map = {all_employees[eid]: eid for eid in all_employees}  # name -> id
+            # Czy filtr jest faktycznie aktywny?
+            _filter_is_active = bool(sel_ids_display) or emp_mode_display in ('show_unassigned', 'show_assigned_only')
             
-            # Znajdź aktualny wybór
-            current_selection = "Wszyscy"
-            if self._mp_employee_filter is not None and self._mp_employee_filter in all_employees:
-                current_selection = all_employees[self._mp_employee_filter]
+            mode_labels = {
+                'show_selected': 'Etapy wybranych',
+                'show_unassigned': 'Bez pracowników',
+                'show_assigned_only': 'Tylko z pracownikami',
+                'highlight': 'Podświetlenie',
+            }
             
-            employee_var = tk.StringVar(value=current_selection)
-            employee_combo = ttk.Combobox(type_row, textvariable=employee_var,
-                                         values=employee_list, state='readonly',
-                                         width=20, font=("Arial", 9))
-            employee_combo.pack(side=tk.LEFT, padx=5)
-            
-            def _on_employee_change(event=None):
-                selected = employee_var.get()
-                if selected == "Wszyscy":
-                    self._mp_employee_filter = None
-                else:
-                    self._mp_employee_filter = employee_ids_map.get(selected)
-                _on_filter_change()
-            
-            employee_combo.bind("<<ComboboxSelected>>", _on_employee_change)
-            
-            # Informacja o liczbie projektów po filtrowaniu
-            if self._mp_employee_filter is not None:
-                filtered_count = sum(1 for pid in project_ids 
-                                   if pid in project_employees and self._mp_employee_filter in project_employees[pid])
-                tk.Label(type_row, 
-                        text=f"({filtered_count}/{len(project_ids)} projektów)",
-                        font=("Arial", 9), fg=self.COLOR_BLUE, bg="#f8f8f8"
-                ).pack(side=tk.LEFT, padx=5)
+            if _filter_is_active:
+                # ===== FILTR AKTYWNY =====
+                parts = [f"FILTR: {mode_labels.get(emp_mode_display, '?')}"]
+                if sel_ids_display:
+                    names = [all_employees[eid]['name'] for eid in sel_ids_display if eid in all_employees]
+                    names_str = ', '.join(names[:3])
+                    if len(names) > 3:
+                        names_str += f' +{len(names)-3}'
+                    parts.append(names_str)
+                emp_summary = '  ▸  '.join(parts)
+                
+                # Wyraźna etykieta z tłem — widać od razu że filtr jest włączony
+                indicator = tk.Frame(type_row, bg='#d35400', padx=6, pady=1)
+                indicator.pack(side=tk.LEFT, padx=(0, 3))
+                tk.Label(indicator, text="👷 " + emp_summary, 
+                        font=("Arial", 9, "bold"), bg='#d35400', fg='white'
+                ).pack(side=tk.LEFT)
+                
+                tk.Button(type_row, text="✏️", font=("Arial", 8), padx=3, pady=0,
+                          command=lambda: self._mp_employees_filter_dialog(project_ids),
+                          relief=tk.FLAT, bg="#f8f8f8", cursor='hand2'
+                ).pack(side=tk.LEFT, padx=2)
+                
+                tk.Button(type_row, text="🧹 Wyłącz", font=("Arial", 8, "bold"), padx=4, pady=0,
+                          command=lambda: (self._mp_employee_filter_cfg.update(
+                              {'selected_ids': set(), 'mode': 'show_selected'}),
+                              setattr(self, '_mp_employee_filter', None),
+                              _on_filter_change()),
+                          relief=tk.RAISED, bg="#fce4e4", cursor='hand2',
+                          fg='#c0392b'
+                ).pack(side=tk.LEFT, padx=2)
+            else:
+                # ===== FILTR NIEAKTYWNY =====
+                tk.Label(type_row, text="👷 Filtr pracowników: wyłączony", 
+                        font=("Arial", 9), bg="#f8f8f8", fg='#aaaaaa'
+                ).pack(side=tk.LEFT, padx=(0, 3))
+                
+                tk.Button(type_row, text="✏️ Ustaw filtr", font=("Arial", 8), padx=4, pady=0,
+                          command=lambda: self._mp_employees_filter_dialog(project_ids),
+                          relief=tk.FLAT, bg="#f8f8f8", cursor='hand2', fg='#555555'
+                ).pack(side=tk.LEFT, padx=2)
             
             # Separator poziomy (przed etapami)
             ttk.Separator(self._mp_filter_frame, orient='horizontal').pack(fill=tk.X, padx=5, pady=2)
@@ -14230,13 +14752,24 @@ class RMManagerGUI:
             linestyle = '--' if item['type'] == 'Szablon' else '-'
             linewidth = 0.8 if item['type'] == 'Szablon' else (0.5 if item['type'] == 'Prognoza' else 1.0)
             
+            # Highlight mode: podświetl paski z wybranym pracownikiem
+            edge_color = 'black'
+            item_alpha = item['alpha']
+            if item.get('highlight_emp'):
+                edge_color = '#e74c3c'
+                linewidth = max(linewidth, 2.5)
+                linestyle = '-'
+            elif sel_ids and emp_mode == 'highlight' and not item.get('highlight_emp'):
+                # Wygaś etapy bez wybranego pracownika
+                item_alpha = item['alpha'] * 0.3
+            
             rect = patches.Rectangle(
                 (mdates.date2num(item['start']), item['y_pos'] + item['y_offset']),
                 duration,
                 item['height'],
                 facecolor=item['color'],
-                alpha=item['alpha'],
-                edgecolor='black',
+                alpha=item_alpha,
+                edgecolor=edge_color,
                 linewidth=linewidth,
                 linestyle=linestyle,
             )
@@ -20438,6 +20971,1138 @@ Kod: {unlock_code}
         
         # Wymuś odświeżenie okna
         dialog.update_idletasks()
+
+    # ========================================================================
+    # OPTYMALIZATOR PRODUKCJI — główny dialog
+    # ========================================================================
+
+    def optimizer_dialog(self):
+        """Okno optymalizatora produkcji z zakładkami: Uruchom, Ograniczenia, Niedostępność, Kalendarz, Historia."""
+        try:
+            import rm_optimizer
+            importlib.reload(rm_optimizer)
+        except ImportError:
+            messagebox.showerror("Błąd", "Moduł rm_optimizer.py nie jest dostępny.\nUpewnij się, że plik istnieje w katalogu aplikacji.")
+            return
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Nie można załadować rm_optimizer:\n{e}")
+            return
+
+        check_fn = getattr(rm_optimizer, 'check_ortools_available', None)
+        if check_fn and not check_fn():
+            messagebox.showwarning(
+                "OR-Tools",
+                "Biblioteka Google OR-Tools nie jest zainstalowana.\n\n"
+                "Zainstaluj poleceniem:\n  pip install ortools\n\n"
+                "Bez niej optymalizacja nie będzie działać."
+            )
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("⚡ Optymalizator produkcji")
+        dlg.transient(self.root)
+        self._center_window(dlg, 1100, 750)
+        dlg.minsize(900, 600)
+
+        header = tk.Label(dlg, text="⚡ OPTYMALIZATOR PRODUKCJI",
+                          bg=self.COLOR_TOPBAR, fg="white",
+                          font=("Arial", 13, "bold"), pady=10)
+        header.pack(fill=tk.X)
+
+        notebook = ttk.Notebook(dlg)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        # === Zakładka 1: Uruchom optymalizację ===
+        tab_run = tk.Frame(notebook)
+        notebook.add(tab_run, text="  ▶  Uruchom  ")
+        self._optimizer_build_run_tab(tab_run, dlg)
+
+        # === Zakładka 2: Ograniczenia zasobów ===
+        tab_constraints = tk.Frame(notebook)
+        notebook.add(tab_constraints, text="  ⚙  Ograniczenia  ")
+        self._optimizer_build_constraints_tab(tab_constraints, dlg)
+
+        # === Zakładka 3: Niedostępność pracowników ===
+        tab_avail = tk.Frame(notebook)
+        notebook.add(tab_avail, text="  🗓  Niedostępność  ")
+        self._optimizer_build_availability_tab(tab_avail, dlg)
+
+        # === Zakładka 4: Kalendarz firmowy ===
+        tab_cal = tk.Frame(notebook)
+        notebook.add(tab_cal, text="  📅  Kalendarz  ")
+        self._optimizer_build_calendar_tab(tab_cal, dlg)
+
+        # === Zakładka 5: Historia ===
+        tab_hist = tk.Frame(notebook)
+        notebook.add(tab_hist, text="  📜  Historia  ")
+        self._optimizer_build_history_tab(tab_hist, dlg)
+
+    # ----------------------------------------------------------------
+    # TAB: Uruchom optymalizację
+    # ----------------------------------------------------------------
+
+    def _optimizer_build_run_tab(self, parent, dlg):
+        """Zakładka uruchamiania optymalizacji — wybór projektów + trybu + wyniki."""
+        import rm_optimizer
+
+        # --- Tryb ---
+        mode_frame = tk.LabelFrame(parent, text="Tryb optymalizacji", font=self.FONT_BOLD, padx=10, pady=5)
+        mode_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+
+        mode_var = tk.StringVar(value='fit_projects')
+        tk.Radiobutton(mode_frame, text="Wciśnij wybrane projekty w istniejący harmonogram (fit_projects)",
+                       variable=mode_var, value='fit_projects', font=self.FONT_DEFAULT
+                       ).pack(anchor='w')
+        tk.Radiobutton(mode_frame, text="Przeoptymalizuj całą produkcję (optimize_all)",
+                       variable=mode_var, value='optimize_all', font=self.FONT_DEFAULT
+                       ).pack(anchor='w')
+
+        # --- Bez pracowników ---
+        nostaff_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(mode_frame, text="🚫 Bez ograniczeń pracowników (tylko zależności + limity kategorii)",
+                       variable=nostaff_var, font=self.FONT_DEFAULT
+                       ).pack(anchor='w', pady=(4, 0))
+
+        # --- Limit czasu ---
+        time_frame = tk.Frame(mode_frame)
+        time_frame.pack(anchor='w', pady=(5, 0))
+        tk.Label(time_frame, text="Limit czasu solvera (s):", font=self.FONT_DEFAULT).pack(side=tk.LEFT)
+        time_var = tk.StringVar(value='30')
+        tk.Entry(time_frame, textvariable=time_var, width=6, font=self.FONT_DEFAULT).pack(side=tk.LEFT, padx=5)
+
+        # --- Wybór projektów ---
+        proj_frame = tk.LabelFrame(parent, text="Projekty do optymalizacji", font=self.FONT_BOLD, padx=10, pady=5)
+        proj_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        proj_toolbar = tk.Frame(proj_frame)
+        proj_toolbar.pack(fill=tk.X, pady=(0, 5))
+
+        tk.Button(proj_toolbar, text="✅ Zaznacz wszystkie", font=self.FONT_SMALL,
+                  command=lambda: _select_all(True)).pack(side=tk.LEFT, padx=2)
+        tk.Button(proj_toolbar, text="⬜ Odznacz wszystkie", font=self.FONT_SMALL,
+                  command=lambda: _select_all(False)).pack(side=tk.LEFT, padx=2)
+        tk.Label(proj_toolbar, text="   ✅ = optymalizuj  |  ⬜ = zamrożony (tło)",
+                 font=self.FONT_SMALL, fg="#666").pack(side=tk.LEFT, padx=10)
+
+        # Canvas z checkbuttons
+        canvas_frame = tk.Frame(proj_frame)
+        canvas_frame.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(canvas_frame, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
+        inner = tk.Frame(canvas)
+
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Obsługa scrolla kółkiem myszy
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel, add='+')
+        dlg.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>") if e.widget == dlg else None, add='+')
+
+        check_vars = {}  # pid -> BooleanVar
+        for pid in self.projects:
+            pname = self.project_names.get(pid, f"Projekt {pid}")
+            pdb = self.get_project_db_path(pid)
+            has_db = os.path.exists(pdb) if hasattr(self, 'get_project_db_path') else False
+
+            row = tk.Frame(inner, pady=1)
+            row.pack(fill=tk.X)
+
+            cv = tk.BooleanVar(value=False)
+            check_vars[pid] = cv
+
+            cb = tk.Checkbutton(row, variable=cv, width=1)
+            cb.pack(side=tk.LEFT)
+
+            status_txt = ""
+            is_blocked = False  # ZAKOŃCZONY / WSTRZYMANY → nie do optymalizacji
+            if has_db:
+                try:
+                    if rmm.is_milestone_set(pdb, pid, 'ZAKONCZONY'):
+                        status_txt = " [ZAKOŃCZONY]"
+                        is_blocked = True
+                    elif rmm.is_project_paused(pdb, pid):
+                        status_txt = " [WSTRZYMANY]"
+                        is_blocked = True
+                except Exception:
+                    pass
+
+            lbl = tk.Label(row, text=f"{pname}{status_txt}",
+                           font=self.FONT_DEFAULT, anchor='w')
+            lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            if not has_db or is_blocked:
+                lbl.configure(fg="#999")
+                cb.configure(state=tk.DISABLED)
+                cv.set(False)
+
+        def _select_all(val):
+            for pid, cv in check_vars.items():
+                pdb = self.get_project_db_path(pid)
+                if not os.path.exists(pdb):
+                    continue
+                # Nie zaznaczaj zakończonych / wstrzymanych
+                try:
+                    if rmm.is_milestone_set(pdb, pid, 'ZAKONCZONY'):
+                        continue
+                    if rmm.is_project_paused(pdb, pid):
+                        continue
+                except Exception:
+                    pass
+                cv.set(val)
+
+        # --- Przycisk uruchomienia + wynik ---
+        bottom = tk.Frame(parent)
+        bottom.pack(fill=tk.X, padx=10, pady=(5, 10))
+
+        result_text = tk.Text(bottom, height=8, font=("Consolas", 9), state=tk.DISABLED,
+                              wrap=tk.WORD, bg="#f9f9f9")
+
+        def _run_optimization():
+            selected = [pid for pid, cv in check_vars.items() if cv.get()]
+            if not selected and mode_var.get() == 'fit_projects':
+                messagebox.showwarning("Uwaga", "Zaznacz co najmniej jeden projekt do optymalizacji.", parent=dlg)
+                return
+
+            if mode_var.get() == 'optimize_all':
+                selected = []
+                for pid in self.projects:
+                    pdb = self.get_project_db_path(pid)
+                    if not os.path.exists(pdb):
+                        continue
+                    try:
+                        if rmm.is_milestone_set(pdb, pid, 'ZAKONCZONY'):
+                            continue
+                        if rmm.is_project_paused(pdb, pid):
+                            continue
+                    except Exception:
+                        pass
+                    selected.append(pid)
+
+            frozen = [pid for pid in self.projects
+                      if pid not in selected and os.path.exists(self.get_project_db_path(pid))]
+
+            try:
+                tl = int(time_var.get())
+            except ValueError:
+                tl = 30
+
+            print(f"⚡ OPTIMIZER: mode={mode_var.get()}, target={selected}, frozen={len(frozen)}")
+            print(f"⚡ OPTIMIZER: rm_projects_dir={self.rm_projects_dir}")
+            print(f"⚡ OPTIMIZER: rm_master_db_path={self.rm_master_db_path}")
+
+            # Wyczyść
+            result_text.configure(state=tk.NORMAL)
+            result_text.delete('1.0', tk.END)
+            result_text.insert(tk.END, "⏳ Optymalizacja w toku...\n")
+            result_text.configure(state=tk.DISABLED)
+            dlg.update()
+
+            try:
+                result = rm_optimizer.run_optimization(
+                    rm_manager_dir=self.rm_projects_dir,
+                    rm_master_db_path=self.rm_master_db_path,
+                    mode=mode_var.get(),
+                    target_project_ids=selected,
+                    frozen_project_ids=frozen,
+                    time_limit_seconds=tl,
+                    ignore_staff=nostaff_var.get(),
+                )
+            except Exception as e:
+                result_text.configure(state=tk.NORMAL)
+                result_text.delete('1.0', tk.END)
+                result_text.insert(tk.END, f"❌ Błąd: {e}\n")
+                result_text.configure(state=tk.DISABLED)
+                return
+
+            # Pokaż wynik
+            result_text.configure(state=tk.NORMAL)
+            result_text.delete('1.0', tk.END)
+            result_text.insert(tk.END, f"{result.get('message', '')}\n\n")
+
+            changes = result.get('changes', {})
+            if changes:
+                result_text.insert(tk.END, f"Zmiany w {len(changes)} projektach:\n")
+                for pid, sc_changes in changes.items():
+                    pname = self.project_names.get(int(pid), f"Projekt {pid}")
+                    result_text.insert(tk.END, f"\n  📁 {pname}:\n")
+                    for sc, info in sc_changes.items():
+                        result_text.insert(tk.END,
+                            f"    {sc}: {info['old_start']}→{info['new_start']}  "
+                            f"do {info['old_end']}→{info['new_end']}\n")
+
+                result_text.insert(tk.END, "\n")
+
+                # Przycisk Zastosuj
+                btn_apply.configure(state=tk.NORMAL)
+                btn_apply._opt_result = result
+            else:
+                result_text.insert(tk.END, "Brak zmian — harmonogram jest już optymalny lub solver nie znalazł lepszego.\n")
+                btn_apply.configure(state=tk.DISABLED)
+
+            result_text.configure(state=tk.DISABLED)
+
+        def _apply_result():
+            result = getattr(btn_apply, '_opt_result', None)
+            if not result or not result.get('changes'):
+                return
+            if not messagebox.askyesno("Potwierdzenie",
+                    f"Zastosować zmiany optymalizacji?\n\n"
+                    f"Zmienione zostaną daty template w {len(result['changes'])} projektach.\n"
+                    f"Operacja jest odwracalna (historia w zakładce Historia).",
+                    parent=dlg):
+                return
+            try:
+                apply_result = rm_optimizer.apply_optimization(
+                    rm_manager_dir=self.rm_projects_dir,
+                    rm_master_db_path=self.rm_master_db_path,
+                    changes=result['changes'],
+                    user=getattr(self, 'current_user', None),
+                )
+                msg = (f"✅ Zastosowano: {apply_result['applied_projects']} projektów, "
+                       f"{apply_result['applied_stages']} etapów.")
+                if apply_result.get('errors'):
+                    msg += f"\n\n⚠️ Błędy:\n" + "\n".join(apply_result['errors'])
+                messagebox.showinfo("Zastosowano", msg, parent=dlg)
+                btn_apply.configure(state=tk.DISABLED)
+            except Exception as e:
+                messagebox.showerror("Błąd", f"Nie udało się zastosować:\n{e}", parent=dlg)
+
+        btn_frame = tk.Frame(bottom)
+        btn_frame.pack(fill=tk.X, pady=(0, 5))
+
+        tk.Button(btn_frame, text="▶  Uruchom optymalizację", command=_run_optimization,
+                  bg=self.COLOR_GREEN, fg="white", font=("Arial", 11, "bold"),
+                  padx=20, pady=6).pack(side=tk.LEFT, padx=5)
+
+        btn_apply = tk.Button(btn_frame, text="✅ Zastosuj wynik", command=_apply_result,
+                              bg=self.COLOR_BLUE, fg="white", font=("Arial", 11, "bold"),
+                              padx=20, pady=6, state=tk.DISABLED)
+        btn_apply.pack(side=tk.LEFT, padx=5)
+
+        result_text.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
+
+    # ----------------------------------------------------------------
+    # TAB: Ograniczenia zasobów
+    # ----------------------------------------------------------------
+
+    def _optimizer_build_constraints_tab(self, parent, dlg):
+        """Zakładka CRUD ograniczeń zasobów."""
+        toolbar = tk.Frame(parent, padx=8, pady=6)
+        toolbar.pack(fill=tk.X)
+
+        tk.Button(toolbar, text="➕ Dodaj", command=lambda: _edit(None),
+                  bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar, text="✏️ Edytuj", command=lambda: _edit_selected(),
+                  bg=self.COLOR_PURPLE, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar, text="🗑 Usuń", command=lambda: _delete_selected(),
+                  bg=self.COLOR_RED, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
+
+        cols = ('id', 'type', 'category', 'stage', 'max_parallel', 'description', 'active')
+        tree = ttk.Treeview(parent, columns=cols, show='headings', height=16)
+        tree.heading('id', text='ID');           tree.column('id', width=40, stretch=False)
+        tree.heading('type', text='Typ');        tree.column('type', width=160)
+        tree.heading('category', text='Kategoria'); tree.column('category', width=120)
+        tree.heading('stage', text='Etap');      tree.column('stage', width=130)
+        tree.heading('max_parallel', text='Max'); tree.column('max_parallel', width=50, stretch=False)
+        tree.heading('description', text='Opis'); tree.column('description', width=300)
+        tree.heading('active', text='Akt.');     tree.column('active', width=40, stretch=False)
+
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, side=tk.LEFT)
+        vsb.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 8))
+
+        def refresh():
+            tree.delete(*tree.get_children())
+            for r in rmm.get_resource_constraints(self.rm_master_db_path, active_only=False):
+                tree.insert('', tk.END, iid=str(r['id']), values=(
+                    r['id'], r['constraint_type'], r.get('category') or '—',
+                    r.get('stage_code') or '—', r.get('max_parallel', 1),
+                    r.get('description') or '', '✓' if r.get('is_active') else '—'
+                ))
+
+        def _edit_selected():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Uwaga", "Wybierz ograniczenie.", parent=dlg)
+                return
+            _edit(int(sel[0]))
+
+        def _delete_selected():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Uwaga", "Wybierz ograniczenie.", parent=dlg)
+                return
+            if messagebox.askyesno("Potwierdzenie", "Usunąć zaznaczone ograniczenie?", parent=dlg):
+                rmm.delete_resource_constraint(self.rm_master_db_path, int(sel[0]))
+                refresh()
+
+        def _edit(cid):
+            ed = tk.Toplevel(dlg)
+            ed.title("Ograniczenie zasobu")
+            ed.transient(dlg)
+            ed.grab_set()
+            self._center_window(ed, 500, 380)
+
+            data = {}
+            if cid:
+                for r in rmm.get_resource_constraints(self.rm_master_db_path, active_only=False):
+                    if r['id'] == cid:
+                        data = r
+                        break
+
+            f = tk.Frame(ed, padx=15, pady=10)
+            f.pack(fill=tk.BOTH, expand=True)
+
+            tk.Label(f, text="Typ:", font=self.FONT_BOLD).grid(row=0, column=0, sticky='w', pady=3)
+            type_var = tk.StringVar(value=data.get('constraint_type', 'exclusive_person'))
+            type_combo = ttk.Combobox(f, textvariable=type_var, state='readonly', width=30,
+                                       values=['exclusive_person', 'max_concurrent_category', 'max_concurrent_stage'])
+            type_combo.grid(row=0, column=1, sticky='w', pady=3)
+
+            tk.Label(f, text="Kategoria:", font=self.FONT_BOLD).grid(row=1, column=0, sticky='w', pady=3)
+            cat_var = tk.StringVar(value=data.get('category') or '')
+            ttk.Combobox(f, textvariable=cat_var, width=30,
+                         values=[''] + rmm.EMPLOYEE_CATEGORIES).grid(row=1, column=1, sticky='w', pady=3)
+
+            tk.Label(f, text="Etap:", font=self.FONT_BOLD).grid(row=2, column=0, sticky='w', pady=3)
+            stage_var = tk.StringVar(value=data.get('stage_code') or '')
+            stage_codes = [''] + [code for code, _, _, _ in rmm.STAGE_DEFINITIONS]
+            ttk.Combobox(f, textvariable=stage_var, width=30,
+                         values=stage_codes).grid(row=2, column=1, sticky='w', pady=3)
+
+            tk.Label(f, text="Max równolegle:", font=self.FONT_BOLD).grid(row=3, column=0, sticky='w', pady=3)
+            max_var = tk.StringVar(value=str(data.get('max_parallel', 1)))
+            tk.Entry(f, textvariable=max_var, width=6).grid(row=3, column=1, sticky='w', pady=3)
+
+            tk.Label(f, text="Opis:", font=self.FONT_BOLD).grid(row=4, column=0, sticky='nw', pady=3)
+            desc_var = tk.StringVar(value=data.get('description') or '')
+            tk.Entry(f, textvariable=desc_var, width=40).grid(row=4, column=1, sticky='w', pady=3)
+
+            active_var = tk.BooleanVar(value=data.get('is_active', 1))
+            tk.Checkbutton(f, text="Aktywne", variable=active_var).grid(row=5, column=1, sticky='w', pady=3)
+
+            def _save():
+                try:
+                    mp = int(max_var.get())
+                except ValueError:
+                    mp = 1
+                save_data = {
+                    'constraint_type': type_var.get(),
+                    'category': cat_var.get() or None,
+                    'stage_code': stage_var.get() or None,
+                    'max_parallel': mp,
+                    'description': desc_var.get() or None,
+                    'is_active': 1 if active_var.get() else 0,
+                }
+                if cid:
+                    save_data['id'] = cid
+                rmm.save_resource_constraint(self.rm_master_db_path, save_data,
+                                             user=getattr(self, 'current_user', None))
+                ed.destroy()
+                refresh()
+
+            btn_f = tk.Frame(ed)
+            btn_f.pack(fill=tk.X, padx=15, pady=10)
+            tk.Button(btn_f, text="💾 Zapisz", command=_save,
+                      bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=15).pack(side=tk.LEFT, padx=5)
+            tk.Button(btn_f, text="Anuluj", command=ed.destroy,
+                      font=self.FONT_DEFAULT, padx=10).pack(side=tk.LEFT, padx=5)
+
+        refresh()
+
+    # ----------------------------------------------------------------
+    # TAB: Niedostępność pracowników
+    # ----------------------------------------------------------------
+
+    def _optimizer_build_availability_tab(self, parent, dlg):
+        """Zakładka CRUD niedostępności pracowników (urlopy, L4 itp.)."""
+        toolbar = tk.Frame(parent, padx=8, pady=6)
+        toolbar.pack(fill=tk.X)
+
+        tk.Button(toolbar, text="➕ Dodaj nieobecność", command=lambda: _edit(None),
+                  bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar, text="✏️ Edytuj", command=lambda: _edit_selected(),
+                  bg=self.COLOR_PURPLE, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar, text="🗑 Usuń", command=lambda: _delete_selected(),
+                  bg=self.COLOR_RED, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
+
+        # Filtr
+        tk.Label(toolbar, text="   Od:", font=self.FONT_SMALL).pack(side=tk.LEFT)
+        from_var = tk.StringVar(value=datetime.now().strftime('%Y-%m-%d'))
+        tk.Entry(toolbar, textvariable=from_var, width=12, font=self.FONT_SMALL).pack(side=tk.LEFT, padx=2)
+        tk.Label(toolbar, text="Do:", font=self.FONT_SMALL).pack(side=tk.LEFT)
+        to_var = tk.StringVar(value=(datetime.now() + timedelta(days=365)).strftime('%Y-%m-%d'))
+        tk.Entry(toolbar, textvariable=to_var, width=12, font=self.FONT_SMALL).pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar, text="🔍", command=lambda: refresh(),
+                  font=self.FONT_SMALL).pack(side=tk.LEFT, padx=2)
+
+        cols = ('id', 'employee', 'category', 'from', 'to', 'reason', 'notes')
+        tree = ttk.Treeview(parent, columns=cols, show='headings', height=16)
+        tree.heading('id', text='ID');           tree.column('id', width=40, stretch=False)
+        tree.heading('employee', text='Pracownik'); tree.column('employee', width=180)
+        tree.heading('category', text='Kategoria'); tree.column('category', width=110)
+        tree.heading('from', text='Od');         tree.column('from', width=100, stretch=False)
+        tree.heading('to', text='Do');           tree.column('to', width=100, stretch=False)
+        tree.heading('reason', text='Powód');    tree.column('reason', width=120)
+        tree.heading('notes', text='Uwagi');     tree.column('notes', width=200)
+
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, side=tk.LEFT)
+        vsb.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 8))
+
+        def refresh():
+            tree.delete(*tree.get_children())
+            rows = rmm.get_employee_availability(
+                self.rm_master_db_path,
+                date_from=from_var.get() or None,
+                date_to=to_var.get() or None,
+            )
+            for r in rows:
+                tree.insert('', tk.END, iid=str(r['id']), values=(
+                    r['id'], r.get('employee_name', '?'),
+                    r.get('employee_category', ''),
+                    r['date_from'], r['date_to'],
+                    r.get('reason') or '', r.get('notes') or '',
+                ))
+
+        def _edit_selected():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Uwaga", "Wybierz wpis.", parent=dlg)
+                return
+            _edit(int(sel[0]))
+
+        def _delete_selected():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Uwaga", "Wybierz wpis.", parent=dlg)
+                return
+            if messagebox.askyesno("Potwierdzenie", "Usunąć zaznaczony wpis niedostępności?", parent=dlg):
+                rmm.delete_employee_availability(self.rm_master_db_path, int(sel[0]))
+                refresh()
+
+        def _edit(avid):
+            ed = tk.Toplevel(dlg)
+            ed.title("Niedostępność pracownika")
+            ed.transient(dlg)
+            ed.grab_set()
+            self._center_window(ed, 500, 350)
+
+            data = {}
+            if avid:
+                for r in rmm.get_employee_availability(self.rm_master_db_path):
+                    if r['id'] == avid:
+                        data = r
+                        break
+
+            f = tk.Frame(ed, padx=15, pady=10)
+            f.pack(fill=tk.BOTH, expand=True)
+
+            # Lista pracowników
+            emps = rmm.get_employees(self.rm_master_db_path, active_only=True)
+            emp_map = {f"{e['name']} ({e['category']})": e['id'] for e in emps}
+            emp_names = list(emp_map.keys())
+
+            tk.Label(f, text="Pracownik:", font=self.FONT_BOLD).grid(row=0, column=0, sticky='w', pady=3)
+            emp_var = tk.StringVar()
+            if avid and data:
+                for name, eid in emp_map.items():
+                    if eid == data.get('employee_id'):
+                        emp_var.set(name)
+                        break
+            emp_combo = ttk.Combobox(f, textvariable=emp_var, values=emp_names, width=35, state='readonly')
+            emp_combo.grid(row=0, column=1, sticky='w', pady=3)
+
+            tk.Label(f, text="Od (YYYY-MM-DD):", font=self.FONT_BOLD).grid(row=1, column=0, sticky='w', pady=3)
+            df_var = tk.StringVar(value=data.get('date_from', ''))
+            tk.Entry(f, textvariable=df_var, width=14).grid(row=1, column=1, sticky='w', pady=3)
+
+            tk.Label(f, text="Do (YYYY-MM-DD):", font=self.FONT_BOLD).grid(row=2, column=0, sticky='w', pady=3)
+            dt_var = tk.StringVar(value=data.get('date_to', ''))
+            tk.Entry(f, textvariable=dt_var, width=14).grid(row=2, column=1, sticky='w', pady=3)
+
+            tk.Label(f, text="Powód:", font=self.FONT_BOLD).grid(row=3, column=0, sticky='w', pady=3)
+            reason_var = tk.StringVar(value=data.get('reason', ''))
+            ttk.Combobox(f, textvariable=reason_var, width=20,
+                         values=['urlop', 'L4', 'delegacja', 'szkolenie', 'inne']).grid(row=3, column=1, sticky='w', pady=3)
+
+            tk.Label(f, text="Uwagi:", font=self.FONT_BOLD).grid(row=4, column=0, sticky='nw', pady=3)
+            notes_var = tk.StringVar(value=data.get('notes') or '')
+            tk.Entry(f, textvariable=notes_var, width=40).grid(row=4, column=1, sticky='w', pady=3)
+
+            def _save():
+                eid = emp_map.get(emp_var.get())
+                if not eid:
+                    messagebox.showwarning("Uwaga", "Wybierz pracownika.", parent=ed)
+                    return
+                if not df_var.get() or not dt_var.get():
+                    messagebox.showwarning("Uwaga", "Podaj daty Od i Do.", parent=ed)
+                    return
+                save_data = {
+                    'employee_id': eid,
+                    'date_from': df_var.get(),
+                    'date_to': dt_var.get(),
+                    'reason': reason_var.get(),
+                    'notes': notes_var.get() or None,
+                }
+                if avid:
+                    save_data['id'] = avid
+                rmm.save_employee_availability(self.rm_master_db_path, save_data,
+                                               user=getattr(self, 'current_user', None))
+                ed.destroy()
+                refresh()
+
+            btn_f = tk.Frame(ed)
+            btn_f.pack(fill=tk.X, padx=15, pady=10)
+            tk.Button(btn_f, text="💾 Zapisz", command=_save,
+                      bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=15).pack(side=tk.LEFT, padx=5)
+            tk.Button(btn_f, text="Anuluj", command=ed.destroy,
+                      font=self.FONT_DEFAULT, padx=10).pack(side=tk.LEFT, padx=5)
+
+        refresh()
+
+    # ----------------------------------------------------------------
+    # TAB: Kalendarz firmowy
+    # ----------------------------------------------------------------
+
+    def _optimizer_build_calendar_tab(self, parent, dlg):
+        """Zakładka kalendarza firmowego — święta, wolne soboty pracujące."""
+        toolbar = tk.Frame(parent, padx=8, pady=6)
+        toolbar.pack(fill=tk.X)
+
+        tk.Button(toolbar, text="➕ Dodaj dzień", command=lambda: _edit(None),
+                  bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar, text="🗑 Usuń", command=lambda: _delete_selected(),
+                  bg=self.COLOR_RED, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
+
+        tk.Label(toolbar, text="   Rok:", font=self.FONT_SMALL).pack(side=tk.LEFT)
+        year_var = tk.StringVar(value=str(datetime.now().year))
+        tk.Entry(toolbar, textvariable=year_var, width=6, font=self.FONT_SMALL).pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar, text="🔍", command=lambda: refresh(),
+                  font=self.FONT_SMALL).pack(side=tk.LEFT, padx=2)
+
+        cols = ('date', 'type', 'description')
+        tree = ttk.Treeview(parent, columns=cols, show='headings', height=18)
+        tree.heading('date', text='Data');       tree.column('date', width=120, stretch=False)
+        tree.heading('type', text='Typ');        tree.column('type', width=160)
+        tree.heading('description', text='Opis'); tree.column('description', width=400)
+
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, side=tk.LEFT)
+        vsb.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 8))
+
+        type_labels = {
+            'holiday': '🔴 Święto / dzień wolny',
+            'day_off': '🟠 Dzień wolny (firmowy)',
+            'saturday_work': '🟢 Sobota pracująca',
+        }
+
+        def refresh():
+            tree.delete(*tree.get_children())
+            try:
+                yr = int(year_var.get())
+            except ValueError:
+                yr = datetime.now().year
+            rows = rmm.get_company_calendar(self.rm_master_db_path,
+                                            date_from=f"{yr}-01-01", date_to=f"{yr}-12-31")
+            for r in rows:
+                tree.insert('', tk.END, iid=r['date'], values=(
+                    r['date'],
+                    type_labels.get(r['day_type'], r['day_type']),
+                    r.get('description') or '',
+                ))
+
+        def _delete_selected():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Uwaga", "Wybierz dzień.", parent=dlg)
+                return
+            if messagebox.askyesno("Potwierdzenie", f"Usunąć dzień {sel[0]}?", parent=dlg):
+                rmm.delete_company_calendar_day(self.rm_master_db_path, sel[0])
+                refresh()
+
+        def _edit(existing_date):
+            ed = tk.Toplevel(dlg)
+            ed.title("Dzień w kalendarzu firmowym")
+            ed.transient(dlg)
+            ed.grab_set()
+            self._center_window(ed, 420, 250)
+
+            f = tk.Frame(ed, padx=15, pady=10)
+            f.pack(fill=tk.BOTH, expand=True)
+
+            tk.Label(f, text="Data (YYYY-MM-DD):", font=self.FONT_BOLD).grid(row=0, column=0, sticky='w', pady=3)
+            date_var = tk.StringVar(value=existing_date or '')
+            tk.Entry(f, textvariable=date_var, width=14).grid(row=0, column=1, sticky='w', pady=3)
+
+            tk.Label(f, text="Typ:", font=self.FONT_BOLD).grid(row=1, column=0, sticky='w', pady=3)
+            dtype_var = tk.StringVar(value='holiday')
+            ttk.Combobox(f, textvariable=dtype_var, state='readonly', width=25,
+                         values=['holiday', 'day_off', 'saturday_work']).grid(row=1, column=1, sticky='w', pady=3)
+
+            tk.Label(f, text="Opis:", font=self.FONT_BOLD).grid(row=2, column=0, sticky='w', pady=3)
+            desc_var = tk.StringVar()
+            tk.Entry(f, textvariable=desc_var, width=30).grid(row=2, column=1, sticky='w', pady=3)
+
+            def _save():
+                d = date_var.get().strip()
+                if not d:
+                    messagebox.showwarning("Uwaga", "Podaj datę.", parent=ed)
+                    return
+                rmm.save_company_calendar_day(self.rm_master_db_path, d, dtype_var.get(),
+                                              desc_var.get() or None,
+                                              user=getattr(self, 'current_user', None))
+                ed.destroy()
+                refresh()
+
+            btn_f = tk.Frame(ed)
+            btn_f.pack(fill=tk.X, padx=15, pady=10)
+            tk.Button(btn_f, text="💾 Zapisz", command=_save,
+                      bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=15).pack(side=tk.LEFT, padx=5)
+            tk.Button(btn_f, text="Anuluj", command=ed.destroy,
+                      font=self.FONT_DEFAULT, padx=10).pack(side=tk.LEFT, padx=5)
+
+        refresh()
+
+    # ----------------------------------------------------------------
+    # TAB: Historia optymalizacji
+    # ----------------------------------------------------------------
+
+    def _optimizer_build_history_tab(self, parent, dlg):
+        """Zakładka historii przebiegów optymalizacji."""
+        toolbar = tk.Frame(parent, padx=8, pady=6)
+        toolbar.pack(fill=tk.X)
+
+        tk.Button(toolbar, text="🔄 Odśwież", command=lambda: refresh(),
+                  font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
+
+        cols = ('id', 'date', 'mode', 'status', 'time', 'before', 'after', 'applied', 'projects')
+        tree = ttk.Treeview(parent, columns=cols, show='headings', height=14)
+        tree.heading('id', text='ID');         tree.column('id', width=40, stretch=False)
+        tree.heading('date', text='Data');     tree.column('date', width=140)
+        tree.heading('mode', text='Tryb');     tree.column('mode', width=110)
+        tree.heading('status', text='Status'); tree.column('status', width=90)
+        tree.heading('time', text='Czas (ms)'); tree.column('time', width=80, stretch=False)
+        tree.heading('before', text='Przed');  tree.column('before', width=60, stretch=False)
+        tree.heading('after', text='Po');      tree.column('after', width=60, stretch=False)
+        tree.heading('applied', text='Zastos.'); tree.column('applied', width=60, stretch=False)
+        tree.heading('projects', text='Projekty'); tree.column('projects', width=250)
+
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, side=tk.LEFT)
+        vsb.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 8))
+
+        # Szczegóły pod treeview
+        detail_text = tk.Text(parent, height=8, font=("Consolas", 9), state=tk.DISABLED,
+                              wrap=tk.WORD, bg="#f9f9f9")
+        detail_text.pack(fill=tk.X, padx=8, pady=(5, 8))
+
+        def refresh():
+            tree.delete(*tree.get_children())
+            for r in rmm.get_optimization_runs(self.rm_master_db_path, limit=50):
+                pids = ''
+                try:
+                    pids = json.loads(r.get('project_ids_json') or '[]')
+                    pids = ', '.join(str(p) for p in pids[:8])
+                    if len(json.loads(r.get('project_ids_json') or '[]')) > 8:
+                        pids += '…'
+                except Exception:
+                    pass
+                tree.insert('', tk.END, iid=str(r['id']), values=(
+                    r['id'],
+                    (r.get('created_at') or '')[:19],
+                    r.get('run_mode', ''),
+                    r.get('solver_status', ''),
+                    r.get('solver_time_ms', ''),
+                    r.get('score_before', ''),
+                    r.get('score_after', ''),
+                    '✅' if r.get('applied') else '—',
+                    pids,
+                ))
+
+        def _on_select(event):
+            sel = tree.selection()
+            if not sel:
+                return
+            rid = int(sel[0])
+            detail_text.configure(state=tk.NORMAL)
+            detail_text.delete('1.0', tk.END)
+            for r in rmm.get_optimization_runs(self.rm_master_db_path, limit=100):
+                if r['id'] == rid:
+                    detail_text.insert(tk.END, f"ID: {r['id']}  |  Tryb: {r.get('run_mode')}  |  "
+                                       f"Status: {r.get('solver_status')}  |  Czas: {r.get('solver_time_ms')}ms\n")
+                    detail_text.insert(tk.END, f"Zakres: {r.get('date_range_start')} → {r.get('date_range_end')}\n")
+                    detail_text.insert(tk.END, f"Zastosowano: {'Tak' if r.get('applied') else 'Nie'}")
+                    if r.get('applied_at'):
+                        detail_text.insert(tk.END, f"  ({r['applied_at'][:19]} przez {r.get('applied_by', '?')})")
+                    detail_text.insert(tk.END, "\n\n")
+                    try:
+                        result = json.loads(r.get('result_json') or '{}')
+                        if result:
+                            detail_text.insert(tk.END, "Zmiany:\n")
+                            for pid, stages in result.items():
+                                pname = self.project_names.get(int(pid), f"Projekt {pid}")
+                                detail_text.insert(tk.END, f"  {pname}:\n")
+                                for sc, info in stages.items():
+                                    detail_text.insert(tk.END,
+                                        f"    {sc}: {info.get('old_start','')}→{info.get('new_start','')}  "
+                                        f"do {info.get('old_end','')}→{info.get('new_end','')}\n")
+                        else:
+                            detail_text.insert(tk.END, "Brak zmian.\n")
+                    except Exception:
+                        detail_text.insert(tk.END, "Nie można odczytać szczegółów.\n")
+                    break
+            detail_text.configure(state=tk.DISABLED)
+
+        tree.bind('<<TreeviewSelect>>', _on_select)
+        refresh()
+
+    # ========================================================================
+    # DEBUG — Zrzut danych projektów (do wklejenia w chat AI)
+    # ========================================================================
+
+    def debug_dump_dialog(self):
+        """Okno DEBUG: zbiera dane projektów i wyświetla je w formacie tekstowym
+        gotowym do skopiowania i wklejenia (np. do ChatGPT/Copilot)."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("🐛 DEBUG — Zrzut danych projektów")
+        dlg.transient(self.root)
+        self._center_window(dlg, 1100, 750)
+        dlg.minsize(900, 600)
+
+        header = tk.Label(dlg, text="🐛 DEBUG — Zrzut danych projektów",
+                          bg="#2c3e50", fg="white",
+                          font=("Arial", 13, "bold"), pady=10)
+        header.pack(fill=tk.X)
+
+        # --- Górna sekcja: wybór projektów ---
+        top_frame = tk.Frame(dlg)
+        top_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        tk.Label(top_frame, text="Wybierz projekty:",
+                 font=("Arial", 10, "bold")).pack(anchor=tk.W)
+
+        sel_frame = tk.Frame(top_frame)
+        sel_frame.pack(fill=tk.X, pady=3)
+
+        # Listbox z projektami (multi-select)
+        lb_frame = tk.Frame(sel_frame)
+        lb_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        lb_scroll = tk.Scrollbar(lb_frame, orient=tk.VERTICAL)
+        project_lb = tk.Listbox(lb_frame, selectmode=tk.EXTENDED, height=6,
+                                yscrollcommand=lb_scroll.set, font=("Consolas", 9))
+        lb_scroll.config(command=project_lb.yview)
+        project_lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        lb_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Wypełnij listę projektów
+        pid_list = []
+        for pid in self.projects:
+            pname = self.project_names.get(pid, f"Projekt {pid}")
+            project_lb.insert(tk.END, f"[{pid}] {pname}")
+            pid_list.append(pid)
+
+        # Przyciski obok listy
+        btn_frame = tk.Frame(sel_frame)
+        btn_frame.pack(side=tk.LEFT, padx=10)
+
+        def select_all():
+            project_lb.select_set(0, tk.END)
+
+        def deselect_all():
+            project_lb.select_clear(0, tk.END)
+
+        tk.Button(btn_frame, text="Zaznacz\nwszystkie", command=select_all,
+                  width=12).pack(pady=2)
+        tk.Button(btn_frame, text="Odznacz\nwszystkie", command=deselect_all,
+                  width=12).pack(pady=2)
+
+        # Checkboxy opcji
+        opt_frame = tk.Frame(top_frame)
+        opt_frame.pack(fill=tk.X, pady=3)
+
+        include_forecast = tk.BooleanVar(value=True)
+        include_staff = tk.BooleanVar(value=True)
+        include_deps = tk.BooleanVar(value=True)
+        include_constraints = tk.BooleanVar(value=False)
+
+        tk.Checkbutton(opt_frame, text="Prognoza (forecast)", variable=include_forecast).pack(side=tk.LEFT, padx=5)
+        tk.Checkbutton(opt_frame, text="Pracownicy (staff)", variable=include_staff).pack(side=tk.LEFT, padx=5)
+        tk.Checkbutton(opt_frame, text="Zależności (dependencies)", variable=include_deps).pack(side=tk.LEFT, padx=5)
+        tk.Checkbutton(opt_frame, text="Ograniczenia zasobów", variable=include_constraints).pack(side=tk.LEFT, padx=5)
+
+        # Przycisk generowania
+        gen_frame = tk.Frame(top_frame)
+        gen_frame.pack(fill=tk.X, pady=5)
+
+        def generate_dump():
+            selected_indices = project_lb.curselection()
+            if not selected_indices:
+                messagebox.showwarning("Brak wyboru", "Zaznacz co najmniej jeden projekt.")
+                return
+            selected_pids = [pid_list[i] for i in selected_indices]
+            dump_text = self._generate_debug_dump(
+                selected_pids,
+                forecast=include_forecast.get(),
+                staff=include_staff.get(),
+                deps=include_deps.get(),
+                constraints=include_constraints.get(),
+            )
+            output_text.configure(state=tk.NORMAL)
+            output_text.delete("1.0", tk.END)
+            output_text.insert(tk.END, dump_text)
+            output_text.configure(state=tk.DISABLED)
+            # Aktualizuj licznik
+            lines = dump_text.count('\n')
+            chars = len(dump_text)
+            info_label.config(text=f"📋 {lines} linii, {chars} znaków")
+
+        def copy_to_clipboard():
+            output_text.configure(state=tk.NORMAL)
+            text = output_text.get("1.0", tk.END).strip()
+            output_text.configure(state=tk.DISABLED)
+            if text:
+                dlg.clipboard_clear()
+                dlg.clipboard_append(text)
+                info_label.config(text="✅ Skopiowano do schowka!")
+
+        tk.Button(gen_frame, text="📋 Generuj zrzut", command=generate_dump,
+                  font=("Arial", 10, "bold"), bg="#27ae60", fg="white",
+                  padx=15, pady=5).pack(side=tk.LEFT, padx=5)
+        tk.Button(gen_frame, text="📎 Kopiuj do schowka", command=copy_to_clipboard,
+                  font=("Arial", 10), padx=15, pady=5).pack(side=tk.LEFT, padx=5)
+        info_label = tk.Label(gen_frame, text="", font=("Arial", 9), fg="#7f8c8d")
+        info_label.pack(side=tk.LEFT, padx=10)
+
+        # --- Dolna sekcja: output ---
+        output_frame = tk.Frame(dlg)
+        output_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        output_scroll = tk.Scrollbar(output_frame, orient=tk.VERTICAL)
+        output_text = tk.Text(output_frame, wrap=tk.NONE, font=("Consolas", 9),
+                              yscrollcommand=output_scroll.set, state=tk.DISABLED,
+                              bg="#1e1e1e", fg="#d4d4d4", insertbackground="white")
+        h_scroll = tk.Scrollbar(output_frame, orient=tk.HORIZONTAL,
+                                command=output_text.xview)
+        output_text.configure(xscrollcommand=h_scroll.set)
+        output_scroll.config(command=output_text.yview)
+
+        output_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        output_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def _generate_debug_dump(self, project_ids, forecast=True, staff=True,
+                              deps=True, constraints=False):
+        """Generuj tekstowy zrzut danych projektów."""
+        import sqlite3
+        from datetime import datetime
+        lines = []
+        lines.append("=" * 80)
+        lines.append(f"DEBUG DUMP — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"Projekty: {project_ids}")
+        lines.append("=" * 80)
+
+        # Zbierz dane pracowników (potrzebne do tłumaczenia ID → nazwy)
+        employees = {}
+        try:
+            emp_list = rmm.get_employees(self.rm_master_db_path, active_only=False)
+            employees = {e['id']: e for e in emp_list}
+        except Exception as e:
+            lines.append(f"⚠️ Błąd pobierania pracowników: {e}")
+
+        def emp_name(eid):
+            e = employees.get(eid)
+            if e:
+                return f"{e['name']} [{e.get('category', '?')}]"
+            return f"eid={eid}"
+
+        for pid in project_ids:
+            pname = self.project_names.get(pid, f"Projekt {pid}")
+            lines.append("")
+            lines.append("─" * 80)
+            lines.append(f"PROJEKT {pid}: {pname}")
+            lines.append("─" * 80)
+
+            db_path = rmm.get_project_db_path(self.rm_projects_dir, pid)
+            if not os.path.exists(db_path):
+                lines.append(f"  ⚠️ Brak bazy: {db_path}")
+                continue
+
+            try:
+                con = rmm._open_rm_connection(db_path)
+            except Exception as e:
+                lines.append(f"  ⚠️ Błąd otwarcia bazy: {e}")
+                continue
+
+            try:
+                # --- ETAPY z datami ---
+                lines.append("")
+                lines.append(f"  ETAPY (stages + schedule + actuals):")
+                lines.append(f"  {'Etap':<25} {'Seq':>3}  {'Template start':<12} {'Template end':<12}  "
+                             f"{'Actual start':<20} {'Actual end':<20}  {'Status'}")
+                lines.append(f"  {'─'*25} {'─'*3}  {'─'*12} {'─'*12}  {'─'*20} {'─'*20}  {'─'*15}")
+
+                rows = con.execute("""
+                    SELECT ps.stage_code, ps.sequence,
+                           ss.template_start, ss.template_end,
+                           sap.started_at, sap.ended_at
+                    FROM project_stages ps
+                    LEFT JOIN stage_schedule ss ON ss.project_stage_id = ps.id
+                    LEFT JOIN stage_actual_periods sap
+                        ON sap.project_stage_id = ps.id
+                    WHERE ps.project_id = ?
+                    ORDER BY ps.sequence
+                """, (pid,)).fetchall()
+
+                for row in rows:
+                    sc = row['stage_code']
+                    seq = row['sequence'] or 0
+                    t_start = (row['template_start'] or '')[:10]
+                    t_end = (row['template_end'] or '')[:10]
+                    a_start = row['started_at'] or ''
+                    a_end = row['ended_at'] or ''
+                    # Status
+                    if a_end:
+                        status = "ZAKOŃCZONY"
+                    elif a_start:
+                        status = "AKTYWNY"
+                    else:
+                        status = "zaplanowany"
+                    lines.append(f"  {sc:<25} {seq:>3}  {t_start:<12} {t_end:<12}  "
+                                 f"{a_start:<20} {a_end:<20}  {status}")
+
+                # --- PROGNOZA (forecast) ---
+                if forecast:
+                    lines.append("")
+                    lines.append(f"  PROGNOZA (forecast):")
+                    try:
+                        fc = rmm.recalculate_forecast(db_path, pid)
+                        if fc:
+                            lines.append(f"  {'Etap':<25} {'Forecast start':<12} {'Forecast end':<12}")
+                            lines.append(f"  {'─'*25} {'─'*12} {'─'*12}")
+                            for sc, fc_data in fc.items():
+                                f_start = str(fc_data.get('forecast_start', ''))[:10]
+                                f_end = str(fc_data.get('forecast_end', ''))[:10]
+                                lines.append(f"  {sc:<25} {f_start:<12} {f_end:<12}")
+                        else:
+                            lines.append("  (brak danych prognozy)")
+                    except Exception as e:
+                        lines.append(f"  ⚠️ Błąd prognozy: {e}")
+
+                # --- PRACOWNICY (staff) ---
+                if staff:
+                    lines.append("")
+                    lines.append(f"  PRACOWNICY (staff assignments):")
+                    try:
+                        ssa_rows = con.execute("""
+                            SELECT ps.stage_code, ssa.employee_id,
+                                   ssa.planned_start, ssa.planned_end,
+                                   ssa.actual_start, ssa.actual_end, ssa.role
+                            FROM stage_staff_assignments ssa
+                            JOIN project_stages ps ON ssa.project_stage_id = ps.id
+                            WHERE ps.project_id = ?
+                            ORDER BY ps.sequence, ssa.id
+                        """, (pid,)).fetchall()
+                        if ssa_rows:
+                            lines.append(f"  {'Etap':<25} {'Pracownik':<35} {'Plan.start':<12} {'Plan.end':<12} {'Rola'}")
+                            lines.append(f"  {'─'*25} {'─'*35} {'─'*12} {'─'*12} {'─'*10}")
+                            for sr in ssa_rows:
+                                sc = sr['stage_code']
+                                ename = emp_name(sr['employee_id'])
+                                p_start = (sr['planned_start'] or '')[:10]
+                                p_end = (sr['planned_end'] or '')[:10]
+                                role = sr['role'] or ''
+                                lines.append(f"  {sc:<25} {ename:<35} {p_start:<12} {p_end:<12} {role}")
+                        else:
+                            # Fallback: JSON z project_stages
+                            import json
+                            ps_rows = con.execute("""
+                                SELECT stage_code, assigned_staff
+                                FROM project_stages WHERE project_id = ?
+                                ORDER BY sequence
+                            """, (pid,)).fetchall()
+                            has_any = False
+                            for pr in ps_rows:
+                                try:
+                                    staff_json = json.loads(pr['assigned_staff'] or '[]')
+                                    if staff_json:
+                                        if not has_any:
+                                            lines.append(f"  {'Etap':<25} {'Pracownik':<35} (z JSON legacy)")
+                                            lines.append(f"  {'─'*25} {'─'*35}")
+                                            has_any = True
+                                        for s in staff_json:
+                                            if isinstance(s, dict) and 'employee_id' in s:
+                                                ename = emp_name(s['employee_id'])
+                                                lines.append(f"  {pr['stage_code']:<25} {ename:<35}")
+                                except (json.JSONDecodeError, TypeError):
+                                    pass
+                            if not has_any:
+                                lines.append("  (brak przypisań)")
+                    except sqlite3.OperationalError:
+                        lines.append("  (tabela stage_staff_assignments nie istnieje)")
+
+                # --- ZALEŻNOŚCI (dependencies) ---
+                if deps:
+                    lines.append("")
+                    lines.append(f"  ZALEŻNOŚCI (dependencies):")
+                    try:
+                        dep_rows = con.execute("""
+                            SELECT DISTINCT predecessor_stage_code, successor_stage_code,
+                                   dependency_type, lag_days
+                            FROM stage_dependencies WHERE project_id = ?
+                            ORDER BY predecessor_stage_code, successor_stage_code
+                        """, (pid,)).fetchall()
+                        if dep_rows:
+                            for dr in dep_rows:
+                                lines.append(f"  {dr['predecessor_stage_code']} "
+                                             f"--{dr['dependency_type']}(lag={dr['lag_days']})--> "
+                                             f"{dr['successor_stage_code']}")
+                        else:
+                            lines.append("  (brak zależności w bazie)")
+                    except sqlite3.OperationalError:
+                        lines.append("  (tabela stage_dependencies nie istnieje)")
+
+            except Exception as e:
+                lines.append(f"  ⚠️ Błąd odczytu danych: {e}")
+            finally:
+                con.close()
+
+        # --- OGRANICZENIA ZASOBÓW (globalne) ---
+        if constraints:
+            lines.append("")
+            lines.append("─" * 80)
+            lines.append("OGRANICZENIA ZASOBÓW (resource_constraints):")
+            lines.append("─" * 80)
+            try:
+                rc_list = rmm.get_resource_constraints(self.rm_master_db_path, active_only=True)
+                if rc_list:
+                    for rc in rc_list:
+                        lines.append(f"  {rc.get('constraint_type', '?')} | "
+                                     f"cat={rc.get('category', '')} | "
+                                     f"stage={rc.get('stage_code', '')} | "
+                                     f"max_parallel={rc.get('max_parallel', '')}")
+                else:
+                    lines.append("  (brak aktywnych ograniczeń)")
+            except Exception as e:
+                lines.append(f"  ⚠️ Błąd: {e}")
+
+        lines.append("")
+        lines.append("=" * 80)
+        lines.append("KONIEC ZRZUTU")
+        lines.append("=" * 80)
+
+        return "\n".join(lines)
 
 
 # ============================================================================
