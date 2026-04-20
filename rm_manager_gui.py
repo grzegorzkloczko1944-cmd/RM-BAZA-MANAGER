@@ -2207,6 +2207,8 @@ class RMManagerGUI:
         tools_menu.add_command(label="⚡ Optymalizator produkcji...", command=self.optimizer_dialog)
         tools_menu.add_separator()
         tools_menu.add_command(label="🐛 DEBUG — Zrzut danych projektów", command=self.debug_dump_dialog)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="🔄 Aktualizuj definicje etapów (nazwy, kolory)", command=self.update_stage_definitions_ui)
 
         # Users menu
         users_menu = tk.Menu(menubar, tearoff=0)
@@ -4045,30 +4047,39 @@ class RMManagerGUI:
             total_added_stages = 0
             total_projects = 0
             for db_path in sorted(project_dbs):
-                info = rmm.ensure_all_stages_for_all_projects(db_path)
-                total_added_stages += info['stages_added']
-                total_projects += info['projects_updated']
+                try:
+                    info = rmm.ensure_all_stages_for_all_projects(db_path)
+                    total_added_stages += info['stages_added']
+                    total_projects += info['projects_updated']
+                except Exception:
+                    pass  # Pomiń bazy bez tabeli project_stages
             
             # KROK 3: Dodaj brakujące zależności (dependencies) dla wszystkich projektów
             total_added_deps = 0
             for db_path in sorted(project_dbs):
                 # Pobierz listę projektów z tej bazy
-                con = rmm._open_rm_connection(db_path, row_factory=False)
-                project_ids = [r[0] for r in con.execute(
-                    "SELECT DISTINCT project_id FROM project_stages"
-                ).fetchall()]
-                con.close()
-                
-                # Dodaj dependencies dla każdego projektu
-                for pid in project_ids:
-                    added_deps = rmm.ensure_default_dependencies_for_project(db_path, pid)
-                    total_added_deps += added_deps
+                try:
+                    con = rmm._open_rm_connection(db_path, row_factory=False)
+                    project_ids = [r[0] for r in con.execute(
+                        "SELECT DISTINCT project_id FROM project_stages"
+                    ).fetchall()]
+                    con.close()
+                    
+                    # Dodaj dependencies dla każdego projektu
+                    for pid in project_ids:
+                        added_deps = rmm.ensure_default_dependencies_for_project(db_path, pid)
+                        total_added_deps += added_deps
+                except Exception:
+                    pass  # Pomiń bazy bez tabeli project_stages
             
             # KROK 4: Napraw kolejność (sequence) dla WSZYSTKICH etapów
             total_seq_updated = 0
             for db_path in sorted(project_dbs):
-                info = rmm.fix_stage_sequence_for_all_projects(db_path)
-                total_seq_updated += info['stages_updated']
+                try:
+                    info = rmm.fix_stage_sequence_for_all_projects(db_path)
+                    total_seq_updated += info['stages_updated']
+                except Exception:
+                    pass  # Pomiń bazy bez tabeli project_stages
             
             self.status_bar.config(
                 text=f"✅ Zaktualizowano: +{added_master} definicji, +{total_added_stages} etapów, +{total_added_deps} zależności, ~{total_seq_updated} sequence",
@@ -6681,8 +6692,8 @@ class RMManagerGUI:
                             anchor="center"
                         ).pack(side=tk.LEFT, padx=1)
                         
-                        # Przycisk "Protokół" dla ODBIOR_1, ODBIOR_2, ODBIOR_3, FAT
-                        if sub_code in ['ODBIOR_1', 'ODBIOR_2', 'ODBIOR_3', 'FAT']:
+                        # Przycisk "Protokół" dla ODBIOR_1, ODBIOR_2, ODBIOR_3, FAT, SAT
+                        if sub_code in ['ODBIOR_1', 'ODBIOR_2', 'ODBIOR_3', 'FAT', 'URUCHOMIENIE_U_KLIENTA']:
                             sub_att_count = self.get_stage_attachments_count(sub_code)
                             tk.Button(
                                 sub_row,
@@ -14130,7 +14141,7 @@ class RMManagerGUI:
             self._mp_pinned_projects = {pid for pid, var in pin_vars.items() if var.get()}
             sel.destroy()
             if selected:
-                self._create_multi_project_chart_window(selected)
+                self._create_multi_project_chart_window(selected, preserve_view=True)
             else:
                 messagebox.showwarning("Brak wyboru", "Nie wybrano żadnych projektów.", parent=parent)
         

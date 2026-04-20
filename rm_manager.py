@@ -144,7 +144,7 @@ STAGE_DEFINITIONS = [
     ('ELEKTROMONTAZ', 'Elektromontaż', '#f39c12', 0),
     ('TRANSPORT', 'Transport', '#16a085', 1),      # MILESTONE informacyjny
     ('URUCHOMIENIE', 'Uruchomienie', '#1abc9c', 0),
-    ('URUCHOMIENIE_U_KLIENTA', 'Uruchomienie u klienta', '#17a589', 1),  # MILESTONE informacyjny
+    ('URUCHOMIENIE_U_KLIENTA', 'SAT', '#17a589', 1),  # MILESTONE informacyjny
     ('FAT', 'FAT', '#27ae60', 1),                  # MILESTONE informacyjny
     ('ODBIORY', 'Odbiory', '#27ae60', 0),
     ('ODBIOR_1', 'Odbiór 1', '#229954', 1),        # MILESTONE informacyjny
