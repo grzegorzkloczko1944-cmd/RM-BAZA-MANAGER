@@ -14151,14 +14151,14 @@ class RMManagerGUI:
         tk.Label(hdr, text="📌", width=3, font=("Arial", 8), bg="#ecf0f1").pack(side=tk.LEFT)
         
         # Stan sortowania: (kolumna, kierunek) — 'asc' lub 'desc'
-        # Domyślnie malejąco (Z-A) dla kolumny 'name'
-        sort_state = {'column': 'name', 'direction': 'desc'}
+        # Domyślnie None — zachowaj kolejność z głównego combo (self.projects)
+        sort_state = {'column': None, 'direction': None}
         header_buttons = {}  # kolumna -> button widget
         
         def update_header_labels():
             """Aktualizuj etykiety nagłówków z ikonami sortowania"""
             for col, btn in header_buttons.items():
-                if col == sort_state['column']:
+                if sort_state['column'] is not None and col == sort_state['column']:
                     arrow = "▼" if sort_state['direction'] == 'desc' else "▲"
                     bg_color = "#d5dbdb"
                 else:
@@ -14248,10 +14248,22 @@ class RMManagerGUI:
             for pid, widget in row_widgets.items():
                 if widget.winfo_ismapped():
                     visible_pids.append(pid)
-            
+
             if not visible_pids:
                 return
-            
+
+            # Brak wybranej kolumny — zachowaj kolejność z self.projects (identyczną jak combo)
+            if sort_state['column'] is None:
+                projects_order = {pid: i for i, pid in enumerate(self.projects)}
+                sorted_pids = sorted(visible_pids, key=lambda pid: projects_order.get(pid, 9999))
+                for pid in sorted_pids:
+                    row_widgets[pid].pack_forget()
+                for pid in sorted_pids:
+                    row_widgets[pid].pack(fill=tk.X)
+                inner.update_idletasks()
+                canvas_sel.configure(scrollregion=canvas_sel.bbox("all"))
+                return
+
             # Funkcja pobierania wartości sortowania
             def get_sort_value(pid, col):
                 info = proj_info[pid]
@@ -14301,7 +14313,7 @@ class RMManagerGUI:
         
         # Przyciski nagłówków z sortowaniem
         for col, label, width in [
-            ('name', 'Projekt', 30),
+            ('name', 'Projekt', 38),
             ('status', 'Status', 12),
             ('health', 'Terminowość', 12),
             ('variance', 'Odchylenie', 10),
@@ -14421,9 +14433,21 @@ class RMManagerGUI:
                 row.configure(bg="#f5f5f5")
             
             name_fg = "#333" if has_db else "#aaaaaa"
-            name_lbl = info['name'] if has_db else f"{info['name']}  (brak bazy danych)"
+            _lock_suffix = ""
+            if has_db:
+                try:
+                    if not getattr(self.lock_manager, '_STUB', False):
+                        _lock_info = self.lock_manager.get_project_lock_owner(pid)
+                        if _lock_info and _lock_info.get('user'):
+                            _locked_by = self._get_user_display_name(_lock_info['user'])
+                            _lock_suffix = f" 🔒 [{_locked_by}]"
+                except Exception:
+                    pass
+                name_lbl = f"{info['name']}{_lock_suffix}"
+            else:
+                name_lbl = f"{info['name']}  (brak bazy danych)"
             tk.Label(row, text=name_lbl, font=("Arial", 9), anchor="w",
-                    width=30, fg=name_fg).pack(side=tk.LEFT, padx=5)
+                    width=38, fg=name_fg).pack(side=tk.LEFT, padx=5)
             tk.Label(row, text=status_text(info) if has_db else "⛔ Brak danych",
                     font=("Arial", 8), width=12, fg="#333" if has_db else "#bdc3c7").pack(side=tk.LEFT)
             tk.Label(row, text=health_text(info) if has_db else "—",
@@ -14553,10 +14577,8 @@ class RMManagerGUI:
         sel.bind('<Control-Delete>', clear_filters)
         sel.bind('<Control-Shift-A>', show_all_projects)
         
-        # Inicjalizuj widok - zastosuj filtry aby automatycznie zaznaczyć projekty zgodne z filtrami
+        # Inicjalizuj widok - zastosuj filtry, zachowaj kolejność jak w combo
         apply_filters()
-        # Posortuj początkowo według nazwy projektu
-        sort_projects('name')
         update_count()
     
     def _create_multi_project_chart_window(self, project_ids, preserve_view=False):
