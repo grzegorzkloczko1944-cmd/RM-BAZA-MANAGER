@@ -188,14 +188,47 @@ DEFAULT_DEPENDENCIES = [
     # 🔵 RÓWNOLEGŁOŚĆ - ELEKTROMONTAŻ i MONTAŻ mogą iść równolegle
     ('MONTAZ',        'ELEKTROMONTAZ', 'SS', 0),  # Elektromontaż może zacząć gdy montaż się zaczął
     
-    # 🔵 URUCHOMIENIE WYMAGA OBU MONTAŻY
+    # 🔵 URUCHOMIENIE tylko po montażu (elektromontaż i uruchomienie są niezależne)
     ('MONTAZ',        'URUCHOMIENIE',  'FS', 0),  # Uruchomienie po montażu
-    ('ELEKTROMONTAZ', 'URUCHOMIENIE',  'FS', 0),  # Uruchomienie po elektromontażu
     
     # 🔵 KOŃCÓWKA
     ('URUCHOMIENIE',  'ODBIORY',       'FS', 0),  # Odbiory po uruchomieniu
     ('ODBIORY',       'POPRAWKI',      'FS', 0),  # Poprawki po odbiorach (jeśli są)
 ]
+
+# Zależności które zostały usunięte z DEFAULT_DEPENDENCIES i muszą być wyczyszczone
+# z istniejących projektów podczas migracji.
+# Format: (predecessor, successor) — usuń KAŻDY rekord z tą parą, niezależnie od typu.
+DEPRECATED_DEPENDENCIES = [
+    ('ELEKTROMONTAZ', 'URUCHOMIENIE'),  # 2026-04-22: usunięto — etapy są teraz w pełni niezależne
+]
+
+
+def remove_deprecated_dependencies_for_project(rm_db_path: str, project_id: int) -> int:
+    """Usuwa z bazy projektu zależności które zostały wycofane z DEFAULT_DEPENDENCIES.
+
+    Bezpieczne: usuwa tylko pary z DEPRECATED_DEPENDENCIES, nic innego nie zmienia.
+
+    Args:
+        rm_db_path: Ścieżka do bazy per-projekt
+        project_id: ID projektu
+
+    Returns:
+        Liczba usuniętych wpisów
+    """
+    con = _open_rm_connection(rm_db_path)
+    removed = 0
+    for pred, succ in DEPRECATED_DEPENDENCIES:
+        cursor = con.execute("""
+            DELETE FROM stage_dependencies
+            WHERE project_id = ? AND predecessor_stage_code = ? AND successor_stage_code = ?
+        """, (project_id, pred, succ))
+        removed += cursor.rowcount
+    con.commit()
+    con.close()
+    if removed > 0:
+        print(f"🧹 Projekt {project_id}: usunięto {removed} wycofanych zależności")
+    return removed
 
 
 # ============================================================================
@@ -366,6 +399,11 @@ def ensure_rm_master_tables(master_db_path: str):
         )
     """)
     con.execute("CREATE INDEX IF NOT EXISTS idx_payment_project ON payment_milestones(project_id)")
+    # Migracja: dodaj kolumnę payment_type jeśli nie istnieje (upgrade starej bazy)
+    try:
+        con.execute("ALTER TABLE payment_milestones ADD COLUMN payment_type TEXT NOT NULL DEFAULT 'PŁATNOŚĆ'")
+    except sqlite3.OperationalError:
+        pass  # kolumna już istnieje
 
     # Historia zmian płatności (audit log)
     con.execute("""
@@ -6818,7 +6856,7 @@ def cleanup_duplicate_dependencies(project_db_path: str, project_id: int = None)
 
 def add_payment_milestone(rm_db_path: str, project_id: int, percentage: int, 
                           payment_date: str, user: str = None, check_trigger: bool = True,
-                          master_db_path: str = None) -> int:
+                          master_db_path: str = None, payment_type: str = 'PŁATNOŚĆ') -> int:
     """Dodaj transzę płatności dla projektu.
     
     Args:
@@ -6829,6 +6867,7 @@ def add_payment_milestone(rm_db_path: str, project_id: int, percentage: int,
         user: Kto dodał
         check_trigger: Czy sprawdzić trigger 100% (domyślnie True)
         master_db_path: Ścieżka do master.sqlite (opcjonalnie, do pobierania nazwy projektu)
+        payment_type: Typ transzy: 'PŁATNOŚĆ' lub 'UMORZONY'
     
     Returns:
         ID dodanej transzy
@@ -6838,13 +6877,15 @@ def add_payment_milestone(rm_db_path: str, project_id: int, percentage: int,
     """
     if not (1 <= percentage <= 100):
         raise ValueError(f"Procent musi być w zakresie 1-100, otrzymano: {percentage}")
+    if payment_type not in ('PŁATNOŚĆ', 'UMORZONY'):
+        payment_type = 'PŁATNOŚĆ'
     
     con = _open_rm_connection(rm_db_path)
     try:
         cursor = con.execute("""
-            INSERT INTO payment_milestones (project_id, percentage, payment_date, created_by, created_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """, (project_id, percentage, payment_date, user))
+            INSERT INTO payment_milestones (project_id, percentage, payment_date, created_by, created_at, payment_type)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+        """, (project_id, percentage, payment_date, user, payment_type))
         
         milestone_id = cursor.lastrowid
         
@@ -6969,7 +7010,7 @@ def get_payment_milestones(rm_db_path: str, project_id: int) -> List[Dict]:
     con = _open_rm_connection(rm_db_path)
     try:
         rows = con.execute("""
-            SELECT id, project_id, percentage, payment_date, 
+            SELECT id, project_id, percentage, payment_date, payment_type,
                    created_by, created_at, modified_by, modified_at
             FROM payment_milestones
             WHERE project_id = ?

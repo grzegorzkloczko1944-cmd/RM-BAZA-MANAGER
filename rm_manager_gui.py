@@ -168,9 +168,8 @@ DEFAULT_DEPENDENCIES = [
     # RÓWNOLEGŁOŚĆ - ELEKTROMONTAŻ i MONTAŻ mogą iść równolegle
     {'from': 'MONTAZ',        'to': 'ELEKTROMONTAZ', 'type': 'SS', 'lag': 0},  # SS = Start-to-Start
     
-    # URUCHOMIENIE WYMAGA OBU MONTAŻY
+    # URUCHOMIENIE tylko po montażu (elektromontaż i uruchomienie są niezależne)
     {'from': 'MONTAZ',        'to': 'URUCHOMIENIE',  'type': 'FS', 'lag': 0},
-    {'from': 'ELEKTROMONTAZ', 'to': 'URUCHOMIENIE',  'type': 'FS', 'lag': 0},
     
     # KOŃCÓWKA
     {'from': 'URUCHOMIENIE',  'to': 'ODBIORY',       'type': 'FS', 'lag': 0},
@@ -405,13 +404,19 @@ class RMManagerGUI:
         if not alarms:
             return
         
-        # Okno powiadomienia
-        notify_win = tk.Toplevel(self.root)
+        # Okno powiadomienia — NIEZALEŻNE od głównego okna (nie transient!)
+        # Zawsze na wierzchu, nie chowa się gdy główne okno dostanie fokus.
+        notify_win = tk.Toplevel()
         notify_win.title("⏰ ALARMY")
         notify_win.resizable(True, True)
-        notify_win.transient(self.root)
         notify_win.attributes('-topmost', True)
         self._center_window(notify_win, 920, 520)
+        # Zapisz referencję — do przekazania jako parent okna Notatek
+        self._alarms_notify_win = notify_win
+        def _on_alarms_close():
+            self._alarms_notify_win = None
+            notify_win.destroy()
+        notify_win.protocol("WM_DELETE_WINDOW", _on_alarms_close)
         
         # Header - licz tylko aktywne alarmy (nie odłożone)
         active_alarms_count = sum(1 for alarm in alarms if not alarm.get('is_snoozed', False))
@@ -711,9 +716,8 @@ class RMManagerGUI:
         ).pack(side=tk.LEFT, padx=5)
         
         def close_notification():
-            """Zamknij okno powiadomienia i przywróć focus do głównego okna"""
-            notify_win.destroy()
-            self.root.focus_force()
+            """Zamknij okno powiadomienia (alarmy niezależne — bez wymuszania focus na root)"""
+            _on_alarms_close()
         
         tk.Button(
             btn_frame,
@@ -741,6 +745,15 @@ class RMManagerGUI:
         project_db = self.get_project_db_path(alarm_project_id)
         stage_code = alarm.get('stage_code', '')
         
+        # Notatki otwierane z alarmów — parent = okno alarmów (zostaje na wierzchu)
+        alarms_parent = getattr(self, '_alarms_notify_win', None)
+        try:
+            if alarms_parent and not alarms_parent.winfo_exists():
+                alarms_parent = None
+        except Exception:
+            alarms_parent = None
+        notes_parent = alarms_parent  # może być None → domyślny self.root
+        
         if alarm['target_type'] == 'TOPIC':
             # Znajdź indeks tematu w liście
             topic_id = alarm['target_id']
@@ -750,7 +763,7 @@ class RMManagerGUI:
                 if t['id'] == topic_id:
                     topic_index = i
                     break
-            self.show_notes_window(stage_code=stage_code, topic_index=topic_index)
+            self.show_notes_window(stage_code=stage_code, topic_index=topic_index, parent=notes_parent)
         
         elif alarm['target_type'] == 'NOTE':
             # Znajdź temat nadrzędny notatki
@@ -776,9 +789,9 @@ class RMManagerGUI:
                     if t['id'] == topic_id:
                         topic_index = i
                         break
-                self.show_notes_window(stage_code=stage_code, topic_index=topic_index)
+                self.show_notes_window(stage_code=stage_code, topic_index=topic_index, parent=notes_parent)
             else:
-                self.show_notes_window(stage_code=stage_code)
+                self.show_notes_window(stage_code=stage_code, parent=notes_parent)
 
     def _start_heartbeat(self):
         """Uruchom cykliczne odświeżanie heartbeat (co 30 s) + cleanup stale locków.
@@ -2777,7 +2790,7 @@ class RMManagerGUI:
         payment_controls = tk.Frame(payment_section, bg=self.COLOR_TOPBAR, pady=10)
         payment_controls.pack(fill=tk.X, padx=5, pady=5)
         
-        tk.Button(
+        self.btn_add_payment = tk.Button(
             payment_controls,
             text="➕ Dodaj transzę",
             command=self.add_payment_milestone,
@@ -2787,7 +2800,8 @@ class RMManagerGUI:
             relief=tk.FLAT,
             padx=15,
             pady=5
-        ).pack(side=tk.LEFT, padx=5)
+        )
+        self.btn_add_payment.pack(side=tk.LEFT, padx=5)
         
         tk.Button(
             payment_controls,
@@ -2801,7 +2815,7 @@ class RMManagerGUI:
             pady=5
         ).pack(side=tk.LEFT, padx=5)
         
-        tk.Button(
+        self.btn_delete_payment = tk.Button(
             payment_controls,
             text="🗑️ Usuń transzę",
             command=self.delete_payment_milestone,
@@ -2811,7 +2825,22 @@ class RMManagerGUI:
             relief=tk.FLAT,
             padx=15,
             pady=5
-        ).pack(side=tk.LEFT, padx=5)
+        )
+        self.btn_delete_payment.pack(side=tk.LEFT, padx=5)
+
+        self.btn_unset_zakonczony = tk.Button(
+            payment_controls,
+            text="🔓 Zdejmij zapłacone",
+            command=self._unset_zakonczony_payment,
+            bg="#8e44ad",
+            fg="white",
+            font=("Arial", 10),
+            relief=tk.FLAT,
+            padx=15,
+            pady=5,
+            state=tk.DISABLED
+        )
+        self.btn_unset_zakonczony.pack(side=tk.LEFT, padx=5)
         
         tk.Button(
             payment_controls,
@@ -2832,19 +2861,24 @@ class RMManagerGUI:
         # Treeview z transzami płatności
         self.payment_tree = ttk.Treeview(
             payment_tree_frame,
-            columns=('percentage', 'payment_date', 'created_by', 'modified_at'),
+            columns=('percentage', 'payment_date', 'payment_type', 'created_by', 'modified_at'),
             show='headings',
             height=8
         )
         self.payment_tree.heading('percentage', text='Procent (%)')
         self.payment_tree.heading('payment_date', text='Data płatności')
+        self.payment_tree.heading('payment_type', text='Typ')
         self.payment_tree.heading('created_by', text='Utworzył')
         self.payment_tree.heading('modified_at', text='Ostatnia zmiana')
         
-        self.payment_tree.column('percentage', width=100, anchor='center')
+        self.payment_tree.column('percentage', width=90, anchor='center')
         self.payment_tree.column('payment_date', width=120)
+        self.payment_tree.column('payment_type', width=110, anchor='center')
         self.payment_tree.column('created_by', width=100)
         self.payment_tree.column('modified_at', width=150)
+        
+        # Kolorowanie wierszy UMORZONY
+        self.payment_tree.tag_configure('umorzony', background='#fff3cd', foreground='#856404')
         
         payment_scroll = ttk.Scrollbar(payment_tree_frame, orient=tk.VERTICAL, command=self.payment_tree.yview)
         self.payment_tree.configure(yscrollcommand=payment_scroll.set)
@@ -2970,7 +3004,13 @@ class RMManagerGUI:
         self.plc_codes_tree.bind('<Escape>', lambda e: self.plc_codes_tree.selection_remove(self.plc_codes_tree.selection()))
         
         tab_control.pack(fill=tk.BOTH, expand=True)
-        
+
+        def _on_tab_changed(event):
+            if tab_control.select() == str(self.timeline_tab):
+                self.refresh_timeline()
+
+        tab_control.bind("<<NotebookTabChanged>>", _on_tab_changed)
+
         # Status bar (styl RM_BAZA)
         self.status_bar = tk.Label(
             self.root, 
@@ -4057,6 +4097,7 @@ class RMManagerGUI:
             
             # KROK 3: Dodaj brakujące zależności (dependencies) dla wszystkich projektów
             total_added_deps = 0
+            total_removed_deps = 0
             for db_path in sorted(project_dbs):
                 # Pobierz listę projektów z tej bazy
                 try:
@@ -4066,8 +4107,10 @@ class RMManagerGUI:
                     ).fetchall()]
                     con.close()
                     
-                    # Dodaj dependencies dla każdego projektu
+                    # Usuń wycofane + dodaj brakujące dependencies dla każdego projektu
                     for pid in project_ids:
+                        removed_deps = rmm.remove_deprecated_dependencies_for_project(db_path, pid)
+                        total_removed_deps += removed_deps
                         added_deps = rmm.ensure_default_dependencies_for_project(db_path, pid)
                         total_added_deps += added_deps
                 except Exception:
@@ -4093,7 +4136,8 @@ class RMManagerGUI:
                 f"• Projekty: +{total_added_defs} definicji w {len(project_dbs)} bazach\n\n"
                 f"Dodano do struktury projektów:\n"
                 f"• {total_added_stages} nowych etapów w {total_projects} projektach\n"
-                f"• {total_added_deps} nowych zależności (dependencies)\n"
+                f"• -{total_removed_deps} wycofanych zależności (usunięto)\n"
+                f"• +{total_added_deps} nowych zależności (dodano)\n"
                 f"• {total_seq_updated} etapów - naprawiono kolejność\n\n"
                 f"✅ Wszystko gotowe! Nowe etapy są już dostępne."
             )
@@ -4566,6 +4610,7 @@ class RMManagerGUI:
 
         try:
             total_added = 0
+            total_removed = 0
             projects_updated = 0
 
             for pid in self.projects:
@@ -4574,9 +4619,11 @@ class RMManagerGUI:
                     continue
 
                 try:
+                    removed = rmm.remove_deprecated_dependencies_for_project(project_db, pid)
                     added = rmm.ensure_default_dependencies_for_project(project_db, pid)
-                    if added > 0:
+                    if added > 0 or removed > 0:
                         total_added += added
+                        total_removed += removed
                         projects_updated += 1
                 except Exception as e:
                     print(f"⚠️  Błąd zależności projektu {pid}: {e}")
@@ -4584,10 +4631,11 @@ class RMManagerGUI:
             msg = (
                 f"✅ Uzupełnianie zakończone!\n\n"
                 f"Zaktualizowano: {projects_updated} projektów\n"
+                f"Usunięto wycofanych: {total_removed}\n"
                 f"Dodano zależności: {total_added}"
             )
             messagebox.showinfo("✅ Zakończono", msg)
-            self.status_bar.config(text=f"🔗 Dodano {total_added} zależności", fg="#27ae60")
+            self.status_bar.config(text=f"🔗 -{total_removed} wycofanych, +{total_added} zależności", fg="#27ae60")
 
         except Exception as e:
             messagebox.showerror("❌ Błąd", f"Nie udało się uzupełnić zależności:\n{e}")
@@ -5686,6 +5734,60 @@ class RMManagerGUI:
             self.status_bar.config(text="🔴 Błąd wznowienia", fg="#e74c3c")
             messagebox.showerror("❌ Błąd", f"Nie można wznowić projektu:\n{e}")
 
+    def _show_elektromontaz_warning(self):
+        """Duże czerwone okno ostrzegające że Elektromontaż wciąż trwa."""
+        win = tk.Toplevel(self.root)
+        win.title("⚠️ Uwaga — Elektromontaż wciąż trwa!")
+        win.configure(bg="#c0392b")
+        win.resizable(False, False)
+        win.grab_set()
+
+        # Wyśrodkuj względem głównego okna
+        win.update_idletasks()
+        w, h = 560, 340
+        rx = self.root.winfo_x() + (self.root.winfo_width() - w) // 2
+        ry = self.root.winfo_y() + (self.root.winfo_height() - h) // 2
+        win.geometry(f"{w}x{h}+{rx}+{ry}")
+
+        # Ikona + nagłówek
+        tk.Label(
+            win, text="⚠", font=("Arial", 52, "bold"),
+            bg="#c0392b", fg="white"
+        ).pack(pady=(24, 0))
+
+        tk.Label(
+            win, text="ELEKTROMONTAŻ WCIĄŻ TRWA!",
+            font=("Arial", 16, "bold"), bg="#c0392b", fg="white"
+        ).pack(pady=(4, 0))
+
+        # Treść
+        msg = (
+            "Etap Elektromontaż jest nadal aktywny.\n\n"
+            "Odbiory zostają otwarte, ale pamiętaj:\n"
+            "aby zakończyć Elektromontaż, wróć do panelu\n"
+            "ETAPY PROJEKTÓW i kliknij przycisk ZAKOŃCZ\n"
+            "przy etapie Elektromontaż."
+        )
+        tk.Label(
+            win, text=msg, font=("Arial", 11),
+            bg="#c0392b", fg="white", justify="center", wraplength=500
+        ).pack(pady=(12, 0), padx=20)
+
+        # Przycisk OK
+        tk.Button(
+            win, text="  OK — rozumiem  ",
+            font=("Arial", 12, "bold"),
+            bg="white", fg="#c0392b", activebackground="#f0f0f0",
+            relief=tk.FLAT, bd=0, padx=16, pady=8,
+            cursor="hand2",
+            command=win.destroy
+        ).pack(pady=24)
+
+        win.bind("<Return>", lambda e: win.destroy())
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.focus_set()
+        win.wait_window()
+
     def start_stage(self, stage_code, force=False):
         """Rozpocznij etap
         
@@ -5757,6 +5859,15 @@ class RMManagerGUI:
                     self.status_bar.config(text="Anulowano", fg="gray")
                     return
             
+            # ⚠️ OSTRZEŻENIE: Odbiory przy aktywnym Elektromontażu
+            if stage_code == 'ODBIORY':
+                active_stages = rmm.get_active_stages(
+                    self.get_project_db_path(self.selected_project_id),
+                    self.selected_project_id
+                )
+                if any(s['stage_code'] == 'ELEKTROMONTAZ' for s in active_stages):
+                    self._show_elektromontaz_warning()
+
             # START
             period_id = rmm.start_stage(
                 self.get_project_db_path(self.selected_project_id),  # rm_db_path
@@ -6116,9 +6227,40 @@ class RMManagerGUI:
                 # Tło: zakończone=zielony, aktywne=niebieski, nieaktywne=biały
                 is_completed = fc.get('is_actual') and not fc.get('is_active')
                 if is_completed:
-                    bg_color = "#d5f4e6"  # Jasny zielony dla zakończonych
+                    if stage_code == 'ZAKONCZONY':
+                        # ZAKONCZONY ustawiony — sprawdź sumę transz
+                        try:
+                            _ms_list = rmm.get_payment_milestones(
+                                self.rm_master_db_path, self.selected_project_id)
+                            _pay_sum = sum(m['percentage'] for m in _ms_list)
+                            _has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in _ms_list)
+                            bg_color = "#00ee44" if (_pay_sum >= 100 or _has_umorzony) else "#ff2222"
+                        except Exception:
+                            bg_color = "#ff2222"
+                    else:
+                        bg_color = "#d5f4e6"
                 elif fc.get('is_active'):
                     bg_color = self.COLOR_LIGHT_BLUE  # Niebieski dla aktywnych
+                elif stage_code == 'ZAKONCZONY':
+                    # Podświetlenie zależne od sumy transz i daty
+                    try:
+                        _ms_list = rmm.get_payment_milestones(
+                            self.rm_master_db_path, self.selected_project_id)
+                        _pay_sum = sum(m['percentage'] for m in _ms_list)
+                        _has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in _ms_list)
+                        if _pay_sum >= 100 or _has_umorzony:
+                            bg_color = "#00ee44"  # Ostry zielony — zapłacono/umorzono
+                        else:
+                            # Sprawdź czy dzisiaj > planowana data milestone
+                            _ms_date = fc.get('template_start')
+                            if _ms_date:
+                                from datetime import date as _date_cls
+                                _planned = _date_cls.fromisoformat(str(_ms_date)[:10])
+                                bg_color = "#ff2222" if _date_cls.today() > _planned else "white"
+                            else:
+                                bg_color = "white"
+                    except Exception:
+                        bg_color = "white"
                 else:
                     bg_color = "white"  # Biały dla nieaktywnych
                 
@@ -6381,6 +6523,30 @@ class RMManagerGUI:
                             padx=8,
                             pady=2
                         ).pack(side=tk.LEFT, padx=5)
+                        
+                        # ── Badge % transz płatności (tylko dla ZAKONCZONY) ──
+                        if stage_code == 'ZAKONCZONY':
+                            try:
+                                _pay_milestones = rmm.get_payment_milestones(self.rm_master_db_path, self.selected_project_id)
+                                _pay_count = len(_pay_milestones)
+                                _pay_sum = sum(m['percentage'] for m in _pay_milestones)
+                                _pay_text = f"💰 {_pay_sum}% ({_pay_count})"
+                                _pay_bg = "#d5f4e6" if _pay_sum >= 100 else "#fef9e7"
+                                _pay_fg = "#27ae60" if _pay_sum >= 100 else "#b7770d"
+                                _pay_lbl = tk.Label(
+                                    att_row,
+                                    text=_pay_text,
+                                    bg=_pay_bg,
+                                    fg=_pay_fg,
+                                    font=("Arial", 10, "bold"),
+                                    padx=10, pady=4,
+                                    relief=tk.RIDGE, bd=1,
+                                    cursor="hand2"
+                                )
+                                _pay_lbl.pack(side=tk.LEFT, padx=5)
+                                _pay_lbl.bind("<Button-1>", lambda e: self.tab_control.select(self.payment_tab))
+                            except Exception as _e:
+                                print(f"⚠️ Badge transz (timeline) błąd: {_e}")
                     
                     continue  # Pomiń normalny rendering dla etapu
                 
@@ -10129,8 +10295,15 @@ class RMManagerGUI:
     # SYSTEM NOTATEK - Okno notatnika dla etapów
     # ========================================================================
 
-    def show_notes_window(self, stage_code: str = None, topic_index: int = None):
-        """Otwórz okno notatnika dla wybranego etapu (read-only gdy brak locka)"""
+    def show_notes_window(self, stage_code: str = None, topic_index: int = None, parent=None):
+        """Otwórz okno notatnika dla wybranego etapu (read-only gdy brak locka).
+        
+        Args:
+            stage_code: Kod etapu do otwarcia.
+            topic_index: Indeks tematu do zaznaczenia.
+            parent: Okno-rodzic (Toplevel lub None → self.root). Po zamknięciu notatek
+                    focus wraca do tego okna. Notatki są transient do parent.
+        """
         if not self.selected_project_id:
             messagebox.showwarning("Brak projektu", "Wybierz projekt")
             return
@@ -10140,10 +10313,19 @@ class RMManagerGUI:
         # Sprawdź czy użytkownik ma lock (określi tryb przeglądania vs edycji)
         can_edit = self.have_lock and not self.read_only_mode
         
-        # Okno główne
-        notes_win = tk.Toplevel(self.root)
+        # Ustal rzeczywistego rodzica — sprawdź czy podane okno jeszcze istnieje
+        _parent = self.root
+        if parent is not None:
+            try:
+                if parent.winfo_exists():
+                    _parent = parent
+            except Exception:
+                pass
+        
+        # Okno główne — transient do rzeczywistego rodzica
+        notes_win = tk.Toplevel(_parent)
         notes_win.can_edit = can_edit  # Zapisz flagę edycji jako atrybut okna
-        notes_win.transient(self.root)  # Okno zawsze na tym samym ekranie co główna aplikacja
+        notes_win.transient(_parent)
         title_suffix = " (READ-ONLY)" if not can_edit else ""
         notes_win.title(f"📝 Notatki - Projekt {self.selected_project_id}{title_suffix}")
         notes_win.resizable(True, True)
@@ -10155,9 +10337,13 @@ class RMManagerGUI:
             if state not in ('zoomed', 'iconic'):
                 self.save_window_geometry('notes_window', notes_win)
             notes_win.destroy()
-            # Przywróć focus na główne okno aplikacji
-            self.root.lift()
-            self.root.focus_force()
+            # Przywróć focus na okno które otworzyło notatki (nie zawsze root!)
+            try:
+                if _parent.winfo_exists():
+                    _parent.lift()
+                    _parent.focus_force()
+            except Exception:
+                pass
         notes_win.protocol("WM_DELETE_WINDOW", on_close)
         
         # Top bar - wybór etapu
@@ -14487,6 +14673,7 @@ class RMManagerGUI:
         y_pos = 0
         project_separators = []  # pozycje Y linii oddzielających projekty
         encountered_stages = set()  # etapy obecne w danych
+        payment_sums = {}  # {pid: int} — cache sum transz dla kolorowania ZAKONCZONY
         
         for pid in project_ids:
             pname = self.project_names.get(pid, f"Projekt {pid}")
@@ -14585,6 +14772,34 @@ class RMManagerGUI:
                                       for eid in stage_emp_ids 
                                       if eid in all_employees]
                 
+                # --- Kolor efektywny (override dla ZAKONCZONY) ---
+                effective_color = stage_color
+                if stage_code == 'ZAKONCZONY':
+                    if pid not in payment_sums:
+                        try:
+                            _ms = rmm.get_payment_milestones(self.rm_master_db_path, pid)
+                            payment_sums[pid] = {
+                                'total': sum(m['percentage'] for m in _ms),
+                                'has_umorzony': any(m.get('payment_type') == 'UMORZONY' for m in _ms),
+                            }
+                        except Exception:
+                            payment_sums[pid] = {'total': 0, 'has_umorzony': False}
+                    _pay_info = payment_sums[pid]
+                    _pay_sum = _pay_info['total']
+                    _has_umorzony = _pay_info['has_umorzony']
+                    if _pay_sum >= 100 or _has_umorzony:
+                        effective_color = '#00ee44'
+                    else:
+                        # Sprawdź czy termin minął (opóźnienie)
+                        _ref_date_str = template_end or stage.get('forecast_end')
+                        if _ref_date_str:
+                            try:
+                                _ref_date = datetime.strptime(_ref_date_str[:10], '%Y-%m-%d')
+                                if datetime.now() > _ref_date:
+                                    effective_color = '#ff2222'
+                            except Exception:
+                                pass
+
                 # --- SZABLON ---
                 proj_tf = self._mp_proj_type_filters.get(pid, {})
                 override = self._mp_proj_filter_override.get(pid, False)
@@ -14604,7 +14819,7 @@ class RMManagerGUI:
                             'start': tpl_start,
                             'end': tpl_end,
                             'type': 'Szablon',
-                            'color': stage_color,
+                            'color': effective_color,
                             'alpha': 0.35,
                             'height': 0.8,
                             'y_offset': -0.1,
@@ -14638,7 +14853,7 @@ class RMManagerGUI:
                                 'start': start_date,
                                 'end': end_date,
                                 'type': 'Rzeczywiste',
-                                'color': stage_color,
+                                'color': effective_color,
                                 'alpha': 0.9,
                                 'height': 0.5,
                                 'y_offset': 0.05,
@@ -14666,7 +14881,7 @@ class RMManagerGUI:
                             'start': fc_start,
                             'end': fc_end,
                             'type': 'Prognoza',
-                            'color': stage_color,
+                            'color': effective_color,
                             'alpha': 0.55,
                             'height': 0.25,
                             'y_offset': 0.18,
@@ -15759,9 +15974,21 @@ class RMManagerGUI:
         fc = forecast[stage_code]
         project_name = self.project_names.get(pid, f"Projekt {pid}")
         
+        # Pobierz display_name z stage_definitions
+        stage_display_name = stage_code
+        try:
+            project_db = self.get_project_db_path(pid)
+            con_sd = rmm._open_rm_connection(project_db)
+            row_sd = con_sd.execute("SELECT display_name FROM stage_definitions WHERE code = ?", (stage_code,)).fetchone()
+            con_sd.close()
+            if row_sd:
+                stage_display_name = row_sd['display_name']
+        except Exception:
+            pass
+        
         # Status etapu
         if fc.get('is_actual'):
-            status_text = "✔️ Zakończony"
+            status_text = f"✔️ {stage_display_name}"
             status_color = self.COLOR_GREEN
         elif fc.get('is_active'):
             try:
@@ -16065,14 +16292,13 @@ class RMManagerGUI:
             if edge == 'move':
                 # ===== TRYB PRZESUWANIA CAŁEGO PRZEDZIAŁU =====
                 anchor = self._mp_drag_state.get('drag_anchor_x')
-                # Zaokrąglij anchor do dnia (tak samo jak new_date)
-                anchor_day = (anchor + timedelta(hours=12)).replace(hour=0, minute=0, second=0)
-                delta = new_date - anchor_day
-                new_start = bar['start'] + delta
-                new_end = bar['end'] + delta
-                # Upewnij się, że wynik jest midnight
-                new_start = new_start.replace(hour=0, minute=0, second=0)
-                new_end = new_end.replace(hour=0, minute=0, second=0)
+                # Używamy surowej delty kursora (bez zaokrąglania anchor) – tak samo jak
+                # w _mp_on_motion (preview). Finalne pozycje pasków zaokrąglamy do
+                # najbliższego dnia. Zaokrąglanie anchor do dnia powoduje błąd ±1 dzień
+                # gdy kliknięto po południu (anchor przeskakuje do następnego dnia).
+                delta_raw = new_date_raw - anchor
+                new_start = (bar['start'] + delta_raw + timedelta(hours=12)).replace(hour=0, minute=0, second=0)
+                new_end   = (bar['end']   + delta_raw + timedelta(hours=12)).replace(hour=0, minute=0, second=0)
                 
                 # Milestone: obie daty = ta sama (1 dzień)
                 stage_defs = self._mp_chart_meta.get('stage_defs', {})
@@ -17442,9 +17668,21 @@ class RMManagerGUI:
         fc = forecast[stage_code]
         project_name = self.project_names.get(self.selected_project_id, f"Projekt {self.selected_project_id}")
         
+        # Pobierz display_name z stage_definitions
+        stage_display_name = stage_code
+        try:
+            project_db = self.get_project_db_path(self.selected_project_id)
+            con_sd = rmm._open_rm_connection(project_db)
+            row_sd = con_sd.execute("SELECT display_name FROM stage_definitions WHERE code = ?", (stage_code,)).fetchone()
+            con_sd.close()
+            if row_sd:
+                stage_display_name = row_sd['display_name']
+        except Exception:
+            pass
+        
         # Status etapu
         if fc.get('is_actual'):
-            status_text = "✔️ Zakończony"
+            status_text = f"✔️ {stage_display_name}"
             status_color = self.COLOR_GREEN
         elif fc.get('is_active'):
             # Oblicz ile dni trwa
@@ -17673,7 +17911,7 @@ class RMManagerGUI:
             notes_btn_text += f" ⏰{alarms_count}"
         
         def open_notes():
-            self.show_notes_window(stage_code)
+            self.show_notes_window(stage_code, parent=dialog)
         
         tk.Button(
             notes_frame,
@@ -19941,10 +20179,34 @@ class RMManagerGUI:
             for m in milestones:
                 percentage = f"{m['percentage']}%"
                 payment_date = m['payment_date'] or "---"
+                ptype = m.get('payment_type', 'PŁATNOŚĆ') or 'PŁATNOŚĆ'
+                ptype_label = "✂️ UMORZONY" if ptype == 'UMORZONY' else "💵 PŁATNOŚĆ"
                 created_by = m['created_by'] or "---"
                 modified_at = m['modified_at'] or "---"
-                
-                self.payment_tree.insert('', tk.END, values=(percentage, payment_date, created_by, modified_at))
+                tag = 'umorzony' if ptype == 'UMORZONY' else ''
+                self.payment_tree.insert('', tk.END, values=(percentage, payment_date, ptype_label, created_by, modified_at), tags=(tag,))
+
+            # Stany przycisków względem sumy transz
+            if hasattr(self, 'btn_delete_payment'):
+                total = sum(m['percentage'] for m in milestones)
+                # USUŃ — zawsze aktywny
+                self.btn_delete_payment.config(state=tk.NORMAL, bg=self.COLOR_RED)
+                # DODAJ — blokowany gdy suma = 100%
+                if total >= 100:
+                    self.btn_add_payment.config(state=tk.DISABLED, bg="#aaaaaa")
+                else:
+                    self.btn_add_payment.config(state=tk.NORMAL, bg=self.COLOR_GREEN)
+                # ZDEJMIJ ZAPŁACONE — aktywny tylko gdy ZAKONCZONY jest ustawiony
+                if hasattr(self, 'btn_unset_zakonczony') and self.selected_project_id:
+                    try:
+                        _db = self.get_project_db_path(self.selected_project_id)
+                        _zak_set = rmm.is_milestone_set(_db, self.selected_project_id, 'ZAKONCZONY')
+                        self.btn_unset_zakonczony.config(
+                            state=tk.NORMAL if _zak_set else tk.DISABLED,
+                            bg="#8e44ad" if _zak_set else "#aaaaaa"
+                        )
+                    except Exception:
+                        self.btn_unset_zakonczony.config(state=tk.DISABLED, bg="#aaaaaa")
             
         except Exception as e:
             print(f"❌ Błąd ładowania płatności: {e}")
@@ -19978,7 +20240,7 @@ class RMManagerGUI:
         dialog.transient(self.root)
         dialog.grab_set()
         
-        self._center_window(dialog, 400, 280)
+        self._center_window(dialog, 420, 360)
         
         # Info o aktualnym stanie
         info_text = f"Zapłacono: {current_sum}%  |  Pozostało: {remaining}%"
@@ -19997,12 +20259,41 @@ class RMManagerGUI:
             font=self.FONT_DEFAULT
         ).grid(row=1, column=1, sticky='w', padx=10, pady=10)
         
+        # Typ transzy
+        tk.Label(dialog, text="Typ transzy:", font=self.FONT_DEFAULT).grid(row=2, column=0, sticky='e', padx=10, pady=(5, 0))
+        type_frame = tk.Frame(dialog)
+        type_frame.grid(row=2, column=1, sticky='w', padx=10, pady=(5, 0))
+        type_var = tk.StringVar(value='PŁATNOŚĆ')
+        
+        rb_platnosc = tk.Radiobutton(type_frame, text="💵 PŁATNOŚĆ", variable=type_var, value='PŁATNOŚĆ',
+                                     font=self.FONT_DEFAULT, fg="#27ae60", activeforeground="#27ae60")
+        rb_platnosc.pack(anchor='w')
+        rb_umorzony = tk.Radiobutton(type_frame, text="✂️ UMORZONY", variable=type_var, value='UMORZONY',
+                                     font=self.FONT_DEFAULT, fg="#856404", activeforeground="#856404")
+        rb_umorzony.pack(anchor='w')
+        
+        # Nota informacyjna
+        note_frame = tk.Frame(dialog, bg="#fff3cd", relief=tk.SOLID, bd=1)
+        note_frame.grid(row=3, column=0, columnspan=2, padx=15, pady=(2, 8), sticky='ew')
+        tk.Label(
+            note_frame,
+            text="ℹ️  UMORZONY = celowe zamknięcie projektu poniżej\n"
+                 "    100% gotówki (barter, ugoda, decyzja zarządu).\n"
+                 "    To nie jest błąd — wpis jest widoczny w historii.",
+            font=("Arial", 8),
+            bg="#fff3cd",
+            fg="#856404",
+            justify='left',
+            padx=8,
+            pady=4
+        ).pack(fill=tk.X)
+        
         # Data płatności
-        tk.Label(dialog, text="Data płatności:", font=self.FONT_DEFAULT).grid(row=2, column=0, sticky='e', padx=10, pady=10)
+        tk.Label(dialog, text="Data:", font=self.FONT_DEFAULT).grid(row=4, column=0, sticky='e', padx=10, pady=10)
         
         # Frame dla daty + przycisk kalendarza
         date_frame = tk.Frame(dialog)
-        date_frame.grid(row=2, column=1, sticky='w', padx=10, pady=10)
+        date_frame.grid(row=4, column=1, sticky='w', padx=10, pady=10)
         
         date_entry = tk.Entry(date_frame, width=20, font=self.FONT_DEFAULT)
         date_entry.pack(side=tk.LEFT, padx=(0, 5))
@@ -20020,11 +20311,12 @@ class RMManagerGUI:
             pady=2
         ).pack(side=tk.LEFT)
         
-        tk.Label(dialog, text="(YYYY-MM-DD)", font=self.FONT_SMALL, fg="gray").grid(row=3, column=1, sticky='w', padx=10)
+        tk.Label(dialog, text="(YYYY-MM-DD)", font=self.FONT_SMALL, fg="gray").grid(row=5, column=1, sticky='w', padx=10)
         
         def save():
             percentage = percentage_var.get()
             payment_date = date_entry.get().strip()
+            payment_type = type_var.get()
             
             if not payment_date:
                 messagebox.showerror("Błąd", "Podaj datę płatności.")
@@ -20058,15 +20350,15 @@ class RMManagerGUI:
                     payment_date,
                     user=self.current_user,
                     check_trigger=False,  # Wyłącz auto-email (zawiesza GUI)
-                    master_db_path=self.master_db_path
+                    master_db_path=self.master_db_path,
+                    payment_type=payment_type,
                 )
                 
                 self.load_payment_milestones()
                 dialog.destroy()
                 
-                # Jeśli SUMA transz = 100% - automatycznie otwórz dialog wysyłki kodu PERMANENT
-                if percentage + current_sum == 100:
-                    self._auto_open_permanent_code_dialog()
+                # Sprawdź czy suma = 100% → ustaw ZAKONCZONY + wyślij PERMANENT
+                self._check_payment_100_trigger()
                 
             except sqlite3.IntegrityError:
                 messagebox.showerror("Błąd", f"Transza {percentage}% już istnieje dla tego projektu.")
@@ -20075,7 +20367,7 @@ class RMManagerGUI:
         
         # Przyciski
         btn_frame = tk.Frame(dialog)
-        btn_frame.grid(row=4, column=0, columnspan=2, pady=20)
+        btn_frame.grid(row=6, column=0, columnspan=2, pady=20)
         
         tk.Button(
             btn_frame,
@@ -20099,6 +20391,105 @@ class RMManagerGUI:
             pady=5
         ).pack(side=tk.LEFT, padx=5)
     
+    def _unset_zakonczony_payment(self):
+        """Administracyjne zdejmowanie stanu ZAKONCZONY z poziomu zakładki Płatności."""
+        if not self.selected_project_id:
+            return
+        if not self.have_lock:
+            messagebox.showerror("🔒 Brak locka", "Musisz najpierw przejąć lock projektu.")
+            return
+        if not messagebox.askyesno(
+            "🔓 Zdejmij stan Zapłacony",
+            "Czy na pewno chcesz zdjąć milestone ZAPŁACONY?\n\n"
+            "Projekt wróci do stanu niezapłaconego.\n"
+            "Będziesz mógł usuwać i modyfikować transze.",
+            icon='warning'
+        ):
+            return
+        try:
+            _db = self.get_project_db_path(self.selected_project_id)
+            rmm.unset_milestone(
+                _db,
+                self.selected_project_id,
+                'ZAKONCZONY',
+                master_db_path=self.master_db_path
+            )
+            print(f"🔓 Ręcznie zdięto milestone ZAKONCZONY (projekt {self.selected_project_id})")
+            self.refresh_all()
+        except Exception as e:
+            messagebox.showerror("❌ Błąd", f"Nie można zdjąć milestone:\n{e}")
+
+    def _check_payment_100_trigger(self):
+        """Sprawdź czy suma transz = 100% i jeśli tak:
+        1. Automatycznie ustaw milestone ZAKONCZONY (jeśli brak aktywnych etapów)
+        2. Otwórz dialog wysyłki kodu PERMANENT
+        Bezpieczne do wielokrotnego wywołania — sprawdza aktualny stan.
+        """
+        if not self.selected_project_id:
+            return
+
+        try:
+            milestones = rmm.get_payment_milestones(self.rm_master_db_path, self.selected_project_id)
+            total = sum(m['percentage'] for m in milestones)
+        except Exception as e:
+            print(f"⚠️ _check_payment_100_trigger: błąd pobierania transz: {e}")
+            return
+
+        if total >= 100:
+            # ── 1. Ustaw ZAKONCZONY jeśli jeszcze nie ustawiony ──────────
+            project_db = self.get_project_db_path(self.selected_project_id)
+            try:
+                already_set = rmm.is_milestone_set(project_db, self.selected_project_id, 'ZAKONCZONY')
+                if not already_set and self.have_lock and not self.read_only_mode:
+                    # Sprawdź aktywne etapy (tylko regularne — nie milestony)
+                    _milestone_codes = {'PRZYJETY', 'ZAKONCZONY', 'WSTRZYMANY'}
+                    active_all = rmm.get_active_stages(project_db, self.selected_project_id)
+                    active_regular = [s for s in active_all if s['stage_code'] not in _milestone_codes]
+
+                    if active_regular:
+                        names = ', '.join(s['stage_code'] for s in active_regular)
+                        messagebox.showwarning(
+                            "💰 Płatność 100% — aktywne etapy",
+                            f"Płatność osiągnęła 100%!\n\n"
+                            f"Nie można automatycznie zamknąć projektu,\n"
+                            f"ponieważ trwają jeszcze etapy:\n• {names}\n\n"
+                            f"Zakończ wszystkie etapy, a następnie\n"
+                            f"oznacz projekt jako Zapłacony."
+                        )
+                    else:
+                        rmm.set_milestone(
+                            project_db,
+                            self.selected_project_id,
+                            'ZAKONCZONY',
+                            user=self.current_user,
+                            master_db_path=self.master_db_path
+                        )
+                        print(f"✅ Automatycznie ustawiono milestone ZAKONCZONY (płatność 100%)")
+                        self.refresh_all()
+            except Exception as e:
+                print(f"⚠️ _check_payment_100_trigger: błąd ustawiania ZAKONCZONY: {e}")
+
+            # ── 2. Otwórz dialog wysyłki kodu PERMANENT ──────────────────
+            self._auto_open_permanent_code_dialog()
+        else:
+            # Suma < 100% — auto-zdejmij ZAKONCZONY jeśli był ustawiony
+            if self.selected_project_id and self.have_lock and not self.read_only_mode:
+                try:
+                    _db = self.get_project_db_path(self.selected_project_id)
+                    if rmm.is_milestone_set(_db, self.selected_project_id, 'ZAKONCZONY'):
+                        rmm.unset_milestone(
+                            _db,
+                            self.selected_project_id,
+                            'ZAKONCZONY',
+                            master_db_path=self.master_db_path
+                        )
+                        print(f"🔓 Automatycznie zdjęto milestone ZAKONCZONY (płatność < 100%)")
+                        self.refresh_all()
+                        return
+                except Exception as e:
+                    print(f"⚠️ Błąd auto-zdejmowania ZAKONCZONY: {e}")
+            self.refresh_timeline()
+
     def _auto_open_permanent_code_dialog(self):
         """Automatyczne utworzenie kodu PERMANENT i otwarcie dialogu wysyłki po dodaniu 100%."""
         if not self.selected_project_id:
@@ -20157,21 +20548,27 @@ class RMManagerGUI:
         percentage_str = values[0]  # "100%"
         percentage = int(percentage_str.replace('%', ''))
         current_date = values[1]
+        ptype_label = values[2]  # "💵 PŁATNOŚĆ" lub "✂️ UMORZONY"
         
         dialog = tk.Toplevel(self.root)
         dialog.title(f"Edytuj transzę {percentage}%")
         dialog.transient(self.root)
         dialog.grab_set()
         
-        self._center_window(dialog, 400, 200)
+        self._center_window(dialog, 400, 220)
         
         tk.Label(dialog, text=f"Transza: {percentage}%", font=("Arial", 12, "bold")).grid(row=0, column=0, columnspan=2, pady=10)
         
+        # Typ transzy — tylko do odczytu
+        ptype_color = "#856404" if "UMORZONY" in ptype_label else "#27ae60"
+        tk.Label(dialog, text=ptype_label, font=("Arial", 10, "bold"), fg=ptype_color).grid(
+            row=1, column=0, columnspan=2, pady=(0, 5))
+        
         # Frame dla daty + przycisk kalendarza
         date_frame = tk.Frame(dialog)
-        date_frame.grid(row=1, column=1, sticky='w', padx=10, pady=10)
+        date_frame.grid(row=2, column=1, sticky='w', padx=10, pady=10)
         
-        tk.Label(dialog, text="Nowa data płatności:", font=self.FONT_DEFAULT).grid(row=1, column=0, sticky='e', padx=10, pady=10)
+        tk.Label(dialog, text="Nowa data płatności:", font=self.FONT_DEFAULT).grid(row=2, column=0, sticky='e', padx=10, pady=10)
         
         date_entry = tk.Entry(date_frame, width=20, font=self.FONT_DEFAULT)
         date_entry.pack(side=tk.LEFT, padx=(0, 5))
@@ -20189,7 +20586,7 @@ class RMManagerGUI:
             pady=2
         ).pack(side=tk.LEFT)
         
-        tk.Label(dialog, text="(YYYY-MM-DD)", font=self.FONT_SMALL, fg="gray").grid(row=2, column=1, sticky='w', padx=10)
+        tk.Label(dialog, text="(YYYY-MM-DD)", font=self.FONT_SMALL, fg="gray").grid(row=3, column=1, sticky='w', padx=10)
         
         def save():
             new_date = date_entry.get().strip()
@@ -20219,12 +20616,14 @@ class RMManagerGUI:
                 self.load_payment_milestones()
                 dialog.destroy()
                 
+                # Sprawdź czy suma = 100% → ustaw ZAKONCZONY + wyślij PERMANENT
+                self._check_payment_100_trigger()
             except Exception as e:
                 messagebox.showerror("Błąd", f"Nie można zaktualizować:\n{e}")
         
         # Przyciski
         btn_frame = tk.Frame(dialog)
-        btn_frame.grid(row=3, column=0, columnspan=2, pady=20)
+        btn_frame.grid(row=4, column=0, columnspan=2, pady=20)
         
         tk.Button(
             btn_frame,
@@ -20276,6 +20675,9 @@ class RMManagerGUI:
             
             messagebox.showinfo("Sukces", f"Usunięto transzę {percentage}%")
             self.load_payment_milestones()
+
+            # Sprawdź nową sumę po usunięciu → może cofnąć ZAKONCZONY jeśli < 100%
+            self._check_payment_100_trigger()
             
         except Exception as e:
             messagebox.showerror("Błąd", f"Nie można usunąć transzy:\n{e}")
