@@ -16076,7 +16076,7 @@ class RMManagerGUI:
         self._mp_info_popup = popup
         
         # Rozmiar i pozycja — obok kursora
-        w, h = 750, 380
+        w, h = 750, 300
         try:
             mx = parent.winfo_pointerx()
             my = parent.winfo_pointery()
@@ -16171,9 +16171,6 @@ class RMManagerGUI:
             ).grid(row=1, column=col, padx=2, pady=2, sticky="ew")
         
         # ===== PRACOWNICY =====
-        staff_frame = tk.Frame(popup, padx=15, pady=3)
-        staff_frame.pack(fill=tk.X)
-        
         try:
             assigned_staff = rmm.get_stage_assigned_staff(
                 project_db, self.rm_master_db_path, pid, stage_code
@@ -16183,13 +16180,13 @@ class RMManagerGUI:
             assigned_staff = []
             staff_count = 0
         
-        staff_label = f"👷 Pracownicy ({staff_count}):" if staff_count > 0 else "👷 Pracownicy: brak"
-        tk.Label(
-            staff_frame, text=staff_label,
-            font=self.FONT_BOLD, fg=self.COLOR_GREEN if staff_count > 0 else "gray"
-        ).pack(side=tk.LEFT, padx=(0, 8))
-        
         if staff_count > 0:
+            staff_frame = tk.Frame(popup, padx=15, pady=3)
+            staff_frame.pack(fill=tk.X)
+            tk.Label(
+                staff_frame, text=f"👷 Pracownicy ({staff_count}):",
+                font=self.FONT_BOLD, fg=self.COLOR_GREEN
+            ).pack(side=tk.LEFT, padx=(0, 8))
             staff_info = []
             for s in assigned_staff:
                 name = s['employee_name']
@@ -16206,9 +16203,6 @@ class RMManagerGUI:
             ).pack(side=tk.LEFT, padx=3)
         
         # ===== NOTATKI =====
-        notes_frame = tk.Frame(popup, padx=15, pady=3)
-        notes_frame.pack(fill=tk.X)
-        
         try:
             notes_stats = rmm.get_topic_stats(project_db, pid, stage_code)
             topic_count = notes_stats['total_topics']
@@ -16219,16 +16213,16 @@ class RMManagerGUI:
             notes_count = 0
             alarms_count = 0
         
-        notes_text = "📝 Notatki: brak"
-        if topic_count > 0 or notes_count > 0:
+        if topic_count > 0 or notes_count > 0 or alarms_count > 0:
+            notes_frame = tk.Frame(popup, padx=15, pady=3)
+            notes_frame.pack(fill=tk.X)
             notes_text = f"📝 {topic_count} tematów, {notes_count} notatek"
-        if alarms_count > 0:
-            notes_text += f" ⏰ {alarms_count} alarmów"
-        
-        tk.Label(
-            notes_frame, text=notes_text,
-            font=self.FONT_BOLD, fg=self.COLOR_PURPLE if topic_count > 0 else "gray"
-        ).pack(side=tk.LEFT, padx=(0, 8))
+            if alarms_count > 0:
+                notes_text += f" ⏰ {alarms_count} alarmów"
+            tk.Label(
+                notes_frame, text=notes_text,
+                font=self.FONT_BOLD, fg=self.COLOR_PURPLE
+            ).pack(side=tk.LEFT, padx=(0, 8))
         
         # Podgląd tematów
         if topic_count > 0:
