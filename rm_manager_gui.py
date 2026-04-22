@@ -1580,6 +1580,10 @@ class RMManagerGUI:
         if not self._dates_snapshot:
             print("⚠️ Brak snapshotu dat do przywrócenia")
             return False
+        # Guard: przywracaj tylko jeśli mamy lock (nie nadpisuj danych po utracie locka)
+        if not self.have_lock or self._locked_project_id != self.selected_project_id:
+            print("⚠️ _restore_stage_dates_from_snapshot: brak locka — pomijam przywrócenie")
+            return False
         try:
             _pdb = self.get_project_db_path(self.selected_project_id)
             con = rmm._open_rm_connection(_pdb, row_factory=False)
@@ -1919,9 +1923,18 @@ class RMManagerGUI:
     def init_database(self):
         """Inicjalizacja bazy danych RM_MANAGER (master + katalog projektów)"""
         try:
+            import glob
             Path(self.rm_manager_dir).mkdir(parents=True, exist_ok=True)
             Path(self.rm_projects_dir).mkdir(parents=True, exist_ok=True)
             rmm.ensure_rm_master_tables(self.rm_master_db_path)
+            # Synchronizuj display_name/color/is_milestone ze STAGE_DEFINITIONS w kodzie
+            rmm.update_stage_definitions(self.rm_master_db_path)
+            project_dbs = glob.glob(os.path.join(self.rm_projects_dir, 'rm_manager_project_*.sqlite'))
+            for db_path in sorted(project_dbs):
+                try:
+                    rmm.update_project_stage_definitions(db_path)
+                except Exception as e_proj:
+                    print(f"⚠️  Pominięto synchronizację etapów dla {db_path}: {e_proj}")
             print(f"✅ Master baza zainicjalizowana: {self.rm_master_db_path}")
             print(f"✅ Katalog projektów: {self.rm_projects_dir}")
         except Exception as e:
@@ -4063,11 +4076,10 @@ class RMManagerGUI:
         result = messagebox.askyesno(
             "🔄 Aktualizuj definicje etapów",
             "Operacja:\n\n"
-            "1️⃣ Zsynchronizuje definicje etapów z kodem\n\n"
+            "1️⃣ Zsynchronizuje nazwy/kolory etapów z kodem\n\n"
             "2️⃣ Doda brakujące etapy do wszystkich projektów\n\n"
             "3️⃣ Doda brakujące zależności (dependencies)\n\n"
-            "Stare etapy pozostaną bez zmian.\n"
-            "Istniejące dane nie zostaną usunięte.\n\n"
+            "Dane etapów (daty, okresy) NIE zostaną usunięte.\n\n"
             "Kontynuować?"
         )
         if not result:
@@ -5361,7 +5373,7 @@ class RMManagerGUI:
                 'zakonczony_enabled': True,  # ✅ Można odznaczyć żeby wznowić projekt
                 'pause_enabled': False,
                 'resume_enabled': False,
-                'status_text': '🏁 Zakończony'
+                'status_text': '🏁 Zapłacony'
             }
         }
         
@@ -5498,7 +5510,7 @@ class RMManagerGUI:
                 pause_btn_state = tk.NORMAL if ui_rules['resume_enabled'] else tk.DISABLED
                 pause_btn_cmd = lambda: self.resume_project()
             elif is_finished:
-                pause_lbl_text = "Projekt zakończony"
+                pause_lbl_text = "Projekt zapłacony"
                 pause_lbl_color = "#7f8c8d"
                 pause_btn_text = "⏸  WSTRZYMAJ PROJEKT"
                 pause_btn_bg = "#c0392b"
@@ -5611,7 +5623,7 @@ class RMManagerGUI:
             zakonczony_var = tk.BooleanVar(value=zakonczony_set)
             zakonczony_cb = tk.Checkbutton(
                 finish_frame,
-                text="✓ PROJEKT ZAKOŃCZONY",
+                text="✓ ZAPŁACONY",
                 variable=zakonczony_var,
                 bg="#eafaf1",
                 font=("Arial", 10, "bold"),
@@ -7294,6 +7306,12 @@ class RMManagerGUI:
 
     def save_milestone_date(self, stage_code: str, milestone_date: str):
         """Zapisz datę milestone (template_start = template_end)"""
+        if not self.have_lock or self._locked_project_id != self.selected_project_id:
+            messagebox.showwarning(
+                "Brak locka",
+                "Nie możesz zapisać daty milestone — brak aktywnego locka projektu.\n\nPrzejmij lock i spróbuj ponownie."
+            )
+            return
         try:
             print(f"\n💾 SAVE_MILESTONE_DATE: {stage_code}, data='{milestone_date}', projekt={self.selected_project_id}")
             
@@ -7716,6 +7734,9 @@ class RMManagerGUI:
     def save_all_templates(self):
         """Zapisz wszystkie niezapisane zmiany z timeline przed zwolnieniem locka"""
         if not self.selected_project_id or not self.timeline_entries:
+            return
+        if not self.have_lock or self._locked_project_id != self.selected_project_id:
+            print("⚠️ save_all_templates: brak locka — pomijam zapis")
             return
         
         try:
@@ -10162,6 +10183,12 @@ class RMManagerGUI:
     
     def save_dates(self):
         """Zapisz zmodyfikowane daty do bazy"""
+        if not self.have_lock or self._locked_project_id != self.selected_project_id:
+            messagebox.showwarning(
+                "Brak locka",
+                "Nie możesz zapisać dat — brak aktywnego locka projektu.\n\nPrzejmij lock i spróbuj ponownie."
+            )
+            return
         try:
             _pdb = self.get_project_db_path(self.selected_project_id)
             con = rmm._open_rm_connection(_pdb, row_factory=False)
@@ -16044,7 +16071,7 @@ class RMManagerGUI:
         popup = tk.Toplevel(parent)
         popup.transient(parent)
         popup.overrideredirect(False)
-        popup.title(f"ℹ️ {stage_code} — {project_name} (READ-ONLY)")
+        popup.title(f"ℹ️ {stage_display_name} — {project_name} (READ-ONLY)")
         popup.resizable(True, True)
         self._mp_info_popup = popup
         
@@ -16096,7 +16123,7 @@ class RMManagerGUI:
         ).pack(side=tk.LEFT, padx=10)
         
         tk.Label(
-            info_frame, text=f"Etap: {stage_code}",
+            info_frame, text=f"Etap: {stage_display_name}",
             bg="#ecf0f1", font=self.FONT_BOLD, fg=self.COLOR_BLUE, anchor='w'
         ).pack(side=tk.LEFT, padx=15)
         
@@ -16245,6 +16272,88 @@ class RMManagerGUI:
                 wraplength=600, justify=tk.LEFT
             ).pack(side=tk.LEFT, padx=3)
         
+        # ===== PŁATNOŚCI (tylko dla ZAKONCZONY) =====
+        if stage_code == 'ZAKONCZONY':
+            try:
+                pay_list = rmm.get_payment_milestones(self.rm_master_db_path, pid)
+                pay_sum = sum(m['percentage'] for m in pay_list)
+                has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in pay_list)
+
+                pay_frame = tk.Frame(popup, bg="#f8f9fa", padx=15, pady=6, relief=tk.GROOVE, bd=1)
+                pay_frame.pack(fill=tk.X, padx=15, pady=(4, 6))
+
+                if has_umorzony:
+                    pay_icon = "🟡"
+                    pay_status = "UMORZONY"
+                    pay_color = "#856404"
+                    pay_bg = "#fff3cd"
+                elif pay_sum >= 100:
+                    pay_icon = "✅"
+                    pay_status = f"ZAPŁACONY ({pay_sum}%)"
+                    pay_color = "#155724"
+                    pay_bg = "#d4edda"
+                elif pay_sum > 0:
+                    pay_icon = "⏳"
+                    pay_status = f"CZĘŚCIOWO ({pay_sum}%)"
+                    pay_color = "#721c24"
+                    pay_bg = "#f8d7da"
+                else:
+                    pay_icon = "❌"
+                    pay_status = "BRAK TRANSZ"
+                    pay_color = "#721c24"
+                    pay_bg = "#f8d7da"
+
+                pay_frame.config(bg=pay_bg)
+
+                tk.Label(
+                    pay_frame,
+                    text=f"💳 Płatność: {pay_icon} {pay_status}",
+                    bg=pay_bg, fg=pay_color,
+                    font=self.FONT_BOLD
+                ).pack(side=tk.LEFT, padx=(0, 20))
+
+                # Licznik dni od milestone ZAKONCZONY (data ustawienia)
+                zakonczony_info = rmm.get_milestone(project_db, pid, 'ZAKONCZONY')
+                if zakonczony_info and zakonczony_info.get('timestamp'):
+                    try:
+                        ms_dt = datetime.fromisoformat(zakonczony_info['timestamp'][:10])
+                        delta = (datetime.now() - ms_dt).days
+                        if delta == 0:
+                            counter_text = "📅 Zapłacony: dzisiaj"
+                        elif delta > 0:
+                            counter_text = f"📅 Zapłacony: {delta} dni temu ({ms_dt.strftime('%d.%m.%Y')})"
+                        else:
+                            counter_text = f"📅 Zapłacony planowo: za {abs(delta)} dni ({ms_dt.strftime('%d.%m.%Y')})"
+                        tk.Label(
+                            pay_frame,
+                            text=counter_text,
+                            bg=pay_bg, fg=pay_color,
+                            font=self.FONT_SMALL
+                        ).pack(side=tk.LEFT)
+                    except Exception:
+                        pass
+
+                # Lista transz
+                if pay_list:
+                    tranches_frame = tk.Frame(pay_frame, bg=pay_bg)
+                    tranches_frame.pack(side=tk.LEFT, padx=(20, 0))
+                    tranches_parts = []
+                    for m in pay_list:
+                        ptype = m.get('payment_type', 'PŁATNOŚĆ')
+                        pct = m['percentage']
+                        pdate = self.format_date_ddmmyyyy(m.get('payment_date')) or '?'
+                        icon = "🟡" if ptype == 'UMORZONY' else "💰"
+                        tranches_parts.append(f"{icon}{pct}% ({pdate})")
+                    tk.Label(
+                        tranches_frame,
+                        text="  |  ".join(tranches_parts),
+                        bg=pay_bg, fg=pay_color,
+                        font=self.FONT_SMALL
+                    ).pack(side=tk.LEFT)
+
+            except Exception:
+                pass
+        
         # Zamknij Escape
         popup.bind('<Escape>', lambda e: popup.destroy())
         popup.focus_set()
@@ -16308,7 +16417,17 @@ class RMManagerGUI:
             edge = self._mp_drag_state['edge']
             stage_code = self._mp_drag_state['stage_code']
             pid = self._mp_drag_state['project_id']
-            
+
+            # Guard: sprawdź lock tuż przed zapisem (mógł być utracony w trakcie dragu)
+            if not self.have_lock or self._locked_project_id != pid:
+                self._mp_status.config(
+                    text="🔴 Brak locka — zmiana odrzucona",
+                    fg=self.COLOR_RED
+                )
+                self._mp_drag_state['active'] = False
+                self._mp_chart_meta['canvas'].draw_idle()
+                return
+
             project_db = self.get_project_db_path(pid)
             
             if edge == 'move':
@@ -17990,6 +18109,13 @@ class RMManagerGUI:
         btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
         
         def save():
+            if not self.have_lock or self._locked_project_id != self.selected_project_id:
+                messagebox.showwarning(
+                    "Brak locka",
+                    "Nie możesz zapisać dat — brak aktywnego locka projektu.\n\nPrzejmij lock i spróbuj ponownie.",
+                    parent=dialog
+                )
+                return
             ts = template_start_entry.get().strip()
             te = template_end_entry.get().strip()
             
@@ -18207,7 +18333,17 @@ class RMManagerGUI:
             stage_code = self._drag_state['stage_code']
             edge = self._drag_state['edge']
             bar_item = self._drag_state['bar_item']
-            
+
+            # Guard: sprawdź lock tuż przed zapisem (mógł być utracony w trakcie dragu)
+            if not self.have_lock or self._locked_project_id != self.selected_project_id:
+                self.status_bar.config(
+                    text="🔴 Brak locka — zmiana odrzucona",
+                    fg=self.COLOR_RED
+                )
+                self._drag_state['active'] = False
+                self.matplotlib_canvas.draw_idle()
+                return
+
             _pdb = self.get_project_db_path(self.selected_project_id)
             
             if edge == 'move':
@@ -18420,6 +18556,13 @@ class RMManagerGUI:
         
         def save_single_date():
             """Zapisz zmienioną datę"""
+            if not self.have_lock or self._locked_project_id != self.selected_project_id:
+                messagebox.showwarning(
+                    "Brak locka",
+                    "Nie możesz zapisać daty — brak aktywnego locka projektu.\n\nPrzejmij lock i spróbuj ponownie.",
+                    parent=dialog
+                )
+                return
             new_date_str = date_entry.get().strip()
             
             # Walidacja i konwersja DD-MM-YYYY → YYYY-MM-DD (ISO)
@@ -18580,6 +18723,12 @@ class RMManagerGUI:
         """Napraw brakujące rekordy stage_schedule dla milestone'ów"""
         if not self.selected_project_id:
             messagebox.showwarning("Uwaga", "Wybierz projekt do naprawy milestone'ów")
+            return
+        if not self.have_lock or self._locked_project_id != self.selected_project_id:
+            messagebox.showwarning(
+                "Brak locka",
+                "Przejmij lock projektu przed naprawą milestone'ów."
+            )
             return
             
         try:
