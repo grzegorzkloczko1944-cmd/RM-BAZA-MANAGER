@@ -2874,16 +2874,17 @@ class RMManagerGUI:
             pady=5
         ).pack(side=tk.LEFT, padx=5)
         
-        # Kontener dla treeview płatności (oryginalny Frame)
-        payment_tree_frame = tk.Frame(payment_section)
-        payment_tree_frame.pack(fill=tk.X, padx=5, pady=(5, 0))
+        # Canvas jako kontener sekcji płatności — watermark w tle, treeview na górze
+        self._payment_wm_photo = None
+        payment_canvas = tk.Canvas(payment_section, bg='white', highlightthickness=0)
+        payment_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Treeview z transzami płatności
         self.payment_tree = ttk.Treeview(
-            payment_tree_frame,
+            payment_canvas,
             columns=('percentage', 'payment_date', 'payment_type', 'created_by', 'modified_at'),
             show='headings',
-            height=5
+            height=1
         )
         self.payment_tree.heading('percentage', text='Procent (%)')
         self.payment_tree.heading('payment_date', text='Data płatności')
@@ -2900,42 +2901,48 @@ class RMManagerGUI:
         # Kolorowanie wierszy UMORZONY
         self.payment_tree.tag_configure('umorzony', background='#fff3cd', foreground='#856404')
         
-        payment_scroll = ttk.Scrollbar(payment_tree_frame, orient=tk.VERTICAL, command=self.payment_tree.yview)
+        payment_scroll = ttk.Scrollbar(payment_canvas, orient=tk.VERTICAL, command=self.payment_tree.yview)
         self.payment_tree.configure(yscrollcommand=payment_scroll.set)
         
-        self.payment_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        payment_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        # Okna na Canvas: scrollbar przy prawej, treeview zajmuje resztę
+        _pay_tree_win   = payment_canvas.create_window(0, 0, anchor='nw', window=self.payment_tree)
+        _pay_scroll_win = payment_canvas.create_window(9999, 0, anchor='ne', window=payment_scroll)
         
-        # Watermark Canvas — pasek poniżej treeview
-        self._payment_wm_photo = None
-        payment_wm_canvas = tk.Canvas(payment_section, bg='white', height=90,
-                                       highlightthickness=0)
-        payment_wm_canvas.pack(fill=tk.X, padx=5, pady=(0, 5))
-        
-        def _draw_wm(event=None):
-            cw = payment_wm_canvas.winfo_width()
-            ch = payment_wm_canvas.winfo_height()
-            if cw < 4 or not PIL_AVAILABLE:
+        def _redraw_payment_canvas(event=None):
+            cw = payment_canvas.winfo_width()
+            ch = payment_canvas.winfo_height()
+            if cw < 4:
                 return
-            try:
-                _wat = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'wat.jpg')
-                if not os.path.exists(_wat):
-                    return
-                _img = Image.open(_wat).convert('RGBA')
-                _size = int(ch * 0.90)
-                _img = _img.resize((_size, _size), Image.LANCZOS)
-                _white = Image.new('RGBA', _img.size, (255, 255, 255, 255))
-                _img_wm = Image.blend(_white, _img, alpha=0.30).convert('RGB')
-                self._payment_wm_photo = ImageTk.PhotoImage(_img_wm)
-                payment_wm_canvas.delete('all')
-                payment_wm_canvas.create_image(
-                    cw // 2, ch // 2, anchor='center',
-                    image=self._payment_wm_photo
-                )
-            except Exception as _e:
-                print(f"⚠️ watermark: {_e}")
+            sw = payment_scroll.winfo_reqwidth() or 17
+            # Scrollbar: prawa krawędź, pełna wysokość
+            payment_canvas.coords(_pay_scroll_win, cw, 0)
+            payment_canvas.itemconfig(_pay_scroll_win, height=ch)
+            # Treeview: pełna szerokość minus scrollbar (wysokość sterowana przez height=N)
+            payment_canvas.itemconfig(_pay_tree_win, width=cw - sw)
+            # Watermark w CAŁYM canvasie (za i pod treeview)
+            if PIL_AVAILABLE:
+                try:
+                    _wat = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'wat.jpg')
+                    if not os.path.exists(_wat):
+                        return
+                    _img = Image.open(_wat).convert('RGBA')
+                    _size = int(min(cw, ch) * 0.85)
+                    _img = _img.resize((_size, _size), Image.LANCZOS)
+                    _white = Image.new('RGBA', _img.size, (255, 255, 255, 255))
+                    _img_wm = Image.blend(_white, _img, alpha=0.25).convert('RGB')
+                    self._payment_wm_photo = ImageTk.PhotoImage(_img_wm)
+                    payment_canvas.delete('_wm')
+                    payment_canvas.create_image(
+                        cw // 2, ch // 2, anchor='center',
+                        image=self._payment_wm_photo, tags='_wm'
+                    )
+                    payment_canvas.tag_lower('_wm')
+                except Exception as _e:
+                    print(f"⚠️ watermark: {_e}")
         
-        payment_wm_canvas.bind('<Configure>', lambda e: payment_wm_canvas.after(80, _draw_wm))
+        payment_canvas.bind('<Configure>', lambda e: payment_canvas.after(60, _redraw_payment_canvas))
+        # Zapisz referencję do funkcji żeby load_payment_milestones mógł odświeżyć
+        self._redraw_payment_canvas = _redraw_payment_canvas
         
         # Double-click na treeview = edycja
         self.payment_tree.bind('<Double-1>', lambda e: self.edit_payment_milestone())
@@ -20388,6 +20395,14 @@ class RMManagerGUI:
                 modified_at = m['modified_at'] or "---"
                 tag = 'umorzony' if ptype == 'UMORZONY' else ''
                 self.payment_tree.insert('', tk.END, values=(percentage, payment_date, ptype_label, created_by, modified_at), tags=(tag,))
+
+            # Dostosuj wysokość treeview do liczby wierszy (min 1, max 8)
+            row_count = max(1, min(len(milestones), 8))
+            self.payment_tree.configure(height=row_count)
+            # Odśwież canvas (watermark)
+            if hasattr(self, '_redraw_payment_canvas'):
+                self.payment_tree.update_idletasks()
+                self._redraw_payment_canvas()
 
             # Stany przycisków względem sumy transz
             if hasattr(self, 'btn_delete_payment'):
