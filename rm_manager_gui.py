@@ -40,6 +40,13 @@ except ImportError:
     PLOTLY_AVAILABLE = False
     go = px = plot = None
 
+# PIL for watermark images
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
 # Matplotlib for embedded charts
 try:
     import matplotlib.pyplot as plt
@@ -2867,16 +2874,16 @@ class RMManagerGUI:
             pady=5
         ).pack(side=tk.LEFT, padx=5)
         
-        # Kontener dla treeview płatności
+        # Kontener dla treeview płatności (oryginalny Frame)
         payment_tree_frame = tk.Frame(payment_section)
-        payment_tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        payment_tree_frame.pack(fill=tk.X, padx=5, pady=(5, 0))
         
         # Treeview z transzami płatności
         self.payment_tree = ttk.Treeview(
             payment_tree_frame,
             columns=('percentage', 'payment_date', 'payment_type', 'created_by', 'modified_at'),
             show='headings',
-            height=8
+            height=5
         )
         self.payment_tree.heading('percentage', text='Procent (%)')
         self.payment_tree.heading('payment_date', text='Data płatności')
@@ -2898,6 +2905,37 @@ class RMManagerGUI:
         
         self.payment_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         payment_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Watermark Canvas — pasek poniżej treeview
+        self._payment_wm_photo = None
+        payment_wm_canvas = tk.Canvas(payment_section, bg='white', height=90,
+                                       highlightthickness=0)
+        payment_wm_canvas.pack(fill=tk.X, padx=5, pady=(0, 5))
+        
+        def _draw_wm(event=None):
+            cw = payment_wm_canvas.winfo_width()
+            ch = payment_wm_canvas.winfo_height()
+            if cw < 4 or not PIL_AVAILABLE:
+                return
+            try:
+                _wat = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'wat.jpg')
+                if not os.path.exists(_wat):
+                    return
+                _img = Image.open(_wat).convert('RGBA')
+                _size = int(ch * 0.90)
+                _img = _img.resize((_size, _size), Image.LANCZOS)
+                _white = Image.new('RGBA', _img.size, (255, 255, 255, 255))
+                _img_wm = Image.blend(_white, _img, alpha=0.30).convert('RGB')
+                self._payment_wm_photo = ImageTk.PhotoImage(_img_wm)
+                payment_wm_canvas.delete('all')
+                payment_wm_canvas.create_image(
+                    cw // 2, ch // 2, anchor='center',
+                    image=self._payment_wm_photo
+                )
+            except Exception as _e:
+                print(f"⚠️ watermark: {_e}")
+        
+        payment_wm_canvas.bind('<Configure>', lambda e: payment_wm_canvas.after(80, _draw_wm))
         
         # Double-click na treeview = edycja
         self.payment_tree.bind('<Double-1>', lambda e: self.edit_payment_milestone())
