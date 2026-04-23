@@ -2922,7 +2922,10 @@ class RMManagerGUI:
             # Watermark w CAŁYM canvasie (za i pod treeview)
             if PIL_AVAILABLE:
                 try:
-                    _wat = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'wat.jpg')
+                    # Ścieżka kompatybilna z PyInstaller (sys._MEIPASS) i normalnym uruchomieniem
+                    import sys as _sys
+                    _base = getattr(_sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+                    _wat = os.path.join(_base, 'wat.jpg')
                     if not os.path.exists(_wat):
                         return
                     _img = Image.open(_wat).convert('RGBA')
