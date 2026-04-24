@@ -646,6 +646,34 @@ def ensure_rm_master_tables(master_db_path: str):
         """, _default_constraints)
         print(f"✅ Master: wstawiono {len(_default_constraints)} domyślnych ograniczeń zasobów")
 
+    # ============================================================================
+    # SESJE UŻYTKOWNIKÓW - tracking aktywnych logowań (2026-04-24)
+    # ============================================================================
+    # Tabela aktywnych sesji - sprawdzanie czy użytkownik jest już zalogowany
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS active_sessions (
+            session_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            hostname TEXT NOT NULL,
+            pid INTEGER NOT NULL,
+            app_name TEXT NOT NULL DEFAULT 'rm_manager',
+            login_at DATETIME NOT NULL,
+            last_heartbeat DATETIME NOT NULL,
+            client_info TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_active_sessions_user ON active_sessions(user_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_active_sessions_heartbeat ON active_sessions(last_heartbeat)")
+    # UNIQUE constraint - DEFENSE IN DEPTH: drugi mechanizm chroniący przed
+    # 2 sesjami tego samego usera na 1 komputerze (oprócz transakcji w register_user_session).
+    # NOTE: nie blokuje 2 komputerów dla 1 usera - to obsługuje logika "force/cancel".
+    con.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_active_sessions_user_host_app
+        ON active_sessions(user_id, hostname, app_name)
+    """)
+
     con.commit()
     con.close()
     print(f"✅ RM_MANAGER master baza zainicjalizowana: {master_db_path}")
@@ -730,6 +758,441 @@ def ensure_list_tables(master_db_path: str):
     con.commit()
     con.close()
     print(f"✅ Tabele list (employees, transports) gotowe: {master_db_path}")
+
+
+# ============================================================================
+# Zarządzanie sesjami użytkowników (session tracking)
+# ============================================================================
+
+# Ile minut bez heartbeat = sesja uznana za martwą
+DEFAULT_STALE_SESSION_MINUTES = 10
+
+
+def _is_db_readonly(con: sqlite3.Connection) -> bool:
+    """Sprawdź czy baza jest otwarta w trybie read-only.
+    
+    Wykrywa: pragma query_only=1, mode=ro w URI, brak praw zapisu.
+    """
+    try:
+        cur = con.execute("PRAGMA query_only")
+        row = cur.fetchone()
+        if row and row[0] == 1:
+            return True
+    except Exception:
+        pass
+    
+    # Test "miękki" - próba na temp table (rollback od razu)
+    try:
+        con.execute("BEGIN")
+        con.execute("CREATE TEMP TABLE __ro_check__ (x INTEGER)")
+        con.execute("DROP TABLE __ro_check__")
+        con.rollback()
+        return False
+    except sqlite3.OperationalError as e:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        if "readonly" in str(e).lower() or "read-only" in str(e).lower():
+            return True
+        return False
+    except Exception:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        return False
+
+
+def register_user_session(master_db_path: str, user_id: int, username: str, 
+                         hostname: str, pid: int, app_name: str = 'rm_manager',
+                         client_info: str = None,
+                         stale_minutes: int = DEFAULT_STALE_SESSION_MINUTES,
+                         force: bool = False):
+    """
+    Atomowo zarejestruj nową sesję użytkownika w bazie.
+    
+    Algorytm (transakcja BEGIN IMMEDIATE - blokuje DB):
+    1. Cleanup starych sesji tego usera (heartbeat > stale_minutes)
+    2. Sprawdź czy są jeszcze AKTYWNE sesje na innych komputerach
+    3a. Jeśli SĄ + force=False: zwróć (None, "active_session_exists", existing_session)
+    3b. Jeśli SĄ + force=True: usuń je
+    4. INSERT nowej sesji
+    
+    To eliminuje TOCTOU race - dwa równoczesne logowania nie utworzą 2 sesji.
+    
+    Args:
+        master_db_path: Ścieżka do rm_manager.sqlite
+        user_id: ID użytkownika
+        username: Login użytkownika
+        hostname: Nazwa komputera
+        pid: PID procesu aplikacji
+        app_name: Nazwa aplikacji
+        client_info: Dodatkowe info (opcjonalne)
+        stale_minutes: Po ilu min bez heartbeat sesja uznana za martwą
+        force: Jeśli True - wymuś (usuń aktywne sesje na innych komputerach)
+    
+    Returns:
+        Tuple (session_id, status, existing_session):
+        - ("uuid...", "ok", None)                 - sesja zarejestrowana
+        - ("uuid...", "readonly", None)           - DB ro, sesja nie zapisana (zwrócono fake id)
+        - (None, "active_session_exists", dict)   - inny komputer, force=False
+        - (None, "error", error_msg_str)          - inny błąd
+    """
+    import uuid
+    import socket
+    from datetime import datetime, timedelta
+    
+    if hostname is None:
+        hostname = socket.gethostname()
+    
+    session_id = str(uuid.uuid4())
+    now = datetime.now()
+    now_iso = now.isoformat()
+    cutoff_iso = (now - timedelta(minutes=stale_minutes)).isoformat()
+    
+    try:
+        con = _open_rm_connection(master_db_path)
+    except Exception as e:
+        print(f"⚠️ Nie można otworzyć DB do rejestracji sesji: {e}")
+        return (None, "error", str(e))
+    
+    # Sprawdź czy DB jest writable
+    if _is_db_readonly(con):
+        con.close()
+        print(f"ℹ️  Master DB read-only - sesja NIE zapisana (tryb GUEST/backup view)")
+        # Zwróć fake session_id żeby kod GUI nie crashował przy dalszej obsłudze
+        return (session_id, "readonly", None)
+    
+    try:
+        # ATOMOWA TRANSAKCJA - BEGIN IMMEDIATE blokuje DB do zapisu (eliminuje TOCTOU)
+        con.execute("BEGIN IMMEDIATE")
+        
+        # Krok 1: Usuń stare martwe sesje tego usera (zwolnij miejsce)
+        con.execute("""
+            DELETE FROM active_sessions
+            WHERE user_id = ? AND last_heartbeat < ?
+        """, (user_id, cutoff_iso))
+        
+        # Krok 2: Sprawdź AKTYWNE sesje na innych komputerach
+        active_others = con.execute("""
+            SELECT session_id, user_id, username, hostname, pid, app_name,
+                   login_at, last_heartbeat, client_info
+            FROM active_sessions
+            WHERE user_id = ? AND last_heartbeat >= ? AND hostname != ?
+            ORDER BY login_at DESC
+            LIMIT 1
+        """, (user_id, cutoff_iso, hostname)).fetchone()
+        
+        if active_others and not force:
+            # Inny komputer ma aktywną sesję - odmów
+            con.rollback()
+            con.close()
+            existing = dict(active_others)
+            print(f"⚠️  Logowanie odrzucone - {username} aktywny na {existing['hostname']}")
+            return (None, "active_session_exists", existing)
+        
+        # Krok 3: Jeśli force=True - usuń sesje na innych komputerach
+        if active_others and force:
+            con.execute("""
+                DELETE FROM active_sessions
+                WHERE user_id = ? AND hostname != ?
+            """, (user_id, hostname))
+            print(f"⚡ Force-login: usunięto sesję {username}@{active_others['hostname']}")
+        
+        # Krok 4: Usuń ewentualne stare sesje na TYM komputerze (np. po crashu)
+        con.execute("""
+            DELETE FROM active_sessions
+            WHERE user_id = ? AND hostname = ?
+        """, (user_id, hostname))
+        
+        # Krok 5: INSERT nowej sesji
+        con.execute("""
+            INSERT INTO active_sessions 
+                (session_id, user_id, username, hostname, pid, app_name, login_at, last_heartbeat, client_info)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (session_id, user_id, username, hostname, pid, app_name, now_iso, now_iso, client_info))
+        
+        _rm_safe_commit(con)
+        con.close()
+        
+        print(f"✅ Zarejestrowano sesję: {username}@{hostname} (session_id: {session_id[:8]}...)")
+        return (session_id, "ok", None)
+    
+    except sqlite3.OperationalError as e:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        try:
+            con.close()
+        except Exception:
+            pass
+        if "readonly" in str(e).lower() or "read-only" in str(e).lower():
+            print(f"ℹ️  DB read-only przy rejestracji sesji - pomijam")
+            return (session_id, "readonly", None)
+        print(f"⚠️ Błąd rejestracji sesji: {e}")
+        return (None, "error", str(e))
+    except Exception as e:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        try:
+            con.close()
+        except Exception:
+            pass
+        print(f"⚠️ Błąd rejestracji sesji: {e}")
+        return (None, "error", str(e))
+
+
+def get_active_user_sessions(master_db_path: str, user_id: int, 
+                            stale_minutes: int = DEFAULT_STALE_SESSION_MINUTES) -> List[Dict]:
+    """
+    Pobierz aktywne sesje użytkownika (heartbeat nie starszy niż stale_minutes).
+    
+    Funkcja read-only - działa nawet na DB ro.
+    
+    Returns:
+        Lista słowników z danymi sesji (puste gdy brak/błąd)
+    """
+    from datetime import datetime, timedelta
+    
+    try:
+        con = _open_rm_connection(master_db_path)
+    except Exception as e:
+        print(f"⚠️ Nie można otworzyć DB: {e}")
+        return []
+    
+    try:
+        cutoff = (datetime.now() - timedelta(minutes=stale_minutes)).isoformat()
+        rows = con.execute("""
+            SELECT session_id, user_id, username, hostname, pid, app_name, 
+                   login_at, last_heartbeat, client_info
+            FROM active_sessions
+            WHERE user_id = ? AND last_heartbeat >= ?
+            ORDER BY login_at DESC
+        """, (user_id, cutoff)).fetchall()
+        con.close()
+        return [dict(r) for r in rows]
+    except sqlite3.OperationalError as e:
+        try:
+            con.close()
+        except Exception:
+            pass
+        # Tabela może nie istnieć (stara baza) - graceful fallback
+        if "no such table" in str(e).lower():
+            return []
+        print(f"⚠️ Błąd pobierania sesji: {e}")
+        return []
+    except Exception as e:
+        try:
+            con.close()
+        except Exception:
+            pass
+        print(f"⚠️ Błąd pobierania sesji: {e}")
+        return []
+
+
+def update_session_heartbeat(master_db_path: str, session_id: str) -> bool:
+    """
+    Odśwież heartbeat sesji (wywołuj co ~30 s).
+    
+    Cicha funkcja - bez logów dla normalnych przypadków read-only.
+    
+    Returns:
+        bool: True jeśli udało się zaktualizować
+    """
+    from datetime import datetime
+    
+    if not session_id:
+        return False
+    
+    try:
+        con = _open_rm_connection(master_db_path)
+    except Exception:
+        return False
+    
+    try:
+        if _is_db_readonly(con):
+            con.close()
+            return False  # Cicho - to normalna sytuacja w trybie GUEST
+        
+        con.execute("""
+            UPDATE active_sessions
+            SET last_heartbeat = ?
+            WHERE session_id = ?
+        """, (datetime.now().isoformat(), session_id))
+        updated = con.total_changes > 0
+        _rm_safe_commit(con)
+        con.close()
+        return updated
+    except sqlite3.OperationalError as e:
+        try:
+            con.close()
+        except Exception:
+            pass
+        if "readonly" in str(e).lower() or "no such table" in str(e).lower():
+            return False  # Cicho
+        print(f"⚠️ Błąd heartbeat sesji: {e}")
+        return False
+    except Exception as e:
+        try:
+            con.close()
+        except Exception:
+            pass
+        print(f"⚠️ Błąd heartbeat sesji: {e}")
+        return False
+
+
+def cleanup_user_session(master_db_path: str, session_id: str):
+    """
+    Usuń sesję użytkownika (przy wylogowaniu/zamknięciu aplikacji).
+    """
+    if not session_id:
+        return
+    
+    try:
+        con = _open_rm_connection(master_db_path)
+    except Exception:
+        return
+    
+    try:
+        if _is_db_readonly(con):
+            con.close()
+            return
+        
+        con.execute("DELETE FROM active_sessions WHERE session_id = ?", (session_id,))
+        _rm_safe_commit(con)
+        con.close()
+        print(f"🧹 Usunięto sesję: {session_id[:8]}...")
+    except sqlite3.OperationalError as e:
+        try:
+            con.close()
+        except Exception:
+            pass
+        if "readonly" not in str(e).lower() and "no such table" not in str(e).lower():
+            print(f"⚠️ Błąd usuwania sesji: {e}")
+    except Exception as e:
+        try:
+            con.close()
+        except Exception:
+            pass
+        print(f"⚠️ Błąd usuwania sesji: {e}")
+
+
+def cleanup_stale_sessions(master_db_path: str,
+                          stale_minutes: int = DEFAULT_STALE_SESSION_MINUTES) -> int:
+    """
+    Usuń nieaktywne sesje (heartbeat starszy niż stale_minutes).
+    
+    Returns:
+        int: Liczba usuniętych sesji (0 gdy brak/error/readonly)
+    """
+    from datetime import datetime, timedelta
+    
+    try:
+        con = _open_rm_connection(master_db_path)
+    except Exception:
+        return 0
+    
+    try:
+        if _is_db_readonly(con):
+            con.close()
+            return 0
+        
+        cutoff = (datetime.now() - timedelta(minutes=stale_minutes)).isoformat()
+        
+        # Pobierz sesje do usunięcia (dla logu)
+        to_delete = con.execute("""
+            SELECT username, hostname, session_id
+            FROM active_sessions
+            WHERE last_heartbeat < ?
+        """, (cutoff,)).fetchall()
+        
+        if not to_delete:
+            con.close()
+            return 0
+        
+        con.execute("DELETE FROM active_sessions WHERE last_heartbeat < ?", (cutoff,))
+        deleted = con.total_changes
+        _rm_safe_commit(con)
+        con.close()
+        
+        if deleted > 0:
+            print(f"🧹 Usunięto {deleted} nieaktywnych sesji:")
+            for row in to_delete:
+                print(f"   • {row[0]}@{row[1]} (ID: {row[2][:8]}...)")
+        return deleted
+    except sqlite3.OperationalError as e:
+        try:
+            con.close()
+        except Exception:
+            pass
+        if "readonly" not in str(e).lower() and "no such table" not in str(e).lower():
+            print(f"⚠️ Błąd cleanup stale sessions: {e}")
+        return 0
+    except Exception as e:
+        try:
+            con.close()
+        except Exception:
+            pass
+        print(f"⚠️ Błąd cleanup stale sessions: {e}")
+        return 0
+
+
+def cleanup_hostname_sessions(master_db_path: str, hostname: str) -> int:
+    """
+    Usuń WSZYSTKIE sesje z danego komputera (przy starcie aplikacji po crashu).
+    
+    Returns:
+        int: Liczba usuniętych sesji
+    """
+    try:
+        con = _open_rm_connection(master_db_path)
+    except Exception:
+        return 0
+    
+    try:
+        if _is_db_readonly(con):
+            con.close()
+            return 0
+        
+        to_delete = con.execute("""
+            SELECT username, session_id
+            FROM active_sessions
+            WHERE hostname = ?
+        """, (hostname,)).fetchall()
+        
+        if not to_delete:
+            con.close()
+            return 0
+        
+        con.execute("DELETE FROM active_sessions WHERE hostname = ?", (hostname,))
+        deleted = con.total_changes
+        _rm_safe_commit(con)
+        con.close()
+        
+        if deleted > 0:
+            print(f"🧹 Startup cleanup: usunięto {deleted} osieroconych sesji z {hostname}:")
+            for row in to_delete:
+                print(f"   • {row[0]} (ID: {row[1][:8]}...)")
+        return deleted
+    except sqlite3.OperationalError as e:
+        try:
+            con.close()
+        except Exception:
+            pass
+        if "readonly" not in str(e).lower() and "no such table" not in str(e).lower():
+            print(f"⚠️ Błąd cleanup hostname sessions: {e}")
+        return 0
+    except Exception as e:
+        try:
+            con.close()
+        except Exception:
+            pass
+        print(f"⚠️ Błąd cleanup hostname sessions: {e}")
+        return 0
 
 
 def update_stage_definitions(master_db_path: str):

@@ -113,6 +113,7 @@ except ImportError:
         def refresh_heartbeat(self, project_id): return True
         def refresh_all_my_locks(self): pass
         def cleanup_all_my_locks(self): pass
+        def cleanup_my_computer_locks(self): return 0
         def cleanup_stale_locks(self): return 0
         def force_delete_lock(self, project_id): return False
 
@@ -126,8 +127,254 @@ except ImportError:
 
 
 # ============================================================================
+# Single Instance Lock - blokada uruchomienia wielu instancji
+# ============================================================================
+
+class SingleInstanceLock:
+    """
+    Zabezpieczenie przed uruchomieniem wielu instancji aplikacji na tym samym komputerze.
+    
+    ARCHITEKTURA:
+    - Lock file w LOKALNYM folderze TEMP (per-komputer, nie sieciowy!)
+    - Atomowe utworzenie pliku (tryb 'x') - eliminuje TOCTOU race condition
+    - Walidacja procesu po PID + nazwie (eliminuje problem PID recycling)
+    - Heartbeat-based timeout jako safety net (jeśli atexit zawiedzie)
+    
+    DLACZEGO LOKALNIE (nie sieciowo):
+    Single-instance to problem LOKALNY - kontrolujemy 1 instancję per komputer.
+    Inne komputery NIE muszą widzieć tego locka. Globalna kontrola "ten sam user
+    na 2 komputerach" rozwiązana jest osobno przez tabelę active_sessions w DB.
+    """
+    
+    # Limit czasowy dla "świeżego" locka (jeśli starszy = ignorujemy, nawet jak PID żyje)
+    LOCK_MAX_AGE_HOURS = 24
+    
+    def __init__(self, app_name: str = "rm_manager"):
+        """
+        Args:
+            app_name: Nazwa aplikacji (używana w nazwie pliku)
+        """
+        import tempfile
+        import socket
+        
+        # LOKALNY folder TEMP - każdy komputer ma własny, brak kolizji w sieci
+        self.lock_dir = Path(tempfile.gettempdir())
+        # Hostname w nazwie - dodatkowe zabezpieczenie gdy TEMP jest współdzielony (np. roaming profiles)
+        self.lock_file = self.lock_dir / f"{app_name}_{socket.gethostname()}.lock"
+        self.pid = os.getpid()
+        self.app_name = app_name
+        self._locked = False
+    
+    def acquire(self):
+        """
+        Próba przejęcia locka (uruchomienia aplikacji).
+        
+        Algorytm:
+        1. Spróbuj atomowo utworzyć plik (tryb 'x')
+        2. Jeśli się nie udało - sprawdź czy istniejący lock jest aktywny:
+           - Czy proces o tym PID istnieje?
+           - Czy to NA PEWNO nasza aplikacja (sprawdź nazwę)?
+           - Czy lock nie jest za stary (>24h)?
+        3. Jeśli stary/martwy - usuń i spróbuj ponownie atomowo
+        
+        Returns:
+            (success, message): 
+            - success: True jeśli można uruchomić aplikację
+            - message: komunikat błędu jeśli inna instancja działa
+        """
+        import socket
+        
+        # Próba 1: atomowe utworzenie (tryb 'x' - exclusive create)
+        result = self._try_atomic_create()
+        if result[0]:
+            return result
+        
+        # Lock już istnieje - sprawdź czy aktywny
+        try:
+            with open(self.lock_file, 'r') as f:
+                data = json.load(f)
+            old_pid = data.get('pid')
+            old_started = data.get('started_at', 'nieznany')
+        except Exception as e:
+            print(f"⚠️ Lock file uszkodzony ({e}) - usuwam i tworzę nowy")
+            try:
+                self.lock_file.unlink()
+            except Exception:
+                pass
+            return self._try_atomic_create()
+        
+        # Sprawdź wiek locka (>24h = na pewno zombie)
+        if self._is_lock_too_old(data):
+            print(f"🧹 Lock starszy niż {self.LOCK_MAX_AGE_HOURS}h - usuwam")
+            try:
+                self.lock_file.unlink()
+            except Exception:
+                pass
+            return self._try_atomic_create()
+        
+        # Sprawdź czy proces nadal żyje I czy to nasza aplikacja
+        if old_pid and self._is_our_app_running(old_pid):
+            # Inna instancja AKTYWNA - blokuj
+            return (False, 
+                    f"❌ RM_MANAGER już działa na tym komputerze!\n\n"
+                    f"• PID: {old_pid}\n"
+                    f"• Uruchomiony: {old_started}\n\n"
+                    f"Zamknij istniejącą instancję przed uruchomieniem kolejnej.\n\n"
+                    f"Jeśli aplikacja nie odpowiada, zamknij ją w Menedżerze zadań\n"
+                    f"lub usuń plik:\n{self.lock_file}")
+        
+        # PID nie istnieje LUB to inny proces (PID recycling)
+        print(f"🧹 Usuwam osieroconego locka (PID {old_pid} = nieaktywny lub inny proces)")
+        try:
+            self.lock_file.unlink()
+        except Exception:
+            pass
+        return self._try_atomic_create()
+    
+    def _try_atomic_create(self):
+        """Atomowa próba utworzenia lock file - eliminuje TOCTOU race."""
+        import socket
+        
+        try:
+            # Tryb 'x' = exclusive create - rzuca FileExistsError jeśli istnieje
+            # To jest ATOMOWE na poziomie OS - tylko jeden proces wygra
+            self.lock_dir.mkdir(parents=True, exist_ok=True)
+            
+            lock_data = {
+                'pid': self.pid,
+                'hostname': socket.gethostname(),
+                'started_at': datetime.now().isoformat(),
+                'user': os.environ.get('USERNAME') or os.environ.get('USER', 'Unknown'),
+                'app_name': self.app_name,
+            }
+            
+            with open(self.lock_file, 'x') as f:  # 'x' = exclusive create
+                json.dump(lock_data, f, indent=2)
+            
+            self._locked = True
+            print(f"✅ Single-instance lock przejęty: {self.lock_file.name} (PID: {self.pid})")
+            return (True, "")
+        
+        except FileExistsError:
+            # Inny proces właśnie utworzył lock - normalna sytuacja
+            return (False, "Lock file already exists")
+        except Exception as e:
+            return (False, f"❌ Nie można utworzyć lock file: {e}")
+    
+    def _is_lock_too_old(self, data: dict) -> bool:
+        """Czy lock jest starszy niż LOCK_MAX_AGE_HOURS?"""
+        try:
+            started = data.get('started_at')
+            if not started:
+                return True
+            lock_dt = datetime.fromisoformat(started)
+            age_hours = (datetime.now() - lock_dt).total_seconds() / 3600
+            return age_hours > self.LOCK_MAX_AGE_HOURS
+        except Exception:
+            return True  # Błąd parsowania = uznaj za stary
+    
+    def _is_our_app_running(self, pid: int) -> bool:
+        """
+        Sprawdź czy proces o danym PID działa I czy to NA PEWNO nasza aplikacja.
+        
+        Dwa kroki - bo PID może być zrecyklowany przez OS dla innego procesu
+        (np. notepad.exe dostaje PID po crashu naszej aplikacji).
+        """
+        # Krok 1: Czy proces istnieje?
+        try:
+            import psutil
+            if not psutil.pid_exists(pid):
+                return False
+            
+            # Krok 2: Czy to NA PEWNO nasza aplikacja?
+            try:
+                proc = psutil.Process(pid)
+                proc_name = (proc.name() or '').lower()
+                try:
+                    cmdline = ' '.join(proc.cmdline() or []).lower()
+                except (psutil.AccessDenied, psutil.NoSuchProcess):
+                    cmdline = ''
+                
+                # Czy nazwa lub cmdline zawiera markery naszej aplikacji?
+                markers = [self.app_name.lower(), 'rm_manager', 'rm_manager_gui']
+                is_our_app = any(m in proc_name or m in cmdline for m in markers)
+                
+                if not is_our_app:
+                    print(f"   ℹ️  PID {pid} istnieje ale to inny proces ({proc_name}) - PID recycling")
+                
+                return is_our_app
+            
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                # Proces zniknął między pid_exists a Process() lub brak uprawnień
+                return False
+        
+        except ImportError:
+            # Fallback bez psutil - tylko sprawdzenie PID (mniej dokładne)
+            print("⚠️ psutil niedostępny - sprawdzanie tylko PID (możliwy false-positive)")
+            try:
+                if os.name == 'nt':  # Windows
+                    import subprocess
+                    result = subprocess.run(
+                        ['tasklist', '/FI', f'PID eq {pid}'],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    # Sprawdź czy w wyniku jest python.exe lub rm_manager
+                    output = result.stdout.lower()
+                    return str(pid) in output and (
+                        'python' in output or 'rm_manager' in output
+                    )
+                else:  # Linux/Unix
+                    os.kill(pid, 0)  # Sygnał 0 = sprawdzenie istnienia
+                    # Sprawdź /proc/<pid>/cmdline
+                    try:
+                        with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                            cmdline = f.read().decode('utf-8', errors='ignore').lower()
+                        return 'rm_manager' in cmdline or 'python' in cmdline
+                    except Exception:
+                        return True  # Plik nie istnieje - ostrożnie zwróć True
+            except Exception:
+                return False
+    
+    def release(self):
+        """Zwolnij lock (usuń plik) - tylko jeśli to NASZ lock."""
+        if not self._locked:
+            return
+        
+        try:
+            # Bezpieczne usuwanie - tylko jeśli plik nadal nasz (nie ktoś go nadpisał)
+            if self.lock_file.exists():
+                try:
+                    with open(self.lock_file, 'r') as f:
+                        data = json.load(f)
+                    if data.get('pid') == self.pid:
+                        self.lock_file.unlink()
+                        print(f"🔓 Single-instance lock zwolniony (PID: {self.pid})")
+                    else:
+                        print(f"⚠️ Lock należy do PID {data.get('pid')} (nie {self.pid}) - nie usuwam")
+                except Exception:
+                    # Plik uszkodzony - usuń tak czy tak (był nasz)
+                    self.lock_file.unlink()
+                    print(f"🔓 Single-instance lock zwolniony (PID: {self.pid})")
+            self._locked = False
+        except Exception as e:
+            print(f"⚠️ Błąd zwalniania single-instance lock: {e}")
+    
+    def __del__(self):
+        """Backup cleanup (NIE niezawodny - polegaj na atexit/signal handlers)."""
+        try:
+            self.release()
+        except Exception:
+            pass
+
+
+
+# ============================================================================
 # Konfiguracja
 # ============================================================================
+
+# Wersja aplikacji (format: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.5.3"
+APP_BUILD_DATE = "2026-04-24"
 
 # Ścieżka do pliku konfiguracyjnego (na sztywno)
 CONFIG_FILE_PATH = r"C:\RMPAK_CLIENT\manager_sync_config.json"
@@ -185,13 +432,138 @@ DEFAULT_DEPENDENCIES = [
 
 
 # ============================================================================
+# Auto-Update System
+# ============================================================================
+
+def check_and_update(config_file_path: str = CONFIG_FILE_PATH) -> bool:
+    """Sprawdza czy dostępna jest nowsza wersja aplikacji na serwerze i aktualizuje.
+    
+    Workflow:
+    1. Czyta ścieżkę do serwera z config JSON (server_exe_path)
+    2. Porównuje daty modyfikacji EXE na serwerze vs lokalnie
+    3. Jeśli serwer nowszy → kopiuje → restartuje aplikację
+    
+    Args:
+        config_file_path: Ścieżka do pliku konfiguracyjnego JSON
+    
+    Returns:
+        True jeśli zaktualizowano i trzeba zamknąć obecną instancję,
+        False jeśli brak aktualizacji lub błąd
+    """
+    import sys
+    import shutil
+    import time
+    
+    try:
+        # 1. Wczytaj konfigurację
+        if not os.path.exists(config_file_path):
+            return False  # Brak config - skip auto-update
+        
+        with open(config_file_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        
+        server_exe_path = config.get('server_exe_path')
+        if not server_exe_path:
+            return False  # Brak ścieżki serwera - skip
+        
+        # 2. Sprawdź czy uruchomiono z EXE czy z Python
+        if getattr(sys, 'frozen', False):
+            # Uruchomiono z EXE - sys.executable to ścieżka do EXE
+            local_exe_path = sys.executable
+        else:
+            # Uruchomiono z Python - użyj standardowej ścieżki lokalnej
+            local_exe_path = r"C:\RMPAK_CLIENT\rm_manager.exe"
+            if not os.path.exists(local_exe_path):
+                return False  # Brak lokalnego EXE - skip (dev mode)
+        
+        # 3. Sprawdź czy serwer ma nowszą wersję
+        if not os.path.exists(server_exe_path):
+            print(f"⚠️ Serwer EXE nie istnieje: {server_exe_path}")
+            return False
+        
+        server_mtime = os.path.getmtime(server_exe_path)
+        local_mtime = os.path.getmtime(local_exe_path) if os.path.exists(local_exe_path) else 0
+        
+        # Tolerancja 2 sekundy (FAT32 ma rozdzielczość 2s)
+        if server_mtime <= local_mtime + 2:
+            return False  # Lokalna wersja aktualna
+        
+        # 4. Serwer ma nowszą wersję - pytaj użytkownika
+        from tkinter import messagebox
+        
+        server_date = datetime.fromtimestamp(server_mtime).strftime('%Y-%m-%d %H:%M:%S')
+        local_date = datetime.fromtimestamp(local_mtime).strftime('%Y-%m-%d %H:%M:%S') if local_mtime > 0 else 'brak'
+        
+        result = messagebox.askyesno(
+            "🔄 Dostępna aktualizacja",
+            f"Dostępna jest nowsza wersja aplikacji!\n\n"
+            f"Aktualna wersja: {APP_VERSION} ({local_date})\n"
+            f"Nowa wersja: {server_date}\n\n"
+            f"Czy zaktualizować teraz?\n\n"
+            f"(Aplikacja zostanie zamknięta i uruchomiona ponownie)",
+            icon='question'
+        )
+        
+        if not result:
+            return False
+        
+        # 5. Kopiuj nową wersję (atomowo: temp → rename)
+        print(f"🔄 Aktualizacja z serwera: {server_exe_path} → {local_exe_path}")
+        
+        # Backup starej wersji
+        backup_path = local_exe_path + ".backup"
+        if os.path.exists(local_exe_path):
+            try:
+                if os.path.exists(backup_path):
+                    os.remove(backup_path)
+                shutil.copy2(local_exe_path, backup_path)
+                print(f"   Backup: {backup_path}")
+            except Exception as e:
+                print(f"⚠️ Nie można utworzyć backupu (kontynuuję): {e}")
+        
+        # Kopiuj nową wersję
+        temp_path = local_exe_path + ".new"
+        try:
+            shutil.copy2(server_exe_path, temp_path)
+            # Atomowe zastąpienie (Windows: os.replace od Python 3.3+)
+            os.replace(temp_path, local_exe_path)
+            print(f"✅ Zaktualizowano: {local_exe_path}")
+        except Exception as e:
+            messagebox.showerror(
+                "❌ Błąd aktualizacji",
+                f"Nie można zaktualizować aplikacji:\n{e}\n\n"
+                f"Spróbuj ponownie lub skontaktuj się z administratorem."
+            )
+            return False
+        
+        # 6. Restart aplikacji
+        messagebox.showinfo(
+            "✅ Aktualizacja zakończona",
+            "Aktualizacja zakończona pomyślnie.\n\n"
+            "Aplikacja zostanie teraz uruchomiona ponownie."
+        )
+        
+        # Uruchom nową wersję i zamknij obecną
+        import subprocess
+        subprocess.Popen([local_exe_path])
+        
+        return True  # Signal do zamknięcia aplikacji
+        
+    except Exception as e:
+        print(f"⚠️ Błąd auto-update: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+# ============================================================================
 # Główne okno aplikacji
 # ============================================================================
 
 class RMManagerGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("RM_MANAGER - Zarządzanie procesami projektów")
+        self.root.title(f"RM_MANAGER v{APP_VERSION} - Zarządzanie procesami projektów")
         self.root.geometry("1400x900")
         
         # Okno edycji (referencja)
@@ -250,6 +622,7 @@ class RMManagerGUI:
         self.current_user_id: int = None       # id z tabeli users
         self.current_user_role: str = "GUEST"  # rola (ADMIN/USER$$/USER$/USER/GUEST)
         self.user_permissions: dict = {}       # cache uprawnień bieżącego użytkownika
+        self.current_session_id: str = None    # ID sesji (dla session tracking)
         self._login_thread = None
         self._login_in_progress = False
 
@@ -288,6 +661,14 @@ class RMManagerGUI:
             self.lock_manager.cleanup_my_computer_locks()
         except Exception as e:
             print(f"⚠️ Startup cleanup error: {e}")
+        
+        # Startup: wyczyść sesje użytkowników z tego komputera (po crashu)
+        try:
+            import socket
+            rmm.cleanup_hostname_sessions(self.rm_master_db_path, socket.gethostname())
+        except Exception as e:
+            print(f"⚠️ Startup cleanup sessions error: {e}")
+        
         self._start_heartbeat()
         
         # Alarmy - sprawdzaj co 5 minut
@@ -812,6 +1193,19 @@ class RMManagerGUI:
             try:
                 self.lock_manager.refresh_all_my_locks()
                 self.lock_manager.cleanup_stale_locks()
+                
+                # Heartbeat sesji użytkownika (session tracking)
+                if self.current_session_id:
+                    try:
+                        rmm.update_session_heartbeat(self.rm_master_db_path, self.current_session_id)
+                    except Exception as e:
+                        print(f"⚠️ Błąd heartbeat sesji: {e}")
+                
+                # Cleanup starych sesji (co 30s przy normalnym heartbeat)
+                try:
+                    rmm.cleanup_stale_sessions(self.rm_master_db_path, stale_minutes=10)
+                except Exception as e:
+                    print(f"⚠️ Błąd cleanup stale sessions: {e}")
 
                 # Detekcja wymuszenia: sprawdź czy lock_id się zmienił
                 # Pomijaj dla stuba (tryb jednousytkownikowy – brak prawdziwych locków)
@@ -1784,6 +2178,8 @@ class RMManagerGUI:
                         'locks_dir',
                         os.path.join(self.rm_projects_dir, 'LOCKS')
                     )
+                    # server_exe_path: ścieżka do EXE na serwerze (dla auto-update)
+                    self.server_exe_path = config.get('server_exe_path', '')
                     # Geometria okien i szerokości kolumn
                     self.window_geometry = config.get('window_geometry', {})
                     self.column_widths = config.get('column_widths', {})
@@ -1805,6 +2201,7 @@ class RMManagerGUI:
                 self.rm_projects_dir   = DEFAULT_RM_PROJECTS_DIR
                 self.backup_dir        = DEFAULT_BACKUP_DIR
                 self.locks_dir         = DEFAULT_LOCKS_DIR
+                self.server_exe_path   = ''  # Brak domyślnej ścieżki do serwera
                 print(f"⚠️ Brak pliku konfiguracyjnego: {self.config_file}")
                 print(f"   Użyto domyślnych ścieżek")
                 # Utwórz domyślny plik
@@ -1819,6 +2216,7 @@ class RMManagerGUI:
             self.rm_projects_dir   = DEFAULT_RM_PROJECTS_DIR
             self.backup_dir        = DEFAULT_BACKUP_DIR
             self.locks_dir         = DEFAULT_LOCKS_DIR
+            self.server_exe_path   = ''  # Brak domyślnej ścieżki do serwera
 
     def save_config(self):
         """Zapisz konfigurację do JSON"""
@@ -1836,6 +2234,7 @@ class RMManagerGUI:
                 'backup_dir': self.backup_dir,
                 'locks_dir': self.locks_dir,
                 'projects_path': self.projects_path,
+                'server_exe_path': self.server_exe_path,
                 'window_geometry': self.window_geometry,
                 'column_widths': self.column_widths,
                 '_comment': 'RM_MANAGER configuration file – edit paths as needed'
@@ -2036,9 +2435,145 @@ class RMManagerGUI:
     def _finish_login(self, uid, username, role):
         """Aktualizacja stanu GUI po zalogowaniu"""
         self._login_in_progress = False
+        
+        # =====================================================================
+        # ATOMOWA REJESTRACJA SESJI (eliminuje TOCTOU race)
+        # =====================================================================
+        # register_user_session w jednej transakcji:
+        # - sprawdza czy są inne aktywne sesje (na innych komputerach)
+        # - jeśli SĄ + force=False: zwraca ("active_session_exists", existing_session)
+        # - jeśli NIE MA / force=True: rejestruje nową sesję
+        
+        import socket
+        my_hostname = socket.gethostname()
+        my_pid = os.getpid()
+        
+        new_session_id, status, existing = rmm.register_user_session(
+            self.rm_master_db_path,
+            user_id=uid,
+            username=username,
+            hostname=my_hostname,
+            pid=my_pid,
+            app_name='rm_manager',
+            client_info=f"PID:{my_pid}",
+            force=False,
+        )
+        
+        if status == "active_session_exists" and existing:
+            # Inny komputer ma aktywną sesję - dialog do usera
+            session = existing
+            
+            dlg = tk.Toplevel(self.root)
+            dlg.title("⚠️ Użytkownik już zalogowany")
+            dlg.transient(self.root)
+            dlg.grab_set()
+            dlg.resizable(False, False)
+            self._center_window(dlg, 550, 280)
+            
+            result = {'action': None}
+            
+            frm = tk.Frame(dlg, padx=30, pady=20)
+            frm.pack(fill=tk.BOTH, expand=True)
+            
+            tk.Label(
+                frm,
+                text=f"⚠️ Użytkownik {username} jest już zalogowany!",
+                font=("Arial", 11, "bold"),
+                fg="#e74c3c"
+            ).pack(pady=(0, 15))
+            
+            info_frame = tk.Frame(frm, relief=tk.RIDGE, borderwidth=2, bg="#f0f0f0")
+            info_frame.pack(fill=tk.X, pady=(0, 20))
+            
+            info_text = (
+                f"📍 Komputer: {session['hostname']}\n"
+                f"🖥️  Aplikacja: {session['app_name']}\n"
+                f"⏰ Zalogowano: {session['login_at'][:19]}\n"
+                f"💓 Ostatnia aktywność: {session['last_heartbeat'][:19]}"
+            )
+            tk.Label(
+                info_frame, text=info_text, font=("Consolas", 9),
+                bg="#f0f0f0", justify=tk.LEFT, padx=15, pady=10
+            ).pack()
+            
+            tk.Label(frm, text="Co chcesz zrobić?",
+                     font=("Arial", 10, "bold")).pack(pady=(0, 10))
+            
+            btn_frame = tk.Frame(frm)
+            btn_frame.pack(fill=tk.X)
+            
+            def on_force():
+                result['action'] = 'force'
+                dlg.destroy()
+            
+            def on_cancel():
+                result['action'] = 'cancel'
+                dlg.destroy()
+            
+            tk.Button(btn_frame, text="⚡ Wymuś zalogowanie\n(wyloguj tamtą sesję)",
+                      command=on_force, bg="#e67e22", fg="white",
+                      font=("Arial", 10, "bold"), width=25, height=3
+                      ).pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+            
+            tk.Button(btn_frame, text="❌ Anuluj\n(nie loguj się)",
+                      command=on_cancel, bg="#95a5a6", fg="white",
+                      font=("Arial", 10, "bold"), width=20, height=3
+                      ).pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+            
+            dlg.wait_window()
+            
+            if result['action'] != 'force':
+                # Anulowano - wróć do GUEST
+                print(f"❌ Logowanie anulowane - {username} aktywny na {session['hostname']}")
+                self._finish_login_failed(f"Anulowano - użytkownik zalogowany na {session['hostname']}")
+                return
+            
+            # Force - ponowna rejestracja z force=True (atomowo wymusi)
+            print(f"⚡ Wymuszanie logowania - przejmuję sesję od {session['hostname']}")
+            new_session_id, status, existing = rmm.register_user_session(
+                self.rm_master_db_path,
+                user_id=uid,
+                username=username,
+                hostname=my_hostname,
+                pid=my_pid,
+                app_name='rm_manager',
+                client_info=f"PID:{my_pid} (forced)",
+                force=True,
+            )
+            
+            if status not in ("ok", "readonly"):
+                # Nie udało się nawet z force - pokaż błąd
+                err = existing if isinstance(existing, str) else "nieznany błąd"
+                messagebox.showerror(
+                    "Błąd logowania",
+                    f"Nie można wymusić logowania:\n{err}"
+                )
+                self._finish_login_failed(f"Force-login failed: {err}")
+                return
+        
+        elif status == "error":
+            # Błąd techniczny - log, ale pozwól na dalsze logowanie (degradacja)
+            err = existing if isinstance(existing, str) else "nieznany"
+            print(f"⚠️ Session tracking niedostępny ({err}) - kontynuuję bez śledzenia sesji")
+            new_session_id = None
+        
+        elif status == "readonly":
+            # DB read-only (np. GUEST/backup view) - kontynuuj bez tracking
+            print(f"ℹ️  Session tracking pominięty (DB read-only)")
+            # new_session_id pozostaje (fake) - heartbeat i tak nic nie zrobi
+        
+        # status == "ok" → wszystko poszło dobrze, new_session_id ustawiony
+        
+        self.current_session_id = new_session_id
+        
+        # =====================================================================
+        # FINALIZACJA LOGOWANIA
+        # =====================================================================
+        
         self.current_user_id = uid
         self.current_user = username
         self.current_user_role = role
+        
         # Zapamiętaj ostatniego usera (auto-login przy restarcie)
         self.save_last_user_to_config(uid)
         # Reload uprawnień
@@ -2261,6 +2796,47 @@ class RMManagerGUI:
         menubar.add_cascade(label="Listy", menu=lists_menu)
         lists_menu.add_command(label="👷 Pracownicy...", command=self.employees_dialog)
         lists_menu.add_command(label="🚚 Transport...", command=self.transports_dialog)
+        
+        # Help menu
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Pomoc", menu=help_menu)
+        help_menu.add_command(label="ℹ️ O programie...", command=self.show_about_dialog)
+        help_menu.add_command(label="🔄 Sprawdź aktualizacje...", command=self.check_for_updates_manual)
+    
+    def show_about_dialog(self):
+        """Wyświetl okno O programie z informacją o wersji"""
+        messagebox.showinfo(
+            "O programie",
+            f"RM_MANAGER\n"
+            f"Zaawansowane zarządzanie procesami projektów\n\n"
+            f"Wersja: {APP_VERSION}\n"
+            f"Data: {APP_BUILD_DATE}\n\n"
+            f"© 2026 RM_ROBUR"
+        )
+    
+    def check_for_updates_manual(self):
+        """Ręczne sprawdzenie aktualizacji (wywołane z menu)"""
+        if not self.server_exe_path:
+            messagebox.showwarning(
+                "⚠️ Brak konfiguracji",
+                "Nie skonfigurowano ścieżki do EXE na serwerze.\n\n"
+                "Przejdź do: Plik → Konfiguracja ścieżek...\n"
+                "i uzupełnij pole 'EXE na serwerze (update)'"
+            )
+            return
+        
+        # Wywołaj sprawdzenie i aktualizację
+        if check_and_update(self.config_file):
+            # Zaktualizowano - zamknij aplikację (nowa wersja została uruchomiona)
+            self.root.quit()
+        else:
+            # Brak aktualizacji lub błąd
+            messagebox.showinfo(
+                "✅ Brak aktualizacji",
+                f"Używasz najnowszej wersji aplikacji.\n\n"
+                f"Wersja: {APP_VERSION}\n"
+                f"Data: {APP_BUILD_DATE}"
+            )
     
     def create_widgets(self):
         """Główny layout"""
@@ -2473,9 +3049,10 @@ class RMManagerGUI:
         )
         self.warning_label.pack(fill=tk.X, expand=True)
         
-        reset_btn = tk.Button(
+        # Przycisk resetowania śledzenia - dla pojedynczego projektu
+        reset_single_btn = tk.Button(
             self.warning_frame,
-            text="🔄 Resetuj śledzenie",
+            text="🔄 Ten projekt",
             command=self.reset_file_tracking_ui,
             bg="#c0392b",
             fg="white",
@@ -2484,7 +3061,21 @@ class RMManagerGUI:
             pady=3,
             relief=tk.RAISED
         )
-        reset_btn.pack(side=tk.RIGHT, padx=10)
+        reset_single_btn.pack(side=tk.RIGHT, padx=5)
+        
+        # Przycisk resetowania wszystkich projektów (po skopiowaniu bazy)
+        reset_all_btn = tk.Button(
+            self.warning_frame,
+            text="🔄 Wszystkie projekty",
+            command=self.reset_all_file_tracking_ui,
+            bg="#c0392b",
+            fg="white",
+            font=self.FONT_BOLD,
+            padx=10,
+            pady=3,
+            relief=tk.RAISED
+        )
+        reset_all_btn.pack(side=tk.RIGHT, padx=5)
         # Warning frame is packed dynamically in show_file_warning()
         
         # Notifications banner (for payment notifications)
@@ -8158,7 +8749,7 @@ class RMManagerGUI:
         dialog.title("Konfiguracja ścieżek")
         dialog.transient(self.root)
         dialog.grab_set()
-        self._center_window(dialog, 780, 620)
+        self._center_window(dialog, 780, 680)
 
         header = tk.Label(
             dialog,
@@ -8225,6 +8816,20 @@ class RMManagerGUI:
         e_locks    = make_row(form, 6, "Folder locków:",
                               "Katalog locków projektów  (np. Y:/RM_MANAGER/RM_MANAGER_projects/LOCKS)",
                               self.locks_dir, browse_folder)
+        
+        def browse_exe(entry):
+            path = filedialog.askopenfilename(
+                title="Wybierz plik .exe",
+                filetypes=[("Executable", "*.exe"), ("Wszystkie pliki", "*.*")],
+                initialdir=os.path.dirname(entry.get()) if os.path.dirname(entry.get()) else "."
+            )
+            if path:
+                entry.delete(0, tk.END)
+                entry.insert(0, path)
+        
+        e_server_exe = make_row(form, 7, "EXE na serwerze (update):",
+                                "Ścieżka do rm_manager.exe na serwerze dla auto-update  (np. Y:/RM_MANAGER/rm_manager.exe)",
+                                self.server_exe_path, browse_exe)
 
         def save_and_close():
             self.master_db_path    = e_master.get().strip()
@@ -8234,6 +8839,7 @@ class RMManagerGUI:
             self.rm_projects_dir   = e_rm_proj.get().strip() or os.path.join(os.path.dirname(self.rm_manager_dir), 'RM_MANAGER_projects')
             self.backup_dir        = e_backup.get().strip() or os.path.join(os.path.dirname(self.rm_manager_dir), 'backups')
             self.locks_dir         = e_locks.get().strip() or os.path.join(self.rm_projects_dir, 'LOCKS')
+            self.server_exe_path   = e_server_exe.get().strip()
             # Utwórz katalog locków jeśli nie istnieje
             Path(self.locks_dir).mkdir(parents=True, exist_ok=True)
             # Utwórz katalog projektów jeśli nie istnieje
@@ -11323,6 +11929,11 @@ class RMManagerGUI:
                 messagebox.showwarning("Brak tytułu", "Podaj tytuł tematu", parent=dlg)
                 return
             
+            # Sprawdź lock
+            if not self.have_lock:
+                messagebox.showerror("🔒 Brak locka", "Musisz najpierw przejąć lock projektu.", parent=dlg)
+                return
+            
             try:
                 rmm.create_topic(
                     project_db,
@@ -11422,6 +12033,12 @@ class RMManagerGUI:
         """Usuń temat (z potwierdzeniem)"""
         # Sprawdź czy widgety jeszcze istnieją
         if not topics_list.winfo_exists() or not notes_container.winfo_exists():
+            return
+        
+        # Sprawdź lock
+        if not self.have_lock:
+            notes_win = topics_list.winfo_toplevel()
+            messagebox.showerror("🔒 Brak locka", "Musisz najpierw przejąć lock projektu.", parent=notes_win)
             return
         
         selection = topics_list.curselection()
@@ -11808,6 +12425,10 @@ class RMManagerGUI:
             if not content:
                 messagebox.showwarning("Brak treści", "Wpisz treść notatki", parent=notes_win_widget)
                 return
+            # Sprawdź lock
+            if not self.have_lock:
+                messagebox.showerror("🔒 Brak locka", "Musisz najpierw przejąć lock projektu.", parent=notes_win_widget)
+                return
             try:
                 # Odbinduj FocusOut przed zapisem
                 note_text.unbind("<FocusOut>")
@@ -11848,6 +12469,12 @@ class RMManagerGUI:
         """Usuń notatkę (z potwierdzeniem)"""
         # Sprawdź czy widget jeszcze istnieje
         if not note_frame.winfo_exists():
+            return
+        
+        # Sprawdź lock
+        if not self.have_lock:
+            notes_win = note_frame.winfo_toplevel()
+            messagebox.showerror("🔒 Brak locka", "Musisz najpierw przejąć lock projektu.", parent=notes_win)
             return
         
         notes_win = note_frame.winfo_toplevel()
@@ -12000,6 +12627,12 @@ class RMManagerGUI:
         
         # Sprawdź czy frame jeszcze istnieje
         if not note_frame.winfo_exists():
+            return
+        
+        # Sprawdź lock
+        if not self.have_lock:
+            parent_win = notes_win if notes_win else self.root
+            messagebox.showerror("🔒 Brak locka", "Musisz najpierw przejąć lock projektu.", parent=parent_win)
             return
         
         parent_win = notes_win if notes_win else self.root
@@ -12274,6 +12907,12 @@ class RMManagerGUI:
                             attachment_id: int, attachments_frame: tk.Frame, notes_win=None):
         """Usuń załącznik po potwierdzeniu"""
         parent_win = notes_win if notes_win else self.root
+        
+        # Sprawdź lock
+        if not self.have_lock:
+            messagebox.showerror("🔒 Brak locka", "Musisz najpierw przejąć lock projektu.", parent=parent_win)
+            return
+        
         if not messagebox.askyesno("Usunąć załącznik?", "Czy na pewno usunąć ten załącznik?", parent=parent_win):
             return
         
@@ -12514,11 +13153,16 @@ class RMManagerGUI:
     def add_stage_attachment_from_path(self, project_db: str, stage_code: str, 
                                        file_path: str, parent_window: tk.Toplevel):
         """Dodaj załącznik do etapu z podanej ścieżki (używane przez dialog i drag-and-drop)"""
+        # Sprawdź lock
+        if not self.have_lock:
+            messagebox.showerror("🔒 Brak locka", "Musisz najpierw przejąć lock projektu.", parent=parent_window)
+            return
+        
         try:
             import os
             
             if not os.path.exists(file_path):
-                messagebox.showerror("Błąd", f"Plik nie istnieje:\n{file_path}")
+                messagebox.showerror("Błąd", f"Plik nie istnieje:\n{file_path}", parent=parent_window)
                 return
             
             file_size = os.path.getsize(file_path)
@@ -12763,6 +13407,11 @@ class RMManagerGUI:
         """Usuń załącznik etapu po potwierdzeniu"""
         # Znajdź okno nadrzędne dla przywrócenia focus
         parent_window = container.winfo_toplevel()
+        
+        # Sprawdź lock
+        if not self.have_lock:
+            messagebox.showerror("🔒 Brak locka", "Musisz najpierw przejąć lock projektu.", parent=parent_window)
+            return
         
         if not messagebox.askyesno("Usunąć załącznik?", "Czy na pewno usunąć ten załącznik?", parent=parent_window):
             return
@@ -23029,6 +23678,42 @@ Kod: {unlock_code}
 def main():
     import signal
     import atexit
+    
+    # ========================================================================
+    # SINGLE INSTANCE LOCK - sprawdź czy aplikacja już działa NA TYM KOMPUTERZE
+    # ========================================================================
+    # Lock w lokalnym folderze TEMP - kontrola jest LOKALNA (per-komputer).
+    # Globalna kontrola "user na 2 komputerach" - tabela active_sessions w DB.
+    
+    instance_lock = SingleInstanceLock(app_name="rm_manager")
+    success, error_msg = instance_lock.acquire()
+    
+    if not success:
+        # Inna instancja już działa - pokaż komunikat i zamknij
+        root_temp = tk.Tk()
+        root_temp.withdraw()  # Ukryj główne okno
+        messagebox.showerror(
+            "Aplikacja już działa",
+            error_msg,
+            parent=root_temp
+        )
+        root_temp.destroy()
+        return  # Zakończ bez uruchamiania aplikacji
+    
+    print("✅ Single-instance check passed - uruchamiam aplikację")
+    
+    # ========================================================================
+    # AUTO-UPDATE - sprawdź czy dostępna jest nowsza wersja na serwerze
+    # ========================================================================
+    # Wywołanie przed utworzeniem GUI (aby móc pokazać messagebox)
+    
+    if check_and_update():
+        # Zaktualizowano - nowa wersja została uruchomiona
+        print("🔄 Aktualizacja zakończona - zamykam obecną instancję")
+        instance_lock.release()
+        return  # Zakończ obecną instancję
+    
+    # ========================================================================
 
     # Użyj TkinterDnD.Tk() jeśli drag-and-drop dostępny
     if HAS_DND:
@@ -23043,9 +23728,19 @@ def main():
     def cleanup_on_exit():
         """Zwolnij wszystkie locki przy zamykaniu (nawet awaryjnym)"""
         try:
+            # Cleanup locków projektów
             if hasattr(app, 'lock_manager') and app.lock_manager:
-                print("\n🧹 ATEXIT: Czyszczenie locków...")
+                print("\n🧹 ATEXIT: Czyszczenie locków projektów...")
                 app.lock_manager.cleanup_all_my_locks()
+            
+            # Cleanup sesji użytkownika
+            if hasattr(app, 'current_session_id') and app.current_session_id:
+                print("🧹 ATEXIT: Czyszczenie sesji użytkownika...")
+                rmm.cleanup_user_session(app.rm_master_db_path, app.current_session_id)
+            
+            # Cleanup single-instance lock
+            instance_lock.release()
+            
         except Exception as e:
             print(f"⚠️ ATEXIT cleanup error: {e}")
 
