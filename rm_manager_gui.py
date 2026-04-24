@@ -6012,7 +6012,7 @@ class RMManagerGUI:
                 'zakonczony_enabled': True,  # ✅ Można odznaczyć żeby wznowić projekt
                 'pause_enabled': False,
                 'resume_enabled': False,
-                'status_text': '🏁 Zapłacony'
+                'status_text': '🏁 Zakończony'
             }
         }
         
@@ -6149,7 +6149,7 @@ class RMManagerGUI:
                 pause_btn_state = tk.NORMAL if ui_rules['resume_enabled'] else tk.DISABLED
                 pause_btn_cmd = lambda: self.resume_project()
             elif is_finished:
-                pause_lbl_text = "Projekt zapłacony"
+                pause_lbl_text = "Projekt zakończony"
                 pause_lbl_color = "#7f8c8d"
                 pause_btn_text = "⏸  WSTRZYMAJ PROJEKT"
                 pause_btn_bg = "#c0392b"
@@ -6252,29 +6252,49 @@ class RMManagerGUI:
                     relief=tk.RAISED, bd=2, width=12
                 ).pack(side=tk.LEFT, padx=3)
 
-            # ── ZAKOŃCZONY – milestone (zdarzenie instant) ─────────
+            # ── ZAKOŃCZONY – status projektu (NIEZALEżny od milestone płatności) ─────
             finish_frame = tk.Frame(self.stages_frame, bg="#eafaf1", relief=tk.GROOVE, bd=2)
             finish_frame.pack(fill=tk.X, padx=8, pady=(4, 8))
-            
-            zakonczony_info = rmm.get_milestone(self.get_project_db_path(self.selected_project_id),
-                                                self.selected_project_id, 'ZAKONCZONY')
-            
-            zakonczony_var = tk.BooleanVar(value=zakonczony_set)
+
+            # Stan checkboxa zależy WYŁĄCZNIE od statusu projektu (DONE), nie od milestone
+            try:
+                _proj_status = rmm.get_project_status(self.master_db_path, self.selected_project_id)
+            except Exception:
+                _proj_status = None
+            _is_done = (_proj_status == ProjectStatus.DONE)
+
+            # Pobierz info kto/kiedy zakończył (z project_events)
+            done_event_info = None
+            try:
+                _con = rmm._open_rm_connection(self.get_project_db_path(self.selected_project_id))
+                _row = _con.execute(
+                    "SELECT timestamp, user FROM project_events "
+                    "WHERE project_id = ? AND event_type = 'ZAKONCZONY' "
+                    "ORDER BY timestamp DESC LIMIT 1",
+                    (self.selected_project_id,)
+                ).fetchone()
+                _con.close()
+                if _row:
+                    done_event_info = {'timestamp': _row['timestamp'], 'user': _row['user']}
+            except Exception:
+                pass
+
+            zakonczony_var = tk.BooleanVar(value=_is_done)
             zakonczony_cb = tk.Checkbutton(
                 finish_frame,
-                text="✓ ZAPŁACONY",
+                text="✓ ZAKOŃCZONY",
                 variable=zakonczony_var,
                 bg="#eafaf1",
                 font=("Arial", 10, "bold"),
                 fg="#27ae60",
                 state=tk.NORMAL if ui_rules['zakonczony_enabled'] else tk.DISABLED,
-                command=lambda: self.toggle_milestone('ZAKONCZONY', zakonczony_var.get())
+                command=lambda: self.toggle_project_done(zakonczony_var.get())
             )
             zakonczony_cb.pack(side=tk.LEFT, padx=10, pady=6)
-            
-            if zakonczony_info:
-                timestamp = self.format_datetime(zakonczony_info['timestamp'])
-                user = zakonczony_info['user'] or '?'
+
+            if done_event_info:
+                timestamp = self.format_datetime(done_event_info['timestamp'])
+                user = done_event_info['user'] or '?'
                 tk.Label(
                     finish_frame,
                     text=f"📅 {timestamp} | 👤 {user}",
@@ -6282,8 +6302,8 @@ class RMManagerGUI:
                     fg="#7f8c8d",
                     font=self.FONT_SMALL
                 ).pack(side=tk.LEFT, padx=10)
-                
-                # Przycisk Protokół odbioru
+
+                # Przycisk Protokół odbioru — powiązany z załącznikami stage_code='ZAKONCZONY'
                 zakonczony_att_count = self.get_stage_attachments_count('ZAKONCZONY')
                 tk.Button(
                     finish_frame,
@@ -6746,7 +6766,124 @@ class RMManagerGUI:
             self.status_bar.config(text=f"🔴 Błąd: {stage_code}", fg="#e74c3c")
             messagebox.showerror("❌ Błąd", f"Nie można zmienić milestone:\n{e}")
             self.load_project_stages()  # Refresh żeby cofnąć checkbox
-    
+
+    def toggle_project_done(self, is_checked: bool):
+        """Combobox 'ZAKOŃCZONY' w lewym panelu — zmienia TYLKO status projektu.
+
+        NIE rusza milestone'a ZAKONCZONY na osi czasu (ten jest sterowany płatnościami
+        i wyświetlany jako "Zapłacony"). Logu kto/kiedy zakończył projekt zapisuje
+        do project_events (event_type='ZAKONCZONY').
+
+        Args:
+            is_checked: True = zamknij projekt (status DONE), False = wznów
+        """
+        if not self.selected_project_id:
+            return
+
+        if not self.have_lock:
+            messagebox.showerror("🔒 Brak locka", "Musisz najpierw przejąć lock projektu.")
+            self.load_project_stages()
+            return
+
+        if self.read_only_mode:
+            messagebox.showerror(
+                "🔒 Tryb tylko do odczytu",
+                f"Nie można zmienić statusu projektu — plik nieprawidłowy.\n\n"
+                f"{self.file_verification_message}"
+            )
+            self.load_project_stages()
+            return
+
+        # Uprawnienia
+        perm = 'can_start_stage' if is_checked else 'can_end_stage'
+        if not self._has_permission(perm):
+            messagebox.showerror(
+                "🚫 Brak uprawnień",
+                f"Twoja rola [{self.current_user_role}] nie ma prawa do tej operacji."
+            )
+            self.load_project_stages()
+            return
+
+        try:
+            project_db = self.get_project_db_path(self.selected_project_id)
+            now = rmm.get_timestamp_now()
+
+            if is_checked:
+                # ── Zamknij projekt ───────────────────────────────────────
+                # Walidacja: nie może być aktywnych etapów (regularnych)
+                con = rmm._open_rm_connection(project_db)
+                cursor = con.execute("""
+                    SELECT COUNT(*) as cnt
+                    FROM stage_actual_periods sap
+                    JOIN project_stages ps ON sap.project_stage_id = ps.id
+                    JOIN stage_definitions sd ON ps.stage_code = sd.code
+                    WHERE ps.project_id = ? AND sap.ended_at IS NULL
+                      AND sd.is_milestone = 0 AND ps.stage_code != 'WSTRZYMANY'
+                """, (self.selected_project_id,))
+                active_count = cursor.fetchone()['cnt']
+                con.close()
+
+                if active_count > 0:
+                    messagebox.showerror(
+                        "⚠️ Aktywne etapy",
+                        f"Nie można zakończyć projektu — trwają {active_count} aktywne etap(y).\n\n"
+                        f"Najpierw zakończ wszystkie etapy."
+                    )
+                    self.load_project_stages()
+                    return
+
+                # Zapisz event do project_events
+                con = rmm._open_rm_connection(project_db)
+                con.execute("""
+                    INSERT OR REPLACE INTO project_events (project_id, event_type, timestamp, user, notes)
+                    VALUES (?, 'ZAKONCZONY', ?, ?, ?)
+                """, (self.selected_project_id, now, self.current_user, None))
+                con.commit()
+                con.close()
+
+                # Status projektu → DONE
+                rmm.set_project_status(self.master_db_path, self.selected_project_id, ProjectStatus.DONE)
+                print(f"🏁 Projekt {self.selected_project_id} zakończony przez {self.current_user} @ {now}")
+                self.status_bar.config(text=f"🏁 Projekt zakończony", fg="#27ae60")
+
+            else:
+                # ── Wznów projekt ─────────────────────────────────────────
+                if not messagebox.askyesno(
+                    "↩️ Wznowić zakończony projekt?",
+                    "Czy na pewno chcesz wznowić zakończony projekt?\n\n"
+                    "Status projektu wróci do IN_PROGRESS / ACCEPTED.\n"
+                    "Milestone 'Zapłacony' (płatności) NIE zostanie zmieniony."
+                ):
+                    self.load_project_stages()
+                    return
+
+                # Usuń event ZAKONCZONY z project_events
+                con = rmm._open_rm_connection(project_db)
+                con.execute("""
+                    DELETE FROM project_events
+                    WHERE project_id = ? AND event_type = 'ZAKONCZONY'
+                """, (self.selected_project_id,))
+                con.commit()
+
+                # Sprawdź czy były aktywne etapy historycznie (PRZYJETY ustawiony?)
+                przyjety = rmm.is_milestone_set(project_db, self.selected_project_id, 'PRZYJETY')
+                con.close()
+
+                # Status: jeśli PRZYJETY → IN_PROGRESS, w przeciwnym razie ACCEPTED
+                new_status = ProjectStatus.IN_PROGRESS if przyjety else ProjectStatus.ACCEPTED
+                rmm.set_project_status(self.master_db_path, self.selected_project_id, new_status)
+                print(f"↩️ Projekt {self.selected_project_id} wznowiony → status={new_status}")
+                self.status_bar.config(text=f"↩️ Projekt wznowiony", fg="#3498db")
+
+            self.refresh_all()
+
+        except Exception as e:
+            print(f"🔥 Exception w toggle_project_done: {e}")
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("❌ Błąd", f"Nie można zmienić statusu projektu:\n{e}")
+            self.load_project_stages()
+
     # ========================================================================
     # Visualization
     # ========================================================================
@@ -6879,7 +7016,7 @@ class RMManagerGUI:
                 is_completed = fc.get('is_actual') and not fc.get('is_active')
                 if is_completed:
                     if stage_code == 'ZAKONCZONY':
-                        # ZAKONCZONY ustawiony — sprawdź sumę transz
+                        # ZAKONCZONY (Zapłacony) ustawiony — sprawdź sumę transz
                         try:
                             _ms_list = rmm.get_payment_milestones(
                                 self.rm_master_db_path, self.selected_project_id)
@@ -7149,33 +7286,29 @@ class RMManagerGUI:
                             fg=self.COLOR_PURPLE
                         ).pack(side=tk.LEFT, padx=2)
                     
-                    # Przyciski załączników dla milestone'ów
+                    # Przyciski załączników dla milestone'ów (PRZYJETY/ZAKONCZONY)
                     if stage_code in ('PRZYJETY', 'ZAKONCZONY'):
                         att_row = tk.Frame(stage_frame, bg=bg_color)
                         att_row.pack(fill=tk.X, pady=(5, 0))
-                        
+
+                        # Przycisk załączników — tylko dla PRZYJETY (Karta maszyny).
+                        # Dla ZAKONCZONY (milestone "Zapłacony") przycisk "Protokół odbioru" został usunięty.
                         if stage_code == 'PRZYJETY':
                             btn_text = "📋 Karta maszyny"
                             btn_title = 'Karta maszyny'
-                        else:  # ZAKONCZONY
-                            btn_text = "📋 Protokół odbioru"
-                            btn_title = 'Protokół odbioru'
-                        
-                        # Dodaj licznik załączników
-                        att_count = self.get_stage_attachments_count(stage_code)
-                        
-                        tk.Button(
-                            att_row,
-                            text=f"{btn_text} ({att_count})",
-                            command=lambda sc=stage_code, title=btn_title: self.show_stage_attachments_window(sc, title),
-                            bg=self.COLOR_PURPLE,
-                            fg="white",
-                            font=self.FONT_SMALL,
-                            padx=8,
-                            pady=2
-                        ).pack(side=tk.LEFT, padx=5)
-                        
-                        # ── Badge % transz płatności (tylko dla ZAKONCZONY) ──
+                            att_count = self.get_stage_attachments_count(stage_code)
+                            tk.Button(
+                                att_row,
+                                text=f"{btn_text} ({att_count})",
+                                command=lambda sc=stage_code, title=btn_title: self.show_stage_attachments_window(sc, title),
+                                bg=self.COLOR_PURPLE,
+                                fg="white",
+                                font=self.FONT_SMALL,
+                                padx=8,
+                                pady=2
+                            ).pack(side=tk.LEFT, padx=5)
+
+                        # ── Badge % transz płatności (tylko dla ZAKONCZONY — milestone "Zapłacony") ──
                         if stage_code == 'ZAKONCZONY':
                             try:
                                 _pay_milestones = rmm.get_payment_milestones(self.rm_master_db_path, self.selected_project_id)
@@ -8109,12 +8242,21 @@ class RMManagerGUI:
         con.close()
         
         stage_display = stage_info['display_name'] if stage_info else stage_code
-        
+
+        # 🏁 Blokada edycji gdy projekt zakończony (read-only przeglądanie nadal możliwe)
+        try:
+            _status = rmm.get_project_status(self.master_db_path, self.selected_project_id)
+        except Exception:
+            _status = None
+        _project_done = (_status == ProjectStatus.DONE)
+
         # Okno dialogowe
         dlg = tk.Toplevel(self.root)
         dlg.transient(self.root)  # Okno na tym samym ekranie co główna aplikacja
-        can_edit = self.have_lock and not self.read_only_mode
+        can_edit = self.have_lock and not self.read_only_mode and not _project_done
         title_suffix = " (READ-ONLY)" if not can_edit else ""
+        if _project_done:
+            title_suffix = " (PROJEKT ZAKOŃCZONY - READ-ONLY)"
         dlg.title(f"👷 Pracownicy: {stage_display}{title_suffix}")
         dlg.resizable(True, True)
         self._center_window(dlg, 700, 500)
@@ -10624,6 +10766,19 @@ class RMManagerGUI:
             return
         if not self.selected_project_id:
             messagebox.showwarning("⚠️ Uwaga", "Wybierz projekt")
+            return
+
+        # 🏁 Blokada: projekt zakończony → brak edycji dat etapów
+        try:
+            _status = rmm.get_project_status(self.master_db_path, self.selected_project_id)
+        except Exception:
+            _status = None
+        if _status == ProjectStatus.DONE:
+            messagebox.showerror(
+                "🏁 Projekt zakończony",
+                "Nie można edytować dat etapów w zakończonym projekcie.\n\n"
+                "Aby kontynuować pracę, najpierw odznacz milestone ZAKOŃCZONY."
+            )
             return
         
         # Zamknij poprzednie okno jeśli istnieje
@@ -21066,14 +21221,24 @@ class RMManagerGUI:
                     self.btn_add_payment.config(state=tk.DISABLED, bg="#aaaaaa")
                 else:
                     self.btn_add_payment.config(state=tk.NORMAL, bg=self.COLOR_GREEN)
-                # ZDEJMIJ ZAPŁACONE — aktywny tylko gdy ZAKONCZONY jest ustawiony
+                # ZDEJMIJ ZAPŁACONE — aktywny gdy:
+                #   • istnieje przynajmniej jedna transza UMORZONY, LUB
+                #   • milestone ZAKONCZONY ("Zapłacony") jest ustawiony mimo że suma transz < 100%
+                #     (osierocona flaga — np. pozostałość po testach lub usuniętych transzach)
                 if hasattr(self, 'btn_unset_zakonczony') and self.selected_project_id:
                     try:
-                        _db = self.get_project_db_path(self.selected_project_id)
-                        _zak_set = rmm.is_milestone_set(_db, self.selected_project_id, 'ZAKONCZONY')
+                        _has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in milestones)
+                        _orphan_flag = False
+                        if not _has_umorzony and total < 100:
+                            try:
+                                _proj_db = self.get_project_db_path(self.selected_project_id)
+                                _orphan_flag = rmm.is_milestone_set(_proj_db, self.selected_project_id, 'ZAKONCZONY')
+                            except Exception:
+                                _orphan_flag = False
+                        _can_unset = _has_umorzony or _orphan_flag
                         self.btn_unset_zakonczony.config(
-                            state=tk.NORMAL if _zak_set else tk.DISABLED,
-                            bg="#8e44ad" if _zak_set else "#aaaaaa"
+                            state=tk.NORMAL if _can_unset else tk.DISABLED,
+                            bg="#8e44ad" if _can_unset else "#aaaaaa"
                         )
                     except Exception:
                         self.btn_unset_zakonczony.config(state=tk.DISABLED, bg="#aaaaaa")
@@ -21262,38 +21427,107 @@ class RMManagerGUI:
         ).pack(side=tk.LEFT, padx=5)
     
     def _unset_zakonczony_payment(self):
-        """Administracyjne zdejmowanie stanu ZAKONCZONY z poziomu zakładki Płatności."""
+        """Administracyjne zdejmowanie stanu "Zapłacony" z poziomu zakładki Płatności.
+
+        Logika:
+        1. Konwertuje wszystkie transze UMORZONY → PŁATNOŚĆ (umorzenie cofnięte)
+        2. Sprawdza nową sumę — jeśli < 100% to milestone ZAKONCZONY zostaje zdjęty
+           (przez _check_payment_100_trigger). Jeśli nadal = 100% (np. były inne
+           wpłaty), milestone pozostaje ustawiony.
+        """
         if not self.selected_project_id:
             return
         if not self.have_lock:
             messagebox.showerror("🔒 Brak locka", "Musisz najpierw przejąć lock projektu.")
             return
+
+        # Sprawdź czy są jakieś transze UMORZONY
+        try:
+            _ms = rmm.get_payment_milestones(self.rm_master_db_path, self.selected_project_id)
+            _umorzony_list = [m for m in _ms if m.get('payment_type') == 'UMORZONY']
+            _total = sum(m['percentage'] for m in _ms)
+        except Exception as e:
+            messagebox.showerror("❌ Błąd", f"Nie można pobrać transz:\n{e}")
+            return
+
+        # Brak transz UMORZONY → sprawdź czy milestone jest osieroconą flagą (suma<100%, a flaga ustawiona)
+        if not _umorzony_list:
+            project_db = self.get_project_db_path(self.selected_project_id)
+            try:
+                _flag_set = rmm.is_milestone_set(project_db, self.selected_project_id, 'ZAKONCZONY')
+            except Exception:
+                _flag_set = False
+
+            if _flag_set and _total < 100:
+                if not messagebox.askyesno(
+                    "🔓 Zdjąć osieroconą flagę?",
+                    f"Brak transz UMORZONY, ale milestone 'Zapłacony' jest ustawiony\n"
+                    f"mimo że suma transz wynosi tylko {_total}% (< 100%).\n\n"
+                    f"Najprawdopodobniej to pozostałość po testach lub usuniętych transzach.\n\n"
+                    f"Zdjąć flagę 'Zapłacony' z osi czasu?",
+                    icon='warning'
+                ):
+                    return
+                try:
+                    rmm.unset_milestone(
+                        project_db,
+                        self.selected_project_id,
+                        'ZAKONCZONY',
+                        master_db_path=self.master_db_path
+                    )
+                    print(f"🔓 Ręcznie zdjęto osieroconą flagę ZAKONCZONY (projekt {self.selected_project_id}, suma={_total}%)")
+                    self.load_payment_milestones()
+                    self.refresh_all()
+                except Exception as e:
+                    messagebox.showerror("❌ Błąd", f"Nie można zdjąć flagi:\n{e}")
+                return
+
+            messagebox.showinfo(
+                "ℹ️ Brak umorzonych transz",
+                "Nie ma żadnych transz oznaczonych jako UMORZONY,\n"
+                "a milestone 'Zapłacony' nie jest ustawiony.\n\n"
+                "Nic do zrobienia."
+            )
+            return
+
+        _umorzony_sum = sum(m['percentage'] for m in _umorzony_list)
+        _platnosc_sum = _total - _umorzony_sum
+
         if not messagebox.askyesno(
-            "🔓 Zdejmij stan Zapłacony",
-            "Czy na pewno chcesz zdjąć milestone ZAPŁACONY?\n\n"
-            "Projekt wróci do stanu niezapłaconego.\n"
-            "Będziesz mógł usuwać i modyfikować transze.",
+            "🔓 Cofnąć umorzenie?",
+            f"W projekcie istnieje {len(_umorzony_list)} transz(a) UMORZONY łącznie {_umorzony_sum}%.\n\n"
+            f"Po cofnięciu — zostaną zamienione na zwykłe transze PŁATNOŚĆ:\n"
+            f"• Suma płatności po zmianie: {_platnosc_sum}%\n"
+            f"• Milestone 'Zapłacony' ź {('zostanie zdjęty' if _platnosc_sum < 100 else 'pozostanie aktywny (suma 100%)')}\n\n"
+            f"Status projektu (Zakończony / W trakcie) NIE zmieni się.\n"
+            f"Kontynuować?",
             icon='warning'
         ):
             return
+
         try:
-            _db = self.get_project_db_path(self.selected_project_id)
-            rmm.unset_milestone(
-                _db,
+            cleared = rmm.clear_umorzony_flags(
+                self.rm_master_db_path,
                 self.selected_project_id,
-                'ZAKONCZONY',
-                master_db_path=self.master_db_path
+                user=self.current_user
             )
-            print(f"🔓 Ręcznie zdięto milestone ZAKONCZONY (projekt {self.selected_project_id})")
-            self.refresh_all()
+            print(f"🔓 Zdjęto flagę UMORZONY z {cleared} transz (projekt {self.selected_project_id})")
+            # Trigger przeliczy stan milestone'a (zdejmie jeśli suma < 100%)
+            self.load_payment_milestones()
+            self._check_payment_100_trigger()
         except Exception as e:
-            messagebox.showerror("❌ Błąd", f"Nie można zdjąć milestone:\n{e}")
+            messagebox.showerror("❌ Błąd", f"Nie można cofnąć umorzenia:\n{e}")
 
     def _check_payment_100_trigger(self):
-        """Sprawdź czy suma transz = 100% i jeśli tak:
-        1. Automatycznie ustaw milestone ZAKONCZONY (jeśli brak aktywnych etapów)
-        2. Otwórz dialog wysyłki kodu PERMANENT
-        Bezpieczne do wielokrotnego wywołania — sprawdza aktualny stan.
+        """Sprawdź sumę transz i zarządzaj milestone ZAKONCZONY (display "Zapłacony" na osi czasu).
+
+        Logika:
+        - suma = 100% → ustaw milestone ZAKONCZONY + otwórz dialog kodu PERMANENT
+        - suma < 100% → zdejmij milestone ZAKONCZONY
+
+        UWAGA: Milestone ZAKONCZONY ("Zapłacony") na osi czasu jest CAŁKOWICIE
+        NIEZALEŻNY od statusu projektu (DONE), który jest sterowany combobox'em
+        ZAKOŃCZONY w lewym panelu ETAPY PROJEKTU → toggle_project_done().
         """
         if not self.selected_project_id:
             return
@@ -21301,32 +21535,20 @@ class RMManagerGUI:
         try:
             milestones = rmm.get_payment_milestones(self.rm_master_db_path, self.selected_project_id)
             total = sum(m['percentage'] for m in milestones)
+            has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in milestones)
         except Exception as e:
             print(f"⚠️ _check_payment_100_trigger: błąd pobierania transz: {e}")
             return
 
-        if total >= 100:
-            # ── 1. Ustaw ZAKONCZONY jeśli jeszcze nie ustawiony ──────────
-            project_db = self.get_project_db_path(self.selected_project_id)
-            try:
-                already_set = rmm.is_milestone_set(project_db, self.selected_project_id, 'ZAKONCZONY')
-                if not already_set and self.have_lock and not self.read_only_mode:
-                    # Sprawdź aktywne etapy (tylko regularne — nie milestony)
-                    _milestone_codes = {'PRZYJETY', 'ZAKONCZONY', 'WSTRZYMANY'}
-                    active_all = rmm.get_active_stages(project_db, self.selected_project_id)
-                    active_regular = [s for s in active_all if s['stage_code'] not in _milestone_codes]
+        project_db = self.get_project_db_path(self.selected_project_id)
 
-                    if active_regular:
-                        names = ', '.join(s['stage_code'] for s in active_regular)
-                        messagebox.showwarning(
-                            "💰 Płatność 100% — aktywne etapy",
-                            f"Płatność osiągnęła 100%!\n\n"
-                            f"Nie można automatycznie zamknąć projektu,\n"
-                            f"ponieważ trwają jeszcze etapy:\n• {names}\n\n"
-                            f"Zakończ wszystkie etapy, a następnie\n"
-                            f"oznacz projekt jako Zapłacony."
-                        )
-                    else:
+        # Milestone "Zapłacony" ustawiony gdy: suma >= 100% LUB istnieje choć jedna transza UMORZONY
+        should_be_paid = (total >= 100) or has_umorzony
+
+        if should_be_paid:
+            try:
+                if self.have_lock and not self.read_only_mode:
+                    if not rmm.is_milestone_set(project_db, self.selected_project_id, 'ZAKONCZONY'):
                         rmm.set_milestone(
                             project_db,
                             self.selected_project_id,
@@ -21334,31 +21556,26 @@ class RMManagerGUI:
                             user=self.current_user,
                             master_db_path=self.master_db_path
                         )
-                        print(f"✅ Automatycznie ustawiono milestone ZAKONCZONY (płatność 100%)")
-                        self.refresh_all()
+                        print(f"✅ Automatycznie ustawiono milestone ZAKONCZONY/Zapłacony (suma={total}%, umorzony={has_umorzony})")
             except Exception as e:
-                print(f"⚠️ _check_payment_100_trigger: błąd ustawiania ZAKONCZONY: {e}")
+                print(f"⚠️ Błąd ustawiania milestone ZAKONCZONY: {e}")
 
-            # ── 2. Otwórz dialog wysyłki kodu PERMANENT ──────────────────
             self._auto_open_permanent_code_dialog()
         else:
-            # Suma < 100% — auto-zdejmij ZAKONCZONY jeśli był ustawiony
-            if self.selected_project_id and self.have_lock and not self.read_only_mode:
-                try:
-                    _db = self.get_project_db_path(self.selected_project_id)
-                    if rmm.is_milestone_set(_db, self.selected_project_id, 'ZAKONCZONY'):
+            try:
+                if self.have_lock and not self.read_only_mode:
+                    if rmm.is_milestone_set(project_db, self.selected_project_id, 'ZAKONCZONY'):
                         rmm.unset_milestone(
-                            _db,
+                            project_db,
                             self.selected_project_id,
                             'ZAKONCZONY',
                             master_db_path=self.master_db_path
                         )
-                        print(f"🔓 Automatycznie zdjęto milestone ZAKONCZONY (płatność < 100%)")
-                        self.refresh_all()
-                        return
-                except Exception as e:
-                    print(f"⚠️ Błąd auto-zdejmowania ZAKONCZONY: {e}")
-            self.refresh_timeline()
+                        print(f"🔓 Automatycznie zdjęto milestone ZAKONCZONY/Zapłacony (suma={total}%, umorzony={has_umorzony})")
+            except Exception as e:
+                print(f"⚠️ Błąd auto-zdejmowania milestone ZAKONCZONY: {e}")
+
+        self.refresh_all()
 
     def _auto_open_permanent_code_dialog(self):
         """Automatyczne utworzenie kodu PERMANENT i otwarcie dialogu wysyłki po dodaniu 100%."""

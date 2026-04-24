@@ -152,7 +152,7 @@ STAGE_DEFINITIONS = [
     ('ODBIOR_3', 'Odbiór 3', '#196f3d', 1),        # MILESTONE informacyjny
     ('POPRAWKI', 'Poprawki', '#95a5a6', 0),
     # 🚫 WSTRZYMANY usunięty - to nie etap, to overlay/pauza!
-    ('ZAKONCZONY', 'Zapłacony', '#2c3e50', 1),     # MILESTONE - zakończenie projektu
+    ('ZAKONCZONY', 'Zapłacony', '#2c3e50', 1),     # MILESTONE płatności 100% (timeline) — sterowany z zakładki Płatności
 ]
 
 # Priorytety statusów (do determine_display_status)
@@ -7416,6 +7416,49 @@ def update_payment_milestone(rm_db_path: str, project_id: int, percentage: int,
         if check_trigger and percentage == 100:
             trigger_payment_notifications(rm_db_path, project_id, percentage, new_date, user, master_db_path)
         
+    finally:
+        con.close()
+
+
+def clear_umorzony_flags(rm_db_path: str, project_id: int, user: str = None) -> int:
+    """Konwertuje wszystkie transze typu UMORZONY w projekcie z powrotem na PŁATNOŚĆ.
+
+    Używane gdy administrator chce zdjąć stan "zapłacony" wynikający z umorzenia
+    — UMORZONY traktowany jest jak zapłacono 100%, a po konwersji staje się
+    zwykłą transzą i milestone "Zapłacony" przestaje obowiązywać (jeśli suma <100%).
+
+    Args:
+        rm_db_path: Ścieżka do rm_manager.sqlite (master)
+        project_id: ID projektu
+        user: Kto wykonał operację (do historii)
+
+    Returns:
+        Liczba zmienionych transz
+    """
+    con = _open_rm_connection(rm_db_path)
+    try:
+        rows = con.execute("""
+            SELECT percentage, payment_date FROM payment_milestones
+            WHERE project_id = ? AND payment_type = 'UMORZONY'
+        """, (project_id,)).fetchall()
+
+        if not rows:
+            return 0
+
+        con.execute("""
+            UPDATE payment_milestones
+            SET payment_type = 'PŁATNOŚĆ', modified_by = ?, modified_at = CURRENT_TIMESTAMP
+            WHERE project_id = ? AND payment_type = 'UMORZONY'
+        """, (user, project_id))
+
+        for r in rows:
+            con.execute("""
+                INSERT INTO payment_history (project_id, percentage, payment_date, action, changed_by, old_date, changed_at)
+                VALUES (?, ?, ?, 'MODIFIED', ?, ?, CURRENT_TIMESTAMP)
+            """, (project_id, r['percentage'], r['payment_date'], user, r['payment_date']))
+
+        _rm_safe_commit(con)
+        return len(rows)
     finally:
         con.close()
 
