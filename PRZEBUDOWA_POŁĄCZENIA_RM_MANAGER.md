@@ -61,91 +61,47 @@ Master DB (`rm_manager.sqlite`) nie ma żadnego locka — każdy pisze kiedy chc
 
 ## Proponowana architektura
 
-### Koncepcja: dwie warstwy locków
+### Koncepcja: optymalizator jako superużytkownik z per-project lockami
+
+Optymalizator używa **istniejącego** mechanizmu `acquire_project_lock` — zakłada locki
+na wszystkie wybrane projekty jednocześnie, pracuje na lokalnych kopiach, uploaduje, zwalnia.
 
 ```
 LOCKS/
-├── project_3.lock      ← per-projekt, 1 użytkownik, heartbeat (istniejące)
+├── project_3.lock      ← per-projekt, zakładany również przez optymalizator
 ├── project_5.lock
-└── scheduler.lock      ← NOWY: optymalizator, blokuje cały folder
+└── project_7.lock
 ```
 
-**Reguły wzajemnego wykluczania:**
+**Flow optymalizatora:**
+```
+1. Użytkownik klika "Zastosuj wynik"
+2. Pętla: acquire_project_lock(pid) dla każdego wybranego projektu
+   → któryś zajęty → abort + informacja "projekt X zajęty przez Kowalskiego"
+   → wszystkie wolne → kontynuuj
+3. Skopiuj lokalne kopie (snapshot do undo)
+4. apply_optimization() pisze do lokalnych kopii
+5. Upload plików na serwer (shutil.copy2)
+6. finally: release_project_lock() dla każdego przejętego projektu
+```
 
-```
-acquire_project_lock(X)  →  sprawdź czy scheduler.lock istnieje → DENY jeśli tak
-acquire_scheduler_lock() →  sprawdź czy istnieje JAKIKOLWIEK project_X.lock → DENY jeśli tak
-```
+**Zalety nad scheduler.lock:**
+- Zero nowego kodu w `lock_manager_v2.py` — `acquire_project_lock` już istnieje
+- Użytkownik widzi konflikty identycznie jak przy normalnej pracy
+- Heartbeat automatycznie odświeża locki podczas liczenia solvera
+- Undo używa tych samych lokalnych kopii (snapshotów)
+- Brak nowego typu pliku lock — prostsze
+
+**Jedyne nowe w GUI:**
+Pętla `acquire` po liście projektów + zbiorcze `release` w bloku `finally`.
 
 ---
 
 ## Plan wdrożenia
 
-### Krok 1 — Konsolidacja lock managera (~1-2h)
+### Krok 1 — Konsolidacja lock managera (~1h)
 
-- Usuń `rm_lock_manager.py` (nieużywany duplikat)
-- Dodaj 3 nowe metody do `lock_manager_v2.py`:
-
-```python
-def acquire_scheduler_lock(self, user: str, reason: str = "optimizer") -> tuple[bool, list]:
-    """Optymalizator przejmuje globalną blokadę.
-    
-    Returns:
-        (True, [])        — lock przejęty
-        (False, [holders]) — lista użytkowników blokujących
-    """
-    scheduler_lock = self.locks_folder / "scheduler.lock"
-
-    # Sprawdź czy ktoś ma project lock
-    active = list(self.locks_folder.glob("project_*.lock"))
-    if active:
-        holders = []
-        for f in active:
-            try:
-                holders.append(json.loads(f.read_text(encoding='utf-8')))
-            except Exception:
-                pass
-        return False, holders
-
-    data = {
-        "user": user,
-        "computer": self.my_computer,
-        "reason": reason,
-        "locked_at": datetime.now().isoformat()
-    }
-    scheduler_lock.write_text(json.dumps(data, indent=2), encoding='utf-8')
-    return True, []
-
-def release_scheduler_lock(self):
-    """Zwolnij globalną blokadę optymalizatora."""
-    scheduler_lock = self.locks_folder / "scheduler.lock"
-    try:
-        scheduler_lock.unlink(missing_ok=True)
-    except Exception as e:
-        print(f"⚠️ release_scheduler_lock: {e}")
-
-def get_scheduler_lock_owner(self) -> dict | None:
-    """Pobierz właściciela globalnej blokady (None = wolne)."""
-    scheduler_lock = self.locks_folder / "scheduler.lock"
-    if not scheduler_lock.exists():
-        return None
-    try:
-        return json.loads(scheduler_lock.read_text(encoding='utf-8'))
-    except Exception:
-        return None
-```
-
-- Patch `acquire_project_lock()` — dodaj sprawdzenie `scheduler.lock` na początku:
-
-```python
-def acquire_project_lock(self, project_id: int, force: bool = False):
-    # NOWE: blokuj jeśli optymalizator pracuje
-    if not force:
-        scheduler_owner = self.get_scheduler_lock_owner()
-        if scheduler_owner:
-            return False, None
-    # ... reszta bez zmian ...
-```
+- Usuń `rm_lock_manager.py` (nieużywany duplikat — 98% identyczny z `lock_manager_v2.py`)
 
 ---
 
@@ -226,7 +182,7 @@ Docelowo przepiąć inline SQL na `_save_stage_schedule(pid, stage_code, ...)`.
 
 ---
 
-### Krok 4 — Optymalizator ze scheduler.lock (~1h)
+### Krok 4 — Optymalizator z per-project lockami (~1h)
 
 Plik: `rm_manager_gui.py` — funkcje `_apply_result()` i `_undo_result()` w `_optimizer_build_run_tab()`
 
@@ -236,27 +192,97 @@ def _apply_result():
     if not result or not result.get('changes'):
         return
 
-    # 1. Spróbuj przejąć scheduler lock
-    ok, blockers = self.lock_manager.acquire_scheduler_lock(
-        user=self.current_user, reason="optimizer"
-    )
-    if not ok:
-        names = [b.get('user', '?') for b in blockers if b]
-        messagebox.showwarning(
-            "Blokada optymalizatora",
-            f"Nie można uruchomić optymalizatora.\n\n"
-            f"Aktywne locki projektów:\n" + "\n".join(f"  • {n}" for n in names) +
-            f"\n\nPoproś użytkowników o zwolnienie locków.",
-            parent=dlg
-        )
-        return
+    target_pids = [int(pid) for pid in result['changes'].keys()]
+
+    # 1. Przejąć locki na wszystkie projekty objęte zmianami
+    acquired = []
+    conflicts = []
+    for pid in target_pids:
+        success, lock_id = self.lock_manager.acquire_project_lock(pid, force=False)
+        if success:
+            acquired.append((pid, lock_id))
+        else:
+            owner = self.lock_manager.get_project_lock_owner(pid)
+            who = self._get_user_display_name(owner.get('user', '?')) if owner else '?'
+            conflicts.append(f"  • Projekt {pid}: zajęty przez {who}")
+
+    if conflicts:
+        # Sprawdź czy wszystkie konflikty są przeterminowane (stale)
+        stale_pids = []
+        fresh_pids = []
+        for pid in [int(c.split()[2].rstrip(':')) for c in conflicts]:
+            owner = self.lock_manager.get_project_lock_owner(pid)
+            age = self.lock_manager._lock_age_seconds(owner) if owner else None
+            if age is None or age >= self.lock_manager.stale_lock_seconds:
+                stale_pids.append(pid)
+            else:
+                fresh_pids.append(pid)
+
+        # Dialog z trzema opcjami
+        conflict_win = tk.Toplevel(dlg)
+        conflict_win.title("⚠️ Konflikty locków")
+        conflict_win.transient(dlg)
+        conflict_win.grab_set()
+
+        tk.Label(conflict_win,
+                 text="Nie można zastosować optymalizacji — zajęte projekty:",
+                 font=("Arial", 10, "bold"), pady=8).pack(padx=15)
+        tk.Label(conflict_win,
+                 text="\n".join(conflicts),
+                 font=("Consolas", 9), justify="left").pack(padx=15)
+
+        force_choice = tk.StringVar(value='cancel')
+
+        btn_frame = tk.Frame(conflict_win, pady=10)
+        btn_frame.pack()
+
+        def _choose(val):
+            force_choice.set(val)
+            conflict_win.destroy()
+
+        tk.Button(btn_frame, text="Anuluj", width=14,
+                  command=lambda: _choose('cancel')).pack(side=tk.LEFT, padx=5)
+
+        btn_stale = tk.Button(btn_frame, text="⚡ Wymuś przeterminowane", width=22,
+                              fg="white", bg="#e67e22",
+                              command=lambda: _choose('force_stale'),
+                              state=tk.NORMAL if stale_pids else tk.DISABLED)
+        btn_stale.pack(side=tk.LEFT, padx=5)
+
+        tk.Button(btn_frame, text="💀 Wymuś WSZYSTKIE", width=18,
+                  fg="white", bg="#c0392b",
+                  command=lambda: _choose('force_all')).pack(side=tk.LEFT, padx=5)
+
+        conflict_win.wait_window()
+        choice = force_choice.get()
+
+        if choice == 'cancel':
+            # Zwolnij już przejęte locki i abort
+            for pid, _ in acquired:
+                self.lock_manager.release_project_lock(pid)
+            return
+
+        # Wymuś — przejmij siłowo konfliktowe locki
+        pids_to_force = stale_pids if choice == 'force_stale' else \
+                        [int(c.split()[2].rstrip(':')) for c in conflicts]
+        for pid in pids_to_force:
+            success, lock_id = self.lock_manager.acquire_project_lock(pid, force=True)
+            if success:
+                acquired.append((pid, lock_id))
+            else:
+                # Nie udało się nawet wymusić — abort wszystkiego
+                for apid, _ in acquired:
+                    self.lock_manager.release_project_lock(apid)
+                messagebox.showerror("Błąd", f"Nie udało się wymusić locka projektu {pid}.", parent=dlg)
+                return
 
     if not messagebox.askyesno("Potwierdzenie",
             f"Zastosować zmiany optymalizacji?\n\n"
             f"Zmienione zostaną daty template w {len(result['changes'])} projektach.\n"
             f"Operację można cofnąć przyciskiem ↩ Cofnij.",
             parent=dlg):
-        self.lock_manager.release_scheduler_lock()
+        for pid, _ in acquired:
+            self.lock_manager.release_project_lock(pid)
         return
 
     try:
@@ -278,8 +304,13 @@ def _apply_result():
     except Exception as e:
         messagebox.showerror("Błąd", f"Nie udało się zastosować:\n{e}", parent=dlg)
     finally:
-        # 3. Zawsze zwolnij scheduler lock
-        self.lock_manager.release_scheduler_lock()
+        # 3. Zawsze zwolnij wszystkie przejęte locki
+        for pid, _ in acquired:
+            self.lock_manager.release_project_lock(pid)
+        # Odśwież GUI jeśli aktualnie otwarty projekt był w puli
+        if self.selected_project_id in target_pids:
+            self._refresh_combo_lock_info()
+            self._update_lock_buttons_state()
 
 
 def _undo_result():
@@ -287,24 +318,31 @@ def _undo_result():
     if not snapshots:
         return
 
-    # Scheduler lock przy cofaniu
-    ok, blockers = self.lock_manager.acquire_scheduler_lock(
-        user=self.current_user, reason="optimizer_undo"
-    )
-    if not ok:
-        names = [b.get('user', '?') for b in blockers if b]
-        messagebox.showwarning(
-            "Blokada cofania",
-            f"Nie można cofnąć optymalizacji.\n\n"
-            f"Aktywne locki projektów:\n" + "\n".join(f"  • {n}" for n in names),
-            parent=dlg
-        )
-        return
+    target_pids = list(snapshots.keys()) if isinstance(snapshots, dict) else []
+
+    # Przejąć locki na projekty do cofnięcia
+    acquired = []
+    conflicts = []
+    for pid in target_pids:
+        success, lock_id = self.lock_manager.acquire_project_lock(int(pid), force=False)
+        if success:
+            acquired.append((int(pid), lock_id))
+        else:
+            owner = self.lock_manager.get_project_lock_owner(int(pid))
+            who = self._get_user_display_name(owner.get('user', '?')) if owner else '?'
+            conflicts.append(f"  • Projekt {pid}: zajęty przez {who}")
+
+    if conflicts:
+        # Identyczny dialog jak w _apply_result — Anuluj / Wymuś przeterminowane / Wymuś WSZYSTKIE
+        # (ten sam kod co powyżej — w implementacji wydzielić do helper _optimizer_force_lock_dialog)
+        pass  # → patrz _apply_result po szczegóły
+        return  # jeśli cancel lub błąd wymuszenia
 
     if not messagebox.askyesno("Cofnij optymalizację",
             f"Przywrócić daty sprzed optymalizacji w {len(snapshots)} projektach?",
             parent=dlg):
-        self.lock_manager.release_scheduler_lock()
+        for pid, _ in acquired:
+            self.lock_manager.release_project_lock(pid)
         return
 
     try:
@@ -321,7 +359,8 @@ def _undo_result():
     except Exception as e:
         messagebox.showerror("Błąd", f"Nie udało się cofnąć:\n{e}", parent=dlg)
     finally:
-        self.lock_manager.release_scheduler_lock()
+        for pid, _ in acquired:
+            self.lock_manager.release_project_lock(pid)
 ```
 
 ---
@@ -340,8 +379,8 @@ def _undo_result():
 
 | Krok | Czas | Ryzyko pominięcia |
 |---|---|---|
-| **Krok 4** (scheduler.lock) | ~1h | **WYSOKIE** — optymalizator może nadpisać dane innym użytkownikom |
-| **Krok 1** (konsolidacja) | ~1-2h | NISKIE — tylko estetyka/porządek |
+| **Krok 4** (optimizer per-project locks) | ~1h | **WYSOKIE** — optymalizator może nadpisać dane innym użytkownikom |
+| **Krok 1** (usuń rm_lock_manager.py) | ~15min | NISKIE — tylko porządek |
 | **Krok 2** (guard + centralna fn) | ~2-3h | ŚREDNIE — dziury w edge-casach |
 | **Krok 3** (multi-project drag) | ~1h | ŚREDNIE — tylko gdy użytkownik edytuje cudzy projekt |
 
