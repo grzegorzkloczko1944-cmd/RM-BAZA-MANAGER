@@ -2841,6 +2841,20 @@ class RMManagerGUI:
             bd=2
         ).pack(side=tk.LEFT, padx=(0, 3), pady=10)
 
+        # Przycisk KOPIUJ PROJEKT
+        tk.Button(
+            self.top_frame,
+            text="📋 Kopiuj projekt",
+            command=self.open_project_copy_dialog,
+            bg="#e74c3c",
+            fg="white",
+            font=self.FONT_BOLD,
+            padx=12,
+            pady=5,
+            relief=tk.RAISED,
+            bd=2
+        ).pack(side=tk.LEFT, padx=(0, 3), pady=10)
+
         # Separator przed comboboxem backupu
         tk.Frame(self.top_frame, bg="#4a6278", width=2, height=40).pack(side=tk.LEFT, padx=8, pady=10)
 
@@ -14351,6 +14365,385 @@ class RMManagerGUI:
             messagebox.showerror("Błąd porównania", f"Nie można utworzyć porównania:\n{e}")
 
     # ========================================================================
+    #  KOPIOWANIE PROJEKTÓW
+    # ========================================================================
+
+    def open_project_copy_dialog(self):
+        """Otwórz dialog kopiowania danych projektu do innych projektów.
+        
+        Wykorzystuje ten sam dialog co Multi-projekt Gantt, ale w trybie 'copy':
+        - dodatkowy combobox z projektem źródłowym
+        - checkboxy z opcjami kopiowania (Szablon/Milestone/Pracownicy/Transport)
+        - przycisk KOPIUJ zamiast Generuj wykres
+        """
+        if not self.projects:
+            messagebox.showwarning("Brak projektów", "Brak załadowanych projektów.")
+            return
+        
+        self._open_project_selector(parent=self.root, current_ids=set(), mode='copy')
+
+    def _execute_project_copy(self, source_pid: int, target_pids: list, options: dict):
+        """Wykonaj kopiowanie projektu z progress barem"""
+        import threading
+        
+        # Utwórz okno progress
+        progress_dlg = tk.Toplevel(self.root)
+        progress_dlg.title("🔄 Kopiowanie projektu...")
+        progress_dlg.transient(self.root)
+        progress_dlg.grab_set()
+        progress_dlg.geometry("600x250")
+        
+        # Wyśrodkuj
+        progress_dlg.update_idletasks()
+        x = (progress_dlg.winfo_screenwidth() // 2) - 300
+        y = (progress_dlg.winfo_screenheight() // 2) - 125
+        progress_dlg.geometry(f"+{x}+{y}")
+        
+        tk.Label(progress_dlg, text="Trwa kopiowanie danych projektu...",
+                font=("Arial", 12, "bold")).pack(pady=(20, 10))
+        
+        status_label = tk.Label(progress_dlg, text="Przygotowanie...",
+                               font=("Arial", 10), fg="#666")
+        status_label.pack(pady=5)
+        
+        progress_bar = ttk.Progressbar(progress_dlg, length=500, mode='determinate')
+        progress_bar.pack(pady=10, padx=20)
+        
+        detail_label = tk.Label(progress_dlg, text="", font=("Arial", 9), fg="#888")
+        detail_label.pack(pady=5)
+        
+        results = {'success': [], 'errors': []}
+        
+        def update_progress(current, total, status, detail=""):
+            progress_bar['value'] = (current / total) * 100
+            status_label.config(text=status)
+            detail_label.config(text=detail)
+            progress_dlg.update()
+        
+        def do_copy():
+            try:
+                total_tasks = len(target_pids)
+                
+                for idx, target_pid in enumerate(target_pids):
+                    target_name = self.project_names.get(target_pid, f"Projekt {target_pid}")
+                    update_progress(idx, total_tasks,
+                                  f"Kopiowanie do: P{target_pid}",
+                                  f"{idx+1}/{total_tasks}: {target_name}")
+                    
+                    # 🔒 Zaloguj lock na projekcie docelowym przed modyfikacją
+                    lock_acquired_here = False
+                    already_locked_by_us = (self._locked_project_id == target_pid and self.have_lock)
+                    if not already_locked_by_us:
+                        try:
+                            success, lock_id = self.lock_manager.acquire_project_lock(
+                                target_pid, force=False
+                            )
+                        except Exception as e:
+                            results['errors'].append(
+                                (target_pid, target_name, f"Błąd locka: {e}")
+                            )
+                            continue
+                        if not success:
+                            try:
+                                owner = self.lock_manager.get_project_lock_owner(target_pid)
+                            except Exception:
+                                owner = None
+                            owner_str = f" (zajęty przez: {owner})" if owner else ""
+                            results['errors'].append(
+                                (target_pid, target_name,
+                                 f"Nie można uzyskać locka{owner_str}")
+                            )
+                            continue
+                        lock_acquired_here = True
+                    
+                    try:
+                        # Wykonaj kopiowanie
+                        self._copy_project_data(source_pid, target_pid, options)
+                        results['success'].append((target_pid, target_name))
+                    except Exception as e:
+                        import traceback
+                        traceback.print_exc()
+                        results['errors'].append((target_pid, target_name, str(e)))
+                    finally:
+                        # 🔓 Zwolnij lock jeśli uzyskaliśmy go w tej iteracji
+                        if lock_acquired_here:
+                            try:
+                                self.lock_manager.release_project_lock(target_pid)
+                            except Exception as e:
+                                print(f"⚠️ Błąd zwalniania locka P{target_pid}: {e}")
+                
+                update_progress(total_tasks, total_tasks, "✅ Zakończono!", "")
+                
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                messagebox.showerror("Błąd", f"Błąd podczas kopiowania:\n{e}", parent=progress_dlg)
+            finally:
+                # Czekaj chwilę przed zamknięciem
+                self.root.after(500, lambda: self._show_copy_results(progress_dlg, results))
+        
+        # Uruchom w wątku
+        thread = threading.Thread(target=do_copy, daemon=True)
+        thread.start()
+
+    def _copy_project_data(self, source_pid: int, target_pid: int, options: dict):
+        """Kopiuj dane z projektu źródłowego do docelowego
+        
+        Args:
+            source_pid: ID projektu źródłowego
+            target_pid: ID projektu docelowego
+            options: Dict z kluczami: template, milestones, staff, transport
+        """
+        import json
+        from datetime import datetime
+        
+        # Ścieżki do baz
+        source_db = self.get_project_db_path(source_pid)
+        target_db = self.get_project_db_path(target_pid)
+        
+        # 1. BACKUP projektu docelowego
+        if _BACKUP_MANAGER_AVAILABLE and self.backup_manager:
+            try:
+                backup_path = self.backup_manager.backup_project(target_pid)
+                print(f"✅ Backup projektu P{target_pid}: {backup_path}")
+            except Exception as e:
+                print(f"⚠️ Błąd backupu dla P{target_pid}: {e}")
+        
+        # Otwórz połączenia
+        source_con = rmm._open_rm_connection(source_db)
+        target_con = rmm._open_rm_connection(target_db)
+        
+        try:
+            # Pobierz etapy z obu projektów
+            source_stages = {}
+            for row in source_con.execute(
+                "SELECT id, stage_code FROM project_stages WHERE project_id = ?",
+                (source_pid,)
+            ).fetchall():
+                source_stages[row['stage_code']] = row['id']
+            
+            target_stages = {}
+            for row in target_con.execute(
+                "SELECT id, stage_code FROM project_stages WHERE project_id = ?",
+                (target_pid,)
+            ).fetchall():
+                target_stages[row['stage_code']] = row['id']
+            
+            # 2. KOPIUJ SZABLON (template_start/template_end)
+            if options.get('template'):
+                for stage_code in source_stages:
+                    if stage_code not in target_stages:
+                        continue  # Etap nie istnieje w projekcie docelowym
+                    
+                    source_stage_id = source_stages[stage_code]
+                    target_stage_id = target_stages[stage_code]
+                    
+                    # Pobierz szablon ze źródła
+                    template = source_con.execute("""
+                        SELECT template_start, template_end, notes
+                        FROM stage_schedule WHERE project_stage_id = ?
+                    """, (source_stage_id,)).fetchone()
+                    
+                    if template and template['template_start'] and template['template_end']:
+                        # Sprawdź czy istnieje w docelowym
+                        existing = target_con.execute("""
+                            SELECT id FROM stage_schedule WHERE project_stage_id = ?
+                        """, (target_stage_id,)).fetchone()
+                        
+                        if existing:
+                            # UPDATE
+                            target_con.execute("""
+                                UPDATE stage_schedule
+                                SET template_start = ?, template_end = ?, notes = ?
+                                WHERE project_stage_id = ?
+                            """, (template['template_start'], template['template_end'],
+                                 template['notes'], target_stage_id))
+                        else:
+                            # INSERT
+                            target_con.execute("""
+                                INSERT INTO stage_schedule
+                                    (project_stage_id, template_start, template_end, notes)
+                                VALUES (?, ?, ?, ?)
+                            """, (target_stage_id, template['template_start'],
+                                 template['template_end'], template['notes']))
+                
+                print(f"  ✓ Skopiowano szablon: P{source_pid} → P{target_pid}")
+            
+            # 3. KOPIUJ MILESTONE (daty actual dla milestone stages)
+            if options.get('milestones'):
+                # Pobierz milestone codes
+                milestone_codes = set()
+                for row in source_con.execute(
+                    "SELECT code FROM stage_definitions WHERE is_milestone = 1"
+                ).fetchall():
+                    milestone_codes.add(row['code'])
+                
+                for stage_code in milestone_codes:
+                    if stage_code not in source_stages or stage_code not in target_stages:
+                        continue
+                    
+                    source_stage_id = source_stages[stage_code]
+                    target_stage_id = target_stages[stage_code]
+                    
+                    # Pobierz actual period ze źródła
+                    period = source_con.execute("""
+                        SELECT started_at, ended_at, started_by, notes
+                        FROM stage_actual_periods
+                        WHERE project_stage_id = ?
+                        ORDER BY id DESC LIMIT 1
+                    """, (source_stage_id,)).fetchone()
+                    
+                    if period and period['started_at']:
+                        # Usuń istniejące periods w docelowym (nadpisanie)
+                        target_con.execute("""
+                            DELETE FROM stage_actual_periods WHERE project_stage_id = ?
+                        """, (target_stage_id,))
+                        
+                        # Wstaw nowy period
+                        target_con.execute("""
+                            INSERT INTO stage_actual_periods
+                                (project_stage_id, started_at, ended_at, started_by, notes)
+                            VALUES (?, ?, ?, ?, ?)
+                        """, (target_stage_id, period['started_at'], period['ended_at'],
+                             self.current_user or 'System',
+                             f"[Skopiowano z P{source_pid}] " + (period['notes'] or '')))
+                
+                print(f"  ✓ Skopiowano milestone: P{source_pid} → P{target_pid}")
+            
+            # 4. KOPIUJ PRACOWNIKÓW
+            if options.get('staff'):
+                for stage_code in source_stages:
+                    if stage_code not in target_stages:
+                        continue
+                    
+                    source_stage_id = source_stages[stage_code]
+                    target_stage_id = target_stages[stage_code]
+                    
+                    # Pobierz assigned_staff JSON ze źródła
+                    staff_json = source_con.execute("""
+                        SELECT assigned_staff FROM project_stages WHERE id = ?
+                    """, (source_stage_id,)).fetchone()
+                    
+                    if staff_json and staff_json['assigned_staff']:
+                        # Nadpisz w docelowym
+                        target_con.execute("""
+                            UPDATE project_stages
+                            SET assigned_staff = ?
+                            WHERE id = ?
+                        """, (staff_json['assigned_staff'], target_stage_id))
+                        
+                        # Sync do stage_staff_assignments (jeśli tabela istnieje)
+                        try:
+                            assigned_staff = json.loads(staff_json['assigned_staff'])
+                            
+                            # Usuń stare przypisania
+                            target_con.execute("""
+                                DELETE FROM stage_staff_assignments
+                                WHERE project_stage_id = ?
+                            """, (target_stage_id,))
+                            
+                            # Pobierz daty template dla planned_start/end
+                            template_dates = target_con.execute("""
+                                SELECT template_start, template_end
+                                FROM stage_schedule WHERE project_stage_id = ?
+                            """, (target_stage_id,)).fetchone()
+                            
+                            p_start = template_dates['template_start'] if template_dates else None
+                            p_end = template_dates['template_end'] if template_dates else None
+                            
+                            # Wstaw nowe przypisania
+                            for staff in assigned_staff:
+                                emp_id = staff.get('employee_id')
+                                if emp_id:
+                                    target_con.execute("""
+                                        INSERT INTO stage_staff_assignments
+                                            (project_stage_id, employee_id, planned_start,
+                                             planned_end, assigned_by)
+                                        VALUES (?, ?, ?, ?, ?)
+                                    """, (target_stage_id, emp_id, p_start, p_end,
+                                         self.current_user or 'System'))
+                        except Exception as e:
+                            print(f"  ⚠️ Błąd sync staff_assignments dla {stage_code}: {e}")
+                
+                print(f"  ✓ Skopiowano pracowników: P{source_pid} → P{target_pid}")
+            
+            # 5. KOPIUJ TRANSPORT
+            if options.get('transport'):
+                # Szukaj etapu TRANSPORT
+                if 'TRANSPORT' in source_stages and 'TRANSPORT' in target_stages:
+                    source_stage_id = source_stages['TRANSPORT']
+                    target_stage_id = target_stages['TRANSPORT']
+                    
+                    # Pobierz transport_id ze źródła
+                    transport = source_con.execute("""
+                        SELECT transport_id FROM stage_schedule WHERE project_stage_id = ?
+                    """, (source_stage_id,)).fetchone()
+                    
+                    if transport and transport['transport_id']:
+                        # Sprawdź czy stage_schedule istnieje w docelowym
+                        existing = target_con.execute("""
+                            SELECT id FROM stage_schedule WHERE project_stage_id = ?
+                        """, (target_stage_id,)).fetchone()
+                        
+                        if existing:
+                            # UPDATE
+                            target_con.execute("""
+                                UPDATE stage_schedule
+                                SET transport_id = ?
+                                WHERE project_stage_id = ?
+                            """, (transport['transport_id'], target_stage_id))
+                        else:
+                            # INSERT
+                            target_con.execute("""
+                                INSERT INTO stage_schedule (project_stage_id, transport_id)
+                                VALUES (?, ?)
+                            """, (target_stage_id, transport['transport_id']))
+                        
+                        print(f"  ✓ Skopiowano transport: P{source_pid} → P{target_pid}")
+            
+            # Zapisz zmiany
+            target_con.commit()
+            
+        finally:
+            source_con.close()
+            target_con.close()
+
+    def _show_copy_results(self, progress_dlg, results):
+        """Pokaż wyniki kopiowania"""
+        progress_dlg.destroy()
+        
+        success_count = len(results['success'])
+        error_count = len(results['errors'])
+        
+        if error_count == 0:
+            messagebox.showinfo(
+                "Kopiowanie zakończone",
+                f"✅ Pomyślnie skopiowano dane do {success_count} projektów!",
+                parent=self.root
+            )
+        else:
+            error_details = "\n".join([
+                f"• P{pid} ({name}): {err}"
+                for pid, name, err in results['errors']
+            ])
+            messagebox.showwarning(
+                "Kopiowanie zakończone z błędami",
+                f"✅ Sukces: {success_count}\n"
+                f"❌ Błędy: {error_count}\n\n"
+                f"Szczegóły błędów:\n{error_details}",
+                parent=self.root
+            )
+        
+        # Odśwież GUI - jeśli aktualnie wybrany projekt był celem kopiowania
+        if self.selected_project_id:
+            target_ids = [pid for pid, _ in results['success']]
+            if self.selected_project_id in target_ids:
+                try:
+                    self.load_project_stages()
+                except Exception as e:
+                    print(f"⚠️ Błąd odświeżania GUI po kopiowaniu: {e}")
+
+    # ========================================================================
     #  MULTI-PROJECT GANTT CHART (osobne okno)
     # ========================================================================
 
@@ -14785,13 +15178,15 @@ class RMManagerGUI:
                   font=("Arial", 10), padx=10, pady=3
         ).pack(side=tk.RIGHT, padx=5)
 
-    def _open_project_selector(self, parent, current_ids=None, pinned_ids=None):
+    def _open_project_selector(self, parent, current_ids=None, pinned_ids=None, mode='gantt'):
         """Profesjonalny dialog wyboru projektów z filtrami statusu, czasu i pinowaniem.
         
         Args:
             parent: okno rodzic
             current_ids: set z aktualnie zaznaczonymi project_id
             pinned_ids: set z przypiętymi project_id (nie reagują na filtry)
+            mode: 'gantt' = generowanie wykresu Multi-project Gantt
+                  'copy' = kopiowanie danych projektu (źródło + cele + opcje)
         """
         from datetime import datetime, timedelta
         import os
@@ -14801,12 +15196,19 @@ class RMManagerGUI:
         if pinned_ids is None:
             pinned_ids = set()
         
+        is_copy_mode = (mode == 'copy')
+        
         sel = tk.Toplevel(parent)
-        sel.title("📊 Wybór projektów — Multi-projekt Gantt")
+        if is_copy_mode:
+            sel.title("📋 Kopiowanie projektu — wybór źródła i celów")
+        else:
+            sel.title("📊 Wybór projektów — Multi-projekt Gantt")
         sel.transient(parent)
         sel.grab_set()
         
         w, h = 750, 720
+        if is_copy_mode:
+            h = 850  # Większe okno dla trybu kopiowania
         sel.update_idletasks()
         try:
             px = parent.winfo_rootx()
@@ -14846,6 +15248,97 @@ class RMManagerGUI:
             except Exception:
                 pass
             proj_info[pid] = info
+        
+        # ===== TRYB KOPIOWANIA — sekcja źródła + opcji (tylko mode='copy') =====
+        copy_source_var = None
+        copy_options = {}
+        valid_source_pids = []
+        
+        if is_copy_mode:
+            # Lista projektów-kandydatów na źródło (te które mają bazę)
+            valid_source_pids = [pid for pid in self.projects if proj_info[pid].get('has_db')]
+            
+            source_frame = tk.LabelFrame(sel, text="📦 Projekt źródłowy (skąd kopiować)",
+                                         font=("Arial", 10, "bold"), padx=8, pady=5)
+            source_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+            
+            src_row = tk.Frame(source_frame)
+            src_row.pack(fill=tk.X, pady=2)
+            tk.Label(src_row, text="Źródło:", font=("Arial", 9, "bold")
+                    ).pack(side=tk.LEFT, padx=(0, 5))
+            
+            copy_source_var = tk.StringVar()
+            source_names = [f"P{pid}: {self.project_names.get(pid, f'Projekt {pid}')}"
+                            for pid in valid_source_pids]
+            source_combo = ttk.Combobox(src_row, textvariable=copy_source_var,
+                                        values=source_names, state='readonly',
+                                        font=("Arial", 9), width=55)
+            source_combo.pack(side=tk.LEFT, padx=(0, 5), fill=tk.X, expand=True)
+            if source_names:
+                source_combo.current(0)
+            
+            source_info_label = tk.Label(source_frame, text="", font=("Arial", 8),
+                                         fg="#666", anchor='w')
+            source_info_label.pack(fill=tk.X, pady=(3, 0))
+            
+            def _update_source_info(*args):
+                idx = source_combo.current()
+                if idx < 0 or idx >= len(valid_source_pids):
+                    return
+                pid = valid_source_pids[idx]
+                try:
+                    pdb = self.get_project_db_path(pid)
+                    timeline = rmm.get_stage_timeline(pdb, pid)
+                    n_tpl = sum(1 for s in timeline
+                                if s.get('template_start') and s.get('template_end'))
+                    n_staff = 0
+                    try:
+                        sm = rmm.get_all_stage_staff_for_project(
+                            pdb, self.rm_master_db_path, pid)
+                        n_staff = sum(1 for v in sm.values() if v)
+                    except Exception:
+                        pass
+                    has_tr = False
+                    try:
+                        tr_id = rmm.get_stage_transport_id(pdb, pid, 'TRANSPORT')
+                        has_tr = tr_id is not None
+                    except Exception:
+                        pass
+                    txt = f"ℹ️  Etapy z szablonem: {n_tpl} | Etapy z pracownikami: {n_staff}"
+                    if has_tr:
+                        txt += " | Transport: ✓"
+                    source_info_label.config(text=txt)
+                except Exception as e:
+                    source_info_label.config(text=f"⚠️ Błąd: {e}")
+            
+            copy_source_var.trace('w', _update_source_info)
+            _update_source_info()
+            
+            # Opcje kopiowania
+            opt_row = tk.Frame(source_frame)
+            opt_row.pack(fill=tk.X, pady=(5, 2))
+            tk.Label(opt_row, text="Co kopiować:", font=("Arial", 9, "bold")
+                    ).pack(side=tk.LEFT, padx=(0, 5))
+            
+            opt_defs = [
+                ('template', '📅 Szablon', True),
+                ('milestones', '🎯 Milestone', True),
+                ('staff', '👷 Pracownicy', False),
+                ('transport', '🚚 Transport', False),
+            ]
+            for key, label, default in opt_defs:
+                var = tk.BooleanVar(value=default)
+                copy_options[key] = var
+                tk.Checkbutton(opt_row, text=label, variable=var,
+                              font=("Arial", 9)).pack(side=tk.LEFT, padx=4)
+            
+            # Ostrzeżenie
+            warn = tk.Label(source_frame,
+                           text="⚠️  Operacja NADPISUJE dane w projektach docelowych. "
+                                "Backup zostanie utworzony automatycznie.",
+                           font=("Arial", 8), fg='#856404', bg='#fff3cd',
+                           anchor='w', padx=8, pady=3)
+            warn.pack(fill=tk.X, pady=(5, 0))
         
         # ===== FILTRY — górna sekcja =====
         filter_frame = tk.LabelFrame(sel, text="🔍 Filtry", font=("Arial", 10, "bold"),
@@ -15448,20 +15941,86 @@ class RMManagerGUI:
             count = sum(1 for v in check_vars.values() if v.get())
             count_label.config(text=f"Zaznaczono: {count} / {len(self.projects)} projektów")
         
-        # Prawa strona — Generuj
+        # Prawa strona — Generuj wykres LUB Kopiuj (zależnie od trybu)
         def on_ok():
             selected = [pid for pid, var in check_vars.items() if var.get()]
             # Zapamiętaj przypięte
             self._mp_pinned_projects = {pid for pid, var in pin_vars.items() if var.get()}
-            sel.destroy()
-            if selected:
-                self._create_multi_project_chart_window(selected, preserve_view=True)
+            
+            if is_copy_mode:
+                # === TRYB KOPIOWANIA ===
+                # Pobierz źródło
+                src_idx = source_combo.current() if source_combo else -1
+                if src_idx < 0 or src_idx >= len(valid_source_pids):
+                    messagebox.showwarning("Brak źródła",
+                                          "Wybierz projekt źródłowy.", parent=sel)
+                    return
+                source_pid = valid_source_pids[src_idx]
+                
+                # Usuń źródło z celów
+                target_pids = [pid for pid in selected if pid != source_pid]
+                if not target_pids:
+                    messagebox.showwarning("Brak celów",
+                                          "Zaznacz przynajmniej jeden projekt docelowy "
+                                          "(różny od źródła).", parent=sel)
+                    return
+                
+                # Sprawdź opcje
+                opts = {key: var.get() for key, var in copy_options.items()}
+                if not any(opts.values()):
+                    messagebox.showwarning("Brak opcji",
+                                          "Zaznacz przynajmniej jedną opcję kopiowania.",
+                                          parent=sel)
+                    return
+                
+                # Potwierdzenie
+                source_name = self.project_names.get(source_pid, f"Projekt {source_pid}")
+                opts_text = []
+                if opts['template']:    opts_text.append("• Szablon (daty etapów)")
+                if opts['milestones']:  opts_text.append("• Milestone")
+                if opts['staff']:       opts_text.append("• Pracownicy")
+                if opts['transport']:   opts_text.append("• Transport")
+                
+                target_summary = "\n  ".join(
+                    f"P{pid}: {self.project_names.get(pid, f'Projekt {pid}')}"
+                    for pid in target_pids[:10]
+                )
+                if len(target_pids) > 10:
+                    target_summary += f"\n  ... oraz {len(target_pids) - 10} więcej"
+                
+                msg = (
+                    f"UWAGA: Operacja nadpisze dane w {len(target_pids)} projektach!\n\n"
+                    f"Źródło:\n  P{source_pid}: {source_name}\n\n"
+                    f"Co zostanie skopiowane:\n" + "\n".join(opts_text) + "\n\n"
+                    f"Cele ({len(target_pids)}):\n  " + target_summary + "\n\n"
+                    f"Przed kopiowaniem zostanie utworzony backup każdego projektu.\n\n"
+                    f"Czy kontynuować?"
+                )
+                
+                if not messagebox.askyesno("Potwierdzenie kopiowania", msg, parent=sel):
+                    return
+                
+                sel.destroy()
+                self._execute_project_copy(source_pid, target_pids, opts)
             else:
-                messagebox.showwarning("Brak wyboru", "Nie wybrano żadnych projektów.", parent=parent)
+                # === TRYB GANTT ===
+                sel.destroy()
+                if selected:
+                    self._create_multi_project_chart_window(selected, preserve_view=True)
+                else:
+                    messagebox.showwarning("Brak wyboru",
+                                          "Nie wybrano żadnych projektów.", parent=parent)
         
-        tk.Button(bottom, text="📊 Generuj wykres", command=on_ok,
-                  bg=self.COLOR_GREEN, fg="white", font=("Arial", 11, "bold"),
-                  padx=20, pady=5).pack(side=tk.RIGHT, padx=5)
+        if is_copy_mode:
+            tk.Button(bottom, text="📋 KOPIUJ", command=on_ok,
+                      bg="#e74c3c", fg="white", font=("Arial", 11, "bold"),
+                      padx=25, pady=5).pack(side=tk.RIGHT, padx=5)
+            tk.Button(bottom, text="Anuluj", command=sel.destroy,
+                      font=("Arial", 10), padx=15, pady=5).pack(side=tk.RIGHT, padx=5)
+        else:
+            tk.Button(bottom, text="📊 Generuj wykres", command=on_ok,
+                      bg=self.COLOR_GREEN, fg="white", font=("Arial", 11, "bold"),
+                      padx=20, pady=5).pack(side=tk.RIGHT, padx=5)
         
         # Keyboard shortcuts
         sel.bind('<Control-Delete>', clear_filters)
