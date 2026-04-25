@@ -432,131 +432,6 @@ DEFAULT_DEPENDENCIES = [
 
 
 # ============================================================================
-# Auto-Update System
-# ============================================================================
-
-def check_and_update(config_file_path: str = CONFIG_FILE_PATH) -> bool:
-    """Sprawdza czy dostępna jest nowsza wersja aplikacji na serwerze i aktualizuje.
-    
-    Workflow:
-    1. Czyta ścieżkę do serwera z config JSON (server_exe_path)
-    2. Porównuje daty modyfikacji EXE na serwerze vs lokalnie
-    3. Jeśli serwer nowszy → kopiuje → restartuje aplikację
-    
-    Args:
-        config_file_path: Ścieżka do pliku konfiguracyjnego JSON
-    
-    Returns:
-        True jeśli zaktualizowano i trzeba zamknąć obecną instancję,
-        False jeśli brak aktualizacji lub błąd
-    """
-    import sys
-    import shutil
-    import time
-    
-    try:
-        # 1. Wczytaj konfigurację
-        if not os.path.exists(config_file_path):
-            return False  # Brak config - skip auto-update
-        
-        with open(config_file_path, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-        
-        server_exe_path = config.get('server_exe_path')
-        if not server_exe_path:
-            return False  # Brak ścieżki serwera - skip
-        
-        # 2. Sprawdź czy uruchomiono z EXE czy z Python
-        if getattr(sys, 'frozen', False):
-            # Uruchomiono z EXE - sys.executable to ścieżka do EXE
-            local_exe_path = sys.executable
-        else:
-            # Uruchomiono z Python - użyj standardowej ścieżki lokalnej
-            local_exe_path = r"C:\RMPAK_CLIENT\rm_manager.exe"
-            if not os.path.exists(local_exe_path):
-                return False  # Brak lokalnego EXE - skip (dev mode)
-        
-        # 3. Sprawdź czy serwer ma nowszą wersję
-        if not os.path.exists(server_exe_path):
-            print(f"⚠️ Serwer EXE nie istnieje: {server_exe_path}")
-            return False
-        
-        server_mtime = os.path.getmtime(server_exe_path)
-        local_mtime = os.path.getmtime(local_exe_path) if os.path.exists(local_exe_path) else 0
-        
-        # Tolerancja 2 sekundy (FAT32 ma rozdzielczość 2s)
-        if server_mtime <= local_mtime + 2:
-            return False  # Lokalna wersja aktualna
-        
-        # 4. Serwer ma nowszą wersję - pytaj użytkownika
-        from tkinter import messagebox
-        
-        server_date = datetime.fromtimestamp(server_mtime).strftime('%Y-%m-%d %H:%M:%S')
-        local_date = datetime.fromtimestamp(local_mtime).strftime('%Y-%m-%d %H:%M:%S') if local_mtime > 0 else 'brak'
-        
-        result = messagebox.askyesno(
-            "🔄 Dostępna aktualizacja",
-            f"Dostępna jest nowsza wersja aplikacji!\n\n"
-            f"Aktualna wersja: {APP_VERSION} ({local_date})\n"
-            f"Nowa wersja: {server_date}\n\n"
-            f"Czy zaktualizować teraz?\n\n"
-            f"(Aplikacja zostanie zamknięta i uruchomiona ponownie)",
-            icon='question'
-        )
-        
-        if not result:
-            return False
-        
-        # 5. Kopiuj nową wersję (atomowo: temp → rename)
-        print(f"🔄 Aktualizacja z serwera: {server_exe_path} → {local_exe_path}")
-        
-        # Backup starej wersji
-        backup_path = local_exe_path + ".backup"
-        if os.path.exists(local_exe_path):
-            try:
-                if os.path.exists(backup_path):
-                    os.remove(backup_path)
-                shutil.copy2(local_exe_path, backup_path)
-                print(f"   Backup: {backup_path}")
-            except Exception as e:
-                print(f"⚠️ Nie można utworzyć backupu (kontynuuję): {e}")
-        
-        # Kopiuj nową wersję
-        temp_path = local_exe_path + ".new"
-        try:
-            shutil.copy2(server_exe_path, temp_path)
-            # Atomowe zastąpienie (Windows: os.replace od Python 3.3+)
-            os.replace(temp_path, local_exe_path)
-            print(f"✅ Zaktualizowano: {local_exe_path}")
-        except Exception as e:
-            messagebox.showerror(
-                "❌ Błąd aktualizacji",
-                f"Nie można zaktualizować aplikacji:\n{e}\n\n"
-                f"Spróbuj ponownie lub skontaktuj się z administratorem."
-            )
-            return False
-        
-        # 6. Restart aplikacji
-        messagebox.showinfo(
-            "✅ Aktualizacja zakończona",
-            "Aktualizacja zakończona pomyślnie.\n\n"
-            "Aplikacja zostanie teraz uruchomiona ponownie."
-        )
-        
-        # Uruchom nową wersję i zamknij obecną
-        import subprocess
-        subprocess.Popen([local_exe_path])
-        
-        return True  # Signal do zamknięcia aplikacji
-        
-    except Exception as e:
-        print(f"⚠️ Błąd auto-update: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-
-# ============================================================================
 # Główne okno aplikacji
 # ============================================================================
 
@@ -2801,7 +2676,6 @@ class RMManagerGUI:
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Pomoc", menu=help_menu)
         help_menu.add_command(label="ℹ️ O programie...", command=self.show_about_dialog)
-        help_menu.add_command(label="🔄 Sprawdź aktualizacje...", command=self.check_for_updates_manual)
     
     def show_about_dialog(self):
         """Wyświetl okno O programie z informacją o wersji"""
@@ -2813,30 +2687,6 @@ class RMManagerGUI:
             f"Data: {APP_BUILD_DATE}\n\n"
             f"© 2026 RM_ROBUR"
         )
-    
-    def check_for_updates_manual(self):
-        """Ręczne sprawdzenie aktualizacji (wywołane z menu)"""
-        if not self.server_exe_path:
-            messagebox.showwarning(
-                "⚠️ Brak konfiguracji",
-                "Nie skonfigurowano ścieżki do EXE na serwerze.\n\n"
-                "Przejdź do: Plik → Konfiguracja ścieżek...\n"
-                "i uzupełnij pole 'EXE na serwerze (update)'"
-            )
-            return
-        
-        # Wywołaj sprawdzenie i aktualizację
-        if check_and_update(self.config_file):
-            # Zaktualizowano - zamknij aplikację (nowa wersja została uruchomiona)
-            self.root.quit()
-        else:
-            # Brak aktualizacji lub błąd
-            messagebox.showinfo(
-                "✅ Brak aktualizacji",
-                f"Używasz najnowszej wersji aplikacji.\n\n"
-                f"Wersja: {APP_VERSION}\n"
-                f"Data: {APP_BUILD_DATE}"
-            )
     
     def create_widgets(self):
         """Główny layout"""
@@ -3726,7 +3576,7 @@ class RMManagerGUI:
             try:
                 project_db = self.get_project_db_path(pid)
                 if os.path.exists(project_db):
-                    is_finished = rmm.is_milestone_set(project_db, pid, 'ZAKONCZONY')
+                    is_finished = (rmm.get_project_status(self.master_db_path, pid) == ProjectStatus.DONE)
                     if is_finished:
                         status_prefix = "[Z]"  # Zakończony
                     else:
@@ -3833,8 +3683,8 @@ class RMManagerGUI:
                 try:
                     project_db = self.get_project_db_path(pid)
                     if os.path.exists(project_db):
-                        # Sprawdź czy zakończony
-                        is_finished = rmm.is_milestone_set(project_db, pid, 'ZAKONCZONY')
+                        # Sprawdź czy zakończony (status DONE w master.sqlite)
+                        is_finished = (rmm.get_project_status(self.master_db_path, pid) == ProjectStatus.DONE)
                         if is_finished:
                             status_prefix = "[Z]"  # Zakończony
                         else:
@@ -8605,28 +8455,74 @@ class RMManagerGUI:
             summary = rmm.get_project_status_summary(_pdb, self.selected_project_id)
             critical = rmm.calculate_critical_path(_pdb, self.selected_project_id)
             
+            # Stan płatności — niezależnie od milestone'a sprawdź sumę transz.
+            # Płatność uznajemy za zrealizowaną gdy spełniony JEDEN z warunków:
+            #   • milestone "Zapłacony" (ZAKONCZONY) ustawiony, LUB
+            #   • suma transz >= 100%, LUB
+            #   • istnieje przynajmniej jedna transza UMORZONY
+            try:
+                _payment_milestones = rmm.get_payment_milestones(self.rm_master_db_path, self.selected_project_id)
+                _total_paid = sum(m['percentage'] for m in _payment_milestones)
+                _has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in _payment_milestones)
+            except Exception as _ex:
+                print(f"⚠️ refresh_dashboard: błąd pobierania transz: {_ex}")
+                _payment_milestones = []
+                _total_paid = 0
+                _has_umorzony = False
+            
+            try:
+                is_milestone_set_flag = rmm.is_milestone_set(_pdb, self.selected_project_id, 'ZAKONCZONY')
+            except Exception as _ex:
+                print(f"⚠️ refresh_dashboard: błąd sprawdzania milestone ZAKONCZONY: {_ex}")
+                is_milestone_set_flag = False
+            
+            is_paid = is_milestone_set_flag or (_total_paid >= 100) or _has_umorzony
+            
+            print(f"🎨 refresh_dashboard: project={self.selected_project_id}, "
+                  f"milestone={is_milestone_set_flag}, suma={_total_paid}%, umorzony={_has_umorzony}, "
+                  f"is_paid={is_paid}")
+            
+            # Zmiana tła pola tekstowego w zależności od stanu płatności
+            try:
+                bg_color = "#d5f4e6" if is_paid else "#ffffff"
+                self.dashboard_text.config(bg=bg_color)
+                if hasattr(self.dashboard_text, 'frame'):
+                    self.dashboard_text.frame.config(bg=bg_color)
+            except Exception as _bg_err:
+                print(f"⚠️ Nie można ustawić tła dashboard: {_bg_err}")
+            
             # Zapisz pozycję scrolla przed odświeżeniem
             scroll_pos = self.dashboard_text.yview()
             
             # Odblokuj na czas edycji
             self.dashboard_text.config(state='normal')
+            
             self.dashboard_text.delete('1.0', tk.END)
             self.dashboard_text.insert(tk.END, "=" * 100 + "\n")
             project_name = self.project_names.get(self.selected_project_id, f'Projekt {self.selected_project_id}')
             self.dashboard_text.insert(tk.END, f"PODSUMOWANIE - {project_name}\n")
             self.dashboard_text.insert(tk.END, "=" * 100 + "\n\n")
             
-            # Status
-            status = summary['status']
-            if status == 'DELAYED':
-                status_icon = "🔴"
-                status_pl = "OPÓŹNIONY"
-            elif status == 'AT_RISK':
-                status_icon = "🟡"
-                status_pl = "ZAGROŻONY"
+            # Status — najpierw sprawdź czy projekt jest zakończony (status DONE w master.sqlite)
+            try:
+                _proj_status_db = rmm.get_project_status(self.master_db_path, self.selected_project_id)
+            except Exception:
+                _proj_status_db = None
+
+            if _proj_status_db == ProjectStatus.DONE:
+                status_icon = "🏁"
+                status_pl = "ZAKOŃCZONY"
             else:
-                status_icon = "🟢"
-                status_pl = "ZGODNIE Z PLANEM"
+                status = summary['status']
+                if status == 'DELAYED':
+                    status_icon = "🔴"
+                    status_pl = "OPÓŹNIONY"
+                elif status == 'AT_RISK':
+                    status_icon = "🟡"
+                    status_pl = "ZAGROŻONY"
+                else:
+                    status_icon = "🟢"
+                    status_pl = "ZGODNIE Z PLANEM"
             
             self.dashboard_text.insert(tk.END, f"Status projektu:        {status_icon} {status_pl}\n\n")
             
@@ -8762,6 +8658,121 @@ class RMManagerGUI:
                     "  Szczegóły CPM: Narzędzia → Ścieżka krytyczna.\n"
                 )
             
+            # ── Sekcja PŁATNOŚCI ──
+            try:
+                milestones_payment = rmm.get_payment_milestones(self.rm_master_db_path, self.selected_project_id)
+                total_paid = sum(m['percentage'] for m in milestones_payment)
+                has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in milestones_payment)
+                is_paid_milestone = rmm.is_milestone_set(_pdb, self.selected_project_id, 'ZAKONCZONY')
+                
+                self.dashboard_text.insert(tk.END, "\n")
+                self.dashboard_text.insert(tk.END, "=" * 100 + "\n")
+                self.dashboard_text.insert(tk.END, "PŁATNOŚCI:\n")
+                self.dashboard_text.insert(tk.END, "=" * 100 + "\n")
+                
+                # Status milestone "Zapłacony"
+                if is_paid_milestone:
+                    paid_icon = "✓"
+                    paid_status = "USTAWIONY"
+                else:
+                    paid_icon = "○"
+                    paid_status = "NIE USTAWIONY"
+                self.dashboard_text.insert(tk.END, f"Milestone 'Zapłacony':  {paid_icon} {paid_status}\n")
+                
+                # Suma płatności
+                if total_paid >= 100:
+                    total_icon = "💰"
+                    total_status = f"{total_paid}% — ZAPŁACONO W CAŁOŚCI"
+                elif total_paid > 0:
+                    total_icon = "⏳"
+                    total_status = f"{total_paid}% — ZAPŁACONO CZĘŚCIOWO (pozostało: {100 - total_paid}%)"
+                else:
+                    total_icon = "⚠️"
+                    total_status = "0% — BRAK PŁATNOŚCI"
+                self.dashboard_text.insert(tk.END, f"Suma płatności:         {total_icon} {total_status}\n")
+                
+                # Status umorzenia
+                if has_umorzony:
+                    umorzony_transze = [m for m in milestones_payment if m.get('payment_type') == 'UMORZONY']
+                    umorzony_sum = sum(m['percentage'] for m in umorzony_transze)
+                    self.dashboard_text.insert(tk.END, f"Umorzenie:              ✂️  {umorzony_sum}% ({len(umorzony_transze)} transz(a))\n")
+                
+                # Liczba transz
+                count_platnosc = sum(1 for m in milestones_payment if m.get('payment_type') == 'PŁATNOŚĆ')
+                self.dashboard_text.insert(tk.END, f"Liczba transz:          {len(milestones_payment)} (PŁATNOŚĆ: {count_platnosc}")
+                if has_umorzony:
+                    self.dashboard_text.insert(tk.END, f", UMORZONY: {len(umorzony_transze)})\n")
+                else:
+                    self.dashboard_text.insert(tk.END, ")\n")
+                
+                # Analiza terminowości płatności - porównaj z planem
+                if milestones_payment:
+                    # Pobierz planowaną datę milestone ZAKONCZONY
+                    fc_zakonczony = forecast.get('ZAKONCZONY', {})
+                    planned_date = fc_zakonczony.get('template_start')  # Data planowana
+                    
+                    if planned_date:
+                        # Znajdź najwcześniejszą i najpóźniejszą datę płatności
+                        payment_dates = [m['payment_date'] for m in milestones_payment if m.get('payment_date')]
+                        if payment_dates:
+                            earliest_payment = min(payment_dates)
+                            latest_payment = max(payment_dates)
+                            
+                            try:
+                                planned_dt = datetime.fromisoformat(planned_date)
+                                latest_dt = datetime.fromisoformat(latest_payment)
+                                delay_days = (latest_dt - planned_dt).days
+                                
+                                if delay_days > 0:
+                                    delay_icon = "⚠️"
+                                    delay_text = f"OPÓŹNIONA o {delay_days} dni"
+                                elif delay_days < 0:
+                                    delay_icon = "✅"
+                                    delay_text = f"PRZED TERMINEM o {abs(delay_days)} dni"
+                                else:
+                                    delay_icon = "✓"
+                                    delay_text = "W TERMINIE"
+                                
+                                planned_fmt = self.format_date_ddmmyyyy(planned_date)
+                                latest_fmt = self.format_date_ddmmyyyy(latest_payment)
+                                
+                                self.dashboard_text.insert(tk.END, f"Termin płatności:       {delay_icon} {delay_text}\n")
+                                self.dashboard_text.insert(tk.END, f"  Plan: {planned_fmt} | Faktyczna (ostatnia): {latest_fmt}\n")
+                            except Exception:
+                                pass
+                
+                # Szczegółowa lista transz
+                if milestones_payment:
+                    self.dashboard_text.insert(tk.END, "\n")
+                    self.dashboard_text.insert(tk.END, f"  {'%':>4}  {'Data':>12}  {'Typ':>10}  {'Utworzono przez'}\n")
+                    self.dashboard_text.insert(tk.END, "  " + "-" * 60 + "\n")
+                    
+                    # Sortuj po procentach
+                    milestones_payment_sorted = sorted(milestones_payment, key=lambda x: x['percentage'])
+                    
+                    for m in milestones_payment_sorted:
+                        perc = f"{m['percentage']}%"
+                        date_fmt = self.format_date_ddmmyyyy(m['payment_date']) or '—'
+                        ptype = m.get('payment_type', 'PŁATNOŚĆ')
+                        
+                        if ptype == 'UMORZONY':
+                            type_display = "✂️ UMORZONY"
+                        else:
+                            type_display = "💵 PŁATNOŚĆ"
+                        
+                        creator = m.get('created_by') or '—'
+                        
+                        self.dashboard_text.insert(tk.END,
+                            f"  {perc:>4}  {date_fmt:>12}  {type_display:>10}  {creator}\n"
+                        )
+                else:
+                    self.dashboard_text.insert(tk.END, "\n  ⚠️  Brak zarejestrowanych transz płatności.\n")
+                
+                self.dashboard_text.insert(tk.END, "\n")
+                
+            except Exception as e:
+                print(f"⚠️ Błąd ładowania płatności w dashboard: {e}")
+            
             # Zablokuj po edycji
             self.dashboard_text.config(state='disabled')
             
@@ -8769,7 +8780,7 @@ class RMManagerGUI:
             self.dashboard_text.yview_moveto(scroll_pos[0])
             
         except Exception as e:
-            self.dashboard_text.config(state='normal')
+            self.dashboard_text.config(state='normal', bg="white")
             self.dashboard_text.delete('1.0', tk.END)
             self.dashboard_text.insert(tk.END, f"Błąd: {e}")
             self.dashboard_text.config(state='disabled')
@@ -9379,8 +9390,8 @@ class RMManagerGUI:
                     try:
                         project_db = self.get_project_db_path(pid)
                         if os.path.exists(project_db):
-                            # Sprawdź czy zakończony
-                            is_finished = rmm.is_milestone_set(project_db, pid, 'ZAKONCZONY')
+                            # Sprawdź czy zakończony (status DONE w master.sqlite)
+                            is_finished = (rmm.get_project_status(self.master_db_path, pid) == ProjectStatus.DONE)
                             if is_finished:
                                 tags.append("finished")  # Ciemnoniebieski
                             else:
@@ -14821,10 +14832,10 @@ class RMManagerGUI:
                 pdb = self.get_project_db_path(pid)
                 if os.path.exists(pdb):
                     info['has_db'] = True
-                    info['is_finished'] = rmm.is_milestone_set(pdb, pid, 'ZAKONCZONY')
-                    info['is_paused'] = rmm.is_project_paused(pdb, pid)
                     ps = rmm.get_project_status(self.master_db_path, pid)
                     info['status'] = ps  # ProjectStatus enum
+                    info['is_finished'] = (ps == ProjectStatus.DONE)
+                    info['is_paused'] = rmm.is_project_paused(pdb, pid)
                     try:
                         summary = rmm.get_project_status_summary(pdb, pid)
                         info['health'] = summary.get('status', 'UNKNOWN')  # DELAYED/AT_RISK/ON_TRACK
@@ -23918,19 +23929,6 @@ def main():
         return  # Zakończ bez uruchamiania aplikacji
     
     print("✅ Single-instance check passed - uruchamiam aplikację")
-    
-    # ========================================================================
-    # AUTO-UPDATE - sprawdź czy dostępna jest nowsza wersja na serwerze
-    # ========================================================================
-    # Wywołanie przed utworzeniem GUI (aby móc pokazać messagebox)
-    
-    if check_and_update():
-        # Zaktualizowano - nowa wersja została uruchomiona
-        print("🔄 Aktualizacja zakończona - zamykam obecną instancję")
-        instance_lock.release()
-        return  # Zakończ obecną instancję
-    
-    # ========================================================================
 
     # Użyj TkinterDnD.Tk() jeśli drag-and-drop dostępny
     if HAS_DND:
