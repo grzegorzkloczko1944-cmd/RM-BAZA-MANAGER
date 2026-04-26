@@ -4834,8 +4834,25 @@ def sync_all_projects(rm_master_db_path: str, rm_projects_dir: str, master_db_pa
     # Synchronizuj każdy projekt
     synced_count = 0
     skipped_locked = 0
+    skipped_simulation = 0
+    
+    # Pobierz nazwy projektów do sprawdzenia [SYM]
+    con = _open_rm_connection(rm_master_db_path)
+    cursor = con.execute("SELECT project_id, name FROM projects WHERE project_id IN ({})".format(
+        ','.join('?' * len(project_ids))
+    ), project_ids)
+    project_names = {row['project_id']: row['name'] for row in cursor.fetchall()}
+    con.close()
+    
     for project_id in project_ids:
         try:
+            # 🚫 Projekty symulacyjne [SYM] nie synchronizują się do RM_BAZA
+            project_name = project_names.get(project_id, "")
+            if "[SYM]" in project_name:
+                print(f"⊘ Pominięto projekt {project_id} ({project_name}): projekt symulacyjny")
+                skipped_simulation += 1
+                continue
+            
             # Sprawdź czy projekt jest zlockowany przez innego użytkownika
             if lock_manager:
                 lock_info = lock_manager.get_project_lock_owner(project_id)
@@ -4861,10 +4878,11 @@ def sync_all_projects(rm_master_db_path: str, rm_projects_dir: str, master_db_pa
             traceback.print_exc()
     
     # Zapisz wpis do sync_log
-    notes = f"Auto-sync: {synced_count} OK, {skipped_locked} zlockowanych"
+    notes = f"Sync: {synced_count} OK, {skipped_locked} zlockowanych, {skipped_simulation} symulacyjnych [SYM]"
     record_sync(rm_master_db_path, synced_count, user, notes=notes)
     
-    print(f"✅ SYNC ALL: {synced_count}/{len(project_ids)} projektów zaktualizowanych, {skipped_locked} pominiętych (lock)")
+    print(f"✅ SYNC ALL: {synced_count}/{len(project_ids)} projektów zaktualizowanych, "
+          f"{skipped_locked} pominiętych (lock), {skipped_simulation} symulacyjnych [SYM]")
     return synced_count
 
 

@@ -3659,8 +3659,16 @@ class RMManagerGUI:
                 self.project_names[pid] = pname
             
             # Sortowanie identyczne jak RM_BAZA: cyfry malejąco → litery A-Z + numery malejąco
+            # PLUS: Projekty [SYM] zawsze na początku
             def sort_key(pid):
                 name_lower = self.project_names.get(pid, '').lower()
+                
+                # ⊘ Projekty symulacyjne [SYM] zawsze na samej górze
+                if '[sym]' in name_lower:
+                    # Usuń [sym] z nazwy dla sortowania wewnętrznego
+                    clean_name = name_lower.replace('[sym]', '').strip()
+                    return (-1, clean_name, 0, "")  # -1 = przed wszystkimi innymi
+                
                 import re
                 match = re.match(r'^(\d+)', name_lower)
                 if match:
@@ -8901,6 +8909,12 @@ class RMManagerGUI:
         if not self.selected_project_id:
             return
         
+        # 🚫 Projekty symulacyjne [SYM] nie synchronizują się do RM_BAZA
+        project_name = self.project_names.get(self.selected_project_id, "")
+        if "[SYM]" in project_name:
+            print(f"⊘ Skip sync: {project_name} (projekt symulacyjny)")
+            return
+        
         if not os.path.exists(self.master_db_path):
             return
         
@@ -9061,7 +9075,7 @@ class RMManagerGUI:
         win.resizable(False, False)
         win.transient(self.root)
         win.grab_set()
-        self._center_window(win, 600, 270)
+        self._center_window(win, 600, 320)
 
         frm = tk.Frame(win, padx=25, pady=20, bg="#f0f0f0")
         frm.pack(fill="both", expand=True)
@@ -9095,17 +9109,32 @@ class RMManagerGUI:
         ent_designer = tk.Entry(frm, textvariable=var_designer, width=45, font=("Arial", 10))
         ent_designer.grid(row=2, column=1, columnspan=2, sticky="ew", pady=(0, 12))
 
+        # Projekt symulacyjny
+        var_simulation = tk.BooleanVar(value=False)
+        sim_frame = tk.Frame(frm, bg="#fff3cd", borderwidth=1, relief=tk.SOLID)
+        sim_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(5, 12), padx=2)
+        tk.Checkbutton(sim_frame, text="⊘ Projekt symulacyjny (testowy)",
+                      variable=var_simulation, bg="#fff3cd",
+                      font=("Arial", 9, "bold"), fg="#856404").pack(side=tk.LEFT, padx=8, pady=4)
+        tk.Label(sim_frame, text="Nie będzie synchronizowany z RM_BAZA",
+                bg="#fff3cd", fg="#856404", font=("Arial", 8)).pack(side=tk.LEFT, padx=(0, 8))
+
         btn_frame = tk.Frame(frm, bg="#f0f0f0")
-        btn_frame.grid(row=3, column=0, columnspan=3, pady=(10, 0))
+        btn_frame.grid(row=4, column=0, columnspan=3, pady=(10, 0))
 
         def ok():
             name = var_name.get().strip()
             path = var_path.get().strip()
             designer = var_designer.get().strip()
+            is_simulation = var_simulation.get()
 
             if not name:
                 messagebox.showwarning("Błąd", "Podaj nazwę projektu!", parent=win)
                 return
+            
+            # 🔄 Dodaj prefix [SYM] jeśli projekt symulacyjny
+            if is_simulation and not name.startswith("[SYM]"):
+                name = f"[SYM] {name}"
 
             try:
                 con = self._reconnect_master_rw()
@@ -9216,6 +9245,16 @@ class RMManagerGUI:
                     idx = self.projects.index(pid_new)
                     self.project_combo.current(idx)
                     self.on_project_selected(None)
+                    
+                    # 🎉 Pokaż komunikat o sukcesie z pozycją na liście
+                    created_name = self.project_names.get(pid_new, name)
+                    is_sim = "[SYM]" in created_name
+                    sim_info = "\n\n[SYM] Projekt symulacyjny - znajduje się NA GÓRZE listy projektów." if is_sim else ""
+                    messagebox.showinfo(
+                        "✅ Projekt utworzony",
+                        f"Projekt został utworzony:\n\n{created_name}\n\nID: {pid_new}{sim_info}",
+                        parent=self.root
+                    )
                 except ValueError:
                     pass
 
@@ -9316,6 +9355,12 @@ class RMManagerGUI:
         def _sort_key_projects(row):
             import re
             name = (row[1] or "").lower()
+            
+            # ⊘ Projekty symulacyjne [SYM] zawsze na samej górze
+            if '[sym]' in name:
+                clean_name = name.replace('[sym]', '').strip()
+                return (-1, clean_name, 0, "")  # -1 = przed wszystkimi innymi
+            
             if name and name[0].isdigit():
                 m = re.match(r'^(\d+)', name)
                 if m:
@@ -9519,6 +9564,82 @@ class RMManagerGUI:
                   bg="#f39c12", fg="white", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_inner, text="🔄 Aktywny/Nieaktywny", command=toggle_active, width=20,
                   bg="#3498db", fg="white", font=("Arial", 10)).pack(side=tk.LEFT, padx=5)
+        
+        def convert_sim_to_real():
+            proj = get_selected()
+            if not proj:
+                messagebox.showwarning("Brak wyboru", "Zaznacz projekt do konwersji!", parent=win)
+                return
+            
+            if "[SYM]" not in proj['name']:
+                messagebox.showinfo("Nie dotyczy",
+                    f"Projekt '{proj['name']}' nie jest projektem symulacyjnym.\n\n"
+                    "Ta operacja działa tylko dla projektów z prefiksem [SYM].",
+                    parent=win)
+                return
+            
+            new_name = proj['name'].replace("[SYM]", "").strip()
+            
+            result = messagebox.askyesnocancel(
+                "⊘ → 🔄 Przekształcenie projektu symulacyjnego",
+                f"Projekt: {proj['name']}\n\n"
+                f"Nowa nazwa: {new_name}\n\n"
+                "Po usunięciu oznaczenia [SYM] projekt stanie się normalnym projektem\n"
+                "i będzie synchronizowany z RM_BAZA.\n\n"
+                "TAK - przekształć i synchronizuj teraz\n"
+                "NIE - przekształć, synchronizuj później\n"
+                "ANULUJ - przerwij operację",
+                icon='question',
+                parent=win
+            )
+            
+            if result is None:  # Cancel
+                return
+            
+            try:
+                # Zmień nazwę w bazie
+                con = self._reconnect_master_rw()
+                con.execute("UPDATE projects SET name = ? WHERE project_id = ?",
+                           (new_name, proj['id']))
+                con.commit()
+                con.close()
+                print(f"✅ Projekt {proj['id']}: {proj['name']} → {new_name}")
+                
+                # Odśwież listę
+                reload()
+                self.load_projects()
+                
+                # Synchronizuj jeśli wybrano TAK
+                if result is True:
+                    try:
+                        if not os.path.exists(self.master_db_path):
+                            messagebox.showwarning("Brak master.sqlite",
+                                f"Nie można zsynchronizować - brak pliku:\n{self.master_db_path}",
+                                parent=win)
+                        else:
+                            rmm.sync_to_master(
+                                self.get_project_db_path(proj['id']),
+                                self.master_db_path,
+                                proj['id']
+                            )
+                            messagebox.showinfo("✅ Sukces",
+                                f"Projekt przekształcony i zsynchronizowany z RM_BAZA:\n\n"
+                                f"{new_name}", parent=win)
+                    except Exception as sync_err:
+                        messagebox.showerror("Błąd synchronizacji",
+                            f"Projekt przekształcony, ale synchronizacja nie powiodła się:\n{sync_err}",
+                            parent=win)
+                else:
+                    messagebox.showinfo("✅ Sukces",
+                        f"Projekt przekształcony w realny:\n\n{new_name}\n\n"
+                        "Synchronizacja z RM_BAZA nastąpi przy następnej edycji lub ręcznej synchronizacji.",
+                        parent=win)
+                
+            except Exception as e:
+                messagebox.showerror("Błąd", f"Nie udało się przekształcić projektu:\n{e}", parent=win)
+        
+        tk.Button(btn_inner, text="⊘ → 🔄 SYM → Realny", command=convert_sim_to_real, width=18,
+                  bg="#9b59b6", fg="white", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_inner, text="🗑️ Usuń", command=delete_selected, width=12,
                   bg="#e74c3c", fg="white", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_inner, text="✖ Zamknij", command=on_close, width=12,
@@ -9566,7 +9687,9 @@ class RMManagerGUI:
         dlg.resizable(False, False)
         dlg.transient(parent)
         dlg.grab_set()
-        self._center_window(dlg, 600, 550)
+        # Zwiększ wysokość okna jeśli projekt symulacyjny (dodatkowe ostrzeżenie)
+        height = 590 if "[SYM]" in proj["name"] else 550
+        self._center_window(dlg, 600, height)
 
         frm = tk.Frame(dlg, padx=25, pady=20, bg="#f0f0f0")
         frm.pack(fill="both", expand=True)
@@ -9580,6 +9703,16 @@ class RMManagerGUI:
         ent_name = tk.Entry(frm, textvariable=var_name, width=45, font=("Arial", 10))
         ent_name.grid(row=row_idx, column=1, columnspan=2, sticky="ew", pady=(0, 12))
         row_idx += 1
+        
+        # 🔒 Ostrzeżenie dla projektów symulacyjnych [SYM]
+        if "[SYM]" in proj["name"]:
+            warning_frame = tk.Frame(frm, bg="#fff3cd", relief=tk.SOLID, borderwidth=1)
+            warning_frame.grid(row=row_idx, column=0, columnspan=3, sticky="ew", pady=(0, 12), padx=(0, 0))
+            tk.Label(warning_frame, 
+                    text="⚠️  PROJEKT SYMULACYJNY - prefix [SYM] jest chroniony i nie może być usunięty przez edycję.",
+                    font=("Arial", 8), fg="#856404", bg="#fff3cd", anchor="w", wraplength=520
+            ).pack(fill=tk.X, padx=8, pady=5)
+            row_idx += 1
 
         # Ścieżka
         tk.Label(frm, text="Ścieżka:", font=("Arial", 10), bg="#f0f0f0").grid(
@@ -9683,6 +9816,35 @@ class RMManagerGUI:
 
             if not name:
                 messagebox.showwarning("Błąd", "Podaj nazwę projektu!", parent=dlg)
+                return
+            
+            # 🔒 WALIDACJA: Projekty [SYM] nie mogą stracić prefixu przez edycję
+            original_name = proj["name"]
+            was_simulation = "[SYM]" in original_name
+            is_simulation = "[SYM]" in name
+            
+            if was_simulation and not is_simulation:
+                messagebox.showerror(
+                    "🚫 Niedozwolona zmiana",
+                    f"Nie można usunąć oznaczenia [SYM] z projektu symulacyjnego.\n\n"
+                    f"Oryginalny projekt: {original_name}\n"
+                    f"Próba zmiany na: {name}\n\n"
+                    f"Aby przekształcić projekt symulacyjny w realny, użyj przycisku:\n"
+                    f"'⊘ → 🔄 SYM → Realny' w Liście projektów.",
+                    parent=dlg
+                )
+                return
+            
+            if not was_simulation and is_simulation:
+                messagebox.showerror(
+                    "🚫 Niedozwolona zmiana",
+                    f"Nie można dodać oznaczenia [SYM] do projektu realnego.\n\n"
+                    f"Oryginalny projekt: {original_name}\n"
+                    f"Próba zmiany na: {name}\n\n"
+                    f"Projekty symulacyjne tworzy się przy tworzeniu nowego projektu\n"
+                    f"(checkbox 'Projekt symulacyjny').",
+                    parent=dlg
+                )
                 return
 
             try:
@@ -10236,6 +10398,18 @@ class RMManagerGUI:
             self.status_bar.config(text="⚠️ Nie wybrano projektu", fg="#f39c12")
             return
         
+        # 🚫 Projekty symulacyjne [SYM] nie synchronizują się do RM_BAZA
+        project_name = self.project_names.get(self.selected_project_id, "")
+        if "[SYM]" in project_name:
+            messagebox.showinfo(
+                "⊘ Projekt symulacyjny",
+                f"Projekt '{project_name}' jest oznaczony jako symulacyjny [SYM].\n\n"
+                "Projekty symulacyjne nie są synchronizowane z RM_BAZA.\n\n"
+                "Aby zsynchronizować ten projekt, usuń prefix [SYM] z nazwy."
+            )
+            self.status_bar.config(text="⊘ Projekt symulacyjny - sync pominięty", fg="#95a5a6")
+            return
+        
         if not os.path.exists(self.master_db_path):
             messagebox.showwarning("⚠️ Uwaga", f"Nie znaleziono master.sqlite:\n{self.master_db_path}")
             self.status_bar.config(text="⚠️ Brak master.sqlite", fg="#f39c12")
@@ -10266,11 +10440,18 @@ class RMManagerGUI:
             self.status_bar.config(text="⚠️ Brak master.sqlite", fg="#f39c12")
             return
         
+        # Policz ile projektów będzie synchronizowanych (bez [SYM])
+        total_projects = len(self.projects)
+        sim_projects = sum(1 for pid in self.projects if "[SYM]" in self.project_names.get(pid, ""))
+        sync_count = total_projects - sim_projects
+        
         # Potwierdź operację
         result = messagebox.askyesno(
             "🔄 Synchronizacja wszystkich projektów",
-            "Czy zsynchronizować wszystkie projekty z RM_MANAGER → RM_BAZA?\n\n"
-            "Operacja może potrwać kilka sekund w zależności od liczby projektów.",
+            f"Czy zsynchronizować projekty z RM_MANAGER → RM_BAZA?\n\n"
+            f"• Projektów do synchronizacji: {sync_count}\n"
+            f"• Projektów symulacyjnych [SYM] (pominięte): {sim_projects}\n\n"
+            "Operacja może potrwać kilka sekund.",
             icon='question'
         )
         if not result:
@@ -15356,6 +15537,7 @@ class RMManagerGUI:
             ('paused', '⏸ Wstrzymane', False),
             ('finished', '🏁 Zakończone', False),
             ('new', '🆕 Nowe', False),
+            ('simulation', '⊘ Symulowane', False),
         ]
         for key, label, default in status_defs:
             var = tk.BooleanVar(value=default)
@@ -15500,6 +15682,9 @@ class RMManagerGUI:
                 var.set(True)
             for var in health_filters.values():
                 var.set(True)
+            # Symulowane defaultowo UKRYTE (zgodnie z domyślną wartością)
+            if 'simulation' in status_filters:
+                status_filters['simulation'].set(False)
             time_filter_var.set('all')
             date_frame.pack_forget()
             date_from_var.set('')
@@ -15512,6 +15697,8 @@ class RMManagerGUI:
                 var.set(True)
             for var in health_filters.values():
                 var.set(True)
+            # Symulowane też zaznaczone
+            status_filters['simulation'].set(True)
             time_filter_var.set('all')
             date_frame.pack_forget()
             date_from_var.set('')
@@ -15651,7 +15838,12 @@ class RMManagerGUI:
             def get_sort_value(pid, col):
                 info = proj_info[pid]
                 if col == 'name':
-                    return info['name'].lower()
+                    name_lower = info['name'].lower()
+                    # ⊘ Projekty [SYM] zawsze na górze przy sortowaniu po nazwie
+                    if '[sym]' in name_lower:
+                        clean = name_lower.replace('[sym]', '').strip()
+                        return f"000_{clean}"  # Prefix 000_ = na początku alfabetycznie
+                    return name_lower
                 elif col == 'status':
                     if info['is_finished']:
                         return 5
@@ -15846,6 +16038,13 @@ class RMManagerGUI:
         # ===== LOGIKA FILTRÓW =====
         def matches_status_filter(pid):
             info = proj_info[pid]
+            
+            # ⊘ Filtr symulowanych - sprawdź najpierw
+            is_sim = '[SYM]' in info['name']
+            if is_sim:
+                return status_filters['simulation'].get()
+            
+            # Pozostałe statusy (tylko realne projekty)
             if info['is_finished']:
                 return status_filters['finished'].get()
             if info['is_paused']:
