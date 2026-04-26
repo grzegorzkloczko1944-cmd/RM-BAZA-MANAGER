@@ -368,6 +368,16 @@ def ensure_rm_master_tables(master_db_path: str):
     if con.total_changes:
         print("🔧 Naprawiono uprawnienia ADMIN (can_manage_permissions)")
 
+    # Tabela uprawnień per-feature per-user (np. transze płatności, kody PLC)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS rm_feature_user_permissions (
+            feature     TEXT NOT NULL,
+            username    TEXT NOT NULL,
+            granted_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (feature, username)
+        )
+    """)
+
     # Tabela synchronizacji z RM_BAZA (tracking)
     con.execute("""
         CREATE TABLE IF NOT EXISTS sync_log (
@@ -5134,6 +5144,71 @@ def set_role_permissions(rm_master_db_path: str, role: str, permissions: Dict):
         con.commit()
     finally:
         con.close()
+
+
+# ===========================================================================
+# Uprawnienia per-feature per-user
+# (np. edycja transz płatności, edycja kodów PLC)
+# ===========================================================================
+
+# Stałe nazwy "feature" (klucze w rm_feature_user_permissions.feature)
+FEATURE_PAYMENT_MILESTONES = 'payment_milestones'
+FEATURE_PLC_CODES = 'plc_codes'
+FEATURE_PROJECT_LIST = 'project_list'
+
+
+def get_feature_users(rm_master_db_path: str, feature: str) -> List[str]:
+    """Zwraca listę username posiadających uprawnienie do danej funkcji."""
+    try:
+        if not Path(rm_master_db_path).exists():
+            return []
+        con = _open_rm_connection(rm_master_db_path)
+        rows = con.execute(
+            "SELECT username FROM rm_feature_user_permissions "
+            "WHERE feature = ? ORDER BY username",
+            (feature,)
+        ).fetchall()
+        con.close()
+        return [r['username'] for r in rows]
+    except Exception as e:
+        print(f"⚠️  get_feature_users({feature}): {e}")
+        return []
+
+
+def set_feature_users(rm_master_db_path: str, feature: str, usernames: List[str]):
+    """Zastępuje pełną listę użytkowników uprawnionych do danej funkcji."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        con.execute("DELETE FROM rm_feature_user_permissions WHERE feature = ?", (feature,))
+        unique = []
+        seen = set()
+        for u in usernames:
+            u = (u or "").strip()
+            if u and u not in seen:
+                seen.add(u)
+                unique.append(u)
+        if unique:
+            con.executemany(
+                "INSERT INTO rm_feature_user_permissions (feature, username) VALUES (?, ?)",
+                [(feature, u) for u in unique]
+            )
+        con.commit()
+    finally:
+        con.close()
+
+
+def has_feature_permission(rm_master_db_path: str, feature: str, username: str,
+                           role: str = None) -> bool:
+    """Czy dany użytkownik ma uprawnienie do funkcji.
+    ADMIN zawsze True. Jeśli lista uprawnionych jest pusta — domyślnie True
+    (brak ograniczeń = każdy ma dostęp).
+    """
+    if role == 'ADMIN':
+        return True
+    users = get_feature_users(rm_master_db_path, feature)
+    if not users:
+        return True  # brak ograniczeń
+    return (username or "") in users
 
 
 # ===========================================================================

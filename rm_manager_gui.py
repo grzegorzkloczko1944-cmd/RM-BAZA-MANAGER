@@ -391,6 +391,12 @@ DEFAULT_LOCKS_DIR = r"C:\RMPAK_CLIENT\RM_MANAGER\RM_MANAGER_projects\LOCKS"  # F
 # Użytkownik (możesz pobrać z systemu)
 CURRENT_USER = os.environ.get('USERNAME', os.environ.get('USER', 'System'))
 
+# Stałe nazw "feature" dla uprawnień per-user (muszą zgadzać się z rm_manager.py)
+# Lokalne fallbacki – użyj wartości z modułu rm_manager jeśli dostępne
+FEATURE_PAYMENT_MILESTONES = getattr(rmm, 'FEATURE_PAYMENT_MILESTONES', 'payment_milestones')
+FEATURE_PLC_CODES = getattr(rmm, 'FEATURE_PLC_CODES', 'plc_codes')
+FEATURE_PROJECT_LIST = getattr(rmm, 'FEATURE_PROJECT_LIST', 'project_list')
+
 # Default stage configuration (dla auto-init)
 DEFAULT_STAGE_SEQUENCE = [
     'PRZYJETY', 'PROJEKT', 'ELEKTROPROJEKT', 'KOMPLETACJA', 'MONTAZ', 'ELEKTROMONTAZ',
@@ -2591,6 +2597,31 @@ class RMManagerGUI:
         """
         return bool(self.user_permissions.get(perm_key, False))
 
+    def _check_feature_permission(self, feature: str, feature_label: str) -> bool:
+        """Sprawdź uprawnienie per-feature per-user.
+        ADMIN zawsze TRUE. Pusta lista uprawnionych = brak ograniczeń.
+        Zwraca True jeśli wolno; przy braku uprawnień pokazuje warning i zwraca False.
+        """
+        # Fallback dla starszej wersji modułu rm_manager (bez has_feature_permission)
+        if not hasattr(rmm, 'has_feature_permission'):
+            return True
+        try:
+            allowed = rmm.has_feature_permission(
+                self.rm_master_db_path, feature,
+                self.current_user or "", self.current_user_role
+            )
+        except Exception as e:
+            print(f"⚠️ _check_feature_permission({feature}): {e}")
+            return True  # fail-open, by nie zablokować przy błędzie odczytu
+        if not allowed:
+            messagebox.showwarning(
+                "Brak uprawnień",
+                f"Nie masz uprawnień do edycji okna: {feature_label}.\n\n"
+                f"Skontaktuj się z administratorem "
+                f"(Użytkownicy → Uprawnienia kategorii)."
+            )
+        return allowed
+
     def _update_action_buttons_state(self):
         """Włącz/wyłącz przyciski akcji w zależności od uprawnień użytkownika.
         Wywoływane po zalogowaniu. Działa tylko jeśli widgety już istnieją.
@@ -2873,8 +2904,10 @@ class RMManagerGUI:
             textvariable=self.backup_date_var,
             width=14,
             state="readonly",
-            font=("Arial", 9)
+            font=("Arial", 9),
+            values=["Aktualny stan"],
         )
+        self.backup_combo.set("Aktualny stan")
         self.backup_combo.pack(side=tk.LEFT, padx=5, pady=10)
         self.backup_combo.bind("<<ComboboxSelected>>", self.on_backup_selected)
 
@@ -3959,14 +3992,37 @@ class RMManagerGUI:
     
     def load_backup_dates(self):
         """Załaduj dostępne daty backupów dla bieżącego projektu"""
-        if not self.selected_project_id or not self.backup_manager:
+        if not self.selected_project_id:
+            print("⚠️ load_backup_dates: brak selected_project_id")
+            self.backup_combo['values'] = ["Aktualny stan"]
+            self.backup_combo.set("Aktualny stan")
+            return
+        if not self.backup_manager:
+            print("⚠️ load_backup_dates: backup_manager = None")
             self.backup_combo['values'] = ["Aktualny stan"]
             self.backup_combo.set("Aktualny stan")
             return
         
         try:
+            # Diagnostyka: sprawdź ścieżki
+            try:
+                pdir = self.backup_manager.projects_backup_dir / f"project_{self.selected_project_id}"
+                print(f"🔍 load_backup_dates: backup_manager.projects_backup_dir = "
+                      f"{self.backup_manager.projects_backup_dir}")
+                print(f"   Szukam katalogu: {pdir} (istnieje={pdir.exists()})")
+                if pdir.exists():
+                    files = list(pdir.glob(f"project_{self.selected_project_id}_*.sqlite"))
+                    print(f"   Znaleziono fizycznie {len(files)} plik(ów) backupu w katalogu")
+                # Wyczyść cache, aby unikąć starych pustych odpowiedzi
+                if hasattr(self.backup_manager, '_backup_cache'):
+                    self.backup_manager._backup_cache.pop(self.selected_project_id, None)
+            except Exception as _diag_e:
+                print(f"   (diag) {_diag_e}")
+            
             # Pobierz listę backupów projektu
             backups = self.backup_manager.list_project_backups(self.selected_project_id)
+            print(f"📅 load_backup_dates(project={self.selected_project_id}): "
+                  f"list_project_backups zwrócił {len(backups)} pozycji")
             
             # Sortuj od najnowszych
             dates = [b['date'] for b in backups]
@@ -3979,6 +4035,7 @@ class RMManagerGUI:
             
         except Exception as e:
             print(f"⚠️  Błąd ładowania backupów: {e}")
+            import traceback; traceback.print_exc()
             self.backup_combo['values'] = ["Aktualny stan"]
             self.backup_combo.set("Aktualny stan")
     
@@ -5071,6 +5128,13 @@ class RMManagerGUI:
         """🔄 Aktualizuj etapy we wszystkich projektach - doda brakujące milestones/etapy.
         Narzędzia → Aktualizuj etapy we wszystkich projektach
         """
+        if not self._has_permission('can_sync_master'):
+            messagebox.showwarning(
+                "Brak uprawnień",
+                "Nie masz uprawnień do synchronizacji (can_sync_master).\n\n"
+                "Skontaktuj się z administratorem (Użytkownicy → Uprawnienia kategorii)."
+            )
+            return
         msg = (
             "Ta funkcja:\n"
             "• Doda brakujące etapy/milestones ze STAGE_DEFINITIONS\n"
@@ -9581,6 +9645,10 @@ class RMManagerGUI:
                 return None
 
         def edit_selected():
+            if not self._check_feature_permission(
+                FEATURE_PROJECT_LIST, "Lista projektów (edycja)"
+            ):
+                return
             proj = get_selected()
             if not proj:
                 messagebox.showwarning("Brak wyboru", "Zaznacz projekt do edycji!", parent=win)
@@ -9588,6 +9656,10 @@ class RMManagerGUI:
             self._edit_project_dialog(proj, parent_win=win, on_saved=lambda: (reload(), self.load_projects()))
 
         def toggle_active():
+            if not self._check_feature_permission(
+                FEATURE_PROJECT_LIST, "Lista projektów (edycja)"
+            ):
+                return
             proj = get_selected()
             if not proj:
                 messagebox.showwarning("Brak wyboru", "Zaznacz projekt!", parent=win)
@@ -9604,6 +9676,10 @@ class RMManagerGUI:
                 messagebox.showerror("Błąd", f"Nie udało się zmienić statusu:\n{e}", parent=win)
 
         def delete_selected():
+            if not self._check_feature_permission(
+                FEATURE_PROJECT_LIST, "Lista projektów (edycja)"
+            ):
+                return
             proj = get_selected()
             if not proj:
                 messagebox.showwarning("Brak wyboru", "Zaznacz projekt do usunięcia!", parent=win)
@@ -9637,6 +9713,10 @@ class RMManagerGUI:
                        command=reload, bg="#ecf0f1", font=("Arial", 9)).pack(side=tk.LEFT, padx=(10, 20))
 
         def add_and_reload():
+            if not self._check_feature_permission(
+                FEATURE_PROJECT_LIST, "Lista projektów (edycja)"
+            ):
+                return
             self.add_project_dialog(on_created=reload)
 
         tk.Button(btn_inner, text="➕ Dodaj", command=add_and_reload, width=12,
@@ -10025,7 +10105,7 @@ class RMManagerGUI:
         dlg.transient(self.root)
         dlg.grab_set()
         dlg.resizable(True, True)
-        self._center_window(dlg, 760, 420)
+        self._center_window(dlg, 820, 660)
 
         # Nagłówek
         header = tk.Label(
@@ -10075,6 +10155,112 @@ class RMManagerGUI:
                     bg="white" if can_save else "#f0f0f0"
                 ).grid(row=row_i, column=col_i, padx=6, pady=3)
 
+        # ===================================================================
+        # Sekcja: Uprawnienia per-feature per-user
+        # ===================================================================
+        # Lista wszystkich userów z RM_BAZA (do comboboxa)
+        try:
+            all_users = rmm.get_users_from_baza(self.master_db_path)
+            all_usernames = [u['username'] for u in all_users if u.get('username')]
+        except Exception:
+            all_usernames = []
+
+        feature_specs = [
+            (FEATURE_PAYMENT_MILESTONES, "💰 Transze płatności"),
+            (FEATURE_PLC_CODES,          "🔓 Kody odblokowujące PLC"),
+            (FEATURE_PROJECT_LIST,       "📋 Lista projektów (edycja)"),
+        ]
+
+        # listboxy do późniejszego odczytu w save_permissions
+        feature_listboxes: dict[str, tk.Listbox] = {}
+
+        feat_section = tk.LabelFrame(
+            dlg,
+            text="  Uprawnienia indywidualne (edycja okien) — wybierz użytkowników  ",
+            font=self.FONT_BOLD, padx=10, pady=8
+        )
+        feat_section.pack(fill=tk.X, padx=15, pady=(4, 0))
+
+        info_lbl = tk.Label(
+            feat_section,
+            text="Pusta lista = brak ograniczeń (każdy może edytować). "
+                 "Dodanie przynajmniej jednego użytkownika ogranicza dostęp tylko do wybranych "
+                 "(ADMIN ma dostęp zawsze).",
+            font=("Arial", 8), fg="#555", wraplength=760, justify="left", anchor="w"
+        )
+        info_lbl.pack(fill=tk.X, pady=(0, 6))
+
+        for feat_key, feat_label in feature_specs:
+            box = tk.Frame(feat_section)
+            box.pack(fill=tk.X, pady=4)
+
+            tk.Label(box, text=feat_label, font=self.FONT_BOLD,
+                     width=26, anchor="w").pack(side=tk.LEFT)
+
+            # Pobierz aktualnie uprawnionych
+            try:
+                if hasattr(rmm, 'get_feature_users'):
+                    current_users = rmm.get_feature_users(self.rm_master_db_path, feat_key)
+                else:
+                    current_users = []
+            except Exception:
+                current_users = []
+
+            # Listbox z aktualnie uprawnionymi
+            lb_frame = tk.Frame(box)
+            lb_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+            lb_scroll = tk.Scrollbar(lb_frame, orient=tk.VERTICAL)
+            lb = tk.Listbox(
+                lb_frame, height=4, font=self.FONT_DEFAULT,
+                yscrollcommand=lb_scroll.set,
+                state=(tk.NORMAL if can_save else tk.DISABLED)
+            )
+            lb_scroll.config(command=lb.yview)
+            lb_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+            lb.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            for u in current_users:
+                lb.insert(tk.END, u)
+            feature_listboxes[feat_key] = lb
+
+            # Combobox + przyciski
+            ctl = tk.Frame(box)
+            ctl.pack(side=tk.LEFT)
+
+            sel_var = tk.StringVar()
+            cb = ttk.Combobox(
+                ctl, textvariable=sel_var, values=all_usernames,
+                state=('readonly' if can_save else 'disabled'),
+                width=18, font=self.FONT_DEFAULT
+            )
+            cb.pack(side=tk.TOP, pady=(0, 3))
+
+            def _make_add(_lb=lb, _var=sel_var):
+                def _add():
+                    name = (_var.get() or "").strip()
+                    if not name:
+                        return
+                    existing = list(_lb.get(0, tk.END))
+                    if name in existing:
+                        return
+                    _lb.insert(tk.END, name)
+                    _var.set("")
+                return _add
+
+            def _make_remove(_lb=lb):
+                def _rm():
+                    sel = _lb.curselection()
+                    if sel:
+                        _lb.delete(sel[0])
+                return _rm
+
+            btn_state = tk.NORMAL if can_save else tk.DISABLED
+            tk.Button(ctl, text="➕ Dodaj", command=_make_add(),
+                      bg=self.COLOR_GREEN, fg="white", font=("Arial", 9, "bold"),
+                      padx=8, state=btn_state).pack(side=tk.LEFT, padx=2)
+            tk.Button(ctl, text="🗑 Usuń", command=_make_remove(),
+                      bg=self.COLOR_RED, fg="white", font=("Arial", 9, "bold"),
+                      padx=8, state=btn_state).pack(side=tk.LEFT, padx=2)
+
         # Przyciski
         btn_frame = tk.Frame(dlg)
         btn_frame.pack(fill=tk.X, padx=15, pady=10)
@@ -10093,6 +10279,15 @@ class RMManagerGUI:
                 for role, perms_vars in row_vars.items():
                     perms = {k: v.get() for k, v in perms_vars.items()}
                     rmm.set_role_permissions(self.rm_master_db_path, role, perms)
+                # Zapis uprawnień per-feature per-user
+                if hasattr(rmm, 'set_feature_users'):
+                    for feat_key, _lbl in feature_specs:
+                        lb = feature_listboxes.get(feat_key)
+                        if lb is not None:
+                            rmm.set_feature_users(
+                                self.rm_master_db_path, feat_key,
+                                list(lb.get(0, tk.END))
+                            )
                 # Odśwież uprawnienia bieżącego usera
                 self.user_permissions = rmm.get_user_permissions(
                     self.rm_master_db_path, self.current_user_role
@@ -20184,6 +20379,13 @@ class RMManagerGUI:
             field: 'start' lub 'end'
             current_bar_data: Słownik z danymi paska (start, end, type, color)
         """
+        if not self._has_permission('can_edit_dates'):
+            messagebox.showwarning(
+                "Brak uprawnień",
+                "Nie masz uprawnień do edycji dat (can_edit_dates).\n\n"
+                "Skontaktuj się z administratorem (Użytkownicy → Uprawnienia kategorii)."
+            )
+            return
         # Pobierz aktualną wartość
         current_value = current_bar_data[field]
         field_label = "Początek" if field == 'start' else "Koniec"
@@ -21082,6 +21284,109 @@ class RMManagerGUI:
         tree.bind("<<TreeviewSelect>>", on_backup_selected)
         project_combo.bind("<<ComboboxSelected>>", lambda e: load_backups())
         
+        # Funkcja przywracania backupu
+        def restore_selected_backup():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning(
+                    "Brak wyboru",
+                    "Zaznacz backup z listy do przywrócenia.",
+                    parent=win
+                )
+                return
+            
+            item = tree.item(sel[0])
+            date = item['values'][0]
+            if date not in backups_cache:
+                return
+            backup_info = backups_cache[date]
+            backup_type = backup_info['type']
+            
+            # Potwierdzenie
+            if backup_type == 'master':
+                msg = (
+                    f"⚠️ PRZYWRÓCENIE BAZY MASTER RM_MANAGER\n\n"
+                    f"Data backupu: {date}\n\n"
+                    f"Bieżąca baza zostanie ZAPISANA jako kopia bezpieczeństwa\n"
+                    f"(plik 'master_before_restore_*.sqlite'),\n"
+                    f"a następnie nadpisana zawartością z backupu.\n\n"
+                    f"Operacja jest odwracalna (ręcznie z kopii bezpieczeństwa).\n\n"
+                    f"Czy kontynuować?"
+                )
+                if not messagebox.askyesno("⚠️ Potwierdź przywrócenie MASTER", msg,
+                                            icon='warning', parent=win):
+                    return
+                try:
+                    self.backup_manager.restore_master(date)
+                    messagebox.showinfo(
+                        "✅ Przywrócono",
+                        f"Baza master została przywrócona z {date}.\n\n"
+                        f"Zalecane: zrestartuj aplikację, aby załadować nowe dane.",
+                        parent=win
+                    )
+                except Exception as e:
+                    messagebox.showerror("❌ Błąd", f"Nie udało się przywrócić master:\n{e}",
+                                          parent=win)
+                    import traceback; traceback.print_exc()
+                return
+            
+            # backup_type == 'project'
+            project_id = backup_info.get('project_id')
+            if project_id is None:
+                messagebox.showerror("❌ Błąd", "Nie udało się odczytać ID projektu.",
+                                      parent=win)
+                return
+            
+            # Sprawdź lock projektu
+            try:
+                lock_owner = self.lock_manager.get_project_lock_owner(project_id)
+            except Exception:
+                lock_owner = None
+            if lock_owner and lock_owner.get('user') != self.current_user:
+                messagebox.showerror(
+                    "🔒 Projekt zablokowany",
+                    f"Projekt {project_id} jest zablokowany przez "
+                    f"{lock_owner.get('user', '?')}.\n"
+                    f"Nie można przywrócić backupu.",
+                    parent=win
+                )
+                return
+            
+            msg = (
+                f"⚠️ PRZYWRÓCENIE BAZY PROJEKTU {project_id}\n\n"
+                f"Data backupu: {date}\n\n"
+                f"Bieżąca baza projektu zostanie ZAPISANA jako kopia bezpieczeństwa\n"
+                f"(plik 'project_{project_id}_before_restore_*.sqlite'),\n"
+                f"a następnie nadpisana zawartością z backupu.\n\n"
+                f"Operacja jest odwracalna (ręcznie z kopii bezpieczeństwa).\n\n"
+                f"Czy kontynuować?"
+            )
+            if not messagebox.askyesno("⚠️ Potwierdź przywrócenie PROJEKTU", msg,
+                                        icon='warning', parent=win):
+                return
+            try:
+                self.backup_manager.restore_project(project_id, date)
+                # Odśwież GUI jeśli ten projekt jest aktualnie wybrany
+                if self.selected_project_id == project_id:
+                    try:
+                        # Wyłącz tryb podglądu backupu
+                        self.viewing_backup = False
+                        self.backup_date = None
+                        self.backup_db_path = None
+                        self.refresh_all()
+                        self.load_backup_dates()
+                    except Exception:
+                        pass
+                messagebox.showinfo(
+                    "✅ Przywrócono",
+                    f"Projekt {project_id} został przywrócony z {date}.",
+                    parent=win
+                )
+            except Exception as e:
+                messagebox.showerror("❌ Błąd", f"Nie udało się przywrócić projektu:\n{e}",
+                                      parent=win)
+                import traceback; traceback.print_exc()
+        
         # Przyciski
         btn_frame = tk.Frame(main_frame, bg="#ecf0f1", height=50)
         btn_frame.pack(fill=tk.X)
@@ -21092,6 +21397,9 @@ class RMManagerGUI:
         
         tk.Button(btn_inner, text="🔄 Odśwież", command=load_backups, width=15,
                  bg="#16a085", fg="white", font=("Arial", 10)).pack(side=tk.LEFT, padx=5)
+        
+        tk.Button(btn_inner, text="♻️ Przywróć z backupu", command=restore_selected_backup, width=22,
+                 bg="#e67e22", fg="white", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
         
         tk.Button(btn_inner, text="✖ Zamknij", command=win.destroy, width=15,
                  bg="#95a5a6", fg="white", font=("Arial", 10)).pack(side=tk.LEFT, padx=5)
@@ -22116,6 +22424,10 @@ class RMManagerGUI:
         if not self.selected_project_id:
             messagebox.showwarning("Brak projektu", "Wybierz projekt z listy.")
             return
+        if not self._check_feature_permission(
+            FEATURE_PAYMENT_MILESTONES, "Transze płatności"
+        ):
+            return
         
         # Sprawdź istniejące transze i oblicz ile zostało
         try:
@@ -22301,6 +22613,10 @@ class RMManagerGUI:
            wpłaty), milestone pozostaje ustawiony.
         """
         if not self.selected_project_id:
+            return
+        if not self._check_feature_permission(
+            FEATURE_PAYMENT_MILESTONES, "Transze płatności"
+        ):
             return
         if not self.have_lock:
             messagebox.showerror("🔒 Brak locka", "Musisz najpierw przejąć lock projektu.")
@@ -22490,6 +22806,10 @@ class RMManagerGUI:
         if not self.selected_project_id:
             messagebox.showwarning("Brak projektu", "Wybierz projekt z listy.")
             return
+        if not self._check_feature_permission(
+            FEATURE_PAYMENT_MILESTONES, "Transze płatności"
+        ):
+            return
         
         selected = self.payment_tree.selection()
         if not selected:
@@ -22603,6 +22923,10 @@ class RMManagerGUI:
         """Usuń wybraną transzę płatności."""
         if not self.selected_project_id:
             messagebox.showwarning("Brak projektu", "Wybierz projekt z listy.")
+            return
+        if not self._check_feature_permission(
+            FEATURE_PAYMENT_MILESTONES, "Transze płatności"
+        ):
             return
         
         selected = self.payment_tree.selection()
@@ -22750,6 +23074,10 @@ class RMManagerGUI:
         if not self.selected_project_id:
             messagebox.showwarning("Brak projektu", "Wybierz projekt z listy.")
             return
+        if not self._check_feature_permission(
+            FEATURE_PLC_CODES, "Kody odblokowujące PLC"
+        ):
+            return
         
         dialog = tk.Toplevel(self.root)
         dialog.title("Dodaj kod PLC")
@@ -22835,6 +23163,10 @@ class RMManagerGUI:
     
     def edit_plc_code(self):
         """Dialog edycji kodu PLC."""
+        if not self._check_feature_permission(
+            FEATURE_PLC_CODES, "Kody odblokowujące PLC"
+        ):
+            return
         selection = self.plc_codes_tree.selection()
         if not selection:
             messagebox.showwarning("Brak wyboru", "Wybierz kod z listy.")
@@ -22922,6 +23254,10 @@ class RMManagerGUI:
     
     def delete_plc_code(self):
         """Usuń kod PLC."""
+        if not self._check_feature_permission(
+            FEATURE_PLC_CODES, "Kody odblokowujące PLC"
+        ):
+            return
         selection = self.plc_codes_tree.selection()
         if not selection:
             messagebox.showwarning("Brak wyboru", "Wybierz kod z listy.")
