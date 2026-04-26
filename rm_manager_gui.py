@@ -9299,7 +9299,7 @@ class RMManagerGUI:
         hsb = tk.Scrollbar(tree_frame, orient="horizontal")
         hsb.pack(side=tk.BOTTOM, fill=tk.X)
 
-        cols = ("id", "active", "name", "designer", "status", "created",
+        cols = ("id", "active", "name", "designer", "status", "paid", "created",
                 "montaz", "fat", "completed", "locked", "path")
         tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                             yscrollcommand=vsb.set, xscrollcommand=hsb.set)
@@ -9309,6 +9309,7 @@ class RMManagerGUI:
         tree.heading("name", text="Nazwa")
         tree.heading("designer", text="Konstruktor")
         tree.heading("status", text="Status")
+        tree.heading("paid", text="Zapłacony")
         tree.heading("created", text="Utworzony")
         tree.heading("montaz", text="Montaż")
         tree.heading("fat", text="FAT")
@@ -9321,6 +9322,7 @@ class RMManagerGUI:
         tree.column("name",      width=220, anchor="w")
         tree.column("designer",  width=84,  anchor="w")
         tree.column("status",    width=216, anchor="center")
+        tree.column("paid",      width=80,  anchor="center")
         tree.column("created",   width=95,  anchor="center")
         tree.column("montaz",    width=95,  anchor="center")
         tree.column("fat",       width=95,  anchor="center")
@@ -9433,9 +9435,72 @@ class RMManagerGUI:
                     if completed_col and idx < len(row):
                         completed = _fmt_date(row[idx]); idx += 1
 
-                    # Statusy multi-select
+                    # 🔄 NADPISYWANIE: Konstruktor — jeśli w etapie PROJEKT (Oś czasu)
+                    # jest przypisany pracownik, ZAWSZE nadpisuj kolumnę pierwszym z listy
+                    try:
+                        project_db = self.get_project_db_path(pid)
+                        if project_db and os.path.exists(project_db):
+                            assigned = rmm.get_stage_assigned_staff(
+                                project_db, self.rm_master_db_path, pid, 'PROJEKT'
+                            )
+                            if assigned:
+                                new_designer = (assigned[0].get('employee_name', '') or "").strip()
+                                if new_designer and new_designer != (designer or "").strip():
+                                    designer = new_designer
+                                    # Persist do master.sqlite
+                                    if designer_col:
+                                        try:
+                                            con_rw = self._reconnect_master_rw()
+                                            con_rw.execute(
+                                                f"UPDATE projects SET {designer_col} = ? WHERE {pk} = ?",
+                                                (new_designer, pid)
+                                            )
+                                            con_rw.commit()
+                                            con_rw.close()
+                                        except Exception as _e_upd:
+                                            print(f"⚠️ Nie udało się zapisać Konstruktora dla {pid}: {_e_upd}")
+                    except Exception:
+                        pass
+
+                    # Statusy multi-select (NOWY SYSTEM)
                     status_list = get_project_statuses(con, pid)
-                    status = ", ".join(status_list) if status_list else "(brak)"
+                    
+                    # 🔄 FALLBACK: Jeśli brak statusów w nowej tabeli, sprawdź starą kolumnę 'status'
+                    if not status_list:
+                        try:
+                            old_status_row = con.execute(
+                                "SELECT status FROM projects WHERE project_id = ?", 
+                                (pid,)
+                            ).fetchone()
+                            if old_status_row and old_status_row[0]:
+                                status_list = [old_status_row[0]]
+                        except Exception:
+                            pass
+                    
+                    # 🎯 Wyświetl tylko NAJWAŻNIEJSZY status (według priorytetu)
+                    # Najpierw sprawdź STARY system (project_status w master: DONE/PAUSED)
+                    # bo on ma priorytet nadrzędny nad multi-status
+                    old_proj_status = None
+                    try:
+                        old_proj_status = rmm.get_project_status(self.master_db_path, pid)
+                    except Exception:
+                        pass
+
+                    if old_proj_status == ProjectStatus.DONE:
+                        status = "ZAKONCZONY"
+                    elif old_proj_status == ProjectStatus.PAUSED:
+                        status = "WSTRZYMANY"
+                    elif status_list:
+                        # Priorytet: ZAKONCZONY > WSTRZYMANY > ostatni chronologicznie
+                        if "ZAKONCZONY" in status_list:
+                            status = "ZAKONCZONY"
+                        elif "WSTRZYMANY" in status_list:
+                            status = "WSTRZYMANY" 
+                        else:
+                            # Pokaż ostatni status (najbardziej aktualny)
+                            status = status_list[-1]
+                    else:
+                        status = "(brak)"
 
                     # Lock
                     locked_by = ""
@@ -9465,9 +9530,26 @@ class RMManagerGUI:
                     if not is_act and not tags:
                         tags.append("inactive")
 
+                    # 💰 Procent zapłaconych płatności (UMORZONY = traktowany jak 100%)
+                    try:
+                        _ms_pay = rmm.get_payment_milestones(self.rm_master_db_path, pid)
+                        _has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in _ms_pay)
+                        pay_pct = rmm.get_payment_total_percentage(self.rm_master_db_path, pid)
+                        if _has_umorzony:
+                            paid = "UMORZONY"
+                        elif pay_pct >= 100:
+                            paid = "TAK (100%)"
+                        elif pay_pct > 0:
+                            paid = f"{pay_pct:.0f}%"
+                        else:
+                            paid = "—"
+                    except Exception as _e:
+                        print(f"⚠️ Błąd pobierania płatności dla projektu {pid}: {_e}")
+                        paid = ""
+
                     tree.insert("", "end",
                                 values=(pid, "TAK" if is_act else "NIE", rname,
-                                        designer, status, created, montaz, fat,
+                                        designer, status, paid, created, montaz, fat,
                                         completed, locked_by, pth),
                                 tags=tuple(tags))
 
@@ -9488,11 +9570,12 @@ class RMManagerGUI:
                     "name": str(vals[2] or ""),
                     "designer": str(vals[3] or ""),
                     "status": str(vals[4] or ""),
-                    "created_at": str(vals[5] or ""),
-                    "montaz": str(vals[6] or ""),
-                    "fat": str(vals[7] or ""),
-                    "completed_at": str(vals[8] or ""),
-                    "path": str(vals[10] or ""),
+                    "paid": str(vals[5] or ""),
+                    "created_at": str(vals[6] or ""),
+                    "montaz": str(vals[7] or ""),
+                    "fat": str(vals[8] or ""),
+                    "completed_at": str(vals[9] or ""),
+                    "path": str(vals[11] or ""),
                 }
             except Exception:
                 return None
@@ -9745,6 +9828,19 @@ class RMManagerGUI:
         try:
             rcon = rmm._open_rm_connection(self.master_db_path)
             current_statuses = get_project_statuses(rcon, proj['id'])
+            
+            # 🔄 FALLBACK: Jeśli brak statusów w nowej tabeli, sprawdź starą kolumnę 'status'
+            if not current_statuses:
+                try:
+                    old_status_row = rcon.execute(
+                        "SELECT status FROM projects WHERE project_id = ?", 
+                        (proj['id'],)
+                    ).fetchone()
+                    if old_status_row and old_status_row[0]:
+                        current_statuses = [old_status_row[0]]
+                except Exception:
+                    pass
+            
             rcon.close()
         except Exception:
             current_statuses = []
