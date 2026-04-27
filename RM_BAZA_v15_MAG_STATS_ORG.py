@@ -10356,9 +10356,9 @@ class MainWindow(tk.Tk):
                     'new_supplier_id': supplier_id
                 }
                 print(f"💾 UNDO: Zapisano bulk_supplier dla {len(old_values)} wierszy")
-                
-                
+
                 dialog.destroy()
+                self.load_suppliers()  # Odśwież filtr dostawców
                 self.refresh_data()
             except Exception as e:
                 messagebox.showerror("Błąd", f"Nie udało się zapisać zmian: {e}")
@@ -10419,9 +10419,9 @@ class MainWindow(tk.Tk):
                         'new_supplier_id': None
                     }
                     print(f"💾 UNDO: Zapisano bulk_supplier (clear) dla {len(old_values)} wierszy")
-                    
-                    
+
                     dialog.destroy()
+                    self.load_suppliers()  # Odśwież filtr dostawców
                     self.refresh_data()
                 except Exception as e:
                     messagebox.showerror("Błąd", f"Nie udało się zapisać zmian: {e}")
@@ -17202,8 +17202,10 @@ class MainWindow(tk.Tk):
             self.sheet.set_cell_data(row, col, supplier_name if supplier_name else "")
             
             print(f"✅ Dostawca item {item_id}: {supplier_name if supplier_name else '(brak)'}")
-            
-            
+
+            # Odśwież filtr dostawców w comboboxie (może pojawić się nowy dostawca w projekcie)
+            self.load_suppliers()
+
             # Odśwież kolory zachowując podświetlenie wiersza
             self._rebuild_all_cell_colors_with_selection()
         

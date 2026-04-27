@@ -3215,11 +3215,11 @@ class RMManagerGUI:
                 
                 tk.Button(
                     chart_controls,
-                    text="📈 Multi-projekt",
+                    text="🌐 Multi-www",
                     command=self.create_multi_project_gantt,
-                    bg=self.COLOR_PURPLE,
+                    bg="#e67e22",
                     fg="white",
-                    font=("Arial", 10),
+                    font=("Arial", 10, "bold"),
                     relief=tk.FLAT,
                     padx=15,
                     pady=5
@@ -11743,10 +11743,12 @@ class RMManagerGUI:
                 pass
             self._notes_window = None
         
-        # Okno główne — transient do rzeczywistego rodzica
+        # Okno główne — niezależny Toplevel (NIE transient), aby nie chowało się
+        # za innymi oknami (np. Multi-projekt Gantt) gdy te przejmą focus.
         notes_win = tk.Toplevel(_parent)
         notes_win.can_edit = can_edit  # Zapisz flagę edycji jako atrybut okna
-        notes_win.transient(_parent)
+        # ⚠️ NIE wywołujemy notes_win.transient(_parent) — to powoduje znikanie okna
+        # za wykresem Multi-projekt po najechaniu myszą (focus_set canvas).
         title_suffix = " (READ-ONLY)" if not can_edit else ""
         notes_win.title(f"📝 Notatki - Projekt {self.selected_project_id}{title_suffix}")
         notes_win.resizable(True, True)
@@ -15120,6 +15122,7 @@ class RMManagerGUI:
                 target_stages[row['stage_code']] = row['id']
             
             # 2. KOPIUJ SZABLON (template_start/template_end)
+            # ⚠️ WERSJA NIEBEZPIECZNA: Puste wartości NADPISUJĄ istniejące dane!
             if options.get('template'):
                 for stage_code in source_stages:
                     if stage_code not in target_stages:
@@ -15128,38 +15131,46 @@ class RMManagerGUI:
                     source_stage_id = source_stages[stage_code]
                     target_stage_id = target_stages[stage_code]
                     
-                    # Pobierz szablon ze źródła
+                    # Pobierz szablon ze źródła (nawet jeśli pusty!)
                     template = source_con.execute("""
                         SELECT template_start, template_end, notes
                         FROM stage_schedule WHERE project_stage_id = ?
                     """, (source_stage_id,)).fetchone()
                     
-                    if template and template['template_start'] and template['template_end']:
-                        # Sprawdź czy istnieje w docelowym
-                        existing = target_con.execute("""
-                            SELECT id FROM stage_schedule WHERE project_stage_id = ?
-                        """, (target_stage_id,)).fetchone()
-                        
-                        if existing:
-                            # UPDATE
-                            target_con.execute("""
-                                UPDATE stage_schedule
-                                SET template_start = ?, template_end = ?, notes = ?
-                                WHERE project_stage_id = ?
-                            """, (template['template_start'], template['template_end'],
-                                 template['notes'], target_stage_id))
-                        else:
-                            # INSERT
+                    # 🔥 NIEBEZPIECZNE: Kopiuj ZAWSZE (nawet NULL nadpisze istniejące dane)
+                    template_start = template['template_start'] if template else None
+                    template_end = template['template_end'] if template else None
+                    notes = template['notes'] if template else None
+                    
+                    # Sprawdź czy istnieje w docelowym
+                    existing = target_con.execute("""
+                        SELECT id FROM stage_schedule WHERE project_stage_id = ?
+                    """, (target_stage_id,)).fetchone()
+                    
+                    if existing:
+                        # UPDATE (nawet jeśli NULL)
+                        target_con.execute("""
+                            UPDATE stage_schedule
+                            SET template_start = ?, template_end = ?, notes = ?
+                            WHERE project_stage_id = ?
+                        """, (template_start, template_end, notes, target_stage_id))
+                    else:
+                        # INSERT (tylko jeśli są jakiekolwiek dane)
+                        if template_start or template_end or notes:
                             target_con.execute("""
                                 INSERT INTO stage_schedule
                                     (project_stage_id, template_start, template_end, notes)
                                 VALUES (?, ?, ?, ?)
-                            """, (target_stage_id, template['template_start'],
-                                 template['template_end'], template['notes']))
+                            """, (target_stage_id, template_start, template_end, notes))
                 
                 print(f"  ✓ Skopiowano szablon: P{source_pid} → P{target_pid}")
             
-            # 3. KOPIUJ MILESTONE (daty actual dla milestone stages)
+            # 3. KOPIUJ MILESTONE (daty z stage_schedule + stage_actual_periods)
+            # ⚠️ WERSJA NIEBEZPIECZNA: Brak milestone w źródle WYCZYŚCI milestone w docelowym!
+            # 🔧 Milestone może być w DWÓCH miejscach:
+            #    - stage_schedule.template_start (zapisany ręcznie przez GUI "Zapisz")
+            #    - stage_actual_periods.started_at (zapisany przez set_milestone backend)
+            #    Kopiujemy oba żeby wykres i Oś czasu działały poprawnie.
             if options.get('milestones'):
                 # Pobierz milestone codes
                 milestone_codes = set()
@@ -15175,7 +15186,16 @@ class RMManagerGUI:
                     source_stage_id = source_stages[stage_code]
                     target_stage_id = target_stages[stage_code]
                     
-                    # Pobierz actual period ze źródła
+                    # A. Pobierz template_start ze stage_schedule (planowana data)
+                    sched = source_con.execute("""
+                        SELECT template_start, template_end
+                        FROM stage_schedule WHERE project_stage_id = ?
+                    """, (source_stage_id,)).fetchone()
+                    
+                    src_template_start = sched['template_start'] if sched else None
+                    src_template_end = sched['template_end'] if sched else None
+                    
+                    # B. Pobierz actual period (rzeczywiste zdarzenie)
                     period = source_con.execute("""
                         SELECT started_at, ended_at, started_by, notes
                         FROM stage_actual_periods
@@ -15183,13 +15203,16 @@ class RMManagerGUI:
                         ORDER BY id DESC LIMIT 1
                     """, (source_stage_id,)).fetchone()
                     
-                    if period and period['started_at']:
-                        # Usuń istniejące periods w docelowym (nadpisanie)
-                        target_con.execute("""
-                            DELETE FROM stage_actual_periods WHERE project_stage_id = ?
-                        """, (target_stage_id,))
-                        
-                        # Wstaw nowy period
+                    has_actual = period and period['started_at']
+                    has_template = src_template_start
+                    
+                    # 🔥 NIEBEZPIECZNE: ZAWSZE czyść stage_actual_periods w docelowym
+                    target_con.execute("""
+                        DELETE FROM stage_actual_periods WHERE project_stage_id = ?
+                    """, (target_stage_id,))
+                    
+                    # Kopiuj actual_period jeśli istnieje w źródle
+                    if has_actual:
                         target_con.execute("""
                             INSERT INTO stage_actual_periods
                                 (project_stage_id, started_at, ended_at, started_by, notes)
@@ -15197,10 +15220,43 @@ class RMManagerGUI:
                         """, (target_stage_id, period['started_at'], period['ended_at'],
                              self.current_user or 'System',
                              f"[Skopiowano z P{source_pid}] " + (period['notes'] or '')))
+                    
+                    # Określ jaką datę zapisać w stage_schedule (template)
+                    # Priorytet: template_start ze źródła > started_at z actual_period > NULL
+                    if has_template:
+                        ms_date_start = src_template_start
+                        ms_date_end = src_template_end or src_template_start
+                    elif has_actual:
+                        ms_date_start = period['started_at']
+                        ms_date_end = period['ended_at'] or period['started_at']
+                    else:
+                        ms_date_start = None
+                        ms_date_end = None
+                    
+                    # Zapisz/wyczyść stage_schedule (NIEBEZPIECZNE - NULL nadpisze)
+                    existing_schedule = target_con.execute("""
+                        SELECT id FROM stage_schedule WHERE project_stage_id = ?
+                    """, (target_stage_id,)).fetchone()
+                    
+                    if existing_schedule:
+                        target_con.execute("""
+                            UPDATE stage_schedule
+                            SET template_start = ?, template_end = ?
+                            WHERE project_stage_id = ?
+                        """, (ms_date_start, ms_date_end, target_stage_id))
+                    elif ms_date_start:
+                        target_con.execute("""
+                            INSERT INTO stage_schedule
+                                (project_stage_id, template_start, template_end)
+                            VALUES (?, ?, ?)
+                        """, (target_stage_id, ms_date_start, ms_date_end))
+                    
+                    print(f"  • Milestone {stage_code}: template={ms_date_start}, actual={'TAK' if has_actual else 'nie'}")
                 
-                print(f"  ✓ Skopiowano milestone: P{source_pid} → P{target_pid}")
+                print(f"  ✓ Skopiowano milestone: P{source_pid} → P{target_pid} (nadpisano)")
             
             # 4. KOPIUJ PRACOWNIKÓW
+            # ⚠️ WERSJA NIEBEZPIECZNA: Pusta lista pracowników WYCZYŚCI przypisania w docelowym!
             if options.get('staff'):
                 for stage_code in source_stages:
                     if stage_code not in target_stages:
@@ -15209,28 +15265,32 @@ class RMManagerGUI:
                     source_stage_id = source_stages[stage_code]
                     target_stage_id = target_stages[stage_code]
                     
-                    # Pobierz assigned_staff JSON ze źródła
+                    # Pobierz assigned_staff JSON ze źródła (nawet jeśli pusty!)
                     staff_json = source_con.execute("""
                         SELECT assigned_staff FROM project_stages WHERE id = ?
                     """, (source_stage_id,)).fetchone()
                     
-                    if staff_json and staff_json['assigned_staff']:
-                        # Nadpisz w docelowym
+                    # 🔥 NIEBEZPIECZNE: ZAWSZE nadpisuj (nawet jeśli źródło puste)
+                    staff_value = staff_json['assigned_staff'] if (staff_json and staff_json['assigned_staff']) else None
+                    
+                    # Nadpisz w docelowym (nawet NULL)
+                    target_con.execute("""
+                        UPDATE project_stages
+                        SET assigned_staff = ?
+                        WHERE id = ?
+                    """, (staff_value, target_stage_id))
+                    
+                    # Sync do stage_staff_assignments - ZAWSZE wyczyść i wstaw nowe
+                    try:
+                        # Usuń stare przypisania (zawsze)
                         target_con.execute("""
-                            UPDATE project_stages
-                            SET assigned_staff = ?
-                            WHERE id = ?
-                        """, (staff_json['assigned_staff'], target_stage_id))
+                            DELETE FROM stage_staff_assignments
+                            WHERE project_stage_id = ?
+                        """, (target_stage_id,))
                         
-                        # Sync do stage_staff_assignments (jeśli tabela istnieje)
-                        try:
-                            assigned_staff = json.loads(staff_json['assigned_staff'])
-                            
-                            # Usuń stare przypisania
-                            target_con.execute("""
-                                DELETE FROM stage_staff_assignments
-                                WHERE project_stage_id = ?
-                            """, (target_stage_id,))
+                        # Jeśli są dane w źródle - wstaw nowe
+                        if staff_value:
+                            assigned_staff = json.loads(staff_value)
                             
                             # Pobierz daty template dla planned_start/end
                             template_dates = target_con.execute("""
@@ -15252,44 +15312,48 @@ class RMManagerGUI:
                                         VALUES (?, ?, ?, ?, ?)
                                     """, (target_stage_id, emp_id, p_start, p_end,
                                          self.current_user or 'System'))
-                        except Exception as e:
-                            print(f"  ⚠️ Błąd sync staff_assignments dla {stage_code}: {e}")
+                    except Exception as e:
+                        print(f"  ⚠️ Błąd sync staff_assignments dla {stage_code}: {e}")
                 
-                print(f"  ✓ Skopiowano pracowników: P{source_pid} → P{target_pid}")
+                print(f"  ✓ Skopiowano pracowników: P{source_pid} → P{target_pid} (nadpisano)")
             
             # 5. KOPIUJ TRANSPORT
+            # ⚠️ WERSJA NIEBEZPIECZNA: Brak transportu w źródle WYCZYŚCI transport w docelowym!
             if options.get('transport'):
                 # Szukaj etapu TRANSPORT
                 if 'TRANSPORT' in source_stages and 'TRANSPORT' in target_stages:
                     source_stage_id = source_stages['TRANSPORT']
                     target_stage_id = target_stages['TRANSPORT']
                     
-                    # Pobierz transport_id ze źródła
+                    # Pobierz transport_id ze źródła (nawet jeśli pusty!)
                     transport = source_con.execute("""
                         SELECT transport_id FROM stage_schedule WHERE project_stage_id = ?
                     """, (source_stage_id,)).fetchone()
                     
-                    if transport and transport['transport_id']:
-                        # Sprawdź czy stage_schedule istnieje w docelowym
-                        existing = target_con.execute("""
-                            SELECT id FROM stage_schedule WHERE project_stage_id = ?
-                        """, (target_stage_id,)).fetchone()
-                        
-                        if existing:
-                            # UPDATE
-                            target_con.execute("""
-                                UPDATE stage_schedule
-                                SET transport_id = ?
-                                WHERE project_stage_id = ?
-                            """, (transport['transport_id'], target_stage_id))
-                        else:
-                            # INSERT
+                    # 🔥 NIEBEZPIECZNE: ZAWSZE nadpisuj (nawet jeśli NULL)
+                    transport_id = transport['transport_id'] if (transport and transport['transport_id']) else None
+                    
+                    # Sprawdź czy stage_schedule istnieje w docelowym
+                    existing = target_con.execute("""
+                        SELECT id FROM stage_schedule WHERE project_stage_id = ?
+                    """, (target_stage_id,)).fetchone()
+                    
+                    if existing:
+                        # UPDATE (nawet jeśli NULL)
+                        target_con.execute("""
+                            UPDATE stage_schedule
+                            SET transport_id = ?
+                            WHERE project_stage_id = ?
+                        """, (transport_id, target_stage_id))
+                    else:
+                        # INSERT (tylko jeśli transport_id nie jest NULL)
+                        if transport_id:
                             target_con.execute("""
                                 INSERT INTO stage_schedule (project_stage_id, transport_id)
                                 VALUES (?, ?)
-                            """, (target_stage_id, transport['transport_id']))
-                        
-                        print(f"  ✓ Skopiowano transport: P{source_pid} → P{target_pid}")
+                            """, (target_stage_id, transport_id))
+                    
+                    print(f"  ✓ Skopiowano transport: P{source_pid} → P{target_pid} (nadpisano)")
             
             # Zapisz zmiany
             target_con.commit()
@@ -16997,12 +17061,19 @@ class RMManagerGUI:
         # Zachowaj widok ze starego okna?
         saved_xlim = None
         saved_ylim = None
+        # 🔧 Wykryj zmianę listy projektów — wtedy NIE przywracaj Y (nowe wiersze
+        # byłyby poza widocznym zakresem i znikały po przerysowaniu)
+        projects_changed = False
         if preserve_view and hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
             try:
                 old_ax = self._mp_chart_meta.get('ax')
+                old_pids = self._mp_chart_meta.get('project_ids', [])
+                if list(old_pids) != list(project_ids):
+                    projects_changed = True
                 if old_ax:
                     saved_xlim = tuple(old_ax.get_xlim())
-                    saved_ylim = tuple(old_ax.get_ylim())
+                    if not projects_changed:
+                        saved_ylim = tuple(old_ax.get_ylim())
             except Exception:
                 pass
         
@@ -17448,6 +17519,7 @@ class RMManagerGUI:
                 'gantt_data': all_gantt_data,
                 'y_positions': {lbl: idx for idx, lbl in enumerate(y_labels)},
                 'stage_defs': stage_defs,
+                'project_ids': project_ids,
                 'all_dates': all_dates,
                 'y_to_pid': y_to_pid,
                 'project_separators': project_separators,
@@ -17520,11 +17592,32 @@ class RMManagerGUI:
             
             # Scroll — Windows: <MouseWheel> z modyfikatorami (Button-4/5 to Linux)
             canvas_widget = mp_canvas.get_tk_widget()
-            canvas_widget.bind('<Enter>', lambda e: canvas_widget.focus_set())
-            canvas_widget.bind('<Control-Shift-MouseWheel>', lambda e: (self._mp_scroll_action('zoom_y', 'up' if e.delta > 0 else 'down', e), 'break')[-1])
-            canvas_widget.bind('<Control-MouseWheel>', lambda e: (self._mp_scroll_action('zoom_x', 'up' if e.delta > 0 else 'down', e), 'break')[-1])
-            canvas_widget.bind('<Shift-MouseWheel>', lambda e: (self._mp_scroll_action('pan_x', 'up' if e.delta > 0 else 'down'), 'break')[-1])
-            canvas_widget.bind('<MouseWheel>', lambda e: (self._mp_scroll_action('pan_y', 'up' if e.delta > 0 else 'down'), 'break')[-1])
+            
+            # 🔧 NIE wymuszamy focus_set() na <Enter> — to powoduje znikanie
+            # otwartych okien notatek za wykresem. Zamiast tego rejestrujemy
+            # handlery kółka globalnie tylko gdy mysz jest nad canvasem,
+            # dzięki czemu działa bez przejmowania focusu.
+            
+            _wheel_handlers = {
+                '<Control-Shift-MouseWheel>': lambda e: (self._mp_scroll_action('zoom_y', 'up' if e.delta > 0 else 'down', e), 'break')[-1],
+                '<Control-MouseWheel>':       lambda e: (self._mp_scroll_action('zoom_x', 'up' if e.delta > 0 else 'down', e), 'break')[-1],
+                '<Shift-MouseWheel>':         lambda e: (self._mp_scroll_action('pan_x', 'up' if e.delta > 0 else 'down'), 'break')[-1],
+                '<MouseWheel>':               lambda e: (self._mp_scroll_action('pan_y', 'up' if e.delta > 0 else 'down'), 'break')[-1],
+            }
+            
+            def _bind_wheel(_e=None):
+                for seq, fn in _wheel_handlers.items():
+                    canvas_widget.bind_all(seq, fn)
+            
+            def _unbind_wheel(_e=None):
+                for seq in _wheel_handlers:
+                    try:
+                        canvas_widget.unbind_all(seq)
+                    except Exception:
+                        pass
+            
+            canvas_widget.bind('<Enter>', _bind_wheel)
+            canvas_widget.bind('<Leave>', _unbind_wheel)
         
         self._mp_status.config(text=f"✅ Wykres: {len(project_ids)} projektów, {len(all_gantt_data)} pasków")
     
