@@ -1368,9 +1368,12 @@ class RMManagerGUI:
                 print(f"❌ Błąd background sync: {e}")
                 import traceback
                 traceback.print_exc()
-                
-                self.root.after(0, lambda: self.status_bar.config(
-                    text=f"⚠️ Błąd synchronizacji: {e}",
+
+                # UWAGA: 'e' wycieka z bloku except w Pythonie 3, więc trzeba
+                # związać wartość przez argument domyślny lambdy.
+                err_msg = str(e)
+                self.root.after(0, lambda msg=err_msg: self.status_bar.config(
+                    text=f"⚠️ Błąd synchronizacji: {msg}",
                     fg="#e74c3c"
                 ))
         
@@ -7614,8 +7617,8 @@ class RMManagerGUI:
                             anchor="center"
                         ).pack(side=tk.LEFT, padx=1)
                         
-                        # Przycisk "Protokół" dla ODBIOR_1, ODBIOR_2, ODBIOR_3, FAT, SAT
-                        if sub_code in ['ODBIOR_1', 'ODBIOR_2', 'ODBIOR_3', 'FAT', 'URUCHOMIENIE_U_KLIENTA']:
+                        # Przycisk "Protokół" dla ODBIOR_1, ODBIOR_2, ODBIOR_3, FAT
+                        if sub_code in ['ODBIOR_1', 'ODBIOR_2', 'ODBIOR_3', 'FAT']:
                             sub_att_count = self.get_stage_attachments_count(sub_code)
                             tk.Button(
                                 sub_row,
@@ -7628,10 +7631,35 @@ class RMManagerGUI:
                                 pady=1
                             ).pack(side=tk.LEFT, padx=4)
                         
+                        # Przycisk "Protokół odbioru" dla SAT (URUCHOMIENIE_U_KLIENTA) - kolor jak Karta Maszyny
+                        if sub_code == 'URUCHOMIENIE_U_KLIENTA':
+                            sub_att_count = self.get_stage_attachments_count(sub_code)
+                            tk.Button(
+                                sub_row,
+                                text=f"📋 Protokół odbioru ({sub_att_count})",
+                                command=lambda sc=sub_code: self.show_stage_attachments_window(sc, 'Protokół odbioru'),
+                                bg=self.COLOR_PURPLE,
+                                fg="white",
+                                font=self.FONT_SMALL,
+                                padx=6,
+                                pady=1
+                            ).pack(side=tk.LEFT, padx=4)
+                        
                         # � URUCHOMIENIE_U_KLIENTA: combobox pracownika
                         if sub_code == 'URUCHOMIENIE_U_KLIENTA':
                             try:
-                                all_employees = rmm.get_employees(self.rm_master_db_path, active_only=True)
+                                all_employees = rmm.get_employees(self.rm_master_db_path, active_only=False)
+                                
+                                # Sortuj: preferowane kategorie (Serwis) na górze - jak w ODBIORY
+                                preferred_categories = rmm.STAGE_TO_PREFERRED_CATEGORY.get('URUCHOMIENIE_U_KLIENTA', ['Serwis'])
+                                
+                                def _sort_key(emp):
+                                    if emp['category'] in preferred_categories:
+                                        return (0, emp['category'], emp['name'])
+                                    else:
+                                        return (1, emp['category'], emp['name'])
+                                
+                                all_employees.sort(key=_sort_key)
                                 employee_map = {e['id']: e['name'] for e in all_employees}
                                 
                                 current_employee_id = rmm.get_stage_employee_id(
@@ -7639,7 +7667,16 @@ class RMManagerGUI:
                                     self.selected_project_id, 'URUCHOMIENIE_U_KLIENTA'
                                 )
                                 
-                                employee_names = [''] + [e['name'] for e in all_employees]
+                                # Lista z oznaczeniem nieaktywnych + gwiazdka dla preferowanych (jak w ODBIORY)
+                                employee_names = ['']
+                                employee_display_map = {}  # name_display -> employee_id
+                                for e in all_employees:
+                                    is_preferred = e['category'] in preferred_categories
+                                    prefix = "⭐ " if is_preferred else ""
+                                    suffix = " (nieaktywny)" if not e.get('is_active', True) else ""
+                                    display_name = f"{prefix}{e['name']} - {e['category']}{suffix}"
+                                    employee_names.append(display_name)
+                                    employee_display_map[display_name] = e['id']
                                 
                                 tk.Label(
                                     sub_row, 
@@ -7652,35 +7689,43 @@ class RMManagerGUI:
                                 employee_combo = ttk.Combobox(
                                     sub_row,
                                     values=employee_names,
-                                    width=20,
+                                    width=35,
                                     state='readonly' if self.have_lock else 'disabled'
                                 )
                                 employee_combo.pack(side=tk.LEFT, padx=2)
                                 
-                                # Ustaw wartość początkową PRZED bindowaniem
-                                if current_employee_id and current_employee_id in employee_map:
-                                    employee_combo.set(employee_map[current_employee_id])
+                                # Ustaw wartość początkową PRZED bindowaniem (z prefixem/suffixem)
+                                if current_employee_id:
+                                    for e in all_employees:
+                                        if e['id'] == current_employee_id:
+                                            is_preferred = e['category'] in preferred_categories
+                                            prefix = "⭐ " if is_preferred else ""
+                                            suffix = " (nieaktywny)" if not e.get('is_active', True) else ""
+                                            employee_combo.set(f"{prefix}{e['name']} - {e['category']}{suffix}")
+                                            break
                                 
                                 # Callback
                                 def on_employee_selected(event,
                                                         pid=self.selected_project_id,
                                                         pdb=self.get_project_db_path(self.selected_project_id),
                                                         combo=employee_combo,
-                                                        employees=all_employees,
+                                                        display_map=employee_display_map,
+                                                        emp_map=employee_map,
                                                         gui_ref=self):
                                     try:
-                                        selected_name = combo.get()
+                                        selected_display = combo.get()
                                         eid = None
-                                        if selected_name:
-                                            for e in employees:
-                                                if e['name'] == selected_name:
-                                                    eid = e['id']
-                                                    break
+                                        clean_name = selected_display
+                                        
+                                        if selected_display:
+                                            eid = display_map.get(selected_display)
+                                            # Czysta nazwa pracownika dla status bar
+                                            clean_name = emp_map.get(eid, selected_display) if eid else selected_display
                                         
                                         rmm.set_stage_employee_id(pdb, pid, 'URUCHOMIENIE_U_KLIENTA', eid)
                                         
                                         gui_ref.status_bar.config(
-                                            text=f"✅ Pracownik: {selected_name}" if selected_name else "✅ Pracownik: wyczyszczony",
+                                            text=f"✅ Pracownik: {clean_name}" if selected_display else "✅ Pracownik: wyczyszczony",
                                             fg=gui_ref.COLOR_GREEN
                                         )
                                     except Exception as ex:
@@ -8186,6 +8231,21 @@ class RMManagerGUI:
             _status = None
         _project_done = (_status == ProjectStatus.DONE)
 
+        # Zabezpieczenie przed wielokrotnym otwarciem - jedno okno dla danego etapu
+        if not hasattr(self, '_assign_staff_dialogs'):
+            self._assign_staff_dialogs = {}
+        existing = self._assign_staff_dialogs.get(stage_code)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except tk.TclError:
+                pass
+            self._assign_staff_dialogs.pop(stage_code, None)
+
         # Okno dialogowe
         dlg = tk.Toplevel(self.root)
         dlg.transient(self.root)  # Okno na tym samym ekranie co główna aplikacja
@@ -8196,6 +8256,19 @@ class RMManagerGUI:
         dlg.title(f"👷 Pracownicy: {stage_display}{title_suffix}")
         dlg.resizable(True, True)
         self._center_window(dlg, 700, 500)
+        
+        # Zarejestruj otwarte okno i wyczyść po zamknięciu
+        self._assign_staff_dialogs[stage_code] = dlg
+        def _on_close(sc=stage_code, d=dlg):
+            try:
+                self._assign_staff_dialogs.pop(sc, None)
+            except Exception:
+                pass
+            try:
+                d.destroy()
+            except Exception:
+                pass
+        dlg.protocol("WM_DELETE_WINDOW", _on_close)
         
         # Nagłówek
         header = tk.Label(dlg, text=f"PRZYPISZ PRACOWNIKÓW\n{stage_display}",
@@ -8442,7 +8515,7 @@ class RMManagerGUI:
         tk.Button(
             dlg,
             text="Zamknij",
-            command=dlg.destroy,
+            command=_on_close,
             font=self.FONT_DEFAULT,
             padx=20,
             pady=5
@@ -11655,6 +11728,21 @@ class RMManagerGUI:
             except Exception:
                 pass
         
+        # Zabezpieczenie przed wielokrotnym otwarciem - jedno okno notatek per projekt
+        if not hasattr(self, '_notes_window'):
+            self._notes_window = None
+        existing = self._notes_window
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except tk.TclError:
+                pass
+            self._notes_window = None
+        
         # Okno główne — transient do rzeczywistego rodzica
         notes_win = tk.Toplevel(_parent)
         notes_win.can_edit = can_edit  # Zapisz flagę edycji jako atrybut okna
@@ -11664,11 +11752,18 @@ class RMManagerGUI:
         notes_win.resizable(True, True)
         self.restore_window_geometry('notes_window', notes_win, 1200, 700)
         
+        # Zarejestruj otwarte okno
+        self._notes_window = notes_win
+        
         # Zapisz geometrię przy zamykaniu (tylko gdy NIE jest zmaksymalizowane)
         def on_close():
             state = notes_win.state()
             if state not in ('zoomed', 'iconic'):
                 self.save_window_geometry('notes_window', notes_win)
+            try:
+                self._notes_window = None
+            except Exception:
+                pass
             notes_win.destroy()
             # Przywróć focus na okno które otworzyło notatki (nie zawsze root!)
             try:
@@ -13623,6 +13718,22 @@ class RMManagerGUI:
         
         project_db = self.get_project_db_path(self.selected_project_id)
         
+        # Zabezpieczenie przed wielokrotnym otwarciem - jedno okno per (stage_code, title)
+        if not hasattr(self, '_attachments_dialogs'):
+            self._attachments_dialogs = {}
+        dlg_key = (stage_code, title)
+        existing = self._attachments_dialogs.get(dlg_key)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except tk.TclError:
+                pass
+            self._attachments_dialogs.pop(dlg_key, None)
+        
         # Okno główne
         win = tk.Toplevel(self.root)
         win.transient(self.root)  # Okno na tym samym ekranie co główna aplikacja
@@ -13633,9 +13744,16 @@ class RMManagerGUI:
         win_key = f'attachments_window_{stage_code}'
         self.restore_window_geometry(win_key, win, 900, 600)
         
+        # Zarejestruj otwarte okno
+        self._attachments_dialogs[dlg_key] = win
+        
         # Zapisz geometrię przy zamykaniu
         def on_close():
             self.save_window_geometry(win_key, win)
+            try:
+                self._attachments_dialogs.pop(dlg_key, None)
+            except Exception:
+                pass
             win.destroy()
             # Przywróć focus na główne okno aplikacji
             self.root.lift()
@@ -17151,7 +17269,9 @@ class RMManagerGUI:
             ax = fig.add_subplot(111)
             mp_canvas = self._mp_chart_meta['canvas']
         else:
-            fig = Figure(figsize=(14, max(6, len(y_labels) * 0.4)), dpi=100)
+            # Stała wysokość figury — dzięki temu Tk canvas zawsze dopasowuje
+            # wszystkie projekty pionowo do widocznego okna (jeden rzut)
+            fig = Figure(figsize=(14, 8), dpi=100)
             ax = fig.add_subplot(111)
         
         # Rysuj paski
@@ -17239,12 +17359,30 @@ class RMManagerGUI:
                     ax.get_yticklabels()[i].set_fontweight('bold')
                     ax.get_yticklabels()[i].set_fontsize(9)
         
-        # Oś X
+        # Oś X - maksymalnie 6 miesięcy (domyślny widok startowy)
         if all_dates:
             min_date = min(all_dates)
             max_date = max(all_dates)
-            ax.set_xlim(mdates.date2num(min_date - timedelta(days=5)),
-                        mdates.date2num(max_date + timedelta(days=30)))
+            now_dt = datetime.now()
+            
+            # Oblicz zakres 6 miesięcy (180 dni)
+            six_months_range = timedelta(days=180)
+            full_range = max_date - min_date
+            
+            if full_range > six_months_range:
+                # Pokaż okno 6 miesięcy: zaczynając od "dziś" (lub od min_date jeśli późniejsze)
+                view_start = max(min_date, now_dt - timedelta(days=15))
+                view_end = view_start + six_months_range
+                # Nie wychodź poza max_date + margines
+                if view_end > max_date + timedelta(days=30):
+                    view_end = max_date + timedelta(days=30)
+                    view_start = view_end - six_months_range
+            else:
+                # Pokaż wszystkie daty z marginesami
+                view_start = min_date - timedelta(days=5)
+                view_end = max_date + timedelta(days=30)
+            
+            ax.set_xlim(mdates.date2num(view_start), mdates.date2num(view_end))
         
         ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=mdates.MO))
         ax.xaxis.set_major_formatter(mdates.DateFormatter('W%W\n%d/%m'))
@@ -17393,20 +17531,39 @@ class RMManagerGUI:
     # ---- Multi-project: nawigacja ----
     
     def _mp_reset_view(self):
-        """Reset widoku multi-project chart"""
+        """Reset widoku multi-project chart - maksymalnie 6 miesięcy na osi X"""
         if not hasattr(self, '_mp_chart_meta') or not self._mp_chart_meta:
             return
         try:
             ax = self._mp_chart_meta['ax']
             y_labels = self._mp_chart_meta['y_labels']
             all_dates = self._mp_chart_meta['all_dates']
-            import matplotlib.dates as mdates
+            
             if all_dates:
-                ax.set_xlim(mdates.date2num(min(all_dates) - timedelta(days=5)),
-                            mdates.date2num(max(all_dates) + timedelta(days=30)))
+                min_date = min(all_dates)
+                max_date = max(all_dates)
+                now_dt = datetime.now()
+                
+                # Oblicz zakres 6 miesięcy (180 dni)
+                six_months_range = timedelta(days=180)
+                full_range = max_date - min_date
+                
+                if full_range > six_months_range:
+                    view_start = max(min_date, now_dt - timedelta(days=15))
+                    view_end = view_start + six_months_range
+                    if view_end > max_date + timedelta(days=30):
+                        view_end = max_date + timedelta(days=30)
+                        view_start = view_end - six_months_range
+                else:
+                    view_start = min_date - timedelta(days=5)
+                    view_end = max_date + timedelta(days=30)
+                
+                ax.set_xlim(mdates.date2num(view_start), mdates.date2num(view_end))
+            
             if y_labels:
                 ax.set_ylim(-0.5, len(y_labels) - 0.5)
                 ax.invert_yaxis()
+            
             self._mp_chart_meta['canvas'].draw_idle()
         except Exception as e:
             print(f"⚠️ MP reset view: {e}")
@@ -18711,7 +18868,7 @@ class RMManagerGUI:
         if is_locked:
             tk.Button(btn_frame, text="🔓 Zwolnij lock",
                       command=self._mp_unlock_project,
-                      bg="#27ae60", fg="white", font=("Arial", 9, "bold"),
+                      bg="#e74c3c", fg="white", font=("Arial", 9, "bold"),
                       padx=5, pady=2, cursor='hand2').pack(fill=tk.X, pady=1)
             tk.Button(btn_frame, text="✖ Anuluj zmiany",
                       command=self._mp_cancel_lock,

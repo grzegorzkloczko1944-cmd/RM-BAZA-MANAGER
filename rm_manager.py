@@ -3589,20 +3589,34 @@ def set_milestone(rm_db_path: str, project_id: int, stage_code: str, user: str =
 
 
 def is_milestone_set(rm_db_path: str, project_id: int, stage_code: str) -> bool:
-    """Sprawdź czy milestone został ustawiony"""
+    """Sprawdź czy milestone został ustawiony.
+
+    Zwraca False również jeśli baza projektu nie ma jeszcze tabel
+    stage_actual_periods / project_stages (stary schemat, projekt nigdy nie
+    miał ustawionego milestone). Nie podnosi wyjątku — to defensywne podejście,
+    żeby sync_all_projects nie wywalał się na starych bazach projektów.
+    """
     con = _open_rm_connection(rm_db_path)
-    
-    cursor = con.execute("""
-        SELECT sap.id
-        FROM stage_actual_periods sap
-        JOIN project_stages ps ON sap.project_stage_id = ps.id
-        WHERE ps.project_id = ? AND ps.stage_code = ?
-        LIMIT 1
-    """, (project_id, stage_code))
-    
-    result = cursor.fetchone() is not None
-    con.close()
-    
+
+    try:
+        cursor = con.execute("""
+            SELECT sap.id
+            FROM stage_actual_periods sap
+            JOIN project_stages ps ON sap.project_stage_id = ps.id
+            WHERE ps.project_id = ? AND ps.stage_code = ?
+            LIMIT 1
+        """, (project_id, stage_code))
+        result = cursor.fetchone() is not None
+    except sqlite3.OperationalError as e:
+        # Stara baza projektu bez tabel etapów - milestone na pewno nie istnieje
+        if "no such table" in str(e).lower():
+            result = False
+        else:
+            con.close()
+            raise
+    finally:
+        con.close()
+
     return result
 
 
@@ -4847,7 +4861,8 @@ def sync_all_projects(rm_master_db_path: str, rm_projects_dir: str, master_db_pa
     skipped_simulation = 0
     
     # Pobierz nazwy projektów do sprawdzenia [SYM]
-    con = _open_rm_connection(rm_master_db_path)
+    # ⚠️  Tabela `projects` jest w master.sqlite (RM_BAZA), NIE w rm_manager.sqlite!
+    con = _open_rm_connection(master_db_path)
     cursor = con.execute("SELECT project_id, name FROM projects WHERE project_id IN ({})".format(
         ','.join('?' * len(project_ids))
     ), project_ids)
