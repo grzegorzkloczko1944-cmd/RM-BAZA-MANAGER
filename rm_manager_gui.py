@@ -447,6 +447,25 @@ class RMManagerGUI:
         self.root.title(f"RM_MANAGER v{APP_VERSION} - Zarządzanie procesami projektów")
         self.root.geometry("1400x900")
         
+        # 🎨 Ustaw ikonę aplikacji (działa zarówno w dev jak i po kompilacji PyInstaller)
+        try:
+            import os
+            import sys
+            # PyInstaller: sys._MEIPASS to katalog z rozpakowanymi zasobami
+            if hasattr(sys, '_MEIPASS'):
+                base_dir = sys._MEIPASS
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            icon_path = os.path.join(base_dir, 'rm_manager_icon.ico')
+            if os.path.exists(icon_path):
+                self.root.iconbitmap(default=icon_path)
+                print(f"✅ Załadowano ikonę: {icon_path}")
+            else:
+                print(f"⚠️ Ikona nie znaleziona: {icon_path}")
+        except Exception as e:
+            print(f"⚠️ Nie można załadować ikony: {e}")
+        
         # Okno edycji (referencja)
         self.edit_window = None
         
@@ -6686,6 +6705,12 @@ class RMManagerGUI:
                 print(f"   ✅ Milestone {stage_code} usunięty")
                 
                 if stage_code == 'ZAKONCZONY':
+                    # Wyczyść również template w stage_schedule, żeby komórka nie świeciła
+                    # czerwonym jako "spóźniona płatność" po zdjęciu milestone Zapłacony.
+                    self._clear_zakonczony_schedule_template(
+                        self.get_project_db_path(self.selected_project_id),
+                        self.selected_project_id
+                    )
                     self.status_bar.config(text=f"🔄 Projekt wznowiony", fg="#27ae60")
                 else:
                     self.status_bar.config(text=f"✅ Milestone {stage_code} usunięty", fg="#27ae60")
@@ -17107,6 +17132,14 @@ class RMManagerGUI:
                         for child in self._mp_chart_frame.winfo_children():
                             child.destroy()
                     reuse = True
+                    # 🔝 Wyciągnij okno na wierzch (gdy ponowne kliknięcie Multi-projekt)
+                    try:
+                        if self._mp_chart_window.state() == 'iconic':
+                            self._mp_chart_window.deiconify()
+                        self._mp_chart_window.lift()
+                        self._mp_chart_window.focus_force()
+                    except Exception:
+                        pass
             except Exception:
                 pass
         
@@ -22678,6 +22711,12 @@ class RMManagerGUI:
             FEATURE_PAYMENT_MILESTONES, "Transze płatności"
         ):
             return
+        if not self.have_lock or self.read_only_mode:
+            messagebox.showerror(
+                "🔒 Brak locka",
+                "Aby dodawać transze płatności musisz najpierw przejąć lock projektu."
+            )
+            return
         
         # Sprawdź istniejące transze i oblicz ile zostało
         try:
@@ -22906,6 +22945,9 @@ class RMManagerGUI:
                         'ZAKONCZONY',
                         master_db_path=self.master_db_path
                     )
+                    # Wyczyść też template w stage_schedule, żeby komórka nie świeciła
+                    # czerwonym jako "spóźniona" i wykres nie pokazywał starej daty.
+                    self._clear_zakonczony_schedule_template(project_db, self.selected_project_id)
                     print(f"🔓 Ręcznie zdjęto osieroconą flagę ZAKONCZONY (projekt {self.selected_project_id}, suma={_total}%)")
                     self.load_payment_milestones()
                     self.refresh_all()
@@ -22949,6 +22991,32 @@ class RMManagerGUI:
         except Exception as e:
             messagebox.showerror("❌ Błąd", f"Nie można cofnąć umorzenia:\n{e}")
 
+    def _clear_zakonczony_schedule_template(self, project_db_path: str, project_id: int) -> None:
+        """Wyczyść template_start/template_end w stage_schedule dla milestone ZAKONCZONY.
+
+        Wywoływane po ręcznym zdjęciu milestone "Zapłacony", żeby komórka GUI etapu
+        nie pokazywała starej daty (świecącej na czerwono jako "spóźniona płatność")
+        i żeby wykres wbudowany nie rysował już zniknionego milestone.
+        """
+        try:
+            import sqlite3 as _sqlite3
+            _con = _sqlite3.connect(project_db_path)
+            try:
+                _con.execute("""
+                    UPDATE stage_schedule
+                    SET template_start = NULL, template_end = NULL
+                    WHERE project_stage_id IN (
+                        SELECT id FROM project_stages
+                        WHERE project_id = ? AND stage_code = 'ZAKONCZONY'
+                    )
+                """, (project_id,))
+                _con.commit()
+                print(f"   🧹 Wyczyszczono template stage_schedule dla ZAKONCZONY (projekt {project_id})")
+            finally:
+                _con.close()
+        except Exception as _e:
+            print(f"⚠️ Nie udało się wyczyścić template ZAKONCZONY: {_e}")
+
     def _check_payment_100_trigger(self):
         """Sprawdź sumę transz i zarządzaj milestone ZAKONCZONY (display "Zapłacony" na osi czasu).
 
@@ -22978,33 +23046,145 @@ class RMManagerGUI:
 
         if should_be_paid:
             try:
-                if self.have_lock and not self.read_only_mode:
-                    if not rmm.is_milestone_set(project_db, self.selected_project_id, 'ZAKONCZONY'):
-                        rmm.set_milestone(
-                            project_db,
-                            self.selected_project_id,
-                            'ZAKONCZONY',
-                            user=self.current_user,
-                            master_db_path=self.master_db_path
-                        )
-                        print(f"✅ Automatycznie ustawiono milestone ZAKONCZONY/Zapłacony (suma={total}%, umorzony={has_umorzony})")
+                if self.read_only_mode:
+                    print(f"⏭️ _check_payment_100_trigger: pomijam set_milestone (read_only_mode=True)")
+                else:
+                    # Wyznacz datę milestone = najpóźniejsza data płatności (ta która spowodowała 100%).
+                    # payment_date w bazie jest w formacie YYYY-MM-DD; set_milestone oczekuje YYYY-MM-DD HH:MM.
+                    latest_date = None
+                    try:
+                        raw_dates = []
+                        for m in milestones:
+                            d = m.get('payment_date')
+                            if not d:
+                                continue
+                            # Może być str ('YYYY-MM-DD' / 'YYYY-MM-DD HH:MM(:SS)') lub datetime.date/datetime
+                            s = str(d)[:10]
+                            if len(s) == 10 and s[4] == '-' and s[7] == '-':
+                                raw_dates.append(s)
+                        if raw_dates:
+                            latest_date = max(raw_dates)
+                    except Exception as _e:
+                        print(f"⚠️ Trigger: błąd wyznaczania latest_date: {_e}")
+                        latest_date = None
+                    ts = f"{latest_date} 12:00" if latest_date else None
+
+                    print(f"🔎 _check_payment_100_trigger: project={self.selected_project_id}, "
+                          f"total={total}%, umorzony={has_umorzony}, latest_date={latest_date}, ts={ts}, "
+                          f"have_lock={self.have_lock}, read_only={self.read_only_mode}")
+
+                    already_set = rmm.is_milestone_set(project_db, self.selected_project_id, 'ZAKONCZONY')
+                    print(f"   is_milestone_set(ZAKONCZONY) = {already_set}")
+
+                    # UWAGA: Nie używamy rmm.set_milestone() bo wymusza state machine
+                    # (projekt musi być IN_PROGRESS = mieć aktywny etap). Tutaj ZAKONCZONY
+                    # to milestone "Zapłacony" — niezależny od etapów. Wstawiamy bezpośrednio
+                    # do stage_actual_periods + project_events. Status projektu w master
+                    # zostaje nietknięty (płatność ≠ zakończenie projektu).
+                    try:
+                        import sqlite3 as _sqlite3
+                        _con = _sqlite3.connect(project_db)
+                        try:
+                            _cur = _con.execute("""
+                                SELECT ps.id AS project_stage_id,
+                                       sap.id AS period_id,
+                                       sap.started_at
+                                FROM project_stages ps
+                                LEFT JOIN stage_actual_periods sap ON sap.project_stage_id = ps.id
+                                WHERE ps.project_id = ? AND ps.stage_code = 'ZAKONCZONY'
+                                LIMIT 1
+                            """, (self.selected_project_id,))
+                            _row = _cur.fetchone()
+                            if not _row:
+                                print(f"   ⚠️  Brak project_stages.ZAKONCZONY dla projektu {self.selected_project_id}")
+                            else:
+                                _project_stage_id, _period_id, _current_ts = _row
+                                _ts_to_write = ts or rmm.get_timestamp_now()
+
+                                if _period_id is None:
+                                    # INSERT — milestone jeszcze nie ustawiony
+                                    _con.execute("""
+                                        INSERT INTO stage_actual_periods
+                                            (project_stage_id, started_at, ended_at, started_by, ended_by, notes)
+                                        VALUES (?, ?, ?, ?, ?, NULL)
+                                    """, (_project_stage_id, _ts_to_write, _ts_to_write,
+                                          self.current_user, self.current_user))
+                                    _con.execute("""
+                                        INSERT INTO project_events
+                                            (project_id, event_type, timestamp, user, notes)
+                                        VALUES (?, 'ZAKONCZONY', ?, ?, NULL)
+                                    """, (self.selected_project_id, _ts_to_write, self.current_user))
+                                    # ⬇️ Zapisz też do stage_schedule jako template_start/template_end
+                                    # — żeby komórka GUI etapu i wykres wbudowany pokazywały datę.
+                                    _date_only = _ts_to_write[:10]
+                                    _sch = _con.execute("""
+                                        SELECT id FROM stage_schedule WHERE project_stage_id = ?
+                                    """, (_project_stage_id,)).fetchone()
+                                    if _sch:
+                                        _con.execute("""
+                                            UPDATE stage_schedule
+                                            SET template_start = ?, template_end = ?
+                                            WHERE project_stage_id = ?
+                                        """, (_date_only, _date_only, _project_stage_id))
+                                    else:
+                                        _con.execute("""
+                                            INSERT INTO stage_schedule
+                                                (project_stage_id, template_start, template_end)
+                                            VALUES (?, ?, ?)
+                                        """, (_project_stage_id, _date_only, _date_only))
+                                    _con.commit()
+                                    print(f"✅ Ustawiono milestone ZAKONCZONY/Zapłacony "
+                                          f"(suma={total}%, umorzony={has_umorzony}, data={_ts_to_write})")
+                                elif ts and (_current_ts or '')[:16] != ts[:16]:
+                                    # UPDATE — milestone istnieje, zsynchronizuj datę
+                                    _con.execute("""
+                                        UPDATE stage_actual_periods
+                                        SET started_at = ?, ended_at = ?
+                                        WHERE id = ?
+                                    """, (ts, ts, _period_id))
+                                    _con.execute("""
+                                        UPDATE project_events
+                                        SET timestamp = ?
+                                        WHERE project_id = ? AND event_type = 'ZAKONCZONY'
+                                    """, (ts, self.selected_project_id))
+                                    # ⬇️ Synchronizuj też stage_schedule (template) — patrz wyżej.
+                                    _date_only = ts[:10]
+                                    _sch = _con.execute("""
+                                        SELECT id FROM stage_schedule WHERE project_stage_id = ?
+                                    """, (_project_stage_id,)).fetchone()
+                                    if _sch:
+                                        _con.execute("""
+                                            UPDATE stage_schedule
+                                            SET template_start = ?, template_end = ?
+                                            WHERE project_stage_id = ?
+                                        """, (_date_only, _date_only, _project_stage_id))
+                                    else:
+                                        _con.execute("""
+                                            INSERT INTO stage_schedule
+                                                (project_stage_id, template_start, template_end)
+                                            VALUES (?, ?, ?)
+                                        """, (_project_stage_id, _date_only, _date_only))
+                                    _con.commit()
+                                    print(f"🔄 Zsynchronizowano datę milestone ZAKONCZONY/Zapłacony: "
+                                          f"{_current_ts} → {ts}")
+                                else:
+                                    print(f"   ⏭️  Milestone już zgodny (started_at={_current_ts}) — bez zmian")
+                        finally:
+                            _con.close()
+                    except Exception as _e:
+                        print(f"⚠️ Błąd zapisu milestone ZAKONCZONY: {_e}")
+                        import traceback; traceback.print_exc()
             except Exception as e:
                 print(f"⚠️ Błąd ustawiania milestone ZAKONCZONY: {e}")
+                import traceback; traceback.print_exc()
 
             self._auto_open_permanent_code_dialog()
         else:
-            try:
-                if self.have_lock and not self.read_only_mode:
-                    if rmm.is_milestone_set(project_db, self.selected_project_id, 'ZAKONCZONY'):
-                        rmm.unset_milestone(
-                            project_db,
-                            self.selected_project_id,
-                            'ZAKONCZONY',
-                            master_db_path=self.master_db_path
-                        )
-                        print(f"🔓 Automatycznie zdjęto milestone ZAKONCZONY/Zapłacony (suma={total}%, umorzony={has_umorzony})")
-            except Exception as e:
-                print(f"⚠️ Błąd auto-zdejmowania milestone ZAKONCZONY: {e}")
+            # AUTO-UNSET WYŁĄCZONY: "flaga podniesiona to podniesiona".
+            # Użytkownik zdejmuje milestone ZAKONCZONY/Zapłacony ręcznie
+            # przyciskiem "🔓 Zdjąć Zapłacony" w zakładce Płatności.
+            print(f"⏭️ _check_payment_100_trigger: suma={total}%, umorzony={has_umorzony} "
+                  f"— auto-unset wyłączony (zdejmij ręcznie jeśli trzeba)")
 
         self.refresh_all()
 
@@ -23059,6 +23239,12 @@ class RMManagerGUI:
         if not self._check_feature_permission(
             FEATURE_PAYMENT_MILESTONES, "Transze płatności"
         ):
+            return
+        if not self.have_lock or self.read_only_mode:
+            messagebox.showerror(
+                "🔒 Brak locka",
+                "Aby edytować transze płatności musisz najpierw przejąć lock projektu."
+            )
             return
         
         selected = self.payment_tree.selection()
@@ -23178,6 +23364,12 @@ class RMManagerGUI:
             FEATURE_PAYMENT_MILESTONES, "Transze płatności"
         ):
             return
+        if not self.have_lock or self.read_only_mode:
+            messagebox.showerror(
+                "🔒 Brak locka",
+                "Aby usuwać transze płatności musisz najpierw przejąć lock projektu."
+            )
+            return
         
         selected = self.payment_tree.selection()
         if not selected:
@@ -23202,9 +23394,40 @@ class RMManagerGUI:
             messagebox.showinfo("Sukces", f"Usunięto transzę {percentage}%")
             self.load_payment_milestones()
 
-            # Sprawdź nową sumę po usunięciu → może cofnąć ZAKONCZONY jeśli < 100%
-            self._check_payment_100_trigger()
-            
+            # Po usunięciu transzy: jeśli suma < 100% (i brak UMORZONY) → zdejmij milestone
+            # "Zapłacony" i wyczyść wszystkie jego daty (stage_actual_periods + project_events
+            # + stage_schedule.template_*). Inaczej komórka GUI etapu świeciłaby na czerwono
+            # jako "spóźniona płatność" mimo braku transz.
+            try:
+                _ms = rmm.get_payment_milestones(self.rm_master_db_path, self.selected_project_id)
+                _total_after = sum(m['percentage'] for m in _ms)
+                _has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in _ms)
+            except Exception:
+                _total_after, _has_umorzony = 0, False
+
+            if _total_after < 100 and not _has_umorzony:
+                project_db = self.get_project_db_path(self.selected_project_id)
+                try:
+                    if rmm.is_milestone_set(project_db, self.selected_project_id, 'ZAKONCZONY'):
+                        rmm.unset_milestone(
+                            project_db,
+                            self.selected_project_id,
+                            'ZAKONCZONY',
+                            master_db_path=self.master_db_path
+                        )
+                        print(f"🔓 Zdjęto milestone ZAKONCZONY po usunięciu transzy "
+                              f"(suma={_total_after}%)")
+                except Exception as _e:
+                    print(f"⚠️ Nie udało się zdjąć milestone ZAKONCZONY: {_e}")
+                # Wyczyść template w stage_schedule (zawsze — nawet gdy milestone nie był ustawiony,
+                # mogła zostać sierota-data po wcześniejszych operacjach).
+                self._clear_zakonczony_schedule_template(project_db, self.selected_project_id)
+                self.refresh_all()
+            else:
+                # Suma nadal 100% lub jest UMORZONY → zsynchronizuj datę milestone z nową
+                # najpóźniejszą datą płatności (np. usunięto najnowszą transzę).
+                self._check_payment_100_trigger()
+
         except Exception as e:
             messagebox.showerror("Błąd", f"Nie można usunąć transzy:\n{e}")
     
@@ -23328,6 +23551,12 @@ class RMManagerGUI:
             FEATURE_PLC_CODES, "Kody odblokowujące PLC"
         ):
             return
+        if not self.have_lock or self.read_only_mode:
+            messagebox.showerror(
+                "🔒 Brak locka",
+                "Aby dodawać kody PLC musisz najpierw przejąć lock projektu."
+            )
+            return
         
         dialog = tk.Toplevel(self.root)
         dialog.title("Dodaj kod PLC")
@@ -23416,6 +23645,12 @@ class RMManagerGUI:
         if not self._check_feature_permission(
             FEATURE_PLC_CODES, "Kody odblokowujące PLC"
         ):
+            return
+        if not self.have_lock or self.read_only_mode:
+            messagebox.showerror(
+                "🔒 Brak locka",
+                "Aby edytować kody PLC musisz najpierw przejąć lock projektu."
+            )
             return
         selection = self.plc_codes_tree.selection()
         if not selection:
@@ -23508,6 +23743,12 @@ class RMManagerGUI:
             FEATURE_PLC_CODES, "Kody odblokowujące PLC"
         ):
             return
+        if not self.have_lock or self.read_only_mode:
+            messagebox.showerror(
+                "🔒 Brak locka",
+                "Aby usuwać kody PLC musisz najpierw przejąć lock projektu."
+            )
+            return
         selection = self.plc_codes_tree.selection()
         if not selection:
             messagebox.showwarning("Brak wyboru", "Wybierz kod z listy.")
@@ -23542,6 +23783,18 @@ class RMManagerGUI:
     
     def mark_plc_code_as_used(self):
         """Oznacz kod PLC jako użyty (przekazany klientowi)."""
+        # Oznaczenie kodu jako użyty = operacja wrażliwa (zmienia stan kodu).
+        # Wymaga locka, żeby ktoś nieuprawniony nie namieszał w cudzym projekcie.
+        if not self._check_feature_permission(
+            FEATURE_PLC_CODES, "Kody odblokowujące PLC"
+        ):
+            return
+        if not self.have_lock or self.read_only_mode:
+            messagebox.showerror(
+                "🔒 Brak locka",
+                "Aby oznaczyć kod PLC jako użyty musisz najpierw przejąć lock projektu."
+            )
+            return
         selection = self.plc_codes_tree.selection()
         if not selection:
             messagebox.showwarning("Brak wyboru", "Wybierz kod z listy.")
@@ -23623,6 +23876,18 @@ class RMManagerGUI:
         Args:
             code_id: ID kodu do wysłania (opcjonalny, jeśli None - pobiera z selekcji treeview)
         """
+        # Wysyłka kodu PLC = operacja wrażliwa (komunikacja z klientem). Wymaga locka,
+        # żeby ktoś nieuprawniony nie mógł wysłać kodu z czyjegoś projektu.
+        if not self._check_feature_permission(
+            FEATURE_PLC_CODES, "Kody odblokowujące PLC"
+        ):
+            return
+        if not self.have_lock or self.read_only_mode:
+            messagebox.showerror(
+                "🔒 Brak locka",
+                "Aby wysłać kod PLC musisz najpierw przejąć lock projektu."
+            )
+            return
         # Jeśli nie podano code_id, pobierz z selekcji
         if code_id is None:
             selection = self.plc_codes_tree.selection()

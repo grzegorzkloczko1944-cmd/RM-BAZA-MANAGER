@@ -182,6 +182,24 @@ class MainWindow(tk.Tk):
         self.title("RM_BAZA_v15_MAG_C_CHAT_STATS")
         self.geometry("1400x800")
         
+        # 🎨 Ustaw ikonę aplikacji (działa zarówno w dev jak i po kompilacji PyInstaller)
+        try:
+            import os
+            import sys
+            if hasattr(sys, '_MEIPASS'):
+                base_dir = sys._MEIPASS
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            icon_path = os.path.join(base_dir, 'rm_baza_icon.ico')
+            if os.path.exists(icon_path):
+                self.iconbitmap(default=icon_path)
+                print(f"✅ Załadowano ikonę: {icon_path}")
+            else:
+                print(f"⚠️ Ikona nie znaleziona: {icon_path}")
+        except Exception as e:
+            print(f"⚠️ Nie można załadować ikony: {e}")
+        
         # Single instance lock
         self.app_lock_file = None
         
