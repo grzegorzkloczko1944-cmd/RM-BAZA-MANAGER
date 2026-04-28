@@ -392,7 +392,13 @@ class ProductionOptimizer:
         for pid, pdata in projects.items():
             # Deduplikacja: baza może mieć wielokrotne wpisy tych samych zależności
             seen_deps = set()
-            for pred, succ, dep_type, lag in pdata['dependencies']:
+            for dep in pdata['dependencies']:
+                # Wsteczna kompatybilność: stare krotki 4-elementowe (bez lag_percent)
+                if len(dep) == 5:
+                    pred, succ, dep_type, lag, lag_pct = dep
+                else:
+                    pred, succ, dep_type, lag = dep
+                    lag_pct = 0
                 dep_sig = (pred, succ, dep_type)
                 if dep_sig in seen_deps:
                     dep_dedup += 1
@@ -419,7 +425,14 @@ class ProductionOptimizer:
                     dep_skipped += 1
                     continue
 
+                # effective_lag = max(lag_days, ceil(pred_dur * lag_percent / 100))
+                # Dla FS lag_percent jest ignorowany (nie ma sensu "75% po zakończeniu").
                 lag_working = max(0, lag)
+                if dep_type == 'SS' and lag_pct and lag_pct > 0:
+                    pred_dur = self._duration_vars.get(pred_key, 0)
+                    pct_lag = (pred_dur * int(lag_pct) + 99) // 100  # ceil
+                    if pct_lag > lag_working:
+                        lag_working = pct_lag
 
                 if dep_type == 'FS':
                     self.model.Add(
@@ -443,7 +456,12 @@ class ProductionOptimizer:
             print(f"⚡ pid={pid}: {len(all_deps)} zależności w bazie, etapy w modelu: "
                   f"{[sc for sc in pdata['stages'] if (pid, sc) in self._start_vars]}")
             seen = set()
-            for pred, succ, dep_type, lag in all_deps:
+            for dep in all_deps:
+                if len(dep) == 5:
+                    pred, succ, dep_type, lag, lag_pct = dep
+                else:
+                    pred, succ, dep_type, lag = dep
+                    lag_pct = 0
                 sig = (pred, succ, dep_type)
                 if sig in seen:
                     continue
@@ -452,7 +470,8 @@ class ProductionOptimizer:
                 succ_key = (pid, succ)
                 in_model = pred_key in self._start_vars and succ_key in self._start_vars
                 status = "✅ ADDED" if in_model else f"⏭️ SKIP (pred_ok={pred_key in self._start_vars}, succ_ok={succ_key in self._start_vars})"
-                print(f"⚡   dep pid={pid}: {pred} --{dep_type}(lag={lag})--> {succ}  {status}")
+                lag_str = f"lag={lag}" + (f"+{lag_pct}%" if lag_pct else "")
+                print(f"⚡   dep pid={pid}: {pred} --{dep_type}({lag_str})--> {succ}  {status}")
 
         # --- 3. Ograniczenia zasobów ---
         if ignore_staff:
@@ -750,7 +769,7 @@ class ProductionOptimizer:
 
     def _add_person_exclusivity_constraints(self, target_pids: Set[int],
                                              frozen_pids: Set[int]):
-        """Reguła biznesowa: master-pracownik = max 1 projekt jednocześnie.
+        """Reguła biznesowa: master-pracownik = max N etapów jednocześnie.
 
         Działa ZAWSZE (niezależnie od ignore_staff) — to fizyczne ograniczenie.
 
@@ -759,16 +778,17 @@ class ProductionOptimizer:
           Drugi i kolejni to slave/pomocnicy — nie blokują harmonogramu.
         - KOMPLETACJA jest wyjątkiem: logistyk może prowadzić wiele
           kompletacji równolegle.
-        - Dla pozostałych etapów: jeśli ten sam master jest przypisany
-          do tego samego typu etapu w różnych projektach, NoOverlap.
+        - Globalny limit per master = employees[eid]['master_max_parallel']
+          (domyślnie 1). Liczy się sumarycznie po wszystkich projektach
+          i typach etapów (poza MILESTONE i PARALLEL_STAGES).
         """
         PARALLEL_STAGES = {'KOMPLETACJA'}  # etapy bez ograniczenia per-person
 
         projects = self.data['projects']
+        employees = self.data.get('employees', {}) or {}
 
-        # Grupuj: (employee_id, stage_code) → [(pid, sc), ...]
-        # Tylko MASTER (idx 0) z listy staff
-        emp_stage_map: Dict[Tuple[int, str], List[Tuple[int, str]]] = defaultdict(list)
+        # Grupuj wg master_eid -> [(pid, sc), ...] (across all stages)
+        emp_stage_map: Dict[int, List[Tuple[int, str]]] = defaultdict(list)
 
         for pid, pdata in projects.items():
             for sc, assigned in pdata['staff'].items():
@@ -780,41 +800,51 @@ class ProductionOptimizer:
                 if key not in self._start_vars:
                     continue
                 master_eid = assigned[0]  # pierwszy = master
-                emp_stage_map[(master_eid, sc)].append((pid, sc))
+                emp_stage_map[master_eid].append((pid, sc))
 
         constraints_added = 0
         skipped_frozen = 0
         skipped_all_frozen = 0
 
-        for (eid, sc), stage_keys in emp_stage_map.items():
-            if len(stage_keys) <= 1:
+        for eid, stage_keys in emp_stage_map.items():
+            # Limit z bazy (domyślnie 1)
+            emp_row = employees.get(eid) or employees.get(str(eid)) or {}
+            try:
+                max_parallel = int(emp_row.get('master_max_parallel', 1) or 1)
+            except (TypeError, ValueError):
+                max_parallel = 1
+            if max_parallel < 1:
+                max_parallel = 1
+
+            if len(stage_keys) <= max_parallel:
                 continue
 
             # Pomiń jeśli same frozen
             has_target = any((pid, sc) in self._target_keys for pid, sc in stage_keys)
             if not has_target:
-                pids_in_group = [p for p, _ in stage_keys]
-                print(f"⚠️  person_excl(eid={eid}, {sc}): pomiń — WSZYSTKIE {len(stage_keys)} etapy "
-                      f"zamrożone (is_actual/is_active) w projektach {pids_in_group}. "
-                      f"Optimizer nie może rozdzielić zakończonych/aktywnych etapów!")
+                pids_in_group = sorted({p for p, _ in stage_keys})
+                print(f"⚠️  person_excl(eid={eid}, max={max_parallel}): pomiń — WSZYSTKIE "
+                      f"{len(stage_keys)} etapy zamrożone (is_actual/is_active) "
+                      f"w projektach {pids_in_group}.")
                 skipped_all_frozen += 1
                 continue
 
-            # Sprawdź frozen overlap
+            # Sprawdź frozen overlap (max liczba zamrożonych nakładających się jednocześnie)
             frozen_overlap = self._max_frozen_overlap(
                 [(p, s) for p, s in stage_keys if (p, s) not in self._target_keys])
 
-            if frozen_overlap > 1:
-                # Frozen nakładają się — globalny NoOverlap byłby sprzeczny.
-                # Dodajemy: (a) NoOverlap wśród targetów,
-                #           (b) każdy target omija każdy frozen pairwise.
+            if frozen_overlap > max_parallel:
+                # Zamrożone same przekraczają limit — globalny Cumulative byłby sprzeczny.
+                # Dla max_parallel=1 robimy strategię pairwise (NoOverlap targetów +
+                # unikanie każdego frozen przez każdy target).
+                # Dla max_parallel>1 — pomijamy z ostrzeżeniem.
                 target_here = [(p, s) for p, s in stage_keys
                                if (p, s) in self._target_keys]
                 frozen_here = [(p, s) for p, s in stage_keys
                                if (p, s) not in self._target_keys
                                and (p, s) in self._frozen_values]
 
-                if target_here:
+                if max_parallel == 1 and target_here:
                     if len(target_here) > 1:
                         t_ivs = []
                         for p, s in target_here:
@@ -831,7 +861,7 @@ class ProductionOptimizer:
                         for p_f, s_f in frozen_here:
                             f_s, f_e = self._frozen_values[(p_f, s_f)]
                             b = self.model.NewBoolVar(
-                                f'pavd_{eid}_{p_t}_{s_t}_{p_f}')
+                                f'pavd_{eid}_{p_t}_{s_t}_{p_f}_{s_f}')
                             self.model.Add(
                                 self._end_vars[k_t] <= f_s
                             ).OnlyEnforceIf(b)
@@ -839,38 +869,40 @@ class ProductionOptimizer:
                                 self._start_vars[k_t] >= f_e
                             ).OnlyEnforceIf(b.Not())
 
-                    print(f"⚠️  person_excl(eid={eid}, {sc}): "
+                    print(f"⚠️  person_excl(eid={eid}, max=1): "
                           f"frozen overlap={frozen_overlap}, "
                           f"NoOverlap wśród {len(target_here)} targetów + "
                           f"{len(frozen_here)} unikań frozen")
                 else:
+                    print(f"⚠️  Pomijam person_excl(eid={eid}, max={max_parallel}): "
+                          f"zamrożone etapy już mają {frozen_overlap} nakładających się")
                     skipped_frozen += 1
                 continue
 
+            # Standardowo: Cumulative z capacity = max_parallel.
+            # Dla max_parallel=1 to równoważne NoOverlap.
             intervals = []
+            demands = []
             for pid, stage in stage_keys:
                 key = (pid, stage)
                 dur = self._duration_vars.get(key, 1)
-                is_target = key in self._target_keys
-                if is_target:
-                    interval = self.model.NewIntervalVar(
-                        self._start_vars[key], dur, self._end_vars[key],
-                        f'pex_{eid}_{pid}_{stage}'
-                    )
-                else:
-                    pres = self.model.NewConstant(1)
-                    interval = self.model.NewOptionalIntervalVar(
-                        self._start_vars[key], dur, self._end_vars[key],
-                        pres, f'pex_{eid}_{pid}_{stage}'
-                    )
+                interval = self.model.NewIntervalVar(
+                    self._start_vars[key], dur, self._end_vars[key],
+                    f'pex_{eid}_{pid}_{stage}'
+                )
                 intervals.append(interval)
+                demands.append(1)
 
             if len(intervals) > 1:
-                self.model.AddNoOverlap(intervals)
+                if max_parallel == 1:
+                    self.model.AddNoOverlap(intervals)
+                else:
+                    self.model.AddCumulative(intervals, demands, max_parallel)
                 constraints_added += 1
 
-        print(f"⚡ person_exclusivity: {constraints_added} ograniczeń NoOverlap "
-              f"(master z >1 projektem), {skipped_frozen} pominiętych (frozen)")
+        print(f"⚡ person_exclusivity: {constraints_added} ograniczeń master-cap "
+              f"({skipped_frozen} pominięte przez frozen, "
+              f"{skipped_all_frozen} pominięte all-frozen)")
 
     def _add_availability_constraints(self, availability_list: List[Dict],
                                       target_pids: Set[int]):
@@ -1182,6 +1214,18 @@ def run_optimization(rm_manager_dir: str, rm_master_db_path: str,
 
     print(f"⚡ run_optimization: rm_manager_dir={rm_manager_dir}")
     print(f"⚡ run_optimization: all_pids={all_pids}")
+
+    # Auto-migracja zależności workflow: usuń wycofane (DEPRECATED) i upewnij
+    # się że wszystkie default workflow są obecne (z aktualnym lag_percent).
+    # Bez tego stare bazy projektów trzymają np. MONTAZ→ELEKTROMONTAZ z lag=0
+    # zamiast 75% i nie mają ELEKTROMONTAZ→URUCHOMIENIE.
+    for pid in all_pids:
+        try:
+            db_path = rm_manager.get_project_db_path(rm_manager_dir, pid)
+            rm_manager.remove_deprecated_dependencies_for_project(db_path, pid)
+            rm_manager.ensure_default_dependencies_for_project(db_path, pid)
+        except Exception as e:
+            print(f"⚠️  Auto-migracja zależności pid={pid} pominięta: {e}")
 
     data = rm_manager.get_projects_scheduling_data(
         rm_manager_dir, rm_master_db_path, all_pids

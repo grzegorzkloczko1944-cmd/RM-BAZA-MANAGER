@@ -414,26 +414,28 @@ _CHILD_MILESTONE_CODES = {code for children in SUB_MILESTONES.values() for code 
 
 # Default dependencies (workflow)
 # 🔵 Automatyczny graf zależności - zgodny z rm_manager.DEFAULT_DEPENDENCIES
+# lag_pct = procent długości POPRZEDNIKA (tylko dla SS), liczony jako
+#           effective_lag = max(lag, ceil(pred_dur * lag_pct/100)).
 DEFAULT_DEPENDENCIES = [
     # START PROJEKTU
-    {'from': 'PRZYJETY',      'to': 'PROJEKT',       'type': 'FS', 'lag': 0},
-    
+    {'from': 'PRZYJETY',      'to': 'PROJEKT',       'type': 'FS', 'lag': 0, 'lag_pct': 0},
+
     # SEKWENCJA GŁÓWNA
-    {'from': 'PROJEKT',       'to': 'KOMPLETACJA',   'type': 'FS', 'lag': 0},
-    {'from': 'KOMPLETACJA',   'to': 'MONTAZ',        'type': 'FS', 'lag': 0},
-    
+    {'from': 'PROJEKT',       'to': 'KOMPLETACJA',   'type': 'FS', 'lag': 0, 'lag_pct': 0},
+    {'from': 'KOMPLETACJA',   'to': 'MONTAZ',        'type': 'FS', 'lag': 0, 'lag_pct': 0},
+
     # ELEKTROPROJEKT → ELEKTROMONTAŻ (niezależny start, blokuje elektromontaż)
-    {'from': 'ELEKTROPROJEKT', 'to': 'ELEKTROMONTAZ', 'type': 'FS', 'lag': 0},
-    
-    # RÓWNOLEGŁOŚĆ - ELEKTROMONTAŻ i MONTAŻ mogą iść równolegle
-    {'from': 'MONTAZ',        'to': 'ELEKTROMONTAZ', 'type': 'SS', 'lag': 0},  # SS = Start-to-Start
-    
-    # URUCHOMIENIE tylko po montażu (elektromontaż i uruchomienie są niezależne)
-    {'from': 'MONTAZ',        'to': 'URUCHOMIENIE',  'type': 'FS', 'lag': 0},
-    
+    {'from': 'ELEKTROPROJEKT', 'to': 'ELEKTROMONTAZ', 'type': 'FS', 'lag': 0, 'lag_pct': 0},
+
+    # NAKŁADANIE: elektromontaż startuje gdy montaż na 3/4 długości
+    {'from': 'MONTAZ',        'to': 'ELEKTROMONTAZ', 'type': 'SS', 'lag': 0, 'lag_pct': 75},
+
+    # NAKŁADANIE: uruchomienie startuje gdy elektromontaż na 3/4 długości
+    {'from': 'ELEKTROMONTAZ', 'to': 'URUCHOMIENIE',  'type': 'SS', 'lag': 0, 'lag_pct': 75},
+
     # KOŃCÓWKA
-    {'from': 'URUCHOMIENIE',  'to': 'ODBIORY',       'type': 'FS', 'lag': 0},
-    {'from': 'ODBIORY',       'to': 'POPRAWKI',      'type': 'FS', 'lag': 0}
+    {'from': 'URUCHOMIENIE',  'to': 'ODBIORY',       'type': 'FS', 'lag': 0, 'lag_pct': 0},
+    {'from': 'ODBIORY',       'to': 'POPRAWKI',      'type': 'FS', 'lag': 0, 'lag_pct': 0}
 ]
 
 
@@ -2696,6 +2698,7 @@ class RMManagerGUI:
         tools_menu.add_command(label="🔧 Migruj odbiorców kodów PLC", command=self.migrate_plc_recipients_ui)
         tools_menu.add_separator()
         tools_menu.add_command(label="🔄 Resetuj śledzenie wszystkich projektów", command=self.reset_all_file_tracking_ui)
+        tools_menu.add_command(label="🛠 Napraw schemat baz projektów (brakujące tabele)", command=self.repair_project_schemas_ui)
         tools_menu.add_separator()
         tools_menu.add_command(label="🔍 Diagnostyka projektów", command=self.diagnose_projects)
         tools_menu.add_command(label="🎯 Diagnostyka milestone'ów", command=self.diagnose_milestones)
@@ -2900,6 +2903,20 @@ class RMManagerGUI:
             text="📋 Kopiuj projekt",
             command=self.open_project_copy_dialog,
             bg="#e74c3c",
+            fg="white",
+            font=self.FONT_BOLD,
+            padx=12,
+            pady=5,
+            relief=tk.RAISED,
+            bd=2
+        ).pack(side=tk.LEFT, padx=(0, 3), pady=10)
+
+        # Przycisk OPTYMALIZACJA
+        tk.Button(
+            self.top_frame,
+            text="⚡ Optymalizator",
+            command=self.optimizer_dialog,
+            bg="#16a085",
             fg="white",
             font=self.FONT_BOLD,
             padx=12,
@@ -4609,6 +4626,52 @@ class RMManagerGUI:
             except Exception as e:
                 messagebox.showerror("❌ Błąd", f"Nie można zresetować śledzenia:\n{e}")
     
+    def repair_project_schemas_ui(self):
+        """Naprawia schemat baz wszystkich projektów: ensure_project_tables +
+        domyślne zależności + usunięcie deprecated. Idempotentne."""
+        if not getattr(self, 'projects', None):
+            messagebox.showinfo("Brak projektów", "Najpierw załaduj listę projektów z RM_BAZA.")
+            return
+        if not messagebox.askyesno(
+            "🛠 Napraw schemat baz projektów",
+            f"Naprawić schemat dla {len(self.projects)} projektów?\n\n"
+            f"Operacja jest BEZPIECZNA i idempotentna:\n"
+            f"  • doda brakujące tabele (stage_actual_periods, stage_dependencies, …)\n"
+            f"  • doda kolumnę lag_percent jeśli brakuje\n"
+            f"  • doda domyślne zależności workflow (jeśli brakuje)\n"
+            f"  • usunie wycofane (deprecated) zależności\n"
+            f"  • aktualizuje lag_percent (np. 75% MONTAZ→ELEKTROMONTAZ)\n\n"
+            f"Nie modyfikuje istniejących dat ani przypisań pracowników."):
+            return
+
+        report = []
+        ok = 0
+        fail = 0
+        for pid in list(self.projects):
+            try:
+                pdb = self.get_project_db_path(pid)
+                if not os.path.exists(pdb):
+                    report.append(f"⏭️  pid={pid}: brak pliku bazy")
+                    continue
+                rmm.ensure_project_tables(pdb)
+                removed = rmm.remove_deprecated_dependencies_for_project(pdb, pid)
+                added = rmm.ensure_default_dependencies_for_project(pdb, pid)
+                report.append(f"✅ pid={pid}: tabele OK, deps +{added}/−{removed}")
+                ok += 1
+            except Exception as e:
+                report.append(f"❌ pid={pid}: {e}")
+                fail += 1
+
+        msg = f"Naprawiono: {ok} projektów, błędy: {fail}.\n\n" + "\n".join(report[-25:])
+        if fail == 0:
+            messagebox.showinfo("✅ Gotowe", msg)
+        else:
+            messagebox.showwarning("⚠️ Zakończono z błędami", msg)
+        try:
+            self.refresh_all()
+        except Exception:
+            pass
+
     def reset_all_file_tracking_ui(self):
         """Reset śledzenia pliku dla WSZYSTKICH projektów (po zmianie ścieżki)"""
         result = messagebox.askyesno(
@@ -15857,7 +15920,8 @@ class RMManagerGUI:
                   font=("Arial", 10), padx=10, pady=3
         ).pack(side=tk.RIGHT, padx=5)
 
-    def _open_project_selector(self, parent, current_ids=None, pinned_ids=None, mode='gantt'):
+    def _open_project_selector(self, parent, current_ids=None, pinned_ids=None, mode='gantt',
+                                on_select_callback=None, title=None, ok_button_text=None):
         """Profesjonalny dialog wyboru projektów z filtrami statusu, czasu i pinowaniem.
         
         Args:
@@ -15866,6 +15930,10 @@ class RMManagerGUI:
             pinned_ids: set z przypiętymi project_id (nie reagują na filtry)
             mode: 'gantt' = generowanie wykresu Multi-project Gantt
                   'copy' = kopiowanie danych projektu (źródło + cele + opcje)
+                  'callback' = po kliknięciu OK wywołaj on_select_callback(selected_pids)
+            on_select_callback: callable(list[int]) — wywoływane w trybie 'callback'
+            title: niestandardowy tytuł okna (tryb 'callback')
+            ok_button_text: niestandardowa etykieta przycisku OK (tryb 'callback')
         """
         from datetime import datetime, timedelta
         import os
@@ -15876,10 +15944,13 @@ class RMManagerGUI:
             pinned_ids = set()
         
         is_copy_mode = (mode == 'copy')
+        is_callback_mode = (mode == 'callback')
         
         sel = tk.Toplevel(parent)
         if is_copy_mode:
             sel.title("📋 Kopiowanie projektu — wybór źródła i celów")
+        elif is_callback_mode:
+            sel.title(title or "📊 Wybór projektów")
         else:
             sel.title("📊 Wybór projektów — Multi-projekt Gantt")
         sel.transient(parent)
@@ -16700,7 +16771,12 @@ class RMManagerGUI:
                 sel.destroy()
                 self._execute_project_copy(source_pid, target_pids, opts)
             else:
-                # === TRYB GANTT ===
+                # === TRYB GANTT lub CALLBACK ===
+                if is_callback_mode:
+                    sel.destroy()
+                    if on_select_callback:
+                        on_select_callback(list(selected))
+                    return
                 sel.destroy()
                 if selected:
                     self._create_multi_project_chart_window(selected, preserve_view=True)
@@ -16712,6 +16788,12 @@ class RMManagerGUI:
             tk.Button(bottom, text="📋 KOPIUJ", command=on_ok,
                       bg="#e74c3c", fg="white", font=("Arial", 11, "bold"),
                       padx=25, pady=5).pack(side=tk.RIGHT, padx=5)
+            tk.Button(bottom, text="Anuluj", command=sel.destroy,
+                      font=("Arial", 10), padx=15, pady=5).pack(side=tk.RIGHT, padx=5)
+        elif is_callback_mode:
+            tk.Button(bottom, text=ok_button_text or "✅ Zatwierdź wybór", command=on_ok,
+                      bg=self.COLOR_GREEN, fg="white", font=("Arial", 11, "bold"),
+                      padx=20, pady=5).pack(side=tk.RIGHT, padx=5)
             tk.Button(bottom, text="Anuluj", command=sel.destroy,
                       font=("Arial", 10), padx=15, pady=5).pack(side=tk.RIGHT, padx=5)
         else:
@@ -18016,10 +18098,15 @@ class RMManagerGUI:
             
             if edge == 'move':
                 # Tryb przesuwania - pokaż dwie linie (nowy początek i nowy koniec)
+                # Delta liczona w całych dniach (zaokrąglanie do najbliższego dnia)
+                # — taka sama logika jak w _mp_on_release, dzięki temu preview
+                # pokazuje dokładnie to, co zostanie zapisane.
                 anchor = self._mp_drag_state.get('drag_anchor_x')
-                delta = new_date - anchor
-                new_start = bar_item['start'] + delta
-                new_end = bar_item['end'] + delta
+                new_date_snap = (new_date + timedelta(hours=12)).replace(hour=0, minute=0, second=0, microsecond=0)
+                anchor_day    = (anchor   + timedelta(hours=12)).replace(hour=0, minute=0, second=0, microsecond=0)
+                delta = new_date_snap - anchor_day
+                new_start = (bar_item['start'] + delta).replace(hour=0, minute=0, second=0, microsecond=0)
+                new_end   = (bar_item['end']   + delta).replace(hour=0, minute=0, second=0, microsecond=0)
                 
                 line1 = ax.axvline(x=mdates.date2num(new_start), color='#e67e22',
                                    linewidth=2, linestyle='--', alpha=0.7, zorder=1000)
@@ -18034,15 +18121,17 @@ class RMManagerGUI:
                     fg=self.COLOR_BLUE
                 )
             else:
-                # Tryb resize - jedna linia
+                # Tryb resize - jedna linia (zaokrąglona do najbliższego dnia,
+                # tak samo jak w _mp_on_release — preview pokazuje docelową datę)
+                new_date_snap = (new_date + timedelta(hours=12)).replace(hour=0, minute=0, second=0, microsecond=0)
                 self._mp_drag_state['preview_line'] = ax.axvline(
-                    x=mdates.date2num(new_date),
+                    x=mdates.date2num(new_date_snap),
                     color='red', linewidth=2, linestyle='--', alpha=0.7, zorder=1000
                 )
                 edge_label = "Początek" if edge == 'start' else "Koniec"
                 self._mp_status.config(
                     text=f"🖱️ Przeciąganie: {self._mp_drag_state['stage_code']} - "
-                         f"{edge_label} → {new_date.strftime('%d-%m-%Y')}",
+                         f"{edge_label} → {new_date_snap.strftime('%d-%m-%Y')}",
                     fg=self.COLOR_BLUE
                 )
             
@@ -18192,6 +18281,592 @@ class RMManagerGUI:
                 pass
             self._mp_info_popup = None
     
+    # MILESTONE_STAGES_FOR_BLOCKERS — etapy bez mastera/duration (popup pomija sekcję mastera)
+    _MS_NO_MASTER = {'PRZYJETY', 'TRANSPORT', 'URUCHOMIENIE_U_KLIENTA', 'FAT',
+                     'ODBIOR_1', 'ODBIOR_2', 'ODBIOR_3', 'ZAKONCZONY', 'KOMPLETACJA'}
+    
+    def _mp_stage_duration_days(self, fc):
+        """Pomocniczo — ile dni trwa etap (do wyliczenia % lag dla SS+pct)."""
+        for s_field, e_field in [('actual_start', 'actual_end'),
+                                  ('forecast_start', 'forecast_end'),
+                                  ('template_start', 'template_end')]:
+            s = fc.get(s_field)
+            e = fc.get(e_field)
+            if s and e:
+                try:
+                    ds = datetime.fromisoformat(s[:10])
+                    de = datetime.fromisoformat(e[:10])
+                    return max(1, (de - ds).days)
+                except Exception:
+                    pass
+        return int(fc.get('duration_days', 5) or 5)
+    
+    def _mp_compute_blockers(self, pid, stage_code, forecast):
+        """Zbiera info o zależnościach etapu na potrzeby popupu informacyjnego.
+        
+        Returns dict:
+            {
+              'this_status': 'done'/'active'/'planned',
+              'predecessors': [...],   # od czego zależy start
+              'successors':   [...],   # kto czeka na koniec tego etapu
+              'master':       {...} | None,
+              'master_conflicts': [...]  # inne etapy tego mastera w innych projektach
+            }
+        """
+        from math import ceil
+        
+        result = {
+            'this_status': None,
+            'this_start':  None,
+            'this_end':    None,
+            'predecessors': [],
+            'successors': [],
+            'master': None,
+            'master_conflicts': [],
+        }
+        
+        if stage_code not in forecast:
+            return result
+        this_fc = forecast[stage_code]
+        result['this_status'] = ('done' if this_fc.get('is_actual')
+                                 else 'active' if this_fc.get('is_active')
+                                 else 'planned')
+        # Okno czasowe bieżącego etapu (do oceny kolizji mastera)
+        ts = (this_fc.get('actual_start') or this_fc.get('forecast_start')
+              or this_fc.get('template_start'))
+        te = (this_fc.get('actual_end') or this_fc.get('forecast_end')
+              or this_fc.get('template_end'))
+        try:
+            if ts:
+                result['this_start'] = datetime.fromisoformat(ts[:10]).date()
+            if te:
+                result['this_end'] = datetime.fromisoformat(te[:10]).date()
+        except Exception:
+            pass
+        
+        try:
+            project_db = self.get_project_db_path(pid)
+        except Exception:
+            return result
+        
+        # Display names
+        stage_names = {}
+        try:
+            con_sd = rmm._open_rm_connection(project_db)
+            for r in con_sd.execute("SELECT code, display_name FROM stage_definitions").fetchall():
+                stage_names[r['code']] = r['display_name']
+            con_sd.close()
+        except Exception:
+            pass
+        
+        # Predecessors + successors
+        try:
+            con = rmm._open_rm_connection(project_db)
+            has_pct = False
+            try:
+                cols = [r['name'] for r in con.execute("PRAGMA table_info(stage_dependencies)").fetchall()]
+                has_pct = 'lag_percent' in cols
+            except Exception:
+                pass
+            pct_select = ", COALESCE(lag_percent,0) AS lag_pct" if has_pct else ", 0 AS lag_pct"
+            
+            try:
+                rows = con.execute(f"""
+                    SELECT predecessor_stage_code AS code, dependency_type AS dtype,
+                           COALESCE(lag_days,0) AS lag {pct_select}
+                    FROM stage_dependencies
+                    WHERE project_id = ? AND successor_stage_code = ?
+                """, (pid, stage_code)).fetchall()
+                seen = set()
+                for r in rows:
+                    sig = (r['code'], r['dtype'])
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                    pred_code = r['code']
+                    pred_fc = forecast.get(pred_code, {})
+                    pred_status = ('done' if pred_fc.get('is_actual')
+                                   else 'active' if pred_fc.get('is_active')
+                                   else 'planned')
+                    if r['dtype'] == 'FS':
+                        ref = (pred_fc.get('actual_end') or pred_fc.get('forecast_end')
+                               or pred_fc.get('template_end'))
+                        ref_label = 'koniec'
+                    else:
+                        ref = (pred_fc.get('actual_start') or pred_fc.get('forecast_start')
+                               or pred_fc.get('template_start'))
+                        ref_label = 'start'
+                    
+                    lag_eff = int(r['lag'] or 0)
+                    if r['dtype'] == 'SS' and (r['lag_pct'] or 0) > 0:
+                        pdur = self._mp_stage_duration_days(pred_fc)
+                        pct_lag = ceil(pdur * int(r['lag_pct']) / 100)
+                        if pct_lag > lag_eff:
+                            lag_eff = pct_lag
+                    
+                    unblock_date = None
+                    if ref:
+                        try:
+                            ref_dt = datetime.fromisoformat(ref[:10])
+                            unblock_date = (ref_dt + timedelta(days=lag_eff)).strftime('%Y-%m-%d')
+                        except Exception:
+                            pass
+                    
+                    is_blocker = False
+                    if result['this_status'] == 'planned':
+                        if r['dtype'] == 'FS' and pred_status != 'done':
+                            is_blocker = True
+                        elif r['dtype'] == 'SS' and pred_status == 'planned':
+                            is_blocker = True
+                    
+                    result['predecessors'].append({
+                        'code': pred_code,
+                        'name': stage_names.get(pred_code, pred_code),
+                        'type': r['dtype'],
+                        'lag_days': int(r['lag'] or 0),
+                        'lag_pct': int(r['lag_pct'] or 0),
+                        'lag_eff': lag_eff,
+                        'pred_status': pred_status,
+                        'ref_label': ref_label,
+                        'ref_date': ref,
+                        'unblock_date': unblock_date,
+                        'is_blocker': is_blocker,
+                    })
+            except Exception as e:
+                print(f"⚠️ _mp_compute_blockers predecessors: {e}")
+            
+            try:
+                rows = con.execute(f"""
+                    SELECT successor_stage_code AS code, dependency_type AS dtype,
+                           COALESCE(lag_days,0) AS lag {pct_select}
+                    FROM stage_dependencies
+                    WHERE project_id = ? AND predecessor_stage_code = ?
+                """, (pid, stage_code)).fetchall()
+                seen = set()
+                for r in rows:
+                    sig = (r['code'], r['dtype'])
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                    succ_fc = forecast.get(r['code'], {})
+                    result['successors'].append({
+                        'code': r['code'],
+                        'name': stage_names.get(r['code'], r['code']),
+                        'type': r['dtype'],
+                        'lag_days': int(r['lag'] or 0),
+                        'lag_pct': int(r['lag_pct'] or 0),
+                        'succ_status': ('done' if succ_fc.get('is_actual')
+                                        else 'active' if succ_fc.get('is_active')
+                                        else 'planned'),
+                        'succ_planned_start': (succ_fc.get('forecast_start')
+                                               or succ_fc.get('template_start')),
+                    })
+            except Exception as e:
+                print(f"⚠️ _mp_compute_blockers successors: {e}")
+            con.close()
+        except Exception as e:
+            print(f"⚠️ _mp_compute_blockers query: {e}")
+        
+        # Master + konflikty
+        if stage_code in self._MS_NO_MASTER:
+            return result
+        try:
+            assigned = rmm.get_stage_assigned_staff(
+                project_db, self.rm_master_db_path, pid, stage_code)
+        except Exception:
+            assigned = []
+        if not assigned:
+            return result
+        master = assigned[0]
+        master_eid = master['employee_id']
+        master_name = master['employee_name']
+        
+        max_par = 1
+        try:
+            con_m = rmm._open_rm_connection(self.rm_master_db_path)
+            mr = con_m.execute(
+                "SELECT master_max_parallel FROM employees WHERE id=?",
+                (master_eid,)).fetchone()
+            if mr:
+                try:
+                    max_par = int(mr['master_max_parallel'] or 1)
+                except (TypeError, ValueError):
+                    max_par = 1
+            con_m.close()
+        except Exception:
+            pass
+        
+        result['master'] = {
+            'id': master_eid,
+            'name': master_name,
+            'category': master.get('category', ''),
+            'max_parallel': max_par,
+        }
+        
+        if max_par >= 9999:
+            return result
+        
+        try:
+            today = datetime.now().date()
+            window_end = today + timedelta(days=180)
+            mp_meta = getattr(self, '_mp_chart_meta', None) or {}
+            # Grupuj wpisy po (opid, osc) — Szablon i Rzeczywiste tego samego etapu
+            # to NIE są dwa konflikty, tylko ten sam etap pokazany dwoma paskami.
+            grouped = {}
+            for item in mp_meta.get('gantt_data', []):
+                if item.get('type') not in ('Szablon', 'Rzeczywiste'):
+                    continue
+                staff_list = item.get('staff_names') or []
+                if not staff_list or staff_list[0] != master_name:
+                    continue
+                opid = item.get('project_id')
+                osc = item.get('stage_code')
+                if opid == pid and osc == stage_code:
+                    continue
+                if osc in self._MS_NO_MASTER:
+                    continue
+                istart = item['start'].date() if hasattr(item['start'], 'date') else item['start']
+                iend = item['end'].date() if hasattr(item['end'], 'date') else item['end']
+                if iend < today or istart > window_end:
+                    continue
+                key = (opid, osc)
+                g = grouped.get(key)
+                if g is None:
+                    g = {
+                        'project_id': opid,
+                        'project_name': self.project_names.get(opid, f'Projekt {opid}'),
+                        'stage_code': osc,
+                        'start': istart,
+                        'end': iend,
+                        'has_actual': False,
+                    }
+                    grouped[key] = g
+                else:
+                    if istart < g['start']:
+                        g['start'] = istart
+                    if iend > g['end']:
+                        g['end'] = iend
+                if item.get('type') == 'Rzeczywiste':
+                    g['has_actual'] = True
+            
+            for g in grouped.values():
+                # Jeden wpis = jeden faktyczny etap. Status: TRWA jeśli zaczął
+                # się i nie skończył przed dzisiaj, inaczej zaplanowany.
+                is_active = g['has_actual'] and g['start'] <= today <= g['end']
+                result['master_conflicts'].append({
+                    'project_id':   g['project_id'],
+                    'project_name': g['project_name'],
+                    'stage_code':   g['stage_code'],
+                    'start': g['start'].isoformat(),
+                    'end':   g['end'].isoformat(),
+                    'status': 'active' if is_active else 'planned',
+                })
+            result['master_conflicts'].sort(key=lambda x: x['start'])
+        except Exception as e:
+            print(f"⚠️ _mp_compute_blockers master conflicts: {e}")
+        
+        return result
+    
+    def _mp_render_blockers_section(self, popup, blk):
+        """Renderuje sekcję ZALEŻNOŚCI / BLOKADY w popupie informacyjnym etapu."""
+        preds = blk.get('predecessors', []) or []
+        succs = blk.get('successors', []) or []
+        master = blk.get('master')
+        conflicts = blk.get('master_conflicts', []) or []
+        
+        if not preds and not succs and not master:
+            return
+        
+        STATUS_ICON = {'done': '✅', 'active': '🟡', 'planned': '⚪', 'missing': '❓'}
+        STATUS_LBL  = {'done': 'zakończony', 'active': 'w toku', 'planned': 'zaplanowany', 'missing': 'brak'}
+        
+        def _fmt_date(iso):
+            if not iso:
+                return '—'
+            try:
+                return datetime.fromisoformat(iso[:10]).strftime('%d-%m-%Y')
+            except Exception:
+                return iso[:10]
+        
+        # Główna ramka — szare tło + obramówka
+        outer = tk.Frame(popup, bg="#ecf0f1", padx=12, pady=8, relief=tk.GROOVE, bd=1)
+        outer.pack(fill=tk.BOTH, expand=True, padx=12, pady=(6, 8))
+        
+        tk.Label(
+            outer, text="🔗 ZALEŻNOŚCI I BLOKADY",
+            bg="#ecf0f1", fg="#2c3e50", font=("Arial", 10, "bold")
+        ).pack(anchor='w', pady=(0, 4))
+        
+        # ── Predecessors ──
+        if preds:
+            tk.Label(
+                outer, text="⏪ Czeka na (poprzednicy):",
+                bg="#ecf0f1", fg="#34495e", font=("Arial", 9, "bold")
+            ).pack(anchor='w', pady=(2, 1))
+            for p in preds:
+                ico = STATUS_ICON.get(p['pred_status'], '⚪')
+                slbl = STATUS_LBL.get(p['pred_status'], '?')
+                lag_txt = ''
+                if p['lag_pct']:
+                    lag_txt = f", lag={p['lag_days']}d/{p['lag_pct']}% (eff {p['lag_eff']}d)"
+                elif p['lag_days']:
+                    lag_txt = f", lag={p['lag_days']}d"
+                ref_txt = f"{p['ref_label']} {_fmt_date(p['ref_date'])}" if p['ref_date'] else "(brak daty)"
+                unblock = f" → odblokowuje od {_fmt_date(p['unblock_date'])}" if p['unblock_date'] else ""
+                blocker_tag = "  🔴 BLOKUJE START" if p['is_blocker'] else ""
+                
+                line = f"   {ico} {p['name']} ({p['code']}) — {p['type']}{lag_txt} — {slbl}, {ref_txt}{unblock}{blocker_tag}"
+                fg_color = "#c0392b" if p['is_blocker'] else "#2c3e50"
+                tk.Label(
+                    outer, text=line, bg="#ecf0f1", fg=fg_color,
+                    font=("Arial", 9, "bold" if p['is_blocker'] else "normal"),
+                    anchor='w', justify=tk.LEFT, wraplength=760
+                ).pack(anchor='w', pady=0)
+        
+        # ── Successors ──
+        if succs:
+            tk.Label(
+                outer, text="⏩ Po zakończeniu odblokuje (następcy):",
+                bg="#ecf0f1", fg="#34495e", font=("Arial", 9, "bold")
+            ).pack(anchor='w', pady=(6, 1))
+            for s in succs:
+                ico = STATUS_ICON.get(s['succ_status'], '⚪')
+                slbl = STATUS_LBL.get(s['succ_status'], '?')
+                lag_txt = ''
+                if s['lag_pct']:
+                    lag_txt = f", lag {s['lag_days']}d/{s['lag_pct']}%"
+                elif s['lag_days']:
+                    lag_txt = f", lag {s['lag_days']}d"
+                start_txt = f" — start {_fmt_date(s['succ_planned_start'])}" if s['succ_planned_start'] else ""
+                line = f"   {ico} {s['name']} ({s['code']}) — {s['type']}{lag_txt} ({slbl}){start_txt}"
+                tk.Label(
+                    outer, text=line, bg="#ecf0f1", fg="#2c3e50",
+                    font=("Arial", 9), anchor='w', justify=tk.LEFT, wraplength=760
+                ).pack(anchor='w', pady=0)
+        
+        # ── Master + konflikty ──
+        if master:
+            cap_txt = "∞ (bez limitu)" if master['max_parallel'] >= 9999 else f"max {master['max_parallel']}"
+            cat_txt = f" • {master['category']}" if master.get('category') else ""
+            
+            # Rozdziel konflikty na PRAWDZIWE KOLIZJE (overlap z bieżącym etapem)
+            # i INNE ZLECENIA (ten sam master, ale w innym oknie czasowym).
+            this_start = blk.get('this_start')
+            this_end = blk.get('this_end')
+            real, info = [], []
+            for c in conflicts:
+                try:
+                    cs = datetime.fromisoformat(c['start'][:10]).date()
+                    ce = datetime.fromisoformat(c['end'][:10]).date()
+                except Exception:
+                    info.append(c)
+                    continue
+                if this_start and this_end and cs <= this_end and ce >= this_start:
+                    real.append(c)
+                else:
+                    info.append(c)
+            
+            if real:
+                head_color = "#c0392b"
+                head_text = (f"👤 MASTER: {master['name']}{cat_txt}  •  limit {cap_txt}  "
+                             f"•  🔴 KOLIZJA z {len(real)} etapem(ami) w tym samym czasie")
+            elif info:
+                head_color = "#7f8c8d"
+                head_text = (f"👤 MASTER: {master['name']}{cat_txt}  •  limit {cap_txt}  "
+                             f"•  ✅ brak kolizji w czasie")
+            else:
+                head_color = "#27ae60"
+                head_text = (f"👤 MASTER: {master['name']}{cat_txt}  •  limit {cap_txt}  "
+                             f"•  ✅ brak innych zleceń na wykresie")
+            
+            tk.Label(
+                outer, text=head_text, bg="#ecf0f1", fg=head_color,
+                font=("Arial", 9, "bold"), anchor='w', justify=tk.LEFT, wraplength=760
+            ).pack(anchor='w', pady=(8, 1))
+            
+            # Realne kolizje — czerwone
+            if real:
+                tk.Label(
+                    outer, text=f"   🔴 Pokrywa się z bieżącym etapem ({len(real)}):",
+                    bg="#ecf0f1", fg="#c0392b", font=("Arial", 9, "bold"),
+                    anchor='w', justify=tk.LEFT, wraplength=760
+                ).pack(anchor='w', pady=(2, 0))
+                for c in real:
+                    ico = '🔴' if c['status'] == 'active' else '🟠'
+                    slbl = 'TRWA' if c['status'] == 'active' else 'zaplanowany'
+                    line = (f"      {ico} {c['project_name']} / {c['stage_code']} — "
+                            f"{_fmt_date(c['start'])} → {_fmt_date(c['end'])}  ({slbl})")
+                    tk.Label(
+                        outer, text=line, bg="#ecf0f1",
+                        fg="#7f1d1d" if c['status'] == 'active' else "#7f4f1d",
+                        font=("Arial", 9), anchor='w', justify=tk.LEFT, wraplength=760
+                    ).pack(anchor='w', pady=0)
+            
+            # Inne zlecenia mastera — szare, informacyjne
+            if info:
+                tk.Label(
+                    outer, text=f"   ℹ️ Inne zlecenia tego mastera w okresie ±180 dni ({len(info)}) — bez kolizji w czasie:",
+                    bg="#ecf0f1", fg="#7f8c8d", font=("Arial", 9, "italic"),
+                    anchor='w', justify=tk.LEFT, wraplength=760
+                ).pack(anchor='w', pady=(4, 0))
+                for c in info:
+                    slbl = 'TRWA' if c['status'] == 'active' else 'zaplanowany'
+                    line = (f"      • {c['project_name']} / {c['stage_code']} — "
+                            f"{_fmt_date(c['start'])} → {_fmt_date(c['end'])}  ({slbl})")
+                    tk.Label(
+                        outer, text=line, bg="#ecf0f1", fg="#7f8c8d",
+                        font=("Arial", 9), anchor='w', justify=tk.LEFT, wraplength=760
+                    ).pack(anchor='w', pady=0)
+    
+    def _show_blockers_dialog(self, pid, stage_code, parent=None):
+        """Samodzielny dialog z sekcją Zależności i blokady (przycisk Szczegóły).
+        
+        Używa tych samych helperów co popup hover w multi-Gantcie:
+        _mp_compute_blockers + _mp_render_blockers_section.
+        """
+        if parent is None:
+            parent = self.root
+        try:
+            project_db = self.get_project_db_path(pid)
+            forecast = rmm.recalculate_forecast(project_db, pid)
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Nie można załadować prognozy:\n{e}", parent=parent)
+            return
+        if stage_code not in forecast:
+            messagebox.showerror("Błąd", f"Nie znaleziono etapu {stage_code} w prognozie",
+                                 parent=parent)
+            return
+        
+        try:
+            blk = self._mp_compute_blockers(pid, stage_code, forecast)
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Nie można policzyć zależności:\n{e}", parent=parent)
+            return
+        
+        # Display name
+        stage_display_name = stage_code
+        try:
+            con_sd = rmm._open_rm_connection(project_db)
+            row_sd = con_sd.execute(
+                "SELECT display_name FROM stage_definitions WHERE code = ?",
+                (stage_code,)).fetchone()
+            con_sd.close()
+            if row_sd:
+                stage_display_name = row_sd['display_name']
+        except Exception:
+            pass
+        project_name = self.project_names.get(pid, f"Projekt {pid}")
+        
+        dlg = tk.Toplevel(parent)
+        dlg.transient(parent)
+        dlg.title(f"🔗 Szczegóły zależności — {stage_display_name} — {project_name}")
+        dlg.resizable(True, True)
+        # Ukryj do czasu pomiaru zawartości — zapobiega flashowaniu zbyt dużego okna
+        try:
+            dlg.withdraw()
+        except Exception:
+            pass
+        
+        w = 850
+        # Ustaw szerokość już teraz, żeby wraplength etykiet liczył się prawidłowo;
+        # ostateczną wysokość i pozycję ustawimy po wyrenderowaniu sekcji.
+        dlg.geometry(f"{w}x100")
+        
+        # Header
+        header = tk.Frame(dlg, bg="#34495e", height=44)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+        tk.Label(
+            header, text=f"🔗 SZCZEGÓŁY ZALEŻNOŚCI ETAPU",
+            bg="#34495e", fg="white", font=("Arial", 12, "bold"), padx=15
+        ).pack(side=tk.LEFT, fill=tk.Y)
+        tk.Button(
+            header, text="✕", command=dlg.destroy,
+            bg="#e74c3c", fg="white", font=("Arial", 10, "bold"),
+            padx=8, pady=2, relief=tk.FLAT, cursor='hand2'
+        ).pack(side=tk.RIGHT, padx=8, pady=8)
+        
+        # Info bar
+        info = tk.Frame(dlg, bg="#ecf0f1", pady=6)
+        info.pack(fill=tk.X)
+        tk.Label(info, text=f"  Projekt: {project_name}",
+                 bg="#ecf0f1", font=self.FONT_BOLD,
+                 fg=self.COLOR_TEXT_DARK).pack(side=tk.LEFT, padx=10)
+        tk.Label(info, text=f"Etap: {stage_display_name} ({stage_code})",
+                 bg="#ecf0f1", font=self.FONT_BOLD,
+                 fg=self.COLOR_BLUE).pack(side=tk.LEFT, padx=15)
+        
+        # Sekcja zależności w scrollowanym kontenerze
+        canvas = tk.Canvas(dlg, bg=dlg.cget('bg'), highlightthickness=0)
+        vsb = ttk.Scrollbar(dlg, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        inner = tk.Frame(canvas, bg=dlg.cget('bg'))
+        win_id = canvas.create_window((0, 0), window=inner, anchor='nw')
+        
+        def _on_resize(_e=None):
+            canvas.configure(scrollregion=canvas.bbox('all'))
+            canvas.itemconfig(win_id, width=canvas.winfo_width())
+        inner.bind('<Configure>', _on_resize)
+        canvas.bind('<Configure>', _on_resize)
+        
+        # Render zależności (ten sam helper co popup)
+        self._mp_render_blockers_section(inner, blk)
+        
+        # Hint jeśli brak danych z multi-Gantta dla konfliktów
+        mp_meta_open = bool(getattr(self, '_mp_chart_meta', None)
+                             and self._mp_chart_meta.get('gantt_data'))
+        if blk.get('master') and not mp_meta_open and blk['master'].get('max_parallel', 1) < 9999:
+            tk.Label(
+                inner,
+                text=("ℹ️  Aby zobaczyć konflikty mastera między projektami, "
+                      "otwórz „Wykres multi-projekt”."),
+                bg=dlg.cget('bg'), fg="#7f8c8d", font=("Arial", 9, "italic"),
+                wraplength=780, justify=tk.LEFT, anchor='w'
+            ).pack(anchor='w', padx=14, pady=(4, 8))
+        
+        # ===== Dopasuj wysokość do zawartości i wyśrodkuj na rodzicu =====
+        try:
+            dlg.update_idletasks()
+            inner_h = inner.winfo_reqheight()
+            # +headera ~44 +infobar ~30 +marginesy ~30
+            req_h = inner_h + 110
+            # wm_maxsize() = obszar użytkowy ekranu (bez paska zadań Windows)
+            try:
+                usw, ush = dlg.wm_maxsize()
+            except Exception:
+                usw, ush = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+            sw = dlg.winfo_screenwidth()
+            sh = dlg.winfo_screenheight()
+            SAFE_BOTTOM = 60
+            avail_h = max(220, min(ush, sh) - SAFE_BOTTOM)
+            h = max(220, min(req_h, avail_h))
+            try:
+                px = parent.winfo_rootx()
+                py = parent.winfo_rooty()
+                pw = parent.winfo_width()
+                ph = parent.winfo_height()
+                x = px + (pw // 2) - (w // 2)
+                y = py + (ph // 2) - (h // 2)
+                # nie wyjedź poza obszar użytkowy ekranu
+                x = max(0, min(x, usw - w))
+                y = max(0, min(y, avail_h - h))
+            except Exception:
+                x = (usw // 2) - (w // 2)
+                y = (avail_h // 2) - (h // 2)
+            dlg.geometry(f"{w}x{h}+{x}+{y}")
+            dlg.deiconify()
+        except Exception:
+            try:
+                dlg.deiconify()
+            except Exception:
+                pass
+        
+        dlg.bind('<Escape>', lambda e: dlg.destroy())
+        dlg.focus_set()
+    
     def _mp_show_stage_info_popup(self, pid, stage_code):
         """Pokaż okno informacyjne (read-only) o etapie innego projektu"""
         self._mp_hover_timer = None
@@ -18270,24 +18945,19 @@ class RMManagerGUI:
         popup.resizable(True, True)
         self._mp_info_popup = popup
         
-        # Rozmiar i pozycja — obok kursora
-        w, h = 750, 300
+        # Wstępnie ukryj okno — pokażemy je dopiero po dopasowaniu rozmiaru
+        # do zawartości (zapobiega flashowaniu zbyt dużego/małego okna).
         try:
-            mx = parent.winfo_pointerx()
-            my = parent.winfo_pointery()
-            x = mx + 20
-            y = my + 10
-            # Nie wyjedź poza ekran
-            sw = popup.winfo_screenwidth()
-            sh = popup.winfo_screenheight()
-            if x + w > sw:
-                x = mx - w - 20
-            if y + h > sh:
-                y = my - h - 10
+            popup.withdraw()
         except Exception:
-            x = (popup.winfo_screenwidth() // 2) - (w // 2)
-            y = (popup.winfo_screenheight() // 2) - (h // 2)
-        popup.geometry(f"{w}x{h}+{x}+{y}")
+            pass
+        
+        # Stała szerokość — wraplength etykiet jest dopasowany pod ~820px.
+        # Wysokość liczymy dynamicznie po wyrenderowaniu wszystkich sekcji.
+        w = 820
+        # Ustaw szerokość już teraz (żeby wraplength etykiet mógł się policzyć
+        # względem właściwej szerokości); pozycję i wysokość ustawimy na końcu.
+        popup.geometry(f"{w}x100")
         
         # ===== HEADER =====
         header_frame = tk.Frame(popup, bg="#7f8c8d", height=40)
@@ -18543,6 +19213,52 @@ class RMManagerGUI:
             except Exception:
                 pass
         
+        # ===== ZALEŻNOŚCI / BLOKADY =====
+        try:
+            blk = self._mp_compute_blockers(pid, stage_code, forecast)
+        except Exception as e:
+            print(f"⚠️ blockers compute: {e}")
+            blk = None
+        
+        if blk:
+            self._mp_render_blockers_section(popup, blk)
+        
+        # ===== Dopasuj rozmiar do zawartości i pokaż obok kursora =====
+        try:
+            popup.update_idletasks()
+            req_h = popup.winfo_reqheight()
+            # wm_maxsize() zwraca obszar użytkowy ekranu (bez paska zadań Windows)
+            try:
+                usw, ush = popup.wm_maxsize()
+            except Exception:
+                usw, ush = popup.winfo_screenwidth(), popup.winfo_screenheight()
+            sw = popup.winfo_screenwidth()
+            sh = popup.winfo_screenheight()
+            # Margines bezpieczeństwa pod pasek zadań / dekoracje okna
+            SAFE_BOTTOM = 60
+            avail_h = max(200, min(ush, sh) - SAFE_BOTTOM)
+            # Ogranicz wysokość: min 200, max obszar użytkowy
+            h = max(200, min(req_h + 10, avail_h))
+            try:
+                mx = parent.winfo_pointerx()
+                my = parent.winfo_pointery()
+                x = mx + 20
+                y = my + 10
+                if x + w > usw:
+                    x = max(0, mx - w - 20)
+                if y + h > avail_h:
+                    y = max(0, avail_h - h)
+            except Exception:
+                x = (usw // 2) - (w // 2)
+                y = (avail_h // 2) - (h // 2)
+            popup.geometry(f"{w}x{h}+{x}+{y}")
+            popup.deiconify()
+        except Exception:
+            try:
+                popup.deiconify()
+            except Exception:
+                pass
+        
         # Zamknij Escape
         popup.bind('<Escape>', lambda e: popup.destroy())
         popup.focus_set()
@@ -18621,14 +19337,16 @@ class RMManagerGUI:
             
             if edge == 'move':
                 # ===== TRYB PRZESUWANIA CAŁEGO PRZEDZIAŁU =====
+                # Liczymy deltę w CAŁYCH dniach – zaokrąglamy zarówno anchor
+                # jak i new_date do najbliższego dnia (tak samo jak wykres
+                # wbudowany w _on_chart_release). Surowa delta powodowała
+                # asymetrię progu zależną od tego czy kliknąłeś rano/po południu
+                # (np. w jedną stronę 12h, w drugą 36h żeby ruszyć o 1 dzień).
                 anchor = self._mp_drag_state.get('drag_anchor_x')
-                # Używamy surowej delty kursora (bez zaokrąglania anchor) – tak samo jak
-                # w _mp_on_motion (preview). Finalne pozycje pasków zaokrąglamy do
-                # najbliższego dnia. Zaokrąglanie anchor do dnia powoduje błąd ±1 dzień
-                # gdy kliknięto po południu (anchor przeskakuje do następnego dnia).
-                delta_raw = new_date_raw - anchor
-                new_start = (bar['start'] + delta_raw + timedelta(hours=12)).replace(hour=0, minute=0, second=0)
-                new_end   = (bar['end']   + delta_raw + timedelta(hours=12)).replace(hour=0, minute=0, second=0)
+                anchor_day = (anchor + timedelta(hours=12)).replace(hour=0, minute=0, second=0, microsecond=0)
+                delta = new_date - anchor_day
+                new_start = (bar['start'] + delta).replace(hour=0, minute=0, second=0, microsecond=0)
+                new_end   = (bar['end']   + delta).replace(hour=0, minute=0, second=0, microsecond=0)
                 
                 # Milestone: obie daty = ta sama (1 dzień)
                 stage_defs = self._mp_chart_meta.get('stage_defs', {})
@@ -20248,6 +20966,22 @@ class RMManagerGUI:
             text=notes_btn_text,
             command=open_notes,
             bg=self.COLOR_PURPLE if topic_count > 0 else "#95a5a6",
+            fg="white",
+            font=self.FONT_BOLD,
+            padx=10,
+            pady=3,
+            cursor='hand2'
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Przycisk „Szczegóły" — pokazuje zależności (poprzedników, następców) i konflikty mastera
+        def open_blockers():
+            self._show_blockers_dialog(self.selected_project_id, stage_code, parent=dialog)
+        
+        tk.Button(
+            notes_frame,
+            text="🔗 Szczegóły",
+            command=open_blockers,
+            bg="#34495e",
             fg="white",
             font=self.FONT_BOLD,
             padx=10,
@@ -24424,7 +25158,7 @@ Kod: {unlock_code}
     # ========================================================================
 
     def optimizer_dialog(self):
-        """Okno optymalizatora produkcji z zakładkami: Uruchom, Ograniczenia, Niedostępność, Kalendarz, Historia."""
+        """Okno optymalizatora produkcji z zakładkami: Uruchom, Ograniczenia, Pracownicy, Niedostępność, Kalendarz, Historia."""
         try:
             import rm_optimizer
             importlib.reload(rm_optimizer)
@@ -24447,8 +25181,8 @@ Kod: {unlock_code}
         dlg = tk.Toplevel(self.root)
         dlg.title("⚡ Optymalizator produkcji")
         dlg.transient(self.root)
-        self._center_window(dlg, 1100, 750)
-        dlg.minsize(900, 600)
+        self._center_window(dlg, 1200, 900)
+        dlg.minsize(1000, 750)
 
         header = tk.Label(dlg, text="⚡ OPTYMALIZATOR PRODUKCJI",
                           bg=self.COLOR_TOPBAR, fg="white",
@@ -24468,17 +25202,22 @@ Kod: {unlock_code}
         notebook.add(tab_constraints, text="  ⚙  Ograniczenia  ")
         self._optimizer_build_constraints_tab(tab_constraints, dlg)
 
-        # === Zakładka 3: Niedostępność pracowników ===
+        # === Zakładka 3: Pracownicy — limit etapów jako Master ===
+        tab_workers = tk.Frame(notebook)
+        notebook.add(tab_workers, text="  👤  Pracownicy  ")
+        self._optimizer_build_workers_tab(tab_workers, dlg)
+
+        # === Zakładka 4: Niedostępność pracowników ===
         tab_avail = tk.Frame(notebook)
         notebook.add(tab_avail, text="  🗓  Niedostępność  ")
         self._optimizer_build_availability_tab(tab_avail, dlg)
 
-        # === Zakładka 4: Kalendarz firmowy ===
+        # === Zakładka 5: Kalendarz firmowy ===
         tab_cal = tk.Frame(notebook)
         notebook.add(tab_cal, text="  📅  Kalendarz  ")
         self._optimizer_build_calendar_tab(tab_cal, dlg)
 
-        # === Zakładka 5: Historia ===
+        # === Zakładka 6: Historia ===
         tab_hist = tk.Frame(notebook)
         notebook.add(tab_hist, text="  📜  Historia  ")
         self._optimizer_build_history_tab(tab_hist, dlg)
@@ -24517,83 +25256,96 @@ Kod: {unlock_code}
         tk.Entry(time_frame, textvariable=time_var, width=6, font=self.FONT_DEFAULT).pack(side=tk.LEFT, padx=5)
 
         # --- Wybór projektów ---
-        proj_frame = tk.LabelFrame(parent, text="Projekty do optymalizacji", font=self.FONT_BOLD, padx=10, pady=5)
+        proj_frame = tk.LabelFrame(parent, text="Projekty", font=self.FONT_BOLD, padx=10, pady=8)
         proj_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        proj_toolbar = tk.Frame(proj_frame)
-        proj_toolbar.pack(fill=tk.X, pady=(0, 5))
+        # Stan: dwa zestawy ID przechowywane na obiekcie metody
+        # (nie używamy self.* żeby nie kolidować z innymi widokami)
+        target_pids_state = {'pids': []}     # 🎯 do optymalizacji
+        visible_pids_state = {'pids': []}    # 👁 widziane przez solver (frozen)
 
-        tk.Button(proj_toolbar, text="✅ Zaznacz wszystkie", font=self.FONT_SMALL,
-                  command=lambda: _select_all(True)).pack(side=tk.LEFT, padx=2)
-        tk.Button(proj_toolbar, text="⬜ Odznacz wszystkie", font=self.FONT_SMALL,
-                  command=lambda: _select_all(False)).pack(side=tk.LEFT, padx=2)
-        tk.Label(proj_toolbar, text="   ✅ = optymalizuj  |  ⬜ = zamrożony (tło)",
-                 font=self.FONT_SMALL, fg="#666").pack(side=tk.LEFT, padx=10)
+        info_lbl = tk.Label(proj_frame,
+            text=("🎯  Projekty do optymalizacji = solver może je przesuwać.\n"
+                  "👁  Projekty widziane przez solver = blokady (zamrożone) — "
+                  "solver bierze je pod uwagę, ale nie zmienia dat.\n"
+                  "Projekt może być w obu listach: jeśli jest w „do optymalizacji”, "
+                  "drugi wpis jest pomijany."),
+            justify='left', font=self.FONT_DEFAULT, fg="#555")
+        info_lbl.pack(anchor='w', pady=(0, 8))
 
-        # Canvas z checkbuttons
-        canvas_frame = tk.Frame(proj_frame)
-        canvas_frame.pack(fill=tk.BOTH, expand=True)
+        # ===== Sekcja 1: Projekty do optymalizacji (target) =====
+        target_box = tk.LabelFrame(proj_frame, text="🎯  Projekty do optymalizacji",
+                                    font=self.FONT_BOLD, fg="#1F4E79", padx=8, pady=6)
+        target_box.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
 
-        canvas = tk.Canvas(canvas_frame, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
-        inner = tk.Frame(canvas)
+        target_top = tk.Frame(target_box)
+        target_top.pack(fill=tk.X)
 
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
+        target_count_lbl = tk.Label(target_top, text="Wybrano: 0 projektów",
+                                     font=self.FONT_BOLD, fg="#1F4E79")
+        target_count_lbl.pack(side=tk.LEFT)
 
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        def _open_target_picker():
+            self._open_project_selector(
+                parent=dlg,
+                current_ids=set(target_pids_state['pids']),
+                mode='callback',
+                title="🎯 Wybierz projekty do optymalizacji",
+                ok_button_text="✅ Zatwierdź jako TARGET",
+                on_select_callback=_set_target_pids,
+            )
 
-        # Obsługa scrolla kółkiem myszy
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel, add='+')
-        dlg.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>") if e.widget == dlg else None, add='+')
+        def _clear_target():
+            target_pids_state['pids'] = []
+            _refresh_target_list()
 
-        check_vars = {}  # pid -> BooleanVar
-        for pid in self.projects:
-            pname = self.project_names.get(pid, f"Projekt {pid}")
-            pdb = self.get_project_db_path(pid)
-            has_db = os.path.exists(pdb) if hasattr(self, 'get_project_db_path') else False
+        tk.Button(target_top, text="➕ Wybierz / zmień…", command=_open_target_picker,
+                  bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=10
+                  ).pack(side=tk.RIGHT, padx=2)
+        tk.Button(target_top, text="🗑 Wyczyść", command=_clear_target,
+                  font=self.FONT_DEFAULT, padx=8).pack(side=tk.RIGHT, padx=2)
 
-            row = tk.Frame(inner, pady=1)
-            row.pack(fill=tk.X)
+        target_list_frame = tk.Frame(target_box)
+        target_list_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        target_list = tk.Listbox(target_list_frame, height=5, font=self.FONT_DEFAULT,
+                                  selectmode=tk.EXTENDED)
+        target_vsb = ttk.Scrollbar(target_list_frame, orient='vertical', command=target_list.yview)
+        target_list.configure(yscrollcommand=target_vsb.set)
+        target_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        target_vsb.pack(side=tk.RIGHT, fill=tk.Y)
 
-            cv = tk.BooleanVar(value=False)
-            check_vars[pid] = cv
+        # ===== Sekcja 2: Projekty widziane przez solver (frozen) =====
+        visible_box = tk.LabelFrame(proj_frame, text="👁  Projekty widziane przez solver (zamrożone)",
+                                     font=self.FONT_BOLD, fg="#7C5400", padx=8, pady=6)
+        visible_box.pack(fill=tk.BOTH, expand=True)
 
-            cb = tk.Checkbutton(row, variable=cv, width=1)
-            cb.pack(side=tk.LEFT)
+        visible_top = tk.Frame(visible_box)
+        visible_top.pack(fill=tk.X)
 
-            status_txt = ""
-            is_blocked = False  # ZAKOŃCZONY / WSTRZYMANY → nie do optymalizacji
-            if has_db:
-                try:
-                    if rmm.is_milestone_set(pdb, pid, 'ZAKONCZONY'):
-                        status_txt = " [ZAKOŃCZONY]"
-                        is_blocked = True
-                    elif rmm.is_project_paused(pdb, pid):
-                        status_txt = " [WSTRZYMANY]"
-                        is_blocked = True
-                except Exception:
-                    pass
+        visible_count_lbl = tk.Label(visible_top, text="Wybrano: 0 projektów",
+                                      font=self.FONT_BOLD, fg="#7C5400")
+        visible_count_lbl.pack(side=tk.LEFT)
 
-            lbl = tk.Label(row, text=f"{pname}{status_txt}",
-                           font=self.FONT_DEFAULT, anchor='w')
-            lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        def _open_visible_picker():
+            self._open_project_selector(
+                parent=dlg,
+                current_ids=set(visible_pids_state['pids']),
+                mode='callback',
+                title="👁 Wybierz projekty WIDZIANE przez solver (zamrożone)",
+                ok_button_text="✅ Zatwierdź jako FROZEN",
+                on_select_callback=_set_visible_pids,
+            )
 
-            if not has_db or is_blocked:
-                lbl.configure(fg="#999")
-                cb.configure(state=tk.DISABLED)
-                cv.set(False)
-
-        def _select_all(val):
-            for pid, cv in check_vars.items():
+        def _autofill_visible():
+            """Wypełnij listę wszystkimi aktywnymi projektami (poza target)."""
+            target_set = set(target_pids_state['pids'])
+            auto = []
+            for pid in self.projects:
+                if pid in target_set:
+                    continue
                 pdb = self.get_project_db_path(pid)
                 if not os.path.exists(pdb):
                     continue
-                # Nie zaznaczaj zakończonych / wstrzymanych
                 try:
                     if rmm.is_milestone_set(pdb, pid, 'ZAKONCZONY'):
                         continue
@@ -24601,7 +25353,74 @@ Kod: {unlock_code}
                         continue
                 except Exception:
                     pass
-                cv.set(val)
+                auto.append(pid)
+            visible_pids_state['pids'] = auto
+            _refresh_visible_list()
+
+        def _clear_visible():
+            visible_pids_state['pids'] = []
+            _refresh_visible_list()
+
+        tk.Button(visible_top, text="➕ Wybierz / zmień…", command=_open_visible_picker,
+                  bg=self.COLOR_BLUE, fg="white", font=self.FONT_BOLD, padx=10
+                  ).pack(side=tk.RIGHT, padx=2)
+        tk.Button(visible_top, text="🔄 Auto: wszystkie aktywne", command=_autofill_visible,
+                  font=self.FONT_DEFAULT, padx=8).pack(side=tk.RIGHT, padx=2)
+        tk.Button(visible_top, text="🗑 Wyczyść", command=_clear_visible,
+                  font=self.FONT_DEFAULT, padx=8).pack(side=tk.RIGHT, padx=2)
+
+        visible_list_frame = tk.Frame(visible_box)
+        visible_list_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        visible_list = tk.Listbox(visible_list_frame, height=5, font=self.FONT_DEFAULT,
+                                   selectmode=tk.EXTENDED)
+        visible_vsb = ttk.Scrollbar(visible_list_frame, orient='vertical', command=visible_list.yview)
+        visible_list.configure(yscrollcommand=visible_vsb.set)
+        visible_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        visible_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def _format_pid_row(pid):
+            pname = self.project_names.get(pid, f"Projekt {pid}")
+            extras = []
+            try:
+                pdb = self.get_project_db_path(pid)
+                if os.path.exists(pdb):
+                    if rmm.is_milestone_set(pdb, pid, 'ZAKONCZONY'):
+                        extras.append("ZAKOŃCZONY")
+                    if rmm.is_project_paused(pdb, pid):
+                        extras.append("WSTRZYMANY")
+            except Exception:
+                pass
+            suffix = f"  [{', '.join(extras)}]" if extras else ""
+            return f"P{pid}: {pname}{suffix}"
+
+        def _refresh_target_list():
+            target_list.delete(0, tk.END)
+            pids = target_pids_state['pids']
+            for pid in pids:
+                target_list.insert(tk.END, _format_pid_row(pid))
+            target_count_lbl.config(text=f"Wybrano: {len(pids)} projektów")
+
+        def _refresh_visible_list():
+            visible_list.delete(0, tk.END)
+            target_set = set(target_pids_state['pids'])
+            pids = visible_pids_state['pids']
+            for pid in pids:
+                marker = "  ⚠️ także w TARGET" if pid in target_set else ""
+                visible_list.insert(tk.END, _format_pid_row(pid) + marker)
+            visible_count_lbl.config(text=f"Wybrano: {len(pids)} projektów")
+
+        def _set_target_pids(pids):
+            target_pids_state['pids'] = list(pids)
+            _refresh_target_list()
+            _refresh_visible_list()  # przelicz markery
+
+        def _set_visible_pids(pids):
+            visible_pids_state['pids'] = list(pids)
+            _refresh_visible_list()
+
+        # Inicjalizacja
+        _refresh_target_list()
+        _refresh_visible_list()
 
         # --- Przycisk uruchomienia + wynik ---
         bottom = tk.Frame(parent)
@@ -24611,12 +25430,16 @@ Kod: {unlock_code}
                               wrap=tk.WORD, bg="#f9f9f9")
 
         def _run_optimization():
-            selected = [pid for pid, cv in check_vars.items() if cv.get()]
+            selected = list(target_pids_state['pids'])
             if not selected and mode_var.get() == 'fit_projects':
-                messagebox.showwarning("Uwaga", "Zaznacz co najmniej jeden projekt do optymalizacji.", parent=dlg)
+                messagebox.showwarning("Uwaga",
+                    "Wybierz co najmniej jeden projekt w sekcji „🎯 Projekty do optymalizacji”.",
+                    parent=dlg)
                 return
 
             if mode_var.get() == 'optimize_all':
+                # Tryb „przeoptymalizuj wszystko” — bierzemy WSZYSTKIE aktywne
+                # (TARGET = aktywne projekty z dostępną bazą, frozen ignorowane)
                 selected = []
                 for pid in self.projects:
                     pdb = self.get_project_db_path(pid)
@@ -24630,9 +25453,15 @@ Kod: {unlock_code}
                     except Exception:
                         pass
                     selected.append(pid)
-
-            frozen = [pid for pid in self.projects
-                      if pid not in selected and os.path.exists(self.get_project_db_path(pid))]
+                # Frozen w tym trybie = pusty (wszystko jest target)
+                frozen = []
+            else:
+                # fit_projects → frozen = jawnie wskazane „widziane przez solver”,
+                # MINUS te które są w target (target wygrywa).
+                target_set = set(selected)
+                frozen = [pid for pid in visible_pids_state['pids']
+                          if pid not in target_set
+                          and os.path.exists(self.get_project_db_path(pid))]
 
             try:
                 tl = int(time_var.get())
@@ -24694,16 +25523,123 @@ Kod: {unlock_code}
 
             result_text.configure(state=tk.DISABLED)
 
+        def _acquire_locks_for_apply(pids):
+            """Próbuje zająć lock na każdy projekt z `pids`.
+            Zwraca (success: bool, locked_ids: list, failed_with_owners: dict).
+            Jeżeli któryś projekt jest zajęty — pyta o wymuszenie.
+            Przy abort zwalnia wszystkie częściowo zajęte i zwraca (False, [], …).
+            """
+            locked = []
+            failed_owners = {}
+            for pid in pids:
+                ok, _lid = self.lock_manager.acquire_project_lock(int(pid), force=False)
+                if ok:
+                    locked.append(int(pid))
+                else:
+                    try:
+                        owner = self.lock_manager.get_project_lock_owner(int(pid))
+                    except Exception:
+                        owner = None
+                    failed_owners[int(pid)] = owner
+
+            if not failed_owners:
+                return True, locked, {}
+
+            # Są konflikty — pytaj o wymuszenie
+            lines = []
+            for pid, owner in failed_owners.items():
+                pname = self.project_names.get(int(pid), f"Projekt {pid}")
+                if owner:
+                    who = f"{owner.get('user', '?')}@{owner.get('computer', '?')}"
+                    lines.append(f"  • {pname} — zajęty przez {who}")
+                else:
+                    lines.append(f"  • {pname} — zajęty (nieznany właściciel)")
+            details = "\n".join(lines)
+            force = messagebox.askyesno(
+                "Projekty zajęte przez innych użytkowników",
+                f"Nie można zająć blokady dla {len(failed_owners)} projektów:\n\n"
+                f"{details}\n\n"
+                f"Wymusić przejęcie blokad? (Inni użytkownicy stracą swoje blokady)",
+                parent=dlg,
+                icon='warning')
+            if not force:
+                # Anuluj — zwolnij już zajęte
+                for pid in locked:
+                    try:
+                        self.lock_manager.release_project_lock(pid)
+                    except Exception:
+                        pass
+                return False, [], failed_owners
+
+            # Wymuś dla pozostałych
+            for pid in list(failed_owners.keys()):
+                ok, _lid = self.lock_manager.acquire_project_lock(int(pid), force=True)
+                if ok:
+                    locked.append(int(pid))
+                else:
+                    # Nawet wymuszenie nie pomogło — wycofaj wszystko
+                    for p in locked:
+                        try:
+                            self.lock_manager.release_project_lock(p)
+                        except Exception:
+                            pass
+                    messagebox.showerror("Błąd",
+                        f"Nie udało się wymusić blokady dla projektu {pid}.\n"
+                        f"Operacja anulowana — żaden projekt nie został zmieniony.",
+                        parent=dlg)
+                    return False, [], failed_owners
+            return True, locked, {}
+
+        def _release_opt_locks():
+            """Zwolnij wszystkie blokady zajęte przez optymalizator (jeśli są)."""
+            pids = list(getattr(dlg, '_opt_locked_pids', []) or [])
+            for pid in pids:
+                try:
+                    self.lock_manager.release_project_lock(int(pid))
+                except Exception as e:
+                    print(f"⚠️ Nie udało się zwolnić locka pid={pid}: {e}")
+            dlg._opt_locked_pids = []
+            return len(pids)
+
+        def _refresh_main_views():
+            """Odśwież listę i otwarte wykresy w głównym oknie po zmianie dat."""
+            try:
+                self.refresh_all()
+            except Exception as e:
+                print(f"⚠️ refresh_all: {e}")
+            if getattr(self, 'matplotlib_canvas', None):
+                try:
+                    self.create_embedded_gantt_chart(preserve_view=True)
+                except Exception as e:
+                    print(f"⚠️ create_embedded_gantt_chart: {e}")
+            try:
+                if self._is_mp_chart_open():
+                    self._create_multi_project_chart_window(
+                        self._mp_chart_meta['project_ids'], preserve_view=True)
+            except Exception as e:
+                print(f"⚠️ multi-project chart refresh: {e}")
+
         def _apply_result():
             result = getattr(btn_apply, '_opt_result', None)
             if not result or not result.get('changes'):
                 return
+            pids_to_lock = [int(p) for p in result['changes'].keys()]
             if not messagebox.askyesno("Potwierdzenie",
                     f"Zastosować zmiany optymalizacji?\n\n"
                     f"Zmienione zostaną daty template w {len(result['changes'])} projektach.\n"
-                    f"Operację można cofnąć przyciskiem ↩ Cofnij.",
+                    f"Najpierw zostaną zajęte blokady projektów (inni nie będą mogli edytować).\n\n"
+                    f"Operację można cofnąć przyciskiem ↩ Cofnij\n"
+                    f"lub zwolnić blokady bez cofania przyciskiem 🔓 Zwolnij blokady.",
                     parent=dlg):
                 return
+
+            # 1. Zajmij blokady
+            ok, locked_pids, _ = _acquire_locks_for_apply(pids_to_lock)
+            if not ok:
+                return
+            dlg._opt_locked_pids = list(locked_pids)
+
+            # 2. Zapisz do baz
             try:
                 apply_result = rm_optimizer.apply_optimization(
                     rm_manager_dir=self.rm_projects_dir,
@@ -24712,24 +25648,34 @@ Kod: {unlock_code}
                     user=getattr(self, 'current_user', None),
                 )
                 msg = (f"✅ Zastosowano: {apply_result['applied_projects']} projektów, "
-                       f"{apply_result['applied_stages']} etapów.")
+                       f"{apply_result['applied_stages']} etapów.\n\n"
+                       f"🔒 Zablokowano {len(locked_pids)} projektów.\n"
+                       f"Użyj ↩ Cofnij aby przywrócić daty + zwolnić blokady,\n"
+                       f"lub 🔓 Zwolnij blokady aby tylko odblokować (zmiany zostają).")
                 if apply_result.get('errors'):
                     msg += f"\n\n⚠️ Błędy:\n" + "\n".join(apply_result['errors'])
                 messagebox.showinfo("Zastosowano", msg, parent=dlg)
                 btn_apply.configure(state=tk.DISABLED)
-                # Zapamiętaj snapshoty do cofania
                 if apply_result.get('snapshots'):
                     btn_undo._snapshots = apply_result['snapshots']
                     btn_undo.configure(state=tk.NORMAL)
+                btn_release_locks.configure(state=tk.NORMAL)
+                # Auto-odśwież Gantt w głównym oknie — daty się zmieniły
+                _refresh_main_views()
             except Exception as e:
-                messagebox.showerror("Błąd", f"Nie udało się zastosować:\n{e}", parent=dlg)
+                # Wycofaj blokady — zapisu nie było
+                _release_opt_locks()
+                messagebox.showerror("Błąd",
+                    f"Nie udało się zastosować:\n{e}\n\nBlokady zostały zwolnione.",
+                    parent=dlg)
 
         def _undo_result():
             snapshots = getattr(btn_undo, '_snapshots', None)
             if not snapshots:
                 return
             if not messagebox.askyesno("Cofnij optymalizację",
-                    f"Przywrócić daty sprzed optymalizacji w {len(snapshots)} projektach?",
+                    f"Przywrócić daty sprzed optymalizacji w {len(snapshots)} projektach?\n"
+                    f"(Blokady projektów również zostaną zwolnione.)",
                     parent=dlg):
                 return
             try:
@@ -24737,14 +25683,37 @@ Kod: {unlock_code}
                     rm_manager_dir=self.rm_projects_dir,
                     snapshots=snapshots,
                 )
-                msg = f"↩ Cofnięto: {undo_res['restored_projects']} projektów."
+                released = _release_opt_locks()
+                msg = (f"↩ Cofnięto: {undo_res['restored_projects']} projektów.\n"
+                       f"🔓 Zwolniono blokady: {released} projektów.")
                 if undo_res.get('errors'):
                     msg += f"\n\n⚠️ Błędy:\n" + "\n".join(undo_res['errors'])
                 messagebox.showinfo("Cofnięto", msg, parent=dlg)
                 btn_undo.configure(state=tk.DISABLED)
                 btn_undo._snapshots = None
+                btn_release_locks.configure(state=tk.DISABLED)
+                # Auto-odśwież Gantt w głównym oknie — daty zostały przywrócone
+                _refresh_main_views()
             except Exception as e:
                 messagebox.showerror("Błąd", f"Nie udało się cofnąć:\n{e}", parent=dlg)
+
+        def _release_locks_only():
+            n = len(getattr(dlg, '_opt_locked_pids', []) or [])
+            if n == 0:
+                return
+            if not messagebox.askyesno("Zwolnij blokady",
+                    f"Zwolnić {n} blokad projektów BEZ przywracania danych?\n\n"
+                    f"⚠️ Zastosowane zmiany dat ZOSTANĄ w bazach — "
+                    f"to tylko zwolnienie blokad edycyjnych.",
+                    parent=dlg):
+                return
+            released = _release_opt_locks()
+            messagebox.showinfo("Blokady zwolnione",
+                f"🔓 Zwolniono blokady: {released} projektów.\n"
+                f"Zmiany dat pozostały w bazach.", parent=dlg)
+            btn_release_locks.configure(state=tk.DISABLED)
+            btn_undo.configure(state=tk.DISABLED)
+            btn_undo._snapshots = None
 
         btn_frame = tk.Frame(bottom)
         btn_frame.pack(fill=tk.X, pady=(0, 5))
@@ -24763,16 +25732,53 @@ Kod: {unlock_code}
                              padx=20, pady=6, state=tk.DISABLED)
         btn_undo.pack(side=tk.LEFT, padx=5)
 
+        btn_release_locks = tk.Button(btn_frame, text="🔓 Zwolnij blokady",
+                                      command=_release_locks_only,
+                                      bg="#7f8c8d", fg="white", font=("Arial", 11, "bold"),
+                                      padx=20, pady=6, state=tk.DISABLED)
+        btn_release_locks.pack(side=tk.LEFT, padx=5)
+
+        # Przy zamknięciu okna — automatycznie zwolnij ewentualne wciąż trzymane blokady
+        dlg._opt_locked_pids = []
+        _prev_close = dlg.protocol("WM_DELETE_WINDOW")
+        def _on_close():
+            try:
+                if getattr(dlg, '_opt_locked_pids', None):
+                    _release_opt_locks()
+            except Exception:
+                pass
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+        dlg.protocol("WM_DELETE_WINDOW", _on_close)
+
         result_text.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
 
     # ----------------------------------------------------------------
     # TAB: Ograniczenia zasobów
     # ----------------------------------------------------------------
 
+    # Mapa typów ograniczeń: kod DB ↔ etykieta polska (UI)
+    OPT_CONSTRAINT_TYPE_LABELS = {
+        'exclusive_person':         'Wyłączność osoby (1 pracownik – N etapów)',
+        'max_concurrent_category':  'Limit kategorii (N etapów równolegle)',
+        'max_concurrent_stage':     'Limit etapu (N etapów równolegle)',
+    }
+
+    def _opt_constraint_type_pl(self, code):
+        """Zwróć polską nazwę typu ograniczenia (fallback: oryginał)."""
+        return self.OPT_CONSTRAINT_TYPE_LABELS.get(code, code or '—')
+
     def _optimizer_build_constraints_tab(self, parent, dlg):
         """Zakładka CRUD ograniczeń zasobów."""
         toolbar = tk.Frame(parent, padx=8, pady=6)
         toolbar.pack(fill=tk.X)
+
+        info_lbl = tk.Label(toolbar,
+            text="Reguły wykorzystywane przez optymalizator gdy włączysz „Ograniczenia zasobów” w zakładce Uruchom.",
+            font=self.FONT_DEFAULT, fg="#555")
+        info_lbl.pack(side=tk.RIGHT, padx=10)
 
         tk.Button(toolbar, text="➕ Dodaj", command=lambda: _edit(None),
                   bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
@@ -24783,13 +25789,13 @@ Kod: {unlock_code}
 
         cols = ('id', 'type', 'category', 'stage', 'max_parallel', 'description', 'active')
         tree = ttk.Treeview(parent, columns=cols, show='headings', height=16)
-        tree.heading('id', text='ID');           tree.column('id', width=40, stretch=False)
-        tree.heading('type', text='Typ');        tree.column('type', width=160)
-        tree.heading('category', text='Kategoria'); tree.column('category', width=120)
-        tree.heading('stage', text='Etap');      tree.column('stage', width=130)
-        tree.heading('max_parallel', text='Max'); tree.column('max_parallel', width=50, stretch=False)
-        tree.heading('description', text='Opis'); tree.column('description', width=300)
-        tree.heading('active', text='Akt.');     tree.column('active', width=40, stretch=False)
+        tree.heading('id', text='ID');                    tree.column('id', width=40, stretch=False)
+        tree.heading('type', text='Typ ograniczenia');    tree.column('type', width=260)
+        tree.heading('category', text='Kategoria pracownika'); tree.column('category', width=140)
+        tree.heading('stage', text='Etap');               tree.column('stage', width=130)
+        tree.heading('max_parallel', text='Maks. równolegle'); tree.column('max_parallel', width=110, stretch=False)
+        tree.heading('description', text='Opis');         tree.column('description', width=300)
+        tree.heading('active', text='Aktywne');           tree.column('active', width=70, stretch=False)
 
         vsb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
@@ -24800,9 +25806,13 @@ Kod: {unlock_code}
             tree.delete(*tree.get_children())
             for r in rmm.get_resource_constraints(self.rm_master_db_path, active_only=False):
                 tree.insert('', tk.END, iid=str(r['id']), values=(
-                    r['id'], r['constraint_type'], r.get('category') or '—',
-                    r.get('stage_code') or '—', r.get('max_parallel', 1),
-                    r.get('description') or '', '✓' if r.get('is_active') else '—'
+                    r['id'],
+                    self._opt_constraint_type_pl(r['constraint_type']),
+                    r.get('category') or '—',
+                    r.get('stage_code') or '—',
+                    r.get('max_parallel', 1),
+                    r.get('description') or '',
+                    'Tak' if r.get('is_active') else 'Nie'
                 ))
 
         def _edit_selected():
@@ -24826,7 +25836,8 @@ Kod: {unlock_code}
             ed.title("Ograniczenie zasobu")
             ed.transient(dlg)
             ed.grab_set()
-            self._center_window(ed, 500, 380)
+            self._center_window(ed, 1100, 720)
+            ed.minsize(900, 500)
 
             data = {}
             if cid:
@@ -24835,44 +25846,215 @@ Kod: {unlock_code}
                         data = r
                         break
 
-            f = tk.Frame(ed, padx=15, pady=10)
-            f.pack(fill=tk.BOTH, expand=True)
+            # ============================================================
+            # SCROLLOWALNY KONTENER (Canvas + Scrollbar + inner Frame)
+            # MouseWheel: Windows używa <MouseWheel> z event.delta.
+            # W Toplevel oknie blokujemy propagację do głównego okna
+            # przez return 'break' (vide notes platformy).
+            # ============================================================
+            # WAŻNE: pakujemy najpierw dolny pasek przycisków (side=BOTTOM),
+            # a dopiero potem 'outer' z expand=True — inaczej outer zjadłby
+            # cały obszar i przyciski byłyby niewidoczne.
+            btn_f = tk.Frame(ed, bg="#F0F0F0")
+            btn_f.pack(fill=tk.X, side=tk.BOTTOM, padx=15, pady=10)
 
-            tk.Label(f, text="Typ:", font=self.FONT_BOLD).grid(row=0, column=0, sticky='w', pady=3)
-            type_var = tk.StringVar(value=data.get('constraint_type', 'exclusive_person'))
-            type_combo = ttk.Combobox(f, textvariable=type_var, state='readonly', width=30,
-                                       values=['exclusive_person', 'max_concurrent_category', 'max_concurrent_stage'])
-            type_combo.grid(row=0, column=1, sticky='w', pady=3)
+            outer = tk.Frame(ed)
+            outer.pack(fill=tk.BOTH, expand=True)
 
-            tk.Label(f, text="Kategoria:", font=self.FONT_BOLD).grid(row=1, column=0, sticky='w', pady=3)
+            scroll_canvas = tk.Canvas(outer, borderwidth=0, highlightthickness=0)
+            vscroll = ttk.Scrollbar(outer, orient='vertical', command=scroll_canvas.yview)
+            scroll_canvas.configure(yscrollcommand=vscroll.set)
+            vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+            scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+            inner = tk.Frame(scroll_canvas)
+            inner_id = scroll_canvas.create_window((0, 0), window=inner, anchor='nw')
+
+            def _on_inner_config(_e=None):
+                scroll_canvas.configure(scrollregion=scroll_canvas.bbox('all'))
+            inner.bind('<Configure>', _on_inner_config)
+
+            def _on_canvas_config(e):
+                # Dopasuj szerokość wewnętrznej ramki do canvasa
+                scroll_canvas.itemconfigure(inner_id, width=e.width)
+            scroll_canvas.bind('<Configure>', _on_canvas_config)
+
+            def _on_mousewheel(e):
+                # Windows: e.delta wielokrotność 120; przewijaj o 3 jednostki na "klik"
+                scroll_canvas.yview_scroll(int(-1 * (e.delta / 120)) * 3, 'units')
+                return 'break'
+
+            # Wiążemy mousewheel TYLKO do widgetów w obrębie tego okna
+            for w in (scroll_canvas, inner):
+                w.bind('<MouseWheel>', _on_mousewheel)
+            ed.bind('<MouseWheel>', _on_mousewheel)
+
+            # ============================================================
+            # LAYOUT: lewa kolumna = formularz, prawa = pomoc
+            # ============================================================
+            container = tk.Frame(inner, padx=12, pady=12)
+            container.pack(fill=tk.BOTH, expand=True)
+            container.columnconfigure(0, weight=0, minsize=380)
+            container.columnconfigure(1, weight=1)
+
+            # ---- LEWA KOLUMNA: formularz ----
+            f = tk.LabelFrame(container, text="  Parametry ograniczenia  ",
+                              font=self.FONT_BOLD, fg="#333", padx=12, pady=10)
+            f.grid(row=0, column=0, sticky='nw', padx=(0, 12))
+
+            # Typ ograniczenia — combobox z polskimi etykietami,
+            # zapis do bazy w angielskim kodzie
+            type_codes = list(self.OPT_CONSTRAINT_TYPE_LABELS.keys())
+            type_labels = [self.OPT_CONSTRAINT_TYPE_LABELS[c] for c in type_codes]
+            current_code = data.get('constraint_type', 'exclusive_person')
+            current_label = self.OPT_CONSTRAINT_TYPE_LABELS.get(current_code, type_labels[0])
+
+            tk.Label(f, text="Typ ograniczenia:", font=self.FONT_BOLD).grid(row=0, column=0, sticky='w', pady=4)
+            type_label_var = tk.StringVar(value=current_label)
+            ttk.Combobox(f, textvariable=type_label_var, state='readonly', width=42,
+                         values=type_labels).grid(row=0, column=1, sticky='w', pady=4)
+
+            tk.Label(f, text="Kategoria pracownika:", font=self.FONT_BOLD).grid(row=1, column=0, sticky='w', pady=4)
             cat_var = tk.StringVar(value=data.get('category') or '')
-            ttk.Combobox(f, textvariable=cat_var, width=30,
-                         values=[''] + rmm.EMPLOYEE_CATEGORIES).grid(row=1, column=1, sticky='w', pady=3)
+            ttk.Combobox(f, textvariable=cat_var, width=40,
+                         values=[''] + rmm.EMPLOYEE_CATEGORIES).grid(row=1, column=1, sticky='w', pady=4)
 
-            tk.Label(f, text="Etap:", font=self.FONT_BOLD).grid(row=2, column=0, sticky='w', pady=3)
+            tk.Label(f, text="Etap:", font=self.FONT_BOLD).grid(row=2, column=0, sticky='w', pady=4)
             stage_var = tk.StringVar(value=data.get('stage_code') or '')
             stage_codes = [''] + [code for code, _, _, _ in rmm.STAGE_DEFINITIONS]
-            ttk.Combobox(f, textvariable=stage_var, width=30,
-                         values=stage_codes).grid(row=2, column=1, sticky='w', pady=3)
+            ttk.Combobox(f, textvariable=stage_var, width=40,
+                         values=stage_codes).grid(row=2, column=1, sticky='w', pady=4)
 
-            tk.Label(f, text="Max równolegle:", font=self.FONT_BOLD).grid(row=3, column=0, sticky='w', pady=3)
+            tk.Label(f, text="Maks. równolegle:", font=self.FONT_BOLD).grid(row=3, column=0, sticky='w', pady=4)
             max_var = tk.StringVar(value=str(data.get('max_parallel', 1)))
-            tk.Entry(f, textvariable=max_var, width=6).grid(row=3, column=1, sticky='w', pady=3)
+            tk.Entry(f, textvariable=max_var, width=6).grid(row=3, column=1, sticky='w', pady=4)
 
-            tk.Label(f, text="Opis:", font=self.FONT_BOLD).grid(row=4, column=0, sticky='nw', pady=3)
+            tk.Label(f, text="Opis:", font=self.FONT_BOLD).grid(row=4, column=0, sticky='nw', pady=4)
             desc_var = tk.StringVar(value=data.get('description') or '')
-            tk.Entry(f, textvariable=desc_var, width=40).grid(row=4, column=1, sticky='w', pady=3)
+            tk.Entry(f, textvariable=desc_var, width=44).grid(row=4, column=1, sticky='w', pady=4)
 
             active_var = tk.BooleanVar(value=data.get('is_active', 1))
-            tk.Checkbutton(f, text="Aktywne", variable=active_var).grid(row=5, column=1, sticky='w', pady=3)
+            tk.Checkbutton(f, text="Aktywne", variable=active_var).grid(row=5, column=1, sticky='w', pady=4)
+
+            # ---- PRAWA KOLUMNA: pomoc — opisy + tabele ----
+            help_frame = tk.LabelFrame(container, text="  Pomoc — typy ograniczeń  ",
+                                       font=self.FONT_BOLD, fg="#333",
+                                       padx=10, pady=8)
+            help_frame.grid(row=0, column=1, sticky='nsew')
+
+            # 👤 Wyłączność osoby
+            tk.Label(help_frame, text="👤  Wyłączność osoby",
+                     font=self.FONT_BOLD, fg="#1F4E79", justify='left'
+                     ).pack(anchor='w', pady=(0, 0))
+            tk.Label(help_frame,
+                     text=("Ile etapów jedna osoba z danej kategorii może prowadzić\n"
+                           "w tym samym czasie. Liczy się tylko, gdy jest wpisana jako\n"
+                           "1. na liście (główny wykonawca – „master”). Pomocnicy\n"
+                           "(2., 3., …) nie są ograniczani.\n"
+                           "Przykład: „Konstruktor – maks. 1 projekt naraz”."),
+                     justify='left', fg="#444"
+                     ).pack(anchor='w', pady=(0, 6))
+
+            # 🏷 Limit kategorii
+            tk.Label(help_frame, text="🏷  Limit kategorii",
+                     font=self.FONT_BOLD, fg="#1F4E79", justify='left'
+                     ).pack(anchor='w', pady=(0, 0))
+            tk.Label(help_frame,
+                     text=("Ile etapów z danego działu może być realizowanych równolegle\n"
+                           "w całej firmie – łącznie wszystkie typy etapów tej kategorii.\n"
+                           "Przykład: „Serwis – maks. 2 zadania jednocześnie”\n"
+                           "(uruchomienie + odbiór + poprawki razem)."),
+                     justify='left', fg="#444"
+                     ).pack(anchor='w', pady=(0, 6))
+
+            # 🔧 Limit etapu
+            tk.Label(help_frame, text="🔧  Limit etapu",
+                     font=self.FONT_BOLD, fg="#1F4E79", justify='left'
+                     ).pack(anchor='w', pady=(0, 0))
+            tk.Label(help_frame,
+                     text=("Ile etapów jednego typu (np. MONTAŻ) może być realizowanych\n"
+                           "równolegle w całej firmie – niezależnie od osób.\n"
+                           "Przykład: „Montaż – maks. 3 stanowiska, więc maks. 3 montaże naraz”."),
+                     justify='left', fg="#444"
+                     ).pack(anchor='w', pady=(0, 8))
+
+            # Tabela porównawcza
+            tbl = tk.Frame(help_frame, bg="#D0D7DE")
+            tbl.pack(fill='x', pady=(2, 0))
+            headers = ("Reguła", "Co ogranicza", "Zakres", "Przykład")
+            rows = [
+                ("👤 Wyłączność osoby", "jedną osobę (master)", "1 pracownik",
+                 "Konstruktor: 1 projekt naraz"),
+                ("🏷 Limit kategorii", "cały dział", "firma",
+                 "Serwis: 2 zadania naraz"),
+                ("🔧 Limit etapu", "jeden typ etapu", "firma",
+                 "Montaż: 3 stanowiska"),
+            ]
+            for c, h in enumerate(headers):
+                tk.Label(tbl, text=h, font=self.FONT_BOLD, bg="#1F4E79", fg="white",
+                         padx=8, pady=4, anchor='w'
+                         ).grid(row=0, column=c, sticky='nsew',
+                                padx=(0 if c == 0 else 1), pady=(0, 1))
+            for r, row in enumerate(rows, start=1):
+                bg = "#FFFFFF" if r % 2 else "#F4F6F8"
+                for c, val in enumerate(row):
+                    tk.Label(tbl, text=val, bg=bg, fg="#222",
+                             padx=8, pady=4, anchor='w', justify='left'
+                             ).grid(row=r, column=c, sticky='nsew',
+                                    padx=(0 if c == 0 else 1),
+                                    pady=(0 if r == 1 else 1))
+            for c in range(len(headers)):
+                tbl.columnconfigure(c, weight=1)
+
+            # Tabela: etap → kategoria pracownika
+            tk.Label(help_frame, text="Mapowanie: etap → kategoria pracownika",
+                     font=self.FONT_BOLD, fg="#1F4E79"
+                     ).pack(anchor='w', pady=(12, 4))
+
+            stage_tbl = tk.Frame(help_frame, bg="#D0D7DE")
+            stage_tbl.pack(fill='x')
+            stage_headers = ("Etap (stage_code)", "Kategoria pracownika")
+            stage_rows = [
+                ("PROJEKT",        "Konstrukcja"),
+                ("ELEKTROPROJEKT", "Elektroprojekt"),
+                ("KOMPLETACJA",    "Logistyka, Magazyn"),
+                ("MONTAZ",         "Montaż"),
+                ("ELEKTROMONTAZ",  "Elektromontaż"),
+                ("URUCHOMIENIE",   "Serwis"),
+                ("ODBIORY",        "Serwis"),
+                ("POPRAWKI",       "Serwis"),
+                ("PRZYJETY",       "— (milestone, brak przypisania)"),
+                ("ZAKONCZONY",     "— (milestone, brak przypisania)"),
+                ("WSTRZYMANY",     "— (stan specjalny)"),
+            ]
+            for c, h in enumerate(stage_headers):
+                tk.Label(stage_tbl, text=h, font=self.FONT_BOLD, bg="#1F4E79", fg="white",
+                         padx=8, pady=4, anchor='w'
+                         ).grid(row=0, column=c, sticky='nsew',
+                                padx=(0 if c == 0 else 1), pady=(0, 1))
+            for r, (sc, cat) in enumerate(stage_rows, start=1):
+                bg = "#FFFFFF" if r % 2 else "#F4F6F8"
+                tk.Label(stage_tbl, text=sc, bg=bg, fg="#222", font=self.FONT_BOLD,
+                         padx=8, pady=3, anchor='w'
+                         ).grid(row=r, column=0, sticky='nsew', pady=(0 if r == 1 else 1))
+                tk.Label(stage_tbl, text=cat, bg=bg, fg="#222",
+                         padx=8, pady=3, anchor='w'
+                         ).grid(row=r, column=1, sticky='nsew',
+                                padx=1, pady=(0 if r == 1 else 1))
+            stage_tbl.columnconfigure(0, weight=0)
+            stage_tbl.columnconfigure(1, weight=1)
 
             def _save():
                 try:
                     mp = int(max_var.get())
                 except ValueError:
                     mp = 1
+                # Polska etykieta -> kod do zapisu
+                lbl = type_label_var.get()
+                code = next((c for c, l in self.OPT_CONSTRAINT_TYPE_LABELS.items() if l == lbl),
+                            'exclusive_person')
                 save_data = {
-                    'constraint_type': type_var.get(),
+                    'constraint_type': code,
                     'category': cat_var.get() or None,
                     'stage_code': stage_var.get() or None,
                     'max_parallel': mp,
@@ -24886,12 +26068,190 @@ Kod: {unlock_code}
                 ed.destroy()
                 refresh()
 
-            btn_f = tk.Frame(ed)
-            btn_f.pack(fill=tk.X, padx=15, pady=10)
+            # Przyciski Zapisz/Anuluj (btn_f utworzony wyżej, przed scrollowanym obszarem)
             tk.Button(btn_f, text="💾 Zapisz", command=_save,
-                      bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=15).pack(side=tk.LEFT, padx=5)
+                      bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=15
+                      ).pack(side=tk.LEFT, padx=5)
             tk.Button(btn_f, text="Anuluj", command=ed.destroy,
                       font=self.FONT_DEFAULT, padx=10).pack(side=tk.LEFT, padx=5)
+
+            # Cleanup mousewheel binding przy zamknięciu (na wypadek gdyby coś się wpięło globalnie)
+            def _on_close():
+                try:
+                    ed.unbind('<MouseWheel>')
+                except Exception:
+                    pass
+                ed.destroy()
+            ed.protocol("WM_DELETE_WINDOW", _on_close)
+
+        refresh()
+
+    # ----------------------------------------------------------------
+    # TAB: Pracownicy — limit etapów jako Master
+    # ----------------------------------------------------------------
+
+    def _optimizer_build_workers_tab(self, parent, dlg):
+        """Zakładka z listą pracowników i edycją kolumny Master.
+
+        Master = maksymalna liczba etapów, które dana osoba może prowadzić
+        równolegle JAKO PIERWSZA na liście pracowników danego etapu.
+        Jeśli pracownik jest wpisany jako 2., 3. itd. — ograniczenie
+        nie obowiązuje (jest pomocnikiem).
+        """
+        # Pasek informacyjny
+        info = tk.Frame(parent, padx=10, pady=8, bg="#F4F6F8")
+        info.pack(fill=tk.X)
+        tk.Label(info,
+                 text=("👤  Master = maksymalna liczba etapów, które pracownik\n"
+                       "    może prowadzić jednocześnie jako PIERWSZY (master) na liście.\n"
+                       "    Gdy jest wpisany jako 2. lub kolejny — pomocnik, brak limitu."),
+                 justify='left', bg="#F4F6F8", font=self.FONT_DEFAULT).pack(side=tk.LEFT)
+
+        # Toolbar
+        toolbar = tk.Frame(parent, padx=8, pady=6)
+        toolbar.pack(fill=tk.X)
+
+        cat_filter_var = tk.StringVar(value='')
+        tk.Label(toolbar, text="Filtr kategorii:", font=self.FONT_BOLD).pack(side=tk.LEFT, padx=(0, 4))
+        cat_combo = ttk.Combobox(toolbar, textvariable=cat_filter_var, state='readonly',
+                                  width=20, values=[''] + rmm.EMPLOYEE_CATEGORIES)
+        cat_combo.pack(side=tk.LEFT, padx=(0, 10))
+
+        show_inactive_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(toolbar, text="Pokaż nieaktywnych",
+                       variable=show_inactive_var).pack(side=tk.LEFT, padx=(0, 10))
+
+        tk.Button(toolbar, text="✏️ Edytuj Master", command=lambda: _edit_selected(),
+                  bg=self.COLOR_PURPLE, fg="white", font=self.FONT_BOLD, padx=10
+                  ).pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar, text="🔄 Odśwież", command=lambda: refresh(),
+                  font=self.FONT_DEFAULT, padx=10).pack(side=tk.LEFT, padx=2)
+
+        # Tabela
+        cols = ('id', 'name', 'category', 'master', 'active')
+        tree = ttk.Treeview(parent, columns=cols, show='headings', height=18)
+        tree.heading('id', text='ID');             tree.column('id', width=50, stretch=False, anchor='center')
+        tree.heading('name', text='Pracownik');    tree.column('name', width=260)
+        tree.heading('category', text='Kategoria'); tree.column('category', width=160)
+        tree.heading('master', text='Master (etapów równolegle)')
+        tree.column('master', width=180, anchor='center', stretch=False)
+        tree.heading('active', text='Aktywny');    tree.column('active', width=80, anchor='center', stretch=False)
+
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, side=tk.LEFT)
+        vsb.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 8))
+
+        def refresh():
+            tree.delete(*tree.get_children())
+            cat = cat_filter_var.get() or None
+            employees = rmm.get_employees(
+                self.rm_master_db_path,
+                category=cat,
+                active_only=not show_inactive_var.get(),
+            )
+            for e in employees:
+                try:
+                    mm = int(e.get('master_max_parallel') or 1)
+                except (TypeError, ValueError):
+                    mm = 1
+                # 9999 to sentinel "bez limitu" — wyświetl jako ∞
+                mm_display = '∞ (bez limitu)' if mm >= 9999 else str(mm)
+                tree.insert('', tk.END, iid=str(e['id']), values=(
+                    e['id'],
+                    e.get('name', ''),
+                    e.get('category', ''),
+                    mm_display,
+                    'Tak' if e.get('is_active') else 'Nie',
+                ))
+
+        cat_combo.bind('<<ComboboxSelected>>', lambda _e: refresh())
+        show_inactive_var.trace_add('write', lambda *_: refresh())
+
+        def _edit_selected():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Uwaga", "Wybierz pracownika z listy.", parent=dlg)
+                return
+            eid = int(sel[0])
+            vals = tree.item(sel[0], 'values')
+            # Odczyt wartości z tabeli (może być "∞ (bez limitu)" lub liczba)
+            raw = vals[3] if vals and len(vals) > 3 else '1'
+            if isinstance(raw, str) and raw.startswith('∞'):
+                current = 9999
+            else:
+                try:
+                    current = int(raw)
+                except (TypeError, ValueError):
+                    current = 1
+            _edit_master(eid, vals[1] if vals else '', current)
+
+        tree.bind('<Double-1>', lambda _e: _edit_selected())
+
+        def _edit_master(eid, name, current):
+            ed = tk.Toplevel(dlg)
+            ed.title("Master — limit równoległych etapów")
+            ed.transient(dlg)
+            ed.grab_set()
+            self._center_window(ed, 460, 270)
+
+            f = tk.Frame(ed, padx=18, pady=14)
+            f.pack(fill=tk.BOTH, expand=True)
+
+            tk.Label(f, text=f"Pracownik:  {name}",
+                     font=self.FONT_BOLD).pack(anchor='w', pady=(0, 8))
+            tk.Label(f,
+                     text=("Maks. liczba etapów, które ten pracownik może\n"
+                           "prowadzić jednocześnie jako MASTER (1. na liście)."),
+                     justify='left', fg="#555").pack(anchor='w', pady=(0, 8))
+
+            unlimited_var = tk.BooleanVar(value=(current >= 9999))
+            row = tk.Frame(f)
+            row.pack(anchor='w', pady=4)
+            tk.Label(row, text="Master:", font=self.FONT_BOLD).pack(side=tk.LEFT, padx=(0, 8))
+            spin_var = tk.StringVar(value=str(max(1, current)) if current < 9999 else '1')
+            spin = tk.Spinbox(row, from_=1, to=99, width=6, textvariable=spin_var,
+                              font=self.FONT_BOLD)
+            spin.pack(side=tk.LEFT)
+            tk.Label(row, text="  etapów równolegle", fg="#555").pack(side=tk.LEFT)
+
+            def _toggle_unlimited():
+                if unlimited_var.get():
+                    spin.configure(state='disabled')
+                else:
+                    spin.configure(state='normal')
+            chk = tk.Checkbutton(f, text="∞  Bez limitu (np. logistyk — wiele drobnych etapów)",
+                                 variable=unlimited_var, command=_toggle_unlimited,
+                                 font=self.FONT_DEFAULT)
+            chk.pack(anchor='w', pady=(8, 0))
+            _toggle_unlimited()
+
+            def _save():
+                if unlimited_var.get():
+                    val = 9999  # sentinel "bez limitu"
+                else:
+                    try:
+                        val = int(spin_var.get())
+                    except ValueError:
+                        messagebox.showwarning("Uwaga", "Podaj liczbę całkowitą ≥ 1.", parent=ed)
+                        return
+                    if val < 1:
+                        messagebox.showwarning("Uwaga", "Wartość musi być ≥ 1.", parent=ed)
+                        return
+                rmm.set_employee_master_max_parallel(self.rm_master_db_path, eid, val)
+                ed.destroy()
+                refresh()
+
+            btn_f = tk.Frame(ed)
+            btn_f.pack(fill=tk.X, padx=18, pady=(0, 14))
+            tk.Button(btn_f, text="💾 Zapisz", command=_save,
+                      bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=15
+                      ).pack(side=tk.LEFT, padx=5)
+            tk.Button(btn_f, text="Anuluj", command=ed.destroy,
+                      font=self.FONT_DEFAULT, padx=10).pack(side=tk.LEFT, padx=5)
+
+            spin.focus_set()
+            spin.selection_range(0, 'end')
 
         refresh()
 

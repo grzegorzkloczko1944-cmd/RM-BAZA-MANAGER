@@ -171,36 +171,43 @@ STAGE_PRIORITY = {
 }
 
 # Domyślne zależności między etapami (automatyczny workflow)
-# Format: (from_stage, to_stage, dependency_type, lag_days)
+# Format: (from_stage, to_stage, dependency_type, lag_days, lag_percent)
 # FS = Finish-to-Start (następny czeka na zakończenie poprzedniego)
 # SS = Start-to-Start (następny może zacząć gdy poprzedni się zaczął)
+# lag_days    — sztywne opóźnienie w dniach roboczych
+# lag_percent — procent długości POPRZEDNIKA (tylko dla SS); solver bierze
+#               effective_lag = max(lag_days, ceil(pred_dur * lag_percent/100))
 DEFAULT_DEPENDENCIES = [
     # 🔵 START PROJEKTU - PRZYJĘTY jako trigger
-    ('PRZYJETY',      'PROJEKT',       'FS', 0),  # Projekt może zacząć po przyjęciu
-    
+    ('PRZYJETY',      'PROJEKT',       'FS', 0, 0),  # Projekt może zacząć po przyjęciu
+
     # 🔵 SEKWENCJA GŁÓWNA
-    ('PROJEKT',       'KOMPLETACJA',   'FS', 0),  # Kompletacja po projekcie
-    ('KOMPLETACJA',   'MONTAZ',        'FS', 0),  # Montaż po kompletacji
-    
+    ('PROJEKT',       'KOMPLETACJA',   'FS', 0, 0),  # Kompletacja po projekcie
+    ('KOMPLETACJA',   'MONTAZ',        'FS', 0, 0),  # Montaż po kompletacji
+
     # 🔵 ELEKTROPROJEKT → ELEKTROMONTAŻ (niezależny start, blokuje elektromontaż)
-    ('ELEKTROPROJEKT', 'ELEKTROMONTAZ', 'FS', 0),  # Elektromontaż czeka na elektroprojekt
-    
-    # 🔵 RÓWNOLEGŁOŚĆ - ELEKTROMONTAŻ i MONTAŻ mogą iść równolegle
-    ('MONTAZ',        'ELEKTROMONTAZ', 'SS', 0),  # Elektromontaż może zacząć gdy montaż się zaczął
-    
-    # 🔵 URUCHOMIENIE tylko po montażu (elektromontaż i uruchomienie są niezależne)
-    ('MONTAZ',        'URUCHOMIENIE',  'FS', 0),  # Uruchomienie po montażu
-    
+    ('ELEKTROPROJEKT', 'ELEKTROMONTAZ', 'FS', 0, 0),  # Elektromontaż czeka na elektroprojekt
+
+    # 🔵 NAKŁADANIE: elektromontaż startuje gdy montaż na 3/4 długości
+    ('MONTAZ',        'ELEKTROMONTAZ', 'SS', 0, 75),  # SS + 75% długości MONTAZ
+
+    # 🔵 NAKŁADANIE: uruchomienie startuje gdy elektromontaż na 3/4 długości
+    ('ELEKTROMONTAZ', 'URUCHOMIENIE',  'SS', 0, 75),  # SS + 75% długości ELEKTROMONTAZ
+
     # 🔵 KOŃCÓWKA
-    ('URUCHOMIENIE',  'ODBIORY',       'FS', 0),  # Odbiory po uruchomieniu
-    ('ODBIORY',       'POPRAWKI',      'FS', 0),  # Poprawki po odbiorach (jeśli są)
+    ('URUCHOMIENIE',  'ODBIORY',       'FS', 0, 0),  # Odbiory po uruchomieniu
+    ('ODBIORY',       'POPRAWKI',      'FS', 0, 0),  # Poprawki po odbiorach (jeśli są)
 ]
 
 # Zależności które zostały usunięte z DEFAULT_DEPENDENCIES i muszą być wyczyszczone
 # z istniejących projektów podczas migracji.
 # Format: (predecessor, successor) — usuń KAŻDY rekord z tą parą, niezależnie od typu.
 DEPRECATED_DEPENDENCIES = [
-    ('ELEKTROMONTAZ', 'URUCHOMIENIE'),  # 2026-04-22: usunięto — etapy są teraz w pełni niezależne
+    # 2026-04-22: usunięto "ELEKTROMONTAZ→URUCHOMIENIE" jako "pełna niezależność"
+    # 2026-04-28: PRZYWRÓCONA jako SS+75% (nakładanie etapów) — patrz DEFAULT_DEPENDENCIES.
+    #             Nie wpisujemy jej już do DEPRECATED.
+    # 2026-04-28: usunięto MONTAZ→URUCHOMIENIE — uruchomienie idzie teraz z ELEKTROMONTAZ
+    ('MONTAZ', 'URUCHOMIENIE'),
 ]
 
 
@@ -762,6 +769,14 @@ def ensure_list_tables(master_db_path: str):
     # Dodaj kolumnę email jeśli nie istnieje (osobne pole dla maila)
     try:
         con.execute("ALTER TABLE employees ADD COLUMN email TEXT")
+    except sqlite3.OperationalError:
+        pass  # kolumna już istnieje
+
+    # Dodaj kolumnę master_max_parallel (2026-04-28) — limit liczby etapów,
+    # które pracownik może prowadzić jako MASTER (1. na liście assigned_staff)
+    # jednocześnie. Dla 2. i kolejnych pozycji ograniczenie nie obowiązuje.
+    try:
+        con.execute("ALTER TABLE employees ADD COLUMN master_max_parallel INTEGER NOT NULL DEFAULT 1")
     except sqlite3.OperationalError:
         pass  # kolumna już istnieje
 
@@ -1465,9 +1480,17 @@ def ensure_project_tables(project_db_path: str):
             successor_stage_code TEXT NOT NULL,
             dependency_type TEXT NOT NULL,
             lag_days INTEGER DEFAULT 0,
+            lag_percent INTEGER DEFAULT 0,
             CHECK (dependency_type IN ('FS', 'SS'))
         )
     """)
+    # Migracja: dodaj kolumnę lag_percent dla starych baz (procentowy lag dla SS,
+    # liczony jako % długości poprzednika — np. 75 = "elektromontaż startuje gdy
+    # montaż na 3/4"). Solver bierze max(lag_days, ceil(pred_dur * lag_percent/100)).
+    try:
+        con.execute("ALTER TABLE stage_dependencies ADD COLUMN lag_percent INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # kolumna już istnieje
     con.execute("CREATE INDEX IF NOT EXISTS idx_dependencies_project ON stage_dependencies(project_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_dependencies_pred ON stage_dependencies(predecessor_stage_code)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_dependencies_succ ON stage_dependencies(successor_stage_code)")
@@ -1979,13 +2002,18 @@ def migrate_central_to_per_project(rm_manager_dir: str, rm_master_db_path: str =
                 """, (project_id,)).fetchall()
                 
                 for d in deps:
+                    # Wsteczna kompatybilność: stara baza może nie mieć kolumny lag_percent
+                    try:
+                        lag_pct = d['lag_percent'] if d['lag_percent'] is not None else 0
+                    except (IndexError, KeyError):
+                        lag_pct = 0
                     pcon.execute("""
                         INSERT OR IGNORE INTO stage_dependencies 
                         (project_id, predecessor_stage_code, successor_stage_code, 
-                         dependency_type, lag_days)
-                        VALUES (?, ?, ?, ?, ?)
+                         dependency_type, lag_days, lag_percent)
+                        VALUES (?, ?, ?, ?, ?, ?)
                     """, (project_id, d['predecessor_stage_code'], d['successor_stage_code'],
-                          d['dependency_type'], d['lag_days']))
+                          d['dependency_type'], d['lag_days'], lag_pct))
                     detail['dependencies'] += 1
             
             # --- 5. stage_events ---
@@ -2606,9 +2634,10 @@ def init_project(rm_db_path: str, project_id: int, stages_config: List[Dict], de
             for dep in dependencies_config:
                 con.execute("""
                     INSERT OR IGNORE INTO stage_dependencies 
-                    (project_id, predecessor_stage_code, successor_stage_code, dependency_type, lag_days)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (project_id, dep['from'], dep['to'], dep['type'], dep.get('lag', 0)))
+                    (project_id, predecessor_stage_code, successor_stage_code, dependency_type, lag_days, lag_percent)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (project_id, dep['from'], dep['to'], dep['type'],
+                      dep.get('lag', 0), dep.get('lag_pct', 0)))
         
         con.commit()
         print(f"✅ Projekt {project_id} zainicjalizowany: {len(stages_config)} etapów, {len(dependencies_config or [])} zależności")
@@ -2943,17 +2972,22 @@ def get_active_stages(rm_db_path: str, project_id: int) -> List[Dict]:
     """
     con = _open_rm_connection(rm_db_path)
     
-    cursor = con.execute("""
-        SELECT sap.id as period_id, ps.stage_code, sap.started_at, sap.started_by, sap.notes
-        FROM stage_actual_periods sap
-        JOIN project_stages ps ON sap.project_stage_id = ps.id
-        JOIN stage_definitions sd ON ps.stage_code = sd.code  -- 🚀 INNER JOIN filtruje nieistniejące etapy
-        WHERE ps.project_id = ? AND sap.ended_at IS NULL
-              AND ps.stage_code != 'WSTRZYMANY'
-        ORDER BY sap.started_at
-    """, (project_id,))
-    
-    rows = cursor.fetchall()
+    try:
+        cursor = con.execute("""
+            SELECT sap.id as period_id, ps.stage_code, sap.started_at, sap.started_by, sap.notes
+            FROM stage_actual_periods sap
+            JOIN project_stages ps ON sap.project_stage_id = ps.id
+            JOIN stage_definitions sd ON ps.stage_code = sd.code  -- 🚀 INNER JOIN filtruje nieistniejące etapy
+            WHERE ps.project_id = ? AND sap.ended_at IS NULL
+                  AND ps.stage_code != 'WSTRZYMANY'
+            ORDER BY sap.started_at
+        """, (project_id,))
+        rows = cursor.fetchall()
+    except sqlite3.OperationalError as e:
+        # Stare bazy projektów mogą nie mieć jeszcze tabel actual/definitions —
+        # traktujemy jako "brak aktywnych etapów" zamiast wywalać sync.
+        print(f"⚠️  get_active_stages pid={project_id}: {e} — zwracam pustą listę")
+        rows = []
     con.close()
     
     return [dict(row) for row in rows]
@@ -4278,23 +4312,45 @@ def ensure_default_dependencies_for_project(rm_db_path: str, project_id: int) ->
         Liczba dodanych zależności
     """
     con = _open_rm_connection(rm_db_path)
-    
+
+    # Migracja w locie: starsze bazy mogą nie mieć kolumny lag_percent.
+    try:
+        con.execute("ALTER TABLE stage_dependencies ADD COLUMN lag_percent INTEGER DEFAULT 0")
+        con.commit()
+    except sqlite3.OperationalError:
+        pass
+
     added = 0
-    for from_stage, to_stage, dep_type, lag in DEFAULT_DEPENDENCIES:
+    updated = 0
+    for from_stage, to_stage, dep_type, lag, lag_pct in DEFAULT_DEPENDENCIES:
         cursor = con.execute("""
             INSERT OR IGNORE INTO stage_dependencies 
-            (project_id, predecessor_stage_code, successor_stage_code, dependency_type, lag_days)
-            VALUES (?, ?, ?, ?, ?)
-        """, (project_id, from_stage, to_stage, dep_type, lag))
+            (project_id, predecessor_stage_code, successor_stage_code, dependency_type, lag_days, lag_percent)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (project_id, from_stage, to_stage, dep_type, lag, lag_pct))
         
         if cursor.rowcount > 0:
             added += 1
+        else:
+            # Wpis już istniał — uaktualnij lag_percent jeśli go nie miał (migracja
+            # ze starych baz, które nie miały tej kolumny).
+            if lag_pct > 0:
+                upd = con.execute("""
+                    UPDATE stage_dependencies
+                    SET lag_percent = ?
+                    WHERE project_id = ? AND predecessor_stage_code = ?
+                      AND successor_stage_code = ? AND dependency_type = ?
+                      AND COALESCE(lag_percent, 0) = 0
+                """, (lag_pct, project_id, from_stage, to_stage, dep_type))
+                if upd.rowcount > 0:
+                    updated += 1
     
     con.commit()
     con.close()
     
-    if added > 0:
-        print(f"✅ Projekt {project_id}: dodano {added} domyślnych zależności workflow")
+    if added > 0 or updated > 0:
+        print(f"✅ Projekt {project_id}: dodano {added} nowych zależności, "
+              f"zaktualizowano {updated} (lag_percent)")
     
     return added
 
@@ -5302,6 +5358,25 @@ def delete_employee(rm_master_db_path: str, employee_id: int):
     con = _open_rm_connection(rm_master_db_path)
     try:
         con.execute("DELETE FROM employees WHERE id = ?", (employee_id,))
+        con.commit()
+    finally:
+        con.close()
+
+
+def set_employee_master_max_parallel(rm_master_db_path: str, employee_id: int, value: int):
+    """Aktualizuj tylko kolumnę master_max_parallel dla danego pracownika.
+
+    Używane w zakładce Pracownicy w oknie Optymalizatora produkcji.
+    Wartość minimalna = 1.
+    """
+    ensure_list_tables(rm_master_db_path)
+    v = max(1, int(value))
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        con.execute(
+            "UPDATE employees SET master_max_parallel = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (v, int(employee_id)),
+        )
         con.commit()
     finally:
         con.close()
@@ -9185,13 +9260,21 @@ def get_projects_scheduling_data(rm_manager_dir: str, rm_master_db_path: str,
                     if assigned:
                         staff_map[sc] = assigned
 
+            # Migracja w locie: starsze bazy projektów mogą nie mieć kolumny
+            # lag_percent. ALTER TABLE jest idempotentne (try/except).
+            try:
+                con.execute("ALTER TABLE stage_dependencies ADD COLUMN lag_percent INTEGER DEFAULT 0")
+                con.commit()
+            except sqlite3.OperationalError:
+                pass
+
             deps_rows = con.execute("""
                 SELECT predecessor_stage_code, successor_stage_code,
-                       dependency_type, lag_days
+                       dependency_type, lag_days, COALESCE(lag_percent, 0) AS lag_percent
                 FROM stage_dependencies WHERE project_id = ?
             """, (pid,)).fetchall()
             dependencies = [(r['predecessor_stage_code'], r['successor_stage_code'],
-                             r['dependency_type'], r['lag_days'])
+                             r['dependency_type'], r['lag_days'], r['lag_percent'])
                             for r in deps_rows]
 
             actuals_rows = con.execute("""
