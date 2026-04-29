@@ -2171,8 +2171,15 @@ class RMManagerGUI:
 
     def _center_window(self, win: tk.Toplevel, w: int, h: int):
         """Wyśrodkuj okno dialogowe na monitorze, na którym wyświetla się
-        aplikacja główna (poprawna obsługa wielomonitorowa)."""
-        win.update_idletasks()
+        aplikacja główna (poprawna obsługa wielomonitorowa).
+
+        Aby uniknąć efektu „okna-ducha" (mignięcie w domyślnej pozycji przed
+        repozycjonowaniem), okno jest natychmiast `withdraw()` i wyświetlane
+        ponownie po zbudowaniu zawartości (`after_idle` → `deiconify`)."""
+        try:
+            win.withdraw()
+        except Exception:
+            pass
         self.root.update_idletasks()
         try:
             rx = self.root.winfo_rootx()
@@ -2187,6 +2194,17 @@ class RMManagerGUI:
             x = (sw - w) // 2
             y = (sh - h) // 2
         win.geometry(f"{w}x{h}+{x}+{y}")
+
+        def _show():
+            try:
+                win.deiconify()
+                win.lift()
+            except Exception:
+                pass
+        try:
+            win.after_idle(_show)
+        except Exception:
+            _show()
 
     def save_window_geometry(self, window_name: str, window: tk.Toplevel):
         """Zapisz geometrię okna do konfiguracji"""
@@ -2764,6 +2782,7 @@ class RMManagerGUI:
         self.project_combo = ttk.Combobox(
             self.top_frame, 
             width=40, 
+            height=25,
             state='readonly', 
             font=self.FONT_DEFAULT
         )
@@ -15948,6 +15967,11 @@ class RMManagerGUI:
         is_callback_mode = (mode == 'callback')
         
         sel = tk.Toplevel(parent)
+        # Schowaj natychmiast, by uniknąć efektu „okna-ducha" przed wyśrodkowaniem
+        try:
+            sel.withdraw()
+        except Exception:
+            pass
         if is_copy_mode:
             sel.title("📋 Kopiowanie projektu — wybór źródła i celów")
         elif is_callback_mode:
@@ -15960,8 +15984,8 @@ class RMManagerGUI:
         w, h = 750, 720
         if is_copy_mode:
             h = 850  # Większe okno dla trybu kopiowania
-        sel.update_idletasks()
         try:
+            parent.update_idletasks()
             px = parent.winfo_rootx()
             py = parent.winfo_rooty()
             pw = parent.winfo_width()
@@ -15973,6 +15997,18 @@ class RMManagerGUI:
             y = (sel.winfo_screenheight() // 2) - (h // 2)
         sel.geometry(f"{w}x{h}+{x}+{y}")
         sel.minsize(650, 550)
+        # Pokaż dopiero po zbudowaniu zawartości
+        def _sel_show():
+            try:
+                sel.deiconify()
+                sel.lift()
+                sel.focus_force()
+            except Exception:
+                pass
+        try:
+            sel.after_idle(_sel_show)
+        except Exception:
+            _sel_show()
         
         # ===== Zbierz dane o projektach (jednorazowo) =====
         proj_info = {}  # pid -> {name, status, health, variance, forecast_end, is_paused, is_finished}
@@ -17232,9 +17268,26 @@ class RMManagerGUI:
         
         if not reuse:
             self._mp_chart_window = tk.Toplevel(self.root)
+            # Schowaj natychmiast, by uniknąć efektu „okna-ducha"
+            try:
+                self._mp_chart_window.withdraw()
+            except Exception:
+                pass
             self._mp_chart_window.title("📊 Multi-projekt Gantt")
             self._mp_chart_window.geometry("1400x900")
             self._mp_chart_window.minsize(800, 500)
+            # Pokaż dopiero po zbudowaniu zawartości okna
+            def _mp_show():
+                try:
+                    if self._mp_chart_window and self._mp_chart_window.winfo_exists():
+                        self._mp_chart_window.deiconify()
+                        self._mp_chart_window.lift()
+                except Exception:
+                    pass
+            try:
+                self._mp_chart_window.after_idle(_mp_show)
+            except Exception:
+                _mp_show()
             
             # Toolbar na górze okna
             top_bar = tk.Frame(self._mp_chart_window, bg=self.COLOR_TOPBAR, pady=5)
