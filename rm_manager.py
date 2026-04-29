@@ -780,6 +780,23 @@ def ensure_list_tables(master_db_path: str):
     except sqlite3.OperationalError:
         pass  # kolumna już istnieje
 
+    # priority_weights — wagi priorytetów projektów dla optymalizatora
+    # (1=Turbo, 2=Pilny, 3=Normalny). Wagi konfigurowalne przez użytkownika.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS priority_weights (
+            level   INTEGER PRIMARY KEY,
+            label   TEXT    NOT NULL,
+            weight  INTEGER NOT NULL DEFAULT 1
+        )
+    """)
+    # Wstaw domyślne wagi tylko jeśli tabela jest pusta
+    cnt = con.execute("SELECT COUNT(*) FROM priority_weights").fetchone()[0]
+    if cnt == 0:
+        con.executemany(
+            "INSERT INTO priority_weights (level, label, weight) VALUES (?, ?, ?)",
+            [(1, 'Turbo', 100), (2, 'Pilny', 10), (3, 'Normalny', 1)]
+        )
+
     con.commit()
     con.close()
     print(f"✅ Tabele list (employees, transports) gotowe: {master_db_path}")
@@ -5382,6 +5399,125 @@ def set_employee_master_max_parallel(rm_master_db_path: str, employee_id: int, v
         con.close()
 
 
+# ============================================================================
+# Priorytety projektów (dla optymalizatora)
+# ============================================================================
+
+# Kanonicznie używane przez UI/optymalizator. Etykiety pokazywane userowi.
+PROJECT_PRIORITY_LABELS = {1: 'Turbo', 2: 'Pilny', 3: 'Normalny'}
+
+# Wagi domyślne (gdy tabela priority_weights nieosiągalna lub pusta).
+# Logarytmicznie rozdzielone — Turbo zawsze przebije wiele Normalnych.
+DEFAULT_PRIORITY_WEIGHTS = {1: 100, 2: 10, 3: 1}
+
+
+def get_priority_weights(rm_master_db_path: str) -> Dict[int, int]:
+    """Zwróć słownik {level: weight} dla wszystkich poziomów priorytetów.
+
+    Jeśli tabela nie istnieje lub jest niekompletna, uzupełnia z DEFAULT.
+    """
+    weights = dict(DEFAULT_PRIORITY_WEIGHTS)
+    try:
+        ensure_list_tables(rm_master_db_path)
+        con = _open_rm_connection(rm_master_db_path)
+        try:
+            rows = con.execute("SELECT level, weight FROM priority_weights").fetchall()
+            for r in rows:
+                lvl = int(r['level'] if hasattr(r, 'keys') else r[0])
+                w = int(r['weight'] if hasattr(r, 'keys') else r[1])
+                if lvl in (1, 2, 3) and w > 0:
+                    weights[lvl] = w
+        finally:
+            con.close()
+    except Exception as e:
+        print(f"⚠️ get_priority_weights fallback do DEFAULT: {e}")
+    return weights
+
+
+def set_priority_weight(rm_master_db_path: str, level: int, weight: int):
+    """Ustaw wagę dla poziomu priorytetu (1/2/3). weight musi być > 0."""
+    if level not in (1, 2, 3):
+        raise ValueError(f"Nieprawidłowy poziom priorytetu: {level}")
+    w = max(1, int(weight))
+    ensure_list_tables(rm_master_db_path)
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        label = PROJECT_PRIORITY_LABELS.get(level, str(level))
+        con.execute("""
+            INSERT INTO priority_weights (level, label, weight) VALUES (?, ?, ?)
+            ON CONFLICT(level) DO UPDATE SET weight = excluded.weight, label = excluded.label
+        """, (level, label, w))
+        con.commit()
+    finally:
+        con.close()
+
+
+def get_project_priority(master_db_path: str, project_id: int) -> int:
+    """Zwróć priorytet projektu (1=Turbo / 2=Pilny / 3=Normalny). Default=3."""
+    try:
+        con = _open_rm_connection(master_db_path)
+        try:
+            row = con.execute(
+                "SELECT priority FROM projects WHERE project_id = ?", (int(project_id),)
+            ).fetchone()
+            if row and row[0] in (1, 2, 3):
+                return int(row[0])
+        finally:
+            con.close()
+    except Exception:
+        pass
+    return 3
+
+
+def set_project_priority(master_db_path: str, project_id: int, level: int):
+    """Ustaw priorytet projektu (1/2/3) w master.sqlite."""
+    if level not in (1, 2, 3):
+        raise ValueError(f"Nieprawidłowy poziom priorytetu: {level}")
+    con = _open_rm_connection(master_db_path)
+    try:
+        # Idempotentnie zapewnij kolumnę
+        try:
+            con.execute("ALTER TABLE projects ADD COLUMN priority INTEGER NOT NULL DEFAULT 3")
+        except sqlite3.OperationalError:
+            pass
+        con.execute(
+            "UPDATE projects SET priority = ? WHERE project_id = ?",
+            (int(level), int(project_id))
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def get_all_project_priorities(master_db_path: str) -> Dict[int, int]:
+    """Zwróć {project_id: priority} dla wszystkich projektów.
+
+    Brak kolumny / brak rekordu → 3 (Normalny).
+    """
+    out: Dict[int, int] = {}
+    try:
+        con = _open_rm_connection(master_db_path)
+        try:
+            # Sprawdź czy kolumna istnieje
+            try:
+                rows = con.execute("SELECT project_id, priority FROM projects").fetchall()
+            except sqlite3.OperationalError:
+                # brak kolumny — wszyscy Normalni
+                rows = con.execute("SELECT project_id FROM projects").fetchall()
+                for r in rows:
+                    out[int(r[0])] = 3
+                return out
+            for r in rows:
+                pid = int(r[0])
+                p = r[1]
+                out[pid] = int(p) if p in (1, 2, 3) else 3
+        finally:
+            con.close()
+    except Exception as e:
+        print(f"⚠️ get_all_project_priorities: {e}")
+    return out
+
+
 def get_transports(rm_master_db_path: str, active_only: bool = False) -> List[Dict]:
     """Pobierz pozycje z listy transport."""
     ensure_list_tables(rm_master_db_path)
@@ -9144,23 +9280,24 @@ def sync_staff_json_to_table(rm_manager_dir: str, project_ids: List[int]) -> Dic
 
 
 def get_projects_scheduling_data(rm_manager_dir: str, rm_master_db_path: str,
-                                 project_ids: List[int]) -> Dict:
+                                 project_ids: List[int],
+                                 master_db_path: str = None) -> Dict:
     """Pobierz wszystkie dane potrzebne do optymalizacji dla podanych projektów.
-    
+
+    Args:
+        rm_manager_dir: katalog z bazami per-projekt
+        rm_master_db_path: rm_manager.sqlite (employees, constraints, priority_weights)
+        project_ids: ID projektów do pobrania
+        master_db_path: master.sqlite (projects.priority). Jeśli None, priorytety = 3.
+
     Returns:
         {
-            'projects': {
-                pid: {
-                    'stages': {stage_code: {template_start, template_end, duration_days, is_actual, is_active}},
-                    'dependencies': [(pred, succ, type, lag)],
-                    'staff': {stage_code: [employee_id, ...]},
-                    'forecast': {stage_code: {forecast_start, forecast_end, ...}},
-                }
-            },
-            'employees': {eid: {name, category, is_active}},
+            'projects': {pid: {... , 'priority': int}},
+            'employees': {...},
             'constraints': [...],
             'availability': [...],
-            'calendar': [...]
+            'calendar': [...],
+            'priority_weights': {1: int, 2: int, 3: int},
         }
     """
     import json
@@ -9315,7 +9452,24 @@ def get_projects_scheduling_data(rm_manager_dir: str, rm_master_db_path: str,
             'staff': staff_map,
             'staff_dates': staff_dates,
             'forecast': forecast,
+            'priority': 3,  # default; nadpisany niżej z master_db_path
         }
+
+    # Wczytaj priorytety projektów z master.sqlite
+    if master_db_path:
+        try:
+            priorities = get_all_project_priorities(master_db_path)
+            for pid, prio in priorities.items():
+                if pid in projects:
+                    projects[pid]['priority'] = prio
+        except Exception as e:
+            print(f"⚠️ Nie udało się wczytać priorytetów projektów: {e}")
+
+    # Wagi priorytetów (z rm_manager.sqlite)
+    try:
+        priority_weights = get_priority_weights(rm_master_db_path)
+    except Exception:
+        priority_weights = dict(DEFAULT_PRIORITY_WEIGHTS)
 
     return {
         'projects': projects,
@@ -9323,6 +9477,7 @@ def get_projects_scheduling_data(rm_manager_dir: str, rm_master_db_path: str,
         'constraints': constraints,
         'availability': availability,
         'calendar': calendar,
+        'priority_weights': priority_weights,
     }
 
 

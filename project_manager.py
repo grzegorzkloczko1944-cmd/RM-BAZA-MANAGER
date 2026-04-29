@@ -179,6 +179,33 @@ def ensure_projects_stats_columns(con: sqlite3.Connection) -> None:
     except Exception as e:
         print(f"⚠️  Błąd normalizacji status: {e}")
 
+    # priority — używane przez optymalizator (1=Turbo, 2=Pilny, 3=Normalny)
+    ensure_project_priority_column(con)
+
+
+def ensure_project_priority_column(con: sqlite3.Connection) -> None:
+    """Zapewnia, że tabela projects ma kolumnę priority (1=Turbo, 2=Pilny, 3=Normalny).
+
+    Używana przez optymalizator do ważenia funkcji celu — projekty z niższym
+    numerem (wyższym priorytetem) są pchane wcześniej w czasie."""
+    cols = colnames(con, "projects")
+    if "priority" in cols:
+        try:
+            con.execute("UPDATE projects SET priority=3 WHERE priority IS NULL OR priority NOT IN (1,2,3);")
+        except Exception:
+            pass
+        return
+    try:
+        con.execute("ALTER TABLE projects ADD COLUMN priority INTEGER NOT NULL DEFAULT 3;")
+        print("✅ Dodano kolumnę: priority (default=3=Normalny)")
+    except Exception as e:
+        print(f"⚠️  Błąd dodawania priority: {e}")
+        return
+    try:
+        con.execute("UPDATE projects SET priority=3 WHERE priority IS NULL;")
+    except Exception:
+        pass
+
 
 def fetch_projects(
     con: sqlite3.Connection, 

@@ -498,20 +498,56 @@ class ProductionOptimizer:
         # Działa ZAWSZE (niezależnie od ignore_staff) — to fizyczne ograniczenie.
         self._add_person_exclusivity_constraints(target_pids, frozen_pids)
 
-        # --- 6. Cel: minimize makespan (najpóźniejsze zakończenie etapów target) ---
-        target_ends = []
+        # --- 6. Cel: ważona suma końców projektów (priorytety) + makespan tiebreaker ---
+        # Dla każdego projektu obliczamy max(end_vars jego etapów) = project_end_p.
+        # Funkcja celu = Σ_p weight_p × project_end_p + makespan
+        # gdzie weight_p pochodzi z mapy priorytetów (Turbo=100, Pilny=10, Normalny=1).
+        # Dzięki temu projekty Turbo są pchane jak najwcześniej (mała wartość end_p
+        # × duża waga = duży zysk z przesuwania w lewo).
+        priority_weights = self.data.get('priority_weights', {1: 100, 2: 10, 3: 1})
+        # Bezpieczne odzyskanie dla brakujących wartości
+        def _w_for(prio):
+            try:
+                return max(1, int(priority_weights.get(int(prio), 1)))
+            except Exception:
+                return 1
+
+        weighted_terms = []
+        all_target_ends = []
         for pid in target_pids:
             if pid not in projects:
                 continue
-            for sc in projects[pid]['stages']:
+            pdata = projects[pid]
+            prio = pdata.get('priority', 3)
+            w = _w_for(prio)
+
+            # Końce wszystkich etapów target tego projektu
+            project_ends = []
+            for sc in pdata['stages']:
                 key = (pid, sc)
                 if key in self._end_vars:
-                    target_ends.append(self._end_vars[key])
+                    project_ends.append(self._end_vars[key])
 
-        if target_ends:
+            if not project_ends:
+                continue
+
+            all_target_ends.extend(project_ends)
+
+            # project_end_p = max(end_vars)
+            project_end_var = self.model.NewIntVar(
+                0, self.cal.total_days, f'project_end_p{pid}'
+            )
+            self.model.AddMaxEquality(project_end_var, project_ends)
+            weighted_terms.append(w * project_end_var)
+
+            print(f"⚡ priorytet pid={pid}: {prio} (waga={w})")
+
+        if weighted_terms:
+            # makespan jako delikatny tiebreaker (waga 1) — zachęca solver do
+            # nieprzeciągania harmonogramu nawet dla projektów Normalnych
             makespan = self.model.NewIntVar(0, self.cal.total_days, 'makespan')
-            self.model.AddMaxEquality(makespan, target_ends)
-            self.model.Minimize(makespan)
+            self.model.AddMaxEquality(makespan, all_target_ends)
+            self.model.Minimize(sum(weighted_terms) + makespan)
 
     def _add_resource_constraints(self, constraints_list: List[Dict],
                                   employees: Dict,
@@ -1181,9 +1217,10 @@ def run_optimization(rm_manager_dir: str, rm_master_db_path: str,
                      frozen_project_ids: List[int] = None,
                      date_range: Tuple[str, str] = None,
                      time_limit_seconds: int = 30,
-                     ignore_staff: bool = False) -> Dict:
+                     ignore_staff: bool = False,
+                     master_db_path: str = None) -> Dict:
     """Główna funkcja — uruchom optymalizację.
-    
+
     Args:
         rm_manager_dir: katalog RM_MANAGER (z bazami per-projekt)
         rm_master_db_path: ścieżka do rm_manager.sqlite
@@ -1193,7 +1230,8 @@ def run_optimization(rm_manager_dir: str, rm_master_db_path: str,
         date_range: (start_iso, end_iso) — zakres dat, None = auto (dziś + 365 dni)
         time_limit_seconds: max czas solvera
         ignore_staff: pomijaj ograniczenia pracowników (exclusive_person + availability)
-    
+        master_db_path: ścieżka do master.sqlite (potrzebne do priorytetów projektów)
+
     Returns:
         Dict z wynikiem (patrz ProductionOptimizer.optimize())
     """
@@ -1228,7 +1266,8 @@ def run_optimization(rm_manager_dir: str, rm_master_db_path: str,
             print(f"⚠️  Auto-migracja zależności pid={pid} pominięta: {e}")
 
     data = rm_manager.get_projects_scheduling_data(
-        rm_manager_dir, rm_master_db_path, all_pids
+        rm_manager_dir, rm_master_db_path, all_pids,
+        master_db_path=master_db_path,
     )
 
     print(f"⚡ run_optimization: projects loaded={list(data.get('projects', {}).keys())}")

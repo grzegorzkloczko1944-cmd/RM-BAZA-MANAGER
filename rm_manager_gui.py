@@ -2704,6 +2704,7 @@ class RMManagerGUI:
         tools_menu.add_command(label="🎯 Diagnostyka milestone'ów", command=self.diagnose_milestones)
         tools_menu.add_separator()
         tools_menu.add_command(label="⚡ Optymalizator produkcji...", command=self.optimizer_dialog)
+        tools_menu.add_command(label="↩ Cofnij ostatnią optymalizację...", command=self.undo_last_optimization_dialog)
         tools_menu.add_separator()
         tools_menu.add_command(label="🐛 DEBUG — Zrzut danych projektów", command=self.debug_dump_dialog)
         tools_menu.add_separator()
@@ -17089,10 +17090,14 @@ class RMManagerGUI:
                     for period in stage.get('actual_periods', []):
                         if period.get('started_at'):
                             start_date = datetime.strptime(period['started_at'][:10], '%Y-%m-%d')
-                            end_date = datetime.strptime(
-                                (period.get('ended_at') or datetime.now().strftime('%Y-%m-%d'))[:10],
-                                '%Y-%m-%d'
-                            )
+                            if period.get('ended_at'):
+                                end_date = datetime.strptime(period['ended_at'][:10], '%Y-%m-%d')
+                            else:
+                                # Etap trwa — koniec paska na początku jutra,
+                                # żeby wizualnie pokrywał cały dzisiejszy dzień
+                                end_date = datetime.strptime(
+                                    datetime.now().strftime('%Y-%m-%d'), '%Y-%m-%d'
+                                ) + timedelta(days=1)
                             if is_ms:
                                 end_date = start_date + timedelta(days=1)
                             else:
@@ -17168,8 +17173,9 @@ class RMManagerGUI:
         # Zachowaj widok ze starego okna?
         saved_xlim = None
         saved_ylim = None
-        # 🔧 Wykryj zmianę listy projektów — wtedy NIE przywracaj Y (nowe wiersze
-        # byłyby poza widocznym zakresem i znikały po przerysowaniu)
+        # 🔧 Wykryj zmianę listy projektów — wtedy NIE przywracaj X i Y, bo
+        # nowe projekty (zwłaszcza [SYM] z testowymi datami) mogą mieć paski
+        # poza dotychczasowym zakresem osi i wyglądałoby to na "znikanie".
         projects_changed = False
         if preserve_view and hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
             try:
@@ -17177,10 +17183,9 @@ class RMManagerGUI:
                 old_pids = self._mp_chart_meta.get('project_ids', [])
                 if list(old_pids) != list(project_ids):
                     projects_changed = True
-                if old_ax:
+                if old_ax and not projects_changed:
                     saved_xlim = tuple(old_ax.get_xlim())
-                    if not projects_changed:
-                        saved_ylim = tuple(old_ax.get_ylim())
+                    saved_ylim = tuple(old_ax.get_ylim())
             except Exception:
                 pass
         
@@ -17569,7 +17574,34 @@ class RMManagerGUI:
                 view_end = max_date + timedelta(days=30)
             
             ax.set_xlim(mdates.date2num(view_start), mdates.date2num(view_end))
-        
+
+        # 🔧 Walidacja zachowanego widoku (preserve_view) względem NOWYCH danych.
+        # Gdy nowe dane (np. po edycji daty etapu, dodaniu projektu, zmianie SYM)
+        # leżą poza zakresem saved_xlim/saved_ylim, paski byłyby niewidoczne ⇒
+        # zresetuj zachowany widok i pokaż domyślne kadrowanie.
+        if saved_xlim and all_dates:
+            try:
+                sx0, sx1 = saved_xlim
+                data_min_num = mdates.date2num(min(all_dates))
+                data_max_num = mdates.date2num(max(all_dates))
+                # Reset gdy KTÓREKOLWIEK dane wystają poza zachowany widok X
+                if data_min_num < sx0 - 0.5 or data_max_num > sx1 + 0.5:
+                    saved_xlim = None
+            except Exception:
+                saved_xlim = None
+        if saved_ylim and y_labels:
+            try:
+                sy0, sy1 = saved_ylim
+                n_rows = len(y_labels)
+                ymax = max(sy0, sy1)
+                ymin = min(sy0, sy1)
+                # Standardowy zakres Y: (-0.5, n_rows-0.5). Reset gdy końcówki
+                # nie pasują do nowej liczby wierszy (z małym marginesem).
+                if ymax > n_rows + 0.5 or ymin < -1.5 or (ymax - ymin) < 0.5:
+                    saved_ylim = None
+            except Exception:
+                saved_ylim = None
+
         ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=mdates.MO))
         ax.xaxis.set_major_formatter(mdates.DateFormatter('W%W\n%d/%m'))
         ax.xaxis.set_minor_locator(mdates.DayLocator())
@@ -17956,11 +17988,32 @@ class RMManagerGUI:
         
         if event.button != 1:
             return
-        
+
+        # 🖱️ LPP w puste pole (poza paskiem) → automatyczny PAN, bez modyfikatorów.
+        # Działa zawsze (nawet bez locka). Sprawdzamy paski PRZED weryfikacją locka,
+        # żeby kliknięcie na tle zawsze startowało przesuwanie.
+        pid_hit, stage_hit, _edge_hit, bar_hit = self._mp_find_bar(event.xdata, event.ydata)
+        if not bar_hit:
+            self._mp_pan_state = {
+                'active': True,
+                'start_px': event.x, 'start_py': event.y,
+                'start_xlim': self._mp_chart_meta['ax'].get_xlim(),
+                'start_ylim': self._mp_chart_meta['ax'].get_ylim(),
+            }
+            self._mp_chart_meta['canvas'].get_tk_widget().config(cursor='fleur')
+            try:
+                self._mp_status.config(
+                    text="🖐️ Przesuwanie wykresu (puść LPP aby zakończyć)",
+                    fg=self.COLOR_BLUE
+                )
+            except Exception:
+                pass
+            return
+
         # Sprawdz lock
         if not self.have_lock or self._locked_project_id is None:
             self._mp_status.config(
-                text="🔒 Dwuklik = lockuj projekt | Shift+mysz: przesuwanie | Ctrl+scroll: zoom",
+                text="🔒 Dwuklik = lockuj projekt | LPP w puste pole: przesuwanie | Ctrl+scroll: zoom",
                 fg=self.COLOR_RED
             )
             return
@@ -17972,8 +18025,8 @@ class RMManagerGUI:
                 fg=self.COLOR_RED
             )
             return
-        
-        pid, stage_code, edge, bar_item = self._mp_find_bar(event.xdata, event.ydata)
+
+        pid, stage_code, edge, bar_item = pid_hit, stage_hit, _edge_hit, bar_hit
         if not stage_code or not bar_item:
             return
         
@@ -18215,7 +18268,7 @@ class RMManagerGUI:
                 canvas.get_tk_widget().config(cursor='')
                 if not self._mp_drag_state.get('active'):
                     self._mp_status.config(
-                        text=f"✅ Wykres gotowy | Shift+mysz: przesuwanie | Ctrl+scroll: zoom czasu | Scroll: góra/dół | 🏠 reset widoku",
+                        text=f"✅ Wykres gotowy | LPP w tło: przesuwanie | Ctrl+scroll: zoom czasu | Scroll: góra/dół | 🏠 reset widoku",
                         fg=self.COLOR_GREEN
                     )
     
@@ -18651,8 +18704,15 @@ class RMManagerGUI:
             
             # Rozdziel konflikty na PRAWDZIWE KOLIZJE (overlap z bieżącym etapem)
             # i INNE ZLECENIA (ten sam master, ale w innym oknie czasowym).
+            # 🔧 Używamy OSTREJ nierówności (cs < this_end AND ce > this_start),
+            # bo styk krawędziami (np. etap A kończy się 20-04, etap B zaczyna
+            # 20-04) to przekazanie pracy, nie kolizja.
+            # 🔧 Dodatkowo: kolizje CZYSTO PRZESZŁE (nakładka kończy się przed
+            # dzisiaj) NIE są raportowane jako 🔴 — historii już nie zmienimy,
+            # a alarm tylko niepotrzebnie straszy. Trafią do „inne zlecenia”.
             this_start = blk.get('this_start')
             this_end = blk.get('this_end')
+            today_d = datetime.now().date()
             real, info = [], []
             for c in conflicts:
                 try:
@@ -18661,10 +18721,17 @@ class RMManagerGUI:
                 except Exception:
                     info.append(c)
                     continue
-                if this_start and this_end and cs <= this_end and ce >= this_start:
-                    real.append(c)
-                else:
+                overlaps = (this_start and this_end
+                            and cs < this_end and ce > this_start)
+                if not overlaps:
                     info.append(c)
+                    continue
+                # Przeszła nakładka (kończy się przed dzisiaj) — bez alarmu
+                overlap_end = min(this_end, ce)
+                if overlap_end < today_d:
+                    info.append(c)
+                else:
+                    real.append(c)
             
             if real:
                 head_color = "#c0392b"
@@ -19999,7 +20066,11 @@ class RMManagerGUI:
                         if period.get('ended_at'):
                             end_date = datetime.strptime(period['ended_at'][:10], '%Y-%m-%d')
                         else:
-                            end_date = datetime.now()
+                            # Etap trwa — koniec paska na początku jutra,
+                            # żeby wizualnie pokrywał cały dzisiejszy dzień
+                            end_date = datetime.strptime(
+                                datetime.now().strftime('%Y-%m-%d'), '%Y-%m-%d'
+                            ) + timedelta(days=1)
                         start_date, end_date = self._ensure_min_1day_dt(start_date, end_date)
                         
                         gantt_data.append({
@@ -25157,6 +25228,222 @@ Kod: {unlock_code}
     # OPTYMALIZATOR PRODUKCJI — główny dialog
     # ========================================================================
 
+    # ---- Trwałe snapshoty undo (przeżywają zamknięcie okna optymalizatora) ----
+
+    def _optimizer_undo_dir(self):
+        """Katalog na trwałe snapshoty undo optymalizacji."""
+        from pathlib import Path
+        d = Path(self.backup_dir) / "optimizer_undo"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _save_optimizer_undo_snapshot(self, snapshots):
+        """Zapisz snapshot dat (sprzed apply_optimization) jako JSON.
+
+        Plik zawiera: timestamp, użytkownika, mapę pid → snapshot.
+        Zapisuje też kopię jako 'last.json' używaną przez „Cofnij ostatnią
+        optymalizację" w menu Narzędzia.
+        """
+        import json
+        from datetime import datetime
+        from pathlib import Path
+
+        if not snapshots:
+            return None
+
+        d = self._optimizer_undo_dir()
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        user = getattr(self, 'current_user_login', None) or 'unknown'
+
+        # Klucze pid muszą być stringami w JSON
+        snap_serializable = {str(k): v for k, v in snapshots.items()}
+        # Nazwy projektów do późniejszego wyświetlenia
+        names = {str(pid): self.project_names.get(int(pid), f"Projekt {pid}")
+                 for pid in snapshots.keys()}
+
+        payload = {
+            'timestamp': datetime.now().isoformat(),
+            'user': user,
+            'project_names': names,
+            'snapshots': snap_serializable,
+        }
+        path = d / f"opt_undo_{ts}.json"
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        # 'last.json' = wskaźnik do najnowszego
+        last = d / "last.json"
+        try:
+            with open(last, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+        print(f"💾 Zapisano snapshot undo: {path.name} ({len(snapshots)} projektów)")
+        return path
+
+    def _load_last_optimizer_undo_snapshot(self):
+        """Załaduj ostatni zapisany snapshot undo (lub None jeśli brak)."""
+        import json
+        from pathlib import Path
+        try:
+            last = Path(self.backup_dir) / "optimizer_undo" / "last.json"
+            if not last.exists():
+                return None
+            with open(last, 'r', encoding='utf-8') as f:
+                payload = json.load(f)
+            # Klucze pid → int
+            snaps = payload.get('snapshots', {}) or {}
+            payload['snapshots'] = {int(k): v for k, v in snaps.items()}
+            return payload
+        except Exception as e:
+            print(f"⚠️ Nie udało się wczytać last.json: {e}")
+            return None
+
+    def _clear_optimizer_undo_snapshot(self):
+        """Usuń wskaźnik 'last.json' (po cofnięciu)."""
+        from pathlib import Path
+        try:
+            last = Path(self.backup_dir) / "optimizer_undo" / "last.json"
+            if last.exists():
+                last.unlink()
+                print("🗑️ Usunięto wskaźnik last.json (snapshot wykorzystany)")
+        except Exception as e:
+            print(f"⚠️ Nie udało się usunąć last.json: {e}")
+
+    def undo_last_optimization_dialog(self):
+        """Cofnij ostatnio zastosowaną optymalizację (między sesjami)."""
+        from datetime import datetime
+        try:
+            import rm_optimizer
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Nie można załadować rm_optimizer:\n{e}")
+            return
+
+        payload = self._load_last_optimizer_undo_snapshot()
+        if not payload or not payload.get('snapshots'):
+            messagebox.showinfo(
+                "Brak danych do cofnięcia",
+                "Nie znaleziono snapshotu z ostatniej optymalizacji.\n\n"
+                "Snapshot tworzony jest tylko po kliknięciu „✅ Zastosuj wynik”\n"
+                "w oknie Optymalizatora i znika po wykonaniu cofnięcia."
+            )
+            return
+
+        snapshots = payload['snapshots']
+        ts = payload.get('timestamp', '?')
+        user = payload.get('user', '?')
+        names_map = payload.get('project_names', {}) or {}
+
+        try:
+            ts_disp = datetime.fromisoformat(ts).strftime("%d-%m-%Y %H:%M:%S")
+        except Exception:
+            ts_disp = ts
+
+        proj_lines = []
+        for pid in sorted(snapshots.keys()):
+            nm = names_map.get(str(pid)) or self.project_names.get(int(pid), f"Projekt {pid}")
+            proj_lines.append(f"  • {nm}")
+        proj_summary = "\n".join(proj_lines[:15])
+        if len(proj_lines) > 15:
+            proj_summary += f"\n  … oraz {len(proj_lines) - 15} więcej"
+
+        if not messagebox.askyesno(
+            "↩ Cofnij ostatnią optymalizację",
+            f"Znaleziono snapshot z optymalizacji:\n\n"
+            f"  📅 Data:        {ts_disp}\n"
+            f"  👤 Użytkownik:  {user}\n"
+            f"  📁 Projektów:   {len(snapshots)}\n\n"
+            f"Projekty do przywrócenia:\n{proj_summary}\n\n"
+            f"⚠️ UWAGA: Wszystkie zmiany dat template wprowadzone PO tej\n"
+            f"optymalizacji (ręczne edycje, kolejne optymalizacje) zostaną\n"
+            f"NADPISANE wartościami sprzed niej.\n\n"
+            f"Przywrócić daty?",
+            icon='warning'):
+            return
+
+        # Zajmij blokady na każdy projekt
+        pids = list(snapshots.keys())
+        locked, failed = [], {}
+        for pid in pids:
+            ok, _lid = self.lock_manager.acquire_project_lock(int(pid), force=False)
+            if ok:
+                locked.append(int(pid))
+            else:
+                try:
+                    failed[int(pid)] = self.lock_manager.get_project_lock_owner(int(pid))
+                except Exception:
+                    failed[int(pid)] = None
+
+        if failed:
+            lines = []
+            for pid, owner in failed.items():
+                nm = names_map.get(str(pid)) or self.project_names.get(int(pid), f"Projekt {pid}")
+                if owner:
+                    who = f"{owner.get('user', '?')}@{owner.get('computer', '?')}"
+                    lines.append(f"  • {nm} — zajęty przez {who}")
+                else:
+                    lines.append(f"  • {nm} — zajęty (nieznany właściciel)")
+            force = messagebox.askyesno(
+                "Projekty zajęte",
+                f"Nie można zająć blokady dla {len(failed)} projektów:\n\n"
+                + "\n".join(lines) + "\n\nWymusić przejęcie? "
+                "(Inni użytkownicy stracą swoje blokady)",
+                icon='warning')
+            if not force:
+                for pid in locked:
+                    try:
+                        self.lock_manager.release_project_lock(pid)
+                    except Exception:
+                        pass
+                return
+            for pid in list(failed.keys()):
+                ok, _lid = self.lock_manager.acquire_project_lock(int(pid), force=True)
+                if ok:
+                    locked.append(int(pid))
+
+        try:
+            undo_res = rm_optimizer.undo_optimization(
+                rm_manager_dir=self.rm_projects_dir,
+                snapshots=snapshots,
+            )
+        except Exception as e:
+            for pid in locked:
+                try:
+                    self.lock_manager.release_project_lock(pid)
+                except Exception:
+                    pass
+            messagebox.showerror("Błąd", f"Nie udało się cofnąć:\n{e}")
+            return
+
+        # Zwolnij blokady
+        for pid in locked:
+            try:
+                self.lock_manager.release_project_lock(pid)
+            except Exception:
+                pass
+
+        # Skasuj snapshot — został wykorzystany
+        self._clear_optimizer_undo_snapshot()
+
+        msg = (f"↩ Przywrócono daty w {undo_res.get('restored_projects', 0)} projektach.\n"
+               f"🔓 Zwolniono blokady: {len(locked)} projektów.")
+        if undo_res.get('errors'):
+            msg += "\n\n⚠️ Błędy:\n" + "\n".join(undo_res['errors'])
+        messagebox.showinfo("Cofnięto", msg)
+
+        # Odśwież widoki
+        try:
+            self.load_project_stages()
+            self.refresh_timeline()
+            if self.matplotlib_canvas:
+                self.create_embedded_gantt_chart(preserve_view=True)
+            if self._is_mp_chart_open():
+                self._create_multi_project_chart_window(
+                    self._mp_chart_meta['project_ids'], preserve_view=True)
+        except Exception:
+            pass
+
     def optimizer_dialog(self):
         """Okno optymalizatora produkcji z zakładkami: Uruchom, Ograniczenia, Pracownicy, Niedostępność, Kalendarz, Historia."""
         try:
@@ -25206,6 +25493,11 @@ Kod: {unlock_code}
         tab_workers = tk.Frame(notebook)
         notebook.add(tab_workers, text="  👤  Pracownicy  ")
         self._optimizer_build_workers_tab(tab_workers, dlg)
+
+        # === Zakładka 3b: Priorytety projektów + wagi ===
+        tab_priorities = tk.Frame(notebook)
+        notebook.add(tab_priorities, text="  ⭐  Priorytety  ")
+        self._optimizer_build_priorities_tab(tab_priorities, dlg)
 
         # === Zakładka 4: Niedostępność pracowników ===
         tab_avail = tk.Frame(notebook)
@@ -25390,8 +25682,14 @@ Kod: {unlock_code}
                         extras.append("WSTRZYMANY")
             except Exception:
                 pass
+            # Priorytet (ikona przed nazwą)
+            try:
+                prio = rmm.get_project_priority(self.master_db_path, pid)
+            except Exception:
+                prio = 3
+            prio_icon = {1: '🔥', 2: '⚠️', 3: '🟢'}.get(prio, '🟢')
             suffix = f"  [{', '.join(extras)}]" if extras else ""
-            return f"P{pid}: {pname}{suffix}"
+            return f"{prio_icon} P{pid}: {pname}{suffix}"
 
         def _refresh_target_list():
             target_list.delete(0, tk.END)
@@ -25472,6 +25770,38 @@ Kod: {unlock_code}
             print(f"⚡ OPTIMIZER: rm_projects_dir={self.rm_projects_dir}")
             print(f"⚡ OPTIMIZER: rm_master_db_path={self.rm_master_db_path}")
 
+            # Ostrzeżenie: wagi priorytetów działają tylko gdy ≥2 projekty są target.
+            # Gdy target jest 1, mnożenie przez wagę to tylko skalowanie funkcji celu
+            # i nie zmienia wyniku. Sprawdź czy wśród WSZYSTKICH wybranych projektów
+            # (target + frozen) są różne priorytety — jeśli tak, ostrzeż.
+            if len(selected) == 1:
+                try:
+                    all_pids_check = list(selected) + list(frozen)
+                    prios = set()
+                    for _pid in all_pids_check:
+                        try:
+                            prios.add(rmm.get_project_priority(self.master_db_path, _pid))
+                        except Exception:
+                            pass
+                    if len(prios) > 1:
+                        if not messagebox.askyesno(
+                            "Priorytety nie wpłyną na wynik",
+                            "Wybrałeś tylko 1 projekt jako TARGET, ale projekty mają różne priorytety.\n\n"
+                            "Wagi priorytetów działają tylko między projektami które są jednocześnie\n"
+                            "optymalizowane (TARGET). Projekty „widziane przez solver” (frozen) mają\n"
+                            "zafiksowany harmonogram i waga ich nie dotyczy.\n\n"
+                            "Aby priorytet zadziałał, zaznacz ≥2 projekty w sekcji „🎯 Projekty do\n"
+                            "optymalizacji”.\n\n"
+                            "Kontynuować mimo to?",
+                            parent=dlg, icon='warning'):
+                            result_text.configure(state=tk.NORMAL)
+                            result_text.delete('1.0', tk.END)
+                            result_text.insert(tk.END, "⏹  Anulowano.\n")
+                            result_text.configure(state=tk.DISABLED)
+                            return
+                except Exception:
+                    pass
+
             # Wyczyść
             result_text.configure(state=tk.NORMAL)
             result_text.delete('1.0', tk.END)
@@ -25488,6 +25818,7 @@ Kod: {unlock_code}
                     frozen_project_ids=frozen,
                     time_limit_seconds=tl,
                     ignore_staff=nostaff_var.get(),
+                    master_db_path=self.master_db_path,
                 )
             except Exception as e:
                 result_text.configure(state=tk.NORMAL)
@@ -25659,6 +25990,12 @@ Kod: {unlock_code}
                 if apply_result.get('snapshots'):
                     btn_undo._snapshots = apply_result['snapshots']
                     btn_undo.configure(state=tk.NORMAL)
+                    # 💾 Zapis snapshotu na dysk — żeby cofnięcie było możliwe
+                    # po zamknięciu okna (z menu „Cofnij ostatnią optymalizację").
+                    try:
+                        self._save_optimizer_undo_snapshot(apply_result['snapshots'])
+                    except Exception as _e:
+                        print(f"⚠️ Nie udało się zapisać snapshotu undo na dysk: {_e}")
                 btn_release_locks.configure(state=tk.NORMAL)
                 # Auto-odśwież Gantt w głównym oknie — daty się zmieniły
                 _refresh_main_views()
@@ -25692,6 +26029,11 @@ Kod: {unlock_code}
                 btn_undo.configure(state=tk.DISABLED)
                 btn_undo._snapshots = None
                 btn_release_locks.configure(state=tk.DISABLED)
+                # 🗑️ Usuń trwały snapshot — został już wykorzystany
+                try:
+                    self._clear_optimizer_undo_snapshot()
+                except Exception:
+                    pass
                 # Auto-odśwież Gantt w głównym oknie — daty zostały przywrócone
                 _refresh_main_views()
             except Exception as e:
@@ -25742,6 +26084,23 @@ Kod: {unlock_code}
         dlg._opt_locked_pids = []
         _prev_close = dlg.protocol("WM_DELETE_WINDOW")
         def _on_close():
+            # ⚠️ Ostrzeżenie: są wciąż dostępne snapshoty (zastosowano wynik
+            # ale nie cofnięto). Po zamknięciu cofnięcie z tego okna nie będzie
+            # możliwe — ale snapshot został zapisany na dysk i można cofnąć
+            # z menu Narzędzia → „↩ Cofnij ostatnią optymalizację".
+            try:
+                if getattr(btn_undo, '_snapshots', None):
+                    if not messagebox.askyesno(
+                        "Zamknąć okno optymalizatora?",
+                        "Zastosowałeś wynik optymalizacji, ale nie cofnąłeś go w tym oknie.\n\n"
+                        "Po zamknięciu okna przycisk „↩ Cofnij optymalizację” zniknie,\n"
+                        "ale snapshot dat został zapisany na dysku i nadal możesz go cofnąć\n"
+                        "z menu  Narzędzia → „↩ Cofnij ostatnią optymalizację”.\n\n"
+                        "Zamknąć okno?",
+                        parent=dlg, icon='warning'):
+                        return
+            except Exception:
+                pass
             try:
                 if getattr(dlg, '_opt_locked_pids', None):
                     _release_opt_locks()
@@ -26085,6 +26444,267 @@ Kod: {unlock_code}
             ed.protocol("WM_DELETE_WINDOW", _on_close)
 
         refresh()
+
+    # ----------------------------------------------------------------
+    # TAB: Pracownicy — limit etapów jako Master
+    # ----------------------------------------------------------------
+
+    def _optimizer_build_priorities_tab(self, parent, dlg):
+        """Zakładka edycji priorytetów projektów + konfigurowalnych wag.
+
+        Lewa strona: lista projektów z dropdownem priorytetu (1=Turbo, 2=Pilny, 3=Normalny).
+        Prawa strona: edycja wag (Turbo/Pilny/Normalny) — wpływ na funkcję celu solvera.
+        """
+        # ===== Górny pasek info =====
+        info = tk.Frame(parent, padx=10, pady=8, bg="#F4F6F8")
+        info.pack(fill=tk.X)
+        tk.Label(info,
+                 text=("⭐  Priorytet projektu wpływa na kolejność w optymalizatorze.\n"
+                       "    Im wyższy priorytet (mniejszy numer), tym wcześniej projekt\n"
+                       "    będzie pchany w czasie. Wagi liczbowe konfigurowalne →"),
+                 justify='left', bg="#F4F6F8", font=self.FONT_DEFAULT
+                 ).pack(side=tk.LEFT)
+
+        # ===== Notka — UWAGA o działaniu wag =====
+        note = tk.Frame(parent, padx=10, pady=6, bg="#FFF8DC")
+        note.pack(fill=tk.X)
+        tk.Label(note,
+                 text=("⚠️  UWAGA: wagi działają TYLKO gdy w zakładce „🚀 Uruchom” zaznaczysz\n"
+                       "    co najmniej 2 projekty jako 🎯 TARGET. Gdy target jest 1, waga jest\n"
+                       "    tylko skalą funkcji celu i nie zmienia wyniku optymalizacji.\n"
+                       "    Projekty „widziane przez solver” (frozen) mają zafiksowany harmonogram —\n"
+                       "    ich priorytet nie wpływa na rozwiązanie."),
+                 justify='left', bg="#FFF8DC", font=self.FONT_DEFAULT, fg="#7A5C00"
+                 ).pack(side=tk.LEFT)
+
+        # ===== Główne 2-kolumnowe rozłożenie =====
+        main = tk.Frame(parent)
+        main.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+
+        # --- LEWO: lista projektów ---
+        left = tk.LabelFrame(main, text="  Projekty — przypisanie priorytetu  ",
+                             font=self.FONT_BOLD, padx=6, pady=6)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
+
+        # Toolbar lewy
+        ltool = tk.Frame(left)
+        ltool.pack(fill=tk.X, pady=(0, 4))
+        show_finished_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(ltool, text="Pokaż zakończone",
+                       variable=show_finished_var,
+                       command=lambda: _refresh_projects()
+                       ).pack(side=tk.LEFT, padx=2)
+        tk.Button(ltool, text="🔄 Odśwież",
+                  command=lambda: _refresh_projects(),
+                  font=self.FONT_DEFAULT, padx=8
+                  ).pack(side=tk.LEFT, padx=4)
+
+        # Treeview projektów
+        cols = ('id', 'name', 'priority')
+        tree = ttk.Treeview(left, columns=cols, show='headings', height=18)
+        tree.heading('id', text='ID');           tree.column('id', width=60, stretch=False, anchor='center')
+        tree.heading('name', text='Projekt');    tree.column('name', width=300)
+        tree.heading('priority', text='Priorytet'); tree.column('priority', width=140, anchor='center')
+
+        # Tagi kolorów wg priorytetu
+        tree.tag_configure('p1', background='#fde2e2', foreground='#c0392b')  # Turbo — czerwony
+        tree.tag_configure('p2', background='#fff4d6', foreground='#b9770e')  # Pilny — pomarańcz
+        tree.tag_configure('p3', background='#ffffff', foreground='#333333')  # Normalny
+
+        vsb = ttk.Scrollbar(left, orient='vertical', command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        PRIO_LABELS = {1: '🔥 1 Turbo', 2: '⚠️ 2 Pilny', 3: '🟢 3 Normalny'}
+        PRIO_TAGS = {1: 'p1', 2: 'p2', 3: 'p3'}
+
+        def _refresh_projects():
+            tree.delete(*tree.get_children())
+            try:
+                priorities = rmm.get_all_project_priorities(self.master_db_path)
+            except Exception as e:
+                messagebox.showerror("Błąd",
+                                     f"Nie udało się odczytać priorytetów: {e}",
+                                     parent=dlg)
+                return
+
+            for pid in self.projects:
+                pname = self.project_names.get(pid, f"Projekt {pid}")
+
+                # Filtr "pokaż zakończone"
+                if not show_finished_var.get():
+                    try:
+                        pdb = self.get_project_db_path(pid)
+                        if os.path.exists(pdb) and rmm.is_milestone_set(pdb, pid, 'ZAKONCZONY'):
+                            continue
+                    except Exception:
+                        pass
+
+                prio = priorities.get(pid, 3)
+                tree.insert('', tk.END, iid=str(pid),
+                            values=(pid, pname, PRIO_LABELS.get(prio, str(prio))),
+                            tags=(PRIO_TAGS.get(prio, 'p3'),))
+
+        # ===== Akcje masowe (przyciski pod listą) =====
+        bulk = tk.Frame(left, pady=4)
+        bulk.pack(fill=tk.X)
+        tk.Label(bulk, text="Ustaw zaznaczonym:",
+                 font=self.FONT_BOLD).pack(side=tk.LEFT, padx=(0, 6))
+
+        def _set_selected(level: int):
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Uwaga",
+                                       "Zaznacz co najmniej jeden projekt z listy.",
+                                       parent=dlg)
+                return
+            for iid in sel:
+                try:
+                    rmm.set_project_priority(self.master_db_path, int(iid), level)
+                except Exception as e:
+                    print(f"⚠️ set priority pid={iid}: {e}")
+            _refresh_projects()
+            # Zaznacz ponownie te same wiersze (po refresh)
+            for iid in sel:
+                try:
+                    tree.selection_add(iid)
+                except tk.TclError:
+                    pass
+
+        tk.Button(bulk, text="🔥 Turbo", command=lambda: _set_selected(1),
+                  bg='#c0392b', fg='white', font=self.FONT_BOLD, padx=10
+                  ).pack(side=tk.LEFT, padx=2)
+        tk.Button(bulk, text="⚠️ Pilny", command=lambda: _set_selected(2),
+                  bg='#e67e22', fg='white', font=self.FONT_BOLD, padx=10
+                  ).pack(side=tk.LEFT, padx=2)
+        tk.Button(bulk, text="🟢 Normalny", command=lambda: _set_selected(3),
+                  bg='#27ae60', fg='white', font=self.FONT_BOLD, padx=10
+                  ).pack(side=tk.LEFT, padx=2)
+
+        # Dwuklik = cykl priorytetu (3→2→1→3)
+        def _cycle_priority(_e=None):
+            sel = tree.selection()
+            if not sel:
+                return
+            iid = sel[0]
+            try:
+                priorities = rmm.get_all_project_priorities(self.master_db_path)
+                cur = priorities.get(int(iid), 3)
+                # Cykl: 3 → 2 → 1 → 3
+                next_level = {3: 2, 2: 1, 1: 3}[cur]
+                rmm.set_project_priority(self.master_db_path, int(iid), next_level)
+                _refresh_projects()
+                tree.selection_set(iid)
+            except Exception as e:
+                print(f"⚠️ cycle priority: {e}")
+
+        tree.bind('<Double-1>', _cycle_priority)
+
+        # --- PRAWO: edycja wag ---
+        right = tk.LabelFrame(main, text="  Wagi priorytetów (funkcja celu solvera)  ",
+                              font=self.FONT_BOLD, padx=10, pady=8, width=320)
+        right.pack(side=tk.RIGHT, fill=tk.Y, padx=(6, 0))
+        right.pack_propagate(False)
+
+        tk.Label(right,
+                 text=("Wagi mnożą „pozycję czasową” każdego projektu\n"
+                       "w funkcji celu. Solver minimalizuje sumę:\n"
+                       "    Σ waga_p × koniec_projektu_p\n\n"
+                       "Większa waga = projekt pchany wcześniej.\n"
+                       "Skala logarytmiczna (np. 1/10/100) gwarantuje,\n"
+                       "że wyższy priorytet zawsze przebije niższy."),
+                 justify='left', font=self.FONT_DEFAULT, fg="#444"
+                 ).pack(anchor='w', pady=(0, 8))
+
+        # Wczytaj aktualne wagi
+        try:
+            current_weights = rmm.get_priority_weights(self.rm_master_db_path)
+        except Exception:
+            current_weights = {1: 100, 2: 10, 3: 1}
+
+        weight_vars = {}
+
+        def _row_for(level: int, label: str, color: str, default: int):
+            row = tk.Frame(right, pady=4)
+            row.pack(fill=tk.X)
+            tk.Label(row, text=label, font=self.FONT_BOLD,
+                     fg=color, width=14, anchor='w'
+                     ).pack(side=tk.LEFT)
+            v = tk.StringVar(value=str(current_weights.get(level, default)))
+            weight_vars[level] = v
+            sp = tk.Spinbox(row, from_=1, to=100000, width=8,
+                            textvariable=v, font=self.FONT_BOLD,
+                            increment=1)
+            sp.pack(side=tk.LEFT, padx=4)
+
+        _row_for(1, '🔥 Turbo:',    '#c0392b', 100)
+        _row_for(2, '⚠️ Pilny:',    '#e67e22', 10)
+        _row_for(3, '🟢 Normalny:', '#27ae60', 1)
+
+        # Przyciski preset
+        presets = tk.Frame(right, pady=8)
+        presets.pack(fill=tk.X)
+        tk.Label(presets, text="Presety:", font=self.FONT_BOLD).pack(anchor='w')
+
+        def _apply_preset(p1, p2, p3):
+            weight_vars[1].set(str(p1))
+            weight_vars[2].set(str(p2))
+            weight_vars[3].set(str(p3))
+
+        prow = tk.Frame(presets)
+        prow.pack(fill=tk.X, pady=2)
+        tk.Button(prow, text="100/10/1\n(rekomendowane)",
+                  command=lambda: _apply_preset(100, 10, 1),
+                  font=("Arial", 8), padx=4
+                  ).pack(side=tk.LEFT, padx=2)
+        tk.Button(prow, text="3/2/1\n(liniowe)",
+                  command=lambda: _apply_preset(3, 2, 1),
+                  font=("Arial", 8), padx=4
+                  ).pack(side=tk.LEFT, padx=2)
+        tk.Button(prow, text="10000/100/1\n(twarde)",
+                  command=lambda: _apply_preset(10000, 100, 1),
+                  font=("Arial", 8), padx=4
+                  ).pack(side=tk.LEFT, padx=2)
+
+        # Przycisk zapisu wag
+        def _save_weights():
+            try:
+                w1 = max(1, int(weight_vars[1].get()))
+                w2 = max(1, int(weight_vars[2].get()))
+                w3 = max(1, int(weight_vars[3].get()))
+            except ValueError:
+                messagebox.showwarning("Błąd",
+                                       "Wagi muszą być liczbami całkowitymi ≥ 1.",
+                                       parent=dlg)
+                return
+            # Walidacja monotoniczności (Turbo ≥ Pilny ≥ Normalny)
+            if not (w1 >= w2 >= w3):
+                if not messagebox.askyesno(
+                    "Ostrzeżenie — wagi nie są monotoniczne",
+                    f"Wagi powinny spełniać:  Turbo ({w1}) ≥ Pilny ({w2}) ≥ Normalny ({w3}).\n\n"
+                    "Inaczej priorytet straci sens.\n\n"
+                    "Zapisać mimo to?",
+                    parent=dlg
+                ):
+                    return
+            try:
+                rmm.set_priority_weight(self.rm_master_db_path, 1, w1)
+                rmm.set_priority_weight(self.rm_master_db_path, 2, w2)
+                rmm.set_priority_weight(self.rm_master_db_path, 3, w3)
+                messagebox.showinfo("OK", "Wagi priorytetów zapisane.", parent=dlg)
+            except Exception as e:
+                messagebox.showerror("Błąd",
+                                     f"Nie udało się zapisać wag: {e}",
+                                     parent=dlg)
+
+        tk.Button(right, text="💾 Zapisz wagi",
+                  command=_save_weights,
+                  bg=self.COLOR_GREEN, fg='white',
+                  font=self.FONT_BOLD, padx=15, pady=4
+                  ).pack(pady=(8, 0))
+
+        _refresh_projects()
 
     # ----------------------------------------------------------------
     # TAB: Pracownicy — limit etapów jako Master
