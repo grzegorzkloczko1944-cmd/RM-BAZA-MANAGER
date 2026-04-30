@@ -182,24 +182,6 @@ class MainWindow(tk.Tk):
         self.title("RM_BAZA_v15_MAG_C_CHAT_STATS")
         self.geometry("1400x800")
         
-        # 🎨 Ustaw ikonę aplikacji (działa zarówno w dev jak i po kompilacji PyInstaller)
-        try:
-            import os
-            import sys
-            if hasattr(sys, '_MEIPASS'):
-                base_dir = sys._MEIPASS
-            else:
-                base_dir = os.path.dirname(os.path.abspath(__file__))
-            
-            icon_path = os.path.join(base_dir, 'rm_baza_icon.ico')
-            if os.path.exists(icon_path):
-                self.iconbitmap(default=icon_path)
-                print(f"✅ Załadowano ikonę: {icon_path}")
-            else:
-                print(f"⚠️ Ikona nie znaleziona: {icon_path}")
-        except Exception as e:
-            print(f"⚠️ Nie można załadować ikony: {e}")
-        
         # Single instance lock
         self.app_lock_file = None
         
@@ -2275,7 +2257,17 @@ class MainWindow(tk.Tk):
             try:
                 cursor_check = self.db_manager.master_con.execute("PRAGMA table_info(projects)")
                 columns = [row[1] for row in cursor_check.fetchall()]
-                
+
+                # ⚡ Skrócony busy_timeout TYLKO dla migracji — żeby nie wisieć
+                # po 5s gdy inny klient w sieci trzyma writer-lock na master.sqlite.
+                # Po migracji przywracamy domyślne 5000ms (w finally).
+                _migration_needed = any(c not in columns for c in
+                                        ('designer', 'completed_at', 'status', 'received_percent'))
+                if _migration_needed:
+                    try:
+                        self.db_manager.master_con.execute("PRAGMA busy_timeout=800")
+                    except Exception:
+                        pass
                 # designer - konstruktor przypisany do projektu
                 if 'designer' not in columns:
                     print("  → Dodaję kolumnę designer...")
@@ -2327,6 +2319,12 @@ class MainWindow(tk.Tk):
                 print("  ✅ Kolumny statystyk produkcji OK")
             except Exception as e:
                 print(f"  ⚠️  Błąd sprawdzania kolumn statystyk: {e}")
+            finally:
+                # przywróć domyślny busy_timeout
+                try:
+                    self.db_manager.master_con.execute("PRAGMA busy_timeout=5000")
+                except Exception:
+                    pass
             
             # MIGRACJA TABELI SUPPLIERS (jeśli nie istnieje)
             print("  → Sprawdzam tabelę suppliers...")
@@ -2993,7 +2991,47 @@ class MainWindow(tk.Tk):
             json.dump(config, f, indent=2)
         
         print(f"✅ Utworzono config: {CONFIG_FILE}")
-    
+
+    def _maybe_update_received_percent(self, pid: int, db_str: str):
+        """Zapisuje received_percent do master.sqlite TYLKO gdy zmieniła się wartość.
+
+        Trzyma cache w pamięci (self._received_pct_cache) — eliminuje setki
+        zbędnych UPDATE-ów na master, które na SMB blokowały innych klientów
+        (database is locked, mulenie GUI). Zapisuje też z krótkim busy_timeout
+        żeby nigdy nie blokować GUI > 500 ms.
+        """
+        if not self.db_manager or not self.db_manager.master_con:
+            return
+        cache = getattr(self, '_received_pct_cache', None)
+        if cache is None:
+            cache = {}
+            self._received_pct_cache = cache
+        if cache.get(pid) == db_str:
+            return  # bez zmian — nie pisz
+        try:
+            con = self.db_manager.master_con
+            try:
+                con.execute("PRAGMA busy_timeout=500")  # max 0.5s czekania
+            except Exception:
+                pass
+            con.execute(
+                "UPDATE projects SET received_percent = ? WHERE project_id = ?",
+                (db_str, pid),
+            )
+            con.commit()
+            cache[pid] = db_str
+        except sqlite3.OperationalError as db_err:
+            # database is locked / readonly — pomiń, spróbujemy następnym razem
+            if "locked" not in str(db_err).lower() and "readonly" not in str(db_err).lower():
+                print(f"⚠️ BŁĄD zapisu received_percent: {db_err}")
+        except Exception as db_err:
+            print(f"⚠️ BŁĄD zapisu received_percent: {db_err}")
+        finally:
+            try:
+                con.execute("PRAGMA busy_timeout=5000")  # przywróć
+            except Exception:
+                pass
+
     def _update_odebrano_stat(self):
         """Aktualizuj statystykę ODEBRANO: procent = odebrane / (wszystkie - ZZ)
         
@@ -3015,15 +3053,7 @@ class MainWindow(tk.Tk):
             
             if total_rows == 0:
                 self.lbl_odebrano_stat.config(text="0%")
-                if self.db_manager.master_con:
-                    try:
-                        self.db_manager.master_con.execute(
-                            "UPDATE projects SET received_percent = ? WHERE project_id = ?",
-                            ("0% (0)", pid)
-                        )
-                        self.db_manager.master_con.commit()
-                    except Exception as db_err:
-                        print(f"⚠️ BŁĄD zapisu received_percent: {db_err}")
+                self._maybe_update_received_percent(pid, "0% (0)")
                 return
             
             # Pozycje z ZZ w numerze rysunku
@@ -3051,26 +3081,10 @@ class MainWindow(tk.Tk):
                 self.lbl_odebrano_stat.config(text=percent_str)
                 
                 db_str = f"{percent_str} ({total_rows})"
-                if self.db_manager.master_con:
-                    try:
-                        self.db_manager.master_con.execute(
-                            "UPDATE projects SET received_percent = ? WHERE project_id = ?",
-                            (db_str, pid)
-                        )
-                        self.db_manager.master_con.commit()
-                    except Exception as db_err:
-                        print(f"⚠️ BŁĄD zapisu received_percent: {db_err}")
+                self._maybe_update_received_percent(pid, db_str)
             else:
                 self.lbl_odebrano_stat.config(text="0%")
-                if self.db_manager.master_con:
-                    try:
-                        self.db_manager.master_con.execute(
-                            "UPDATE projects SET received_percent = ? WHERE project_id = ?",
-                            ("0% (0)", pid)
-                        )
-                        self.db_manager.master_con.commit()
-                    except Exception as db_err:
-                        print(f"⚠️ BŁĄD zapisu received_percent: {db_err}")
+                self._maybe_update_received_percent(pid, "0% (0)")
         except Exception as e:
             print(f"⚠️  Błąd aktualizacji statystyki ODEBRANO: {e}")
             self.lbl_odebrano_stat.config(text="-")
@@ -16277,8 +16291,14 @@ class MainWindow(tk.Tk):
             cursor = None
             for attempt in range(3):
                 try:
-                    # Commit przed SELECT aby zwolnić locki
-                    self.db_manager.master_con.commit()
+                    # NIE commit'ujemy przed SELECT — to czysty read, a commit na SMB
+                    # zajmuje writer-lock i blokuje innych klientów. Jeśli była otwarta
+                    # transakcja write, rollback ją zamyka bez I/O.
+                    try:
+                        if self.db_manager.master_con.in_transaction:
+                            self.db_manager.master_con.rollback()
+                    except Exception:
+                        pass
                     cursor = self.db_manager.master_con.execute(sql)
                     break
                 except sqlite3.OperationalError as e:
