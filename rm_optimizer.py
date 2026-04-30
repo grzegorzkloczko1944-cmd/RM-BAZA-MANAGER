@@ -425,24 +425,44 @@ class ProductionOptimizer:
                     dep_skipped += 1
                     continue
 
-                # effective_lag = max(lag_days, ceil(pred_dur * lag_percent / 100))
-                # Dla FS lag_percent jest ignorowany (nie ma sensu "75% po zakończeniu").
+                # SS lag — ZASADY 2026-04-29:
+                #   • lag_days  : klasyczny SS lag (succ.start >= pred.start + lag_days)
+                #   • lag_pct   : INTERPRETACJA „min(pred, succ)" (Propozycja A) —
+                #                 lag_pct = % pracy poprzednika która musi minąć,
+                #                 czyli MAX overlap = (100 - lag_pct)% × min(pred_dur, succ_dur).
+                #                 Symetryczne: następnik nie wjeżdża głębiej niż X%
+                #                 KRÓTSZEGO z dwóch etapów. Eliminuje patologie gdy
+                #                 etapy mają drastycznie różne długości
+                #                 (np. ELEKTROMONTAZ 10 wd vs URUCHOMIENIE 5 wd).
+                # Dla FS lag_pct jest ignorowany.
                 lag_working = max(0, lag)
-                if dep_type == 'SS' and lag_pct and lag_pct > 0:
-                    pred_dur = self._duration_vars.get(pred_key, 0)
-                    pct_lag = (pred_dur * int(lag_pct) + 99) // 100  # ceil
-                    if pct_lag > lag_working:
-                        lag_working = pct_lag
-
                 if dep_type == 'FS':
                     self.model.Add(
                         self._start_vars[succ_key] >= self._end_vars[pred_key] + lag_working
                     )
                     dep_count += 1
                 elif dep_type == 'SS':
+                    # Klasyczny SS lag (start succ ≥ start pred + lag_days)
                     self.model.Add(
                         self._start_vars[succ_key] >= self._start_vars[pred_key] + lag_working
                     )
+                    # Limit overlap = floor((100 - lag_pct)% × min(pred_dur, succ_dur))
+                    # FLOOR (zamiast ceil) — bardziej restrykcyjne, dla małych
+                    # etapów nadaje 0 wd overlap, eliminując efekt weekendu
+                    # (1 wd robocze = pt→pn = 3 dni kalendarzowe = wizualnie
+                    # cały krótki pasek).
+                    if lag_pct and 0 < int(lag_pct) <= 100:
+                        pred_dur = int(self._duration_vars.get(pred_key, 1))
+                        succ_dur = int(self._duration_vars.get(succ_key, 1))
+                        min_dur = max(1, min(pred_dur, succ_dur))
+                        max_overlap_pct = 100 - int(lag_pct)
+                        # floor(min_dur * max_overlap_pct / 100)
+                        max_overlap = (min_dur * max_overlap_pct) // 100
+                        # succ.start ≥ pred.end − max_overlap
+                        self.model.Add(
+                            self._start_vars[succ_key]
+                            >= self._end_vars[pred_key] - max_overlap
+                        )
                     dep_count += 1
 
         print(f"⚡ build_model: {dep_count} zależności dodanych, {dep_skipped} pominiętych (frozen-frozen), {dep_dedup} zdeduplikowanych")

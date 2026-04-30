@@ -725,10 +725,18 @@ class RMManagerGUI:
         
         # Funkcja do aktualizacji licznika alarmów
         def update_alarm_count():
+            try:
+                if not alarm_count_label.winfo_exists():
+                    return
+            except Exception:
+                return
             active_count = sum(1 for iid, alarm in alarm_data_map.items() if not alarm.get('is_snoozed', False))
             snoozed_count = len(alarm_data_map) - active_count
-            alarm_count_label.config(text=f"⏰ Masz {active_count} aktywnych alarmów!" + 
-                                   (f" (+ {snoozed_count} odłożonych)" if snoozed_count > 0 else ""))
+            try:
+                alarm_count_label.config(text=f"⏰ Masz {active_count} aktywnych alarmów!" + 
+                                       (f" (+ {snoozed_count} odłożonych)" if snoozed_count > 0 else ""))
+            except Exception:
+                pass
         
         # Tabela alarmów (Treeview)
         tree_frame = tk.Frame(notify_win, bg="white")
@@ -923,15 +931,21 @@ class RMManagerGUI:
                         count += 1
                         # Oznacz jako odłożony w danych i wizualnie
                         alarm['is_snoozed'] = True
-                        alarms_tree.item(iid, tags=('snoozed',))
+                        try:
+                            if alarms_tree.winfo_exists():
+                                alarms_tree.item(iid, tags=('snoozed',))
+                        except Exception:
+                            pass
                         checked_items.discard(iid)
                 
-                messagebox.showinfo("🔔 Odłożono", f"Odłożono {count} alarmów.\nPowiadomienie pojawi się jutro o 9:00")
                 update_alarm_count()
-                
                 # Odśwież oś czasu
                 if hasattr(self, 'refresh_timeline'):
-                    self.refresh_timeline()
+                    try:
+                        self.refresh_timeline()
+                    except Exception:
+                        pass
+                messagebox.showinfo("🔔 Odłożono", f"Odłożono {count} alarmów.\nPowiadomienie pojawi się jutro o 9:00")
             except Exception as e:
                 messagebox.showerror("Błąd", f"Nie można odłożyć alarmu:\n{e}")
         
@@ -952,16 +966,22 @@ class RMManagerGUI:
                 for iid, alarm in alarm_data_map.items():
                     if not alarm.get('is_snoozed', False):
                         alarm['is_snoozed'] = True
-                        alarms_tree.item(iid, tags=('snoozed',))
+                        try:
+                            if alarms_tree.winfo_exists():
+                                alarms_tree.item(iid, tags=('snoozed',))
+                        except Exception:
+                            pass
                 
                 active_count = sum(1 for a in alarms if not a.get('is_snoozed', False))
-                messagebox.showinfo("🔔 Odłożono", f"Odłożono {active_count} aktywnych alarmów.\nPowiadomienie pojawi się jutro o 9:00")
                 checked_items.clear()
                 update_alarm_count()
-                
                 # Odśwież oś czasu
                 if hasattr(self, 'refresh_timeline'):
-                    self.refresh_timeline()
+                    try:
+                        self.refresh_timeline()
+                    except Exception:
+                        pass
+                messagebox.showinfo("🔔 Odłożono", f"Odłożono {active_count} aktywnych alarmów.\nPowiadomienie pojawi się jutro o 9:00")
             except Exception as e:
                 messagebox.showerror("Błąd", f"Nie można odłożyć alarmów:\n{e}")
         
@@ -2722,7 +2742,7 @@ class RMManagerGUI:
         tools_menu.add_command(label="🎯 Diagnostyka milestone'ów", command=self.diagnose_milestones)
         tools_menu.add_separator()
         tools_menu.add_command(label="⚡ Optymalizator produkcji...", command=self.optimizer_dialog)
-        tools_menu.add_command(label="↩ Cofnij ostatnią optymalizację...", command=self.undo_last_optimization_dialog)
+        tools_menu.add_command(label="↩ Cofnij optymalizację...", command=self.undo_last_optimization_dialog)
         tools_menu.add_separator()
         tools_menu.add_command(label="🐛 DEBUG — Zrzut danych projektów", command=self.debug_dump_dialog)
         tools_menu.add_separator()
@@ -25282,6 +25302,14 @@ Kod: {unlock_code}
     # ========================================================================
 
     # ---- Trwałe snapshoty undo (przeżywają zamknięcie okna optymalizatora) ----
+    #
+    # Każda zatwierdzona optymalizacja zapisuje osobny plik
+    # `opt_undo_YYYYMMDD_HHMMSS.json` w `{backup_dir}/optimizer_undo/`.
+    # Menu „↩ Cofnij optymalizację…" pokazuje listę dostępnych snapshotów —
+    # użytkownik wybiera który cofnąć. Snapshoty starsze niż UNDO_RETENTION_HOURS
+    # są automatycznie kasowane przy zapisie i przy otwarciu listy.
+
+    UNDO_RETENTION_HOURS = 24
 
     def _optimizer_undo_dir(self):
         """Katalog na trwałe snapshoty undo optymalizacji."""
@@ -25290,27 +25318,56 @@ Kod: {unlock_code}
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def _purge_old_optimizer_snapshots(self):
+        """Usuń snapshoty starsze niż UNDO_RETENTION_HOURS (też legacy last.json)."""
+        from datetime import datetime, timedelta
+        from pathlib import Path
+        try:
+            d = self._optimizer_undo_dir()
+            cutoff = datetime.now() - timedelta(hours=self.UNDO_RETENTION_HOURS)
+            removed = 0
+            for p in d.glob("opt_undo_*.json"):
+                try:
+                    mtime = datetime.fromtimestamp(p.stat().st_mtime)
+                    if mtime < cutoff:
+                        p.unlink()
+                        removed += 1
+                except Exception:
+                    pass
+            # Skasuj legacy 'last.json' (z poprzedniej wersji — nie jest już używany)
+            legacy = Path(d) / "last.json"
+            if legacy.exists():
+                try:
+                    legacy.unlink()
+                except Exception:
+                    pass
+            if removed:
+                print(f"🗑️ Usunięto {removed} snapshotów undo starszych niż {self.UNDO_RETENTION_HOURS}h")
+        except Exception as e:
+            print(f"⚠️ _purge_old_optimizer_snapshots: {e}")
+
     def _save_optimizer_undo_snapshot(self, snapshots):
         """Zapisz snapshot dat (sprzed apply_optimization) jako JSON.
 
-        Plik zawiera: timestamp, użytkownika, mapę pid → snapshot.
-        Zapisuje też kopię jako 'last.json' używaną przez „Cofnij ostatnią
-        optymalizację" w menu Narzędzia.
+        Zwraca pathlib.Path zapisanego pliku (lub None gdy snapshots puste).
+        Każda optymalizacja = osobny plik. Stare pliki (>24h) są automatycznie
+        kasowane.
         """
         import json
         from datetime import datetime
-        from pathlib import Path
 
         if not snapshots:
             return None
 
+        # Najpierw usuń starsze niż 24h
+        self._purge_old_optimizer_snapshots()
+
         d = self._optimizer_undo_dir()
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        user = getattr(self, 'current_user_login', None) or 'unknown'
+        user = getattr(self, 'current_user', None) or getattr(self, 'current_user_login', None) or 'unknown'
 
         # Klucze pid muszą być stringami w JSON
         snap_serializable = {str(k): v for k, v in snapshots.items()}
-        # Nazwy projektów do późniejszego wyświetlenia
         names = {str(pid): self.project_names.get(int(pid), f"Projekt {pid}")
                  for pid in snapshots.keys()}
 
@@ -25324,48 +25381,66 @@ Kod: {unlock_code}
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
-        # 'last.json' = wskaźnik do najnowszego
-        last = d / "last.json"
-        try:
-            with open(last, 'w', encoding='utf-8') as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
         print(f"💾 Zapisano snapshot undo: {path.name} ({len(snapshots)} projektów)")
         return path
 
-    def _load_last_optimizer_undo_snapshot(self):
-        """Załaduj ostatni zapisany snapshot undo (lub None jeśli brak)."""
-        import json
-        from pathlib import Path
-        try:
-            last = Path(self.backup_dir) / "optimizer_undo" / "last.json"
-            if not last.exists():
-                return None
-            with open(last, 'r', encoding='utf-8') as f:
-                payload = json.load(f)
-            # Klucze pid → int
-            snaps = payload.get('snapshots', {}) or {}
-            payload['snapshots'] = {int(k): v for k, v in snaps.items()}
-            return payload
-        except Exception as e:
-            print(f"⚠️ Nie udało się wczytać last.json: {e}")
-            return None
+    def _list_optimizer_undo_snapshots(self):
+        """Zwróć listę dostępnych snapshotów (najnowsze pierwsze, <24h).
 
-    def _clear_optimizer_undo_snapshot(self):
-        """Usuń wskaźnik 'last.json' (po cofnięciu)."""
-        from pathlib import Path
+        Format: [{path, timestamp_str, timestamp_dt, user, projects, snapshots}, ...]
+        Przy okazji kasuje pliki starsze niż 24h.
+        """
+        import json
+        from datetime import datetime
+        self._purge_old_optimizer_snapshots()
+        out = []
         try:
-            last = Path(self.backup_dir) / "optimizer_undo" / "last.json"
-            if last.exists():
-                last.unlink()
-                print("🗑️ Usunięto wskaźnik last.json (snapshot wykorzystany)")
+            d = self._optimizer_undo_dir()
+            for p in d.glob("opt_undo_*.json"):
+                try:
+                    with open(p, 'r', encoding='utf-8') as f:
+                        payload = json.load(f)
+                    snaps = payload.get('snapshots', {}) or {}
+                    snaps = {int(k): v for k, v in snaps.items()}
+                    ts_str = payload.get('timestamp', '')
+                    try:
+                        ts_dt = datetime.fromisoformat(ts_str)
+                    except Exception:
+                        ts_dt = datetime.fromtimestamp(p.stat().st_mtime)
+                    out.append({
+                        'path': p,
+                        'timestamp_str': ts_str,
+                        'timestamp_dt': ts_dt,
+                        'user': payload.get('user', '?'),
+                        'project_names': payload.get('project_names', {}) or {},
+                        'snapshots': snaps,
+                    })
+                except Exception as e:
+                    print(f"⚠️ Nie udało się wczytać {p.name}: {e}")
         except Exception as e:
-            print(f"⚠️ Nie udało się usunąć last.json: {e}")
+            print(f"⚠️ _list_optimizer_undo_snapshots: {e}")
+        out.sort(key=lambda x: x['timestamp_dt'], reverse=True)
+        return out
+
+    def _clear_optimizer_undo_snapshot(self, path=None):
+        """Usuń konkretny plik snapshotu (po wykorzystaniu).
+
+        Gdy `path` jest None — nic nie robi (legacy zachowanie zostało zastąpione
+        listą snapshotów).
+        """
+        from pathlib import Path
+        if path is None:
+            return
+        try:
+            p = Path(path)
+            if p.exists():
+                p.unlink()
+                print(f"🗑️ Usunięto snapshot: {p.name}")
+        except Exception as e:
+            print(f"⚠️ Nie udało się usunąć snapshotu: {e}")
 
     def undo_last_optimization_dialog(self):
-        """Cofnij ostatnio zastosowaną optymalizację (między sesjami)."""
+        """Pokaż listę dostępnych snapshotów (<24h) i pozwól wybrać który cofnąć."""
         from datetime import datetime
         try:
             import rm_optimizer
@@ -25373,25 +25448,153 @@ Kod: {unlock_code}
             messagebox.showerror("Błąd", f"Nie można załadować rm_optimizer:\n{e}")
             return
 
-        payload = self._load_last_optimizer_undo_snapshot()
-        if not payload or not payload.get('snapshots'):
+        snapshots_list = self._list_optimizer_undo_snapshots()
+        if not snapshots_list:
             messagebox.showinfo(
-                "Brak danych do cofnięcia",
-                "Nie znaleziono snapshotu z ostatniej optymalizacji.\n\n"
-                "Snapshot tworzony jest tylko po kliknięciu „✅ Zastosuj wynik”\n"
-                "w oknie Optymalizatora i znika po wykonaniu cofnięcia."
+                "Brak snapshotów do cofnięcia",
+                f"Nie znaleziono żadnego snapshotu z ostatnich {self.UNDO_RETENTION_HOURS}h.\n\n"
+                "Snapshot tworzony jest po kliknięciu „✅ Zastosuj wynik”\n"
+                "w oknie Optymalizatora i jest automatycznie usuwany po\n"
+                f"{self.UNDO_RETENTION_HOURS}h."
             )
             return
 
-        snapshots = payload['snapshots']
-        ts = payload.get('timestamp', '?')
-        user = payload.get('user', '?')
-        names_map = payload.get('project_names', {}) or {}
+        # ===== Dialog wyboru =====
+        dlg = tk.Toplevel(self.root)
+        try:
+            dlg.withdraw()
+        except Exception:
+            pass
+        dlg.title("↩ Cofnij optymalizację — wybierz snapshot")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        self._center_window(dlg, 900, 500)
+        dlg.minsize(700, 350)
+
+        tk.Label(dlg,
+                 text=f"↩ DOSTĘPNE SNAPSHOTY ({len(snapshots_list)}, ≤ {self.UNDO_RETENTION_HOURS}h)",
+                 bg=self.COLOR_TOPBAR, fg="white",
+                 font=("Arial", 12, "bold"), pady=8).pack(fill=tk.X)
+
+        info = tk.Label(dlg,
+                        text='Wybierz snapshot z listy i kliknij „↩ Cofnij wybrany”.\n'
+                             'Przywrócone zostaną daty template wszystkich projektów wymienionych '
+                             'w snapshocie.',
+                        font=("Arial", 9), fg="#555", justify=tk.LEFT, pady=6, padx=10)
+        info.pack(fill=tk.X)
+
+        list_frame = tk.Frame(dlg)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        cols = ("when", "age", "user", "count", "projects")
+        tree = ttk.Treeview(list_frame, columns=cols, show='headings', selectmode='browse')
+        tree.heading("when",     text="Data zatwierdzenia")
+        tree.heading("age",      text="Wiek")
+        tree.heading("user",     text="Użytkownik")
+        tree.heading("count",    text="Projektów")
+        tree.heading("projects", text="Projekty")
+        tree.column("when",     width=160, anchor=tk.W)
+        tree.column("age",      width=70,  anchor=tk.CENTER)
+        tree.column("user",     width=130, anchor=tk.W)
+        tree.column("count",    width=80,  anchor=tk.CENTER)
+        tree.column("projects", width=420, anchor=tk.W)
+
+        sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        now = datetime.now()
+        index_to_snap = {}
+        for i, snap in enumerate(snapshots_list):
+            ts_dt = snap['timestamp_dt']
+            ts_disp = ts_dt.strftime("%d-%m-%Y %H:%M:%S")
+            age_min = int((now - ts_dt).total_seconds() // 60)
+            if age_min < 60:
+                age_str = f"{age_min} min"
+            else:
+                age_str = f"{age_min // 60} h {age_min % 60} m"
+            names = []
+            for pid in sorted(snap['snapshots'].keys()):
+                nm = snap['project_names'].get(str(pid)) or self.project_names.get(int(pid), f"Projekt {pid}")
+                names.append(nm)
+            proj_str = ", ".join(names[:6])
+            if len(names) > 6:
+                proj_str += f" … (+{len(names) - 6})"
+            iid = tree.insert("", "end", values=(ts_disp, age_str, snap['user'],
+                                                  len(snap['snapshots']), proj_str))
+            index_to_snap[iid] = snap
+
+        # Zaznacz najnowszy domyślnie
+        first = tree.get_children()
+        if first:
+            tree.selection_set(first[0])
+            tree.focus(first[0])
+
+        # ===== Przyciski =====
+        btn_frame = tk.Frame(dlg, pady=8)
+        btn_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        def _do_undo():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Brak wyboru", "Wybierz snapshot z listy.", parent=dlg)
+                return
+            snap = index_to_snap.get(sel[0])
+            if not snap:
+                return
+            dlg.destroy()
+            self._undo_optimizer_snapshot(snap)
+
+        def _delete_selected():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Brak wyboru", "Wybierz snapshot do usunięcia.", parent=dlg)
+                return
+            snap = index_to_snap.get(sel[0])
+            if not snap:
+                return
+            if not messagebox.askyesno("Usuń snapshot",
+                    f"Usunąć snapshot z {snap['timestamp_dt'].strftime('%d-%m-%Y %H:%M:%S')}?\n\n"
+                    "Po usunięciu nie da się go już cofnąć z menu.",
+                    parent=dlg, icon='warning'):
+                return
+            self._clear_optimizer_undo_snapshot(snap['path'])
+            tree.delete(sel[0])
+            index_to_snap.pop(sel[0], None)
+
+        tk.Button(btn_frame, text="↩ Cofnij wybrany", command=_do_undo,
+                  bg=self.COLOR_GREEN, fg="white", font=("Arial", 10, "bold"),
+                  padx=14, pady=5).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="🗑 Usuń wybrany", command=_delete_selected,
+                  bg="#c0392b", fg="white", font=("Arial", 10),
+                  padx=14, pady=5).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Zamknij", command=dlg.destroy,
+                  font=("Arial", 10), padx=14, pady=5).pack(side=tk.RIGHT, padx=5)
+
+        # Dwuklik = cofnij
+        tree.bind("<Double-Button-1>", lambda e: _do_undo())
 
         try:
-            ts_disp = datetime.fromisoformat(ts).strftime("%d-%m-%Y %H:%M:%S")
+            dlg.after_idle(lambda: (dlg.deiconify(), dlg.lift()))
         except Exception:
-            ts_disp = ts
+            dlg.deiconify()
+
+    def _undo_optimizer_snapshot(self, snap):
+        """Wykonaj cofnięcie wskazanego snapshotu (z dialogu listy).
+
+        snap: dict z _list_optimizer_undo_snapshots() — zawiera path, snapshots,
+        project_names, timestamp_dt itd.
+        """
+        try:
+            import rm_optimizer
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Nie można załadować rm_optimizer:\n{e}")
+            return
+
+        snapshots = snap['snapshots']
+        names_map = snap.get('project_names', {}) or {}
+        ts_disp = snap['timestamp_dt'].strftime("%d-%m-%Y %H:%M:%S")
 
         proj_lines = []
         for pid in sorted(snapshots.keys()):
@@ -25402,20 +25605,20 @@ Kod: {unlock_code}
             proj_summary += f"\n  … oraz {len(proj_lines) - 15} więcej"
 
         if not messagebox.askyesno(
-            "↩ Cofnij ostatnią optymalizację",
-            f"Znaleziono snapshot z optymalizacji:\n\n"
+            "↩ Cofnij optymalizację",
+            f"Snapshot:\n\n"
             f"  📅 Data:        {ts_disp}\n"
-            f"  👤 Użytkownik:  {user}\n"
+            f"  👤 Użytkownik:  {snap.get('user', '?')}\n"
             f"  📁 Projektów:   {len(snapshots)}\n\n"
             f"Projekty do przywrócenia:\n{proj_summary}\n\n"
-            f"⚠️ UWAGA: Wszystkie zmiany dat template wprowadzone PO tej\n"
-            f"optymalizacji (ręczne edycje, kolejne optymalizacje) zostaną\n"
-            f"NADPISANE wartościami sprzed niej.\n\n"
+            f"⚠️ UWAGA: Wszystkie zmiany dat template wprowadzone PO tym\n"
+            f"snapshocie (ręczne edycje, kolejne optymalizacje) zostaną\n"
+            f"NADPISANE wartościami sprzed niego.\n\n"
             f"Przywrócić daty?",
             icon='warning'):
             return
 
-        # Zajmij blokady na każdy projekt
+        # Zajmij blokady
         pids = list(snapshots.keys())
         locked, failed = [], {}
         for pid in pids:
@@ -25469,15 +25672,14 @@ Kod: {unlock_code}
             messagebox.showerror("Błąd", f"Nie udało się cofnąć:\n{e}")
             return
 
-        # Zwolnij blokady
         for pid in locked:
             try:
                 self.lock_manager.release_project_lock(pid)
             except Exception:
                 pass
 
-        # Skasuj snapshot — został wykorzystany
-        self._clear_optimizer_undo_snapshot()
+        # Skasuj wykorzystany snapshot
+        self._clear_optimizer_undo_snapshot(snap.get('path'))
 
         msg = (f"↩ Przywrócono daty w {undo_res.get('restored_projects', 0)} projektach.\n"
                f"🔓 Zwolniono blokady: {len(locked)} projektów.")
@@ -25485,7 +25687,6 @@ Kod: {unlock_code}
             msg += "\n\n⚠️ Błędy:\n" + "\n".join(undo_res['errors'])
         messagebox.showinfo("Cofnięto", msg)
 
-        # Odśwież widoki
         try:
             self.load_project_stages()
             self.refresh_timeline()
@@ -25518,9 +25719,10 @@ Kod: {unlock_code}
                 "Bez niej optymalizacja nie będzie działać."
             )
 
+        # Niezależne okno (jak Multi-projekt) — bez transient, własna pozycja
+        # w pasku zadań, nie znika gdy zminimalizujemy okno główne.
         dlg = tk.Toplevel(self.root)
         dlg.title("⚡ Optymalizator produkcji")
-        dlg.transient(self.root)
         self._center_window(dlg, 1200, 900)
         dlg.minsize(1000, 750)
 
@@ -26042,11 +26244,12 @@ Kod: {unlock_code}
                 btn_apply.configure(state=tk.DISABLED)
                 if apply_result.get('snapshots'):
                     btn_undo._snapshots = apply_result['snapshots']
+                    btn_undo._snapshot_path = None
                     btn_undo.configure(state=tk.NORMAL)
                     # 💾 Zapis snapshotu na dysk — żeby cofnięcie było możliwe
-                    # po zamknięciu okna (z menu „Cofnij ostatnią optymalizację").
+                    # po zamknięciu okna (z menu „Cofnij optymalizację").
                     try:
-                        self._save_optimizer_undo_snapshot(apply_result['snapshots'])
+                        btn_undo._snapshot_path = self._save_optimizer_undo_snapshot(apply_result['snapshots'])
                     except Exception as _e:
                         print(f"⚠️ Nie udało się zapisać snapshotu undo na dysk: {_e}")
                 btn_release_locks.configure(state=tk.NORMAL)
@@ -26084,9 +26287,10 @@ Kod: {unlock_code}
                 btn_release_locks.configure(state=tk.DISABLED)
                 # 🗑️ Usuń trwały snapshot — został już wykorzystany
                 try:
-                    self._clear_optimizer_undo_snapshot()
+                    self._clear_optimizer_undo_snapshot(getattr(btn_undo, '_snapshot_path', None))
                 except Exception:
                     pass
+                btn_undo._snapshot_path = None
                 # Auto-odśwież Gantt w głównym oknie — daty zostały przywrócone
                 _refresh_main_views()
             except Exception as e:
@@ -26140,7 +26344,7 @@ Kod: {unlock_code}
             # ⚠️ Ostrzeżenie: są wciąż dostępne snapshoty (zastosowano wynik
             # ale nie cofnięto). Po zamknięciu cofnięcie z tego okna nie będzie
             # możliwe — ale snapshot został zapisany na dysk i można cofnąć
-            # z menu Narzędzia → „↩ Cofnij ostatnią optymalizację".
+            # z menu Narzędzia → „↩ Cofnij optymalizację".
             try:
                 if getattr(btn_undo, '_snapshots', None):
                     if not messagebox.askyesno(
@@ -26148,7 +26352,7 @@ Kod: {unlock_code}
                         "Zastosowałeś wynik optymalizacji, ale nie cofnąłeś go w tym oknie.\n\n"
                         "Po zamknięciu okna przycisk „↩ Cofnij optymalizację” zniknie,\n"
                         "ale snapshot dat został zapisany na dysku i nadal możesz go cofnąć\n"
-                        "z menu  Narzędzia → „↩ Cofnij ostatnią optymalizację”.\n\n"
+                        "z menu  Narzędzia → „↩ Cofnij optymalizację”.\n\n"
                         "Zamknąć okno?",
                         parent=dlg, icon='warning'):
                         return
