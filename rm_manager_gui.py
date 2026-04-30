@@ -6154,6 +6154,9 @@ class RMManagerGUI:
             zakonczony_set = rmm.is_milestone_set(self.get_project_db_path(self.selected_project_id), 
                                                    self.selected_project_id, 'ZAKONCZONY')
             
+            # ── 🔗 LINIA PRODUKCYJNA — kojarzenie projektów ──────────────────
+            self._render_production_line_bar()
+
             # ── PRZYJĘTY – milestone (zdarzenie instant) ──────────────────────
             przyjety_frame = tk.Frame(self.stages_frame, bg="#e8f4fd", relief=tk.GROOVE, bd=2)
             przyjety_frame.pack(fill=tk.X, padx=8, pady=(8, 4))
@@ -27839,6 +27842,428 @@ Kod: {unlock_code}
         lines.append("=" * 80)
 
         return "\n".join(lines)
+
+    # ================================================================
+    # 🔗 LINIE PRODUKCYJNE — kojarzenie projektów-maszyn w linie
+    # ================================================================
+
+    def _render_production_line_bar(self):
+        """Pasek na górze panelu ETAPY PROJEKTU pokazujący linię, do której
+        należy bieżący projekt + przycisk zarządzania liniami."""
+        try:
+            line = rmm.get_project_line(self.rm_master_db_path,
+                                        self.selected_project_id)
+        except Exception as e:
+            print(f"⚠️ _render_production_line_bar: {e}")
+            line = None
+
+        if line:
+            bar_bg = "#fdf2d0"
+            members = ", ".join(self.project_names.get(p, str(p))
+                                for p in line['project_ids'])
+            txt = (f"🔗 LINIA: {line['name']}  "
+                   f"({len(line['project_ids'])} maszyn)")
+            tooltip = f"Maszyny w linii: {members}\n" \
+                      f"Etapy równoległe: {', '.join(line['parallel_stages']) or '—'}"
+        else:
+            bar_bg = "#f0f0f0"
+            txt = "🔗 Brak linii produkcyjnej"
+            tooltip = "Projekt nie należy do żadnej linii produkcyjnej."
+
+        bar = tk.Frame(self.stages_frame, bg=bar_bg, relief=tk.GROOVE, bd=1)
+        bar.pack(fill=tk.X, padx=8, pady=(8, 0))
+        lbl = tk.Label(bar, text=txt, bg=bar_bg, font=("Arial", 9, "bold"),
+                       anchor='w', padx=8, pady=4)
+        lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        btn = tk.Button(bar, text="⚙ Zarządzaj liniami…",
+                        font=("Arial", 8),
+                        command=self.production_lines_dialog,
+                        bg="white", relief=tk.RAISED, bd=1,
+                        padx=6, pady=2)
+        btn.pack(side=tk.RIGHT, padx=4, pady=2)
+
+        # Prosty tooltip
+        try:
+            self._attach_tooltip(lbl, tooltip)
+        except Exception:
+            pass
+
+    def _attach_tooltip(self, widget, text: str):
+        """Lekki tooltip — pokazuje tekst po najechaniu myszką."""
+        if not text:
+            return
+        tip = {'win': None}
+
+        def show(_e=None):
+            if tip['win'] is not None:
+                return
+            try:
+                x = widget.winfo_rootx() + 20
+                y = widget.winfo_rooty() + widget.winfo_height() + 4
+                w = tk.Toplevel(widget)
+                w.wm_overrideredirect(True)
+                w.wm_geometry(f"+{x}+{y}")
+                tk.Label(w, text=text, bg="#ffffe0", relief=tk.SOLID, bd=1,
+                         font=("Arial", 8), padx=6, pady=3,
+                         justify='left').pack()
+                tip['win'] = w
+            except Exception:
+                pass
+
+        def hide(_e=None):
+            try:
+                if tip['win'] is not None:
+                    tip['win'].destroy()
+            except Exception:
+                pass
+            tip['win'] = None
+
+        widget.bind("<Enter>", show)
+        widget.bind("<Leave>", hide)
+
+    def production_lines_dialog(self):
+        """Okno zarządzania liniami produkcyjnymi.
+
+        Lista linii (lewy panel) + edycja (prawy panel): nazwa, opis,
+        etapy równoległe, lista projektów. Projekty są dodawane przez
+        standardowy `_open_project_selector`.
+        """
+        try:
+            rmm.ensure_rm_master_tables(self.rm_master_db_path)
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Nie udało się zainicjalizować schematu:\n{e}")
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("🔗 Linie produkcyjne")
+        self._center_window(dlg, 1000, 700)
+        dlg.minsize(900, 550)
+
+        header = tk.Label(dlg, text="🔗 LINIE PRODUKCYJNE",
+                          bg=self.COLOR_TOPBAR, fg="white",
+                          font=("Arial", 13, "bold"), pady=10)
+        header.pack(fill=tk.X)
+
+        info = tk.Label(
+            dlg,
+            text=("Kojarz projekty-maszyny tworzące jedną linię. "
+                  "Etapy zaznaczone jako „równoległe” mogą być prowadzone "
+                  "JEDNOCZEŚNIE przez tego samego mastera dla wszystkich "
+                  "projektów linii (optymalizator traktuje je jak jedną czynność)."),
+            bg="white", fg="#444", font=("Arial", 9),
+            anchor='w', padx=10, pady=6, wraplength=970, justify='left'
+        )
+        info.pack(fill=tk.X)
+
+        paned = tk.PanedWindow(dlg, orient=tk.HORIZONTAL,
+                               sashrelief=tk.RAISED, sashwidth=6)
+        paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        # ---- LEWY: lista linii ----
+        left = tk.Frame(paned)
+        paned.add(left, minsize=280, stretch='first')
+
+        tk.Label(left, text="Linie produkcyjne",
+                 font=self.FONT_BOLD).pack(anchor='w', padx=4, pady=(2, 4))
+
+        cols = ('name', 'count')
+        tv = ttk.Treeview(left, columns=cols, show='headings', height=18)
+        tv.heading('name', text='Nazwa')
+        tv.heading('count', text='# maszyn')
+        tv.column('name', width=200, anchor='w')
+        tv.column('count', width=70, anchor='center')
+        tv.pack(fill=tk.BOTH, expand=True, padx=4)
+
+        btns_left = tk.Frame(left)
+        btns_left.pack(fill=tk.X, padx=4, pady=4)
+        btn_new = tk.Button(btns_left, text="➕ Nowa", font=("Arial", 9))
+        btn_new.pack(side=tk.LEFT, padx=2)
+        btn_del = tk.Button(btns_left, text="🗑 Usuń",
+                            font=("Arial", 9), fg="#c0392b")
+        btn_del.pack(side=tk.LEFT, padx=2)
+
+        # ---- PRAWY: edycja ----
+        right = tk.Frame(paned)
+        paned.add(right, minsize=520, stretch='last')
+
+        # State edytowanej linii
+        state = {
+            'line_id': None,           # None = nowa
+            'project_ids': [],         # lista pid w aktualnie edytowanej linii
+            'parallel_stages': set(),  # set kodów etapów
+        }
+
+        form = tk.Frame(right)
+        form.pack(fill=tk.X, padx=8, pady=(8, 4))
+
+        tk.Label(form, text="Nazwa:", font=self.FONT_BOLD).grid(row=0, column=0, sticky='w')
+        name_var = tk.StringVar()
+        name_entry = tk.Entry(form, textvariable=name_var, width=50,
+                              font=self.FONT_DEFAULT)
+        name_entry.grid(row=0, column=1, sticky='we', padx=4, pady=2)
+
+        tk.Label(form, text="Opis:", font=self.FONT_BOLD).grid(row=1, column=0, sticky='nw')
+        desc_text = tk.Text(form, width=50, height=2, font=self.FONT_DEFAULT)
+        desc_text.grid(row=1, column=1, sticky='we', padx=4, pady=2)
+        form.grid_columnconfigure(1, weight=1)
+
+        # Etapy równoległe (checkboxy)
+        stages_frame = tk.LabelFrame(
+            right, text="Etapy prowadzone JEDNOCZEŚNIE dla całej linii",
+            font=self.FONT_BOLD, padx=8, pady=4
+        )
+        stages_frame.pack(fill=tk.X, padx=8, pady=4)
+
+        # Zbierz kody etapów ze stage_definitions (z RM master DB — nie z master.sqlite!)
+        all_stage_codes = []
+        try:
+            con = rmm._open_rm_connection(self.rm_master_db_path)
+            rows = con.execute(
+                "SELECT code, display_name FROM stage_definitions "
+                "ORDER BY id"
+            ).fetchall()
+            con.close()
+            all_stage_codes = [(r['code'], r['display_name']) for r in rows]
+        except Exception as e:
+            print(f"⚠️ Nie wczytano stage_definitions: {e}")
+            # fallback — minimalny zestaw
+            all_stage_codes = [(c, c) for c in
+                               rmm.DEFAULT_LINE_PARALLEL_STAGES]
+
+        stage_vars = {}
+        # 4 kolumny checkboxów
+        for i, (code, label) in enumerate(all_stage_codes):
+            v = tk.BooleanVar(value=False)
+            stage_vars[code] = v
+            tk.Checkbutton(stages_frame, text=label, variable=v,
+                           font=("Arial", 9), anchor='w'
+                           ).grid(row=i // 4, column=i % 4,
+                                  sticky='w', padx=4, pady=1)
+
+        # Lista projektów w linii
+        proj_frame = tk.LabelFrame(right, text="Maszyny (projekty) w linii",
+                                   font=self.FONT_BOLD, padx=8, pady=4)
+        proj_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+
+        proj_lb = tk.Listbox(proj_frame, font=self.FONT_DEFAULT,
+                             selectmode=tk.SINGLE)
+        proj_lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2, pady=2)
+        proj_sb = ttk.Scrollbar(proj_frame, orient=tk.VERTICAL,
+                                command=proj_lb.yview)
+        proj_sb.pack(side=tk.LEFT, fill=tk.Y)
+        proj_lb.config(yscrollcommand=proj_sb.set)
+
+        proj_btns = tk.Frame(proj_frame)
+        proj_btns.pack(side=tk.LEFT, fill=tk.Y, padx=4)
+
+        def _refresh_proj_list():
+            proj_lb.delete(0, tk.END)
+            for pid in state['project_ids']:
+                nm = self.project_names.get(pid, f"Projekt {pid}")
+                proj_lb.insert(tk.END, f"#{pid}  {nm}")
+
+        def _add_projects():
+            current = set(state['project_ids'])
+
+            def _on_pick(pids):
+                for p in pids:
+                    if p not in current:
+                        state['project_ids'].append(int(p))
+                        current.add(int(p))
+                _refresh_proj_list()
+
+            try:
+                self._open_project_selector(
+                    dlg,
+                    current_ids=current,
+                    mode='callback',
+                    on_select_callback=_on_pick,
+                    title="🔗 Wybierz projekty do linii",
+                    ok_button_text="Dodaj wybrane",
+                )
+            except Exception as e:
+                messagebox.showerror("Błąd", f"Nie udało się otworzyć "
+                                              f"selektora projektów:\n{e}",
+                                     parent=dlg)
+
+        def _remove_project():
+            sel = proj_lb.curselection()
+            if not sel:
+                return
+            idx = int(sel[0])
+            if 0 <= idx < len(state['project_ids']):
+                del state['project_ids'][idx]
+                _refresh_proj_list()
+
+        tk.Button(proj_btns, text="➕ Dodaj…", font=("Arial", 9),
+                  command=_add_projects, width=12).pack(pady=2)
+        tk.Button(proj_btns, text="➖ Usuń", font=("Arial", 9),
+                  command=_remove_project, width=12).pack(pady=2)
+
+        # Bottom action buttons
+        actions = tk.Frame(dlg)
+        actions.pack(fill=tk.X, padx=8, pady=(0, 8))
+
+        # ---- Helpers: load/clear/save/delete ----
+        def _clear_form(new_line=True):
+            state['line_id'] = None if new_line else state['line_id']
+            state['project_ids'] = []
+            state['parallel_stages'] = set()
+            name_var.set('')
+            desc_text.delete('1.0', tk.END)
+            for v in stage_vars.values():
+                v.set(False)
+            _refresh_proj_list()
+
+        def _load_line_into_form(line):
+            state['line_id'] = int(line['id'])
+            state['project_ids'] = list(line.get('project_ids', []))
+            state['parallel_stages'] = set(line.get('parallel_stages', []))
+            name_var.set(line.get('name', ''))
+            desc_text.delete('1.0', tk.END)
+            desc_text.insert('1.0', line.get('description', '') or '')
+            for code, v in stage_vars.items():
+                v.set(code in state['parallel_stages'])
+            _refresh_proj_list()
+
+        def _refresh_lines_list(select_id=None):
+            tv.delete(*tv.get_children())
+            try:
+                lines = rmm.list_production_lines(self.rm_master_db_path)
+            except Exception as e:
+                messagebox.showerror("Błąd",
+                                     f"Nie udało się wczytać linii:\n{e}",
+                                     parent=dlg)
+                return
+            for ln in lines:
+                tv.insert('', tk.END, iid=str(ln['id']),
+                          values=(ln['name'], len(ln['project_ids'])))
+            if select_id is not None and tv.exists(str(select_id)):
+                tv.selection_set(str(select_id))
+                tv.see(str(select_id))
+
+        def _on_tv_select(_e=None):
+            sel = tv.selection()
+            if not sel:
+                return
+            try:
+                line_id = int(sel[0])
+                lines = rmm.list_production_lines(self.rm_master_db_path)
+                line = next((l for l in lines if l['id'] == line_id), None)
+                if line:
+                    _load_line_into_form(line)
+            except Exception as e:
+                messagebox.showerror("Błąd",
+                                     f"Nie udało się wczytać linii:\n{e}",
+                                     parent=dlg)
+
+        tv.bind('<<TreeviewSelect>>', _on_tv_select)
+
+        def _new_line():
+            tv.selection_remove(tv.selection())
+            _clear_form(new_line=True)
+            name_entry.focus_set()
+
+        def _delete_line():
+            sel = tv.selection()
+            if not sel:
+                messagebox.showinfo("Linie",
+                                    "Wybierz linię z listy.",
+                                    parent=dlg)
+                return
+            line_id = int(sel[0])
+            name = tv.set(sel[0], 'name')
+            if not messagebox.askyesno(
+                "Usuń linię",
+                'Usunąć linię „' + name + '”?\n'
+                'Projekty NIE zostaną usunięte — zostaną tylko odczepione '
+                'od linii.',
+                parent=dlg
+            ):
+                return
+            try:
+                rmm.delete_production_line(self.rm_master_db_path, line_id)
+                _refresh_lines_list()
+                _clear_form(new_line=True)
+                # Odśwież panel ETAPY PROJEKTU jeśli to dotyczyło bieżącego
+                try:
+                    self.load_project_stages()
+                except Exception:
+                    pass
+            except Exception as e:
+                messagebox.showerror("Błąd",
+                                     f"Nie udało się usunąć linii:\n{e}",
+                                     parent=dlg)
+
+        def _save_line():
+            name = name_var.get().strip()
+            if not name:
+                messagebox.showwarning("Brak nazwy",
+                                       "Podaj nazwę linii.",
+                                       parent=dlg)
+                name_entry.focus_set()
+                return
+            if len(state['project_ids']) < 1:
+                if not messagebox.askyesno(
+                    "Pusta linia",
+                    "Linia nie zawiera żadnych maszyn. Zapisać mimo to?",
+                    parent=dlg
+                ):
+                    return
+            desc = desc_text.get('1.0', tk.END).strip()
+            parallel = [c for c, v in stage_vars.items() if v.get()]
+            user = (getattr(self, 'current_user', None)
+                    or getattr(self, 'current_user_login', None)
+                    or 'unknown')
+            try:
+                line_id = rmm.save_production_line(
+                    self.rm_master_db_path,
+                    state['line_id'],
+                    name, desc, parallel,
+                    state['project_ids'],
+                    user=user,
+                )
+                state['line_id'] = line_id
+                _refresh_lines_list(select_id=line_id)
+                # Odśwież panel ETAPY PROJEKTU (pasek linii)
+                try:
+                    self.load_project_stages()
+                except Exception:
+                    pass
+                messagebox.showinfo(
+                    "Zapisano",
+                    'Linia „' + name + '” została zapisana.',
+                    parent=dlg
+                )
+            except Exception as e:
+                messagebox.showerror("Błąd",
+                                     f"Nie udało się zapisać linii:\n{e}",
+                                     parent=dlg)
+
+        btn_new.config(command=_new_line)
+        btn_del.config(command=_delete_line)
+
+        tk.Button(actions, text="💾 Zapisz", font=("Arial", 10, "bold"),
+                  bg="#27ae60", fg="white", padx=14, pady=4,
+                  command=_save_line).pack(side=tk.LEFT, padx=4)
+        tk.Button(actions, text="✖ Zamknij", font=("Arial", 10),
+                  padx=14, pady=4,
+                  command=dlg.destroy).pack(side=tk.RIGHT, padx=4)
+
+        # Load list + auto-select line of current project
+        _refresh_lines_list()
+        try:
+            cur_line = rmm.get_project_line(self.rm_master_db_path,
+                                            self.selected_project_id)
+            if cur_line and tv.exists(str(cur_line['id'])):
+                tv.selection_set(str(cur_line['id']))
+                tv.see(str(cur_line['id']))
+                _load_line_into_form(cur_line)
+            else:
+                _new_line()
+        except Exception:
+            _new_line()
 
 
 # ============================================================================

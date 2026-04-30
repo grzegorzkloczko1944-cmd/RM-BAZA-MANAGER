@@ -797,9 +797,175 @@ def ensure_list_tables(master_db_path: str):
             [(1, 'Turbo', 100), (2, 'Pilny', 10), (3, 'Normalny', 1)]
         )
 
+    # production_lines — linie produkcyjne (zestaw projektów-maszyn budowanych
+    # razem dla jednego klienta). Etapy z `parallel_stages_csv` mogą być
+    # prowadzone JEDNOCZEŚNIE przez tego samego mastera dla wszystkich
+    # projektów w linii (np. URUCHOMIENIE / ODBIORY / POPRAWKI dla całej linii).
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS production_lines (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            name                 TEXT    NOT NULL UNIQUE,
+            description          TEXT,
+            parallel_stages_csv  TEXT    NOT NULL DEFAULT '',
+            created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_by           TEXT,
+            updated_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_by           TEXT
+        )
+    """)
+    # Mapowanie projekt → linia. UNIQUE na project_id = projekt może być
+    # w max 1 linii. Brak FK do projects (master.sqlite jest osobno).
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS line_projects (
+            line_id     INTEGER NOT NULL,
+            project_id  INTEGER NOT NULL UNIQUE,
+            PRIMARY KEY (line_id, project_id),
+            FOREIGN KEY (line_id) REFERENCES production_lines(id) ON DELETE CASCADE
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_line_projects_line ON line_projects(line_id)")
+
     con.commit()
     con.close()
     print(f"✅ Tabele list (employees, transports) gotowe: {master_db_path}")
+
+
+# ============================================================================
+# PRODUCTION LINES — kojarzenie projektów w linie
+# ============================================================================
+
+# Etapy które domyślnie pojawiają się jako „proponowane do równoległego
+# prowadzenia" przy tworzeniu nowej linii (URUCHOMIENIE/ODBIORY/POPRAWKI to
+# typowe etapy linii — serwisant uruchamia całą linię na raz).
+DEFAULT_LINE_PARALLEL_STAGES = [
+    'URUCHOMIENIE', 'ODBIORY', 'POPRAWKI', 'TESTY',
+    'URUCHOMIENIE_U_KLIENTA', 'FAT', 'ODBIOR_1', 'ODBIOR_2', 'ODBIOR_3',
+]
+
+
+def list_production_lines(rm_master_db_path: str) -> List[Dict]:
+    """Zwróć wszystkie linie produkcyjne z listą projektów.
+
+    Returns: [{id, name, description, parallel_stages: [str], project_ids: [int]}, ...]
+    """
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        rows = con.execute(
+            "SELECT id, name, description, parallel_stages_csv "
+            "FROM production_lines ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+        result = []
+        for r in rows:
+            pids = [int(x['project_id']) for x in con.execute(
+                "SELECT project_id FROM line_projects WHERE line_id = ? "
+                "ORDER BY project_id", (r['id'],)
+            ).fetchall()]
+            ps_csv = (r['parallel_stages_csv'] or '').strip()
+            parallel = [s.strip() for s in ps_csv.split(',') if s.strip()]
+            result.append({
+                'id': int(r['id']),
+                'name': r['name'],
+                'description': r['description'] or '',
+                'parallel_stages': parallel,
+                'project_ids': pids,
+            })
+        return result
+    finally:
+        con.close()
+
+
+def get_project_line(rm_master_db_path: str, project_id: int) -> Optional[Dict]:
+    """Zwróć linię produkcyjną do której należy projekt (lub None)."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        row = con.execute("""
+            SELECT pl.id, pl.name, pl.description, pl.parallel_stages_csv
+            FROM line_projects lp
+            JOIN production_lines pl ON pl.id = lp.line_id
+            WHERE lp.project_id = ?
+        """, (int(project_id),)).fetchone()
+        if not row:
+            return None
+        pids = [int(x['project_id']) for x in con.execute(
+            "SELECT project_id FROM line_projects WHERE line_id = ? "
+            "ORDER BY project_id", (row['id'],)
+        ).fetchall()]
+        ps_csv = (row['parallel_stages_csv'] or '').strip()
+        parallel = [s.strip() for s in ps_csv.split(',') if s.strip()]
+        return {
+            'id': int(row['id']),
+            'name': row['name'],
+            'description': row['description'] or '',
+            'parallel_stages': parallel,
+            'project_ids': pids,
+        }
+    finally:
+        con.close()
+
+
+def save_production_line(rm_master_db_path: str, line_id: Optional[int],
+                         name: str, description: str,
+                         parallel_stages: List[str],
+                         project_ids: List[int],
+                         user: Optional[str] = None) -> int:
+    """Utwórz lub zaktualizuj linię produkcyjną.
+
+    Args:
+        line_id: None = nowa linia, int = update istniejącej
+        project_ids: lista pid; każdy może być w max 1 linii — przepisanie
+                     z innej linii odbywa się automatycznie (UNIQUE w line_projects).
+
+    Returns: id linii.
+    """
+    name = (name or '').strip()
+    if not name:
+        raise ValueError("Nazwa linii nie może być pusta")
+    parallel_csv = ','.join(s.strip() for s in (parallel_stages or []) if s.strip())
+    pids = sorted({int(p) for p in (project_ids or []) if p})
+
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        if line_id is None:
+            cur = con.execute("""
+                INSERT INTO production_lines
+                    (name, description, parallel_stages_csv, created_by, updated_by)
+                VALUES (?, ?, ?, ?, ?)
+            """, (name, description or '', parallel_csv, user, user))
+            line_id = int(cur.lastrowid)
+        else:
+            con.execute("""
+                UPDATE production_lines
+                SET name = ?, description = ?, parallel_stages_csv = ?,
+                    updated_at = CURRENT_TIMESTAMP, updated_by = ?
+                WHERE id = ?
+            """, (name, description or '', parallel_csv, user, int(line_id)))
+
+        # Przepnij projekty: usuń stare powiązania tej linii i wszystkich pids
+        # (pid mógł być w innej linii — UNIQUE).
+        con.execute("DELETE FROM line_projects WHERE line_id = ?", (int(line_id),))
+        if pids:
+            con.executemany(
+                "DELETE FROM line_projects WHERE project_id = ?",
+                [(p,) for p in pids]
+            )
+            con.executemany(
+                "INSERT INTO line_projects (line_id, project_id) VALUES (?, ?)",
+                [(int(line_id), p) for p in pids]
+            )
+        con.commit()
+        return int(line_id)
+    finally:
+        con.close()
+
+
+def delete_production_line(rm_master_db_path: str, line_id: int):
+    """Usuń linię (FK CASCADE usunie też wpisy w line_projects)."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        con.execute("DELETE FROM production_lines WHERE id = ?", (int(line_id),))
+        con.commit()
+    finally:
+        con.close()
 
 
 # ============================================================================
@@ -9471,6 +9637,14 @@ def get_projects_scheduling_data(rm_manager_dir: str, rm_master_db_path: str,
     except Exception:
         priority_weights = dict(DEFAULT_PRIORITY_WEIGHTS)
 
+    # Linie produkcyjne (rm_manager.sqlite) — pełna lista, optymalizator
+    # filtruje po project_ids sam.
+    try:
+        production_lines = list_production_lines(rm_master_db_path)
+    except Exception as e:
+        print(f"⚠️ Nie udało się wczytać linii produkcyjnych: {e}")
+        production_lines = []
+
     return {
         'projects': projects,
         'employees': employees,
@@ -9478,6 +9652,7 @@ def get_projects_scheduling_data(rm_manager_dir: str, rm_master_db_path: str,
         'availability': availability,
         'calendar': calendar,
         'priority_weights': priority_weights,
+        'production_lines': production_lines,
     }
 
 

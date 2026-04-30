@@ -837,11 +837,32 @@ class ProductionOptimizer:
         - Globalny limit per master = employees[eid]['master_max_parallel']
           (domyślnie 1). Liczy się sumarycznie po wszystkich projektach
           i typach etapów (poza MILESTONE i PARALLEL_STAGES).
+        - LINIE PRODUKCYJNE: jeśli kilka projektów należy do tej samej linii,
+          a etap jest w `parallel_stages` linii — etapy te traktujemy jako
+          JEDNĄ czynność (kompozytowy interwał: start = min, end = max),
+          bo serwisant uruchamia całą linię równolegle.
         """
         PARALLEL_STAGES = {'KOMPLETACJA'}  # etapy bez ograniczenia per-person
 
         projects = self.data['projects']
         employees = self.data.get('employees', {}) or {}
+
+        # Mapowanie: pid -> (line_id, set(parallel_stages_for_line))
+        # Tylko linie z >= 2 projektami w modelu mają sens (1 projekt = nic
+        # nie zmienia). Optymalizator traktuje pids z linii jak grupę.
+        production_lines = self.data.get('production_lines', []) or []
+        pid_to_line: Dict[int, Tuple[int, Set[str]]] = {}
+        for line in production_lines:
+            line_id = int(line.get('id', 0))
+            line_pids = [int(p) for p in line.get('project_ids', [])]
+            line_pids_in_model = [p for p in line_pids if p in projects]
+            if len(line_pids_in_model) < 2:
+                continue
+            parallel_set = set(line.get('parallel_stages', []) or [])
+            if not parallel_set:
+                continue
+            for p in line_pids_in_model:
+                pid_to_line[p] = (line_id, parallel_set)
 
         # Grupuj wg master_eid -> [(pid, sc), ...] (across all stages)
         emp_stage_map: Dict[int, List[Tuple[int, str]]] = defaultdict(list)
@@ -861,6 +882,48 @@ class ProductionOptimizer:
         constraints_added = 0
         skipped_frozen = 0
         skipped_all_frozen = 0
+        line_groups_merged = 0
+
+        def _build_interval_for_group(group_label: str, members: List[Tuple[int, str]]):
+            """Zwróć IntervalVar reprezentujący jedną „czynność" mastera.
+
+            Dla single member: zwykły IntervalVar po istniejących start/end.
+            Dla wielu (kompozyt linii): start=min(starts), end=max(ends),
+            size=end-start. Master jest uznany za zajętego przez cały rozstaw.
+            """
+            if len(members) == 1:
+                p, s = members[0]
+                k = (p, s)
+                d = self._duration_vars.get(k, 1)
+                return self.model.NewIntervalVar(
+                    self._start_vars[k], d, self._end_vars[k], group_label
+                )
+            horizon = self.cal.total_days
+            starts = [self._start_vars[(p, s)] for p, s in members]
+            ends = [self._end_vars[(p, s)] for p, s in members]
+            cs = self.model.NewIntVar(0, horizon, group_label + '_s')
+            ce = self.model.NewIntVar(0, horizon, group_label + '_e')
+            sz = self.model.NewIntVar(0, horizon, group_label + '_z')
+            self.model.AddMinEquality(cs, starts)
+            self.model.AddMaxEquality(ce, ends)
+            self.model.Add(sz == ce - cs)
+            return self.model.NewIntervalVar(cs, sz, ce, group_label)
+
+        def _group_stage_keys(stage_keys: List[Tuple[int, str]]):
+            """Podziel etapy mastera na grupy kompozytowe (per-linia, per-etap).
+
+            Zwraca listę (group_id, members) gdzie:
+            - dla etapów linii: group_id = ('LINE', line_id, sc), members > 1
+            - dla pozostałych: group_id = ('SOLO', pid, sc), members = 1
+            """
+            groups: Dict[Tuple, List[Tuple[int, str]]] = defaultdict(list)
+            for p, s in stage_keys:
+                line_info = pid_to_line.get(p)
+                if line_info and s in line_info[1]:
+                    groups[('LINE', line_info[0], s)].append((p, s))
+                else:
+                    groups[('SOLO', p, s)].append((p, s))
+            return list(groups.items())
 
         for eid, stage_keys in emp_stage_map.items():
             # Limit z bazy (domyślnie 1)
@@ -894,6 +957,8 @@ class ProductionOptimizer:
                 # Dla max_parallel=1 robimy strategię pairwise (NoOverlap targetów +
                 # unikanie każdego frozen przez każdy target).
                 # Dla max_parallel>1 — pomijamy z ostrzeżeniem.
+                # UWAGA: w tej gałęzi grupowanie linii pomijamy — frozen
+                # mają i tak stałe daty, a target-target traktujemy klasycznie.
                 target_here = [(p, s) for p, s in stage_keys
                                if (p, s) in self._target_keys]
                 frozen_here = [(p, s) for p, s in stage_keys
@@ -937,16 +1002,18 @@ class ProductionOptimizer:
 
             # Standardowo: Cumulative z capacity = max_parallel.
             # Dla max_parallel=1 to równoważne NoOverlap.
+            # Etapy linii grupujemy w 1 kompozytowy interwał (start=min, end=max).
+            grouped = _group_stage_keys(stage_keys)
             intervals = []
             demands = []
-            for pid, stage in stage_keys:
-                key = (pid, stage)
-                dur = self._duration_vars.get(key, 1)
-                interval = self.model.NewIntervalVar(
-                    self._start_vars[key], dur, self._end_vars[key],
-                    f'pex_{eid}_{pid}_{stage}'
-                )
-                intervals.append(interval)
+            for gkey, members in grouped:
+                if len(members) > 1:
+                    line_groups_merged += 1
+                    label = f'pex_line_{eid}_{gkey[1]}_{gkey[2]}'
+                else:
+                    p, s = members[0]
+                    label = f'pex_{eid}_{p}_{s}'
+                intervals.append(_build_interval_for_group(label, members))
                 demands.append(1)
 
             if len(intervals) > 1:
@@ -958,7 +1025,8 @@ class ProductionOptimizer:
 
         print(f"⚡ person_exclusivity: {constraints_added} ograniczeń master-cap "
               f"({skipped_frozen} pominięte przez frozen, "
-              f"{skipped_all_frozen} pominięte all-frozen)")
+              f"{skipped_all_frozen} pominięte all-frozen, "
+              f"{line_groups_merged} kompozytów linii)")
 
     def _add_availability_constraints(self, availability_list: List[Dict],
                                       target_pids: Set[int]):
