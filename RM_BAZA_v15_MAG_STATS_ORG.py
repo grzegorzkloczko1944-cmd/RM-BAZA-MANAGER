@@ -15732,6 +15732,159 @@ class MainWindow(tk.Tk):
                     pass
                 messagebox.showerror("Błąd", f"Nie udało się usunąć projektu:\n{e}", parent=win)
         
+        def hard_kill_selected():
+            """💀 HARD KILL — admin only.
+            
+            Wymusza skasowanie projektu nawet gdy:
+              • baza jest zablokowana ('database is locked'),
+              • lock pliku należy do innego użytkownika,
+              • plik bazy projektu został już ręcznie usunięty (rekord-zombie),
+              • zostały osierocone pliki -wal/-shm.
+            """
+            proj = get_selected()
+            if not proj:
+                messagebox.showwarning("Brak wyboru", "Zaznacz projekt do HARD KILL!", parent=win)
+                return
+            
+            if self.current_user_role != "ADMIN":
+                messagebox.showerror(
+                    "Brak uprawnień",
+                    "HARD KILL dostępny TYLKO dla ADMIN-a.",
+                    parent=win
+                )
+                return
+            
+            # Dwustopniowe potwierdzenie — wpisz nazwę projektu
+            from tkinter import simpledialog
+            confirm_name = simpledialog.askstring(
+                "💀 HARD KILL — potwierdzenie",
+                f"OPERACJA NIEODWRACALNA!\n\n"
+                f"Projekt: '{proj['name']}' (ID: {proj['id']})\n\n"
+                f"To wymusi:\n"
+                f"  • usunięcie locka pliku (nawet cudzego),\n"
+                f"  • reconnect master DB (RW),\n"
+                f"  • DELETE rekordu z master.sqlite,\n"
+                f"  • usunięcie pliku project_X.sqlite (+ -wal, -shm).\n\n"
+                f"Aby potwierdzić, wpisz dokładną nazwę projektu:",
+                parent=win
+            )
+            if confirm_name is None:
+                return
+            if confirm_name.strip() != (proj['name'] or '').strip():
+                messagebox.showwarning(
+                    "Anulowano",
+                    "Nazwa nie pasuje — HARD KILL anulowany.",
+                    parent=win
+                )
+                return
+            
+            pid = int(proj["id"])
+            ptype = proj.get("project_type", "MACHINE") or "MACHINE"
+            log_lines = [f"💀 HARD KILL projektu {pid}: {proj['name']} ({ptype})"]
+            print("\n" + log_lines[-1])
+            
+            # 1) Wymuś usunięcie locka (plikowy lock_manager_v2)
+            try:
+                if hasattr(self, 'lock_manager') and self.lock_manager:
+                    removed = self.lock_manager.force_delete_lock(pid)
+                    msg = f"   🔓 force_delete_lock({pid}) = {removed}"
+                else:
+                    msg = "   ⚠️  brak lock_manager — pomijam"
+                print(msg); log_lines.append(msg)
+            except Exception as e:
+                msg = f"   ⚠️  force_delete_lock błąd: {e}"
+                print(msg); log_lines.append(msg)
+            
+            # 2) Reconnect master jako READ-WRITE z dłuższym busy_timeout
+            try:
+                self.db_manager.reconnect_master_rw()
+                try:
+                    self.db_manager.master_con.execute("PRAGMA busy_timeout=15000")
+                except Exception:
+                    pass
+                msg = "   🔄 master reconnect RW OK (busy_timeout=15s)"
+                print(msg); log_lines.append(msg)
+            except Exception as e:
+                msg = f"   ⚠️  reconnect_master_rw błąd: {e}"
+                print(msg); log_lines.append(msg)
+            
+            # 3) DELETE z retry (do 5 prób, między próbami reconnect)
+            db_row_deleted = False
+            last_err = None
+            for attempt in range(1, 6):
+                try:
+                    delete_project(self.db_manager.master_con, pid)
+                    self.db_manager.master_con.commit()
+                    db_row_deleted = True
+                    msg = f"   ✅ DELETE rekordu (próba {attempt}) OK"
+                    print(msg); log_lines.append(msg)
+                    break
+                except Exception as e:
+                    last_err = e
+                    err_low = str(e).lower()
+                    msg = f"   ⚠️  DELETE próba {attempt}: {e}"
+                    print(msg); log_lines.append(msg)
+                    try:
+                        self.db_manager.master_con.rollback()
+                    except Exception:
+                        pass
+                    if "locked" in err_low or "busy" in err_low:
+                        try:
+                            self.db_manager._reconnect_master_after_locked()
+                            try:
+                                self.db_manager.master_con.execute("PRAGMA busy_timeout=15000")
+                            except Exception:
+                                pass
+                        except Exception as re:
+                            log_lines.append(f"   ⚠️  reconnect po lock: {re}")
+                    else:
+                        # Inny błąd niż lock — przerwij
+                        break
+            
+            if not db_row_deleted:
+                log_lines.append(f"   ❌ Nie udało się skasować rekordu: {last_err}")
+            
+            # 4) Skasuj pliki bazy projektowej (+ -wal, -shm)
+            files_removed = []
+            files_failed = []
+            try:
+                base_dir = (
+                    self.db_manager.projects_mag_dir
+                    if ptype == "WAREHOUSE"
+                    else self.db_manager.projects_dir
+                )
+                db_path = get_project_db_path(base_dir, pid, ptype)
+                for suffix in ("", "-wal", "-shm", "-journal"):
+                    p = db_path.with_name(db_path.name + suffix) if suffix else db_path
+                    try:
+                        if p.exists():
+                            p.unlink()
+                            files_removed.append(p.name)
+                    except Exception as e:
+                        files_failed.append(f"{p.name}: {e}")
+                msg = f"   🗑️  pliki: usunięto {files_removed or '(brak)'}"
+                print(msg); log_lines.append(msg)
+                if files_failed:
+                    msg = f"   ⚠️  pliki niemożliwe do usunięcia: {files_failed}"
+                    print(msg); log_lines.append(msg)
+            except Exception as e:
+                msg = f"   ⚠️  błąd usuwania plików: {e}"
+                print(msg); log_lines.append(msg)
+            
+            # 5) Refresh widoków
+            try:
+                reload()
+                self.load_projects()
+            except Exception as e:
+                log_lines.append(f"   ⚠️  refresh: {e}")
+            
+            # Podsumowanie
+            summary = "\n".join(log_lines)
+            if db_row_deleted:
+                messagebox.showinfo("HARD KILL — OK", summary, parent=win)
+            else:
+                messagebox.showerror("HARD KILL — niepełny", summary, parent=win)
+        
         # Przyciski
         btn_bar = tk.Frame(win, bg="#ecf0f1", height=60)
         btn_bar.pack(fill="x", padx=0, pady=0)
@@ -15758,6 +15911,11 @@ class MainWindow(tk.Tk):
                  bg="#3498db", fg="white", font=("Arial", 10)).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_inner, text="🗑️ Usuń", command=delete_selected, width=12,
                  bg="#e74c3c", fg="white", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
+        if self.current_user_role == "ADMIN":
+            tk.Button(
+                btn_inner, text="💀 HARD KILL", command=hard_kill_selected, width=14,
+                bg="#7f0000", fg="white", font=("Arial", 10, "bold")
+            ).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_inner, text="✖ Zamknij", command=win.destroy, width=12,
                  bg="#95a5a6", fg="white", font=("Arial", 10)).pack(side=tk.LEFT, padx=5)
         

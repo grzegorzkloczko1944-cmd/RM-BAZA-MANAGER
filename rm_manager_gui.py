@@ -6015,6 +6015,28 @@ class RMManagerGUI:
                     print(f"⚠️ Nie udało się ustawić statusu: {e}")
                     status = ProjectStatus.NEW  # Fallback
             
+            # 🔧 Korekta niespójności (kierunek 2): status NEW ale milestone PRZYJĘTY
+            #    JEST ustawiony w per-projekt DB. Zdarza się gdy `set_milestone` ustawił
+            #    PRZYJĘTY w per-projekt DB, ale następujące potem `set_project_status`
+            #    w master.sqlite poległo na "database is locked" i zostało tylko zalogowane.
+            #    Bez tego stages_start_enabled=False i wszystkie przyciski w ETAPY są nieaktywne.
+            if status == ProjectStatus.NEW:
+                try:
+                    _pdb = self.get_project_db_path(self.selected_project_id)
+                    if rmm.is_milestone_set(_pdb, self.selected_project_id, 'PRZYJETY'):
+                        print(f"🔧 Niespójność: status=NEW ale PRZYJĘTY ustawiony → naprawiam na ACCEPTED")
+                        rmm.set_project_status(self.master_db_path, self.selected_project_id, ProjectStatus.ACCEPTED)
+                        status = ProjectStatus.ACCEPTED
+                        # Jeśli są aktywne etapy → IN_PROGRESS
+                        try:
+                            if rmm.get_active_stages(_pdb, self.selected_project_id):
+                                rmm.set_project_status(self.master_db_path, self.selected_project_id, ProjectStatus.IN_PROGRESS)
+                                status = ProjectStatus.IN_PROGRESS
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print(f"⚠️ Błąd korekty NEW→ACCEPTED: {e}")
+            
             # 🔧 Korekta niespójności: status ACCEPTED/IN_PROGRESS ale milestone PRZYJĘTY
             #    nie istnieje w RM_MANAGER (np. po usunięciu i odtworzeniu bazy per-projekt)
             if status in (ProjectStatus.ACCEPTED, ProjectStatus.IN_PROGRESS):
