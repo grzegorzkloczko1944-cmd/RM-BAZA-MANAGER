@@ -64,8 +64,34 @@ except ImportError:
 import rm_manager as rmm
 from rm_manager import ProjectStatus
 
-# Kolejność etapów na wykresach (od góry do dołu)
-STAGE_ORDER = {code: idx for idx, (code, _, _, _) in enumerate(rmm.STAGE_DEFINITIONS)}
+# Kolejność etapów na wykresach (od góry do dołu).
+# 🔧 Niestandardowa kolejność: etapy zwykłe wg sekwencji workflow, a milestones
+# wg życzenia użytkownika (PRZYJĘTY jako trigger pozostaje pierwszy):
+#   PRZYJĘTY → (etapy zwykłe) → FAT → ODBIÓR_1/2/3 → TRANSPORT → SAT → ZAKOŃCZONY
+_CHART_STAGE_ORDER_LIST = [
+    'PRZYJETY',                # 0  🎯 milestone — trigger projektu
+    'PROJEKT',                 # 1  etap
+    'ELEKTROPROJEKT',          # 2  etap
+    'KOMPLETACJA',             # 3  etap
+    'MONTAZ',                  # 4  etap
+    'ELEKTROMONTAZ',           # 5  etap
+    'URUCHOMIENIE',            # 6  etap
+    'ODBIORY',                 # 7  etap
+    'FAT',                     # 8  🎯 milestone
+    'ODBIOR_1',                # 9  🎯 milestone
+    'ODBIOR_2',                # 10 🎯 milestone
+    'ODBIOR_3',                # 11 🎯 milestone
+    'POPRAWKI',                # 12 etap
+    'TRANSPORT',               # 13 🎯 milestone
+    'URUCHOMIENIE_U_KLIENTA',  # 14 🎯 milestone (SAT)
+    'ZAKONCZONY',              # 15 🎯 milestone (Zapłacony)
+]
+STAGE_ORDER = {code: idx for idx, code in enumerate(_CHART_STAGE_ORDER_LIST)}
+# Dołącz ewentualne kody zdefiniowane w bazie a brakujące w liście powyżej —
+# trafią na koniec, zachowując kolejność z `STAGE_DEFINITIONS`.
+for _code, _, _, _ in rmm.STAGE_DEFINITIONS:
+    if _code not in STAGE_ORDER:
+        STAGE_ORDER[_code] = len(STAGE_ORDER)
 
 # Przeładuj moduł aby mieć najnowsze funkcje
 try:
@@ -6014,28 +6040,6 @@ class RMManagerGUI:
                 except Exception as e:
                     print(f"⚠️ Nie udało się ustawić statusu: {e}")
                     status = ProjectStatus.NEW  # Fallback
-            
-            # 🔧 Korekta niespójności (kierunek 2): status NEW ale milestone PRZYJĘTY
-            #    JEST ustawiony w per-projekt DB. Zdarza się gdy `set_milestone` ustawił
-            #    PRZYJĘTY w per-projekt DB, ale następujące potem `set_project_status`
-            #    w master.sqlite poległo na "database is locked" i zostało tylko zalogowane.
-            #    Bez tego stages_start_enabled=False i wszystkie przyciski w ETAPY są nieaktywne.
-            if status == ProjectStatus.NEW:
-                try:
-                    _pdb = self.get_project_db_path(self.selected_project_id)
-                    if rmm.is_milestone_set(_pdb, self.selected_project_id, 'PRZYJETY'):
-                        print(f"🔧 Niespójność: status=NEW ale PRZYJĘTY ustawiony → naprawiam na ACCEPTED")
-                        rmm.set_project_status(self.master_db_path, self.selected_project_id, ProjectStatus.ACCEPTED)
-                        status = ProjectStatus.ACCEPTED
-                        # Jeśli są aktywne etapy → IN_PROGRESS
-                        try:
-                            if rmm.get_active_stages(_pdb, self.selected_project_id):
-                                rmm.set_project_status(self.master_db_path, self.selected_project_id, ProjectStatus.IN_PROGRESS)
-                                status = ProjectStatus.IN_PROGRESS
-                        except Exception:
-                            pass
-                except Exception as e:
-                    print(f"⚠️ Błąd korekty NEW→ACCEPTED: {e}")
             
             # 🔧 Korekta niespójności: status ACCEPTED/IN_PROGRESS ale milestone PRZYJĘTY
             #    nie istnieje w RM_MANAGER (np. po usunięciu i odtworzeniu bazy per-projekt)
@@ -15961,6 +15965,10 @@ class RMManagerGUI:
             
             # Odśwież wykres
             if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+                # 🔧 Filtr pracowników zmienia liczbę widocznych wierszy/projektów —
+                # unieważnij zachowany widok (xlim/ylim), inaczej po wyczyszczeniu
+                # filtra widoczny pozostaje tylko fragment osi z poprzedniego stanu.
+                self._mp_chart_meta['ax'] = None
                 pids = self._mp_chart_meta.get('project_ids', project_ids)
                 self._create_multi_project_chart_window(pids, preserve_view=True)
         
@@ -15969,6 +15977,8 @@ class RMManagerGUI:
             self._mp_employee_filter = None
             dlg.destroy()
             if hasattr(self, '_mp_chart_meta') and self._mp_chart_meta:
+                # 🔧 Wyczyść zachowany widok — patrz on_apply.
+                self._mp_chart_meta['ax'] = None
                 pids = self._mp_chart_meta.get('project_ids', project_ids)
                 self._create_multi_project_chart_window(pids, preserve_view=True)
         
@@ -16010,6 +16020,24 @@ class RMManagerGUI:
         
         is_copy_mode = (mode == 'copy')
         is_callback_mode = (mode == 'callback')
+        is_gantt_mode = (mode == 'gantt')
+        
+        # 🔧 Singleton dla trybu gantt — gdy okno selektora jest już otwarte,
+        # po prostu wyciągnij je na wierzch zamiast tworzyć drugie.
+        if is_gantt_mode:
+            existing = getattr(self, '_mp_selector_window', None)
+            if existing is not None:
+                try:
+                    if existing.winfo_exists():
+                        try:
+                            existing.deiconify()
+                            existing.lift()
+                            existing.focus_force()
+                        except Exception:
+                            pass
+                        return
+                except Exception:
+                    pass
         
         sel = tk.Toplevel(parent)
         # Schowaj natychmiast, by uniknąć efektu „okna-ducha" przed wyśrodkowaniem
@@ -16023,8 +16051,21 @@ class RMManagerGUI:
             sel.title(title or "📊 Wybór projektów")
         else:
             sel.title("📊 Wybór projektów — Multi-projekt Gantt")
-        sel.transient(parent)
-        sel.grab_set()
+        # 🔧 Tryb 'gantt' = MODELESS (równoległy z oknem wykresu).
+        # Bez transient + bez grab_set, żeby user mógł klikać w okno wykresu.
+        if is_gantt_mode:
+            self._mp_selector_window = sel
+            def _on_sel_close():
+                try:
+                    if getattr(self, '_mp_selector_window', None) is sel:
+                        self._mp_selector_window = None
+                except Exception:
+                    pass
+                sel.destroy()
+            sel.protocol("WM_DELETE_WINDOW", _on_sel_close)
+        else:
+            sel.transient(parent)
+            sel.grab_set()
         
         w, h = 750, 720
         if is_copy_mode:
@@ -16859,12 +16900,20 @@ class RMManagerGUI:
                     if on_select_callback:
                         on_select_callback(list(selected))
                     return
-                sel.destroy()
+                # 🔧 Gantt: NIE zamykaj okna — pozwól na równoległą edycję wyboru
+                # i wykresu. Generuj/odśwież wykres, ale zostaw selektor otwarty.
                 if selected:
                     self._create_multi_project_chart_window(selected, preserve_view=True)
+                    # Wyciągnij okno wykresu na wierzch (selektor pozostaje obok)
+                    try:
+                        if hasattr(self, '_mp_chart_window') and self._mp_chart_window \
+                                and self._mp_chart_window.winfo_exists():
+                            self._mp_chart_window.lift()
+                    except Exception:
+                        pass
                 else:
                     messagebox.showwarning("Brak wyboru",
-                                          "Nie wybrano żadnych projektów.", parent=parent)
+                                          "Nie wybrano żadnych projektów.", parent=sel)
         
         if is_copy_mode:
             tk.Button(bottom, text="📋 KOPIUJ", command=on_ok,
@@ -16879,9 +16928,19 @@ class RMManagerGUI:
             tk.Button(bottom, text="Anuluj", command=sel.destroy,
                       font=("Arial", 10), padx=15, pady=5).pack(side=tk.RIGHT, padx=5)
         else:
-            tk.Button(bottom, text="📊 Generuj wykres", command=on_ok,
+            def _close_sel():
+                try:
+                    if getattr(self, '_mp_selector_window', None) is sel:
+                        self._mp_selector_window = None
+                except Exception:
+                    pass
+                sel.destroy()
+            tk.Button(bottom, text="📊 Generuj / odśwież wykres", command=on_ok,
                       bg=self.COLOR_GREEN, fg="white", font=("Arial", 11, "bold"),
                       padx=20, pady=5).pack(side=tk.RIGHT, padx=5)
+            # Modeless: dodatkowy przycisk zamknięcia (X w ramce robi to samo)
+            tk.Button(bottom, text="Zamknij", command=_close_sel,
+                      font=("Arial", 10), padx=15, pady=5).pack(side=tk.RIGHT, padx=5)
         
         # Keyboard shortcuts
         sel.bind('<Control-Delete>', clear_filters)
@@ -18565,10 +18624,29 @@ class RMManagerGUI:
                     
                     is_blocker = False
                     if result['this_status'] == 'planned':
+                        # 🔧 Blokerem jest TYLKO sytuacja, gdy poprzednik realnie
+                        # opóźnia start bieżącego etapu, tj. unblock_date > this_start.
+                        # „Styk dni" (unblock_date == this_start) i wcześniejsze
+                        # zakończenie poprzednika to NORMALNE płynne przejście,
+                        # nie kolizja — nie strasz na czerwono.
+                        this_start_d = result.get('this_start')
+                        unblock_d = None
+                        if unblock_date:
+                            try:
+                                unblock_d = datetime.fromisoformat(unblock_date[:10]).date()
+                            except Exception:
+                                unblock_d = None
                         if r['dtype'] == 'FS' and pred_status != 'done':
-                            is_blocker = True
+                            if this_start_d and unblock_d:
+                                is_blocker = unblock_d > this_start_d
+                            else:
+                                # Brak danych do porównania — fallback na starą logikę
+                                is_blocker = True
                         elif r['dtype'] == 'SS' and pred_status == 'planned':
-                            is_blocker = True
+                            if this_start_d and unblock_d:
+                                is_blocker = unblock_d > this_start_d
+                            else:
+                                is_blocker = True
                     
                     result['predecessors'].append({
                         'code': pred_code,
