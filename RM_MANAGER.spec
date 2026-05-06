@@ -1,12 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('rm_manager.py', '.'), ('lock_manager_v2.py', '.'), ('backup_manager.py', '.')]
+datas = [('rm_manager.py', '.'), ('rm_optimizer.py', '.'), ('lock_manager_v2.py', '.'), ('backup_manager.py', '.'), ('wat.jpg', '.'), ('rm_manager_icon.ico', '.')]
 binaries = []
-hiddenimports = ['plotly', 'PIL', 'PIL.Image', 'PIL.ImageDraw']
+hiddenimports = ['plotly', 'PIL', 'PIL.Image', 'PIL.ImageTk', 'PIL.ImageDraw', 'PIL.ImageFilter', 'ortools', 'ortools.sat', 'ortools.sat.python', 'ortools.sat.python.cp_model', 'psutil']
 tmp_ret = collect_all('plotly')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('PIL')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('ortools')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
@@ -44,5 +46,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='rm_manager_icon.ico',
+    icon=['rm_manager_icon.ico'],
 )
