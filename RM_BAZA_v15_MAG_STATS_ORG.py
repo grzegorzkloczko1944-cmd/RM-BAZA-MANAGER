@@ -342,6 +342,7 @@ class MainWindow(tk.Tk):
         self.filem.add_command(label="Aktualizuj BOM…", command=self.menu_aktualizuj_bom, state='disabled')
         self.filem.add_command(label="Dodaj BOM…", command=self.menu_dodaj_bom, state='disabled')
         self.filem.add_command(label="Import moduł…", command=self.menu_import_modul, state='disabled')
+        self.filem.add_command(label="Aktualizuj ilości…", command=self.menu_aktualizuj_ilosci, state='disabled')
         self.filem.add_separator()
         self.filem.add_command(label="Odśwież", command=self.refresh_data)
         self.filem.add_separator()
@@ -4376,6 +4377,7 @@ class MainWindow(tk.Tk):
         # 1: Aktualizuj BOM… (tylko MACHINE)
         # 2: Dodaj BOM… (tylko MACHINE)
         # 3: Import moduł… (tylko WAREHOUSE)
+        # 4: Aktualizuj ilości… (MACHINE + WAREHOUSE)
         
         if project_type == "MACHINE":
             # PRODUKCJA: włącz "Import BOM…", "Aktualizuj BOM…" i "Dodaj BOM…", wyłącz "Import moduł…"
@@ -4383,18 +4385,21 @@ class MainWindow(tk.Tk):
             self.filem.entryconfig(1, state='normal')
             self.filem.entryconfig(2, state='normal')
             self.filem.entryconfig(3, state='disabled')
+            self.filem.entryconfig(4, state='normal')
         elif project_type == "WAREHOUSE":
             # MAGAZYN: włącz "Import moduł…", wyłącz "Import BOM…", "Aktualizuj BOM…" i "Dodaj BOM…"
             self.filem.entryconfig(0, state='disabled')
             self.filem.entryconfig(1, state='disabled')
             self.filem.entryconfig(2, state='disabled')
             self.filem.entryconfig(3, state='normal')
+            self.filem.entryconfig(4, state='normal')
         else:
             # Domyślnie wyłącz wszystkie
             self.filem.entryconfig(0, state='disabled')
             self.filem.entryconfig(1, state='disabled')
             self.filem.entryconfig(2, state='disabled')
             self.filem.entryconfig(3, state='disabled')
+            self.filem.entryconfig(4, state='disabled')
         
         # Aktualizuj przycisk "Usuń dla zaznaczonych" - tylko WAREHOUSE
         if hasattr(self, 'btn_delete_selected'):
@@ -11466,6 +11471,532 @@ class MainWindow(tk.Tk):
     # KONIEC MODUŁU IMPORT BOM
     # ========================================================================
     
+    # ========================================================================
+    # MODUŁ AKTUALIZUJ ILOŚCI - aktualizuje TYLKO Ilość BOM (work_qty) i
+    #                          Ilość (zam.) (order_qty), NIC innego.
+    # ========================================================================
+
+    def menu_aktualizuj_ilosci(self):
+        """
+        AKTUALIZUJ ILOŚCI z pliku XLSX (PRODUKCJA + MAGAZYN).
+
+        Aktualizuje WYŁĄCZNIE dwie kolumny w tabeli items:
+          - work_qty   (wyświetlane w GUI jako "Ilość BOM")
+          - order_qty  (wyświetlane w GUI jako "Ilość (zam.)")
+
+        Pozostałe pola (nazwy, opisy, materiały, moduły, dostawcy, klasyfikacja,
+        delivered_qty, eventy, milestones, statusy, locki, drzewo BOM-u) NIE są
+        ruszane. Dopasowanie pozycji:
+          1) po znormalizowanym numerze rysunku,
+          2) jeśli pozycja w XLSX nie ma numeru — po znormalizowanej nazwie.
+
+        Przebieg: wybór XLSX → analiza (dry-run) → okno podglądu z tabelą i
+        statystykami → backup projektu → UPDATE w jednej transakcji.
+        """
+        # --- Sprawdzenia uprawnień / locka / projektu ---
+        if self.current_user_role not in ("ADMIN", "USER$$"):
+            messagebox.showinfo(
+                "Brak uprawnień",
+                "Aktualizacja ilości jest dostępna tylko dla ADMIN i USER$$."
+            )
+            return
+        if not self.have_lock:
+            messagebox.showwarning("Brak locka", "Przejmij lock projektu aby aktualizować ilości!")
+            return
+        if not self.current_project_id:
+            messagebox.showwarning("Brak projektu", "Wybierz projekt najpierw!")
+            return
+
+        # --- Wybór pliku ---
+        from tkinter import filedialog
+        from pathlib import Path
+        xlsx_path = filedialog.askopenfilename(
+            title="Wybierz plik XLSX (arkusz ZBIORCZY) z poprawnymi ilościami",
+            filetypes=[("Excel / CSV", "*.xlsx *.csv"),
+                       ("Excel", "*.xlsx"),
+                       ("CSV", "*.csv"),
+                       ("Wszystkie pliki", "*.*")]
+        )
+        if not xlsx_path:
+            return
+        excel_path = Path(xlsx_path)
+
+        # --- Auto-konwersja CSV → XLSX (analogicznie jak w innych importach) ---
+        try:
+            if excel_path.suffix.lower() == ".csv":
+                from import_bom import csv_to_xlsx
+                print(f"🔄 Wykryto CSV - konwertuję na XLSX...")
+                excel_path = csv_to_xlsx(excel_path)
+                print(f"✅ Skonwertowano: {excel_path.name}")
+        except Exception as e:
+            messagebox.showerror("Błąd CSV→XLSX", f"Nie udało się skonwertować CSV:\n{e}")
+            return
+
+        # --- Wczytaj XLSX (pandas + openpyxl) ---
+        try:
+            import pandas as pd
+        except ImportError:
+            messagebox.showerror(
+                "Brak pandas",
+                "Moduł 'pandas' nie jest zainstalowany.\nZainstaluj: pip install pandas openpyxl"
+            )
+            return
+
+        try:
+            xls = pd.ExcelFile(excel_path, engine="openpyxl")
+        except Exception as e:
+            messagebox.showerror("Błąd odczytu XLSX", f"Nie udało się otworzyć pliku:\n{e}")
+            return
+
+        # --- Mapowanie kolumn ---
+        import re as _re
+        _ws_re = _re.compile(r"\s+")
+
+        def _norm_key(s):
+            if s is None:
+                return ""
+            try:
+                if isinstance(s, float) and pd.isna(s):
+                    return ""
+            except Exception:
+                pass
+            return _ws_re.sub(" ", str(s).strip()).upper()
+
+        def _to_float(v):
+            if v is None:
+                return None
+            try:
+                if isinstance(v, float) and pd.isna(v):
+                    return None
+            except Exception:
+                pass
+            s = str(v).strip().replace(",", ".")
+            if s == "" or s.lower() == "nan" or s == "●":
+                return None
+            try:
+                return float(s)
+            except ValueError:
+                return None
+
+        # --- Auto-wykrywanie wiersza nagłówka ---
+        # Po edycji arkusza nagłówek może NIE być w wierszu 1 (mogą być
+        # ukryte/scalone wiersze powyżej). Skanujemy pierwsze ~40 wierszy
+        # i szukamy wiersza zawierającego "Nazwa" + przynajmniej jedną
+        # z kolumn ilości.
+        WANTED_NAME = {"NAZWA"}
+        WANTED_QTY = {
+            "ILOŚĆ CAŁKOWITA", "ILOSC CALKOWITA", "ILOŚĆ BOM", "ILOSC BOM",
+            "ILOŚĆ (ZAM.)", "ILOSC (ZAM.)", "ILOŚĆ ZAM.", "ILOSC ZAM.",
+        }
+
+        def _looks_like_header(values):
+            keys = {_norm_key(v) for v in values}
+            return bool(keys & WANTED_NAME) and bool(keys & WANTED_QTY)
+
+        try:
+            sheet_to_use = "ZBIORCZY" if "ZBIORCZY" in xls.sheet_names else xls.sheet_names[0]
+            raw = xls.parse(sheet_to_use, dtype=object, header=None)
+        except Exception as e:
+            messagebox.showerror("Błąd odczytu XLSX", f"Nie udało się odczytać arkusza:\n{e}")
+            return
+
+        header_row_idx = None
+        scan_limit = min(40, len(raw))
+        for i in range(scan_limit):
+            try:
+                row_vals = list(raw.iloc[i].values)
+            except Exception:
+                continue
+            if _looks_like_header(row_vals):
+                header_row_idx = i
+                break
+
+        if header_row_idx is None:
+            # Pokaż użytkownikowi pierwsze wykryte nagłówki dla diagnozy
+            sample_cols = []
+            for i in range(min(5, len(raw))):
+                try:
+                    sample_cols.append(
+                        f"  wiersz {i+1}: " +
+                        " | ".join(str(v) for v in raw.iloc[i].values[:12] if v is not None)
+                    )
+                except Exception:
+                    pass
+            messagebox.showerror(
+                "Brak wymaganych kolumn",
+                "W arkuszu '{}' nie znaleziono nagłówka zawierającego\n"
+                "kolumnę 'Nazwa' oraz co najmniej jedną z\n"
+                "'Ilość całkowita' / 'Ilość (zam.)' / 'Ilość BOM'.\n\n"
+                "Pierwsze wiersze arkusza:\n{}".format(
+                    sheet_to_use, "\n".join(sample_cols) if sample_cols else "(arkusz pusty)"
+                )
+            )
+            return
+
+        # Zbuduj DataFrame z poprawnym nagłówkiem
+        header_vals = [str(v).strip() if v is not None else "" for v in raw.iloc[header_row_idx].values]
+        # Dla powtarzających się/pustych nagłówków dodaj suffix, by uniknąć kolizji
+        seen = {}
+        unique_headers = []
+        for h in header_vals:
+            base = h if h else "_col"
+            n = seen.get(base, 0)
+            unique_headers.append(base if n == 0 else f"{base}__{n}")
+            seen[base] = n + 1
+        df = raw.iloc[header_row_idx + 1:].copy()
+        df.columns = unique_headers
+        df.reset_index(drop=True, inplace=True)
+        if header_row_idx > 0:
+            print(f"ℹ️  Nagłówek wykryty w wierszu {header_row_idx + 1} (nie 1).")
+
+        def _pick_col(candidates):
+            for c in candidates:
+                if c in df.columns:
+                    return c
+            nm = {_norm_key(c): c for c in df.columns}
+            for c in candidates:
+                if _norm_key(c) in nm:
+                    return nm[_norm_key(c)]
+            return None
+
+        col_dn = _pick_col(["Nr rysunku", "Nr Rysunku", "Numer rysunku"])
+        col_name = _pick_col(["Nazwa"])
+        col_bom = _pick_col(["Ilość całkowita", "Ilosc calkowita", "Ilość BOM", "Ilosc BOM"])
+        col_ord = _pick_col(["Ilość (zam.)", "Ilosc (zam.)", "Ilość zam.", "Ilosc zam."])
+
+        if col_name is None or (col_bom is None and col_ord is None):
+            messagebox.showerror(
+                "Brak wymaganych kolumn",
+                "W arkuszu '{}' nie znaleziono kolumny 'Nazwa' i co najmniej jednej z\n"
+                "'Ilość całkowita' / 'Ilość (zam.)'.\n\n"
+                "Wykryte kolumny:\n{}".format(
+                    sheet_to_use,
+                    ", ".join(str(c) for c in df.columns[:30])
+                )
+            )
+            return
+
+        print(f"\n{'='*60}")
+        print(f"📥 AKTUALIZUJ ILOŚCI (tylko work_qty / order_qty)")
+        print(f"{'='*60}")
+        print(f"Projekt: {self.current_project_id}   plik: {excel_path.name}")
+        print(f"Kolumny: dn='{col_dn}'  name='{col_name}'  qty_bom='{col_bom}'  qty_ord='{col_ord}'")
+
+        # --- Pobierz pozycje z bazy ---
+        rows = self.db_manager.project_con.execute(
+            """
+            SELECT id,
+                   COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) AS dn,
+                   COALESCE(NULLIF(work_name, ''),         src_name)     AS nm,
+                   COALESCE(work_qty, src_qty)                            AS qty_bom,
+                   order_qty
+            FROM items
+            WHERE project_id = ?
+            """,
+            (self.current_project_id,)
+        ).fetchall()
+
+        by_dn = {}
+        by_name = {}
+        for r in rows:
+            it = {'id': r[0], 'drawing_no': r[1] or '', 'name': r[2] or '',
+                  'qty_bom': r[3], 'order_qty': r[4]}
+            k = _norm_key(it['drawing_no'])
+            if k:
+                by_dn.setdefault(k, []).append(it)
+            else:
+                by_name.setdefault(_norm_key(it['name']), []).append(it)
+
+        # --- Analiza (dry-run) ---
+        TOL = 1e-6
+
+        def _almost_equal(a, b):
+            if a is None and b is None:
+                return True
+            if a is None or b is None:
+                return False
+            return abs(float(a) - float(b)) <= TOL
+
+        stats = {'xlsx_rows': 0, 'matched_dn': 0, 'matched_name': 0,
+                 'ambiguous': 0, 'not_found': 0, 'no_change': 0, 'to_update': 0}
+        plan = []        # lista zmian: (item_id, dn, nm, cur_bom, new_bom, cur_ord, new_ord, change_bom, change_ord)
+        not_found = []   # (dn, nm, new_bom, new_ord)
+
+        for _, r in df.iterrows():
+            raw_dn = r[col_dn] if col_dn else None
+            raw_nm = r[col_name] if col_name else None
+            if (_norm_key(raw_dn) == "") and (_norm_key(raw_nm) == ""):
+                continue
+            stats['xlsx_rows'] += 1
+
+            new_bom = _to_float(r[col_bom]) if col_bom else None
+            new_ord = _to_float(r[col_ord]) if col_ord else None
+            # Zasada z importu: '●' w BOM => potraktuj qty_zam jako BOM
+            if col_bom is not None:
+                raw_bom_val = r[col_bom]
+                if raw_bom_val is not None and str(raw_bom_val).strip() == "●":
+                    new_bom = new_ord
+
+            dn_n = _norm_key(raw_dn)
+            nm_n = _norm_key(raw_nm)
+            cands = []
+            kind = None
+            if dn_n and dn_n in by_dn:
+                cands = by_dn[dn_n]; kind = 'DRAWING_NO'; stats['matched_dn'] += 1
+            elif nm_n and nm_n in by_name:
+                cands = by_name[nm_n]; kind = 'NAME'; stats['matched_name'] += 1
+
+            if not cands:
+                stats['not_found'] += 1
+                not_found.append((raw_dn or '', raw_nm or '', new_bom, new_ord))
+                continue
+            if len(cands) > 1:
+                stats['ambiguous'] += 1
+
+            for it in cands:
+                cur_bom = it['qty_bom']
+                cur_ord = it['order_qty']
+                ch_bom = (new_bom is not None) and (not _almost_equal(cur_bom, new_bom))
+                ch_ord = (new_ord is not None) and (not _almost_equal(cur_ord, new_ord))
+                if not ch_bom and not ch_ord:
+                    stats['no_change'] += 1
+                    continue
+                stats['to_update'] += 1
+                plan.append((it['id'], it['drawing_no'], it['name'],
+                             cur_bom, new_bom, cur_ord, new_ord, ch_bom, ch_ord))
+
+        print(f"📊 Statystyki: {stats}")
+
+        if not plan and not not_found:
+            messagebox.showinfo(
+                "Aktualizuj ilości",
+                f"Plik przeanalizowany — brak różnic do zapisania.\n\n"
+                f"Wierszy w XLSX: {stats['xlsx_rows']}\n"
+                f"Bez zmian:      {stats['no_change']}"
+            )
+            return
+
+        # --- Okno podglądu z tabelą ---
+        dlg = tk.Toplevel(self)
+        dlg.title("Aktualizuj ilości — podgląd zmian")
+        dlg.geometry("1100x650")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        # nagłówek + statystyki
+        hdr = tk.Frame(dlg, bg='#cce5ff', padx=10, pady=8)
+        hdr.pack(fill=tk.X)
+        tk.Label(
+            hdr,
+            text="📥 Aktualizuj TYLKO Ilość BOM i Ilość (zam.)",
+            font=('Arial', 13, 'bold'), bg='#cce5ff'
+        ).pack(anchor='w')
+        tk.Label(
+            hdr,
+            text=(
+                f"Plik: {excel_path.name}    |    "
+                f"Wierszy XLSX: {stats['xlsx_rows']}    "
+                f"Dopasowanych po nr.rys.: {stats['matched_dn']}    "
+                f"po nazwie: {stats['matched_name']}    "
+                f"Bez zmian: {stats['no_change']}    "
+                f"Do aktualizacji: {stats['to_update']}    "
+                f"Brak w bazie: {stats['not_found']}    "
+                f"Wieloznaczne: {stats['ambiguous']}"
+            ),
+            font=('Arial', 9), bg='#cce5ff', justify='left'
+        ).pack(anchor='w', pady=(4, 0))
+
+        # zakładki: zmiany / nie znaleziono
+        nb = ttk.Notebook(dlg)
+        nb.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+
+        # --- Tab 1: zmiany ---
+        f1 = tk.Frame(nb)
+        nb.add(f1, text=f"Zmiany ({len(plan)})")
+        cols = ('id', 'dn', 'nm', 'cur_bom', 'new_bom', 'cur_ord', 'new_ord')
+        tv = ttk.Treeview(f1, columns=cols, show='headings', selectmode='extended')
+        for c, txt, w in [
+            ('id', 'ID', 60),
+            ('dn', 'Nr rysunku', 160),
+            ('nm', 'Nazwa', 320),
+            ('cur_bom', 'BOM (obecna)', 110),
+            ('new_bom', 'BOM (nowa)', 110),
+            ('cur_ord', 'Zam. (obecna)', 120),
+            ('new_ord', 'Zam. (nowa)', 110),
+        ]:
+            tv.heading(c, text=txt)
+            anchor = 'e' if c.startswith(('cur_', 'new_', 'id')) else 'w'
+            tv.column(c, width=w, anchor=anchor, stretch=(c == 'nm'))
+        vsb = ttk.Scrollbar(f1, orient='vertical', command=tv.yview)
+        tv.configure(yscrollcommand=vsb.set)
+        tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def _fmt(v):
+            if v is None:
+                return ""
+            try:
+                f = float(v)
+                if abs(f - round(f)) < 1e-9:
+                    return str(int(round(f)))
+                return f"{f:g}"
+            except Exception:
+                return str(v)
+
+        tv.tag_configure('chg_bom', background='#fff3cd')
+        tv.tag_configure('chg_ord', background='#d1ecf1')
+        tv.tag_configure('chg_both', background='#f8d7da')
+
+        for (iid, dn, nm, cur_bom, new_bom, cur_ord, new_ord, ch_bom, ch_ord) in plan:
+            tag = ''
+            if ch_bom and ch_ord:
+                tag = 'chg_both'
+            elif ch_bom:
+                tag = 'chg_bom'
+            elif ch_ord:
+                tag = 'chg_ord'
+            tv.insert(
+                '', 'end',
+                values=(iid, dn, nm,
+                        _fmt(cur_bom), _fmt(new_bom) if ch_bom else '',
+                        _fmt(cur_ord), _fmt(new_ord) if ch_ord else ''),
+                tags=(tag,) if tag else ()
+            )
+
+        # --- Tab 2: brak w bazie ---
+        f2 = tk.Frame(nb)
+        nb.add(f2, text=f"Brak w bazie ({len(not_found)})")
+        tv2 = ttk.Treeview(
+            f2, columns=('dn', 'nm', 'bom', 'ord'),
+            show='headings', selectmode='extended'
+        )
+        for c, txt, w, an in [
+            ('dn', 'Nr rysunku (XLSX)', 200, 'w'),
+            ('nm', 'Nazwa (XLSX)', 420, 'w'),
+            ('bom', 'BOM (XLSX)', 120, 'e'),
+            ('ord', 'Zam. (XLSX)', 120, 'e'),
+        ]:
+            tv2.heading(c, text=txt)
+            tv2.column(c, width=w, anchor=an, stretch=(c == 'nm'))
+        vsb2 = ttk.Scrollbar(f2, orient='vertical', command=tv2.yview)
+        tv2.configure(yscrollcommand=vsb2.set)
+        tv2.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb2.pack(side=tk.RIGHT, fill=tk.Y)
+        for (dn, nm, b, o) in not_found:
+            tv2.insert('', 'end', values=(dn, nm, _fmt(b), _fmt(o)))
+
+        # --- Stopka: opcje + przyciski ---
+        bottom = tk.Frame(dlg, padx=10, pady=8)
+        bottom.pack(fill=tk.X)
+
+        backup_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            bottom,
+            text="Zrób backup projektu przed zapisem (zalecane)",
+            variable=backup_var
+        ).pack(side=tk.LEFT)
+
+        decision = {'apply': False}
+
+        def _on_cancel():
+            decision['apply'] = False
+            dlg.destroy()
+
+        def _on_apply():
+            if not plan:
+                messagebox.showinfo("Aktualizuj ilości", "Brak zmian do zapisania.", parent=dlg)
+                return
+            if not messagebox.askyesno(
+                "Potwierdzenie",
+                f"Zapisać {len(plan)} aktualizacji ilości?\n\n"
+                f"Zmienione zostaną TYLKO kolumny:\n"
+                f"  • work_qty (Ilość BOM)\n"
+                f"  • order_qty (Ilość (zam.))\n\n"
+                f"Pozostałe dane (nazwy, opisy, materiały, dostawcy, dostarczone, "
+                f"moduły, statusy itd.) pozostaną nietknięte.",
+                parent=dlg
+            ):
+                return
+            decision['apply'] = True
+            dlg.destroy()
+
+        tk.Button(bottom, text="Anuluj", width=14, command=_on_cancel).pack(side=tk.RIGHT, padx=4)
+        tk.Button(
+            bottom, text="✅ Zastosuj zmiany",
+            width=20, bg='#c8e6c9', command=_on_apply
+        ).pack(side=tk.RIGHT, padx=4)
+
+        dlg.wait_window()
+
+        if not decision['apply']:
+            print("Aktualizacja ilości anulowana przez użytkownika.")
+            return
+
+        # --- Backup projektu ---
+        if backup_var.get():
+            try:
+                print(f"📦 Backup projektu {self.current_project_id} przed aktualizacją ilości...")
+                self.backup_manager.backup_project(self.current_project_id, skip_checkpoint=False)
+                print(f"✅ Backup OK")
+            except Exception as e:
+                if not messagebox.askyesno(
+                    "Backup nieudany",
+                    f"Backup nie powiódł się:\n{e}\n\nKontynuować mimo to?"
+                ):
+                    return
+
+        # --- Zapis: TYLKO work_qty / order_qty + updated_at ---
+        cur = self.db_manager.project_con.cursor()
+        applied = 0
+        try:
+            cur.execute("BEGIN")
+            for (iid, dn, nm, cur_bom, new_bom, cur_ord, new_ord, ch_bom, ch_ord) in plan:
+                sets = []
+                params = []
+                desc_parts = []
+                if ch_bom:
+                    sets.append("work_qty = ?")
+                    params.append(new_bom)
+                    desc_parts.append(f"BOM {cur_bom}->{new_bom}")
+                if ch_ord:
+                    sets.append("order_qty = ?")
+                    params.append(new_ord)
+                    desc_parts.append(f"ZAM {cur_ord}->{new_ord}")
+                if not sets:
+                    continue
+                sets.append("updated_at = datetime('now')")
+                params.append(iid)
+                cur.execute(f"UPDATE items SET {', '.join(sets)} WHERE id = ?", params)
+                applied += 1
+                try:
+                    self._log_item_change(
+                        iid, 'EDIT', 'menu_aktualizuj_ilosci',
+                        None, "; ".join(desc_parts)
+                    )
+                except Exception:
+                    pass
+            self.db_manager.project_con.commit()
+        except Exception as e:
+            self.db_manager.project_con.rollback()
+            messagebox.showerror("Błąd zapisu", f"Zapis nie powiódł się — wycofano:\n{e}")
+            return
+
+        print(f"✅ Zaktualizowano {applied} pozycji (tylko work_qty / order_qty).")
+        messagebox.showinfo(
+            "Aktualizuj ilości",
+            f"Zaktualizowano {applied} pozycji.\n\n"
+            f"Brak w bazie: {len(not_found)}\n"
+            f"Bez zmian: {stats['no_change']}"
+        )
+        try:
+            self.refresh_data()
+        except Exception:
+            pass
+
+    # ========================================================================
+    # KONIEC MODUŁU AKTUALIZUJ ILOŚCI
+    # ========================================================================
+
     
     # ========================================================================
     # MODUŁ AKTUALIZUJ BOM - dodaje pozycje, przy konflikcie pokazuje dialog
