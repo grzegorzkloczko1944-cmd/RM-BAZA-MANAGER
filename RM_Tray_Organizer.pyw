@@ -16,15 +16,23 @@ import os
 import subprocess
 import json
 import winreg
+import sqlite3
+import hashlib
+import re
+import time
+import shutil
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from PyQt5.QtWidgets import (
-    QApplication, QSystemTrayIcon, QMenu, QAction, 
+    QApplication, QSystemTrayIcon, QMenu, QAction,
     QMessageBox, QDialog, QVBoxLayout, QCheckBox,
     QPushButton, QLabel, QHBoxLayout, QFileDialog,
-    QLineEdit, QGridLayout, QGroupBox, QInputDialog
+    QLineEdit, QGridLayout, QGroupBox, QInputDialog,
+    QComboBox, QScrollArea, QWidget, QFrame, QSizePolicy,
+    QTextEdit, QSplitter
 )
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread
 from PyQt5.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QCursor
 
 try:
@@ -232,7 +240,52 @@ def load_config() -> Dict:
                 return json.load(f)
         except Exception:
             pass
-    return {"autostart_apps": [], "app_paths": {}, "custom_apps": {}, "visible_apps": []}
+    return {"autostart_apps": [], "app_paths": {}, "custom_apps": {}, "visible_apps": [],
+            "master_sqlite_path": "", "server_apps_path": ""}
+
+
+def get_master_sqlite_path() -> Optional[Path]:
+    """Zwróć ścieżkę do master.sqlite z konfiguracji (lub None)."""
+    p = load_config().get("master_sqlite_path", "").strip()
+    if p:
+        path = Path(p)
+        if path.exists():
+            return path
+    return None
+
+
+def get_chat_dir() -> Optional[Path]:
+    """Zwróć katalog z plikami JSON chatu (podfolder 'chat' obok master.sqlite)."""
+    mp = get_master_sqlite_path()
+    if mp:
+        return mp.parent / "chat"
+    return None
+
+
+def get_users_from_master() -> List[Dict]:
+    """Wczytaj aktywnych użytkowników z master.sqlite."""
+    mp = get_master_sqlite_path()
+    if not mp:
+        return []
+    try:
+        con = sqlite3.connect(str(mp), timeout=5)
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            "SELECT id, username, display_name, role, password_hash "
+            "FROM users WHERE is_active = 1 ORDER BY username"
+        ).fetchall()
+        con.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"⚠️  get_users_from_master: {e}")
+        return []
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """Sprawdź hasło (SHA-256)."""
+    if not stored_hash:
+        return True  # Brak hasła → wolny dostęp
+    return hashlib.sha256(password.encode()).hexdigest() == stored_hash
 
 
 def save_config(config: Dict):
@@ -380,7 +433,60 @@ class SettingsDialog(QDialog):
         self.setMinimumHeight(700)
         
         layout = QVBoxLayout()
-        
+
+        # RM_BAZA – master.sqlite
+        layout.addWidget(QLabel("<b>Połączenie z RM_BAZA (chat / logowanie):</b>"))
+        mb_group = QGroupBox("Plik master.sqlite")
+        mb_layout = QHBoxLayout()
+        cfg = load_config()
+
+        self.master_sqlite_input = QLineEdit()
+        self.master_sqlite_input.setPlaceholderText("Ścieżka do master.sqlite (np. Y:/RM_BAZA/master.sqlite)")
+        self.master_sqlite_input.setReadOnly(True)
+        mb_path = cfg.get("master_sqlite_path", "")
+        if mb_path:
+            self.master_sqlite_input.setText(mb_path)
+        mb_layout.addWidget(self.master_sqlite_input)
+
+        mb_browse = QPushButton("Wybierz...")
+        mb_browse.clicked.connect(self._browse_master_sqlite)
+        mb_layout.addWidget(mb_browse)
+
+        mb_clear = QPushButton("Wyczyść")
+        mb_clear.clicked.connect(lambda: self.master_sqlite_input.clear())
+        mb_layout.addWidget(mb_clear)
+
+        mb_group.setLayout(mb_layout)
+        layout.addWidget(mb_group)
+
+        layout.addSpacing(10)
+
+        # Serwer – katalog z plikami aplikacji
+        layout.addWidget(QLabel("<b>Katalog aktualizacji aplikacji (serwer):</b>"))
+        sa_group = QGroupBox("Katalog z plikami aplikacji na serwerze")
+        sa_layout = QHBoxLayout()
+
+        self.server_apps_input = QLineEdit()
+        self.server_apps_input.setPlaceholderText("Ścieżka do katalogu z aplikacjami (np. Y:/RM_APPS/)")
+        self.server_apps_input.setReadOnly(True)
+        sa_path = cfg.get("server_apps_path", "")
+        if sa_path:
+            self.server_apps_input.setText(sa_path)
+        sa_layout.addWidget(self.server_apps_input)
+
+        sa_browse = QPushButton("Wybierz...")
+        sa_browse.clicked.connect(self._browse_server_apps)
+        sa_layout.addWidget(sa_browse)
+
+        sa_clear = QPushButton("Wyczyść")
+        sa_clear.clicked.connect(lambda: self.server_apps_input.clear())
+        sa_layout.addWidget(sa_clear)
+
+        sa_group.setLayout(sa_layout)
+        layout.addWidget(sa_group)
+
+        layout.addSpacing(10)
+
         # Autostart organizera
         layout.addWidget(QLabel("<b>Autostart systemu:</b>"))
         self.autostart_checkbox = QCheckBox("Uruchom RM Tray Organizer przy starcie Windows")
@@ -448,7 +554,13 @@ class SettingsDialog(QDialog):
             clear_btn = QPushButton("Wyczyść")
             clear_btn.clicked.connect(lambda checked, inp=path_input: inp.clear())
             paths_layout.addWidget(clear_btn, row, 3)
-            
+
+            # Przycisk aktualizuj
+            update_btn = QPushButton("Aktualizuj")
+            update_btn.setToolTip("Skopiuj plik z katalogu serwera do lokalnej ścieżki")
+            update_btn.clicked.connect(lambda checked, aid=app_id, inp=path_input: self._update_app(aid, inp))
+            paths_layout.addWidget(update_btn, row, 4)
+
             self.path_inputs[app_id] = path_input
             row += 1
         
@@ -519,6 +631,80 @@ class SettingsDialog(QDialog):
         layout.addLayout(btn_layout)
         self.setLayout(layout)
     
+    def _browse_master_sqlite(self):
+        """Wybierz plik master.sqlite."""
+        current = self.master_sqlite_input.text()
+        start_dir = str(Path(current).parent) if current and Path(current).exists() else str(get_app_directory())
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Wskaż plik master.sqlite",
+            start_dir,
+            "SQLite (*.sqlite *.db);;Wszystkie pliki (*.*)"
+        )
+        if file_path:
+            self.master_sqlite_input.setText(file_path)
+
+    def _browse_server_apps(self):
+        """Wybierz katalog z aplikacjami na serwerze."""
+        current = self.server_apps_input.text()
+        start_dir = current if current and Path(current).exists() else str(get_app_directory())
+        dir_path = QFileDialog.getExistingDirectory(
+            self,
+            "Wskaż katalog z aplikacjami na serwerze",
+            start_dir,
+        )
+        if dir_path:
+            self.server_apps_input.setText(dir_path)
+
+    def _update_app(self, app_id: str, path_input: QLineEdit):
+        """Skopiuj plik aplikacji z serwera do lokalnej ścieżki."""
+        local_path_str = path_input.text().strip()
+        if not local_path_str:
+            QMessageBox.warning(
+                self, "Brak ścieżki lokalnej",
+                "Nie podano lokalnej ścieżki docelowej.\nNajpierw wybierz plik przez 'Wybierz...'"
+            )
+            return
+
+        server_dir_str = self.server_apps_input.text().strip()
+        if not server_dir_str:
+            QMessageBox.warning(
+                self, "Brak ścieżki serwera",
+                "Nie ustawiono katalogu z aplikacjami na serwerze.\n"
+                "Ustaw ścieżkę w sekcji 'Katalog aktualizacji aplikacji (serwer)'."
+            )
+            return
+
+        server_dir = Path(server_dir_str)
+        if not server_dir.exists():
+            QMessageBox.warning(self, "Błąd", f"Katalog serwera nie istnieje:\n{server_dir}")
+            return
+
+        local_path = Path(local_path_str)
+        filename = local_path.name
+        server_file = server_dir / filename
+
+        if not server_file.exists():
+            QMessageBox.warning(
+                self, "Brak pliku na serwerze",
+                f"Nie znaleziono pliku na serwerze:\n{server_file}"
+            )
+            return
+
+        try:
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(server_file), str(local_path))
+            all_apps = get_all_applications()
+            app_name = all_apps.get(app_id, {}).get('name', app_id)
+            QMessageBox.information(
+                self, "Zaktualizowano",
+                f"Plik '{app_name}' został zaktualizowany.\n\n"
+                f"Źródło:  {server_file}\n"
+                f"Cel:     {local_path}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Błąd kopiowania", f"Nie udało się skopiować pliku:\n{e}")
+
     def browse_file(self, app_id: str, path_input: QLineEdit):
         """Otwórz dialog wyboru pliku dla aplikacji."""
         all_apps = get_all_applications()
@@ -676,16 +862,26 @@ class SettingsDialog(QDialog):
                 if cb.isChecked()
             ]
             
-            # Zachowaj custom_apps z bieżącej konfiguracji
+            # master.sqlite
+            master_sqlite_path = self.master_sqlite_input.text().strip()
+
+            # Serwer – katalog z plikami aplikacji
+            server_apps_path = self.server_apps_input.text().strip()
+
+            # Zachowaj custom_apps i last_user_id z bieżącej konfiguracji
             current_config = load_config()
-            
+
             # Zapisz konfigurację
             config = {
                 "autostart_apps": autostart_apps,
                 "app_paths": app_paths,
                 "custom_apps": current_config.get("custom_apps", {}),
-                "visible_apps": visible_apps
+                "visible_apps": visible_apps,
+                "master_sqlite_path": master_sqlite_path,
+                "server_apps_path": server_apps_path,
             }
+            if "last_user_id" in current_config:
+                config["last_user_id"] = current_config["last_user_id"]
             save_config(config)
             
             # Informacja o zapisie (opcjonalnie)
@@ -714,6 +910,631 @@ class SettingsDialog(QDialog):
 
 
 # ============================================================================
+# DIALOG LOGOWANIA
+# ============================================================================
+
+class LoginDialog(QDialog):
+    """Dialog logowania do RM_BAZA (weryfikacja przez master.sqlite)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Logowanie do RM_BAZA")
+        self.setModal(True)
+        self.setMinimumWidth(380)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        self.result_user = None  # Dict: id, username, display_name, role
+
+        layout = QVBoxLayout()
+        layout.setSpacing(10)
+
+        # Ścieżka
+        mp = get_master_sqlite_path()
+        if not mp:
+            layout.addWidget(QLabel(
+                "<b style='color:red'>Nie ustawiono ścieżki do master.sqlite!</b><br/>"
+                "Otwórz Ustawienia i wskaż plik."
+            ))
+            btn = QPushButton("Zamknij")
+            btn.clicked.connect(self.reject)
+            layout.addWidget(btn)
+            self.setLayout(layout)
+            return
+
+        layout.addWidget(QLabel(f"<b>Baza:</b> {mp}"))
+        layout.addWidget(QLabel("<b>Użytkownik:</b>"))
+
+        self.user_combo = QComboBox()
+        self._users = get_users_from_master()
+        if not self._users:
+            layout.addWidget(QLabel("<b style='color:red'>Brak użytkowników w bazie!</b>"))
+            btn = QPushButton("Zamknij")
+            btn.clicked.connect(self.reject)
+            layout.addWidget(btn)
+            self.setLayout(layout)
+            return
+
+        for u in self._users:
+            dn = u.get('display_name') or u['username']
+            self.user_combo.addItem(f"{dn} [{u['role']}]", userData=u)
+        layout.addWidget(self.user_combo)
+
+        layout.addWidget(QLabel("<b>Hasło:</b>"))
+        self.pwd_edit = QLineEdit()
+        self.pwd_edit.setEchoMode(QLineEdit.Password)
+        self.pwd_edit.setPlaceholderText("(puste = brak hasła)")
+        layout.addWidget(self.pwd_edit)
+
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: red;")
+        layout.addWidget(self.status_label)
+
+        btn_layout = QHBoxLayout()
+        ok_btn = QPushButton("Zaloguj")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(self._on_login)
+        cancel_btn = QPushButton("Anuluj")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addStretch()
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+        self.setLayout(layout)
+
+        self.pwd_edit.returnPressed.connect(self._on_login)
+
+    def _on_login(self):
+        idx = self.user_combo.currentIndex()
+        if idx < 0:
+            return
+        user = self.user_combo.itemData(idx)
+        password = self.pwd_edit.text()
+        stored = user.get('password_hash') or ""
+        if not verify_password(password, stored):
+            self.status_label.setText("Nieprawidłowe hasło!")
+            self.pwd_edit.clear()
+            self.pwd_edit.setFocus()
+            return
+        self.result_user = user
+        self.accept()
+
+
+# ============================================================================
+# OKNO CHATU TRAY
+# ============================================================================
+
+class _ChatInputEdit(QTextEdit):
+    """QTextEdit: Enter=wyślij, Shift+Enter=nowa linia, Ctrl+A=zaznacz."""
+
+    send_requested = pyqtSignal()
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        mods = event.modifiers()
+        if key == Qt.Key_A and (mods & Qt.ControlModifier):
+            self.selectAll()
+            return
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            if mods & Qt.ShiftModifier:
+                super().keyPressEvent(event)   # Shift+Enter = nowa linia
+                return
+            self.send_requested.emit()         # Enter = wyślij
+            return
+        super().keyPressEvent(event)
+
+
+class TrayChatWindow(QDialog):
+    """Okno chatu – identyczne wizualnie i algorytmicznie z ChatWindow z RM_BAZA."""
+
+    # Kolory identyczne jak w RM_BAZA
+    _BG_COLORS = ["#fff3cd", "#ffcccc"]
+    _HEADER_BG = "#34495e"
+    _BODY_BG   = "#2c3e50"
+    _MSG_BG    = "#ecf0f1"
+
+    def __init__(self, username: str, display_name: str, chat_dir: Path, parent=None):
+        super().__init__(parent)
+        self.username     = username
+        self.display_name = display_name or username
+        self.chat_dir     = chat_dir
+
+        self._last_timestamp  = None
+        self._displayed_count = 0   # Liczba wyświetlonych wiadomości (kolory naprzemienne)
+        self._always_on_top   = False
+
+        self.setWindowTitle("💬 Chat - RM_BAZA")
+        self.setMinimumSize(500, 400)
+        self.setWindowFlags(self.windowFlags() | Qt.Window)
+
+        self._build_ui()
+
+        # Ustaw rozmiar po pierwszym pokazaniu okna (omija ograniczenia layoutu)
+        QTimer.singleShot(0, lambda: self.resize(1000, 720))
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self.refresh_messages)
+        self._timer.start(5000)   # Auto-refresh co 5 s
+
+        QTimer.singleShot(50, self._deferred_init)
+
+    # ------------------------------------------------------------------
+    # BUDOWA UI (identyczny układ jak RM_BAZA)
+    # ------------------------------------------------------------------
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── HEADER (ciemny pasek) ──────────────────────────────────────
+        header = QFrame()
+        header.setFixedHeight(50)
+        header.setStyleSheet(f"background: {self._HEADER_BG};")
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(10, 5, 10, 5)
+        hl.setSpacing(10)
+
+        title = QLabel("💬 Chat")
+        title.setStyleSheet("color: white; font-size: 14pt; font-weight: bold; background: transparent;")
+        hl.addWidget(title)
+
+        self.topmost_cb = QCheckBox("📌 Zawsze na wierzchu")
+        self.topmost_cb.setStyleSheet(
+            "QCheckBox { color: white; font-size: 9pt; background: transparent; }"
+            "QCheckBox::indicator { background: #2c3e50; border: 1px solid #aaa; width: 13px; height: 13px; }"
+            "QCheckBox::indicator:checked { background: #3498db; }"
+        )
+        self.topmost_cb.toggled.connect(self._toggle_always_on_top)
+        hl.addWidget(self.topmost_cb)
+        hl.addStretch()
+
+        user_lbl = QLabel(f"Zalogowany: {self.display_name}")
+        user_lbl.setStyleSheet("color: #ecf0f1; font-size: 10pt; background: transparent;")
+        hl.addWidget(user_lbl)
+
+        root.addWidget(header)
+
+        # ── OBSZAR WIADOMOŚCI ──────────────────────────────────────────
+        msg_outer = QFrame()
+        msg_outer.setStyleSheet(f"background: {self._BODY_BG};")
+        mol = QVBoxLayout(msg_outer)
+        mol.setContentsMargins(10, 10, 10, 10)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setStyleSheet(
+            f"QScrollArea {{ background: {self._MSG_BG}; border: none; }}"
+        )
+
+        self.msg_container = QWidget()
+        self.msg_container.setStyleSheet(f"background: {self._MSG_BG};")
+        self.msg_layout = QVBoxLayout(self.msg_container)
+        self.msg_layout.setAlignment(Qt.AlignTop)
+        self.msg_layout.setSpacing(0)
+        self.msg_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Padding na dole (jak w RM_BAZA)
+        self._padding = QFrame()
+        self._padding.setObjectName("chat_padding")
+        self._padding.setFixedHeight(20)
+        self._padding.setStyleSheet(f"background: {self._MSG_BG}; border: none;")
+        self.msg_layout.addWidget(self._padding)
+
+        self.scroll.setWidget(self.msg_container)
+        mol.addWidget(self.scroll)
+        root.addWidget(msg_outer, stretch=1)
+
+        # ── INPUT (ciemny pasek) ───────────────────────────────────────
+        input_frame = QFrame()
+        input_frame.setStyleSheet(f"background: {self._HEADER_BG};")
+        il = QHBoxLayout(input_frame)
+        il.setContentsMargins(10, 5, 5, 10)
+        il.setSpacing(5)
+
+        self.input_edit = _ChatInputEdit()
+        self.input_edit.setStyleSheet(
+            "background: white; color: #2c3e50; font-size: 10pt;"
+            "border: 1px solid #ccc; border-radius: 0;"
+        )
+        self.input_edit.setPlaceholderText(
+            "Napisz wiadomość… (Enter = wyślij, Shift+Enter = nowa linia)"
+        )
+        self.input_edit.send_requested.connect(self.send_message)
+        self.input_edit.document().contentsChanged.connect(self._adjust_input_height)
+        self._adjust_input_height()
+        il.addWidget(self.input_edit)
+
+        send_btn = QPushButton("📤\nWyślij")
+        send_btn.setFixedSize(70, 60)
+        send_btn.setStyleSheet(
+            "QPushButton { background: #3498db; color: white; font-size: 9pt;"
+            " font-weight: bold; border: none; }"
+            "QPushButton:hover { background: #2980b9; }"
+        )
+        send_btn.clicked.connect(self.send_message)
+        il.addWidget(send_btn)
+
+        root.addWidget(input_frame)
+
+    # ------------------------------------------------------------------
+    # POMOCNICZE
+    # ------------------------------------------------------------------
+
+    def _adjust_input_height(self):
+        """Dynamiczna wysokość pola input: 1–8 linii (jak w RM_BAZA)."""
+        fm = self.input_edit.fontMetrics()
+        line_h = fm.lineSpacing()
+        n = max(2, min(self.input_edit.document().blockCount(), 8))
+        m = self.input_edit.contentsMargins()
+        self.input_edit.setFixedHeight(n * line_h + m.top() + m.bottom() + 10)
+
+    def _toggle_always_on_top(self, checked: bool):
+        """Przełącz 'Zawsze na wierzchu' (jak RM_BAZA: toggle_always_on_top)."""
+        flags = self.windowFlags()
+        if checked:
+            flags |= Qt.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        self.show()  # Wymagane po setWindowFlags
+
+    def _scroll_to_bottom(self):
+        QTimer.singleShot(50, lambda:
+            self.scroll.verticalScrollBar().setValue(
+                self.scroll.verticalScrollBar().maximum()
+            )
+        )
+
+    def _remove_padding(self):
+        """Tymczasowo odepnij padding od layoutu (jak RM_BAZA usuwa padding_frame)."""
+        self._padding.setParent(None)
+
+    def _restore_padding(self):
+        """Przywróć padding na koniec layoutu."""
+        self.msg_layout.addWidget(self._padding)
+
+    # ------------------------------------------------------------------
+    # ALGORYTM WIADOMOŚCI – identyczny z RM_BAZA
+    # ------------------------------------------------------------------
+
+    def _deferred_init(self):
+        """Jak RM_BAZA._deferred_init: cleanup → load → focus."""
+        self._cleanup_old_messages()
+        self._load_messages()
+        self.input_edit.setFocus()
+
+    def _cleanup_old_messages(self):
+        """Usuń najstarsze pliki, zachowaj tylko 200 (identycznie jak RM_BAZA)."""
+        try:
+            json_files = list(self.chat_dir.glob("*.json"))
+            if len(json_files) <= 200:
+                return
+            json_files.sort(key=lambda f: f.stat().st_mtime)
+            to_delete = len(json_files) - 200
+            deleted = 0
+            for fp in json_files[:to_delete]:
+                try:
+                    fp.unlink()
+                    deleted += 1
+                except Exception:
+                    continue
+            if deleted:
+                print(f"🗑️  Usunięto {deleted} najstarszych wiadomości (limit: 200)")
+        except Exception as e:
+            print(f"⚠️  cleanup_old_messages: {e}")
+
+    def _load_messages(self):
+        """Załaduj wszystkie wiadomości przy pierwszym otwarciu (jak RM_BAZA.load_messages)."""
+        try:
+            if not self.chat_dir.exists():
+                self.chat_dir.mkdir(parents=True, exist_ok=True)
+
+            json_files = list(self.chat_dir.glob("*.json"))
+            messages = []
+            for fp in json_files:
+                try:
+                    with open(fp, 'r', encoding='utf-8') as f:
+                        messages.append(json.load(f))
+                except Exception:
+                    continue
+
+            messages.sort(key=lambda x: x.get('timestamp', ''))
+            messages = messages[-200:]
+
+            self._remove_padding()
+
+            for msg in messages:
+                self._display_message(
+                    msg.get('username', '?'),
+                    msg.get('display_name'),
+                    msg.get('message', ''),
+                    msg.get('timestamp', ''),
+                    msg_index=self._displayed_count,
+                )
+                self._displayed_count += 1
+                if msg.get('timestamp'):
+                    self._last_timestamp = msg['timestamp']
+
+            self._restore_padding()
+            self._scroll_to_bottom()
+
+        except Exception as e:
+            print(f"⚠️  _load_messages: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def refresh_messages(self):
+        """Dodaj tylko NOWE wiadomości (delta, identycznie jak RM_BAZA.refresh_messages)."""
+        try:
+            json_files = list(self.chat_dir.glob("*.json"))
+            new_messages = []
+            for fp in json_files:
+                try:
+                    with open(fp, 'r', encoding='utf-8') as f:
+                        msg = json.load(f)
+                        if not self._last_timestamp or msg.get('timestamp', '') > self._last_timestamp:
+                            new_messages.append(msg)
+                except Exception:
+                    continue
+
+            if not new_messages:
+                return
+
+            new_messages.sort(key=lambda x: x.get('timestamp', ''))
+
+            # Usuń padding (jak RM_BAZA usuwa padding_frame przed dodaniem nowych)
+            self._remove_padding()
+
+            for msg in new_messages:
+                self._display_message(
+                    msg.get('username', '?'),
+                    msg.get('display_name'),
+                    msg.get('message', ''),
+                    msg.get('timestamp', ''),
+                    msg_index=self._displayed_count,
+                )
+                self._displayed_count += 1
+                if msg.get('timestamp'):
+                    self._last_timestamp = msg['timestamp']
+
+            # Przywróć padding (jak RM_BAZA dodaje padding_frame z powrotem)
+            self._restore_padding()
+            self._scroll_to_bottom()
+
+        except Exception:
+            pass
+
+    def _display_message(self, username, display_name, message, timestamp, msg_index=0):
+        """Wyświetl pojedynczą wiadomość – identyczny układ 2-kolumnowy jak RM_BAZA.display_message."""
+        # Parsuj timestamp
+        try:
+            dt = datetime.fromisoformat(timestamp)
+            time_str = dt.strftime("%H:%M:%S")
+        except Exception:
+            time_str = timestamp[:8] if len(timestamp) >= 8 else timestamp
+
+        name_to_display = display_name or username
+
+        # Naprzemienne kolory (#fff3cd / #ffcccc) – identycznie jak RM_BAZA
+        bg = self._BG_COLORS[msg_index % 2]
+
+        # ── Ramka wiadomości (fill=X jak w RM_BAZA) ──
+        msg_frame = QFrame()
+        msg_frame.setStyleSheet(f"background: {bg}; border: none;")
+        msg_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        fl = QHBoxLayout(msg_frame)
+        fl.setContentsMargins(0, 0, 0, 0)
+        fl.setSpacing(0)
+
+        # ── Lewa kolumna: stała szerokość 160px – [czas] nazwa ──
+        left = QWidget()
+        left.setFixedWidth(160)
+        left.setStyleSheet(f"background: {bg};")
+        ll = QHBoxLayout(left)
+        ll.setContentsMargins(5, 5, 5, 5)
+        ll.setSpacing(2)
+
+        ts_lbl = QLabel(f"[{time_str}]")
+        ts_lbl.setStyleSheet(f"color: #000000; font-size: 10pt; background: {bg};")
+        ll.addWidget(ts_lbl)
+
+        # Spacja
+        sp = QLabel(" ")
+        sp.setStyleSheet(f"background: {bg};")
+        ll.addWidget(sp)
+
+        user_lbl = QLabel(name_to_display)
+        user_lbl.setStyleSheet(
+            f"color: #003366; font-size: 10pt; font-weight: bold; background: {bg};"
+        )
+        ll.addWidget(user_lbl)
+        ll.addStretch()
+
+        fl.addWidget(left)
+
+        # ── Pionowy separator 2px czarny ──
+        vsep = QFrame()
+        vsep.setFixedWidth(2)
+        vsep.setStyleSheet("background: #000000; border: none;")
+        fl.addWidget(vsep)
+
+        # ── Prawa kolumna: treść wiadomości (selectable, readonly) ──
+        msg_lbl = QLabel(message)
+        msg_lbl.setWordWrap(True)
+        msg_lbl.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        msg_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        msg_lbl.setStyleSheet(
+            f"color: #000000; font-size: 10pt; background: {bg}; padding: 5px;"
+        )
+        msg_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        fl.addWidget(msg_lbl, stretch=1)
+
+        self.msg_layout.addWidget(msg_frame)
+
+        # ── Separator poziomy 1px szary ──
+        hsep = QFrame()
+        hsep.setFixedHeight(1)
+        hsep.setStyleSheet("background: #cccccc; border: none;")
+        self.msg_layout.addWidget(hsep)
+
+    # ------------------------------------------------------------------
+    # WYSYŁANIE
+    # ------------------------------------------------------------------
+
+    def send_message(self):
+        """Wyślij wiadomość – identycznie jak RM_BAZA.send_message."""
+        text = self.input_edit.toPlainText().strip()
+        if not text:
+            return
+        if len(text) > 2000:
+            QMessageBox.warning(self, "Za długa", "Wiadomość max 2000 znaków.")
+            return
+        try:
+            self.chat_dir.mkdir(parents=True, exist_ok=True)
+            now = datetime.now()
+            unix_us = int(time.time() * 1_000_000)
+            msg_data = {
+                'timestamp': now.isoformat(),
+                'username':  self.username,
+                'display_name': self.display_name,
+                'message': text,
+            }
+            safe_u = re.sub(r'[^a-zA-Z0-9_-]', '_', self.username)
+            fname = f"{now.strftime('%Y-%m-%d_%H-%M-%S')}_{safe_u}_{unix_us}.json"
+            with open(self.chat_dir / fname, 'w', encoding='utf-8') as f:
+                json.dump(msg_data, f, ensure_ascii=False, indent=2)
+            self.input_edit.clear()
+            self._adjust_input_height()
+            print(f"💬 Wysłano: {fname}")
+            self.refresh_messages()
+        except Exception as e:
+            QMessageBox.critical(self, "Błąd", f"Nie udało się wysłać:\n{e}")
+
+    def closeEvent(self, event):
+        self._timer.stop()
+        super().closeEvent(event)
+
+
+# ============================================================================
+# OKNO POWIADOMIENIA CHAT
+# ============================================================================
+
+class ChatNotificationWindow(QDialog):
+    """Popup o nowej wiadomości – port show_custom_notification z RM_BAZA."""
+
+    mute_requested = pyqtSignal(int)   # minuty wyciszenia
+
+    def __init__(self, username: str, message: str, on_open_chat, parent=None):
+        super().__init__(parent)
+        self._on_open_chat_cb = on_open_chat
+        self.setWindowFlags(
+            Qt.FramelessWindowHint |
+            Qt.WindowStaysOnTopHint |
+            Qt.Tool
+        )
+        self.setAttribute(Qt.WA_ShowWithoutActivating)  # Nie kradnij focusa
+        self._build_ui(username, message)
+        self.adjustSize()
+        self._position_bottom_right()
+
+    def _build_ui(self, username: str, message: str):
+        _BG = "#2c3e50"
+        self.setStyleSheet(f"background: {_BG};")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(15, 10, 15, 8)
+        root.setSpacing(6)
+
+        # ── Wiersz 1: [Od: username] [stretch] [Zamknij] [✕] ─────────
+        header = QHBoxLayout()
+        header.setSpacing(6)
+
+        from_lbl = QLabel(f"Od: {username}")
+        from_lbl.setStyleSheet(
+            f"color: #ecf0f1; font-size: 10pt; font-weight: bold; background: {_BG};"
+        )
+        header.addWidget(from_lbl)
+        header.addStretch()
+
+        close_red = QPushButton("Zamknij")
+        close_red.setFixedHeight(22)
+        close_red.setStyleSheet(
+            "QPushButton { background: #e74c3c; color: white; font-size: 8pt;"
+            " font-weight: bold; border: none; padding: 0 10px; }"
+            "QPushButton:hover { background: #c0392b; }"
+        )
+        close_red.clicked.connect(self.close)
+        header.addWidget(close_red)
+
+        x_btn = QPushButton("✕")
+        x_btn.setFixedSize(22, 22)
+        x_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #95a5a6; font-size: 12pt;"
+            " border: none; padding: 0; }"
+            "QPushButton:hover { color: white; }"
+        )
+        x_btn.clicked.connect(self.close)
+        header.addWidget(x_btn)
+
+        root.addLayout(header)
+
+        # ── Wiersz 2: treść wiadomości ─────────────────────────────
+        if len(message) > 150:
+            message = message[:147] + "..."
+
+        msg_lbl = QLabel(message)
+        msg_lbl.setWordWrap(True)
+        msg_lbl.setFixedWidth(310)
+        msg_lbl.setStyleSheet(
+            "color: white; font-size: 9pt; background: #34495e; padding: 4px 6px;"
+        )
+        root.addWidget(msg_lbl)
+
+        # ── Wiersz 3: wyciszanie ────────────────────────────────────
+        mute_row = QHBoxLayout()
+        mute_row.setSpacing(4)
+
+        mute_lbl = QLabel("🔕 Nie powiadamiaj przez:")
+        mute_lbl.setStyleSheet(f"color: #95a5a6; font-size: 8pt; background: {_BG};")
+        mute_row.addWidget(mute_lbl)
+        mute_row.addStretch()
+
+        for minutes, label in [(30, "30min"), (60, "1h"), (120, "2h")]:
+            btn = QPushButton(label)
+            btn.setFixedHeight(20)
+            btn.setStyleSheet(
+                "QPushButton { background: #34495e; color: white; font-size: 8pt;"
+                " border: none; padding: 0 8px; }"
+                "QPushButton:hover { background: #4a6278; }"
+            )
+            btn.clicked.connect(lambda checked, m=minutes: self._on_mute(m))
+            mute_row.addWidget(btn)
+
+        root.addLayout(mute_row)
+
+        self.setFixedWidth(350)
+
+    def _position_bottom_right(self):
+        screen = QApplication.primaryScreen()
+        avail = screen.availableGeometry()
+        x = avail.right() - self.width() - 10
+        y = avail.bottom() - self.height() - 10
+        self.move(x, y)
+
+    def _on_mute(self, minutes: int):
+        self.mute_requested.emit(minutes)
+        self.close()
+
+    def mousePressEvent(self, event):
+        """Kliknięcie w obszar (poza przyciskami) → otwórz chat."""
+        if event.button() == Qt.LeftButton:
+            self.close()
+            self._on_open_chat_cb()
+        super().mousePressEvent(event)
+
+
+# ============================================================================
 # GŁÓWNA APLIKACJA TRAY
 # ============================================================================
 
@@ -725,7 +1546,21 @@ class RMTrayOrganizer(QSystemTrayIcon):
         
         # Procesy uruchomionych aplikacji
         self.processes: Dict[str, subprocess.Popen] = {}
-        
+
+        # Aktualny użytkownik (po zalogowaniu)
+        self.current_user: Optional[str] = None
+        self.current_display_name: Optional[str] = None
+        self.current_user_id: Optional[int] = None
+        self.current_user_role: Optional[str] = None
+
+        # Okno chatu
+        self._chat_window: Optional[TrayChatWindow] = None
+
+        # Powiadomienia chat (background polling)
+        self._last_chat_timestamp: Optional[str] = None
+        self._chat_notifications_muted_until = None
+        self._notification_window: Optional[ChatNotificationWindow] = None
+
         # Ustaw ikonę
         self.setIcon(create_icon())
         self.setToolTip("RM Tray Organizer")
@@ -754,7 +1589,14 @@ class RMTrayOrganizer(QSystemTrayIcon):
         
         # Autostart aplikacji
         self.autostart_apps()
-    
+        # Auto-logowanie na ostatnim użytkowniku
+        self._try_autologin()
+
+        # Timer sprawdzania nowych wiadomości chat (powiadomienia w tle)
+        self._chat_monitor_timer = QTimer()
+        self._chat_monitor_timer.timeout.connect(self._check_for_new_chat_messages)
+        self._chat_monitor_timer.start(10_000)  # Co 10 sekund
+
     def ensure_icon_visible(self):
         """Wymuś widoczność ikony w tray."""
         if not self.isVisible():
@@ -818,19 +1660,38 @@ class RMTrayOrganizer(QSystemTrayIcon):
             menu.addAction(action)
         
         menu.addSeparator()
-        
+
+        # Chat / logowanie
+        if self.current_user:
+            login_action = QAction(f"👤 {self.current_display_name or self.current_user}  [wyloguj]", menu)
+            login_action.triggered.connect(self.logout_user)
+        else:
+            login_action = QAction("👤 Zaloguj do RM_BAZA...", menu)
+            login_action.triggered.connect(self.show_login)
+            if not get_master_sqlite_path():
+                login_action.setEnabled(False)
+                login_action.setToolTip("Ustaw ścieżkę do master.sqlite w Ustawieniach")
+        menu.addAction(login_action)
+
+        chat_action = QAction("💬 Chat", menu)
+        chat_action.triggered.connect(self.open_chat)
+        chat_action.setEnabled(bool(self.current_user and get_chat_dir()))
+        menu.addAction(chat_action)
+
+        menu.addSeparator()
+
         # Ustawienia
         settings_action = QAction("⚙ Ustawienia...", menu)
         settings_action.triggered.connect(self.show_settings)
         menu.addAction(settings_action)
-        
+
         menu.addSeparator()
-        
+
         # Wyjście
         exit_action = QAction("✕ Zakończ", menu)
         exit_action.triggered.connect(self.exit_app)
         menu.addAction(exit_action)
-        
+
         self.setContextMenu(menu)
     
     def update_menu_status(self):
@@ -994,11 +1855,200 @@ class RMTrayOrganizer(QSystemTrayIcon):
             if app_id in all_apps and get_app_path(app_id):
                 self.start_app(app_id)
     
+    def show_login(self):
+        """Dialog logowania do RM_BAZA."""
+        dlg = LoginDialog()
+        if dlg.exec_() == QDialog.Accepted and dlg.result_user:
+            u = dlg.result_user
+            self.current_user = u['username']
+            self.current_display_name = u.get('display_name') or u['username']
+            self.current_user_id = u['id']
+            self.current_user_role = u.get('role', 'USER')
+            print(f"✅ Zalogowano: {self.current_user} ({self.current_user_role})")
+            # Zapisz ostatniego użytkownika do config (auto-login przy następnym starcie)
+            cfg = load_config()
+            cfg['last_user_id'] = u['id']
+            save_config(cfg)
+            self.refresh_menu()
+
+    def logout_user(self):
+        """Wyloguj bieżącego użytkownika."""
+        if self._chat_window and self._chat_window.isVisible():
+            self._chat_window.close()
+            self._chat_window = None
+        self.current_user = None
+        self.current_display_name = None
+        self.current_user_id = None
+        self.current_user_role = None
+        # Usuń zapisanego użytkownika z config
+        cfg = load_config()
+        cfg.pop('last_user_id', None)
+        save_config(cfg)
+        self.refresh_menu()
+
+    def _try_autologin(self):
+        """Automatyczne logowanie na ostatnim użytkowniku (z config)."""
+        cfg = load_config()
+        last_id = cfg.get('last_user_id')
+        if not last_id:
+            return
+        users = get_users_from_master()
+        if not users:
+            return
+        matched = next((u for u in users if u['id'] == last_id), None)
+        if not matched:
+            return
+        self.current_user = matched['username']
+        self.current_display_name = matched.get('display_name') or matched['username']
+        self.current_user_id = matched['id']
+        self.current_user_role = matched.get('role', 'USER')
+        print(f"🔄 Auto-logowanie: {self.current_user}")
+        self.refresh_menu()
+
+    def _check_for_new_chat_messages(self):
+        """Sprawdź nowe wiadomości i pokaż popup (gdy okno chat nie jest otwarte)."""
+        if not self.current_user:
+            return
+
+        chat_dir = get_chat_dir()
+        if not chat_dir or not chat_dir.exists():
+            return
+
+        try:
+            latest_timestamp = None
+            newest_foreign = None
+
+            for fp in chat_dir.glob("*.json"):
+                try:
+                    with open(fp, 'r', encoding='utf-8') as f:
+                        msg = json.load(f)
+                    ts = msg.get('timestamp')
+                    if ts and (not latest_timestamp or ts > latest_timestamp):
+                        latest_timestamp = ts
+                    # Nowe wiadomości od innych użytkowników
+                    if ts and msg.get('username') != self.current_user:
+                        if not self._last_chat_timestamp or ts > self._last_chat_timestamp:
+                            if not newest_foreign or ts > newest_foreign.get('timestamp', ''):
+                                newest_foreign = msg
+                except Exception:
+                    continue
+
+            if newest_foreign:
+                if self._is_rm_baza_running():
+                    # RM_BAZA jest otwarta – zamknij okno TRAY chatu, nie pokazuj popupu
+                    if self._chat_window and self._chat_window.isVisible():
+                        self._chat_window.close()
+                        self._chat_window = None
+                elif not (self._chat_window and self._chat_window.isVisible()):
+                    # RM_BAZA nie jest otwarta, okno TRAY chatu nie jest widoczne → popup
+                    u = newest_foreign.get('display_name') or newest_foreign.get('username', '?')
+                    m = newest_foreign.get('message', '')
+                    self._show_chat_notification(u, m)
+
+            # Synchronizuj timestamp (też z okna chatu jeśli otwarte)
+            if self._chat_window and self._chat_window.isVisible():
+                if self._chat_window._last_timestamp:
+                    latest_timestamp = max(
+                        latest_timestamp or '',
+                        self._chat_window._last_timestamp
+                    ) or latest_timestamp
+            if latest_timestamp:
+                self._last_chat_timestamp = latest_timestamp
+
+        except Exception as e:
+            print(f"⚠️  _check_for_new_chat_messages: {e}")
+
+    def _is_rm_baza_running(self) -> bool:
+        """Sprawdź czy RM_BAZA jest aktualnie uruchomiona."""
+        # 1. Procesy zarządzane przez Tray
+        if "RM_BAZA" in self.processes and self.processes["RM_BAZA"].poll() is None:
+            return True
+        # 2. Szukaj okna z tytułem zaczynającym się od "RM_BAZA" (EnumWindows – wildcard)
+        try:
+            import ctypes
+            found = []
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong, ctypes.c_long)
+            def _enum_cb(hwnd, _lp):
+                length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+                if length >= 6:
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+                    if buf.value.startswith("RM_BAZA"):
+                        found.append(True)
+                        return False  # Przerwij – wystarczy jeden hit
+                return True
+
+            ctypes.windll.user32.EnumWindows(_enum_cb, 0)
+            if found:
+                return True
+        except Exception:
+            pass
+        # 3. Fallback: tasklist
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq RM_BAZA.exe", "/NH"],
+                capture_output=True, text=True, timeout=3,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            if "RM_BAZA.exe" in result.stdout:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _show_chat_notification(self, username: str, message: str):
+        """Pokaż popup o nowej wiadomości (identyczny z RM_BAZA show_custom_notification)."""
+        # Sprawdź wyciszenie
+        if self._chat_notifications_muted_until:
+            if datetime.now() < self._chat_notifications_muted_until:
+                return
+            self._chat_notifications_muted_until = None
+
+        # Zamknij poprzednie okno powiadomienia
+        if self._notification_window:
+            try:
+                self._notification_window.close()
+            except Exception:
+                pass
+            self._notification_window = None
+
+        notif = ChatNotificationWindow(username, message, self.open_chat)
+        notif.mute_requested.connect(self._on_mute_chat_notifications)
+        notif.show()
+        self._notification_window = notif
+
+    def _on_mute_chat_notifications(self, minutes: int):
+        """Wycisz powiadomienia chat na N minut."""
+        from datetime import timedelta  # noqa: PLC0415
+        self._chat_notifications_muted_until = datetime.now() + timedelta(minutes=minutes)
+        print(f"🔕 Wyciszono powiadomienia chat na {minutes} min")
+
+    def open_chat(self):
+        """Otwórz okno chatu."""
+        chat_dir = get_chat_dir()
+        if not chat_dir:
+            QMessageBox.warning(None, "Błąd", "Nie ustawiono ścieżki do master.sqlite w Ustawieniach.")
+            return
+        if not self.current_user:
+            QMessageBox.warning(None, "Błąd", "Najpierw zaloguj się do RM_BAZA.")
+            return
+        if self._chat_window and self._chat_window.isVisible():
+            self._chat_window.raise_()
+            self._chat_window.activateWindow()
+            return
+        self._chat_window = TrayChatWindow(
+            username=self.current_user,
+            display_name=self.current_display_name,
+            chat_dir=chat_dir,
+        )
+        self._chat_window.show()
+
     def show_settings(self):
         """Pokaż dialog ustawień."""
         dialog = SettingsDialog()
         result = dialog.exec_()
-        
+
         # Po zapisaniu ustawień, odśwież menu
         if result == QDialog.Accepted:
             self.refresh_menu()
