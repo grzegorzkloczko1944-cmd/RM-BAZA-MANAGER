@@ -17608,8 +17608,7 @@ class MainWindow(tk.Tk):
         
         # Utwórz małe okno wyboru
         popup = tk.Toplevel(self)
-        popup.wm_overrideredirect(True)  # Bez ramki
-        popup.wm_attributes("-topmost", True)
+        popup.transient(self)  # Przypięte do RM_BAZA, nie nad innymi apkami
         
         # Frame główny
         main_frame = tk.Frame(popup, bg="white", relief=tk.SOLID, bd=1)
@@ -17730,7 +17729,39 @@ class MainWindow(tk.Tk):
             # Kliknięcie było poza popup - zamknij
             on_close()
         
+        # Typeahead A→AB→ABC: bufor liter resetowany po 700ms
+        _typeahead_buf = []
+        _typeahead_after = [None]
+
+        def on_key(event):
+            ch = event.char
+            if not ch or not ch.isprintable():
+                return
+            if _typeahead_after[0]:
+                popup.after_cancel(_typeahead_after[0])
+            _typeahead_buf.append(ch)
+            query = "".join(_typeahead_buf).lower()
+            # Szukaj pierwszego dostawcy zaczynającego się na query
+            for i, (sid, name) in enumerate(suppliers_list):
+                if name.lower().startswith(query):
+                    listbox.selection_clear(0, tk.END)
+                    listbox.selection_set(i)
+                    listbox.activate(i)
+                    listbox.see(i)
+                    break
+            _typeahead_after[0] = popup.after(700, _typeahead_buf.clear)
+
         # Bindings
+        def on_arrow(event):
+            # Synchronizuj selection z active po ruchu strzałką
+            popup.after(1, lambda: (
+                listbox.selection_clear(0, tk.END),
+                listbox.selection_set(listbox.index(tk.ACTIVE))
+            ))
+
+        listbox.bind("<Up>", on_arrow, add="+")
+        listbox.bind("<Down>", on_arrow, add="+")
+        listbox.bind("<Key>", on_key)
         listbox.bind("<ButtonRelease-1>", on_select)  # Pojedyncze kliknięcie (po puszczeniu) wybiera
         listbox.bind("<Return>", on_select)
         listbox.bind("<Escape>", on_close)
