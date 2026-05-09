@@ -429,7 +429,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Ustawienia RM Tray Organizer")
         self.setModal(True)
-        self.setMinimumWidth(700)
+        self.setMinimumWidth(1400)
         self.setMinimumHeight(700)
         
         layout = QVBoxLayout()
