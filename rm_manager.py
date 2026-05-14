@@ -959,9 +959,10 @@ def save_production_line(rm_master_db_path: str, line_id: Optional[int],
 
 
 def delete_production_line(rm_master_db_path: str, line_id: int):
-    """Usuń linię (FK CASCADE usunie też wpisy w line_projects)."""
+    """Usuń linię i jej powiązania z projektami."""
     con = _open_rm_connection(rm_master_db_path)
     try:
+        con.execute("DELETE FROM line_projects WHERE line_id = ?", (int(line_id),))
         con.execute("DELETE FROM production_lines WHERE id = ?", (int(line_id),))
         con.commit()
     finally:
@@ -5166,6 +5167,100 @@ def get_stage_variance(rm_db_path: str, project_id: int, stage_code: str) -> Dic
         "template_end": stage_fc.get('template_end'),
         "forecast_start": stage_fc.get('forecast_start'),
         "forecast_end": stage_fc.get('forecast_end'),
+    }
+
+
+_OPTIMIZER_MILESTONE_STAGES = {
+    'PRZYJETY', 'TRANSPORT', 'URUCHOMIENIE_U_KLIENTA', 'FAT',
+    'ODBIOR_1', 'ODBIOR_2', 'ODBIOR_3', 'ZAKONCZONY',
+}
+
+
+def check_optimizer_readiness(project_db_path: str, project_id: int) -> Dict:
+    """Sprawdź czy projekt spełnia warunki optymalizacji w trybie normalnym (z ograniczeniami pracowników).
+
+    Returns:
+        {
+            'can_optimize': bool,
+            'issues': [str],
+            'stages_missing_staff': [str],
+            'stages_missing_dates': [str],
+        }
+    """
+    from datetime import date as _date
+    today = _date.today().isoformat()
+    issues = []
+    stages_missing_staff = []
+    stages_missing_dates = []
+
+    try:
+        con = _open_rm_connection(project_db_path)
+
+        rows = con.execute("""
+            SELECT ps.stage_code,
+                   ss.template_start,
+                   ss.template_end
+            FROM project_stages ps
+            LEFT JOIN stage_schedule ss ON ss.project_stage_id = ps.id
+            WHERE ps.project_id = ?
+            ORDER BY ps.id
+        """, (project_id,)).fetchall()
+
+        # Pomiń milestone'y i etapy N/A (puste oba pola dat)
+        non_ms = []
+        for r in rows:
+            if r['stage_code'] in _OPTIMIZER_MILESTONE_STAGES:
+                continue
+            ts = r['template_start']
+            te = r['template_end']
+            if not ts and not te:  # N/A — puste pola dat
+                continue
+            non_ms.append(r)
+
+        if not non_ms:
+            con.close()
+            return {'can_optimize': False,
+                    'issues': ['Brak etapów do optymalizacji (wszystkie N/A lub zakończone)'],
+                    'stages_missing_staff': [],
+                    'stages_missing_dates': []}
+
+        future_stages = []
+        for r in non_ms:
+            te = r['template_end']
+            if te and str(te)[:10] >= today:
+                future_stages.append(r['stage_code'])
+            elif not te:
+                stages_missing_dates.append(r['stage_code'])
+
+        if stages_missing_dates:
+            issues.append(f"Brak dat szablonu: {', '.join(stages_missing_dates)}")
+
+        if not future_stages and not stages_missing_dates:
+            issues.append("Wszystkie etapy już zakończone — brak przyszłych do optymalizacji")
+
+        for sc in future_stages + stages_missing_dates:
+            cnt = con.execute("""
+                SELECT COUNT(*) as c
+                FROM stage_staff_assignments sa
+                JOIN project_stages ps ON sa.project_stage_id = ps.id
+                WHERE ps.project_id = ? AND ps.stage_code = ?
+            """, (project_id, sc)).fetchone()['c']
+            if cnt == 0:
+                stages_missing_staff.append(sc)
+
+        con.close()
+
+        if stages_missing_staff:
+            issues.append(f"Brak masterów: {', '.join(stages_missing_staff)}")
+
+    except Exception as e:
+        issues.append(f"Błąd odczytu bazy: {e}")
+
+    return {
+        'can_optimize': len(issues) == 0,
+        'issues': issues,
+        'stages_missing_staff': stages_missing_staff,
+        'stages_missing_dates': stages_missing_dates,
     }
 
 

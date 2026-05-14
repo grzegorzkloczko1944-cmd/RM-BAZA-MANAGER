@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+"""  """#!/usr/bin/env python3
 """
 ============================================================================
 RM_MANAGER GUI - Zarządzanie procesami projektów
@@ -131,6 +131,7 @@ except ImportError:
 
         def update_user_name(self, name): self.my_name = name
         def acquire_project_lock(self, project_id, force=False): return (True, "no-lock")
+        def acquire_project_locks_bulk(self, project_ids, force=False): return {p: (True, "no-lock") for p in project_ids}
         def release_project_lock(self, project_id): pass
         def have_project_lock(self, project_id): return True
         def get_project_lock_owner(self, project_id):
@@ -529,6 +530,9 @@ class RMManagerGUI:
         self._locked_project_id = None  # Aktualnie zablokowany projekt
         self.have_lock = False           # Czy mamy aktywny lock
         self.current_lock_id = None      # ID locka do detekcji wymuszenia przez kogoś
+        self._line_locked_pids: list = []       # PIDs pozostałych projektów linii zablokowanych razem
+        self._line_parallel_stages: set = set() # Kody etapów równoległych bieżącej linii
+        self._line_snapshots: dict = {}         # {pid: {stage_code: (start, end)}} snapshoty linii
         self.viewing_backup = False      # Czy oglądamy backup (read-only podgląd)
         self.backup_date = None          # Data backupu (np. "2026-04-12")
         self.received_percent = None     # % odebranych elementów (z RM_BAZA)
@@ -1474,6 +1478,7 @@ class RMManagerGUI:
         if self._locked_project_id is not None:
             self.lock_manager.release_project_lock(self._locked_project_id)
             self._locked_project_id = None
+        self._release_line_locks()
         self.have_lock = False
         self.current_lock_id = None
 
@@ -1829,6 +1834,7 @@ class RMManagerGUI:
             self.current_lock_id = lock_id
             self.read_only_mode = False
             self._snapshot_stage_dates()  # Snapshot dat do cofnięcia przy Anuluj
+            self._try_acquire_line_locks()  # Locki na pozostałe projekty linii
             self.status_bar.config(
                 text=f"🟢 Lock przejęty dla projektu {self.selected_project_id}",
                 fg="#27ae60"
@@ -1838,6 +1844,7 @@ class RMManagerGUI:
             self.refresh_timeline()  # Odśwież aby włączyć edycję pól
             self._refresh_combo_lock_info()  # Odśwież combo projektów (pokaż lock)
             self._sync_mp_chart_lock_state()  # Synchronizuj Multi-project chart
+            self._refresh_mp_lock_labels()    # Odśwież etykiety locków w selektorze
             print(f"✅ Lock przejęty: projekt {self.selected_project_id}, lock_id={lock_id}")
 
         except Exception as e:
@@ -1894,6 +1901,7 @@ class RMManagerGUI:
             self.current_lock_id = lock_id
             self.read_only_mode = False
             self._snapshot_stage_dates()  # Snapshot dat do cofnięcia przy Anuluj
+            self._try_acquire_line_locks()  # Locki na pozostałe projekty linii
             self.status_bar.config(
                 text=f"⚡ Lock wymuszony dla projektu {self.selected_project_id}",
                 fg="#9b59b6"
@@ -1903,6 +1911,7 @@ class RMManagerGUI:
             self.refresh_timeline()  # Odśwież aby włączyć edycję pól
             self._refresh_combo_lock_info()  # Odśwież combo projektów (pokaż lock)
             self._sync_mp_chart_lock_state()  # Synchronizuj Multi-project chart
+            self._refresh_mp_lock_labels()    # Odśwież etykiety locków w selektorze
             print(f"⚡ Lock wymuszony: projekt {self.selected_project_id}, lock_id={lock_id}")
 
         except Exception as e:
@@ -1958,6 +1967,135 @@ class RMManagerGUI:
             print(f"🔥 Błąd przywracania snapshotu: {e}")
             return False
 
+    def _propagate_parallel_stage(self, stage_code: str,
+                                   start_iso, end_iso):
+        """Propaguje daty etapu do pozostałych projektów linii (jeśli równoległy)."""
+        if not self._line_locked_pids or stage_code not in self._line_parallel_stages:
+            return
+        for pid in self._line_locked_pids:
+            try:
+                pdb = self.get_project_db_path(pid)
+                pcon = rmm._open_rm_connection(pdb, row_factory=False)
+                pcon.execute("""
+                    UPDATE stage_schedule
+                    SET template_start = ?, template_end = ?
+                    WHERE project_stage_id = (
+                        SELECT id FROM project_stages
+                        WHERE project_id = ? AND stage_code = ?
+                    )
+                """, (start_iso, end_iso, pid, stage_code))
+                pcon.commit()
+                pcon.close()
+                rmm.recalculate_forecast(pdb, pid)
+                print(f"🔗 Propagowano {stage_code} → pid={pid}: {start_iso} — {end_iso}")
+            except Exception as e:
+                print(f"⚠️ Propagacja {stage_code} → pid={pid}: {e}")
+
+    def _snapshot_line_project(self, pid: int):
+        """Zapisz snapshot dat stage_schedule dla projektu linii."""
+        try:
+            pdb = self.get_project_db_path(pid)
+            con = rmm._open_rm_connection(pdb, row_factory=False)
+            rows = con.execute("""
+                SELECT ps.stage_code, ss.template_start, ss.template_end
+                FROM stage_schedule ss
+                JOIN project_stages ps ON ss.project_stage_id = ps.id
+                WHERE ps.project_id = ?
+            """, (pid,)).fetchall()
+            con.close()
+            self._line_snapshots[pid] = {row[0]: (row[1], row[2]) for row in rows}
+            print(f"📸 Snapshot linii pid={pid} ({len(rows)} etapów)")
+        except Exception as e:
+            print(f"⚠️ _snapshot_line_project pid={pid}: {e}")
+
+    def _restore_line_snapshots(self):
+        """Przywróć snapshoty dat dla wszystkich projektów linii."""
+        for pid, snapshot in self._line_snapshots.items():
+            try:
+                pdb = self.get_project_db_path(pid)
+                con = rmm._open_rm_connection(pdb, row_factory=False)
+                for stage_code, (t_start, t_end) in snapshot.items():
+                    con.execute("""
+                        UPDATE stage_schedule
+                        SET template_start = ?, template_end = ?
+                        WHERE project_stage_id = (
+                            SELECT id FROM project_stages
+                            WHERE project_id = ? AND stage_code = ?
+                        )
+                    """, (t_start, t_end, pid, stage_code))
+                con.commit()
+                con.close()
+                rmm.recalculate_forecast(pdb, pid)
+                print(f"♻️ Przywrócono snapshot linii pid={pid}")
+            except Exception as e:
+                print(f"⚠️ _restore_line_snapshots pid={pid}: {e}")
+
+    def _release_line_locks(self):
+        """Zwolnij locki na pozostałe projekty linii i wyczyść stan."""
+        for pid in self._line_locked_pids:
+            try:
+                self.lock_manager.release_project_lock(pid)
+                print(f"🔓 Zwolniono lock linii pid={pid}")
+            except Exception as e:
+                print(f"⚠️ _release_line_locks pid={pid}: {e}")
+        self._line_locked_pids = []
+        self._line_parallel_stages = set()
+        self._line_snapshots = {}
+
+    def _try_acquire_line_locks(self):
+        """Po przejęciu locka na projekt z linii produkcyjnej, przejmuje locki
+        na wszystkie pozostałe projekty tej linii."""
+        self._line_locked_pids = []
+        self._line_parallel_stages = set()
+        self._line_snapshots = {}
+
+        try:
+            line = rmm.get_project_line(self.rm_master_db_path, self.selected_project_id)
+        except Exception as e:
+            print(f"⚠️ _try_acquire_line_locks: {e}")
+            return
+
+        if not line:
+            print(f"🔗 Projekt {self.selected_project_id} nie należy do żadnej linii — brak propagacji")
+            return
+        if len(line['project_ids']) < 2:
+            print(f"🔗 Linia {line['name']!r} ma tylko {len(line['project_ids'])} projekt — brak propagacji")
+            return
+
+        self._line_parallel_stages = set(line.get('parallel_stages', []))
+
+        # Przejmij locki na WSZYSTKIE projekty linii (w tym już trzymany primary —
+        # bulk nie wywoła single-lock i nie zwolni primary)
+        all_pids = line['project_ids']
+        results = self.lock_manager.acquire_project_locks_bulk(all_pids)
+
+        locked = [p for p in all_pids if p != self.selected_project_id
+                  and results.get(p, (False,))[0]]
+        failed = [p for p in all_pids if p != self.selected_project_id
+                  and not results.get(p, (False,))[0]]
+
+        self._line_locked_pids = locked
+
+        for pid in locked:
+            self._snapshot_line_project(pid)
+
+        if failed:
+            failed_names = ', '.join(
+                self.project_names.get(p, str(p)) for p in failed)
+            messagebox.showwarning(
+                "Linia produkcyjna",
+                f"🔗 Linia: {line['name']}\n\n"
+                f"✅ Locki przejęte: {len(locked)}/{len(all_pids) - 1} projektów\n"
+                f"⚠️ Zajęte przez innego użytkownika: {failed_names}\n\n"
+                f"Etapy równoległe będą propagowane tylko do odblokowanych projektów.",
+                parent=self.root
+            )
+        else:
+            print(f"🔗 Linia {line['name']!r}: locki na {len(locked)} dodatkowych projektach")
+
+        if self._line_parallel_stages:
+            print(f"🔗 Etapy równoległe: {self._line_parallel_stages}")
+
     def cancel_lock(self):
         """Anuluj lock - cofnij WSZYSTKIE zmiany dat i zwolnij lock (przycisk ✖ Anuluj)"""
         if not self.have_lock or not self.selected_project_id:
@@ -1977,9 +2115,11 @@ class RMManagerGUI:
         try:
             # Przywróć daty ze snapshotu PRZED zwolnieniem locka
             restored = self._restore_stage_dates_from_snapshot()
+            self._restore_line_snapshots()
 
-            # Zwolnij lock
+            # Zwolnij lock primary + locki linii
             self.lock_manager.release_project_lock(self.selected_project_id)
+            self._release_line_locks()
             self._locked_project_id = None
             self.have_lock = False
             self.current_lock_id = None
@@ -1995,6 +2135,7 @@ class RMManagerGUI:
             self.refresh_timeline()
             self._refresh_combo_lock_info()
             self._sync_mp_chart_lock_state()  # Synchronizuj Multi-project chart
+            self._refresh_mp_lock_labels()    # Odśwież etykiety locków w selektorze
             print(f"✖ Lock anulowany (daty przywrócone={restored}): projekt {self.selected_project_id}")
 
         except Exception as e:
@@ -2025,10 +2166,11 @@ class RMManagerGUI:
                 return
 
         try:
-            # Zapisz wszystkie niezapisane zmiany przed zwolnieniem
+            # Zapisz wszystkie niezapisane zmiany przed zwolnieniem (propaguje też etapy równoległe)
             self.save_all_templates()
-            
+
             self.lock_manager.release_project_lock(self.selected_project_id)
+            self._release_line_locks()
             self._locked_project_id = None
             self.have_lock = False
             self.current_lock_id = None
@@ -2042,6 +2184,7 @@ class RMManagerGUI:
             self.refresh_timeline()  # Odśwież aby zablokować edycję pól
             self._refresh_combo_lock_info()  # Odśwież combo projektów (usuń lock)
             self._sync_mp_chart_lock_state()  # Synchronizuj Multi-project chart
+            self._refresh_mp_lock_labels()    # Odśwież etykiety locków w selektorze
             print(f"🔓 Lock zwolniony: projekt {self.selected_project_id}")
 
         except Exception as e:
@@ -2059,6 +2202,7 @@ class RMManagerGUI:
         self.refresh_timeline()  # Odśwież aby zablokować edycję pól
         self._refresh_combo_lock_info()  # Odśwież combo projektów (pokaż nowy lock)
         self._sync_mp_chart_lock_state()  # Synchronizuj Multi-project chart
+        self._refresh_mp_lock_labels()    # Odśwież etykiety locków w selektorze
         self.status_bar.config(
             text=f"⚠️ Utracono lock projektu {self.selected_project_id} - tryb READ-ONLY",
             fg="#e74c3c"
@@ -3822,7 +3966,19 @@ class RMManagerGUI:
                 return (1, name_lower, 0, "")
             
             self.projects.sort(key=sort_key)
-            
+
+            # Dopisz nazwę linii produkcyjnej do nazwy projektu (jeśli należy do linii)
+            try:
+                all_lines = rmm.list_production_lines(self.rm_master_db_path)
+                for line in all_lines:
+                    for lpid in line['project_ids']:
+                        if lpid in self.project_names:
+                            self.project_names[lpid] = (
+                                f"{self.project_names[lpid]}  [{line['name']}]"
+                            )
+            except Exception as e:
+                print(f"⚠️ Nie udało się dołączyć nazw linii: {e}")
+
             # Jednorazowa migracja JSON → stage_staff_assignments (idempotentna)
             try:
                 result = rmm.sync_staff_json_to_table(self.rm_manager_dir, self.projects)
@@ -8183,7 +8339,10 @@ class RMManagerGUI:
             print(f"💾 Wywołuję recalculate_forecast...")
             rmm.recalculate_forecast(db_path, self.selected_project_id)
             print(f"💾 Prognoza przeliczona")
-            
+
+            # Propaguj do linii produkcyjnej (jeśli etap równoległy)
+            self._propagate_parallel_stage(stage_code, template_start_iso, template_end_iso)
+
             # Odśwież widoki
             print(f"💾 Wywołuję refresh_all...")
             self.refresh_all()
@@ -8690,29 +8849,30 @@ class RMManagerGUI:
             con = rmm._open_rm_connection(self.get_project_db_path(self.selected_project_id), row_factory=False)
             saved_count = 0
             errors = []  # Zbieraj błędy, aby pokazać użytkownikowi
-            
+            saved_iso: dict = {}  # {stage_code: (start_iso, end_iso)} — do propagacji linii
+
             for stage_code, (start_entry, end_entry) in self.timeline_entries.items():
                 try:
                     template_start = start_entry.get().strip()
                     template_end = end_entry.get().strip()
-                    
+
                     # Walidacja i konwersja DD-MM-YYYY → YYYY-MM-DD (ISO)
                     valid_start, template_start_iso = self.validate_and_convert_date(template_start)
                     if not valid_start:
                         errors.append(f"{stage_code}: {template_start_iso}")
                         continue
-                    
+
                     valid_end, template_end_iso = self.validate_and_convert_date(template_end)
                     if not valid_end:
                         errors.append(f"{stage_code}: {template_end_iso}")
                         continue
-                    
+
                     # Walidacja logiczna: koniec >= początek (tylko jeśli obie daty są podane)
                     if template_start_iso and template_end_iso:
                         if template_end_iso < template_start_iso:
                             errors.append(f"{stage_code}: Data końcowa nie może być wcześniejsza niż początkowa")
                             continue
-                    
+
                     # UPDATE stage_schedule - zapisz w formacie ISO (YYYY-MM-DD)
                     con.execute("""
                         UPDATE stage_schedule
@@ -8723,14 +8883,42 @@ class RMManagerGUI:
                         )
                     """, (template_start_iso, template_end_iso, self.selected_project_id, stage_code))
                     saved_count += 1
-                    
+                    saved_iso[stage_code] = (template_start_iso, template_end_iso)
+
                 except Exception as e:
                     print(f"⚠️ Błąd zapisu szablonu {stage_code}: {e}")
                     continue
-            
+
             con.commit()
             con.close()
-            
+
+            # Propaguj etapy równoległe do pozostałych projektów linii
+            if self._line_locked_pids and self._line_parallel_stages and saved_iso:
+                for pid in self._line_locked_pids:
+                    try:
+                        pdb = self.get_project_db_path(pid)
+                        pcon = rmm._open_rm_connection(pdb, row_factory=False)
+                        propagated = 0
+                        for sc, (s_iso, e_iso) in saved_iso.items():
+                            if sc not in self._line_parallel_stages:
+                                continue
+                            pcon.execute("""
+                                UPDATE stage_schedule
+                                SET template_start = ?, template_end = ?
+                                WHERE project_stage_id = (
+                                    SELECT id FROM project_stages
+                                    WHERE project_id = ? AND stage_code = ?
+                                )
+                            """, (s_iso, e_iso, pid, sc))
+                            propagated += 1
+                        pcon.commit()
+                        pcon.close()
+                        if propagated:
+                            rmm.recalculate_forecast(pdb, pid)
+                            print(f"🔗 Propagowano {propagated} etapów równoległych → pid={pid}")
+                    except Exception as e:
+                        print(f"⚠️ Propagacja do pid={pid}: {e}")
+
             # Pokaż błędy użytkownikowi jeśli były
             if errors:
                 messagebox.showwarning(
@@ -8738,7 +8926,7 @@ class RMManagerGUI:
                     f"Nie można zapisać dat dla niektórych etapów:\n\n" + "\n".join(errors) +
                     f"\n\nZapisano poprawne: {saved_count}/{len(self.timeline_entries)}"
                 )
-            
+
         except Exception as e:
             messagebox.showerror("❌ Błąd", f"Błąd zapisu szablonów: {e}")
     
@@ -11728,24 +11916,25 @@ class RMManagerGUI:
         try:
             _pdb = self.get_project_db_path(self.selected_project_id)
             con = rmm._open_rm_connection(_pdb, row_factory=False)
-            
+            saved_iso: dict = {}
+
             for stage_code, entries in self.date_entries.items():
                 template_start = entries['template_start'].get().strip()
                 template_end = entries['template_end'].get().strip()
-                
+
                 # Walidacja i konwersja DD-MM-YYYY → YYYY-MM-DD (ISO)
                 valid_start, template_start_iso = self.validate_and_convert_date(template_start)
                 if not valid_start:
                     messagebox.showerror("❌ Błąd walidacji", template_start_iso)
                     con.close()
                     return
-                
+
                 valid_end, template_end_iso = self.validate_and_convert_date(template_end)
                 if not valid_end:
                     messagebox.showerror("❌ Błąd walidacji", template_end_iso)
                     con.close()
                     return
-                
+
                 # Walidacja logiczna: koniec >= początek (tylko jeśli obie daty są podane)
                 if template_start_iso and template_end_iso:
                     if template_end_iso < template_start_iso:
@@ -11755,7 +11944,7 @@ class RMManagerGUI:
                         )
                         con.close()
                         return
-                
+
                 # UPDATE stage_schedule (szablon) - zapisz w formacie ISO
                 con.execute("""
                     UPDATE stage_schedule
@@ -11765,22 +11954,50 @@ class RMManagerGUI:
                         WHERE project_id = ? AND stage_code = ?
                     )
                 """, (template_start_iso, template_end_iso, self.selected_project_id, stage_code))
-            
+                saved_iso[stage_code] = (template_start_iso, template_end_iso)
+
             con.commit()
             con.close()
-            
+
             # Przelicz prognozę
             rmm.recalculate_forecast(_pdb, self.selected_project_id)
-            
+
+            # Propaguj etapy równoległe do pozostałych projektów linii
+            if self._line_locked_pids and self._line_parallel_stages and saved_iso:
+                for pid in self._line_locked_pids:
+                    try:
+                        pdb = self.get_project_db_path(pid)
+                        pcon = rmm._open_rm_connection(pdb, row_factory=False)
+                        propagated = 0
+                        for sc, (s_iso, e_iso) in saved_iso.items():
+                            if sc not in self._line_parallel_stages:
+                                continue
+                            pcon.execute("""
+                                UPDATE stage_schedule
+                                SET template_start = ?, template_end = ?
+                                WHERE project_stage_id = (
+                                    SELECT id FROM project_stages
+                                    WHERE project_id = ? AND stage_code = ?
+                                )
+                            """, (s_iso, e_iso, pid, sc))
+                            propagated += 1
+                        pcon.commit()
+                        pcon.close()
+                        if propagated:
+                            rmm.recalculate_forecast(pdb, pid)
+                            print(f"🔗 Propagowano {propagated} etapów równoległych → pid={pid}")
+                    except Exception as e:
+                        print(f"⚠️ Propagacja do pid={pid}: {e}")
+
             # Zamknij okno (zapisując geometrię)
             self.save_window_geometry('edit_dates_window', self.edit_window)
             self.edit_window.destroy()
-            
+
             # Odśwież widoki
             self.refresh_all()
-            
+
             self.status_bar.config(text="💾 Daty zapisane i prognoza przeliczona", fg="#27ae60")
-            
+
         except Exception as e:
             messagebox.showerror("❌ Błąd", f"Nie można zapisać dat:\n{e}")
 
@@ -16059,6 +16276,7 @@ class RMManagerGUI:
                 try:
                     if getattr(self, '_mp_selector_window', None) is sel:
                         self._mp_selector_window = None
+                    self._mp_selector_refresh_locks = None
                 except Exception:
                     pass
                 sel.destroy()
@@ -16432,7 +16650,7 @@ class RMManagerGUI:
                     'status': 'Status',
                     'health': 'Terminowość',
                     'variance': 'Odchylenie',
-                    'forecast': 'Koniec (prognoza)'
+                    'forecast': 'Prognoza',
                 }
                 label_text = f"{col_names[col]} {arrow}".strip()
                 btn.config(text=label_text, bg=bg_color)
@@ -16584,17 +16802,20 @@ class RMManagerGUI:
             ('status', 'Status', 12),
             ('health', 'Terminowość', 12),
             ('variance', 'Odchylenie', 10),
-            ('forecast', 'Koniec (prognoza)', 14)
+            ('forecast', 'Prognoza', 10),
         ]:
             btn = tk.Button(hdr, text=label, width=width, font=("Arial", 9, "bold"),
-                          bg="#ecf0f1", relief=tk.FLAT, anchor="w" if col == 'name' else "center",
+                          bg="#ecf0f1", relief=tk.FLAT,
+                          anchor="w" if col in ('name', 'forecast') else "center",
                           cursor="hand2", activebackground="#bdc3c7",
                           command=lambda c=col: sort_projects(c))
             btn.pack(side=tk.LEFT, padx=5 if col == 'name' else 0)
             header_buttons[col] = btn
         
         update_header_labels()
-        
+        tk.Label(hdr, text="Opt.", width=5, font=("Arial", 9, "bold"),
+                 bg="#ecf0f1", anchor='w').pack(side=tk.LEFT)
+
         # Scrollable list
         outer = tk.Frame(list_frame)
         outer.pack(fill=tk.BOTH, expand=True)
@@ -16670,18 +16891,20 @@ class RMManagerGUI:
                 return str(fe)[:10]
         
         no_db_pids = set()  # projekty bez pliku bazy danych
-        
+        _name_labels: dict = {}  # {pid: tk.Label} — do odświeżania locków
+        _opt_icon_widgets: dict = {}  # {pid: opt_lbl} — do bulk update ikon optymalizatora
+
         for pid in self.projects:
             info = proj_info[pid]
             has_db = info.get('has_db', False)
             row = tk.Frame(inner, pady=1)
             row.pack(fill=tk.X)
-            
+
             if has_db:
                 cv = tk.BooleanVar(value=(pid in current_ids))
                 check_vars[pid] = cv
                 tk.Checkbutton(row, variable=cv, width=1).pack(side=tk.LEFT, padx=(2, 0))
-                
+
                 pv = tk.BooleanVar(value=(pid in pinned_ids))
                 pin_vars[pid] = pv
                 tk.Checkbutton(row, variable=pv, text="📌", indicatoron=0,
@@ -16698,7 +16921,7 @@ class RMManagerGUI:
                 pin_vars[pid] = pv
                 tk.Label(row, text="  ⛔", font=("Arial", 8), width=3, fg="#bdc3c7").pack(side=tk.LEFT)
                 row.configure(bg="#f5f5f5")
-            
+
             name_fg = "#333" if has_db else "#aaaaaa"
             _lock_suffix = ""
             if has_db:
@@ -16713,8 +16936,11 @@ class RMManagerGUI:
                 name_lbl = f"{info['name']}{_lock_suffix}"
             else:
                 name_lbl = f"{info['name']}  (brak bazy danych)"
-            tk.Label(row, text=name_lbl, font=("Arial", 9), anchor="w",
-                    width=38, fg=name_fg).pack(side=tk.LEFT, padx=5)
+            name_label_widget = tk.Label(row, text=name_lbl, font=("Arial", 9), anchor="w",
+                    width=38, fg=name_fg)
+            name_label_widget.pack(side=tk.LEFT, padx=5)
+            if has_db:
+                _name_labels[pid] = (name_label_widget, info['name'])
             tk.Label(row, text=status_text(info) if has_db else "⛔ Brak danych",
                     font=("Arial", 8), width=12, fg="#333" if has_db else "#bdc3c7").pack(side=tk.LEFT)
             tk.Label(row, text=health_text(info) if has_db else "—",
@@ -16724,9 +16950,90 @@ class RMManagerGUI:
                     fg=variance_color(info) if has_db else "#bdc3c7", width=10).pack(side=tk.LEFT)
             tk.Label(row, text=forecast_text(info) if has_db else "—",
                     font=("Arial", 8), width=14, fg="#333" if has_db else "#bdc3c7").pack(side=tk.LEFT)
-            
+
+            # Wskaźnik gotowości do optymalizacji (⚡ = kliknij aby sprawdzić)
+            if has_db:
+                is_sym = '[sym]' in info.get('name', '').lower()
+                can_basic = (not info.get('is_finished') and
+                             not info.get('is_paused') and
+                             not is_sym and
+                             info.get('status') not in (ProjectStatus.NEW, ProjectStatus.DONE))
+                opt_icon = "⚡" if can_basic else "⊘"
+                opt_color = "#f39c12" if can_basic else "#bdc3c7"
+                opt_lbl = tk.Label(row, text=opt_icon, font=("Arial", 9, "bold"),
+                                   fg=opt_color, cursor="hand2" if can_basic else "",
+                                   width=5, anchor='center')
+                opt_lbl.pack(side=tk.LEFT)
+                if can_basic:
+                    opt_lbl._result_color = opt_color
+                    _opt_icon_widgets[pid] = opt_lbl
+                    opt_lbl.bind("<Button-1>",
+                                 lambda e, p=pid: _check_all_and_update(p))
+                    opt_lbl.bind("<Enter>", lambda e, l=opt_lbl: l.config(fg="#e67e22"))
+                    opt_lbl.bind("<Leave>", lambda e, l=opt_lbl: l.config(fg=l._result_color))
+
             row_widgets[pid] = row
         
+        def _check_all_and_update(clicked_pid: int):
+            """Sprawdź wszystkie projekty z ⚡ w tle i zaktualizuj kolory ikon."""
+            pids_to_check = list(_opt_icon_widgets.keys())
+            if not pids_to_check:
+                return
+            import threading
+
+            def _worker():
+                results = {}
+                for p in pids_to_check:
+                    try:
+                        pdb = self.get_project_db_path(p)
+                        results[p] = rmm.check_optimizer_readiness(pdb, p)
+                    except Exception:
+                        results[p] = None
+
+                def _apply():
+                    for p, res in results.items():
+                        lbl = _opt_icon_widgets.get(p)
+                        if not lbl:
+                            continue
+                        try:
+                            if res is None:
+                                color = "#f39c12"
+                            elif res['can_optimize']:
+                                color = "#27ae60"
+                            else:
+                                color = "#e74c3c"
+                            lbl._result_color = color
+                            lbl.config(fg=color)
+                        except Exception:
+                            pass
+                try:
+                    sel.after(0, _apply)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_worker, daemon=True).start()
+            # Pokaż popup dla klikniętego projektu
+            pname = proj_info[clicked_pid]['name']
+            self._show_optimizer_readiness_popup(sel, clicked_pid, pname)
+
+        # Odśwież etykiety locków w wierszach selektora (wywoływane z zewnątrz po lock/unlock)
+        def _refresh_lock_labels():
+            for pid, (lbl, base_name) in _name_labels.items():
+                try:
+                    suffix = ""
+                    if not getattr(self.lock_manager, '_STUB', False):
+                        li = self.lock_manager.get_project_lock_owner(pid)
+                        if li and li.get('user'):
+                            suffix = f" 🔒 [{self._get_user_display_name(li['user'])}]"
+                    lbl.config(text=f"{base_name}{suffix}")
+                except Exception:
+                    pass
+
+        if is_gantt_mode:
+            self._mp_selector_refresh_locks = _refresh_lock_labels
+        else:
+            self._mp_selector_refresh_locks = None
+
         # ===== LOGIKA FILTRÓW =====
         def matches_status_filter(pid):
             info = proj_info[pid]
@@ -17677,7 +17984,7 @@ class RMManagerGUI:
                 fontsize=24,
                 fontweight='bold',
                 color='#000000',
-                alpha=0.12,
+                alpha=0.22,
                 ha='center',
                 va='center',
                 zorder=0,
@@ -17698,11 +18005,15 @@ class RMManagerGUI:
         ax.invert_yaxis()  # Pierwszy etap na górze (przed saved restore)
         
         # Wizualizacja wybranego/locked projektu — czerwone + bold etykiety
-        locked_pid = self._mp_selected_pid
-        if locked_pid is not None:
+        # Podświetl primary lock + wszystkie projekty linii
+        highlighted_pids = set()
+        if self._mp_selected_pid is not None:
+            highlighted_pids.add(self._mp_selected_pid)
+        highlighted_pids.update(self._line_locked_pids)
+        if highlighted_pids:
             for i, lbl in enumerate(y_labels):
                 pid_for_row = y_to_pid.get(i)
-                if pid_for_row == locked_pid:
+                if pid_for_row in highlighted_pids:
                     ax.get_yticklabels()[i].set_color('#e74c3c')
                     ax.get_yticklabels()[i].set_fontweight('bold')
                     ax.get_yticklabels()[i].set_fontsize(9)
@@ -18440,6 +18751,15 @@ class RMManagerGUI:
         except Exception:
             return False
     
+    def _refresh_mp_lock_labels(self):
+        """Odśwież etykiety locków w oknie Wybór projektów (selektor Multi-projekt)."""
+        fn = getattr(self, '_mp_selector_refresh_locks', None)
+        if fn:
+            try:
+                fn()
+            except Exception as e:
+                print(f"⚠️ _refresh_mp_lock_labels: {e}")
+
     def _sync_mp_chart_lock_state(self):
         """Synchronizuj stan locka z głównej aplikacji do Multi-project chart.
         Wywoływane po acquire/release/cancel locka z głównego okna."""
@@ -18450,7 +18770,7 @@ class RMManagerGUI:
             project_ids = self._mp_chart_meta.get('project_ids', [])
             if pid not in project_ids:
                 return
-            
+
             if self.have_lock and self._locked_project_id == pid:
                 # Lock przejęty — zaznacz projekt na multi-chart
                 self._mp_selected_pid = pid
@@ -19608,9 +19928,10 @@ class RMManagerGUI:
                 """, (new_start_iso, new_end_iso, pid, stage_code))
                 con.commit()
                 con.close()
-                
+
                 rmm.recalculate_forecast(project_db, pid)
-                
+                self._propagate_parallel_stage(stage_code, new_start_iso, new_end_iso)
+
                 duration = (bar['end'] - bar['start']).days
                 if bar.get('type') == 'Milestone' or stage_defs.get(stage_code, {}).get('is_milestone', False):
                     self._mp_status.config(
@@ -19650,7 +19971,9 @@ class RMManagerGUI:
                 
                 date_iso = new_date.strftime('%Y-%m-%d')
                 field_db = 'template_start' if edge == 'start' else 'template_end'
-                
+                mp_start_iso = date_iso if edge == 'start' else bar['start'].strftime('%Y-%m-%d')
+                mp_end_iso = bar['end'].strftime('%Y-%m-%d') if edge == 'start' else date_iso
+
                 con = rmm._open_rm_connection(project_db, row_factory=False)
                 con.execute(f"""
                     UPDATE stage_schedule SET {field_db} = ?
@@ -19660,9 +19983,10 @@ class RMManagerGUI:
                 """, (date_iso, pid, stage_code))
                 con.commit()
                 con.close()
-                
+
                 rmm.recalculate_forecast(project_db, pid)
-                
+                self._propagate_parallel_stage(stage_code, mp_start_iso, mp_end_iso)
+
                 edge_label = "początek" if edge == 'start' else "koniec"
                 self._mp_status.config(
                     text=f"✅ Zaktualizowano {edge_label} szablonu: {stage_code} → {new_date.strftime('%d-%m-%Y')}",
@@ -19782,6 +20106,7 @@ class RMManagerGUI:
             self.selected_project_id = pid
             self.read_only_mode = False
             self._snapshot_stage_dates()  # Snapshot dat do cofnięcia przy Anuluj
+            self._try_acquire_line_locks()  # Locki na pozostałe projekty linii
             self._mp_status.config(
                 text=f"🔒 Locked: {pname} — dwuklik na pasek = edycja etapu",
                 fg=self.COLOR_GREEN
@@ -19794,6 +20119,7 @@ class RMManagerGUI:
                 pass
             self._update_lock_buttons_state()
             self._refresh_combo_lock_info()
+            self._refresh_mp_lock_labels()
             self.load_project_stages()
             self.refresh_timeline()
             try:
@@ -19848,12 +20174,13 @@ class RMManagerGUI:
                 except Exception as e:
                     print(f"⚠️ Błąd backupu projektu (niegroźne): {e}")
             
-            # Zwolnij lock
+            # Zwolnij lock primary + locki linii
             self.lock_manager.release_project_lock(self._locked_project_id)
             print(f"🔓 Lock project {self._locked_project_id} zwolniony")
             self._locked_project_id = None
             self.have_lock = False
             self.current_lock_id = None
+            self._release_line_locks()
             
             # Odśwież formularz główny z DB (żeby miał aktualne daty)
             if self.selected_project_id == pid and self.timeline_entries:
@@ -19865,10 +20192,11 @@ class RMManagerGUI:
         self._mp_selected_pid = None
         self._update_lock_buttons_state()
         self._refresh_combo_lock_info()
+        self._refresh_mp_lock_labels()
         self._mp_status.config(text=f"🔓 Zwolniono: {pname}", fg="#7f8c8d")
         self._mp_build_right_panel(self._mp_chart_meta['project_ids'])
         self._create_multi_project_chart_window(self._mp_chart_meta['project_ids'], preserve_view=True)
-    
+
     def _mp_cancel_lock(self):
         """Anuluj lock z multi-Gantt (cofnij zmiany + zwolnij)"""
         if not self._mp_selected_pid:
@@ -19899,11 +20227,13 @@ class RMManagerGUI:
                     self.backup_manager.backup_project(self._locked_project_id, skip_checkpoint=True)
                 except Exception:
                     pass
+            self._restore_line_snapshots()
             self.lock_manager.release_project_lock(self._locked_project_id)
             print(f"🔓 Lock project {self._locked_project_id} zwolniony (anulowano)")
             self._locked_project_id = None
             self.have_lock = False
             self.current_lock_id = None
+            self._release_line_locks()
             
             # Odśwież formularz główny
             if self.selected_project_id == pid and self.timeline_entries:
@@ -19915,10 +20245,11 @@ class RMManagerGUI:
         self._mp_selected_pid = None
         self._update_lock_buttons_state()
         self._refresh_combo_lock_info()
+        self._refresh_mp_lock_labels()
         self._mp_status.config(text=f"✖ Anulowano: {pname}", fg=self.COLOR_ORANGE)
         self._mp_build_right_panel(self._mp_chart_meta['project_ids'])
         self._create_multi_project_chart_window(self._mp_chart_meta['project_ids'], preserve_view=True)
-    
+
     def _mp_build_right_panel(self, project_ids):
         """Buduje/odświeża statyczny prawy panel multi-Gantt"""
         panel = self._mp_right_panel
@@ -19983,7 +20314,30 @@ class RMManagerGUI:
                   command=self._mp_deselect_project,
                   bg="#7f8c8d", fg="white", font=("Arial", 8),
                   padx=5, pady=1, cursor='hand2').pack(fill=tk.X, pady=(3, 0))
-        
+
+        # === Linia produkcyjna ===
+        if self._line_locked_pids:
+            ttk.Separator(panel, orient='horizontal').pack(fill=tk.X, padx=5, pady=(5, 2))
+            tk.Label(panel, text="🔗 Linia produkcyjna",
+                     font=("Arial", 9, "bold"), bg="#f0f0f0", fg="#8e44ad",
+                     anchor='w').pack(fill=tk.X, padx=6, pady=(2, 1))
+            all_line_pids = [pid] + self._line_locked_pids
+            for lpid in all_line_pids:
+                lname = self.project_names.get(lpid, f"Projekt {lpid}")
+                is_primary = (lpid == pid)
+                prefix = "▶ " if is_primary else "  "
+                owner = self.lock_manager.get_project_lock_owner(lpid)
+                owner_txt = f" 🔒 [{self._get_user_display_name(owner['user'])}]" if owner else ""
+                tk.Label(panel, text=f"{prefix}{lname}{owner_txt}",
+                         font=("Arial", 8, "bold" if is_primary else "normal"),
+                         bg="#f0f0f0", fg="#e74c3c" if owner else "#555",
+                         anchor='w', wraplength=155).pack(fill=tk.X, padx=8, pady=1)
+            if getattr(self, '_line_parallel_stages', None):
+                tk.Label(panel,
+                         text="Etapy równoległe: " + ", ".join(sorted(self._line_parallel_stages)),
+                         font=("Arial", 7), bg="#f0f0f0", fg="#8e44ad",
+                         anchor='w', wraplength=155).pack(fill=tk.X, padx=8, pady=(0, 2))
+
         # === Filtr per-projekt (S/R/P) z przełącznikiem ON/OFF ===
         ttk.Separator(panel, orient='horizontal').pack(fill=tk.X, padx=5, pady=5)
         
@@ -21319,9 +21673,10 @@ class RMManagerGUI:
                 con.close()
                 
                 rmm.recalculate_forecast(_pdb, self.selected_project_id)
+                self._propagate_parallel_stage(stage_code, ts_iso, te_iso)
                 dialog.destroy()
                 self.create_embedded_gantt_chart(preserve_view=True)
-                
+
                 # Odśwież multi-Gantt jeśli jest otwarty
                 if self._is_mp_chart_open():
                     try:
@@ -21329,7 +21684,7 @@ class RMManagerGUI:
                             self._mp_chart_meta['project_ids'], preserve_view=True)
                     except Exception:
                         pass
-                
+
                 self.status_bar.config(
                     text=f"✅ Zaktualizowano {stage_code}: {ts} — {te}",
                     fg=self.COLOR_GREEN
@@ -21544,8 +21899,9 @@ class RMManagerGUI:
                 con.close()
                 
                 rmm.recalculate_forecast(_pdb, self.selected_project_id)
+                self._propagate_parallel_stage(stage_code, new_start_iso, new_end_iso)
                 self.create_embedded_gantt_chart(preserve_view=True)
-                
+
                 # Odśwież multi-Gantt jeśli otwarty
                 if self._is_mp_chart_open():
                     try:
@@ -21553,7 +21909,7 @@ class RMManagerGUI:
                             self._mp_chart_meta['project_ids'], preserve_view=True)
                     except Exception:
                         pass
-                
+
                 duration = (bar_item['end'] - bar_item['start']).days
                 if bar_item['type'] == 'Milestone':
                     self.status_bar.config(
@@ -21591,7 +21947,9 @@ class RMManagerGUI:
                 
                 date_iso = new_date.strftime('%Y-%m-%d')
                 field_db = 'template_start' if edge == 'start' else 'template_end'
-                
+                resize_start_iso = date_iso if edge == 'start' else bar_item['start'].strftime('%Y-%m-%d')
+                resize_end_iso = bar_item['end'].strftime('%Y-%m-%d') if edge == 'start' else date_iso
+
                 con = rmm._open_rm_connection(_pdb, row_factory=False)
                 con.execute(f"""
                     UPDATE stage_schedule
@@ -21603,10 +21961,11 @@ class RMManagerGUI:
                 """, (date_iso, self.selected_project_id, stage_code))
                 con.commit()
                 con.close()
-                
+
                 rmm.recalculate_forecast(_pdb, self.selected_project_id)
+                self._propagate_parallel_stage(stage_code, resize_start_iso, resize_end_iso)
                 self.create_embedded_gantt_chart(preserve_view=True)
-                
+
                 # Odśwież multi-Gantt jeśli otwarty
                 if self._is_mp_chart_open():
                     try:
@@ -21614,7 +21973,7 @@ class RMManagerGUI:
                             self._mp_chart_meta['project_ids'], preserve_view=True)
                     except Exception:
                         pass
-                
+
                 edge_label = "początek" if edge == 'start' else "koniec"
                 self.status_bar.config(
                     text=f"✅ Zaktualizowano {edge_label} szablonu: {stage_code} → {new_date.strftime('%d-%m-%Y')}",
@@ -27988,6 +28347,52 @@ Kod: {unlock_code}
             self._attach_tooltip(lbl, tooltip)
         except Exception:
             pass
+
+    def _show_optimizer_readiness_popup(self, parent, pid: int, pname: str):
+        """Popup ze szczegółami gotowości projektu do optymalizacji normalnej."""
+        pdb = self.get_project_db_path(pid)
+        try:
+            result = rmm.check_optimizer_readiness(pdb, pid)
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Nie udało się sprawdzić projektu:\n{e}", parent=parent)
+            return
+
+        win = tk.Toplevel(parent)
+        win.title(f"⚡ Gotowość do optymalizacji — {pname}")
+        win.resizable(False, False)
+        win.grab_set()
+
+        hdr_bg = "#27ae60" if result['can_optimize'] else "#e74c3c"
+        hdr_text = "✅ Projekt gotowy do optymalizacji normalnej" if result['can_optimize'] \
+                   else "⚠️ Projekt NIE spełnia warunków trybu normalnego"
+        tk.Label(win, text=hdr_text, bg=hdr_bg, fg="white",
+                 font=("Arial", 10, "bold"), pady=8, padx=12).pack(fill=tk.X)
+
+        body = tk.Frame(win, padx=16, pady=10)
+        body.pack(fill=tk.BOTH)
+
+        if result['can_optimize']:
+            tk.Label(body, text="Optymalizator może pracować na tym projekcie\nw trybie z ograniczeniami pracowników.",
+                     font=("Arial", 9), fg="#27ae60", justify='left').pack(anchor='w')
+        else:
+            tk.Label(body, text="Brakujące warunki:", font=("Arial", 9, "bold")).pack(anchor='w', pady=(0, 4))
+            for issue in result['issues']:
+                tk.Label(body, text=f"  • {issue}", font=("Arial", 9),
+                         fg="#c0392b", justify='left', wraplength=380).pack(anchor='w')
+
+            if result['stages_missing_staff'] or result['stages_missing_dates']:
+                ttk.Separator(body, orient='horizontal').pack(fill=tk.X, pady=8)
+                tk.Label(body,
+                         text="Rozwiązanie: przypisz masterów do brakujących etapów\nlub użyj trybu '🚫 Bez ograniczeń pracowników'.",
+                         font=("Arial", 8), fg="#7f8c8d", justify='left').pack(anchor='w')
+
+        tk.Button(win, text="Zamknij", command=win.destroy,
+                  font=("Arial", 9), padx=20, pady=4).pack(pady=(4, 10))
+
+        win.update_idletasks()
+        x = parent.winfo_rootx() + parent.winfo_width() // 2 - win.winfo_reqwidth() // 2
+        y = parent.winfo_rooty() + parent.winfo_height() // 2 - win.winfo_reqheight() // 2
+        win.geometry(f"+{x}+{y}")
 
     def _attach_tooltip(self, widget, text: str):
         """Lekki tooltip — pokazuje tekst po najechaniu myszką."""

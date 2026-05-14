@@ -19,7 +19,7 @@ import socket
 import uuid
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 
 class ProjectLockManager:
@@ -206,6 +206,53 @@ class ProjectLockManager:
             print(f"❌ Błąd przejmowania locka project {project_id}: {e}")
             return (False, None)
     
+    def acquire_project_locks_bulk(self, project_ids: List[int],
+                                   force: bool = False) -> Dict[int, Tuple[bool, Optional[str]]]:
+        """Przejmij locki dla wielu projektów jednocześnie (linia produkcyjna).
+
+        Nie stosuje polityki single-lock — przejmuje wszystkie podane projekty.
+        Zwalnia własne locki spoza podanego zestawu.
+        """
+        ids_set = set(project_ids)
+        try:
+            for lock_file in self.locks_folder.glob("project_*.lock"):
+                try:
+                    pid = int(lock_file.stem.replace('project_', ''))
+                    if pid in ids_set:
+                        continue
+                    with open(lock_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if (data.get('computer') == self.my_computer
+                            and data.get('user') == self.my_name):
+                        lock_file.unlink()
+                        self._my_locks.discard(pid)
+                        print(f"🧹 Bulk: zwolniono lock project {pid}")
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"⚠️ acquire_project_locks_bulk cleanup: {e}")
+
+        results: Dict[int, Tuple[bool, Optional[str]]] = {}
+        for pid in project_ids:
+            lock_file = self.locks_folder / f"project_{pid}.lock"
+            if not lock_file.exists():
+                results[pid] = self._create_lock_file(pid, lock_file)
+                continue
+            owner = self.get_project_lock_owner(pid)
+            if (owner and owner.get('computer') == self.my_computer
+                    and owner.get('user') == self.my_name):
+                self._my_locks.add(pid)
+                results[pid] = (True, owner.get('lock_id', str(uuid.uuid4())))
+            elif force:
+                results[pid] = self._create_lock_file(pid, lock_file)
+            else:
+                lock_age = self._lock_age_seconds(owner)
+                if lock_age is None or lock_age >= self.stale_lock_seconds:
+                    results[pid] = self._create_lock_file(pid, lock_file)
+                else:
+                    results[pid] = (False, None)
+        return results
+
     def release_project_lock(self, project_id: int):
         """Zwolnij lock projektu"""
         lock_file = self.locks_folder / f"project_{project_id}.lock"
