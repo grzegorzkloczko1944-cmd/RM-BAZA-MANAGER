@@ -1,0 +1,37 @@
+python -m py_compile rm_manager.py rm_manager_gui.py
+
+git add .
+git commit -m "Dom: wieczór - dalsze zmiany"
+git push 
+
+
+git pull - na początek
+
+pip install psutil    - to trzeba dodać na firmowym + PIL do obrazków
+
+python -m PyInstaller ^
+    --onefile ^
+    --noconsole ^
+    --name=RM_MANAGER ^
+    --icon=rm_manager_icon.ico ^
+    --add-data="rm_manager.py;." ^
+    --add-data="rm_optimizer.py;." ^
+    --add-data="lock_manager_v2.py;." ^
+    --add-data="backup_manager.py;." ^
+    --add-data="wat.jpg;." ^
+    --add-data="rm_manager_icon.ico;." ^
+    --hidden-import=plotly ^
+    --hidden-import=PIL ^
+    --hidden-import=PIL.Image ^
+    --hidden-import=PIL.ImageTk ^
+    --hidden-import=PIL.ImageDraw ^
+    --hidden-import=PIL.ImageFilter ^
+    --hidden-import=ortools ^
+    --hidden-import=ortools.sat ^
+    --hidden-import=ortools.sat.python ^
+    --hidden-import=ortools.sat.python.cp_model ^
+    --hidden-import=psutil ^
+    --collect-all=plotly ^
+    --collect-all=PIL ^
+    --collect-all=ortools ^
+    rm_manager_gui.py

@@ -8363,7 +8363,8 @@ class RMManagerGUI:
             
             self.status_bar.config(text=f"✅ Zapisano szablon dla {stage_code}", fg=self.COLOR_GREEN)
             print(f"💾 Status bar ustawiony - KONIEC")
-            
+            self._notify_data_change()
+
         except Exception as e:
             print(f"💾 BŁĄD w save_stage_template: {e}")
             messagebox.showerror("❌ Błąd", f"Nie można zapisać dat:\n{e}")
@@ -16969,52 +16970,60 @@ class RMManagerGUI:
                     _opt_icon_widgets[pid] = opt_lbl
                     opt_lbl.bind("<Button-1>",
                                  lambda e, p=pid: _check_all_and_update(p))
-                    opt_lbl.bind("<Enter>", lambda e, l=opt_lbl: l.config(fg="#e67e22"))
+                    opt_lbl.bind("<Enter>", lambda e, l=opt_lbl: (_check_all_and_update(), l.config(fg="#e67e22")))
                     opt_lbl.bind("<Leave>", lambda e, l=opt_lbl: l.config(fg=l._result_color))
 
             row_widgets[pid] = row
         
-        def _check_all_and_update(clicked_pid: int):
+        _check_running = [False]
+
+        def _check_all_and_update(clicked_pid: int = None):
             """Sprawdź wszystkie projekty z ⚡ w tle i zaktualizuj kolory ikon."""
             pids_to_check = list(_opt_icon_widgets.keys())
             if not pids_to_check:
                 return
             import threading
 
-            def _worker():
-                results = {}
-                for p in pids_to_check:
-                    try:
-                        pdb = self.get_project_db_path(p)
-                        results[p] = rmm.check_optimizer_readiness(pdb, p)
-                    except Exception:
-                        results[p] = None
+            if not _check_running[0]:
+                _check_running[0] = True
 
-                def _apply():
-                    for p, res in results.items():
-                        lbl = _opt_icon_widgets.get(p)
-                        if not lbl:
-                            continue
+                def _worker():
+                    results = {}
+                    for p in pids_to_check:
                         try:
-                            if res is None:
-                                color = "#f39c12"
-                            elif res['can_optimize']:
-                                color = "#27ae60"
-                            else:
-                                color = "#e74c3c"
-                            lbl._result_color = color
-                            lbl.config(fg=color)
+                            pdb = self.get_project_db_path(p)
+                            results[p] = rmm.check_optimizer_readiness(pdb, p)
                         except Exception:
-                            pass
-                try:
-                    sel.after(0, _apply)
-                except Exception:
-                    pass
+                            results[p] = None
 
-            threading.Thread(target=_worker, daemon=True).start()
-            # Pokaż popup dla klikniętego projektu
-            pname = proj_info[clicked_pid]['name']
-            self._show_optimizer_readiness_popup(sel, clicked_pid, pname)
+                    def _apply():
+                        _check_running[0] = False
+                        for p, res in results.items():
+                            lbl = _opt_icon_widgets.get(p)
+                            if not lbl:
+                                continue
+                            try:
+                                if res is None:
+                                    color = "#f39c12"
+                                elif res['can_optimize']:
+                                    color = "#27ae60"
+                                else:
+                                    color = "#e74c3c"
+                                lbl._result_color = color
+                                lbl.config(fg=color)
+                            except Exception:
+                                pass
+                    try:
+                        sel.after(0, _apply)
+                    except Exception:
+                        _check_running[0] = False
+
+                threading.Thread(target=_worker, daemon=True).start()
+
+            # Pokaż popup tylko przy kliknięciu
+            if clicked_pid is not None:
+                pname = proj_info[clicked_pid]['name']
+                self._show_optimizer_readiness_popup(sel, clicked_pid, pname)
 
         # Odśwież etykiety locków w wierszach selektora (wywoływane z zewnątrz po lock/unlock)
         def _refresh_lock_labels():
@@ -18740,13 +18749,21 @@ class RMManagerGUI:
                         fg=self.COLOR_GREEN
                     )
     
+    def _notify_data_change(self):
+        """Powiadamiaj zarejestrowane okna o zmianie danych (np. okno kopiowania etapów)."""
+        for cb in list(getattr(self, '_data_change_callbacks', [])):
+            try:
+                cb()
+            except Exception:
+                pass
+
     def _is_mp_chart_open(self):
         """Sprawdź czy okno multi-projekt jest otwarte i widoczne"""
         try:
-            return (hasattr(self, '_mp_chart_window') and 
-                    self._mp_chart_window and 
+            return (hasattr(self, '_mp_chart_window') and
+                    self._mp_chart_window and
                     self._mp_chart_window.winfo_exists() and
-                    hasattr(self, '_mp_chart_meta') and 
+                    hasattr(self, '_mp_chart_meta') and
                     self._mp_chart_meta)
         except Exception:
             return False
@@ -20015,6 +20032,8 @@ class RMManagerGUI:
                     self.refresh_timeline()
                 except Exception:
                     pass
+
+            self._notify_data_change()
             
         except Exception as e:
             import traceback
@@ -28357,6 +28376,17 @@ Kod: {unlock_code}
             messagebox.showerror("Błąd", f"Nie udało się sprawdzić projektu:\n{e}", parent=parent)
             return
 
+        # Sprawdź czy projekt należy do linii
+        line_name = None
+        try:
+            lines = rmm.list_production_lines(self.rm_master_db_path)
+            for line in lines:
+                if pid in line.get('project_ids', []):
+                    line_name = line['name']
+                    break
+        except Exception:
+            pass
+
         win = tk.Toplevel(parent)
         win.title(f"⚡ Gotowość do optymalizacji — {pname}")
         win.resizable(False, False)
@@ -28370,6 +28400,18 @@ Kod: {unlock_code}
 
         body = tk.Frame(win, padx=16, pady=10)
         body.pack(fill=tk.BOTH)
+
+        # Projekt i linia
+        tk.Label(body, text=f"Projekt: {pname}", font=("Arial", 9, "bold"),
+                 anchor='w').pack(anchor='w', pady=(0, 2))
+        if line_name:
+            tk.Label(body, text=f"Linia: {line_name}", font=("Arial", 9),
+                     fg="#2980b9", anchor='w').pack(anchor='w', pady=(0, 6))
+        else:
+            tk.Label(body, text="Linia: —", font=("Arial", 9),
+                     fg="#95a5a6", anchor='w').pack(anchor='w', pady=(0, 6))
+
+        ttk.Separator(body, orient='horizontal').pack(fill=tk.X, pady=(0, 8))
 
         if result['can_optimize']:
             tk.Label(body, text="Optymalizator może pracować na tym projekcie\nw trybie z ograniczeniami pracowników.",
@@ -28386,13 +28428,16 @@ Kod: {unlock_code}
                          text="Rozwiązanie: przypisz masterów do brakujących etapów\nlub użyj trybu '🚫 Bez ograniczeń pracowników'.",
                          font=("Arial", 8), fg="#7f8c8d", justify='left').pack(anchor='w')
 
-        tk.Button(win, text="Zamknij", command=win.destroy,
-                  font=("Arial", 9), padx=20, pady=4).pack(pady=(4, 10))
+        btn_close = tk.Button(win, text="Zamknij", command=win.destroy,
+                              font=("Arial", 9), padx=20, pady=4)
+        btn_close.pack(pady=(4, 10))
+        win.bind("<Escape>", lambda e: win.destroy())
 
         win.update_idletasks()
         x = parent.winfo_rootx() + parent.winfo_width() // 2 - win.winfo_reqwidth() // 2
         y = parent.winfo_rooty() + parent.winfo_height() // 2 - win.winfo_reqheight() // 2
         win.geometry(f"+{x}+{y}")
+        btn_close.focus_set()
 
     def _attach_tooltip(self, widget, text: str):
         """Lekki tooltip — pokazuje tekst po najechaniu myszką."""
@@ -28752,6 +28797,26 @@ Kod: {unlock_code}
         tk.Button(actions, text="💾 Zapisz", font=("Arial", 10, "bold"),
                   bg="#27ae60", fg="white", padx=14, pady=4,
                   command=_save_line).pack(side=tk.LEFT, padx=4)
+
+        def _open_copy():
+            if not state['line_id']:
+                messagebox.showinfo("Brak linii",
+                                    "Najpierw zapisz linię przed kopiowaniem etapów.",
+                                    parent=dlg)
+                return
+            if len(state['project_ids']) < 2:
+                messagebox.showinfo("Za mało projektów",
+                                    "Linia musi mieć co najmniej 2 projekty.",
+                                    parent=dlg)
+                return
+            self._open_stage_copy_dialog(dlg, name_var.get(),
+                                         list(state['project_ids']),
+                                         set(state['parallel_stages']))
+
+        tk.Button(actions, text="📋 Kopiowanie etapów", font=("Arial", 10),
+                  bg="#3498db", fg="white", padx=14, pady=4,
+                  command=_open_copy).pack(side=tk.LEFT, padx=8)
+
         tk.Button(actions, text="✖ Zamknij", font=("Arial", 10),
                   padx=14, pady=4,
                   command=dlg.destroy).pack(side=tk.RIGHT, padx=4)
@@ -28769,6 +28834,538 @@ Kod: {unlock_code}
                 _new_line()
         except Exception:
             _new_line()
+
+
+    def _open_stage_copy_dialog(self, parent_dlg, line_name: str, project_ids: list,
+                                parallel_stages: set = None):
+        """Okno kopiowania dat szablonów między projektami w linii."""
+
+        win = tk.Toplevel(parent_dlg)
+        win.title(f"📋 Kopiowanie etapów — {line_name}")
+        self._center_window(win, 1100, 660)
+        win.minsize(800, 500)
+        win.bind("<Escape>", lambda e: win.destroy())
+
+        # Rejestruj _reload_table jako callback zmian danych
+        if not hasattr(self, '_data_change_callbacks'):
+            self._data_change_callbacks = []
+
+        def _on_data_change():
+            if win.winfo_exists():
+                _reload_table()
+
+        self._data_change_callbacks.append(_on_data_change)
+        win.bind("<Destroy>", lambda e: self._data_change_callbacks.remove(_on_data_change)
+                 if _on_data_change in self._data_change_callbacks else None)
+
+        # ── Wczytaj nazwy pracowników z master DB ──────────────────────
+        emp_names = {}
+        try:
+            con = rmm._open_rm_connection(self.rm_master_db_path)
+            for r in con.execute("SELECT id, name FROM employees").fetchall():
+                emp_names[r['id']] = r['name']
+            con.close()
+        except Exception:
+            pass
+
+        # ── Wczytaj stage_definitions (kolejność + display_name) ───────
+        stage_order = []
+        stage_display = {}
+        try:
+            con = rmm._open_rm_connection(self.rm_master_db_path)
+            for r in con.execute(
+                "SELECT code, display_name FROM stage_definitions ORDER BY id"
+            ).fetchall():
+                stage_order.append(r['code'])
+                stage_display[r['code']] = r['display_name'] or r['code']
+            con.close()
+        except Exception:
+            pass
+
+        # ── Wczytaj dane etapów dla każdego projektu ───────────────────
+        # {pid: {sc: {template_start, template_end, master_name}}}
+        project_data = {}
+        valid_pids = []
+
+        for pid in project_ids:
+            db_path = self.get_project_db_path(pid)
+            if not Path(db_path).exists():
+                continue
+            try:
+                con = rmm._open_rm_connection(db_path)
+                rows = con.execute("""
+                    SELECT ps.stage_code, ps.assigned_staff,
+                           ss.template_start, ss.template_end
+                    FROM project_stages ps
+                    LEFT JOIN stage_schedule ss ON ss.project_stage_id = ps.id
+                    WHERE ps.project_id = ?
+                """, (pid,)).fetchall()
+
+                stages = {}
+                for r in rows:
+                    stages[r['stage_code']] = {
+                        'template_start': r['template_start'] or '',
+                        'template_end':   r['template_end']   or '',
+                        'master_name':    '',
+                    }
+
+                # Master z stage_staff_assignments
+                try:
+                    for sr in con.execute("""
+                        SELECT ps.stage_code, ssa.employee_id
+                        FROM stage_staff_assignments ssa
+                        JOIN project_stages ps ON ssa.project_stage_id = ps.id
+                        WHERE ps.project_id = ?
+                    """, (pid,)).fetchall():
+                        sc = sr['stage_code']
+                        if sc in stages and not stages[sc]['master_name']:
+                            stages[sc]['master_name'] = emp_names.get(
+                                sr['employee_id'], f"#{sr['employee_id']}")
+                except Exception:
+                    pass
+
+                # Fallback: master z JSON assigned_staff
+                for r in rows:
+                    sc = r['stage_code']
+                    if sc in stages and not stages[sc]['master_name']:
+                        try:
+                            staff = json.loads(r['assigned_staff'] or '[]')
+                            if staff and isinstance(staff[0], dict):
+                                eid = staff[0].get('employee_id')
+                                if eid:
+                                    stages[sc]['master_name'] = emp_names.get(eid, f"#{eid}")
+                        except Exception:
+                            pass
+
+                con.close()
+                project_data[pid] = stages
+                valid_pids.append(pid)
+            except Exception as e:
+                print(f"⚠️ Kopiowanie etapów — pid={pid}: {e}")
+
+        if not valid_pids:
+            messagebox.showinfo("Brak danych",
+                                "Nie udało się wczytać danych żadnego projektu linii.",
+                                parent=win)
+            win.destroy()
+            return
+
+        # ── Kolejność etapów (unia projektów, wg stage_definitions) ───
+        all_sc = set()
+        for stages in project_data.values():
+            all_sc.update(stages.keys())
+        ordered_stages = [(sc, stage_display.get(sc, sc))
+                          for sc in stage_order if sc in all_sc]
+        known = {sc for sc, _ in ordered_stages}
+        for sc in all_sc:
+            if sc not in known:
+                ordered_stages.append((sc, stage_display.get(sc, sc)))
+
+        proj_names = {pid: self.project_names.get(pid, f"Projekt {pid}")
+                      for pid in valid_pids}
+
+        # ── HEADER ─────────────────────────────────────────────────────
+        tk.Label(win, text=f"📋 Kopiowanie etapów — {line_name}",
+                 bg=self.COLOR_TOPBAR, fg="white",
+                 font=("Arial", 12, "bold"), pady=8, padx=12).pack(fill=tk.X)
+
+        # ── PASEK ŹRÓDŁO / CEL ─────────────────────────────────────────
+        ctrl = tk.Frame(win, padx=10, pady=6, bg="#f5f6fa")
+        ctrl.pack(fill=tk.X)
+
+        tk.Label(ctrl, text="Źródło:", font=("Arial", 9, "bold"),
+                 bg="#f5f6fa").pack(side=tk.LEFT)
+        src_var = tk.StringVar()
+        src_combo = ttk.Combobox(
+            ctrl, textvariable=src_var, state='readonly', width=32,
+            values=[f"{pid}: {proj_names[pid]}" for pid in valid_pids])
+        src_combo.pack(side=tk.LEFT, padx=(4, 16))
+        if valid_pids:
+            src_combo.current(0)
+
+        tk.Label(ctrl, text="Cel:", font=("Arial", 9, "bold"),
+                 bg="#f5f6fa").pack(side=tk.LEFT)
+        tgt_vars = {}
+        tgt_checks = {}
+        _update_colors_ref = [None]  # forward reference — wypełniane po zbudowaniu tabeli
+
+        def _get_src_pid():
+            try:
+                return int(src_var.get().split(':')[0])
+            except Exception:
+                return valid_pids[0] if valid_pids else None
+
+        def _call_update_colors():
+            if _update_colors_ref[0]:
+                _update_colors_ref[0]()
+
+        for pid in valid_pids:
+            v = tk.BooleanVar(value=False)
+            tgt_vars[pid] = v
+            cb = tk.Checkbutton(ctrl, text=proj_names[pid], variable=v,
+                                bg="#f5f6fa", font=("Arial", 9),
+                                command=_call_update_colors)
+            cb.pack(side=tk.LEFT, padx=4)
+            tgt_checks[pid] = cb
+
+        def _on_src_change(_e=None):
+            src_pid = _get_src_pid()
+            if src_pid is not None:
+                tgt_vars[src_pid].set(False)
+                for pid, cb in tgt_checks.items():
+                    cb.config(state='disabled' if pid == src_pid else 'normal')
+            _call_update_colors()
+
+        src_combo.bind("<<ComboboxSelected>>", _on_src_change)
+        # Ustaw stan początkowy (pierwsze źródło zablokowane w Cel)
+        _on_src_change()
+
+        # ── TABELA (Canvas+Frame — kolorowanie per-kolumna) ────────────
+        tbl_frame = tk.Frame(win)
+        tbl_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+
+        cv = tk.Canvas(tbl_frame, bg="white")
+        vsb = ttk.Scrollbar(tbl_frame, orient=tk.VERTICAL,   command=cv.yview)
+        hsb = ttk.Scrollbar(tbl_frame, orient=tk.HORIZONTAL, command=cv.xview)
+        cv.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        hsb.pack(side=tk.BOTTOM, fill=tk.X)
+        cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        inner = tk.Frame(cv, bg="white")
+        cv.create_window((0, 0), window=inner, anchor='nw')
+        inner.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all")))
+
+        def _mw(e):
+            cv.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        cv.bind_all("<MouseWheel>", _mw)
+        win.bind("<Destroy>", lambda e: cv.unbind_all("<MouseWheel>"), add="+")
+
+        def _fmt(t_start, t_end):
+            if not t_start or not t_end:
+                return '—'
+            try:
+                s, e = t_start[:10], t_end[:10]
+                return (f"{s[8:10]}.{s[5:7]}.{s[0:4]}"
+                        f" – {e[8:10]}.{e[5:7]}.{e[0:4]}")
+            except Exception:
+                return t_start[:10] if t_start else '—'
+
+        def _build_cell(pid, sc):
+            sdata = project_data.get(pid, {}).get(sc)
+            if sdata is None:
+                return '(brak etapu)'
+            dates = _fmt(sdata['template_start'], sdata['template_end'])
+            master = sdata['master_name'] or '—'
+            return f"{dates}  [{master}]"
+
+        W_STAGE = 22
+        W_PROJ  = 42
+        FONT_H  = ("Arial", 9, "bold")
+        FONT_D  = ("Arial", 9)
+        BG_SRC_H, FG_SRC_H = "#e74c3c", "white"
+        BG_TGT_H, FG_TGT_H = "#e67e22", "white"
+        BG_NEU_H, FG_NEU_H = "#ecf0f1", "#333"
+        BG_SRC_C = "#fdecea"
+        BG_TGT_C = "#fef9e7"
+        BG_NEU_C = "white"
+        BG_SEL_C = "#d5e8d4"
+
+        # Nagłówek — wiersz 0
+        tk.Label(inner, text="Etap", font=FONT_H, bg=BG_NEU_H, fg=FG_NEU_H,
+                 width=W_STAGE, anchor='w', relief=tk.RIDGE
+                 ).grid(row=0, column=0, sticky='nsew', padx=1, pady=1)
+
+        hdr_widgets = {}
+        for col_i, pid in enumerate(valid_pids, start=1):
+            lbl = tk.Label(inner, text=proj_names[pid][:28], font=FONT_H,
+                           bg=BG_NEU_H, fg=FG_NEU_H, width=W_PROJ,
+                           anchor='center', relief=tk.RIDGE)
+            lbl.grid(row=0, column=col_i, sticky='nsew', padx=1, pady=1)
+            hdr_widgets[pid] = lbl
+
+        # Wiersze danych
+        cell_widgets    = {}   # (sc, pid) → Label
+        row_all_labels  = {}   # sc → [Label, ...]
+        _selected_sc    = set()
+        _copyable_stages = set()  # aktualizowane przez _update_cell_colors
+        _last_clicked   = [None]  # indeks w ordered_stages ostatnio klikniętego wiersza
+
+        stage_list = [sc for sc, _ in ordered_stages]  # kolejność indeksów
+
+        for row_i, (sc, display_name) in enumerate(ordered_stages, start=1):
+            name_lbl = tk.Label(inner, text=display_name, font=FONT_D,
+                                bg=BG_NEU_C, anchor='w', width=W_STAGE,
+                                relief=tk.FLAT, cursor="hand2")
+            name_lbl.grid(row=row_i, column=0, sticky='nsew', padx=1, pady=0)
+            row_lbls = [name_lbl]
+
+            for col_i, pid in enumerate(valid_pids, start=1):
+                lbl = tk.Label(inner, text=_build_cell(pid, sc), font=FONT_D,
+                               bg=BG_NEU_C, anchor='w', width=W_PROJ, relief=tk.FLAT)
+                lbl.grid(row=row_i, column=col_i, sticky='nsew', padx=1, pady=0)
+                cell_widgets[(sc, pid)] = lbl
+                row_lbls.append(lbl)
+
+            row_all_labels[sc] = row_lbls
+
+            def _toggle(e, _sc=sc):
+                if _sc not in _copyable_stages:
+                    return  # szary wiersz — blokada kliknięcia
+                idx = stage_list.index(_sc)
+                if e.state & 0x1:  # Shift wciśnięty
+                    if _last_clicked[0] is not None:
+                        lo = min(_last_clicked[0], idx)
+                        hi = max(_last_clicked[0], idx)
+                        # Kierunek: zaznacz jeśli cel nie zaznaczony, odznacz jeśli zaznaczony
+                        if _sc in _selected_sc:
+                            for i in range(lo, hi + 1):
+                                _selected_sc.discard(stage_list[i])
+                        else:
+                            for i in range(lo, hi + 1):
+                                if stage_list[i] in _copyable_stages:
+                                    _selected_sc.add(stage_list[i])
+                    else:
+                        _selected_sc.discard(_sc) if _sc in _selected_sc else _selected_sc.add(_sc)
+                else:
+                    if _sc in _selected_sc:
+                        _selected_sc.discard(_sc)
+                    else:
+                        _selected_sc.add(_sc)
+                _last_clicked[0] = idx
+                _update_cell_colors()
+
+            for lbl in row_lbls:
+                lbl.bind("<Button-1>", _toggle)
+
+        def _update_cell_colors():
+            src_pid = _get_src_pid()
+            tgt_set = {p for p, v in tgt_vars.items() if v.get() and p != src_pid}
+            src_stages = project_data.get(src_pid, {}) if src_pid else {}
+
+            _copyable_stages.clear()
+
+            for sc, _ in ordered_stages:
+                # Kopiowalny = etap prowadzony jednocześnie (z definicji linii)
+                # Jeśli linia nie ma zdefiniowanych etapów równoległych → wszystkie kopiowalny
+                if parallel_stages:
+                    is_copyable = sc in parallel_stages
+                else:
+                    is_copyable = True
+
+                if is_copyable:
+                    _copyable_stages.add(sc)
+                else:
+                    _selected_sc.discard(sc)  # odznacz jeśli stał się niekopiowalny
+
+                sel = sc in _selected_sc
+
+                for pid in valid_pids:
+                    lbl = cell_widgets.get((sc, pid))
+                    if lbl is None:
+                        continue
+                    if sel:
+                        bg = BG_SEL_C
+                    elif pid == src_pid:
+                        bg = BG_SRC_C
+                    elif pid in tgt_set:
+                        bg = BG_TGT_C
+                    else:
+                        bg = BG_NEU_C
+                    lbl.config(bg=bg)
+
+                name_lbl = row_all_labels.get(sc, [None])[0]
+                if name_lbl:
+                    if sel:
+                        name_lbl.config(bg=BG_SEL_C, fg="#333",
+                                        font=(FONT_D[0], FONT_D[1], "bold"))
+                    elif is_copyable:
+                        name_lbl.config(bg=BG_NEU_C, fg="#333", font=FONT_D,
+                                        cursor="hand2")
+                    else:
+                        name_lbl.config(bg=BG_NEU_C, fg="#aaa",
+                                        font=(FONT_D[0], FONT_D[1], "italic"),
+                                        cursor="")
+
+        def _update_colors():
+            src_pid = _get_src_pid()
+            tgt_set = {p for p, v in tgt_vars.items() if v.get() and p != src_pid}
+            for pid, lbl in hdr_widgets.items():
+                if pid == src_pid:
+                    lbl.config(bg=BG_SRC_H, fg=FG_SRC_H)
+                elif pid in tgt_set:
+                    lbl.config(bg=BG_TGT_H, fg=FG_TGT_H)
+                else:
+                    lbl.config(bg=BG_NEU_H, fg=FG_NEU_H)
+            _update_cell_colors()
+
+        _update_colors_ref[0] = _update_colors
+        _update_colors()
+
+        def _reload_table():
+            for pid in valid_pids:
+                db_path = self.get_project_db_path(pid)
+                if not Path(db_path).exists():
+                    continue
+                try:
+                    con = rmm._open_rm_connection(db_path)
+                    for r in con.execute("""
+                        SELECT ps.stage_code, ss.template_start, ss.template_end
+                        FROM project_stages ps
+                        LEFT JOIN stage_schedule ss ON ss.project_stage_id = ps.id
+                        WHERE ps.project_id = ?
+                    """, (pid,)).fetchall():
+                        sc = r['stage_code']
+                        if sc in project_data.get(pid, {}):
+                            project_data[pid][sc]['template_start'] = r['template_start'] or ''
+                            project_data[pid][sc]['template_end']   = r['template_end']   or ''
+                    con.close()
+                except Exception as e:
+                    print(f"⚠️ _reload_table pid={pid}: {e}")
+            for sc, _ in ordered_stages:
+                for pid in valid_pids:
+                    lbl = cell_widgets.get((sc, pid))
+                    if lbl:
+                        lbl.config(text=_build_cell(pid, sc))
+            _update_colors()
+            win.update_idletasks()
+
+        # ── PRZYCISKI ──────────────────────────────────────────────────
+        btns = tk.Frame(win, padx=8, pady=6)
+        btns.pack(fill=tk.X)
+
+        def _do_copy(only_selected: bool):
+            src_pid = _get_src_pid()
+            if src_pid is None:
+                messagebox.showwarning("Brak źródła", "Wybierz projekt źródłowy.", parent=win)
+                return
+            tgt_pids = [pid for pid, v in tgt_vars.items() if v.get() and pid != src_pid]
+            if not tgt_pids:
+                messagebox.showwarning("Brak celu",
+                                       "Zaznacz co najmniej jeden projekt docelowy.",
+                                       parent=win)
+                return
+
+            if only_selected:
+                stage_codes = [sc for sc in _selected_sc if sc in _copyable_stages]
+                if not stage_codes:
+                    messagebox.showinfo("Brak zaznaczenia",
+                                        "Kliknij kopiowalny wiersz (czarny tekst) aby go zaznaczyć.",
+                                        parent=win)
+                    return
+            else:
+                stage_codes = [sc for sc, _ in ordered_stages if sc in _copyable_stages]
+
+            # ── Sprawdź konflikty locków (bez przejmowania) ────────────
+            # acquire_project_locks_bulk zwalnia istniejące locki spoza zestawu
+            # — niszczyłoby lock aktywnego projektu. Zamiast tego tylko sprawdzamy
+            # czy ktoś inny aktualnie trzyma lock na projekcie docelowym.
+            conflicts = []
+            is_stub = getattr(self.lock_manager, '_STUB', False)
+            if not is_stub:
+                for p in tgt_pids:
+                    owner = self.lock_manager.get_project_lock_owner(p)
+                    if owner is None:
+                        continue
+                    if (owner.get('computer') == self.lock_manager.my_computer
+                            and owner.get('user') == self.lock_manager.my_name):
+                        continue  # mój własny lock — OK
+                    owner_name = self._get_user_display_name(owner.get('user', '?'))
+                    conflicts.append(f"  • {proj_names.get(p, str(p))} — zajęty przez: {owner_name}")
+
+            if conflicts:
+                conflict_msg = ("Projekty zablokowane przez innych użytkowników:\n\n"
+                                + "\n".join(conflicts)
+                                + "\n\nCzy mimo to wymusić kopiowanie?\n"
+                                  "(Uwaga: może to nadpisać zmiany wprowadzone przez drugiego użytkownika)")
+                if not messagebox.askyesno("Konflikty locków", conflict_msg,
+                                           icon='warning', parent=win):
+                    return
+
+            # ── Kopiuj ─────────────────────────────────────────────────
+            src_stages = project_data.get(src_pid, {})
+            errors = []
+            total_copied = 0
+
+            for tgt_pid in tgt_pids:
+                tgt_stages = project_data.get(tgt_pid, {})
+                stage_dates = {}
+                for sc in stage_codes:
+                    src = src_stages.get(sc)
+                    if src is None or not src['template_start'] or not src['template_end']:
+                        continue
+                    if sc not in tgt_stages:
+                        continue
+                    stage_dates[sc] = (src['template_start'], src['template_end'])
+                if not stage_dates:
+                    continue
+                try:
+                    rmm.apply_optimization_result(self.rm_projects_dir, tgt_pid, stage_dates)
+                    total_copied += len(stage_dates)
+                except Exception as e:
+                    errors.append(f"Projekt {proj_names.get(tgt_pid, tgt_pid)}: {e}")
+
+            if errors:
+                messagebox.showerror("Błędy podczas kopiowania", "\n".join(errors), parent=win)
+            else:
+                tgt_names = ", ".join(proj_names.get(p, str(p)) for p in tgt_pids)
+                messagebox.showinfo("Skopiowano",
+                                    f"Skopiowano {total_copied} dat etapów do:\n{tgt_names}",
+                                    parent=win)
+            _reload_table()
+            _refresh_main_app()
+
+        def _refresh_main_app():
+            """Odśwież główny wykres, oś czasu i multi-projekt po zmianie danych."""
+            try:
+                if self.matplotlib_canvas:
+                    self.create_embedded_gantt_chart(preserve_view=True)
+            except Exception:
+                pass
+            try:
+                if self._is_mp_chart_open():
+                    self._create_multi_project_chart_window(
+                        self._mp_chart_meta['project_ids'], preserve_view=True)
+            except Exception:
+                pass
+            try:
+                if self.selected_project_id in valid_pids:
+                    self.refresh_timeline()
+                    self.load_project_stages()
+            except Exception:
+                pass
+
+        def _auto_refresh():
+            """Cykliczne odświeżanie tabeli (co 15 s) dopóki okno jest otwarte."""
+            if not win.winfo_exists():
+                return
+            _reload_table()
+            win.after(15_000, _auto_refresh)
+
+        win.after(15_000, _auto_refresh)
+
+        tk.Button(btns, text="📋 Kopiuj zaznaczone etapy", font=("Arial", 9),
+                  bg="#3498db", fg="white", padx=10, pady=4,
+                  command=lambda: _do_copy(only_selected=True)).pack(side=tk.LEFT, padx=4)
+        tk.Button(btns, text="📋 Kopiuj wszystkie etapy", font=("Arial", 9),
+                  bg="#8e44ad", fg="white", padx=10, pady=4,
+                  command=lambda: _do_copy(only_selected=False)).pack(side=tk.LEFT, padx=4)
+        tk.Button(btns, text="🔄 Odśwież", font=("Arial", 9),
+                  padx=10, pady=4,
+                  command=_reload_table).pack(side=tk.LEFT, padx=8)
+
+        def _deselect_all():
+            _selected_sc.clear()
+            _last_clicked[0] = None
+            _update_cell_colors()
+
+        tk.Button(btns, text="Odznacz wszystkie", font=("Arial", 9),
+                  padx=10, pady=4,
+                  command=_deselect_all).pack(side=tk.LEFT, padx=2)
+        close_btn = tk.Button(btns, text="✖ Zamknij", font=("Arial", 9),
+                              padx=10, pady=4, command=win.destroy)
+        close_btn.pack(side=tk.RIGHT, padx=4)
+        close_btn.focus_set()
 
 
 # ============================================================================

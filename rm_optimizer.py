@@ -368,6 +368,9 @@ class ProductionOptimizer:
                     self._frozen_values[key] = (fixed_start, fixed_end)
                     frozen_stages += 1
                 else:
+                    # Etap bez żadnych dat = wyłączony przez użytkownika — pomijamy
+                    if not self._has_any_date(pid, sc):
+                        continue
                     # Target: nie wcześniej niż DZIŚ
                     sv = self.model.NewIntVar(today_idx, horizon - 1, f's_{pid}_{sc}')
                     ev = self.model.NewIntVar(today_idx, horizon - 1, f'e_{pid}_{sc}')
