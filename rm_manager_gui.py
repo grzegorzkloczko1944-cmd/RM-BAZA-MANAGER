@@ -724,16 +724,22 @@ class RMManagerGUI:
         if not alarms:
             return
         
-        # Okno powiadomienia — NIEZALEŻNE od głównego okna (nie transient!)
-        # Zawsze na wierzchu, nie chowa się gdy główne okno dostanie fokus.
+        # Okno powiadomienia — zawsze na wierzchu, klikalne nawet gdy inne okno ma grab
         notify_win = tk.Toplevel()
         notify_win.title("⏰ ALARMY")
         notify_win.resizable(True, True)
         notify_win.attributes('-topmost', True)
         self._center_window(notify_win, 920, 520)
+        # Przejmij grab od ewentualnego blokującego okna i wymuś focus
+        notify_win.grab_set()
+        notify_win.focus_force()
         # Zapisz referencję — do przekazania jako parent okna Notatek
         self._alarms_notify_win = notify_win
         def _on_alarms_close():
+            try:
+                notify_win.grab_release()
+            except Exception:
+                pass
             self._alarms_notify_win = None
             notify_win.destroy()
         notify_win.protocol("WM_DELETE_WINDOW", _on_alarms_close)
@@ -2495,7 +2501,9 @@ class RMManagerGUI:
         rows = rmm.get_users_from_baza(self.master_db_path)
         if not rows:
             print(f"⚠️  Brak użytkowników lub niedostępna baza: {self.master_db_path}")
+            self._user_labels = []
             self.user_combo['values'] = []
+            self.login_submenu.delete(0, 'end')
             self.user_var.set("")
             return
 
@@ -2507,7 +2515,14 @@ class RMManagerGUI:
             label += f" [{r['role']}]"
             labels.append(label)
 
+        self._user_labels = labels
         self.user_combo['values'] = labels
+        self.login_submenu.delete(0, 'end')
+        for lbl in labels:
+            self.login_submenu.add_command(
+                label=lbl,
+                command=lambda l=lbl: self._login_from_menu(l)
+            )
         print(f"📋 Załadowano {len(labels)} użytkowników")
 
         if auto_login:
@@ -2686,7 +2701,8 @@ class RMManagerGUI:
         self.current_user_id = uid
         self.current_user = username
         self.current_user_role = role
-        
+        self.users_menu.entryconfig(0, label=f"👤 {username}  [{role}]")
+
         # Zapamiętaj ostatniego usera (auto-login przy restarcie)
         self.save_last_user_to_config(uid)
         # Reload uprawnień
@@ -2717,6 +2733,7 @@ class RMManagerGUI:
         self.current_user = None
         self.current_user_id = None
         self.current_user_role = "GUEST"
+        self.users_menu.entryconfig(0, label="👤 Niezalogowany")
         self.user_permissions = rmm.get_user_permissions(self.rm_master_db_path, "GUEST")
         # Wyczyść listę pokazanych alarmów przy fallback GUEST
         if hasattr(self, '_shown_alarm_ids'):
@@ -2741,7 +2758,7 @@ class RMManagerGUI:
         var_pwd = tk.StringVar()
         entry_pwd = tk.Entry(frm, textvariable=var_pwd, show="*", width=35)
         entry_pwd.pack(pady=5, fill=tk.X)
-        entry_pwd.focus()
+        dlg.after(50, entry_pwd.focus_force)
 
         result = {"ok": False, "password": ""}
 
@@ -2812,12 +2829,17 @@ class RMManagerGUI:
         if self.current_user_id is None:
             self.user_var.set("")
             return
-        for lbl in self.user_combo['values']:
+        for lbl in self._user_labels:
             if lbl.startswith(f"{self.current_user_id} |"):
                 self.user_combo.unbind('<<ComboboxSelected>>')
                 self.user_var.set(lbl)
                 self.user_combo.bind('<<ComboboxSelected>>', self.on_user_selected)
                 return
+
+    def _login_from_menu(self, label):
+        """Zaloguj użytkownika wybranego z menu Użytkownicy → Zaloguj jako"""
+        self.user_var.set(label)
+        self.on_user_selected()
 
     # ========================================================================
     # Uprawnienia użytkowników
@@ -2919,15 +2941,26 @@ class RMManagerGUI:
         tools_menu.add_command(label="🔄 Aktualizuj definicje etapów (nazwy, kolory)", command=self.update_stage_definitions_ui)
 
         # Users menu
-        users_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Użytkownicy", menu=users_menu)
-        users_menu.add_command(label="🔄 Odśwież listę użytkowników", command=self.load_users)
-        users_menu.add_separator()
-        users_menu.add_command(label="🔑 Uprawnienia kategorii...", command=self.edit_permissions_dialog)
+        self.user_var = tk.StringVar()
+        self._user_labels = []
+        self.users_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Użytkownicy", menu=self.users_menu)
+        self.users_menu.add_command(label="👤 Niezalogowany", state=tk.DISABLED)
+        self.users_menu.add_separator()
+        self.login_submenu = tk.Menu(self.users_menu, tearoff=0)
+        self.users_menu.add_cascade(label="Zaloguj jako", menu=self.login_submenu)
+        self.users_menu.add_command(label="🔄 Odśwież listę użytkowników", command=self.load_users)
+        self.users_menu.add_separator()
+        self.users_menu.add_command(label="🔑 Uprawnienia kategorii...", command=self.edit_permissions_dialog)
 
         # Backup menu
         backup_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Backupy", menu=backup_menu)
+        self.backup_dates_submenu = tk.Menu(backup_menu, tearoff=0)
+        backup_menu.add_cascade(label="📅 Wybierz datę", menu=self.backup_dates_submenu)
+        self.backup_dates_submenu.add_command(label="Aktualny stan",
+                                              command=lambda: self._select_backup_from_menu("Aktualny stan"))
+        backup_menu.add_separator()
         backup_menu.add_command(label="📋 Podgląd backupów…", command=self.menu_view_backups)
         backup_menu.add_command(label="💾 Wykonaj backup teraz", command=self.menu_run_backup_now)
 
@@ -2960,10 +2993,10 @@ class RMManagerGUI:
         self.top_frame = tk.Frame(self.root, bg=self.COLOR_TOPBAR, height=60)
         self.top_frame.pack(fill=tk.X)
         self.top_frame.pack_propagate(False)
-        
+
         tk.Label(
-            self.top_frame, 
-            text="PROJEKT:", 
+            self.top_frame,
+            text="PROJEKT:",
             bg=self.COLOR_TOPBAR, 
             fg="white", 
             font=self.FONT_BOLD
@@ -3003,7 +3036,9 @@ class RMManagerGUI:
             bg=self.COLOR_TOPBAR,
             fg="#95a5a6",
             font=("Arial", 9),
-            padx=4
+            padx=4,
+            width=22,
+            anchor="w"
         )
         self.lock_status_label.pack(side=tk.LEFT, padx=(0, 4), pady=10)
 
@@ -3172,7 +3207,6 @@ class RMManagerGUI:
             font=("Arial", 9, "bold")
         ).pack(side=tk.RIGHT, padx=(0, 4), pady=10)
 
-        self.user_var = tk.StringVar()
         self.user_combo = ttk.Combobox(
             self.top_frame,
             textvariable=self.user_var,
@@ -3610,7 +3644,19 @@ class RMManagerGUI:
             padx=15,
             pady=5
         ).pack(side=tk.LEFT, padx=5)
-        
+
+        tk.Button(
+            payment_controls,
+            text="📨 Wyślij status",
+            command=self.send_payment_status,
+            bg="#e67e22",
+            fg="white",
+            font=("Arial", 10),
+            relief=tk.FLAT,
+            padx=15,
+            pady=5
+        ).pack(side=tk.LEFT, padx=5)
+
         # Canvas jako kontener sekcji płatności — watermark w tle, treeview na górze
         self._payment_wm_photo = None
         payment_canvas = tk.Canvas(payment_section, bg='white', highlightthickness=0)
@@ -4257,11 +4303,13 @@ class RMManagerGUI:
             print("⚠️ load_backup_dates: brak selected_project_id")
             self.backup_combo['values'] = ["Aktualny stan"]
             self.backup_combo.set("Aktualny stan")
+            self._populate_backup_dates_submenu(["Aktualny stan"])
             return
         if not self.backup_manager:
             print("⚠️ load_backup_dates: backup_manager = None")
             self.backup_combo['values'] = ["Aktualny stan"]
             self.backup_combo.set("Aktualny stan")
+            self._populate_backup_dates_submenu(["Aktualny stan"])
             return
         
         try:
@@ -4293,13 +4341,30 @@ class RMManagerGUI:
             
             self.backup_combo['values'] = values
             self.backup_combo.set("Aktualny stan")
-            
+            self._populate_backup_dates_submenu(values)
+
         except Exception as e:
             print(f"⚠️  Błąd ładowania backupów: {e}")
             import traceback; traceback.print_exc()
             self.backup_combo['values'] = ["Aktualny stan"]
             self.backup_combo.set("Aktualny stan")
+            self._populate_backup_dates_submenu(["Aktualny stan"])
     
+    def _populate_backup_dates_submenu(self, values):
+        """Synchronizuje submenu Backupy → Wybierz datę z listą wartości backup combo"""
+        self.backup_dates_submenu.delete(0, 'end')
+        for v in values:
+            self.backup_dates_submenu.add_command(
+                label=v,
+                command=lambda val=v: self._select_backup_from_menu(val)
+            )
+
+    def _select_backup_from_menu(self, value):
+        """Wybór daty backupu z menu — odpowiednik kliknięcia w combo"""
+        self.backup_combo.set(value)
+        self.backup_date_var.set(value)
+        self.on_backup_selected()
+
     def on_backup_selected(self, event=None):
         """Wybrano datę backupu do podglądu"""
         selected = self.backup_date_var.get()
@@ -6358,7 +6423,7 @@ class RMManagerGUI:
                 command=lambda: self.toggle_milestone('PRZYJETY', przyjety_var.get())
             )
             przyjety_cb.pack(side=tk.LEFT, padx=10, pady=6)
-            
+
             # Przycisk "Karta maszyny" - renderuj PRZED info (side=RIGHT)
             przyjety_att_count = self.get_stage_attachments_count('PRZYJETY')
             tk.Button(
@@ -7513,7 +7578,65 @@ class RMManagerGUI:
                         state=tk.NORMAL if self.have_lock else tk.DISABLED
                     )
                     save_btn.pack(side=tk.LEFT, padx=10)
-                    
+
+                    # Przycisk Sprzedaż — tylko dla PRZYJETY
+                    if stage_code == 'PRZYJETY':
+                        try:
+                            _sprzedaz_staff = rmm.get_stage_assigned_staff(
+                                self.get_project_db_path(self.selected_project_id),
+                                self.rm_master_db_path,
+                                self.selected_project_id,
+                                'PRZYJETY'
+                            )
+                            sprzedaz_count = len(_sprzedaz_staff)
+                            sprzedaz_btn_text = f"💼 Sprzedaż ({sprzedaz_count})" if sprzedaz_count > 0 else "💼 Sprzedaż"
+                            sprzedaz_btn_bg = self.COLOR_GREEN if sprzedaz_count > 0 else "#95a5a6"
+                        except Exception:
+                            _sprzedaz_staff = []
+                            sprzedaz_count = 0
+                            sprzedaz_btn_text = "💼 Sprzedaż"
+                            sprzedaz_btn_bg = "#95a5a6"
+
+                        tk.Button(
+                            row1,
+                            text=sprzedaz_btn_text,
+                            command=lambda: self.assign_staff_dialog('PRZYJETY'),
+                            bg=sprzedaz_btn_bg,
+                            fg="white",
+                            font=self.FONT_SMALL,
+                            padx=8,
+                            pady=2,
+                            state=tk.NORMAL if self.have_lock else tk.DISABLED
+                        ).pack(side=tk.LEFT, padx=5)
+
+                        if sprzedaz_count > 0:
+                            row1b = tk.Frame(stage_frame, bg=bg_color)
+                            row1b.pack(fill=tk.X, pady=(0, 3))
+                            tk.Label(
+                                row1b,
+                                text="",
+                                bg=bg_color,
+                                width=12
+                            ).pack(side=tk.LEFT, padx=(0, 5))
+                            staff_info = []
+                            for s in _sprzedaz_staff:
+                                name = s['employee_name']
+                                category = s['category']
+                                preferred = rmm.STAGE_TO_PREFERRED_CATEGORY.get('PRZYJETY', [])
+                                if category not in preferred:
+                                    staff_info.append(f"⚠️ {name} ({category})")
+                                else:
+                                    staff_info.append(f"👤 {name} ({category})")
+                            tk.Label(
+                                row1b,
+                                text=", ".join(staff_info),
+                                bg=bg_color,
+                                font=self.FONT_SMALL,
+                                fg="gray",
+                                wraplength=600,
+                                justify=tk.LEFT
+                            ).pack(side=tk.LEFT, padx=2)
+
                     # Prognoza (tylko do odczytu) - tylko dla ZAKONCZONY
                     if stage_code == 'ZAKONCZONY':
                         row2 = tk.Frame(stage_frame, bg=bg_color)
@@ -7690,8 +7813,7 @@ class RMManagerGUI:
                 )
                 reset_btn.pack(side=tk.LEFT, padx=5)
                 
-                # Przycisk pracowników - zawsze dostępny (edycja wymaga locka w dialogu)
-                # Pobierz liczbę przypisanych pracowników
+                # Przycisk pracowników
                 try:
                     assigned_staff = rmm.get_stage_assigned_staff(
                         self.get_project_db_path(self.selected_project_id),
@@ -7706,8 +7828,7 @@ class RMManagerGUI:
                     staff_btn_text = "👷 Pracownicy"
                     staff_btn_bg = "#95a5a6"
                     staff_count = 0
-                
-                # Przyciski pracowników zawsze aktywne (umożliwiają przeglądanie)
+
                 staff_btn = tk.Button(
                     row1,
                     text=staff_btn_text,
@@ -7716,7 +7837,8 @@ class RMManagerGUI:
                     fg="white",
                     font=self.FONT_SMALL,
                     padx=8,
-                    pady=2
+                    pady=2,
+                    state=tk.NORMAL if self.have_lock else tk.DISABLED
                 )
                 staff_btn.pack(side=tk.LEFT, padx=5)
                 
@@ -23885,19 +24007,37 @@ class RMManagerGUI:
         dialog.title("Dodaj użytkownika")
         dialog.transient(parent_dialog)
         dialog.grab_set()
-        
-        self._center_window(dialog, 400, 250)
-        
-        tk.Label(dialog, text="Nazwa użytkownika:", font=self.FONT_DEFAULT).grid(row=0, column=0, sticky='e', padx=10, pady=10)
-        username_entry = tk.Entry(dialog, width=25, font=self.FONT_DEFAULT)
-        username_entry.grid(row=0, column=1, sticky='w', padx=10, pady=10)
-        
+
+        self._center_window(dialog, 420, 250)
+
+        # Pobierz userów z RM_BAZA (tabela users)
+        try:
+            known_users = [u['username'] for u in rmm.get_users_from_baza(self.master_db_path)]
+        except Exception:
+            known_users = []
+
+        # Pobierz już dodanych senderów żeby nie duplikować
+        try:
+            existing_senders = {s['username'] for s in rmm.get_plc_authorized_senders(self.rm_master_db_path)}
+        except Exception:
+            existing_senders = set()
+
+        available_users = [u for u in known_users if u not in existing_senders]
+
+        tk.Label(dialog, text="Użytkownik:", font=self.FONT_DEFAULT).grid(row=0, column=0, sticky='e', padx=10, pady=10)
+        username_var = tk.StringVar()
+        username_combo = ttk.Combobox(dialog, textvariable=username_var,
+                                      values=available_users, width=23, font=self.FONT_DEFAULT)
+        username_combo.grid(row=0, column=1, sticky='w', padx=10, pady=10)
+        if available_users:
+            username_combo.set(available_users[0])
+
         tk.Label(dialog, text="Notatki (opcjonalnie):", font=self.FONT_DEFAULT).grid(row=1, column=0, sticky='e', padx=10, pady=10)
         notes_entry = tk.Entry(dialog, width=25, font=self.FONT_DEFAULT)
         notes_entry.grid(row=1, column=1, sticky='w', padx=10, pady=10)
-        
+
         def save():
-            username = username_entry.get().strip()
+            username = username_var.get().strip()
             notes = notes_entry.get().strip()
             
             if not username:
@@ -24213,15 +24353,19 @@ class RMManagerGUI:
                     master_db_path=self.master_db_path,
                     payment_type=payment_type,
                 )
-                
+
                 self.load_payment_milestones()
                 dialog.destroy()
-                
-                # Sprawdź czy suma = 100% → ustaw ZAKONCZONY + wyślij PERMANENT
+
+                new_sum = current_sum + percentage
+                has_umorzony_now = (payment_type == 'UMORZONY') or any(
+                    m.get('payment_type') == 'UMORZONY' for m in existing)
                 self._check_payment_100_trigger()
-                
-            except sqlite3.IntegrityError:
-                messagebox.showerror("Błąd", f"Transza {percentage}% już istnieje dla tego projektu.")
+                plc_will_open = (new_sum >= 100) or has_umorzony_now
+                if not plc_will_open:
+                    self.root.after(300, self.send_payment_status)
+                # gdy plc_will_open: send_plc_code otworzy się, po zamknięciu otworzy send_payment_status
+
             except Exception as e:
                 messagebox.showerror("Błąd", f"Nie można dodać transzy:\n{e}")
         
@@ -25229,6 +25373,339 @@ class RMManagerGUI:
             pady=5
         ).pack(side=tk.LEFT, padx=5)
     
+    def send_payment_status(self):
+        """Dialog wysyłki statusu płatności (email/SMS)."""
+        if not self.selected_project_id:
+            messagebox.showwarning("Uwaga", "Brak wybranego projektu.")
+            return
+        if not self.have_lock or self.read_only_mode:
+            messagebox.showerror("🔒 Brak locka",
+                                 "Aby wysłać status płatności musisz najpierw przejąć lock projektu.")
+            return
+
+        project_name = self.project_names.get(self.selected_project_id, f"Projekt {self.selected_project_id}")
+
+        try:
+            milestones = rmm.get_payment_milestones(self.rm_master_db_path, self.selected_project_id)
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Nie można pobrać transz płatności:\n{e}")
+            return
+
+        # ── Dialog ──────────────────────────────────────────────────────────
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Wyślij status płatności")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(True, True)
+        self._center_window(dialog, 720, 750)
+
+        # Przyciski na dole — pack PRZED canvas
+        button_frame = tk.Frame(dialog, pady=10)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # Scrollowalny kontener — identyczny wzorzec jak send_plc_code
+        _vsb = ttk.Scrollbar(dialog, orient=tk.VERTICAL)
+        _vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        _mc = tk.Canvas(dialog, yscrollcommand=_vsb.set)
+        _mc.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        _vsb.configure(command=_mc.yview)
+        c = tk.Frame(_mc)
+        _wid = _mc.create_window((0, 0), window=c, anchor='nw')
+        c.bind('<Configure>', lambda e: _mc.configure(scrollregion=_mc.bbox('all')))
+        _mc.bind('<Configure>', lambda e: _mc.itemconfig(_wid, width=e.width))
+
+        def _mw_ps(event):
+            _mc.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+
+        def _scroll_on(e=None):
+            _mc.bind_all('<MouseWheel>', _mw_ps)
+
+        def _scroll_off(e=None):
+            _mc.unbind_all('<MouseWheel>')
+
+        _mc.bind('<Enter>', _scroll_on)
+        _mc.bind('<Leave>', _scroll_off)
+        c.bind('<Enter>', _scroll_on)
+        dialog.protocol('WM_DELETE_WINDOW', lambda: (_scroll_off(), dialog.destroy()))
+
+        # ── Metoda wysyłki ───────────────────────────────────────────────────
+        method_frame = tk.LabelFrame(c, text="Metoda wysyłki", font=("Arial", 10, "bold"), padx=10, pady=10)
+        method_frame.pack(fill=tk.X, padx=10, pady=10)
+        send_email_var = tk.BooleanVar(value=True)
+        send_sms_var   = tk.BooleanVar(value=True)
+        tk.Checkbutton(method_frame, text="📧 Email", variable=send_email_var, font=self.FONT_DEFAULT).pack(anchor='w', pady=2)
+        tk.Checkbutton(method_frame, text="📱 SMS",   variable=send_sms_var,  font=self.FONT_DEFAULT).pack(anchor='w', pady=2)
+
+        # ── Nadawca ──────────────────────────────────────────────────────────
+        sender_frame = tk.Frame(c, padx=10)
+        sender_frame.pack(fill=tk.X, pady=5)
+        tk.Label(sender_frame, text="Nazwa nadawcy:", font=self.FONT_DEFAULT).grid(row=0, column=0, sticky='w', pady=5)
+        sender_entry = tk.Entry(sender_frame, width=40, font=self.FONT_DEFAULT)
+        sender_entry.insert(0, "RM Manager - Status płatności")
+        sender_entry.grid(row=0, column=1, sticky='ew', pady=5, padx=(10, 0))
+        sender_frame.columnconfigure(1, weight=1)
+
+        # ── Tytuł email ──────────────────────────────────────────────────────
+        email_title_frame = tk.Frame(c, padx=10)
+        email_title_frame.pack(fill=tk.X, pady=5)
+        tk.Label(email_title_frame, text="Tytuł email:", font=self.FONT_DEFAULT).grid(row=0, column=0, sticky='w', pady=5)
+        email_title_entry = tk.Entry(email_title_frame, width=40, font=self.FONT_DEFAULT)
+        email_title_entry.insert(0, f"Status płatności – {project_name}")
+        email_title_entry.grid(row=0, column=1, sticky='ew', pady=5, padx=(10, 0))
+        email_title_frame.columnconfigure(1, weight=1)
+
+        # ── Odbiorcy globalni ─────────────────────────────────────────────────
+        selected_recipients = []
+        try:
+            _saved = rmm.get_payment_status_recipients(self.rm_master_db_path)
+            if _saved:
+                _emp_map = {e['id']: e for e in rmm.get_employees(self.rm_master_db_path, active_only=False)}
+                for eid in _saved:
+                    emp = _emp_map.get(eid)
+                    if emp:
+                        selected_recipients.append({
+                            'id': eid,
+                            'name': emp['name'],
+                            'category': emp.get('category', ''),
+                            'email': emp.get('email', '') or emp.get('contact_info', ''),
+                            'phone': emp.get('phone', '')
+                        })
+        except Exception:
+            pass
+
+        recipients_frame = tk.LabelFrame(c, text="Odbiorcy (globalni dla wszystkich projektów)",
+                                         font=("Arial", 10, "bold"), padx=10, pady=10)
+        recipients_frame.pack(fill=tk.X, padx=10, pady=5)
+        recipients_list_frame = tk.Frame(recipients_frame, bg='#f0f0f0')
+        recipients_list_frame.pack(fill=tk.X, pady=5)
+
+        def _save_ps_recipients():
+            try:
+                rmm.save_payment_status_recipients(self.rm_master_db_path,
+                                                   [r['id'] for r in selected_recipients])
+            except Exception as _e:
+                print(f"⚠️ Błąd zapisu odbiorców statusu: {_e}")
+
+        def update_recipients_display():
+            for w in recipients_list_frame.winfo_children():
+                w.destroy()
+            if selected_recipients:
+                for r in list(selected_recipients):
+                    row = tk.Frame(recipients_list_frame, bg='#f0f0f0')
+                    row.pack(fill=tk.X, padx=2, pady=1)
+                    row.bind('<Enter>', _scroll_on)
+                    email = r.get('email') or '—'
+                    phone = r.get('phone') or '—'
+                    tk.Label(row, text=f"👤 {r['name']} ({r.get('category', '')})   📧 {email}   📱 {phone}",
+                             bg='#f0f0f0', font=self.FONT_DEFAULT, anchor='w'
+                             ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+                    tk.Button(row, text="✕", fg='red', bg='#f0f0f0', relief=tk.FLAT,
+                              font=self.FONT_SMALL, cursor='hand2',
+                              command=lambda rec=r: (selected_recipients.remove(rec),
+                                                     _save_ps_recipients(),
+                                                     update_recipients_display())
+                              ).pack(side=tk.RIGHT, padx=4)
+            else:
+                tk.Label(recipients_list_frame, text="(brak wybranych odbiorców)",
+                         bg='#f0f0f0', font=self.FONT_DEFAULT, fg='gray').pack(anchor='w', padx=5, pady=3)
+
+        def select_recipients():
+            nonlocal selected_recipients
+            _scroll_off()
+            sel_dlg = tk.Toplevel(dialog)
+            sel_dlg.title("Wybierz odbiorców (globalni)")
+            sel_dlg.transient(dialog)
+            sel_dlg.grab_set()
+            self._center_window(sel_dlg, 500, 600)
+
+            lf = tk.Frame(sel_dlg)
+            lf.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+            sb = tk.Scrollbar(lf)
+            sb.pack(side=tk.RIGHT, fill=tk.Y)
+            cv = tk.Canvas(lf, yscrollcommand=sb.set)
+            cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            sb.config(command=cv.yview)
+            inner = tk.Frame(cv)
+            cv.create_window((0, 0), window=inner, anchor='nw')
+            inner.bind('<Configure>', lambda e: cv.configure(scrollregion=cv.bbox('all')))
+            cv.bind('<Enter>', lambda e: cv.bind_all('<MouseWheel>',
+                    lambda ev: cv.yview_scroll(int(-1*(ev.delta/120)), 'units')))
+            cv.bind('<Leave>', lambda e: cv.unbind_all('<MouseWheel>'))
+
+            def _close_sel():
+                cv.unbind_all('<MouseWheel>')
+                _scroll_on()
+                sel_dlg.destroy()
+
+            sel_dlg.protocol('WM_DELETE_WINDOW', _close_sel)
+
+            try:
+                employees = rmm.get_employees(self.rm_master_db_path, active_only=True)
+            except Exception:
+                employees = []
+            checkbox_vars = {}
+            for emp in employees:
+                var = tk.BooleanVar(value=any(r['id'] == emp['id'] for r in selected_recipients))
+                checkbox_vars[emp['id']] = (var, emp)
+                tk.Checkbutton(inner, text=f"{emp['name']} ({emp.get('category', '')})",
+                               variable=var, font=self.FONT_DEFAULT).pack(anchor='w', pady=2, padx=5)
+
+            def confirm():
+                selected_recipients.clear()
+                for emp_id, (var, emp) in checkbox_vars.items():
+                    if var.get():
+                        selected_recipients.append({
+                            'id': emp_id,
+                            'name': emp['name'],
+                            'category': emp.get('category', ''),
+                            'email': emp.get('email', '') or emp.get('contact_info', ''),
+                            'phone': emp.get('phone', '')
+                        })
+                _save_ps_recipients()
+                update_recipients_display()
+                _close_sel()
+
+            btn_f = tk.Frame(sel_dlg)
+            btn_f.pack(fill=tk.X, padx=10, pady=10)
+            tk.Button(btn_f, text="✔️ Zatwierdź", command=confirm,
+                      bg=self.COLOR_GREEN, fg="white", font=("Arial", 10, "bold"), padx=20).pack(side=tk.LEFT, padx=5)
+            tk.Button(btn_f, text="❌ Anuluj", command=_close_sel,
+                      bg=self.COLOR_TOPBAR, fg="white", font=("Arial", 10), padx=20).pack(side=tk.LEFT, padx=5)
+
+        tk.Button(recipients_frame, text="👥 Wybierz odbiorców", command=select_recipients,
+                  bg="#3498db", fg="white", font=self.FONT_DEFAULT, padx=10).pack(pady=5)
+        update_recipients_display()
+
+        # ── Sprzedaż (dynamiczni z etapu PRZYJETY) ───────────────────────────
+        sprzedaz_recipients = []
+        try:
+            _proj_db = self.get_project_db_path(self.selected_project_id)
+            if _proj_db and os.path.exists(_proj_db):
+                _staff = rmm.get_stage_assigned_staff(
+                    _proj_db, self.rm_master_db_path, self.selected_project_id, 'PRZYJETY')
+                if _staff:
+                    _all_emp = {e['id']: e for e in rmm.get_employees(self.rm_master_db_path, active_only=False)}
+                    for s in _staff:
+                        emp = _all_emp.get(s['employee_id'], {})
+                        sprzedaz_recipients.append({
+                            'name': s['employee_name'],
+                            'category': s['category'],
+                            'email': emp.get('email', '') or emp.get('contact_info', ''),
+                            'phone': emp.get('phone', '')
+                        })
+        except Exception as _e:
+            print(f"⚠️ Błąd pobierania Sprzedaż: {_e}")
+
+        sprzedaz_frame = tk.LabelFrame(c, text="💼 Sprzedaż (z projektu – dynamiczni)",
+                                       font=("Arial", 10, "bold"), fg="#27ae60", padx=10, pady=10)
+        sprzedaz_frame.pack(fill=tk.X, padx=10, pady=5)
+        if sprzedaz_recipients:
+            lines = [f"👤 {r['name']} ({r['category']})   📧 {r.get('email') or '—'}   📱 {r.get('phone') or '—'}"
+                     for r in sprzedaz_recipients]
+            sp_text = tk.Text(sprzedaz_frame, height=max(2, len(lines)), width=70,
+                              font=self.FONT_DEFAULT, bg='#f0fff0', relief=tk.FLAT)
+            sp_text.insert('1.0', '\n'.join(lines))
+            sp_text.config(state='disabled')
+            sp_text.pack(fill=tk.X, pady=5)
+        else:
+            tk.Label(sprzedaz_frame, text="(brak przypisanych pracowników Sprzedaż)",
+                     font=self.FONT_DEFAULT, fg="gray").pack(anchor='w')
+
+        # ── Treść wiadomości ─────────────────────────────────────────────────
+        message_frame = tk.LabelFrame(c, text="Treść wiadomości", font=("Arial", 10, "bold"), padx=10, pady=10)
+        message_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        total_pct  = sum(m['percentage'] for m in milestones)
+        has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in milestones)
+        transze_lines = [project_name, ""]
+        for m in milestones:
+            pct  = f"{m['percentage']}%"
+            date = m.get('payment_date') or '—'
+            if (m.get('payment_type') or 'PŁATNOŚĆ') == 'UMORZONY':
+                transze_lines.append(f"{pct}  –  {date}  (umorzony)")
+            else:
+                transze_lines.append(f"{pct}  –  {date}")
+        if not milestones:
+            transze_lines.append("(brak transz)")
+        if total_pct >= 100:
+            transze_lines += ["", "Płatność 100%"]
+        elif has_umorzony:
+            transze_lines += ["", f"Płatność {total_pct}%"]
+
+        msg_text = tk.Text(message_frame, height=max(4, len(transze_lines) + 1),
+                           width=60, font=self.FONT_DEFAULT)
+        msg_text.insert('1.0', '\n'.join(transze_lines))
+        msg_text.pack(fill=tk.X, pady=5)
+
+        tk.Label(message_frame, text="Dodatkowy opis:", font=self.FONT_DEFAULT).pack(anchor='w', pady=(5, 2))
+        desc_text = tk.Text(message_frame, height=3, width=60, font=self.FONT_DEFAULT)
+        desc_text.pack(fill=tk.X, pady=5)
+
+        # ── Wysyłka ──────────────────────────────────────────────────────────
+        def send_status():
+            send_email    = send_email_var.get()
+            send_sms      = send_sms_var.get()
+            email_subject = email_title_entry.get().strip() or f"Status płatności – {project_name}"
+            main_msg      = msg_text.get('1.0', tk.END).strip()
+            extra_msg     = desc_text.get('1.0', tk.END).strip()
+            full_message  = f"{main_msg}\n{extra_msg}".strip() if extra_msg else main_msg
+
+            if not send_email and not send_sms:
+                messagebox.showwarning("Brak metody", "Wybierz przynajmniej Email lub SMS.")
+                return
+            all_recv = selected_recipients + sprzedaz_recipients
+            if not all_recv:
+                messagebox.showwarning("Brak odbiorców", "Wybierz odbiorców wiadomości.")
+                return
+            rec_emails = [r['email'] for r in all_recv if r.get('email')]
+            rec_phones = [r['phone'] for r in all_recv if r.get('phone')]
+            if send_email and not rec_emails:
+                messagebox.showwarning("Brak emaili", "Wybrani odbiorcy nie mają adresów email.")
+                return
+            if send_sms and not rec_phones:
+                messagebox.showwarning("Brak telefonów", "Wybrani odbiorcy nie mają numerów telefonów.")
+                return
+
+            auth_user = None if self.current_user_role == 'ADMIN' else self.current_user
+            dialog.destroy()
+            self.status_bar.config(text="⏳ Wysyłanie statusu płatności...", fg="#f39c12")
+            import threading
+
+            def _do_send():
+                errors = []
+                try:
+                    if send_email:
+                        try:
+                            rmm.send_plc_code_email(rm_db_path=self.rm_master_db_path, code_id=None,
+                                                    recipient_emails=rec_emails, subject=email_subject,
+                                                    message=full_message, user=auth_user)
+                        except Exception as e:
+                            errors.append(f"Email: {e}")
+                    if send_sms:
+                        try:
+                            rmm.send_plc_code_sms(rm_db_path=self.rm_master_db_path, code_id=None,
+                                                  phone_numbers=rec_phones, message=full_message,
+                                                  user=auth_user, sms_config=self.config)
+                        except Exception as e:
+                            errors.append(f"SMS: {e}")
+                except Exception as e:
+                    errors.append(str(e))
+
+                def _done():
+                    if errors:
+                        self.status_bar.config(text=f"⚠️ Błędy wysyłki: {'; '.join(errors)}", fg="red")
+                        messagebox.showerror("Błąd wysyłki", '\n'.join(errors))
+                    else:
+                        self.status_bar.config(text="✅ Status płatności wysłany", fg=self.COLOR_GREEN)
+                self.root.after(0, _done)
+
+            threading.Thread(target=_do_send, daemon=True).start()
+
+        tk.Button(button_frame, text="📨 Wyślij", command=send_status,
+                  bg="#e67e22", fg="white", font=("Arial", 11, "bold"), padx=20, pady=5).pack(side=tk.LEFT, padx=10)
+        tk.Button(button_frame, text="❌ Anuluj", command=dialog.destroy,
+                  bg=self.COLOR_TOPBAR, fg="white", font=("Arial", 10), padx=20, pady=5).pack(side=tk.LEFT, padx=5)
+
     def send_plc_code(self, code_id=None):
         """Dialog wysyłki kodu PLC (email/SMS).
         
@@ -25368,58 +25845,68 @@ class RMManagerGUI:
         dialog.title("Wyślij kod PLC")
         dialog.transient(self.root)
         dialog.grab_set()
-        dialog.geometry("700x800")
-        
+        dialog.resizable(True, True)
+        self._center_window(dialog, 720, 800)
+
+        # Przyciski na dole (pack przed canvas żeby były zawsze widoczne)
+        button_frame = tk.Frame(dialog, pady=10)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # Scrollowalny kontener na całą zawartość
+        _vsb = ttk.Scrollbar(dialog, orient=tk.VERTICAL)
+        _vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        _main_canvas = tk.Canvas(dialog, yscrollcommand=_vsb.set)
+        _main_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        _vsb.configure(command=_main_canvas.yview)
+        c = tk.Frame(_main_canvas)
+        _win_id = _main_canvas.create_window((0, 0), window=c, anchor='nw')
+        c.bind('<Configure>', lambda e: _main_canvas.configure(scrollregion=_main_canvas.bbox('all')))
+        _main_canvas.bind('<Configure>', lambda e: _main_canvas.itemconfig(_win_id, width=e.width))
+        def _mw_plc(event):
+            _main_canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+        _main_canvas.bind('<Enter>', lambda e: _main_canvas.bind_all('<MouseWheel>', _mw_plc))
+        _main_canvas.bind('<Leave>', lambda e: _main_canvas.unbind_all('<MouseWheel>'))
+        dialog.protocol('WM_DELETE_WINDOW', lambda: dialog.destroy())
+
         # Informacje o kodzie
-        info_frame = tk.LabelFrame(dialog, text="Kod do wysłania", font=("Arial", 10, "bold"), padx=10, pady=10)
+        info_frame = tk.LabelFrame(c, text="Kod do wysłania", font=("Arial", 10, "bold"), padx=10, pady=10)
         info_frame.pack(fill=tk.X, padx=10, pady=10)
-        
+
         tk.Label(info_frame, text=f"Typ: {code_type}", font=self.FONT_DEFAULT, anchor='w').pack(fill=tk.X)
         tk.Label(info_frame, text=f"Kod: {unlock_code}", font=("Arial", 10, "bold"), anchor='w').pack(fill=tk.X)
-        
+
         # Checkboxy: SMS i Email
-        method_frame = tk.LabelFrame(dialog, text="Metoda wysyłki", font=("Arial", 10, "bold"), padx=10, pady=10)
+        method_frame = tk.LabelFrame(c, text="Metoda wysyłki", font=("Arial", 10, "bold"), padx=10, pady=10)
         method_frame.pack(fill=tk.X, padx=10, pady=5)
-        
+
         send_email_var = tk.BooleanVar(value=True)
         send_sms_var = tk.BooleanVar(value=True)
-        
-        tk.Checkbutton(
-            method_frame,
-            text="📧 Email",
-            variable=send_email_var,
-            font=self.FONT_DEFAULT
-        ).pack(anchor='w', pady=2)
-        
-        tk.Checkbutton(
-            method_frame,
-            text="📱 SMS",
-            variable=send_sms_var,
-            font=self.FONT_DEFAULT
-        ).pack(anchor='w', pady=2)
-        
+
+        tk.Checkbutton(method_frame, text="📧 Email", variable=send_email_var,
+                       font=self.FONT_DEFAULT).pack(anchor='w', pady=2)
+        tk.Checkbutton(method_frame, text="📱 SMS",   variable=send_sms_var,
+                       font=self.FONT_DEFAULT).pack(anchor='w', pady=2)
+
         # Nazwa nadawcy
-        sender_frame = tk.Frame(dialog, padx=10)
+        sender_frame = tk.Frame(c, padx=10)
         sender_frame.pack(fill=tk.X, pady=5)
-        
         tk.Label(sender_frame, text="Nazwa nadawcy:", font=self.FONT_DEFAULT).grid(row=0, column=0, sticky='w', pady=5)
         sender_entry = tk.Entry(sender_frame, width=40, font=self.FONT_DEFAULT)
         sender_entry.insert(0, "RM Manager - Kody PLC")
         sender_entry.grid(row=0, column=1, sticky='ew', pady=5, padx=(10, 0))
         sender_frame.columnconfigure(1, weight=1)
-        
+
         # Tytuł email
-        email_title_frame = tk.Frame(dialog, padx=10)
+        email_title_frame = tk.Frame(c, padx=10)
         email_title_frame.pack(fill=tk.X, pady=5)
-        
         tk.Label(email_title_frame, text="Tytuł email:", font=self.FONT_DEFAULT).grid(row=0, column=0, sticky='w', pady=5)
         email_title_entry = tk.Entry(email_title_frame, width=40, font=self.FONT_DEFAULT)
         email_title_entry.insert(0, f"KOD - {project_name}")
         email_title_entry.grid(row=0, column=1, sticky='ew', pady=5, padx=(10, 0))
         email_title_frame.columnconfigure(1, weight=1)
-        
+
         # Lista odbiorców
-        recipients_frame = tk.LabelFrame(dialog, text="Odbiorcy (globalni dla wszystkich projektów)", font=("Arial", 10, "bold"), padx=10, pady=10)
+        recipients_frame = tk.LabelFrame(c, text="Odbiorcy (globalni dla wszystkich projektów)", font=("Arial", 10, "bold"), padx=10, pady=10)
         recipients_frame.pack(fill=tk.X, padx=10, pady=5)
         
         # Wczytaj GLOBALNE odbiorcy (wspólne dla wszystkich projektów RM_MANAGER)
@@ -25450,83 +25937,84 @@ class RMManagerGUI:
             import traceback
             traceback.print_exc()
         
-        recipients_text = tk.Text(recipients_frame, height=3, width=50, font=self.FONT_DEFAULT, state='disabled', bg='#f0f0f0')
-        recipients_text.pack(fill=tk.X, pady=5)
-        
+        recipients_list_frame = tk.Frame(recipients_frame, bg='#f0f0f0')
+        recipients_list_frame.pack(fill=tk.X, pady=5)
+
+        def _save_plc_recipients():
+            try:
+                rmm.save_plc_code_recipients(self.rm_master_db_path, code_id,
+                                             [r['id'] for r in selected_recipients])
+            except Exception as _e:
+                print(f"⚠️ Błąd zapisu odbiorców PLC: {_e}")
+
         def update_recipients_display():
-            recipients_text.config(state='normal')
-            recipients_text.delete('1.0', tk.END)
+            for w in recipients_list_frame.winfo_children():
+                w.destroy()
             if selected_recipients:
-                names = [r['name'] for r in selected_recipients]
-                recipients_text.insert('1.0', ', '.join(names))
+                for r in list(selected_recipients):
+                    row = tk.Frame(recipients_list_frame, bg='#f0f0f0')
+                    row.pack(fill=tk.X, padx=2, pady=1)
+                    email = r.get('email') or '—'
+                    phone = r.get('phone') or '—'
+                    tk.Label(row,
+                             text=f"👤 {r['name']} ({r.get('category', '')})   📧 {email}   📱 {phone}",
+                             bg='#f0f0f0', font=self.FONT_DEFAULT, anchor='w'
+                             ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+                    tk.Button(row, text="✕", fg='red', bg='#f0f0f0', relief=tk.FLAT,
+                              font=self.FONT_SMALL, cursor='hand2',
+                              command=lambda rec=r: (selected_recipients.remove(rec),
+                                                     _save_plc_recipients(),
+                                                     update_recipients_display())
+                              ).pack(side=tk.RIGHT, padx=4)
             else:
-                recipients_text.insert('1.0', "(brak wybranych odbiorców)")
-            recipients_text.config(state='disabled')
+                tk.Label(recipients_list_frame, text="(brak wybranych odbiorców)",
+                         bg='#f0f0f0', font=self.FONT_DEFAULT, fg='gray').pack(anchor='w', padx=5, pady=3)
         
         def select_recipients():
             nonlocal selected_recipients
-            
-            # Dialog wyboru pracowników
+
             select_dialog = tk.Toplevel(dialog)
             select_dialog.title("Wybierz odbiorców (globalni dla wszystkich projektów)")
             select_dialog.transient(dialog)
             select_dialog.grab_set()
-            
             self._center_window(select_dialog, 500, 600)
-            
-            # Frame z listą
+
             list_frame = tk.Frame(select_dialog)
             list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-            
-            # Scrollbar
+
             scrollbar = tk.Scrollbar(list_frame)
             scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-            
-            # Canvas dla checkboxów
+
             canvas = tk.Canvas(list_frame, yscrollcommand=scrollbar.set)
             canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             scrollbar.config(command=canvas.yview)
-            
-            # Frame wewnętrzny
+
             inner_frame = tk.Frame(canvas)
             canvas.create_window((0, 0), window=inner_frame, anchor='nw')
-            
-            # Pobierz wszystkich pracowników
+
+            inner_frame.bind('<Configure>',
+                             lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+
+            def _mw(event):
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+            canvas.bind_all('<MouseWheel>', _mw)
+            select_dialog.protocol('WM_DELETE_WINDOW',
+                                   lambda: (canvas.unbind_all('<MouseWheel>'), select_dialog.destroy()))
+
             try:
                 employees = rmm.get_employees(self.rm_master_db_path, active_only=True)
-                if not employees:
-                    print(f"⚠️ Brak pracowników w bazie: {self.rm_master_db_path}")
-            except Exception as e:
-                print(f"⚠️ Błąd pobierania pracowników: {e}")
-                import traceback
-                traceback.print_exc()
+            except Exception:
                 employees = []
-            
-            # Zmienne checkboxów
+
             checkbox_vars = {}
-            
             for emp in employees:
                 emp_id = emp['id']
                 emp_name = emp['name']
                 emp_category = emp.get('category', '')
-                
-                var = tk.BooleanVar(value=False)
-                # Sprawdź czy już wybrany
-                if any(r['id'] == emp_id for r in selected_recipients):
-                    var.set(True)
-                
+                var = tk.BooleanVar(value=any(r['id'] == emp_id for r in selected_recipients))
                 checkbox_vars[emp_id] = (var, emp_name, emp_category, emp)
-                
-                cb = tk.Checkbutton(
-                    inner_frame,
-                    text=f"{emp_name} ({emp_category})",
-                    variable=var,
-                    font=self.FONT_DEFAULT
-                )
-                cb.pack(anchor='w', pady=2, padx=5)
-            
-            inner_frame.update_idletasks()
-            canvas.config(scrollregion=canvas.bbox('all'))
+                tk.Checkbutton(inner_frame, text=f"{emp_name} ({emp_category})",
+                               variable=var, font=self.FONT_DEFAULT).pack(anchor='w', pady=2, padx=5)
             
             def confirm_selection():
                 selected_recipients.clear()
@@ -25587,9 +26075,65 @@ class RMManagerGUI:
         ).pack(pady=5)
         
         update_recipients_display()
-        
+
+        # Sekcja Sprzedaż — pracownicy z etapu PRZYJETY (dynamiczni, read-only)
+        sprzedaz_recipients = []
+        try:
+            _proj_db = self.get_project_db_path(self.selected_project_id)
+            if _proj_db and os.path.exists(_proj_db):
+                _przyjety_staff = rmm.get_stage_assigned_staff(
+                    _proj_db, self.rm_master_db_path,
+                    self.selected_project_id, 'PRZYJETY'
+                )
+                if _przyjety_staff:
+                    _all_emp = {e['id']: e for e in rmm.get_employees(self.rm_master_db_path, active_only=False)}
+                    for s in _przyjety_staff:
+                        emp = _all_emp.get(s['employee_id'], {})
+                        sprzedaz_recipients.append({
+                            'name': s['employee_name'],
+                            'category': s['category'],
+                            'email': emp.get('email', '') or emp.get('contact_info', ''),
+                            'phone': emp.get('phone', '')
+                        })
+        except Exception as _e:
+            print(f"⚠️ Błąd pobierania pracowników Sprzedaż: {_e}")
+
+        sprzedaz_frame = tk.LabelFrame(
+            c,
+            text="💼 Sprzedaż (z projektu – dynamiczni)",
+            font=("Arial", 10, "bold"),
+            fg="#27ae60",
+            padx=10, pady=10
+        )
+        sprzedaz_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        if sprzedaz_recipients:
+            lines = []
+            for r in sprzedaz_recipients:
+                email = r.get('email') or '—'
+                phone = r.get('phone') or '—'
+                lines.append(f"👤 {r['name']} ({r['category']})   📧 {email}   📱 {phone}")
+            sprzedaz_text = tk.Text(
+                sprzedaz_frame,
+                height=max(2, len(lines)),
+                width=70,
+                font=self.FONT_DEFAULT,
+                bg='#f0fff0',
+                relief=tk.FLAT
+            )
+            sprzedaz_text.insert('1.0', '\n'.join(lines))
+            sprzedaz_text.config(state='disabled')
+            sprzedaz_text.pack(fill=tk.X, pady=5)
+        else:
+            tk.Label(
+                sprzedaz_frame,
+                text="(brak przypisanych pracowników Sprzedaż)",
+                font=self.FONT_DEFAULT,
+                fg="gray"
+            ).pack(anchor='w')
+
         # Treść wiadomości
-        message_frame = tk.LabelFrame(dialog, text="Treść wiadomości", font=("Arial", 10, "bold"), padx=10, pady=10)
+        message_frame = tk.LabelFrame(c, text="Treść wiadomości", font=("Arial", 10, "bold"), padx=10, pady=10)
         message_frame.pack(fill=tk.X, padx=10, pady=5)
         
         # Auto-generowana część
@@ -25635,12 +26179,14 @@ Kod: {unlock_code}
             # Email subject (z edytowalnego pola)
             email_subject = email_title if email_title else f"KOD - {project_name}"
             
-            # Przygotuj listy odbiorców
-            recipient_emails = [r['email'] for r in selected_recipients if r.get('email')]
-            recipient_phones = [r['phone'] for r in selected_recipients if r.get('phone')]
-            
+            # Przygotuj listy odbiorców (globalni + Sprzedaż z projektu)
+            all_recipients = selected_recipients + sprzedaz_recipients
+            recipient_emails = [r['email'] for r in all_recipients if r.get('email')]
+            recipient_phones = [r['phone'] for r in all_recipients if r.get('phone')]
+
             print(f"\n📤 WYSYŁKA KODU PLC:")
-            print(f"   Odbiorcy: {[r['name'] for r in selected_recipients]}")
+            print(f"   Odbiorcy globalni: {[r['name'] for r in selected_recipients]}")
+            print(f"   Sprzedaż (projekt): {[r['name'] for r in sprzedaz_recipients]}")
             print(f"   Emails: {recipient_emails}")
             print(f"   Phones: {recipient_phones}")
             print(f"   Send email: {send_email}, Send SMS: {send_sms}")
@@ -25660,7 +26206,8 @@ Kod: {unlock_code}
             
             # Zamknij dialog OD RAZU po kliknięciu Wyślij
             dialog.destroy()
-            
+            self.root.after(400, self.send_payment_status)
+
             # Wysyłka w osobnym wątku (żeby GUI się nie zawieszało)
             import threading
             
@@ -25749,10 +26296,7 @@ Kod: {unlock_code}
             
             threading.Thread(target=_do_send, daemon=True).start()
         
-        # Przyciski
-        button_frame = tk.Frame(dialog, pady=10)
-        button_frame.pack(fill=tk.X)
-        
+        # Przyciski (button_frame już stworzony i spakowany na dole dialogu)
         tk.Button(
             button_frame,
             text="📤 Wyślij",
@@ -25767,14 +26311,14 @@ Kod: {unlock_code}
         tk.Button(
             button_frame,
             text="❌ Anuluj",
-            command=dialog.destroy,
+            command=lambda: (dialog.destroy(), self.root.after(200, self.send_payment_status)),
             bg=self.COLOR_TOPBAR,
             fg="white",
             font=("Arial", 10),
             padx=20,
             pady=5
         ).pack(side=tk.LEFT, padx=5)
-        
+
         # Wymuś odświeżenie okna
         dialog.update_idletasks()
 

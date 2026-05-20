@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(dir \"c:\\\\RMPAK_CLIENT\\\\Repozytoria\\\\RM-BAZA-MANAGER\\\\needle_analysis.png\")",
+      "Bash(python -c \"from scipy.interpolate import CubicSpline; print\\('scipy OK'\\)\")"
+    ]
+  }
+}

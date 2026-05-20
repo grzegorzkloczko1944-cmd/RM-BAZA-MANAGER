@@ -422,6 +422,38 @@ def ensure_rm_master_tables(master_db_path: str):
     except sqlite3.OperationalError:
         pass  # kolumna już istnieje
 
+    # Migracja: usuń UNIQUE(project_id, percentage) — pozwala na wiele transz o tym samym %
+    _schema = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='payment_milestones'"
+    ).fetchone()
+    if _schema and 'UNIQUE(project_id, percentage)' in (_schema['sql'] or ''):
+        con.execute("""
+            CREATE TABLE payment_milestones_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                percentage INTEGER NOT NULL CHECK (percentage > 0 AND percentage <= 100),
+                payment_date DATE,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_by TEXT,
+                modified_at DATETIME,
+                modified_by TEXT,
+                payment_type TEXT NOT NULL DEFAULT 'PŁATNOŚĆ'
+            )
+        """)
+        con.execute("""
+            INSERT INTO payment_milestones_new
+                (id, project_id, percentage, payment_date, created_at, created_by,
+                 modified_at, modified_by, payment_type)
+            SELECT id, project_id, percentage, payment_date, created_at, created_by,
+                   modified_at, modified_by, payment_type
+            FROM payment_milestones
+        """)
+        con.execute("DROP TABLE payment_milestones")
+        con.execute("ALTER TABLE payment_milestones_new RENAME TO payment_milestones")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_payment_project ON payment_milestones(project_id)")
+        _rm_safe_commit(con)
+        print("    ↳ Migracja: usunięto UNIQUE(project_id, percentage) z payment_milestones")
+
     # Historia zmian płatności (audit log)
     con.execute("""
         CREATE TABLE IF NOT EXISTS payment_history (
@@ -8100,7 +8132,7 @@ def get_payment_milestones(rm_db_path: str, project_id: int) -> List[Dict]:
                    created_by, created_at, modified_by, modified_at
             FROM payment_milestones
             WHERE project_id = ?
-            ORDER BY percentage
+            ORDER BY id
         """, (project_id,)).fetchall()
         
         return [dict(row) for row in rows]
@@ -8728,9 +8760,43 @@ def get_plc_code_recipients(rm_db_path: str, code_id: int) -> List[int]:
         con.close()
 
 
+def save_payment_status_recipients(rm_db_path: str, recipient_ids: List[int]):
+    """Zapisz globalną listę odbiorców statusu płatności."""
+    import json
+    con = _open_rm_connection(rm_db_path)
+    try:
+        con.execute("""
+            INSERT INTO plc_global_recipients (setting_key, recipients_json, updated_at)
+            VALUES ('payment_status_recipients', ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                recipients_json = excluded.recipients_json,
+                updated_at = CURRENT_TIMESTAMP
+        """, (json.dumps(recipient_ids),))
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+
+
+def get_payment_status_recipients(rm_db_path: str) -> List[int]:
+    """Pobierz globalną listę odbiorców statusu płatności."""
+    import json
+    con = _open_rm_connection(rm_db_path)
+    try:
+        row = con.execute(
+            "SELECT recipients_json FROM plc_global_recipients WHERE setting_key = 'payment_status_recipients'"
+        ).fetchone()
+        if row and row['recipients_json']:
+            return json.loads(row['recipients_json']) or []
+        return []
+    except Exception:
+        return []
+    finally:
+        con.close()
+
+
 def mark_plc_code_as_used(rm_db_path: str, code_id: int, user: str = None, notes: str = None):
     """Oznacz kod PLC jako użyty (przekazany klientowi).
-    
+
     Args:
         rm_db_path: Ścieżka do rm_manager.sqlite (master)
         code_id: ID kodu
