@@ -148,9 +148,23 @@ class RMKOD:
         filter_frame = ttk.Frame(self.root)
         filter_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
 
-        self.filter_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(filter_frame, text="📁 Projekty bez kodu", variable=self.filter_var,
-                       command=self._apply_project_filter).pack(side=tk.LEFT, padx=5)
+        self.filter_without_code = tk.BooleanVar(value=False)
+        self.filter_with_code = tk.BooleanVar(value=False)
+
+        def _on_filter_without():
+            if self.filter_without_code.get():
+                self.filter_with_code.set(False)
+            self._apply_project_filter()
+
+        def _on_filter_with():
+            if self.filter_with_code.get():
+                self.filter_without_code.set(False)
+            self._apply_project_filter()
+
+        ttk.Checkbutton(filter_frame, text="📁 Projekty bez kodu", variable=self.filter_without_code,
+                       command=_on_filter_without).pack(side=tk.LEFT, padx=5)
+        ttk.Checkbutton(filter_frame, text="📁 Projekty z kodem", variable=self.filter_with_code,
+                       command=_on_filter_with).pack(side=tk.LEFT, padx=5)
 
         # ── Tabs ─────────────────────────────────────────────────────
         self.tab_control = ttk.Notebook(self.root)
@@ -787,12 +801,19 @@ class RMKOD:
 
             # Apply filter if enabled
             projects_to_show = self.projects
-            if self.filter_var.get():
+            if self.filter_without_code.get():
                 # Filter: show only projects WITHOUT codes
                 projects_to_show = []
                 for pid in self.projects:
                     codes = rmm.get_plc_codes(str(self.rm_master_db_path), pid)
                     if not codes:  # No codes
+                        projects_to_show.append(pid)
+            elif self.filter_with_code.get():
+                # Filter: show only projects WITH codes
+                projects_to_show = []
+                for pid in self.projects:
+                    codes = rmm.get_plc_codes(str(self.rm_master_db_path), pid)
+                    if codes:  # Has codes
                         projects_to_show.append(pid)
 
             # Format for combo (like RM_MANAGER does)
@@ -822,7 +843,12 @@ class RMKOD:
                 self.project_combo.current(0)
                 self._on_project_selected()
 
-            filter_info = " (filtr: bez kodu)" if self.filter_var.get() else ""
+            if self.filter_without_code.get():
+                filter_info = " (filtr: bez kodu)"
+            elif self.filter_with_code.get():
+                filter_info = " (filtr: z kodem)"
+            else:
+                filter_info = ""
             self.status_bar.config(text=f"✅ Załadowano {len(combo_values)} z {len(self.projects)} projektów{filter_info}")
         except Exception as e:
             messagebox.showerror("Błąd", f"Nie można załadować projektów:\n{e}")
