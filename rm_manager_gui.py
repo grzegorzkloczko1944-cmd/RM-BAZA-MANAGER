@@ -25752,25 +25752,37 @@ class RMManagerGUI:
 
         # ── Sprzedaż (dynamiczni z etapu PRZYJETY) ───────────────────────────
         sprzedaz_recipients = []
+        seen_emails = {r.get('email') for r in selected_recipients if r.get('email')}  # Już w globalnej
+        seen_names = {r.get('name') for r in selected_recipients if r.get('name')}
         try:
-            _proj_db = self.get_project_db_path(self.selected_project_id)
-            if _proj_db and os.path.exists(_proj_db):
-                _staff = rmm.get_stage_assigned_staff(
-                    _proj_db, self.rm_master_db_path, self.selected_project_id, 'PRZYJETY')
-                if _staff:
-                    _all_emp = {e['id']: e for e in rmm.get_employees(self.rm_master_db_path, active_only=False)}
-                    for s in _staff:
-                        emp = _all_emp.get(s['employee_id'], {})
-                        sprzedaz_recipients.append({
-                            'name': s['employee_name'],
-                            'category': s['category'],
-                            'email': emp.get('email', '') or emp.get('contact_info', ''),
-                            'phone': emp.get('phone', '')
-                        })
+            _all_emp = {e['id']: e for e in rmm.get_employees(self.rm_master_db_path, active_only=False)}
+            # Jeśli projekt w linii — zbieraj Sprzedaż ze wszystkich maszyn linii
+            project_ids_to_check = line_info.get('project_ids', []) if line_info else [self.selected_project_id]
+            for pid in project_ids_to_check:
+                _proj_db = self.get_project_db_path(pid)
+                if _proj_db and os.path.exists(_proj_db):
+                    _staff = rmm.get_stage_assigned_staff(
+                        _proj_db, self.rm_master_db_path, pid, 'PRZYJETY')
+                    if _staff:
+                        for s in _staff:
+                            emp = _all_emp.get(s['employee_id'], {})
+                            email = emp.get('email', '') or emp.get('contact_info', '')
+                            # Unikaj duplikatów i tych już w globalnej liście
+                            if email not in seen_emails and s['employee_name'] not in seen_names:
+                                rec = {
+                                    'name': s['employee_name'],
+                                    'category': s['category'],
+                                    'email': email,
+                                    'phone': emp.get('phone', '')
+                                }
+                                sprzedaz_recipients.append(rec)
+                                seen_emails.add(email)
+                                seen_names.add(s['employee_name'])
         except Exception as _e:
             print(f"⚠️ Błąd pobierania Sprzedaż: {_e}")
 
-        sprzedaz_frame = tk.LabelFrame(c, text="💼 Sprzedaż (z projektu – dynamiczni)",
+        sprzedaz_label = f"💼 Sprzedaż (z {'linii' if line_info else 'projektu'} – dynamiczni)"
+        sprzedaz_frame = tk.LabelFrame(c, text=sprzedaz_label,
                                        font=("Arial", 10, "bold"), fg="#27ae60", padx=10, pady=10)
         sprzedaz_frame.pack(fill=tk.X, padx=10, pady=5)
         if sprzedaz_recipients:
