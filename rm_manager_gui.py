@@ -24354,6 +24354,10 @@ class RMManagerGUI:
                     payment_type=payment_type,
                 )
 
+                # Propagacja do linii (jeśli projekt należy do linii)
+                if self._line_locked_pids:
+                    self._propagate_payment_to_line('add', percentage, payment_date, payment_type)
+
                 self.load_payment_milestones()
                 dialog.destroy()
 
@@ -24452,6 +24456,18 @@ class RMManagerGUI:
                     # czerwonym jako "spóźniona" i wykres nie pokazywał starej daty.
                     self._clear_zakonczony_schedule_template(project_db, self.selected_project_id)
                     print(f"🔓 Ręcznie zdjęto osieroconą flagę ZAKONCZONY (projekt {self.selected_project_id}, suma={_total}%)")
+
+                    # Propagacja do linii (jeśli projekt należy do linii)
+                    if self._line_locked_pids:
+                        for _pid in self._line_locked_pids:
+                            try:
+                                _pdb = self.get_project_db_path(_pid)
+                                if _pdb and os.path.exists(_pdb):
+                                    rmm.unset_milestone(_pdb, _pid, 'ZAKONCZONY', master_db_path=self.rm_master_db_path)
+                                    self._clear_zakonczony_schedule_template(_pdb, _pid)
+                            except Exception as _e:
+                                print(f"⚠️ Propagacja unset ZAKONCZONY → pid={_pid}: {_e}")
+
                     self.load_payment_milestones()
                     self.refresh_all()
                 except Exception as e:
@@ -24488,6 +24504,15 @@ class RMManagerGUI:
                 user=self.current_user
             )
             print(f"🔓 Zdjęto flagę UMORZONY z {cleared} transz (projekt {self.selected_project_id})")
+
+            # Propagacja do linii (jeśli projekt należy do linii)
+            if self._line_locked_pids:
+                for _pid in self._line_locked_pids:
+                    try:
+                        rmm.clear_umorzony_flags(self.rm_master_db_path, _pid, user=self.current_user)
+                    except Exception as _e:
+                        print(f"⚠️ Propagacja clear_umorzony → pid={_pid}: {_e}")
+
             # Trigger przeliczy stan milestone'a (zdejmie jeśli suma < 100%)
             self.load_payment_milestones()
             self._check_payment_100_trigger()
@@ -24733,7 +24758,136 @@ class RMManagerGUI:
             print(f"❌ Błąd przy auto-tworzeniu kodu PERMANENT: {e}")
             import traceback
             traceback.print_exc()
-    
+
+    def _propagate_payment_to_line(self, action: str, percentage: int,
+                                    payment_date: str = None, payment_type: str = None):
+        """Propaguje zmianę transzy płatności do pozostałych maszyn linii."""
+        if not self._line_locked_pids:
+            return
+        user = self.current_user
+        for pid in self._line_locked_pids:
+            try:
+                if action == 'add':
+                    try:
+                        rmm.add_payment_milestone(
+                            self.rm_master_db_path, pid, percentage,
+                            payment_date, user=user, check_trigger=False,
+                            payment_type=payment_type or 'PŁATNOŚĆ'
+                        )
+                    except Exception:
+                        pass
+                elif action == 'update':
+                    try:
+                        rmm.update_payment_milestone(
+                            self.rm_master_db_path, pid, percentage,
+                            payment_date, user=user, check_trigger=False
+                        )
+                    except Exception as e:
+                        print(f"⚠️ Propagacja update płatności → pid={pid}: {e}")
+                elif action == 'delete':
+                    try:
+                        rmm.delete_payment_milestone(
+                            self.rm_master_db_path, pid, percentage, user=user
+                        )
+                    except Exception as e:
+                        print(f"⚠️ Propagacja delete płatności → pid={pid}: {e}")
+            except Exception as e:
+                print(f"⚠️ Propagacja płatności [{action}] → pid={pid}: {e}")
+
+        try:
+            milestones_source = rmm.get_payment_milestones(self.rm_master_db_path, self.selected_project_id)
+            for pid in self._line_locked_pids:
+                self._sync_zakonczony_for_line_pid(pid, milestones_source)
+        except Exception as e:
+            print(f"⚠️ Błąd przy sync ZAKONCZONY dla linii: {e}")
+
+    def _sync_zakonczony_for_line_pid(self, pid: int, milestones: list):
+        """Ustawia/synchronizuje milestone ZAKONCZONY dla maszyny linii (bez dialogów)."""
+        total = sum(m['percentage'] for m in milestones)
+        has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in milestones)
+        should_be_paid = (total >= 100) or has_umorzony
+        if not should_be_paid:
+            return
+
+        raw_dates = [str(m['payment_date'])[:10] for m in milestones
+                     if m.get('payment_date') and len(str(m['payment_date'])) >= 10]
+        latest_date = max(raw_dates) if raw_dates else None
+        ts = f"{latest_date} 12:00" if latest_date else rmm.get_timestamp_now()
+
+        project_db = self.get_project_db_path(pid)
+        if not project_db or not os.path.exists(project_db):
+            return
+        try:
+            import sqlite3 as _sqlite3
+            _con = _sqlite3.connect(project_db)
+            try:
+                _cur = _con.execute("""
+                    SELECT ps.id AS project_stage_id,
+                           sap.id AS period_id,
+                           sap.started_at
+                    FROM project_stages ps
+                    LEFT JOIN stage_actual_periods sap ON sap.project_stage_id = ps.id
+                    WHERE ps.project_id = ? AND ps.stage_code = 'ZAKONCZONY'
+                    LIMIT 1
+                """, (pid,))
+                _row = _cur.fetchone()
+                if not _row:
+                    return
+                _project_stage_id, _period_id, _current_ts = _row
+                _date_only = ts[:10]
+                if _period_id is None:
+                    _con.execute("""
+                        INSERT INTO stage_actual_periods
+                            (project_stage_id, started_at, ended_at, started_by, ended_by, notes)
+                        VALUES (?, ?, ?, ?, ?, NULL)
+                    """, (_project_stage_id, ts, ts, self.current_user, self.current_user))
+                    _con.execute("""
+                        INSERT INTO project_events (project_id, event_type, timestamp, user, notes)
+                        VALUES (?, 'ZAKONCZONY', ?, ?, NULL)
+                    """, (pid, ts, self.current_user))
+                    _sch = _con.execute(
+                        "SELECT id FROM stage_schedule WHERE project_stage_id = ?",
+                        (_project_stage_id,)).fetchone()
+                    if _sch:
+                        _con.execute("""
+                            UPDATE stage_schedule SET template_start=?, template_end=?
+                            WHERE project_stage_id=?
+                        """, (_date_only, _date_only, _project_stage_id))
+                    else:
+                        _con.execute("""
+                            INSERT INTO stage_schedule (project_stage_id, template_start, template_end)
+                            VALUES (?, ?, ?)
+                        """, (_project_stage_id, _date_only, _date_only))
+                    _con.commit()
+                    print(f"✅ Propagacja ZAKONCZONY → pid={pid}, data={ts}")
+                elif ts and (_current_ts or '')[:16] != ts[:16]:
+                    _con.execute("""
+                        UPDATE stage_actual_periods SET started_at=?, ended_at=? WHERE id=?
+                    """, (ts, ts, _period_id))
+                    _con.execute("""
+                        UPDATE project_events SET timestamp=?
+                        WHERE project_id=? AND event_type='ZAKONCZONY'
+                    """, (ts, pid))
+                    _sch = _con.execute(
+                        "SELECT id FROM stage_schedule WHERE project_stage_id=?",
+                        (_project_stage_id,)).fetchone()
+                    if _sch:
+                        _con.execute("""
+                            UPDATE stage_schedule SET template_start=?, template_end=?
+                            WHERE project_stage_id=?
+                        """, (_date_only, _date_only, _project_stage_id))
+                    else:
+                        _con.execute("""
+                            INSERT INTO stage_schedule (project_stage_id, template_start, template_end)
+                            VALUES (?, ?, ?)
+                        """, (_project_stage_id, _date_only, _date_only))
+                    _con.commit()
+                    print(f"🔄 Propagacja ZAKONCZONY (sync daty) → pid={pid}: {_current_ts} → {ts}")
+            finally:
+                _con.close()
+        except Exception as e:
+            print(f"⚠️ Sync ZAKONCZONY → pid={pid}: {e}")
+
     def edit_payment_milestone(self):
         """Dialog edycji daty istniejącej transzy."""
         if not self.selected_project_id:
@@ -24823,7 +24977,11 @@ class RMManagerGUI:
                     check_trigger=True,
                     master_db_path=self.master_db_path
                 )
-                
+
+                # Propagacja do linii (jeśli projekt należy do linii)
+                if self._line_locked_pids:
+                    self._propagate_payment_to_line('update', percentage, new_date)
+
                 self.load_payment_milestones()
                 dialog.destroy()
                 
@@ -24893,7 +25051,11 @@ class RMManagerGUI:
                 percentage,
                 user=self.current_user
             )
-            
+
+            # Propagacja do linii (jeśli projekt należy do linii)
+            if self._line_locked_pids:
+                self._propagate_payment_to_line('delete', percentage)
+
             messagebox.showinfo("Sukces", f"Usunięto transzę {percentage}%")
             self.load_payment_milestones()
 
@@ -25391,6 +25553,16 @@ class RMManagerGUI:
             messagebox.showerror("Błąd", f"Nie można pobrać transz płatności:\n{e}")
             return
 
+        # Sprawdź czy projekt należy do linii
+        line_info = None
+        line_project_names = []
+        try:
+            line_info = rmm.get_project_line(self.rm_master_db_path, self.selected_project_id)
+            if line_info:
+                line_project_names = [self.project_names.get(pid, f"Projekt {pid}") for pid in line_info.get('project_ids', [])]
+        except Exception:
+            pass
+
         # ── Dialog ──────────────────────────────────────────────────────────
         dialog = tk.Toplevel(self.root)
         dialog.title("Wyślij status płatności")
@@ -25450,7 +25622,9 @@ class RMManagerGUI:
         email_title_frame.pack(fill=tk.X, pady=5)
         tk.Label(email_title_frame, text="Tytuł email:", font=self.FONT_DEFAULT).grid(row=0, column=0, sticky='w', pady=5)
         email_title_entry = tk.Entry(email_title_frame, width=40, font=self.FONT_DEFAULT)
-        email_title_entry.insert(0, f"Status płatności – {project_name}")
+        # Jeśli projekt należy do linii, pokaż nazwę linii w tytule
+        title_text = f"Status płatności – {line_info['name']}" if line_info else f"Status płatności – {project_name}"
+        email_title_entry.insert(0, title_text)
         email_title_entry.grid(row=0, column=1, sticky='ew', pady=5, padx=(10, 0))
         email_title_frame.columnconfigure(1, weight=1)
 
@@ -25617,7 +25791,11 @@ class RMManagerGUI:
 
         total_pct  = sum(m['percentage'] for m in milestones)
         has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in milestones)
-        transze_lines = [project_name, ""]
+        # Jeśli projekt należy do linii, pokaż wszystkie projekty z linii
+        if line_info and line_project_names:
+            transze_lines = ["LINIA: " + line_info['name']] + line_project_names + [""]
+        else:
+            transze_lines = [project_name, ""]
         for m in milestones:
             pct  = f"{m['percentage']}%"
             date = m.get('payment_date') or '—'
