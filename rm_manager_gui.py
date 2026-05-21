@@ -26610,7 +26610,7 @@ Kod: {unlock_code}
             padx=20,
             pady=5
         ).pack(side=tk.LEFT, padx=10)
-        
+
         tk.Button(
             button_frame,
             text="❌ Anuluj",
