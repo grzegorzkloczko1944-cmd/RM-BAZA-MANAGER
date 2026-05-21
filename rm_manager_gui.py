@@ -26344,13 +26344,25 @@ class RMManagerGUI:
                 fg="gray"
             ).pack(anchor='w')
 
+        # ── Opcja: wyślij dla linii czy tylko dla tej maszyny ────────────
+        if line_info and line_info.get('project_ids'):
+            scope_frame = tk.LabelFrame(c, text="Zakres wysyłki", font=("Arial", 10, "bold"), padx=10, pady=10)
+            scope_frame.pack(fill=tk.X, padx=10, pady=5)
+            scope_var = tk.StringVar(value='line')  # 'line' lub 'single'
+            tk.Radiobutton(scope_frame, text=f"📦 Wyślij dla całej LINII ({len(line_info.get('project_ids', []))} maszyn)",
+                          variable=scope_var, value='line', font=self.FONT_DEFAULT).pack(anchor='w', pady=2)
+            tk.Radiobutton(scope_frame, text=f"🔧 Wyślij tylko dla tej maszyny ({project_name})",
+                          variable=scope_var, value='single', font=self.FONT_DEFAULT).pack(anchor='w', pady=2)
+        else:
+            scope_var = None
+
         # Treść wiadomości
         message_frame = tk.LabelFrame(c, text="Treść wiadomości", font=("Arial", 10, "bold"), padx=10, pady=10)
         message_frame.pack(fill=tk.X, padx=10, pady=5)
 
         # Auto-generowana część
-        # Jeśli projekt w linii — zbieraj kody ze wszystkich maszyn linii
-        if line_info and line_info.get('project_ids'):
+        # Jeśli projekt w linii i użytkownik wybrał 'line' — zbieraj kody ze wszystkich maszyn linii
+        if line_info and line_info.get('project_ids') and scope_var and scope_var.get() == 'line':
             auto_lines = []
             try:
                 for pid in line_info.get('project_ids', []):
@@ -26388,7 +26400,52 @@ Kod: {unlock_code}
 {service_employee}
 {code_type}"""
 
-        tk.Label(message_frame, text=auto_text, font=self.FONT_DEFAULT, anchor='w', justify='left').pack(fill=tk.X, pady=5)
+        message_label = tk.Label(message_frame, text=auto_text, font=self.FONT_DEFAULT, anchor='w', justify='left')
+        message_label.pack(fill=tk.X, pady=5)
+
+        # Callback na zmianę zakresu wysyłki — przebuduj wiadomość
+        def update_message_for_scope():
+            if line_info and line_info.get('project_ids') and scope_var and scope_var.get() == 'line':
+                auto_lines = []
+                try:
+                    for pid in line_info.get('project_ids', []):
+                        pid_name = self.project_names.get(pid, f"Projekt {pid}")
+                        codes_for_pid = rmm.get_plc_codes(self.rm_master_db_path, pid)
+                        matching_code = next((c for c in codes_for_pid if c['code_type'] == code_type and not c['is_used']), None)
+                        if matching_code:
+                            service_emp_for_pid = "---"
+                            try:
+                                proj_db_pid = self.get_project_db_path(pid)
+                                if proj_db_pid and os.path.exists(proj_db_pid):
+                                    staff_for_pid = rmm.get_stage_assigned_staff(proj_db_pid, self.rm_master_db_path, pid, 'ODBIORY')
+                                    if staff_for_pid:
+                                        for emp in staff_for_pid:
+                                            if emp.get('category') == 'Serwis':
+                                                service_emp_for_pid = emp.get('employee_name', '???')
+                                                break
+                                        if service_emp_for_pid == "---" and len(staff_for_pid) > 0:
+                                            service_emp_for_pid = staff_for_pid[0].get('employee_name', '???')
+                            except Exception:
+                                pass
+                            auto_lines.append(f"{pid_name}\nKod: {matching_code['unlock_code']}\n{service_emp_for_pid}\n{code_type}\n")
+                except Exception:
+                    pass
+                new_text = "\n".join(auto_lines) if auto_lines else f"""{project_name}
+Kod: {unlock_code}
+{service_employee}
+{code_type}"""
+            else:
+                new_text = f"""{project_name}
+Kod: {unlock_code}
+{service_employee}
+{code_type}"""
+            message_label.config(text=new_text)
+
+        # Powiąż callback ze zmianą radiobutton
+        if scope_var:
+            for child in scope_frame.winfo_children():
+                if isinstance(child, tk.Radiobutton):
+                    child.config(command=update_message_for_scope)
         
         # Opis (edytowalne pole)
         tk.Label(message_frame, text="Dodatkowy opis:", font=self.FONT_DEFAULT).pack(anchor='w', pady=(10, 5))
