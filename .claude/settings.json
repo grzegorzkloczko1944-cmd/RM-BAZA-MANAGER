@@ -3,7 +3,9 @@
     "allow": [
       "Bash(python -c ' *)",
       "Bash(dir \"c:\\\\RMPAK_CLIENT\\\\Repozytoria\\\\RM-BAZA-MANAGER\\\\needle_analysis.png\")",
-      "Bash(python -c \"from scipy.interpolate import CubicSpline; print\\('scipy OK'\\)\")"
+      "Bash(python -c \"from scipy.interpolate import CubicSpline; print\\('scipy OK'\\)\")",
+      "Bash(python RM_KOD.py --help)",
+      "PowerShell(cd \"c:\\\\RMPAK_CLIENT\\\\Repozytoria\\\\RM-BAZA-MANAGER\"; $env:PYTHONIOENCODING = 'utf-8'; python RM_KOD.py --help 2>&1 | Select-Object -First 30)"
     ]
   }
 }

@@ -1,0 +1,9 @@
+python -m PyInstaller ^
+    --onedir ^
+    --noconsole ^
+    --name=RM_KOD ^
+    --icon=RM_KOD.ico ^
+    --add-data="RM_KOD.ico;." ^
+    --add-data="rm_manager.py;." ^
+    --add-data="lock_manager_v2.py;." ^
+    RM_KOD.py
