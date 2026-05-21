@@ -25914,6 +25914,17 @@ class RMManagerGUI:
                 "Aby wysłać kod PLC musisz najpierw przejąć lock projektu."
             )
             return
+
+        # Sprawdź czy projekt należy do linii (dla message content)
+        line_info = None
+        line_project_names = []
+        try:
+            line_info = rmm.get_project_line(self.rm_master_db_path, self.selected_project_id)
+            if line_info:
+                line_project_names = [self.project_names.get(pid, f"Projekt {pid}") for pid in line_info.get('project_ids', [])]
+        except Exception:
+            pass
+
         # Jeśli nie podano code_id, pobierz z selekcji
         if code_id is None:
             selection = self.plc_codes_tree.selection()
@@ -26268,29 +26279,40 @@ class RMManagerGUI:
 
         # Sekcja Sprzedaż — pracownicy z etapu PRZYJETY (dynamiczni, read-only)
         sprzedaz_recipients = []
+        seen_sp_emails = {r.get('email') for r in selected_recipients if r.get('email')}  # Już w globalnej
+        seen_sp_names = {r.get('name') for r in selected_recipients if r.get('name')}
         try:
-            _proj_db = self.get_project_db_path(self.selected_project_id)
-            if _proj_db and os.path.exists(_proj_db):
-                _przyjety_staff = rmm.get_stage_assigned_staff(
-                    _proj_db, self.rm_master_db_path,
-                    self.selected_project_id, 'PRZYJETY'
-                )
-                if _przyjety_staff:
-                    _all_emp = {e['id']: e for e in rmm.get_employees(self.rm_master_db_path, active_only=False)}
-                    for s in _przyjety_staff:
-                        emp = _all_emp.get(s['employee_id'], {})
-                        sprzedaz_recipients.append({
-                            'name': s['employee_name'],
-                            'category': s['category'],
-                            'email': emp.get('email', '') or emp.get('contact_info', ''),
-                            'phone': emp.get('phone', '')
-                        })
+            _all_emp = {e['id']: e for e in rmm.get_employees(self.rm_master_db_path, active_only=False)}
+            # Jeśli projekt w linii — zbieraj Sprzedaż ze wszystkich maszyn linii
+            project_ids_for_sprzedaz = line_info.get('project_ids', []) if line_info else [self.selected_project_id]
+            for pid in project_ids_for_sprzedaz:
+                _proj_db = self.get_project_db_path(pid)
+                if _proj_db and os.path.exists(_proj_db):
+                    _przyjety_staff = rmm.get_stage_assigned_staff(
+                        _proj_db, self.rm_master_db_path,
+                        pid, 'PRZYJETY'
+                    )
+                    if _przyjety_staff:
+                        for s in _przyjety_staff:
+                            emp = _all_emp.get(s['employee_id'], {})
+                            email = emp.get('email', '') or emp.get('contact_info', '')
+                            # Unikaj duplikatów i tych już w globalnej liście
+                            if email not in seen_sp_emails and s['employee_name'] not in seen_sp_names:
+                                sprzedaz_recipients.append({
+                                    'name': s['employee_name'],
+                                    'category': s['category'],
+                                    'email': email,
+                                    'phone': emp.get('phone', '')
+                                })
+                                seen_sp_emails.add(email)
+                                seen_sp_names.add(s['employee_name'])
         except Exception as _e:
             print(f"⚠️ Błąd pobierania pracowników Sprzedaż: {_e}")
 
+        sprzedaz_label = f"💼 Sprzedaż (z {'linii' if line_info else 'projektu'} – dynamiczni)"
         sprzedaz_frame = tk.LabelFrame(
             c,
-            text="💼 Sprzedaż (z projektu – dynamiczni)",
+            text=sprzedaz_label,
             font=("Arial", 10, "bold"),
             fg="#27ae60",
             padx=10, pady=10
@@ -26325,13 +26347,47 @@ class RMManagerGUI:
         # Treść wiadomości
         message_frame = tk.LabelFrame(c, text="Treść wiadomości", font=("Arial", 10, "bold"), padx=10, pady=10)
         message_frame.pack(fill=tk.X, padx=10, pady=5)
-        
+
         # Auto-generowana część
-        auto_text = f"""{project_name}
+        # Jeśli projekt w linii — zbieraj kody ze wszystkich maszyn linii
+        if line_info and line_info.get('project_ids'):
+            auto_lines = []
+            try:
+                for pid in line_info.get('project_ids', []):
+                    pid_name = self.project_names.get(pid, f"Projekt {pid}")
+                    # Pobierz kody dla tego projektu
+                    codes_for_pid = rmm.get_plc_codes(self.rm_master_db_path, pid)
+                    # Szukaj kodu o takim samym typie jak aktualny (PERMANENT/TEMPORARY)
+                    matching_code = next((c for c in codes_for_pid if c['code_type'] == code_type and not c['is_used']), None)
+                    if matching_code:
+                        # Pobierz service employee dla tego projektu
+                        service_emp_for_pid = "---"
+                        try:
+                            proj_db_pid = self.get_project_db_path(pid)
+                            if proj_db_pid and os.path.exists(proj_db_pid):
+                                staff_for_pid = rmm.get_stage_assigned_staff(proj_db_pid, self.rm_master_db_path, pid, 'ODBIORY')
+                                if staff_for_pid:
+                                    for emp in staff_for_pid:
+                                        if emp.get('category') == 'Serwis':
+                                            service_emp_for_pid = emp.get('employee_name', '???')
+                                            break
+                                    if service_emp_for_pid == "---" and len(staff_for_pid) > 0:
+                                        service_emp_for_pid = staff_for_pid[0].get('employee_name', '???')
+                        except Exception:
+                            pass
+                        auto_lines.append(f"{pid_name}\nKod: {matching_code['unlock_code']}\n{service_emp_for_pid}\n{code_type}\n")
+            except Exception as _e:
+                print(f"⚠️ Błąd budowania kody linii: {_e}")
+            auto_text = "\n".join(auto_lines) if auto_lines else f"""{project_name}
 Kod: {unlock_code}
 {service_employee}
 {code_type}"""
-        
+        else:
+            auto_text = f"""{project_name}
+Kod: {unlock_code}
+{service_employee}
+{code_type}"""
+
         tk.Label(message_frame, text=auto_text, font=self.FONT_DEFAULT, anchor='w', justify='left').pack(fill=tk.X, pady=5)
         
         # Opis (edytowalne pole)
