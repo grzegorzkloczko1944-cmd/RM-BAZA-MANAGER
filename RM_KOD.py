@@ -7,7 +7,6 @@ Dla programistów PLC - edycja kodów odblokowujących bez całego RM_MANAGER'a
 
 import tkinter as tk
 from tkinter import ttk, messagebox
-import sqlite3
 import json
 from datetime import datetime
 from pathlib import Path
@@ -1192,12 +1191,8 @@ class RMKOD:
 
         def save():
             try:
-                con = sqlite3.connect(str(self.rm_master_db_path))
-                con.execute("UPDATE plc_unlock_codes SET description = ? WHERE id = ?",
-                          (desc_text.get('1.0', tk.END).strip(), code_id))
-                con.commit()
-                con.close()
-
+                rmm.update_plc_code(str(self.rm_master_db_path), code_id,
+                                   description=desc_text.get('1.0', tk.END).strip())
                 self._load_codes()
                 dialog.destroy()
                 self.status_bar.config(text="✅ Kod zaktualizowany")
@@ -1233,11 +1228,7 @@ class RMKOD:
         code_id = int(self.codes_tree.item(selection[0], 'tags')[0])
 
         try:
-            con = sqlite3.connect(str(self.rm_master_db_path))
-            con.execute("DELETE FROM plc_unlock_codes WHERE id = ?", (code_id,))
-            con.commit()
-            con.close()
-
+            rmm.delete_plc_code(str(self.rm_master_db_path), code_id)
             self._load_codes()
             self.status_bar.config(text="✅ Kod usunięty")
         except Exception as e:
