@@ -204,12 +204,14 @@ class RMKOD:
         dialog.grab_set()
         dialog.geometry("750x500")
 
-        # Center on screen
+        # Center on parent window
         dialog.update_idletasks()
-        screen_width = dialog.winfo_screenwidth()
-        screen_height = dialog.winfo_screenheight()
-        x = (screen_width // 2) - (750 // 2)
-        y = (screen_height // 2) - (500 // 2)
+        parent_width = self.root.winfo_width()
+        parent_height = self.root.winfo_height()
+        parent_x = self.root.winfo_x()
+        parent_y = self.root.winfo_y()
+        x = parent_x + (parent_width // 2) - (750 // 2)
+        y = parent_y + (parent_height // 2) - (500 // 2)
         dialog.geometry(f"750x500+{x}+{y}")
 
         # Header
@@ -430,12 +432,14 @@ class RMKOD:
         dlg.resizable(False, False)
         dlg.geometry("420x180")
 
-        # Center on screen
+        # Center on parent window
         dlg.update_idletasks()
-        screen_width = dlg.winfo_screenwidth()
-        screen_height = dlg.winfo_screenheight()
-        x = (screen_width // 2) - (420 // 2)
-        y = (screen_height // 2) - (180 // 2)
+        parent_width = self.root.winfo_width()
+        parent_height = self.root.winfo_height()
+        parent_x = self.root.winfo_x()
+        parent_y = self.root.winfo_y()
+        x = parent_x + (parent_width // 2) - (420 // 2)
+        y = parent_y + (parent_height // 2) - (180 // 2)
         dlg.geometry(f"420x180+{x}+{y}")
 
         frm = tk.Frame(dlg, padx=25, pady=20)
@@ -918,12 +922,14 @@ class RMKOD:
                     dlg.resizable(False, False)
                     dlg.geometry("500x200")
 
-                    # Center on screen
+                    # Center on parent window
                     dlg.update_idletasks()
-                    screen_width = dlg.winfo_screenwidth()
-                    screen_height = dlg.winfo_screenheight()
-                    x = (screen_width // 2) - (500 // 2)
-                    y = (screen_height // 2) - (200 // 2)
+                    parent_width = self.root.winfo_width()
+                    parent_height = self.root.winfo_height()
+                    parent_x = self.root.winfo_x()
+                    parent_y = self.root.winfo_y()
+                    x = parent_x + (parent_width // 2) - (500 // 2)
+                    y = parent_y + (parent_height // 2) - (200 // 2)
                     dlg.geometry(f"500x200+{x}+{y}")
 
                     frm = tk.Frame(dlg, padx=20, pady=20)
@@ -1062,6 +1068,7 @@ class RMKOD:
                 self.have_lock = True
                 self.btn_lock.config(state=tk.DISABLED)
                 self.btn_release.config(state=tk.NORMAL)
+                self._load_codes()  # Reload codes with lock active
                 self.status_bar.config(text=f"🔒 Lock przejęty na projekt {self.selected_project_id}")
             else:
                 messagebox.showerror("Błąd", f"Nie można przejąć lock'a:\n{error}")
@@ -1110,29 +1117,38 @@ class RMKOD:
         dialog.grab_set()
         dialog.geometry("400x300")
 
-        # Center on screen
+        # Center on parent window (RM_KOD main window)
         dialog.update_idletasks()
-        screen_width = dialog.winfo_screenwidth()
-        screen_height = dialog.winfo_screenheight()
-        x = (screen_width // 2) - (400 // 2)
-        y = (screen_height // 2) - (300 // 2)
+        parent_width = self.root.winfo_width()
+        parent_height = self.root.winfo_height()
+        parent_x = self.root.winfo_x()
+        parent_y = self.root.winfo_y()
+        x = parent_x + (parent_width // 2) - (400 // 2)
+        y = parent_y + (parent_height // 2) - (300 // 2)
         dialog.geometry(f"400x300+{x}+{y}")
 
+        # Main frame with padding
+        main_frame = ttk.Frame(dialog, padding=15)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Configure grid columns for proper centering
+        main_frame.columnconfigure(1, weight=1)
+
         # Type
-        ttk.Label(dialog, text="Typ:", font=self.FONT_DEFAULT).grid(row=0, column=0, sticky='e', padx=10, pady=10)
+        ttk.Label(main_frame, text="Typ:", font=self.FONT_DEFAULT).grid(row=0, column=0, sticky='e', padx=(0, 10), pady=10)
         type_var = tk.StringVar(value='PERMANENT')
-        ttk.Combobox(dialog, textvariable=type_var, values=['TEMPORARY', 'PERMANENT'], state='readonly',
-                    width=20).grid(row=0, column=1, padx=10, pady=10)
+        ttk.Combobox(main_frame, textvariable=type_var, values=['TEMPORARY', 'PERMANENT'], state='readonly',
+                    width=20).grid(row=0, column=1, sticky='w', padx=(0, 10), pady=10)
 
         # Code
-        ttk.Label(dialog, text="Kod:", font=self.FONT_DEFAULT).grid(row=1, column=0, sticky='e', padx=10, pady=10)
-        code_entry = ttk.Entry(dialog, width=30, font=self.FONT_DEFAULT)
-        code_entry.grid(row=1, column=1, padx=10, pady=10)
+        ttk.Label(main_frame, text="Kod:", font=self.FONT_DEFAULT).grid(row=1, column=0, sticky='e', padx=(0, 10), pady=10)
+        code_entry = ttk.Entry(main_frame, width=30, font=self.FONT_DEFAULT)
+        code_entry.grid(row=1, column=1, sticky='ew', padx=(0, 10), pady=10)
 
         # Description
-        ttk.Label(dialog, text="Opis:", font=self.FONT_DEFAULT).grid(row=2, column=0, sticky='ne', padx=10, pady=10)
-        desc_text = tk.Text(dialog, width=30, height=5, font=self.FONT_DEFAULT)
-        desc_text.grid(row=2, column=1, padx=10, pady=10)
+        ttk.Label(main_frame, text="Opis:", font=self.FONT_DEFAULT).grid(row=2, column=0, sticky='ne', padx=(0, 10), pady=10)
+        desc_text = tk.Text(main_frame, width=30, height=5, font=self.FONT_DEFAULT)
+        desc_text.grid(row=2, column=1, sticky='ew', padx=(0, 10), pady=10)
 
         def save():
             code = code_entry.get().strip()
@@ -1150,9 +1166,9 @@ class RMKOD:
             except Exception as e:
                 messagebox.showerror("Błąd", f"Nie można dodać kodu:\n{e}")
 
-        # Buttons
-        btn_frame = ttk.Frame(dialog)
-        btn_frame.grid(row=3, column=0, columnspan=2, pady=20)
+        # Buttons - centered
+        btn_frame = tk.Frame(dialog)
+        btn_frame.pack(pady=15)
         ttk.Button(btn_frame, text="Zapisz", command=save).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Anuluj", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
 
