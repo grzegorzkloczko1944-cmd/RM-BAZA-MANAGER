@@ -14466,10 +14466,7 @@ class RMManagerGUI:
         except Exception as e:
             import traceback
             traceback.print_exc()
-            messagebox.showerror("Błąd", f"Nie można dodać załącznika:\n{e}", parent=parent_win)
-            if notes_win:
-                notes_win.lift()
-                notes_win.focus_set()
+            messagebox.showerror("Błąd", f"Nie można dodać załącznika:\n{e}", parent=parent_window)
     
     def load_stage_attachments_list(self, project_db: str, stage_code: str, container: tk.Frame):
         """Załaduj i wyświetl załączniki dla etapu"""
