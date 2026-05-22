@@ -744,6 +744,7 @@ class RMKOD:
                 FROM projects
                 WHERE COALESCE(active, 1) = 1
                   AND COALESCE(project_type, 'MACHINE') = 'MACHINE'
+                  AND LOWER(name) NOT LIKE '%[sym]%'
                 ORDER BY name COLLATE NOCASE
             """)
 
@@ -839,8 +840,14 @@ class RMKOD:
             self.project_combo['values'] = combo_values
 
             if combo_values:
-                self.project_combo.current(0)
-                self._on_project_selected()
+                # Restore previous selection if possible, otherwise select first
+                current_selection = self.project_combo.get()
+                if current_selection in combo_values:
+                    self.project_combo.set(current_selection)
+                else:
+                    self.project_combo.current(0)
+                    if not self.have_lock:  # Only trigger selection callback if not locked
+                        self._on_project_selected()
 
             if self.filter_without_code.get():
                 filter_info = " (filtr: bez kodu)"
