@@ -454,7 +454,8 @@ class MainWindow(tk.Tk):
             textvariable=self.project_var,
             width=30,  # Zwiększono o 25% + 5 jednostek (20 * 1.25 + 5 = 30)
             state="readonly",
-            font=("Arial", 10)
+            font=("Arial", 10),
+            height=25
         )
         self.project_combo.pack(side=tk.LEFT, padx=(5, 8), pady=10)
         self.project_combo.bind("<<ComboboxSelected>>", self.on_project_selected)
@@ -1276,7 +1277,24 @@ class MainWindow(tk.Tk):
             bd=2
         )
         self.lbl_odebrano_stat.pack(side=tk.RIGHT, padx=10, pady=10)
-        
+
+        # Okienko sumy Cena PLN
+        self.lbl_cena_pln_stat = tk.Label(
+            bt_r2,
+            text="0,00 PLN",
+            bg="#1a5276",
+            fg="#aed6f1",
+            font=("Arial", 11, "bold"),
+            padx=15,
+            pady=8,
+            relief=tk.SUNKEN,
+            bd=2
+        )
+        self.lbl_cena_pln_stat.pack(side=tk.RIGHT, padx=5, pady=10)
+        self.lbl_cena_pln_stat.config(cursor="hand2")
+        self.lbl_cena_pln_stat.bind("<Button-1>", self._open_price_stats_window)
+        self.lbl_cena_pln_stat.pack_forget()  # ukryty do czasu logowania
+
         # ====================================================================
         # MIDDLE - Tksheet (Tabelka)
         # ====================================================================
@@ -3089,7 +3107,363 @@ class MainWindow(tk.Tk):
         except Exception as e:
             print(f"⚠️  Błąd aktualizacji statystyki ODEBRANO: {e}")
             self.lbl_odebrano_stat.config(text="-")
-    
+
+    def _update_cena_pln_stat(self):
+        """Aktualizuj sumę kolumny Cena PLN — tylko widoczne (przefiltrowane) wiersze."""
+        try:
+            row_ids = getattr(self, '_sheet_row_ids', None)
+            if not row_ids:
+                self.lbl_cena_pln_stat.config(text="0,00 PLN")
+                return
+            if not self.db_manager or not self.db_manager.project_con:
+                self.lbl_cena_pln_stat.config(text="0,00 PLN")
+                return
+            con = self.db_manager.project_con
+            placeholders = ",".join("?" * len(row_ids))
+            row = con.execute(
+                f"SELECT COALESCE(SUM(price_pln), 0) FROM items WHERE id IN ({placeholders})",
+                row_ids
+            ).fetchone()
+            total = row[0] if row else 0.0
+            formatted = f"{total:,.2f}".replace(",", " ").replace(".", ",") + " PLN"
+            self.lbl_cena_pln_stat.config(text=formatted)
+        except Exception as e:
+            print(f"⚠️  Błąd aktualizacji sumy Cena PLN: {e}")
+            self.lbl_cena_pln_stat.config(text="-")
+
+    def _update_price_stat_visibility(self):
+        """Pokaż lub ukryj widget sumy Cena PLN w zależności od roli (tylko ADMIN i USER$$)."""
+        if not hasattr(self, 'lbl_cena_pln_stat') or not hasattr(self, 'lbl_odebrano_stat'):
+            return
+        allowed = self.current_user_role in ("ADMIN", "USER$$")
+        try:
+            is_packed = bool(self.lbl_cena_pln_stat.pack_info())
+        except tk.TclError:
+            is_packed = False
+        if allowed and not is_packed:
+            self.lbl_cena_pln_stat.pack(side=tk.RIGHT, padx=5, pady=10,
+                                        after=self.lbl_odebrano_stat)
+        elif not allowed and is_packed:
+            self.lbl_cena_pln_stat.pack_forget()
+
+    def _open_price_stats_window(self, event=None):
+        """Statystyki Cena PLN dla widocznych (przefiltrowanych) pozycji."""
+        import statistics as _stats
+        import datetime as _dt
+
+        row_ids = getattr(self, '_sheet_row_ids', None)
+        if not row_ids or not self.db_manager or not self.db_manager.project_con:
+            return
+
+        con = self.db_manager.project_con
+        ph = ",".join("?" * len(row_ids))
+        today = _dt.date.today()
+
+        rows = con.execute(f"""
+            SELECT
+                COALESCE(work_drawing_no, src_drawing_no) AS drawing_no,
+                COALESCE(work_name, src_name) AS name,
+                COALESCE(class_manual, class_auto, class_effective, '') AS typ,
+                supplier_id,
+                thickness_mm,
+                COALESCE(NULLIF(work_modul,''), src_modul) AS modul,
+                price_pln,
+                src_material_text,
+                delivered_qty,
+                COALESCE(order_qty, work_qty, src_qty) AS target_qty,
+                ordered_flag,
+                deadline_date,
+                alarm_date,
+                alarm_offset,
+                alarm_unit,
+                COALESCE(dwf_biblioteka, 0) AS dwf_bib,
+                COALESCE(is_manual, 0) AS is_manual
+            FROM items WHERE id IN ({ph})
+        """, row_ids).fetchall()
+
+        def _parse_d(s):
+            if not s: return None
+            try: return _dt.date.fromisoformat(str(s)[:10])
+            except Exception: return None
+
+        def _alarm(r):
+            try:
+                t, d = r['target_qty'], r['delivered_qty']
+                if t and d and float(d) >= float(t) > 0:
+                    return 'none'
+            except Exception:
+                pass
+            dl = _parse_d(r['deadline_date'])
+            al = _parse_d(r['alarm_date'])
+            if al is None and dl and r['alarm_offset']:
+                try:
+                    mul = 7 if str(r['alarm_unit'] or "").upper().startswith("W") else 1
+                    al = dl - _dt.timedelta(days=int(r['alarm_offset']) * mul)
+                except Exception:
+                    pass
+            if dl and today > dl: return 'red'
+            if al and (dl is None or today <= dl) and today >= al: return 'yellow'
+            return 'none'
+
+        def _delivered(r):
+            try:
+                t, d = r['target_qty'], r['delivered_qty']
+                return bool(t and d and float(d) >= float(t) > 0)
+            except Exception:
+                return False
+
+        # (nieużywane stałe T/N usunięto — każda cecha ma własne etykiety)
+
+        # Buduj listę dict z danych pozycji
+        items_data = []
+        for r in rows:
+            price = None
+            try:
+                if r['price_pln'] is not None:
+                    price = float(r['price_pln'])
+            except Exception:
+                pass
+
+            sup_name = ""
+            if r['supplier_id']:
+                sup_name = self.suppliers_map.get(r['supplier_id'], "")
+            if not sup_name:
+                sup_name = "(brak)"
+
+            thick = r['thickness_mm']
+            if thick is None:
+                try:
+                    mat = r['src_material_text'] or ""
+                    if mat:
+                        from import_bom import parse_thickness_mm
+                        thick = parse_thickness_mm(mat)
+                except Exception:
+                    pass
+            thick_str = ""
+            if thick is not None:
+                try:
+                    t = float(thick)
+                    thick_str = str(int(t)) if t == int(t) else f"{t:.2f}".rstrip('0').rstrip('.')
+                except Exception:
+                    thick_str = str(thick)
+            if not thick_str:
+                thick_str = "(brak)"
+
+            typ = r['typ'] or "(brak)"
+            if typ == "ZNORMALIZOWANE":
+                typ = "ZNORM"
+            if not typ.strip():
+                typ = "(brak)"
+
+            modul_raw = r['modul'] or ""
+            modul_str = "(brak)"
+            if modul_raw:
+                first = modul_raw.split(',')[0].strip()
+                m = re.match(r'([^(]+)', first)
+                modul_str = (m.group(1).strip() if m else first) or "(brak)"
+
+            alarm_st = _alarm(r)
+            deliv    = _delivered(r)
+
+            items_data.append({
+                'drawing_no':     r['drawing_no'] or "",
+                'name':           r['name'] or "",
+                'typ':            typ,
+                'supplier':       sup_name,
+                'thickness':      thick_str,
+                'modul':          modul_str,
+                'price':          price,
+                # cechy binarne — opisowe etykiety
+                'brak_dostawcy':  "Brak dostawcy"   if not r['supplier_id']               else "Ma dostawcę",
+                'po_terminie':    "Po terminie"      if alarm_st == 'red'                  else "W terminie",
+                'biblioteka':     "Biblioteka"       if int(r['dwf_bib'])                  else "Nie biblioteka",
+                'dodane':         "Dodane ręcznie"   if int(r['is_manual'])                else "Z BOM",
+                'zamowiono':      "Zamówiono"        if int(r['ordered_flag'] or 0)        else "Niezamówione",
+                'do_zamowienia':  "Do zamówienia"    if not int(r['ordered_flag'] or 0)    else "Już zamówione",
+                'alarm_zolty':    "Alarm aktywny"    if alarm_st == 'yellow'               else "Brak alarmu",
+                'alarm_czerwony': "Po terminie"      if alarm_st == 'red'                  else "W terminie",
+                'dostarczone':    "Dostarczone"      if deliv                              else "Niedostarczone",
+                'nie_dostarczone':"Niedostarczone"   if not deliv                          else "Dostarczone",
+            })
+
+        priced = [it for it in items_data if it['price'] and it['price'] > 0]
+        unpriced = [it for it in items_data if not it['price']]
+        prices_list = [it['price'] for it in priced]
+        total = sum(prices_list)
+        avg = total / len(prices_list) if prices_list else 0.0
+        median = _stats.median(prices_list) if prices_list else 0.0
+
+        def fmt(v):
+            return f"{v:,.2f}".replace(",", " ").replace(".", ",") + " PLN"
+
+        # Okno główne
+        win = tk.Toplevel(self)
+        win.title("📊 Statystyki Cena PLN")
+        win.geometry("960x560")
+        win.transient(self)
+        win.update_idletasks()
+        wx = self.winfo_x() + (self.winfo_width() - 960) // 2
+        wy = self.winfo_y() + (self.winfo_height() - 560) // 2
+        win.geometry(f"960x560+{wx}+{wy}")
+
+        nb = ttk.Notebook(win)
+        nb.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        # ── Tab 1: Podsumowanie ─────────────────────────────────────────────
+        f1 = tk.Frame(nb, bg="#f5f5f5")
+        nb.add(f1, text="📋 Podsumowanie")
+
+        summary_rows = [
+            ("Pozycji widocznych:", str(len(items_data)), False),
+            ("Pozycji z ceną:", str(len(priced)), False),
+            ("Pozycji bez ceny:", str(len(unpriced)), False),
+            None,
+            ("Łączna kwota:", fmt(total), True),
+            ("Średnia cena:", fmt(avg), False),
+            ("Mediana ceny:", fmt(median), False),
+            ("Najwyższa cena:", fmt(max(prices_list)) if prices_list else "—", False),
+            ("Najniższa cena:", fmt(min(prices_list)) if prices_list else "—", False),
+        ]
+        fr = tk.Frame(f1, bg="#f5f5f5")
+        fr.pack(padx=60, pady=35)
+        for i, row in enumerate(summary_rows):
+            if row is None:
+                tk.Frame(fr, height=14, bg="#f5f5f5").grid(row=i, column=0, columnspan=2)
+                continue
+            lbl, val, bold = row
+            tk.Label(fr, text=lbl, bg="#f5f5f5", font=("Arial", 12),
+                     anchor="e", width=22).grid(row=i, column=0, sticky="e", padx=(0, 20), pady=5)
+            tk.Label(fr, text=val, bg="#f5f5f5",
+                     font=("Arial", 12, "bold" if bold else "normal"),
+                     fg="#27ae60" if bold else "#2c3e50",
+                     anchor="w").grid(row=i, column=1, sticky="w", pady=5)
+
+        # ── Tab 2: Najdroższe / Najtańsze ──────────────────────────────────
+        f2 = tk.Frame(nb)
+        nb.add(f2, text="🏆 Najdroższe / Najtańsze")
+        f2.columnconfigure(0, weight=1)
+        f2.columnconfigure(1, weight=1)
+        f2.rowconfigure(1, weight=1)
+
+        tk.Label(f2, text="🔺 Najdroższe (top 15)", font=("Arial", 10, "bold"),
+                 fg="#c0392b").grid(row=0, column=0, pady=(10, 4))
+        tk.Label(f2, text="🔻 Najtańsze z ceną (top 15)", font=("Arial", 10, "bold"),
+                 fg="#27ae60").grid(row=0, column=1, pady=(10, 4))
+
+        def _price_tree(parent):
+            frm = tk.Frame(parent)
+            frm.pack(fill=tk.BOTH, expand=True)
+            t = ttk.Treeview(frm, columns=("nr", "nazwa", "cena", "pct"), show="headings", height=15)
+            t.heading("nr",   text="Nr rysunku"); t.column("nr",   width=110, anchor="w")
+            t.heading("nazwa",text="Nazwa");      t.column("nazwa",width=175, anchor="w")
+            t.heading("cena", text="Cena PLN");   t.column("cena", width=105, anchor="e")
+            t.heading("pct",  text="% sumy");     t.column("pct",  width=65,  anchor="e")
+            sb = ttk.Scrollbar(frm, orient="vertical", command=t.yview)
+            t.configure(yscrollcommand=sb.set)
+            t.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            sb.pack(side=tk.RIGHT, fill=tk.Y)
+            return t
+
+        lf_hi = tk.Frame(f2); lf_hi.grid(row=1, column=0, sticky="nsew", padx=(8, 4), pady=8)
+        lf_lo = tk.Frame(f2); lf_lo.grid(row=1, column=1, sticky="nsew", padx=(4, 8), pady=8)
+        t_hi = _price_tree(lf_hi)
+        t_lo = _price_tree(lf_lo)
+
+        grand = total or 1
+        for it in sorted(priced, key=lambda x: x['price'], reverse=True)[:15]:
+            t_hi.insert("", tk.END, values=(
+                it['drawing_no'], it['name'],
+                f"{it['price']:,.2f}".replace(",", " ").replace(".", ","),
+                f"{it['price'] / grand * 100:.1f}%"))
+        for it in sorted(priced, key=lambda x: x['price'])[:15]:
+            t_lo.insert("", tk.END, values=(
+                it['drawing_no'], it['name'],
+                f"{it['price']:,.2f}".replace(",", " ").replace(".", ","),
+                f"{it['price'] / grand * 100:.1f}%"))
+
+        # ── Tab 3: Grupy ───────────────────────────────────────────────────
+        f3 = tk.Frame(nb)
+        nb.add(f3, text="📊 Grupy")
+
+        SEP = "─────────────────────"
+        group_options = [
+            "Typ", "Dostawca", "Grubość [mm]", "Moduł",
+            SEP,
+            "Brak dostawcy", "Po terminie", "Biblioteka (DWF)",
+            "Dodane ręcznie", "Zamówiono", "Do zamówienia",
+            "Alarm żółty", "Alarm czerwony",
+            "Dostarczone", "Nie dostarczone",
+        ]
+        key_map = {
+            "Typ":              "typ",
+            "Dostawca":         "supplier",
+            "Grubość [mm]":     "thickness",
+            "Moduł":            "modul",
+            "Brak dostawcy":    "brak_dostawcy",
+            "Po terminie":      "po_terminie",
+            "Biblioteka (DWF)": "biblioteka",
+            "Dodane ręcznie":   "dodane",
+            "Zamówiono":        "zamowiono",
+            "Do zamówienia":    "do_zamowienia",
+            "Alarm żółty":      "alarm_zolty",
+            "Alarm czerwony":   "alarm_czerwony",
+            "Dostarczone":      "dostarczone",
+            "Nie dostarczone":  "nie_dostarczone",
+        }
+        group_var = tk.StringVar(value="Typ")
+
+        ctrl = tk.Frame(f3)
+        ctrl.pack(fill=tk.X, padx=12, pady=(12, 6))
+        tk.Label(ctrl, text="Grupuj według:", font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+        ttk.Combobox(ctrl, textvariable=group_var, values=group_options,
+                     state="readonly", width=24, height=20).pack(side=tk.LEFT, padx=10)
+
+        g_frame = tk.Frame(f3)
+        g_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 10))
+        cols_g = ("grupa", "count", "suma", "srednia", "procent")
+        tree_g = ttk.Treeview(g_frame, columns=cols_g, show="headings")
+        tree_g.heading("grupa",   text="Grupa");      tree_g.column("grupa",   width=220, anchor="w")
+        tree_g.heading("count",   text="Pozycji");    tree_g.column("count",   width=70,  anchor="e")
+        tree_g.heading("suma",    text="Suma PLN");   tree_g.column("suma",    width=150, anchor="e")
+        tree_g.heading("srednia", text="Śr. PLN");    tree_g.column("srednia", width=130, anchor="e")
+        tree_g.heading("procent", text="% sumy");     tree_g.column("procent", width=80,  anchor="e")
+        sb_g = ttk.Scrollbar(g_frame, orient="vertical", command=tree_g.yview)
+        tree_g.configure(yscrollcommand=sb_g.set)
+        tree_g.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb_g.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def _refresh_groups(*_):
+            chosen = group_var.get()
+            if chosen not in key_map:
+                return
+            tree_g.delete(*tree_g.get_children())
+            key = key_map[chosen]
+            groups = {}
+            for it in items_data:
+                g = it.get(key) or "(brak)"
+                if g not in groups:
+                    groups[g] = {"count": 0, "suma": 0.0, "prices": []}
+                groups[g]["count"] += 1
+                if it['price'] and it['price'] > 0:
+                    groups[g]["suma"] += it['price']
+                    groups[g]["prices"].append(it['price'])
+            grand = sum(d["suma"] for d in groups.values()) or 1
+            for g, d in sorted(groups.items(), key=lambda x: x[1]["suma"], reverse=True):
+                avg_g = d["suma"] / len(d["prices"]) if d["prices"] else 0.0
+                pct = d["suma"] / grand * 100
+                tree_g.insert("", tk.END, values=(
+                    g, d["count"],
+                    f"{d['suma']:,.2f}".replace(",", " ").replace(".", ","),
+                    f"{avg_g:,.2f}".replace(",", " ").replace(".", ","),
+                    f"{pct:.1f}%"
+                ))
+
+        group_var.trace_add("write", _refresh_groups)
+        _refresh_groups()
+
+        tk.Button(win, text="✖ Zamknij", command=win.destroy,
+                  bg="#95a5a6", fg="white", font=("Arial", 10), padx=20, pady=5).pack(pady=(0, 8))
+
     def _on_project_combo_click(self, event=None):
         """Odśwież listę projektów przy kliknięciu dropdown (debounce 5s)"""
         try:
@@ -3685,7 +4059,8 @@ class MainWindow(tk.Tk):
         self.current_user_id = uid
         self.current_user = username
         self.current_user_role = role
-        
+        self._update_price_stat_visibility()
+
         # Zaktualizuj nazwę użytkownika w LockManager
         if hasattr(self, 'lock_manager') and self.lock_manager:
             self.lock_manager.update_user_name(username)
@@ -3721,7 +4096,8 @@ class MainWindow(tk.Tk):
                 self.current_user_id = uid
                 self.current_user = username
                 self.current_user_role = role
-                
+                self._update_price_stat_visibility()
+
                 # Zaktualizuj nazwę użytkownika w LockManager
                 if hasattr(self, 'lock_manager') and self.lock_manager:
                     self.lock_manager.update_user_name(username)
@@ -4099,7 +4475,8 @@ class MainWindow(tk.Tk):
                 self.current_user_id = new_user_id
                 self.current_user = username
                 self.current_user_role = role
-                
+                self._update_price_stat_visibility()
+
                 # Zaktualizuj nazwę użytkownika w LockManager
                 if hasattr(self, 'lock_manager') and self.lock_manager:
                     self.lock_manager.update_user_name(username)
@@ -5263,6 +5640,7 @@ class MainWindow(tk.Tk):
         
         # Aktualizuj statystykę ODEBRANO
         self._update_odebrano_stat()
+        self._update_cena_pln_stat()
         
         print(f"✅ Załadowano {len(items)} items")
     
