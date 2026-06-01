@@ -6721,7 +6721,8 @@ class RMManagerGUI:
         win = tk.Toplevel(self.root)
         win.title("⚠️ Uwaga — Elektromontaż wciąż trwa!")
         win.configure(bg="#c0392b")
-        win.resizable(False, False)
+        win.resizable(True, True)
+        win.minsize(430, 200)
         win.grab_set()
 
         # Wyśrodkuj względem głównego okna
@@ -7979,6 +7980,18 @@ class RMManagerGUI:
                         print(f"⚠️ Błąd ładowania firm transportowych: {ex}")
                         pass
                     
+                    # Pobierz pracowników ODBIORY raz (wyświetlani przy FAT/ODBIOR_*)
+                    odbiory_staff_names = []
+                    try:
+                        odbiory_staff = rmm.get_stage_assigned_staff(
+                            self.get_project_db_path(self.selected_project_id),
+                            self.rm_master_db_path,
+                            self.selected_project_id, 'ODBIORY'
+                        )
+                        odbiory_staff_names = [s['employee_name'] for s in odbiory_staff]
+                    except Exception:
+                        pass
+
                     for sub_code in SUB_MILESTONES[stage_code]:
                         sub_fc = forecast.get(sub_code)
                         sub_info = stage_data.get(sub_code, {'display_name': sub_code, 'is_milestone': True})
@@ -8065,7 +8078,17 @@ class RMManagerGUI:
                                 padx=6,
                                 pady=1
                             ).pack(side=tk.LEFT, padx=4)
-                        
+                            # Pracownicy z etapu ODBIORY
+                            if odbiory_staff_names:
+                                tk.Label(
+                                    sub_row,
+                                    text=f"👷 {', '.join(odbiory_staff_names)}",
+                                    bg=bg_color,
+                                    font=self.FONT_SMALL,
+                                    fg="#2980b9",
+                                    anchor="w"
+                                ).pack(side=tk.LEFT, padx=(4, 2))
+
                         # Przycisk "Protokół odbioru" dla SAT (URUCHOMIENIE_U_KLIENTA) - kolor jak Karta Maszyny
                         if sub_code == 'URUCHOMIENIE_U_KLIENTA':
                             sub_att_count = self.get_stage_attachments_count(sub_code)
@@ -9535,7 +9558,9 @@ class RMManagerGUI:
         dialog.title("Konfiguracja ścieżek")
         dialog.transient(self.root)
         dialog.grab_set()
-        self._center_window(dialog, 780, 680)
+        self._center_window(dialog, 820, 700)
+        dialog.resizable(True, True)
+        dialog.minsize(700, 500)
 
         header = tk.Label(
             dialog,
@@ -9545,8 +9570,17 @@ class RMManagerGUI:
         )
         header.pack(fill=tk.X)
 
-        form = tk.Frame(dialog, padx=15, pady=10)
-        form.pack(fill=tk.BOTH, expand=True)
+        _cfg_wrap = tk.Frame(dialog)
+        _cfg_wrap.pack(fill=tk.BOTH, expand=True)
+        _cfg_vsb = ttk.Scrollbar(_cfg_wrap, orient=tk.VERTICAL)
+        _cfg_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        _cfg_sc = tk.Canvas(_cfg_wrap, yscrollcommand=_cfg_vsb.set, bd=0, highlightthickness=0)
+        _cfg_sc.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        _cfg_vsb.config(command=_cfg_sc.yview)
+        form = tk.Frame(_cfg_sc, padx=15, pady=10)
+        _cfg_sc.create_window((0, 0), window=form, anchor="nw", tags="_cfgwin")
+        form.bind("<Configure>", lambda e, c=_cfg_sc: c.configure(scrollregion=c.bbox("all")))
+        _cfg_sc.bind("<Configure>", lambda e, c=_cfg_sc: c.itemconfig("_cfgwin", width=e.width))
 
         def make_row(parent, row, label, hint, default_val, browse_cmd):
             tk.Label(parent, text=label, font=self.FONT_BOLD, anchor="w", width=22).grid(
@@ -10388,15 +10422,24 @@ class RMManagerGUI:
 
         dlg = tk.Toplevel(parent)
         dlg.title(f"✏️ Edycja projektu #{proj['id']}")
-        dlg.resizable(False, False)
+        dlg.resizable(True, True)
         dlg.transient(parent)
         dlg.grab_set()
-        # Zwiększ wysokość okna jeśli projekt symulacyjny (dodatkowe ostrzeżenie)
-        height = 590 if "[SYM]" in proj["name"] else 550
-        self._center_window(dlg, 600, height)
+        height = 620 if "[SYM]" in proj["name"] else 580
+        self._center_window(dlg, 620, height)
+        dlg.minsize(600, 480)
 
-        frm = tk.Frame(dlg, padx=25, pady=20, bg="#f0f0f0")
-        frm.pack(fill="both", expand=True)
+        _epd_wrap = tk.Frame(dlg)
+        _epd_wrap.pack(fill="both", expand=True)
+        _epd_vsb = ttk.Scrollbar(_epd_wrap, orient=tk.VERTICAL)
+        _epd_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        _epd_sc = tk.Canvas(_epd_wrap, yscrollcommand=_epd_vsb.set, bd=0, highlightthickness=0)
+        _epd_sc.pack(side=tk.LEFT, fill="both", expand=True)
+        _epd_vsb.config(command=_epd_sc.yview)
+        frm = tk.Frame(_epd_sc, padx=25, pady=20, bg="#f0f0f0")
+        _epd_sc.create_window((0, 0), window=frm, anchor="nw", tags="_epdwin")
+        frm.bind("<Configure>", lambda e, c=_epd_sc: c.configure(scrollregion=c.bbox("all")))
+        _epd_sc.bind("<Configure>", lambda e, c=_epd_sc: c.itemconfig("_epdwin", width=e.width))
 
         row_idx = 0
 
@@ -15259,11 +15302,35 @@ class RMManagerGUI:
                     stage_milestones[row['code']] = bool(row['is_milestone'])
                 
                 con.close()
-                
+
                 project_name = self.project_names.get(project_id, f"Projekt {project_id}")
                 status_icon = self._get_project_status_icon(project_id)
                 project_label = f"{status_icon} P{project_id}"
-                
+
+                # Pobierz pracowników dla milestone'ów tego projektu
+                _mp_odbiory_ms = {'FAT', 'ODBIOR_1', 'ODBIOR_2', 'ODBIOR_3'}
+                _mp_worker_suffix = {}
+                try:
+                    odbiory_staff = rmm.get_stage_assigned_staff(
+                        project_db, self.rm_master_db_path, project_id, 'ODBIORY'
+                    )
+                    if odbiory_staff:
+                        sfx = ' (' + ', '.join(s['employee_name'] for s in odbiory_staff) + ')'
+                        for sc in _mp_odbiory_ms:
+                            _mp_worker_suffix[sc] = sfx
+                except Exception:
+                    pass
+                try:
+                    sat_eid = rmm.get_stage_employee_id(project_db, project_id, 'URUCHOMIENIE_U_KLIENTA')
+                    if sat_eid:
+                        _emp_map = {e['id']: e['name'] for e in
+                                    rmm.get_employees(self.rm_master_db_path, active_only=False)}
+                        sat_name = _emp_map.get(sat_eid, '')
+                        if sat_name:
+                            _mp_worker_suffix['URUCHOMIENIE_U_KLIENTA'] = f' ({sat_name})'
+                except Exception:
+                    pass
+
                 for stage in timeline:
                     stage_code = stage['stage_code']
                     stage_name = stage_names.get(stage_code, stage_code)
@@ -15290,6 +15357,8 @@ class RMManagerGUI:
                     
                     # Dla milestone z datą → actual LUB template
                     if is_ms:
+                        _ms_sfx = _mp_worker_suffix.get(stage_code, '')
+                        _ms_task = f"{project_label}: ✅ {stage_name}{_ms_sfx}"
                         ms_date_shown = False
                         for i, period in enumerate(stage.get('actual_periods', [])):
                             if period.get('started_at'):
@@ -15297,7 +15366,7 @@ class RMManagerGUI:
                                 end_date = period.get('ended_at', period['started_at'])
                                 start_date, end_date = self._ensure_min_1day_str(start_date, end_date)
                                 gantt_data.append({
-                                    'Task': f"{project_label}: ✅ {stage_name}",
+                                    'Task': _ms_task,
                                     'Start': start_date,
                                     'Finish': end_date,
                                     'Resource': f"{project_name} (Milestone)",
@@ -15309,7 +15378,7 @@ class RMManagerGUI:
                         if not ms_date_shown and has_template:
                             tpl_start, tpl_end = self._ensure_min_1day_str(template_start, template_end)
                             gantt_data.append({
-                                'Task': f"{project_label}: ✅ {stage_name}",
+                                'Task': _ms_task,
                                 'Start': tpl_start,
                                 'Finish': tpl_end,
                                 'Resource': f"{project_name} (Milestone)",
@@ -19701,8 +19770,19 @@ class RMManagerGUI:
             bg="#ecf0f1", font=self.FONT_BOLD, fg=var_color
         ).pack(side=tk.LEFT, padx=15)
         
+        # ===== SCROLLABLE BODY =====
+        _mp_vsb = ttk.Scrollbar(popup, orient=tk.VERTICAL)
+        _mp_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        _mp_sc = tk.Canvas(popup, yscrollcommand=_mp_vsb.set, bd=0, highlightthickness=0)
+        _mp_sc.pack(fill=tk.BOTH, expand=True)
+        _mp_vsb.config(command=_mp_sc.yview)
+        body = tk.Frame(_mp_sc)
+        _mp_sc.create_window((0, 0), window=body, anchor='nw', tags='_mpwin')
+        body.bind('<Configure>', lambda e, c=_mp_sc: c.configure(scrollregion=c.bbox('all')))
+        _mp_sc.bind('<Configure>', lambda e, c=_mp_sc: c.itemconfig('_mpwin', width=e.width))
+
         # ===== TABELA DAT (read-only) =====
-        table_frame = tk.Frame(popup, padx=15, pady=10)
+        table_frame = tk.Frame(body, padx=15, pady=10)
         table_frame.pack(fill=tk.X)
         
         for col in range(4):
@@ -19735,31 +19815,54 @@ class RMManagerGUI:
             ).grid(row=1, column=col, padx=2, pady=2, sticky="ew")
         
         # ===== PRACOWNICY =====
+        _odbiory_ms = {'FAT', 'ODBIOR_1', 'ODBIOR_2', 'ODBIOR_3'}
+        staff_source_label = ""
         try:
-            assigned_staff = rmm.get_stage_assigned_staff(
-                project_db, self.rm_master_db_path, pid, stage_code
-            )
+            if stage_code in _odbiory_ms:
+                assigned_staff = rmm.get_stage_assigned_staff(
+                    project_db, self.rm_master_db_path, pid, 'ODBIORY'
+                )
+                staff_source_label = " (z etapu Odbiory)"
+            else:
+                assigned_staff = rmm.get_stage_assigned_staff(
+                    project_db, self.rm_master_db_path, pid, stage_code
+                )
             staff_count = len(assigned_staff)
         except Exception:
             assigned_staff = []
             staff_count = 0
-        
-        if staff_count > 0:
-            staff_frame = tk.Frame(popup, padx=15, pady=3)
+
+        # Pracownik SAT (osobny mechanizm — stage_schedule.employee_id)
+        sat_employee_name = ''
+        if stage_code == 'URUCHOMIENIE_U_KLIENTA':
+            try:
+                sat_eid = rmm.get_stage_employee_id(project_db, pid, 'URUCHOMIENIE_U_KLIENTA')
+                if sat_eid:
+                    _emp_map = {e['id']: e['name'] for e in
+                                rmm.get_employees(self.rm_master_db_path, active_only=False)}
+                    sat_employee_name = _emp_map.get(sat_eid, '')
+            except Exception:
+                pass
+
+        if staff_count > 0 or sat_employee_name:
+            staff_frame = tk.Frame(body, padx=15, pady=3)
             staff_frame.pack(fill=tk.X)
             tk.Label(
-                staff_frame, text=f"👷 Pracownicy ({staff_count}):",
+                staff_frame, text=f"👷 Pracownicy{staff_source_label}:",
                 font=self.FONT_BOLD, fg=self.COLOR_GREEN
             ).pack(side=tk.LEFT, padx=(0, 8))
             staff_info = []
             for s in assigned_staff:
                 name = s['employee_name']
                 category = s['category']
-                preferred = rmm.STAGE_TO_PREFERRED_CATEGORY.get(stage_code, [])
+                ref_code = 'ODBIORY' if stage_code in _odbiory_ms else stage_code
+                preferred = rmm.STAGE_TO_PREFERRED_CATEGORY.get(ref_code, [])
                 if category not in preferred:
                     staff_info.append(f"⚠️ {name} ({category})")
                 else:
                     staff_info.append(f"👤 {name} ({category})")
+            if sat_employee_name:
+                staff_info.append(f"👤 {sat_employee_name}")
             tk.Label(
                 staff_frame, text=", ".join(staff_info),
                 font=self.FONT_SMALL, fg="gray",
@@ -19778,7 +19881,7 @@ class RMManagerGUI:
             alarms_count = 0
         
         if topic_count > 0 or notes_count > 0 or alarms_count > 0:
-            notes_frame = tk.Frame(popup, padx=15, pady=3)
+            notes_frame = tk.Frame(body, padx=15, pady=3)
             notes_frame.pack(fill=tk.X)
             notes_text = f"📝 {topic_count} tematów, {notes_count} notatek"
             if alarms_count > 0:
@@ -19809,7 +19912,7 @@ class RMManagerGUI:
         # ===== OKRESY =====
         periods = fc.get('actual_periods', [])
         if periods:
-            per_frame = tk.Frame(popup, padx=15, pady=3)
+            per_frame = tk.Frame(body, padx=15, pady=3)
             per_frame.pack(fill=tk.X)
             
             tk.Label(
@@ -19837,7 +19940,7 @@ class RMManagerGUI:
                 pay_sum = sum(m['percentage'] for m in pay_list)
                 has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in pay_list)
 
-                pay_frame = tk.Frame(popup, bg="#f8f9fa", padx=15, pady=6, relief=tk.GROOVE, bd=1)
+                pay_frame = tk.Frame(body, bg="#f8f9fa", padx=15, pady=6, relief=tk.GROOVE, bd=1)
                 pay_frame.pack(fill=tk.X, padx=15, pady=(4, 6))
 
                 if has_umorzony:
@@ -19920,7 +20023,7 @@ class RMManagerGUI:
             blk = None
         
         if blk:
-            self._mp_render_blockers_section(popup, blk)
+            self._mp_render_blockers_section(body, blk)
         
         # ===== Dopasuj rozmiar do zawartości i pokaż obok kursora =====
         try:
@@ -20647,7 +20750,34 @@ class RMManagerGUI:
                 stage_milestones[row['code']] = bool(row['is_milestone'])
             
             con.close()
-            
+
+            # Pobierz pracowników dla milestone'ów ODBIORY (FAT/ODBIOR_1-3) i SAT
+            _odbiory_ms_codes = {'FAT', 'ODBIOR_1', 'ODBIOR_2', 'ODBIOR_3'}
+            _worker_suffix = {}  # stage_code -> " (Imię Nazwisko)"
+            try:
+                odbiory_staff = rmm.get_stage_assigned_staff(
+                    project_db, self.rm_master_db_path,
+                    self.selected_project_id, 'ODBIORY'
+                )
+                if odbiory_staff:
+                    sfx = ' (' + ', '.join(s['employee_name'] for s in odbiory_staff) + ')'
+                    for sc in _odbiory_ms_codes:
+                        _worker_suffix[sc] = sfx
+            except Exception:
+                pass
+            try:
+                sat_eid = rmm.get_stage_employee_id(
+                    project_db, self.selected_project_id, 'URUCHOMIENIE_U_KLIENTA'
+                )
+                if sat_eid:
+                    _emp_map = {e['id']: e['name'] for e in rmm.get_employees(
+                        self.rm_master_db_path, active_only=False)}
+                    sat_name = _emp_map.get(sat_eid, '')
+                    if sat_name:
+                        _worker_suffix['URUCHOMIENIE_U_KLIENTA'] = f' ({sat_name})'
+            except Exception:
+                pass
+
             # Przygotuj dane dla wykresu
             gantt_data = []
             all_dates = []
@@ -20678,6 +20808,7 @@ class RMManagerGUI:
                 
                 # Dla milestone z datą → actual LUB template (bez sztucznej prognozy)
                 if is_ms:
+                    ms_task_name = f"[M] {stage_name}{_worker_suffix.get(stage_code, '')}"
                     ms_date_shown = False
                     for i, period in enumerate(stage.get('actual_periods', [])):
                         if period.get('started_at'):
@@ -20686,7 +20817,7 @@ class RMManagerGUI:
                             end_date = datetime.strptime(end_date_str[:10], '%Y-%m-%d')
                             start_date, end_date = self._ensure_min_1day_dt(start_date, end_date)
                             gantt_data.append({
-                                'task': f"[M] {stage_name}",
+                                'task': ms_task_name,
                                 'stage_code': stage_code,
                                 'start': start_date,
                                 'end': end_date,
@@ -20700,7 +20831,7 @@ class RMManagerGUI:
                         tpl_end = datetime.strptime(template_end[:10], '%Y-%m-%d')
                         tpl_start, tpl_end = self._ensure_min_1day_dt(tpl_start, tpl_end)
                         gantt_data.append({
-                            'task': f"[M] {stage_name}",
+                            'task': ms_task_name,
                             'stage_code': stage_code,
                             'start': tpl_start,
                             'end': tpl_end,
@@ -21559,8 +21690,21 @@ class RMManagerGUI:
             bg="#ecf0f1", font=self.FONT_BOLD, fg=var_color
         ).pack(side=tk.LEFT, padx=15)
         
+        # ===== SCROLLABLE BODY =====
+        _ed_wrap = tk.Frame(dialog)
+        _ed_wrap.pack(fill=tk.BOTH, expand=True)
+        _ed_vsb = ttk.Scrollbar(_ed_wrap, orient=tk.VERTICAL)
+        _ed_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        _ed_sc = tk.Canvas(_ed_wrap, yscrollcommand=_ed_vsb.set, bd=0, highlightthickness=0)
+        _ed_sc.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        _ed_vsb.config(command=_ed_sc.yview)
+        body = tk.Frame(_ed_sc)
+        _ed_sc.create_window((0, 0), window=body, anchor='nw', tags='_edwin')
+        body.bind('<Configure>', lambda e, c=_ed_sc: c.configure(scrollregion=c.bbox('all')))
+        _ed_sc.bind('<Configure>', lambda e, c=_ed_sc: c.itemconfig('_edwin', width=e.width))
+
         # ===== TABELA DAT =====
-        table_frame = tk.Frame(dialog, padx=15, pady=15)
+        table_frame = tk.Frame(body, padx=15, pady=15)
         table_frame.pack(fill=tk.BOTH, expand=True)
         
         # Konfiguracja kolumn - równomierne rozłożenie
@@ -21617,63 +21761,112 @@ class RMManagerGUI:
         template_start_entry.select_range(0, tk.END)
         
         # ===== SEKCJA PRACOWNIKÓW =====
-        staff_frame = tk.Frame(dialog, padx=15, pady=5)
+        staff_frame = tk.Frame(body, padx=15, pady=5)
         staff_frame.pack(fill=tk.X)
-        
-        # Pobierz przypisanych pracowników
-        try:
-            assigned_staff = rmm.get_stage_assigned_staff(
-                self.get_project_db_path(self.selected_project_id),
-                self.rm_master_db_path,
-                self.selected_project_id,
-                stage_code
-            )
-            staff_count = len(assigned_staff)
-        except Exception:
-            assigned_staff = []
-            staff_count = 0
-        
-        staff_btn_text = f"👷 Pracownicy ({staff_count})" if staff_count > 0 else "👷 Pracownicy"
-        staff_btn_bg = self.COLOR_GREEN if staff_count > 0 else "#95a5a6"
-        
-        def open_staff():
-            self.assign_staff_dialog(stage_code)
-        
-        tk.Button(
-            staff_frame,
-            text=staff_btn_text,
-            command=open_staff,
-            bg=staff_btn_bg,
-            fg="white",
-            font=self.FONT_BOLD,
-            padx=10,
-            pady=3,
-            cursor='hand2'
-        ).pack(side=tk.LEFT, padx=(0, 10))
-        
-        # Wyświetl listę przypisanych pracowników
-        if staff_count > 0:
-            staff_info = []
-            for s in assigned_staff:
-                name = s['employee_name']
-                category = s['category']
-                preferred = rmm.STAGE_TO_PREFERRED_CATEGORY.get(stage_code, [])
-                if category not in preferred:
-                    staff_info.append(f"⚠️ {name} ({category})")
-                else:
-                    staff_info.append(f"👤 {name} ({category})")
-            
+
+        _odbiory_ms = {'FAT', 'ODBIOR_1', 'ODBIOR_2', 'ODBIOR_3'}
+
+        # Dla milestone'ów ODBIORY i SAT — tylko wyświetl (brak własnych pracowników)
+        if stage_code in _odbiory_ms or stage_code == 'URUCHOMIENIE_U_KLIENTA':
+            ms_staff_info = []
+            if stage_code in _odbiory_ms:
+                try:
+                    odbiory_staff = rmm.get_stage_assigned_staff(
+                        self.get_project_db_path(self.selected_project_id),
+                        self.rm_master_db_path,
+                        self.selected_project_id, 'ODBIORY'
+                    )
+                    for s in odbiory_staff:
+                        ms_staff_info.append(f"👤 {s['employee_name']} ({s['category']})")
+                except Exception:
+                    pass
+                source_lbl = "👷 Pracownicy (z etapu Odbiory):"
+            else:
+                try:
+                    sat_eid = rmm.get_stage_employee_id(
+                        self.get_project_db_path(self.selected_project_id),
+                        self.selected_project_id, 'URUCHOMIENIE_U_KLIENTA'
+                    )
+                    if sat_eid:
+                        _emp_map = {e['id']: e['name'] for e in
+                                    rmm.get_employees(self.rm_master_db_path, active_only=False)}
+                        sat_name = _emp_map.get(sat_eid, '')
+                        if sat_name:
+                            ms_staff_info.append(f"👤 {sat_name}")
+                except Exception:
+                    pass
+                source_lbl = "👷 Pracownik (SAT):"
+
             tk.Label(
+                staff_frame, text=source_lbl,
+                font=self.FONT_BOLD, fg=self.COLOR_GREEN
+            ).pack(side=tk.LEFT, padx=(0, 8))
+            if ms_staff_info:
+                tk.Label(
+                    staff_frame,
+                    text=", ".join(ms_staff_info),
+                    font=self.FONT_SMALL, fg="gray",
+                    wraplength=600, justify=tk.LEFT
+                ).pack(side=tk.LEFT, padx=5)
+            else:
+                tk.Label(
+                    staff_frame, text="— brak przypisanych —",
+                    font=self.FONT_SMALL, fg="gray"
+                ).pack(side=tk.LEFT, padx=5)
+        else:
+            # Standardowe etapy — przycisk + lista
+            try:
+                assigned_staff = rmm.get_stage_assigned_staff(
+                    self.get_project_db_path(self.selected_project_id),
+                    self.rm_master_db_path,
+                    self.selected_project_id,
+                    stage_code
+                )
+                staff_count = len(assigned_staff)
+            except Exception:
+                assigned_staff = []
+                staff_count = 0
+
+            staff_btn_text = f"👷 Pracownicy ({staff_count})" if staff_count > 0 else "👷 Pracownicy"
+            staff_btn_bg = self.COLOR_GREEN if staff_count > 0 else "#95a5a6"
+
+            def open_staff():
+                self.assign_staff_dialog(stage_code)
+
+            tk.Button(
                 staff_frame,
-                text=", ".join(staff_info),
-                font=self.FONT_SMALL,
-                fg="gray",
-                wraplength=600,
-                justify=tk.LEFT
-            ).pack(side=tk.LEFT, padx=5)
+                text=staff_btn_text,
+                command=open_staff,
+                bg=staff_btn_bg,
+                fg="white",
+                font=self.FONT_BOLD,
+                padx=10,
+                pady=3,
+                cursor='hand2'
+            ).pack(side=tk.LEFT, padx=(0, 10))
+
+            if staff_count > 0:
+                staff_info = []
+                for s in assigned_staff:
+                    name = s['employee_name']
+                    category = s['category']
+                    preferred = rmm.STAGE_TO_PREFERRED_CATEGORY.get(stage_code, [])
+                    if category not in preferred:
+                        staff_info.append(f"⚠️ {name} ({category})")
+                    else:
+                        staff_info.append(f"👤 {name} ({category})")
+
+                tk.Label(
+                    staff_frame,
+                    text=", ".join(staff_info),
+                    font=self.FONT_SMALL,
+                    fg="gray",
+                    wraplength=600,
+                    justify=tk.LEFT
+                ).pack(side=tk.LEFT, padx=5)
         
         # ===== SEKCJA NOTATEK =====
-        notes_frame = tk.Frame(dialog, padx=15, pady=5)
+        notes_frame = tk.Frame(body, padx=15, pady=5)
         notes_frame.pack(fill=tk.X)
         
         # Pobierz statystyki notatek
@@ -22155,8 +22348,9 @@ class RMManagerGUI:
         dialog = tk.Toplevel(self.root)
         dialog.transient(self.root)
         dialog.title(f"Edytuj datę szablonu - {stage_code}")
-        dialog.geometry("400x200")
-        dialog.resizable(False, False)
+        dialog.geometry("420x220")
+        dialog.resizable(True, True)
+        dialog.minsize(380, 200)
         
         # Wyśrodkuj okno
         dialog.update_idletasks()
@@ -23581,7 +23775,9 @@ class RMManagerGUI:
         dialog = tk.Toplevel(self.root)
         dialog.title("Konfiguracja SMS - SMSAPI.pl")
         dialog.transient(self.root)
-        dialog.geometry("650x550")
+        dialog.geometry("650x580")
+        dialog.resizable(True, True)
+        dialog.minsize(600, 450)
         
         # Centrowanie okna
         dialog.update_idletasks()
@@ -24237,7 +24433,9 @@ class RMManagerGUI:
         dialog.transient(self.root)
         dialog.grab_set()
         
-        self._center_window(dialog, 420, 360)
+        self._center_window(dialog, 440, 400)
+        dialog.resizable(True, True)
+        dialog.minsize(400, 350)
         
         # Info o aktualnym stanie
         info_text = f"Zapłacono: {current_sum}%  |  Pozostało: {remaining}%"
@@ -25225,7 +25423,9 @@ class RMManagerGUI:
         dialog.transient(self.root)
         dialog.grab_set()
         
-        self._center_window(dialog, 450, 300)
+        self._center_window(dialog, 450, 320)
+        dialog.resizable(True, True)
+        dialog.minsize(400, 280)
         
         # Typ kodu
         tk.Label(dialog, text="Typ kodu:", font=self.FONT_DEFAULT).grid(row=0, column=0, sticky='e', padx=10, pady=10)
@@ -25482,7 +25682,9 @@ class RMManagerGUI:
         dialog.transient(self.root)
         dialog.grab_set()
         
-        self._center_window(dialog, 400, 200)
+        self._center_window(dialog, 420, 240)
+        dialog.resizable(True, True)
+        dialog.minsize(380, 200)
         
         tk.Label(dialog, text="Notatka (opcjonalnie):", font=self.FONT_DEFAULT).pack(pady=10)
         notes_entry = tk.Entry(dialog, width=40, font=self.FONT_DEFAULT)
@@ -25718,8 +25920,15 @@ class RMManagerGUI:
             for emp in employees:
                 var = tk.BooleanVar(value=any(r['id'] == emp['id'] for r in selected_recipients))
                 checkbox_vars[emp['id']] = (var, emp)
-                tk.Checkbutton(inner, text=f"{emp['name']} ({emp.get('category', '')})",
-                               variable=var, font=self.FONT_DEFAULT).pack(anchor='w', pady=2, padx=5)
+                _e = emp.get('email', '') or emp.get('contact_info', '') or '—'
+                _p = emp.get('phone', '') or '—'
+                _row = tk.Frame(inner, bg='white')
+                _row.pack(fill=tk.X, pady=1, padx=5)
+                tk.Checkbutton(_row, text=f"{emp['name']} ({emp.get('category', '')})",
+                               variable=var, font=self.FONT_DEFAULT,
+                               anchor='w', bg='white').pack(side=tk.LEFT)
+                tk.Label(_row, text=f"📧 {_e}  📱 {_p}",
+                         font=("Arial", 8), fg="#7f8c8d", bg='white').pack(side=tk.LEFT, padx=(8, 0))
 
             def confirm():
                 selected_recipients.clear()
@@ -26211,8 +26420,15 @@ class RMManagerGUI:
                 emp_category = emp.get('category', '')
                 var = tk.BooleanVar(value=any(r['id'] == emp_id for r in selected_recipients))
                 checkbox_vars[emp_id] = (var, emp_name, emp_category, emp)
-                tk.Checkbutton(inner_frame, text=f"{emp_name} ({emp_category})",
-                               variable=var, font=self.FONT_DEFAULT).pack(anchor='w', pady=2, padx=5)
+                _e = emp.get('email', '') or emp.get('contact_info', '') or '—'
+                _p = emp.get('phone', '') or '—'
+                _row = tk.Frame(inner_frame, bg='white')
+                _row.pack(fill=tk.X, pady=1, padx=5)
+                tk.Checkbutton(_row, text=f"{emp_name} ({emp_category})",
+                               variable=var, font=self.FONT_DEFAULT,
+                               anchor='w', bg='white').pack(side=tk.LEFT)
+                tk.Label(_row, text=f"📧 {_e}  📱 {_p}",
+                         font=("Arial", 8), fg="#7f8c8d", bg='white').pack(side=tk.LEFT, padx=(8, 0))
             
             def confirm_selection():
                 selected_recipients.clear()
@@ -29233,7 +29449,8 @@ Kod: {unlock_code}
 
         win = tk.Toplevel(parent)
         win.title(f"⚡ Gotowość do optymalizacji — {pname}")
-        win.resizable(False, False)
+        win.resizable(True, True)
+        win.minsize(430, 200)
         win.grab_set()
 
         hdr_bg = "#27ae60" if result['can_optimize'] else "#e74c3c"
@@ -29242,8 +29459,17 @@ Kod: {unlock_code}
         tk.Label(win, text=hdr_text, bg=hdr_bg, fg="white",
                  font=("Arial", 10, "bold"), pady=8, padx=12).pack(fill=tk.X)
 
-        body = tk.Frame(win, padx=16, pady=10)
-        body.pack(fill=tk.BOTH)
+        _opr_wrap = tk.Frame(win)
+        _opr_wrap.pack(fill=tk.BOTH, expand=True)
+        _opr_vsb = ttk.Scrollbar(_opr_wrap, orient=tk.VERTICAL)
+        _opr_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        _opr_sc = tk.Canvas(_opr_wrap, yscrollcommand=_opr_vsb.set, bd=0, highlightthickness=0)
+        _opr_sc.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        _opr_vsb.config(command=_opr_sc.yview)
+        body = tk.Frame(_opr_sc, padx=16, pady=10)
+        _opr_sc.create_window((0, 0), window=body, anchor='nw', tags='_oprwin')
+        body.bind('<Configure>', lambda e, c=_opr_sc: c.configure(scrollregion=c.bbox('all')))
+        _opr_sc.bind('<Configure>', lambda e, c=_opr_sc: c.itemconfig('_oprwin', width=e.width))
 
         # Projekt i linia
         tk.Label(body, text=f"Projekt: {pname}", font=("Arial", 9, "bold"),
