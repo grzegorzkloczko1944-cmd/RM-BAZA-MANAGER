@@ -29751,9 +29751,10 @@ Kod: {unlock_code}
                         'template_start': r['template_start'] or '',
                         'template_end':   r['template_end']   or '',
                         'master_name':    '',
+                        'employee_ids':   [],
                     }
 
-                # Master z stage_staff_assignments
+                # Master + lista pracowników z stage_staff_assignments
                 try:
                     for sr in con.execute("""
                         SELECT ps.stage_code, ssa.employee_id
@@ -29762,22 +29763,30 @@ Kod: {unlock_code}
                         WHERE ps.project_id = ?
                     """, (pid,)).fetchall():
                         sc = sr['stage_code']
-                        if sc in stages and not stages[sc]['master_name']:
-                            stages[sc]['master_name'] = emp_names.get(
-                                sr['employee_id'], f"#{sr['employee_id']}")
+                        if sc in stages:
+                            eid = sr['employee_id']
+                            if not stages[sc]['master_name']:
+                                stages[sc]['master_name'] = emp_names.get(eid, f"#{eid}")
+                            if eid not in stages[sc]['employee_ids']:
+                                stages[sc]['employee_ids'].append(eid)
                 except Exception:
                     pass
 
-                # Fallback: master z JSON assigned_staff
+                # Fallback: master + pracownicy z JSON assigned_staff
                 for r in rows:
                     sc = r['stage_code']
-                    if sc in stages and not stages[sc]['master_name']:
+                    if sc in stages and not stages[sc]['employee_ids']:
                         try:
                             staff = json.loads(r['assigned_staff'] or '[]')
-                            if staff and isinstance(staff[0], dict):
-                                eid = staff[0].get('employee_id')
-                                if eid:
-                                    stages[sc]['master_name'] = emp_names.get(eid, f"#{eid}")
+                            for s in staff:
+                                if isinstance(s, dict):
+                                    eid = s.get('employee_id')
+                                    if eid:
+                                        if not stages[sc]['master_name']:
+                                            stages[sc]['master_name'] = emp_names.get(
+                                                eid, f"#{eid}")
+                                        if eid not in stages[sc]['employee_ids']:
+                                            stages[sc]['employee_ids'].append(eid)
                         except Exception:
                             pass
 
@@ -29990,17 +29999,10 @@ Kod: {unlock_code}
             _copyable_stages.clear()
 
             for sc, _ in ordered_stages:
-                # Kopiowalny = etap prowadzony jednocześnie (z definicji linii)
-                # Jeśli linia nie ma zdefiniowanych etapów równoległych → wszystkie kopiowalny
-                if parallel_stages:
-                    is_copyable = sc in parallel_stages
-                else:
-                    is_copyable = True
-
-                if is_copyable:
-                    _copyable_stages.add(sc)
-                else:
-                    _selected_sc.discard(sc)  # odznacz jeśli stał się niekopiowalny
+                # Wszystkie etapy są kopiowalny — parallel_stages służy tylko jako
+                # wyróżnienie wizualne (niebieska etykieta = etap równoległy linii).
+                is_parallel = bool(parallel_stages) and sc in parallel_stages
+                _copyable_stages.add(sc)
 
                 sel = sc in _selected_sc
 
@@ -30022,14 +30024,16 @@ Kod: {unlock_code}
                 if name_lbl:
                     if sel:
                         name_lbl.config(bg=BG_SEL_C, fg="#333",
-                                        font=(FONT_D[0], FONT_D[1], "bold"))
-                    elif is_copyable:
-                        name_lbl.config(bg=BG_NEU_C, fg="#333", font=FONT_D,
+                                        font=(FONT_D[0], FONT_D[1], "bold"),
+                                        cursor="hand2")
+                    elif is_parallel:
+                        # Etap równoległy linii — wyróżniony kolorem (nadal kopiowalny)
+                        name_lbl.config(bg=BG_NEU_C, fg="#1a5276",
+                                        font=(FONT_D[0], FONT_D[1], "bold"),
                                         cursor="hand2")
                     else:
-                        name_lbl.config(bg=BG_NEU_C, fg="#aaa",
-                                        font=(FONT_D[0], FONT_D[1], "italic"),
-                                        cursor="")
+                        name_lbl.config(bg=BG_NEU_C, fg="#333", font=FONT_D,
+                                        cursor="hand2")
 
         def _update_colors():
             src_pid = _get_src_pid()
@@ -30063,6 +30067,28 @@ Kod: {unlock_code}
                         if sc in project_data.get(pid, {}):
                             project_data[pid][sc]['template_start'] = r['template_start'] or ''
                             project_data[pid][sc]['template_end']   = r['template_end']   or ''
+
+                    # Przeładuj pracowników
+                    for sc in list(project_data.get(pid, {}).keys()):
+                        project_data[pid][sc]['master_name'] = ''
+                        project_data[pid][sc]['employee_ids'] = []
+                    try:
+                        for sr in con.execute("""
+                            SELECT ps.stage_code, ssa.employee_id
+                            FROM stage_staff_assignments ssa
+                            JOIN project_stages ps ON ssa.project_stage_id = ps.id
+                            WHERE ps.project_id = ?
+                        """, (pid,)).fetchall():
+                            sc = sr['stage_code']
+                            if sc in project_data.get(pid, {}):
+                                eid = sr['employee_id']
+                                if not project_data[pid][sc]['master_name']:
+                                    project_data[pid][sc]['master_name'] = emp_names.get(
+                                        eid, f"#{eid}")
+                                if eid not in project_data[pid][sc]['employee_ids']:
+                                    project_data[pid][sc]['employee_ids'].append(eid)
+                    except Exception:
+                        pass
                     con.close()
                 except Exception as e:
                     print(f"⚠️ _reload_table pid={pid}: {e}")
@@ -30078,12 +30104,37 @@ Kod: {unlock_code}
         btns = tk.Frame(win, padx=8, pady=6)
         btns.pack(fill=tk.X)
 
-        def _do_copy(only_selected: bool):
+        def _check_lock_conflicts(tgt_pids):
+            conflicts = []
+            is_stub = getattr(self.lock_manager, '_STUB', False)
+            if not is_stub:
+                for p in tgt_pids:
+                    owner = self.lock_manager.get_project_lock_owner(p)
+                    if owner is None:
+                        continue
+                    if (owner.get('computer') == self.lock_manager.my_computer
+                            and owner.get('user') == self.lock_manager.my_name):
+                        continue
+                    owner_name = self._get_user_display_name(owner.get('user', '?'))
+                    conflicts.append(f"  • {proj_names.get(p, str(p))} — zajęty przez: {owner_name}")
+            if conflicts:
+                conflict_msg = ("Projekty zablokowane przez innych użytkowników:\n\n"
+                                + "\n".join(conflicts)
+                                + "\n\nCzy mimo to wymusić kopiowanie?\n"
+                                  "(Uwaga: może to nadpisać zmiany wprowadzone przez drugiego użytkownika)")
+                return messagebox.askyesno("Konflikty locków", conflict_msg,
+                                           icon='warning', parent=win)
+            return True
+
+        def _get_tgt_pids(src_pid):
+            return [pid for pid, v in tgt_vars.items() if v.get() and pid != src_pid]
+
+        def _do_copy(only_selected: bool, create_new: bool = True):
             src_pid = _get_src_pid()
             if src_pid is None:
                 messagebox.showwarning("Brak źródła", "Wybierz projekt źródłowy.", parent=win)
                 return
-            tgt_pids = [pid for pid, v in tgt_vars.items() if v.get() and pid != src_pid]
+            tgt_pids = _get_tgt_pids(src_pid)
             if not tgt_pids:
                 messagebox.showwarning("Brak celu",
                                        "Zaznacz co najmniej jeden projekt docelowy.",
@@ -30094,68 +30145,222 @@ Kod: {unlock_code}
                 stage_codes = [sc for sc in _selected_sc if sc in _copyable_stages]
                 if not stage_codes:
                     messagebox.showinfo("Brak zaznaczenia",
-                                        "Kliknij kopiowalny wiersz (czarny tekst) aby go zaznaczyć.",
+                                        "Kliknij wiersz etapu aby go zaznaczyć.",
                                         parent=win)
                     return
             else:
                 stage_codes = [sc for sc, _ in ordered_stages if sc in _copyable_stages]
 
-            # ── Sprawdź konflikty locków (bez przejmowania) ────────────
-            # acquire_project_locks_bulk zwalnia istniejące locki spoza zestawu
-            # — niszczyłoby lock aktywnego projektu. Zamiast tego tylko sprawdzamy
-            # czy ktoś inny aktualnie trzyma lock na projekcie docelowym.
-            conflicts = []
-            is_stub = getattr(self.lock_manager, '_STUB', False)
-            if not is_stub:
-                for p in tgt_pids:
-                    owner = self.lock_manager.get_project_lock_owner(p)
-                    if owner is None:
-                        continue
-                    if (owner.get('computer') == self.lock_manager.my_computer
-                            and owner.get('user') == self.lock_manager.my_name):
-                        continue  # mój własny lock — OK
-                    owner_name = self._get_user_display_name(owner.get('user', '?'))
-                    conflicts.append(f"  • {proj_names.get(p, str(p))} — zajęty przez: {owner_name}")
+            if not _check_lock_conflicts(tgt_pids):
+                return
 
-            if conflicts:
-                conflict_msg = ("Projekty zablokowane przez innych użytkowników:\n\n"
-                                + "\n".join(conflicts)
-                                + "\n\nCzy mimo to wymusić kopiowanie?\n"
-                                  "(Uwaga: może to nadpisać zmiany wprowadzone przez drugiego użytkownika)")
-                if not messagebox.askyesno("Konflikty locków", conflict_msg,
-                                           icon='warning', parent=win):
-                    return
-
-            # ── Kopiuj ─────────────────────────────────────────────────
             src_stages = project_data.get(src_pid, {})
             errors = []
             total_copied = 0
 
             for tgt_pid in tgt_pids:
-                tgt_stages = project_data.get(tgt_pid, {})
+                tgt_db_path = self.get_project_db_path(tgt_pid)
+                locally_created: set = set()
+
+                if create_new:
+                    tgt_stages_orig = set(project_data.get(tgt_pid, {}).keys())
+                else:
+                    tgt_stages_orig = set(
+                        sc for sc, d in project_data.get(tgt_pid, {}).items()
+                        if d.get('template_start')
+                    )
+
+                # Fioletowy: utwórz brakujące etapy PRZED kopiowaniem dat
+                if create_new:
+                    for sc in stage_codes:
+                        if sc in tgt_stages_orig or sc in locally_created:
+                            continue
+                        src = src_stages.get(sc)
+                        if not src or not src.get('template_start') or not src.get('template_end'):
+                            continue
+                        try:
+                            con = rmm._open_rm_connection(tgt_db_path)
+                            row = con.execute(
+                                "SELECT MAX(sequence) AS ms FROM project_stages "
+                                "WHERE project_id = ?", (tgt_pid,)
+                            ).fetchone()
+                            next_seq = (row['ms'] or 0) + 1 if row else 1
+                            cur = con.execute(
+                                "INSERT INTO project_stages "
+                                "(project_id, stage_code, sequence) VALUES (?, ?, ?)",
+                                (tgt_pid, sc, next_seq)
+                            )
+                            ps_id = cur.lastrowid
+                            con.execute(
+                                "INSERT INTO stage_schedule (project_stage_id) VALUES (?)",
+                                (ps_id,)
+                            )
+                            con.commit()
+                            con.close()
+                            locally_created.add(sc)
+                        except Exception as e:
+                            errors.append(f"Tworzenie etapu {sc} "
+                                          f"({proj_names.get(tgt_pid, tgt_pid)}): {e}")
+
                 stage_dates = {}
                 for sc in stage_codes:
                     src = src_stages.get(sc)
                     if src is None or not src['template_start'] or not src['template_end']:
                         continue
-                    if sc not in tgt_stages:
+                    if sc not in tgt_stages_orig and sc not in locally_created:
                         continue
                     stage_dates[sc] = (src['template_start'], src['template_end'])
+
                 if not stage_dates:
                     continue
+
                 try:
                     rmm.apply_optimization_result(self.rm_projects_dir, tgt_pid, stage_dates)
                     total_copied += len(stage_dates)
+                    rmm.recalculate_forecast(tgt_db_path, tgt_pid)
                 except Exception as e:
                     errors.append(f"Projekt {proj_names.get(tgt_pid, tgt_pid)}: {e}")
+
+                if tgt_pid in getattr(self, '_line_locked_pids', []):
+                    self._snapshot_line_project(tgt_pid)
+                elif tgt_pid == getattr(self, '_locked_project_id', None):
+                    self._snapshot_stage_dates()
 
             if errors:
                 messagebox.showerror("Błędy podczas kopiowania", "\n".join(errors), parent=win)
             else:
                 tgt_names = ", ".join(proj_names.get(p, str(p)) for p in tgt_pids)
-                messagebox.showinfo("Skopiowano",
-                                    f"Skopiowano {total_copied} dat etapów do:\n{tgt_names}",
-                                    parent=win)
+                summary = f"{total_copied} dat etapów" if total_copied else "0 etapów"
+                messagebox.showinfo("Skopiowano", f"Skopiowano {summary} do:\n{tgt_names}", parent=win)
+            _reload_table()
+            _refresh_main_app()
+
+        def _do_copy_workers(only_selected: bool, create_new: bool = True):
+            src_pid = _get_src_pid()
+            if src_pid is None:
+                messagebox.showwarning("Brak źródła", "Wybierz projekt źródłowy.", parent=win)
+                return
+            tgt_pids = _get_tgt_pids(src_pid)
+            if not tgt_pids:
+                messagebox.showwarning("Brak celu",
+                                       "Zaznacz co najmniej jeden projekt docelowy.",
+                                       parent=win)
+                return
+
+            if only_selected:
+                stage_codes = [sc for sc in _selected_sc if sc in _copyable_stages]
+                if not stage_codes:
+                    messagebox.showinfo("Brak zaznaczenia",
+                                        "Kliknij wiersz etapu aby go zaznaczyć.",
+                                        parent=win)
+                    return
+            else:
+                stage_codes = [sc for sc, _ in ordered_stages if sc in _copyable_stages]
+
+            if not _check_lock_conflicts(tgt_pids):
+                return
+
+            src_stages = project_data.get(src_pid, {})
+            errors = []
+            total_workers = 0
+
+            for tgt_pid in tgt_pids:
+                tgt_db_path = self.get_project_db_path(tgt_pid)
+                locally_created: set = set()
+
+                if not create_new and not only_selected:
+                    # Zielony-pracownicy: tylko etapy z datami w celu
+                    tgt_stages_ref = set(
+                        sc for sc, d in project_data.get(tgt_pid, {}).items()
+                        if d.get('template_start')
+                    )
+                else:
+                    # Fioletowy-pracownicy / Niebieski: wszystkie etapy z project_stages
+                    tgt_stages_ref = set(project_data.get(tgt_pid, {}).keys())
+
+                for sc in stage_codes:
+                    src = src_stages.get(sc)
+                    src_eids = src.get('employee_ids', []) if src else []
+
+                    if not create_new and not only_selected and sc not in tgt_stages_ref:
+                        continue  # Zielony: pomiń etapy bez dat w celu
+
+                    # Fioletowy: utwórz etap jeśli nie istnieje i źródło ma pracowników
+                    if create_new and sc not in tgt_stages_ref and sc not in locally_created:
+                        if not src_eids:
+                            continue
+                        try:
+                            con = rmm._open_rm_connection(tgt_db_path)
+                            row = con.execute(
+                                "SELECT MAX(sequence) AS ms FROM project_stages "
+                                "WHERE project_id = ?", (tgt_pid,)
+                            ).fetchone()
+                            next_seq = (row['ms'] or 0) + 1 if row else 1
+                            cur = con.execute(
+                                "INSERT INTO project_stages "
+                                "(project_id, stage_code, sequence) VALUES (?, ?, ?)",
+                                (tgt_pid, sc, next_seq)
+                            )
+                            ps_id = cur.lastrowid
+                            con.execute(
+                                "INSERT INTO stage_schedule (project_stage_id) VALUES (?)",
+                                (ps_id,)
+                            )
+                            con.commit()
+                            con.close()
+                            locally_created.add(sc)
+                        except Exception as e:
+                            errors.append(f"Tworzenie etapu {sc} "
+                                          f"({proj_names.get(tgt_pid, tgt_pid)}): {e}")
+                            continue
+
+                    # Wyczyść pracowników (nadpisanie) i sprawdź czy etap istnieje w DB
+                    stage_found = False
+                    try:
+                        con = rmm._open_rm_connection(tgt_db_path)
+                        ps_row = con.execute(
+                            "SELECT id FROM project_stages "
+                            "WHERE project_id = ? AND stage_code = ?",
+                            (tgt_pid, sc)
+                        ).fetchone()
+                        if ps_row:
+                            stage_found = True
+                            ps_id = ps_row['id']
+                            try:
+                                con.execute(
+                                    "DELETE FROM stage_staff_assignments "
+                                    "WHERE project_stage_id = ?", (ps_id,))
+                            except sqlite3.OperationalError:
+                                pass
+                            con.execute(
+                                "UPDATE project_stages SET assigned_staff = '[]' "
+                                "WHERE id = ?", (ps_id,))
+                            con.commit()
+                        con.close()
+                    except Exception as e:
+                        print(f"⚠️ Czyszczenie pracowników {sc} pid={tgt_pid}: {e}")
+
+                    if not stage_found:
+                        continue
+
+                    for eid in src_eids:
+                        try:
+                            rmm.add_staff_to_stage(
+                                tgt_db_path, self.rm_master_db_path,
+                                tgt_pid, sc, eid, self.current_user
+                            )
+                            total_workers += 1
+                        except Exception as e:
+                            errors.append(f"Pracownik {eid}→{sc} "
+                                          f"({proj_names.get(tgt_pid, tgt_pid)}): {e}")
+
+            if errors:
+                messagebox.showerror("Błędy kopiowania pracowników", "\n".join(errors), parent=win)
+            else:
+                tgt_names = ", ".join(proj_names.get(p, str(p)) for p in tgt_pids)
+                summary = f"{total_workers} przypisań" if total_workers else "0 (wyczyszczono)"
+                messagebox.showinfo("Skopiowano pracowników",
+                                    f"Skopiowano {summary} do:\n{tgt_names}", parent=win)
             _reload_table()
             _refresh_main_app()
 
@@ -30188,15 +30393,38 @@ Kod: {unlock_code}
 
         win.after(15_000, _auto_refresh)
 
+        # ── Rząd 1: etapy ──────────────────────────────────────────────
         tk.Button(btns, text="📋 Kopiuj zaznaczone etapy", font=("Arial", 9),
                   bg="#3498db", fg="white", padx=10, pady=4,
                   command=lambda: _do_copy(only_selected=True)).pack(side=tk.LEFT, padx=4)
+        tk.Button(btns, text="📋 Kopiuj wszystkie etapy bez tworzenia nowych",
+                  font=("Arial", 9),
+                  bg="#27ae60", fg="white", padx=10, pady=4,
+                  command=lambda: _do_copy(only_selected=False, create_new=False)
+                  ).pack(side=tk.LEFT, padx=4)
         tk.Button(btns, text="📋 Kopiuj wszystkie etapy", font=("Arial", 9),
                   bg="#8e44ad", fg="white", padx=10, pady=4,
-                  command=lambda: _do_copy(only_selected=False)).pack(side=tk.LEFT, padx=4)
+                  command=lambda: _do_copy(only_selected=False, create_new=True)
+                  ).pack(side=tk.LEFT, padx=4)
         tk.Button(btns, text="🔄 Odśwież", font=("Arial", 9),
                   padx=10, pady=4,
                   command=_reload_table).pack(side=tk.LEFT, padx=8)
+
+        # ── Rząd 2: pracownicy ──────────────────────────────────────────
+        btns2 = tk.Frame(win, padx=8, pady=2)
+        btns2.pack(fill=tk.X)
+        tk.Button(btns2, text="👷 Kopiuj zaznaczonych pracowników", font=("Arial", 9),
+                  bg="#2980b9", fg="white", padx=10, pady=4,
+                  command=lambda: _do_copy_workers(only_selected=True)).pack(side=tk.LEFT, padx=4)
+        tk.Button(btns2, text="👷 Kopiuj wszystkich pracowników bez tworzenia etapów",
+                  font=("Arial", 9),
+                  bg="#27ae60", fg="white", padx=10, pady=4,
+                  command=lambda: _do_copy_workers(only_selected=False, create_new=False)
+                  ).pack(side=tk.LEFT, padx=4)
+        tk.Button(btns2, text="👷 Kopiuj wszystkich pracowników", font=("Arial", 9),
+                  bg="#8e44ad", fg="white", padx=10, pady=4,
+                  command=lambda: _do_copy_workers(only_selected=False, create_new=True)
+                  ).pack(side=tk.LEFT, padx=4)
 
         def _deselect_all():
             _selected_sc.clear()
