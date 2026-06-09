@@ -29955,10 +29955,13 @@ Kod: {unlock_code}
 
             for col_i, pid in enumerate(valid_pids, start=1):
                 lbl = tk.Label(inner, text=_build_cell(pid, sc), font=FONT_D,
-                               bg=BG_NEU_C, anchor='w', width=W_PROJ, relief=tk.FLAT)
+                               bg=BG_NEU_C, anchor='w', width=W_PROJ, relief=tk.FLAT,
+                               cursor="hand2")
                 lbl.grid(row=row_i, column=col_i, sticky='nsew', padx=1, pady=0)
                 cell_widgets[(sc, pid)] = lbl
                 row_lbls.append(lbl)
+                lbl.bind("<Double-Button-1>",
+                         lambda e, _pid=pid, _sc=sc: _open_worker_editor(_pid, _sc))
 
             row_all_labels[sc] = row_lbls
 
@@ -30099,6 +30102,138 @@ Kod: {unlock_code}
                         lbl.config(text=_build_cell(pid, sc))
             _update_colors()
             win.update_idletasks()
+
+        def _open_worker_editor(pid, sc):
+            """Otwórz popup do ręcznej edycji pracowników dla etapu w projekcie."""
+            tgt_db_path = self.get_project_db_path(pid)
+            if not Path(tgt_db_path).exists():
+                messagebox.showwarning("Brak bazy",
+                                       f"Baza projektu {pid} nie istnieje.", parent=win)
+                return
+
+            stage_data = project_data.get(pid, {}).get(sc)
+            if stage_data is None:
+                messagebox.showwarning("Brak etapu",
+                                       f"Etap {sc} nie istnieje w projekcie "
+                                       f"{proj_names.get(pid, str(pid))}.", parent=win)
+                return
+
+            current_eids = set(stage_data.get('employee_ids', []))
+            stage_name = stage_display.get(sc, sc)
+            proj_name  = proj_names.get(pid, str(pid))
+
+            popup = tk.Toplevel(win)
+            popup.title(f"👷 Pracownicy — {stage_name} / {proj_name}")
+            popup.resizable(False, False)
+            popup.grab_set()
+
+            tk.Label(popup, text=stage_name, font=("Arial", 11, "bold")
+                     ).pack(padx=14, pady=(12, 0), anchor='w')
+            tk.Label(popup, text=proj_name, font=("Arial", 9), fg="#555"
+                     ).pack(padx=14, pady=(0, 8), anchor='w')
+
+            # Lista z paskiem przewijania
+            list_frame = tk.Frame(popup, bd=1, relief=tk.SUNKEN)
+            list_frame.pack(padx=14, pady=4, fill=tk.BOTH, expand=True)
+
+            canvas_e = tk.Canvas(list_frame, width=300, height=320, highlightthickness=0)
+            sb = tk.Scrollbar(list_frame, orient="vertical", command=canvas_e.yview)
+            inner_e = tk.Frame(canvas_e)
+            inner_e.bind("<Configure>",
+                         lambda e: canvas_e.configure(scrollregion=canvas_e.bbox("all")))
+            canvas_e.create_window((0, 0), window=inner_e, anchor="nw")
+            canvas_e.configure(yscrollcommand=sb.set)
+            canvas_e.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+            # Mysz → scroll
+            canvas_e.bind_all("<MouseWheel>",
+                              lambda e: canvas_e.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+
+            check_vars = {}
+            if emp_names:
+                for eid, ename in sorted(emp_names.items(), key=lambda x: x[1]):
+                    var = tk.BooleanVar(value=(eid in current_eids))
+                    tk.Checkbutton(inner_e, text=ename, variable=var,
+                                   anchor='w', font=("Arial", 9)
+                                   ).pack(fill=tk.X, padx=6, pady=1)
+                    check_vars[eid] = var
+            else:
+                tk.Label(inner_e, text="Brak pracowników w bazie",
+                         fg="gray", font=("Arial", 9)).pack(padx=6, pady=10)
+
+            # Przyciski
+            btn_f = tk.Frame(popup)
+            btn_f.pack(padx=14, pady=(6, 12), fill=tk.X)
+
+            def _save():
+                selected_eids = [eid for eid, v in check_vars.items() if v.get()]
+                # Wyczyść
+                try:
+                    con = rmm._open_rm_connection(tgt_db_path)
+                    ps_row = con.execute(
+                        "SELECT id FROM project_stages "
+                        "WHERE project_id = ? AND stage_code = ?",
+                        (pid, sc)
+                    ).fetchone()
+                    if not ps_row:
+                        con.close()
+                        messagebox.showerror("Błąd",
+                                             "Etap nie istnieje w bazie projektu.",
+                                             parent=popup)
+                        return
+                    ps_id = ps_row['id']
+                    try:
+                        con.execute("DELETE FROM stage_staff_assignments "
+                                    "WHERE project_stage_id = ?", (ps_id,))
+                    except sqlite3.OperationalError:
+                        pass
+                    con.execute("UPDATE project_stages SET assigned_staff = '[]' "
+                                "WHERE id = ?", (ps_id,))
+                    con.commit()
+                    con.close()
+                except Exception as e:
+                    messagebox.showerror("Błąd", f"Błąd czyszczenia: {e}", parent=popup)
+                    return
+
+                # Dodaj wybranych
+                errs = []
+                for eid in selected_eids:
+                    try:
+                        rmm.add_staff_to_stage(
+                            tgt_db_path, self.rm_master_db_path,
+                            pid, sc, eid, self.current_user)
+                    except Exception as e:
+                        errs.append(f"{emp_names.get(eid, str(eid))}: {e}")
+
+                # Aktualizuj project_data in-memory
+                if pid in project_data and sc in project_data[pid]:
+                    project_data[pid][sc]['employee_ids'] = selected_eids
+                    project_data[pid][sc]['master_name'] = (
+                        emp_names.get(selected_eids[0], '') if selected_eids else '')
+
+                # Odśwież komórkę
+                lbl = cell_widgets.get((sc, pid))
+                if lbl:
+                    lbl.config(text=_build_cell(pid, sc))
+                _update_cell_colors()
+
+                if errs:
+                    messagebox.showwarning("Błędy", "\n".join(errs), parent=popup)
+                popup.destroy()
+
+            tk.Button(btn_f, text="✅ Zapisz", bg="#27ae60", fg="white",
+                      font=("Arial", 9), padx=12, pady=4,
+                      command=_save).pack(side=tk.LEFT, padx=4)
+            tk.Button(btn_f, text="✖ Anuluj", font=("Arial", 9),
+                      padx=12, pady=4,
+                      command=popup.destroy).pack(side=tk.LEFT, padx=4)
+
+            popup.update_idletasks()
+            pw, ph = popup.winfo_width(), popup.winfo_height()
+            x = win.winfo_rootx() + (win.winfo_width()  - pw) // 2
+            y = win.winfo_rooty() + (win.winfo_height() - ph) // 2
+            popup.geometry(f"+{x}+{y}")
 
         # ── PRZYCISKI ──────────────────────────────────────────────────
         btns = tk.Frame(win, padx=8, pady=6)
