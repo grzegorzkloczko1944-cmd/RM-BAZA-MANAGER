@@ -8930,7 +8930,93 @@ class RMManagerGUI:
             width=8,
             height=3
         ).pack(pady=5)
-        
+
+        def _get_assigned_staff_ordered():
+            try:
+                return rmm.get_stage_assigned_staff(
+                    self.get_project_db_path(self.selected_project_id),
+                    self.rm_master_db_path,
+                    self.selected_project_id,
+                    stage_code
+                )
+            except Exception:
+                return []
+
+        def _reorder_staff_in_db(new_order_eids):
+            try:
+                for eid in new_order_eids:
+                    rmm.remove_staff_from_stage(
+                        self.get_project_db_path(self.selected_project_id),
+                        self.selected_project_id,
+                        stage_code,
+                        eid
+                    )
+                for eid in new_order_eids:
+                    rmm.add_staff_to_stage(
+                        self.get_project_db_path(self.selected_project_id),
+                        self.rm_master_db_path,
+                        self.selected_project_id,
+                        stage_code,
+                        eid,
+                        self.current_user
+                    )
+            except Exception as e:
+                print(f"⚠️ Błąd reorder pracowników: {e}")
+
+        def _move_up_assigned():
+            sel = assigned_list.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            if idx == 0:
+                return
+            staff = _get_assigned_staff_ordered()
+            if idx >= len(staff):
+                return
+            staff[idx], staff[idx - 1] = staff[idx - 1], staff[idx]
+            _reorder_staff_in_db([s['employee_id'] for s in staff])
+            refresh_assigned()
+            assigned_list.selection_set(idx - 1)
+            assigned_list.see(idx - 1)
+            self.refresh_timeline()
+
+        def _move_down_assigned():
+            sel = assigned_list.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            staff = _get_assigned_staff_ordered()
+            if idx >= len(staff) - 1:
+                return
+            staff[idx], staff[idx + 1] = staff[idx + 1], staff[idx]
+            _reorder_staff_in_db([s['employee_id'] for s in staff])
+            refresh_assigned()
+            assigned_list.selection_set(idx + 1)
+            assigned_list.see(idx + 1)
+            self.refresh_timeline()
+
+        tk.Button(
+            button_frame,
+            text="⬆️\nWyżej",
+            command=_move_up_assigned,
+            bg="#2980b9",
+            fg="white",
+            font=self.FONT_DEFAULT,
+            width=8,
+            height=3
+        ).pack(pady=5)
+
+        tk.Button(
+            button_frame,
+            text="⬇️\nNiżej",
+            command=_move_down_assigned,
+            bg="#2980b9",
+            fg="white",
+            font=self.FONT_DEFAULT,
+            width=8,
+            height=3
+        ).pack(pady=5)
+
         # Stopka z informacją
         info_frame = tk.Frame(dlg, bg="#f0f0f0")
         info_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -30161,57 +30247,189 @@ Kod: {unlock_code}
                                        f"{proj_names.get(pid, str(pid))}.", parent=win)
                 return
 
-            current_eids = set(stage_data.get('employee_ids', []))
+            current_eids = list(stage_data.get('employee_ids', []))
             stage_name = stage_display.get(sc, sc)
             proj_name  = proj_names.get(pid, str(pid))
 
+            # Pełne dane pracowników (z kategorią i statusem aktywności)
+            try:
+                all_employees_full = rmm.get_employees(self.rm_master_db_path, active_only=False)
+            except Exception:
+                all_employees_full = []
+            emp_info = {e['id']: e for e in all_employees_full}
+
+            preferred_categories = rmm.STAGE_TO_PREFERRED_CATEGORY.get(sc, [])
+
+            def _emp_sort_key(eid):
+                e = emp_info.get(eid, {})
+                cat = e.get('category', '')
+                name = emp_names.get(eid, '')
+                return (0 if cat in preferred_categories else 1, name)
+
+            all_eids_sorted = sorted(emp_names.keys(), key=_emp_sort_key)
+
+            # Robocza lista przypisanych (zachowuje kolejność dodawania)
+            assigned_eids = list(current_eids)
+
             popup = tk.Toplevel(win)
             popup.title(f"👷 Pracownicy — {stage_name} / {proj_name}")
-            popup.resizable(False, False)
+            popup.resizable(True, True)
             popup.grab_set()
 
-            tk.Label(popup, text=stage_name, font=("Arial", 11, "bold")
-                     ).pack(padx=14, pady=(12, 0), anchor='w')
-            tk.Label(popup, text=proj_name, font=("Arial", 9), fg="#555"
-                     ).pack(padx=14, pady=(0, 8), anchor='w')
+            # Nagłówek
+            hdr = tk.Frame(popup, bg="#2c3e50", padx=10, pady=8)
+            hdr.pack(fill=tk.X)
+            tk.Label(hdr, text=f"PRZYPISZ PRACOWNIKÓW — {stage_name}",
+                     bg="#2c3e50", fg="white", font=("Arial", 11, "bold")).pack(anchor='w')
+            tk.Label(hdr, text=proj_name, bg="#2c3e50", fg="#aabbcc",
+                     font=("Arial", 9)).pack(anchor='w')
 
-            # Lista z paskiem przewijania
-            list_frame = tk.Frame(popup, bd=1, relief=tk.SUNKEN)
-            list_frame.pack(padx=14, pady=4, fill=tk.BOTH, expand=True)
+            # Główny frame trzech kolumn
+            main_frame = tk.Frame(popup)
+            main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-            canvas_e = tk.Canvas(list_frame, width=300, height=320, highlightthickness=0)
-            sb = tk.Scrollbar(list_frame, orient="vertical", command=canvas_e.yview)
-            inner_e = tk.Frame(canvas_e)
-            inner_e.bind("<Configure>",
-                         lambda e: canvas_e.configure(scrollregion=canvas_e.bbox("all")))
-            canvas_e.create_window((0, 0), window=inner_e, anchor="nw")
-            canvas_e.configure(yscrollcommand=sb.set)
-            canvas_e.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-            sb.pack(side=tk.RIGHT, fill=tk.Y)
+            # Lewa kolumna: dostępni
+            left_frame = tk.LabelFrame(main_frame, text="Dostępni pracownicy",
+                                       font=("Arial", 9, "bold"))
+            left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
 
-            # Mysz → scroll
-            canvas_e.bind_all("<MouseWheel>",
-                              lambda e: canvas_e.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+            available_list = tk.Listbox(left_frame, font=("Arial", 9),
+                                        selectmode=tk.SINGLE, width=36, height=18)
+            sb_avail = ttk.Scrollbar(left_frame, orient=tk.VERTICAL,
+                                     command=available_list.yview)
+            available_list.config(yscrollcommand=sb_avail.set)
+            available_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
+                                padx=(4, 0), pady=4)
+            sb_avail.pack(side=tk.RIGHT, fill=tk.Y, pady=4)
 
-            check_vars = {}
-            if emp_names:
-                for eid, ename in sorted(emp_names.items(), key=lambda x: x[1]):
-                    var = tk.BooleanVar(value=(eid in current_eids))
-                    tk.Checkbutton(inner_e, text=ename, variable=var,
-                                   anchor='w', font=("Arial", 9)
-                                   ).pack(fill=tk.X, padx=6, pady=1)
-                    check_vars[eid] = var
+            # Środkowa kolumna: przyciski
+            btn_mid = tk.Frame(main_frame)
+            btn_mid.pack(side=tk.LEFT, padx=8, fill=tk.Y)
+            tk.Label(btn_mid, text="").pack(expand=True)
+
+            # Prawa kolumna: przypisani
+            right_frame = tk.LabelFrame(main_frame, text="Przypisani do etapu",
+                                        font=("Arial", 9, "bold"))
+            right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0))
+
+            assigned_list = tk.Listbox(right_frame, font=("Arial", 9),
+                                       selectmode=tk.SINGLE, width=36, height=18)
+            sb_asgn = ttk.Scrollbar(right_frame, orient=tk.VERTICAL,
+                                    command=assigned_list.yview)
+            assigned_list.config(yscrollcommand=sb_asgn.set)
+            assigned_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
+                               padx=(4, 0), pady=4)
+            sb_asgn.pack(side=tk.RIGHT, fill=tk.Y, pady=4)
+
+            def _fill_available():
+                available_list.delete(0, tk.END)
+                for eid in all_eids_sorted:
+                    if eid in assigned_eids:
+                        continue
+                    e = emp_info.get(eid, {})
+                    cat = e.get('category', '')
+                    is_active = e.get('is_active', True)
+                    prefix = "⭐ " if cat in preferred_categories else "   "
+                    suffix = " (nieaktywny)" if not is_active else ""
+                    available_list.insert(
+                        tk.END, f"{prefix}{emp_names.get(eid, str(eid))} - {cat}{suffix}")
+
+            def _fill_assigned():
+                assigned_list.delete(0, tk.END)
+                for eid in assigned_eids:
+                    e = emp_info.get(eid, {})
+                    cat = e.get('category', '')
+                    icon = "👤" if cat in preferred_categories else "⚠️"
+                    assigned_list.insert(
+                        tk.END, f"{icon} {emp_names.get(eid, str(eid))} ({cat})")
+
+            _fill_available()
+            _fill_assigned()
+
+            def _add():
+                sel = available_list.curselection()
+                if not sel:
+                    return
+                avail_visible = [eid for eid in all_eids_sorted
+                                 if eid not in assigned_eids]
+                idx = sel[0]
+                if idx >= len(avail_visible):
+                    return
+                eid = avail_visible[idx]
+                assigned_eids.append(eid)
+                _fill_available()
+                _fill_assigned()
+
+            def _remove():
+                sel = assigned_list.curselection()
+                if not sel:
+                    return
+                idx = sel[0]
+                if idx >= len(assigned_eids):
+                    return
+                assigned_eids.pop(idx)
+                _fill_available()
+                _fill_assigned()
+
+            def _move_up():
+                sel = assigned_list.curselection()
+                if not sel:
+                    return
+                idx = sel[0]
+                if idx == 0:
+                    return
+                assigned_eids[idx], assigned_eids[idx - 1] = \
+                    assigned_eids[idx - 1], assigned_eids[idx]
+                _fill_assigned()
+                assigned_list.selection_set(idx - 1)
+                assigned_list.see(idx - 1)
+
+            def _move_down():
+                sel = assigned_list.curselection()
+                if not sel:
+                    return
+                idx = sel[0]
+                if idx >= len(assigned_eids) - 1:
+                    return
+                assigned_eids[idx], assigned_eids[idx + 1] = \
+                    assigned_eids[idx + 1], assigned_eids[idx]
+                _fill_assigned()
+                assigned_list.selection_set(idx + 1)
+                assigned_list.see(idx + 1)
+
+            tk.Button(btn_mid, text="➡️\nDodaj", command=_add,
+                      bg="#27ae60", fg="white", font=("Arial", 9),
+                      width=8, height=3).pack(pady=5)
+            tk.Button(btn_mid, text="⬅️\nUsuń", command=_remove,
+                      bg="#c0392b", fg="white", font=("Arial", 9),
+                      width=8, height=3).pack(pady=5)
+            tk.Button(btn_mid, text="⬆️\nWyżej", command=_move_up,
+                      bg="#2980b9", fg="white", font=("Arial", 9),
+                      width=8, height=3).pack(pady=5)
+            tk.Button(btn_mid, text="⬇️\nNiżej", command=_move_down,
+                      bg="#2980b9", fg="white", font=("Arial", 9),
+                      width=8, height=3).pack(pady=5)
+            tk.Label(btn_mid, text="").pack(expand=True)
+
+            # Stopka: informacja o preferowanych kategoriach
+            info_frame = tk.Frame(popup, bg="#f0f0f0")
+            info_frame.pack(fill=tk.X, padx=10, pady=(0, 4))
+            if preferred_categories:
+                info_text = "ℹ️ Preferowane kategorie dla tego etapu: " + \
+                            ", ".join(preferred_categories)
             else:
-                tk.Label(inner_e, text="Brak pracowników w bazie",
-                         fg="gray", font=("Arial", 9)).pack(padx=6, pady=10)
+                info_text = "ℹ️ Brak preferowanych kategorii dla tego etapu"
+            tk.Label(info_frame, text=info_text, bg="#f0f0f0",
+                     font=("Arial", 8), fg="gray", anchor='w'
+                     ).pack(fill=tk.X, padx=5, pady=4)
 
-            # Przyciski
+            # Przyciski Zapisz / Anuluj
             btn_f = tk.Frame(popup)
-            btn_f.pack(padx=14, pady=(6, 12), fill=tk.X)
+            btn_f.pack(padx=14, pady=(4, 12), fill=tk.X)
 
             def _save():
-                selected_eids = [eid for eid, v in check_vars.items() if v.get()]
-                # Wyczyść
+                selected_eids = list(assigned_eids)
+                # Wyczyść przypisania w bazie
                 try:
                     con = rmm._open_rm_connection(tgt_db_path)
                     ps_row = con.execute(
