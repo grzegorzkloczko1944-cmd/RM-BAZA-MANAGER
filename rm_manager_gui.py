@@ -28330,19 +28330,57 @@ Kod: {unlock_code}
                   font=self.FONT_DEFAULT, padx=10).pack(side=tk.LEFT, padx=2)
 
         # Tabela
-        cols = ('id', 'name', 'category', 'master', 'active')
+        cols = ('id', 'name', 'category', 'master', 'projekty', 'active')
         tree = ttk.Treeview(parent, columns=cols, show='headings', height=18)
         tree.heading('id', text='ID');             tree.column('id', width=50, stretch=False, anchor='center')
-        tree.heading('name', text='Pracownik');    tree.column('name', width=260)
-        tree.heading('category', text='Kategoria'); tree.column('category', width=160)
-        tree.heading('master', text='Master (etapów równolegle)')
-        tree.column('master', width=180, anchor='center', stretch=False)
-        tree.heading('active', text='Aktywny');    tree.column('active', width=80, anchor='center', stretch=False)
+        tree.heading('name', text='Pracownik');    tree.column('name', width=220)
+        tree.heading('category', text='Kategoria'); tree.column('category', width=130)
+        tree.heading('master', text='Master (etapów)')
+        tree.column('master', width=130, anchor='center', stretch=False)
+        tree.heading('projekty', text='Projekty (jako master)')
+        tree.column('projekty', width=320)
+        tree.heading('active', text='Aktywny');    tree.column('active', width=70, anchor='center', stretch=False)
 
         vsb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(fill=tk.BOTH, expand=True, padx=8, side=tk.LEFT)
         vsb.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 8))
+
+        def _build_emp_projects_map():
+            """Zwraca {employee_id: [project_name, ...]} — projekty gdzie pracownik jest masterem."""
+            emp_projects: dict = {}
+            try:
+                con_m = rmm._open_rm_connection(self.rm_master_db_path)
+                prows = con_m.execute(
+                    "SELECT project_id, project_name FROM project_file_tracking ORDER BY project_id"
+                ).fetchall()
+                con_m.close()
+            except Exception:
+                return emp_projects
+            for prow in prows:
+                pid = prow['project_id']
+                pname = prow['project_name'] or f"Projekt {pid}"
+                db_path = self.get_project_db_path(pid)
+                if not os.path.exists(db_path):
+                    continue
+                try:
+                    con_p = rmm._open_rm_connection(db_path)
+                    rows = con_p.execute("""
+                        SELECT DISTINCT ssa.employee_id
+                        FROM stage_staff_assignments ssa
+                        WHERE ssa.id = (
+                            SELECT MIN(ssa2.id)
+                            FROM stage_staff_assignments ssa2
+                            WHERE ssa2.project_stage_id = ssa.project_stage_id
+                        )
+                    """).fetchall()
+                    con_p.close()
+                    for r in rows:
+                        eid = r['employee_id']
+                        emp_projects.setdefault(eid, []).append(pname)
+                except Exception:
+                    pass
+            return emp_projects
 
         def refresh():
             tree.delete(*tree.get_children())
@@ -28352,18 +28390,23 @@ Kod: {unlock_code}
                 category=cat,
                 active_only=not show_inactive_var.get(),
             )
+            emp_projects = _build_emp_projects_map()
             for e in employees:
+                eid = e['id']
                 try:
                     mm = int(e.get('master_max_parallel') or 1)
                 except (TypeError, ValueError):
                     mm = 1
                 # 9999 to sentinel "bez limitu" — wyświetl jako ∞
                 mm_display = '∞ (bez limitu)' if mm >= 9999 else str(mm)
-                tree.insert('', tk.END, iid=str(e['id']), values=(
-                    e['id'],
+                projs = emp_projects.get(eid, [])
+                proj_display = ', '.join(projs) if projs else '—'
+                tree.insert('', tk.END, iid=str(eid), values=(
+                    eid,
                     e.get('name', ''),
                     e.get('category', ''),
                     mm_display,
+                    proj_display,
                     'Tak' if e.get('is_active') else 'Nie',
                 ))
 
