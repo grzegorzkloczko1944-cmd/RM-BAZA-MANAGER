@@ -18,6 +18,7 @@ Features:
 
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
+from rmpak_calculator import RmpakCalculatorDialog
 from pathlib import Path
 import json
 import sys
@@ -620,7 +621,22 @@ class MainWindow(tk.Tk):
             state=tk.DISABLED
         )
         self.btn_search_library.pack(side=tk.LEFT, padx=5, pady=2)
-        
+
+        self.btn_rmpak_calc = tk.Button(
+            search_frame,
+            text="🧮 Kalkulator RMPAK",
+            command=self.rmpak_calculator_dialog,
+            bg="#8e44ad",
+            fg="white",
+            font=("Arial", 9),
+            padx=12,
+            pady=4,
+            relief=tk.RAISED,
+            bd=2,
+            state=tk.DISABLED,
+        )
+        self.btn_rmpak_calc.pack(side=tk.LEFT, padx=5, pady=2)
+
         # WIERSZ 2 (lub dalsza część wiersza 1 w NORMAL): ALARMY, EXPORT, etc.
         # Przycisk do RM_ALARM.EXE
         alarm_link = tk.Button(
@@ -1977,6 +1993,7 @@ class MainWindow(tk.Tk):
                                     self.btn_cancel_lock.config(state=tk.DISABLED)
                                     self.btn_release_lock.config(state=tk.DISABLED)
                                     self.btn_add_item.config(state=tk.DISABLED)
+                                    self.btn_rmpak_calc.config(state=tk.DISABLED)
                                     self.btn_hide_selected.config(state=tk.DISABLED)
                                     self.btn_restore_hidden.config(state=tk.DISABLED)
                                     self.btn_scanner.config(state=tk.DISABLED)
@@ -3121,7 +3138,7 @@ class MainWindow(tk.Tk):
             con = self.db_manager.project_con
             placeholders = ",".join("?" * len(row_ids))
             row = con.execute(
-                f"SELECT COALESCE(SUM(price_pln), 0) FROM items WHERE id IN ({placeholders})",
+                f"SELECT COALESCE(SUM(price_pln * COALESCE(order_qty, work_qty, src_qty, 1)), 0) FROM items WHERE id IN ({placeholders})",
                 row_ids
             ).fetchone()
             total = row[0] if row else 0.0
@@ -4977,6 +4994,7 @@ class MainWindow(tk.Tk):
             self.btn_acquire_lock.config(state=tk.NORMAL)
             self.btn_force_lock.config(state=tk.NORMAL)
             self.btn_add_item.config(state=tk.DISABLED)
+            self.btn_rmpak_calc.config(state=tk.DISABLED)
             self.btn_hide_selected.config(state=tk.DISABLED)
             self.btn_restore_hidden.config(state=tk.DISABLED)
             self.btn_scanner.config(state=tk.DISABLED)
@@ -6645,6 +6663,7 @@ class MainWindow(tk.Tk):
             self.btn_cancel_lock.config(state=tk.NORMAL)
             self.btn_release_lock.config(state=tk.NORMAL)
             self.btn_add_item.config(state=tk.NORMAL)
+            self.btn_rmpak_calc.config(state=tk.NORMAL)
             self.btn_hide_selected.config(state=tk.NORMAL)
             self.btn_restore_hidden.config(state=tk.NORMAL)
             self.btn_scanner.config(state=tk.NORMAL)
@@ -6737,6 +6756,7 @@ class MainWindow(tk.Tk):
             self.btn_cancel_lock.config(state=tk.NORMAL)
             self.btn_release_lock.config(state=tk.NORMAL)
             self.btn_add_item.config(state=tk.NORMAL)
+            self.btn_rmpak_calc.config(state=tk.NORMAL)
             self.btn_hide_selected.config(state=tk.NORMAL)
             self.btn_restore_hidden.config(state=tk.NORMAL)
             self.btn_scanner.config(state=tk.NORMAL)
@@ -6807,6 +6827,7 @@ class MainWindow(tk.Tk):
                 self.btn_cancel_lock.config(state=tk.DISABLED)
                 self.btn_release_lock.config(state=tk.DISABLED)
                 self.btn_add_item.config(state=tk.DISABLED)
+                self.btn_rmpak_calc.config(state=tk.DISABLED)
                 self.btn_hide_selected.config(state=tk.DISABLED)
                 self.btn_restore_hidden.config(state=tk.DISABLED)
                 self.btn_scanner.config(state=tk.DISABLED)
@@ -6828,6 +6849,7 @@ class MainWindow(tk.Tk):
                 self.btn_cancel_lock.config(state=tk.DISABLED)
                 self.btn_release_lock.config(state=tk.DISABLED)
                 self.btn_add_item.config(state=tk.DISABLED)
+                self.btn_rmpak_calc.config(state=tk.DISABLED)
                 self.btn_hide_selected.config(state=tk.DISABLED)
                 self.btn_restore_hidden.config(state=tk.DISABLED)
                 self.btn_scanner.config(state=tk.DISABLED)
@@ -6908,6 +6930,7 @@ class MainWindow(tk.Tk):
             self.btn_cancel_lock.config(state=tk.DISABLED)
             self.btn_release_lock.config(state=tk.DISABLED)
             self.btn_add_item.config(state=tk.DISABLED)
+            self.btn_rmpak_calc.config(state=tk.DISABLED)
             self.btn_hide_selected.config(state=tk.DISABLED)
             self.btn_restore_hidden.config(state=tk.DISABLED)
             self.btn_scanner.config(state=tk.DISABLED)
@@ -7002,6 +7025,7 @@ class MainWindow(tk.Tk):
             self.btn_cancel_lock.config(state=tk.DISABLED)
             self.btn_release_lock.config(state=tk.DISABLED)
             self.btn_add_item.config(state=tk.DISABLED)
+            self.btn_rmpak_calc.config(state=tk.DISABLED)
             self.btn_hide_selected.config(state=tk.DISABLED)
             self.btn_restore_hidden.config(state=tk.DISABLED)
             self.btn_scanner.config(state=tk.DISABLED)
@@ -8461,6 +8485,55 @@ class MainWindow(tk.Tk):
             import traceback
             traceback.print_exc()
     
+    def rmpak_calculator_dialog(self):
+        if not self.current_project_id:
+            messagebox.showwarning("Brak projektu", "Najpierw wybierz projekt.")
+            return
+        if not self.db_manager or not self.db_manager.master_con:
+            messagebox.showwarning("Brak połączenia", "Baza master nie jest dostępna.")
+            return
+        if not self.db_manager.project_con:
+            messagebox.showwarning("Brak projektu", "Projekt nie jest otwarty.")
+            return
+        if not self.have_lock:
+            messagebox.showwarning("Brak locka", "Musisz mieć lock na projekcie aby edytować ceny.")
+            return
+
+        # Ścieżka do lokalnej kopii (ta którą aplikacja aktualnie czyta/pisze gdy ma lock)
+        local_path = self.db_manager.local_dir / f"project_{self.current_project_id}.sqlite"
+        remote_path = self.db_manager.projects_dir / f"project_{self.current_project_id}.sqlite"
+        rw_path = local_path if local_path.exists() else remote_path
+
+        # Migracja kolumn przez osobne R/W połączenie
+        try:
+            from rmpak_calculator import _ensure_calc_columns
+            rw_con = sqlite3.connect(str(rw_path))
+            _ensure_calc_columns(rw_con)
+            rw_con.close()
+        except Exception as e:
+            print(f"⚠️  rmpak calc columns migration: {e}")
+
+        try:
+            row = self.db_manager.master_con.execute(
+                "SELECT name FROM projects WHERE project_id = ?", (self.current_project_id,)
+            ).fetchone()
+            project_name = row[0] if row else str(self.current_project_id)
+        except Exception:
+            project_name = str(self.current_project_id)
+
+        def _save_item(item_id, price_pln, hours, material, extra):
+            from datetime import datetime as _dt
+            self.db_manager.project_con.execute(
+                """UPDATE items SET price_pln=?, calc_hours=?, calc_material=?, calc_extra=?,
+                   updated_at=? WHERE id=?""",
+                (price_pln, hours, material, extra, _dt.now().isoformat(), item_id)
+            )
+            self.db_manager.project_con.commit()
+
+        RmpakCalculatorDialog(self, self.db_manager.master_con, self.db_manager.project_con,
+                              project_name, on_price_saved=self.refresh_data,
+                              on_save_item=_save_item)
+
     def launch_rm_import(self):
         """Uruchom RM_IMPORT.EXE z konfiguracji lub folderu lokalnego"""
         import subprocess
