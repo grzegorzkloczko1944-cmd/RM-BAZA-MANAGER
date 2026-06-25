@@ -115,6 +115,15 @@ class RmpakCalculatorDialog:
         self._bind_select_all(rate_entry)
         tk.Button(top, text="Zapisz stawkę", command=self._save_rate).pack(side="left", padx=4)
 
+        # --- legenda kolorów + odśwież ---
+        legend_frame = tk.Frame(top)
+        legend_frame.pack(side="right", padx=(0, 4))
+        tk.Button(legend_frame, text="Odśwież", command=self._load_items,
+                  bg="#2980b9", fg="white", font=("", 9, "bold")).pack(side="left", padx=(0, 12))
+        for color, label in (("#90EE90", "Zrealizowano"), ("#FFFACD", "Zamówiono")):
+            tk.Label(legend_frame, text="  ", bg=color, relief="solid", bd=1).pack(side="left", padx=(8, 2))
+            tk.Label(legend_frame, text=label).pack(side="left", padx=(0, 4))
+
         # --- tabela pozycji ---
         frame_table = tk.Frame(self.win)
         frame_table.pack(fill="both", expand=True, padx=8, pady=(0, 4))
@@ -137,10 +146,10 @@ class RmpakCalculatorDialog:
             ("RMPAK.Treeview.treearea", {"sticky": "nswe"})
         ])
         self.tree.configure(style="RMPAK.Treeview")
-        self.tree.tag_configure("odd",  background="#ffffff")
-        self.tree.tag_configure("even", background="#dce9f5")
-        self.tree.tag_configure("delivered", background="#90EE90")   # zielony — dostarczone
-        self.tree.tag_configure("ordered",   background="#FFFACD")   # żółty — zamówione
+        self.tree.tag_configure("odd",       background="#eef4fb")
+        self.tree.tag_configure("even",      background="#ddeaf6")
+        self.tree.tag_configure("delivered", background="#90EE90")
+        self.tree.tag_configure("ordered",   background="#FFFACD")
 
         vsb = ttk.Scrollbar(frame_table, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
@@ -216,6 +225,8 @@ class RmpakCalculatorDialog:
         self._items = {}
         self._qtys = {}
         self._rates = {}
+        self._sel_iid = None
+        self._sel_base_tag = None
         rows = _load_rmpak_items(self.project_con, self.supplier_ids)
         grand_total = 0.0
         for lp, row in enumerate(rows, start=1):

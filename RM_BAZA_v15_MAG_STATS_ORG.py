@@ -6086,7 +6086,20 @@ class MainWindow(tk.Tk):
             import traceback
             traceback.print_exc()
 
-    
+        self._refresh_rmpak_calc()
+
+    def _refresh_rmpak_calc(self):
+        """Odśwież kolory w oknie Kalkulatora RMPAK jeśli jest otwarte."""
+        try:
+            dlg = getattr(self, '_rmpak_calc_win', None)
+            if dlg is None:
+                return
+            if not dlg.win.winfo_exists():
+                return
+            dlg._load_items()
+        except Exception:
+            pass
+
     def _on_lp_click(self, event):
         """Klik na kolumnie LP (row index) — zaznacz komórkę w wierszu zamiast grubego row_select."""
         try:
