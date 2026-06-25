@@ -3282,6 +3282,13 @@ class MainWindow(tk.Tk):
             alarm_st = _alarm(r)
             deliv    = _delivered(r)
 
+            try:
+                qty = float(r['target_qty']) if r['target_qty'] else 1.0
+                if qty <= 0:
+                    qty = 1.0
+            except Exception:
+                qty = 1.0
+
             items_data.append({
                 'drawing_no':     r['drawing_no'] or "",
                 'name':           r['name'] or "",
@@ -3290,6 +3297,8 @@ class MainWindow(tk.Tk):
                 'thickness':      thick_str,
                 'modul':          modul_str,
                 'price':          price,
+                'qty':            qty,
+                'value':          (price * qty) if price else None,
                 # cechy binarne — opisowe etykiety
                 'brak_dostawcy':  "Brak dostawcy"   if not r['supplier_id']               else "Ma dostawcę",
                 'po_terminie':    "Po terminie"      if alarm_st == 'red'                  else "W terminie",
@@ -3305,10 +3314,11 @@ class MainWindow(tk.Tk):
 
         priced = [it for it in items_data if it['price'] and it['price'] > 0]
         unpriced = [it for it in items_data if not it['price']]
-        prices_list = [it['price'] for it in priced]
-        total = sum(prices_list)
-        avg = total / len(prices_list) if prices_list else 0.0
-        median = _stats.median(prices_list) if prices_list else 0.0
+        values_list = [it['value'] for it in priced]   # cena * ilość (wartość partii)
+        prices_list = [it['price'] for it in priced]   # cena za sztukę (do min/max/median)
+        total = sum(values_list)
+        avg = total / len(values_list) if values_list else 0.0
+        median = _stats.median(values_list) if values_list else 0.0
 
         def fmt(v):
             return f"{v:,.2f}".replace(",", " ").replace(".", ",") + " PLN"
@@ -3316,12 +3326,12 @@ class MainWindow(tk.Tk):
         # Okno główne
         win = tk.Toplevel(self)
         win.title("📊 Statystyki Cena PLN")
-        win.geometry("960x560")
+        win.geometry("1100x580")
         win.transient(self)
         win.update_idletasks()
         wx = self.winfo_x() + (self.winfo_width() - 960) // 2
         wy = self.winfo_y() + (self.winfo_height() - 560) // 2
-        win.geometry(f"960x560+{wx}+{wy}")
+        win.geometry(f"1100x580+{wx}+{wy}")
 
         nb = ttk.Notebook(win)
         nb.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -3330,30 +3340,66 @@ class MainWindow(tk.Tk):
         f1 = tk.Frame(nb, bg="#f5f5f5")
         nb.add(f1, text="📋 Podsumowanie")
 
-        summary_rows = [
+        fr = tk.Frame(f1, bg="#f5f5f5")
+        fr.pack(padx=30, pady=20)
+
+        # Lewa kolumna: ogólne + wartości partii
+        left_rows = [
             ("Pozycji widocznych:", str(len(items_data)), False),
             ("Pozycji z ceną:", str(len(priced)), False),
             ("Pozycji bez ceny:", str(len(unpriced)), False),
             None,
             ("Łączna kwota:", fmt(total), True),
-            ("Średnia cena:", fmt(avg), False),
-            ("Mediana ceny:", fmt(median), False),
-            ("Najwyższa cena:", fmt(max(prices_list)) if prices_list else "—", False),
-            ("Najniższa cena:", fmt(min(prices_list)) if prices_list else "—", False),
+            ("Średnia wartość partii:", fmt(avg), False),
+            ("Mediana wartości partii:", fmt(median), False),
+            ("Najwyższa wartość partii:", fmt(max(values_list)) if values_list else "—", False),
+            ("Najniższa wartość partii:", fmt(min(values_list)) if values_list else "—", False),
         ]
-        fr = tk.Frame(f1, bg="#f5f5f5")
-        fr.pack(padx=60, pady=35)
-        for i, row in enumerate(summary_rows):
+        # Prawa kolumna: ceny za sztukę
+        avg_unit = sum(prices_list) / len(prices_list) if prices_list else 0.0
+        median_unit = _stats.median(prices_list) if prices_list else 0.0
+        right_rows = [
+            None,
+            None,
+            None,
+            None,
+            None,
+            ("Średnia cena za szt.:", fmt(avg_unit), False),
+            ("Mediana ceny za szt.:", fmt(median_unit), False),
+            ("Najwyższa cena za szt.:", fmt(max(prices_list)) if prices_list else "—", False),
+            ("Najniższa cena za szt.:", fmt(min(prices_list)) if prices_list else "—", False),
+        ]
+
+        fl = tk.Frame(fr, bg="#f5f5f5")
+        fl.grid(row=0, column=0, sticky="n", padx=(0, 10))
+        sep = tk.Frame(fr, bg="#bdc3c7", width=1)
+        sep.grid(row=0, column=1, sticky="ns", padx=15)
+        fright = tk.Frame(fr, bg="#f5f5f5")
+        fright.grid(row=0, column=2, sticky="n", padx=(10, 0))
+
+        for i, row in enumerate(left_rows):
             if row is None:
-                tk.Frame(fr, height=14, bg="#f5f5f5").grid(row=i, column=0, columnspan=2)
+                tk.Frame(fl, height=14, bg="#f5f5f5").grid(row=i, column=0, columnspan=2)
                 continue
             lbl, val, bold = row
-            tk.Label(fr, text=lbl, bg="#f5f5f5", font=("Arial", 12),
-                     anchor="e", width=22).grid(row=i, column=0, sticky="e", padx=(0, 20), pady=5)
-            tk.Label(fr, text=val, bg="#f5f5f5",
-                     font=("Arial", 12, "bold" if bold else "normal"),
+            tk.Label(fl, text=lbl, bg="#f5f5f5", font=("Arial", 11),
+                     anchor="e", width=26).grid(row=i, column=0, sticky="e", padx=(0, 12), pady=4)
+            tk.Label(fl, text=val, bg="#f5f5f5",
+                     font=("Arial", 11, "bold" if bold else "normal"),
                      fg="#27ae60" if bold else "#2c3e50",
-                     anchor="w").grid(row=i, column=1, sticky="w", pady=5)
+                     anchor="w").grid(row=i, column=1, sticky="w", pady=4)
+
+        for i, row in enumerate(right_rows):
+            if row is None:
+                tk.Frame(fright, height=14, bg="#f5f5f5").grid(row=i, column=0, columnspan=2)
+                continue
+            lbl, val, bold = row
+            tk.Label(fright, text=lbl, bg="#f5f5f5", font=("Arial", 11),
+                     anchor="e", width=24).grid(row=i, column=0, sticky="e", padx=(0, 12), pady=4)
+            tk.Label(fright, text=val, bg="#f5f5f5",
+                     font=("Arial", 11, "bold" if bold else "normal"),
+                     fg="#27ae60" if bold else "#2c3e50",
+                     anchor="w").grid(row=i, column=1, sticky="w", pady=4)
 
         # ── Tab 2: Najdroższe / Najtańsze ──────────────────────────────────
         f2 = tk.Frame(nb)
@@ -3370,11 +3416,12 @@ class MainWindow(tk.Tk):
         def _price_tree(parent):
             frm = tk.Frame(parent)
             frm.pack(fill=tk.BOTH, expand=True)
-            t = ttk.Treeview(frm, columns=("nr", "nazwa", "cena", "pct"), show="headings", height=15)
-            t.heading("nr",   text="Nr rysunku"); t.column("nr",   width=110, anchor="w")
-            t.heading("nazwa",text="Nazwa");      t.column("nazwa",width=175, anchor="w")
-            t.heading("cena", text="Cena PLN");   t.column("cena", width=105, anchor="e")
-            t.heading("pct",  text="% sumy");     t.column("pct",  width=65,  anchor="e")
+            t = ttk.Treeview(frm, columns=("nr", "nazwa", "qty", "cena", "pct"), show="headings", height=15)
+            t.heading("nr",   text="Nr rysunku"); t.column("nr",   width=100, anchor="w",  stretch=False, minwidth=80)
+            t.heading("nazwa",text="Nazwa");      t.column("nazwa",width=130, anchor="w",  stretch=True,  minwidth=80)
+            t.heading("qty",  text="Ilość");      t.column("qty",  width=45,  anchor="e",  stretch=False, minwidth=40)
+            t.heading("cena", text="Wartość partii"); t.column("cena", width=105, anchor="e", stretch=False, minwidth=90)
+            t.heading("pct",  text="% sumy");     t.column("pct",  width=62,  anchor="e",  stretch=False, minwidth=55)
             sb = ttk.Scrollbar(frm, orient="vertical", command=t.yview)
             t.configure(yscrollcommand=sb.set)
             t.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -3386,17 +3433,22 @@ class MainWindow(tk.Tk):
         t_hi = _price_tree(lf_hi)
         t_lo = _price_tree(lf_lo)
 
+        def _qty_str(qty):
+            return str(int(qty)) if qty == int(qty) else f"{qty:.2f}".rstrip('0').rstrip('.')
+
         grand = total or 1
-        for it in sorted(priced, key=lambda x: x['price'], reverse=True)[:15]:
+        for it in sorted(priced, key=lambda x: x['value'], reverse=True)[:15]:
             t_hi.insert("", tk.END, values=(
                 it['drawing_no'], it['name'],
-                f"{it['price']:,.2f}".replace(",", " ").replace(".", ","),
-                f"{it['price'] / grand * 100:.1f}%"))
-        for it in sorted(priced, key=lambda x: x['price'])[:15]:
+                _qty_str(it['qty']),
+                f"{it['value']:,.2f}".replace(",", " ").replace(".", ","),
+                f"{it['value'] / grand * 100:.1f}%"))
+        for it in sorted(priced, key=lambda x: x['value'])[:15]:
             t_lo.insert("", tk.END, values=(
                 it['drawing_no'], it['name'],
-                f"{it['price']:,.2f}".replace(",", " ").replace(".", ","),
-                f"{it['price'] / grand * 100:.1f}%"))
+                _qty_str(it['qty']),
+                f"{it['value']:,.2f}".replace(",", " ").replace(".", ","),
+                f"{it['value'] / grand * 100:.1f}%"))
 
         # ── Tab 3: Grupy ───────────────────────────────────────────────────
         f3 = tk.Frame(nb)
@@ -3462,8 +3514,8 @@ class MainWindow(tk.Tk):
                     groups[g] = {"count": 0, "suma": 0.0, "prices": []}
                 groups[g]["count"] += 1
                 if it['price'] and it['price'] > 0:
-                    groups[g]["suma"] += it['price']
-                    groups[g]["prices"].append(it['price'])
+                    groups[g]["suma"] += it['value']
+                    groups[g]["prices"].append(it['value'])
             grand = sum(d["suma"] for d in groups.values()) or 1
             for g, d in sorted(groups.items(), key=lambda x: x[1]["suma"], reverse=True):
                 avg_g = d["suma"] / len(d["prices"]) if d["prices"] else 0.0
@@ -8530,9 +8582,20 @@ class MainWindow(tk.Tk):
             )
             self.db_manager.project_con.commit()
 
-        RmpakCalculatorDialog(self, self.db_manager.master_con, self.db_manager.project_con,
+        existing = getattr(self, '_rmpak_calc_win', None)
+        if existing is not None:
+            try:
+                if existing.win.winfo_exists():
+                    existing.win.lift()
+                    existing.win.focus_force()
+                    return
+            except Exception:
+                pass
+
+        dlg = RmpakCalculatorDialog(self, self.db_manager.master_con, self.db_manager.project_con,
                               project_name, on_price_saved=self.refresh_data,
                               on_save_item=_save_item)
+        self._rmpak_calc_win = dlg
 
     def launch_rm_import(self):
         """Uruchom RM_IMPORT.EXE z konfiguracji lub folderu lokalnego"""

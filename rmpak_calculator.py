@@ -82,8 +82,17 @@ class RmpakCalculatorDialog:
 
         self.win = tk.Toplevel(parent)
         self.win.title(f"Kalkulator RMPAK — {project_name}")
-        self.win.geometry("1050x620")
         self.win.resizable(True, True)
+        w, h = 1050, 620
+        self.win.update_idletasks()
+        parent.update_idletasks()
+        px = parent.winfo_rootx()
+        py = parent.winfo_rooty()
+        pw = parent.winfo_width()
+        ph = parent.winfo_height()
+        x = px + (pw - w) // 2
+        y = py + (ph - h) // 2
+        self.win.geometry(f"{w}x{h}+{x}+{y}")
 
         self._build_ui()
         self._load_items()
