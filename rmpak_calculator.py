@@ -53,7 +53,10 @@ def _load_rmpak_items(project_con, supplier_ids):
                    COALESCE(calc_hours, 0), COALESCE(calc_material, 0), COALESCE(calc_extra, 0),
                    COALESCE(work_qty, order_qty, 1),
                    COALESCE(work_drawing_no, src_drawing_no, ''),
-                   COALESCE(calc_rate, 0)
+                   COALESCE(calc_rate, 0),
+                   COALESCE(ordered_flag, 0),
+                   COALESCE(delivered_qty, 0),
+                   COALESCE(order_qty, work_qty, src_qty, 1)
             FROM items
             WHERE supplier_id IN ({placeholders})
             ORDER BY src_modul, work_name""",
@@ -136,6 +139,8 @@ class RmpakCalculatorDialog:
         self.tree.configure(style="RMPAK.Treeview")
         self.tree.tag_configure("odd",  background="#ffffff")
         self.tree.tag_configure("even", background="#dce9f5")
+        self.tree.tag_configure("delivered", background="#90EE90")   # zielony — dostarczone
+        self.tree.tag_configure("ordered",   background="#FFFACD")   # żółty — zamówione
 
         vsb = ttk.Scrollbar(frame_table, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
@@ -214,7 +219,7 @@ class RmpakCalculatorDialog:
         rows = _load_rmpak_items(self.project_con, self.supplier_ids)
         grand_total = 0.0
         for lp, row in enumerate(rows, start=1):
-            item_id, name, modul, price, hours, material, extra, qty, drawing_no, calc_rate = row
+            item_id, name, modul, price, hours, material, extra, qty, drawing_no, calc_rate, ordered_flag, delivered_qty, target_qty = row
             qty = qty or 1
             price_str = f"{price:.2f}" if price is not None else "—"
             total = price * qty if price is not None else None
@@ -222,7 +227,17 @@ class RmpakCalculatorDialog:
             rate_str = f"{calc_rate:.2f}" if calc_rate else "—"
             if total is not None:
                 grand_total += total
-            tag = "odd" if lp % 2 else "even"
+            try:
+                is_delivered = float(target_qty or 0) > 0 and float(delivered_qty or 0) >= float(target_qty or 0)
+            except (ValueError, TypeError):
+                is_delivered = False
+            is_ordered = bool(int(ordered_flag or 0))
+            if is_delivered:
+                tag = "delivered"
+            elif is_ordered:
+                tag = "ordered"
+            else:
+                tag = "odd" if lp % 2 else "even"
             iid = self.tree.insert("", "end", tags=(tag,), values=(
                 lp, drawing_no or "", name or "", int(qty),
                 hours or 0, f"{material:.2f}", f"{extra:.2f}", rate_str, price_str, total_str
