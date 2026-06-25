@@ -1342,7 +1342,6 @@ class MainWindow(tk.Tk):
         
         self.sheet.enable_bindings((
             "single_select",        # Pojedyncze zaznaczenie komórki
-            "row_select",           # Zaznaczanie wierszy (klik w LP + SHIFT)
             # "ctrl_select",        # WYŁĄCZONE - własna implementacja w on_ctrl_click_block
             # "drag_select",        # WYŁĄCZONE - nie chcemy zaznaczania przeciąganiem
             "select_all",           # Ctrl+A - zaznacz wszystko
@@ -1381,6 +1380,11 @@ class MainWindow(tk.Tk):
         # CTRL+klik - blokuj zaznaczanie w komórkach danych (tylko LP dozwolone)
         # BEZ add="+" żeby przejąć kontrolę PRZED tksheet
         self.sheet.bind("<Control-Button-1>", self.on_ctrl_click_block)
+        # Klik na LP (row index) - zablokuj grube row_select, zamiast tego zaznacz komórkę w wierszu
+        try:
+            self.sheet.RI.bind("<Button-1>", self._on_lp_click)
+        except Exception:
+            pass
         
         # Undo/Redo
         self.bind_all("<Control-z>", lambda e: self.undo_last_action(), add="+")
@@ -6083,6 +6087,38 @@ class MainWindow(tk.Tk):
             traceback.print_exc()
 
     
+    def _on_lp_click(self, event):
+        """Klik na kolumnie LP (row index) — zaznacz komórkę w wierszu zamiast grubego row_select."""
+        try:
+            row = self.sheet.identify_row(event, exclude_index=False)
+            if row is not None and row >= 0:
+                self.sheet.select_cell(row=row, column=1, redraw=True)
+        except Exception as e:
+            print(f"⚠️  _on_lp_click: {e}")
+        return "break"
+
+    def _scroll_to_row_center(self, row_idx):
+        """Przewija arkusz tak, aby wiersz row_idx był na środku widocznego obszaru."""
+        try:
+            mt = self.sheet.MT
+            row_h = mt.default_row_height if hasattr(mt, "default_row_height") else 20
+            total_rows = len(mt.row_positions) - 1 if hasattr(mt, "row_positions") else 0
+            if total_rows <= 0:
+                self.sheet.see(row_idx, 0, redraw=True)
+                return
+            visible_h = mt.winfo_height()
+            rows_visible = max(1, visible_h // row_h)
+            top = max(0, row_idx - rows_visible // 2)
+            top = min(top, max(0, total_rows - rows_visible))
+            fraction = top / total_rows
+            mt.yview_moveto(fraction)
+            self.sheet.refresh()
+        except Exception as e:
+            try:
+                self.sheet.see(row_idx, 0, redraw=True)
+            except Exception:
+                pass
+
     def on_sheet_cell_select(self, event=None):
         """Obsługa zaznaczenia komórki - podświetla cały wiersz (jak v6)
         
@@ -6108,9 +6144,11 @@ class MainWindow(tk.Tk):
             except:
                 pass
             
-            # Parsuj row z sel (może być dict lub tuple)
+            # Parsuj row z sel (obiekt Selected, dict lub tuple)
             r0 = None
-            if isinstance(sel, dict):
+            if hasattr(sel, "row"):
+                r0 = sel.row
+            elif isinstance(sel, dict):
                 r0 = sel.get("row", sel.get("r"))
             elif isinstance(sel, (tuple, list)) and len(sel) >= 1:
                 r0 = sel[0]
@@ -8573,12 +8611,12 @@ class MainWindow(tk.Tk):
         except Exception:
             project_name = str(self.current_project_id)
 
-        def _save_item(item_id, price_pln, hours, material, extra):
+        def _save_item(item_id, price_pln, hours, material, extra, rate=0.0):
             from datetime import datetime as _dt
             self.db_manager.project_con.execute(
                 """UPDATE items SET price_pln=?, calc_hours=?, calc_material=?, calc_extra=?,
-                   updated_at=? WHERE id=?""",
-                (price_pln, hours, material, extra, _dt.now().isoformat(), item_id)
+                   calc_rate=?, updated_at=? WHERE id=?""",
+                (price_pln, hours, material, extra, rate, _dt.now().isoformat(), item_id)
             )
             self.db_manager.project_con.commit()
 
@@ -8592,9 +8630,24 @@ class MainWindow(tk.Tk):
             except Exception:
                 pass
 
+        def _jump_to_item(item_id):
+            try:
+                row_ids = getattr(self, '_sheet_row_ids', [])
+                if item_id not in row_ids:
+                    return
+                row_idx = row_ids.index(item_id)
+                self._selected_row_idx = row_idx
+                self.sheet.select_cell(row=row_idx, column=1, redraw=False)
+                self._rebuild_all_cell_colors_with_selection()
+                self._scroll_to_row_center(row_idx)
+                self.lift()
+                self.focus_force()
+            except Exception as e:
+                print(f"⚠️  _jump_to_item: {e}")
+
         dlg = RmpakCalculatorDialog(self, self.db_manager.master_con, self.db_manager.project_con,
                               project_name, on_price_saved=self.refresh_data,
-                              on_save_item=_save_item)
+                              on_save_item=_save_item, on_jump_to_item=_jump_to_item)
         self._rmpak_calc_win = dlg
 
     def launch_rm_import(self):
@@ -17407,10 +17460,9 @@ class MainWindow(tk.Tk):
             self._selected_row_idx = row_idx
             self._rebuild_all_cell_colors_with_selection()
             
-            # Przewiń do wiersza (jeśli możliwe)
+            # Przewiń do wiersza (wycentruj)
             try:
-                self.sheet.see(row=row_idx, column=0, keep_yscroll=False, keep_xscroll=True, 
-                              bottom_right_corner=False, check_cell_visibility=True, redraw=True)
+                self._scroll_to_row_center(row_idx)
                 print(f"✅ Podświetlono wiersz {row_idx} (item_id={item_id})")
             except Exception as e:
                 print(f"⚠️  Błąd przewijania do wiersza: {e}")

@@ -38,7 +38,7 @@ def _save_hourly_rate(master_con, rate):
 
 def _ensure_calc_columns(project_con):
     existing = {row[1] for row in project_con.execute("PRAGMA table_info(items)")}
-    for col, coltype in [("calc_hours", "REAL"), ("calc_material", "REAL"), ("calc_extra", "REAL")]:
+    for col, coltype in [("calc_hours", "REAL"), ("calc_material", "REAL"), ("calc_extra", "REAL"), ("calc_rate", "REAL")]:
         if col not in existing:
             project_con.execute(f"ALTER TABLE items ADD COLUMN {col} {coltype} DEFAULT 0")
     project_con.commit()
@@ -52,7 +52,8 @@ def _load_rmpak_items(project_con, supplier_ids):
         f"""SELECT id, COALESCE(work_name, src_name, ''), src_modul, price_pln,
                    COALESCE(calc_hours, 0), COALESCE(calc_material, 0), COALESCE(calc_extra, 0),
                    COALESCE(work_qty, order_qty, 1),
-                   COALESCE(work_drawing_no, src_drawing_no, '')
+                   COALESCE(work_drawing_no, src_drawing_no, ''),
+                   COALESCE(calc_rate, 0)
             FROM items
             WHERE supplier_id IN ({placeholders})
             ORDER BY src_modul, work_name""",
@@ -62,7 +63,7 @@ def _load_rmpak_items(project_con, supplier_ids):
 
 
 class RmpakCalculatorDialog:
-    def __init__(self, parent, master_con, project_con, project_name="", on_price_saved=None, on_save_item=None):
+    def __init__(self, parent, master_con, project_con, project_name="", on_price_saved=None, on_save_item=None, on_jump_to_item=None):
         self.master_con = master_con
         self.project_con = project_con
 
@@ -78,7 +79,8 @@ class RmpakCalculatorDialog:
         self.selected_item_id = None
         self._updating = False
         self.on_price_saved = on_price_saved
-        self.on_save_item = on_save_item  # fn(item_id, price_pln, hours, material, extra)
+        self.on_save_item = on_save_item  # fn(item_id, price_pln, hours, material, extra, rate)
+        self.on_jump_to_item = on_jump_to_item  # fn(item_id)
 
         self.win = tk.Toplevel(parent)
         self.win.title(f"Kalkulator RMPAK — {project_name}")
@@ -96,6 +98,7 @@ class RmpakCalculatorDialog:
 
         self._build_ui()
         self._load_items()
+        self.win.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self):
         # --- górny pasek: stawka godzinowa ---
@@ -113,10 +116,10 @@ class RmpakCalculatorDialog:
         frame_table = tk.Frame(self.win)
         frame_table.pack(fill="both", expand=True, padx=8, pady=(0, 4))
 
-        cols = ("ID", "Nr rysunku", "Nazwa", "Szt.", "Godz./partia", "Materiał", "Dodatkowe", "Cena/szt.", "Wartość partii")
+        cols = ("ID", "Nr rysunku", "Nazwa", "Szt.", "Godz./partia", "Materiał", "Dodatkowe", "Stawka", "Cena/szt.", "Wartość partii")
         self.tree = ttk.Treeview(frame_table, columns=cols, show="headings", selectmode="browse")
-        widths = (40, 110, 280, 45, 90, 90, 90, 90, 110)
-        anchors = ("center", "w", "w", "e", "e", "e", "e", "e", "e")
+        widths = (40, 110, 260, 45, 90, 90, 90, 70, 90, 110)
+        anchors = ("center", "w", "w", "e", "e", "e", "e", "e", "e", "e")
         for col, w, a in zip(cols, widths, anchors):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=w, anchor=a)
@@ -140,6 +143,7 @@ class RmpakCalculatorDialog:
         vsb.pack(side="right", fill="y")
 
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
+        self.tree.bind("<Double-Button-1>", self._on_double_click)
 
         # --- dolny obszar: kalkulator + suma ---
         bottom_area = tk.Frame(self.win)
@@ -172,13 +176,20 @@ class RmpakCalculatorDialog:
         self.qty_label = tk.Label(bottom, text="—", width=6, anchor="w", font=("", 10))
         self.qty_label.grid(row=1, column=7, sticky="w")
 
-        tk.Label(bottom, text="Cena/szt.:").grid(row=2, column=0, sticky="e", padx=(4, 2), pady=(6, 0))
-        self.price_per_unit_var = tk.StringVar(value="—")
-        tk.Label(bottom, textvariable=self.price_per_unit_var, font=("", 11, "bold"), fg="darkgreen", width=10, anchor="w").grid(row=2, column=1, sticky="w", pady=(6, 0))
+        tk.Label(bottom, text="Stawka (PLN/h):").grid(row=2, column=0, sticky="e", padx=(4, 2), pady=(6, 0))
+        self.item_rate_var = tk.StringVar(value=str(self.hourly_rate))
+        item_rate_entry = tk.Entry(bottom, textvariable=self.item_rate_var, width=10)
+        item_rate_entry.grid(row=2, column=1, padx=(0, 8), pady=(6, 0))
+        self._bind_select_all(item_rate_entry)
+        self.item_rate_var.trace_add("write", self._recalc)
 
-        tk.Label(bottom, text="Wartość partii:").grid(row=2, column=2, sticky="e", padx=(4, 2), pady=(6, 0))
+        tk.Label(bottom, text="Cena/szt.:").grid(row=2, column=2, sticky="e", padx=(4, 2), pady=(6, 0))
+        self.price_per_unit_var = tk.StringVar(value="—")
+        tk.Label(bottom, textvariable=self.price_per_unit_var, font=("", 11, "bold"), fg="darkgreen", width=10, anchor="w").grid(row=2, column=3, sticky="w", pady=(6, 0))
+
+        tk.Label(bottom, text="Wartość partii:").grid(row=2, column=4, sticky="e", padx=(4, 2), pady=(6, 0))
         self.price_total_var = tk.StringVar(value="—")
-        tk.Label(bottom, textvariable=self.price_total_var, font=("", 11, "bold"), fg="navy", width=12, anchor="w").grid(row=2, column=3, sticky="w", pady=(6, 0))
+        tk.Label(bottom, textvariable=self.price_total_var, font=("", 11, "bold"), fg="navy", width=12, anchor="w").grid(row=2, column=5, sticky="w", pady=(6, 0))
 
         tk.Button(bottom, text="💾 Zapisz cenę/szt.", command=self._save_price,
                   bg="#4CAF50", fg="white", font=("", 10, "bold")).grid(row=2, column=6, columnspan=2, padx=(16, 0), pady=(6, 0))
@@ -192,27 +203,33 @@ class RmpakCalculatorDialog:
         tk.Label(sum_frame, textvariable=self.grand_total_var,
                  font=("", 14, "bold"), fg="darkred", anchor="e").pack(anchor="e", pady=(4, 0))
 
+        tk.Button(sum_frame, text="Zamknij", command=self._on_close,
+                  width=12, bg="#d9534f", fg="white", font=("", 9, "bold")).pack(anchor="e", pady=(10, 0))
+
     def _load_items(self):
         self.tree.delete(*self.tree.get_children())
         self._items = {}
         self._qtys = {}
+        self._rates = {}
         rows = _load_rmpak_items(self.project_con, self.supplier_ids)
         grand_total = 0.0
         for lp, row in enumerate(rows, start=1):
-            item_id, name, modul, price, hours, material, extra, qty, drawing_no = row
+            item_id, name, modul, price, hours, material, extra, qty, drawing_no, calc_rate = row
             qty = qty or 1
             price_str = f"{price:.2f}" if price is not None else "—"
             total = price * qty if price is not None else None
             total_str = f"{total:.2f}" if total is not None else "—"
+            rate_str = f"{calc_rate:.2f}" if calc_rate else "—"
             if total is not None:
                 grand_total += total
             tag = "odd" if lp % 2 else "even"
             iid = self.tree.insert("", "end", tags=(tag,), values=(
                 lp, drawing_no or "", name or "", int(qty),
-                hours or 0, f"{material:.2f}", f"{extra:.2f}", price_str, total_str
+                hours or 0, f"{material:.2f}", f"{extra:.2f}", rate_str, price_str, total_str
             ))
             self._items[iid] = item_id
             self._qtys[iid] = qty
+            self._rates[iid] = calc_rate or 0.0
         self.grand_total_var.set(f"{grand_total:,.2f} PLN")
 
     @staticmethod
@@ -227,7 +244,8 @@ class RmpakCalculatorDialog:
             return False
         current = [self.calc_vars[0].get().strip(),
                    self.calc_vars[1].get().strip(),
-                   self.calc_vars[2].get().strip()]
+                   self.calc_vars[2].get().strip(),
+                   self.item_rate_var.get().strip()]
         return current != list(self._loaded_vals)
 
     def _on_select(self, _event=None):
@@ -247,6 +265,7 @@ class RmpakCalculatorDialog:
                 self.calc_vars[0].set(self._loaded_vals[0])
                 self.calc_vars[1].set(self._loaded_vals[1])
                 self.calc_vars[2].set(self._loaded_vals[2])
+                self.item_rate_var.set(self._loaded_vals[3])
                 self._updating = False
                 self._recalc()
                 return
@@ -259,14 +278,20 @@ class RmpakCalculatorDialog:
         self.selected_label.config(text=f"Pozycja: {vals[2]}", fg="black")
         qty = self._qtys.get(iid, 1)
         self.qty_label.config(text=str(qty))
+        saved_rate = self._rates.get(iid, 0.0)
         self._updating = True
         self.calc_vars[0].set(str(vals[4]))   # godz./partia
         self.calc_vars[1].set(str(vals[5]))   # materiał
         self.calc_vars[2].set(str(vals[6]))   # dodatkowe
+        if saved_rate:
+            self.item_rate_var.set(str(saved_rate))
+        else:
+            self.item_rate_var.set(str(self.hourly_rate))
         self._updating = False
         self._loaded_vals = (self.calc_vars[0].get().strip(),
                              self.calc_vars[1].get().strip(),
-                             self.calc_vars[2].get().strip())
+                             self.calc_vars[2].get().strip(),
+                             self.item_rate_var.get().strip())
         self._recalc()
 
     @staticmethod
@@ -283,7 +308,7 @@ class RmpakCalculatorDialog:
         if self._updating:
             return
         try:
-            rate = self._parse(self.rate_var.get())
+            rate = self._parse(self.item_rate_var.get())
             hours = self._parse(self.calc_vars[0].get())
             material = self._parse(self.calc_vars[1].get())
             extra = self._parse(self.calc_vars[2].get())
@@ -305,6 +330,8 @@ class RmpakCalculatorDialog:
             return
         _save_hourly_rate(self.master_con, rate)
         self.hourly_rate = rate
+        if not self.selected_item_id:
+            self.item_rate_var.set(str(rate))
         messagebox.showinfo("OK", f"Stawka {rate:.2f} PLN/h zapisana.", parent=self.win)
 
     def _save_price(self):
@@ -312,7 +339,7 @@ class RmpakCalculatorDialog:
             messagebox.showwarning("Brak wyboru", "Wybierz pozycję z listy.", parent=self.win)
             return
         try:
-            rate = self._parse(self.rate_var.get())
+            rate = self._parse(self.item_rate_var.get())
             hours = self._parse(self.calc_vars[0].get())
             material = self._parse(self.calc_vars[1].get())
             extra = self._parse(self.calc_vars[2].get())
@@ -325,17 +352,18 @@ class RmpakCalculatorDialog:
             return
 
         if self.on_save_item:
-            self.on_save_item(self.selected_item_id, price_per_unit, hours, material, extra)
+            self.on_save_item(self.selected_item_id, price_per_unit, hours, material, extra, rate)
         else:
             self.project_con.execute(
-                """UPDATE items SET price_pln=?, calc_hours=?, calc_material=?, calc_extra=?
+                """UPDATE items SET price_pln=?, calc_hours=?, calc_material=?, calc_extra=?, calc_rate=?
                    WHERE id=?""",
-                (price_per_unit, hours, material, extra, self.selected_item_id)
+                (price_per_unit, hours, material, extra, rate, self.selected_item_id)
             )
             self.project_con.commit()
         self._loaded_vals = (self.calc_vars[0].get().strip(),
                              self.calc_vars[1].get().strip(),
-                             self.calc_vars[2].get().strip())
+                             self.calc_vars[2].get().strip(),
+                             self.rate_var.get().strip())
 
         # odśwież wiersz w tabeli
         sel = self.tree.selection()
@@ -346,13 +374,15 @@ class RmpakCalculatorDialog:
             vals[4] = hours
             vals[5] = material
             vals[6] = extra
-            vals[7] = f"{price_per_unit:.2f}"
-            vals[8] = f"{price_per_unit * qty:.2f}"
+            vals[7] = f"{rate:.2f}"
+            vals[8] = f"{price_per_unit:.2f}"
+            vals[9] = f"{price_per_unit * qty:.2f}"
             self.tree.item(iid, values=vals)
+            self._rates[iid] = rate
         # przelicz sumę całkowitą
         grand = 0.0
         for child in self.tree.get_children():
-            v = self.tree.item(child, "values")[8]
+            v = self.tree.item(child, "values")[9]
             try:
                 grand += float(v)
             except (ValueError, TypeError):
@@ -361,3 +391,21 @@ class RmpakCalculatorDialog:
 
         if self.on_price_saved:
             self.on_price_saved()
+
+    def _on_double_click(self, _event=None):
+        if not self.on_jump_to_item or not self.selected_item_id:
+            return
+        self.on_jump_to_item(self.selected_item_id)
+
+    def _on_close(self):
+        if self._has_unsaved_changes():
+            answer = messagebox.askyesnocancel(
+                "Niezapisane zmiany",
+                "Masz niezapisane zmiany dla tej pozycji.\nCzy zapisać przed zamknięciem?",
+                parent=self.win
+            )
+            if answer is None:  # Anuluj — nie zamykaj
+                return
+            if answer:  # Tak — zapisz i zamknij
+                self._save_price()
+        self.win.destroy()
