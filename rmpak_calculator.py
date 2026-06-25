@@ -163,14 +163,17 @@ class RmpakCalculatorDialog:
         bottom_area = tk.Frame(self.win)
         bottom_area.pack(fill="x", padx=8, pady=(0, 8))
 
-        bottom = tk.LabelFrame(bottom_area, text="Kalkulator dla wybranej pozycji", padx=8, pady=6)
-        bottom.pack(side="left", fill="both", expand=True)
+        self.bottom = tk.LabelFrame(bottom_area, text="Kalkulator dla wybranej pozycji", padx=8, pady=6)
+        self.bottom.pack(side="left", fill="both", expand=True)
+        bottom = self.bottom
 
         self._loaded_vals = None  # wartości załadowane z tabeli dla bieżącej pozycji
         self._prev_iid = None
 
-        self.selected_label = tk.Label(bottom, text="(wybierz pozycję z listy)", anchor="w", fg="gray")
-        self.selected_label.grid(row=0, column=0, columnspan=10, sticky="w", pady=(0, 6))
+        self.lbl_prefix = tk.Label(bottom, text="Pozycja:", anchor="w")
+        self.lbl_prefix.grid(row=0, column=0, sticky="w", padx=(0, 4), pady=(0, 6))
+        self.selected_label = tk.Label(bottom, text="(wybierz pozycję z listy)", anchor="w", fg="gray", font=("", 9, "bold"))
+        self.selected_label.grid(row=0, column=1, columnspan=9, sticky="w", pady=(0, 6))
 
         fields = [
             ("Czas partii (h lub h:mm):", 0),
@@ -221,12 +224,12 @@ class RmpakCalculatorDialog:
                   width=12, bg="#d9534f", fg="white", font=("", 9, "bold")).pack(anchor="e", pady=(10, 0))
 
     def _load_items(self):
+        prev_item_id = self.selected_item_id
         self.tree.delete(*self.tree.get_children())
         self._items = {}
         self._qtys = {}
         self._rates = {}
-        self._sel_iid = None
-        self._sel_base_tag = None
+
         rows = _load_rmpak_items(self.project_con, self.supplier_ids)
         grand_total = 0.0
         for lp, row in enumerate(rows, start=1):
@@ -257,6 +260,13 @@ class RmpakCalculatorDialog:
             self._qtys[iid] = qty
             self._rates[iid] = calc_rate or 0.0
         self.grand_total_var.set(f"{grand_total:,.2f} PLN")
+
+        if prev_item_id:
+            for iid, item_id in self._items.items():
+                if item_id == prev_item_id:
+                    self.tree.selection_set(iid)
+                    self.tree.see(iid)
+                    break
 
     @staticmethod
     def _bind_select_all(entry):
@@ -300,8 +310,22 @@ class RmpakCalculatorDialog:
 
         self._prev_iid = iid
         self.selected_item_id = self._items.get(iid)
+
+        tag = (self.tree.item(iid, "tags") or ("",))[0]
+        bg = "#90EE90" if tag == "delivered" else "#FFFACD" if tag == "ordered" else "#f0f0f0"
+        self.bottom.config(bg=bg)
+        for child in self.bottom.winfo_children():
+            if isinstance(child, tk.Label):
+                try:
+                    child.config(bg=bg)
+                except Exception:
+                    pass
+        self.lbl_prefix.config(bg=bg)
         vals = self.tree.item(iid, "values")
-        self.selected_label.config(text=f"Pozycja: {vals[2]}", fg="black")
+        nr = vals[1] or ""
+        nazwa = vals[2] or ""
+        tekst = f"{nr}  {nazwa}" if nr else nazwa
+        self.selected_label.config(text=tekst, fg="black")
         qty = self._qtys.get(iid, 1)
         self.qty_label.config(text=str(qty))
         saved_rate = self._rates.get(iid, 0.0)
