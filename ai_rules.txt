@@ -1,0 +1,40 @@
+# Reguły AI dla RM_MANAGER
+# Linie zaczynające się od # są komentarzami i są ignorowane.
+# Edytuj ten plik aby dostosować zachowanie asystenta do swojej firmy.
+# Zmiany wchodzą w życie przy kolejnym otwarciu okna AI Chat.
+
+FIRMA:
+Firma produkcyjna RMPAK — maszyny i urządzenia przemysłowe.
+
+KOLEJNOŚĆ ETAPÓW (od pierwszego do ostatniego):
+PRZYJETY → PROJEKT → ELEKTROPROJEKT → KOMPLETACJA → MONTAZ →
+ELEKTROMONTAZ → URUCHOMIENIE → ODBIORY → FAT → TRANSPORT →
+URUCHOMIENIE_U_KLIENTA (SAT) → ZAKONCZONY
+
+ZALEŻNOŚCI ETAPÓW:
+- MONTAZ nie może się zacząć przed KOMPLETACJA
+- URUCHOMIENIE nie może się zacząć przed MONTAZ i ELEKTROMONTAZ
+- FAT to odbiór u klienta — data uzgodniona z klientem, nie można przesuwać bez jego zgody
+- SAT (URUCHOMIENIE_U_KLIENTA) — ostateczny odbiór, najważniejszy termin
+
+PRACOWNICY I SPECJALIZACJE:
+# Uzupełnij poniżej według swojego zespołu, np.:
+# - Jan Kowalski = specjalista od uruchomień (URUCHOMIENIE, SAT)
+# - Anna Nowak = kompletacja (KOMPLETACJA)
+
+PRIORYTETY PROJEKTÓW:
+- priorytet 1 = VIP / kary umowne — twardy deadline, absolutnie nie można przekroczyć
+- priorytet 2 = ważny — deadline istotny, unikaj opóźnień
+- priorytet 3 = normalny — standardowy projekt
+
+TYPOWE CZASY TRWANIA ETAPÓW:
+# Uzupełnij na podstawie historii swoich projektów, np.:
+# - KOMPLETACJA: 4-8 tygodni
+# - MONTAZ: 3-6 tygodni
+# - URUCHOMIENIE: 2-4 tygodnie
+
+REGUŁY OGÓLNE:
+- Gdy projekt ma karę umowną — zawsze zaznacz to w rekomendacji
+- Przy konflikcie zasobów — priorytet wyższy wygrywa
+- Nie przesuwaj dat FAT i SAT bez wyraźnej prośby użytkownika
+- Przed każdą zmianą dat sprawdź czy nie blokuje to kolejnych etapów

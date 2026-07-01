@@ -35,6 +35,26 @@ except ImportError:
 MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 4096
 
+# Domyślna lokalizacja pliku reguł — obok tego modułu
+_DEFAULT_RULES_FILE = Path(__file__).parent / "ai_rules.txt"
+
+
+def load_rules(rules_file: Optional[str] = None) -> str:
+    """Wczytaj reguły z pliku tekstowego.
+
+    Linie zaczynające się od # są komentarzami i są pomijane.
+    Zwraca pusty string jeśli plik nie istnieje.
+    """
+    path = Path(rules_file) if rules_file else _DEFAULT_RULES_FILE
+    if not path.exists():
+        return ""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        content = "\n".join(l for l in lines if not l.strip().startswith("#"))
+        return content.strip()
+    except Exception:
+        return ""
+
 SYSTEM_PROMPT = """Jesteś asystentem kierownika produkcji w firmie stolarskiej/produkcyjnej.
 Masz dostęp do harmonogramu projektów zapisanego w bazie SQLite.
 Odpowiadasz po polsku, zwięźle i konkretnie — jak doświadczony kierownik.
@@ -951,7 +971,9 @@ def run_ai_agent(
     """
     client = anthropic.Anthropic()
 
-    system = SYSTEM_PROMPT.format(today=context.today)
+    rules = load_rules(getattr(context, 'rules_file', None))
+    rules_section = f"\n\nREGUŁY FIRMOWE:\n{rules}" if rules else ""
+    system = SYSTEM_PROMPT.format(today=context.today) + rules_section
 
     history.append({"role": "user", "content": user_message})
 

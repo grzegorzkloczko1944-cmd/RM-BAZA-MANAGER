@@ -2936,6 +2936,7 @@ class RMManagerGUI:
         tools_menu.add_command(label="⚡ Optymalizator produkcji...", command=self.optimizer_dialog)
         tools_menu.add_command(label="↩ Cofnij optymalizację...", command=self.undo_last_optimization_dialog)
         tools_menu.add_command(label="🤖 AI Asystent harmonogramu...", command=self.ai_chat_dialog)
+        tools_menu.add_command(label="📝 Reguły AI...", command=self.ai_rules_dialog)
         tools_menu.add_separator()
         tools_menu.add_command(label="🐛 DEBUG — Zrzut danych projektów", command=self.debug_dump_dialog)
         tools_menu.add_separator()
@@ -27123,6 +27124,82 @@ Kod: {unlock_code}
                     self._mp_chart_meta['project_ids'], preserve_view=True)
         except Exception:
             pass
+
+    def ai_rules_dialog(self):
+        """Edytor reguł firmowych dla AI Asystenta."""
+        import importlib
+        rules_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_rules.txt")
+
+        win = tk.Toplevel(self.root)
+        win.title("📝 Reguły AI — edytor")
+        win.geometry("740x560")
+        win.resizable(True, True)
+
+        hdr = tk.Frame(win, bg="#2c3e50", height=44)
+        hdr.pack(fill=tk.X)
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text="📝  Reguły firmowe dla AI Asystenta",
+                 bg="#2c3e50", fg="white", font=("Segoe UI", 11, "bold")).pack(side=tk.LEFT, padx=14, pady=10)
+
+        info = tk.Label(win,
+            text="Linie zaczynające się od # są komentarzami. Zmiany wchodzą w życie przy kolejnym otwarciu AI Chat.",
+            font=("Segoe UI", 8), fg="#666")
+        info.pack(anchor="w", padx=10, pady=(6, 0))
+
+        txt = scrolledtext.ScrolledText(win, font=("Consolas", 10), wrap=tk.WORD, undo=True)
+        txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
+
+        # Wczytaj istniejący plik
+        try:
+            if os.path.exists(rules_file):
+                with open(rules_file, encoding="utf-8") as f:
+                    txt.insert("1.0", f.read())
+        except Exception as e:
+            txt.insert("1.0", f"# Błąd odczytu pliku: {e}\n")
+
+        def _save():
+            try:
+                content = txt.get("1.0", tk.END)
+                with open(rules_file, "w", encoding="utf-8") as f:
+                    f.write(content)
+                messagebox.showinfo("Zapisano", "Reguły zapisane.\nZmiany wejdą w życie przy kolejnym otwarciu AI Chat.")
+            except Exception as e:
+                messagebox.showerror("Błąd", f"Nie można zapisać:\n{e}")
+
+        def _restore_default():
+            if not messagebox.askyesno("Potwierdź", "Przywrócić domyślne reguły? Nadpisze bieżącą treść."):
+                return
+            try:
+                import rm_ai_optimizer as ai_mod
+                importlib.reload(ai_mod)
+                default_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_rules.txt")
+                # Przywróć przez reset treści w edytorze do wbudowanego szablonu
+                template = (
+                    "# Reguły AI dla RM_MANAGER\n"
+                    "# Linie zaczynające się od # są komentarzami.\n\n"
+                    "FIRMA:\n\nKOLEJNOŚĆ ETAPÓW:\n"
+                    "PRZYJETY → PROJEKT → KOMPLETACJA → MONTAZ → URUCHOMIENIE → ZAKONCZONY\n\n"
+                    "PRACOWNICY I SPECJALIZACJE:\n\nPRIORYTETY:\n"
+                    "- priorytet 1 = VIP / kary umowne\n"
+                    "- priorytet 2 = ważny\n- priorytet 3 = normalny\n\n"
+                    "REGUŁY OGÓLNE:\n"
+                    "- Nie przesuwaj FAT i SAT bez zgody użytkownika\n"
+                )
+                txt.delete("1.0", tk.END)
+                txt.insert("1.0", template)
+            except Exception as e:
+                messagebox.showerror("Błąd", str(e))
+
+        btn_frame = tk.Frame(win)
+        btn_frame.pack(fill=tk.X, padx=10, pady=(0, 8))
+        tk.Button(btn_frame, text="💾 Zapisz", command=_save,
+                  bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=14).pack(side=tk.LEFT, padx=4)
+        tk.Button(btn_frame, text="↩ Przywróć domyślne", command=_restore_default,
+                  font=self.FONT_DEFAULT, padx=10).pack(side=tk.LEFT, padx=4)
+        tk.Button(btn_frame, text="✖ Zamknij", command=win.destroy,
+                  font=self.FONT_DEFAULT, padx=10).pack(side=tk.RIGHT, padx=4)
+
+        txt.focus_set()
 
     def ai_chat_dialog(self):
         """Okno czatu z AI Asystentem harmonogramu (Claude API, read-only)."""
