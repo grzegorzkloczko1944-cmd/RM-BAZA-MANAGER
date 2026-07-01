@@ -2935,6 +2935,7 @@ class RMManagerGUI:
         tools_menu.add_separator()
         tools_menu.add_command(label="⚡ Optymalizator produkcji...", command=self.optimizer_dialog)
         tools_menu.add_command(label="↩ Cofnij optymalizację...", command=self.undo_last_optimization_dialog)
+        tools_menu.add_command(label="🤖 AI Asystent harmonogramu...", command=self.ai_chat_dialog)
         tools_menu.add_separator()
         tools_menu.add_command(label="🐛 DEBUG — Zrzut danych projektów", command=self.debug_dump_dialog)
         tools_menu.add_separator()
@@ -3162,6 +3163,20 @@ class RMManagerGUI:
             text="⚡ Optymalizator",
             command=self.optimizer_dialog,
             bg="#16a085",
+            fg="white",
+            font=self.FONT_BOLD,
+            padx=12,
+            pady=5,
+            relief=tk.RAISED,
+            bd=2
+        ).pack(side=tk.LEFT, padx=(0, 3), pady=10)
+
+        # Przycisk AI ASYSTENT
+        tk.Button(
+            self.top_frame,
+            text="🤖 AI Asystent",
+            command=self.ai_chat_dialog,
+            bg="#6c3483",
             fg="white",
             font=self.FONT_BOLD,
             padx=12,
@@ -27108,6 +27123,282 @@ Kod: {unlock_code}
                     self._mp_chart_meta['project_ids'], preserve_view=True)
         except Exception:
             pass
+
+    def ai_chat_dialog(self):
+        """Okno czatu z AI Asystentem harmonogramu (Claude API, read-only)."""
+        import importlib
+        import threading
+
+        try:
+            import rm_ai_optimizer as ai_mod
+            importlib.reload(ai_mod)
+        except ImportError as e:
+            messagebox.showerror(
+                "Brak modułu",
+                f"Nie udało się załadować rm_ai_optimizer.py:\n{e}\n\n"
+                "Upewnij się że plik istnieje i zainstalowano: pip install anthropic",
+            )
+            return
+
+        # Sprawdź klucz API — najpierw env, potem plik konfiguracyjny, na końcu dialog
+        import os
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            api_key = self._ai_load_api_key()
+        if not api_key:
+            api_key = self._ai_ask_for_api_key()
+            if not api_key:
+                return
+        os.environ["ANTHROPIC_API_KEY"] = api_key
+
+        ctx = ai_mod.AIOptimizerContext(
+            master_db_path=self.master_db_path,
+            rm_manager_dir=self.rm_manager_dir,
+            rm_master_db_path=self.rm_master_db_path,
+            locks_dir=getattr(self, 'locks_dir', None),
+            current_user=self.current_user or CURRENT_USER,
+        )
+        session = ai_mod.AIChatSession(ctx)
+
+        # ---- Okno ----
+        win = tk.Toplevel(self.root)
+        win.title("🤖 AI Asystent harmonogramu")
+        win.geometry("860x640")
+        win.configure(bg="#1a1a2e")
+        win.resizable(True, True)
+
+        DARK_BG   = "#1a1a2e"
+        PANEL_BG  = "#16213e"
+        USER_BG   = "#0f3460"
+        AI_BG     = "#2d2d44"
+        ACCENT    = "#9b59b6"
+        FG        = "#e0e0e0"
+        FG_DIM    = "#888"
+        FONT_CHAT = ("Segoe UI", 10)
+        FONT_BOLD = ("Segoe UI", 10, "bold")
+
+        # Header
+        hdr = tk.Frame(win, bg=ACCENT, height=48)
+        hdr.pack(fill=tk.X)
+        hdr.pack_propagate(False)
+        tk.Label(
+            hdr, text="🤖  AI Asystent harmonogramu",
+            bg=ACCENT, fg="white", font=("Segoe UI", 13, "bold")
+        ).pack(side=tk.LEFT, padx=16, pady=10)
+
+        btn_reset = tk.Button(
+            hdr, text="🗑 Nowa rozmowa", bg="#7d3c98", fg="white",
+            font=FONT_CHAT, relief=tk.FLAT, padx=10,
+            command=lambda: _reset_chat()
+        )
+        btn_reset.pack(side=tk.RIGHT, padx=10, pady=8)
+
+        # Obszar czatu (Text — read-only)
+        chat_frame = tk.Frame(win, bg=DARK_BG)
+        chat_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(8, 4))
+
+        chat_text = tk.Text(
+            chat_frame, bg=PANEL_BG, fg=FG, font=FONT_CHAT,
+            wrap=tk.WORD, state=tk.DISABLED,
+            relief=tk.FLAT, bd=0, padx=12, pady=8,
+            cursor="arrow",
+        )
+        scrollbar = tk.Scrollbar(chat_frame, command=chat_text.yview, bg=DARK_BG)
+        chat_text.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        chat_text.pack(fill=tk.BOTH, expand=True)
+
+        # Tagi kolorów
+        chat_text.tag_configure("user_label",  foreground="#a9cce3", font=FONT_BOLD)
+        chat_text.tag_configure("user_msg",    foreground="#d6eaf8", font=FONT_CHAT)
+        chat_text.tag_configure("ai_label",    foreground="#d7bde2", font=FONT_BOLD)
+        chat_text.tag_configure("ai_msg",      foreground=FG,        font=FONT_CHAT)
+        chat_text.tag_configure("thinking_msg",foreground=FG_DIM,    font=("Segoe UI", 9, "italic"))
+        chat_text.tag_configure("separator",   foreground="#444")
+
+        # Pasek statusu (thinking...)
+        status_var = tk.StringVar(value="")
+        status_bar = tk.Label(
+            win, textvariable=status_var,
+            bg=DARK_BG, fg=FG_DIM, font=("Segoe UI", 9, "italic"),
+            anchor="w", padx=14,
+        )
+        status_bar.pack(fill=tk.X)
+
+        # Pole wprowadzania
+        input_frame = tk.Frame(win, bg=DARK_BG, pady=6)
+        input_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        input_var = tk.StringVar()
+        entry = tk.Entry(
+            input_frame, textvariable=input_var,
+            bg=USER_BG, fg="white", font=FONT_CHAT,
+            insertbackground="white", relief=tk.FLAT, bd=0,
+        )
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=8, padx=(0, 8))
+
+        send_btn = tk.Button(
+            input_frame, text="Wyślij ▶",
+            bg=ACCENT, fg="white", font=FONT_BOLD,
+            relief=tk.FLAT, padx=14, pady=6,
+            command=lambda: _send()
+        )
+        send_btn.pack(side=tk.RIGHT)
+
+        # ---- Sugestie szybkich pytań ----
+        suggestions_frame = tk.Frame(win, bg=DARK_BG)
+        suggestions_frame.pack(fill=tk.X, padx=10, pady=(0, 4))
+
+        SUGGESTIONS = [
+            "Które projekty są opóźnione?",
+            "Podsumuj stan produkcji na dziś",
+            "Który pracownik jest najbardziej obciążony?",
+            "Jakie projekty kończą się w tym miesiącu?",
+        ]
+        for sug in SUGGESTIONS:
+            tk.Button(
+                suggestions_frame, text=sug,
+                bg="#2c3e50", fg="#bdc3c7", font=("Segoe UI", 8),
+                relief=tk.FLAT, padx=6, pady=2,
+                command=lambda s=sug: _quick_send(s)
+            ).pack(side=tk.LEFT, padx=(0, 4), pady=2)
+
+        # ---- Logika ----
+
+        def _append(text, tag):
+            chat_text.configure(state=tk.NORMAL)
+            chat_text.insert(tk.END, text, tag)
+            chat_text.configure(state=tk.DISABLED)
+            chat_text.see(tk.END)
+
+        def _add_message(role, text):
+            _append("\n", "separator")
+            if role == "user":
+                _append("Ty:  ", "user_label")
+                _append(text + "\n", "user_msg")
+            else:
+                _append("AI:  ", "ai_label")
+                _append(text + "\n", "ai_msg")
+
+        def _set_busy(busy: bool):
+            state = tk.DISABLED if busy else tk.NORMAL
+            entry.configure(state=state)
+            send_btn.configure(state=state)
+
+        def _send_message(text: str):
+            text = text.strip()
+            if not text:
+                return
+            input_var.set("")
+            _add_message("user", text)
+            _set_busy(True)
+            status_var.set("⏳ AI myśli...")
+
+            def _worker():
+                def _on_thinking(label):
+                    win.after(0, lambda: status_var.set(f"🔍 {label}"))
+
+                try:
+                    answer = session.send(text, on_thinking=_on_thinking)
+                except Exception as ex:
+                    answer = f"⚠️ Błąd: {ex}"
+
+                win.after(0, lambda: _finish(answer))
+
+            def _finish(answer):
+                _add_message("ai", answer)
+                _set_busy(False)
+                status_var.set("")
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        def _send():
+            _send_message(input_var.get())
+
+        def _quick_send(text):
+            input_var.set(text)
+            _send()
+
+        def _reset_chat():
+            session.reset()
+            chat_text.configure(state=tk.NORMAL)
+            chat_text.delete("1.0", tk.END)
+            chat_text.configure(state=tk.DISABLED)
+            status_var.set("")
+            _append("Rozmowa wyczyszczona. Możesz zacząć od nowa.\n", "thinking_msg")
+
+        # Wiadomość powitalna
+        _append(
+            "Cześć! Jestem AI Asystentem harmonogramu.\n"
+            "Mogę odpowiedzieć na pytania o stan projektów, opóźnienia i obciążenie pracowników.\n"
+            "Wpisz pytanie lub użyj szybkich sugestii poniżej.\n",
+            "thinking_msg",
+        )
+
+        entry.bind("<Return>", lambda e: _send())
+        entry.focus_set()
+
+    def _ai_key_file(self) -> str:
+        """Ścieżka do pliku z kluczem API — obok rm_manager_gui.py."""
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ai_api_key")
+
+    def _ai_load_api_key(self) -> str:
+        """Wczytaj klucz API z pliku. Zwraca klucz lub ''."""
+        try:
+            p = self._ai_key_file()
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    return f.read().strip()
+        except Exception:
+            pass
+        return ""
+
+    def _ai_save_api_key(self, key: str) -> None:
+        """Zapisz klucz API do pliku."""
+        try:
+            with open(self._ai_key_file(), "w", encoding="utf-8") as f:
+                f.write(key)
+        except Exception:
+            pass
+
+    def _ai_ask_for_api_key(self) -> str:
+        """Wyświetl dialog z prośbą o klucz API Anthropica. Zwraca klucz lub ''."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Klucz API Anthropica")
+        dialog.geometry("520x200")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        tk.Label(dialog, text="Podaj klucz API Anthropica (sk-ant-...):", font=("Segoe UI", 10)).pack(pady=(20, 6), padx=20, anchor="w")
+
+        key_var = tk.StringVar()
+        entry = tk.Entry(dialog, textvariable=key_var, width=60, show="*", font=("Segoe UI", 10))
+        entry.pack(padx=20, fill=tk.X)
+
+        save_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(dialog, text="Zapamiętaj klucz na tym komputerze", variable=save_var,
+                       font=("Segoe UI", 9)).pack(anchor="w", padx=20, pady=(8, 0))
+
+        result = {"key": ""}
+
+        def _ok():
+            result["key"] = key_var.get().strip()
+            if result["key"] and save_var.get():
+                self._ai_save_api_key(result["key"])
+            dialog.destroy()
+
+        def _cancel():
+            dialog.destroy()
+
+        btn_frame = tk.Frame(dialog)
+        btn_frame.pack(pady=12)
+        tk.Button(btn_frame, text="OK", width=12, command=_ok).pack(side=tk.LEFT, padx=6)
+        tk.Button(btn_frame, text="Anuluj", width=12, command=_cancel).pack(side=tk.LEFT, padx=6)
+
+        entry.bind("<Return>", lambda e: _ok())
+        entry.focus_set()
+        dialog.wait_window()
+        return result["key"]
 
     def optimizer_dialog(self):
         """Okno optymalizatora produkcji z zakładkami: Uruchom, Ograniczenia, Pracownicy, Niedostępność, Kalendarz, Historia."""
