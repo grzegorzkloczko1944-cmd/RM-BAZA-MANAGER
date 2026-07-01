@@ -1,3 +1,5 @@
 RM_BAZA/
 build/
 dist/
+__pycache__/
+*.pyc
