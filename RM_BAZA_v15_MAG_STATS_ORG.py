@@ -1396,12 +1396,101 @@ class MainWindow(tk.Tk):
         
         # Custom prawy klik - dodaj "Powrót do BOM"
         self.sheet.popup_menu_add_command("Powrót do BOM", self.on_restore_to_bom)
-        
+
+        # Home/End - przejście do pierwszego/ostatniego wiersza (PgUp/PgDn działają już
+        # natywnie przez "arrowkeys" w enable_bindings, ale tksheet nie ma wbudowanej
+        # obsługi zwykłego Home/End - tylko Ctrl+Home).
+        self.sheet.bind("<Home>", self._on_sheet_home_key)
+        self.sheet.bind("<End>", self._on_sheet_end_key)
+
+        # Scroll kółkiem ze stałą prędkością (1 wiersz co min. 60ms, nadmiarowe
+        # ticki pomijane). Bez timerów/odraczania - przesunięcie i pełny redraw razem.
+        self._setup_sheet_scroll_step()
+
         self.sheet.pack(fill=tk.BOTH, expand=True)
-        
+
         # Protokół zamykania
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
-    
+
+    def _on_sheet_home_key(self, event=None):
+        """Home - przenosi zaznaczenie do pierwszego wiersza (w bieżącej kolumnie)."""
+        try:
+            if not self.sheet.selected:
+                return "break"
+            col = self.sheet.selected.column
+            self.sheet.select_cell(0, col, redraw=False)
+            self.sheet.see(0, col, redraw=True)
+        except Exception as e:
+            print(f"⚠️  Błąd Home: {e}")
+        return "break"
+
+    def _on_sheet_end_key(self, event=None):
+        """End - przenosi zaznaczenie do ostatniego wiersza (w bieżącej kolumnie)."""
+        try:
+            if not self.sheet.selected:
+                return "break"
+            last_row = len(self._sheet_row_ids) - 1
+            if last_row < 0:
+                return "break"
+            col = self.sheet.selected.column
+            self.sheet.select_cell(last_row, col, redraw=False)
+            self.sheet.see(last_row, col, redraw=True)
+        except Exception as e:
+            print(f"⚠️  Błąd End: {e}")
+        return "break"
+
+    def _setup_sheet_scroll_step(self):
+        """Scroll kółkiem myszy ze stałą, przewidywalną prędkością.
+
+        Na 4K pełny redraw klatki arkusza trwa ~150ms (zmierzone), więc szybkie
+        kręcenie kółkiem generuje więcej zdarzeń niż GUI zdąży obsłużyć - tempo
+        scrolla staje się nierówne (raz szarpie, raz przyspiesza). Tutaj każdy
+        wykonany krok to zawsze 1 wiersz + pełny synchroniczny redraw (jak
+        natywnie, zero timerów), ale kroki wykonują się nie częściej niż co
+        MIN_STEP_MS - nadmiarowe ticki są po prostu pomijane, dzięki czemu
+        arkusz przewija się jednostajnie niezależnie od tempa kręcenia.
+        """
+        try:
+            mt = self.sheet.MT
+        except Exception:
+            return
+
+        # Jedna, stała prędkość scrolla: 1 wiersz na krok, maksymalnie co MIN_STEP_MS.
+        # Ticki przychodzące szybciej są POMIJANE (nie kolejkowane/odraczane!) - dzięki
+        # temu tempo jest równe niezależnie od tego, jak szybko user kręci kółkiem,
+        # a każdy wykonany krok to komplet: przesunięcie + pełny synchroniczny redraw
+        # (zero timerów => zero znikających wierszy).
+        SCROLL_STEP_ROWS = 1
+        MIN_STEP_MS = 100
+
+        self._sheet_scroll_last_step_ts = 0.0
+
+        def stepped_mousewheel(event):
+            now = time.monotonic()
+            if (now - self._sheet_scroll_last_step_ts) * 1000 < MIN_STEP_MS:
+                return  # za wcześnie - pomiń tick, utrzymuje stałą prędkość
+            self._sheet_scroll_last_step_ts = now
+
+            if event.delta < 0 or getattr(event, "num", None) == 5:
+                mt.yview_scroll(SCROLL_STEP_ROWS, "units")
+                mt.RI.yview_scroll(SCROLL_STEP_ROWS, "units")
+                mt.y_move_synced_scrolls("moveto", mt.yview()[0])
+            elif event.delta >= 0 or getattr(event, "num", None) == 4:
+                if mt.canvasy(0) <= 0:
+                    return
+                mt.yview_scroll(-SCROLL_STEP_ROWS, "units")
+                mt.RI.yview_scroll(-SCROLL_STEP_ROWS, "units")
+                mt.y_move_synced_scrolls("moveto", mt.yview()[0])
+            mt.main_table_redraw_grid_and_text(redraw_header=False, redraw_row_index=True)
+
+        try:
+            # Tkinter .bind() zarejestrował referencję do oryginalnej metody, więc
+            # trzeba nadpisać bindingi jawnie (bind bez add="+" zastępuje poprzedni).
+            mt.bind("<MouseWheel>", stepped_mousewheel)
+            mt.RI.bind("<MouseWheel>", stepped_mousewheel)
+        except Exception:
+            pass
+
     def run_initialize(self):
         """Uruchom inicjalizację bez splash screen"""
         # Zablokuj interakcje na start - odblokujemy po finish_initialize
@@ -3756,9 +3845,194 @@ class MainWindow(tk.Tk):
         
         print(f"✅ Załadowano {len(suppliers)} dostawców")
     
+    # Kolory (jak v6) - stałe modułowe używane przez kolorowanie pełne i per-wiersz
+    _COLOR_GRAY_BG = "#D3D3D3"      # Szare tło BOM
+    _COLOR_GREEN_BG_LIGHT = "#D9EDF7"   # Zielone Zamówiono (jasne, stary kolor)
+    _COLOR_GREEN_BG_BRIGHT = "#90EE90"  # Zielone Odebrane (wyraziste, nowy kolor)
+    _COLOR_YELLOW_BG = "#FCF8E3"    # Żółty alarm (jasny)
+    _COLOR_RED_BG = "#F2DEDE"       # Czerwony po terminie (jasny)
+
+    @staticmethod
+    def _parse_alarm_date(d):
+        if not d:
+            return None
+        try:
+            import datetime as dt
+            return dt.date.fromisoformat(str(d)[:10])
+        except Exception:
+            return None
+
+    def _fetch_alarm_data_map(self, row_ids):
+        """Pobiera dane alarmów/statusów dla podanych id-ków jednym zapytaniem SQL."""
+        row_ids = [rid for rid in row_ids if rid]
+        if not row_ids:
+            return {}
+        if not self.db_manager.project_con:
+            print("⚠️  _fetch_alarm_data_map: project_con is None — pomijam kolory alarmów")
+            return {}
+
+        qs = ",".join(["?"] * len(row_ids))
+        sql = f"""
+            SELECT
+                id,
+                COALESCE(ordered_flag, 0) AS ordered_flag,
+                deadline_date,
+                alarm_date,
+                COALESCE(order_qty, work_qty, src_qty) AS target_qty,
+                COALESCE(delivered_qty, 0) AS delivered_qty,
+                alarm_offset,
+                alarm_unit,
+                COALESCE(dwf_biblioteka, 0) AS dwf_biblioteka,
+                COALESCE(is_manual, 0) AS is_manual
+            FROM items
+            WHERE id IN ({qs})
+        """
+        cursor = self.db_manager.project_con.execute(sql, row_ids)
+
+        data_map = {}
+        for row in cursor.fetchall():
+            iid, ordered_flag, deadline_date, alarm_date, target_qty, delivered_qty, alarm_offset, alarm_unit, dwf_biblioteka, is_manual = row
+            data_map[int(iid)] = {
+                'ordered_flag': int(ordered_flag or 0),
+                'deadline_date': deadline_date,
+                'alarm_date': alarm_date,
+                'target_qty': target_qty,
+                'delivered_qty': delivered_qty,
+                'alarm_offset': alarm_offset,
+                'alarm_unit': alarm_unit,
+                'dwf_biblioteka': int(dwf_biblioteka or 0),
+                'is_manual': int(is_manual or 0)
+            }
+        return data_map
+
+    def _color_single_row(self, row_idx, data, today):
+        """Aplikuje kolory (szarości BOM + alarmy) dla JEDNEGO wiersza.
+
+        Zwraca nic; aktualizuje self._cells_special_bg dla komórek tego wiersza.
+        Używane zarówno przez pełny rebuild, jak i przez odświeżenie pojedynczego wiersza
+        przy zmianie selekcji (bez przeliczania całej tabeli).
+        """
+        GRAY_BG = self._COLOR_GRAY_BG
+        GREEN_BG_LIGHT = self._COLOR_GREEN_BG_LIGHT
+        GREEN_BG_BRIGHT = self._COLOR_GREEN_BG_BRIGHT
+        YELLOW_BG = self._COLOR_YELLOW_BG
+        RED_BG = self._COLOR_RED_BG
+
+        # Usuń wpisy special_bg z poprzedniego stanu tego wiersza
+        self._cells_special_bg = {(r, c) for (r, c) in self._cells_special_bg if r != row_idx}
+
+        # Usuń (nie: pokoloruj na biało) wszystkie 19 kolumn tego wiersza.
+        # dehighlight_cells kasuje wpis w cell_options zamiast dopisywać bg="white",
+        # co utrzymuje cell_options małym (mniej obciąża silnik canvas Tk przy dużych arkuszach).
+        try:
+            self.sheet.dehighlight_cells(row=row_idx, cells=[(row_idx, col) for col in range(19)], redraw=False)
+        except Exception:
+            pass
+
+        # === SZARE TŁO BOM ===
+        overridden = self._sheet_overridden[row_idx] if row_idx < len(self._sheet_overridden) else set()
+        for col in [0, 1, 2, 3, 7, 8, 9, 18]:
+            if col in overridden:
+                try:
+                    val = self.sheet.get_cell_data(row_idx, col)
+                    if not val or str(val).strip() == "":
+                        continue
+                except Exception:
+                    pass
+                self.sheet.highlight_cells(row=row_idx, column=col, bg=GRAY_BG)
+                self._cells_special_bg.add((row_idx, col))
+
+        if not data:
+            return
+
+        # === NIEBIESKA CZCIONKA dla pozycji BIBLIOTEKA (kolumna NUMER) ===
+        if data.get('dwf_biblioteka', 0) == 1:
+            try:
+                numer_val = self.sheet.get_cell_data(row_idx, 0)
+                if numer_val and str(numer_val).strip():
+                    if (row_idx, 0) in self._cells_special_bg:
+                        self.sheet.highlight_cells(row=row_idx, column=0, bg=GRAY_BG, fg="blue")
+                    else:
+                        self.sheet.highlight_cells(row=row_idx, column=0, bg="white", fg="blue")
+                    self._cells_special_bg.add((row_idx, 0))
+            except Exception:
+                pass
+
+        # === NIEBIESKIE TŁO dla DELTA (kolumna 5) pozycji RĘCZNYCH ===
+        if data.get('is_manual', 0) == 1:
+            try:
+                self.sheet.highlight_cells(row=row_idx, column=5, bg="#e1f6f7", fg="black")
+                self._cells_special_bg.add((row_idx, 5))
+            except Exception:
+                pass
+
+        # === CZERWONA CZCIONKA dla NAZWY i DOSTAWCY gdy Dostawca = "anulowane" ===
+        try:
+            dostawca_val = self.sheet.get_cell_data(row_idx, 10)
+            if dostawca_val and str(dostawca_val).strip().lower() == "anulowane":
+                bg_col1 = GRAY_BG if (1 in overridden) else "white"
+                self.sheet.highlight_cells(row=row_idx, column=1, bg=bg_col1, fg="red")
+                self._cells_special_bg.add((row_idx, 1))
+                self.sheet.highlight_cells(row=row_idx, column=10, bg="white", fg="red")
+                self._cells_special_bg.add((row_idx, 10))
+        except Exception:
+            pass
+
+        deadline_dt = self._parse_alarm_date(data['deadline_date'])
+        alarm_dt = self._parse_alarm_date(data['alarm_date'])
+
+        if alarm_dt is None and deadline_dt and data['alarm_offset']:
+            try:
+                import datetime as dt
+                off = int(data['alarm_offset'])
+                mul = 7 if str(data['alarm_unit'] or "").upper().startswith("W") else 1
+                alarm_dt = deadline_dt - dt.timedelta(days=off * mul)
+            except Exception:
+                alarm_dt = None
+
+        is_complete = False
+        try:
+            if data['target_qty'] is not None and data['delivered_qty'] is not None:
+                if float(data['target_qty']) > 0 and float(data['delivered_qty']) >= float(data['target_qty']):
+                    is_complete = True
+        except Exception:
+            pass
+
+        if is_complete:
+            try:
+                # Kolumny 12/13/14 pozostają bez highlightu (już usunięty wpis powyżej)
+                self.sheet.highlight_cells(row=row_idx, column=6, bg=GREEN_BG_BRIGHT)
+                self._cells_special_bg.add((row_idx, 6))
+            except Exception:
+                pass
+            return
+
+        if data['ordered_flag']:
+            try:
+                self.sheet.highlight_cells(row=row_idx, column=12, bg=GREEN_BG_LIGHT)
+                self._cells_special_bg.add((row_idx, 12))
+            except Exception:
+                pass
+        # else: kolumna 12 pozostaje bez highlightu (już usunięty wpis powyżej)
+
+        if deadline_dt and today > deadline_dt:
+            try:
+                self.sheet.highlight_cells(row=row_idx, column=13, bg=RED_BG)
+                self.sheet.highlight_cells(row=row_idx, column=14, bg=RED_BG)
+                self._cells_special_bg.add((row_idx, 13))
+                self._cells_special_bg.add((row_idx, 14))
+            except Exception:
+                pass
+        elif alarm_dt and (deadline_dt is None or today <= deadline_dt) and today >= alarm_dt:
+            try:
+                self.sheet.highlight_cells(row=row_idx, column=14, bg=YELLOW_BG)
+                self._cells_special_bg.add((row_idx, 14))
+            except Exception:
+                pass
+
     def _apply_cell_colors(self):
-        """Aplikuj kolory: szare tło BOM + alarmy (jak v6)
-        
+        """Aplikuj kolory: szare tło BOM + alarmy (jak v6) dla WSZYSTKICH wierszy.
+
         UWAGA: Ta funkcja NIE obsługuje podświetlenia wiersza.
         Zamiast tej funkcji używaj _rebuild_all_cell_colors_with_selection(),
         która wywołuje _apply_cell_colors() + _apply_selected_row_highlight_only().
@@ -3766,232 +4040,20 @@ class MainWindow(tk.Tk):
         try:
             import datetime as dt
             today = dt.date.today()
-            
-            # Wyczyść zbiór komórek specjalnych
+
             self._cells_special_bg = set()
-            
-            # Kolory (jak v6)
-            GRAY_BG = "#D3D3D3"      # Szare tło BOM
-            GREEN_BG_LIGHT = "#D9EDF7"   # Zielone Zamówiono (jasne, stary kolor)
-            GREEN_BG_BRIGHT = "#90EE90"  # Zielone Odebrane (wyraziste, nowy kolor)
-            YELLOW_BG = "#FCF8E3"    # Żółty alarm (jasny)
-            RED_BG = "#F2DEDE"       # Czerwony po terminie (jasny)
-            
-            # Helper parse date
-            def parse_date(d):
-                if not d:
-                    return None
-                try:
-                    return dt.date.fromisoformat(str(d)[:10])
-                except:
-                    return None
-            
-            # === 0. WYCZYŚĆ WSZYSTKIE KOLORY (usunięcie artefaktów podświetlenia) ===
-            for row_idx in range(len(self._sheet_row_ids)):
-                try:
-                    # Wyczyść WSZYSTKIE 19 kolumn aby usunąć artefakty podświetlenia wiersza
-                    for col in range(19):
-                        self.sheet.highlight_cells(row=row_idx, column=col, bg="white", fg="black")
-                except:
-                    pass
-            
-            # === 1. SZARE TŁO BOM ===
-            for row_idx, overridden in enumerate(self._sheet_overridden):
-                for col in [0, 1, 2, 3, 7, 8, 9, 18]:
-                    if col in overridden:  # NADPISANE = szare
-                        # NIE koloruj pustych komórek (Nr rysunku może być pusty w BOM)
-                        try:
-                            val = self.sheet.get_cell_data(row_idx, col)
-                            if not val or str(val).strip() == "":
-                                continue  # Pomiń puste
-                        except:
-                            pass
-                        
-                        self.sheet.highlight_cells(row=row_idx, column=col, bg=GRAY_BG)
-                        # Dodaj do special_bg - podświetlenie wiersza nie nadpisze tego koloru
-                        self._cells_special_bg.add((row_idx, col))
-            
-            # === 2. KOLORY ALARMÓW - JEDNO ZAPYTANIE SQL (jak v6) ===
-            row_ids = [rid for rid in self._sheet_row_ids if rid]
-            if not row_ids:
-                return
-            
-            # Guard: po sleep/wake lub zmianie projektu project_con może być None
-            if not self.db_manager.project_con:
-                print("⚠️  _apply_cell_colors: project_con is None — pomijam kolory alarmów")
-                return
-            
-            # Pobierz WSZYSTKIE dane jednym zapytaniem
-            qs = ",".join(["?"] * len(row_ids))
-            sql = f"""
-                SELECT 
-                    id,
-                    COALESCE(ordered_flag, 0) AS ordered_flag,
-                    deadline_date,
-                    alarm_date,
-                    COALESCE(order_qty, work_qty, src_qty) AS target_qty,
-                    COALESCE(delivered_qty, 0) AS delivered_qty,
-                    alarm_offset,
-                    alarm_unit,
-                    COALESCE(dwf_biblioteka, 0) AS dwf_biblioteka,
-                    COALESCE(is_manual, 0) AS is_manual
-                FROM items
-                WHERE id IN ({qs})
-            """
-            
-            cursor = self.db_manager.project_con.execute(sql, row_ids)
-            
-            # Mapuj id → dane
-            data_map = {}
-            for row in cursor.fetchall():
-                iid, ordered_flag, deadline_date, alarm_date, target_qty, delivered_qty, alarm_offset, alarm_unit, dwf_biblioteka, is_manual = row
-                data_map[int(iid)] = {
-                    'ordered_flag': int(ordered_flag or 0),
-                    'deadline_date': deadline_date,
-                    'alarm_date': alarm_date,
-                    'target_qty': target_qty,
-                    'delivered_qty': delivered_qty,
-                    'alarm_offset': alarm_offset,
-                    'alarm_unit': alarm_unit,
-                    'dwf_biblioteka': int(dwf_biblioteka or 0),
-                    'is_manual': int(is_manual or 0)
-                }
-            
-            
-            # === 3. KOLORUJ KAŻDY WIERSZ ===
-            colored_count = 0
-            biblioteka_colored = 0
-            
+
+            data_map = self._fetch_alarm_data_map(self._sheet_row_ids)
+
             for row_idx, item_id in enumerate(self._sheet_row_ids):
-                if not item_id or item_id not in data_map:
-                    continue
-                
-                data = data_map[item_id]
-                
-                # === NIEBIESKA CZCIONKA dla pozycji BIBLIOTEKA (kolumna NUMER) ===
-                if data.get('dwf_biblioteka', 0) == 1:
-                    try:
-                        # Sprawdź czy komórka NUMER nie jest pusta
-                        numer_val = self.sheet.get_cell_data(row_idx, 0)
-                        if numer_val and str(numer_val).strip():
-                            # Ustaw niebieską czcionkę dla kolumny NUMER (indeks 0)
-                            # Sprawdź czy komórka ma szare tło (BOM override)
-                            if (row_idx, 0) in self._cells_special_bg:
-                                # Zachowaj szare tło, zmień tylko czcionkę
-                                self.sheet.highlight_cells(row=row_idx, column=0, bg=GRAY_BG, fg="blue")
-                            else:
-                                # Białe tło, niebieska czcionka
-                                self.sheet.highlight_cells(row=row_idx, column=0, bg="white", fg="blue")
-                            # Dodaj do special_bg żeby podświetlenie wiersza nie nadpisało koloru czcionki
-                            self._cells_special_bg.add((row_idx, 0))
-                            biblioteka_colored += 1
-                    except:
-                        pass
-                                
-                # === NIEBIESKIE TŁO dla DELTA (kolumna 5) pozycji RĘCZNYCH ===
-                if data.get('is_manual', 0) == 1:
-                    try:
-                        # Kolumna DELTA zawsze podkreslana dla ręcznych (nawet jeśli pusta)
-                        self.sheet.highlight_cells(row=row_idx, column=5, bg="#e1f6f7", fg="black")
-                        # Dodaj do special_bg żeby podświetlenie wiersza nie nadpisało tła
-                        self._cells_special_bg.add((row_idx, 5))
-                    except:
-                        pass
-                
-                # === CZERWONA CZCIONKA dla NAZWY i DOSTAWCY gdy Dostawca = "anulowane" ===
-                try:
-                    # Pobierz wartość z kolumny Dostawca (10)
-                    dostawca_val = self.sheet.get_cell_data(row_idx, 10)
-                    if dostawca_val and str(dostawca_val).strip().lower() == "anulowane":
-                        # Sprawdź czy kolumna 1 (NAZWA) ma szare tło (BOM override)
-                        bg_col1 = GRAY_BG if (1 in self._sheet_overridden[row_idx]) else "white"
-                        self.sheet.highlight_cells(row=row_idx, column=1, bg=bg_col1, fg="red")
-                        self._cells_special_bg.add((row_idx, 1))
-                        
-                        # Kolumna 10 (DOSTAWCA) - czerwona czcionka
-                        self.sheet.highlight_cells(row=row_idx, column=10, bg="white", fg="red")
-                        self._cells_special_bg.add((row_idx, 10))
-                except:
-                    pass
-                
-                # DEBUG pierwszych 3 wierszy
-                
-                # Parse dat
-                deadline_dt = parse_date(data['deadline_date'])
-                alarm_dt = parse_date(data['alarm_date'])
-                
-                # Wylicz alarm_date dynamicznie jeśli NULL
-                if alarm_dt is None and deadline_dt and data['alarm_offset']:
-                    try:
-                        off = int(data['alarm_offset'])
-                        mul = 7 if str(data['alarm_unit'] or "").upper().startswith("W") else 1
-                        alarm_dt = deadline_dt - dt.timedelta(days=off * mul)
-                    except:
-                        alarm_dt = None
-                
-                # Sprawdź czy kompletne (delivered >= target)
-                is_complete = False
-                try:
-                    if data['target_qty'] is not None and data['delivered_qty'] is not None:
-                        if float(data['target_qty']) > 0 and float(data['delivered_qty']) >= float(data['target_qty']):
-                            is_complete = True
-                except:
-                    pass
-                
-                # Jeśli kompletne - BEZ KOLORÓW (białe tło zamiast dehighlight)
-                # + WYRAZISTE ZIELONE tło dla kolumny "Ilość dostarczonych"
-                if is_complete:
-                    try:
-                        self.sheet.highlight_cells(row=row_idx, column=6, bg=GREEN_BG_BRIGHT)   # Ilość dostarczonych (wyraziste)
-                        self._cells_special_bg.add((row_idx, 6))
-                        self.sheet.highlight_cells(row=row_idx, column=12, bg="white")  # Zamówiono
-                        self.sheet.highlight_cells(row=row_idx, column=13, bg="white")  # Termin
-                        self.sheet.highlight_cells(row=row_idx, column=14, bg="white")  # ALARM
-                    except:
-                        pass
-                    continue
-                
-                # === JASNE ZIELONE "Zamówiono" gdy ordered_flag=1 (stary kolor) ===
-                if data['ordered_flag']:
-                    try:
-                        self.sheet.highlight_cells(row=row_idx, column=12, bg=GREEN_BG_LIGHT)
-                        self._cells_special_bg.add((row_idx, 12))
-                    except:
-                        pass
-                else:
-                    # Wyczyść zielone jeśli NIE zamówione
-                    try:
-                        self.sheet.highlight_cells(row=row_idx, column=12, bg="white")
-                    except:
-                        pass
-                
-                # === CZERWONE: po terminie (today > deadline) ===
-                if deadline_dt and today > deadline_dt:
-                    try:
-                        self.sheet.highlight_cells(row=row_idx, column=13, bg=RED_BG)  # Termin
-                        self.sheet.highlight_cells(row=row_idx, column=14, bg=RED_BG)  # ALARM
-                        self._cells_special_bg.add((row_idx, 13))
-                        self._cells_special_bg.add((row_idx, 14))
-                    except:
-                        pass
-                
-                # === ŻÓŁTE: alarm aktywny (today >= alarm && today <= deadline) ===
-                elif alarm_dt and (deadline_dt is None or today <= deadline_dt) and today >= alarm_dt:
-                    try:
-                        self.sheet.highlight_cells(row=row_idx, column=14, bg=YELLOW_BG)  # ALARM
-                        self._cells_special_bg.add((row_idx, 14))
-                    except:
-                        pass
-                
-                # === BEZ ALARMU: już wyczyszczone na początku ===
-                else:
-                    pass
-        
+                data = data_map.get(item_id) if item_id else None
+                self._color_single_row(row_idx, data, today)
+
         except Exception as e:
             print(f"⚠️  Błąd kolorowania: {e}")
             import traceback
             traceback.print_exc()
-        
+
         # Wymuś odświeżenie widoku
         try:
             self.sheet.refresh()
@@ -4048,6 +4110,37 @@ class MainWindow(tk.Tk):
             self._apply_selected_row_highlight_only()
         except Exception as e:
             print(f"⚠️  Błąd podświetlenia wiersza: {e}")
+        try:
+            self.sheet.refresh()
+        except Exception:
+            pass
+
+    def _refresh_row_selection_highlight(self, old_row_idx, new_row_idx):
+        """Odświeża kolory TYLKO dla starego i nowego zaznaczonego wiersza.
+
+        Zamiennik dla _rebuild_all_cell_colors_with_selection() używany przy zwykłej
+        zmianie selekcji komórki - unika przeliczania kolorów całej tabeli (O(1) wiersze
+        zamiast O(n)), co było głównym źródłem opóźnień przy klikaniu w arkuszu.
+        """
+        try:
+            import datetime as dt
+            today = dt.date.today()
+
+            rows_to_refresh = {r for r in (old_row_idx, new_row_idx) if r is not None and 0 <= r < len(self._sheet_row_ids)}
+            if not rows_to_refresh:
+                return
+
+            item_ids = [self._sheet_row_ids[r] for r in rows_to_refresh]
+            data_map = self._fetch_alarm_data_map(item_ids)
+
+            for r in rows_to_refresh:
+                item_id = self._sheet_row_ids[r]
+                data = data_map.get(item_id) if item_id else None
+                self._color_single_row(r, data, today)
+
+            self._apply_selected_row_highlight_only()
+        except Exception as e:
+            print(f"⚠️  Błąd odświeżania podświetlenia wiersza: {e}")
         try:
             self.sheet.refresh()
         except Exception:
@@ -6169,9 +6262,11 @@ class MainWindow(tk.Tk):
             if r0 is not None and int(r0) >= 0:
                 self._in_row_highlight = True
                 try:
-                    self._selected_row_idx = int(r0)
-                    # Odtwórz kolory (szarości + alarmy) i nałóż highlight wiersza
-                    self._rebuild_all_cell_colors_with_selection()
+                    old_row_idx = getattr(self, "_selected_row_idx", None)
+                    new_row_idx = int(r0)
+                    self._selected_row_idx = new_row_idx
+                    # Odśwież kolory TYLKO starego i nowego wiersza (szybkie - bez przeliczania całej tabeli)
+                    self._refresh_row_selection_highlight(old_row_idx, new_row_idx)
                 finally:
                     self._in_row_highlight = False
         except Exception as e:
