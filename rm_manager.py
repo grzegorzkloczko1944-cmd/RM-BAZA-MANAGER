@@ -8927,11 +8927,11 @@ def is_user_authorized_for_plc_sending(rm_db_path: str, username: str) -> bool:
         row = con.execute("""
             SELECT COUNT(*) as cnt
             FROM plc_authorized_senders
-            WHERE username = ?
+            WHERE TRIM(LOWER(username)) = TRIM(LOWER(?))
         """, (username,)).fetchone()
-        
+
         return row['cnt'] > 0 if row else False
-        
+
     finally:
         con.close()
 
@@ -8950,7 +8950,7 @@ def add_plc_authorized_sender(rm_db_path: str, username: str, added_by: str = No
         con.execute("""
             INSERT OR IGNORE INTO plc_authorized_senders (username, added_by, notes)
             VALUES (?, ?, ?)
-        """, (username, added_by, notes))
+        """, (username.strip(), added_by, notes))
         
         _rm_safe_commit(con)
         
