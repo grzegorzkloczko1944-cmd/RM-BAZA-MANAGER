@@ -275,10 +275,15 @@ class AIOptimizerContext:
         rm_master_db_path: str,
         locks_dir: Optional[str] = None,
         current_user: str = "AI",
+        rules_file: Optional[str] = None,
     ):
         self.master_db_path = master_db_path          # master.sqlite (projekty)
         self.rm_manager_dir = rm_manager_dir          # katalog z bazami per-projekt
         self.rm_master_db_path = rm_master_db_path    # rm_manager.sqlite (pracownicy)
+        # ai_rules.txt — wspólny plik reguł dla wszystkich userów (konfigurowalny
+        # w GUI: "Konfiguracja ścieżek" → "Plik kontekstu AI"). Gdy nie podano
+        # jawnie, spadamy na rm_manager_dir/ai_rules.txt (dawny domyślny wzorzec).
+        self.rules_file = rules_file or (str(Path(rm_manager_dir) / "ai_rules.txt") if rm_manager_dir else None)
         self.today = date.today().isoformat()
         # Bufor zmian czekających na zatwierdzenie przez użytkownika
         self._pending_changes: List[Dict] = []
