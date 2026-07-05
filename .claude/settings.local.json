@@ -2,7 +2,16 @@
   "permissions": {
     "allow": [
       "Bash(python -c \"import ast; ast.parse\\(open\\('rm_manager_gui.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
-      "Bash(python -c \"import needle_designer; print\\('OK'\\)\")"
+      "Bash(python -c \"import needle_designer; print\\('OK'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python Parser_RM_BAZA.py --out \"C:/RMPAK_CLIENT/Repozytoria/RM-BAZA-MANAGER/test_anomalie.xlsx\")",
+      "Bash(python -c \"import tksheet; print\\(tksheet.__version__ if hasattr\\(tksheet,'__version__'\\) else 'ok'\\)\")",
+      "Bash(python -c \"import Parser_RM_BAZA_gui; print\\('OK import'\\)\")",
+      "Bash(python Parser_RM_BAZA.py --out \"C:/RMPAK_CLIENT/Repozytoria/RM-BAZA-MANAGER/test_catalog.xlsx\")",
+      "Bash(rm \"c:/RMPAK_CLIENT/Repozytoria/RM-BAZA-MANAGER/test_catalog.xlsx\")",
+      "Bash(python Parser_RM_BAZA.py --out \"C:/RMPAK_CLIENT/Repozytoria/RM-BAZA-MANAGER/test_catalog2.xlsx\")",
+      "Bash(python Parser_RM_BAZA.py --out \"C:/RMPAK_CLIENT/Repozytoria/RM-BAZA-MANAGER/test_catalog3.xlsx\")",
+      "Bash(python Parser_RM_BAZA.py --out \"C:/RMPAK_CLIENT/Repozytoria/RM-BAZA-MANAGER/test_real.xlsx\")"
     ]
   }
 }
