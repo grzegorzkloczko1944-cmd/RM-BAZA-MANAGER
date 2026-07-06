@@ -610,7 +610,12 @@ class RMManagerGUI:
         # Synchronizacja z RM_BAZA - sprawdzanie codziennie o 23:00
         self._sync_check_job = None
         self._last_sync_check_date = None
-        self._start_sync_timer()
+        # Pierwsze uruchomienie odłożone do momentu aż mainloop() faktycznie
+        # wystartuje - _start_sync_timer() odpala wątek, który wywołuje
+        # root.after() z drugiego wątku; przed wejściem w mainloop() Tcl/Tk
+        # rzuca "RuntimeError: main thread is not in main loop" (widoczne
+        # zwłaszcza gdy w tym momencie trwa modalny dialog, np. zmiana projektu).
+        self.root.after(1000, self._start_sync_timer)
 
         # UI
         self.create_menu()
@@ -676,48 +681,64 @@ class RMManagerGUI:
         return all_alarms
 
     def check_alarms(self):
-        """Sprawdź aktywne alarmy ze WSZYSTKICH projektów (filtrowane po użytkowniku)"""
-        try:
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        """Sprawdź aktywne alarmy ze WSZYSTKICH projektów (filtrowane po użytkowniku).
+
+        Skan baz per-projekt (I/O, może być na dysku sieciowym) wykonywany
+        jest w osobnym wątku, żeby nie blokować GUI - wzór z _start_heartbeat.
+        """
+        import threading
+
+        def _scan_worker():
             all_alarms = []
-            
-            # Przeskanuj wszystkie per-projekt bazy
-            pattern = os.path.join(self.rm_projects_dir, "rm_manager_project_*.sqlite")
-            for db_path in glob.glob(pattern):
-                try:
-                    basename = os.path.basename(db_path)
-                    pid = int(basename.replace('rm_manager_project_', '').replace('.sqlite', ''))
-                    
-                    alarms = rmm.get_active_alarms(
-                        db_path, pid, current_time,
-                        for_user=self.current_user
-                    )
-                    for a in alarms:
-                        a['_project_db'] = db_path
-                        a['_project_name'] = self.project_names.get(pid, f'Projekt {pid}')
-                    all_alarms.extend(alarms)
-                except Exception as e:
-                    # Cicho ignoruj błędy (np. brak tabeli stage_alarms w starszych bazach)
-                    pass
-            
-            if all_alarms:
-                # Sortuj po dacie alarmu
+            try:
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                pattern = os.path.join(self.rm_projects_dir, "rm_manager_project_*.sqlite")
+                for db_path in glob.glob(pattern):
+                    try:
+                        basename = os.path.basename(db_path)
+                        pid = int(basename.replace('rm_manager_project_', '').replace('.sqlite', ''))
+
+                        alarms = rmm.get_active_alarms(
+                            db_path, pid, current_time,
+                            for_user=self.current_user
+                        )
+                        for a in alarms:
+                            a['_project_db'] = db_path
+                            a['_project_name'] = self.project_names.get(pid, f'Projekt {pid}')
+                        all_alarms.extend(alarms)
+                    except Exception:
+                        # Cicho ignoruj błędy (np. brak tabeli stage_alarms w starszych bazach)
+                        pass
                 all_alarms.sort(key=lambda a: a.get('alarm_datetime', ''))
-                
-                # Pokazuj okno TYLKO dla NOWYCH alarmów (jeszcze nie pokazanych)
-                new_alarms = [a for a in all_alarms if a['id'] not in self._shown_alarm_ids]
-                if new_alarms:
-                    # Zapisz ID nowych alarmów jako pokazane
-                    for alarm in new_alarms:
-                        self._shown_alarm_ids.add(alarm['id'])
-                    self.show_alarms_notification(all_alarms)  # Pokaż wszystkie (włącznie z nowymi)
-        except Exception as e:
-            print(f"⚠️ Błąd sprawdzania alarmów: {e}")
-        
+            except Exception as e:
+                print(f"⚠️ Błąd sprawdzania alarmów: {e}")
+            try:
+                self.root.after(0, lambda: self._on_alarms_scanned(all_alarms))
+            except RuntimeError:
+                # Tcl/Tk może odrzucić after() z wątku pobocznego, gdy w danym
+                # momencie trwa zagnieżdżony modalny event loop (np. dialog
+                # przy zmianie projektu) - pomiń ten tick, kolejny za 5 min.
+                pass
+
+        t = threading.Thread(target=_scan_worker, daemon=True)
+        t.start()
+
         # Ustaw następne sprawdzenie za 5 minut
         if hasattr(self, '_alarm_check_job') and self._alarm_check_job is not None:
             self.root.after_cancel(self._alarm_check_job)
         self._alarm_check_job = self.root.after(300_000, self.check_alarms)
+
+    def _on_alarms_scanned(self, all_alarms: list):
+        """Callback wywoływany w GUI thread po zakończeniu skanu alarmów w tle."""
+        if not all_alarms:
+            return
+        # Pokazuj okno TYLKO dla NOWYCH alarmów (jeszcze nie pokazanych)
+        new_alarms = [a for a in all_alarms if a['id'] not in self._shown_alarm_ids]
+        if new_alarms:
+            # Zapisz ID nowych alarmów jako pokazane
+            for alarm in new_alarms:
+                self._shown_alarm_ids.add(alarm['id'])
+            self.show_alarms_notification(all_alarms)  # Pokaż wszystkie (włącznie z nowymi)
 
     def show_alarms_notification(self, alarms: list):
         """Wyświetl powiadomienie o alarmach z pełnymi informacjami"""
@@ -1341,31 +1362,53 @@ class RMManagerGUI:
 
     def _start_sync_timer(self):
         """Uruchom timer sprawdzania synchronizacji (cel: raz dziennie o 23:00)
-        
+
         Timer sprawdza co 60 sekund czy:
         1. Jest godzina 23:00 → oznacz że potrzebny sync
         2. Dzień się zmienił od ostatniego sprawdzenia → jeśli nie było sync dzisiaj, wykonaj
+
+        should_sync_today() otwiera połączenie SQLite do bazy master (może być
+        na dysku sieciowym SMB) - wykonywane w osobnym wątku, żeby nie blokować
+        GUI co 60s (wzór z _start_heartbeat/check_alarms).
         """
-        try:
+        import threading
+
+        def _check_worker():
             now = datetime.now()
             today = now.strftime("%Y-%m-%d")
             current_hour = now.hour
-            
-            # Sprawdź czy potrzebna synchronizacja
-            if rmm.should_sync_today(self.rm_master_db_path):
-                # Jeśli godzina 23:00 lub aplikacja właśnie wystartowała (różny dzień od ostatniego sprawdzenia)
-                if current_hour == 23 or (self._last_sync_check_date and self._last_sync_check_date != today):
-                    print(f"🔄 Automatyczna synchronizacja: {today} {now.strftime('%H:%M')}")
-                    self._run_background_sync()
-            
-            # Zapamiętaj dzisiejszą datę
-            self._last_sync_check_date = today
-            
-        except Exception as e:
-            print(f"⚠️ Błąd sync timer: {e}")
-        
+            try:
+                needs_sync = rmm.should_sync_today(self.rm_master_db_path)
+            except Exception as e:
+                print(f"⚠️ Błąd sync timer: {e}")
+                needs_sync = False
+            try:
+                self.root.after(0, lambda: self._on_sync_check_done(needs_sync, today, current_hour))
+            except RuntimeError:
+                # Tcl/Tk może odrzucić after() z wątku pobocznego, gdy w danym
+                # momencie trwa zagnieżdżony modalny event loop (np. dialog
+                # przy zmianie projektu) - pomiń ten tick, kolejny za 60s.
+                pass
+
+        t = threading.Thread(target=_check_worker, daemon=True)
+        t.start()
+
         # Następne sprawdzenie za 60 sekund
         self._sync_check_job = self.root.after(60_000, self._start_sync_timer)
+
+    def _on_sync_check_done(self, needs_sync: bool, today: str, current_hour: int):
+        """Callback w GUI thread po sprawdzeniu should_sync_today() w tle."""
+        try:
+            if needs_sync:
+                # Jeśli godzina 23:00 lub aplikacja właśnie wystartowała (różny dzień od ostatniego sprawdzenia)
+                if current_hour == 23 or (self._last_sync_check_date and self._last_sync_check_date != today):
+                    print(f"🔄 Automatyczna synchronizacja: {today} {datetime.now().strftime('%H:%M')}")
+                    self._run_background_sync()
+
+            # Zapamiętaj dzisiejszą datę
+            self._last_sync_check_date = today
+        except Exception as e:
+            print(f"⚠️ Błąd sync timer: {e}")
 
     def _check_startup_sync(self):
         """Sprawdź przy starcie aplikacji czy potrzebna synchronizacja dzisiaj
@@ -2281,6 +2324,11 @@ class RMManagerGUI:
                     )
                     # server_exe_path: ścieżka do EXE na serwerze (dla auto-update)
                     self.server_exe_path = config.get('server_exe_path', '')
+                    # ai_rules_path: wspólny plik reguł firmowych dla AI (jeden dla wszystkich userów)
+                    self.ai_rules_path = config.get(
+                        'ai_rules_path',
+                        os.path.join(self.rm_manager_dir, 'ai_rules.txt')
+                    )
                     # Geometria okien i szerokości kolumn
                     self.window_geometry = config.get('window_geometry', {})
                     self.column_widths = config.get('column_widths', {})
@@ -2303,6 +2351,7 @@ class RMManagerGUI:
                 self.backup_dir        = DEFAULT_BACKUP_DIR
                 self.locks_dir         = DEFAULT_LOCKS_DIR
                 self.server_exe_path   = ''  # Brak domyślnej ścieżki do serwera
+                self.ai_rules_path     = os.path.join(self.rm_manager_dir, 'ai_rules.txt')
                 print(f"⚠️ Brak pliku konfiguracyjnego: {self.config_file}")
                 print(f"   Użyto domyślnych ścieżek")
                 # Utwórz domyślny plik
@@ -2318,6 +2367,7 @@ class RMManagerGUI:
             self.backup_dir        = DEFAULT_BACKUP_DIR
             self.locks_dir         = DEFAULT_LOCKS_DIR
             self.server_exe_path   = ''  # Brak domyślnej ścieżki do serwera
+            self.ai_rules_path     = os.path.join(self.rm_manager_dir, 'ai_rules.txt')
 
     def save_config(self):
         """Zapisz konfigurację do JSON"""
@@ -2336,6 +2386,7 @@ class RMManagerGUI:
                 'locks_dir': self.locks_dir,
                 'projects_path': self.projects_path,
                 'server_exe_path': self.server_exe_path,
+                'ai_rules_path': self.ai_rules_path,
                 'window_geometry': self.window_geometry,
                 'column_widths': self.column_widths,
                 '_comment': 'RM_MANAGER configuration file – edit paths as needed'
@@ -3925,6 +3976,14 @@ class RMManagerGUI:
             return
         current_idx = self.project_combo.current()
         is_stub = getattr(self.lock_manager, '_STUB', False)
+
+        # Statusy WSZYSTKICH projektów jednym zapytaniem zamiast N osobnych
+        # połączeń do tego samego master.sqlite (get_project_status w pętli).
+        try:
+            all_statuses = rmm.get_all_project_statuses(self.master_db_path)
+        except Exception:
+            all_statuses = {}
+
         combo_values = []
         for pid in self.projects:
             name = self.project_names.get(pid, f"Projekt {pid}")
@@ -3934,7 +3993,7 @@ class RMManagerGUI:
             try:
                 project_db = self.get_project_db_path(pid)
                 if os.path.exists(project_db):
-                    is_finished = (rmm.get_project_status(self.master_db_path, pid) == ProjectStatus.DONE)
+                    is_finished = (all_statuses.get(pid, ProjectStatus.NEW) == ProjectStatus.DONE)
                     if is_finished:
                         status_prefix = "[Z]"  # Zakończony
                     else:
@@ -4053,16 +4112,24 @@ class RMManagerGUI:
             
             combo_values = []
             is_stub = getattr(self.lock_manager, '_STUB', False)
+
+            # Statusy WSZYSTKICH projektów jednym zapytaniem zamiast N osobnych
+            # połączeń do tego samego master.sqlite (get_project_status w pętli).
+            try:
+                all_statuses = rmm.get_all_project_statuses(self.master_db_path)
+            except Exception:
+                all_statuses = {}
+
             for pid in self.projects:
                 name = self.project_names.get(pid, f"Projekt {pid}")
-                
+
                 # Sprawdź status projektu i dodaj stałoszerokościowy prefiks
                 status_prefix = "[A]"  # Aktywny
                 try:
                     project_db = self.get_project_db_path(pid)
                     if os.path.exists(project_db):
                         # Sprawdź czy zakończony (status DONE w master.sqlite)
-                        is_finished = (rmm.get_project_status(self.master_db_path, pid) == ProjectStatus.DONE)
+                        is_finished = (all_statuses.get(pid, ProjectStatus.NEW) == ProjectStatus.DONE)
                         if is_finished:
                             status_prefix = "[Z]"  # Zakończony
                         else:
@@ -9660,7 +9727,7 @@ class RMManagerGUI:
         dialog.title("Konfiguracja ścieżek")
         dialog.transient(self.root)
         dialog.grab_set()
-        self._center_window(dialog, 820, 700)
+        self._center_window(dialog, 820, 750)
         dialog.resizable(True, True)
         dialog.minsize(700, 500)
 
@@ -9753,6 +9820,20 @@ class RMManagerGUI:
                                 "Ścieżka do rm_manager.exe na serwerze dla auto-update  (np. Y:/RM_MANAGER/rm_manager.exe)",
                                 self.server_exe_path, browse_exe)
 
+        def browse_txt(entry):
+            path = filedialog.askopenfilename(
+                title="Wybierz plik .txt",
+                filetypes=[("Plik tekstowy", "*.txt"), ("Wszystkie pliki", "*.*")],
+                initialdir=os.path.dirname(entry.get()) if os.path.dirname(entry.get()) else "."
+            )
+            if path:
+                entry.delete(0, tk.END)
+                entry.insert(0, path)
+
+        e_ai_rules = make_row(form, 8, "Plik kontekstu AI:",
+                              "Wspólne reguły firmowe dla Agenta AI (jeden plik dla wszystkich userów)  (np. Y:/RM_MANAGER/ai_rules.txt)",
+                              self.ai_rules_path, browse_txt)
+
         def save_and_close():
             self.master_db_path    = e_master.get().strip()
             self.projects_path     = e_projects.get().strip()
@@ -9762,6 +9843,7 @@ class RMManagerGUI:
             self.backup_dir        = e_backup.get().strip() or os.path.join(os.path.dirname(self.rm_manager_dir), 'backups')
             self.locks_dir         = e_locks.get().strip() or os.path.join(self.rm_projects_dir, 'LOCKS')
             self.server_exe_path   = e_server_exe.get().strip()
+            self.ai_rules_path     = e_ai_rules.get().strip() or os.path.join(self.rm_manager_dir, 'ai_rules.txt')
             # Utwórz katalog locków jeśli nie istnieje
             Path(self.locks_dir).mkdir(parents=True, exist_ok=True)
             # Utwórz katalog projektów jeśli nie istnieje
@@ -17565,8 +17647,9 @@ class RMManagerGUI:
         """
         from datetime import datetime, timedelta
         import matplotlib.dates as mdates
+        import matplotlib.colors as mcolors
         from matplotlib.lines import Line2D
-        
+
         # ===== Zbierz dane ze wszystkich projektów =====
         # Pobierz kolory etapów z STAGE_DEFINITIONS
         stage_colors = {}
@@ -17614,16 +17697,30 @@ class RMManagerGUI:
             import importlib
             importlib.reload(rmm)
         
+        # Jedno połączenie SQLite per projekt na cały czas budowania wykresu -
+        # zamiast otwierać osobne połączenie w każdej z dwóch pętli poniżej
+        # (get_all_stage_staff_for_project + get_stage_timeline), co przy
+        # dziesiątkach projektów podwaja koszt otwierania połączeń (PRAGMA
+        # itd. w _open_rm_connection, zauważalne zwłaszcza na dysku sieciowym).
+        project_cons = {}
+        for pid in project_ids:
+            try:
+                project_cons[pid] = rmm._open_rm_connection(self.get_project_db_path(pid))
+            except Exception:
+                pass
+
         # Zbierz WSZYSTKICH pracowników (wszystkie kategorie) z wszystkich projektów
         all_employees = {}  # {employee_id: {'name': ..., 'category': ...}}
         project_employees = {}  # {pid: set(employee_ids)}
         stage_employees = {}  # {(pid, stage_code): set(employee_ids)}
-        
+
         for pid in project_ids:
             try:
-                project_db = self.get_project_db_path(pid)
+                con_p = project_cons.get(pid)
+                if con_p is None:
+                    raise RuntimeError("brak połączenia")
                 # Pobierz przypisania per etap
-                stage_staff_map = rmm.get_all_stage_staff_for_project(project_db, self.rm_master_db_path, pid)
+                stage_staff_map = rmm._get_all_stage_staff_with_con(con_p, pid)
                 emp_ids_project = set()
                 for sc, staff_list in stage_staff_map.items():
                     stage_emp_ids = set()
@@ -17693,8 +17790,10 @@ class RMManagerGUI:
                 self._mp_proj_type_filters[pid] = {'Szablon': True, 'Rzeczywiste': True, 'Prognoza': True}
             
             try:
-                project_db = self.get_project_db_path(pid)
-                timeline = rmm.get_stage_timeline(project_db, pid)
+                con_p = project_cons.get(pid)
+                if con_p is None:
+                    raise RuntimeError("brak połączenia")
+                timeline = rmm._get_stage_timeline_with_con(con_p, pid)
             except Exception as e:
                 print(f"⚠️ Błąd wczytania projektu {pid}: {e}")
                 continue
@@ -17903,7 +18002,14 @@ class RMManagerGUI:
                     'y_center': (project_start_y + y_pos - 1) / 2,
                     'pid': pid,
                 })
-        
+
+        # Zamknij połączenia otwarte na początku (jedno na projekt)
+        for _con_p in project_cons.values():
+            try:
+                _con_p.close()
+            except Exception:
+                pass
+
         if not all_gantt_data:
             if hasattr(self, '_mp_chart_window') and self._mp_chart_window:
                 try:
@@ -18228,18 +18334,29 @@ class RMManagerGUI:
             fig = Figure(figsize=(14, 8), dpi=100)
             ax = fig.add_subplot(111)
         
-        # Rysuj paski
+        # Rysuj paski — batchowane w jedną PatchCollection zamiast N osobnych
+        # ax.add_patch() (dużo szybsze przy setkach pasków: matplotlib unika
+        # narzutu per-artysta przy renderowaniu i dodawaniu do listy artystów).
+        # Hit-testing (_mp_find_bar/_mp_find_any_bar) działa na danych
+        # gantt_data, nie na obiektach Rectangle, więc batchowanie jest
+        # bezpieczne względem hover/klik/drag.
+        from matplotlib.collections import PatchCollection
+        bar_rects = []
+        bar_facecolors = []
+        bar_edgecolors = []
+        bar_linewidths = []
+        bar_linestyles = []
         for item in all_gantt_data:
             if item['start'] is None:
                 continue
             duration = (item['end'] - item['start']).days
             if duration < 1:
                 duration = 1
-            
+
             # Szablon - obramowanie przerywane, Rzeczywiste - pełne, Prognoza - cienkie
             linestyle = '--' if item['type'] == 'Szablon' else '-'
             linewidth = 0.8 if item['type'] == 'Szablon' else (0.5 if item['type'] == 'Prognoza' else 1.0)
-            
+
             # Highlight mode: podświetl paski z wybranym pracownikiem
             edge_color = 'black'
             item_alpha = item['alpha']
@@ -18250,19 +18367,30 @@ class RMManagerGUI:
             elif sel_ids and emp_mode == 'highlight' and not item.get('highlight_emp'):
                 # Wygaś etapy bez wybranego pracownika
                 item_alpha = item['alpha'] * 0.3
-            
-            rect = patches.Rectangle(
+
+            bar_rects.append(patches.Rectangle(
                 (mdates.date2num(item['start']), item['y_pos'] + item['y_offset']),
                 duration,
                 item['height'],
-                facecolor=item['color'],
-                alpha=item_alpha,
-                edgecolor=edge_color,
-                linewidth=linewidth,
-                linestyle=linestyle,
+            ))
+            # facecolor z uwzględnieniem alpha per-pasek (PatchCollection.set_alpha
+            # nadpisałby wspólną wartość dla wszystkich, więc alpha wypalamy w RGBA)
+            rgba = mcolors.to_rgba(item['color'], alpha=item_alpha)
+            bar_facecolors.append(rgba)
+            bar_edgecolors.append(mcolors.to_rgba(edge_color, alpha=1.0))
+            bar_linewidths.append(linewidth)
+            bar_linestyles.append(linestyle)
+
+        if bar_rects:
+            bars_collection = PatchCollection(
+                bar_rects,
+                facecolor=bar_facecolors,
+                edgecolor=bar_edgecolors,
+                linewidths=bar_linewidths,
+                linestyles=bar_linestyles,
             )
-            ax.add_patch(rect)
-        
+            ax.add_collection(bars_collection)
+
         # Dziś - linia pioniowa
         today_num = mdates.date2num(datetime.now())
         ax.axvline(x=today_num, color='red', linewidth=1.5, linestyle='--', alpha=0.7, zorder=5)
@@ -18310,13 +18438,17 @@ class RMManagerGUI:
             highlighted_pids.add(self._mp_selected_pid)
         highlighted_pids.update(self._line_locked_pids)
         if highlighted_pids:
+            # ax.get_yticklabels() zwraca listę WSZYSTKICH etykiet - wywoływanie
+            # go w pętli (jak poprzednio, 3x per iterację) to O(n²) przy dużej
+            # liczbie wierszy. Pobierz raz i indeksuj.
+            yticklabels = ax.get_yticklabels()
             for i, lbl in enumerate(y_labels):
                 pid_for_row = y_to_pid.get(i)
                 if pid_for_row in highlighted_pids:
-                    ax.get_yticklabels()[i].set_color('#e74c3c')
-                    ax.get_yticklabels()[i].set_fontweight('bold')
-                    ax.get_yticklabels()[i].set_fontsize(9)
-        
+                    yticklabels[i].set_color('#e74c3c')
+                    yticklabels[i].set_fontweight('bold')
+                    yticklabels[i].set_fontsize(9)
+
         # Oś X - maksymalnie 6 miesięcy (domyślny widok startowy)
         if all_dates:
             min_date = min(all_dates)
@@ -18374,19 +18506,39 @@ class RMManagerGUI:
         ax.xaxis.set_minor_locator(mdates.DayLocator())
         ax.tick_params(axis='x', which='major', labelsize=8, pad=12)
         ax.tick_params(axis='x', which='minor', labelsize=6, labelcolor='#888888')
-        fig.autofmt_xdate(rotation=0, ha='center')
-        
-        # Weekendy
+        # fig.autofmt_xdate(rotation=0, ha='center') wywoływane z rotation=0
+        # (czyli BEZ rotacji etykiet) kosztuje ~0.13s przy każdym rebuildzie
+        # (przelicza layout wszystkich tick labels + subplots_adjust), a przy
+        # reuse_canvas subplots_adjust jest i tak wywoływane jawnie zaraz
+        # potem (fig.subplots_adjust(...) niżej) - efekt wizualny tej linii
+        # był więc zerowy przy odświeżeniu. Zostaje tylko przy pierwszym
+        # budowaniu okna (not reuse_canvas), żeby nie zmieniać wyglądu startowego.
+        if not reuse_canvas:
+            fig.autofmt_xdate(rotation=0, ha='center')
+
+        # Weekendy — batchowane w jedną PatchCollection zamiast N osobnych
+        # axvspan() (ten sam powód co paski: axvspan tworzy Rectangle + patch
+        # per wywołanie, kosztowne przy szerokim zakresie dat/wielu weekendach).
         xlim = ax.get_xlim()
         x_start = mdates.num2date(xlim[0]).replace(tzinfo=None)
         x_end = mdates.num2date(xlim[1]).replace(tzinfo=None)
         current = x_start.replace(hour=0, minute=0, second=0, microsecond=0)
+        weekend_rects = []
         while current <= x_end:
             if current.weekday() in (5, 6):
-                ax.axvspan(mdates.date2num(current), mdates.date2num(current + timedelta(days=1)),
-                           facecolor='#e0e0e0', alpha=0.4, zorder=0)
+                weekend_rects.append(patches.Rectangle(
+                    (mdates.date2num(current), 0),
+                    1, 1,
+                ))
             current += timedelta(days=1)
-        
+        if weekend_rects:
+            weekend_collection = PatchCollection(
+                weekend_rects,
+                facecolor='#e0e0e0', alpha=0.4, edgecolor='none', zorder=0,
+                transform=ax.get_xaxis_transform(),  # x=data, y=axes (0..1 = pełna wysokość)
+            )
+            ax.add_collection(weekend_collection)
+
         # Siatka
         ax.grid(True, which='major', alpha=0.4, linewidth=0.8)
         ax.grid(True, which='minor', alpha=0.15, linewidth=0.3)
@@ -18417,7 +18569,7 @@ class RMManagerGUI:
                   ncol=min(8, len(legend_elements)), fontsize=7, frameon=True, fancybox=True)
         
         fig.subplots_adjust(left=0.08, right=0.99, top=0.95, bottom=0.12)
-        
+
         if reuse_canvas:
             # Reuse: odśwież figurę i przywróć widok
             if saved_xlim:
@@ -18425,7 +18577,7 @@ class RMManagerGUI:
             if saved_ylim:
                 ax.set_ylim(saved_ylim)
             mp_canvas.draw()
-            
+
             # Zaktualizuj metadane (nowe ax, dane)
             self._mp_chart_meta.update({
                 'ax': ax,
@@ -18534,7 +18686,7 @@ class RMManagerGUI:
             canvas_widget.bind('<Leave>', _unbind_wheel)
         
         self._mp_status.config(text=f"✅ Wykres: {len(project_ids)} projektów, {len(all_gantt_data)} pasków")
-    
+
     # ---- Multi-project: nawigacja ----
     
     def _mp_reset_view(self):
@@ -20342,7 +20494,7 @@ class RMManagerGUI:
             
             # Odśwież wykres (zachowaj widok)
             self._create_multi_project_chart_window(self._mp_chart_meta['project_ids'], preserve_view=True)
-            
+
             # Odśwież wykres wbudowany jeśli otwarty i dotyczy tego samego projektu
             if self.selected_project_id == pid and self.matplotlib_canvas:
                 try:
@@ -27342,9 +27494,14 @@ Kod: {unlock_code}
             pass
 
     def ai_rules_dialog(self):
-        """Edytor reguł firmowych dla AI Asystenta."""
+        """Edytor reguł firmowych dla AI Asystenta.
+
+        Plik ai_rules.txt wskazywany przez self.ai_rules_path (konfigurowalny
+        w oknie "Konfiguracja ścieżek") - jeden wspólny plik reguł dla
+        wszystkich userów, zamiast osobnej kopii przy każdej instalacji EXE.
+        """
         import importlib
-        rules_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_rules.txt")
+        rules_file = self.ai_rules_path
 
         win = tk.Toplevel(self.root)
         win.title("📝 Reguły AI — edytor")
@@ -27388,7 +27545,6 @@ Kod: {unlock_code}
             try:
                 import rm_ai_optimizer as ai_mod
                 importlib.reload(ai_mod)
-                default_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_rules.txt")
                 # Przywróć przez reset treści w edytorze do wbudowanego szablonu
                 template = (
                     "# Reguły AI dla RM_MANAGER\n"
@@ -27450,6 +27606,7 @@ Kod: {unlock_code}
             rm_master_db_path=self.rm_master_db_path,
             locks_dir=getattr(self, 'locks_dir', None),
             current_user=self.current_user or CURRENT_USER,
+            rules_file=getattr(self, 'ai_rules_path', None),
         )
         session = ai_mod.AIChatSession(ctx)
 

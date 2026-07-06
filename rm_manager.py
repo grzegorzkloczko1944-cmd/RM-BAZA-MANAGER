@@ -3466,30 +3466,53 @@ def cleanup_orphaned_wstrzymany(rm_db_path: str, project_id: int) -> int:
 
 def get_project_status(master_db_path: str, project_id: int) -> str:
     """Pobierz aktualny status projektu z master.sqlite
-    
+
     Returns:
         Status projektu (NEW, ACCEPTED, IN_PROGRESS, PAUSED, DONE)
         Jeśli brak kolumny project_status w master, zwraca None
     """
     con = _open_rm_connection(master_db_path)
-    
+
     try:
         cursor = con.execute("""
             SELECT project_status FROM projects WHERE project_id = ?
         """, (project_id,))
         row = cursor.fetchone()
         con.close()
-        
+
         if row and row['project_status']:
             return row['project_status']
         else:
             # Domyślny status jeśli nie ustawiony
             return ProjectStatus.NEW
-            
+
     except sqlite3.OperationalError:
         # Kolumna project_status nie istnieje (stary schemat)
         con.close()
         return None
+
+
+def get_all_project_statuses(master_db_path: str) -> Dict[int, str]:
+    """Pobierz statusy WSZYSTKICH projektów z master.sqlite jednym zapytaniem.
+
+    Odpowiednik get_project_status() wołanego w pętli po projektach - zamiast
+    N osobnych połączeń SQLite do tego samego pliku, jedno zapytanie zbiorcze.
+
+    Returns:
+        Dict {project_id: status}. Brak wpisu / brak kolumny project_status
+        traktowany jak ProjectStatus.NEW.
+    """
+    con = _open_rm_connection(master_db_path)
+    result = {}
+    try:
+        cursor = con.execute("SELECT project_id, project_status FROM projects")
+        for row in cursor.fetchall():
+            result[row['project_id']] = row['project_status'] or ProjectStatus.NEW
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        con.close()
+    return result
 
 
 def set_project_status(master_db_path: str, project_id: int, new_status: str):
@@ -4098,7 +4121,20 @@ def recalculate_forecast(rm_db_path: str, project_id: int) -> Dict:
         }
     """
     con = _open_rm_connection(rm_db_path)
-    
+    try:
+        return _recalculate_forecast_with_con(con, project_id)
+    finally:
+        con.close()
+
+
+def _recalculate_forecast_with_con(con: sqlite3.Connection, project_id: int) -> Dict:
+    """Wersja recalculate_forecast() przyjmująca już otwarte połączenie.
+
+    Używane tam, gdzie trzeba przeliczyć forecast dla wielu projektów bez
+    otwierania osobnego połączenia SQLite na każdy (np. wykres multi-projekt) -
+    _open_rm_connection() wykonuje kilka PRAGMA przy każdym otwarciu, co przy
+    dziesiątkach projektów jest zauważalnym kosztem.
+    """
     # 1. Pobierz etapy projektu (tylko te które istnieją w stage_definitions)
     #    WSTRZYMANY to pauza/overlay - nie etap timeline
     cursor = con.execute("""
@@ -4110,7 +4146,7 @@ def recalculate_forecast(rm_db_path: str, project_id: int) -> Dict:
         ORDER BY ps.sequence
     """, (project_id,))
     stages = {row['stage_code']: dict(row) for row in cursor.fetchall()}
-    
+
     # 2. Pobierz zależności
     cursor = con.execute("""
         SELECT predecessor_stage_code, successor_stage_code, dependency_type, lag_days
@@ -4118,7 +4154,7 @@ def recalculate_forecast(rm_db_path: str, project_id: int) -> Dict:
         WHERE project_id = ?
     """, (project_id,))
     dependencies = [dict(row) for row in cursor.fetchall()]
-    
+
     # 3. Pobierz rzeczywiste okresy
     cursor = con.execute("""
         SELECT ps.stage_code, sap.started_at, sap.ended_at
@@ -4128,7 +4164,7 @@ def recalculate_forecast(rm_db_path: str, project_id: int) -> Dict:
         ORDER BY sap.started_at
     """, (project_id,))
     actuals_rows = cursor.fetchall()
-    
+
     # Grupuj po stage_code
     actuals = {}
     for row in actuals_rows:
@@ -4139,8 +4175,6 @@ def recalculate_forecast(rm_db_path: str, project_id: int) -> Dict:
             'started_at': row['started_at'],
             'ended_at': row['ended_at']
         })
-    
-    con.close()
     
     # 4. Topological sort
     stage_order = _topological_sort(list(stages.keys()), dependencies)
@@ -5334,7 +5368,17 @@ def get_project_status_summary(rm_db_path: str, project_id: int) -> Dict:
 def get_stage_timeline(rm_db_path: str, project_id: int) -> List[Dict]:
     """Zwraca kompletny timeline dla GUI (wizualizacja Gantt)"""
     forecast = recalculate_forecast(rm_db_path, project_id)
-    
+    return _timeline_from_forecast(forecast)
+
+
+def _get_stage_timeline_with_con(con: sqlite3.Connection, project_id: int) -> List[Dict]:
+    """Wersja get_stage_timeline() przyjmująca już otwarte połączenie (patrz
+    _recalculate_forecast_with_con)."""
+    forecast = _recalculate_forecast_with_con(con, project_id)
+    return _timeline_from_forecast(forecast)
+
+
+def _timeline_from_forecast(forecast: Dict) -> List[Dict]:
     timeline = []
     for stage_code, fc in forecast.items():
         timeline.append({
@@ -5348,7 +5392,7 @@ def get_stage_timeline(rm_db_path: str, project_id: int) -> List[Dict]:
             "is_active": fc.get('is_active', False),
             "is_critical_path": False  # TODO: calculate
         })
-    
+
     return timeline
 
 
@@ -6589,37 +6633,42 @@ def end_staff_actual(project_db_path: str, project_id: int,
 def get_all_stage_staff_for_project(project_db_path: str, rm_master_db_path: str,
                                    project_id: int) -> Dict[str, List[Dict]]:
     """Pobierz przypisania pracowników dla wszystkich etapów projektu.
-    
+
     Returns:
         Dict: {stage_code: [lista pracowników]}
     """
-    import json
-    
     con = _open_rm_connection(project_db_path)
-    
     try:
-        rows = con.execute("""
-            SELECT stage_code, assigned_staff
-            FROM project_stages
-            WHERE project_id = ?
-        """, (project_id,)).fetchall()
-        
-        result = {}
-        for row in rows:
-            stage_code = row['stage_code']
-            if row['assigned_staff']:
-                try:
-                    assigned_staff = json.loads(row['assigned_staff'])
-                    result[stage_code] = assigned_staff
-                except (json.JSONDecodeError, TypeError):
-                    result[stage_code] = []
-            else:
-                result[stage_code] = []
-        
-        return result
-        
+        return _get_all_stage_staff_with_con(con, project_id)
     finally:
         con.close()
+
+
+def _get_all_stage_staff_with_con(con: sqlite3.Connection, project_id: int) -> Dict[str, List[Dict]]:
+    """Wersja get_all_stage_staff_for_project() przyjmująca już otwarte połączenie
+    (patrz _recalculate_forecast_with_con - ten sam powód: uniknąć N otwarć
+    połączenia SQLite przy budowaniu wykresu multi-projekt)."""
+    import json
+
+    rows = con.execute("""
+        SELECT stage_code, assigned_staff
+        FROM project_stages
+        WHERE project_id = ?
+    """, (project_id,)).fetchall()
+
+    result = {}
+    for row in rows:
+        stage_code = row['stage_code']
+        if row['assigned_staff']:
+            try:
+                assigned_staff = json.loads(row['assigned_staff'])
+                result[stage_code] = assigned_staff
+            except (json.JSONDecodeError, TypeError):
+                result[stage_code] = []
+        else:
+            result[stage_code] = []
+
+    return result
 
 
 def get_project_staff(project_db_path: str, rm_master_db_path: str,
