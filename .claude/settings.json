@@ -5,7 +5,8 @@
       "Bash(dir \"c:\\\\RMPAK_CLIENT\\\\Repozytoria\\\\RM-BAZA-MANAGER\\\\needle_analysis.png\")",
       "Bash(python -c \"from scipy.interpolate import CubicSpline; print\\('scipy OK'\\)\")",
       "Bash(python RM_KOD.py --help)",
-      "PowerShell(cd \"c:\\\\RMPAK_CLIENT\\\\Repozytoria\\\\RM-BAZA-MANAGER\"; $env:PYTHONIOENCODING = 'utf-8'; python RM_KOD.py --help 2>&1 | Select-Object -First 30)"
+      "PowerShell(cd \"c:\\\\RMPAK_CLIENT\\\\Repozytoria\\\\RM-BAZA-MANAGER\"; $env:PYTHONIOENCODING = 'utf-8'; python RM_KOD.py --help 2>&1 | Select-Object -First 30)",
+      "Bash(python Parser_RM_BAZA.py --out \"C:/RMPAK_CLIENT/Repozytoria/RM-BAZA-MANAGER/test_warehouse.xlsx\")"
     ]
   }
 }
