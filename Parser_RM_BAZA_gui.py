@@ -12,6 +12,7 @@ Uruchomienie:
 ============================================================================
 """
 
+import os
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -56,6 +57,10 @@ class ParserRMBazaGUI(tk.Tk):
         self.anomalies = []  # lista (group, med, max_price, ratio) z ostatniego przebiegu
         self._row_meta = []  # równoległa lista: (item_id,) per wiersz arkusza
 
+        # Konfigurowalne ścieżki (domyślne z Parser_RM_BAZA, można nadpisać w GUI)
+        self.master_path_var = tk.StringVar(value=MASTER_PATH)
+        self.projects_dir_var = tk.StringVar(value=PROJECTS_DIR)
+
         self._build_toolbar()
         self._build_sheet()
         self._build_statusbar()
@@ -64,6 +69,8 @@ class ParserRMBazaGUI(tk.Tk):
     # UI budowa
     # ------------------------------------------------------------------
     def _build_toolbar(self):
+        self._build_path_config()
+
         bar = ttk.Frame(self)
         bar.pack(side=tk.TOP, fill=tk.X, padx=8, pady=6)
 
@@ -83,6 +90,48 @@ class ParserRMBazaGUI(tk.Tk):
 
         self.progress = ttk.Progressbar(bar, mode="indeterminate", length=160)
         self.progress.pack(side=tk.LEFT, padx=12)
+
+    def _build_path_config(self):
+        box = ttk.LabelFrame(self, text="Ścieżki bazy")
+        box.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(6, 0))
+
+        # Baza główna (master.sqlite)
+        row1 = ttk.Frame(box)
+        row1.pack(side=tk.TOP, fill=tk.X, padx=6, pady=(4, 2))
+        ttk.Label(row1, text="Baza główna:", width=14).pack(side=tk.LEFT)
+        ttk.Entry(row1, textvariable=self.master_path_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4)
+        )
+        ttk.Button(row1, text="Przeglądaj...", command=self._browse_master).pack(side=tk.LEFT)
+
+        # Katalog projektów
+        row2 = ttk.Frame(box)
+        row2.pack(side=tk.TOP, fill=tk.X, padx=6, pady=(2, 4))
+        ttk.Label(row2, text="Katalog projektów:", width=14).pack(side=tk.LEFT)
+        ttk.Entry(row2, textvariable=self.projects_dir_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4)
+        )
+        ttk.Button(row2, text="Przeglądaj...", command=self._browse_projects).pack(side=tk.LEFT)
+
+    def _browse_master(self):
+        current = self.master_path_var.get()
+        initial_dir = os.path.dirname(current) if current else None
+        path = filedialog.askopenfilename(
+            title="Wybierz bazę główną (master.sqlite)",
+            initialdir=initial_dir,
+            filetypes=[("SQLite", "*.sqlite *.db *.sqlite3"), ("Wszystkie pliki", "*.*")],
+        )
+        if path:
+            self.master_path_var.set(os.path.normpath(path))
+
+    def _browse_projects(self):
+        current = self.projects_dir_var.get()
+        path = filedialog.askdirectory(
+            title="Wybierz katalog projektów",
+            initialdir=current if current else None,
+        )
+        if path:
+            self.projects_dir_var.set(os.path.normpath(path))
 
     def _build_sheet(self):
         frame = ttk.Frame(self)
@@ -134,19 +183,31 @@ class ParserRMBazaGUI(tk.Tk):
             messagebox.showerror("Błąd", "Próg i minimalna liczba pozycji muszą być liczbami.")
             return
 
+        master_path = self.master_path_var.get().strip()
+        projects_dir = self.projects_dir_var.get().strip()
+
+        if not master_path or not os.path.isfile(master_path):
+            messagebox.showerror("Błąd", f"Baza główna nie istnieje:\n{master_path}")
+            return
+        if not projects_dir or not os.path.isdir(projects_dir):
+            messagebox.showerror("Błąd", f"Katalog projektów nie istnieje:\n{projects_dir}")
+            return
+
         self.btn_run.config(state=tk.DISABLED)
         self.btn_export.config(state=tk.DISABLED)
         self.progress.start(12)
         self.status_var.set("Łączenie z bazą RM_BAZA (read-only)...")
 
         thread = threading.Thread(
-            target=self._run_analysis_worker, args=(threshold, min_group_size), daemon=True
+            target=self._run_analysis_worker,
+            args=(threshold, min_group_size, master_path, projects_dir),
+            daemon=True,
         )
         thread.start()
 
-    def _run_analysis_worker(self, threshold, min_group_size):
+    def _run_analysis_worker(self, threshold, min_group_size, master_path, projects_dir):
         try:
-            db = DatabaseManager(master_path=MASTER_PATH, projects_dir=PROJECTS_DIR, local_dir=LOCAL_DIR)
+            db = DatabaseManager(master_path=master_path, projects_dir=projects_dir, local_dir=LOCAL_DIR)
 
             if not db.connect_master():
                 self.after(0, self._on_run_error, "Nie udało się połączyć z master.sqlite")
