@@ -1421,6 +1421,16 @@ class MainWindow(tk.Tk):
         self.sheet.bind("<Home>", self._on_sheet_home_key)
         self.sheet.bind("<End>", self._on_sheet_end_key)
 
+        # Globalne PgUp/PgDn/Home/End - działają niezależnie od tego, który widget
+        # ma aktualnie focus (np. po kliknięciu w pole "Szukaj" i powrocie klawiszem,
+        # bez konieczności klikania z powrotem w arkusz). Wywołujemy metody tksheet
+        # bezpośrednio (arrowkey_UP/DOWN, select_cell) zamiast przez event_generate,
+        # żeby uniknąć podwójnego wywołania gdy sheet i tak ma już focus.
+        self.bind_all("<Prior>", self._on_global_pgup_pgdn, add="+")
+        self.bind_all("<Next>", self._on_global_pgup_pgdn, add="+")
+        self.bind_all("<Home>", self._on_global_home_end, add="+")
+        self.bind_all("<End>", self._on_global_home_end, add="+")
+
         # Scroll kółkiem ze stałą prędkością (1 wiersz co min. 60ms, nadmiarowe
         # ticki pomijane). Bez timerów/odraczania - przesunięcie i pełny redraw razem.
         self._setup_sheet_scroll_step()
@@ -1433,9 +1443,7 @@ class MainWindow(tk.Tk):
     def _on_sheet_home_key(self, event=None):
         """Home - przenosi zaznaczenie do pierwszego wiersza (w bieżącej kolumnie)."""
         try:
-            if not self.sheet.selected:
-                return "break"
-            col = self.sheet.selected.column
+            col = self.sheet.selected.column if self.sheet.selected else 1
             self.sheet.select_cell(0, col, redraw=False)
             self.sheet.see(0, col, redraw=True)
         except Exception as e:
@@ -1445,17 +1453,67 @@ class MainWindow(tk.Tk):
     def _on_sheet_end_key(self, event=None):
         """End - przenosi zaznaczenie do ostatniego wiersza (w bieżącej kolumnie)."""
         try:
-            if not self.sheet.selected:
-                return "break"
             last_row = len(self._sheet_row_ids) - 1
             if last_row < 0:
                 return "break"
-            col = self.sheet.selected.column
+            col = self.sheet.selected.column if self.sheet.selected else 1
             self.sheet.select_cell(last_row, col, redraw=False)
             self.sheet.see(last_row, col, redraw=True)
         except Exception as e:
             print(f"⚠️  Błąd End: {e}")
         return "break"
+
+    @staticmethod
+    def _is_text_input_widget(widget):
+        """Czy dany widget to edytowalne pole tekstowe - tam PgUp/PgDn/Home/End
+        mają działać normalnie (przewijanie kursora w tekście), a nie sterować
+        arkuszem. Readonly combobox/listbox nie edytuje tekstu, więc te klawisze
+        powinny sterować arkuszem tak samo jak z dowolnego innego widgetu.
+
+        Uwaga: ttk.Combobox dziedziczy po ttk.Entry/tk.Entry, więc musi być
+        sprawdzony PRZED ogólnym testem na Entry, inaczej readonly combobox
+        (np. wybór projektu) zostałby błędnie uznany za edytowalne pole tekstowe."""
+        if isinstance(widget, ttk.Combobox):
+            try:
+                return str(widget.cget("state")) != "readonly"
+            except Exception:
+                return True
+        if isinstance(widget, (tk.Entry, tk.Text, tk.Spinbox)):
+            return True
+        if isinstance(widget, ttk.Entry):
+            return True
+        return False
+
+    def _on_global_pgup_pgdn(self, event):
+        """PgUp/PgDn - prawdziwe stronicowanie arkusza (przeskok o pełny ekran
+        wierszy), niezależnie od tego, który widget ma aktualnie focus (poza
+        polami tekstowymi). Natywny binding tksheet mapuje te klawisze na
+        arrowkey_UP/DOWN (przesunięcie o 1 wiersz, jak strzałka) - tutaj zawsze
+        przejmujemy klawisz i wołamy page_UP/page_DOWN zamiast tego."""
+        if self._is_text_input_widget(self.focus_get()):
+            return None
+        try:
+            mt = self.sheet.MT
+            if event.keysym == "Prior":
+                mt.page_UP()
+            else:
+                mt.page_DOWN()
+        except Exception as e:
+            print(f"⚠️  Błąd PgUp/PgDn: {e}")
+        return "break"
+
+    def _on_global_home_end(self, event):
+        """Home/End - przesuwa zaznaczenie arkusza na pierwszy/ostatni wiersz,
+        niezależnie od tego, który widget ma aktualnie focus (poza polami tekstowymi).
+        Gdy arkusz sam ma focus, jego bind (_on_sheet_home_key/end) obsłuży klawisz sam."""
+        focus_widget = self.focus_get()
+        if self._is_text_input_widget(focus_widget):
+            return None
+        if focus_widget is getattr(self.sheet, "MT", None):
+            return None
+        if event.keysym == "Home":
+            return self._on_sheet_home_key()
+        return self._on_sheet_end_key()
 
     def _setup_sheet_scroll_step(self):
         """Scroll kółkiem myszy ze stałą, przewidywalną prędkością.
