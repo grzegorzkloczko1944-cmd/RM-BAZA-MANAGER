@@ -141,6 +141,10 @@ def release_single_instance_lock(lock_file):
 # KONFIGURACJA
 # ============================================================================
 
+class InitConfigRequired(Exception):
+    """Initialization requires user-provided config (missing master path)."""
+    pass
+
 # Domyślne ścieżki (mogą być nadpisane przez config)
 DEFAULT_MASTER_PATH = "Y:/RM_BAZA/master.sqlite"
 DEFAULT_PROJECTS_DIR = "Y:/RM_BAZA/projects"  # Katalog z plikami project_X.sqlite (MACHINE)
@@ -636,6 +640,20 @@ class MainWindow(tk.Tk):
             state=tk.DISABLED,
         )
         self.btn_rmpak_calc.pack(side=tk.LEFT, padx=5, pady=2)
+
+        self.btn_material_calc = tk.Button(
+            search_frame,
+            text="🧮",
+            command=self.material_calculator_dialog,
+            bg="#8e44ad",
+            fg="white",
+            font=("Arial", 9),
+            padx=8,
+            pady=4,
+            relief=tk.RAISED,
+            bd=2,
+        )
+        self.btn_material_calc.pack(side=tk.LEFT, padx=(0, 5), pady=2)
 
         # WIERSZ 2 (lub dalsza część wiersza 1 w NORMAL): ALARMY, EXPORT, etc.
         # Przycisk do RM_ALARM.EXE
@@ -2506,8 +2524,14 @@ class MainWindow(tk.Tk):
             print(f"  → Ścieżka locks: {LOCKS_DIR}")
             
             # Upewnij się że folder locks istnieje
-            Path(LOCKS_DIR).mkdir(parents=True, exist_ok=True)
-            print(f"  ✅ Folder locks utworzony/zweryfikowany")
+            try:
+                Path(LOCKS_DIR).mkdir(parents=True, exist_ok=True)
+                print(f"  ✅ Folder locks utworzony/zweryfikowany")
+            except OSError as e:
+                raise InitConfigRequired(
+                    f"Folder locków jest niedostępny: {LOCKS_DIR}\n\n"
+                    f"Sprawdź czy dysk sieciowy jest podłączony.\n\nSzczegóły: {e}"
+                ) from e
             
             print("  → Tworzę LockManager...")
             self.lock_manager = ProjectLockManager(config)
@@ -8719,12 +8743,15 @@ class MainWindow(tk.Tk):
         except Exception:
             project_name = str(self.current_project_id)
 
-        def _save_item(item_id, price_pln, hours, material, extra, rate=0.0):
+        def _save_item(item_id, price_pln, hours, material, extra, rate=0.0,
+                        mode="cut", semi_price=0.0, semi_name="", semi_supplier_id=None):
             from datetime import datetime as _dt
             self.db_manager.project_con.execute(
                 """UPDATE items SET price_pln=?, calc_hours=?, calc_material=?, calc_extra=?,
-                   calc_rate=?, updated_at=? WHERE id=?""",
-                (price_pln, hours, material, extra, rate, _dt.now().isoformat(), item_id)
+                   calc_rate=?, calc_mode=?, calc_semi_price=?, calc_semi_name=?,
+                   calc_semi_supplier_id=?, updated_at=? WHERE id=?""",
+                (price_pln, hours, material, extra, rate, mode, semi_price, semi_name,
+                 semi_supplier_id, _dt.now().isoformat(), item_id)
             )
             self.db_manager.project_con.commit()
 
@@ -8757,6 +8784,14 @@ class MainWindow(tk.Tk):
                               project_name, on_price_saved=self.refresh_data,
                               on_save_item=_save_item, on_jump_to_item=_jump_to_item)
         self._rmpak_calc_win = dlg
+
+    def material_calculator_dialog(self):
+        """Samodzielny kalkulator materiału (na szybko, bez powiązania z pozycją)."""
+        if not self.db_manager or not self.db_manager.master_con:
+            messagebox.showwarning("Brak połączenia", "Baza master nie jest dostępna.")
+            return
+        from material_calculator import MaterialCalculatorDialog
+        MaterialCalculatorDialog(self, self.db_manager.master_con)
 
     def launch_rm_import(self):
         """Uruchom RM_IMPORT.EXE z konfiguracji lub folderu lokalnego"""
@@ -9694,10 +9729,6 @@ class MainWindow(tk.Tk):
         # WALIDACJA: Nr Rysunku - NIE POZWÓL NA DUPLIKATY
         # ========================================================================
 
-
-        class InitConfigRequired(Exception):
-            """Initialization requires user-provided config (missing master path)."""
-            pass
         if col == 0:  # Nr rysunku
             drawing_no = str(new_value).strip()
             if drawing_no:
@@ -24515,22 +24546,30 @@ class MainWindow(tk.Tk):
             return
         
         # Znajdź katalogi projektów zaczynające się od numeru projektu
+        # Projekty ZP* zostały przeniesione do podkatalogu SERVER_DIR/ZP/ - przeszukaj też tam
+        search_roots = [server_path]
+        zp_root = server_path / "ZP"
+        if zp_root.exists() and zp_root.is_dir():
+            search_roots.append(zp_root)
+
         project_dirs = []
         seen_dirs = set()
         try:
-            for item in server_path.iterdir():
-                if item.is_dir() and item.name.startswith(project_number):
-                    project_dirs.append(item)
-                    seen_dirs.add(item.name)
-                    print(f"   ✓ Znaleziono katalog (projekt): {item.name}")
-            
-            # Dodatkowo: katalogi zaczynające się od prefiksu numeru rysunku
-            if drawing_prefix and drawing_prefix != project_number:
-                for item in server_path.iterdir():
-                    if item.is_dir() and item.name.startswith(drawing_prefix) and item.name not in seen_dirs:
+            for root in search_roots:
+                for item in root.iterdir():
+                    if item.is_dir() and item.name.startswith(project_number) and item.name not in seen_dirs:
                         project_dirs.append(item)
                         seen_dirs.add(item.name)
-                        print(f"   ✓ Znaleziono katalog (rysunek {drawing_prefix}): {item.name}")
+                        print(f"   ✓ Znaleziono katalog (projekt): {item}")
+
+            # Dodatkowo: katalogi zaczynające się od prefiksu numeru rysunku
+            if drawing_prefix and drawing_prefix != project_number:
+                for root in search_roots:
+                    for item in root.iterdir():
+                        if item.is_dir() and item.name.startswith(drawing_prefix) and item.name not in seen_dirs:
+                            project_dirs.append(item)
+                            seen_dirs.add(item.name)
+                            print(f"   ✓ Znaleziono katalog (rysunek {drawing_prefix}): {item}")
         except Exception as e:
             messagebox.showerror(
                 "Błąd",
