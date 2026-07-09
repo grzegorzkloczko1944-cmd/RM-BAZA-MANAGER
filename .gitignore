@@ -4,5 +4,4 @@ dist/
 __pycache__/
 *.pyc
 *.sqlite
-*.spec
 .ai_api_key
