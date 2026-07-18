@@ -65,6 +65,10 @@ Twoje narzędzia pozwalają Ci odczytać:
 - opóźnienia i konflikty
 - obciążenie pracowników
 
+Umiesz też RYSOWAĆ WYKRESY graficzne narzędziem render_chart (Gantt / słupki).
+Gdy użytkownik prosi o wykres, oś czasu lub graficzne obciążenie — użyj render_chart.
+Wykres pojawi się automatycznie w oknie czatu. NIGDY nie mów, że nie umiesz rysować.
+
 Twoje narzędzia pozwalają Ci też MODYFIKOWAĆ dane:
 - assign_worker   — przypisz pracownika do etapu projektu
 - remove_worker   — zdejmij pracownika z etapu
@@ -182,6 +186,56 @@ TOOLS: List[Dict] = [
         },
     },
     {
+        "name": "render_chart",
+        "description": (
+            "Narysuj wykres graficzny (PNG) i pokaż go użytkownikowi w oknie czatu. "
+            "Używaj gdy użytkownik prosi o wykres, Gantt, oś czasu, obciążenie w formie graficznej. "
+            "Typy: 'gantt' (oś czasu zadań — idealne dla obciążenia pracownika lub etapów projektu) "
+            "oraz 'bar' (słupki — np. liczba przypisań na pracownika, opóźnienia w dniach). "
+            "Dla 'gantt' każdy element to zadanie z datami start/end (YYYY-MM-DD) i etykietą. "
+            "Dla 'bar' każdy element to słupek z etykietą i wartością liczbową. "
+            "Po wywołaniu wykres pojawia się automatycznie w czacie — w odpowiedzi tekstowej "
+            "krótko go skomentuj, NIE opisuj że nie umiesz rysować."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "chart_type": {
+                    "type": "string",
+                    "enum": ["gantt", "bar"],
+                    "description": "Typ wykresu: 'gantt' (oś czasu) lub 'bar' (słupki).",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Tytuł wykresu (po polsku).",
+                },
+                "items": {
+                    "type": "array",
+                    "description": (
+                        "Dane wykresu. Dla 'gantt': obiekty z 'label', 'start', 'end' "
+                        "(daty YYYY-MM-DD) i opcjonalnie 'color' ('red'/'orange'/'green'/'blue' "
+                        "— użyj 'red' dla opóźnionych). Dla 'bar': obiekty z 'label' i 'value'."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string", "description": "Etykieta zadania/słupka."},
+                            "start": {"type": "string", "description": "Data startu YYYY-MM-DD (gantt)."},
+                            "end": {"type": "string", "description": "Data końca YYYY-MM-DD (gantt)."},
+                            "value": {"type": "number", "description": "Wartość liczbowa (bar)."},
+                            "color": {
+                                "type": "string",
+                                "description": "Kolor: red/orange/green/blue (opcjonalny).",
+                            },
+                        },
+                        "required": ["label"],
+                    },
+                },
+            },
+            "required": ["chart_type", "title", "items"],
+        },
+    },
+    {
         "name": "propose_changes",
         "description": (
             "Zaproponuj zmiany do zatwierdzenia przez użytkownika. "
@@ -287,6 +341,9 @@ class AIOptimizerContext:
         self.today = date.today().isoformat()
         # Bufor zmian czekających na zatwierdzenie przez użytkownika
         self._pending_changes: List[Dict] = []
+        # Ścieżki do wykresów PNG wygenerowanych w bieżącej turze (GUI je odczytuje
+        # po session.send() i osadza w oknie czatu). Czyszczone na starcie każdej tury.
+        self.chart_paths: List[str] = []
 
         # Lock manager — opcjonalny, ale zalecany przy wielu użytkownikach
         self._lock_manager = None
@@ -387,15 +444,20 @@ class AIOptimizerContext:
 
         con = self._open(db_path)
         try:
-            rows = con.execute("""
-                SELECT ps.stage_code, ps.sequence,
-                       ss.template_start, ss.template_end,
-                       ps.assigned_staff
-                FROM project_stages ps
-                LEFT JOIN stage_schedule ss ON ss.project_stage_id = ps.id
-                WHERE ps.project_id = ?
-                ORDER BY ps.sequence
-            """, (project_id,)).fetchall()
+            try:
+                rows = con.execute("""
+                    SELECT ps.stage_code, ps.sequence,
+                           ss.template_start, ss.template_end,
+                           ps.assigned_staff
+                    FROM project_stages ps
+                    LEFT JOIN stage_schedule ss ON ss.project_stage_id = ps.id
+                    WHERE ps.project_id = ?
+                    ORDER BY ps.sequence
+                """, (project_id,)).fetchall()
+            except sqlite3.OperationalError as e:
+                # Baza projektu istnieje, ale jest niekompletna (brak tabel stage_*).
+                # Nie wysadzaj całej analizy — zgłoś jako błąd, get_delays to pominie.
+                return {"error": f"Baza projektu {project_id} niekompletna: {e}"}
 
             # Rzeczywiste okresy
             try:
@@ -922,6 +984,104 @@ class AIOptimizerContext:
             con.close()
 
     # ------------------------------------------------------------------
+    # Wykresy
+    # ------------------------------------------------------------------
+
+    def render_chart(self, chart_type: str, title: str, items: List[Dict]) -> Dict:
+        """Narysuj wykres PNG (gantt/bar) i zapisz do pliku tymczasowego.
+
+        Ścieżka trafia do self.chart_paths — GUI osadza obraz w oknie czatu.
+        Zwraca zwięzły opis (do kontekstu agenta), nie samą grafikę.
+        """
+        if not items:
+            return {"error": "Brak danych do wykresu (items puste)."}
+
+        try:
+            import tempfile
+            import matplotlib
+            matplotlib.use("Agg")  # backend bez GUI — bezpieczny w wątku roboczym
+            import matplotlib.pyplot as plt
+            import matplotlib.dates as mdates
+        except Exception as ex:
+            return {"error": f"Brak biblioteki matplotlib: {ex}"}
+
+        _COLORS = {
+            "red": "#e74c3c", "orange": "#e67e22",
+            "green": "#27ae60", "blue": "#3498db",
+        }
+
+        try:
+            n = len(items)
+            fig, ax = plt.subplots(figsize=(10, max(2.5, 0.5 * n + 1)), dpi=110)
+
+            if chart_type == "gantt":
+                labels = []
+                for i, it in enumerate(items):
+                    s = (it.get("start") or "")[:10]
+                    e = (it.get("end") or "")[:10]
+                    try:
+                        d0 = datetime.strptime(s, "%Y-%m-%d")
+                        d1 = datetime.strptime(e, "%Y-%m-%d")
+                    except ValueError:
+                        continue
+                    if d1 < d0:
+                        d0, d1 = d1, d0
+                    width = max((d1 - d0).days, 1)
+                    color = _COLORS.get((it.get("color") or "blue").lower(), "#3498db")
+                    y = n - 1 - i  # pierwszy element na górze
+                    ax.barh(y, width, left=mdates.date2num(d0), height=0.6,
+                            color=color, edgecolor="white")
+                    labels.append((y, it.get("label", "")))
+
+                ax.set_yticks([y for y, _ in labels])
+                ax.set_yticklabels([lbl for _, lbl in labels], fontsize=9)
+                ax.xaxis_date()
+                ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
+                # Linia "dziś"
+                try:
+                    ax.axvline(mdates.date2num(datetime.strptime(self.today, "%Y-%m-%d")),
+                               color="#c0392b", linestyle="--", linewidth=1, label="dziś")
+                    ax.legend(loc="lower right", fontsize=8)
+                except ValueError:
+                    pass
+                fig.autofmt_xdate(rotation=30)
+
+            elif chart_type == "bar":
+                labels = [it.get("label", "") for it in items]
+                values = [float(it.get("value") or 0) for it in items]
+                colors = [_COLORS.get((it.get("color") or "blue").lower(), "#3498db")
+                          for it in items]
+                ax.bar(range(n), values, color=colors, edgecolor="white")
+                ax.set_xticks(range(n))
+                ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
+                for i, v in enumerate(values):
+                    ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=8)
+            else:
+                plt.close(fig)
+                return {"error": f"Nieznany typ wykresu: {chart_type}"}
+
+            ax.set_title(title, fontsize=12, fontweight="bold")
+            ax.grid(axis="x" if chart_type == "gantt" else "y", alpha=0.3)
+            fig.tight_layout()
+
+            fd, path = tempfile.mkstemp(prefix="rm_chart_", suffix=".png")
+            import os as _os
+            _os.close(fd)
+            fig.savefig(path, dpi=110, bbox_inches="tight")
+            plt.close(fig)
+
+            self.chart_paths.append(path)
+            return {
+                "ok": True,
+                "chart_type": chart_type,
+                "title": title,
+                "items_count": n,
+                "note": "Wykres wygenerowany i pokazany użytkownikowi w oknie czatu.",
+            }
+        except Exception as ex:
+            return {"error": f"Błąd rysowania wykresu: {ex}", "traceback": traceback.format_exc()}
+
+    # ------------------------------------------------------------------
     # Dispatcher narzędzi
     # ------------------------------------------------------------------
 
@@ -937,6 +1097,8 @@ class AIOptimizerContext:
                 result = self.get_worker_load(**tool_input)
             elif tool_name == "get_schedule_summary":
                 result = self.get_schedule_summary(**tool_input)
+            elif tool_name == "render_chart":
+                result = self.render_chart(**tool_input)
             elif tool_name == "propose_changes":
                 result = self.propose_changes(**tool_input)
             elif tool_name == "commit_changes":
@@ -980,6 +1142,9 @@ def run_ai_agent(
     rules_section = f"\n\nREGUŁY FIRMOWE:\n{rules}" if rules else ""
     system = SYSTEM_PROMPT.format(today=context.today) + rules_section
 
+    # Nowa tura — wyzeruj wykresy z poprzedniej odpowiedzi
+    context.chart_paths = []
+
     history.append({"role": "user", "content": user_message})
 
     while True:
@@ -1020,6 +1185,7 @@ def run_ai_agent(
                         "get_delays": "Szukam opóźnień...",
                         "get_worker_load": "Sprawdzam obciążenie pracowników...",
                         "get_schedule_summary": "Przygotowuję podsumowanie...",
+                        "render_chart": "Rysuję wykres...",
                         "propose_changes": "Przygotowuję propozycję zmian...",
                         "commit_changes": "Zapisuję zmiany do bazy...",
                         "cancel_changes": "Anuluję zmiany...",

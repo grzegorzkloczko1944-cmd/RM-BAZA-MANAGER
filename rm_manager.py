@@ -723,6 +723,61 @@ def ensure_rm_master_tables(master_db_path: str):
         ON active_sessions(user_id, hostname, app_name)
     """)
 
+    # ============================================================================
+    # URLOPY — godziny w wpisie niedostępności + roczna pula urlopu (2026-07-15)
+    # ============================================================================
+    # Opcjonalne godziny nieobecności (puste = cały dzień). Solver dalej pracuje
+    # na dniach; godziny służą tylko do rozliczenia.
+    for _col in ("time_from", "time_to"):
+        try:
+            con.execute(f"ALTER TABLE employee_availability ADD COLUMN {_col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # kolumna już istnieje
+
+    # Roczna pula dni urlopu — edytowalna per pracownik i rok.
+    # carryover_override: ręcznie urealniony zaległy urlop z ub. roku (NULL = wylicz automatycznie).
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS employee_vacation_quota (
+            employee_id INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            days REAL NOT NULL DEFAULT 26,
+            carryover_override REAL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_by TEXT,
+            PRIMARY KEY (employee_id, year),
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+        )
+    """)
+    try:
+        con.execute("ALTER TABLE employee_vacation_quota ADD COLUMN carryover_override REAL")
+    except sqlite3.OperationalError:
+        pass  # kolumna już istnieje
+
+    # Pula bazowa (permanentna) — stały roczny wymiar urlopu per pracownik,
+    # niezależny od roku. Pula roczna (quota) nadpisuje ją tylko dla danego roku.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS employee_vacation_base (
+            employee_id INTEGER PRIMARY KEY,
+            days REAL NOT NULL DEFAULT 26,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_by TEXT,
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Ręczny zaległy urlop (override) — osobna tabela, niezależna od korekty rocznej.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS employee_carryover_override (
+            employee_id INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            days REAL NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_by TEXT,
+            PRIMARY KEY (employee_id, year),
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+        )
+    """)
+
     con.commit()
     con.close()
     print(f"✅ RM_MANAGER master baza zainicjalizowana: {master_db_path}")
@@ -3059,6 +3114,65 @@ def start_stage(rm_db_path: str, project_id: int, stage_code: str, started_by: s
         raise
 
 
+def is_project_ready_to_close(rm_db_path: str, project_id: int,
+                              idle_days: int = 14) -> Dict:
+    """Sprawdź czy projekt jest gotowy do zamknięcia (P3).
+
+    Warunki:
+    - istnieje przynajmniej jeden zakończony etap roboczy (projekt coś zrobił),
+    - brak aktywnych etapów roboczych (żaden nie trwa),
+    - od ostatniej aktywności minęło >= idle_days dni.
+
+    Nie sprawdza statusu projektu w master (to robi wołający). Zwraca:
+    {ready: bool, reason: str, last_activity: str|None, idle_days: int|None}.
+    """
+    con = _open_rm_connection(rm_db_path)
+    try:
+        # Aktywne etapy robocze (is_milestone=0, nie zakończone)
+        active = con.execute("""
+            SELECT COUNT(*) FROM stage_actual_periods sap
+            JOIN project_stages ps ON sap.project_stage_id = ps.id
+            JOIN stage_definitions sd ON ps.stage_code = sd.code
+            WHERE ps.project_id = ? AND sap.ended_at IS NULL
+              AND sd.is_milestone = 0
+        """, (project_id,)).fetchone()[0]
+        if active > 0:
+            return {"ready": False, "reason": f"Trwają aktywne etapy ({active}).",
+                    "last_activity": None, "idle_days": None}
+
+        # Ostatnia aktywność = najpóźniejszy ended_at wśród etapów roboczych
+        row = con.execute("""
+            SELECT MAX(sap.ended_at) AS last_end, COUNT(*) AS done_cnt
+            FROM stage_actual_periods sap
+            JOIN project_stages ps ON sap.project_stage_id = ps.id
+            JOIN stage_definitions sd ON ps.stage_code = sd.code
+            WHERE ps.project_id = ? AND sap.ended_at IS NOT NULL
+              AND sd.is_milestone = 0
+        """, (project_id,)).fetchone()
+        last_end, done_cnt = row["last_end"], row["done_cnt"]
+
+        if not done_cnt or not last_end:
+            return {"ready": False, "reason": "Brak zakończonych etapów roboczych.",
+                    "last_activity": None, "idle_days": None}
+
+        try:
+            last_dt = datetime.strptime(last_end[:10], "%Y-%m-%d").date()
+            days_idle = (datetime.now().date() - last_dt).days
+        except (ValueError, TypeError):
+            return {"ready": False, "reason": "Nieczytelna data ostatniej aktywności.",
+                    "last_activity": last_end, "idle_days": None}
+
+        if days_idle >= idle_days:
+            return {"ready": True,
+                    "reason": f"Wszystkie etapy zakończone, brak aktywności od {days_idle} dni.",
+                    "last_activity": last_end, "idle_days": days_idle}
+        return {"ready": False,
+                "reason": f"Ostatnia aktywność {days_idle} dni temu (próg {idle_days}).",
+                "last_activity": last_end, "idle_days": days_idle}
+    finally:
+        con.close()
+
+
 def end_stage(rm_db_path: str, project_id: int, stage_code: str, ended_by: str = None, notes: str = None, master_db_path: str = None):
     """Zakończ etap (zamknij aktywny okres)
     
@@ -3528,28 +3642,56 @@ def set_project_status(master_db_path: str, project_id: int, new_status: str):
                      ProjectStatus.PAUSED, ProjectStatus.DONE]
     if new_status not in valid_statuses:
         raise ValueError(f"Nieprawidłowy status: {new_status}")
-    
-    con = _open_rm_connection(master_db_path)
-    
-    try:
-        # Dodaj kolumnę project_status jeśli nie istnieje
+
+    # 🔁 RETRY: master.sqlite jest współdzielony po SMB i bywa chwilowo zablokowany
+    #    przez sync/innego użytkownika. Bez retry zapis statusu ginie (np. milestone
+    #    PRZYJETY zapisany, ale project_status zostaje NEW → projekt nie startuje).
+    import time as _time
+    last_err = None
+    for attempt in range(5):
+        con = _open_rm_connection(master_db_path)
         try:
-            con.execute("ALTER TABLE projects ADD COLUMN project_status TEXT DEFAULT 'NEW'")
-        except sqlite3.OperationalError:
-            pass  # Kolumna już istnieje
-        
-        # Update status
-        con.execute("""
-            UPDATE projects 
-            SET project_status = ?
-            WHERE project_id = ?
-        """, (new_status, project_id))
-        
-        con.commit()
-        print(f"✅ Status projektu {project_id}: {new_status}")
-        
-    finally:
-        con.close()
+            # Dodaj kolumnę project_status jeśli nie istnieje
+            try:
+                con.execute("ALTER TABLE projects ADD COLUMN project_status TEXT DEFAULT 'NEW'")
+            except sqlite3.OperationalError:
+                pass  # Kolumna już istnieje
+
+            # Update status
+            con.execute("""
+                UPDATE projects
+                SET project_status = ?
+                WHERE project_id = ?
+            """, (new_status, project_id))
+
+            con.commit()
+            print(f"✅ Status projektu {project_id}: {new_status}")
+            return
+
+        except sqlite3.OperationalError as e:
+            last_err = e
+            if "locked" in str(e).lower() or "busy" in str(e).lower():
+                wait = 0.3 * (attempt + 1)
+                try:
+                    print(f"master zablokowany (proba {attempt + 1}/5), ponawiam za {wait:.1f}s: {e}")
+                except Exception:
+                    pass  # stdout cp1250/None w trybie windowed - nie przerywaj retry
+                con.close()
+                _time.sleep(wait)
+                continue
+            con.close()
+            raise
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+    # Wszystkie próby nieudane — nie połykaj cicho, zgłoś dalej
+    raise RuntimeError(
+        f"Nie udało się zapisać statusu projektu {project_id}='{new_status}' "
+        f"do master po 5 próbach (master zablokowany): {last_err}"
+    )
 
 
 def can_transition_to(current_status: str, new_status: str) -> tuple:
@@ -9392,19 +9534,23 @@ def save_employee_availability(rm_master_db_path: str, data: Dict, user: str = N
         if data.get('id'):
             con.execute("""
                 UPDATE employee_availability
-                SET employee_id = ?, date_from = ?, date_to = ?, reason = ?, notes = ?
+                SET employee_id = ?, date_from = ?, date_to = ?, reason = ?, notes = ?,
+                    time_from = ?, time_to = ?
                 WHERE id = ?
             """, (data['employee_id'], data['date_from'], data['date_to'],
-                  data['reason'], data.get('notes'), data['id']))
+                  data['reason'], data.get('notes'),
+                  data.get('time_from'), data.get('time_to'), data['id']))
             _rm_safe_commit(con)
             return data['id']
         else:
             cursor = con.execute("""
                 INSERT INTO employee_availability
-                    (employee_id, date_from, date_to, reason, notes, created_by)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (employee_id, date_from, date_to, reason, notes, created_by,
+                     time_from, time_to)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (data['employee_id'], data['date_from'], data['date_to'],
-                  data['reason'], data.get('notes'), user))
+                  data['reason'], data.get('notes'), user,
+                  data.get('time_from'), data.get('time_to')))
             _rm_safe_commit(con)
             return cursor.lastrowid
     finally:
@@ -9419,6 +9565,254 @@ def delete_employee_availability(rm_master_db_path: str, avail_id: int):
         _rm_safe_commit(con)
     finally:
         con.close()
+
+
+# ============================================================================
+# URLOPY — pula roczna i rozliczenie
+# ============================================================================
+
+DEFAULT_VACATION_DAYS = 26  # domyślny roczny wymiar urlopu (Kodeks pracy)
+
+
+def get_vacation_base(rm_master_db_path: str, employee_id: int) -> float:
+    """Zwróć pulę bazową (permanentną) pracownika. Domyślnie 26."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        row = con.execute(
+            "SELECT days FROM employee_vacation_base WHERE employee_id = ?",
+            (employee_id,),
+        ).fetchone()
+        return float(row['days']) if row else float(DEFAULT_VACATION_DAYS)
+    finally:
+        con.close()
+
+
+def set_vacation_base(rm_master_db_path: str, employee_id: int, days: float,
+                      user: str = None):
+    """Ustaw (upsert) pulę bazową (permanentną) pracownika."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        con.execute("""
+            INSERT INTO employee_vacation_base (employee_id, days, updated_by)
+            VALUES (?, ?, ?)
+            ON CONFLICT(employee_id) DO UPDATE SET
+                days = excluded.days,
+                updated_at = CURRENT_TIMESTAMP,
+                updated_by = excluded.updated_by
+        """, (employee_id, days, user))
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+
+
+def has_vacation_quota_for_year(rm_master_db_path: str, employee_id: int, year: int) -> bool:
+    """Czy pracownik ma osobną (roczną) korektę puli na dany rok?"""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        row = con.execute(
+            "SELECT days FROM employee_vacation_quota WHERE employee_id = ? AND year = ?",
+            (employee_id, year),
+        ).fetchone()
+        return row is not None and row['days'] is not None
+    finally:
+        con.close()
+
+
+def get_vacation_quota(rm_master_db_path: str, employee_id: int, year: int) -> float:
+    """Zwróć efektywną pulę urlopu pracownika na dany rok.
+
+    Priorytet: korekta roczna (employee_vacation_quota) → pula bazowa
+    (employee_vacation_base, permanentna) → domyślne 26.
+    """
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        row = con.execute(
+            "SELECT days FROM employee_vacation_quota WHERE employee_id = ? AND year = ?",
+            (employee_id, year),
+        ).fetchone()
+        if row and row['days'] is not None:
+            return float(row['days'])
+        base = con.execute(
+            "SELECT days FROM employee_vacation_base WHERE employee_id = ?",
+            (employee_id,),
+        ).fetchone()
+        return float(base['days']) if base else float(DEFAULT_VACATION_DAYS)
+    finally:
+        con.close()
+
+
+def set_vacation_quota(rm_master_db_path: str, employee_id: int, year: int,
+                       days: float, user: str = None):
+    """Ustaw (upsert) roczną korektę puli urlopu (nadpisuje bazową na ten rok)."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        con.execute("""
+            INSERT INTO employee_vacation_quota (employee_id, year, days, updated_by)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(employee_id, year) DO UPDATE SET
+                days = excluded.days,
+                updated_at = CURRENT_TIMESTAMP,
+                updated_by = excluded.updated_by
+        """, (employee_id, year, days, user))
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+
+
+def clear_vacation_quota(rm_master_db_path: str, employee_id: int, year: int):
+    """Usuń roczną korektę puli (powrót do puli bazowej).
+
+    Zachowuje carryover_override jeśli był ustawiony (to osobna dana w tym wierszu):
+    gdy override istnieje — usuwa tylko korektę days przez skasowanie i odtworzenie
+    wiersza z samym override; w przeciwnym razie usuwa cały wiersz.
+    """
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        # Roczna korekta i override to osobne tabele — po prostu usuń korektę.
+        con.execute(
+            "DELETE FROM employee_vacation_quota WHERE employee_id = ? AND year = ?",
+            (employee_id, year))
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+
+
+def get_carryover_override(rm_master_db_path: str, employee_id: int, year: int):
+    """Zwróć ręcznie ustawiony zaległy urlop (float) lub None jeśli brak (= wylicz auto)."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        row = con.execute(
+            "SELECT days FROM employee_carryover_override "
+            "WHERE employee_id = ? AND year = ?",
+            (employee_id, year),
+        ).fetchone()
+        return float(row['days']) if row else None
+    finally:
+        con.close()
+
+
+def set_carryover_override(rm_master_db_path: str, employee_id: int, year: int,
+                           value, user: str = None):
+    """Ustaw ręczny zaległy urlop. value=None czyści override (powrót do auto)."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        if value is None:
+            con.execute(
+                "DELETE FROM employee_carryover_override WHERE employee_id = ? AND year = ?",
+                (employee_id, year))
+        else:
+            con.execute("""
+                INSERT INTO employee_carryover_override (employee_id, year, days, updated_by)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(employee_id, year) DO UPDATE SET
+                    days = excluded.days,
+                    updated_at = CURRENT_TIMESTAMP,
+                    updated_by = excluded.updated_by
+            """, (employee_id, year, value, user))
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+
+
+def _count_absence_days(date_from: str, date_to: str, time_from: str = None,
+                        time_to: str = None) -> float:
+    """Policz dni nieobecności dla wpisu.
+
+    Wpis godzinowy (time_from + time_to podane) liczony jako ułamek dnia
+    (8h = 1 dzień roboczy). W przeciwnym razie liczba dni kalendarzowych Od–Do
+    włącznie. Nie odejmuje weekendów/świąt — to surowe dni wpisu.
+    """
+    try:
+        d0 = datetime.strptime(date_from[:10], "%Y-%m-%d").date()
+        d1 = datetime.strptime(date_to[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return 0.0
+    day_span = (d1 - d0).days + 1
+    if day_span < 1:
+        day_span = 1
+
+    # Wpis godzinowy — tylko gdy jednodniowy i podane obie godziny
+    if time_from and time_to and day_span == 1:
+        try:
+            h0 = datetime.strptime(time_from, "%H:%M")
+            h1 = datetime.strptime(time_to, "%H:%M")
+            hours = (h1 - h0).seconds / 3600.0
+            if hours > 0:
+                return round(hours / 8.0, 2)  # 8h = 1 dzień roboczy
+        except ValueError:
+            pass
+    return float(day_span)
+
+
+def _used_urlop_in_year(rm_master_db_path: str, employee_id: int, year: int) -> float:
+    """Suma dni URLOP wykorzystanych przez pracownika w danym roku (8h=1d)."""
+    y_from, y_to = f"{year}-01-01", f"{year}-12-31"
+    avail = get_employee_availability(rm_master_db_path, employee_id=employee_id,
+                                      date_from=y_from, date_to=y_to)
+    total = 0.0
+    for a in avail:
+        if (a.get('reason') or '').upper() == 'URLOP':
+            total += _count_absence_days(a['date_from'], a['date_to'],
+                                         a.get('time_from'), a.get('time_to'))
+    return total
+
+
+def get_vacation_report(rm_master_db_path: str, year: int) -> List[Dict]:
+    """Rozliczenie urlopów/nieobecności per pracownik za dany rok.
+
+    Zwraca listę: {employee_id, name, category, quota, carryover, available,
+    used_urlop, remaining, by_reason: {URLOP, L4, ...}, total_days}.
+    - carryover: zaległy urlop z poprzedniego roku (co pozostało na jego koniec, min 0)
+    - available: carryover + quota (łączny dostępny urlop w tym roku)
+    - remaining: available - used_urlop
+    Godzinowe wpisy liczone jako ułamek dnia (8h=1d).
+    """
+    employees = get_employees(rm_master_db_path, active_only=False)
+    y_from, y_to = f"{year}-01-01", f"{year}-12-31"
+    avail = get_employee_availability(rm_master_db_path, date_from=y_from, date_to=y_to)
+
+    per_emp: Dict[int, Dict] = {}
+    for e in employees:
+        quota = get_vacation_quota(rm_master_db_path, e['id'], year)
+        # Zaległy z poprzedniego roku: ręczny override ma pierwszeństwo, w przeciwnym
+        # razie wylicz automatycznie (ile pozostało na koniec ub. roku, min 0).
+        override = get_carryover_override(rm_master_db_path, e['id'], year)
+        if override is not None:
+            carryover = override
+        else:
+            prev_quota = get_vacation_quota(rm_master_db_path, e['id'], year - 1)
+            prev_used = _used_urlop_in_year(rm_master_db_path, e['id'], year - 1)
+            carryover = max(0.0, prev_quota - prev_used)
+        per_emp[e['id']] = {
+            'employee_id': e['id'],
+            'name': e['name'],
+            'category': e.get('category', ''),
+            'quota': quota,
+            'carryover': round(carryover, 2),
+            'available': round(carryover + quota, 2),
+            'by_reason': {},
+            'total_days': 0.0,
+        }
+
+    for a in avail:
+        eid = a['employee_id']
+        if eid not in per_emp:
+            continue
+        days = _count_absence_days(a['date_from'], a['date_to'],
+                                   a.get('time_from'), a.get('time_to'))
+        reason = (a.get('reason') or 'INNE').upper()
+        per_emp[eid]['by_reason'][reason] = per_emp[eid]['by_reason'].get(reason, 0.0) + days
+        per_emp[eid]['total_days'] += days
+
+    result = []
+    for eid, rec in per_emp.items():
+        used = rec['by_reason'].get('URLOP', 0.0)
+        rec['used_urlop'] = round(used, 2)
+        rec['remaining'] = round(rec['available'] - used, 2)
+        rec['total_days'] = round(rec['total_days'], 2)
+        result.append(rec)
+    result.sort(key=lambda r: r['name'].lower())
+    return result
 
 
 # ============================================================================

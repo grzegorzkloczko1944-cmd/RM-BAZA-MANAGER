@@ -3209,6 +3209,20 @@ class RMManagerGUI:
             bd=2
         ).pack(side=tk.LEFT, padx=(0, 3), pady=10)
 
+        # Przycisk URLOPY
+        tk.Button(
+            self.top_frame,
+            text="🏖 Urlopy",
+            command=self.vacation_dialog,
+            bg="#2980b9",
+            fg="white",
+            font=self.FONT_BOLD,
+            padx=12,
+            pady=5,
+            relief=tk.RAISED,
+            bd=2
+        ).pack(side=tk.LEFT, padx=(0, 3), pady=10)
+
         # Przycisk OPTYMALIZACJA
         tk.Button(
             self.top_frame,
@@ -6356,6 +6370,19 @@ class RMManagerGUI:
                         status = ProjectStatus.NEW
                 except Exception as e:
                     print(f"⚠️ Błąd korekty statusu: {e}")
+
+            # 🔧 Korekta niespójności ODWROTNA: milestone PRZYJĘTY ustawiony, ale status=NEW.
+            #    Dzieje się gdy zapis project_status do zablokowanego master zginął przy
+            #    ustawianiu PRZYJĘTY → projekt "nie chce ruszyć". Samonaprawa → ACCEPTED.
+            elif status == ProjectStatus.NEW:
+                try:
+                    _pdb = self.get_project_db_path(self.selected_project_id)
+                    if rmm.is_milestone_set(_pdb, self.selected_project_id, 'PRZYJETY'):
+                        print(f"🔧 Niespójność: PRZYJĘTY ustawiony ale status=NEW → naprawiam na ACCEPTED")
+                        rmm.set_project_status(self.master_db_path, self.selected_project_id, ProjectStatus.ACCEPTED)
+                        status = ProjectStatus.ACCEPTED
+                except Exception as e:
+                    print(f"⚠️ Błąd korekty statusu (PRZYJĘTY→ACCEPTED): {e}")
                     
         except Exception as e:
             print(f"⚠️ _get_ui_button_states: get_project_status rzucił wyjątek: {e}")
@@ -6685,6 +6712,31 @@ class RMManagerGUI:
                 command=lambda: self.toggle_project_done(zakonczony_var.get())
             )
             zakonczony_cb.pack(side=tk.LEFT, padx=10, pady=6)
+
+            # ── P3: Podpowiedź „gotowy do zamknięcia" ──────────────────────────
+            # Gdy projekt nie jest DONE, nie ma aktywnych etapów, a od ostatniej
+            # aktywności minęło >14 dni — zasugeruj kierownikowi zamknięcie.
+            if not _is_done and ui_rules['zakonczony_enabled']:
+                try:
+                    _ready = rmm.is_project_ready_to_close(
+                        self.get_project_db_path(self.selected_project_id),
+                        self.selected_project_id, idle_days=14)
+                except Exception:
+                    _ready = {"ready": False}
+                if _ready.get("ready"):
+                    hint = tk.Label(
+                        finish_frame,
+                        text=f"💡 Gotowy do zamknięcia — brak aktywności od "
+                             f"{_ready.get('idle_days', '?')} dni",
+                        bg="#eafaf1", fg="#e67e22", font=("Arial", 9, "bold"),
+                    )
+                    hint.pack(side=tk.LEFT, padx=8)
+                    tk.Button(
+                        finish_frame, text="✅ Zamknij projekt",
+                        bg="#e67e22", fg="white", font=("Arial", 9, "bold"),
+                        relief=tk.FLAT, padx=8,
+                        command=lambda: self._quick_close_project(),
+                    ).pack(side=tk.LEFT, padx=4, pady=4)
 
             if done_event_info:
                 timestamp = self.format_datetime(done_event_info['timestamp'])
@@ -7167,6 +7219,19 @@ class RMManagerGUI:
             self.status_bar.config(text=f"🔴 Błąd: {stage_code}", fg="#e74c3c")
             messagebox.showerror("❌ Błąd", f"Nie można zmienić milestone:\n{e}")
             self.load_project_stages()  # Refresh żeby cofnąć checkbox
+
+    def _quick_close_project(self):
+        """P3: Zamknij gotowy projekt jednym kliknięciem (z potwierdzeniem)."""
+        if not self.selected_project_id:
+            return
+        if not messagebox.askyesno(
+            "✅ Zamknąć projekt?",
+            "Wszystkie etapy robocze są zakończone i projekt od dłuższego czasu\n"
+            "nie ma aktywności.\n\nUstawić status projektu na ZAKOŃCZONY?",
+            icon='question',
+        ):
+            return
+        self.toggle_project_done(True)
 
     def toggle_project_done(self, is_checked: bool):
         """Combobox 'ZAKOŃCZONY' w lewym panelu — zmienia TYLKO status projektu.
@@ -12305,6 +12370,37 @@ class RMManagerGUI:
                     )
                 """, (template_start_iso, template_end_iso, self.selected_project_id, stage_code))
                 saved_iso[stage_code] = (template_start_iso, template_end_iso)
+
+            # ── Walidacja kolejności dat między etapami (ostrzeżenie) ──────────
+            # Data planowanego STARTU następnika powinna być >= planowany KONIEC
+            # poprzednika. Miękka walidacja: użytkownik może świadomie zignorować.
+            _ORDER_RULES = [
+                ('URUCHOMIENIE',            'URUCHOMIENIE_U_KLIENTA', 'SAT po uruchomieniu'),
+                ('ODBIORY',                'FAT',                    'FAT po odbiorach'),
+                ('URUCHOMIENIE',           'TRANSPORT',              'Transport po uruchomieniu'),
+                ('MONTAZ',                 'URUCHOMIENIE',           'Uruchomienie po montażu'),
+            ]
+            _order_warnings = []
+            for pred, succ, opis in _ORDER_RULES:
+                if pred not in saved_iso or succ not in saved_iso:
+                    continue
+                pred_end = saved_iso[pred][1]
+                succ_start = saved_iso[succ][0]
+                if pred_end and succ_start and succ_start < pred_end:
+                    _order_warnings.append(
+                        f"• {opis}: {succ} zaczyna się {succ_start}, "
+                        f"a {pred} kończy się dopiero {pred_end}")
+
+            if _order_warnings:
+                if not messagebox.askyesno(
+                    "⚠️ Nietypowa kolejność dat",
+                    "Wykryto etapy zaplanowane niezgodnie z typową kolejnością:\n\n"
+                    + "\n".join(_order_warnings)
+                    + "\n\nZapisać mimo to?",
+                    icon='warning',
+                ):
+                    con.close()
+                    return
 
             con.commit()
             con.close()
@@ -27721,6 +27817,30 @@ Kod: {unlock_code}
             chat_text.configure(state=tk.DISABLED)
             chat_text.see(tk.END)
 
+        # Referencje do obrazów wykresów — MUSZĄ przetrwać, inaczej tkinter je zwolni
+        chat_images = []
+
+        def _embed_chart(path):
+            """Osadź wygenerowany wykres PNG w oknie czatu."""
+            try:
+                from PIL import Image, ImageTk
+                img = Image.open(path)
+                # Ogranicz szerokość do ~760 px (okno ma 860)
+                max_w = 760
+                if img.width > max_w:
+                    ratio = max_w / img.width
+                    img = img.resize((max_w, int(img.height * ratio)), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                chat_images.append(photo)  # trzymaj referencję
+                chat_text.configure(state=tk.NORMAL)
+                chat_text.insert(tk.END, "\n")
+                chat_text.image_create(tk.END, image=photo)
+                chat_text.insert(tk.END, "\n")
+                chat_text.configure(state=tk.DISABLED)
+                chat_text.see(tk.END)
+            except Exception as ex:
+                _append(f"\n[⚠️ Nie udało się wyświetlić wykresu: {ex}]\n", "thinking_msg")
+
         def _add_message(role, text):
             _append("\n", "separator")
             if role == "user":
@@ -27757,6 +27877,12 @@ Kod: {unlock_code}
 
             def _finish(answer):
                 _add_message("ai", answer)
+                # Osadź wykresy wygenerowane przez agenta w tej turze
+                try:
+                    for chart_path in getattr(session.context, "chart_paths", []):
+                        _embed_chart(chart_path)
+                except Exception as ex:
+                    _append(f"\n[⚠️ Błąd osadzania wykresów: {ex}]\n", "thinking_msg")
                 _set_busy(False)
                 status_var.set("")
 
@@ -27906,10 +28032,8 @@ Kod: {unlock_code}
         notebook.add(tab_priorities, text="  ⭐  Priorytety  ")
         self._optimizer_build_priorities_tab(tab_priorities, dlg)
 
-        # === Zakładka 4: Niedostępność pracowników ===
-        tab_avail = tk.Frame(notebook)
-        notebook.add(tab_avail, text="  🗓  Niedostępność  ")
-        self._optimizer_build_availability_tab(tab_avail, dlg)
+        # === Niedostępność przeniesiona do osobnego okna URLOPY (na głównym oknie).
+        #     Optymalizator dalej czyta employee_availability z tej samej bazy. ===
 
         # === Zakładka 5: Kalendarz firmowy ===
         tab_cal = tk.Frame(notebook)
@@ -29331,8 +29455,39 @@ Kod: {unlock_code}
     # TAB: Niedostępność pracowników
     # ----------------------------------------------------------------
 
-    def _optimizer_build_availability_tab(self, parent, dlg):
-        """Zakładka CRUD niedostępności pracowników (urlopy, L4 itp.)."""
+    # ================================================================
+    # OKNO URLOPY — pełny blok rozliczania (nieobecności + pula + raport)
+    # ================================================================
+
+    REASON_LABELS = {
+        'URLOP': 'Urlop', 'L4': 'L4 (chorobowe)', 'DELEGACJA': 'Delegacja',
+        'SZKOLENIE': 'Szkolenie', 'INNE': 'Inne',
+    }
+
+    def vacation_dialog(self):
+        """Główne okno URLOPY — zakładki: Nieobecności / Pula urlopu / Rozliczenie."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("🏖 Urlopy i nieobecności")
+        dlg.transient(self.root)
+        self._center_window(dlg, 1040, 620)
+
+        notebook = ttk.Notebook(dlg)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        tab_abs = tk.Frame(notebook)
+        notebook.add(tab_abs, text="  🗓  Nieobecności  ")
+        self._vacation_build_absences_tab(tab_abs, dlg)
+
+        tab_quota = tk.Frame(notebook)
+        notebook.add(tab_quota, text="  📊  Pula urlopu  ")
+        self._vacation_build_quota_tab(tab_quota, dlg)
+
+        tab_report = tk.Frame(notebook)
+        notebook.add(tab_report, text="  🧾  Rozliczenie  ")
+        self._vacation_build_report_tab(tab_report, dlg)
+
+    def _vacation_build_absences_tab(self, parent, dlg):
+        """CRUD nieobecności (urlopy, L4 itp.) z opcjonalnymi godzinami."""
         toolbar = tk.Frame(parent, padx=8, pady=6)
         toolbar.pack(fill=tk.X)
 
@@ -29345,7 +29500,7 @@ Kod: {unlock_code}
 
         # Filtr
         tk.Label(toolbar, text="   Od:", font=self.FONT_SMALL).pack(side=tk.LEFT)
-        from_var = tk.StringVar(value=datetime.now().strftime('%Y-%m-%d'))
+        from_var = tk.StringVar(value=datetime.now().strftime('%Y-01-01'))
         tk.Entry(toolbar, textvariable=from_var, width=12, font=self.FONT_SMALL).pack(side=tk.LEFT, padx=2)
         tk.Label(toolbar, text="Do:", font=self.FONT_SMALL).pack(side=tk.LEFT)
         to_var = tk.StringVar(value=(datetime.now() + timedelta(days=365)).strftime('%Y-%m-%d'))
@@ -29353,15 +29508,16 @@ Kod: {unlock_code}
         tk.Button(toolbar, text="🔍", command=lambda: refresh(),
                   font=self.FONT_SMALL).pack(side=tk.LEFT, padx=2)
 
-        cols = ('id', 'employee', 'category', 'from', 'to', 'reason', 'notes')
+        cols = ('id', 'employee', 'category', 'from', 'to', 'hours', 'reason', 'notes')
         tree = ttk.Treeview(parent, columns=cols, show='headings', height=16)
         tree.heading('id', text='ID');           tree.column('id', width=40, stretch=False)
-        tree.heading('employee', text='Pracownik'); tree.column('employee', width=180)
-        tree.heading('category', text='Kategoria'); tree.column('category', width=110)
-        tree.heading('from', text='Od');         tree.column('from', width=100, stretch=False)
-        tree.heading('to', text='Do');           tree.column('to', width=100, stretch=False)
+        tree.heading('employee', text='Pracownik'); tree.column('employee', width=170)
+        tree.heading('category', text='Kategoria'); tree.column('category', width=100)
+        tree.heading('from', text='Od');         tree.column('from', width=95, stretch=False)
+        tree.heading('to', text='Do');           tree.column('to', width=95, stretch=False)
+        tree.heading('hours', text='Godziny');   tree.column('hours', width=100, stretch=False)
         tree.heading('reason', text='Powód');    tree.column('reason', width=120)
-        tree.heading('notes', text='Uwagi');     tree.column('notes', width=200)
+        tree.heading('notes', text='Uwagi');     tree.column('notes', width=180)
 
         vsb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
@@ -29376,11 +29532,14 @@ Kod: {unlock_code}
                 date_to=to_var.get() or None,
             )
             for r in rows:
+                tf, tt = r.get('time_from'), r.get('time_to')
+                hours = f"{tf}–{tt}" if tf and tt else "cały dzień"
+                reason = self.REASON_LABELS.get((r.get('reason') or '').upper(), r.get('reason') or '')
                 tree.insert('', tk.END, iid=str(r['id']), values=(
                     r['id'], r.get('employee_name', '?'),
                     r.get('employee_category', ''),
-                    r['date_from'], r['date_to'],
-                    r.get('reason') or '', r.get('notes') or '',
+                    r['date_from'], r['date_to'], hours,
+                    reason, r.get('notes') or '',
                 ))
 
         def _edit_selected():
@@ -29395,89 +29554,451 @@ Kod: {unlock_code}
             if not sel:
                 messagebox.showwarning("Uwaga", "Wybierz wpis.", parent=dlg)
                 return
-            if messagebox.askyesno("Potwierdzenie", "Usunąć zaznaczony wpis niedostępności?", parent=dlg):
+            if messagebox.askyesno("Potwierdzenie", "Usunąć zaznaczony wpis nieobecności?", parent=dlg):
                 rmm.delete_employee_availability(self.rm_master_db_path, int(sel[0]))
                 refresh()
 
         def _edit(avid):
-            ed = tk.Toplevel(dlg)
-            ed.title("Niedostępność pracownika")
-            ed.transient(dlg)
-            ed.grab_set()
-            self._center_window(ed, 500, 350)
-
-            data = {}
-            if avid:
-                for r in rmm.get_employee_availability(self.rm_master_db_path):
-                    if r['id'] == avid:
-                        data = r
-                        break
-
-            f = tk.Frame(ed, padx=15, pady=10)
-            f.pack(fill=tk.BOTH, expand=True)
-
-            # Lista pracowników
-            emps = rmm.get_employees(self.rm_master_db_path, active_only=True)
-            emp_map = {f"{e['name']} ({e['category']})": e['id'] for e in emps}
-            emp_names = list(emp_map.keys())
-
-            tk.Label(f, text="Pracownik:", font=self.FONT_BOLD).grid(row=0, column=0, sticky='w', pady=3)
-            emp_var = tk.StringVar()
-            if avid and data:
-                for name, eid in emp_map.items():
-                    if eid == data.get('employee_id'):
-                        emp_var.set(name)
-                        break
-            emp_combo = ttk.Combobox(f, textvariable=emp_var, values=emp_names, width=35, state='readonly')
-            emp_combo.grid(row=0, column=1, sticky='w', pady=3)
-
-            tk.Label(f, text="Od (YYYY-MM-DD):", font=self.FONT_BOLD).grid(row=1, column=0, sticky='w', pady=3)
-            df_var = tk.StringVar(value=data.get('date_from', ''))
-            tk.Entry(f, textvariable=df_var, width=14).grid(row=1, column=1, sticky='w', pady=3)
-
-            tk.Label(f, text="Do (YYYY-MM-DD):", font=self.FONT_BOLD).grid(row=2, column=0, sticky='w', pady=3)
-            dt_var = tk.StringVar(value=data.get('date_to', ''))
-            tk.Entry(f, textvariable=dt_var, width=14).grid(row=2, column=1, sticky='w', pady=3)
-
-            tk.Label(f, text="Powód:", font=self.FONT_BOLD).grid(row=3, column=0, sticky='w', pady=3)
-            reason_var = tk.StringVar(value=data.get('reason', ''))
-            ttk.Combobox(f, textvariable=reason_var, width=20,
-                         values=['urlop', 'L4', 'delegacja', 'szkolenie', 'inne']).grid(row=3, column=1, sticky='w', pady=3)
-
-            tk.Label(f, text="Uwagi:", font=self.FONT_BOLD).grid(row=4, column=0, sticky='nw', pady=3)
-            notes_var = tk.StringVar(value=data.get('notes') or '')
-            tk.Entry(f, textvariable=notes_var, width=40).grid(row=4, column=1, sticky='w', pady=3)
-
-            def _save():
-                eid = emp_map.get(emp_var.get())
-                if not eid:
-                    messagebox.showwarning("Uwaga", "Wybierz pracownika.", parent=ed)
-                    return
-                if not df_var.get() or not dt_var.get():
-                    messagebox.showwarning("Uwaga", "Podaj daty Od i Do.", parent=ed)
-                    return
-                save_data = {
-                    'employee_id': eid,
-                    'date_from': df_var.get(),
-                    'date_to': dt_var.get(),
-                    'reason': reason_var.get(),
-                    'notes': notes_var.get() or None,
-                }
-                if avid:
-                    save_data['id'] = avid
-                rmm.save_employee_availability(self.rm_master_db_path, save_data,
-                                               user=getattr(self, 'current_user', None))
-                ed.destroy()
-                refresh()
-
-            btn_f = tk.Frame(ed)
-            btn_f.pack(fill=tk.X, padx=15, pady=10)
-            tk.Button(btn_f, text="💾 Zapisz", command=_save,
-                      bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=15).pack(side=tk.LEFT, padx=5)
-            tk.Button(btn_f, text="Anuluj", command=ed.destroy,
-                      font=self.FONT_DEFAULT, padx=10).pack(side=tk.LEFT, padx=5)
+            self._vacation_edit_absence(dlg, avid, on_saved=refresh)
 
         refresh()
+
+    def _vacation_edit_absence(self, parent_win, avid=None, on_saved=None,
+                               preset_employee_id=None):
+        """Formularz dodawania/edycji nieobecności. Używany w zakładce Nieobecności
+        oraz w oknie Historia pracownika.
+
+        avid: id wpisu do edycji (None = nowy).
+        on_saved: callback po zapisie (odświeżenie widoku wołającego).
+        preset_employee_id: wstępnie wybrany pracownik (dla nowego wpisu z historii).
+        """
+        ed = tk.Toplevel(parent_win)
+        ed.title("Nieobecność pracownika")
+        ed.transient(parent_win)
+        ed.grab_set()
+        self._center_window(ed, 520, 400)
+
+        data = {}
+        if avid:
+            for r in rmm.get_employee_availability(self.rm_master_db_path):
+                if r['id'] == avid:
+                    data = r
+                    break
+
+        f = tk.Frame(ed, padx=15, pady=10)
+        f.pack(fill=tk.BOTH, expand=True)
+
+        emps = rmm.get_employees(self.rm_master_db_path, active_only=True)
+        emp_map = {f"{e['name']} ({e['category']})": e['id'] for e in emps}
+        emp_names = list(emp_map.keys())
+
+        tk.Label(f, text="Pracownik:", font=self.FONT_BOLD).grid(row=0, column=0, sticky='w', pady=3)
+        emp_var = tk.StringVar()
+        _target_eid = data.get('employee_id') if (avid and data) else preset_employee_id
+        if _target_eid:
+            for name, eid in emp_map.items():
+                if eid == _target_eid:
+                    emp_var.set(name)
+                    break
+        ttk.Combobox(f, textvariable=emp_var, values=emp_names, width=35,
+                     state='readonly').grid(row=0, column=1, columnspan=2, sticky='w', pady=3)
+
+        tk.Label(f, text="Od (YYYY-MM-DD):", font=self.FONT_BOLD).grid(row=1, column=0, sticky='w', pady=3)
+        df_var = tk.StringVar(value=data.get('date_from', ''))
+        tk.Entry(f, textvariable=df_var, width=14).grid(row=1, column=1, sticky='w', pady=3)
+
+        tk.Label(f, text="Do (YYYY-MM-DD):", font=self.FONT_BOLD).grid(row=2, column=0, sticky='w', pady=3)
+        dt_var = tk.StringVar(value=data.get('date_to', ''))
+        tk.Entry(f, textvariable=dt_var, width=14).grid(row=2, column=1, sticky='w', pady=3)
+
+        tk.Label(f, text="Powód:", font=self.FONT_BOLD).grid(row=3, column=0, sticky='w', pady=3)
+        reason_var = tk.StringVar(value=(data.get('reason') or 'URLOP').upper())
+        ttk.Combobox(f, textvariable=reason_var, width=20, state='readonly',
+                     values=['URLOP', 'L4', 'DELEGACJA', 'SZKOLENIE', 'INNE']
+                     ).grid(row=3, column=1, sticky='w', pady=3)
+
+        # Godziny — opcjonalne (puste = cały dzień)
+        tk.Label(f, text="Godziny (opcjonalnie):", font=self.FONT_BOLD).grid(row=4, column=0, sticky='w', pady=3)
+        hour_frame = tk.Frame(f)
+        hour_frame.grid(row=4, column=1, columnspan=2, sticky='w', pady=3)
+        tf_var = tk.StringVar(value=data.get('time_from') or '')
+        tt_var = tk.StringVar(value=data.get('time_to') or '')
+        tk.Entry(hour_frame, textvariable=tf_var, width=7).pack(side=tk.LEFT)
+        tk.Label(hour_frame, text=" – ").pack(side=tk.LEFT)
+        tk.Entry(hour_frame, textvariable=tt_var, width=7).pack(side=tk.LEFT)
+        tk.Label(hour_frame, text="  (HH:MM, puste = cały dzień)",
+                 font=self.FONT_SMALL, fg="#888").pack(side=tk.LEFT)
+
+        tk.Label(f, text="Uwagi:", font=self.FONT_BOLD).grid(row=5, column=0, sticky='nw', pady=3)
+        notes_var = tk.StringVar(value=data.get('notes') or '')
+        tk.Entry(f, textvariable=notes_var, width=40).grid(row=5, column=1, columnspan=2, sticky='w', pady=3)
+
+        def _save():
+            eid = emp_map.get(emp_var.get())
+            if not eid:
+                messagebox.showwarning("Uwaga", "Wybierz pracownika.", parent=ed)
+                return
+            if not df_var.get() or not dt_var.get():
+                messagebox.showwarning("Uwaga", "Podaj daty Od i Do.", parent=ed)
+                return
+            tf, tt = tf_var.get().strip(), tt_var.get().strip()
+            if (tf or tt):
+                if not (tf and tt):
+                    messagebox.showwarning("Uwaga", "Podaj obie godziny (od i do) albo zostaw obie puste.", parent=ed)
+                    return
+                for hv in (tf, tt):
+                    try:
+                        datetime.strptime(hv, "%H:%M")
+                    except ValueError:
+                        messagebox.showwarning("Uwaga", f"Zły format godziny: {hv}. Użyj HH:MM.", parent=ed)
+                        return
+                if df_var.get() != dt_var.get():
+                    messagebox.showwarning("Uwaga", "Godziny można podać tylko dla nieobecności jednodniowej (Od = Do).", parent=ed)
+                    return
+            save_data = {
+                'employee_id': eid,
+                'date_from': df_var.get(),
+                'date_to': dt_var.get(),
+                'reason': reason_var.get().upper(),
+                'notes': notes_var.get() or None,
+                'time_from': tf or None,
+                'time_to': tt or None,
+            }
+            if avid:
+                save_data['id'] = avid
+            try:
+                rmm.save_employee_availability(self.rm_master_db_path, save_data,
+                                               user=getattr(self, 'current_user', None))
+            except Exception as ex:
+                messagebox.showerror("Błąd zapisu", str(ex), parent=ed)
+                return
+            ed.destroy()
+            if on_saved:
+                on_saved()
+
+        btn_f = tk.Frame(ed)
+        btn_f.pack(fill=tk.X, padx=15, pady=10)
+        tk.Button(btn_f, text="💾 Zapisz", command=_save,
+                  bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=15).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_f, text="Anuluj", command=ed.destroy,
+                  font=self.FONT_DEFAULT, padx=10).pack(side=tk.LEFT, padx=5)
+
+    def _vacation_build_quota_tab(self, parent, dlg):
+        """Dwie pule urlopu per pracownik: bazowa (permanentna) + korekta na dany rok."""
+        toolbar = tk.Frame(parent, padx=8, pady=6)
+        toolbar.pack(fill=tk.X)
+        tk.Label(toolbar, text="Rok:", font=self.FONT_BOLD).pack(side=tk.LEFT, padx=(0, 3))
+        year_var = tk.StringVar(value=str(datetime.now().year))
+        tk.Entry(toolbar, textvariable=year_var, width=6, font=self.FONT_SMALL).pack(side=tk.LEFT)
+        tk.Button(toolbar, text="🔍 Pokaż", command=lambda: refresh(),
+                  font=self.FONT_SMALL, padx=8).pack(side=tk.LEFT, padx=4)
+        tk.Label(toolbar,
+                 text="Dwuklik: 'Pula bazowa' = stały wymiar; 'Pula {rok}' = korekta na ten rok.",
+                 font=self.FONT_SMALL, fg="#888").pack(side=tk.LEFT, padx=10)
+
+        cols = ('id', 'employee', 'category', 'base', 'year')
+        tree = ttk.Treeview(parent, columns=cols, show='headings', height=18)
+        tree.heading('id', text='ID');             tree.column('id', width=40, stretch=False)
+        tree.heading('employee', text='Pracownik'); tree.column('employee', width=210)
+        tree.heading('category', text='Kategoria'); tree.column('category', width=130)
+        tree.heading('base', text='Pula bazowa');  tree.column('base', width=100, stretch=False)
+        tree.heading('year', text='Pula (rok)');   tree.column('year', width=140, stretch=False)
+        tree.tag_configure('inherited', foreground='#888')  # rok dziedziczony z bazowej
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, side=tk.LEFT)
+        vsb.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 8))
+
+        def _year():
+            try:
+                return int(year_var.get())
+            except ValueError:
+                return datetime.now().year
+
+        def _year_col_label():
+            tree.heading('year', text=f'Pula {_year()}')
+
+        def refresh():
+            tree.delete(*tree.get_children())
+            _year_col_label()
+            yr = _year()
+            for e in rmm.get_employees(self.rm_master_db_path, active_only=True):
+                base = rmm.get_vacation_base(self.rm_master_db_path, e['id'])
+                has_year = rmm.has_vacation_quota_for_year(self.rm_master_db_path, e['id'], yr)
+                eff = rmm.get_vacation_quota(self.rm_master_db_path, e['id'], yr)
+                year_txt = f"{eff:g}" if has_year else f"{eff:g}  (bazowa)"
+                tag = () if has_year else ('inherited',)
+                tree.insert('', tk.END, iid=str(e['id']), values=(
+                    e['id'], e['name'], e.get('category', ''),
+                    f"{base:g}", year_txt), tags=tag)
+
+        def _edit_base(iid):
+            cur = rmm.get_vacation_base(self.rm_master_db_path, int(iid))
+            new = simpledialog.askstring(
+                "Pula bazowa (permanentna)",
+                "Stały roczny wymiar urlopu (dni):",
+                initialvalue=f"{cur:g}", parent=dlg)
+            if new is None:
+                return
+            try:
+                days = float(new.replace(',', '.'))
+            except ValueError:
+                messagebox.showwarning("Uwaga", "Podaj liczbę dni.", parent=dlg)
+                return
+            rmm.set_vacation_base(self.rm_master_db_path, int(iid), days,
+                                  user=getattr(self, 'current_user', None))
+            refresh()
+
+        def _edit_year(iid):
+            has_year = rmm.has_vacation_quota_for_year(self.rm_master_db_path, int(iid), _year())
+            cur = rmm.get_vacation_quota(self.rm_master_db_path, int(iid), _year())
+            new = simpledialog.askstring(
+                f"Pula na rok {_year()}",
+                f"Korekta puli na rok {_year()} (dni):\n"
+                f"(zostaw puste = użyj puli bazowej)",
+                initialvalue=(f"{cur:g}" if has_year else ""), parent=dlg)
+            if new is None:
+                return
+            new = new.strip()
+            if new == '':
+                # wyczyść korektę roczną → powrót do bazowej
+                rmm.clear_vacation_quota(self.rm_master_db_path, int(iid), _year())
+                refresh()
+                return
+            try:
+                days = float(new.replace(',', '.'))
+            except ValueError:
+                messagebox.showwarning("Uwaga", "Podaj liczbę dni (lub puste).", parent=dlg)
+                return
+            rmm.set_vacation_quota(self.rm_master_db_path, int(iid), _year(), days,
+                                   user=getattr(self, 'current_user', None))
+            refresh()
+
+        def _on_double(event):
+            iid = tree.identify_row(event.y)
+            if not iid:
+                return
+            col = tree.identify_column(event.x)
+            if col == '#4':      # Pula bazowa
+                _edit_base(iid)
+            elif col == '#5':    # Pula (rok)
+                _edit_year(iid)
+
+        tree.bind("<Double-1>", _on_double)
+        refresh()
+
+    def _vacation_build_report_tab(self, parent, dlg):
+        """Rozliczenie: suma dni wg typu + wykorzystany/pozostały urlop + eksport."""
+        toolbar = tk.Frame(parent, padx=8, pady=6)
+        toolbar.pack(fill=tk.X)
+        tk.Label(toolbar, text="Rok:", font=self.FONT_BOLD).pack(side=tk.LEFT, padx=(0, 3))
+        year_var = tk.StringVar(value=str(datetime.now().year))
+        tk.Entry(toolbar, textvariable=year_var, width=6, font=self.FONT_SMALL).pack(side=tk.LEFT)
+        tk.Button(toolbar, text="🔍 Przelicz", command=lambda: refresh(),
+                  font=self.FONT_SMALL, padx=8).pack(side=tk.LEFT, padx=4)
+        tk.Button(toolbar, text="📥 Eksport CSV", command=lambda: _export(),
+                  bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=8)
+
+        cols = ('employee', 'category', 'carryover', 'quota', 'available', 'urlop', 'remaining',
+                'l4', 'delegacja', 'szkolenie', 'inne', 'total')
+        tree = ttk.Treeview(parent, columns=cols, show='headings', height=18)
+        headers = [
+            ('employee', 'Pracownik', 160), ('category', 'Kategoria', 100),
+            ('carryover', 'Zaległy', 60), ('quota', 'Pula', 50), ('available', 'Dostępne', 70),
+            ('urlop', 'Urlop', 55), ('remaining', 'Pozostało', 75),
+            ('l4', 'L4', 50), ('delegacja', 'Deleg.', 55), ('szkolenie', 'Szkol.', 55),
+            ('inne', 'Inne', 50), ('total', 'Razem', 60),
+        ]
+        for key, txt, w in headers:
+            tree.heading(key, text=txt)
+            tree.column(key, width=w, stretch=(key in ('employee', 'category')))
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, side=tk.LEFT)
+        vsb.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 8))
+        tree.tag_configure('over', background='#f9d6d5')  # przekroczony urlop
+
+        _report_cache = {'rows': [], 'year': None}
+
+        def _year():
+            try:
+                return int(year_var.get())
+            except ValueError:
+                return datetime.now().year
+
+        def refresh():
+            tree.delete(*tree.get_children())
+            yr = _year()
+            rows = rmm.get_vacation_report(self.rm_master_db_path, yr)
+            _report_cache['rows'] = rows
+            _report_cache['year'] = yr
+            for r in rows:
+                br = r['by_reason']
+                tag = ('over',) if r['remaining'] < 0 else ()
+                tree.insert('', tk.END, iid=str(r['employee_id']), values=(
+                    r['name'], r['category'],
+                    f"{r['carryover']:g}", f"{r['quota']:g}", f"{r['available']:g}",
+                    f"{r['used_urlop']:g}", f"{r['remaining']:g}",
+                    f"{br.get('L4', 0):g}", f"{br.get('DELEGACJA', 0):g}",
+                    f"{br.get('SZKOLENIE', 0):g}", f"{br.get('INNE', 0):g}",
+                    f"{r['total_days']:g}",
+                ), tags=tag)
+
+        def _export():
+            rows = _report_cache['rows']
+            if not rows:
+                messagebox.showinfo("Eksport", "Brak danych — najpierw przelicz.", parent=dlg)
+                return
+            path = filedialog.asksaveasfilename(
+                parent=dlg, defaultextension=".csv",
+                initialfile=f"rozliczenie_urlopow_{_report_cache['year']}.csv",
+                filetypes=[("CSV", "*.csv")])
+            if not path:
+                return
+            import csv
+            try:
+                with open(path, 'w', newline='', encoding='utf-8-sig') as fh:
+                    w = csv.writer(fh, delimiter=';')
+                    w.writerow(['Pracownik', 'Kategoria', 'Zaległy z ub. roku', 'Pula',
+                                'Dostępne razem', 'Urlop wykorzystany', 'Urlop pozostały',
+                                'L4', 'Delegacja', 'Szkolenie', 'Inne', 'Razem dni'])
+                    for r in rows:
+                        br = r['by_reason']
+                        w.writerow([r['name'], r['category'], r['carryover'], r['quota'],
+                                    r['available'], r['used_urlop'], r['remaining'],
+                                    br.get('L4', 0), br.get('DELEGACJA', 0),
+                                    br.get('SZKOLENIE', 0), br.get('INNE', 0), r['total_days']])
+                messagebox.showinfo("Eksport", f"Zapisano:\n{path}", parent=dlg)
+            except Exception as ex:
+                messagebox.showerror("Błąd eksportu", str(ex), parent=dlg)
+
+        def _open_history(event=None):
+            sel = tree.selection()
+            if not sel:
+                return
+            self._vacation_show_employee_history(dlg, int(sel[0]))
+
+        def _edit_carryover(iid):
+            eid = int(iid)
+            cur = tree.set(iid, 'carryover')
+            new = simpledialog.askstring(
+                "Zaległy urlop",
+                f"Zaległy urlop z ub. roku ({_year()}):\n"
+                f"(wpisz liczbę aby urealnić ręcznie, zostaw puste = wylicz automatycznie)",
+                initialvalue=cur, parent=dlg)
+            if new is None:
+                return
+            new = new.strip()
+            try:
+                val = None if new == '' else float(new.replace(',', '.'))
+            except ValueError:
+                messagebox.showwarning("Uwaga", "Podaj liczbę dni (lub puste).", parent=dlg)
+                return
+            rmm.set_carryover_override(self.rm_master_db_path, eid, _year(), val,
+                                       user=getattr(self, 'current_user', None))
+            refresh()  # przelicz dostępne/pozostało
+
+        def _on_double(event):
+            iid = tree.identify_row(event.y)
+            if not iid:
+                return
+            if tree.identify_column(event.x) == '#3':  # kolumna 'Zaległy'
+                _edit_carryover(iid)
+            else:
+                self._vacation_show_employee_history(dlg, int(iid))
+
+        tree.bind("<Double-1>", _on_double)
+        tk.Label(toolbar, text="  (dwuklik 'Zaległy' = edytuj)",
+                 font=self.FONT_SMALL, fg="#888").pack(side=tk.LEFT)
+        tk.Button(toolbar, text="📖 Historia pracownika", command=_open_history,
+                  bg=self.COLOR_PURPLE, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=8)
+
+        refresh()
+
+    def _vacation_show_employee_history(self, parent_dlg, employee_id):
+        """Okno pełnej historii nieobecności jednego pracownika (wszystkie lata).
+        Umożliwia też dodanie / edycję / usunięcie wpisu (jak w zakładce Nieobecności).
+        """
+        emps = {e['id']: e for e in rmm.get_employees(self.rm_master_db_path, active_only=False)}
+        emp = emps.get(employee_id, {})
+        name = emp.get('name', f'ID {employee_id}')
+
+        win = tk.Toplevel(parent_dlg)
+        win.title(f"📖 Historia nieobecności — {name}")
+        win.transient(parent_dlg)
+        self._center_window(win, 760, 540)
+
+        hdr = tk.Frame(win, bg="#2980b9")
+        hdr.pack(fill=tk.X)
+        tk.Label(hdr, text=f"  {name}   ({emp.get('category', '')})",
+                 bg="#2980b9", fg="white", font=("Arial", 12, "bold")).pack(side=tk.LEFT, pady=8)
+
+        # Toolbar: dodaj / edytuj / usuń
+        toolbar = tk.Frame(win, padx=8, pady=6)
+        toolbar.pack(fill=tk.X)
+        tk.Button(toolbar, text="➕ Dodaj nieobecność",
+                  command=lambda: self._vacation_edit_absence(
+                      win, None, on_saved=_reload, preset_employee_id=employee_id),
+                  bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar, text="✏️ Edytuj", command=lambda: _edit_sel(),
+                  bg=self.COLOR_PURPLE, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar, text="🗑 Usuń", command=lambda: _del_sel(),
+                  bg=self.COLOR_RED, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
+
+        summ_var = tk.StringVar()
+        tk.Label(win, textvariable=summ_var, font=self.FONT_SMALL, fg="#333",
+                 anchor="w", padx=10, pady=4).pack(fill=tk.X)
+
+        cols = ('from', 'to', 'hours', 'days', 'reason', 'notes')
+        tree = ttk.Treeview(win, columns=cols, show='headings')
+        tree.heading('from', text='Od');       tree.column('from', width=95, stretch=False)
+        tree.heading('to', text='Do');         tree.column('to', width=95, stretch=False)
+        tree.heading('hours', text='Godziny'); tree.column('hours', width=95, stretch=False)
+        tree.heading('days', text='Dni');      tree.column('days', width=55, stretch=False)
+        tree.heading('reason', text='Powód');  tree.column('reason', width=130)
+        tree.heading('notes', text='Uwagi');   tree.column('notes', width=220)
+        vsb = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=6, side=tk.LEFT)
+        vsb.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 8), pady=6)
+
+        def _reload():
+            tree.delete(*tree.get_children())
+            rows = rmm.get_employee_availability(self.rm_master_db_path, employee_id=employee_id)
+            rows.sort(key=lambda r: r['date_from'], reverse=True)
+            summary = {}
+            for r in rows:
+                tf, tt = r.get('time_from'), r.get('time_to')
+                hours = f"{tf}–{tt}" if tf and tt else "cały dzień"
+                days = rmm._count_absence_days(r['date_from'], r['date_to'], tf, tt)
+                rsn = (r.get('reason') or 'INNE').upper()
+                summary[rsn] = summary.get(rsn, 0.0) + days
+                tree.insert('', tk.END, iid=str(r['id']), values=(
+                    r['date_from'], r['date_to'], hours, f"{days:g}",
+                    self.REASON_LABELS.get(rsn, rsn), r.get('notes') or ''))
+            summ_txt = "   ".join(
+                f"{self.REASON_LABELS.get(k, k)}: {v:g} dni" for k, v in sorted(summary.items())
+            ) or "brak wpisów"
+            summ_var.set(f"Razem w historii →  {summ_txt}")
+
+        def _edit_sel():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Uwaga", "Wybierz wpis.", parent=win)
+                return
+            self._vacation_edit_absence(win, int(sel[0]), on_saved=_reload)
+
+        def _del_sel():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Uwaga", "Wybierz wpis.", parent=win)
+                return
+            if messagebox.askyesno("Potwierdzenie", "Usunąć zaznaczony wpis?", parent=win):
+                rmm.delete_employee_availability(self.rm_master_db_path, int(sel[0]))
+                _reload()
+
+        tree.bind("<Double-1>", lambda e: _edit_sel())
+        _reload()
 
     # ----------------------------------------------------------------
     # TAB: Kalendarz firmowy
