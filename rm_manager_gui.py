@@ -2396,9 +2396,10 @@ class RMManagerGUI:
             if self.current_user_id is not None:
                 config['last_user_id'] = self.current_user_id
             
-            # Zachowaj ustawienia SMS (jeśli są w self.config)
+            # Zachowaj ustawienia SMS + klucz API AI (jeśli są w self.config)
             if hasattr(self, 'config'):
-                for key in ['sms_enabled', 'sms_api_token', 'sms_sender_name', 'sms_default_country_code']:
+                for key in ['sms_enabled', 'sms_api_token', 'sms_sender_name',
+                            'sms_default_country_code', 'ai_api_key']:
                     if key in self.config:
                         config[key] = self.config[key]
             
@@ -3065,7 +3066,8 @@ class RMManagerGUI:
         self.project_combo.pack(side=tk.LEFT, padx=5, pady=10)
         self.project_combo.bind('<<ComboboxSelected>>', self.on_project_selected)
         self.project_combo.bind('<Button-1>', self._on_project_combo_click)
-        
+        self._setup_project_combo_tooltip()
+
         tk.Button(
             self.top_frame, 
             text="🔄 Odśwież", 
@@ -3984,6 +3986,90 @@ class RMManagerGUI:
             import traceback
             traceback.print_exc()
 
+    def _setup_project_combo_tooltip(self):
+        """Dymek z pełną nazwą projektu — na wąskim polu ORAZ na pozycjach rozwiniętej
+        listy (gdy nazwa jest ucięta). Pole i górny pasek zostają nietknięte."""
+        self._project_tip = None
+        self._project_popdown_bound = False
+
+        def _show_at(text, x, y):
+            if not text:
+                return
+            _hide()
+            tip = tk.Toplevel(self.project_combo)
+            tip.wm_overrideredirect(True)
+            tip.wm_geometry(f"+{x}+{y}")
+            tk.Label(tip, text=text, bg="#ffffe0", fg="#000",
+                     font=("Segoe UI", 15, "bold"), relief=tk.SOLID, bd=1,
+                     padx=10, pady=6, justify=tk.LEFT).pack()
+            # Na wierzch — inaczej rozwinięta lista (popdown) zasłania dymek
+            try:
+                tip.wm_attributes('-topmost', True)
+                tip.lift()
+            except Exception:
+                pass
+            self._project_tip = tip
+
+        def _hide(event=None):
+            if getattr(self, '_project_tip', None) is not None:
+                try:
+                    self._project_tip.destroy()
+                except Exception:
+                    pass
+                self._project_tip = None
+
+        # --- Dymek na polu (wybrany projekt) ---
+        def _show_field(event=None):
+            text = self.project_combo.get()
+            if not text:
+                return
+            x = self.project_combo.winfo_rootx() + 10
+            y = self.project_combo.winfo_rooty() + self.project_combo.winfo_height() + 2
+            _show_at(text, x, y)
+
+        # --- Dymek na pozycjach rozwiniętej listy ---
+        # Callback wywoływany z Tcl z podstawionymi współrzędnymi kursora (%x %y)
+        # względem listboxa popdown.
+        def _lb_motion(x, y):
+            try:
+                path = str(self.project_combo)
+                lb = f'{path}.popdown.f.l'
+                idx = int(self.project_combo.tk.eval(f'{lb} index @{x},{y}'))
+                vals = self.project_combo['values']
+                if 0 <= idx < len(vals):
+                    px = self.project_combo.winfo_pointerx() + 16
+                    py = self.project_combo.winfo_pointery() + 12
+                    _show_at(str(vals[idx]), px, py)
+            except Exception:
+                pass
+
+        _lb_motion_cmd = self.project_combo.register(_lb_motion)
+        _lb_hide_cmd = self.project_combo.register(lambda: _hide())
+
+        def _bind_popdown():
+            if self._project_popdown_bound:
+                return
+            try:
+                path = str(self.project_combo)
+                self.project_combo.tk.call('ttk::combobox::PopdownWindow', self.project_combo)
+                lb = f'{path}.popdown.f.l'
+                # dodaj bind (add '+') żeby nie zniszczyć wewnętrznych bindów ttk
+                self.project_combo.tk.eval(
+                    f'bind {lb} <Motion> +[list {_lb_motion_cmd} %x %y]')
+                self.project_combo.tk.eval(
+                    f'bind {lb} <Leave> +[list {_lb_hide_cmd}]')
+                self._project_popdown_bound = True
+            except Exception as e:
+                print(f"⚠️  _bind_popdown: {e}")
+
+        self._hide = _hide
+        self.project_combo.bind('<Enter>', _show_field, add='+')
+        self.project_combo.bind('<Leave>', _hide, add='+')
+        self.project_combo.bind(
+            '<Button-1>',
+            lambda e: (_hide(), self.project_combo.after(50, _bind_popdown)), add='+')
+        self.project_combo.bind('<<ComboboxSelected>>', lambda e: _hide(), add='+')
+
     def _refresh_combo_lock_info(self):
         """Odśwież display values combo projektów (lock info) bez resetu selekcji"""
         if not self.projects:
@@ -4166,7 +4252,7 @@ class RMManagerGUI:
                 combo_values.append(f"{status_prefix}     {name}")
             
             self.project_combo['values'] = combo_values
-            
+
             if self.projects:
                 self.project_combo.current(0)
                 self.on_project_selected(None)
@@ -27914,28 +28000,44 @@ Kod: {unlock_code}
         entry.bind("<Return>", lambda e: _send())
         entry.focus_set()
 
-    def _ai_key_file(self) -> str:
-        """Ścieżka do pliku z kluczem API — obok rm_manager_gui.py."""
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ai_api_key")
-
     def _ai_load_api_key(self) -> str:
-        """Wczytaj klucz API z pliku. Zwraca klucz lub ''."""
+        """Wczytaj klucz API z konfiguracji RM_MANAGERa (manager_sync_config.json).
+
+        Klucz trzymany w self.config['ai_api_key'] — razem z resztą ustawień, w
+        trwałej lokalizacji (nie znika w skompilowanym .exe). Dla zgodności wstecznej
+        jednorazowo migruje klucz ze starego osobnego pliku .ai_api_key, jeśli istnieje.
+        """
         try:
-            p = self._ai_key_file()
-            if os.path.exists(p):
-                with open(p, "r", encoding="utf-8") as f:
-                    return f.read().strip()
+            key = (getattr(self, 'config', {}) or {}).get('ai_api_key', '')
+            if key:
+                return key.strip()
         except Exception:
             pass
+        # Migracja ze starego pliku (uruchomienia sprzed przeniesienia do configu)
+        for old_path in (
+            os.path.join(os.path.dirname(os.path.abspath(CONFIG_FILE_PATH)), ".ai_api_key"),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ai_api_key"),
+        ):
+            try:
+                if os.path.exists(old_path):
+                    with open(old_path, "r", encoding="utf-8") as f:
+                        old_key = f.read().strip()
+                    if old_key:
+                        self._ai_save_api_key(old_key)  # przenieś do configu
+                        return old_key
+            except Exception:
+                pass
         return ""
 
     def _ai_save_api_key(self, key: str) -> None:
-        """Zapisz klucz API do pliku."""
+        """Zapisz klucz API w konfiguracji RM_MANAGERa (self.config + JSON)."""
         try:
-            with open(self._ai_key_file(), "w", encoding="utf-8") as f:
-                f.write(key)
-        except Exception:
-            pass
+            if not hasattr(self, 'config') or self.config is None:
+                self.config = {}
+            self.config['ai_api_key'] = key
+            self.save_config()
+        except Exception as e:
+            print(f"⚠️ Nie udało się zapisać klucza API: {e}")
 
     def _ai_ask_for_api_key(self) -> str:
         """Wyświetl dialog z prośbą o klucz API Anthropica. Zwraca klucz lub ''."""
