@@ -1341,7 +1341,7 @@ class MainWindow(tk.Tk):
                 "Nr rysunku", "Nazwa", "Opis",
                 "Ilość BOM", "Ilość (zam.)", "Δ", "Ilość dostarczonych",
                 "Typ", "Materiał", "Grubość [mm]", "Dostawca",
-                "Cena PLN", "Zamówiono", "Termin dostawy", "ALARM",
+                "Cena 1szt PLN", "Zamówiono", "Termin dostawy", "ALARM",
                 "Uwagi", "DWF_BIB", "ODEBRANE", "Moduł"
             ],
             column_width=100,
@@ -19455,7 +19455,7 @@ class MainWindow(tk.Tk):
             'mat_manual_text': 'Materiał',
             'thickness_mm': 'Grubość',
             'supplier_id': 'Dostawca',
-            'price_pln': 'Cena PLN',
+            'price_pln': 'Cena 1szt PLN',
             'ordered_at': 'Zamówiono',
             'deadline_date': 'Termin dostawy',
             'alarm': 'ALARM',
@@ -23471,7 +23471,7 @@ class MainWindow(tk.Tk):
             (8, "Materiał"),
             (9, "Grubość [mm]"),
             (10, "Dostawca"),
-            (11, "Cena PLN"),
+            (11, "Cena 1szt PLN"),
             (12, "Zamówiono"),
             (13, "Termin dostawy"),
             (14, "ALARM"),
@@ -24187,10 +24187,10 @@ class MainWindow(tk.Tk):
                 "Nr rysunku", "Nazwa", "Opis",
                 "Ilość BOM", "Ilość (zam.)", "Δ", "Ilość dostarczonych",
                 "Typ", "Materiał", "Grubość [mm]", "Dostawca",
-                "Cena PLN", "Zamówiono", "Termin dostawy", "ALARM",
+                "Cena 1szt PLN", "Zamówiono", "Termin dostawy", "ALARM",
                 "Uwagi", "DWF_BIB", "ODEBRANE", "Moduł"
             ]
-            
+
             # Helper: fmt_qty jak w UI (linie 2990-2999)
             def fmt_qty(val):
                 if val is None:
