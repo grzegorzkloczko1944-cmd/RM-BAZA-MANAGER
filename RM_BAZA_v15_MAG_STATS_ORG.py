@@ -16,12 +16,22 @@ Features:
 ============================================================================
 """
 
+import sys
+
+# Wymuś UTF-8 na stdout/stderr — inaczej print() z emoji wywala UnicodeEncodeError
+# gdy aplikacja jest uruchamiana z konsoli w kodowaniu cp1250 (polski Windows),
+# co przy print na poziomie modułu blokuje start całej aplikacji.
+for _stream in ('stdout', 'stderr'):
+    try:
+        getattr(sys, _stream).reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
 from rmpak_calculator import RmpakCalculatorDialog
 from pathlib import Path
 import json
-import sys
 import socket
 from datetime import datetime
 import re
