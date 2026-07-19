@@ -4358,7 +4358,16 @@ def _recalculate_forecast_with_con(con: sqlite3.Connection, project_id: int) -> 
             
             start_dt = datetime.fromisoformat(active_period['started_at'])
             end_dt = start_dt + timedelta(days=duration_days)
-            
+
+            # Etap TRWA i jest już opóźniony: jeśli przewidywany koniec wypada
+            # w przeszłości (minęła data planowanego zakończenia, a etap wciąż
+            # otwarty), przesuń forecast_end co najmniej na dziś. Bez tego etap
+            # "w toku" nigdy nie sygnalizuje opóźnienia, bo jego czas trwania
+            # zawsze = template_duration (odchylenie = 0).
+            now_dt = datetime.now()
+            if end_dt < now_dt:
+                end_dt = now_dt
+
             forecast[stage_code] = {
                 "template_start": template.get('template_start'),
                 "template_end": template.get('template_end'),
@@ -5476,19 +5485,40 @@ def get_project_status_summary(rm_db_path: str, project_id: int) -> Dict:
     """Generuje podsumowanie dla dashboard"""
     forecast = recalculate_forecast(rm_db_path, project_id)
     active = get_active_stages(rm_db_path, project_id)
-    
-    # Oblicz overall variance
-    total_variance = sum(fc.get('variance_days', 0) for fc in forecast.values())
-    
-    # Status
+
+    # Odchylenie całości = przewidywany koniec projektu vs. planowany koniec.
+    # NIE suma odchyleń czasów trwania etapów — bo wcześnie zamknięty etap
+    # (duża rezerwa) maskowałby opóźnienie etapu krytycznego, a etap "w toku"
+    # który się przeciąga w ogóle nie wchodziłby do sumy (jego duration zawsze
+    # = template_duration → odchylenie 0).
+    def _to_dt(v):
+        return datetime.fromisoformat(v) if isinstance(v, str) else v
+
+    forecast_end_dates = [
+        _to_dt(fc['forecast_end']) for fc in forecast.values()
+        if fc.get('forecast_end')
+    ]
+    template_end_dates = [
+        _to_dt(fc['template_end']) for fc in forecast.values()
+        if fc.get('template_end')
+    ]
+    completion_forecast_dt = max(forecast_end_dates) if forecast_end_dates else None
+    planned_end_dt = max(template_end_dates) if template_end_dates else None
+
+    if completion_forecast_dt and planned_end_dt:
+        total_variance = (completion_forecast_dt - planned_end_dt).days
+    else:
+        total_variance = 0
+
+    # Status wg opóźnienia zakończenia projektu (dni)
     if total_variance > 10:
         status = "DELAYED"
     elif total_variance > 5:
         status = "AT_RISK"
     else:
         status = "ON_TRACK"
-    
-    # Completion forecast
+
+    # Completion forecast (zachowaj oryginalny format – ISO string lub None)
     completion_dates = [fc['forecast_end'] for fc in forecast.values() if fc.get('forecast_end')]
     completion_forecast = max(completion_dates) if completion_dates else None
     
