@@ -37,13 +37,16 @@ class RMStatsDB:
         master_db_path        — master.sqlite (RM_BAZA): tabela projects
         rm_master_db_path     — rm_manager.sqlite: płatności, pracownicy
         rm_manager_projects_dir — katalog rm_manager_project_<id>.sqlite
+        projects_path         — katalog project_<id>.sqlite (RM_BAZA Machines/BOM),
+                                opcjonalny — potrzebny do completion_percent()
     """
 
     def __init__(self, master_db_path: str, rm_master_db_path: str,
-                 rm_manager_projects_dir: str):
+                 rm_manager_projects_dir: str, projects_path: str = None):
         self.master_db_path = master_db_path
         self.rm_master_db_path = rm_master_db_path
         self.rm_manager_projects_dir = Path(rm_manager_projects_dir)
+        self.projects_path = Path(projects_path) if projects_path else None
 
     # ------------------------------------------------------------------
     # Ścieżki do baz per-projekt
@@ -52,6 +55,66 @@ class RMStatsDB:
     def project_events_db_path(self, project_id: int) -> Optional[Path]:
         p = self.rm_manager_projects_dir / f'rm_manager_project_{project_id}.sqlite'
         return p if p.exists() else None
+
+    def mag_db_path(self, project_id: int) -> Optional[Path]:
+        """Baza Machines (BOM/items) — RM_BAZA/projects/project_<id>.sqlite."""
+        if not self.projects_path:
+            return None
+        p = self.projects_path / f'project_{project_id}.sqlite'
+        return p if p.exists() else None
+
+    def completion_percent(self, project_id: int) -> Optional[Dict]:
+        """Stopień kompletacji BOM — liczony na żywo z tabeli items.
+
+        Procent = odebrane / (wszystkie − ZZ):
+        - "wszystkie" = items nie-ukryte (is_hidden=0)
+        - "ZZ" = pozycje których numer rysunku kończy się na "ZZ" (złożenia do
+          montażu, wyłączone z mianownika)
+        - "odebrane" = delivered_qty >= COALESCE(order_qty, work_qty, src_qty)
+        Zwraca None gdy brak bazy Machines dla projektu."""
+        db_path = self.mag_db_path(project_id)
+        if not db_path:
+            return None
+        con = open_ro(str(db_path))
+        try:
+            total_rows = con.execute(
+                'SELECT COUNT(*) FROM items WHERE project_id = ? AND COALESCE(is_hidden, 0) = 0',
+                (project_id,),
+            ).fetchone()[0]
+
+            if total_rows == 0:
+                return {'percent': 0, 'total_rows': 0, 'valid_count': 0, 'delivered_count': 0}
+
+            zz_count = con.execute(
+                """SELECT COUNT(*) FROM items
+                WHERE project_id = ? AND COALESCE(is_hidden, 0) = 0
+                AND UPPER(TRIM(COALESCE(NULLIF(work_drawing_no,''), src_drawing_no, ''))) LIKE '%ZZ'""",
+                (project_id,),
+            ).fetchone()[0]
+
+            delivered_count = con.execute(
+                """SELECT COUNT(*) FROM items
+                WHERE project_id = ? AND COALESCE(is_hidden, 0) = 0
+                AND UPPER(TRIM(COALESCE(NULLIF(work_drawing_no,''), src_drawing_no, ''))) NOT LIKE '%ZZ'
+                AND delivered_qty IS NOT NULL
+                AND COALESCE(order_qty, work_qty, src_qty) IS NOT NULL
+                AND CAST(delivered_qty AS REAL) >= CAST(COALESCE(order_qty, work_qty, src_qty) AS REAL)""",
+                (project_id,),
+            ).fetchone()[0]
+
+            valid_count = total_rows - zz_count
+            percent = round((delivered_count / valid_count) * 100) if valid_count > 0 else 0
+
+            return {
+                'percent': percent,
+                'total_rows': total_rows,
+                'valid_count': valid_count,
+                'delivered_count': delivered_count,
+            }
+        except sqlite3.OperationalError:
+            return None
+        finally:
+            con.close()
 
     # ------------------------------------------------------------------
     # Projekty (master.sqlite)

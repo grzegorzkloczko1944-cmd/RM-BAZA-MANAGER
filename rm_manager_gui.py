@@ -29660,6 +29660,54 @@ Kod: {unlock_code}
         win.bind('<F11>', _toggle)
         win.bind('<Escape>', _exit)
 
+    def _attach_marker_tooltip(self, tree, col_id='status'):
+        """Tooltip z opisem znaczników ⚠️/📦⚠️/⏸ po najechaniu na komórkę Status."""
+        tip = {'win': None}
+
+        def _hide(_e=None):
+            if tip['win'] is not None:
+                try:
+                    tip['win'].destroy()
+                except Exception:
+                    pass
+                tip['win'] = None
+
+        def _motion(event):
+            row = tree.identify_row(event.y)
+            col = tree.identify_column(event.x)
+            # kolumna Status = pozycja col_id w liście columns
+            try:
+                col_idx = list(tree['columns']).index(col_id)
+            except ValueError:
+                return
+            if not row or col != f'#{col_idx + 1}':
+                _hide()
+                return
+            text = str(tree.set(row, col_id))
+            parts = []
+            if '⏸' in text:
+                parts.append('⏸ Projekt wstrzymany')
+            if '📦⚠️' in text:
+                parts.append('📦⚠️ Przeterminowane odbiory FAT/SAT')
+            # ⚠️ (Poprawki) — tylko gdy występuje poza '📦⚠️'
+            if text.replace('📦⚠️', '').find('⚠️') != -1:
+                parts.append('⚠️ Etap Poprawki — wymaga uwagi')
+            if not parts:
+                _hide()
+                return
+            _hide()
+            win = tk.Toplevel(tree)
+            win.wm_overrideredirect(True)
+            win.wm_attributes('-topmost', True)
+            win.wm_geometry(f"+{tree.winfo_pointerx() + 14}+{tree.winfo_pointery() + 12}")
+            tk.Label(win, text='\n'.join(parts), bg="#ffffe0", fg="#000",
+                     font=("Segoe UI", 10), relief=tk.SOLID, bd=1,
+                     justify=tk.LEFT, padx=8, pady=4).pack()
+            tip['win'] = win
+
+        tree.bind('<Motion>', _motion, add='+')
+        tree.bind('<Leave>', _hide, add='+')
+
     def _stats_db(self):
         """Utwórz adapter RMStatsDB na ścieżkach z konfiguracji RM_MANAGERa."""
         import db as _statsdb
@@ -29667,6 +29715,7 @@ Kod: {unlock_code}
             master_db_path=self.master_db_path,
             rm_master_db_path=self.rm_master_db_path,
             rm_manager_projects_dir=self.rm_projects_dir,
+            projects_path=getattr(self, 'projects_path', None),
         )
 
     def stats_summary_dialog(self):
@@ -29680,7 +29729,7 @@ Kod: {unlock_code}
         dlg.title("📊 Podsumowanie projektów")
         dlg.transient(self.root)
         self._register_window('stats_summary', dlg)
-        self._center_window(dlg, 1180, 640)
+        self._center_window(dlg, 1180, 830)
 
         bar = tk.Frame(dlg, padx=8, pady=6)
         bar.pack(fill=tk.X)
@@ -29688,54 +29737,149 @@ Kod: {unlock_code}
                   bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT)
         count_var = tk.StringVar()
         tk.Label(bar, textvariable=count_var, font=self.FONT_SMALL, fg="#555").pack(side=tk.LEFT, padx=12)
+        filter_var = tk.StringVar(value="")  # aktywny filtr statusu (status_code)
         self._add_fullscreen(dlg, bar)
 
+        # Panel klikalnych kart filtra statusów
+        cards_wrap = tk.Frame(dlg, padx=6, pady=4)
+        cards_wrap.pack(fill=tk.X)
+        sum_state = {'data': None, 'cards': []}
+
+        # Etykiety i kolory kategorii Podsumowania (status_code)
+        _CAT = [
+            ('DELAYED', 'Opóźnione', '#c0392b'),
+            ('AT_RISK', 'Zagrożone', '#e67e22'),
+            ('ON_TRACK', 'Zgodne z planem', '#27ae60'),
+            ('DONE', 'Zakończone', '#7f8c8d'),
+        ]
+
+        def _sum_make_card(parent, title, value, fg, filt_key):
+            holder = tk.Frame(parent, width=180, height=64)
+            holder.pack_propagate(False)
+            card = tk.Frame(holder, relief=tk.SOLID, bd=1, bg="white",
+                            padx=10, pady=6, cursor="hand2")
+            card.pack(fill=tk.BOTH, expand=True)
+            card._filt = filt_key
+            tk.Label(card, text=str(value), font=("Segoe UI", 15, "bold"),
+                     fg=fg, bg="white", anchor="w").pack(anchor="w")
+            tk.Label(card, text=title, font=("Segoe UI", 8), fg="#666",
+                     bg="white", anchor="w").pack(anchor="w")
+            def _click(e=None):
+                filter_var.set('' if filter_var.get() == filt_key else filt_key)
+                _apply_filter(); _sum_highlight()
+            for w in (card, *card.winfo_children()):
+                w.bind('<Button-1>', _click)
+            return holder, card
+
+        def _sum_highlight():
+            filt = filter_var.get()
+            for holder, card in sum_state['cards']:
+                bg = "#d6eaf8" if card._filt == filt else "white"
+                card.config(bg=bg)
+                for c in card.winfo_children():
+                    c.config(bg=bg)
+
+        def _sum_build_cards(projects):
+            for holder, card in sum_state['cards']:
+                holder.destroy()
+            sum_state['cards'] = []
+            counts = {}
+            for s in projects:
+                if not s.get('error'):
+                    counts[s['status_code']] = counts.get(s['status_code'], 0) + 1
+            cards = [('', 'Wszystkie', '#2c3e50', len(projects))]
+            cards += [(code, label, color, counts.get(code, 0)) for code, label, color in _CAT]
+            COLS = 6
+            for col in range(COLS):
+                cards_wrap.grid_columnconfigure(col, weight=1, uniform="scard")
+            for i, (code, label, color, val) in enumerate(cards):
+                holder, card = _sum_make_card(cards_wrap, label, val, color, code)
+                holder.grid(row=i // COLS, column=i % COLS, padx=4, pady=4, sticky="nsew")
+                sum_state['cards'].append((holder, card))
+            _sum_highlight()
+
         cols = ('id', 'name', 'status', 'variance', 'completion',
-                'active', 'critical', 'payment')
+                'active', 'critical', 'payment', 'bom')
         tree = ttk.Treeview(dlg, columns=cols, show='headings', height=22)
         for key, txt, w, stretch in [
-            ('id', 'ID', 45, False), ('name', 'Projekt', 230, True),
-            ('status', 'Status', 150, False), ('variance', 'Odchylenie', 90, False),
-            ('completion', 'Przew. zakończenie', 130, False),
-            ('active', 'Aktywne etapy', 180, True),
-            ('critical', 'Etapy bez rezerwy', 120, False),
-            ('payment', 'Płatności', 120, False),
+            ('id', 'ID', 45, False), ('name', 'Projekt', 210, True),
+            ('status', 'Status', 175, False), ('variance', 'Odchylenie', 85, False),
+            ('completion', 'Przew. zakończenie', 125, False),
+            ('active', 'Aktywne etapy', 160, True),
+            ('critical', 'Etapy bez rezerwy', 115, False),
+            ('payment', 'Płatności', 115, False),
+            ('bom', 'Kompletacja', 115, False),
         ]:
             tree.heading(key, text=txt)
             tree.column(key, width=w, stretch=stretch)
-        tree.tag_configure('DELAYED', foreground='#c0392b')
-        tree.tag_configure('AT_RISK', foreground='#e67e22')
-        tree.tag_configure('ON_TRACK', foreground='#27ae60')
-        tree.tag_configure('DONE', foreground='#7f8c8d')
+        # Ciemniejsze czcionki dla lepszej czytelności (kolory statusu przyciemnione)
+        tree.tag_configure('DELAYED', foreground='#a01e1e')
+        tree.tag_configure('AT_RISK', foreground='#b8600f')
+        tree.tag_configure('ON_TRACK', foreground='#1e6b3a')
+        tree.tag_configure('DONE', foreground='#4a4a4a')
+        try:
+            _sty = ttk.Style()
+            _sty.configure('Summary.Treeview', foreground='#1a1a1a', rowheight=22)
+            tree.configure(style='Summary.Treeview')
+        except Exception:
+            pass
         vsb = ttk.Scrollbar(dlg, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8), side=tk.LEFT)
         vsb.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 8), pady=(0, 8))
+        self._attach_marker_tooltip(tree, 'status')
 
-        def _load():
-            tree.delete(*tree.get_children())
-            try:
-                data = sps.build_projects_summary(self._stats_db())
-            except Exception as ex:
-                messagebox.showerror("Błąd", f"Nie można policzyć podsumowania:\n{ex}", parent=dlg)
+        def _apply_filter():
+            data = sum_state['data']
+            if not data:
                 return
+            filt = filter_var.get()
+            tree.delete(*tree.get_children())
+            shown = 0
             for s in data['projects']:
                 if s.get('error'):
+                    if filt:
+                        continue
                     tree.insert('', tk.END, values=(
-                        s['project_id'], s.get('name', ''), 'BŁĄD', '', '', s['error'], '', ''))
+                        s['project_id'], s.get('name', ''), 'BŁĄD', '', '', s['error'], '', '', ''))
                     continue
+                if filt and s['status_code'] != filt:
+                    continue
+                shown += 1
                 v = s['overall_variance_days']
                 variance = f"{v:+d}d" if v else "0d"
                 crit = f"{s['stages_critical']}/{s['stages_total']}"
                 if s.get('is_linear_project'):
                     crit = "Liniowy"
                 pay = f"{s['payment_total_paid_pct']}% ({s['payment_transze_count']} transz)"
+                # Znaczniki w kolumnie Status (jak w RM_STATS): ⏸ wstrzymany,
+                # ⚠️ Poprawki, 📦⚠️ przeterminowane odbiory FAT/SAT.
+                status_txt = s['status_label']
+                if s.get('is_paused'):
+                    status_txt += ' ⏸'
+                if s.get('needs_attention'):
+                    status_txt += ' ⚠️'
+                if s.get('overdue_milestones_count', 0) > 0:
+                    status_txt += ' 📦⚠️'
+                bom = ('—' if s.get('bom_completion_pct') is None
+                       else f"📦 {s['bom_completion_pct']}% ({s.get('bom_completion_total')})")
                 tree.insert('', tk.END, values=(
-                    s['project_id'], s['name'], s['status_label'], variance,
+                    s['project_id'], s['name'], status_txt, variance,
                     s.get('completion_forecast') or '—',
-                    ', '.join(s['active_stages']) or '—', crit, pay,
+                    ', '.join(s['active_stages']) or '—', crit, pay, bom,
                 ), tags=(s['status_code'],))
-            count_var.set(f"Projektów: {data['count']}")
+            count_var.set(
+                f"Pokazano: {shown}" + (f" / {data['count']}" if filt else ""))
+
+        def _load():
+            try:
+                data = sps.build_projects_summary(self._stats_db())
+            except Exception as ex:
+                messagebox.showerror("Błąd", f"Nie można policzyć podsumowania:\n{ex}", parent=dlg)
+                return
+            sum_state['data'] = data
+            _sum_build_cards(data['projects'])
+            _apply_filter()
 
         _load()
 
@@ -29750,7 +29894,7 @@ Kod: {unlock_code}
         dlg.title("📋 Status projektów")
         dlg.transient(self.root)
         self._register_window('stats_status', dlg)
-        self._center_window(dlg, 1080, 700)
+        self._center_window(dlg, 1080, 910)
 
         bar = tk.Frame(dlg, padx=8, pady=6)
         bar.pack(fill=tk.X)
@@ -29798,8 +29942,30 @@ Kod: {unlock_code}
                 w.bind('<Leave>', _leave)
             return holder, card
 
+        # ── Sekcja: Przeterminowane odbiory (FAT/SAT) — nad główną listą ──
+        overdue_wrap = tk.Frame(dlg)
+        overdue_lbl = tk.Label(overdue_wrap, font=("Segoe UI", 10, "bold"),
+                               fg="#c0392b", anchor="w")
+        overdue_lbl.pack(fill=tk.X, padx=8, pady=(2, 0))
+        ovd_cols = ('id', 'name', 'status', 'overdue')
+        overdue_tree = ttk.Treeview(overdue_wrap, columns=ovd_cols, show='headings', height=5)
+        for key, txt, w, stretch in [
+            ('id', 'ID', 45, False), ('name', 'Projekt', 210, False),
+            ('status', 'Status', 125, False),
+            ('overdue', 'Przeterminowane (FAT/SAT)', 500, True),
+        ]:
+            overdue_tree.heading(key, text=txt)
+            overdue_tree.column(key, width=w, stretch=stretch)
+        overdue_tree.tag_configure('overdue', foreground='#c0392b')
+        overdue_tree.pack(fill=tk.X, padx=8, pady=(0, 6))
+        self._attach_marker_tooltip(overdue_tree, 'status')
+        # overdue_wrap pakowany warunkowo w _apply_filter (tylko gdy są wpisy)
+
+        # ── Główna lista projektów ────────────────────────────────────────
+        main_wrap = tk.Frame(dlg)
+        main_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         cols = ('id', 'name', 'status', 'priority', 'completion', 'delays')
-        tree = ttk.Treeview(dlg, columns=cols, show='headings', height=20)
+        tree = ttk.Treeview(main_wrap, columns=cols, show='headings', height=20)
         for key, txt, w, stretch in [
             ('id', 'ID', 45, False), ('name', 'Projekt', 210, False),
             ('status', 'Status', 125, False), ('priority', 'Priorytet', 65, False),
@@ -29809,12 +29975,13 @@ Kod: {unlock_code}
             tree.heading(key, text=txt)
             tree.column(key, width=w, stretch=stretch)
         tree.tag_configure('delayed', foreground='#c0392b')
-        vsb = ttk.Scrollbar(dlg, orient="vertical", command=tree.yview)
+        vsb = ttk.Scrollbar(main_wrap, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
-        tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8), side=tk.LEFT)
-        vsb.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 8), pady=(0, 8))
+        tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+        vsb.pack(fill=tk.Y, side=tk.RIGHT)
+        self._attach_marker_tooltip(tree, 'status')
 
-        _FINAL = {'Zakonczony', 'Wstrzymany'}
+        _FINAL = {'Zakończony', 'Wstrzymany'}  # status z polskimi znakami (jak w bazie)
 
         def _row_matches(p, filt):
             if not filt:
@@ -29851,6 +30018,25 @@ Kod: {unlock_code}
                 text=(f"Filtr: {filt}  ({shown})  — kliknij kartę ponownie by wyłączyć"
                       if filt else f"Wszystkie ({shown})"))
 
+            # Sekcja przeterminowanych odbiorów (FAT/SAT) — osobny sygnał,
+            # niezależny od klasyfikacji opóźnień (CPM). Pokazuj gdy są wpisy.
+            overdue_tree.delete(*overdue_tree.get_children())
+            omp = data.get('overdue_milestone_projects', [])
+            if omp:
+                overdue_lbl.config(
+                    text=f"⚠️ Przeterminowane odbiory (FAT/SAT) — {len(omp)}   "
+                         "(nieodhaczone mimo minionego terminu; nie wpływa na "
+                         "klasyfikację opóźnień)")
+                for p in omp:
+                    ms = ', '.join(
+                        f"{m['stage_code']} +{m['overrun_days']}d" for m in p['milestones'])
+                    overdue_tree.insert('', tk.END, values=(
+                        p['project_id'], p['name'], p['status'], ms), tags=('overdue',))
+                if not overdue_wrap.winfo_ismapped():
+                    overdue_wrap.pack(fill=tk.X, before=main_wrap)
+            else:
+                overdue_wrap.pack_forget()
+
         def _highlight_cards():
             filt = filter_var.get()
             for holder, card in state['cards']:
@@ -29868,10 +30054,15 @@ Kod: {unlock_code}
             state['cards'] = []
             main = [
                 ('Aktywne projekty', data['in_progress_count'], '#2c3e50', 'ACTIVE'),
-                ('Na czas', data['on_time_count'], '#27ae60', 'ON_TIME'),
-                ('Opóźnione', data['delayed_count'], '#c0392b', 'DELAYED'),
+                ('W terminie', data['on_time_count'], '#27ae60', 'ON_TIME'),
+                ('Opóźnione projekty', data['delayed_count'], '#c0392b', 'DELAYED'),
             ]
-            per_status = [(name, cnt, '#34495e', name) for name, cnt in data['by_status'].items()]
+            # Karty per-status; "Zakończony" → "Zakończone projekty" jak w RM_STATS
+            _STATUS_CARD_LABEL = {'Zakończony': 'Zakończone projekty'}
+            per_status = [
+                (_STATUS_CARD_LABEL.get(name, name), cnt, '#34495e', name)
+                for name, cnt in data['by_status'].items()
+            ]
             all_cards = main + per_status
             # Równy grid: 6 kolumn jednakowej szerokości
             COLS = 6

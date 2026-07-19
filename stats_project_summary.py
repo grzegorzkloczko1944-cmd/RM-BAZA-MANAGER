@@ -15,7 +15,7 @@ przeglad zbiorczy po wszystkich projektach naraz.
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
 from db import RMStatsDB
@@ -26,6 +26,32 @@ SUB_MILESTONES = {
     'ODBIORY': ['FAT', 'ODBIOR_1', 'ODBIOR_2', 'ODBIOR_3', 'TRANSPORT', 'URUCHOMIENIE_U_KLIENTA'],
 }
 CHILD_MILESTONE_CODES = {code for children in SUB_MILESTONES.values() for code in children}
+
+# Milestone'y odbiorowe z wlasnym terminem (bez TRANSPORT - to punktowe
+# zdarzenie bez sensownego "terminu do przekroczenia", patrz stats_status.py).
+_ODBIORY_MILESTONE_CODES_WITH_DEADLINE = ('FAT', 'ODBIOR_1', 'ODBIOR_2', 'ODBIOR_3', 'URUCHOMIENIE_U_KLIENTA')
+
+
+def _overdue_milestones_count(inputs: Dict, today: date) -> int:
+    """Ile milestone'ow odbiorowych (FAT/ODBIOR_x/SAT) ma miniety termin bez
+    zamkniecia - ta sama logika co _overdue_milestones w stats_status.py,
+    port lokalny zeby uniknac cyklicznego importu (stats_status importuje
+    build_project_summary z tego modulu)."""
+    count = 0
+    for code in _ODBIORY_MILESTONE_CODES_WITH_DEADLINE:
+        template = inputs['stages'].get(code) or {}
+        planned_end_raw = template.get('template_end')
+        if not planned_end_raw:
+            continue
+        try:
+            planned_end = date.fromisoformat(planned_end_raw[:10])
+        except ValueError:
+            continue
+        periods = inputs['actuals'].get(code) or []
+        has_ended = any(p.get('ended_at') for p in periods)
+        if not has_ended and planned_end < today:
+            count += 1
+    return count
 
 
 def _topological_sort(stages: List[str], dependencies: List[Dict]) -> List[str]:
@@ -317,6 +343,23 @@ def build_project_summary(db: RMStatsDB, project: Dict) -> Dict:
     is_paid_milestone = any(p.get('started_at') for p in zakonczony_periods)
     is_paid = is_paid_milestone or total_paid >= 100 or has_umorzony
 
+    completion = db.completion_percent(pid)
+
+    # Trzecia, niezalezna warstwa sygnalow (patrz stats_status.py) - CPM
+    # (overall_variance_days) mowi "czy sie slizga harmonogram", te dwa
+    # pola mowia o czyms innym: "cos wymagalo korekty" (Poprawki) i
+    # "zapomniano odhaczyc odbior" (FAT/SAT po terminie) - zaden nie wplywa
+    # na status_code/overall_variance_days powyzej.
+    raw_status = (project.get('status') or '').strip().lower()
+    needs_attention = raw_status in ('poprawki', 'poprawka')
+    # Zakonczony projekt nie ma juz "biezacych zaleglosci" - milestone bez
+    # zamkniecia sprzed dawna to zamknieta historia (projekt.status_code
+    # DONE), nie aktywny sygnal do sprawdzenia (analogicznie do skip_delays
+    # w stats_status.py).
+    overdue_milestones = (
+        0 if status_info['code'] == 'DONE' else _overdue_milestones_count(inputs, date.today())
+    )
+
     return {
         'project_id': pid,
         'name': project.get('name'),
@@ -326,6 +369,8 @@ def build_project_summary(db: RMStatsDB, project: Dict) -> Dict:
         'completion_forecast': (completion_forecast or '')[:10] or None,
         'active_stages': active_stages,
         'is_paused': inputs.get('is_paused', False),
+        'needs_attention': needs_attention,
+        'overdue_milestones_count': overdue_milestones,
         'stages_total': len(relevant_details),
         'stages_critical': n_critical,
         'is_linear_project': n_critical == len(relevant_details) if relevant_details else False,
@@ -335,6 +380,10 @@ def build_project_summary(db: RMStatsDB, project: Dict) -> Dict:
         'payment_has_umorzony': has_umorzony,
         'payment_transze_count': len(milestones_payment),
         'payment_transze_platnosc_count': count_platnosc,
+        'bom_completion_pct': completion['percent'] if completion else None,
+        # total_rows = wszystkie nie-ukryte pozycje w arkuszu (wliczajac ZZ) -
+        # to samo "M" co w badge'u RM_MANAGER "📦 NN% (M)".
+        'bom_completion_total': completion['total_rows'] if completion else None,
     }
 
 
