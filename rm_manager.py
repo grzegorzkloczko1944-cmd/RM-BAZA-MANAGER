@@ -734,6 +734,14 @@ def ensure_rm_master_tables(master_db_path: str):
         except sqlite3.OperationalError:
             pass  # kolumna już istnieje
 
+    # days_override: ręcznie zmniejszona liczba dni nieobecności (2026-07-20).
+    # NULL = użyj automatycznie policzonych dni roboczych (kalendarz firmowy).
+    # User może wpisać tylko MNIEJ niż wyliczono (np. wrócił wcześniej z urlopu).
+    try:
+        con.execute("ALTER TABLE employee_availability ADD COLUMN days_override REAL")
+    except sqlite3.OperationalError:
+        pass  # kolumna już istnieje
+
     # Roczna pula dni urlopu — edytowalna per pracownik i rok.
     # carryover_override: ręcznie urealniony zaległy urlop z ub. roku (NULL = wylicz automatycznie).
     con.execute("""
@@ -782,6 +790,17 @@ def ensure_rm_master_tables(master_db_path: str):
     con.close()
     print(f"✅ RM_MANAGER master baza zainicjalizowana: {master_db_path}")
     ensure_list_tables(master_db_path)
+
+    # Auto-zasiew polskich świąt do kalendarza firmowego (bieżący i przyszły
+    # rok). Idempotentne — nie nadpisuje istniejących wpisów (ręcznych korekt,
+    # sobót pracujących). Dzięki temu liczenie dni roboczych od razu pomija
+    # święta bez ręcznej konfiguracji.
+    try:
+        this_year = datetime.now().year
+        for _y in (this_year, this_year + 1):
+            seed_polish_holidays(master_db_path, _y)
+    except Exception as _e:
+        print(f"⚠️  Auto-zasiew świąt pominięty: {_e}")
 
 
 # Kategorie pracowników (stała lista)
@@ -9557,7 +9576,8 @@ def get_employee_availability(rm_master_db_path: str, employee_id: int = None,
 def save_employee_availability(rm_master_db_path: str, data: Dict, user: str = None) -> int:
     """Dodaj lub zaktualizuj okres niedostępności.
     
-    data keys: id (opt), employee_id, date_from, date_to, reason, notes
+    data keys: id (opt), employee_id, date_from, date_to, reason, notes,
+               time_from, time_to, days_override (opt, NULL = auto dni robocze)
     """
     con = _open_rm_connection(rm_master_db_path)
     try:
@@ -9565,22 +9585,24 @@ def save_employee_availability(rm_master_db_path: str, data: Dict, user: str = N
             con.execute("""
                 UPDATE employee_availability
                 SET employee_id = ?, date_from = ?, date_to = ?, reason = ?, notes = ?,
-                    time_from = ?, time_to = ?
+                    time_from = ?, time_to = ?, days_override = ?
                 WHERE id = ?
             """, (data['employee_id'], data['date_from'], data['date_to'],
                   data['reason'], data.get('notes'),
-                  data.get('time_from'), data.get('time_to'), data['id']))
+                  data.get('time_from'), data.get('time_to'),
+                  data.get('days_override'), data['id']))
             _rm_safe_commit(con)
             return data['id']
         else:
             cursor = con.execute("""
                 INSERT INTO employee_availability
                     (employee_id, date_from, date_to, reason, notes, created_by,
-                     time_from, time_to)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     time_from, time_to, days_override)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (data['employee_id'], data['date_from'], data['date_to'],
                   data['reason'], data.get('notes'), user,
-                  data.get('time_from'), data.get('time_to')))
+                  data.get('time_from'), data.get('time_to'),
+                  data.get('days_override')))
             _rm_safe_commit(con)
             return cursor.lastrowid
     finally:
@@ -9744,22 +9766,31 @@ def set_carryover_override(rm_master_db_path: str, employee_id: int, year: int,
         con.close()
 
 
-def _count_absence_days(date_from: str, date_to: str, time_from: str = None,
-                        time_to: str = None) -> float:
-    """Policz dni nieobecności dla wpisu.
+_WEEKDAY_PL = ['pon', 'wt', 'śr', 'czw', 'pt', 'sob', 'ndz']
 
-    Wpis godzinowy (time_from + time_to podane) liczony jako ułamek dnia
-    (8h = 1 dzień roboczy). W przeciwnym razie liczba dni kalendarzowych Od–Do
-    włącznie. Nie odejmuje weekendów/świąt — to surowe dni wpisu.
+
+def compute_absence_days(rm_master_db_path: str, date_from: str, date_to: str,
+                         time_from: str = None, time_to: str = None) -> Dict:
+    """Policz dni nieobecności wg kalendarza firmowego i zwróć rozbicie dla UI.
+
+    Zwraca dict:
+      - working_days: liczba dni roboczych Od–Do (pomija weekendy/święta,
+        uwzględnia soboty pracujące z company_calendar)
+      - skipped: lista {'date','label'} dni pominiętych (dlaczego mniej niż
+        kalendarzowo) — do pokazania użytkownikowi
+      - is_hourly: True gdy wpis godzinowy (jednodniowy, obie godziny)
+
+    Wpis godzinowy (time_from + time_to, jednodniowy) liczony jako ułamek dnia
+    (8h = 1 dzień roboczy).
     """
     try:
         d0 = datetime.strptime(date_from[:10], "%Y-%m-%d").date()
         d1 = datetime.strptime(date_to[:10], "%Y-%m-%d").date()
     except (ValueError, TypeError):
-        return 0.0
+        return {'working_days': 0.0, 'skipped': [], 'is_hourly': False}
+    if d1 < d0:
+        d1 = d0
     day_span = (d1 - d0).days + 1
-    if day_span < 1:
-        day_span = 1
 
     # Wpis godzinowy — tylko gdy jednodniowy i podane obie godziny
     if time_from and time_to and day_span == 1:
@@ -9768,7 +9799,82 @@ def _count_absence_days(date_from: str, date_to: str, time_from: str = None,
             h1 = datetime.strptime(time_to, "%H:%M")
             hours = (h1 - h0).seconds / 3600.0
             if hours > 0:
-                return round(hours / 8.0, 2)  # 8h = 1 dzień roboczy
+                return {'working_days': round(hours / 8.0, 2),
+                        'skipped': [], 'is_hourly': True}
+        except ValueError:
+            pass
+
+    # Dni robocze wg kalendarza firmowego (weekendy/święta pominięte).
+    working = get_working_days(rm_master_db_path, date_from[:10], date_to[:10])
+    working_set = set(working)
+
+    # Zbierz kalendarz raz, żeby opisać powód pominięcia każdego dnia.
+    cal = {}
+    try:
+        for e in get_company_calendar(rm_master_db_path, date_from[:10], date_to[:10]):
+            cal[e['date']] = (e.get('day_type'), e.get('description'))
+    except Exception:
+        pass
+
+    skipped = []
+    current = d0
+    while current <= d1:
+        iso = current.isoformat()
+        if iso not in working_set:
+            if iso in cal:
+                dt, desc = cal[iso]
+                label = desc or ('Święto' if dt == 'HOLIDAY' else 'Dzień wolny')
+            else:
+                label = 'weekend'
+            skipped.append({'date': iso,
+                            'label': f"{_WEEKDAY_PL[current.weekday()]} {current.strftime('%d-%m-%Y')} — {label}"})
+        current += timedelta(days=1)
+
+    return {'working_days': float(len(working)), 'skipped': skipped,
+            'is_hourly': False}
+
+
+def _count_absence_days(date_from: str, date_to: str, time_from: str = None,
+                        time_to: str = None, rm_master_db_path: str = None,
+                        days_override=None) -> float:
+    """Policz dni nieobecności dla wpisu (dni robocze wg kalendarza firmowego).
+
+    - days_override (jeśli podany i > 0): ma pierwszeństwo — user ręcznie
+      zmniejszył liczbę dni (np. wrócił wcześniej). Zakładamy, że warstwa
+      zapisu wymusiła override <= wyliczonych dni roboczych.
+    - rm_master_db_path podany → liczy dni robocze (pomija weekendy/święta).
+    - rm_master_db_path None (fallback) → surowe dni kalendarzowe Od–Do,
+      z ułamkiem dnia dla wpisu godzinowego. Zostawione dla wywołań bez dostępu
+      do bazy; nowy kod powinien podawać ścieżkę master.
+    """
+    if days_override is not None:
+        try:
+            ov = float(days_override)
+            if ov > 0:
+                return ov
+        except (TypeError, ValueError):
+            pass
+
+    if rm_master_db_path is not None:
+        return compute_absence_days(rm_master_db_path, date_from, date_to,
+                                    time_from, time_to)['working_days']
+
+    # Fallback bez bazy — surowe dni kalendarzowe (dawne zachowanie).
+    try:
+        d0 = datetime.strptime(date_from[:10], "%Y-%m-%d").date()
+        d1 = datetime.strptime(date_to[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return 0.0
+    day_span = (d1 - d0).days + 1
+    if day_span < 1:
+        day_span = 1
+    if time_from and time_to and day_span == 1:
+        try:
+            h0 = datetime.strptime(time_from, "%H:%M")
+            h1 = datetime.strptime(time_to, "%H:%M")
+            hours = (h1 - h0).seconds / 3600.0
+            if hours > 0:
+                return round(hours / 8.0, 2)
         except ValueError:
             pass
     return float(day_span)
@@ -9783,7 +9889,9 @@ def _used_urlop_in_year(rm_master_db_path: str, employee_id: int, year: int) -> 
     for a in avail:
         if (a.get('reason') or '').upper() == 'URLOP':
             total += _count_absence_days(a['date_from'], a['date_to'],
-                                         a.get('time_from'), a.get('time_to'))
+                                         a.get('time_from'), a.get('time_to'),
+                                         rm_master_db_path=rm_master_db_path,
+                                         days_override=a.get('days_override'))
     return total
 
 
@@ -9829,7 +9937,9 @@ def get_vacation_report(rm_master_db_path: str, year: int) -> List[Dict]:
         if eid not in per_emp:
             continue
         days = _count_absence_days(a['date_from'], a['date_to'],
-                                   a.get('time_from'), a.get('time_to'))
+                                   a.get('time_from'), a.get('time_to'),
+                                   rm_master_db_path=rm_master_db_path,
+                                   days_override=a.get('days_override'))
         reason = (a.get('reason') or 'INNE').upper()
         per_emp[eid]['by_reason'][reason] = per_emp[eid]['by_reason'].get(reason, 0.0) + days
         per_emp[eid]['total_days'] += days
@@ -9895,9 +10005,75 @@ def delete_company_calendar_day(rm_master_db_path: str, date: str):
         con.close()
 
 
+def _easter_sunday(year: int) -> "date":
+    """Niedziela wielkanocna dla danego roku (algorytm Gaussa/Meeusa)."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return datetime(year, month, day).date()
+
+
+def polish_public_holidays(year: int) -> Dict[str, str]:
+    """Zwróć polskie święta ustawowo wolne od pracy dla danego roku.
+
+    Klucz = data ISO (YYYY-MM-DD), wartość = opis. Uwzględnia święta ruchome
+    (Wielkanoc, Poniedziałek Wielkanocny, Zielone Świątki, Boże Ciało).
+    """
+    easter = _easter_sunday(year)
+    fixed = {
+        f"{year}-01-01": "Nowy Rok",
+        f"{year}-01-06": "Trzech Króli",
+        f"{year}-05-01": "1 Maja",
+        f"{year}-05-03": "Święto Konstytucji 3 Maja",
+        f"{year}-08-15": "Wniebowzięcie NMP",
+        f"{year}-11-01": "Wszystkich Świętych",
+        f"{year}-11-11": "Narodowe Święto Niepodległości",
+        f"{year}-12-25": "Boże Narodzenie (1. dzień)",
+        f"{year}-12-26": "Boże Narodzenie (2. dzień)",
+    }
+    movable = {
+        easter.isoformat(): "Wielkanoc",
+        (easter + timedelta(days=1)).isoformat(): "Poniedziałek Wielkanocny",
+        (easter + timedelta(days=49)).isoformat(): "Zielone Świątki",
+        (easter + timedelta(days=60)).isoformat(): "Boże Ciało",
+    }
+    fixed.update(movable)
+    return fixed
+
+
+def seed_polish_holidays(rm_master_db_path: str, year: int,
+                         user: str = None, overwrite: bool = False) -> int:
+    """Zasiej polskie święta ustawowe do company_calendar dla danego roku.
+
+    Wpisuje jako day_type='HOLIDAY'. Domyślnie NIE nadpisuje dni już będących
+    w kalendarzu (żeby nie zniszczyć ręcznych korekt / sobót pracujących).
+    Zwraca liczbę realnie dodanych dni.
+    """
+    existing = {e['date'] for e in get_company_calendar(
+        rm_master_db_path, f"{year}-01-01", f"{year}-12-31")}
+    added = 0
+    for iso, desc in sorted(polish_public_holidays(year).items()):
+        if iso in existing and not overwrite:
+            continue
+        save_company_calendar_day(rm_master_db_path, iso, 'HOLIDAY', desc, user)
+        added += 1
+    return added
+
+
 def get_working_days(rm_master_db_path: str, date_from: str, date_to: str) -> List[str]:
     """Zwróć listę dni roboczych w podanym przedziale.
-    
+
     Uwzględnia:
     - Weekendy (sob/ndz = wolne, chyba że SATURDAY_WORK)
     - Święta i dni wolne z company_calendar

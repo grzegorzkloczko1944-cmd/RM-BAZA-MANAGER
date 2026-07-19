@@ -75,6 +75,17 @@ except ImportError:
 import rm_manager as rmm
 from rm_manager import ProjectStatus
 
+
+def _fmt_days(v):
+    """Sformatuj liczbę dni: 5.0 -> '5', 4.5 -> '4.5', None -> ''."""
+    if v is None:
+        return ''
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return str(int(f)) if abs(f - round(f)) < 1e-9 else f"{f:.2f}".rstrip('0').rstrip('.')
+
 # Kolejność etapów na wykresach (od góry do dołu).
 # 🔧 Niestandardowa kolejność: etapy zwykłe wg sekwencji workflow, a milestones
 # wg życzenia użytkownika (PRZYJĘTY jako trigger pozostaje pierwszy):
@@ -30115,7 +30126,18 @@ Kod: {unlock_code}
 
         tab_report = tk.Frame(notebook)
         notebook.add(tab_report, text="  🧾  Rozliczenie  ")
-        self._vacation_build_report_tab(tab_report, dlg)
+        report_refresh = self._vacation_build_report_tab(tab_report, dlg)
+
+        # Auto-przelicz Rozliczenie przy każdym wejściu na tę zakładkę — dzięki
+        # temu dodanie/edycja nieobecności od razu widać w saldach bez klikania
+        # "Przelicz".
+        def _on_vac_tab_changed(_e=None):
+            try:
+                if notebook.tab(notebook.select(), "text").strip().startswith("🧾") and report_refresh:
+                    report_refresh()
+            except Exception:
+                pass
+        notebook.bind("<<NotebookTabChanged>>", _on_vac_tab_changed)
 
     def _vacation_build_absences_tab(self, parent, dlg):
         """CRUD nieobecności (urlopy, L4 itp.) z opcjonalnymi godzinami."""
@@ -30169,7 +30191,8 @@ Kod: {unlock_code}
                 tree.insert('', tk.END, iid=str(r['id']), values=(
                     r['id'], r.get('employee_name', '?'),
                     r.get('employee_category', ''),
-                    r['date_from'], r['date_to'], hours,
+                    self.format_date_ddmmyyyy(r['date_from']),
+                    self.format_date_ddmmyyyy(r['date_to']), hours,
                     reason, r.get('notes') or '',
                 ))
 
@@ -30207,7 +30230,7 @@ Kod: {unlock_code}
         ed.title("Nieobecność pracownika")
         ed.transient(parent_win)
         ed.grab_set()
-        self._center_window(ed, 520, 400)
+        self._center_window(ed, 580, 620)
 
         data = {}
         if avid:
@@ -30223,6 +30246,14 @@ Kod: {unlock_code}
         emp_map = {f"{e['name']} ({e['category']})": e['id'] for e in emps}
         emp_names = list(emp_map.keys())
 
+        def _to_iso(ddmmyyyy):
+            """DD-MM-YYYY (z pola) -> YYYY-MM-DD (do bazy/logiki). '' -> ''."""
+            s = (ddmmyyyy or '').strip()
+            if not s:
+                return ''
+            dt = self.parse_date_ddmmyyyy(s)  # rzuca ValueError na zły format
+            return dt.strftime('%Y-%m-%d')
+
         tk.Label(f, text="Pracownik:", font=self.FONT_BOLD).grid(row=0, column=0, sticky='w', pady=3)
         emp_var = tk.StringVar()
         _target_eid = data.get('employee_id') if (avid and data) else preset_employee_id
@@ -30231,16 +30262,62 @@ Kod: {unlock_code}
                 if eid == _target_eid:
                     emp_var.set(name)
                     break
-        ttk.Combobox(f, textvariable=emp_var, values=emp_names, width=35,
-                     state='readonly').grid(row=0, column=1, columnspan=2, sticky='w', pady=3)
+        # Edytowalny combobox z autopodpowiedzią: wpisujesz początek nazwiska,
+        # pole samo dopisuje resztę pasującej pozycji (dopisany fragment jest
+        # zaznaczony, więc dalsze pisanie go nadpisuje). Lista zostaje pełna.
+        emp_combo = ttk.Combobox(f, textvariable=emp_var, values=emp_names, width=35)
+        emp_combo.grid(row=0, column=1, columnspan=2, sticky='w', pady=3)
 
-        tk.Label(f, text="Od (YYYY-MM-DD):", font=self.FONT_BOLD).grid(row=1, column=0, sticky='w', pady=3)
-        df_var = tk.StringVar(value=data.get('date_from', ''))
-        tk.Entry(f, textvariable=df_var, width=14).grid(row=1, column=1, sticky='w', pady=3)
+        def _autocomplete(event=None):
+            # Nie podpowiadaj przy kasowaniu / nawigacji — inaczej nie da się
+            # skasować znaku (od razu by się dopisywał z powrotem).
+            if event and event.keysym in ('BackSpace', 'Delete', 'Up', 'Down',
+                                          'Return', 'Escape', 'Tab', 'Left', 'Right'):
+                return
+            typed = emp_var.get()
+            if not typed:
+                return
+            low = typed.lower()
+            # 1) dopasowanie od początku całości (imię) → dopisz brakującą resztę.
+            match = next((n for n in emp_names if n.lower().startswith(low)), None)
+            if match and match != typed:
+                emp_combo.delete(0, tk.END)
+                emp_combo.insert(0, match)
+                emp_combo.select_range(len(typed), tk.END)
+                emp_combo.icursor(len(typed))
+                return
+            # 2) dopasowanie po dowolnym słowie (nazwisko, kategoria) → podstaw
+            #    całą pozycję; kursor za wpisanym fragmentem, reszta zaznaczona.
+            def _word_match(name):
+                return any(w.startswith(low) for w in name.lower().split())
+            match = next((n for n in emp_names if _word_match(n)), None)
+            if match and match.lower() != low:
+                emp_combo.delete(0, tk.END)
+                emp_combo.insert(0, match)
+                emp_combo.select_range(0, tk.END)  # całość zaznaczona (piszesz = nadpisujesz)
+                emp_combo.icursor(tk.END)
 
-        tk.Label(f, text="Do (YYYY-MM-DD):", font=self.FONT_BOLD).grid(row=2, column=0, sticky='w', pady=3)
-        dt_var = tk.StringVar(value=data.get('date_to', ''))
-        tk.Entry(f, textvariable=dt_var, width=14).grid(row=2, column=1, sticky='w', pady=3)
+        emp_combo.bind('<KeyRelease>', _autocomplete)
+
+        # Daty w formacie DD-MM-YYYY (spójnie z resztą aplikacji). Baza trzyma
+        # ISO (YYYY-MM-DD) — konwersja przy wczytaniu i zapisie.
+        tk.Label(f, text="Od (DD-MM-YYYY):", font=self.FONT_BOLD).grid(row=1, column=0, sticky='w', pady=3)
+        df_row = tk.Frame(f)
+        df_row.grid(row=1, column=1, columnspan=2, sticky='w', pady=3)
+        df_var = tk.StringVar(value=self.format_date_ddmmyyyy(data.get('date_from')) if data.get('date_from') else '')
+        df_entry = tk.Entry(df_row, textvariable=df_var, width=14)
+        df_entry.pack(side=tk.LEFT)
+        tk.Button(df_row, text="📅", command=lambda: self.open_calendar_picker(df_entry),
+                  bg="#3498db", fg="white", font=self.FONT_SMALL, padx=3, pady=1).pack(side=tk.LEFT, padx=3)
+
+        tk.Label(f, text="Do (DD-MM-YYYY):", font=self.FONT_BOLD).grid(row=2, column=0, sticky='w', pady=3)
+        dt_row = tk.Frame(f)
+        dt_row.grid(row=2, column=1, columnspan=2, sticky='w', pady=3)
+        dt_var = tk.StringVar(value=self.format_date_ddmmyyyy(data.get('date_to')) if data.get('date_to') else '')
+        dt_entry = tk.Entry(dt_row, textvariable=dt_var, width=14)
+        dt_entry.pack(side=tk.LEFT)
+        tk.Button(dt_row, text="📅", command=lambda: self.open_calendar_picker(dt_entry),
+                  bg="#3498db", fg="white", font=self.FONT_SMALL, padx=3, pady=1).pack(side=tk.LEFT, padx=3)
 
         tk.Label(f, text="Powód:", font=self.FONT_BOLD).grid(row=3, column=0, sticky='w', pady=3)
         reason_var = tk.StringVar(value=(data.get('reason') or 'URLOP').upper())
@@ -30260,9 +30337,72 @@ Kod: {unlock_code}
         tk.Label(hour_frame, text="  (HH:MM, puste = cały dzień)",
                  font=self.FONT_SMALL, fg="#888").pack(side=tk.LEFT)
 
-        tk.Label(f, text="Uwagi:", font=self.FONT_BOLD).grid(row=5, column=0, sticky='nw', pady=3)
+        # Dni robocze — auto-wyliczone z kalendarza firmowego (pomija weekendy/
+        # święta). Edytowalne TYLKO w dół: user może wpisać mniej (wrócił
+        # wcześniej), nigdy więcej niż wyliczono.
+        tk.Label(f, text="Dni robocze:", font=self.FONT_BOLD).grid(row=5, column=0, sticky='nw', pady=3)
+        days_frame = tk.Frame(f)
+        days_frame.grid(row=5, column=1, columnspan=2, sticky='w', pady=3)
+        days_top = tk.Frame(days_frame)
+        days_top.pack(anchor='w')
+        days_var = tk.StringVar(value='')
+        days_entry = tk.Entry(days_top, textvariable=days_var, width=7)
+        days_entry.pack(side=tk.LEFT)
+        days_summary = tk.Label(days_top, text="", font=self.FONT_SMALL, fg="#333")
+        days_summary.pack(side=tk.LEFT, padx=6)
+        # Pełna lista pominiętych dni (każdy w osobnym wierszu).
+        days_hint = tk.Label(days_frame, text="", font=self.FONT_SMALL, fg="#444",
+                             justify=tk.LEFT, anchor='w')
+        days_hint.pack(anchor='w', pady=(2, 0))
+
+        # _auto_days: ostatnio wyliczona wartość (górny limit dla override).
+        # _user_touched: czy user ręcznie zmienił pole (wtedy nie nadpisujemy).
+        state = {'auto_days': None, 'user_touched': bool(data.get('days_override'))}
+        if data.get('days_override') is not None:
+            days_var.set(_fmt_days(data.get('days_override')))
+
+        def _recalc_days(*_a):
+            if not df_var.get().strip() or not dt_var.get().strip():
+                days_hint.config(text="podaj daty Od i Do")
+                return
+            try:
+                df_iso, dt_iso = _to_iso(df_var.get()), _to_iso(dt_var.get())
+            except ValueError:
+                days_hint.config(text="format daty: DD-MM-YYYY")
+                return
+            try:
+                info = rmm.compute_absence_days(
+                    self.rm_master_db_path, df_iso, dt_iso,
+                    tf_var.get().strip() or None, tt_var.get().strip() or None)
+            except Exception as ex:
+                days_hint.config(text=f"błąd wyliczenia: {ex}")
+                return
+            auto = info['working_days']
+            state['auto_days'] = auto
+            if not state['user_touched']:
+                days_var.set(_fmt_days(auto))
+            skipped = info.get('skipped') or []
+            if info.get('is_hourly'):
+                days_summary.config(text=f"wyliczono {_fmt_days(auto)} — wpis godzinowy (8h = 1 dzień)")
+                days_hint.config(text="")
+            elif skipped:
+                days_summary.config(
+                    text=f"wyliczono {_fmt_days(auto)} dni roboczych — pominięto {len(skipped)} dni:")
+                # Wymień KAŻDY pominięty dzień (po jednym w wierszu).
+                days_hint.config(text="\n".join(f"  • {s['label']}" for s in skipped))
+            else:
+                days_summary.config(
+                    text=f"wyliczono {_fmt_days(auto)} dni roboczych — wszystkie dni w zakresie są robocze")
+                days_hint.config(text="")
+
+        days_entry.bind('<Key>', lambda e: state.update(user_touched=True))
+        for _v in (df_var, dt_var, tf_var, tt_var):
+            _v.trace_add('write', _recalc_days)
+        _recalc_days()
+
+        tk.Label(f, text="Uwagi:", font=self.FONT_BOLD).grid(row=6, column=0, sticky='nw', pady=3)
         notes_var = tk.StringVar(value=data.get('notes') or '')
-        tk.Entry(f, textvariable=notes_var, width=40).grid(row=5, column=1, columnspan=2, sticky='w', pady=3)
+        tk.Entry(f, textvariable=notes_var, width=40).grid(row=6, column=1, columnspan=2, sticky='w', pady=3)
 
         def _save():
             eid = emp_map.get(emp_var.get())
@@ -30271,6 +30411,14 @@ Kod: {unlock_code}
                 return
             if not df_var.get() or not dt_var.get():
                 messagebox.showwarning("Uwaga", "Podaj daty Od i Do.", parent=ed)
+                return
+            try:
+                df_iso, dt_iso = _to_iso(df_var.get()), _to_iso(dt_var.get())
+            except ValueError as ve:
+                messagebox.showwarning("Uwaga", str(ve), parent=ed)
+                return
+            if dt_iso < df_iso:
+                messagebox.showwarning("Uwaga", "Data 'Do' nie może być wcześniejsza niż 'Od'.", parent=ed)
                 return
             tf, tt = tf_var.get().strip(), tt_var.get().strip()
             if (tf or tt):
@@ -30286,14 +30434,42 @@ Kod: {unlock_code}
                 if df_var.get() != dt_var.get():
                     messagebox.showwarning("Uwaga", "Godziny można podać tylko dla nieobecności jednodniowej (Od = Do).", parent=ed)
                     return
+
+            # Dni robocze / override. Auto-wyliczoną wartość zapisujemy jako NULL
+            # (days_override=None → logika policzy z kalendarza). Zapisujemy liczbę
+            # tylko gdy user ją ZMNIEJSZYŁ względem wyliczonej.
+            auto = state.get('auto_days')
+            days_override = None
+            raw = days_var.get().strip().replace(',', '.')
+            if raw:
+                try:
+                    entered = float(raw)
+                except ValueError:
+                    messagebox.showwarning("Uwaga", f"Zła liczba dni: {days_var.get()}", parent=ed)
+                    return
+                if entered <= 0:
+                    messagebox.showwarning("Uwaga", "Liczba dni musi być większa od 0.", parent=ed)
+                    return
+                if auto is not None and entered > auto + 1e-9:
+                    messagebox.showwarning(
+                        "Uwaga",
+                        f"Można wpisać maksymalnie {_fmt_days(auto)} dni roboczych "
+                        f"(tyle wychodzi z kalendarza). Mniej – można.",
+                        parent=ed)
+                    return
+                # Zapisz override tylko gdy realnie mniejszy niż auto.
+                if auto is None or abs(entered - auto) > 1e-9:
+                    days_override = entered
+
             save_data = {
                 'employee_id': eid,
-                'date_from': df_var.get(),
-                'date_to': dt_var.get(),
+                'date_from': df_iso,
+                'date_to': dt_iso,
                 'reason': reason_var.get().upper(),
                 'notes': notes_var.get() or None,
                 'time_from': tf or None,
                 'time_to': tt or None,
+                'days_override': days_override,
             }
             if avid:
                 save_data['id'] = avid
@@ -30461,6 +30637,10 @@ Kod: {unlock_code}
             tree.delete(*tree.get_children())
             yr = _year()
             rows = rmm.get_vacation_report(self.rm_master_db_path, yr)
+            # Sortuj wg kategorii, potem nazwiska — tak jak zakładka "Pula urlopu"
+            # (get_employees: ORDER BY category, name).
+            rows.sort(key=lambda r: ((r.get('category') or '').lower(),
+                                     (r.get('name') or '').lower()))
             _report_cache['rows'] = rows
             _report_cache['year'] = yr
             for r in rows:
@@ -30545,6 +30725,7 @@ Kod: {unlock_code}
                   bg=self.COLOR_PURPLE, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=8)
 
         refresh()
+        return refresh
 
     def _vacation_show_employee_history(self, parent_dlg, employee_id):
         """Okno pełnej historii nieobecności jednego pracownika (wszystkie lata).
@@ -30601,11 +30782,16 @@ Kod: {unlock_code}
             for r in rows:
                 tf, tt = r.get('time_from'), r.get('time_to')
                 hours = f"{tf}–{tt}" if tf and tt else "cały dzień"
-                days = rmm._count_absence_days(r['date_from'], r['date_to'], tf, tt)
+                days = rmm._count_absence_days(
+                    r['date_from'], r['date_to'], tf, tt,
+                    rm_master_db_path=self.rm_master_db_path,
+                    days_override=r.get('days_override'))
                 rsn = (r.get('reason') or 'INNE').upper()
                 summary[rsn] = summary.get(rsn, 0.0) + days
                 tree.insert('', tk.END, iid=str(r['id']), values=(
-                    r['date_from'], r['date_to'], hours, f"{days:g}",
+                    self.format_date_ddmmyyyy(r['date_from']),
+                    self.format_date_ddmmyyyy(r['date_to']),
+                    hours, f"{days:g}",
                     self.REASON_LABELS.get(rsn, rsn), r.get('notes') or ''))
             summ_txt = "   ".join(
                 f"{self.REASON_LABELS.get(k, k)}: {v:g} dni" for k, v in sorted(summary.items())
