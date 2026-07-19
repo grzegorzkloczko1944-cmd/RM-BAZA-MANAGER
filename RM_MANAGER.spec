@@ -1,9 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('rm_manager.py', '.'), ('rm_optimizer.py', '.'), ('lock_manager_v2.py', '.'), ('backup_manager.py', '.'), ('rm_ai_optimizer.py', '.'), ('ai_rules.txt', '.'), ('wat.jpg', '.'), ('rm_manager_icon.ico', '.')]
+datas = [('rm_manager.py', '.'), ('rm_optimizer.py', '.'), ('lock_manager_v2.py', '.'), ('backup_manager.py', '.'), ('rm_ai_optimizer.py', '.'), ('db.py', '.'), ('stats_status.py', '.'), ('stats_project_summary.py', '.'), ('ai_rules.txt', '.'), ('wat.jpg', '.'), ('rm_manager_icon.ico', '.')]
 binaries = []
-hiddenimports = ['plotly', 'PIL', 'PIL.Image', 'PIL.ImageTk', 'PIL.ImageDraw', 'PIL.ImageFilter', 'ortools', 'ortools.sat', 'ortools.sat.python', 'ortools.sat.python.cp_model', 'psutil', 'anthropic', 'rm_ai_optimizer', 'matplotlib', 'matplotlib.backends.backend_agg']
+hiddenimports = ['plotly', 'PIL', 'PIL.Image', 'PIL.ImageTk', 'PIL.ImageDraw', 'PIL.ImageFilter', 'ortools', 'ortools.sat', 'ortools.sat.python', 'ortools.sat.python.cp_model', 'psutil', 'anthropic', 'rm_ai_optimizer', 'matplotlib', 'matplotlib.backends.backend_agg', 'db', 'stats_status', 'stats_project_summary']
 tmp_ret = collect_all('anthropic')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('plotly')

@@ -15,6 +15,17 @@ Zgodnie z PROJECT_STATS_MANAGER_SPEC.md
 ============================================================================
 """
 
+import sys
+
+# Wymuś UTF-8 na stdout/stderr — inaczej print() z emoji wywala UnicodeEncodeError
+# gdy aplikacja jest uruchamiana z konsoli w kodowaniu cp1250 (polski Windows).
+# Dotyczy setek print(...) z emoji w tym pliku; bez tego moduł nie zaimportuje się.
+for _stream in ('stdout', 'stderr'):
+    try:
+        getattr(sys, _stream).reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext, filedialog, simpledialog
 import sqlite3
@@ -3043,10 +3054,16 @@ class RMManagerGUI:
     def create_widgets(self):
         """Główny layout"""
         
-        # Top bar - Project selector (styl RM_BAZA)
-        self.top_frame = tk.Frame(self.root, bg=self.COLOR_TOPBAR, height=60)
+        # Top bar - dwa wiersze: wiersz 1 = projekt/lock/backup/user (krytyczne,
+        # zawsze widoczne), wiersz 2 = przyciski narzędzi (żeby nie wyłaziły poza
+        # okno na mniejszej rozdzielczości i nie ucinały panelu użytkownika).
+        self.top_frame = tk.Frame(self.root, bg=self.COLOR_TOPBAR, height=54)
         self.top_frame.pack(fill=tk.X)
         self.top_frame.pack_propagate(False)
+
+        self.top_frame2 = tk.Frame(self.root, bg=self.COLOR_TOPBAR, height=48)
+        self.top_frame2.pack(fill=tk.X)
+        self.top_frame2.pack_propagate(False)
 
         tk.Label(
             self.top_frame,
@@ -3161,98 +3178,130 @@ class RMManagerGUI:
         )
         self.btn_release_lock.pack(side=tk.LEFT, padx=(0, 3), pady=10)
 
-        # Separator przed przyciskiem alarmów
-        tk.Frame(self.top_frame, bg="#4a6278", width=2, height=40).pack(side=tk.LEFT, padx=8, pady=10)
+        # ── WIERSZ 2: przyciski narzędzi ──────────────────────────────────
+        tk.Label(
+            self.top_frame2, text="NARZĘDZIA:",
+            bg=self.COLOR_TOPBAR, fg="#bdc3c7", font=("Arial", 9, "bold")
+        ).pack(side=tk.LEFT, padx=(10, 6), pady=6)
 
         # Przycisk ALARMY
         def _open_alarms():
             alarms = self._get_all_alarms()
             if alarms:
                 self.show_alarms_notification(alarms)
-        
+
         tk.Button(
-            self.top_frame,
+            self.top_frame2,
             text="⏰ Alarmy",
             command=_open_alarms,
             bg="#e67e22",
             fg="white",
             font=self.FONT_BOLD,
             padx=12,
-            pady=5,
+            pady=4,
             relief=tk.RAISED,
             bd=2
-        ).pack(side=tk.LEFT, padx=(0, 3), pady=10)
+        ).pack(side=tk.LEFT, padx=(0, 3), pady=6)
 
         # Przycisk MULTI-PROJEKT
         tk.Button(
-            self.top_frame,
+            self.top_frame2,
             text="📊 Multi-projekt",
             command=self.open_multi_project_chart,
             bg="#8e44ad",
             fg="white",
             font=self.FONT_BOLD,
             padx=12,
-            pady=5,
+            pady=4,
             relief=tk.RAISED,
             bd=2
-        ).pack(side=tk.LEFT, padx=(0, 3), pady=10)
+        ).pack(side=tk.LEFT, padx=(0, 3), pady=6)
 
         # Przycisk KOPIUJ PROJEKT
         tk.Button(
-            self.top_frame,
+            self.top_frame2,
             text="📋 Kopiuj projekt",
             command=self.open_project_copy_dialog,
             bg="#e74c3c",
             fg="white",
             font=self.FONT_BOLD,
             padx=12,
-            pady=5,
+            pady=4,
             relief=tk.RAISED,
             bd=2
-        ).pack(side=tk.LEFT, padx=(0, 3), pady=10)
+        ).pack(side=tk.LEFT, padx=(0, 3), pady=6)
 
         # Przycisk URLOPY
         tk.Button(
-            self.top_frame,
+            self.top_frame2,
             text="🏖 Urlopy",
             command=self.vacation_dialog,
             bg="#2980b9",
             fg="white",
             font=self.FONT_BOLD,
             padx=12,
-            pady=5,
+            pady=4,
             relief=tk.RAISED,
             bd=2
-        ).pack(side=tk.LEFT, padx=(0, 3), pady=10)
+        ).pack(side=tk.LEFT, padx=(0, 3), pady=6)
+
+        # Przycisk STATUS PROJEKTÓW
+        tk.Button(
+            self.top_frame2,
+            text="📋 Status",
+            command=self.stats_status_dialog,
+            bg="#34495e",
+            fg="white",
+            font=self.FONT_BOLD,
+            padx=12,
+            pady=4,
+            relief=tk.RAISED,
+            bd=2
+        ).pack(side=tk.LEFT, padx=(0, 3), pady=6)
+
+        # Przycisk PODSUMOWANIE
+        tk.Button(
+            self.top_frame2,
+            text="📊 Podsumowanie",
+            command=self.stats_summary_dialog,
+            bg="#2c3e50",
+            fg="white",
+            font=self.FONT_BOLD,
+            padx=12,
+            pady=4,
+            relief=tk.RAISED,
+            bd=2
+        ).pack(side=tk.LEFT, padx=(0, 3), pady=6)
 
         # Przycisk OPTYMALIZACJA
         tk.Button(
-            self.top_frame,
+            self.top_frame2,
             text="⚡ Optymalizator",
             command=self.optimizer_dialog,
             bg="#16a085",
             fg="white",
             font=self.FONT_BOLD,
             padx=12,
-            pady=5,
+            pady=4,
             relief=tk.RAISED,
             bd=2
-        ).pack(side=tk.LEFT, padx=(0, 3), pady=10)
+        ).pack(side=tk.LEFT, padx=(0, 3), pady=6)
 
         # Przycisk AI ASYSTENT
         tk.Button(
-            self.top_frame,
+            self.top_frame2,
             text="🤖 AI Asystent",
             command=self.ai_chat_dialog,
             bg="#6c3483",
             fg="white",
             font=self.FONT_BOLD,
             padx=12,
-            pady=5,
+            pady=4,
             relief=tk.RAISED,
             bd=2
-        ).pack(side=tk.LEFT, padx=(0, 3), pady=10)
+        ).pack(side=tk.LEFT, padx=(0, 3), pady=6)
 
+        # ── WIERSZ 1 (dalej): backup + użytkownik po prawej ───────────────
         # Separator przed comboboxem backupu
         tk.Frame(self.top_frame, bg="#4a6278", width=2, height=40).pack(side=tk.LEFT, padx=8, pady=10)
 
@@ -5059,7 +5108,7 @@ class RMManagerGUI:
             warning_text = f"⚠️ {message}"
         
         self.warning_label.config(text=warning_text)
-        self.warning_frame.pack(fill=tk.X, after=self.top_frame)
+        self.warning_frame.pack(fill=tk.X, after=self.top_frame2)
     
     def hide_file_warning(self):
         """Ukryj ostrzeżenie o nieprawidłowym pliku"""
@@ -23810,7 +23859,7 @@ class RMManagerGUI:
         if count > 0:
             msg = f"🔔 Masz {count} {'nowe powiadomienie' if count == 1 else 'nowe powiadomienia'} o płatnościach!"
             self.notifications_label.config(text=msg)
-            self.notifications_banner.pack(fill=tk.X, after=self.top_frame, pady=(0, 5))
+            self.notifications_banner.pack(fill=tk.X, after=self.top_frame2, pady=(0, 5))
         else:
             self.hide_notifications_banner()
     
@@ -29566,11 +29615,300 @@ Kod: {unlock_code}
         'SZKOLENIE': 'Szkolenie', 'INNE': 'Inne',
     }
 
+    # ================================================================
+    # STATYSTYKI — Podsumowanie / Status projektów (port z RM_STATS)
+    # ================================================================
+
+    def _single_window(self, key: str):
+        """Zwróć istniejące okno o danym kluczu (podniesione) albo None.
+
+        Zapobiega otwieraniu wielu kopii tego samego okna. Jeśli okno istnieje
+        i żyje — podnosi je i zwraca; jeśli zamknięte/nieistniejące — zwraca None
+        (wołający tworzy nowe i rejestruje przez _register_window)."""
+        if not hasattr(self, '_open_windows'):
+            self._open_windows = {}
+        win = self._open_windows.get(key)
+        if win is not None:
+            try:
+                if win.winfo_exists():
+                    win.deiconify()
+                    win.lift()
+                    win.focus_force()
+                    return win
+            except Exception:
+                pass
+            self._open_windows.pop(key, None)
+        return None
+
+    def _register_window(self, key: str, win):
+        """Zarejestruj okno pod kluczem i sprzątnij wpis po jego zamknięciu."""
+        if not hasattr(self, '_open_windows'):
+            self._open_windows = {}
+        self._open_windows[key] = win
+        win.bind('<Destroy>', lambda e, k=key: (
+            self._open_windows.pop(k, None) if e.widget is win else None), add='+')
+
+    def _add_fullscreen(self, win, toolbar):
+        """Dodaj przycisk pełnego ekranu (toggle) + skrót F11/Esc do okna."""
+        def _toggle(e=None):
+            cur = bool(win.attributes('-fullscreen'))
+            win.attributes('-fullscreen', not cur)
+        def _exit(e=None):
+            win.attributes('-fullscreen', False)
+        tk.Button(toolbar, text="⛶ Pełny ekran", command=_toggle,
+                  bg="#7f8c8d", fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.RIGHT, padx=4)
+        win.bind('<F11>', _toggle)
+        win.bind('<Escape>', _exit)
+
+    def _stats_db(self):
+        """Utwórz adapter RMStatsDB na ścieżkach z konfiguracji RM_MANAGERa."""
+        import db as _statsdb
+        return _statsdb.RMStatsDB(
+            master_db_path=self.master_db_path,
+            rm_master_db_path=self.rm_master_db_path,
+            rm_manager_projects_dir=self.rm_projects_dir,
+        )
+
+    def stats_summary_dialog(self):
+        """Okno "Podsumowanie" — status/odchylenie/CPM/płatności per projekt
+        (odpowiednik widoku Podsumowanie z RM_STATS)."""
+        import stats_project_summary as sps
+
+        if self._single_window('stats_summary'):
+            return
+        dlg = tk.Toplevel(self.root)
+        dlg.title("📊 Podsumowanie projektów")
+        dlg.transient(self.root)
+        self._register_window('stats_summary', dlg)
+        self._center_window(dlg, 1180, 640)
+
+        bar = tk.Frame(dlg, padx=8, pady=6)
+        bar.pack(fill=tk.X)
+        tk.Button(bar, text="🔄 Odśwież", command=lambda: _load(),
+                  bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT)
+        count_var = tk.StringVar()
+        tk.Label(bar, textvariable=count_var, font=self.FONT_SMALL, fg="#555").pack(side=tk.LEFT, padx=12)
+        self._add_fullscreen(dlg, bar)
+
+        cols = ('id', 'name', 'status', 'variance', 'completion',
+                'active', 'critical', 'payment')
+        tree = ttk.Treeview(dlg, columns=cols, show='headings', height=22)
+        for key, txt, w, stretch in [
+            ('id', 'ID', 45, False), ('name', 'Projekt', 230, True),
+            ('status', 'Status', 150, False), ('variance', 'Odchylenie', 90, False),
+            ('completion', 'Przew. zakończenie', 130, False),
+            ('active', 'Aktywne etapy', 180, True),
+            ('critical', 'Etapy bez rezerwy', 120, False),
+            ('payment', 'Płatności', 120, False),
+        ]:
+            tree.heading(key, text=txt)
+            tree.column(key, width=w, stretch=stretch)
+        tree.tag_configure('DELAYED', foreground='#c0392b')
+        tree.tag_configure('AT_RISK', foreground='#e67e22')
+        tree.tag_configure('ON_TRACK', foreground='#27ae60')
+        tree.tag_configure('DONE', foreground='#7f8c8d')
+        vsb = ttk.Scrollbar(dlg, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8), side=tk.LEFT)
+        vsb.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 8), pady=(0, 8))
+
+        def _load():
+            tree.delete(*tree.get_children())
+            try:
+                data = sps.build_projects_summary(self._stats_db())
+            except Exception as ex:
+                messagebox.showerror("Błąd", f"Nie można policzyć podsumowania:\n{ex}", parent=dlg)
+                return
+            for s in data['projects']:
+                if s.get('error'):
+                    tree.insert('', tk.END, values=(
+                        s['project_id'], s.get('name', ''), 'BŁĄD', '', '', s['error'], '', ''))
+                    continue
+                v = s['overall_variance_days']
+                variance = f"{v:+d}d" if v else "0d"
+                crit = f"{s['stages_critical']}/{s['stages_total']}"
+                if s.get('is_linear_project'):
+                    crit = "Liniowy"
+                pay = f"{s['payment_total_paid_pct']}% ({s['payment_transze_count']} transz)"
+                tree.insert('', tk.END, values=(
+                    s['project_id'], s['name'], s['status_label'], variance,
+                    s.get('completion_forecast') or '—',
+                    ', '.join(s['active_stages']) or '—', crit, pay,
+                ), tags=(s['status_code'],))
+            count_var.set(f"Projektów: {data['count']}")
+
+        _load()
+
+    def stats_status_dialog(self):
+        """Okno "Status projektów" — karty statystyk + lista z filtrowaniem
+        (odpowiednik widoku Status z RM_STATS)."""
+        import stats_status as ss
+
+        if self._single_window('stats_status'):
+            return
+        dlg = tk.Toplevel(self.root)
+        dlg.title("📋 Status projektów")
+        dlg.transient(self.root)
+        self._register_window('stats_status', dlg)
+        self._center_window(dlg, 1080, 700)
+
+        bar = tk.Frame(dlg, padx=8, pady=6)
+        bar.pack(fill=tk.X)
+        tk.Button(bar, text="🔄 Odśwież", command=lambda: _load(),
+                  bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT)
+        filter_var = tk.StringVar(value="")  # aktywny filtr (klucz karty)
+        active_lbl = tk.Label(bar, text="", font=self.FONT_SMALL, fg="#2980b9")
+        active_lbl.pack(side=tk.LEFT, padx=12)
+        self._add_fullscreen(dlg, bar)
+
+        # Panel kart (kafelki) — klikalne, filtrują listę
+        cards_wrap = tk.Frame(dlg, padx=6, pady=4)
+        cards_wrap.pack(fill=tk.X)
+
+        state = {'data': None, 'cards': [], 'completion': {}}
+
+        def _make_card(parent, title, value, fg, filt_key):
+            # Kafelek o stałej szerokości (grid) — równe, estetyczne ułożenie.
+            holder = tk.Frame(parent, width=155, height=64)
+            holder.pack_propagate(False)
+            card = tk.Frame(holder, relief=tk.SOLID, bd=1, bg="white",
+                            padx=10, pady=6, cursor="hand2")
+            card.pack(fill=tk.BOTH, expand=True)
+            card._is_card = True
+            card._filt = filt_key
+            lbl_val = tk.Label(card, text=str(value), font=("Segoe UI", 15, "bold"),
+                               fg=fg, bg="white", anchor="w")
+            lbl_val.pack(anchor="w")
+            tk.Label(card, text=title, font=("Segoe UI", 8), fg="#666",
+                     bg="white", anchor="w").pack(anchor="w")
+            def _click(e=None):
+                filter_var.set('' if filter_var.get() == filt_key else filt_key)
+                _apply_filter()
+                _highlight_cards()
+            def _enter(e=None):
+                if filter_var.get() != filt_key:
+                    card.config(bg="#f0f4f8")
+                    for c in card.winfo_children():
+                        c.config(bg="#f0f4f8")
+            def _leave(e=None):
+                _highlight_cards()
+            for w in (card, lbl_val, *card.winfo_children()):
+                w.bind('<Button-1>', _click)
+                w.bind('<Enter>', _enter)
+                w.bind('<Leave>', _leave)
+            return holder, card
+
+        cols = ('id', 'name', 'status', 'priority', 'completion', 'delays')
+        tree = ttk.Treeview(dlg, columns=cols, show='headings', height=20)
+        for key, txt, w, stretch in [
+            ('id', 'ID', 45, False), ('name', 'Projekt', 210, False),
+            ('status', 'Status', 125, False), ('priority', 'Priorytet', 65, False),
+            ('completion', 'Kompletacja', 90, False),
+            ('delays', 'Opóźnione etapy', 440, True),
+        ]:
+            tree.heading(key, text=txt)
+            tree.column(key, width=w, stretch=stretch)
+        tree.tag_configure('delayed', foreground='#c0392b')
+        vsb = ttk.Scrollbar(dlg, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8), side=tk.LEFT)
+        vsb.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 8), pady=(0, 8))
+
+        _FINAL = {'Zakonczony', 'Wstrzymany'}
+
+        def _row_matches(p, filt):
+            if not filt:
+                return True
+            if filt == 'ACTIVE':
+                return p['status'] not in _FINAL
+            if filt == 'ON_TIME':
+                return not p['is_delayed']
+            if filt == 'DELAYED':
+                return p['is_delayed']
+            # inaczej filt = nazwa statusu (by_status)
+            return p['status'] == filt
+
+        def _apply_filter():
+            data = state['data']
+            if not data:
+                return
+            filt = filter_var.get()
+            tree.delete(*tree.get_children())
+            shown = 0
+            for p in data['all_projects']:
+                if not _row_matches(p, filt):
+                    continue
+                shown += 1
+                delays_txt = ', '.join(
+                    f"{d['stage_code']} +{d['overrun_days']}d" for d in p['delays']) or '—'
+                completion = state['completion'].get(p['project_id']) or '—'
+                tree.insert('', tk.END, values=(
+                    p['project_id'], p['name'], p['status'],
+                    p.get('priority') if p.get('priority') is not None else '',
+                    completion, delays_txt,
+                ), tags=('delayed',) if p['is_delayed'] else ())
+            active_lbl.config(
+                text=(f"Filtr: {filt}  ({shown})  — kliknij kartę ponownie by wyłączyć"
+                      if filt else f"Wszystkie ({shown})"))
+
+        def _highlight_cards():
+            filt = filter_var.get()
+            for holder, card in state['cards']:
+                sel = (card._filt == filt)
+                bg = "#d6eaf8" if sel else "white"
+                # Tylko tło — bez zmiany grubości ramki (inaczej tekst by się ucinał
+                # w stałym rozmiarze kafelka). Zaznaczenie sygnalizuje samo tło.
+                card.config(bg=bg)
+                for c in card.winfo_children():
+                    c.config(bg=bg)
+
+        def _build_cards(data):
+            for holder, card in state['cards']:
+                holder.destroy()
+            state['cards'] = []
+            main = [
+                ('Aktywne projekty', data['in_progress_count'], '#2c3e50', 'ACTIVE'),
+                ('Na czas', data['on_time_count'], '#27ae60', 'ON_TIME'),
+                ('Opóźnione', data['delayed_count'], '#c0392b', 'DELAYED'),
+            ]
+            per_status = [(name, cnt, '#34495e', name) for name, cnt in data['by_status'].items()]
+            all_cards = main + per_status
+            # Równy grid: 6 kolumn jednakowej szerokości
+            COLS = 6
+            for col in range(COLS):
+                cards_wrap.grid_columnconfigure(col, weight=1, uniform="card")
+            for i, (title, val, fg, filt) in enumerate(all_cards):
+                holder, card = _make_card(cards_wrap, title, val, fg, filt)
+                holder.grid(row=i // COLS, column=i % COLS, padx=4, pady=4, sticky="nsew")
+                state['cards'].append((holder, card))
+            _highlight_cards()
+
+        def _load():
+            try:
+                _db = self._stats_db()
+                data = ss.build_status_overview(_db)
+                # Poziom kompletacji (received_percent z master.sqlite) — mapa pid→tekst
+                state['completion'] = {
+                    p['project_id']: p.get('received_percent')
+                    for p in _db.list_projects(only_active=True)
+                }
+            except Exception as ex:
+                messagebox.showerror("Błąd", f"Nie można policzyć statusów:\n{ex}", parent=dlg)
+                return
+            state['data'] = data
+            _build_cards(data)
+            _apply_filter()
+
+        _load()
+
     def vacation_dialog(self):
         """Główne okno URLOPY — zakładki: Nieobecności / Pula urlopu / Rozliczenie."""
+        if self._single_window('vacation'):
+            return
         dlg = tk.Toplevel(self.root)
         dlg.title("🏖 Urlopy i nieobecności")
         dlg.transient(self.root)
+        self._register_window('vacation', dlg)
         self._center_window(dlg, 1040, 620)
 
         notebook = ttk.Notebook(dlg)
