@@ -28101,14 +28101,42 @@ Kod: {unlock_code}
         return ""
 
     def _ai_save_api_key(self, key: str) -> None:
-        """Zapisz klucz API w konfiguracji RM_MANAGERa (self.config + JSON)."""
+        """Zapisz klucz API trwale (config JSON + zapasowy plik obok configu).
+
+        Zapisujemy DWUTOROWO, bo główny plik configu bywa przebudowywany przy
+        każdym save_config — a klucz musi przetrwać restart nawet gdyby coś go
+        z configu wyparło. Weryfikujemy zapis i sygnalizujemy realny błąd
+        (np. brak praw zapisu), zamiast po cichu go połknąć.
+        """
+        ok = False
+        # 1) config JSON
         try:
             if not hasattr(self, 'config') or self.config is None:
                 self.config = {}
             self.config['ai_api_key'] = key
             self.save_config()
+            # weryfikacja: odczytaj plik i sprawdź, że klucz tam jest
+            with open(self.config_file, 'r', encoding='utf-8') as f:
+                ok = (json.load(f).get('ai_api_key') == key)
         except Exception as e:
-            print(f"⚠️ Nie udało się zapisać klucza API: {e}")
+            print(f"⚠️ Zapis klucza do configu nie powiódł się: {e}")
+        # 2) zapasowy plik obok configu (odczytywany przez _ai_load_api_key)
+        try:
+            side = os.path.join(os.path.dirname(os.path.abspath(self.config_file)),
+                                ".ai_api_key")
+            with open(side, 'w', encoding='utf-8') as f:
+                f.write(key)
+            ok = True
+        except Exception as e:
+            print(f"⚠️ Zapis klucza do pliku zapasowego nie powiódł się: {e}")
+        if not ok:
+            try:
+                messagebox.showwarning(
+                    "Klucz API",
+                    "Nie udało się trwale zapisać klucza API.\n"
+                    f"Sprawdź uprawnienia zapisu do:\n{self.config_file}")
+            except Exception:
+                pass
 
     def _ai_ask_for_api_key(self) -> str:
         """Wyświetl dialog z prośbą o klucz API Anthropica. Zwraca klucz lub ''."""
@@ -29688,25 +29716,59 @@ Kod: {unlock_code}
         win.bind('<Destroy>', lambda e, k=key: (
             self._open_windows.pop(k, None) if e.widget is win else None), add='+')
 
+    def _monitor_workarea(self, win):
+        """Zwróć (x, y, w, h) roboczego obszaru monitora, na którym leży okno.
+
+        Roboczy obszar = ekran bez paska zadań. Multi-monitor: wykrywa monitor
+        pod oknem przez Windows API (ctypes). Fallback: cały ekran wg tkinter.
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+            hwnd = ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+            MONITOR_DEFAULTTONEAREST = 2
+            hmon = ctypes.windll.user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG),
+                            ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", RECT),
+                            ("rcWork", RECT), ("dwFlags", wintypes.DWORD)]
+
+            mi = MONITORINFO()
+            mi.cbSize = ctypes.sizeof(MONITORINFO)
+            if ctypes.windll.user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                r = mi.rcWork  # obszar roboczy = bez paska zadań
+                return (r.left, r.top, r.right - r.left, r.bottom - r.top)
+        except Exception:
+            pass
+        return (0, 0, win.winfo_screenwidth(), win.winfo_screenheight())
+
     def _add_fullscreen(self, win, toolbar):
         """Dodaj przycisk pełnego ekranu (toggle) + skrót F11/Esc do okna.
 
-        Używa maksymalizacji ('zoomed') zamiast trybu '-fullscreen' — okno
-        rozciąga się do pełnego pulpitu, ALE pasek zadań Windows pozostaje
-        widoczny (nie tryb kiosk).
+        Powiększa okno do pełnego obszaru roboczego TEGO monitora, na którym
+        aktualnie się znajduje (multi-monitor), z widocznym paskiem zadań.
+        Ponowne kliknięcie / Esc przywraca poprzedni rozmiar i pozycję.
         """
+        st = {'prev': None}
+
         def _toggle(e=None):
-            try:
-                is_max = (win.state() == 'zoomed')
-            except Exception:
-                is_max = False
-            win.state('normal' if is_max else 'zoomed')
+            if st['prev'] is None:
+                st['prev'] = win.geometry()  # zapamiętaj rozmiar/pozycję
+                x, y, w, h = self._monitor_workarea(win)
+                win.geometry(f"{w}x{h}+{x}+{y}")
+            else:
+                win.geometry(st['prev'])
+                st['prev'] = None
+
         def _exit(e=None):
-            try:
-                if win.state() == 'zoomed':
-                    win.state('normal')
-            except Exception:
-                pass
+            if st['prev'] is not None:
+                win.geometry(st['prev'])
+                st['prev'] = None
+
         tk.Button(toolbar, text="⛶ Pełny ekran", command=_toggle,
                   bg="#7f8c8d", fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.RIGHT, padx=4)
         win.bind('<F11>', _toggle)
@@ -30396,7 +30458,8 @@ Kod: {unlock_code}
                 messagebox.showwarning("Uwaga", "Wybierz wpis.", parent=dlg)
                 return
             if messagebox.askyesno("Potwierdzenie", "Usunąć zaznaczony wpis nieobecności?", parent=dlg):
-                rmm.delete_employee_availability(self.rm_master_db_path, int(sel[0]))
+                rmm.delete_employee_availability(self.rm_master_db_path, int(sel[0]),
+                                                 user=getattr(self, 'current_user', None))
                 refresh()
 
         def _edit(avid):
@@ -31581,7 +31644,8 @@ Kod: {unlock_code}
                 messagebox.showwarning("Uwaga", "Wybierz wpis.", parent=win)
                 return
             if messagebox.askyesno("Potwierdzenie", "Usunąć zaznaczony wpis?", parent=win):
-                rmm.delete_employee_availability(self.rm_master_db_path, int(sel[0]))
+                rmm.delete_employee_availability(self.rm_master_db_path, int(sel[0]),
+                                                 user=getattr(self, 'current_user', None))
                 _reload()
 
         tree.bind("<Double-1>", lambda e: _edit_sel())
@@ -31601,13 +31665,10 @@ Kod: {unlock_code}
         toolbar = tk.Frame(parent, padx=8, pady=6)
         toolbar.pack(fill=tk.X)
 
-        title_var = tk.StringVar()
-        tk.Button(toolbar, text="◀", command=lambda: _shift(-1),
-                  font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
-        tk.Label(toolbar, textvariable=title_var, font=("Arial", 12, "bold"),
-                 width=22).pack(side=tk.LEFT, padx=4)
-        tk.Button(toolbar, text="▶", command=lambda: _shift(1),
-                  font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
+        # Nawigacja: „Dziś" + skok po roku; przewijanie po miesiącach robi się
+        # scrollem w bok (Shift+kółko / dolny suwak), więc strzałki ◀▶ zbędne.
+        tk.Label(toolbar, text="📆 Kalendarz zespołu — przewijaj w bok (Shift+kółko)",
+                 font=self.FONT_SMALL, fg="#666").pack(side=tk.LEFT, padx=(0, 10))
         tk.Button(toolbar, text="📅 Dziś", command=lambda: _today(),
                   font=self.FONT_SMALL, padx=8).pack(side=tk.LEFT, padx=6)
 
@@ -31711,6 +31772,7 @@ Kod: {unlock_code}
         def _open_card(event):
             ri = int(names_cv.canvasy(event.y) // ROW_H)
             if 0 <= ri < len(cal['emps']):
+                _select_row(ri)
                 # on_change=_full_reset → zmiany w karcie od razu widać na kalendarzu.
                 self._employee_card(dlg, cal['emps'][ri]['id'], on_change=_full_reset)
         names_cv.bind('<Button-1>', _open_card)
@@ -31734,21 +31796,28 @@ Kod: {unlock_code}
                  fg="#c0392b", anchor='w', padx=10, justify=tk.LEFT).pack(fill=tk.X)
 
         # ── Synchronizacja przewijania ──
-        # v_locked: gdy zawartość mieści się w widoku, pionowy scroll jest
-        # zablokowany (widok przypięty do góry) — nie ma czego przewijać i nie
-        # ma jak się rozjechać.
-        vlock = {'on': True}
+        # Pasek pionowy jest STAŁY (zawsze zajmuje miejsce, nie pojawia się/znika)
+        # — dzięki temu zmiana rozmiaru okna nie przesuwa layoutu i nic się nie
+        # rozjeżdża. Gdy wszyscy pracownicy się mieszczą, pasek jest po prostu
+        # pełny i nieaktywny (żadnego przełączania stanu).
 
-        # Pionowo: grid + names_cv razem (przez wspólny scrollbar).
-        def _yview(*args):
-            if vlock['on']:
+        # Pionowo: grid + names_cv razem. Synchronizujemy PIKSELOWO (nie frakcją),
+        # bo oba canvasy mogą mieć różną wysokość widżetu — ta sama frakcja dałaby
+        # różne przesunięcie i rozjazd nazwisk vs siatki.
+        def _sync_names_to_grid():
+            total = len(cal['emps']) * ROW_H
+            if total <= 0:
                 return
+            top_px = grid.canvasy(0)  # piksel u góry widoku siatki
+            names_cv.yview_moveto(max(0.0, top_px / total))
+
+        def _yview(*args):
             grid.yview(*args)
-            names_cv.yview(*args)
+            _sync_names_to_grid()
         vsb.config(command=_yview)
         def _on_grid_y(lo, hi):
             vsb.set(lo, hi)
-            names_cv.yview_moveto(lo)
+            _sync_names_to_grid()
         grid.config(yscrollcommand=_on_grid_y)
 
         # Poziomo: grid + header razem; przy zbliżeniu do brzegu doładuj miesiące.
@@ -31775,6 +31844,7 @@ Kod: {unlock_code}
             'tips': {},       # (day_index, row) -> tekst tooltipa
             'conflicts': {},  # (cat, day_index) -> licznik
             'months_drawn': set(),
+            'sel_row': None,  # podświetlony wiersz (indeks pracownika)
         }
 
         def _idx_to_date(idx):
@@ -31805,10 +31875,12 @@ Kod: {unlock_code}
             names_cv.delete('all')
             for ri, e in enumerate(cal['emps']):
                 y0 = ri * ROW_H
+                sel = (ri == cal['sel_row'])
                 names_cv.create_rectangle(0, y0, NAME_W, y0 + ROW_H,
-                                          fill="#ecf0f1", outline="#bdc3c7")
+                                          fill=("#fff3b0" if sel else "#ecf0f1"),
+                                          outline="#bdc3c7")
                 names_cv.create_text(6, y0 + ROW_H / 2, text=e['name'], anchor='w',
-                                     font=self.FONT_SMALL)
+                                     font=(self.FONT_BOLD if sel else self.FONT_SMALL))
             names_cv.configure(scrollregion=(0, 0, NAME_W, len(cal['emps']) * ROW_H))
 
         def _draw_month(midx_year, midx_month):
@@ -31830,6 +31902,10 @@ Kod: {unlock_code}
             allowed_st = {s for s, v in status_vars.items() if v.get()}
             avail = [a for a in avail
                      if (a.get('status') or 'ZATWIERDZONY').upper() in allowed_st]
+            # Priorytet statusu przy nakładających się wpisach na ten sam dzień:
+            # aktywny (zatwierdzony > oczekujący) przesłania odrzucony. Bez tego
+            # stary odrzucony wniosek potrafił zasłonić nowy zatwierdzony.
+            _ST_PRIO = {'ZATWIERDZONY': 2, 'OCZEKUJE': 1, 'ODRZUCONY': 0}
             by_emp = {}
             for a in avail:
                 st = (a.get('status') or 'ZATWIERDZONY').upper()
@@ -31843,9 +31919,15 @@ Kod: {unlock_code}
                     day = date(midx_year, midx_month, dd)
                     if df <= day <= dt:
                         gi = first_idx + (dd - 1)
-                        by_emp.setdefault(a['employee_id'], {})[gi] = (code, st)
-                        cat = a.get('employee_category') or ''
-                        cal['conflicts'][(cat, gi)] = cal['conflicts'].get((cat, gi), 0) + 1
+                        cell = by_emp.setdefault(a['employee_id'], {})
+                        prev = cell.get(gi)
+                        # nadpisz tylko gdy nowy wpis ma >= priorytet statusu
+                        if prev is None or _ST_PRIO.get(st, 0) >= _ST_PRIO.get(prev[1], 0):
+                            cell[gi] = (code, st)
+                        # Odrzucone nie liczą się do konfliktów obsady.
+                        if st != 'ODRZUCONY':
+                            cat = a.get('employee_category') or ''
+                            cal['conflicts'][(cat, gi)] = cal['conflicts'].get((cat, gi), 0) + 1
 
             hdr_bg = "#34495e"
             month_x0 = first_idx * CELL_W
@@ -31913,6 +31995,30 @@ Kod: {unlock_code}
             cal['hi'] = max(cal['hi'], first_idx + ndays)
             _update_scrollregion()
             _update_conflicts()
+            _draw_selection()
+
+        def _draw_selection():
+            # Obwódka wokół wybranego wiersza — NA WIERZCHU komórek (bez fill),
+            # więc kolory urlopów pozostają widoczne.
+            grid.delete('selrow')
+            ri = cal['sel_row']
+            if ri is None or ri >= len(cal['emps']):
+                return
+            y0 = ri * ROW_H
+            x0 = cal['lo'] * CELL_W
+            x1 = cal['hi'] * CELL_W
+            grid.create_rectangle(x0, y0 + 1, x1, y0 + ROW_H - 1,
+                                  outline="#e67e22", width=2, tags='selrow')
+
+        def _select_row(ri, toggle=False):
+            # toggle=True: ponowny klik w ten sam wiersz odznacza (ri=None).
+            if toggle and ri == cal['sel_row']:
+                ri = None
+            elif ri == cal['sel_row']:
+                return
+            cal['sel_row'] = ri
+            _draw_names()
+            _draw_selection()
 
         def _update_scrollregion():
             x0 = cal['lo'] * CELL_W
@@ -31922,19 +32028,39 @@ Kod: {unlock_code}
             header.configure(scrollregion=(x0, 0, x1, HDR_H))
 
         def _update_conflicts():
-            hot = [(cat, gi) for (cat, gi), n in cal['conflicts'].items()
-                   if n >= 2 and cat]
-            if hot:
-                lines = {}
-                for cat, gi in hot:
-                    d = _idx_to_date(gi)
-                    lines.setdefault(cat, []).append(d.strftime('%d.%m'))
-                msg = "⚠ Konflikty obsady (≥2 osoby tej samej kategorii):  " + \
-                    "   ".join(f"{cat}: {', '.join(sorted(set(v)))}"
-                              for cat, v in sorted(lines.items()))
-                conflict_var.set(msg[:400])
-            else:
+            # {kat: {gi: liczba_osob}} dla dni z >=2 osobami tej samej kategorii.
+            per_cat = {}
+            for (cat, gi), n in cal['conflicts'].items():
+                if n >= 2 and cat:
+                    per_cat.setdefault(cat, {})[gi] = n
+            if not per_cat:
                 conflict_var.set("✅ Brak nakładających się nieobecności w jednej kategorii.")
+                return
+
+            def _fmt_ranges(days):
+                # Zwiń ciągłe indeksy dni w zakresy "dd.mm–dd.mm"; podaj max osób.
+                out = []
+                for gi in sorted(days):
+                    if out and gi == out[-1][1] + 1:
+                        out[-1][1] = gi
+                    else:
+                        out.append([gi, gi])
+                parts = []
+                for lo, hi in out:
+                    a = _idx_to_date(lo).strftime('%d.%m')
+                    if lo == hi:
+                        parts.append(a)
+                    else:
+                        parts.append(f"{a}–{_idx_to_date(hi).strftime('%d.%m')}")
+                return ", ".join(parts)
+
+            chunks = []
+            for cat in sorted(per_cat):
+                days = per_cat[cat]
+                mx = max(days.values())
+                chunks.append(f"{cat}: do {mx} os. ({_fmt_ranges(days)})")
+            conflict_var.set("⚠ Nakładające się nieobecności w jednej kategorii —  " +
+                             "    ".join(chunks))
 
         def _month_of_idx(idx, side):
             """Zwróć (rok, miesiąc) miesiąca zawierającego day_index=idx."""
@@ -31993,14 +32119,6 @@ Kod: {unlock_code}
             # liczbie pracowników siatka potrafi zostać przewinięta w dół.
             parent.after_idle(_resync)
 
-        def _shift(delta):
-            # ◀ ▶ przesuwają widok o miesiąc (a nie przebudowują wszystkiego)
-            frac_month = (30 * CELL_W) / max((cal['hi'] - cal['lo']) * CELL_W, 1)
-            lo_frac = grid.xview()[0]
-            grid.xview_moveto(max(0.0, lo_frac + delta * frac_month))
-            header.xview_moveto(grid.xview()[0])
-            _maybe_extend()
-
         def _today():
             nonlocal base_date
             t = datetime.now().date()
@@ -32019,8 +32137,6 @@ Kod: {unlock_code}
             mo = t.month if yr == t.year else 1
             base_date = date(yr, mo, 1)
             _full_reset()
-
-        title_var.set("oś czasu — przewijaj w bok (Shift+kółko)")
 
         # Tooltip: jeden handler <Motion> mapuje pozycję kursora na komórkę.
         tip = {'win': None, 'key': None}
@@ -32059,6 +32175,20 @@ Kod: {unlock_code}
         grid.bind('<Motion>', _on_motion)
         grid.bind('<Leave>', lambda e: _hide_tip())
 
+        # Klik w siatkę → podświetl wiersz (ponowny klik = odznacz; klik poza
+        # listą = odznacz). Karty stąd nie otwieramy (od tego jest nazwisko).
+        def _click_grid(event):
+            ri = int(grid.canvasy(event.y) // ROW_H)
+            if 0 <= ri < len(cal['emps']):
+                _select_row(ri, toggle=True)
+            else:
+                _select_row(None)  # klik w pusty obszar → odznacz
+        grid.bind('<Button-1>', _click_grid)
+
+        # Odznaczanie: ponowny klik w wiersz (toggle) albo klik w pusty obszar
+        # siatki poniżej listy (obsłużone w _click_grid). NIE odznaczamy przy
+        # kliknięciu w przyciski/zakładki — byłoby to irytujące.
+
         # Scroll kółkiem: pionowo zwykłym kółkiem, poziomo z Shift.
         def _wheel_v(event):
             _yview('scroll', -1 if event.delta > 0 else 1, "units")
@@ -32084,18 +32214,11 @@ Kod: {unlock_code}
                 h = grid.winfo_height()
                 if h > 1:
                     names_cv.configure(height=h)
-                # Zablokuj pionowy scroll, gdy wszyscy pracownicy mieszczą się
-                # w widoku (zawartość ≤ wysokość canvasu).
-                content_h = len(cal['emps']) * ROW_H
-                vlock['on'] = (content_h <= h)
-                if vlock['on']:
-                    grid.yview_moveto(0)
-                    names_cv.yview_moveto(0)
-                    vsb.set(0.0, 1.0)
-                    return  # widok przypięty do góry — nie nadpisuj wyrównania
+                _sync_names_to_grid()  # pikselowo, żeby nazwiska trzymały siatkę
             except Exception:
                 pass
-            names_cv.yview_moveto(grid.yview()[0])
+            # przerysuj podświetlenie po zmianie rozmiaru (np. wyjście z fullscreena)
+            _draw_selection()
         grid.bind('<Configure>', _resync)
 
         _full_reset()
