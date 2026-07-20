@@ -298,6 +298,53 @@ DEFAULT_ROLE_PERMISSIONS = [
 ]
 
 
+def _rebuild_availability_without_reason_check(con: sqlite3.Connection):
+    """Przebuduj employee_availability bez CHECK(reason IN ...).
+
+    Stary schemat ograniczał typy nieobecności do 5 wartości. Nowe typy kadrowe
+    (URLOP_ZADANIE, OKOLICZNOSCIOWY, OPIEKA_188, BEZPLATNY, MACIERZYNSKI) nie
+    mieszczą się w tym CHECK, a SQLite nie umie go zdjąć w miejscu. Przenosimy
+    dane do nowej tabeli bez CHECK (walidacja typu żyje teraz w kodzie).
+    Zachowuje wszystkie kolumny dodane wcześniej przez ALTER (time_*, status,
+    decided_*, days_override), więc odczytuje aktualny zestaw kolumn dynamicznie.
+    """
+    cols = [r[1] for r in con.execute("PRAGMA table_info(employee_availability)").fetchall()]
+    col_list = ", ".join(cols)
+    con.execute("PRAGMA foreign_keys=OFF")
+    con.execute("ALTER TABLE employee_availability RENAME TO employee_availability_old")
+    con.execute("""
+        CREATE TABLE employee_availability (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER NOT NULL,
+            date_from DATE NOT NULL,
+            date_to DATE NOT NULL,
+            reason TEXT NOT NULL,
+            notes TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_by TEXT,
+            time_from TEXT,
+            time_to TEXT,
+            days_override REAL,
+            status TEXT NOT NULL DEFAULT 'OCZEKUJE',
+            decided_by TEXT,
+            decided_at DATETIME,
+            decision_note TEXT,
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+            CHECK (date_to >= date_from)
+        )
+    """)
+    con.execute(
+        f"INSERT INTO employee_availability ({col_list}) "
+        f"SELECT {col_list} FROM employee_availability_old"
+    )
+    con.execute("DROP TABLE employee_availability_old")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_emp_avail_employee ON employee_availability(employee_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_emp_avail_dates ON employee_availability(date_from, date_to)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_emp_avail_status ON employee_availability(status)")
+    con.execute("PRAGMA foreign_keys=ON")
+    print("✅ Master: employee_availability przebudowana bez CHECK(reason) — nowe typy kadrowe dozwolone")
+
+
 def ensure_rm_master_tables(master_db_path: str):
     """Tworzy tabele w rm_manager.sqlite (MASTER RM_MANAGER):
     - stage_definitions       (słownik etapów)
@@ -742,6 +789,44 @@ def ensure_rm_master_tables(master_db_path: str):
     except sqlite3.OperationalError:
         pass  # kolumna już istnieje
 
+    # ========================================================================
+    # KADRY — workflow wniosków (status/decyzja) na wpisie nieobecności (2026-07-20)
+    # ========================================================================
+    # status: OCZEKUJE (nowy wpis) / ZATWIERDZONY / ODRZUCONY.
+    # decided_by/at/note: kto, kiedy i z jaką uwagą zatwierdził/odrzucił.
+    _avail_new_cols = [
+        ("status", "TEXT NOT NULL DEFAULT 'OCZEKUJE'"),
+        ("decided_by", "TEXT"),
+        ("decided_at", "DATETIME"),
+        ("decision_note", "TEXT"),
+    ]
+    _avail_added_status = False
+    for _col, _decl in _avail_new_cols:
+        try:
+            con.execute(f"ALTER TABLE employee_availability ADD COLUMN {_col} {_decl}")
+            if _col == "status":
+                _avail_added_status = True
+        except sqlite3.OperationalError:
+            pass  # kolumna już istnieje
+    con.execute("CREATE INDEX IF NOT EXISTS idx_emp_avail_status ON employee_availability(status)")
+    # Istniejące wpisy (sprzed workflow) traktujemy jako już zatwierdzone —
+    # inaczej cała dotychczasowa historia wyglądałaby na 'oczekującą'.
+    if _avail_added_status:
+        con.execute("UPDATE employee_availability SET status = 'ZATWIERDZONY' WHERE status = 'OCZEKUJE'")
+
+    # Rozszerzona lista typów nieobecności — stary CHECK(reason IN (...)) blokował
+    # nowe typy kadrowe (na żądanie, okolicznościowy, opieka art.188, bezpłatny,
+    # macierzyński). SQLite nie potrafi ALTER-ować CHECK — jeśli tabela ma stary
+    # constraint, przebudowujemy ją bez CHECK (walidacja przeniesiona do kodu).
+    try:
+        _tbl_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='employee_availability'"
+        ).fetchone()
+        if _tbl_sql and _tbl_sql[0] and "CHECK (reason IN" in _tbl_sql[0].replace("\n", " "):
+            _rebuild_availability_without_reason_check(con)
+    except sqlite3.OperationalError:
+        pass
+
     # Roczna pula dni urlopu — edytowalna per pracownik i rok.
     # carryover_override: ręcznie urealniony zaległy urlop z ub. roku (NULL = wylicz automatycznie).
     con.execute("""
@@ -785,6 +870,27 @@ def ensure_rm_master_tables(master_db_path: str):
             FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
         )
     """)
+
+    # KADRY — dziennik zmian (audyt). Rejestruje ręczne modyfikacje danych
+    # pracownika i wpisów kadrowych: kto, kiedy, co, stara→nowa wartość.
+    # entity_type: 'employee' / 'availability' / 'quota' / 'carryover' / ...
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER,
+            entity_type TEXT NOT NULL,
+            entity_id INTEGER,
+            action TEXT NOT NULL,
+            field TEXT,
+            old_value TEXT,
+            new_value TEXT,
+            note TEXT,
+            changed_by TEXT,
+            changed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_audit_employee ON audit_log(employee_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_audit_changed_at ON audit_log(changed_at)")
 
     con.commit()
     con.close()
@@ -5852,6 +5958,109 @@ def get_employees(rm_master_db_path: str, category: str = None, active_only: boo
     return [dict(r) for r in rows]
 
 
+# ===========================================================================
+# KADRY — audyt (dziennik zmian) + edycja danych pracownika z historią
+# ===========================================================================
+
+def log_audit(rm_master_db_path: str, entity_type: str, action: str,
+              employee_id: int = None, entity_id: int = None, field: str = None,
+              old_value=None, new_value=None, note: str = None, user: str = None):
+    """Zapisz wpis do dziennika zmian (audit_log)."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        con.execute("""
+            INSERT INTO audit_log
+                (employee_id, entity_type, entity_id, action, field,
+                 old_value, new_value, note, changed_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (employee_id, entity_type, entity_id, action, field,
+              None if old_value is None else str(old_value),
+              None if new_value is None else str(new_value),
+              note, user))
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+
+
+def get_audit_log(rm_master_db_path: str, employee_id: int = None,
+                  limit: int = 500) -> List[Dict]:
+    """Pobierz dziennik zmian (najnowsze pierwsze). Filtruje po pracowniku."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        if employee_id is not None:
+            rows = con.execute("""
+                SELECT * FROM audit_log WHERE employee_id = ?
+                ORDER BY changed_at DESC, id DESC LIMIT ?
+            """, (employee_id, limit)).fetchall()
+        else:
+            rows = con.execute("""
+                SELECT * FROM audit_log ORDER BY changed_at DESC, id DESC LIMIT ?
+            """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def get_employee_by_id(rm_master_db_path: str, employee_id: int) -> Dict:
+    """Zwróć pełny rekord pracownika (lub {} gdy brak)."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        row = con.execute("SELECT * FROM employees WHERE id = ?",
+                          (employee_id,)).fetchone()
+        return dict(row) if row else {}
+    finally:
+        con.close()
+
+
+# Pola pracownika edytowalne z karty (klucz → etykieta do audytu).
+EMPLOYEE_EDITABLE_FIELDS = {
+    'name': 'Imię i nazwisko', 'category': 'Kategoria', 'phone': 'Telefon',
+    'email': 'E-mail', 'description': 'Opis', 'contact_info': 'Kontakt (inne)',
+    'is_active': 'Aktywny',
+}
+
+
+def update_employee_fields(rm_master_db_path: str, employee_id: int,
+                           changes: Dict, user: str = None) -> int:
+    """Zaktualizuj wybrane pola pracownika i zapisz KAŻDĄ zmianę do audytu.
+
+    changes: {pole: nowa_wartość} — tylko pola z EMPLOYEE_EDITABLE_FIELDS.
+    Zwraca liczbę realnie zmienionych pól (audyt tylko dla różnic).
+    """
+    current = get_employee_by_id(rm_master_db_path, employee_id)
+    if not current:
+        raise ValueError(f"Pracownik id={employee_id} nie istnieje")
+    to_set = {}
+    audits = []
+    for field, new_val in changes.items():
+        if field not in EMPLOYEE_EDITABLE_FIELDS:
+            continue
+        old_val = current.get(field)
+        if field == 'is_active':
+            new_val = int(bool(new_val))
+            old_val = int(bool(old_val))
+        # porównanie jako string (NULL == '' traktujemy jak brak zmiany)
+        if (old_val or '') == (new_val or '') if isinstance(new_val, str) else old_val == new_val:
+            continue
+        to_set[field] = new_val
+        audits.append((field, old_val, new_val))
+    if not to_set:
+        return 0
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        set_sql = ", ".join(f"{f} = ?" for f in to_set) + ", updated_at = CURRENT_TIMESTAMP"
+        con.execute(f"UPDATE employees SET {set_sql} WHERE id = ?",
+                    (*to_set.values(), employee_id))
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+    for field, old_val, new_val in audits:
+        log_audit(rm_master_db_path, 'employee', 'UPDATE', employee_id=employee_id,
+                  entity_id=employee_id, field=EMPLOYEE_EDITABLE_FIELDS[field],
+                  old_value=old_val, new_value=new_val, user=user)
+    return len(to_set)
+
+
 def save_employee(rm_master_db_path: str, data: Dict) -> int:
     """Dodaj lub aktualizuj pracownika.
     data musi zawierać: name, category.
@@ -9577,7 +9786,10 @@ def save_employee_availability(rm_master_db_path: str, data: Dict, user: str = N
     """Dodaj lub zaktualizuj okres niedostępności.
     
     data keys: id (opt), employee_id, date_from, date_to, reason, notes,
-               time_from, time_to, days_override (opt, NULL = auto dni robocze)
+               time_from, time_to, days_override (opt, NULL = auto dni robocze),
+               status (opt).
+    Nowy wpis bez podanego status → OCZEKUJE (workflow wniosku). Edycja nie
+    rusza statusu/decyzji, chyba że 'status' podano jawnie (wtedy tylko status).
     """
     con = _open_rm_connection(rm_master_db_path)
     try:
@@ -9591,32 +9803,52 @@ def save_employee_availability(rm_master_db_path: str, data: Dict, user: str = N
                   data['reason'], data.get('notes'),
                   data.get('time_from'), data.get('time_to'),
                   data.get('days_override'), data['id']))
+            if data.get('status'):
+                con.execute("UPDATE employee_availability SET status = ? WHERE id = ?",
+                            (str(data['status']).upper(), data['id']))
             _rm_safe_commit(con)
-            return data['id']
+            _saved_id = data['id']
+            _action = 'EDIT'
         else:
+            status = str(data.get('status') or 'OCZEKUJE').upper()
             cursor = con.execute("""
                 INSERT INTO employee_availability
                     (employee_id, date_from, date_to, reason, notes, created_by,
-                     time_from, time_to, days_override)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     time_from, time_to, days_override, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (data['employee_id'], data['date_from'], data['date_to'],
                   data['reason'], data.get('notes'), user,
                   data.get('time_from'), data.get('time_to'),
-                  data.get('days_override')))
+                  data.get('days_override'), status))
             _rm_safe_commit(con)
-            return cursor.lastrowid
+            _saved_id = cursor.lastrowid
+            _action = 'ADD'
     finally:
         con.close()
+    # Audyt wpisu nieobecności.
+    log_audit(rm_master_db_path, 'availability', _action,
+              employee_id=data['employee_id'], entity_id=_saved_id,
+              field=(data.get('reason') or ''),
+              new_value=f"{data['date_from']}→{data['date_to']}", user=user)
+    return _saved_id
 
 
-def delete_employee_availability(rm_master_db_path: str, avail_id: int):
+def delete_employee_availability(rm_master_db_path: str, avail_id: int, user: str = None):
     """Usuń okres niedostępności."""
     con = _open_rm_connection(rm_master_db_path)
     try:
+        prev = con.execute(
+            "SELECT employee_id, reason, date_from, date_to FROM employee_availability "
+            "WHERE id = ?", (avail_id,)).fetchone()
         con.execute("DELETE FROM employee_availability WHERE id = ?", (avail_id,))
         _rm_safe_commit(con)
     finally:
         con.close()
+    if prev:
+        log_audit(rm_master_db_path, 'availability', 'DELETE',
+                  employee_id=prev['employee_id'], entity_id=avail_id,
+                  field=(prev['reason'] or ''),
+                  old_value=f"{prev['date_from']}→{prev['date_to']}", user=user)
 
 
 # ============================================================================
@@ -9624,6 +9856,91 @@ def delete_employee_availability(rm_master_db_path: str, avail_id: int):
 # ============================================================================
 
 DEFAULT_VACATION_DAYS = 26  # domyślny roczny wymiar urlopu (Kodeks pracy)
+
+# Kanoniczne typy nieobecności (walidacja w kodzie — CHECK zdjęty ze schematu,
+# żeby dało się dokładać typy bez przebudowy tabeli).
+# 'counts_as_vacation': czy dzień odejmuje się od puli urlopowej.
+# 'annual_limit': ustawowy limit dni w roku (None = bez twardego limitu).
+ABSENCE_TYPES = [
+    {'code': 'URLOP',           'label': 'Urlop wypoczynkowy', 'counts_as_vacation': True,  'annual_limit': None},
+    {'code': 'URLOP_ZADANIE',   'label': 'Urlop na żądanie',   'counts_as_vacation': True,  'annual_limit': 4},
+    {'code': 'OKOLICZNOSCIOWY', 'label': 'Okolicznościowy',    'counts_as_vacation': False, 'annual_limit': None},
+    {'code': 'OPIEKA_188',      'label': 'Opieka (art. 188)',  'counts_as_vacation': False, 'annual_limit': 2},
+    {'code': 'BEZPLATNY',       'label': 'Bezpłatny',          'counts_as_vacation': False, 'annual_limit': None},
+    {'code': 'MACIERZYNSKI',    'label': 'Macierzyński/rodz.', 'counts_as_vacation': False, 'annual_limit': None},
+    {'code': 'L4',              'label': 'L4 (chorobowe)',     'counts_as_vacation': False, 'annual_limit': None},
+    {'code': 'DELEGACJA',       'label': 'Delegacja',          'counts_as_vacation': False, 'annual_limit': None},
+    {'code': 'SZKOLENIE',       'label': 'Szkolenie',          'counts_as_vacation': False, 'annual_limit': None},
+    {'code': 'INNE',            'label': 'Inne',               'counts_as_vacation': False, 'annual_limit': None},
+]
+ABSENCE_TYPE_CODES = [t['code'] for t in ABSENCE_TYPES]
+ABSENCE_TYPE_BY_CODE = {t['code']: t for t in ABSENCE_TYPES}
+# Statusy wniosku / wpisu.
+ABSENCE_STATUSES = ['OCZEKUJE', 'ZATWIERDZONY', 'ODRZUCONY']
+
+
+def set_absence_status(rm_master_db_path: str, avail_id: int, status: str,
+                       note: str = None, user: str = None):
+    """Zmień status wpisu nieobecności (workflow wniosku).
+
+    status: OCZEKUJE / ZATWIERDZONY / ODRZUCONY. Zapisuje decyzję (kto/kiedy/uwaga)
+    dla ZATWIERDZONY/ODRZUCONY; powrót do OCZEKUJE czyści dane decyzji.
+    """
+    status = (status or '').upper()
+    if status not in ABSENCE_STATUSES:
+        raise ValueError(f"Nieznany status: {status}")
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        prev = con.execute(
+            "SELECT employee_id, status FROM employee_availability WHERE id = ?",
+            (avail_id,)).fetchone()
+        if status == 'OCZEKUJE':
+            con.execute(
+                "UPDATE employee_availability SET status = ?, decided_by = NULL, "
+                "decided_at = NULL, decision_note = NULL WHERE id = ?",
+                (status, avail_id))
+        else:
+            con.execute(
+                "UPDATE employee_availability SET status = ?, decided_by = ?, "
+                "decided_at = CURRENT_TIMESTAMP, decision_note = ? WHERE id = ?",
+                (status, user, note, avail_id))
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+    # Audyt decyzji o wniosku.
+    if prev:
+        log_audit(rm_master_db_path, 'availability', 'STATUS',
+                  employee_id=prev['employee_id'], entity_id=avail_id,
+                  field='Status wniosku', old_value=prev['status'],
+                  new_value=status, note=note, user=user)
+
+
+def count_absence_type_days_in_year(rm_master_db_path: str, employee_id: int,
+                                    reason: str, year: int,
+                                    include_pending: bool = True) -> float:
+    """Suma dni danego typu nieobecności w roku (do kontroli limitów ustawowych).
+
+    Domyślnie liczy wpisy OCZEKUJE + ZATWIERDZONY (odrzucone pomija) — dzięki
+    temu limit 'na żądanie'/art.188 ostrzega już przy składaniu wniosku.
+    Liczy dni robocze wg kalendarza firmowego (i respektuje days_override).
+    """
+    reason = (reason or '').upper()
+    y_from, y_to = f"{year}-01-01", f"{year}-12-31"
+    total = 0.0
+    for a in get_employee_availability(rm_master_db_path, employee_id=employee_id,
+                                       date_from=y_from, date_to=y_to):
+        if (a.get('reason') or '').upper() != reason:
+            continue
+        st = (a.get('status') or 'ZATWIERDZONY').upper()
+        if st == 'ODRZUCONY':
+            continue
+        if st == 'OCZEKUJE' and not include_pending:
+            continue
+        total += _count_absence_days(a['date_from'], a['date_to'],
+                                     a.get('time_from'), a.get('time_to'),
+                                     rm_master_db_path=rm_master_db_path,
+                                     days_override=a.get('days_override'))
+    return total
 
 
 def get_vacation_base(rm_master_db_path: str, employee_id: int) -> float:
@@ -9642,6 +9959,7 @@ def get_vacation_base(rm_master_db_path: str, employee_id: int) -> float:
 def set_vacation_base(rm_master_db_path: str, employee_id: int, days: float,
                       user: str = None):
     """Ustaw (upsert) pulę bazową (permanentną) pracownika."""
+    old = get_vacation_base(rm_master_db_path, employee_id)
     con = _open_rm_connection(rm_master_db_path)
     try:
         con.execute("""
@@ -9655,6 +9973,9 @@ def set_vacation_base(rm_master_db_path: str, employee_id: int, days: float,
         _rm_safe_commit(con)
     finally:
         con.close()
+    log_audit(rm_master_db_path, 'quota', 'UPDATE', employee_id=employee_id,
+              field='Pula bazowa (stała)', old_value=f"{old:g}", new_value=f"{days:g}",
+              user=user)
 
 
 def has_vacation_quota_for_year(rm_master_db_path: str, employee_id: int, year: int) -> bool:
@@ -9696,6 +10017,7 @@ def get_vacation_quota(rm_master_db_path: str, employee_id: int, year: int) -> f
 def set_vacation_quota(rm_master_db_path: str, employee_id: int, year: int,
                        days: float, user: str = None):
     """Ustaw (upsert) roczną korektę puli urlopu (nadpisuje bazową na ten rok)."""
+    old = get_vacation_quota(rm_master_db_path, employee_id, year)
     con = _open_rm_connection(rm_master_db_path)
     try:
         con.execute("""
@@ -9709,6 +10031,9 @@ def set_vacation_quota(rm_master_db_path: str, employee_id: int, year: int,
         _rm_safe_commit(con)
     finally:
         con.close()
+    log_audit(rm_master_db_path, 'quota', 'UPDATE', employee_id=employee_id,
+              field=f'Pula na rok {year}', old_value=f"{old:g}", new_value=f"{days:g}",
+              user=user)
 
 
 def clear_vacation_quota(rm_master_db_path: str, employee_id: int, year: int):
@@ -9746,6 +10071,7 @@ def get_carryover_override(rm_master_db_path: str, employee_id: int, year: int):
 def set_carryover_override(rm_master_db_path: str, employee_id: int, year: int,
                            value, user: str = None):
     """Ustaw ręczny zaległy urlop. value=None czyści override (powrót do auto)."""
+    old = get_carryover_override(rm_master_db_path, employee_id, year)
     con = _open_rm_connection(rm_master_db_path)
     try:
         if value is None:
@@ -9764,6 +10090,10 @@ def set_carryover_override(rm_master_db_path: str, employee_id: int, year: int,
         _rm_safe_commit(con)
     finally:
         con.close()
+    log_audit(rm_master_db_path, 'carryover', 'UPDATE', employee_id=employee_id,
+              field=f'Zaległy z ub. roku ({year})',
+              old_value=('auto' if old is None else f"{old:g}"),
+              new_value=('auto' if value is None else f"{value:g}"), user=user)
 
 
 _WEEKDAY_PL = ['pon', 'wt', 'śr', 'czw', 'pt', 'sob', 'ndz']
@@ -9887,6 +10217,8 @@ def _used_urlop_in_year(rm_master_db_path: str, employee_id: int, year: int) -> 
                                       date_from=y_from, date_to=y_to)
     total = 0.0
     for a in avail:
+        if (a.get('status') or 'ZATWIERDZONY').upper() == 'ODRZUCONY':
+            continue  # odrzucone wnioski nie liczą się do wykorzystanego urlopu
         if (a.get('reason') or '').upper() == 'URLOP':
             total += _count_absence_days(a['date_from'], a['date_to'],
                                          a.get('time_from'), a.get('time_to'),
@@ -9936,6 +10268,8 @@ def get_vacation_report(rm_master_db_path: str, year: int) -> List[Dict]:
         eid = a['employee_id']
         if eid not in per_emp:
             continue
+        if (a.get('status') or 'ZATWIERDZONY').upper() == 'ODRZUCONY':
+            continue  # odrzucone wnioski nie wchodzą do rozliczenia
         days = _count_absence_days(a['date_from'], a['date_to'],
                                    a.get('time_from'), a.get('time_to'),
                                    rm_master_db_path=rm_master_db_path,
@@ -9946,13 +10280,139 @@ def get_vacation_report(rm_master_db_path: str, year: int) -> List[Dict]:
 
     result = []
     for eid, rec in per_emp.items():
-        used = rec['by_reason'].get('URLOP', 0.0)
+        # Wykorzystany urlop = wszystkie typy odejmowane od puli (URLOP + na żądanie).
+        used = sum(
+            rec['by_reason'].get(t['code'], 0.0)
+            for t in ABSENCE_TYPES if t['counts_as_vacation']
+        )
         rec['used_urlop'] = round(used, 2)
         rec['remaining'] = round(rec['available'] - used, 2)
         rec['total_days'] = round(rec['total_days'], 2)
         result.append(rec)
     result.sort(key=lambda r: r['name'].lower())
     return result
+
+
+def get_vacation_entries(rm_master_db_path: str, year: int = None,
+                         month: int = None) -> List[Dict]:
+    """Płaska lista wpisów nieobecności (do eksportu), z policzonymi dniami roboczymi.
+
+    year=None → wszystkie lata; month podany (1-12) → tylko ten miesiąc roku.
+    """
+    if year and month:
+        import calendar as _cal
+        nd = _cal.monthrange(year, month)[1]
+        d_from, d_to = f"{year}-{month:02d}-01", f"{year}-{month:02d}-{nd:02d}"
+    elif year:
+        d_from, d_to = f"{year}-01-01", f"{year}-12-31"
+    else:
+        d_from = d_to = None
+    rows = get_employee_availability(rm_master_db_path, date_from=d_from, date_to=d_to)
+    out = []
+    for a in rows:
+        days = _count_absence_days(a['date_from'], a['date_to'],
+                                   a.get('time_from'), a.get('time_to'),
+                                   rm_master_db_path=rm_master_db_path,
+                                   days_override=a.get('days_override'))
+        code = (a.get('reason') or 'INNE').upper()
+        tinfo = ABSENCE_TYPE_BY_CODE.get(code, {})
+        out.append({
+            'employee': a.get('employee_name', ''),
+            'category': a.get('employee_category', ''),
+            'date_from': a['date_from'], 'date_to': a['date_to'],
+            'type_code': code, 'type_label': tinfo.get('label', code),
+            'counts_as_vacation': bool(tinfo.get('counts_as_vacation')),
+            'days': days,
+            'hours': (f"{a.get('time_from')}–{a.get('time_to')}"
+                      if a.get('time_from') and a.get('time_to') else 'cały dzień'),
+            'status': (a.get('status') or 'ZATWIERDZONY').upper(),
+            'decided_by': a.get('decided_by') or '',
+            'decided_at': (a.get('decided_at') or '')[:16],
+            'notes': a.get('notes') or '',
+        })
+    out.sort(key=lambda r: (r['employee'].lower(), r['date_from']))
+    return out
+
+
+def export_vacations_xlsx(rm_master_db_path: str, path: str, year: int = None,
+                          month: int = None) -> str:
+    """Eksport bazy urlopów do Excela (2 arkusze: Wpisy + Podsumowanie).
+
+    Zakres: cały rok (month=None) albo konkretny miesiąc. Gdy brak openpyxl —
+    zapisuje 2 pliki CSV (…_wpisy.csv, …_podsumowanie.csv) i zwraca ich opis.
+    Zwraca komunikat o zapisanych plikach.
+    """
+    entries = get_vacation_entries(rm_master_db_path, year=year, month=month)
+    report = get_vacation_report(rm_master_db_path, year) if year else []
+    _STATUS_PL = {'OCZEKUJE': 'Oczekuje', 'ZATWIERDZONY': 'Zatwierdzony',
+                  'ODRZUCONY': 'Odrzucony'}
+
+    entry_headers = ['Pracownik', 'Kategoria', 'Od', 'Do', 'Typ',
+                     'Odejmuje pulę', 'Dni robocze', 'Godziny', 'Status',
+                     'Decyzja (kto)', 'Decyzja (kiedy)', 'Uwagi']
+    def _entry_row(e):
+        return [e['employee'], e['category'], e['date_from'], e['date_to'],
+                e['type_label'], 'TAK' if e['counts_as_vacation'] else 'nie',
+                e['days'], e['hours'], _STATUS_PL.get(e['status'], e['status']),
+                e['decided_by'], e['decided_at'], e['notes']]
+
+    sum_headers = ['Pracownik', 'Kategoria', 'Zaległy', 'Pula', 'Dostępne',
+                   'Urlop wyp.', 'Na żądanie', 'Pozostało', 'L4', 'Delegacja',
+                   'Szkolenie', 'Inne', 'Razem dni']
+    def _sum_row(r):
+        br = r['by_reason']
+        return [r['name'], r['category'], r['carryover'], r['quota'], r['available'],
+                br.get('URLOP', 0), br.get('URLOP_ZADANIE', 0), r['remaining'],
+                br.get('L4', 0), br.get('DELEGACJA', 0), br.get('SZKOLENIE', 0),
+                br.get('INNE', 0), r['total_days']]
+
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        wb = Workbook()
+        hdr_fill = PatternFill("solid", fgColor="34495E")
+        hdr_font = Font(bold=True, color="FFFFFF")
+
+        def _sheet(ws, headers, rows):
+            ws.append(headers)
+            for c in ws[1]:
+                c.fill = hdr_fill; c.font = hdr_font
+                c.alignment = Alignment(horizontal='center')
+            for r in rows:
+                ws.append(r)
+            for col in ws.columns:
+                w = max((len(str(c.value)) for c in col if c.value is not None), default=8)
+                ws.column_dimensions[col[0].column_letter].width = min(w + 2, 40)
+            ws.freeze_panes = "A2"
+
+        ws1 = wb.active
+        ws1.title = "Wpisy"
+        _sheet(ws1, entry_headers, [_entry_row(e) for e in entries])
+        if report:
+            ws2 = wb.create_sheet("Podsumowanie")
+            _sheet(ws2, sum_headers, [_sum_row(r) for r in report])
+        if not path.lower().endswith('.xlsx'):
+            path += '.xlsx'
+        wb.save(path)
+        return f"Zapisano Excel: {path}"
+    except ImportError:
+        # Fallback: dwa pliki CSV (Excel je otworzy).
+        import csv, os
+        base = path[:-5] if path.lower().endswith('.xlsx') else path
+        p1, p2 = base + '_wpisy.csv', base + '_podsumowanie.csv'
+        with open(p1, 'w', newline='', encoding='utf-8-sig') as fh:
+            w = csv.writer(fh, delimiter=';')
+            w.writerow(entry_headers)
+            for e in entries:
+                w.writerow(_entry_row(e))
+        if report:
+            with open(p2, 'w', newline='', encoding='utf-8-sig') as fh:
+                w = csv.writer(fh, delimiter=';')
+                w.writerow(sum_headers)
+                for r in report:
+                    w.writerow(_sum_row(r))
+            return f"Brak openpyxl — zapisano CSV:\n{p1}\n{p2}"
+        return f"Brak openpyxl — zapisano CSV:\n{p1}"
 
 
 # ============================================================================
