@@ -31722,12 +31722,56 @@ Kod: {unlock_code}
             tk.Checkbutton(catbar, text=c or "(brak)", variable=cat_vars[c],
                            font=self.FONT_SMALL,
                            command=lambda: _full_reset()).pack(side=tk.LEFT)
-        # Przełącznik: wszyscy z kategorii vs tylko z nieobecnościami (w roku) —
-        # trzymany przy filtrach pracowników, bo dotyczy tego samego.
-        tk.Label(catbar, text="   |   ", font=self.FONT_SMALL, fg="#999").pack(side=tk.LEFT)
-        tk.Checkbutton(catbar, text="tylko z nieobecnościami (w roku)",
-                       variable=only_absent, font=self.FONT_SMALL,
-                       command=lambda: _full_reset()).pack(side=tk.LEFT)
+        # Osobny wiersz na filtr obecności — checkbox „tylko nieobecni" z wyborem
+        # zakresu: Rok / Miesiąc / Od–Do (kalendarzyki). Pola zakresu widoczne
+        # tylko gdy checkbox zaznaczony.
+        absbar = tk.Frame(parent, padx=8, pady=2)
+        absbar.pack(fill=tk.X)
+        tk.Checkbutton(absbar, text="tylko nieobecni — zakres:", variable=only_absent,
+                       font=self.FONT_SMALL,
+                       command=lambda: (_abs_refresh_fields(), _full_reset())
+                       ).pack(side=tk.LEFT)
+        abs_mode = tk.StringVar(value='Rok')
+        ttk.Combobox(absbar, textvariable=abs_mode, width=8, state='readonly',
+                     values=['Rok', 'Miesiąc', 'Od–Do'], font=self.FONT_SMALL
+                     ).pack(side=tk.LEFT, padx=3)
+        abs_mode.trace_add('write', lambda *a: (_abs_refresh_fields(), _full_reset()))
+
+        # Kontener na pola zależne od trybu (miesiąc / Od–Do).
+        abs_fields = tk.Frame(absbar)
+        abs_fields.pack(side=tk.LEFT, padx=4)
+        _MONTHS_PL = ['Styczeń', 'Luty', 'Marzec', 'Kwiecień', 'Maj', 'Czerwiec',
+                      'Lipiec', 'Sierpień', 'Wrzesień', 'Październik', 'Listopad', 'Grudzień']
+        abs_month = tk.StringVar(value=_MONTHS_PL[datetime.now().month - 1])
+        abs_from = tk.StringVar(value=datetime.now().strftime('01-%m-%Y'))
+        abs_to = tk.StringVar(value=datetime.now().strftime('%d-%m-%Y'))
+        abs_month.trace_add('write', lambda *a: _full_reset())
+
+        def _abs_refresh_fields():
+            for w in abs_fields.winfo_children():
+                w.destroy()
+            if not only_absent.get():
+                return
+            mode = abs_mode.get()
+            if mode == 'Miesiąc':
+                ttk.Combobox(abs_fields, textvariable=abs_month, width=11,
+                             state='readonly', values=_MONTHS_PL,
+                             font=self.FONT_SMALL).pack(side=tk.LEFT)
+            elif mode == 'Od–Do':
+                tk.Label(abs_fields, text="Od:", font=self.FONT_SMALL).pack(side=tk.LEFT)
+                ef = tk.Entry(abs_fields, textvariable=abs_from, width=11, font=self.FONT_SMALL)
+                ef.pack(side=tk.LEFT)
+                tk.Button(abs_fields, text="📅", command=lambda: self.open_calendar_picker(ef),
+                          bg="#3498db", fg="white", font=self.FONT_SMALL, padx=2).pack(side=tk.LEFT, padx=(1, 6))
+                tk.Label(abs_fields, text="Do:", font=self.FONT_SMALL).pack(side=tk.LEFT)
+                et = tk.Entry(abs_fields, textvariable=abs_to, width=11, font=self.FONT_SMALL)
+                et.pack(side=tk.LEFT)
+                tk.Button(abs_fields, text="📅", command=lambda: self.open_calendar_picker(et),
+                          bg="#3498db", fg="white", font=self.FONT_SMALL, padx=2).pack(side=tk.LEFT, padx=1)
+                tk.Button(abs_fields, text="🔍", command=lambda: _full_reset(),
+                          font=self.FONT_SMALL, padx=3).pack(side=tk.LEFT, padx=4)
+            # tryb 'Rok' → brak dodatkowych pól (rok bierze z pola Rok wyżej)
+        _abs_refresh_fields()
 
         # Legenda typów
         legend = tk.Frame(parent, padx=8, pady=2)
@@ -31856,16 +31900,28 @@ Kod: {unlock_code}
             emps = [e for e in all_emps
                     if cat_vars.get(e.get('category') or '',
                                     tk.BooleanVar(value=True)).get()]
-            # Filtr "tylko z nieobecnościami" — kto ma jakąkolwiek nieobecność
-            # (poza odrzuconą) w wybranym roku.
+            # Filtr "tylko nieobecni" — kto ma jakąkolwiek nieobecność (poza
+            # odrzuconą) w wybranym ZAKRESIE (Rok / Miesiąc / Od–Do).
             if only_absent.get():
                 try:
                     yr = int(year_sel.get())
                 except ValueError:
                     yr = datetime.now().year
+                mode = abs_mode.get()
+                d_from, d_to = f"{yr}-01-01", f"{yr}-12-31"  # domyślnie cały rok
+                if mode == 'Miesiąc':
+                    mo = _MONTHS_PL.index(abs_month.get()) + 1
+                    import calendar as __c
+                    nd = __c.monthrange(yr, mo)[1]
+                    d_from, d_to = f"{yr}-{mo:02d}-01", f"{yr}-{mo:02d}-{nd:02d}"
+                elif mode == 'Od–Do':
+                    try:
+                        d_from = self.parse_date_ddmmyyyy(abs_from.get()).strftime('%Y-%m-%d')
+                        d_to = self.parse_date_ddmmyyyy(abs_to.get()).strftime('%Y-%m-%d')
+                    except Exception:
+                        pass  # zły format → zostaw cały rok
                 av = rmm.get_employee_availability(
-                    self.rm_master_db_path,
-                    date_from=f"{yr}-01-01", date_to=f"{yr}-12-31")
+                    self.rm_master_db_path, date_from=d_from, date_to=d_to)
                 have = {a['employee_id'] for a in av
                         if (a.get('status') or 'ZATWIERDZONY').upper() != 'ODRZUCONY'}
                 emps = [e for e in emps if e['id'] in have]
@@ -32097,10 +32153,11 @@ Kod: {unlock_code}
                                    lo_frac * total) / max((cal['hi'] - cal['lo']) * CELL_W, 1))
 
         def _full_reset():
-            """Przerysuj od zera wokół base_date (np. po zmianie 'tylko zatwierdzone')."""
+            """Przerysuj od zera wokół base_date (np. po zmianie filtra)."""
             grid.delete('all'); header.delete('all')
             cal['tips'] = {}; cal['conflicts'] = {}; cal['months_drawn'] = set()
             cal['lo'] = 0; cal['hi'] = 0
+            cal['sel_row'] = None  # filtr zmienia listę → zdejmij podświetlenie
             _load_emps()
             _draw_names()
             # narysuj miesiąc bazowy + sąsiednie, żeby był zapas na scroll
@@ -32185,9 +32242,17 @@ Kod: {unlock_code}
                 _select_row(None)  # klik w pusty obszar → odznacz
         grid.bind('<Button-1>', _click_grid)
 
-        # Odznaczanie: ponowny klik w wiersz (toggle) albo klik w pusty obszar
-        # siatki poniżej listy (obsłużone w _click_grid). NIE odznaczamy przy
-        # kliknięciu w przyciski/zakładki — byłoby to irytujące.
+        # Odznaczanie: ponowny klik w wiersz (toggle), klik w pusty obszar siatki
+        # (w _click_grid) LUB klik w szare tło okna (ramki/kontenery) — ale NIE
+        # w przyciski/checkboxy/zakładki/pola. Odróżniamy po klasie widgetu.
+        _DEAD_CLASSES = ('Frame', 'TFrame', 'Labelframe', 'TLabelframe', 'Toplevel')
+
+        def _click_bg(event):
+            if cal['sel_row'] is None:
+                return
+            if event.widget.winfo_class() in _DEAD_CLASSES:
+                _select_row(None)
+        dlg.bind('<Button-1>', _click_bg, add='+')
 
         # Scroll kółkiem: pionowo zwykłym kółkiem, poziomo z Shift.
         def _wheel_v(event):
