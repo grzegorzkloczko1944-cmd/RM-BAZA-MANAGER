@@ -30305,7 +30305,7 @@ Kod: {unlock_code}
 
         tab_cal = tk.Frame(notebook)
         notebook.add(tab_cal, text="  📆  Kalendarz zespołu  ")
-        self._vacation_build_team_calendar_tab(tab_cal, dlg)
+        cal_refresh = self._vacation_build_team_calendar_tab(tab_cal, dlg)
 
         tab_emp = tk.Frame(notebook)
         notebook.add(tab_emp, text="  👥  Pracownicy  ")
@@ -30328,8 +30328,11 @@ Kod: {unlock_code}
         # "Przelicz".
         def _on_vac_tab_changed(_e=None):
             try:
-                if notebook.tab(notebook.select(), "text").strip().startswith("🧾") and report_refresh:
+                txt = notebook.tab(notebook.select(), "text").strip()
+                if txt.startswith("🧾") and report_refresh:
                     report_refresh()
+                elif txt.startswith("📆") and cal_refresh:
+                    cal_refresh()  # odśwież kalendarz po zmianach w innych zakładkach
             except Exception:
                 pass
         notebook.bind("<<NotebookTabChanged>>", _on_vac_tab_changed)
@@ -31800,8 +31803,19 @@ Kod: {unlock_code}
         wrap = tk.Frame(parent)
         wrap.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
 
+        # KLUCZOWE dla braku rozjazdu: poziomy pasek (hsb) jest na dnie CAŁEGO
+        # wrap — pod OBIEMA kolumnami. Dzięki temu kolumna nazwisk (left) i siatka
+        # (right) mają DOKŁADNIE tę samą wysokość. Wcześniej hsb był tylko pod
+        # siatką, przez co nazwiska były wyższe → ta sama frakcja yview dawała
+        # inne przesunięcie i wiersze rozjeżdżały się ku dołowi.
+        hsb = ttk.Scrollbar(wrap, orient="horizontal")
+        hsb.pack(side=tk.BOTTOM, fill=tk.X)
+
+        body = tk.Frame(wrap)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
         # Lewa, nieruchoma kolumna nazwisk: nagłówek (names_hdr) + lista (names_cv).
-        left = tk.Frame(wrap)
+        left = tk.Frame(body)
         left.pack(side=tk.LEFT, fill=tk.Y)
         names_hdr = tk.Canvas(left, width=NAME_W, height=HDR_H,
                               highlightthickness=0, bg="#34495e")
@@ -31822,7 +31836,7 @@ Kod: {unlock_code}
         names_cv.bind('<Button-1>', _open_card)
 
         # Prawa strona: nagłówek dni (header, scroll tylko X) + siatka (grid, X+Y).
-        right = tk.Frame(wrap)
+        right = tk.Frame(body)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         header = tk.Canvas(right, height=HDR_H, highlightthickness=0, bg="white")
         header.pack(side=tk.TOP, fill=tk.X)
@@ -31830,10 +31844,8 @@ Kod: {unlock_code}
         gwrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         grid = tk.Canvas(gwrap, highlightthickness=0, bg="white")
         vsb = ttk.Scrollbar(gwrap, orient="vertical")
-        hsb = ttk.Scrollbar(right, orient="horizontal")
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         grid.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        hsb.pack(side=tk.BOTTOM, fill=tk.X)
 
         conflict_var = tk.StringVar()
         tk.Label(parent, textvariable=conflict_var, font=self.FONT_SMALL,
@@ -31848,20 +31860,29 @@ Kod: {unlock_code}
         # Pionowo: grid + names_cv razem. Synchronizujemy PIKSELOWO (nie frakcją),
         # bo oba canvasy mogą mieć różną wysokość widżetu — ta sama frakcja dałaby
         # różne przesunięcie i rozjazd nazwisk vs siatki.
+        # vlock: gdy WSZYSCY pracownicy mieszczą się w widoku, blokujemy pionowy
+        # scroll i przypinamy oba canvasy do góry. Wtedy nic się nie przewija →
+        # nazwiska i siatka są zawsze idealnie zsynchronizowane (zero rozjazdu).
+        # Gdy pracownicy nie mieszczą się — scroll działa normalnie, a names_cv
+        # podąża za gridem pikselowo (ta sama frakcja, równe wysokości).
+        vlock = {'on': True}
+
         def _sync_names_to_grid():
-            total = len(cal['emps']) * ROW_H
-            if total <= 0:
-                return
-            top_px = grid.canvasy(0)  # piksel u góry widoku siatki
-            names_cv.yview_moveto(max(0.0, top_px / total))
+            names_cv.yview_moveto(grid.yview()[0])
 
         def _yview(*args):
+            if vlock['on']:
+                return
             grid.yview(*args)
             _sync_names_to_grid()
         vsb.config(command=_yview)
         def _on_grid_y(lo, hi):
             vsb.set(lo, hi)
-            _sync_names_to_grid()
+            if vlock['on']:
+                grid.yview_moveto(0)
+                names_cv.yview_moveto(0)
+            else:
+                _sync_names_to_grid()
         grid.config(yscrollcommand=_on_grid_y)
 
         # Poziomo: grid + header razem; przy zbliżeniu do brzegu doładuj miesiące.
@@ -32279,7 +32300,17 @@ Kod: {unlock_code}
                 h = grid.winfo_height()
                 if h > 1:
                     names_cv.configure(height=h)
-                _sync_names_to_grid()  # pikselowo, żeby nazwiska trzymały siatkę
+                # Zablokuj pionowy scroll, gdy wszyscy pracownicy mieszczą się
+                # w widoku (zawartość ≤ wysokość) — wtedy nic się nie przewija
+                # i nazwiska/siatka są zawsze zsynchronizowane.
+                content_h = len(cal['emps']) * ROW_H
+                vlock['on'] = (h > 1 and content_h <= h)
+                if vlock['on']:
+                    grid.yview_moveto(0)
+                    names_cv.yview_moveto(0)
+                    vsb.set(0.0, 1.0)
+                else:
+                    _sync_names_to_grid()
             except Exception:
                 pass
             # przerysuj podświetlenie po zmianie rozmiaru (np. wyjście z fullscreena)
@@ -32287,6 +32318,10 @@ Kod: {unlock_code}
         grid.bind('<Configure>', _resync)
 
         _full_reset()
+        parent.after_idle(_resync)  # wyrównaj wysokości po policzeniu geometrii
+        # Zwróć funkcję pełnego odświeżenia — używana do auto-refresh kalendarza
+        # przy wejściu na jego zakładkę (po zmianach w innych zakładkach).
+        return _full_reset
 
     def _vacation_report_to_pdf(self, path, rows, year):
         """Zestawienie roczne urlopów → PDF (matplotlib, bez dodatkowych zależności)."""
