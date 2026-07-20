@@ -29719,6 +29719,76 @@ Kod: {unlock_code}
         tree.bind('<Motion>', _motion, add='+')
         tree.bind('<Leave>', _hide, add='+')
 
+    def _attach_overflow_tooltip(self, tree, col_id):
+        """Tooltip z pełną treścią komórki — ale TYLKO gdy tekst nie mieści się
+        w szerokości kolumny (Treeview ucina długie wpisy). Gdy się mieści,
+        tooltip się nie pokazuje.
+        """
+        import tkinter.font as tkfont
+        tip = {'win': None, 'row': None}
+
+        def _hide(_e=None):
+            if tip['win'] is not None:
+                try:
+                    tip['win'].destroy()
+                except Exception:
+                    pass
+                tip['win'] = None
+                tip['row'] = None
+
+        def _cell_font():
+            # Czcionka wierszy Treeview (styl 'Treeview'); fallback na TkDefault.
+            try:
+                style = ttk.Style()
+                fname = style.lookup('Treeview', 'font') or 'TkDefaultFont'
+            except Exception:
+                fname = 'TkDefaultFont'
+            try:
+                return tkfont.nametofont(fname)
+            except Exception:
+                return tkfont.nametofont('TkDefaultFont')
+
+        def _motion(event):
+            row = tree.identify_row(event.y)
+            col = tree.identify_column(event.x)
+            try:
+                col_idx = list(tree['columns']).index(col_id)
+            except ValueError:
+                return
+            if not row or col != f'#{col_idx + 1}':
+                _hide()
+                return
+            text = str(tree.set(row, col_id))
+            if not text or text == '—':
+                _hide()
+                return
+            # Mieści się? Zmierz tekst czcionką i porównaj z szerokością kolumny
+            # (minus margines na padding komórki).
+            try:
+                col_w = int(tree.column(col_id, 'width'))
+            except Exception:
+                col_w = 0
+            text_w = _cell_font().measure(text)
+            if text_w <= col_w - 12:   # mieści się → bez tooltipa
+                _hide()
+                return
+            if tip['row'] == row and tip['win'] is not None:
+                return  # już pokazany dla tego wiersza
+            _hide()
+            win = tk.Toplevel(tree)
+            win.wm_overrideredirect(True)
+            win.wm_attributes('-topmost', True)
+            win.wm_geometry(f"+{tree.winfo_pointerx() + 14}+{tree.winfo_pointery() + 12}")
+            # Zawijamy długą treść w dymku, żeby sam tooltip nie był zbyt szeroki.
+            tk.Label(win, text=text, bg="#ffffe0", fg="#000",
+                     font=("Segoe UI", 10), relief=tk.SOLID, bd=1,
+                     justify=tk.LEFT, padx=8, pady=4, wraplength=600).pack()
+            tip['win'] = win
+            tip['row'] = row
+
+        tree.bind('<Motion>', _motion, add='+')
+        tree.bind('<Leave>', _hide, add='+')
+
     def _stats_db(self):
         """Utwórz adapter RMStatsDB na ścieżkach z konfiguracji RM_MANAGERa."""
         import db as _statsdb
@@ -29959,7 +30029,11 @@ Kod: {unlock_code}
                                fg="#c0392b", anchor="w")
         overdue_lbl.pack(fill=tk.X, padx=8, pady=(2, 0))
         ovd_cols = ('id', 'name', 'status', 'overdue')
-        overdue_tree = ttk.Treeview(overdue_wrap, columns=ovd_cols, show='headings', height=5)
+        # Ramka na tree + pionowy scrollbar (przy dużej liczbie pozycji lista
+        # nie mieści się w height=5 — bez paska część wpisów była nieosiągalna).
+        overdue_inner = tk.Frame(overdue_wrap)
+        overdue_inner.pack(fill=tk.X, padx=8, pady=(0, 6))
+        overdue_tree = ttk.Treeview(overdue_inner, columns=ovd_cols, show='headings', height=5)
         for key, txt, w, stretch in [
             ('id', 'ID', 45, False), ('name', 'Projekt', 210, False),
             ('status', 'Status', 125, False),
@@ -29968,8 +30042,12 @@ Kod: {unlock_code}
             overdue_tree.heading(key, text=txt)
             overdue_tree.column(key, width=w, stretch=stretch)
         overdue_tree.tag_configure('overdue', foreground='#c0392b')
-        overdue_tree.pack(fill=tk.X, padx=8, pady=(0, 6))
+        ovd_vsb = ttk.Scrollbar(overdue_inner, orient="vertical", command=overdue_tree.yview)
+        overdue_tree.configure(yscrollcommand=ovd_vsb.set)
+        overdue_tree.pack(fill=tk.X, expand=True, side=tk.LEFT)
+        ovd_vsb.pack(fill=tk.Y, side=tk.RIGHT)
         self._attach_marker_tooltip(overdue_tree, 'status')
+        self._attach_overflow_tooltip(overdue_tree, 'overdue')
         # overdue_wrap pakowany warunkowo w _apply_filter (tylko gdy są wpisy)
 
         # ── Główna lista projektów ────────────────────────────────────────
@@ -29991,6 +30069,7 @@ Kod: {unlock_code}
         tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
         vsb.pack(fill=tk.Y, side=tk.RIGHT)
         self._attach_marker_tooltip(tree, 'status')
+        self._attach_overflow_tooltip(tree, 'delays')
 
         _FINAL = {'Zakończony', 'Wstrzymany'}  # status z polskimi znakami (jak w bazie)
 
