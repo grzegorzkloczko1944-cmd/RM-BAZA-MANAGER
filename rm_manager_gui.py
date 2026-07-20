@@ -30309,30 +30309,32 @@ Kod: {unlock_code}
 
         tab_emp = tk.Frame(notebook)
         notebook.add(tab_emp, text="  👥  Pracownicy  ")
-        self._vacation_build_employees_tab(tab_emp, dlg)
+        emp_refresh = self._vacation_build_employees_tab(tab_emp, dlg)
 
         tab_abs = tk.Frame(notebook)
         notebook.add(tab_abs, text="  📋  Wnioski / Nieobecności  ")
-        self._vacation_build_absences_tab(tab_abs, dlg)
+        abs_refresh = self._vacation_build_absences_tab(tab_abs, dlg)
 
         tab_quota = tk.Frame(notebook)
         notebook.add(tab_quota, text="  📊  Pula urlopu  ")
-        self._vacation_build_quota_tab(tab_quota, dlg)
+        quota_refresh = self._vacation_build_quota_tab(tab_quota, dlg)
 
         tab_report = tk.Frame(notebook)
         notebook.add(tab_report, text="  🧾  Rozliczenie  ")
         report_refresh = self._vacation_build_report_tab(tab_report, dlg)
 
-        # Auto-przelicz Rozliczenie przy każdym wejściu na tę zakładkę — dzięki
-        # temu dodanie/edycja nieobecności od razu widać w saldach bez klikania
-        # "Przelicz".
+        # Auto-odśwież KAŻDĄ zakładkę przy wejściu na nią — zmiany zrobione w
+        # innej zakładce (dodanie wniosku, edycja pracownika, pula) są od razu
+        # widoczne, bez ręcznego odświeżania. Mapujemy po ikonie w tytule.
+        _tab_refresh = {'📆': cal_refresh, '👥': emp_refresh, '📋': abs_refresh,
+                        '📊': quota_refresh, '🧾': report_refresh}
+
         def _on_vac_tab_changed(_e=None):
             try:
                 txt = notebook.tab(notebook.select(), "text").strip()
-                if txt.startswith("🧾") and report_refresh:
-                    report_refresh()
-                elif txt.startswith("📆") and cal_refresh:
-                    cal_refresh()  # odśwież kalendarz po zmianach w innych zakładkach
+                fn = _tab_refresh.get(txt[:1])
+                if fn:
+                    fn()
             except Exception:
                 pass
         notebook.bind("<<NotebookTabChanged>>", _on_vac_tab_changed)
@@ -30404,6 +30406,8 @@ Kod: {unlock_code}
                 date_from=from_var.get() or None,
                 date_to=to_var.get() or None,
             )
+            # Najnowsze u góry (data „od" malejąco).
+            rows.sort(key=lambda r: r.get('date_from') or '', reverse=True)
             wanted = {'Oczekuje': 'OCZEKUJE', 'Zatwierdzony': 'ZATWIERDZONY',
                       'Odrzucony': 'ODRZUCONY'}.get(status_var.get())
             pending = 0
@@ -30470,6 +30474,7 @@ Kod: {unlock_code}
 
         tree.bind("<Double-1>", lambda e: _edit_selected())
         refresh()
+        return refresh
 
     def _vacation_edit_absence(self, parent_win, avid=None, on_saved=None,
                                preset_employee_id=None):
@@ -30896,6 +30901,7 @@ Kod: {unlock_code}
 
         tree.bind("<Double-1>", _on_double)
         refresh()
+        return refresh
 
     def _vacation_build_report_tab(self, parent, dlg):
         """Rozliczenie: suma dni wg typu + wykorzystany/pozostały urlop + eksport."""
@@ -31185,6 +31191,7 @@ Kod: {unlock_code}
         show_inactive.trace_add('write', refresh)
         tree.bind('<Double-1>', lambda e: _card())
         refresh()
+        return refresh
 
     def _employee_card(self, parent_win, employee_id, on_change=None):
         """Karta pracownika — wszystko w jednym miejscu: dane kontaktowe (edytowalne),
