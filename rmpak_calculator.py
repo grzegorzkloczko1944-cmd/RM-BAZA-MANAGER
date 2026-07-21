@@ -62,7 +62,7 @@ def _load_rmpak_items(project_con, supplier_ids):
     rows = project_con.execute(
         f"""SELECT id, COALESCE(work_name, src_name, ''), src_modul, price_pln,
                    COALESCE(calc_hours, 0), COALESCE(calc_material, 0), COALESCE(calc_extra, 0),
-                   COALESCE(work_qty, order_qty, 1),
+                   COALESCE(work_qty, order_qty, src_qty, 1),
                    COALESCE(work_drawing_no, src_drawing_no, ''),
                    COALESCE(calc_rate, 0),
                    COALESCE(ordered_flag, 0),
