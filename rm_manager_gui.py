@@ -32006,6 +32006,13 @@ Kod: {unlock_code}
             d_to = f"{midx_year:04d}-{midx_month:02d}-{ndays:02d}"
             avail = rmm.get_employee_availability(
                 self.rm_master_db_path, date_from=d_from, date_to=d_to)
+            # Dni robocze miesiąca (wg kalendarza firmowego) — tylko one liczą się
+            # do urlopu, więc tylko one malujemy kolorem nieobecności. Weekendy i
+            # święta zostają szare, nawet jeśli mieszczą się w zakresie urlopu.
+            try:
+                _workdays = set(rmm.get_working_days(self.rm_master_db_path, d_from, d_to))
+            except Exception:
+                _workdays = None  # fallback: maluj wszystko (jak dawniej)
             # Filtr statusów wg zaznaczonych checkboxów (domyślnie wszystkie).
             allowed_st = {s for s, v in status_vars.items() if v.get()}
             avail = [a for a in avail
@@ -32059,9 +32066,15 @@ Kod: {unlock_code}
                 header.create_text(x0 + CELL_W / 2, HDR_H * 0.75, text=str(dd),
                                    fill="white",
                                    font=("Segoe UI", 7, "bold") if is_today else ("Segoe UI", 7))
+                _iso = f"{midx_year:04d}-{midx_month:02d}-{dd:02d}"
+                _is_workday = (_workdays is None) or (_iso in _workdays)
                 for ri, e in enumerate(cal['emps']):
                     y0 = ri * ROW_H
                     cell = by_emp.get(e['id'], {}).get(gi)
+                    # Weekend/święto w zakresie urlopu — nie liczy się do urlopu,
+                    # więc nie malujemy kolorem nieobecności (zostaje szary).
+                    if cell and not _is_workday:
+                        cell = None
                     if cell:
                         code, st = cell
                         c = self.ABSENCE_CAL_COLORS.get(code, '#999')
