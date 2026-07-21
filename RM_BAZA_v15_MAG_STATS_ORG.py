@@ -196,6 +196,16 @@ class MainWindow(tk.Tk):
         
         self.title("RM_BAZA_v15_MAG_C_CHAT_STATS")
         self.geometry("1400x800")
+
+        # Ikona okna (pasek zadań/tytuł). Onefile rozpakowuje datas do sys._MEIPASS,
+        # ze zrodel ikona lezy obok pliku .py. Brak pliku nie moze wywalic startu.
+        try:
+            _base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+            _icon_path = os.path.join(_base, "rm_baza_icon.ico")
+            if os.path.exists(_icon_path):
+                self.iconbitmap(_icon_path)
+        except Exception as _e:
+            print(f"⚠️  Nie udalo sie ustawic ikony okna: {_e}")
         
         # Single instance lock
         self.app_lock_file = None
