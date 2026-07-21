@@ -2432,7 +2432,8 @@ class RMManagerGUI:
             # Zachowaj ustawienia SMS + klucz API AI (jeśli są w self.config)
             if hasattr(self, 'config'):
                 for key in ['sms_enabled', 'sms_api_token', 'sms_sender_name',
-                            'sms_default_country_code', 'ai_api_key']:
+                            'sms_default_country_code', 'ai_api_key',
+                            'service_chart_prefs']:
                     if key in self.config:
                         config[key] = self.config[key]
             
@@ -31795,7 +31796,7 @@ Kod: {unlock_code}
                              template_start, template_end}, ... ]}
         Serwisanci = pracownicy kategorii 'Serwis'.
         """
-        codes = set(stage_filter) if stage_filter else set(self.SERVICE_STAGE_CODES)
+        codes = set(stage_filter) if stage_filter is not None else set(self.SERVICE_STAGE_CODES)
         meta = self._service_stage_meta()
 
         # Serwisanci (kategoria 'Serwis') — tylko ich etapy nas interesują.
@@ -31837,6 +31838,15 @@ Kod: {unlock_code}
                             emp_ids.add(eid)
                     except Exception:
                         pass
+                    # Brak własnego przypisania (SAT) → pokaż u serwisanta
+                    # przypisanego do rodzica ODBIORY.
+                    if not emp_ids:
+                        try:
+                            staff = rmm.get_stage_assigned_staff(
+                                pdb, self.rm_master_db_path, pid, 'ODBIORY')
+                            emp_ids = {s['employee_id'] for s in staff}
+                        except Exception:
+                            pass
                 else:
                     try:
                         staff = rmm.get_stage_assigned_staff(
@@ -31952,6 +31962,10 @@ Kod: {unlock_code}
         stage_meta = self._service_stage_meta()
         stagebar = tk.Frame(parent, padx=8, pady=2)
         stagebar.pack(fill=tk.X)
+        show_a_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(stagebar, text="Pokaż A", variable=show_a_var,
+                       font=self.FONT_SMALL,
+                       command=lambda: _redraw()).pack(side=tk.LEFT, padx=(0, 10))
         tk.Label(stagebar, text="Etapy (A):", font=self.FONT_SMALL).pack(side=tk.LEFT, padx=(0, 2))
         stage_vars = {c: tk.BooleanVar(value=True) for c in self.SERVICE_STAGE_CODES}
         for c in self.SERVICE_STAGE_CODES:
@@ -31960,30 +31974,64 @@ Kod: {unlock_code}
                            font=self.FONT_SMALL,
                            command=lambda: _reload_lineA()).pack(side=tk.LEFT)
 
+        def _set_all_stage(val):
+            for v in stage_vars.values():
+                v.set(val)
+            _reload_lineA()
+
+        tk.Button(stagebar, text="Zaznacz wszystko", font=self.FONT_SMALL, padx=4,
+                  command=lambda: _set_all_stage(True)).pack(side=tk.LEFT, padx=(8, 2))
+        tk.Button(stagebar, text="Odznacz wszystko", font=self.FONT_SMALL, padx=4,
+                  command=lambda: _set_all_stage(False)).pack(side=tk.LEFT, padx=2)
+
         # ── Okno czasowe linii A ──
         # Wiersz A dla projektu powstaje tylko gdy projekt ma etap serwisowy
         # w oknie [dziś − wstecz, dziś + wprzód]. Bez tego serwisant z wieloma
         # projektami w roku dawałby dziesiątki wierszy. Filtrujemy przy budowie
         # wierszy (dane A z cache), więc zmiana okna = tylko _redraw (tanie).
-        tk.Label(stagebar, text="   Okno A:  wstecz", font=self.FONT_SMALL).pack(side=tk.LEFT)
-        back_var = tk.StringVar(value="7")
-        _back_e = tk.Entry(stagebar, textvariable=back_var, width=4, font=self.FONT_SMALL,
+        winbar = tk.Frame(parent, padx=8, pady=2)
+        winbar.pack(fill=tk.X)
+        _svc_prefs = self.config.get('service_chart_prefs', {}) if hasattr(self, 'config') else {}
+        tk.Label(winbar, text="Okno A:  wstecz", font=self.FONT_SMALL).pack(side=tk.LEFT)
+        back_var = tk.StringVar(value=str(_svc_prefs.get('win_back', 7)))
+        _back_e = tk.Entry(winbar, textvariable=back_var, width=4, font=self.FONT_SMALL,
                            justify='center')
         _back_e.pack(side=tk.LEFT, padx=2)
-        tk.Label(stagebar, text="dni,  w przód", font=self.FONT_SMALL).pack(side=tk.LEFT)
-        fwd_var = tk.StringVar(value="30")
-        _fwd_e = tk.Entry(stagebar, textvariable=fwd_var, width=4, font=self.FONT_SMALL,
+        tk.Label(winbar, text="dni,  w przód", font=self.FONT_SMALL).pack(side=tk.LEFT)
+        fwd_var = tk.StringVar(value=str(_svc_prefs.get('win_fwd', 30)))
+        _fwd_e = tk.Entry(winbar, textvariable=fwd_var, width=4, font=self.FONT_SMALL,
                           justify='center')
         _fwd_e.pack(side=tk.LEFT, padx=2)
+
+        def _save_svc_prefs():
+            if not hasattr(self, 'config'):
+                return
+            try:
+                b = int(back_var.get())
+            except ValueError:
+                b = 7
+            try:
+                f = int(fwd_var.get())
+            except ValueError:
+                f = 30
+            self.config['service_chart_prefs'] = {
+                'win_back': b, 'win_fwd': f, 'win_all': win_all_var.get(),
+            }
+            self.save_config()
+
+        def _redraw_and_save():
+            _save_svc_prefs()
+            _redraw()
+
         for _e in (_back_e, _fwd_e):
-            _e.bind('<Return>', lambda ev: _redraw())
-            _e.bind('<FocusOut>', lambda ev: _redraw())
-        tk.Label(stagebar, text="dni", font=self.FONT_SMALL).pack(side=tk.LEFT)
-        win_all_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(stagebar, text="pokaż wszystkie", variable=win_all_var,
+            _e.bind('<Return>', lambda ev: _redraw_and_save())
+            _e.bind('<FocusOut>', lambda ev: _redraw_and_save())
+        tk.Label(winbar, text="dni", font=self.FONT_SMALL).pack(side=tk.LEFT)
+        win_all_var = tk.BooleanVar(value=bool(_svc_prefs.get('win_all', False)))
+        tk.Checkbutton(winbar, text="pokaż wszystkie", variable=win_all_var,
                        font=self.FONT_SMALL,
-                       command=lambda: _redraw()).pack(side=tk.LEFT, padx=(6, 0))
-        tk.Button(stagebar, text="↻", font=self.FONT_SMALL, padx=4,
+                       command=lambda: _redraw_and_save()).pack(side=tk.LEFT, padx=(6, 0))
+        tk.Button(winbar, text="↻", font=self.FONT_SMALL, padx=4,
                   command=lambda: _redraw()).pack(side=tk.LEFT, padx=3)
 
         def _window_range():
@@ -32004,18 +32052,41 @@ Kod: {unlock_code}
         # ── Filtr typów wyjazdu (B) + statusów ──
         tripbar = tk.Frame(parent, padx=8, pady=2)
         tripbar.pack(fill=tk.X)
+        show_b_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(tripbar, text="Pokaż B", variable=show_b_var,
+                       font=self.FONT_SMALL,
+                       command=lambda: _redraw()).pack(side=tk.LEFT, padx=(0, 10))
         tk.Label(tripbar, text="Wyjazdy (B):", font=self.FONT_SMALL).pack(side=tk.LEFT, padx=(0, 2))
         trip_vars = {t['code']: tk.BooleanVar(value=True) for t in rmm.SERVICE_TRIP_TYPES}
         for t in rmm.SERVICE_TRIP_TYPES:
             box = tk.Frame(tripbar)
             box.pack(side=tk.LEFT, padx=2)
-            tk.Label(box, text="  ", bg=t['color']).pack(side=tk.LEFT)
             tk.Checkbutton(box, text=t['label'], variable=trip_vars[t['code']],
                            font=self.FONT_SMALL,
                            command=lambda: _redraw()).pack(side=tk.LEFT)
+
+        def _set_all_trip(val):
+            for v in trip_vars.values():
+                v.set(val)
+            _redraw()
+
+        tk.Button(tripbar, text="Zaznacz wszystko", font=self.FONT_SMALL, padx=4,
+                  command=lambda: _set_all_trip(True)).pack(side=tk.LEFT, padx=(8, 2))
+        tk.Button(tripbar, text="Odznacz wszystko", font=self.FONT_SMALL, padx=4,
+                  command=lambda: _set_all_trip(False)).pack(side=tk.LEFT, padx=2)
+
+        # ── Legenda statusów (B) + opcje dodatkowe ──
+        legendbar = tk.Frame(parent, padx=8, pady=2)
+        legendbar.pack(fill=tk.X)
+        tk.Label(legendbar, text="Status:", font=self.FONT_SMALL).pack(side=tk.LEFT, padx=(0, 2))
+        for status in rmm.SERVICE_TRIP_STATUSES:
+            box = tk.Frame(legendbar)
+            box.pack(side=tk.LEFT, padx=2)
+            tk.Label(box, text="  ", bg=rmm.SERVICE_TRIP_STATUS_COLORS.get(status, '#7f8c8d')).pack(side=tk.LEFT)
+            tk.Label(box, text=status.capitalize(), font=self.FONT_SMALL).pack(side=tk.LEFT)
         # opcja: pokaż tylko serwisantów mających cokolwiek (A lub B)
         only_active = tk.BooleanVar(value=True)
-        tk.Checkbutton(tripbar, text="tylko z planem/wyjazdem", variable=only_active,
+        tk.Checkbutton(legendbar, text="tylko z planem/wyjazdem", variable=only_active,
                        font=self.FONT_SMALL,
                        command=lambda: _redraw()).pack(side=tk.LEFT, padx=(10, 0))
 
@@ -32068,6 +32139,7 @@ Kod: {unlock_code}
             'tips': {},       # (day_index, row) -> tekst tooltipa
             'trip_at': {},    # (day_index, row) -> trip_id (klik → edycja)
             'collide_days': {},  # emp_id -> set(day_index) kolizji B∩milestone
+            'collide_labels': {},  # (emp_id, day_index) -> [etykiety milestone'ów]
         }
 
         def _idx_to_date(idx):
@@ -32144,39 +32216,49 @@ Kod: {unlock_code}
                     if ent['project_id'] not in seen:
                         seen.add(ent['project_id'])
                         proj_ids.append(ent['project_id'])
+                show_a = show_a_var.get()
+                show_b = show_b_var.get()
                 has_trips = eid in trips_by_emp
+                # only_active patrzy na realne dane, niezależnie od tego czy
+                # A/B jest akurat ukryte przełącznikiem Pokaż A / Pokaż B.
                 if only_active.get() and not proj_ids and not has_trips:
                     continue
+                if not show_a:
+                    proj_ids = []
                 # Wiersz-nagłówek pracownika (samo nazwisko) — osobny, żeby nazwa
                 # nie nachodziła na etykiety projektów.
                 rows.append({'emp_id': eid, 'emp_name': e['name'], 'kind': 'H',
                              'project_id': None, 'sub_label': ""})
                 # Wiersze A — jeden na projekt
-                for pid in proj_ids:
-                    pname = self.project_names.get(pid, f"P{pid}")
-                    rows.append({'emp_id': eid, 'emp_name': e['name'], 'kind': 'A',
-                                 'project_id': pid,
-                                 'sub_label': f"▸ {pname[:26]}"})
+                if show_a:
+                    for pid in proj_ids:
+                        pname = self.project_names.get(pid, f"P{pid}")
+                        rows.append({'emp_id': eid, 'emp_name': e['name'], 'kind': 'A',
+                                     'project_id': pid,
+                                     'sub_label': f"▸ {pname[:26]}"})
                 # Wiersz B — zawsze (chyba że filtr only_active i brak czegokolwiek)
-                rows.append({'emp_id': eid, 'emp_name': e['name'], 'kind': 'B',
-                             'project_id': None, 'sub_label': "✈ wyjazdy"})
+                if show_b:
+                    rows.append({'emp_id': eid, 'emp_name': e['name'], 'kind': 'B',
+                                 'project_id': None, 'sub_label': "✈ wyjazdy"})
             sv['rows'] = rows
             _compute_collisions()
 
         def _compute_collisions():
             """emp_id -> set(day_index) gdzie wyjazd B nachodzi na milestone A."""
             sv['collide_days'] = {}
-            # dni milestone'ów per pracownik
+            sv['collide_labels'] = {}  # (emp_id, day_index) -> [etykiety milestone'ów]
+            # dni milestone'ów per pracownik (+ etykieta projekt/etap)
             ms_days = {}
             for eid, entries in sv['lineA'].items():
-                dd = set()
+                dd = {}
                 for ent in entries:
                     if not ent['is_milestone']:
                         continue
                     s = ent.get('forecast_start') or ent.get('template_start')
                     en = ent.get('forecast_end') or ent.get('template_end') or s
+                    lbl = f"{ent['project_name']} — {ent['stage_label']}"
                     for gi in _iter_day_idx(s, en):
-                        dd.add(gi)
+                        dd.setdefault(gi, []).append(lbl)
                 if dd:
                     ms_days[eid] = dd
             # dni wyjazdów per pracownik
@@ -32187,6 +32269,7 @@ Kod: {unlock_code}
                 for gi in _iter_day_idx(t.get('date_from'), t.get('date_to')):
                     if gi in ms_days[eid]:
                         sv['collide_days'].setdefault(eid, set()).add(gi)
+                        sv['collide_labels'][(eid, gi)] = ms_days[eid][gi]
 
         def _iter_day_idx(d_from, d_to):
             """Iteruj day_index od d_from do d_to (ISO)."""
@@ -32280,6 +32363,9 @@ Kod: {unlock_code}
                 if r['kind'] == 'A':
                     entries = [e for e in sv['lineA'].get(r['emp_id'], [])
                                if e['project_id'] == r['project_id']]
+                    # Etapy najpierw, milestone'y na wierzchu — gdy pokrywają
+                    # się w tym samym dniu, milestone ma być widoczny.
+                    entries.sort(key=lambda e: bool(e['is_milestone']))
                     for ent in entries:
                         _paint_stage(ri, y0, ent, m_lo, m_hi)
                 else:  # B
@@ -32289,7 +32375,7 @@ Kod: {unlock_code}
                             continue
                         if t['trip_type'] not in active_trip_types:
                             continue
-                        _paint_trip(ri, y0, t, m_lo, m_hi, coll)
+                        _paint_trip(ri, y0, t, m_lo, m_hi, coll, r['emp_id'])
 
         def _paint_stage(ri, y0, ent, m_lo, m_hi):
             f_s = ent.get('forecast_start')
@@ -32323,13 +32409,15 @@ Kod: {unlock_code}
                         grid.create_rectangle(x0, y0 + 3, x0 + CELL_W, y0 + ROW_H - 3,
                                               fill=color, outline="#bdc3c7")
                     key = (gi, ri)
-                    sv['tips'][key] = (
+                    desc = (
                         f"{ent['project_name']}\n{ent['stage_label']}"
                         f"{'  (milestone)' if is_ms else ''}\n"
                         f"Prognoza: {self.format_date_ddmmyyyy(f_s)} → {self.format_date_ddmmyyyy(f_e)}")
+                    prev = sv['tips'].get(key)
+                    sv['tips'][key] = f"{prev}\n───\n{desc}" if prev else desc
 
-        def _paint_trip(ri, y0, t, m_lo, m_hi, coll):
-            color = rmm.SERVICE_TRIP_TYPE_BY_CODE.get(t['trip_type'], {}).get('color', '#7f8c8d')
+        def _paint_trip(ri, y0, t, m_lo, m_hi, coll, eid):
+            color = rmm.SERVICE_TRIP_STATUS_COLORS.get(t.get('status'), '#7f8c8d')
             tlabel = rmm.SERVICE_TRIP_TYPE_BY_CODE.get(t['trip_type'], {}).get('label', t['trip_type'])
             for gi in _iter_day_idx(t.get('date_from'), t.get('date_to')):
                 if not (m_lo <= gi < m_hi):
@@ -32346,12 +32434,19 @@ Kod: {unlock_code}
                 key = (gi, ri)
                 sv['trip_at'][key] = t['id']
                 place = t.get('client_or_place') or '—'
+                coll_txt = ""
+                if is_coll:
+                    labels = sv.get('collide_labels', {}).get((eid, gi), [])
+                    if labels:
+                        coll_txt = "\n⚠ KOLIZJA z: " + "; ".join(labels)
+                    else:
+                        coll_txt = "\n⚠ KOLIZJA z milestone'em!"
                 sv['tips'][key] = (
                     f"✈ {tlabel}: {place}\n"
                     f"{self.format_date_ddmmyyyy(t.get('date_from'))} → "
                     f"{self.format_date_ddmmyyyy(t.get('date_to'))}\n"
                     f"Status: {t.get('status', '')}"
-                    + ("\n⚠ KOLIZJA z milestone'em!" if is_coll else "")
+                    + coll_txt
                     + "\n(klik = edytuj)")
 
         def _update_scrollregion():

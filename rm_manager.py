@@ -9945,6 +9945,11 @@ SERVICE_TRIP_TYPE_CODES = [t['code'] for t in SERVICE_TRIP_TYPES]
 SERVICE_TRIP_TYPE_BY_CODE = {t['code']: t for t in SERVICE_TRIP_TYPES}
 # Statusy wyjazdu.
 SERVICE_TRIP_STATUSES = ['PLANOWANY', 'POTWIERDZONY', 'ZREALIZOWANY']
+SERVICE_TRIP_STATUS_COLORS = {
+    'PLANOWANY':    '#f1c40f',
+    'POTWIERDZONY': '#3498db',
+    'ZREALIZOWANY': '#27ae60',
+}
 
 
 def get_service_trips(rm_master_db_path: str, employee_id: int = None,
