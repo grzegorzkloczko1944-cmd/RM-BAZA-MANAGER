@@ -17133,15 +17133,19 @@ class RMManagerGUI:
             ('year_current', 'Bieżący rok'),
             ('custom', 'Zakres dat...'),
         ]
-        time_menu = tk.OptionMenu(row3, time_filter_var, *[k for k, _ in time_options],
-                                   command=lambda _: on_time_filter_change())
+        _time_key_to_label = dict(time_options)
+        time_display_var = tk.StringVar(value=_time_key_to_label['all'])
+        time_menu = tk.OptionMenu(row3, time_display_var, *[lbl for _, lbl in time_options])
         time_menu.config(font=("Arial", 9), width=18)
         time_menu.pack(side=tk.LEFT, padx=3)
-        # Ustaw etykiety menu
+        # Ustaw etykiety menu — wpis do menu ustawia zarówno klucz (logika),
+        # jak i etykietę (co widać na przycisku), żeby OptionMenu nie pokazywał
+        # surowego klucza (np. "h_current") zamiast czytelnego opisu.
         menu = time_menu['menu']
         menu.delete(0, tk.END)
         for key, label in time_options:
-            menu.add_command(label=label, command=lambda k=key: (time_filter_var.set(k), on_time_filter_change()))
+            menu.add_command(label=label, command=lambda k=key, lbl=label: (
+                time_filter_var.set(k), time_display_var.set(lbl), on_time_filter_change()))
         
         # Custom date range
         date_frame = tk.Frame(row3)
@@ -17363,8 +17367,8 @@ class RMManagerGUI:
             
             # Odśwież scroll region
             inner.update_idletasks()
-            canvas_sel.configure(scrollregion=canvas_sel.bbox("all"))
-            
+            _update_scrollregion_sel()
+
             # Aktualizuj nagłówki
             update_header_labels()
         
@@ -17388,7 +17392,7 @@ class RMManagerGUI:
                 for pid in sorted_pids:
                     row_widgets[pid].pack(fill=tk.X)
                 inner.update_idletasks()
-                canvas_sel.configure(scrollregion=canvas_sel.bbox("all"))
+                _update_scrollregion_sel()
                 return
 
             # Funkcja pobierania wartości sortowania
@@ -17441,8 +17445,8 @@ class RMManagerGUI:
             
             # Odśwież scroll region
             inner.update_idletasks()
-            canvas_sel.configure(scrollregion=canvas_sel.bbox("all"))
-        
+            _update_scrollregion_sel()
+
         # Przyciski nagłówków z sortowaniem
         for col, label, width in [
             ('name', 'Projekt', 38),
@@ -17469,7 +17473,26 @@ class RMManagerGUI:
         canvas_sel = tk.Canvas(outer, highlightthickness=0)
         scrollbar = tk.Scrollbar(outer, orient="vertical", command=canvas_sel.yview)
         inner = tk.Frame(canvas_sel)
-        inner.bind("<Configure>", lambda e: canvas_sel.configure(scrollregion=canvas_sel.bbox("all")))
+
+        def _update_scrollregion_sel():
+            """Ustaw scrollregion, ale nie mniejszy niż widoczna wysokość canvasa —
+            inaczej przy krótkiej liście (mniej pozycji niż miejsca) scrollbar
+            i tak pozwala 'scrollować w pustkę' i lista się rozjeżdża."""
+            canvas_sel.update_idletasks()
+            bbox = canvas_sel.bbox("all")
+            visible_h = canvas_sel.winfo_height()
+            if bbox:
+                content_h = bbox[3] - bbox[1]
+                if content_h <= visible_h:
+                    canvas_sel.configure(scrollregion=(0, 0, bbox[2], visible_h))
+                    canvas_sel.yview_moveto(0)
+                else:
+                    canvas_sel.configure(scrollregion=bbox)
+            else:
+                canvas_sel.configure(scrollregion=(0, 0, 0, visible_h))
+
+        inner.bind("<Configure>", lambda e: _update_scrollregion_sel())
+        canvas_sel.bind("<Configure>", lambda e: _update_scrollregion_sel())
         canvas_sel.create_window((0, 0), window=inner, anchor="nw")
         canvas_sel.configure(yscrollcommand=scrollbar.set)
         canvas_sel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -17784,8 +17807,8 @@ class RMManagerGUI:
             
             # Odśwież scroll region
             inner.update_idletasks()
-            canvas_sel.configure(scrollregion=canvas_sel.bbox("all"))
-            
+            _update_scrollregion_sel()
+
             # Pokaż ile zaznaczono
             count = sum(1 for v in check_vars.values() if v.get())
             count_label.config(text=f"Zaznaczono: {count} / {len(self.projects)} projektów")
@@ -30408,11 +30431,15 @@ Kod: {unlock_code}
         notebook.add(tab_now, text="  📍  Stan obecny  ")
         now_refresh = self._vacation_build_now_tab(tab_now, dlg)
 
+        tab_parser = tk.Frame(notebook)
+        notebook.add(tab_parser, text="  🚫  Parser  ")
+        parser_refresh = self._vacation_build_parser_tab(tab_parser, dlg)
+
         # Auto-odśwież KAŻDĄ zakładkę przy wejściu na nią — zmiany zrobione w
         # innej zakładce (dodanie wniosku, edycja pracownika, pula) są od razu
         # widoczne, bez ręcznego odświeżania. Mapujemy po ikonie w tytule.
         _tab_refresh = {'📍': now_refresh, '📆': cal_refresh, '👥': emp_refresh, '📋': abs_refresh,
-                        '📊': quota_refresh, '🧾': report_refresh}
+                        '📊': quota_refresh, '🧾': report_refresh, '🚫': parser_refresh}
 
         def _on_vac_tab_changed(_e=None):
             try:
@@ -30423,6 +30450,161 @@ Kod: {unlock_code}
             except Exception:
                 pass
         notebook.bind("<<NotebookTabChanged>>", _on_vac_tab_changed)
+
+    def _vacation_build_parser_tab(self, parent, dlg):
+        """Zakładka „Parser" — grupy pracowników, którzy nie mogą być na
+        urlopie/nieobecni jednocześnie (np. jedyni dwaj znający dany proces).
+
+        Egzekwowane jako ostrzeżenie (nie blokada) przy zapisie wniosku
+        w zakładce „Wnioski / Nieobecności" (patrz check_absence_exclusion_conflicts).
+        """
+        bar = tk.Frame(parent, padx=8, pady=6)
+        bar.pack(fill=tk.X)
+        tk.Button(bar, text="➕ Nowa grupa", bg=self.COLOR_GREEN, fg="white",
+                  font=self.FONT_BOLD, padx=10,
+                  command=lambda: _edit(None)).pack(side=tk.LEFT, padx=2)
+        tk.Button(bar, text="✏ Edytuj", font=self.FONT_SMALL, padx=10,
+                  command=lambda: _edit_sel()).pack(side=tk.LEFT, padx=2)
+        tk.Button(bar, text="🗑 Usuń", fg="#c0392b", font=self.FONT_SMALL, padx=10,
+                  command=lambda: _del_sel()).pack(side=tk.LEFT, padx=2)
+        tk.Label(parent, text="Grupy pracowników, którzy NIE mogą być nieobecni "
+                "(urlop/L4/itd.) w tym samym czasie. Sprawdzane jako ostrzeżenie "
+                "przy zapisie wniosku, nie jako twarda blokada.",
+                font=self.FONT_SMALL, fg="#666", anchor='w', justify=tk.LEFT,
+                wraplength=700).pack(fill=tk.X, padx=10, pady=(0, 6))
+
+        cols = ('id', 'name', 'members')
+        tree = ttk.Treeview(parent, columns=cols, show='headings', height=18)
+        tree.heading('id', text='ID'); tree.column('id', width=40, stretch=False)
+        tree.heading('name', text='Nazwa grupy'); tree.column('name', width=220)
+        tree.heading('members', text='Członkowie'); tree.column('members', width=500)
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        def _reload():
+            tree.delete(*tree.get_children())
+            try:
+                groups = rmm.get_absence_exclusion_groups(self.rm_master_db_path)
+            except Exception:
+                groups = []
+            for g in groups:
+                members = ", ".join(m['employee_name'] for m in g['members'])
+                tree.insert('', tk.END, iid=str(g['id']), values=(g['id'], g['name'], members))
+
+        def _edit_sel():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Uwaga", "Wybierz grupę.", parent=dlg)
+                return
+            _edit(int(sel[0]))
+
+        def _del_sel():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Uwaga", "Wybierz grupę.", parent=dlg)
+                return
+            if not messagebox.askyesno("Usuń", "Usunąć zaznaczoną grupę?", parent=dlg):
+                return
+            try:
+                rmm.delete_absence_exclusion_group(self.rm_master_db_path, int(sel[0]))
+            except Exception as e:
+                messagebox.showerror("Błąd", str(e), parent=dlg)
+            _reload()
+
+        def _edit(group_id):
+            existing = None
+            if group_id:
+                for g in rmm.get_absence_exclusion_groups(self.rm_master_db_path):
+                    if g['id'] == group_id:
+                        existing = g
+                        break
+
+            win = tk.Toplevel(dlg)
+            win.title("Grupa wykluczająca" + (" — edycja" if existing else " — nowa"))
+            win.transient(dlg)
+            win.grab_set()
+            win.resizable(False, False)
+
+            frm = tk.Frame(win, padx=14, pady=12)
+            frm.pack(fill=tk.BOTH, expand=True)
+
+            tk.Label(frm, text="Nazwa grupy:", font=self.FONT_BOLD).grid(
+                row=0, column=0, sticky='w', pady=3)
+            name_var = tk.StringVar(value=existing['name'] if existing else '')
+            tk.Entry(frm, textvariable=name_var, width=36, font=self.FONT_SMALL
+                     ).grid(row=0, column=1, sticky='we', pady=3)
+
+            tk.Label(frm, text="Członkowie (min. 2):", font=self.FONT_BOLD).grid(
+                row=1, column=0, sticky='nw', pady=3)
+            emp_list = rmm.get_employees(self.rm_master_db_path, active_only=True)
+            emp_list.sort(key=lambda e: (e.get('category') or '', e['name']))
+            existing_ids = {m['employee_id'] for m in existing['members']} if existing else set()
+
+            box = tk.Frame(frm, relief=tk.SUNKEN, bd=1)
+            box.grid(row=1, column=1, sticky='we', pady=3)
+            canvas = tk.Canvas(box, height=220, highlightthickness=0)
+            vsb2 = ttk.Scrollbar(box, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=vsb2.set)
+            vsb2.pack(side=tk.RIGHT, fill=tk.Y)
+            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            inner = tk.Frame(canvas)
+            canvas.create_window((0, 0), window=inner, anchor='nw')
+            inner.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+
+            def _on_mousewheel(ev):
+                canvas.yview_scroll(int(-1 * (ev.delta / 120)), "units")
+            canvas.bind('<Enter>', lambda e: canvas.bind_all('<MouseWheel>', _on_mousewheel))
+            canvas.bind('<Leave>', lambda e: canvas.unbind_all('<MouseWheel>'))
+
+            check_vars = {}
+            _last_cat = None
+            for e in emp_list:
+                cat = e.get('category') or 'Bez kategorii'
+                if cat != _last_cat:
+                    tk.Label(inner, text=cat, font=self.FONT_BOLD, fg="#2c3e50",
+                            anchor='w').pack(fill=tk.X, anchor='w', pady=(6 if _last_cat else 2, 1))
+                    _last_cat = cat
+                v = tk.BooleanVar(value=(e['id'] in existing_ids))
+                check_vars[e['id']] = v
+                tk.Checkbutton(inner, text=e['name'], variable=v, font=self.FONT_SMALL,
+                              anchor='w').pack(fill=tk.X, anchor='w', padx=(12, 0))
+
+            frm.columnconfigure(1, weight=1)
+
+            def _save():
+                name = name_var.get().strip()
+                if not name:
+                    messagebox.showwarning("Uwaga", "Podaj nazwę grupy.", parent=win)
+                    return
+                selected = [eid for eid, v in check_vars.items() if v.get()]
+                if len(selected) < 2:
+                    messagebox.showwarning("Uwaga", "Wybierz co najmniej 2 pracowników.", parent=win)
+                    return
+                try:
+                    rmm.save_absence_exclusion_group(
+                        self.rm_master_db_path, name, selected,
+                        group_id=existing['id'] if existing else None,
+                        user=getattr(self, 'current_user', None))
+                except Exception as e:
+                    messagebox.showerror("Błąd zapisu", str(e), parent=win)
+                    return
+                win.destroy()
+                _reload()
+
+            btn_row = tk.Frame(frm)
+            btn_row.grid(row=2, column=0, columnspan=2, pady=(12, 0))
+            tk.Button(btn_row, text="💾 Zapisz", command=_save, bg=self.COLOR_GREEN,
+                     fg="white", font=self.FONT_BOLD, padx=15).pack(side=tk.LEFT, padx=5)
+            tk.Button(btn_row, text="Anuluj", command=win.destroy,
+                     font=self.FONT_DEFAULT, padx=10).pack(side=tk.LEFT, padx=5)
+
+            self._center_window(win, 480, 400)
+
+        tree.bind("<Double-1>", lambda e: _edit_sel())
+        _reload()
+        return _reload
 
     def _vacation_build_now_tab(self, parent, dlg):
         """Zakładka „Stan obecny" — kto jest dziś nieobecny + najbliższe
@@ -30986,6 +31168,28 @@ Kod: {unlock_code}
                     "\n\nNie można wpisać dwóch nieobecności na te same dni.",
                     parent=ed)
                 return
+
+            # Grupy wykluczające (zakładka Parser) — ostrzeżenie, nie blokada:
+            # inny pracownik z tej samej grupy nie może być nieobecny równocześnie.
+            try:
+                excl_conflicts = rmm.check_absence_exclusion_conflicts(
+                    self.rm_master_db_path, eid, df_iso, dt_iso,
+                    exclude_availability_id=avid)
+            except Exception:
+                excl_conflicts = []
+            if excl_conflicts:
+                lst = "\n".join(
+                    f"  • [{c['group_name']}] {c['employee_name']}: "
+                    f"{self.format_date_ddmmyyyy(c['date_from'])}–"
+                    f"{self.format_date_ddmmyyyy(c['date_to'])}  "
+                    f"({self.REASON_LABELS.get((c['reason'] or '').upper(), c['reason'])})"
+                    for c in excl_conflicts)
+                if not messagebox.askyesno(
+                        "⚠ Konflikt grupy wykluczającej",
+                        "Ten pracownik jest w grupie (zakładka Parser), która nie może "
+                        "być nieobecna jednocześnie.\nKoliduje z:\n\n" + lst +
+                        "\n\nZapisać mimo to?", icon='warning', parent=ed):
+                    return
 
             save_data = {
                 'employee_id': eid,
@@ -32214,7 +32418,7 @@ Kod: {unlock_code}
             tk.Label(box, text="  ", bg=rmm.SERVICE_TRIP_STATUS_COLORS.get(status, '#7f8c8d')).pack(side=tk.LEFT)
             tk.Label(box, text=status.capitalize(), font=self.FONT_SMALL).pack(side=tk.LEFT)
         # opcja: pokaż tylko serwisantów mających cokolwiek (A lub B)
-        only_active = tk.BooleanVar(value=True)
+        only_active = tk.BooleanVar(value=False)
         tk.Checkbutton(legendbar, text="tylko z planem/wyjazdem", variable=only_active,
                        font=self.FONT_SMALL,
                        command=lambda: _redraw()).pack(side=tk.LEFT, padx=(10, 0))

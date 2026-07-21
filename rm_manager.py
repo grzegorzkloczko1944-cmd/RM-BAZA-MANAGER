@@ -707,6 +707,30 @@ def ensure_rm_master_tables(master_db_path: str):
     con.execute("CREATE INDEX IF NOT EXISTS idx_service_trips_employee ON service_trips(employee_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_service_trips_dates ON service_trips(date_from, date_to)")
 
+    # Grupy pracowników, którzy nie mogą być na urlopie równocześnie (np. jedyni
+    # dwaj ludzie znający dany proces). Egzekwowane jako ostrzeżenie (nie twarda
+    # blokada) przy składaniu/zatwierdzaniu wniosku urlopowego.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS absence_exclusion_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_by TEXT
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS absence_exclusion_members (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL,
+            employee_id INTEGER NOT NULL,
+            FOREIGN KEY (group_id) REFERENCES absence_exclusion_groups(id) ON DELETE CASCADE,
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+            UNIQUE (group_id, employee_id)
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_abs_excl_members_group ON absence_exclusion_members(group_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_abs_excl_members_emp ON absence_exclusion_members(employee_id)")
+
     # Dni wolne / kalendarz firmy
     con.execute("""
         CREATE TABLE IF NOT EXISTS company_calendar (
@@ -9803,6 +9827,127 @@ def get_employee_availability(rm_master_db_path: str, employee_id: int = None,
             ORDER BY ea.date_from
         """, params).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+# ============================================================================
+# GRUPY WYKLUCZAJĄCE SIĘ URLOPY ("Parser") — pracownicy, którzy nie mogą być
+# na urlopie/nieobecni jednocześnie (np. jedyni dwaj znający dany proces).
+# ============================================================================
+
+def get_absence_exclusion_groups(rm_master_db_path: str) -> List[Dict]:
+    """Lista grup wykluczających się z listą członków (employee_id + name)."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        groups = con.execute(
+            "SELECT * FROM absence_exclusion_groups ORDER BY name").fetchall()
+        result = []
+        for g in groups:
+            members = con.execute("""
+                SELECT m.employee_id, e.name AS employee_name
+                FROM absence_exclusion_members m
+                JOIN employees e ON e.id = m.employee_id
+                WHERE m.group_id = ?
+                ORDER BY e.name
+            """, (g['id'],)).fetchall()
+            result.append({
+                'id': g['id'], 'name': g['name'],
+                'members': [dict(m) for m in members],
+            })
+        return result
+    finally:
+        con.close()
+
+
+def save_absence_exclusion_group(rm_master_db_path: str, name: str,
+                                 employee_ids: List[int], group_id: int = None,
+                                 user: str = None) -> int:
+    """Utwórz lub zaktualizuj grupę wykluczającą (nazwa + lista pracowników)."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        if group_id:
+            con.execute("UPDATE absence_exclusion_groups SET name = ? WHERE id = ?",
+                       (name, group_id))
+            con.execute("DELETE FROM absence_exclusion_members WHERE group_id = ?", (group_id,))
+        else:
+            cur = con.execute(
+                "INSERT INTO absence_exclusion_groups (name, created_by) VALUES (?, ?)",
+                (name, user))
+            group_id = cur.lastrowid
+        for eid in set(employee_ids):
+            con.execute("""
+                INSERT OR IGNORE INTO absence_exclusion_members (group_id, employee_id)
+                VALUES (?, ?)
+            """, (group_id, eid))
+        _rm_safe_commit(con)
+        return group_id
+    finally:
+        con.close()
+
+
+def delete_absence_exclusion_group(rm_master_db_path: str, group_id: int):
+    """Usuń grupę wykluczającą (kaskadowo usuwa jej członków)."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        con.execute("DELETE FROM absence_exclusion_groups WHERE id = ?", (group_id,))
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+
+
+def check_absence_exclusion_conflicts(rm_master_db_path: str, employee_id: int,
+                                      date_from: str, date_to: str,
+                                      exclude_availability_id: int = None) -> List[Dict]:
+    """Sprawdź, czy w danym terminie inny członek tej samej grupy wykluczającej
+    ma już zatwierdzoną/oczekującą nieobecność (nakładający się zakres dat).
+
+    Zwraca listę konfliktów: [{group_name, employee_name, date_from, date_to,
+    reason, status}, ...].
+    """
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        groups = con.execute("""
+            SELECT DISTINCT g.id, g.name
+            FROM absence_exclusion_groups g
+            JOIN absence_exclusion_members m ON m.group_id = g.id
+            WHERE m.employee_id = ?
+        """, (employee_id,)).fetchall()
+        if not groups:
+            return []
+
+        conflicts = []
+        for g in groups:
+            peers = con.execute("""
+                SELECT m.employee_id FROM absence_exclusion_members m
+                WHERE m.group_id = ? AND m.employee_id != ?
+            """, (g['id'], employee_id)).fetchall()
+            peer_ids = [p['employee_id'] for p in peers]
+            if not peer_ids:
+                continue
+            placeholders = ",".join("?" * len(peer_ids))
+            params = peer_ids + [date_to, date_from]
+            clause = ""
+            if exclude_availability_id:
+                clause = " AND ea.id != ?"
+                params.append(exclude_availability_id)
+            rows = con.execute(f"""
+                SELECT ea.*, e.name AS employee_name
+                FROM employee_availability ea
+                JOIN employees e ON e.id = ea.employee_id
+                WHERE ea.employee_id IN ({placeholders})
+                  AND ea.status != 'ODRZUCONY'
+                  AND ea.date_from <= ? AND ea.date_to >= ?
+                  {clause}
+            """, params).fetchall()
+            for r in rows:
+                conflicts.append({
+                    'group_name': g['name'],
+                    'employee_name': r['employee_name'],
+                    'date_from': r['date_from'], 'date_to': r['date_to'],
+                    'reason': r['reason'], 'status': r['status'],
+                })
+        return conflicts
     finally:
         con.close()
 
