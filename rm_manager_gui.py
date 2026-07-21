@@ -3267,6 +3267,20 @@ class RMManagerGUI:
             bd=2
         ).pack(side=tk.LEFT, padx=(0, 3), pady=6)
 
+        # Przycisk SERWIS — grafik serwisantów (obok Kadry)
+        tk.Button(
+            self.top_frame2,
+            text="🔧 Serwis",
+            command=self.service_schedule_dialog,
+            bg="#1abc9c",
+            fg="white",
+            font=self.FONT_BOLD,
+            padx=12,
+            pady=4,
+            relief=tk.RAISED,
+            bd=2
+        ).pack(side=tk.LEFT, padx=(0, 3), pady=6)
+
         # Przycisk STATUS PROJEKTÓW
         tk.Button(
             self.top_frame2,
@@ -17453,14 +17467,32 @@ class RMManagerGUI:
         canvas_sel.configure(yscrollcommand=scrollbar.set)
         canvas_sel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        # mousewheel scroll
+        # mousewheel scroll — bind LOKALNIE (canvas/inner/wiersze), NIE bind_all.
+        # Okno jest modeless: globalny bind_all kolidowałby z bind_all głównego okna
+        # (jego <Enter>/<Leave> nadpisuje/kasuje globalny handler → scroll przestaje działać).
         def _on_mousewheel_sel(event):
             try:
-                canvas_sel.yview_scroll(-1 if event.delta > 0 else 1, "units")
+                if event.num == 4:        # Linux scroll up
+                    canvas_sel.yview_scroll(-1, "units")
+                elif event.num == 5:      # Linux scroll down
+                    canvas_sel.yview_scroll(1, "units")
+                else:                     # Windows / macOS
+                    canvas_sel.yview_scroll(-1 if event.delta > 0 else 1, "units")
             except tk.TclError:
                 pass
-        canvas_sel.bind_all("<MouseWheel>", _on_mousewheel_sel)
-        sel.bind("<Destroy>", lambda e: canvas_sel.unbind_all("<MouseWheel>") if e.widget == sel else None, add='+')
+            return "break"
+
+        def _bind_wheel_sel(widget):
+            """Podepnij scroll kółkiem do widgetu (rekurencyjnie po dzieciach)."""
+            try:
+                widget.bind("<MouseWheel>", _on_mousewheel_sel, add='+')
+                widget.bind("<Button-4>", _on_mousewheel_sel, add='+')
+                widget.bind("<Button-5>", _on_mousewheel_sel, add='+')
+            except Exception:
+                pass
+        self._bind_wheel_sel = _bind_wheel_sel  # dostępne przy tworzeniu wierszy
+        _bind_wheel_sel(canvas_sel)
+        _bind_wheel_sel(inner)
         
         check_vars = {}   # pid -> BooleanVar (zaznaczenie)
         pin_vars = {}      # pid -> BooleanVar (przypięcie)
@@ -17599,7 +17631,11 @@ class RMManagerGUI:
                     opt_lbl.bind("<Leave>", lambda e, l=opt_lbl: l.config(fg=l._result_color))
 
             row_widgets[pid] = row
-        
+            # Scroll kółkiem działa też gdy mysz jest nad wierszem i jego dziećmi
+            _bind_wheel_sel(row)
+            for _child in row.winfo_children():
+                _bind_wheel_sel(_child)
+
         _check_running = [False]
 
         def _check_all_and_update(clicked_pid: int = None):
@@ -20288,6 +20324,32 @@ class RMManagerGUI:
         body.bind('<Configure>', lambda e, c=_mp_sc: c.configure(scrollregion=c.bbox('all')))
         _mp_sc.bind('<Configure>', lambda e, c=_mp_sc: c.itemconfig('_mpwin', width=e.width))
 
+        # Scroll kółkiem — bez tego user nie wie, że treść jest przewijalna niżej
+        # (popup ma transient + własny fokus, więc lokalny bind bez kolizji z wykresem).
+        def _mp_info_wheel(event):
+            try:
+                if event.num == 4:
+                    _mp_sc.yview_scroll(-1, "units")
+                elif event.num == 5:
+                    _mp_sc.yview_scroll(1, "units")
+                else:
+                    _mp_sc.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            except tk.TclError:
+                pass
+            return "break"
+
+        def _mp_bind_wheel(widget):
+            try:
+                widget.bind('<MouseWheel>', _mp_info_wheel, add='+')
+                widget.bind('<Button-4>', _mp_info_wheel, add='+')
+                widget.bind('<Button-5>', _mp_info_wheel, add='+')
+            except Exception:
+                pass
+        # Podepnij do okna, canvasu i body; dzieci body podpinamy na końcu (po zbudowaniu)
+        for _w in (popup, _mp_sc, body):
+            _mp_bind_wheel(_w)
+        self._mp_info_bind_wheel = _mp_bind_wheel
+
         # ===== TABELA DAT (read-only) =====
         table_frame = tk.Frame(body, padx=15, pady=10)
         table_frame.pack(fill=tk.X)
@@ -20532,9 +20594,21 @@ class RMManagerGUI:
         if blk:
             self._mp_render_blockers_section(body, blk)
         
+        # Podepnij scroll kółkiem do wszystkich dzieci body (Label/Frame nie
+        # propagują <MouseWheel> do rodzica — kursor jest zwykle nad nimi).
+        def _mp_bind_wheel_tree(widget):
+            self._mp_info_bind_wheel(widget)
+            for _ch in widget.winfo_children():
+                _mp_bind_wheel_tree(_ch)
+        try:
+            _mp_bind_wheel_tree(body)
+        except Exception:
+            pass
+
         # ===== Dopasuj rozmiar do zawartości i pokaż obok kursora =====
         try:
             popup.update_idletasks()
+            popup.minsize(600, 300)
             req_h = popup.winfo_reqheight()
             # wm_maxsize() zwraca obszar użytkowy ekranu (bez paska zadań Windows)
             try:
@@ -31686,8 +31760,1285 @@ Kod: {unlock_code}
         _reload()
 
     # ================================================================
-    # KADRY — Kalendarz zespołu (grafik miesięczny) + eksport PDF
+    # SERWIS — grafik serwisantów (linia A z RM_MANAGER + B wyjazdy)
     # ================================================================
+
+    # Etapy/milestone brane pod uwagę na linii A (grafik serwisanta). Kolejność
+    # = kolejność checkboxów w belce filtrów.
+    SERVICE_STAGE_CODES = [
+        'URUCHOMIENIE_U_KLIENTA', 'FAT', 'ODBIORY',
+        'ODBIOR_1', 'ODBIOR_2', 'ODBIOR_3',
+        'URUCHOMIENIE', 'POPRAWKI',
+    ]
+
+    def _service_stage_meta(self):
+        """{code: {'label', 'color', 'is_milestone'}} dla etapów serwisowych."""
+        meta = {}
+        for code, name, color, is_ms in rmm.STAGE_DEFINITIONS:
+            if code in self.SERVICE_STAGE_CODES:
+                meta[code] = {'label': name, 'color': color,
+                              'is_milestone': bool(is_ms)}
+        return meta
+
+    def _collect_service_stages(self, stage_filter=None, progress_cb=None):
+        """Zbierz linię A: etapy serwisowe ze wszystkich projektów RM_MANAGER.
+
+        Dla każdego projektu liczy recalculate_forecast (KOSZTOWNE — cały graf),
+        więc wołać raz przy otwarciu / na żądanie, nie przy scrollu.
+
+        stage_filter: zbiór kodów etapów do uwzględnienia (None = wszystkie
+        z SERVICE_STAGE_CODES).
+
+        Zwraca:
+            {employee_id: [ {project_id, project_name, stage_code, is_milestone,
+                             forecast_start, forecast_end,
+                             template_start, template_end}, ... ]}
+        Serwisanci = pracownicy kategorii 'Serwis'.
+        """
+        codes = set(stage_filter) if stage_filter else set(self.SERVICE_STAGE_CODES)
+        meta = self._service_stage_meta()
+
+        # Serwisanci (kategoria 'Serwis') — tylko ich etapy nas interesują.
+        try:
+            serwisanci = {e['id'] for e in
+                          rmm.get_employees(self.rm_master_db_path, active_only=True)
+                          if (e.get('category') or '') == 'Serwis'}
+        except Exception:
+            serwisanci = set()
+
+        result = {}
+        pids = list(self.projects)
+        for i, pid in enumerate(pids):
+            if progress_cb:
+                try:
+                    progress_cb(i + 1, len(pids))
+                except Exception:
+                    pass
+            try:
+                pdb = self.get_project_db_path(pid)
+                if not os.path.exists(pdb):
+                    continue
+                forecast = rmm.recalculate_forecast(pdb, pid)
+            except Exception:
+                continue
+            pname = self.project_names.get(pid, f"Projekt {pid}")
+
+            for stage_code in codes:
+                fc = forecast.get(stage_code)
+                if not fc:
+                    continue
+                # Kto robi ten etap? SAT ma osobny mechanizm (employee_id),
+                # reszta — przypisania stage_staff_assignments.
+                emp_ids = set()
+                if stage_code == 'URUCHOMIENIE_U_KLIENTA':
+                    try:
+                        eid = rmm.get_stage_employee_id(pdb, pid, stage_code)
+                        if eid:
+                            emp_ids.add(eid)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        staff = rmm.get_stage_assigned_staff(
+                            pdb, self.rm_master_db_path, pid, stage_code)
+                        emp_ids = {s['employee_id'] for s in staff}
+                    except Exception:
+                        pass
+                # Zostaw tylko serwisantów (jeśli lista serwisantów znana).
+                if serwisanci:
+                    emp_ids &= serwisanci
+                if not emp_ids:
+                    continue
+
+                m = meta.get(stage_code, {})
+                entry = {
+                    'project_id': pid,
+                    'project_name': pname,
+                    'stage_code': stage_code,
+                    'stage_label': m.get('label', stage_code),
+                    'color': m.get('color', '#3498db'),
+                    'is_milestone': m.get('is_milestone', False),
+                    'forecast_start': fc.get('forecast_start'),
+                    'forecast_end': fc.get('forecast_end'),
+                    'template_start': fc.get('template_start'),
+                    'template_end': fc.get('template_end'),
+                }
+                for eid in emp_ids:
+                    result.setdefault(eid, []).append(entry)
+        return result
+
+    def service_schedule_dialog(self):
+        """Okno „🔧 Serwis" — zakładki (Grafik serwisów / Wyjazdy).
+
+        Struktura jak Kadry: Notebook z zakładkami. Grafik serwisów jest pierwszą
+        zakładką (silnik w _service_build_chart_tab).
+        """
+        if self._single_window('service'):
+            return
+        try:
+            rmm.ensure_rm_master_tables(self.rm_master_db_path)
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Nie udało się zainicjalizować schematu:\n{e}")
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("🔧 Serwis")
+        dlg.transient(self.root)
+        self._register_window('service', dlg)
+        self._center_window(dlg, 1200, 720)
+        dlg.minsize(1000, 560)
+
+        header = tk.Label(dlg, text="🔧 SERWIS",
+                          bg=self.COLOR_TOPBAR, fg="white",
+                          font=("Arial", 13, "bold"), pady=8)
+        header.pack(fill=tk.X)
+
+        # Górny pasek z pełnym ekranem (jak w Kadrach)
+        topbar = tk.Frame(dlg)
+        topbar.pack(fill=tk.X, padx=6, pady=(4, 0))
+        self._add_fullscreen(dlg, topbar)
+
+        notebook = ttk.Notebook(dlg)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        tab_chart = tk.Frame(notebook)
+        notebook.add(tab_chart, text="  📆  Grafik serwisów  ")
+        chart_refresh = self._service_build_chart_tab(tab_chart, dlg)
+
+        tab_trips = tk.Frame(notebook)
+        notebook.add(tab_trips, text="  ✈  Wyjazdy  ")
+        trips_refresh = self._service_build_trips_tab(tab_trips, dlg)
+
+        # Odśwież aktywną zakładkę po zmianie (dane współdzielone: service_trips)
+        def _on_tab_changed(_e=None):
+            try:
+                idx = notebook.index(notebook.select())
+                if idx == 0 and chart_refresh:
+                    chart_refresh()
+                elif idx == 1 and trips_refresh:
+                    trips_refresh()
+            except Exception:
+                pass
+        notebook.bind('<<NotebookTabChanged>>', _on_tab_changed)
+
+    def _service_build_chart_tab(self, parent, dlg):
+        """Zakładka „Grafik serwisów" — silnik grafiku (wiersze A/projekt + B).
+
+        Dla każdego serwisanta: nagłówek + N wierszy A (1/projekt, read-only)
+        + 1 wiersz B (wyjazdy z service_trips). Kolizja = wyjazd B ∩ milestone A.
+        Zwraca funkcję odświeżenia (do wołania przy wejściu na zakładkę).
+        """
+        # ── Belka narzędzi ──
+        toolbar = tk.Frame(parent, padx=8, pady=6)
+        toolbar.pack(fill=tk.X)
+        tk.Label(toolbar, text="📆 Przewijaj w bok (Shift+kółko)  •  A = plan z projektów, B = wyjazdy",
+                 font=self.FONT_SMALL, fg="#666").pack(side=tk.LEFT, padx=(0, 10))
+        tk.Button(toolbar, text="📅 Dziś", command=lambda: _today(),
+                  font=self.FONT_SMALL, padx=8).pack(side=tk.LEFT, padx=6)
+        _now = datetime.now()
+        tk.Label(toolbar, text="   Rok:", font=self.FONT_SMALL).pack(side=tk.LEFT)
+        year_sel = ttk.Combobox(toolbar, width=6, state='readonly', font=self.FONT_SMALL,
+                                values=[str(y) for y in range(_now.year - 3, _now.year + 3)])
+        year_sel.set(str(_now.year))
+        year_sel.pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar, text="🔍 Idź", command=lambda: _goto_month(),
+                  font=self.FONT_SMALL, padx=6).pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar, text="🔄 Przelicz plan (A)", command=lambda: _reload_lineA(),
+                  font=self.FONT_SMALL, padx=8, bg="#e8f4fd").pack(side=tk.LEFT, padx=(12, 4))
+        tk.Button(toolbar, text="➕ Dodaj wyjazd", command=lambda: self._service_trip_editor(dlg, on_change=_reload_lineB),
+                  font=self.FONT_SMALL, padx=8, bg="#d5f5e3").pack(side=tk.LEFT, padx=4)
+
+        # ── Filtr etapów linii A ──
+        stage_meta = self._service_stage_meta()
+        stagebar = tk.Frame(parent, padx=8, pady=2)
+        stagebar.pack(fill=tk.X)
+        tk.Label(stagebar, text="Etapy (A):", font=self.FONT_SMALL).pack(side=tk.LEFT, padx=(0, 2))
+        stage_vars = {c: tk.BooleanVar(value=True) for c in self.SERVICE_STAGE_CODES}
+        for c in self.SERVICE_STAGE_CODES:
+            lbl = stage_meta.get(c, {}).get('label', c)
+            tk.Checkbutton(stagebar, text=lbl, variable=stage_vars[c],
+                           font=self.FONT_SMALL,
+                           command=lambda: _reload_lineA()).pack(side=tk.LEFT)
+
+        # ── Okno czasowe linii A ──
+        # Wiersz A dla projektu powstaje tylko gdy projekt ma etap serwisowy
+        # w oknie [dziś − wstecz, dziś + wprzód]. Bez tego serwisant z wieloma
+        # projektami w roku dawałby dziesiątki wierszy. Filtrujemy przy budowie
+        # wierszy (dane A z cache), więc zmiana okna = tylko _redraw (tanie).
+        tk.Label(stagebar, text="   Okno A:  wstecz", font=self.FONT_SMALL).pack(side=tk.LEFT)
+        back_var = tk.StringVar(value="7")
+        _back_e = tk.Entry(stagebar, textvariable=back_var, width=4, font=self.FONT_SMALL,
+                           justify='center')
+        _back_e.pack(side=tk.LEFT, padx=2)
+        tk.Label(stagebar, text="dni,  w przód", font=self.FONT_SMALL).pack(side=tk.LEFT)
+        fwd_var = tk.StringVar(value="30")
+        _fwd_e = tk.Entry(stagebar, textvariable=fwd_var, width=4, font=self.FONT_SMALL,
+                          justify='center')
+        _fwd_e.pack(side=tk.LEFT, padx=2)
+        for _e in (_back_e, _fwd_e):
+            _e.bind('<Return>', lambda ev: _redraw())
+            _e.bind('<FocusOut>', lambda ev: _redraw())
+        tk.Label(stagebar, text="dni", font=self.FONT_SMALL).pack(side=tk.LEFT)
+        win_all_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(stagebar, text="pokaż wszystkie", variable=win_all_var,
+                       font=self.FONT_SMALL,
+                       command=lambda: _redraw()).pack(side=tk.LEFT, padx=(6, 0))
+        tk.Button(stagebar, text="↻", font=self.FONT_SMALL, padx=4,
+                  command=lambda: _redraw()).pack(side=tk.LEFT, padx=3)
+
+        def _window_range():
+            """(d_from, d_to) jako date lub (None, None) gdy 'pokaż wszystkie'."""
+            if win_all_var.get():
+                return None, None
+            t = datetime.now().date()
+            try:
+                b = int(back_var.get())
+            except ValueError:
+                b = 7
+            try:
+                f = int(fwd_var.get())
+            except ValueError:
+                f = 30
+            return t - timedelta(days=abs(b)), t + timedelta(days=abs(f))
+
+        # ── Filtr typów wyjazdu (B) + statusów ──
+        tripbar = tk.Frame(parent, padx=8, pady=2)
+        tripbar.pack(fill=tk.X)
+        tk.Label(tripbar, text="Wyjazdy (B):", font=self.FONT_SMALL).pack(side=tk.LEFT, padx=(0, 2))
+        trip_vars = {t['code']: tk.BooleanVar(value=True) for t in rmm.SERVICE_TRIP_TYPES}
+        for t in rmm.SERVICE_TRIP_TYPES:
+            box = tk.Frame(tripbar)
+            box.pack(side=tk.LEFT, padx=2)
+            tk.Label(box, text="  ", bg=t['color']).pack(side=tk.LEFT)
+            tk.Checkbutton(box, text=t['label'], variable=trip_vars[t['code']],
+                           font=self.FONT_SMALL,
+                           command=lambda: _redraw()).pack(side=tk.LEFT)
+        # opcja: pokaż tylko serwisantów mających cokolwiek (A lub B)
+        only_active = tk.BooleanVar(value=True)
+        tk.Checkbutton(tripbar, text="tylko z planem/wyjazdem", variable=only_active,
+                       font=self.FONT_SMALL,
+                       command=lambda: _redraw()).pack(side=tk.LEFT, padx=(10, 0))
+
+        # ── Layout siatki (jak w kalendarzu zespołu) ──
+        NAME_W = 210
+        CELL_W = 22
+        ROW_H = 20
+        HDR_H = 34
+
+        wrap = tk.Frame(parent)
+        wrap.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        hsb = ttk.Scrollbar(wrap, orient="horizontal")
+        hsb.pack(side=tk.BOTTOM, fill=tk.X)
+        body = tk.Frame(wrap)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        left = tk.Frame(body)
+        left.pack(side=tk.LEFT, fill=tk.Y)
+        names_hdr = tk.Canvas(left, width=NAME_W, height=HDR_H,
+                              highlightthickness=0, bg="#34495e")
+        names_hdr.pack(side=tk.TOP, fill=tk.X)
+        names_hdr.create_text(6, HDR_H / 2, text="Serwisant / linia", anchor='w',
+                              fill="white", font=self.FONT_BOLD)
+        names_cv = tk.Canvas(left, width=NAME_W, highlightthickness=0, bg="#ecf0f1",
+                             cursor="hand2")
+        names_cv.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        right = tk.Frame(body)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        header_cv = tk.Canvas(right, height=HDR_H, highlightthickness=0, bg="white")
+        header_cv.pack(side=tk.TOP, fill=tk.X)
+        gwrap = tk.Frame(right)
+        gwrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        grid = tk.Canvas(gwrap, highlightthickness=0, bg="white")
+        vsb = ttk.Scrollbar(gwrap, orient="vertical")
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        grid.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        conflict_var = tk.StringVar()
+        tk.Label(parent, textvariable=conflict_var, font=self.FONT_SMALL,
+                 fg="#c0392b", anchor='w', padx=10, justify=tk.LEFT).pack(fill=tk.X)
+
+        # ── Model osi czasu ──
+        today = datetime.now().date()
+        base_date = date(today.year, today.month, 1)
+        sv = {
+            'lineA': {},      # {emp_id: [entry,...]}  (cache — liczone rzadko)
+            'rows': [],       # [{emp_id, emp_name, kind, project_id, sub_label}]
+            'trips': [],      # wszystkie wyjazdy B (cache)
+            'tips': {},       # (day_index, row) -> tekst tooltipa
+            'trip_at': {},    # (day_index, row) -> trip_id (klik → edycja)
+            'collide_days': {},  # emp_id -> set(day_index) kolizji B∩milestone
+        }
+
+        def _idx_to_date(idx):
+            return base_date + timedelta(days=idx)
+
+        def _emp_of_row(ri):
+            if 0 <= ri < len(sv['rows']):
+                return sv['rows'][ri]
+            return None
+
+        # ── Ładowanie danych (kosztowne — na żądanie) ──
+        def _reload_lineA():
+            active = {c for c, v in stage_vars.items() if v.get()}
+            conflict_var.set("⏳ Przeliczam plan serwisantów ze wszystkich projektów…")
+            dlg.update_idletasks()
+            try:
+                sv['lineA'] = self._collect_service_stages(stage_filter=active)
+            except Exception as e:
+                sv['lineA'] = {}
+                print(f"⚠️ collect_service_stages: {e}")
+            _rebuild_rows()
+            _redraw()
+
+        def _reload_lineB():
+            try:
+                sv['trips'] = rmm.get_service_trips(self.rm_master_db_path)
+            except Exception as e:
+                sv['trips'] = []
+                print(f"⚠️ get_service_trips: {e}")
+            _rebuild_rows()
+            _redraw()
+
+        def _entry_in_window(ent, d_from, d_to):
+            """Czy etap (prognoza, fallback szablon) przecina okno [d_from, d_to]."""
+            if d_from is None:
+                return True
+            s = ent.get('forecast_start') or ent.get('template_start')
+            e = ent.get('forecast_end') or ent.get('template_end') or s
+            if not s:
+                return False
+            try:
+                a = datetime.strptime(s[:10], "%Y-%m-%d").date()
+                b = datetime.strptime((e or s)[:10], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                return False
+            # przecięcie zakresów: etap.start <= okno.koniec AND etap.koniec >= okno.start
+            return a <= d_to and b >= d_from
+
+        def _rebuild_rows():
+            """Zbuduj listę wierszy: per serwisant N×A (po projekcie) + 1×B.
+
+            Wiersz A powstaje tylko dla projektów z etapem w oknie czasowym
+            (dziś − wstecz … dziś + wprzód), inaczej lista puchnie o cały rok.
+            """
+            d_from, d_to = _window_range()
+            emps = rmm.get_employees(self.rm_master_db_path, active_only=True)
+            serwis = [e for e in emps if (e.get('category') or '') == 'Serwis']
+            # wyjazdy pogrupowane po pracowniku
+            trips_by_emp = {}
+            for t in sv['trips']:
+                trips_by_emp.setdefault(t['employee_id'], []).append(t)
+            rows = []
+            for e in serwis:
+                eid = e['id']
+                a_entries = sv['lineA'].get(eid, [])
+                # projekty tego serwisanta (unikalne, zachowaj kolejność self.projects)
+                # — tylko te z co najmniej jednym etapem w oknie czasowym.
+                proj_ids = []
+                seen = set()
+                order = {pid: i for i, pid in enumerate(self.projects)}
+                for ent in sorted(a_entries, key=lambda x: order.get(x['project_id'], 9999)):
+                    if not _entry_in_window(ent, d_from, d_to):
+                        continue
+                    if ent['project_id'] not in seen:
+                        seen.add(ent['project_id'])
+                        proj_ids.append(ent['project_id'])
+                has_trips = eid in trips_by_emp
+                if only_active.get() and not proj_ids and not has_trips:
+                    continue
+                # Wiersz-nagłówek pracownika (samo nazwisko) — osobny, żeby nazwa
+                # nie nachodziła na etykiety projektów.
+                rows.append({'emp_id': eid, 'emp_name': e['name'], 'kind': 'H',
+                             'project_id': None, 'sub_label': ""})
+                # Wiersze A — jeden na projekt
+                for pid in proj_ids:
+                    pname = self.project_names.get(pid, f"P{pid}")
+                    rows.append({'emp_id': eid, 'emp_name': e['name'], 'kind': 'A',
+                                 'project_id': pid,
+                                 'sub_label': f"▸ {pname[:26]}"})
+                # Wiersz B — zawsze (chyba że filtr only_active i brak czegokolwiek)
+                rows.append({'emp_id': eid, 'emp_name': e['name'], 'kind': 'B',
+                             'project_id': None, 'sub_label': "✈ wyjazdy"})
+            sv['rows'] = rows
+            _compute_collisions()
+
+        def _compute_collisions():
+            """emp_id -> set(day_index) gdzie wyjazd B nachodzi na milestone A."""
+            sv['collide_days'] = {}
+            # dni milestone'ów per pracownik
+            ms_days = {}
+            for eid, entries in sv['lineA'].items():
+                dd = set()
+                for ent in entries:
+                    if not ent['is_milestone']:
+                        continue
+                    s = ent.get('forecast_start') or ent.get('template_start')
+                    en = ent.get('forecast_end') or ent.get('template_end') or s
+                    for gi in _iter_day_idx(s, en):
+                        dd.add(gi)
+                if dd:
+                    ms_days[eid] = dd
+            # dni wyjazdów per pracownik
+            for t in sv['trips']:
+                eid = t['employee_id']
+                if eid not in ms_days:
+                    continue
+                for gi in _iter_day_idx(t.get('date_from'), t.get('date_to')):
+                    if gi in ms_days[eid]:
+                        sv['collide_days'].setdefault(eid, set()).add(gi)
+
+        def _iter_day_idx(d_from, d_to):
+            """Iteruj day_index od d_from do d_to (ISO)."""
+            if not d_from:
+                return
+            try:
+                a = datetime.strptime(d_from[:10], "%Y-%m-%d").date()
+                b = datetime.strptime((d_to or d_from)[:10], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                return
+            if b < a:
+                a, b = b, a
+            cur = a
+            while cur <= b:
+                yield (cur - base_date).days
+                cur += timedelta(days=1)
+
+        # ── Rysowanie ──
+        def _draw_names():
+            names_cv.delete('all')
+            for ri, r in enumerate(sv['rows']):
+                y0 = ri * ROW_H
+                if r['kind'] == 'H':
+                    # Nagłówek pracownika — ciemny pasek, samo nazwisko.
+                    names_cv.create_rectangle(0, y0, NAME_W, y0 + ROW_H,
+                                              fill="#34495e", outline="#2c3e50")
+                    names_cv.create_text(6, y0 + ROW_H / 2, text=r['emp_name'],
+                                         anchor='w', fill="white", font=self.FONT_BOLD)
+                else:
+                    bg = "#dfe6e9" if r['kind'] == 'B' else "#ecf0f1"
+                    names_cv.create_rectangle(0, y0, NAME_W, y0 + ROW_H,
+                                              fill=bg, outline="#bdc3c7")
+                    names_cv.create_text(16, y0 + ROW_H / 2, text=r['sub_label'],
+                                         anchor='w', font=("Segoe UI", 8),
+                                         fill=("#2c3e50" if r['kind'] == 'B' else "#444"))
+            names_cv.configure(scrollregion=(0, 0, NAME_W, len(sv['rows']) * ROW_H))
+
+        cal_months = {'drawn': set(), 'lo': 0, 'hi': 0}
+
+        def _draw_month(yr, mo):
+            key = (yr, mo)
+            if key in cal_months['drawn']:
+                return
+            cal_months['drawn'].add(key)
+            import calendar as __cal
+            ndays = __cal.monthrange(yr, mo)[1]
+            first_idx = (date(yr, mo, 1) - base_date).days
+            _today_date = datetime.now().date()
+
+            month_x0 = first_idx * CELL_W
+            month_w = ndays * CELL_W
+            header_cv.create_rectangle(month_x0, 0, month_x0 + month_w, HDR_H / 2,
+                                       fill="#2c3e50", outline="#1a252f")
+            header_cv.create_text(month_x0 + month_w / 2, HDR_H / 4,
+                                  text=f"{__cal.month_name[mo]} {yr}".capitalize(),
+                                  fill="white", font=self.FONT_BOLD)
+            for dd in range(1, ndays + 1):
+                gi = first_idx + (dd - 1)
+                x0 = gi * CELL_W
+                wd = date(yr, mo, dd).weekday()
+                is_today = (date(yr, mo, dd) == _today_date)
+                bg = "#e67e22" if is_today else ("#7f8c8d" if wd >= 5 else "#34495e")
+                header_cv.create_rectangle(x0, HDR_H / 2, x0 + CELL_W, HDR_H,
+                                           fill=bg, outline="#2c3e50")
+                header_cv.create_text(x0 + CELL_W / 2, HDR_H * 0.75, text=str(dd),
+                                      fill="white",
+                                      font=("Segoe UI", 7, "bold") if is_today else ("Segoe UI", 7))
+                # tło kolumn siatki (weekend szary; wiersz-nagłówek = ciemny separator)
+                for ri, r in enumerate(sv['rows']):
+                    y0 = ri * ROW_H
+                    if r['kind'] == 'H':
+                        cbg = "#34495e"
+                    else:
+                        cbg = "#dfe4ea" if wd >= 5 else "white"
+                    grid.create_rectangle(x0, y0, x0 + CELL_W, y0 + ROW_H,
+                                          fill=cbg, outline="#eeeeee")
+            cal_months['lo'] = min(cal_months['lo'], first_idx)
+            cal_months['hi'] = max(cal_months['hi'], first_idx + ndays)
+            _paint_data(yr, mo, first_idx, ndays)
+            _update_scrollregion()
+
+        def _paint_data(yr, mo, first_idx, ndays):
+            """Namaluj etapy (A) i wyjazdy (B) w zakresie tego miesiąca."""
+            active_trip_types = {c for c, v in trip_vars.items() if v.get()}
+            m_lo = first_idx
+            m_hi = first_idx + ndays
+            for ri, r in enumerate(sv['rows']):
+                y0 = ri * ROW_H
+                if r['kind'] == 'H':
+                    continue  # nagłówek pracownika — bez danych
+                if r['kind'] == 'A':
+                    entries = [e for e in sv['lineA'].get(r['emp_id'], [])
+                               if e['project_id'] == r['project_id']]
+                    for ent in entries:
+                        _paint_stage(ri, y0, ent, m_lo, m_hi)
+                else:  # B
+                    coll = sv['collide_days'].get(r['emp_id'], set())
+                    for t in sv['trips']:
+                        if t['employee_id'] != r['emp_id']:
+                            continue
+                        if t['trip_type'] not in active_trip_types:
+                            continue
+                        _paint_trip(ri, y0, t, m_lo, m_hi, coll)
+
+        def _paint_stage(ri, y0, ent, m_lo, m_hi):
+            f_s = ent.get('forecast_start')
+            f_e = ent.get('forecast_end') or f_s
+            t_s = ent.get('template_start')
+            t_e = ent.get('template_end') or t_s
+            color = ent.get('color', '#3498db')
+            is_ms = ent['is_milestone']
+            # Zbiór dni prognozy (żeby obrys szablonu nie nachodził na kolor).
+            forecast_days = set(_iter_day_idx(f_s, f_e))
+            # Szablon jako delikatny obrys — TYLKO dla etapów z czasem trwania
+            # (nie milestone) i TYLKO w dniach bez prognozy. Inaczej powstają
+            # mylące puste przerywane ramki (milestone / rozjazd plan↔prognoza).
+            if not is_ms:
+                for gi in _iter_day_idx(t_s, t_e):
+                    if m_lo <= gi < m_hi and gi not in forecast_days:
+                        x0 = gi * CELL_W
+                        grid.create_rectangle(x0 + 1, y0 + 4, x0 + CELL_W - 1, y0 + ROW_H - 4,
+                                              outline="#c7ccd1", dash=(2, 2), fill='')
+            # Prognoza pełnym kolorem
+            for gi in _iter_day_idx(f_s, f_e):
+                if m_lo <= gi < m_hi:
+                    x0 = gi * CELL_W
+                    if is_ms:
+                        # milestone = romb/marker
+                        grid.create_rectangle(x0 + 2, y0 + 2, x0 + CELL_W - 2, y0 + ROW_H - 2,
+                                              fill=color, outline="#2c3e50", width=2)
+                        grid.create_text(x0 + CELL_W / 2, y0 + ROW_H / 2, text="◆",
+                                         fill="white", font=("Segoe UI", 8, "bold"))
+                    else:
+                        grid.create_rectangle(x0, y0 + 3, x0 + CELL_W, y0 + ROW_H - 3,
+                                              fill=color, outline="#bdc3c7")
+                    key = (gi, ri)
+                    sv['tips'][key] = (
+                        f"{ent['project_name']}\n{ent['stage_label']}"
+                        f"{'  (milestone)' if is_ms else ''}\n"
+                        f"Prognoza: {self.format_date_ddmmyyyy(f_s)} → {self.format_date_ddmmyyyy(f_e)}")
+
+        def _paint_trip(ri, y0, t, m_lo, m_hi, coll):
+            color = rmm.SERVICE_TRIP_TYPE_BY_CODE.get(t['trip_type'], {}).get('color', '#7f8c8d')
+            tlabel = rmm.SERVICE_TRIP_TYPE_BY_CODE.get(t['trip_type'], {}).get('label', t['trip_type'])
+            for gi in _iter_day_idx(t.get('date_from'), t.get('date_to')):
+                if not (m_lo <= gi < m_hi):
+                    continue
+                x0 = gi * CELL_W
+                is_coll = gi in coll
+                grid.create_rectangle(x0, y0 + 2, x0 + CELL_W, y0 + ROW_H - 2,
+                                      fill=color,
+                                      outline=("#c0392b" if is_coll else "#7f8c8d"),
+                                      width=(3 if is_coll else 1))
+                if is_coll:
+                    grid.create_text(x0 + CELL_W / 2, y0 + ROW_H / 2, text="⚠",
+                                     fill="white", font=("Segoe UI", 8, "bold"))
+                key = (gi, ri)
+                sv['trip_at'][key] = t['id']
+                place = t.get('client_or_place') or '—'
+                sv['tips'][key] = (
+                    f"✈ {tlabel}: {place}\n"
+                    f"{self.format_date_ddmmyyyy(t.get('date_from'))} → "
+                    f"{self.format_date_ddmmyyyy(t.get('date_to'))}\n"
+                    f"Status: {t.get('status', '')}"
+                    + ("\n⚠ KOLIZJA z milestone'em!" if is_coll else "")
+                    + "\n(klik = edytuj)")
+
+        def _update_scrollregion():
+            x0 = cal_months['lo'] * CELL_W
+            x1 = cal_months['hi'] * CELL_W
+            h = len(sv['rows']) * ROW_H
+            grid.configure(scrollregion=(x0, 0, x1, h))
+            header_cv.configure(scrollregion=(x0, 0, x1, HDR_H))
+
+        def _update_conflict_summary():
+            total = sum(len(v) for v in sv['collide_days'].values())
+            if total == 0:
+                conflict_var.set("✅ Brak kolizji wyjazdów z milestone'ami.")
+                return
+            names = []
+            id2name = {r['emp_id']: r['emp_name'] for r in sv['rows']}
+            for eid, days in sv['collide_days'].items():
+                nm = id2name.get(eid, f"#{eid}")
+                ds = ", ".join(sorted({_idx_to_date(gi).strftime('%d.%m') for gi in days}))
+                names.append(f"{nm} ({ds})")
+            conflict_var.set("⚠ Wyjazd nachodzi na milestone —  " + "    ".join(names))
+
+        def _redraw():
+            grid.delete('all'); header_cv.delete('all')
+            sv['tips'] = {}; sv['trip_at'] = {}
+            cal_months['drawn'] = set(); cal_months['lo'] = 0; cal_months['hi'] = 0
+            _rebuild_rows()
+            _draw_names()
+            _draw_month(base_date.year, base_date.month)
+            for _ in range(2):
+                _extend_right()
+            _extend_left()
+            grid.xview_moveto((0 - cal_months['lo'] * CELL_W) /
+                              max((cal_months['hi'] - cal_months['lo']) * CELL_W, 1))
+            grid.yview_moveto(0); names_cv.yview_moveto(0)
+            _update_conflict_summary()
+            dlg.after_idle(_resync)
+
+        def _extend_right():
+            d = _idx_to_date(cal_months['hi'])
+            _draw_month(d.year, d.month)
+
+        def _extend_left():
+            d = _idx_to_date(cal_months['lo'] - 1)
+            _draw_month(d.year, d.month)
+
+        def _maybe_extend():
+            try:
+                lo_frac, hi_frac = grid.xview()
+            except Exception:
+                return
+            if hi_frac > 0.85:
+                for _ in range(2):
+                    _extend_right()
+            if lo_frac < 0.15:
+                old_lo_x = cal_months['lo'] * CELL_W
+                total = (cal_months['hi'] - cal_months['lo']) * CELL_W or 1
+                for _ in range(2):
+                    _extend_left()
+                grid.xview_moveto((old_lo_x - cal_months['lo'] * CELL_W +
+                                   lo_frac * total) /
+                                  max((cal_months['hi'] - cal_months['lo']) * CELL_W, 1))
+
+        # ── Sync scroll (pionowo pikselowo, poziomo z doładowaniem) ──
+        vlock = {'on': True}
+
+        def _sync_names():
+            names_cv.yview_moveto(grid.yview()[0])
+
+        def _yview(*args):
+            if vlock['on']:
+                return
+            grid.yview(*args); _sync_names()
+        vsb.config(command=_yview)
+
+        def _on_grid_y(lo, hi):
+            vsb.set(lo, hi)
+            if vlock['on']:
+                grid.yview_moveto(0); names_cv.yview_moveto(0)
+            else:
+                _sync_names()
+        grid.config(yscrollcommand=_on_grid_y)
+
+        def _xview(*args):
+            grid.xview(*args); header_cv.xview(*args); _maybe_extend()
+        hsb.config(command=_xview)
+
+        def _on_grid_x(lo, hi):
+            hsb.set(lo, hi); header_cv.xview_moveto(lo); _maybe_extend()
+        grid.config(xscrollcommand=_on_grid_x)
+
+        def _resync(_e=None):
+            try:
+                h = grid.winfo_height()
+                if h > 1:
+                    names_cv.configure(height=h)
+                content_h = len(sv['rows']) * ROW_H
+                vlock['on'] = (h > 1 and content_h <= h)
+                if vlock['on']:
+                    grid.yview_moveto(0); names_cv.yview_moveto(0); vsb.set(0.0, 1.0)
+                else:
+                    _sync_names()
+            except Exception:
+                pass
+        grid.bind('<Configure>', _resync)
+
+        # ── Tooltip ──
+        tip = {'win': None, 'key': None}
+
+        def _hide_tip():
+            if tip['win'] is not None:
+                try:
+                    tip['win'].destroy()
+                except Exception:
+                    pass
+                tip['win'] = None; tip['key'] = None
+
+        def _on_motion(event):
+            gi = int(grid.canvasx(event.x) // CELL_W)
+            row = int(grid.canvasy(event.y) // ROW_H)
+            key = (gi, row)
+            text = sv['tips'].get(key)
+            if not text:
+                _hide_tip()
+                return
+            if tip['key'] == key and tip['win'] is not None:
+                return
+            _hide_tip()
+            win = tk.Toplevel(grid)
+            win.wm_overrideredirect(True)
+            win.wm_attributes('-topmost', True)
+            win.wm_geometry(f"+{grid.winfo_pointerx() + 12}+{grid.winfo_pointery() + 12}")
+            tk.Label(win, text=text, bg="#ffffe0", fg="#000", font=("Segoe UI", 9),
+                     relief=tk.SOLID, bd=1, justify=tk.LEFT, padx=6, pady=3).pack()
+            tip['win'] = win; tip['key'] = key
+        grid.bind('<Motion>', _on_motion)
+        grid.bind('<Leave>', lambda e: _hide_tip())
+
+        # ── Klik: wiersz B → edycja wyjazdu; nazwisko → nic (na razie) ──
+        def _click_grid(event):
+            gi = int(grid.canvasx(event.x) // CELL_W)
+            ri = int(grid.canvasy(event.y) // ROW_H)
+            trip_id = sv['trip_at'].get((gi, ri))
+            if trip_id:
+                self._service_trip_editor(dlg, trip_id=trip_id, on_change=_reload_lineB)
+                return
+            # klik w pusty obszar wiersza B → nowy wyjazd dla tego serwisanta z tą datą
+            r = _emp_of_row(ri)
+            if r and r['kind'] == 'B':
+                d = _idx_to_date(gi)
+                self._service_trip_editor(dlg, on_change=_reload_lineB,
+                                          preset_emp=r['emp_id'],
+                                          preset_date=d.strftime('%d-%m-%Y'))
+        grid.bind('<Button-1>', _click_grid)
+
+        # Klik w nazwisko/etykietę (lewy panel) → karta serwisanta.
+        def _click_names(event):
+            ri = int(names_cv.canvasy(event.y) // ROW_H)
+            r = _emp_of_row(ri)
+            if r:
+                self._service_person_card(dlg, r['emp_id'], on_change=_reload_lineB)
+        names_cv.bind('<Button-1>', _click_names)
+
+        # ── Scroll kółkiem ──
+        def _wheel_v(event):
+            _yview('scroll', -1 if event.delta > 0 else 1, "units"); return "break"
+
+        def _wheel_h(event):
+            _xview('scroll', -1 if event.delta > 0 else 1, "units"); return "break"
+        for _cv in (grid, names_cv, header_cv):
+            _cv.bind('<MouseWheel>', _wheel_v)
+            _cv.bind('<Shift-MouseWheel>', _wheel_h)
+            _cv.bind('<Button-4>', lambda e: (_yview('scroll', -1, "units"), "break")[1])
+            _cv.bind('<Button-5>', lambda e: (_yview('scroll', 1, "units"), "break")[1])
+
+        def _today():
+            nonlocal base_date
+            t = datetime.now().date()
+            base_date = date(t.year, t.month, 1)
+            year_sel.set(str(t.year))
+            _redraw()
+
+        def _goto_month():
+            nonlocal base_date
+            try:
+                yr = int(year_sel.get())
+            except ValueError:
+                return
+            t = datetime.now().date()
+            mo = t.month if yr == t.year else 1
+            base_date = date(yr, mo, 1)
+            _redraw()
+
+        # ── Start: załaduj B (tanie) + A (kosztowne) i narysuj ──
+        _reload_lineB()   # ładuje trips + rebuild + redraw
+        _reload_lineA()   # przelicza plan + redraw
+        dlg.after_idle(_resync)
+
+        # Zwróć lekkie odświeżenie (linia B) — wołane przy wejściu na zakładkę.
+        # Linia A (kosztowna) tylko na żądanie przez „🔄 Przelicz plan".
+        return _reload_lineB
+
+    def _service_build_trips_tab(self, parent, dlg):
+        """Zakładka „Wyjazdy" — tabelaryczna lista wszystkich wyjazdów (CRUD)."""
+        bar = tk.Frame(parent, padx=8, pady=6)
+        bar.pack(fill=tk.X)
+        tk.Button(bar, text="➕ Nowy wyjazd", bg="#27ae60", fg="white",
+                  font=self.FONT_BOLD, padx=12, pady=3,
+                  command=lambda: self._service_trip_editor(dlg, on_change=_reload)
+                  ).pack(side=tk.LEFT, padx=3)
+        tk.Button(bar, text="✏ Edytuj", font=self.FONT_SMALL, padx=10, pady=3,
+                  command=lambda: _edit_sel()).pack(side=tk.LEFT, padx=3)
+        tk.Button(bar, text="🗑 Usuń", fg="#c0392b", font=self.FONT_SMALL, padx=10, pady=3,
+                  command=lambda: _del_sel()).pack(side=tk.LEFT, padx=3)
+
+        cols = ('id', 'employee', 'type', 'status', 'place', 'project', 'from', 'to', 'note')
+        tree = ttk.Treeview(parent, columns=cols, show='headings', height=18)
+        for c, txt, w in [('id', 'ID', 40), ('employee', 'Serwisant', 150),
+                          ('type', 'Typ', 110), ('status', 'Status', 100),
+                          ('place', 'Klient / miejsce', 180), ('project', 'Projekt', 150),
+                          ('from', 'Od', 90), ('to', 'Do', 90), ('note', 'Notatka', 200)]:
+            tree.heading(c, text=txt)
+            tree.column(c, width=w, stretch=(c == 'note'))
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        def _reload():
+            tree.delete(*tree.get_children())
+            try:
+                trips = rmm.get_service_trips(self.rm_master_db_path)
+            except Exception:
+                trips = []
+            trips.sort(key=lambda t: t.get('date_from') or '', reverse=True)
+            code2lbl = {t['code']: t['label'] for t in rmm.SERVICE_TRIP_TYPES}
+            for t in trips:
+                pid = t.get('project_id')
+                pname = self.project_names.get(pid, f"P{pid}") if pid else '—'
+                tree.insert('', tk.END, iid=str(t['id']), values=(
+                    t['id'], t.get('employee_name', '?'),
+                    code2lbl.get(t['trip_type'], t['trip_type']), t.get('status', ''),
+                    t.get('client_or_place') or '—', pname,
+                    self.format_date_ddmmyyyy(t['date_from']),
+                    self.format_date_ddmmyyyy(t['date_to']),
+                    (t.get('note') or '')[:60],
+                ))
+
+        def _edit_sel():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Uwaga", "Wybierz wyjazd.", parent=dlg)
+                return
+            self._service_trip_editor(dlg, trip_id=int(sel[0]), on_change=_reload)
+
+        def _del_sel():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Uwaga", "Wybierz wyjazd.", parent=dlg)
+                return
+            if not messagebox.askyesno("Usuń", "Usunąć zaznaczony wyjazd?", parent=dlg):
+                return
+            try:
+                rmm.delete_service_trip(self.rm_master_db_path, int(sel[0]))
+            except Exception as e:
+                messagebox.showerror("Błąd", str(e), parent=dlg)
+            _reload()
+
+        tree.bind("<Double-1>", lambda e: _edit_sel())
+        _reload()
+        return _reload
+
+    def _service_person_card(self, parent_win, employee_id, on_change=None):
+        """Karta serwisanta — jak karta pracownika w Kadrach, ale serwisowa:
+        Wyjazdy (CRUD) / Aktualne etapy (linia A) / Historia zrealizowanych.
+
+        on_change: callback po zmianach (odświeżenie grafiku pod spodem).
+        """
+        emp = rmm.get_employee_by_id(self.rm_master_db_path, employee_id)
+        if not emp:
+            messagebox.showwarning("Karta serwisanta", "Nie znaleziono pracownika.",
+                                   parent=parent_win)
+            return
+        name = emp.get('name', f'ID {employee_id}')
+
+        win = tk.Toplevel(parent_win)
+        win.title(f"🔧 Karta serwisanta — {name}")
+        win.transient(parent_win)
+        self._center_window(win, 940, 620)
+
+        hdr = tk.Frame(win, bg="#1abc9c")
+        hdr.pack(fill=tk.X)
+        tk.Label(hdr, text=f"🔧 {name}", bg="#1abc9c", fg="white",
+                 font=("Arial", 14, "bold"), padx=12, pady=8).pack(side=tk.LEFT)
+        tk.Label(hdr, text=emp.get('category', ''), bg="#1abc9c", fg="#d5f5ee",
+                 font=self.FONT_BOLD, padx=6).pack(side=tk.LEFT)
+
+        nb = ttk.Notebook(win)
+        nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        tab_trips = tk.Frame(nb)
+        nb.add(tab_trips, text="  ✈  Wyjazdy  ")
+        trips_reload = self._service_card_trips_tab(tab_trips, win, employee_id,
+                                                    on_change=on_change)
+
+        tab_stages = tk.Frame(nb)
+        nb.add(tab_stages, text="  📆  Aktualne etapy  ")
+        stages_reload = self._service_card_stages_tab(tab_stages, win, employee_id)
+
+        tab_hist = tk.Frame(nb)
+        nb.add(tab_hist, text="  📜  Historia  ")
+        hist_reload = self._service_card_history_tab(tab_hist, win, employee_id)
+
+        if on_change:
+            win.bind('<Destroy>', lambda e: (on_change() if e.widget is win else None),
+                     add='+')
+
+        def _on_card_tab(_e=None):
+            try:
+                t = nb.tab(nb.select(), "text").strip()
+                if t.startswith("✈") and trips_reload:
+                    trips_reload()
+                elif t.startswith("📆") and stages_reload:
+                    stages_reload()
+                elif t.startswith("📜") and hist_reload:
+                    hist_reload()
+            except Exception:
+                pass
+        nb.bind("<<NotebookTabChanged>>", _on_card_tab)
+
+    def _service_card_trips_tab(self, parent, win, employee_id, on_change=None):
+        """Wyjazdy jednego serwisanta — lista + dodaj/edytuj/usuń."""
+        toolbar = tk.Frame(parent, padx=8, pady=6)
+        toolbar.pack(fill=tk.X)
+
+        def _after_change():
+            _reload()
+            if on_change:
+                on_change()
+
+        tk.Button(toolbar, text="➕ Dodaj wyjazd", bg=self.COLOR_GREEN, fg="white",
+                  font=self.FONT_BOLD, padx=10,
+                  command=lambda: self._service_trip_editor(
+                      win, on_change=_after_change, preset_emp=employee_id)
+                  ).pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar, text="✏️ Edytuj", bg=self.COLOR_PURPLE, fg="white",
+                  font=self.FONT_BOLD, padx=10, command=lambda: _edit()).pack(side=tk.LEFT, padx=2)
+        tk.Button(toolbar, text="🗑 Usuń", bg=self.COLOR_RED, fg="white",
+                  font=self.FONT_BOLD, padx=10, command=lambda: _del()).pack(side=tk.LEFT, padx=2)
+
+        summ_var = tk.StringVar()
+        tk.Label(parent, textvariable=summ_var, font=self.FONT_SMALL, fg="#333",
+                 anchor="w", padx=10, pady=4).pack(fill=tk.X)
+
+        cols = ('type', 'status', 'place', 'project', 'from', 'to', 'note')
+        tree = ttk.Treeview(parent, columns=cols, show='headings')
+        for key, txt, w in [('type', 'Typ', 120), ('status', 'Status', 110),
+                            ('place', 'Klient / miejsce', 190), ('project', 'Projekt', 150),
+                            ('from', 'Od', 90), ('to', 'Do', 90), ('note', 'Notatka', 200)]:
+            tree.heading(key, text=txt)
+            tree.column(key, width=w, stretch=(key == 'note'))
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        def _reload():
+            tree.delete(*tree.get_children())
+            try:
+                trips = rmm.get_service_trips(self.rm_master_db_path,
+                                              employee_id=employee_id)
+            except Exception:
+                trips = []
+            trips.sort(key=lambda t: t.get('date_from') or '', reverse=True)
+            code2lbl = {t['code']: t['label'] for t in rmm.SERVICE_TRIP_TYPES}
+            for t in trips:
+                pid = t.get('project_id')
+                pname = self.project_names.get(pid, f"P{pid}") if pid else '—'
+                tree.insert('', tk.END, iid=str(t['id']), values=(
+                    code2lbl.get(t['trip_type'], t['trip_type']), t.get('status', ''),
+                    t.get('client_or_place') or '—', pname,
+                    self.format_date_ddmmyyyy(t['date_from']),
+                    self.format_date_ddmmyyyy(t['date_to']),
+                    (t.get('note') or '')[:60],
+                ))
+            summ_var.set(f"Wyjazdów: {len(trips)}")
+
+        def _edit():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Uwaga", "Wybierz wyjazd.", parent=win)
+                return
+            self._service_trip_editor(win, trip_id=int(sel[0]), on_change=_after_change)
+
+        def _del():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Uwaga", "Wybierz wyjazd.", parent=win)
+                return
+            if not messagebox.askyesno("Usuń", "Usunąć zaznaczony wyjazd?", parent=win):
+                return
+            try:
+                rmm.delete_service_trip(self.rm_master_db_path, int(sel[0]))
+            except Exception as e:
+                messagebox.showerror("Błąd", str(e), parent=win)
+            _after_change()
+
+        tree.bind("<Double-1>", lambda e: _edit())
+        _reload()
+        return _reload
+
+    def _service_card_stages_tab(self, parent, win, employee_id):
+        """Aktualne etapy serwisowe pracownika (linia A) — read-only."""
+        info = tk.Label(parent, text="Etapy serwisowe z projektów RM_MANAGER "
+                        "(prognoza). Kliknij „🔄 Przelicz”, by odświeżyć.",
+                        font=self.FONT_SMALL, fg="#666", anchor='w', padx=10, pady=4)
+        info.pack(fill=tk.X)
+        bar = tk.Frame(parent, padx=8, pady=4)
+        bar.pack(fill=tk.X)
+        tk.Button(bar, text="🔄 Przelicz", font=self.FONT_SMALL, padx=10,
+                  command=lambda: _reload()).pack(side=tk.LEFT, padx=2)
+
+        cols = ('project', 'stage', 'kind', 'start', 'end')
+        tree = ttk.Treeview(parent, columns=cols, show='headings')
+        for key, txt, w in [('project', 'Projekt', 240), ('stage', 'Etap', 140),
+                            ('kind', 'Typ', 90), ('start', 'Start (prog.)', 110),
+                            ('end', 'Koniec (prog.)', 110)]:
+            tree.heading(key, text=txt)
+            tree.column(key, width=w, stretch=(key == 'project'))
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        def _reload():
+            tree.delete(*tree.get_children())
+            try:
+                allA = self._collect_service_stages()
+            except Exception:
+                allA = {}
+            entries = allA.get(employee_id, [])
+            entries.sort(key=lambda e: (e.get('forecast_start') or '9999'))
+            for e in entries:
+                tree.insert('', tk.END, values=(
+                    e['project_name'], e['stage_label'],
+                    'milestone' if e['is_milestone'] else 'etap',
+                    self.format_date_ddmmyyyy(e.get('forecast_start')),
+                    self.format_date_ddmmyyyy(e.get('forecast_end')),
+                ))
+
+        _reload()
+        return _reload
+
+    def _service_card_history_tab(self, parent, win, employee_id):
+        """Historia — wyjazdy zrealizowane lub już zakończone (data do < dziś)."""
+        tk.Label(parent, text="Zrealizowane / zakończone wyjazdy serwisowe.",
+                 font=self.FONT_SMALL, fg="#666", anchor='w', padx=10, pady=4).pack(fill=tk.X)
+        cols = ('type', 'status', 'place', 'project', 'from', 'to')
+        tree = ttk.Treeview(parent, columns=cols, show='headings')
+        for key, txt, w in [('type', 'Typ', 120), ('status', 'Status', 110),
+                            ('place', 'Klient / miejsce', 200), ('project', 'Projekt', 160),
+                            ('from', 'Od', 95), ('to', 'Do', 95)]:
+            tree.heading(key, text=txt)
+            tree.column(key, width=w, stretch=(key == 'place'))
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        def _reload():
+            tree.delete(*tree.get_children())
+            try:
+                trips = rmm.get_service_trips(self.rm_master_db_path,
+                                              employee_id=employee_id)
+            except Exception:
+                trips = []
+            today_iso = datetime.now().strftime('%Y-%m-%d')
+            hist = [t for t in trips
+                    if t.get('status') == 'ZREALIZOWANY'
+                    or (t.get('date_to') or '')[:10] < today_iso]
+            hist.sort(key=lambda t: t.get('date_from') or '', reverse=True)
+            code2lbl = {t['code']: t['label'] for t in rmm.SERVICE_TRIP_TYPES}
+            for t in hist:
+                pid = t.get('project_id')
+                pname = self.project_names.get(pid, f"P{pid}") if pid else '—'
+                tree.insert('', tk.END, values=(
+                    code2lbl.get(t['trip_type'], t['trip_type']), t.get('status', ''),
+                    t.get('client_or_place') or '—', pname,
+                    self.format_date_ddmmyyyy(t['date_from']),
+                    self.format_date_ddmmyyyy(t['date_to']),
+                ))
+
+        _reload()
+        return _reload
+
+    def _service_trip_editor(self, parent, trip_id=None, on_change=None,
+                             preset_emp=None, preset_date=None):
+        """Dialog dodania/edycji wyjazdu serwisowego (linia B).
+
+        trip_id=None → nowy wpis. on_change → callback po zapisie/usunięciu.
+        preset_emp/preset_date → wstępne wartości przy tworzeniu z kliku w siatkę.
+        """
+        # Wczytaj istniejący wpis (edycja)
+        rec = None
+        if trip_id is not None:
+            try:
+                for t in rmm.get_service_trips(self.rm_master_db_path):
+                    if t['id'] == trip_id:
+                        rec = t
+                        break
+            except Exception:
+                rec = None
+
+        win = tk.Toplevel(parent)
+        win.title("✈ Wyjazd serwisowy" + (" — edycja" if rec else " — nowy"))
+        win.transient(parent)
+        win.grab_set()
+        win.resizable(False, False)
+
+        frm = tk.Frame(win, padx=14, pady=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+
+        # Pracownik (serwisanci)
+        serwis = [e for e in rmm.get_employees(self.rm_master_db_path, active_only=True)
+                  if (e.get('category') or '') == 'Serwis']
+        emp_names = [f"{e['name']} (#{e['id']})" for e in serwis]
+        emp_by_label = {f"{e['name']} (#{e['id']})": e['id'] for e in serwis}
+
+        r = 0
+        tk.Label(frm, text="Serwisant:", font=self.FONT_BOLD).grid(row=r, column=0, sticky='w', pady=3)
+        emp_var = tk.StringVar()
+        emp_combo = ttk.Combobox(frm, textvariable=emp_var, values=emp_names,
+                                 state='readonly', width=32, font=self.FONT_SMALL)
+        emp_combo.grid(row=r, column=1, columnspan=2, sticky='we', pady=3)
+        if rec:
+            for lbl, eid in emp_by_label.items():
+                if eid == rec['employee_id']:
+                    emp_var.set(lbl); break
+        elif preset_emp is not None:
+            for lbl, eid in emp_by_label.items():
+                if eid == preset_emp:
+                    emp_var.set(lbl); break
+        elif emp_names:
+            emp_combo.current(0)
+
+        # Typ wyjazdu
+        r += 1
+        tk.Label(frm, text="Typ:", font=self.FONT_BOLD).grid(row=r, column=0, sticky='w', pady=3)
+        type_var = tk.StringVar()
+        type_labels = [t['label'] for t in rmm.SERVICE_TRIP_TYPES]
+        type_by_label = {t['label']: t['code'] for t in rmm.SERVICE_TRIP_TYPES}
+        code_by_label = {t['code']: t['label'] for t in rmm.SERVICE_TRIP_TYPES}
+        type_combo = ttk.Combobox(frm, textvariable=type_var, values=type_labels,
+                                  state='readonly', width=20, font=self.FONT_SMALL)
+        type_combo.grid(row=r, column=1, sticky='w', pady=3)
+        type_var.set(code_by_label.get(rec['trip_type'], type_labels[0]) if rec else type_labels[0])
+
+        # Status
+        r += 1
+        tk.Label(frm, text="Status:", font=self.FONT_BOLD).grid(row=r, column=0, sticky='w', pady=3)
+        status_var = tk.StringVar(value=(rec['status'] if rec else 'PLANOWANY'))
+        ttk.Combobox(frm, textvariable=status_var, values=rmm.SERVICE_TRIP_STATUSES,
+                     state='readonly', width=20, font=self.FONT_SMALL
+                     ).grid(row=r, column=1, sticky='w', pady=3)
+
+        # Klient / miejsce
+        r += 1
+        tk.Label(frm, text="Klient / miejsce:", font=self.FONT_BOLD).grid(row=r, column=0, sticky='w', pady=3)
+        place_var = tk.StringVar(value=(rec.get('client_or_place') or '') if rec else '')
+        tk.Entry(frm, textvariable=place_var, width=34, font=self.FONT_SMALL
+                 ).grid(row=r, column=1, columnspan=2, sticky='we', pady=3)
+
+        # Projekt (opcjonalnie)
+        r += 1
+        tk.Label(frm, text="Projekt (opc.):", font=self.FONT_BOLD).grid(row=r, column=0, sticky='w', pady=3)
+        proj_var = tk.StringVar()
+        proj_labels = ["— brak —"] + [f"{self.project_names.get(pid, f'P{pid}')} (#{pid})"
+                                       for pid in self.projects]
+        proj_by_label = {"— brak —": None}
+        for pid in self.projects:
+            proj_by_label[f"{self.project_names.get(pid, f'P{pid}')} (#{pid})"] = pid
+        proj_combo = ttk.Combobox(frm, textvariable=proj_var, values=proj_labels,
+                                  state='readonly', width=32, font=self.FONT_SMALL)
+        proj_combo.grid(row=r, column=1, columnspan=2, sticky='we', pady=3)
+        proj_var.set("— brak —")
+        if rec and rec.get('project_id'):
+            for lbl, pid in proj_by_label.items():
+                if pid == rec['project_id']:
+                    proj_var.set(lbl); break
+
+        # Daty od / do
+        r += 1
+        tk.Label(frm, text="Od:", font=self.FONT_BOLD).grid(row=r, column=0, sticky='w', pady=3)
+        from_var = tk.StringVar(value=(self.format_date_ddmmyyyy(rec['date_from']) if rec
+                                       else (preset_date or datetime.now().strftime('%d-%m-%Y'))))
+        ef = tk.Entry(frm, textvariable=from_var, width=14, font=self.FONT_SMALL)
+        ef.grid(row=r, column=1, sticky='w', pady=3)
+        tk.Button(frm, text="📅", command=lambda: self.open_calendar_picker(ef),
+                  bg="#3498db", fg="white", font=self.FONT_SMALL, padx=3).grid(row=r, column=2, sticky='w')
+
+        r += 1
+        tk.Label(frm, text="Do:", font=self.FONT_BOLD).grid(row=r, column=0, sticky='w', pady=3)
+        to_var = tk.StringVar(value=(self.format_date_ddmmyyyy(rec['date_to']) if rec
+                                     else (preset_date or datetime.now().strftime('%d-%m-%Y'))))
+        et = tk.Entry(frm, textvariable=to_var, width=14, font=self.FONT_SMALL)
+        et.grid(row=r, column=1, sticky='w', pady=3)
+        tk.Button(frm, text="📅", command=lambda: self.open_calendar_picker(et),
+                  bg="#3498db", fg="white", font=self.FONT_SMALL, padx=3).grid(row=r, column=2, sticky='w')
+
+        # Notatka
+        r += 1
+        tk.Label(frm, text="Notatka:", font=self.FONT_BOLD).grid(row=r, column=0, sticky='nw', pady=3)
+        note_txt = tk.Text(frm, width=34, height=3, font=self.FONT_SMALL)
+        note_txt.grid(row=r, column=1, columnspan=2, sticky='we', pady=3)
+        if rec and rec.get('note'):
+            note_txt.insert('1.0', rec['note'])
+
+        frm.columnconfigure(1, weight=1)
+
+        def _save():
+            eid = emp_by_label.get(emp_var.get())
+            if not eid:
+                messagebox.showwarning("Brak serwisanta", "Wybierz serwisanta.", parent=win)
+                return
+            try:
+                d_from = self.parse_date_ddmmyyyy(from_var.get()).strftime('%Y-%m-%d')
+                d_to = self.parse_date_ddmmyyyy(to_var.get()).strftime('%Y-%m-%d')
+            except Exception:
+                messagebox.showwarning("Zła data", "Popraw format dat (DD-MM-YYYY).", parent=win)
+                return
+            if d_to < d_from:
+                messagebox.showwarning("Zły zakres", "Data 'Do' jest wcześniejsza niż 'Od'.", parent=win)
+                return
+            fields = {
+                'employee_id': eid,
+                'project_id': proj_by_label.get(proj_var.get()),
+                'client_or_place': place_var.get().strip() or None,
+                'trip_type': type_by_label.get(type_var.get(), 'INNE'),
+                'date_from': d_from, 'date_to': d_to,
+                'status': status_var.get(),
+                'note': note_txt.get('1.0', 'end').strip() or None,
+            }
+            try:
+                if rec:
+                    rmm.update_service_trip(self.rm_master_db_path, rec['id'], **fields)
+                else:
+                    rmm.add_service_trip(self.rm_master_db_path, user=self.current_user, **fields)
+            except Exception as e:
+                messagebox.showerror("Błąd zapisu", str(e), parent=win)
+                return
+            win.destroy()
+            if on_change:
+                on_change()
+
+        def _delete():
+            if not rec:
+                return
+            if not messagebox.askyesno("Usuń", "Usunąć ten wyjazd serwisowy?", parent=win):
+                return
+            try:
+                rmm.delete_service_trip(self.rm_master_db_path, rec['id'])
+            except Exception as e:
+                messagebox.showerror("Błąd", str(e), parent=win)
+                return
+            win.destroy()
+            if on_change:
+                on_change()
+
+        r += 1
+        btns = tk.Frame(frm)
+        btns.grid(row=r, column=0, columnspan=3, sticky='we', pady=(10, 0))
+        tk.Button(btns, text="💾 Zapisz", command=_save, bg="#27ae60", fg="white",
+                  font=self.FONT_BOLD, padx=16, pady=4).pack(side=tk.LEFT, padx=3)
+        if rec:
+            tk.Button(btns, text="🗑 Usuń", command=_delete, bg="#e74c3c", fg="white",
+                      font=self.FONT_SMALL, padx=12, pady=4).pack(side=tk.LEFT, padx=3)
+        tk.Button(btns, text="Anuluj", command=win.destroy,
+                  font=self.FONT_SMALL, padx=12, pady=4).pack(side=tk.RIGHT, padx=3)
+
+        win.bind('<Escape>', lambda e: win.destroy())
+        win.update_idletasks()
+        try:
+            px = parent.winfo_rootx() + parent.winfo_width() // 2 - win.winfo_reqwidth() // 2
+            py = parent.winfo_rooty() + parent.winfo_height() // 2 - win.winfo_reqheight() // 2
+            win.geometry(f"+{max(10, px)}+{max(10, py)}")
+        except Exception:
+            pass
 
     def _vacation_build_team_calendar_tab(self, parent, dlg):
         """Grafik miesięczny: wiersze = pracownicy, kolumny = dni miesiąca.
@@ -33130,6 +34481,23 @@ Kod: {unlock_code}
         body.bind('<Configure>', lambda e, c=_opr_sc: c.configure(scrollregion=c.bbox('all')))
         _opr_sc.bind('<Configure>', lambda e, c=_opr_sc: c.itemconfig('_oprwin', width=e.width))
 
+        # Scroll kółkiem (lokalnie na oknie popupu — ma grab_set, więc bez kolizji)
+        def _opr_wheel(event):
+            try:
+                if event.num == 4:
+                    _opr_sc.yview_scroll(-1, "units")
+                elif event.num == 5:
+                    _opr_sc.yview_scroll(1, "units")
+                else:
+                    _opr_sc.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            except tk.TclError:
+                pass
+            return "break"
+        for _w in (win, _opr_sc, body):
+            _w.bind('<MouseWheel>', _opr_wheel, add='+')
+            _w.bind('<Button-4>', _opr_wheel, add='+')
+            _w.bind('<Button-5>', _opr_wheel, add='+')
+
         # Projekt i linia
         tk.Label(body, text=f"Projekt: {pname}", font=("Arial", 9, "bold"),
                  anchor='w').pack(anchor='w', pady=(0, 2))
@@ -33163,9 +34531,20 @@ Kod: {unlock_code}
         win.bind("<Escape>", lambda e: win.destroy())
 
         win.update_idletasks()
-        x = parent.winfo_rootx() + parent.winfo_width() // 2 - win.winfo_reqwidth() // 2
-        y = parent.winfo_rooty() + parent.winfo_height() // 2 - win.winfo_reqheight() // 2
-        win.geometry(f"+{x}+{y}")
+        # Rozmiar żądany przez treść, ale ograniczony do ekranu (inaczej długie listy
+        # braków wychodzą poza ekran i popup jest ucinany).
+        scr_w = win.winfo_screenwidth()
+        scr_h = win.winfo_screenheight()
+        req_w = max(win.winfo_reqwidth(), 430)
+        req_h = win.winfo_reqheight()
+        w = min(req_w, scr_w - 80)
+        h = min(req_h, scr_h - 120)  # zostaw margines na pasek zadań
+        x = parent.winfo_rootx() + parent.winfo_width() // 2 - w // 2
+        y = parent.winfo_rooty() + parent.winfo_height() // 2 - h // 2
+        # Przytnij pozycję, by całe okno mieściło się na ekranie
+        x = max(10, min(x, scr_w - w - 10))
+        y = max(10, min(y, scr_h - h - 40))
+        win.geometry(f"{w}x{h}+{x}+{y}")
         btn_close.focus_set()
 
     def _attach_tooltip(self, widget, text: str):

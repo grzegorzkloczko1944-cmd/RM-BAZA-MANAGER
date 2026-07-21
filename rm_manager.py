@@ -682,6 +682,31 @@ def ensure_rm_master_tables(master_db_path: str):
     con.execute("CREATE INDEX IF NOT EXISTS idx_emp_avail_employee ON employee_availability(employee_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_emp_avail_dates ON employee_availability(date_from, date_to)")
 
+    # Wyjazdy serwisowe — ręcznie planowane wyjazdy serwisantów (linia B grafiku
+    # Serwis). Uzupełnienie linii A, która jest wyliczana z etapów projektów.
+    # project_id opcjonalne (wyjazd nie musi być powiązany z projektem RM_MANAGER).
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS service_trips (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER NOT NULL,
+            project_id INTEGER,
+            client_or_place TEXT,
+            trip_type TEXT NOT NULL DEFAULT 'INNE',
+            date_from DATE NOT NULL,
+            date_to DATE NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PLANOWANY' CHECK (status IN (
+                'PLANOWANY', 'POTWIERDZONY', 'ZREALIZOWANY'
+            )),
+            note TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_by TEXT,
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+            CHECK (date_to >= date_from)
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_service_trips_employee ON service_trips(employee_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_service_trips_dates ON service_trips(date_from, date_to)")
+
     # Dni wolne / kalendarz firmy
     con.execute("""
         CREATE TABLE IF NOT EXISTS company_calendar (
@@ -9903,6 +9928,128 @@ ABSENCE_TYPE_CODES = [t['code'] for t in ABSENCE_TYPES]
 ABSENCE_TYPE_BY_CODE = {t['code']: t for t in ABSENCE_TYPES}
 # Statusy wniosku / wpisu.
 ABSENCE_STATUSES = ['OCZEKUJE', 'ZATWIERDZONY', 'ODRZUCONY']
+
+# ============================================================================
+# WYJAZDY SERWISOWE (blok Serwis — linia B)
+# ============================================================================
+# Typy wyjazdów serwisowych — własny słownik (kod, etykieta, kolor komórki).
+SERVICE_TRIP_TYPES = [
+    {'code': 'GWARANCJA', 'label': 'Gwarancja',        'color': '#3498db'},
+    {'code': 'PRZEGLAD',  'label': 'Przegląd',         'color': '#16a085'},
+    {'code': 'AWARIA',    'label': 'Awaria',           'color': '#e74c3c'},
+    {'code': 'SZKOLENIE', 'label': 'Szkolenie u kl.',  'color': '#9b59b6'},
+    {'code': 'MODYFIKACJA','label': 'Modyfikacja',     'color': '#e67e22'},
+    {'code': 'INNE',      'label': 'Inne',             'color': '#7f8c8d'},
+]
+SERVICE_TRIP_TYPE_CODES = [t['code'] for t in SERVICE_TRIP_TYPES]
+SERVICE_TRIP_TYPE_BY_CODE = {t['code']: t for t in SERVICE_TRIP_TYPES}
+# Statusy wyjazdu.
+SERVICE_TRIP_STATUSES = ['PLANOWANY', 'POTWIERDZONY', 'ZREALIZOWANY']
+
+
+def get_service_trips(rm_master_db_path: str, employee_id: int = None,
+                      date_from: str = None, date_to: str = None) -> List[Dict]:
+    """Pobierz wyjazdy serwisowe (linia B). Filtry: pracownik + zakres dat.
+
+    Zakres dat = nakładanie (wyjazd, który choć częściowo mieści się w oknie).
+    Dołącza employee_name i employee_category z tabeli employees.
+    """
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        clauses, params = [], []
+        if employee_id is not None:
+            clauses.append("st.employee_id = ?")
+            params.append(employee_id)
+        # Nakładanie zakresów: trip.from <= window.to AND trip.to >= window.from
+        if date_to:
+            clauses.append("st.date_from <= ?")
+            params.append(date_to)
+        if date_from:
+            clauses.append("st.date_to >= ?")
+            params.append(date_from)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = con.execute(f"""
+            SELECT st.*, e.name AS employee_name, e.category AS employee_category
+            FROM service_trips st
+            LEFT JOIN employees e ON e.id = st.employee_id
+            {where}
+            ORDER BY st.date_from
+        """, params).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def add_service_trip(rm_master_db_path: str, employee_id: int, date_from: str,
+                     date_to: str, trip_type: str = 'INNE',
+                     client_or_place: str = None, project_id: int = None,
+                     status: str = 'PLANOWANY', note: str = None,
+                     user: str = None) -> int:
+    """Dodaj wyjazd serwisowy. Zwraca id nowego wpisu."""
+    trip_type = (trip_type or 'INNE').upper()
+    if trip_type not in SERVICE_TRIP_TYPE_CODES:
+        trip_type = 'INNE'
+    status = (status or 'PLANOWANY').upper()
+    if status not in SERVICE_TRIP_STATUSES:
+        raise ValueError(f"Nieznany status wyjazdu: {status}")
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        cur = con.execute("""
+            INSERT INTO service_trips
+                (employee_id, project_id, client_or_place, trip_type,
+                 date_from, date_to, status, note, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (employee_id, project_id, client_or_place, trip_type,
+              date_from[:10], date_to[:10], status, note, user))
+        _rm_safe_commit(con)
+        return cur.lastrowid
+    finally:
+        con.close()
+
+
+def update_service_trip(rm_master_db_path: str, trip_id: int, **fields):
+    """Zaktualizuj wybrane pola wyjazdu serwisowego.
+
+    Dozwolone pola: employee_id, project_id, client_or_place, trip_type,
+    date_from, date_to, status, note.
+    """
+    allowed = {'employee_id', 'project_id', 'client_or_place', 'trip_type',
+               'date_from', 'date_to', 'status', 'note'}
+    sets, params = [], []
+    for k, v in fields.items():
+        if k not in allowed:
+            continue
+        if k == 'trip_type':
+            v = (v or 'INNE').upper()
+            if v not in SERVICE_TRIP_TYPE_CODES:
+                v = 'INNE'
+        if k == 'status':
+            v = (v or 'PLANOWANY').upper()
+            if v not in SERVICE_TRIP_STATUSES:
+                raise ValueError(f"Nieznany status wyjazdu: {v}")
+        if k in ('date_from', 'date_to') and v:
+            v = v[:10]
+        sets.append(f"{k} = ?")
+        params.append(v)
+    if not sets:
+        return
+    params.append(trip_id)
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        con.execute(f"UPDATE service_trips SET {', '.join(sets)} WHERE id = ?", params)
+        _rm_safe_commit(con)
+    finally:
+        con.close()
+
+
+def delete_service_trip(rm_master_db_path: str, trip_id: int):
+    """Usuń wyjazd serwisowy."""
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        con.execute("DELETE FROM service_trips WHERE id = ?", (trip_id,))
+        _rm_safe_commit(con)
+    finally:
+        con.close()
 
 
 def set_absence_status(rm_master_db_path: str, avail_id: int, status: str,
