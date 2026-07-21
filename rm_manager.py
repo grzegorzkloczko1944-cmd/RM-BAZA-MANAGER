@@ -700,12 +700,17 @@ def ensure_rm_master_tables(master_db_path: str):
             note TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             created_by TEXT,
+            working_days REAL,
             FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
             CHECK (date_to >= date_from)
         )
     """)
     con.execute("CREATE INDEX IF NOT EXISTS idx_service_trips_employee ON service_trips(employee_id)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_service_trips_dates ON service_trips(date_from, date_to)")
+    # Migracja: working_days dla bazy utworzonej przed dodaniem tej kolumny.
+    _cols = {r[1] for r in con.execute("PRAGMA table_info(service_trips)").fetchall()}
+    if 'working_days' not in _cols:
+        con.execute("ALTER TABLE service_trips ADD COLUMN working_days REAL")
 
     # Grupy pracowników, którzy nie mogą być na urlopie równocześnie (np. jedyni
     # dwaj ludzie znający dany proces). Egzekwowane jako ostrzeżenie (nie twarda
@@ -10142,15 +10147,21 @@ def add_service_trip(rm_master_db_path: str, employee_id: int, date_from: str,
     status = (status or 'PLANOWANY').upper()
     if status not in SERVICE_TRIP_STATUSES:
         raise ValueError(f"Nieznany status wyjazdu: {status}")
+    # Dni robocze wg kalendarza firmowego (bez weekendów/świąt) — liczone po
+    # cichu, nie wyświetlane w GUI; do odczytu przez zewnętrzne narzędzia.
+    # Tylko dla ZREALIZOWANY — dopóki wyjazd jest planowany/potwierdzony,
+    # dni jeszcze się nie "wydarzyły" faktycznie.
+    working_days = (compute_absence_days(rm_master_db_path, date_from, date_to)['working_days']
+                    if status == 'ZREALIZOWANY' else None)
     con = _open_rm_connection(rm_master_db_path)
     try:
         cur = con.execute("""
             INSERT INTO service_trips
                 (employee_id, project_id, client_or_place, trip_type,
-                 date_from, date_to, status, note, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 date_from, date_to, status, note, created_by, working_days)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (employee_id, project_id, client_or_place, trip_type,
-              date_from[:10], date_to[:10], status, note, user))
+              date_from[:10], date_to[:10], status, note, user, working_days))
         _rm_safe_commit(con)
         return cur.lastrowid
     finally:
@@ -10183,9 +10194,25 @@ def update_service_trip(rm_master_db_path: str, trip_id: int, **fields):
         params.append(v)
     if not sets:
         return
-    params.append(trip_id)
     con = _open_rm_connection(rm_master_db_path)
     try:
+        # Przelicz working_days gdy zmienia się zakres dat lub status — scal
+        # z aktualnymi wartościami w bazie, żeby policzyć efektywny stan.
+        # Tylko dla ZREALIZOWANY (patrz add_service_trip) — inaczej NULL.
+        if 'date_from' in fields or 'date_to' in fields or 'status' in fields:
+            row = con.execute(
+                "SELECT date_from, date_to, status FROM service_trips WHERE id = ?",
+                (trip_id,)).fetchone()
+            eff_from = fields.get('date_from', row['date_from'] if row else None)
+            eff_to = fields.get('date_to', row['date_to'] if row else None)
+            eff_status = fields.get('status', row['status'] if row else None)
+            if eff_from and eff_to and eff_status == 'ZREALIZOWANY':
+                wd = compute_absence_days(rm_master_db_path, eff_from, eff_to)['working_days']
+            else:
+                wd = None
+            sets.append("working_days = ?")
+            params.append(wd)
+        params.append(trip_id)
         con.execute(f"UPDATE service_trips SET {', '.join(sets)} WHERE id = ?", params)
         _rm_safe_commit(con)
     finally:

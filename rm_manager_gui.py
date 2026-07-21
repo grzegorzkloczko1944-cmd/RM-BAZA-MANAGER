@@ -32797,6 +32797,15 @@ Kod: {unlock_code}
             active_trip_types = {c for c, v in trip_vars.items() if v.get()}
             m_lo = first_idx
             m_hi = first_idx + ndays
+            # Dni robocze tego miesiąca (wg kalendarza firmowego) — do wizualnego
+            # wyszarzenia weekendów/świąt w paskach wyjazdów (linia B), tak jak
+            # w Kalendarzu zespołu dla urlopów.
+            _m_d_from = f"{yr:04d}-{mo:02d}-01"
+            _m_d_to = f"{yr:04d}-{mo:02d}-{ndays:02d}"
+            try:
+                month_workdays = set(rmm.get_working_days(self.rm_master_db_path, _m_d_from, _m_d_to))
+            except Exception:
+                month_workdays = None  # fallback: traktuj wszystkie dni jako robocze
             for ri, r in enumerate(sv['rows']):
                 y0 = ri * ROW_H
                 if r['kind'] == 'H':
@@ -32822,7 +32831,8 @@ Kod: {unlock_code}
                             day_counts[gi] = day_counts.get(gi, 0) + 1
                     double_days = {gi for gi, cnt in day_counts.items() if cnt > 1}
                     for t in emp_trips:
-                        _paint_trip(ri, y0, t, m_lo, m_hi, coll, r['emp_id'], double_days)
+                        _paint_trip(ri, y0, t, m_lo, m_hi, coll, r['emp_id'], double_days,
+                                   month_workdays, first_idx)
 
         def _paint_stage(ri, y0, ent, m_lo, m_hi):
             f_s = ent.get('forecast_start')
@@ -32863,7 +32873,8 @@ Kod: {unlock_code}
                     prev = sv['tips'].get(key)
                     sv['tips'][key] = f"{prev}\n───\n{desc}" if prev else desc
 
-        def _paint_trip(ri, y0, t, m_lo, m_hi, coll, eid, double_days=frozenset()):
+        def _paint_trip(ri, y0, t, m_lo, m_hi, coll, eid, double_days=frozenset(),
+                        month_workdays=None, first_idx=0):
             color = rmm.SERVICE_TRIP_STATUS_COLORS.get(t.get('status'), '#7f8c8d')
             tlabel = rmm.SERVICE_TRIP_TYPE_BY_CODE.get(t['trip_type'], {}).get('label', t['trip_type'])
             for gi in _iter_day_idx(t.get('date_from'), t.get('date_to')):
@@ -32872,6 +32883,15 @@ Kod: {unlock_code}
                 x0 = gi * CELL_W
                 is_coll = gi in coll
                 is_double = gi in double_days
+                # Weekend/święto w zakresie wyjazdu — nie liczy się do dni
+                # roboczych, więc nie malujemy kolorem statusu (zostaje szare
+                # tło siatki), tak jak nieobecności w Kalendarzu zespołu.
+                _iso = _idx_to_date(gi).strftime('%Y-%m-%d')
+                _is_workday = (month_workdays is None) or (_iso in month_workdays)
+                if not _is_workday:
+                    key = (gi, ri)
+                    sv['trip_at'][key] = t['id']
+                    continue
                 grid.create_rectangle(x0, y0 + 2, x0 + CELL_W, y0 + ROW_H - 2,
                                       fill=color,
                                       outline=("#c0392b" if is_coll else "#7f8c8d"),
