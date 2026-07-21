@@ -11373,6 +11373,7 @@ class RMManagerGUI:
         tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=4)
         vsb.pack(side=tk.LEFT, fill=tk.Y, pady=4)
+        tree.tag_configure('inactive', foreground='#999999', background='#f0f0f0')
 
         def refresh(*_):
             tree.delete(*tree.get_children())
@@ -11391,8 +11392,8 @@ class RMManagerGUI:
                     r.get('phone') or '',
                     r.get('email') or '',
                     r.get('contact_info') or '',
-                    '✓' if r['is_active'] else '—'
-                ))
+                    '✓' if r['is_active'] else '⛔ Nieaktywny'
+                ), tags=() if r['is_active'] else ('inactive',))
 
         cat_combo.bind('<<ComboboxSelected>>', refresh)
         show_inactive_var.trace_add('write', refresh)
@@ -30403,10 +30404,14 @@ Kod: {unlock_code}
         notebook.add(tab_report, text="  🧾  Rozliczenie  ")
         report_refresh = self._vacation_build_report_tab(tab_report, dlg)
 
+        tab_now = tk.Frame(notebook)
+        notebook.add(tab_now, text="  📍  Stan obecny  ")
+        now_refresh = self._vacation_build_now_tab(tab_now, dlg)
+
         # Auto-odśwież KAŻDĄ zakładkę przy wejściu na nią — zmiany zrobione w
         # innej zakładce (dodanie wniosku, edycja pracownika, pula) są od razu
         # widoczne, bez ręcznego odświeżania. Mapujemy po ikonie w tytule.
-        _tab_refresh = {'📆': cal_refresh, '👥': emp_refresh, '📋': abs_refresh,
+        _tab_refresh = {'📍': now_refresh, '📆': cal_refresh, '👥': emp_refresh, '📋': abs_refresh,
                         '📊': quota_refresh, '🧾': report_refresh}
 
         def _on_vac_tab_changed(_e=None):
@@ -30418,6 +30423,119 @@ Kod: {unlock_code}
             except Exception:
                 pass
         notebook.bind("<<NotebookTabChanged>>", _on_vac_tab_changed)
+
+    def _vacation_build_now_tab(self, parent, dlg):
+        """Zakładka „Stan obecny" — kto jest dziś nieobecny + najbliższe
+        nadchodzące urlopy/nieobecności. Krótki skrót, read-only."""
+        UPCOMING_HORIZON_DAYS = 60
+
+        bar = tk.Frame(parent, padx=8, pady=6)
+        bar.pack(fill=tk.X)
+        tk.Button(bar, text="🔄 Odśwież", font=self.FONT_SMALL, padx=10,
+                  command=lambda: _reload()).pack(side=tk.LEFT, padx=2)
+
+        tk.Label(parent, text="Dzisiaj nieobecni", font=("Arial", 12, "bold"),
+                anchor='w').pack(fill=tk.X, padx=10, pady=(6, 2))
+        cols_today = ('employee', 'category', 'reason', 'period', 'notes')
+        tree_today = ttk.Treeview(parent, columns=cols_today, show='headings', height=6)
+        for c, txt, w in [('employee', 'Pracownik', 160), ('category', 'Kategoria', 100),
+                          ('reason', 'Powód', 140), ('period', 'Okres', 160),
+                          ('notes', 'Uwagi', 220)]:
+            tree_today.heading(c, text=txt)
+            tree_today.column(c, width=w, stretch=(c == 'notes'))
+        tree_today.pack(fill=tk.X, padx=8, pady=(0, 8))
+
+        tk.Label(parent, text="Pracownicy na wyjeździe (dziś)", font=("Arial", 12, "bold"),
+                anchor='w').pack(fill=tk.X, padx=10, pady=(4, 2))
+        cols_trip = ('employee', 'type', 'place', 'project', 'period', 'status')
+        tree_trip = ttk.Treeview(parent, columns=cols_trip, show='headings', height=6)
+        for c, txt, w in [('employee', 'Serwisant', 160), ('type', 'Typ', 110),
+                          ('place', 'Klient / miejsce', 200), ('project', 'Projekt', 160),
+                          ('period', 'Okres', 160), ('status', 'Status', 100)]:
+            tree_trip.heading(c, text=txt)
+            tree_trip.column(c, width=w, stretch=(c == 'place'))
+        tree_trip.pack(fill=tk.X, padx=8, pady=(0, 8))
+
+        tk.Label(parent, text=f"Nadchodzące urlopy/nieobecności (najbliższe {UPCOMING_HORIZON_DAYS} dni)",
+                font=("Arial", 12, "bold"), anchor='w').pack(fill=tk.X, padx=10, pady=(4, 2))
+        cols_up = ('employee', 'category', 'reason', 'period', 'notes')
+        tree_up = ttk.Treeview(parent, columns=cols_up, show='headings', height=12)
+        for c, txt, w in [('employee', 'Pracownik', 160), ('category', 'Kategoria', 100),
+                          ('reason', 'Powód', 140), ('period', 'Okres', 160),
+                          ('notes', 'Uwagi', 220)]:
+            tree_up.heading(c, text=txt)
+            tree_up.column(c, width=w, stretch=(c == 'notes'))
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=tree_up.yview)
+        tree_up.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        tree_up.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        def _reload():
+            tree_today.delete(*tree_today.get_children())
+            tree_trip.delete(*tree_trip.get_children())
+            tree_up.delete(*tree_up.get_children())
+            today = datetime.now().date()
+            today_iso0 = today.strftime('%Y-%m-%d')
+            horizon = today + timedelta(days=UPCOMING_HORIZON_DAYS)
+
+            try:
+                trips_today = rmm.get_service_trips(self.rm_master_db_path,
+                                                     date_from=today_iso0, date_to=today_iso0)
+            except Exception:
+                trips_today = []
+            trips_today = [t for t in trips_today
+                          if (t.get('date_from') or '')[:10] <= today_iso0 <= (t.get('date_to') or '')[:10]]
+            trips_today.sort(key=lambda t: t.get('employee_name') or '')
+            for t in trips_today:
+                pid = t.get('project_id')
+                pname = self.project_names.get(pid, f"P{pid}") if pid else '—'
+                period = f"{self.format_date_ddmmyyyy(t.get('date_from'))} - {self.format_date_ddmmyyyy(t.get('date_to'))}"
+                tree_trip.insert('', tk.END, values=(
+                    t.get('employee_name', '?'),
+                    rmm.SERVICE_TRIP_TYPE_BY_CODE.get(t['trip_type'], {}).get('label', t['trip_type']),
+                    t.get('client_or_place') or '—', pname, period, t.get('status', ''),
+                ))
+            try:
+                avail = rmm.get_employee_availability(
+                    self.rm_master_db_path,
+                    date_from=today.strftime('%Y-%m-%d'),
+                    date_to=horizon.strftime('%Y-%m-%d'))
+            except Exception:
+                avail = []
+            # Tylko zatwierdzone / bez workflow (pomijamy odrzucone) — to co
+            # realnie obowiązuje, nie same wnioski oczekujące na decyzję.
+            avail = [a for a in avail if (a.get('status') or '').upper() != 'ODRZUCONY']
+
+            today_iso = today.strftime('%Y-%m-%d')
+            today_rows, upcoming_rows = [], []
+            for a in avail:
+                d_from = (a.get('date_from') or '')[:10]
+                d_to = (a.get('date_to') or '')[:10]
+                if not d_from:
+                    continue
+                period = f"{self.format_date_ddmmyyyy(d_from)} - {self.format_date_ddmmyyyy(d_to)}"
+                row = (
+                    a.get('employee_name', '?'),
+                    a.get('employee_category', ''),
+                    self.REASON_LABELS.get((a.get('reason') or '').upper(), a.get('reason') or ''),
+                    period,
+                    a.get('notes') or '',
+                )
+                if d_from <= today_iso <= (d_to or d_from):
+                    today_rows.append(row)
+                elif d_from > today_iso:
+                    upcoming_rows.append((d_from, row))
+
+            today_rows.sort(key=lambda r: r[0])
+            for row in today_rows:
+                tree_today.insert('', tk.END, values=row)
+
+            upcoming_rows.sort(key=lambda x: x[0])
+            for _, row in upcoming_rows:
+                tree_up.insert('', tk.END, values=row)
+
+        _reload()
+        return _reload
 
     def _vacation_build_absences_tab(self, parent, dlg):
         """CRUD nieobecności + workflow wniosków (Zatwierdź / Odrzuć)."""
