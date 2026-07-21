@@ -32519,9 +32519,10 @@ Kod: {unlock_code}
             box.pack(side=tk.LEFT, padx=2)
             tk.Label(box, text="  ", bg=rmm.SERVICE_TRIP_STATUS_COLORS.get(status, '#7f8c8d')).pack(side=tk.LEFT)
             tk.Label(box, text=status.capitalize(), font=self.FONT_SMALL).pack(side=tk.LEFT)
-        # opcja: pokaż tylko serwisantów mających cokolwiek (A lub B)
-        only_active = tk.BooleanVar(value=False)
-        tk.Checkbutton(legendbar, text="tylko z planem/wyjazdem", variable=only_active,
+        # opcja: pokaż tylko serwisantów BEZ aktualnego/planowanego wyjazdu (B).
+        # ZREALIZOWANY się nie liczy — wyjazd musi być PLANOWANY lub POTWIERDZONY.
+        only_no_trip = tk.BooleanVar(value=False)
+        tk.Checkbutton(legendbar, text="bez wyjazdu", variable=only_no_trip,
                        font=self.FONT_SMALL,
                        command=lambda: _redraw()).pack(side=tk.LEFT, padx=(10, 0))
 
@@ -32653,10 +32654,13 @@ Kod: {unlock_code}
                         proj_ids.append(ent['project_id'])
                 show_a = show_a_var.get()
                 show_b = show_b_var.get()
-                has_trips = eid in trips_by_emp
-                # only_active patrzy na realne dane, niezależnie od tego czy
-                # A/B jest akurat ukryte przełącznikiem Pokaż A / Pokaż B.
-                if only_active.get() and not proj_ids and not has_trips:
+                # "bez wyjazdu": ukryj serwisantów mających choć jeden wyjazd
+                # PLANOWANY/POTWIERDZONY (ZREALIZOWANY się nie liczy — to już
+                # przeszłość, nie blokuje traktowania kogoś jako "wolnego").
+                has_active_trip = any(
+                    (t.get('status') or '').upper() in ('PLANOWANY', 'POTWIERDZONY')
+                    for t in trips_by_emp.get(eid, []))
+                if only_no_trip.get() and has_active_trip:
                     continue
                 if not show_a:
                     proj_ids = []
@@ -32671,7 +32675,8 @@ Kod: {unlock_code}
                         rows.append({'emp_id': eid, 'emp_name': e['name'], 'kind': 'A',
                                      'project_id': pid,
                                      'sub_label': f"▸ {pname[:26]}"})
-                # Wiersz B — zawsze (chyba że filtr only_active i brak czegokolwiek)
+                # Wiersz B — zawsze gdy Pokaż B (filtr "bez wyjazdu" działa na
+                # poziomie serwisanta, nie ukrywa wiersza B samego w sobie)
                 if show_b:
                     rows.append({'emp_id': eid, 'emp_name': e['name'], 'kind': 'B',
                                  'project_id': None, 'sub_label': "✈ wyjazdy"})
