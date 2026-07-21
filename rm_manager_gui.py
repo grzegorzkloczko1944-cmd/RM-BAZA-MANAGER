@@ -493,6 +493,11 @@ DEFAULT_DEPENDENCIES = [
 # ============================================================================
 
 class RMManagerGUI:
+    MONTH_NAMES_PL = [
+        '', 'Styczeń', 'Luty', 'Marzec', 'Kwiecień', 'Maj', 'Czerwiec',
+        'Lipiec', 'Sierpień', 'Wrzesień', 'Październik', 'Listopad', 'Grudzień'
+    ]
+
     def __init__(self, root):
         self.root = root
         self.root.title(f"RM_MANAGER v{APP_VERSION} - Zarządzanie procesami projektów")
@@ -31919,6 +31924,10 @@ Kod: {unlock_code}
         notebook.add(tab_trips, text="  ✈  Wyjazdy  ")
         trips_refresh = self._service_build_trips_tab(tab_trips, dlg)
 
+        tab_summary = tk.Frame(notebook)
+        notebook.add(tab_summary, text="  📋  Podsumowanie  ")
+        summary_refresh = self._service_build_summary_tab(tab_summary, dlg)
+
         # Odśwież aktywną zakładkę po zmianie (dane współdzielone: service_trips)
         def _on_tab_changed(_e=None):
             try:
@@ -31927,6 +31936,8 @@ Kod: {unlock_code}
                     chart_refresh()
                 elif idx == 1 and trips_refresh:
                     trips_refresh()
+                elif idx == 2 and summary_refresh:
+                    summary_refresh()
             except Exception:
                 pass
         notebook.bind('<<NotebookTabChanged>>', _on_tab_changed)
@@ -32324,7 +32335,7 @@ Kod: {unlock_code}
             header_cv.create_rectangle(month_x0, 0, month_x0 + month_w, HDR_H / 2,
                                        fill="#2c3e50", outline="#1a252f")
             header_cv.create_text(month_x0 + month_w / 2, HDR_H / 4,
-                                  text=f"{__cal.month_name[mo]} {yr}".capitalize(),
+                                  text=f"{self.MONTH_NAMES_PL[mo]} {yr}",
                                   fill="white", font=self.FONT_BOLD)
             for dd in range(1, ndays + 1):
                 gi = first_idx + (dd - 1)
@@ -32349,6 +32360,12 @@ Kod: {unlock_code}
             cal_months['lo'] = min(cal_months['lo'], first_idx)
             cal_months['hi'] = max(cal_months['hi'], first_idx + ndays)
             _paint_data(yr, mo, first_idx, ndays)
+            # Oś dnia bieżącego — pionowe obramowanie na kolumnie dzisiejszej daty.
+            if yr == _today_date.year and mo == _today_date.month:
+                gi_today = first_idx + (_today_date.day - 1)
+                xt = gi_today * CELL_W
+                grid.create_rectangle(xt, 0, xt + CELL_W, len(sv['rows']) * ROW_H,
+                                      outline="#e67e22", width=2, fill='', tags='today')
             _update_scrollregion()
 
         def _paint_data(yr, mo, first_idx, ndays):
@@ -32370,12 +32387,18 @@ Kod: {unlock_code}
                         _paint_stage(ri, y0, ent, m_lo, m_hi)
                 else:  # B
                     coll = sv['collide_days'].get(r['emp_id'], set())
-                    for t in sv['trips']:
-                        if t['employee_id'] != r['emp_id']:
-                            continue
-                        if t['trip_type'] not in active_trip_types:
-                            continue
-                        _paint_trip(ri, y0, t, m_lo, m_hi, coll, r['emp_id'])
+                    emp_trips = [t for t in sv['trips']
+                                if t['employee_id'] == r['emp_id']
+                                and t['trip_type'] in active_trip_types]
+                    # Dni z ≥2 wyjazdami tego samego serwisanta (świadome nakładanie,
+                    # np. dwóch klientów jednego dnia) — oznaczamy osobnym znacznikiem.
+                    day_counts = {}
+                    for t in emp_trips:
+                        for gi in _iter_day_idx(t.get('date_from'), t.get('date_to')):
+                            day_counts[gi] = day_counts.get(gi, 0) + 1
+                    double_days = {gi for gi, cnt in day_counts.items() if cnt > 1}
+                    for t in emp_trips:
+                        _paint_trip(ri, y0, t, m_lo, m_hi, coll, r['emp_id'], double_days)
 
         def _paint_stage(ri, y0, ent, m_lo, m_hi):
             f_s = ent.get('forecast_start')
@@ -32416,7 +32439,7 @@ Kod: {unlock_code}
                     prev = sv['tips'].get(key)
                     sv['tips'][key] = f"{prev}\n───\n{desc}" if prev else desc
 
-        def _paint_trip(ri, y0, t, m_lo, m_hi, coll, eid):
+        def _paint_trip(ri, y0, t, m_lo, m_hi, coll, eid, double_days=frozenset()):
             color = rmm.SERVICE_TRIP_STATUS_COLORS.get(t.get('status'), '#7f8c8d')
             tlabel = rmm.SERVICE_TRIP_TYPE_BY_CODE.get(t['trip_type'], {}).get('label', t['trip_type'])
             for gi in _iter_day_idx(t.get('date_from'), t.get('date_to')):
@@ -32424,6 +32447,7 @@ Kod: {unlock_code}
                     continue
                 x0 = gi * CELL_W
                 is_coll = gi in coll
+                is_double = gi in double_days
                 grid.create_rectangle(x0, y0 + 2, x0 + CELL_W, y0 + ROW_H - 2,
                                       fill=color,
                                       outline=("#c0392b" if is_coll else "#7f8c8d"),
@@ -32431,9 +32455,15 @@ Kod: {unlock_code}
                 if is_coll:
                     grid.create_text(x0 + CELL_W / 2, y0 + ROW_H / 2, text="⚠",
                                      fill="white", font=("Segoe UI", 8, "bold"))
+                if is_double:
+                    # ✕ na środku komórki — dwa (lub więcej) wyjazdy tego serwisanta tego dnia.
+                    grid.create_text(x0 + CELL_W / 2, y0 + ROW_H / 2, text="✕",
+                                     fill="#ffffff", font=("Segoe UI", 12, "bold"))
                 key = (gi, ri)
                 sv['trip_at'][key] = t['id']
                 place = t.get('client_or_place') or '—'
+                pid = t.get('project_id')
+                proj_txt = f"\nProjekt: {self.project_names.get(pid, f'P{pid}')}" if pid else ""
                 coll_txt = ""
                 if is_coll:
                     labels = sv.get('collide_labels', {}).get((eid, gi), [])
@@ -32441,13 +32471,18 @@ Kod: {unlock_code}
                         coll_txt = "\n⚠ KOLIZJA z: " + "; ".join(labels)
                     else:
                         coll_txt = "\n⚠ KOLIZJA z milestone'em!"
-                sv['tips'][key] = (
-                    f"✈ {tlabel}: {place}\n"
+                double_txt = "\n✕ Dwa wyjazdy tego dnia!" if is_double else ""
+                desc = (
+                    f"✈ {tlabel}: {place}"
+                    f"{proj_txt}\n"
                     f"{self.format_date_ddmmyyyy(t.get('date_from'))} → "
                     f"{self.format_date_ddmmyyyy(t.get('date_to'))}\n"
                     f"Status: {t.get('status', '')}"
                     + coll_txt
+                    + double_txt
                     + "\n(klik = edytuj)")
+                prev = sv['tips'].get(key)
+                sv['tips'][key] = f"{prev}\n───\n{desc}" if prev else desc
 
         def _update_scrollregion():
             x0 = cal_months['lo'] * CELL_W
@@ -32719,6 +32754,161 @@ Kod: {unlock_code}
         _reload()
         return _reload
 
+    def _service_build_summary_tab(self, parent, dlg):
+        """Zakładka „Podsumowanie" — skrót aktywności serwisantów.
+
+        Dla każdego serwisanta: co robi dziś (wyjazd / etap w toku) + najbliższe
+        zaplanowane wydarzenia (do SUMMARY_HORIZON_DAYS). Czysto informacyjne,
+        read-only — ma dać szybki obraz "co się dzieje" bez wchodzenia w grafik.
+        """
+        SUMMARY_HORIZON_DAYS = 14
+
+        bar = tk.Frame(parent, padx=8, pady=6)
+        bar.pack(fill=tk.X)
+        tk.Button(bar, text="🔄 Odśwież", font=self.FONT_SMALL, padx=10,
+                  command=lambda: _reload()).pack(side=tk.LEFT, padx=2)
+        info = tk.Label(bar, text=f"Dziś + najbliższe {SUMMARY_HORIZON_DAYS} dni. "
+                        "Dane linii A wg ostatniego przeliczenia (zakładka „Grafik serwisów”).",
+                        font=self.FONT_SMALL, fg="#666")
+        info.pack(side=tk.LEFT, padx=(10, 0))
+
+        canvas = tk.Canvas(parent, highlightthickness=0, bg="white")
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        inner = tk.Frame(canvas, bg="white")
+        canvas.create_window((0, 0), window=inner, anchor='nw')
+
+        def _on_configure(_e=None):
+            canvas.configure(scrollregion=canvas.bbox('all'))
+        inner.bind('<Configure>', _on_configure)
+
+        def _on_mousewheel(ev):
+            canvas.yview_scroll(int(-1 * (ev.delta / 120)), "units")
+        canvas.bind_all('<MouseWheel>', _on_mousewheel)
+
+        def _fmt_range(s, e):
+            if not s:
+                return "—"
+            if not e or e == s:
+                return self.format_date_ddmmyyyy(s)
+            return f"{self.format_date_ddmmyyyy(s)} → {self.format_date_ddmmyyyy(e)}"
+
+        def _reload():
+            for w in inner.winfo_children():
+                w.destroy()
+
+            today = datetime.now().date()
+            horizon = today + timedelta(days=SUMMARY_HORIZON_DAYS)
+            today_iso = today.strftime('%Y-%m-%d')
+            horizon_iso = horizon.strftime('%Y-%m-%d')
+
+            try:
+                lineA = self._collect_service_stages()
+            except Exception:
+                lineA = {}
+            try:
+                trips = rmm.get_service_trips(self.rm_master_db_path,
+                                              date_from=today_iso, date_to=horizon_iso)
+            except Exception:
+                trips = []
+            trips_by_emp = {}
+            for t in trips:
+                trips_by_emp.setdefault(t['employee_id'], []).append(t)
+
+            emps = rmm.get_employees(self.rm_master_db_path, active_only=True)
+            serwis = [e for e in emps if (e.get('category') or '') == 'Serwis']
+            serwis.sort(key=lambda e: e['name'])
+
+            if not serwis:
+                tk.Label(inner, text="Brak aktywnych serwisantów.",
+                        font=self.FONT_SMALL, fg="#666", bg="white").pack(anchor='w', padx=6, pady=6)
+                return
+
+            for e in serwis:
+                eid = e['id']
+                card = tk.Frame(inner, bg="white", highlightbackground="#dcdcdc",
+                                highlightthickness=1, bd=0)
+                card.pack(fill=tk.X, padx=4, pady=4)
+
+                # Wyjazdy tego serwisanta w oknie [dziś, dziś+horyzont]
+                e_trips = sorted(trips_by_emp.get(eid, []),
+                                 key=lambda t: t.get('date_from') or '')
+                today_trip = next((t for t in e_trips
+                                   if (t.get('date_from') or '9999') <= today_iso <= (t.get('date_to') or '0000')),
+                                  None)
+                future_trips = [t for t in e_trips if (t.get('date_from') or '') > today_iso]
+
+                # Etapy A: w toku dziś / nadchodzące w horyzoncie
+                a_entries = lineA.get(eid, [])
+                today_stages, future_stages = [], []
+                for ent in a_entries:
+                    s = ent.get('forecast_start') or ent.get('template_start')
+                    en = ent.get('forecast_end') or ent.get('template_end') or s
+                    if not s:
+                        continue
+                    if s <= today_iso <= (en or s):
+                        today_stages.append(ent)
+                    elif s > today_iso and s <= horizon_iso:
+                        future_stages.append(ent)
+                future_stages.sort(key=lambda x: x.get('forecast_start') or '')
+
+                # ── Nagłówek: nazwisko + status "teraz" ──
+                head = tk.Frame(card, bg="white")
+                head.pack(fill=tk.X, padx=8, pady=(6, 2))
+                tk.Label(head, text=e['name'], font=self.FONT_BOLD, bg="white",
+                        fg="#2c3e50").pack(side=tk.LEFT)
+
+                if today_trip:
+                    tlabel = rmm.SERVICE_TRIP_TYPE_BY_CODE.get(
+                        today_trip['trip_type'], {}).get('label', today_trip['trip_type'])
+                    place = today_trip.get('client_or_place') or '—'
+                    status_txt = f"✈ W trasie: {tlabel} — {place}"
+                    status_color = "#e67e22"
+                elif today_stages:
+                    labels = [f"{s['project_name']} ({s['stage_label']})" for s in today_stages]
+                    status_txt = "🔧 W toku: " + "; ".join(labels)
+                    status_color = "#27ae60"
+                else:
+                    status_txt = "— brak zaplanowanych zadań na dziś —"
+                    status_color = "#999"
+                tk.Label(head, text=status_txt, font=self.FONT_SMALL, bg="white",
+                        fg=status_color).pack(side=tk.LEFT, padx=(10, 0))
+
+                # ── Najbliższe wydarzenia ──
+                upcoming = []
+                for t in future_trips:
+                    tlabel = rmm.SERVICE_TRIP_TYPE_BY_CODE.get(
+                        t['trip_type'], {}).get('label', t['trip_type'])
+                    place = t.get('client_or_place') or '—'
+                    upcoming.append((t.get('date_from') or '',
+                                     f"✈ {tlabel} — {place}  ({_fmt_range(t.get('date_from'), t.get('date_to'))})"))
+                for s in future_stages:
+                    kind = "◆ milestone" if s['is_milestone'] else "▸ etap"
+                    upcoming.append((s.get('forecast_start') or '',
+                                     f"{kind}: {s['project_name']} — {s['stage_label']}  "
+                                     f"({_fmt_range(s.get('forecast_start'), s.get('forecast_end'))})"))
+                upcoming.sort(key=lambda x: x[0])
+
+                if upcoming:
+                    body = tk.Frame(card, bg="white")
+                    body.pack(fill=tk.X, padx=8, pady=(0, 6))
+                    for _, txt in upcoming[:8]:
+                        tk.Label(body, text=txt, font=self.FONT_SMALL, bg="white",
+                                fg="#444", anchor='w', justify=tk.LEFT
+                                ).pack(anchor='w')
+                    if len(upcoming) > 8:
+                        tk.Label(body, text=f"… i {len(upcoming) - 8} więcej",
+                                font=self.FONT_SMALL, fg="#999", bg="white").pack(anchor='w')
+                else:
+                    tk.Label(card, text="Brak zaplanowanych zadań w najbliższych dniach.",
+                            font=self.FONT_SMALL, fg="#999", bg="white"
+                            ).pack(anchor='w', padx=8, pady=(0, 6))
+
+        _reload()
+        return _reload
+
     def _service_person_card(self, parent_win, employee_id, on_change=None):
         """Karta serwisanta — jak karta pracownika w Kadrach, ale serwisowa:
         Wyjazdy (CRUD) / Aktualne etapy (linia A) / Historia zrealizowanych.
@@ -32942,6 +33132,66 @@ Kod: {unlock_code}
         _reload()
         return _reload
 
+    def _confirm_overlap_dialog(self, parent, overlap_lines):
+        """Dialog ostrzeżenia o nakładających się wyjazdach (z czerwonym akcentem).
+
+        Zwraca True, jeśli user potwierdził zapis mimo kolizji.
+        """
+        result = {'ok': False}
+        win = tk.Toplevel(parent)
+        win.title("Nakładające się wyjazdy")
+        win.transient(parent)
+        win.grab_set()
+        win.resizable(False, False)
+        win.configure(bg="#c0392b")
+
+        outer = tk.Frame(win, bg="white")
+        outer.pack(padx=2, pady=2)
+
+        head = tk.Frame(outer, bg="#c0392b", padx=12, pady=8)
+        head.pack(fill=tk.X)
+        tk.Label(head, text="⚠ NAKŁADAJĄCE SIĘ WYJAZDY", bg="#c0392b", fg="white",
+                font=("Arial", 12, "bold")).pack(anchor='w')
+
+        body = tk.Frame(outer, bg="white", padx=14, pady=12)
+        body.pack(fill=tk.BOTH)
+        tk.Label(body, text="Ten serwisant ma już wyjazd w tym terminie:",
+                font=self.FONT_SMALL, bg="white", anchor='w', justify=tk.LEFT
+                ).pack(anchor='w')
+        tk.Label(body, text=overlap_lines, font=self.FONT_SMALL, fg="#c0392b",
+                bg="white", anchor='w', justify=tk.LEFT).pack(anchor='w', pady=(2, 8))
+        tk.Label(body,
+                text="UWAGA: dwa wyjazdy tego samego dnia są dopuszczalne TYLKO gdy\n"
+                     "robisz to świadomie (np. jeden dzień, dwóch różnych klientów).\n"
+                     "W każdym innym przypadku to prawdopodobnie pomyłka w dacie.",
+                font=self.FONT_BOLD, fg="#c0392b", bg="white",
+                anchor='w', justify=tk.LEFT).pack(anchor='w', pady=(0, 10))
+        tk.Label(body, text="Czy na pewno chcesz zapisać ten wyjazd mimo kolizji?",
+                font=self.FONT_SMALL, bg="white", anchor='w', justify=tk.LEFT
+                ).pack(anchor='w')
+
+        btns = tk.Frame(body, bg="white")
+        btns.pack(fill=tk.X, pady=(12, 0))
+
+        def _yes():
+            result['ok'] = True
+            win.destroy()
+
+        def _no():
+            result['ok'] = False
+            win.destroy()
+
+        tk.Button(btns, text="Tak, zapisz mimo to", bg="#c0392b", fg="white",
+                 font=self.FONT_BOLD, padx=10, pady=4, command=_yes).pack(side=tk.RIGHT, padx=(6, 0))
+        tk.Button(btns, text="Nie, popraw daty", font=self.FONT_SMALL, padx=10, pady=4,
+                 command=_no).pack(side=tk.RIGHT)
+
+        win.protocol("WM_DELETE_WINDOW", _no)
+        win.update_idletasks()
+        self._center_window(win, win.winfo_reqwidth(), win.winfo_reqheight())
+        win.wait_window()
+        return result['ok']
+
     def _service_trip_editor(self, parent, trip_id=None, on_change=None,
                              preset_emp=None, preset_date=None):
         """Dialog dodania/edycji wyjazdu serwisowego (linia B).
@@ -33056,6 +33306,20 @@ Kod: {unlock_code}
         tk.Button(frm, text="📅", command=lambda: self.open_calendar_picker(et),
                   bg="#3498db", fg="white", font=self.FONT_SMALL, padx=3).grid(row=r, column=2, sticky='w')
 
+        # "Do" podąża za "Od", dopóki user go ręcznie nie zmieni na inną datę
+        # (wyjazd jednodniowy = jedno kliknięcie w kalendarzu "Od").
+        _linked_dates = {'active': not rec}
+
+        def _on_from_change(*_a):
+            if _linked_dates['active']:
+                to_var.set(from_var.get())
+        from_var.trace_add('write', _on_from_change)
+
+        def _on_to_change(*_a):
+            if to_var.get() != from_var.get():
+                _linked_dates['active'] = False
+        to_var.trace_add('write', _on_to_change)
+
         # Notatka
         r += 1
         tk.Label(frm, text="Notatka:", font=self.FONT_BOLD).grid(row=r, column=0, sticky='nw', pady=3)
@@ -33080,6 +33344,20 @@ Kod: {unlock_code}
             if d_to < d_from:
                 messagebox.showwarning("Zły zakres", "Data 'Do' jest wcześniejsza niż 'Od'.", parent=win)
                 return
+            try:
+                existing = rmm.get_service_trips(self.rm_master_db_path, employee_id=eid,
+                                                 date_from=d_from, date_to=d_to)
+            except Exception:
+                existing = []
+            overlap = [t for t in existing if not rec or t['id'] != rec['id']]
+            if overlap:
+                lines = "\n".join(
+                    f"  • {self.format_date_ddmmyyyy(t['date_from'])} → "
+                    f"{self.format_date_ddmmyyyy(t['date_to'])} "
+                    f"({rmm.SERVICE_TRIP_TYPE_BY_CODE.get(t['trip_type'], {}).get('label', t['trip_type'])})"
+                    for t in overlap)
+                if not self._confirm_overlap_dialog(win, lines):
+                    return
             fields = {
                 'employee_id': eid,
                 'project_id': proj_by_label.get(proj_var.get()),
@@ -33497,7 +33775,7 @@ Kod: {unlock_code}
             header.create_rectangle(month_x0, 0, month_x0 + month_w, HDR_H / 2,
                                     fill="#2c3e50", outline="#1a252f")
             header.create_text(month_x0 + month_w / 2, HDR_H / 4,
-                               text=f"{__cal.month_name[midx_month]} {midx_year}".capitalize(),
+                               text=f"{self.MONTH_NAMES_PL[midx_month]} {midx_year}",
                                fill="white", font=self.FONT_BOLD)
             _today_date = datetime.now().date()
             # Numery dni (dolny poziom) + kolumny siatki
