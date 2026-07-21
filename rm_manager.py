@@ -9782,9 +9782,35 @@ def get_employee_availability(rm_master_db_path: str, employee_id: int = None,
         con.close()
 
 
+def find_overlapping_absences(rm_master_db_path: str, employee_id: int,
+                              date_from: str, date_to: str,
+                              exclude_id: int = None) -> List[Dict]:
+    """Zwróć nie-odrzucone nieobecności tego pracownika nachodzące na [date_from,
+    date_to]. exclude_id: pomiń ten wpis (przy edycji). Do walidacji kolizji.
+
+    Zakresy nachodzą, gdy: istniejący.date_from <= nowy.date_to
+                       AND istniejący.date_to   >= nowy.date_from.
+    """
+    df, dt = date_from[:10], date_to[:10]
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        rows = con.execute("""
+            SELECT id, date_from, date_to, reason, status
+            FROM employee_availability
+            WHERE employee_id = ?
+              AND date_from <= ? AND date_to >= ?
+              AND UPPER(COALESCE(status,'ZATWIERDZONY')) != 'ODRZUCONY'
+            ORDER BY date_from
+        """, (employee_id, dt, df)).fetchall()
+        out = [dict(r) for r in rows if exclude_id is None or r['id'] != exclude_id]
+        return out
+    finally:
+        con.close()
+
+
 def save_employee_availability(rm_master_db_path: str, data: Dict, user: str = None) -> int:
     """Dodaj lub zaktualizuj okres niedostępności.
-    
+
     data keys: id (opt), employee_id, date_from, date_to, reason, notes,
                time_from, time_to, days_override (opt, NULL = auto dni robocze),
                status (opt).
@@ -9892,8 +9918,25 @@ def set_absence_status(rm_master_db_path: str, avail_id: int, status: str,
     con = _open_rm_connection(rm_master_db_path)
     try:
         prev = con.execute(
-            "SELECT employee_id, status FROM employee_availability WHERE id = ?",
-            (avail_id,)).fetchone()
+            "SELECT employee_id, status, date_from, date_to "
+            "FROM employee_availability WHERE id = ?", (avail_id,)).fetchone()
+        # Blokada przy ZATWIERDZANIU: nie może kolidować z innym ZATWIERDZONYM
+        # wpisem tego pracownika w tych samych dniach.
+        if status == 'ZATWIERDZONY' and prev:
+            clash = con.execute("""
+                SELECT date_from, date_to, reason FROM employee_availability
+                WHERE employee_id = ? AND id != ?
+                  AND UPPER(COALESCE(status,'ZATWIERDZONY')) = 'ZATWIERDZONY'
+                  AND date_from <= ? AND date_to >= ?
+                ORDER BY date_from LIMIT 1
+            """, (prev['employee_id'], avail_id,
+                  prev['date_to'][:10], prev['date_from'][:10])).fetchone()
+            if clash:
+                con.close()
+                raise ValueError(
+                    "Nie można zatwierdzić — koliduje z już zatwierdzoną "
+                    f"nieobecnością {clash['date_from'][:10]}…{clash['date_to'][:10]} "
+                    f"({clash['reason']}).")
         if status == 'OCZEKUJE':
             con.execute(
                 "UPDATE employee_availability SET status = ?, decided_by = NULL, "

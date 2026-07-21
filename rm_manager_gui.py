@@ -30446,10 +30446,13 @@ Kod: {unlock_code}
                     "Odrzucenie wniosku", "Powód odrzucenia (opcjonalnie):", parent=dlg)
                 if note is None:
                     return  # anulowano
-            for iid in sel:
-                rmm.set_absence_status(
-                    self.rm_master_db_path, int(iid), new_status,
-                    note=note, user=getattr(self, 'current_user', None))
+            try:
+                for iid in sel:
+                    rmm.set_absence_status(
+                        self.rm_master_db_path, int(iid), new_status,
+                        note=note, user=getattr(self, 'current_user', None))
+            except ValueError as ve:
+                messagebox.showerror("Nie można zatwierdzić", str(ve), parent=dlg)
             refresh()
 
         def _edit_selected():
@@ -30767,6 +30770,24 @@ Kod: {unlock_code}
                             return
                 except (ValueError, TypeError):
                     pass
+
+            # Blokada nakładania: ten pracownik nie może mieć dwóch nieobecności
+            # (nie-odrzuconych) w tych samych dniach.
+            overlaps = rmm.find_overlapping_absences(
+                self.rm_master_db_path, eid, df_iso, dt_iso, exclude_id=avid)
+            if overlaps:
+                lst = "\n".join(
+                    f"  • {self.format_date_ddmmyyyy(o['date_from'])}–"
+                    f"{self.format_date_ddmmyyyy(o['date_to'])}  "
+                    f"{self.REASON_LABELS.get((o['reason'] or '').upper(), o['reason'])}"
+                    f"  ({self.STATUS_LABELS.get((o.get('status') or 'ZATWIERDZONY').upper(), '')})"
+                    for o in overlaps)
+                messagebox.showerror(
+                    "Nakładające się nieobecności",
+                    "Ten pracownik ma już nieobecność w tych dniach:\n\n" + lst +
+                    "\n\nNie można wpisać dwóch nieobecności na te same dni.",
+                    parent=ed)
+                return
 
             save_data = {
                 'employee_id': eid,
@@ -31405,9 +31426,12 @@ Kod: {unlock_code}
                     "Odrzucenie wniosku", "Powód odrzucenia (opcjonalnie):", parent=win)
                 if note is None:
                     return
-            for iid in sel:
-                rmm.set_absence_status(self.rm_master_db_path, int(iid), new_status,
-                                       note=note, user=getattr(self, 'current_user', None))
+            try:
+                for iid in sel:
+                    rmm.set_absence_status(self.rm_master_db_path, int(iid), new_status,
+                                           note=note, user=getattr(self, 'current_user', None))
+            except ValueError as ve:
+                messagebox.showerror("Nie można zatwierdzić", str(ve), parent=win)
             _after_change()
 
         def _edit():
