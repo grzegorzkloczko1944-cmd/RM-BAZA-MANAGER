@@ -17967,6 +17967,14 @@ class RMManagerGUI:
         from datetime import datetime, timedelta
         import matplotlib.dates as mdates
         import matplotlib.colors as mcolors
+
+        # Zapamiętaj AKTUALNĄ listę projektów w atrybucie instancji — przycisk
+        # "Odśwież" w toolbarze (budowany tylko RAZ, przy pierwszym otwarciu
+        # okna) musi czytać stąd, a nie zamykać się nad parametrem project_ids
+        # z chwili pierwszego wywołania. Inaczej dodanie projektu przez selektor
+        # (np. status NOWE) do już otwartego okna wykresu renderuje go raz, ale
+        # kolejne kliknięcie "Odśwież" po cichu wraca do starej (pierwszej) listy.
+        self._mp_current_project_ids = list(project_ids)
         from matplotlib.lines import Line2D
 
         # ===== Zbierz dane ze wszystkich projektów =====
@@ -18022,11 +18030,24 @@ class RMManagerGUI:
         # dziesiątkach projektów podwaja koszt otwierania połączeń (PRAGMA
         # itd. w _open_rm_connection, zauważalne zwłaszcza na dysku sieciowym).
         project_cons = {}
+        _dropped_projects = []  # [(pid, reason)] — projekty pominięte na wykresie
         for pid in project_ids:
+            pdb = self.get_project_db_path(pid)
             try:
-                project_cons[pid] = rmm._open_rm_connection(self.get_project_db_path(pid))
-            except Exception:
-                pass
+                project_cons[pid] = rmm._open_rm_connection(pdb)
+            except Exception as e:
+                # Retry raz — otwarcie mogło chwilowo nie powieść się przez
+                # rywalizację o dostęp do pliku (dysk sieciowy, inny proces
+                # trzymający lock), a nie faktyczny brak/uszkodzenie bazy.
+                try:
+                    import time as _time
+                    _time.sleep(0.15)
+                    project_cons[pid] = rmm._open_rm_connection(pdb)
+                except Exception as e2:
+                    pname = self.project_names.get(pid, f"P{pid}")
+                    print(f"⚠️ Multi-projekt: nie udało się otworzyć bazy projektu "
+                          f"{pid} ({pname}): {e2}")
+                    _dropped_projects.append((pid, pname, str(e2)))
 
         # Zbierz WSZYSTKICH pracowników (wszystkie kategorie) z wszystkich projektów
         all_employees = {}  # {employee_id: {'name': ..., 'category': ...}}
@@ -18085,6 +18106,7 @@ class RMManagerGUI:
         y_labels = []
         y_pos = 0
         project_separators = []  # pozycje Y linii oddzielających projekty
+        project_row_ranges = {}  # pid -> (y_from, y_to) — do zaznaczenia wyjazdów serwisowych
         encountered_stages = set()  # etapy obecne w danych
         payment_sums = {}  # {pid: int} — cache sum transz dla kolorowania ZAKONCZONY
         
@@ -18321,6 +18343,7 @@ class RMManagerGUI:
                     'y_center': (project_start_y + y_pos - 1) / 2,
                     'pid': pid,
                 })
+                project_row_ranges[pid] = (project_start_y, y_pos)
 
         # Zamknij połączenia otwarte na początku (jedno na projekt)
         for _con_p in project_cons.values():
@@ -18428,8 +18451,9 @@ class RMManagerGUI:
             top_bar = tk.Frame(self._mp_chart_window, bg=self.COLOR_TOPBAR, pady=5)
             top_bar.pack(fill=tk.X)
             
-            tk.Button(top_bar, text="🔄 Odśwież", 
-                      command=lambda: self._create_multi_project_chart_window(project_ids, preserve_view=True),
+            tk.Button(top_bar, text="🔄 Odśwież",
+                      command=lambda: self._create_multi_project_chart_window(
+                          self._mp_current_project_ids, preserve_view=True),
                       bg=self.COLOR_BLUE, fg="white", font=("Arial", 10, "bold"),
                       padx=10, pady=3).pack(side=tk.LEFT, padx=5)
             
@@ -18449,7 +18473,7 @@ class RMManagerGUI:
                       padx=10, pady=3).pack(side=tk.LEFT, padx=5)
             
             tk.Button(top_bar, text="👷 Pracownicy",
-                      command=lambda: self._mp_employees_filter_dialog(project_ids),
+                      command=lambda: self._mp_employees_filter_dialog(self._mp_current_project_ids),
                       bg="#d35400", fg="white", font=("Arial", 10, "bold"),
                       padx=10, pady=3).pack(side=tk.LEFT, padx=5)
             
@@ -18858,17 +18882,68 @@ class RMManagerGUI:
             )
             ax.add_collection(weekend_collection)
 
+        # Wyjazdy serwisowe (linia B) — pomarańczowe tło na wierszach danego
+        # projektu w dniach objętych wyjazdem. Tylko projekty faktycznie
+        # widoczne na wykresie (project_row_ranges).
+        if project_row_ranges:
+            try:
+                service_trips_all = rmm.get_service_trips(
+                    self.rm_master_db_path,
+                    date_from=x_start.strftime('%Y-%m-%d'),
+                    date_to=x_end.strftime('%Y-%m-%d'))
+            except Exception:
+                service_trips_all = []
+            # Grupuj po statusie wyjazdu (te same kolory co w Grafiku serwisów:
+            # PLANOWANY=żółty, POTWIERDZONY=niebieski, ZREALIZOWANY=zielony),
+            # żeby kolor od razu mówił czy wyjazd jest pewny czy tylko planowany.
+            trip_rects_by_status = {}
+            for t in service_trips_all:
+                pid = t.get('project_id')
+                if pid not in project_row_ranges:
+                    continue
+                y_from, y_to = project_row_ranges[pid]
+                try:
+                    t_start = datetime.strptime(t['date_from'][:10], '%Y-%m-%d')
+                    t_end = datetime.strptime(t['date_to'][:10], '%Y-%m-%d')
+                except (ValueError, TypeError, KeyError):
+                    continue
+                status = t.get('status')
+                trip_rects_by_status.setdefault(status, []).append(patches.Rectangle(
+                    (mdates.date2num(t_start), y_from - 0.5),
+                    (t_end - t_start).days + 1, y_to - y_from,
+                ))
+            for status, rects in trip_rects_by_status.items():
+                color = rmm.SERVICE_TRIP_STATUS_COLORS.get(status, '#e67e22')
+                trip_collection = PatchCollection(
+                    rects,
+                    facecolor=color, alpha=0.25, edgecolor=color,
+                    linewidth=0.5, zorder=0.5,
+                )
+                ax.add_collection(trip_collection)
+
         # Siatka
         ax.grid(True, which='major', alpha=0.4, linewidth=0.8)
         ax.grid(True, which='minor', alpha=0.15, linewidth=0.3)
         ax.set_xlabel('Data', fontweight='bold')
-        ax.set_title(f'Multi-projekt Gantt ({len(project_ids)} projektów)', fontweight='bold', pad=15)
+        _title = f'Multi-projekt Gantt ({len(project_ids)} projektów)'
+        if _dropped_projects:
+            _title += f'  —  ⚠ pominięto {len(_dropped_projects)} (błąd wczytania bazy)'
+        ax.set_title(_title, fontweight='bold', pad=15)
+        if _dropped_projects:
+            _names = ", ".join(f"{p[1]} (#{p[0]})" for p in _dropped_projects)
+            print(f"⚠️ Multi-projekt: pominięte projekty na wykresie: {_names}")
         
         # Legenda — typy pasków + kolory etapów
         legend_elements = [
-            patches.Patch(facecolor='gray', alpha=0.35, edgecolor='black', 
+            patches.Patch(facecolor='gray', alpha=0.35, edgecolor='black',
                          linestyle='--', label='Szablon'),
             patches.Patch(facecolor='gray', alpha=0.9, edgecolor='black', label='Rzeczywiste'),
+            patches.Patch(facecolor=rmm.SERVICE_TRIP_STATUS_COLORS['PLANOWANY'], alpha=0.25,
+                         edgecolor=rmm.SERVICE_TRIP_STATUS_COLORS['PLANOWANY'], label='Wyjazd: planowany'),
+            patches.Patch(facecolor=rmm.SERVICE_TRIP_STATUS_COLORS['POTWIERDZONY'], alpha=0.25,
+                         edgecolor=rmm.SERVICE_TRIP_STATUS_COLORS['POTWIERDZONY'], label='Wyjazd: potwierdzony'),
+            patches.Patch(facecolor=rmm.SERVICE_TRIP_STATUS_COLORS['ZREALIZOWANY'], alpha=0.25,
+                         edgecolor=rmm.SERVICE_TRIP_STATUS_COLORS['ZREALIZOWANY'], label='Wyjazd: zrealizowany'),
             patches.Patch(facecolor='gray', alpha=0.55, edgecolor='black', label='Prognoza'),
         ]
         # Kolory etapów
@@ -21667,7 +21742,28 @@ class RMManagerGUI:
                     ax.axvspan(mdates.date2num(current), mdates.date2num(current + timedelta(days=1)),
                               facecolor='#e0e0e0', alpha=0.4, zorder=0)
                 current += timedelta(days=1)
-            
+
+            # Wyjazdy serwisowe (linia B) powiązane z tym projektem — tło na
+            # całej wysokości wykresu w dniach objętych wyjazdem, kolor wg
+            # statusu (jak w Grafiku serwisów / Multi-projekt Gantt).
+            try:
+                service_trips_proj = rmm.get_service_trips(
+                    self.rm_master_db_path, date_from=x_start.strftime('%Y-%m-%d'),
+                    date_to=x_end.strftime('%Y-%m-%d'))
+            except Exception:
+                service_trips_proj = []
+            for t in service_trips_proj:
+                if t.get('project_id') != self.selected_project_id:
+                    continue
+                try:
+                    t_start = datetime.strptime(t['date_from'][:10], '%Y-%m-%d')
+                    t_end = datetime.strptime(t['date_to'][:10], '%Y-%m-%d')
+                except (ValueError, TypeError, KeyError):
+                    continue
+                color = rmm.SERVICE_TRIP_STATUS_COLORS.get(t.get('status'), '#e67e22')
+                ax.axvspan(mdates.date2num(t_start), mdates.date2num(t_end + timedelta(days=1)),
+                          facecolor=color, edgecolor=color, alpha=0.25, linewidth=0.5, zorder=0.5)
+
             # Siatka i styling
             ax.grid(True, which='major', alpha=0.4, linewidth=0.8)
             ax.grid(True, which='minor', alpha=0.15, linewidth=0.3)
@@ -21681,7 +21777,13 @@ class RMManagerGUI:
                 Line2D([0], [0], color='#95a5a6', lw=8, label='Szablon'),
                 Line2D([0], [0], color='#27ae60', lw=8, label='Rzeczywiste'),
                 Line2D([0], [0], color='#3498db', lw=8, label='Prognoza'),
-                Line2D([0], [0], color='#2ecc71', lw=8, label='Milestone')
+                Line2D([0], [0], color='#2ecc71', lw=8, label='Milestone'),
+                patches.Patch(facecolor=rmm.SERVICE_TRIP_STATUS_COLORS['PLANOWANY'], alpha=0.25,
+                             edgecolor=rmm.SERVICE_TRIP_STATUS_COLORS['PLANOWANY'], label='Wyjazd: planowany'),
+                patches.Patch(facecolor=rmm.SERVICE_TRIP_STATUS_COLORS['POTWIERDZONY'], alpha=0.25,
+                             edgecolor=rmm.SERVICE_TRIP_STATUS_COLORS['POTWIERDZONY'], label='Wyjazd: potwierdzony'),
+                patches.Patch(facecolor=rmm.SERVICE_TRIP_STATUS_COLORS['ZREALIZOWANY'], alpha=0.25,
+                             edgecolor=rmm.SERVICE_TRIP_STATUS_COLORS['ZREALIZOWANY'], label='Wyjazd: zrealizowany'),
             ]
             ax.legend(handles=legend_elements, loc='upper center', bbox_to_anchor=(0.5, -0.08),
                       ncol=4, fontsize=8, frameon=False)
