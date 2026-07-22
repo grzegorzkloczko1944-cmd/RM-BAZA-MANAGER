@@ -2456,9 +2456,14 @@ class RMManagerGUI:
     # Narzędzie pomocnicze – centrowanie okien dialogowych
     # -----------------------------------------------------------------------
 
-    def _center_window(self, win: tk.Toplevel, w: int, h: int):
+    def _center_window(self, win: tk.Toplevel, w: int, h: int, parent=None):
         """Wyśrodkuj okno dialogowe na monitorze, na którym wyświetla się
-        aplikacja główna (poprawna obsługa wielomonitorowa).
+        jego okno-rodzic (poprawna obsługa wielomonitorowa).
+
+        parent: okno względem którego centrować. Domyślnie `win.master`
+        (rzeczywisty rodzic Tk tego Toplevel) — czyli np. okno Kadry/Serwis,
+        jeśli dialog został z niego otwarty, a nie zawsze główne okno
+        aplikacji. Jawne podanie parent nadpisuje to zachowanie.
 
         Aby uniknąć efektu „okna-ducha" (mignięcie w domyślnej pozycji przed
         repozycjonowaniem), okno jest natychmiast `withdraw()` i wyświetlane
@@ -2467,12 +2472,16 @@ class RMManagerGUI:
             win.withdraw()
         except Exception:
             pass
-        self.root.update_idletasks()
+        ref = parent or getattr(win, 'master', None) or self.root
         try:
-            rx = self.root.winfo_rootx()
-            ry = self.root.winfo_rooty()
-            rw = self.root.winfo_width()
-            rh = self.root.winfo_height()
+            ref.update_idletasks()
+        except Exception:
+            pass
+        try:
+            rx = ref.winfo_rootx()
+            ry = ref.winfo_rooty()
+            rw = ref.winfo_width()
+            rh = ref.winfo_height()
             x = rx + (rw - w) // 2
             y = ry + (rh - h) // 2
         except Exception:
@@ -2503,16 +2512,23 @@ class RMManagerGUI:
             print(f"⚠️ Błąd zapisu geometrii okna {window_name}: {e}")
     
     def restore_window_geometry(self, window_name: str, window: tk.Toplevel, default_w: int, default_h: int):
-        """Przywróć zapamiętaną geometrię okna lub wycentruj z domyślnymi wymiarami"""
+        """Przywróć zapamiętany ROZMIAR okna, ale zawsze wycentruj na monitorze
+        aktualnego okna-rodzica — nigdy na zapisanych bezwzględnych
+        współrzędnych ekranu. Stara wersja robiła window.geometry(geometry)
+        z pełnym stringiem "SZxWY+X+Y" zapisanym z poprzedniej sesji, więc
+        okno "wracało" na monitor, na którym stała aplikacja gdy zapisano tę
+        pozycję — niezależnie od tego, gdzie jest teraz."""
+        w, h = default_w, default_h
         try:
             if window_name in self.window_geometry:
                 geometry = self.window_geometry[window_name]
-                window.geometry(geometry)
-            else:
-                self._center_window(window, default_w, default_h)
+                size_part = geometry.split('+', 1)[0]
+                gw, gh = size_part.split('x')
+                w, h = int(gw), int(gh)
         except Exception as e:
-            print(f"⚠️ Błąd przywracania geometrii okna {window_name}: {e}")
-            self._center_window(window, default_w, default_h)
+            print(f"⚠️ Błąd odczytu rozmiaru okna {window_name}: {e}")
+            w, h = default_w, default_h
+        self._center_window(window, w, h)
     
     def save_column_widths(self, tree_name: str, tree: ttk.Treeview):
         """Zapisz szerokości kolumn treeview do konfiguracji"""
@@ -11429,9 +11445,10 @@ class RMManagerGUI:
                     existing = r
                     break
 
-        frm = tk.Toplevel(self.root)
+        _parent_win = tree.winfo_toplevel()
+        frm = tk.Toplevel(_parent_win)
         frm.title("Dodaj pracownika" if not employee_id else "Edytuj pracownika")
-        frm.transient(self.root)
+        frm.transient(_parent_win)
         frm.grab_set()
         frm.resizable(False, False)
         self._center_window(frm, 540, 520)
@@ -11621,9 +11638,10 @@ class RMManagerGUI:
                     existing = r
                     break
 
-        frm = tk.Toplevel(self.root)
+        _parent_win = tree.winfo_toplevel()
+        frm = tk.Toplevel(_parent_win)
         frm.title("Dodaj transport" if not transport_id else "Edytuj transport")
-        frm.transient(self.root)
+        frm.transient(_parent_win)
         frm.grab_set()
         frm.resizable(False, False)
         self._center_window(frm, 540, 380)
@@ -17910,7 +17928,7 @@ class RMManagerGUI:
                 # 🔧 Gantt: NIE zamykaj okna — pozwól na równoległą edycję wyboru
                 # i wykresu. Generuj/odśwież wykres, ale zostaw selektor otwarty.
                 if selected:
-                    self._create_multi_project_chart_window(selected, preserve_view=True)
+                    self._create_multi_project_chart_window(selected, preserve_view=True, center_on=sel)
                     # Wyciągnij okno wykresu na wierzch (selektor pozostaje obok)
                     try:
                         if hasattr(self, '_mp_chart_window') and self._mp_chart_window \
@@ -17957,12 +17975,16 @@ class RMManagerGUI:
         apply_filters()
         update_count()
     
-    def _create_multi_project_chart_window(self, project_ids, preserve_view=False):
+    def _create_multi_project_chart_window(self, project_ids, preserve_view=False, center_on=None):
         """Rysuje multi-project Gantt w osobnym oknie.
-        
+
         Args:
             project_ids: lista project_id do wyświetlenia
             preserve_view: zachowaj widok po odświeżeniu
+            center_on: okno względem którego centrować przy (re)tworzeniu (np.
+                selektor "Wybór projektów" — jeśli user go przesunął na inny
+                monitor, wykres ma podążyć tam, a nie zawsze wracać do
+                self.root). Domyślnie self.root.
         """
         from datetime import datetime, timedelta
         import matplotlib.dates as mdates
@@ -18432,7 +18454,7 @@ class RMManagerGUI:
             except Exception:
                 pass
             self._mp_chart_window.title("📊 Multi-projekt Gantt")
-            self._mp_chart_window.geometry("1400x900")
+            self._center_window(self._mp_chart_window, 1400, 900, parent=center_on)
             self._mp_chart_window.minsize(800, 500)
             # Pokaż dopiero po zbudowaniu zawartości okna
             def _mp_show():
@@ -28071,9 +28093,9 @@ Kod: {unlock_code}
         # ---- Okno ----
         win = tk.Toplevel(self.root)
         win.title("🤖 AI Asystent harmonogramu")
-        win.geometry("860x640")
         win.configure(bg="#1a1a2e")
         win.resizable(True, True)
+        self._center_window(win, 860, 640)
 
         DARK_BG   = "#1a1a2e"
         PANEL_BG  = "#16213e"
@@ -30127,6 +30149,12 @@ Kod: {unlock_code}
         count_var = tk.StringVar()
         tk.Label(bar, textvariable=count_var, font=self.FONT_SMALL, fg="#555").pack(side=tk.LEFT, padx=12)
         filter_var = tk.StringVar(value="")  # aktywny filtr statusu (status_code)
+        # Domyślnie ukryte — zakończone projekty (zwykle sporo) zaśmiecały
+        # widok od razu po otwarciu okna.
+        show_done_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(bar, text="Włącz zakończone", variable=show_done_var,
+                       font=self.FONT_SMALL,
+                       command=lambda: _apply_filter()).pack(side=tk.LEFT, padx=(0, 12))
         self._add_fullscreen(dlg, bar)
 
         # Panel klikalnych kart filtra statusów
@@ -30234,6 +30262,8 @@ Kod: {unlock_code}
                     continue
                 if filt and s['status_code'] != filt:
                     continue
+                if not show_done_var.get() and not filt and s['status_code'] == 'DONE':
+                    continue
                 shown += 1
                 v = s['overall_variance_days']
                 variance = f"{v:+d}d" if v else "0d"
@@ -30292,6 +30322,12 @@ Kod: {unlock_code}
         filter_var = tk.StringVar(value="")  # aktywny filtr (klucz karty)
         active_lbl = tk.Label(bar, text="", font=self.FONT_SMALL, fg="#2980b9")
         active_lbl.pack(side=tk.LEFT, padx=12)
+        # Domyślnie ukryte — zakończone projekty zaśmiecały widok od razu
+        # po otwarciu okna.
+        show_done_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(bar, text="Włącz zakończone", variable=show_done_var,
+                       font=self.FONT_SMALL,
+                       command=lambda: _apply_filter()).pack(side=tk.LEFT, padx=(0, 12))
         self._add_fullscreen(dlg, bar)
 
         # Panel kart (kafelki) — klikalne, filtrują listę
@@ -30403,6 +30439,8 @@ Kod: {unlock_code}
             for p in data['all_projects']:
                 if not _row_matches(p, filt):
                     continue
+                if not show_done_var.get() and not filt and p['status'] == 'Zakończony':
+                    continue
                 shown += 1
                 delays_txt = ', '.join(
                     f"{d['stage_code']} +{d['overrun_days']}d" for d in p['delays']) or '—'
@@ -30501,6 +30539,8 @@ Kod: {unlock_code}
         self._center_window(dlg, 1180, 680)
 
         # Górny pasek z przyciskiem pełnego ekranu (maksymalizacja; F11 / Esc).
+        # dlg.transient() ukrywa natywny przycisk maksymalizacji Windows —
+        # to zastępstwo.
         topbar = tk.Frame(dlg)
         topbar.pack(fill=tk.X, padx=6, pady=(4, 0))
         self._add_fullscreen(dlg, topbar)
@@ -32331,7 +32371,8 @@ Kod: {unlock_code}
                           font=("Arial", 13, "bold"), pady=8)
         header.pack(fill=tk.X)
 
-        # Górny pasek z pełnym ekranem (jak w Kadrach)
+        # Górny pasek z pełnym ekranem (jak w Kadrach) — dlg.transient() ukrywa
+        # natywny przycisk maksymalizacji Windows, to zastępstwo.
         topbar = tk.Frame(dlg)
         topbar.pack(fill=tk.X, padx=6, pady=(4, 0))
         self._add_fullscreen(dlg, topbar)
@@ -33854,12 +33895,7 @@ Kod: {unlock_code}
 
         win.bind('<Escape>', lambda e: win.destroy())
         win.update_idletasks()
-        try:
-            px = parent.winfo_rootx() + parent.winfo_width() // 2 - win.winfo_reqwidth() // 2
-            py = parent.winfo_rooty() + parent.winfo_height() // 2 - win.winfo_reqheight() // 2
-            win.geometry(f"+{max(10, px)}+{max(10, py)}")
-        except Exception:
-            pass
+        self._center_window(win, win.winfo_reqwidth(), win.winfo_reqheight())
 
     def _vacation_build_team_calendar_tab(self, parent, dlg):
         """Grafik miesięczny: wiersze = pracownicy, kolumny = dni miesiąca.
