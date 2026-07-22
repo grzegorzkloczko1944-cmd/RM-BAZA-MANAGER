@@ -25625,45 +25625,44 @@ class RMManagerGUI:
         self.refresh_all()
 
     def _auto_open_permanent_code_dialog(self):
-        """Automatyczne utworzenie kodu PERMANENT i otwarcie dialogu wysyłki po dodaniu 100%."""
+        """Po osiągnięciu 100% płatności wyślij kod PERMANENT wpisany przez
+        programistę/osobę upoważnioną.
+
+        UWAGA: program NIE generuje żadnego kodu. Prawdziwy kod odblokowujący PLC
+        zna wyłącznie programista sterownika — musi być wcześniej wpisany ręcznie
+        w zakładce „Kody PLC". Jeśli kodu nie ma, otwieramy dialog dodawania kodu
+        zamiast wysyłać wygenerowaną atrapę.
+        """
         if not self.selected_project_id:
             return
-        
+
         try:
             # Sprawdź czy już istnieje kod PERMANENT dla tego projektu
             existing_codes = rmm.get_plc_codes(self.rm_master_db_path, self.selected_project_id)
             permanent_code = next((c for c in existing_codes if c['code_type'] == 'PERMANENT'), None)
-            
+
             if permanent_code:
-                # Kod już istnieje - otwórz dialog wysyłki
+                # Kod istnieje (wpisany przez programistę/osobę upoważnioną) - wyślij go
                 print(f"✅ Znaleziono istniejący kod PERMANENT: {permanent_code['unlock_code']}")
                 self.root.after(500, lambda: self.send_plc_code(permanent_code['id']))
             else:
-                # Utwórz nowy kod PERMANENT
-                import random
-                import string
-                unlock_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-                
-                code_id = rmm.add_plc_code(
-                    rm_db_path=self.rm_master_db_path,
-                    project_id=self.selected_project_id,
-                    code_type='PERMANENT',
-                    unlock_code=unlock_code,
-                    description='Kod permanentny - płatność 100%',
-                    user=self.current_user
+                # Brak kodu — NIE generujemy atrapy. Poproś o wpisanie prawdziwego kodu.
+                print("⚠️ Brak kodu PERMANENT — poproszę o wpisanie prawdziwego kodu od programisty")
+                project_name = self.project_names.get(
+                    self.selected_project_id, f"Projekt {self.selected_project_id}"
                 )
-                
-                print(f"✅ Utworzono nowy kod PERMANENT: {unlock_code}")
-                
-                # Odbiorcy są teraz GLOBALNI - nie trzeba kopiować z innych kodów
-                
-                self.load_plc_codes()
-                
-                # Otwórz dialog wysyłki po krótkiej chwili
-                self.root.after(500, lambda: self.send_plc_code(code_id))
-                
+                messagebox.showwarning(
+                    "Brak kodu PLC",
+                    f"Projekt {project_name} osiągnął 100% płatności, ale nie ma "
+                    f"wpisanego kodu odblokowującego PLC.\n\n"
+                    f"Kod musi wpisać programista sterownika lub osoba upoważniona.\n\n"
+                    f"Za chwilę otworzy się okno dodawania kodu."
+                )
+                # Otwórz dialog dodawania kodu (wysyłka nastąpi po ręcznym wpisaniu i wybraniu „Wyślij")
+                self.root.after(500, self.add_plc_code)
+
         except Exception as e:
-            print(f"❌ Błąd przy auto-tworzeniu kodu PERMANENT: {e}")
+            print(f"❌ Błąd przy obsłudze kodu PERMANENT: {e}")
             import traceback
             traceback.print_exc()
 
