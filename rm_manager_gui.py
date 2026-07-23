@@ -1932,6 +1932,7 @@ class RMManagerGUI:
             self._refresh_combo_lock_info()  # Odśwież combo projektów (pokaż lock)
             self._sync_mp_chart_lock_state()  # Synchronizuj Multi-project chart
             self._refresh_mp_lock_labels()    # Odśwież etykiety locków w selektorze
+            self._reopen_notes_window_if_open()  # Odśwież tryb edycji notatek
             print(f"✅ Lock przejęty: projekt {self.selected_project_id}, lock_id={lock_id}")
 
         except Exception as e:
@@ -1999,6 +2000,7 @@ class RMManagerGUI:
             self._refresh_combo_lock_info()  # Odśwież combo projektów (pokaż lock)
             self._sync_mp_chart_lock_state()  # Synchronizuj Multi-project chart
             self._refresh_mp_lock_labels()    # Odśwież etykiety locków w selektorze
+            self._reopen_notes_window_if_open()  # Odśwież tryb edycji notatek
             print(f"⚡ Lock wymuszony: projekt {self.selected_project_id}, lock_id={lock_id}")
 
         except Exception as e:
@@ -2272,6 +2274,7 @@ class RMManagerGUI:
             self._refresh_combo_lock_info()  # Odśwież combo projektów (usuń lock)
             self._sync_mp_chart_lock_state()  # Synchronizuj Multi-project chart
             self._refresh_mp_lock_labels()    # Odśwież etykiety locków w selektorze
+            self._reopen_notes_window_if_open()  # Odśwież tryb edycji notatek
             print(f"🔓 Lock zwolniony: projekt {self.selected_project_id}")
 
         except Exception as e:
@@ -2290,6 +2293,7 @@ class RMManagerGUI:
         self._refresh_combo_lock_info()  # Odśwież combo projektów (pokaż nowy lock)
         self._sync_mp_chart_lock_state()  # Synchronizuj Multi-project chart
         self._refresh_mp_lock_labels()    # Odśwież etykiety locków w selektorze
+        self._reopen_notes_window_if_open()  # Odśwież tryb edycji notatek
         self.status_bar.config(
             text=f"⚠️ Utracono lock projektu {self.selected_project_id} - tryb READ-ONLY",
             fg="#e74c3c"
@@ -12713,6 +12717,62 @@ class RMManagerGUI:
         except Exception as e:
             messagebox.showerror("❌ Błąd", f"Nie można wyczyścić dat:\n{e}")
 
+    def _scroll_notes_canvas_to_widget(self, notes_win, widget):
+        """Przewiń canvas notatek tak, by dolna krawędź `widget` (edytowana
+        notatka) była widoczna — inaczej pisanie w polu blisko dołu okna
+        "ucieka" pod krawędź bez żadnego auto-scrolla, mimo że treść rośnie."""
+        try:
+            canvas = getattr(notes_win, 'notes_canvas', None)
+            if canvas is None or not canvas.winfo_exists():
+                return
+            canvas.update_idletasks()
+            wy = widget.winfo_rooty() - canvas.winfo_rooty()
+            wh = widget.winfo_height()
+            ch = canvas.winfo_height()
+            bbox = canvas.bbox("all")
+            if not bbox:
+                return
+            total_h = bbox[3] - bbox[1]
+            if total_h <= 0:
+                return
+            # Dolna krawędź widgetu poniżej widocznego obszaru → przewiń w dół
+            # tak, by ta krawędź (+ mały margines) była tuż przy dolnej granicy.
+            if wy + wh > ch:
+                overflow = (wy + wh) - ch
+                current_top = canvas.canvasy(0)
+                new_top = current_top + overflow + 10
+                canvas.yview_moveto(max(0.0, min(1.0, new_top / total_h)))
+        except Exception:
+            pass
+
+    def _reopen_notes_window_if_open(self):
+        """Zamknij i odtwórz okno Notatek, jeśli jest otwarte dla bieżącego
+        projektu — tryb edycji (can_edit) jest ustalany raz przy budowie
+        okna, więc zmiana stanu locka (przejęcie/zwolnienie/wymuszenie) sama
+        z siebie nie przełącza pól z disabled na normal. Zachowuje wybrany
+        etap, żeby user nie musiał go wybierać ponownie."""
+        win = getattr(self, '_notes_window', None)
+        if win is None:
+            return
+        try:
+            if not win.winfo_exists():
+                return
+        except Exception:
+            return
+        stage_choice = ""
+        try:
+            stage_choice = win.selected_stage_var.get() if hasattr(win, 'selected_stage_var') else ""
+        except Exception:
+            pass
+        stage_code = stage_choice.split(' - ', 1)[0] if stage_choice else None
+        try:
+            win.protocol("WM_DELETE_WINDOW", lambda: None)  # nie zapisuj geometrii/focus na to zamknięcie
+            win.destroy()
+        except Exception:
+            pass
+        self._notes_window = None
+        self.show_notes_window(stage_code=stage_code)
+
     # ========================================================================
     # SYSTEM NOTATEK - Okno notatnika dla etapów
     # ========================================================================
@@ -12818,7 +12878,8 @@ class RMManagerGUI:
         
         stage_choices = [f"{s['code']} - {s['display_name']}" for s in stages]
         selected_stage = tk.StringVar()
-        
+        notes_win.selected_stage_var = selected_stage  # do odczytu przy reopen po zmianie locka
+
         if stage_code:
             for choice in stage_choices:
                 if choice.startswith(stage_code):
@@ -13028,8 +13089,24 @@ class RMManagerGUI:
         
         def on_frame_configure(event):
             notes_canvas.configure(scrollregion=notes_canvas.bbox("all"))
-        
+
         notes_container.bind("<Configure>", on_frame_configure)
+
+        # Scroll kółkiem myszy — bind LOKALNIE (tylko gdy kursor nad canvasem
+        # notatek), żeby nie kolidować z bind_all głównego okna.
+        def _on_notes_mousewheel(event):
+            bbox = notes_canvas.bbox("all")
+            # Treść mieści się w widocznym obszarze — nic do przewinięcia,
+            # nie ruszaj scrollbara (inaczej "scrolluje w pustkę").
+            if not bbox or (bbox[3] - bbox[1]) <= notes_canvas.winfo_height():
+                return
+            notes_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        def _bind_notes_wheel(_e=None):
+            notes_canvas.bind_all("<MouseWheel>", _on_notes_mousewheel)
+        def _unbind_notes_wheel(_e=None):
+            notes_canvas.unbind_all("<MouseWheel>")
+        notes_canvas.bind("<Enter>", _bind_notes_wheel)
+        notes_canvas.bind("<Leave>", _unbind_notes_wheel)
         
         # Handler kliknięcia na puste pole w oknie notatek - zamyka edycję
         def close_note_edit_on_empty_click(event):
@@ -13489,7 +13566,15 @@ class RMManagerGUI:
             # Dodaj handler FocusOut i zapisz go jako atrybut
             note_text._focus_out_handler = on_focus_out
             note_text.bind("<FocusOut>", on_focus_out)
-            
+
+            # Rosnij z tekstem + przewiń canvas tak, by kursor był widoczny —
+            # inaczej pisanie w polu na dole okna "ucieka" pod dolną krawędź
+            # bez żadnego auto-scrolla.
+            def _on_note_keyrelease(event=None):
+                note_text.config(height=_recalc_height(note_text.get(1.0, tk.END)))
+                self._scroll_notes_canvas_to_widget(notes_win, note_text)
+            note_text.bind("<KeyRelease>", _on_note_keyrelease)
+
             # Oznacz jako obecnie edytowaną
             if parent_container and hasattr(parent_container, '_currently_editing'):
                 parent_container._currently_editing = note_text
@@ -14144,7 +14229,19 @@ class RMManagerGUI:
         )
         note_text.pack(fill=tk.BOTH, padx=5, pady=5)
         note_text.focus_set()
-        
+
+        # Rosnij z tekstem + przewiń canvas tak, by kursor był widoczny.
+        _notes_win_ref = notes_container.winfo_toplevel()
+        def _on_new_note_keyrelease(event=None):
+            content = note_text.get(1.0, tk.END)
+            lc = max(content.count('\n') + 1, 4)
+            for ln in content.split('\n'):
+                if len(ln) > 80:
+                    lc += len(ln) // 80
+            note_text.config(height=lc)
+            self._scroll_notes_canvas_to_widget(_notes_win_ref, note_text)
+        note_text.bind("<KeyRelease>", _on_new_note_keyrelease)
+
         # Inicjalizuj _currently_editing jeśli nie istnieje
         if not hasattr(notes_container, '_currently_editing'):
             notes_container._currently_editing = None
