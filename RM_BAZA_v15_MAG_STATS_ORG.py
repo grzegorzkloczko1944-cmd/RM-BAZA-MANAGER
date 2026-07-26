@@ -404,6 +404,11 @@ class MainWindow(tk.Tk):
         self.toolsm.add_command(label="📥 RM_IMPORT…", command=self.launch_rm_import)
         menubar.add_cascade(label="Narzędzia", menu=self.toolsm)
         
+        # Menu KSEF
+        ksefm = tk.Menu(menubar, tearoff=0)
+        ksefm.add_command(label="Import cen z faktury XML…", command=self.menu_import_ceny_ksef)
+        menubar.add_cascade(label="KSEF", menu=ksefm)
+
         # Menu Backupy
         backupm = tk.Menu(menubar, tearoff=0)
         backupm.add_command(label="📋 Podgląd backupów…", command=self.menu_view_backups)
@@ -12716,6 +12721,16 @@ class MainWindow(tk.Tk):
             print("Aktualizacja ilości anulowana przez użytkownika.")
             return
 
+        # --- Re-weryfikacja locka tuż przed zapisem (mógł zostać przejęty/wymuszony,
+        #     podczas gdy okno podglądu było otwarte) ---
+        if not self.have_lock:
+            messagebox.showerror(
+                "Utracono lock",
+                "Lock projektu został w międzyczasie przejęty przez innego użytkownika.\n"
+                "Zmiany NIE zostały zapisane — otwórz projekt ponownie i przejmij lock."
+            )
+            return
+
         # --- Backup projektu ---
         if backup_var.get():
             try:
@@ -12779,6 +12794,372 @@ class MainWindow(tk.Tk):
 
     # ========================================================================
     # KONIEC MODUŁU AKTUALIZUJ ILOŚCI
+    # ========================================================================
+
+    def menu_import_ceny_ksef(self):
+        """
+        Import cen jednostkowych z pliku XML faktury KSeF (FA(2)/FA(3)).
+
+        Aktualizuje WYŁĄCZNIE kolumnę price_pln w tabeli items. Pozycje
+        z faktury są dopasowywane do pozycji w bazie po znormalizowanej
+        nazwie (brak numeru rysunku na fakturze). Ilość z faktury jest
+        pokazywana wyłącznie informacyjnie (porównanie z ilością zamówioną),
+        nic z niej nie jest zapisywane.
+
+        Przebieg: wybór XML → parsowanie → dopasowanie po nazwie → okno
+        podglądu (cena do wpisania edytowalna, decyzja Akceptuj/Pomiń na
+        wiersz) → backup projektu → UPDATE w jednej transakcji → zapis
+        do audit logu i do stosu UNDO (typ 'bulk_price', tak jak przy
+        ręcznej masowej zmianie ceny).
+        """
+        if self.current_user_role not in ("ADMIN", "USER$$"):
+            messagebox.showinfo(
+                "Brak uprawnień",
+                "Import cen z faktury KSEF jest dostępny tylko dla ADMIN i USER$$."
+            )
+            return
+        if not self.have_lock:
+            messagebox.showwarning("Brak locka", "Przejmij lock projektu aby importować ceny!")
+            return
+        if not self.current_project_id:
+            messagebox.showwarning("Brak projektu", "Wybierz projekt najpierw!")
+            return
+
+        xml_path = filedialog.askopenfilename(
+            title="Wybierz plik XML faktury KSeF (FA(2)/FA(3))",
+            filetypes=[("XML", "*.xml"), ("Wszystkie pliki", "*.*")]
+        )
+        if not xml_path:
+            return
+
+        from ksef_invoice_parser import parse_ksef_invoice_xml
+        try:
+            invoice = parse_ksef_invoice_xml(xml_path)
+        except ValueError as e:
+            messagebox.showerror("Błąd wczytywania faktury", str(e))
+            return
+        except Exception as e:
+            messagebox.showerror("Błąd wczytywania faktury", f"Nie udało się wczytać pliku:\n{e}")
+            return
+
+        _ws_re = re.compile(r"\s+")
+
+        def _norm_key(s):
+            if s is None:
+                return ""
+            return _ws_re.sub(" ", str(s).strip()).upper()
+
+        # --- Pobierz pozycje z bazy ---
+        rows = self.db_manager.project_con.execute(
+            """
+            SELECT id,
+                   COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) AS dn,
+                   COALESCE(NULLIF(work_name, ''),         src_name)     AS nm,
+                   price_pln,
+                   order_qty
+            FROM items
+            WHERE project_id = ?
+            """,
+            (self.current_project_id,)
+        ).fetchall()
+
+        by_name = {}
+        for r in rows:
+            it = {'id': r[0], 'drawing_no': r[1] or '', 'name': r[2] or '',
+                  'price_pln': r[3], 'order_qty': r[4]}
+            by_name.setdefault(_norm_key(it['name']), []).append(it)
+
+        TOL = 1e-6
+
+        def _almost_equal(a, b):
+            if a is None and b is None:
+                return True
+            if a is None or b is None:
+                return False
+            return abs(float(a) - float(b)) <= TOL
+
+        matched = []     # (line, item, cur_price, new_price, changed)
+        not_matched = []  # line
+        for line in invoice.pozycje:
+            cands = by_name.get(_norm_key(line.nazwa), [])
+            if not cands:
+                not_matched.append(line)
+                continue
+            for it in cands:
+                changed = not _almost_equal(it['price_pln'], line.cena_netto)
+                matched.append((line, it, it['price_pln'], line.cena_netto, changed))
+
+        if not matched and not not_matched:
+            messagebox.showinfo("Import cen z faktury KSEF", "Faktura nie zawiera pozycji do zaimportowania.")
+            return
+
+        # --- Okno podglądu ---
+        dlg = tk.Toplevel(self)
+        dlg.title("Import cen z faktury KSEF — podgląd")
+        dlg.geometry("1350x650")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        hdr = tk.Frame(dlg, bg='#cce5ff', padx=10, pady=8)
+        hdr.pack(fill=tk.X)
+        tk.Label(
+            hdr,
+            text="📄 Import cen z faktury KSEF (XML) — aktualizuje TYLKO cenę (price_pln)",
+            font=('Arial', 13, 'bold'), bg='#cce5ff'
+        ).pack(anchor='w')
+        tk.Label(
+            hdr,
+            text=(
+                f"Faktura: {invoice.numer_faktury or '(brak numeru)'}    "
+                f"Sprzedawca: {invoice.sprzedawca_nazwa or '-'}    "
+                f"Data: {invoice.data_wystawienia or '-'}    "
+                f"Pozycji: {len(invoice.pozycje)}    "
+                f"Dopasowanych: {len(matched)}    "
+                f"Niedopasowanych: {len(not_matched)}"
+            ),
+            font=('Arial', 9), bg='#cce5ff', justify='left'
+        ).pack(anchor='w', pady=(4, 0))
+
+        nb = ttk.Notebook(dlg)
+        nb.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+
+        # --- Tab 1: pozycje dopasowane ---
+        f1 = tk.Frame(nb)
+        nb.add(f1, text=f"Pozycje ({len(matched)})")
+
+        cols = ('id', 'dn', 'nm_baza', 'nm_ksef', 'cena_baza', 'cena_ksef',
+                'ilosc_zam', 'ilosc_fv', 'cena_do_wpisania', 'decyzja')
+        tv = ttk.Treeview(f1, columns=cols, show='headings', selectmode='browse', height=18)
+        headers = [
+            ('id', 'ID', 50, 'e'),
+            ('dn', 'Nr rysunku', 120, 'w'),
+            ('nm_baza', 'Nazwa (RM_BAZA)', 260, 'w'),
+            ('nm_ksef', 'Nazwa (KSEF)', 260, 'w'),
+            ('cena_baza', 'Cena RM_BAZA', 100, 'e'),
+            ('cena_ksef', 'Cena KSEF', 100, 'e'),
+            ('ilosc_zam', 'Ilość zam.', 90, 'e'),
+            ('ilosc_fv', 'Ilość FV', 90, 'e'),
+            ('cena_do_wpisania', 'Cena do wpisania', 120, 'e'),
+            ('decyzja', 'Decyzja', 100, 'center'),
+        ]
+        for c, txt, w, anchor in headers:
+            tv.heading(c, text=txt)
+            tv.column(c, width=w, anchor=anchor, stretch=(c in ('nm_baza', 'nm_ksef')))
+        vsb = ttk.Scrollbar(f1, orient='vertical', command=tv.yview)
+        tv.configure(yscrollcommand=vsb.set)
+        tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def _fmt(v):
+            if v is None:
+                return ""
+            try:
+                return f"{float(v):.2f}"
+            except Exception:
+                return str(v)
+
+        tv.tag_configure('changed', background='#fff3cd')
+        tv.tag_configure('unchanged', background='#f0f0f0')
+
+        # row_data[iid] = {'item_id', 'new_price', 'decision'}
+        row_data = {}
+        for (line, it, cur_price, new_price, changed) in matched:
+            decision = 'Akceptuj' if changed else 'Pomiń'
+            iid = tv.insert(
+                '', 'end',
+                values=(it['id'], it['drawing_no'], it['name'], line.nazwa,
+                        _fmt(cur_price), _fmt(new_price),
+                        _fmt(it['order_qty']), _fmt(line.ilosc),
+                        _fmt(new_price), decision),
+                tags=('changed' if changed else 'unchanged',)
+            )
+            row_data[iid] = {'item_id': it['id'], 'cur_price': cur_price,
+                              'new_price': new_price, 'decision': decision}
+
+        # --- Edycja komórek: cena do wpisania (double-click) i decyzja (combobox) ---
+        def _on_double_click(event):
+            region = tv.identify_region(event.x, event.y)
+            if region != 'cell':
+                return
+            col = tv.identify_column(event.x)
+            iid = tv.identify_row(event.y)
+            if not iid:
+                return
+            col_idx = int(col.replace('#', '')) - 1
+            col_name = cols[col_idx]
+
+            if col_name == 'cena_do_wpisania':
+                x, y, w, h = tv.bbox(iid, col)
+                entry = tk.Entry(tv)
+                entry.insert(0, tv.set(iid, 'cena_do_wpisania'))
+                entry.select_range(0, tk.END)
+                entry.place(x=x, y=y, width=w, height=h)
+                entry.focus()
+
+                def _commit(_e=None):
+                    val = entry.get().strip().replace(',', '.')
+                    try:
+                        new_val = float(val)
+                    except ValueError:
+                        entry.destroy()
+                        return
+                    tv.set(iid, 'cena_do_wpisania', f"{new_val:.2f}")
+                    row_data[iid]['new_price'] = new_val
+                    entry.destroy()
+
+                entry.bind('<Return>', _commit)
+                entry.bind('<FocusOut>', _commit)
+
+            elif col_name == 'decyzja':
+                x, y, w, h = tv.bbox(iid, col)
+                cb = ttk.Combobox(tv, values=['Akceptuj', 'Pomiń'], state='readonly')
+                cb.set(tv.set(iid, 'decyzja'))
+                cb.place(x=x, y=y, width=w, height=h)
+                cb.focus()
+
+                def _commit_cb(_e=None):
+                    tv.set(iid, 'decyzja', cb.get())
+                    row_data[iid]['decision'] = cb.get()
+                    cb.destroy()
+
+                cb.bind('<<ComboboxSelected>>', _commit_cb)
+                cb.bind('<FocusOut>', lambda _e: cb.destroy())
+
+        tv.bind('<Double-1>', _on_double_click)
+
+        # --- Tab 2: niedopasowane ---
+        f2 = tk.Frame(nb)
+        nb.add(f2, text=f"Nie dopasowano ({len(not_matched)})")
+        tv2 = ttk.Treeview(f2, columns=('nm', 'cena', 'ilosc'), show='headings', selectmode='browse')
+        for c, txt, w in [('nm', 'Nazwa (KSEF)', 500), ('cena', 'Cena KSEF', 120), ('ilosc', 'Ilość FV', 100)]:
+            tv2.heading(c, text=txt)
+            tv2.column(c, width=w, anchor='w' if c == 'nm' else 'e', stretch=(c == 'nm'))
+        vsb2 = ttk.Scrollbar(f2, orient='vertical', command=tv2.yview)
+        tv2.configure(yscrollcommand=vsb2.set)
+        tv2.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb2.pack(side=tk.RIGHT, fill=tk.Y)
+        for line in not_matched:
+            tv2.insert('', 'end', values=(line.nazwa, _fmt(line.cena_netto), _fmt(line.ilosc)))
+
+        # --- Stopka ---
+        bottom = tk.Frame(dlg, padx=10, pady=8)
+        bottom.pack(fill=tk.X)
+
+        backup_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            bottom,
+            text="Zrób backup projektu przed zapisem (zalecane)",
+            variable=backup_var
+        ).pack(side=tk.LEFT)
+
+        tk.Label(
+            bottom,
+            text="Dwuklik na komórkę 'Cena do wpisania' lub 'Decyzja' aby edytować.",
+            font=('Arial', 8, 'italic'), fg='#666'
+        ).pack(side=tk.LEFT, padx=15)
+
+        decision_result = {'apply': False}
+
+        def _on_cancel():
+            decision_result['apply'] = False
+            dlg.destroy()
+
+        def _on_apply():
+            to_apply = [rd for rd in row_data.values() if rd['decision'] == 'Akceptuj']
+            if not to_apply:
+                messagebox.showinfo("Import cen z faktury KSEF", "Brak pozycji zaakceptowanych do zapisania.", parent=dlg)
+                return
+            if not messagebox.askyesno(
+                "Potwierdzenie",
+                f"Zapisać nowe ceny dla {len(to_apply)} pozycji?\n\n"
+                f"Zmieniona zostanie TYLKO kolumna price_pln.\n"
+                f"Pozostałe dane pozycji pozostaną nietknięte.",
+                parent=dlg
+            ):
+                return
+            decision_result['apply'] = True
+            dlg.destroy()
+
+        tk.Button(bottom, text="Anuluj", width=14, command=_on_cancel).pack(side=tk.RIGHT, padx=4)
+        tk.Button(
+            bottom, text="✅ Zastosuj zmiany",
+            width=20, bg='#c8e6c9', command=_on_apply
+        ).pack(side=tk.RIGHT, padx=4)
+
+        dlg.wait_window()
+
+        if not decision_result['apply']:
+            print("Import cen z faktury KSEF anulowany przez użytkownika.")
+            return
+
+        # --- Re-weryfikacja locka tuż przed zapisem (mógł zostać przejęty/wymuszony,
+        #     podczas gdy okno podglądu było otwarte) ---
+        if not self.have_lock:
+            messagebox.showerror(
+                "Utracono lock",
+                "Lock projektu został w międzyczasie przejęty przez innego użytkownika.\n"
+                "Zmiany NIE zostały zapisane — otwórz projekt ponownie i przejmij lock."
+            )
+            return
+
+        to_apply = [rd for rd in row_data.values() if rd['decision'] == 'Akceptuj']
+
+        if backup_var.get():
+            try:
+                print(f"📦 Backup projektu {self.current_project_id} przed importem cen KSEF...")
+                self.backup_manager.backup_project(self.current_project_id, skip_checkpoint=False)
+                print(f"✅ Backup OK")
+            except Exception as e:
+                if not messagebox.askyesno(
+                    "Backup nieudany",
+                    f"Backup nie powiódł się:\n{e}\n\nKontynuować mimo to?"
+                ):
+                    return
+
+        cur = self.db_manager.project_con.cursor()
+        applied = 0
+        old_values = {}
+        try:
+            cur.execute("BEGIN")
+            for rd in to_apply:
+                item_id = rd['item_id']
+                old_values[item_id] = rd['cur_price']
+                cur.execute(
+                    "UPDATE items SET price_pln = ?, updated_at = datetime('now') WHERE id = ?",
+                    (rd['new_price'], item_id)
+                )
+                applied += 1
+                try:
+                    self._log_item_change(
+                        item_id, 'UPDATE', 'price_pln', rd['cur_price'], rd['new_price']
+                    )
+                except Exception:
+                    pass
+            self.db_manager.project_con.commit()
+        except Exception as e:
+            self.db_manager.project_con.rollback()
+            messagebox.showerror("Błąd zapisu", f"Zapis nie powiódł się — wycofano:\n{e}")
+            return
+
+        self._last_undo_action = {
+            'type': 'bulk_price',
+            'old_values': old_values,  # dict {item_id: old_price}
+            'new_price': None,  # różne ceny per pozycja — pole informacyjne nieużywane przy undo
+        }
+
+        print(f"✅ Zaimportowano ceny dla {applied} pozycji z faktury KSEF ({invoice.numer_faktury}).")
+        messagebox.showinfo(
+            "Import cen z faktury KSEF",
+            f"Zaimportowano ceny dla {applied} pozycji.\n\n"
+            f"Niedopasowane pozycje z faktury: {len(not_matched)}"
+        )
+        try:
+            self.refresh_data()
+        except Exception:
+            pass
+
+    # ========================================================================
+    # KONIEC MODUŁU IMPORT CEN Z FAKTURY KSEF
     # ========================================================================
 
     
