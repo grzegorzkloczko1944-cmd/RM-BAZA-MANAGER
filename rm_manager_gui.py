@@ -11348,7 +11348,7 @@ class RMManagerGUI:
         dlg = tk.Toplevel(self.root)
         dlg.title("Pracownicy")
         dlg.transient(self.root)
-        self._center_window(dlg, 1200, 580)
+        self._center_window(dlg, 1300, 580)
 
         header = tk.Label(dlg, text="LISTA PRACOWNIKÓW",
                           bg=self.COLOR_TOPBAR, fg="white",
@@ -11365,6 +11365,13 @@ class RMManagerGUI:
                                  values=["Wszystkie"] + rmm.EMPLOYEE_CATEGORIES, font=self.FONT_DEFAULT)
         cat_combo.pack(side=tk.LEFT, padx=(4, 15))
 
+        tk.Label(toolbar, text="Podmiot:", font=self.FONT_BOLD).pack(side=tk.LEFT)
+        podmiot_var = tk.StringVar(value="Wszystkie")
+        podmiot_combo = ttk.Combobox(toolbar, textvariable=podmiot_var, state='readonly', width=18,
+                                 values=["Wszystkie"] + rmm.EMPLOYEE_PODMIOTY + ["(bez przypisania)"],
+                                 font=self.FONT_DEFAULT)
+        podmiot_combo.pack(side=tk.LEFT, padx=(4, 15))
+
         show_inactive_var = tk.BooleanVar(value=False)
         tk.Checkbutton(toolbar, text="Pokaż nieaktywnych",
                        variable=show_inactive_var).pack(side=tk.LEFT, padx=(0, 15))
@@ -11377,11 +11384,12 @@ class RMManagerGUI:
                   bg=self.COLOR_RED, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
 
         # Treeview
-        cols = ('id', 'name', 'category', 'description', 'phone', 'email', 'contact', 'active')
+        cols = ('id', 'name', 'category', 'podmiot', 'description', 'phone', 'email', 'contact', 'active')
         tree = ttk.Treeview(dlg, columns=cols, show='headings', height=22)
         tree.heading('id',          text='ID');          tree.column('id',          width=40,  stretch=False)
         tree.heading('name',        text='Imię i nazwisko'); tree.column('name',    width=180)
         tree.heading('category',    text='Kategoria');   tree.column('category',    width=110, stretch=False)
+        tree.heading('podmiot',     text='Podmiot');     tree.column('podmiot',     width=110, stretch=False)
         tree.heading('description', text='Opis');        tree.column('description', width=180)
         tree.heading('phone',       text='Nr telefonu'); tree.column('phone',       width=120, stretch=False)
         tree.heading('email',       text='Email');       tree.column('email',       width=180)
@@ -11398,9 +11406,17 @@ class RMManagerGUI:
         def refresh(*_):
             tree.delete(*tree.get_children())
             cat = cat_var.get()
+            podmiot_sel = podmiot_var.get()
+            if podmiot_sel == "Wszystkie":
+                podmiot_filter = None
+            elif podmiot_sel == "(bez przypisania)":
+                podmiot_filter = rmm.EMPLOYEE_PODMIOT_BRAK
+            else:
+                podmiot_filter = podmiot_sel
             rows = rmm.get_employees(
                 self.rm_master_db_path,
                 category=(None if cat == "Wszystkie" else cat),
+                podmiot=podmiot_filter,
                 active_only=False
             )
             for r in rows:
@@ -11408,6 +11424,7 @@ class RMManagerGUI:
                     continue
                 tree.insert('', tk.END, iid=str(r['id']), values=(
                     r['id'], r['name'], r['category'],
+                    r.get('podmiot') or '',
                     r.get('description') or '',
                     r.get('phone') or '',
                     r.get('email') or '',
@@ -11416,6 +11433,7 @@ class RMManagerGUI:
                 ), tags=() if r['is_active'] else ('inactive',))
 
         cat_combo.bind('<<ComboboxSelected>>', refresh)
+        podmiot_combo.bind('<<ComboboxSelected>>', refresh)
         show_inactive_var.trace_add('write', refresh)
         tree.bind('<Double-1>', lambda e: _edit_selected())
         refresh()
@@ -11455,7 +11473,7 @@ class RMManagerGUI:
         frm.transient(_parent_win)
         frm.grab_set()
         frm.resizable(False, False)
-        self._center_window(frm, 540, 520)
+        self._center_window(frm, 540, 560)
 
         header = tk.Label(frm,
                           text="DODAJ PRACOWNIKA" if not employee_id else "EDYTUJ PRACOWNIKA",
@@ -11508,10 +11526,18 @@ class RMManagerGUI:
         contact_text.insert('1.0', existing.get('contact_info') or '')
         contact_text.grid(row=5, column=1, sticky='ew', pady=4)
 
+        # Podmiot (spółka: RM PAK / RM PRODUKCJA) — opcjonalny
+        lbl(6, "Podmiot:")
+        podmiot_var = tk.StringVar(value=existing.get('podmiot') or '')
+        ttk.Combobox(body, textvariable=podmiot_var,
+                     values=[''] + rmm.EMPLOYEE_PODMIOTY,
+                     state='readonly', font=self.FONT_DEFAULT).grid(
+            row=6, column=1, sticky='ew', pady=4)
+
         # Aktywny
         active_var = tk.BooleanVar(value=bool(existing.get('is_active', True)))
         tk.Checkbutton(body, text="Aktywny", variable=active_var,
-                       font=self.FONT_DEFAULT).grid(row=6, column=1, sticky='w', pady=4)
+                       font=self.FONT_DEFAULT).grid(row=7, column=1, sticky='w', pady=4)
 
         def save():
             name = name_var.get().strip()
@@ -11525,6 +11551,7 @@ class RMManagerGUI:
                 'phone': phone_var.get().strip(),
                 'email': email_var.get().strip(),
                 'contact_info': contact_text.get('1.0', tk.END).strip(),
+                'podmiot': podmiot_var.get().strip(),
                 'is_active': active_var.get(),
             }
             if employee_id:
@@ -30853,6 +30880,11 @@ Kod: {unlock_code}
         bar.pack(fill=tk.X)
         tk.Button(bar, text="🔄 Odśwież", font=self.FONT_SMALL, padx=10,
                   command=lambda: _reload()).pack(side=tk.LEFT, padx=2)
+        tk.Label(bar, text="   Podmiot:", font=self.FONT_SMALL).pack(side=tk.LEFT)
+        podmiot_var = tk.StringVar(value="Wszystkie")
+        ttk.Combobox(bar, textvariable=podmiot_var, state='readonly', width=16,
+                     values=["Wszystkie"] + rmm.EMPLOYEE_PODMIOTY + ["(bez przypisania)"],
+                     font=self.FONT_SMALL).pack(side=tk.LEFT, padx=2)
 
         tk.Label(parent, text="Dzisiaj nieobecni", font=("Arial", 12, "bold"),
                 anchor='w').pack(fill=tk.X, padx=10, pady=(6, 2))
@@ -30898,6 +30930,16 @@ Kod: {unlock_code}
             today_iso0 = today.strftime('%Y-%m-%d')
             horizon = today + timedelta(days=UPCOMING_HORIZON_DAYS)
 
+            podmiot_sel = podmiot_var.get()
+            if podmiot_sel == "Wszystkie":
+                allowed_ids = None
+            elif podmiot_sel == "(bez przypisania)":
+                allowed_ids = {e['id'] for e in rmm.get_employees(
+                    self.rm_master_db_path, podmiot=rmm.EMPLOYEE_PODMIOT_BRAK)}
+            else:
+                allowed_ids = {e['id'] for e in rmm.get_employees(
+                    self.rm_master_db_path, podmiot=podmiot_sel)}
+
             try:
                 trips_today = rmm.get_service_trips(self.rm_master_db_path,
                                                      date_from=today_iso0, date_to=today_iso0)
@@ -30905,6 +30947,8 @@ Kod: {unlock_code}
                 trips_today = []
             trips_today = [t for t in trips_today
                           if (t.get('date_from') or '')[:10] <= today_iso0 <= (t.get('date_to') or '')[:10]]
+            if allowed_ids is not None:
+                trips_today = [t for t in trips_today if t.get('employee_id') in allowed_ids]
             trips_today.sort(key=lambda t: t.get('employee_name') or '')
             for t in trips_today:
                 pid = t.get('project_id')
@@ -30925,6 +30969,8 @@ Kod: {unlock_code}
             # Tylko zatwierdzone / bez workflow (pomijamy odrzucone) — to co
             # realnie obowiązuje, nie same wnioski oczekujące na decyzję.
             avail = [a for a in avail if (a.get('status') or '').upper() != 'ODRZUCONY']
+            if allowed_ids is not None:
+                avail = [a for a in avail if a.get('employee_id') in allowed_ids]
 
             today_iso = today.strftime('%Y-%m-%d')
             today_rows, upcoming_rows = [], []
@@ -30954,6 +31000,7 @@ Kod: {unlock_code}
             for _, row in upcoming_rows:
                 tree_up.insert('', tk.END, values=row)
 
+        podmiot_var.trace_add('write', lambda *_: _reload())
         _reload()
         return _reload
 
@@ -30986,9 +31033,15 @@ Kod: {unlock_code}
         tk.Label(toolbar, text="Do:", font=self.FONT_SMALL).pack(side=tk.LEFT)
         to_var = tk.StringVar(value=(datetime.now() + timedelta(days=365)).strftime('%Y-%m-%d'))
         tk.Entry(toolbar, textvariable=to_var, width=12, font=self.FONT_SMALL).pack(side=tk.LEFT, padx=2)
+        tk.Label(toolbar, text="   Podmiot:", font=self.FONT_SMALL).pack(side=tk.LEFT)
+        podmiot_var = tk.StringVar(value="Wszystkie")
+        ttk.Combobox(toolbar, textvariable=podmiot_var, state='readonly', width=16,
+                     values=["Wszystkie"] + rmm.EMPLOYEE_PODMIOTY + ["(bez przypisania)"],
+                     font=self.FONT_SMALL).pack(side=tk.LEFT, padx=2)
         tk.Button(toolbar, text="🔍", command=lambda: refresh(),
                   font=self.FONT_SMALL).pack(side=tk.LEFT, padx=2)
         status_var.trace_add('write', lambda *a: refresh())
+        podmiot_var.trace_add('write', lambda *a: refresh())
 
         # Licznik oczekujących
         pending_var = tk.StringVar()
@@ -31028,8 +31081,19 @@ Kod: {unlock_code}
             rows.sort(key=lambda r: r.get('date_from') or '', reverse=True)
             wanted = {'Oczekuje': 'OCZEKUJE', 'Zatwierdzony': 'ZATWIERDZONY',
                       'Odrzucony': 'ODRZUCONY'}.get(status_var.get())
+            podmiot_sel = podmiot_var.get()
+            if podmiot_sel == "Wszystkie":
+                allowed_ids = None
+            elif podmiot_sel == "(bez przypisania)":
+                allowed_ids = {e['id'] for e in rmm.get_employees(
+                    self.rm_master_db_path, podmiot=rmm.EMPLOYEE_PODMIOT_BRAK)}
+            else:
+                allowed_ids = {e['id'] for e in rmm.get_employees(
+                    self.rm_master_db_path, podmiot=podmiot_sel)}
             pending = 0
             for r in rows:
+                if allowed_ids is not None and r.get('employee_id') not in allowed_ids:
+                    continue
                 st = (r.get('status') or 'ZATWIERDZONY').upper()
                 if st == 'OCZEKUJE':
                     pending += 1
@@ -31466,11 +31530,24 @@ Kod: {unlock_code}
         tk.Label(toolbar, text="Rok:", font=self.FONT_BOLD).pack(side=tk.LEFT, padx=(0, 3))
         year_var = tk.StringVar(value=str(datetime.now().year))
         tk.Entry(toolbar, textvariable=year_var, width=6, font=self.FONT_SMALL).pack(side=tk.LEFT)
+        tk.Label(toolbar, text="Podmiot:", font=self.FONT_BOLD).pack(side=tk.LEFT, padx=(10, 3))
+        podmiot_var = tk.StringVar(value="Wszystkie")
+        ttk.Combobox(toolbar, textvariable=podmiot_var, state='readonly', width=18,
+                     values=["Wszystkie"] + rmm.EMPLOYEE_PODMIOTY + ["(bez przypisania)"],
+                     font=self.FONT_SMALL).pack(side=tk.LEFT)
         tk.Button(toolbar, text="🔍 Pokaż", command=lambda: refresh(),
                   font=self.FONT_SMALL, padx=8).pack(side=tk.LEFT, padx=4)
         tk.Label(toolbar,
                  text="Dwuklik: 'Pula bazowa' = stały wymiar; 'Pula {rok}' = korekta na ten rok.",
                  font=self.FONT_SMALL, fg="#888").pack(side=tk.LEFT, padx=10)
+
+        def _podmiot_filter():
+            sel = podmiot_var.get()
+            if sel == "Wszystkie":
+                return None
+            if sel == "(bez przypisania)":
+                return rmm.EMPLOYEE_PODMIOT_BRAK
+            return sel
 
         cols = ('id', 'employee', 'category', 'base', 'year')
         tree = ttk.Treeview(parent, columns=cols, show='headings', height=18)
@@ -31498,7 +31575,8 @@ Kod: {unlock_code}
             tree.delete(*tree.get_children())
             _year_col_label()
             yr = _year()
-            for e in rmm.get_employees(self.rm_master_db_path, active_only=True):
+            for e in rmm.get_employees(self.rm_master_db_path, active_only=True,
+                                        podmiot=_podmiot_filter()):
                 base = rmm.get_vacation_base(self.rm_master_db_path, e['id'])
                 has_year = rmm.has_vacation_quota_for_year(self.rm_master_db_path, e['id'], yr)
                 eff = rmm.get_vacation_quota(self.rm_master_db_path, e['id'], yr)
@@ -31561,6 +31639,7 @@ Kod: {unlock_code}
                 _edit_year(iid)
 
         tree.bind("<Double-1>", _on_double)
+        podmiot_var.trace_add('write', lambda *_: refresh())
         refresh()
         return refresh
 
@@ -31571,6 +31650,20 @@ Kod: {unlock_code}
         tk.Label(toolbar, text="Rok:", font=self.FONT_BOLD).pack(side=tk.LEFT, padx=(0, 3))
         year_var = tk.StringVar(value=str(datetime.now().year))
         tk.Entry(toolbar, textvariable=year_var, width=6, font=self.FONT_SMALL).pack(side=tk.LEFT)
+        tk.Label(toolbar, text="Podmiot:", font=self.FONT_BOLD).pack(side=tk.LEFT, padx=(10, 3))
+        podmiot_var = tk.StringVar(value="Wszystkie")
+        ttk.Combobox(toolbar, textvariable=podmiot_var, state='readonly', width=18,
+                     values=["Wszystkie"] + rmm.EMPLOYEE_PODMIOTY + ["(bez przypisania)"],
+                     font=self.FONT_SMALL).pack(side=tk.LEFT)
+
+        def _podmiot_filter():
+            sel = podmiot_var.get()
+            if sel == "Wszystkie":
+                return None
+            if sel == "(bez przypisania)":
+                return rmm.EMPLOYEE_PODMIOT_BRAK
+            return sel
+
         tk.Button(toolbar, text="🔍 Przelicz", command=lambda: refresh(),
                   font=self.FONT_SMALL, padx=8).pack(side=tk.LEFT, padx=4)
         tk.Button(toolbar, text="📥 CSV", command=lambda: _export(),
@@ -31579,7 +31672,7 @@ Kod: {unlock_code}
                   bg="#c0392b", fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=4)
         tk.Button(toolbar, text="🪪 Karta urlopowa (PDF)", command=lambda: _card_pdf(),
                   bg="#8e44ad", fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=4)
-        tk.Button(toolbar, text="📗 Excel (księgowa)", command=lambda: _export_excel(),
+        tk.Button(toolbar, text="📗 EXCEL FULL", command=lambda: _export_excel(),
                   bg="#1e7e34", fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=4)
 
         # Legenda: które kolumny odejmują się od puli urlopu.
@@ -31619,6 +31712,11 @@ Kod: {unlock_code}
             tree.delete(*tree.get_children())
             yr = _year()
             rows = rmm.get_vacation_report(self.rm_master_db_path, yr)
+            podmiot_filter = _podmiot_filter()
+            if podmiot_filter:
+                allowed_ids = {e['id'] for e in rmm.get_employees(
+                    self.rm_master_db_path, podmiot=podmiot_filter)}
+                rows = [r for r in rows if r['employee_id'] in allowed_ids]
             # Sortuj wg kategorii, potem nazwiska — tak jak zakładka "Pula urlopu"
             # (get_employees: ORDER BY category, name).
             rows.sort(key=lambda r: ((r.get('category') or '').lower(),
@@ -31774,6 +31872,7 @@ Kod: {unlock_code}
         tk.Button(toolbar, text="📖 Historia pracownika", command=_open_history,
                   bg=self.COLOR_PURPLE, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=8)
 
+        podmiot_var.trace_add('write', lambda *_: refresh())
         refresh()
         return refresh
 
@@ -31785,6 +31884,11 @@ Kod: {unlock_code}
         cat_var = tk.StringVar(value="Wszystkie")
         ttk.Combobox(toolbar, textvariable=cat_var, state='readonly', width=18,
                      values=["Wszystkie"] + rmm.EMPLOYEE_CATEGORIES,
+                     font=self.FONT_DEFAULT).pack(side=tk.LEFT, padx=(4, 15))
+        tk.Label(toolbar, text="Podmiot:", font=self.FONT_BOLD).pack(side=tk.LEFT)
+        podmiot_var = tk.StringVar(value="Wszystkie")
+        ttk.Combobox(toolbar, textvariable=podmiot_var, state='readonly', width=18,
+                     values=["Wszystkie"] + rmm.EMPLOYEE_PODMIOTY + ["(bez przypisania)"],
                      font=self.FONT_DEFAULT).pack(side=tk.LEFT, padx=(4, 15))
         show_inactive = tk.BooleanVar(value=False)
         tk.Checkbutton(toolbar, text="Pokaż nieaktywnych",
@@ -31801,11 +31905,12 @@ Kod: {unlock_code}
         tk.Label(toolbar, text="(dwuklik = karta pracownika)",
                  font=self.FONT_SMALL, fg="#888").pack(side=tk.LEFT)
 
-        cols = ('id', 'name', 'category', 'description', 'phone', 'email', 'contact', 'active')
+        cols = ('id', 'name', 'category', 'podmiot', 'description', 'phone', 'email', 'contact', 'active')
         tree = ttk.Treeview(parent, columns=cols, show='headings', height=20)
         for key, txt, w, stretch in [
             ('id', 'ID', 40, False), ('name', 'Imię i nazwisko', 180, False),
-            ('category', 'Kategoria', 110, False), ('description', 'Opis', 160, False),
+            ('category', 'Kategoria', 110, False), ('podmiot', 'Podmiot', 110, False),
+            ('description', 'Opis', 160, False),
             ('phone', 'Nr telefonu', 120, False), ('email', 'Email', 180, False),
             ('contact', 'Dane kontaktowe', 150, True), ('active', 'Aktywny', 65, False)]:
             tree.heading(key, text=txt)
@@ -31818,14 +31923,24 @@ Kod: {unlock_code}
         def refresh(*_):
             tree.delete(*tree.get_children())
             cat = cat_var.get()
+            podmiot_sel = podmiot_var.get()
+            if podmiot_sel == "Wszystkie":
+                podmiot_filter = None
+            elif podmiot_sel == "(bez przypisania)":
+                podmiot_filter = rmm.EMPLOYEE_PODMIOT_BRAK
+            else:
+                podmiot_filter = podmiot_sel
             rows = rmm.get_employees(
                 self.rm_master_db_path,
-                category=(None if cat == "Wszystkie" else cat), active_only=False)
+                category=(None if cat == "Wszystkie" else cat),
+                podmiot=podmiot_filter,
+                active_only=False)
             for r in rows:
                 if not show_inactive.get() and not r['is_active']:
                     continue
                 tree.insert('', tk.END, iid=str(r['id']), values=(
-                    r['id'], r['name'], r['category'], r.get('description') or '',
+                    r['id'], r['name'], r['category'], r.get('podmiot') or '',
+                    r.get('description') or '',
                     r.get('phone') or '', r.get('email') or '',
                     r.get('contact_info') or '', '✓' if r['is_active'] else '—'))
 
@@ -31849,6 +31964,7 @@ Kod: {unlock_code}
                 self._employee_card(dlg, int(sel[0]), on_change=refresh)
 
         cat_var.trace_add('write', refresh)
+        podmiot_var.trace_add('write', refresh)
         show_inactive.trace_add('write', refresh)
         tree.bind('<Double-1>', lambda e: _card())
         refresh()
@@ -31932,6 +32048,7 @@ Kod: {unlock_code}
         rows = [
             ('name', 'Imię i nazwisko', 'entry'),
             ('category', 'Kategoria', 'combo'),
+            ('podmiot', 'Podmiot', 'podmiot_combo'),
             ('phone', 'Telefon', 'entry'),
             ('email', 'E-mail', 'entry'),
             ('description', 'Opis / stanowisko', 'entry'),
@@ -31944,6 +32061,10 @@ Kod: {unlock_code}
             vars_[key] = v
             if kind == 'combo':
                 ttk.Combobox(f, textvariable=v, values=cats, width=34).grid(
+                    row=r, column=1, sticky='w', pady=5)
+            elif kind == 'podmiot_combo':
+                ttk.Combobox(f, textvariable=v, values=[''] + rmm.EMPLOYEE_PODMIOTY,
+                             state='readonly', width=34).grid(
                     row=r, column=1, sticky='w', pady=5)
             else:
                 tk.Entry(f, textvariable=v, width=40).grid(
@@ -34061,6 +34182,21 @@ Kod: {unlock_code}
             tk.Checkbutton(catbar, text=c or "(brak)", variable=cat_vars[c],
                            font=self.FONT_SMALL,
                            command=lambda: _full_reset()).pack(side=tk.LEFT)
+
+        tk.Label(catbar, text="   Podmiot:", font=self.FONT_SMALL).pack(side=tk.LEFT, padx=(10, 2))
+        podmiot_var = tk.StringVar(value="Wszystkie")
+        ttk.Combobox(catbar, textvariable=podmiot_var, state='readonly', width=16,
+                     values=["Wszystkie"] + rmm.EMPLOYEE_PODMIOTY + ["(bez przypisania)"],
+                     font=self.FONT_SMALL).pack(side=tk.LEFT)
+        podmiot_var.trace_add('write', lambda *a: _full_reset())
+
+        def _podmiot_filter():
+            sel = podmiot_var.get()
+            if sel == "Wszystkie":
+                return None
+            if sel == "(bez przypisania)":
+                return rmm.EMPLOYEE_PODMIOT_BRAK
+            return sel
         # Osobny wiersz na filtr obecności — checkbox „tylko nieobecni" z wyborem
         # zakresu: Rok / Miesiąc / Od–Do (kalendarzyki). Pola zakresu widoczne
         # tylko gdy checkbox zaznaczony.
@@ -34252,7 +34388,8 @@ Kod: {unlock_code}
             return base_date + timedelta(days=idx)
 
         def _load_emps():
-            all_emps = rmm.get_employees(self.rm_master_db_path, active_only=True)
+            all_emps = rmm.get_employees(self.rm_master_db_path, active_only=True,
+                                          podmiot=_podmiot_filter())
             # Filtr kategorii: pokaż tylko pracowników z zaznaczonych kategorii.
             emps = [e for e in all_emps
                     if cat_vars.get(e.get('category') or '',

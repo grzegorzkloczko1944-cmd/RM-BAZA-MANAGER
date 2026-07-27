@@ -976,6 +976,13 @@ EMPLOYEE_CATEGORIES = [
     'Sprzedaż',
 ]
 
+# Podmioty (firmy) do których może być przypisany pracownik (stała lista)
+EMPLOYEE_PODMIOTY = [
+    'RM PAK',
+    'RM PRODUKCJA',
+]
+BRAK_PODMIOTU_LABEL = 'Bez przypisania'
+
 # Mapowanie etap → preferowana kategoria pracownika
 STAGE_TO_PREFERRED_CATEGORY = {
     'PROJEKT':        ['Konstrukcja'],
@@ -1043,6 +1050,13 @@ def ensure_list_tables(master_db_path: str):
     # jednocześnie. Dla 2. i kolejnych pozycji ograniczenie nie obowiązuje.
     try:
         con.execute("ALTER TABLE employees ADD COLUMN master_max_parallel INTEGER NOT NULL DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass  # kolumna już istnieje
+
+    # Dodaj kolumnę podmiot (2026-07-27) — rozdzielenie pracowników na spółki
+    # RM PAK / RM PRODUKCJA dla celów księgowych. Opcjonalna, może być pusta.
+    try:
+        con.execute("ALTER TABLE employees ADD COLUMN podmiot TEXT")
     except sqlite3.OperationalError:
         pass  # kolumna już istnieje
 
@@ -5991,10 +6005,15 @@ def has_feature_permission(rm_master_db_path: str, feature: str, username: str,
 # Listy zasobów – Pracownicy i Transport
 # ===========================================================================
 
-def get_employees(rm_master_db_path: str, category: str = None, active_only: bool = False) -> List[Dict]:
+EMPLOYEE_PODMIOT_BRAK = '__BRAK__'  # sentinel: filtruj pracowników bez przypisanego podmiotu
+
+def get_employees(rm_master_db_path: str, category: str = None, active_only: bool = False,
+                   podmiot: str = None) -> List[Dict]:
     """Pobierz pracowników z rm_manager.sqlite.
     category=None → wszystkie kategorie.
     active_only=True → tylko is_active=1.
+    podmiot=None → wszystkie podmioty (RM PAK / RM PRODUKCJA).
+    podmiot=EMPLOYEE_PODMIOT_BRAK → tylko pracownicy bez przypisanego podmiotu.
     """
     ensure_list_tables(rm_master_db_path)
     con = _open_rm_connection(rm_master_db_path)
@@ -6002,6 +6021,11 @@ def get_employees(rm_master_db_path: str, category: str = None, active_only: boo
     if category:
         clauses.append("category = ?")
         params.append(category)
+    if podmiot == EMPLOYEE_PODMIOT_BRAK:
+        clauses.append("(podmiot IS NULL OR podmiot = '')")
+    elif podmiot:
+        clauses.append("podmiot = ?")
+        params.append(podmiot)
     if active_only:
         clauses.append("is_active = 1")
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
@@ -6070,7 +6094,7 @@ def get_employee_by_id(rm_master_db_path: str, employee_id: int) -> Dict:
 EMPLOYEE_EDITABLE_FIELDS = {
     'name': 'Imię i nazwisko', 'category': 'Kategoria', 'phone': 'Telefon',
     'email': 'E-mail', 'description': 'Opis', 'contact_info': 'Kontakt (inne)',
-    'is_active': 'Aktywny',
+    'is_active': 'Aktywny', 'podmiot': 'Podmiot',
 }
 
 
@@ -6133,6 +6157,7 @@ def save_employee(rm_master_db_path: str, data: Dict) -> int:
                     contact_info = ?,
                     phone        = ?,
                     email        = ?,
+                    podmiot      = ?,
                     is_active    = ?,
                     updated_at   = CURRENT_TIMESTAMP
                 WHERE id = ?
@@ -6140,18 +6165,20 @@ def save_employee(rm_master_db_path: str, data: Dict) -> int:
                 data['name'], data['category'],
                 data.get('description', ''), data.get('contact_info', ''),
                 data.get('phone', ''), data.get('email', ''),
+                data.get('podmiot') or None,
                 int(bool(data.get('is_active', True))),
                 data['id']
             ))
             row_id = data['id']
         else:
             cur = con.execute("""
-                INSERT INTO employees (name, category, description, contact_info, phone, email, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO employees (name, category, description, contact_info, phone, email, podmiot, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 data['name'], data['category'],
                 data.get('description', ''), data.get('contact_info', ''),
                 data.get('phone', ''), data.get('email', ''),
+                data.get('podmiot') or None,
                 int(bool(data.get('is_active', True))),
             ))
             row_id = cur.lastrowid
@@ -10624,6 +10651,7 @@ def get_vacation_report(rm_master_db_path: str, year: int) -> List[Dict]:
             'employee_id': e['id'],
             'name': e['name'],
             'category': e.get('category', ''),
+            'podmiot': e.get('podmiot') or '',
             'quota': quota,
             'carryover': round(carryover, 2),
             'available': round(carryover + quota, 2),
@@ -10675,6 +10703,8 @@ def get_vacation_entries(rm_master_db_path: str, year: int = None,
     else:
         d_from = d_to = None
     rows = get_employee_availability(rm_master_db_path, date_from=d_from, date_to=d_to)
+    emp_podmiot = {e['id']: (e.get('podmiot') or '') for e in
+                   get_employees(rm_master_db_path)}
     out = []
     for a in rows:
         days = _count_absence_days(a['date_from'], a['date_to'],
@@ -10684,8 +10714,10 @@ def get_vacation_entries(rm_master_db_path: str, year: int = None,
         code = (a.get('reason') or 'INNE').upper()
         tinfo = ABSENCE_TYPE_BY_CODE.get(code, {})
         out.append({
+            'employee_id': a.get('employee_id'),
             'employee': a.get('employee_name', ''),
             'category': a.get('employee_category', ''),
+            'podmiot': emp_podmiot.get(a.get('employee_id'), ''),
             'date_from': a['date_from'], 'date_to': a['date_to'],
             'type_code': code, 'type_label': tinfo.get('label', code),
             'counts_as_vacation': bool(tinfo.get('counts_as_vacation')),
@@ -10703,10 +10735,12 @@ def get_vacation_entries(rm_master_db_path: str, year: int = None,
 
 def export_vacations_xlsx(rm_master_db_path: str, path: str, year: int = None,
                           month: int = None) -> str:
-    """Eksport bazy urlopów do Excela (2 arkusze: Wpisy + Podsumowanie).
+    """Eksport bazy urlopów do Excela — osobne arkusze Wpisy/Podsumowanie
+    DLA KAŻDEGO PODMIOTU (RM PAK, RM PRODUKCJA, Bez przypisania), plus
+    zbiorcze arkusze "Wpisy — WSZYSCY" / "Podsumowanie — WSZYSCY".
 
     Zakres: cały rok (month=None) albo konkretny miesiąc. Gdy brak openpyxl —
-    zapisuje 2 pliki CSV (…_wpisy.csv, …_podsumowanie.csv) i zwraca ich opis.
+    zapisuje pliki CSV per podmiot i zwraca ich opis.
     Zwraca komunikat o zapisanych plikach.
     """
     entries = get_vacation_entries(rm_master_db_path, year=year, month=month)
@@ -10714,24 +10748,38 @@ def export_vacations_xlsx(rm_master_db_path: str, path: str, year: int = None,
     _STATUS_PL = {'OCZEKUJE': 'Oczekuje', 'ZATWIERDZONY': 'Zatwierdzony',
                   'ODRZUCONY': 'Odrzucony'}
 
-    entry_headers = ['Pracownik', 'Kategoria', 'Od', 'Do', 'Typ',
+    entry_headers = ['Pracownik', 'Podmiot', 'Kategoria', 'Od', 'Do', 'Typ',
                      'Odejmuje pulę', 'Dni robocze', 'Godziny', 'Status',
                      'Decyzja (kto)', 'Decyzja (kiedy)', 'Uwagi']
     def _entry_row(e):
-        return [e['employee'], e['category'], e['date_from'], e['date_to'],
+        return [e['employee'], e.get('podmiot') or BRAK_PODMIOTU_LABEL, e['category'],
+                e['date_from'], e['date_to'],
                 e['type_label'], 'TAK' if e['counts_as_vacation'] else 'nie',
                 e['days'], e['hours'], _STATUS_PL.get(e['status'], e['status']),
                 e['decided_by'], e['decided_at'], e['notes']]
 
-    sum_headers = ['Pracownik', 'Kategoria', 'Zaległy', 'Pula', 'Dostępne',
+    sum_headers = ['Pracownik', 'Podmiot', 'Kategoria', 'Zaległy', 'Pula', 'Dostępne',
                    'Urlop wyp.', 'Na żądanie', 'Pozostało', 'L4', 'Delegacja',
                    'Szkolenie', 'Inne', 'Razem dni']
     def _sum_row(r):
         br = r['by_reason']
-        return [r['name'], r['category'], r['carryover'], r['quota'], r['available'],
+        return [r['name'], r.get('podmiot') or BRAK_PODMIOTU_LABEL, r['category'],
+                r['carryover'], r['quota'], r['available'],
                 br.get('URLOP', 0), br.get('URLOP_ZADANIE', 0), r['remaining'],
                 br.get('L4', 0), br.get('DELEGACJA', 0), br.get('SZKOLENIE', 0),
                 br.get('INNE', 0), r['total_days']]
+
+    # Grupowanie po podmiocie — kolejność: podmioty znane, potem "Bez przypisania".
+    groups = [(p, p) for p in EMPLOYEE_PODMIOTY] + [('', BRAK_PODMIOTU_LABEL)]
+
+    def _by_podmiot(rows, key_getter):
+        out = {p: [] for p, _ in groups}
+        for row in rows:
+            out.setdefault(key_getter(row) or '', []).append(row)
+        return out
+
+    entries_by_podmiot = _by_podmiot(entries, lambda e: e.get('podmiot'))
+    report_by_podmiot = _by_podmiot(report, lambda r: r.get('podmiot'))
 
     try:
         from openpyxl import Workbook
@@ -10752,34 +10800,62 @@ def export_vacations_xlsx(rm_master_db_path: str, path: str, year: int = None,
                 ws.column_dimensions[col[0].column_letter].width = min(w + 2, 40)
             ws.freeze_panes = "A2"
 
-        ws1 = wb.active
-        ws1.title = "Wpisy"
-        _sheet(ws1, entry_headers, [_entry_row(e) for e in entries])
+        def _safe_title(name):
+            # Excel: max 31 znaków, bez : \ / ? * [ ]
+            for ch in ':\\/?*[]':
+                name = name.replace(ch, '-')
+            return name[:31]
+
+        wb.remove(wb.active)
+        _sheet(wb.create_sheet(_safe_title("Wpisy — WSZYSCY")),
+               entry_headers, [_entry_row(e) for e in entries])
         if report:
-            ws2 = wb.create_sheet("Podsumowanie")
-            _sheet(ws2, sum_headers, [_sum_row(r) for r in report])
+            _sheet(wb.create_sheet(_safe_title("Podsumowanie — WSZYSCY")),
+                   sum_headers, [_sum_row(r) for r in report])
+
+        for podmiot_key, podmiot_label in groups:
+            p_entries = entries_by_podmiot.get(podmiot_key, [])
+            p_report = report_by_podmiot.get(podmiot_key, [])
+            if not p_entries and not p_report:
+                continue
+            _sheet(wb.create_sheet(_safe_title(f"Wpisy — {podmiot_label}")),
+                   entry_headers, [_entry_row(e) for e in p_entries])
+            if p_report:
+                _sheet(wb.create_sheet(_safe_title(f"Podsum. — {podmiot_label}")),
+                       sum_headers, [_sum_row(r) for r in p_report])
+
         if not path.lower().endswith('.xlsx'):
             path += '.xlsx'
         wb.save(path)
         return f"Zapisano Excel: {path}"
     except ImportError:
-        # Fallback: dwa pliki CSV (Excel je otworzy).
-        import csv, os
+        # Fallback: pliki CSV — zbiorcze + jeden komplet per podmiot.
+        import csv
         base = path[:-5] if path.lower().endswith('.xlsx') else path
-        p1, p2 = base + '_wpisy.csv', base + '_podsumowanie.csv'
-        with open(p1, 'w', newline='', encoding='utf-8-sig') as fh:
-            w = csv.writer(fh, delimiter=';')
-            w.writerow(entry_headers)
-            for e in entries:
-                w.writerow(_entry_row(e))
-        if report:
-            with open(p2, 'w', newline='', encoding='utf-8-sig') as fh:
+        saved = []
+
+        def _write_csv(suffix, headers, rows, row_fn):
+            p = f"{base}_{suffix}.csv"
+            with open(p, 'w', newline='', encoding='utf-8-sig') as fh:
                 w = csv.writer(fh, delimiter=';')
-                w.writerow(sum_headers)
-                for r in report:
-                    w.writerow(_sum_row(r))
-            return f"Brak openpyxl — zapisano CSV:\n{p1}\n{p2}"
-        return f"Brak openpyxl — zapisano CSV:\n{p1}"
+                w.writerow(headers)
+                for r in rows:
+                    w.writerow(row_fn(r))
+            saved.append(p)
+
+        _write_csv('wpisy_wszyscy', entry_headers, entries, _entry_row)
+        if report:
+            _write_csv('podsumowanie_wszyscy', sum_headers, report, _sum_row)
+        for podmiot_key, podmiot_label in groups:
+            p_entries = entries_by_podmiot.get(podmiot_key, [])
+            p_report = report_by_podmiot.get(podmiot_key, [])
+            if not p_entries and not p_report:
+                continue
+            slug = podmiot_label.lower().replace(' ', '_')
+            _write_csv(f'wpisy_{slug}', entry_headers, p_entries, _entry_row)
+            if p_report:
+                _write_csv(f'podsumowanie_{slug}', sum_headers, p_report, _sum_row)
+        return "Brak openpyxl — zapisano CSV:\n" + "\n".join(saved)
 
 
 # ============================================================================
