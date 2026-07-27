@@ -40,6 +40,47 @@ import time
 import os
 import threading
 
+
+def format_nip(nip):
+    """Formatuje NIP do postaci XXX-XXX-XX-XX. Zwraca oryginał, jeśli nie da się rozpoznać 10 cyfr."""
+    if not nip:
+        return ""
+    digits = re.sub(r"\D", "", str(nip))
+    if len(digits) != 10:
+        return str(nip)
+    return f"{digits[0:3]}-{digits[3:6]}-{digits[6:8]}-{digits[8:10]}"
+
+
+def bind_nip_mask(entry):
+    """
+    Podpina do pola tk.Entry maskę NIP: podczas pisania dopuszcza tylko
+    cyfry, maksymalnie 10, i sam wstawia myślniki po 3/6/8 cyfrze
+    (XXX-XXX-XX-XX). Wklejanie/kasowanie też przechodzi przez tę samą
+    normalizację, więc pole nie da się doprowadzić do złego formatu.
+    """
+    def _on_keyrelease(event=None):
+        raw = entry.get()
+        digits = re.sub(r"\D", "", raw)[:10]
+        formatted = format_nip(digits) if len(digits) == 10 else (
+            "-".join(filter(None, [digits[0:3], digits[3:6], digits[6:8], digits[8:10]]))
+        )
+        if formatted != raw:
+            pos = entry.index(tk.INSERT)
+            digits_before_cursor = len(re.sub(r"\D", "", raw[:pos]))
+            entry.delete(0, tk.END)
+            entry.insert(0, formatted)
+            new_pos = 0
+            seen_digits = 0
+            for ch in formatted:
+                if seen_digits >= digits_before_cursor:
+                    break
+                if ch.isdigit():
+                    seen_digits += 1
+                new_pos += 1
+            entry.icursor(new_pos)
+    entry.bind("<KeyRelease>", _on_keyrelease)
+
+
 # Tray icon
 try:
     import pystray
@@ -407,6 +448,11 @@ class MainWindow(tk.Tk):
         # Menu KSEF
         ksefm = tk.Menu(menubar, tearoff=0)
         ksefm.add_command(label="Import cen z faktury XML…", command=self.menu_import_ceny_ksef)
+        ksefm.add_separator()
+        ksefm.add_command(label="🌐 Sprawdź nowe faktury KSEF (API)…", command=self.menu_ksef_check_new_invoices)
+        ksefm.add_separator()
+        ksefm.add_command(label="📂 Skanuj nierozpoznane (lista)…", command=self.menu_ksef_scan_unrecognized_list)
+        ksefm.add_command(label="🔄 Skanuj nierozpoznane (auto)…", command=self.menu_ksef_scan_unrecognized_auto)
         menubar.add_cascade(label="KSEF", menu=ksefm)
 
         # Menu Backupy
@@ -2574,7 +2620,7 @@ class MainWindow(tk.Tk):
                 print("  ✅ Tabela suppliers OK")
             except Exception as e:
                 print(f"  ⚠️  Błąd migracji suppliers: {e}")
-            
+
             # Inicjalizuj tabelę settings w master DB
             print("  → Inicjalizuję settings...")
             self._init_settings_table()
@@ -2862,6 +2908,35 @@ class MainWindow(tk.Tk):
             import traceback
             traceback.print_exc()
     
+    def _ksef_base_dir(self):
+        """Katalog bazowy archiwum faktur KSEF (zawiera podfoldery dostawcy/ i nierozpoznane/)."""
+        try:
+            with open(CONFIG_FILE) as f:
+                _cfg = json.load(f).get("ksef", {})
+        except Exception:
+            _cfg = {}
+        configured = _cfg.get("unrecognized_dir")
+        if configured:
+            # katalog "nierozpoznane" jest podfolderem bazowego katalogu faktury_ksef
+            return Path(configured).parent
+        return Path(self.db_manager.master_path).parent / "faktury_ksef"
+
+    def _ensure_suppliers_nip_column(self):
+        """
+        Migracja: dodaje kolumnę nip do suppliers, jeśli jeszcze nie istnieje.
+        Musi być wywoływana PO przełączeniu master.sqlite na READ-WRITE
+        (reconnect_master_rw) — wcześniej połączenie jest READ-ONLY i
+        ALTER TABLE kończy się błędem "attempt to write a readonly database".
+        """
+        try:
+            cols_sup = [r[1] for r in self.db_manager.master_con.execute("PRAGMA table_info(suppliers)").fetchall()]
+            if "nip" not in cols_sup:
+                self.db_manager.master_con.execute("ALTER TABLE suppliers ADD COLUMN nip TEXT")
+                self.db_manager.master_con.commit()
+                print("✅ Kolumna nip dodana do suppliers")
+        except Exception as e:
+            print(f"⚠️  Błąd dodawania kolumny nip do suppliers: {e}")
+
     def _init_items_audit_log(self):
         """Inicjalizuj tabelę logowania zmian pozycji projektu"""
         try:
@@ -4311,6 +4386,7 @@ class MainWindow(tk.Tk):
             if role in ("ADMIN", "USER$$", "USER$"):
                 try:
                     self.db_manager.reconnect_master_rw()
+                    self._ensure_suppliers_nip_column()
                 except Exception as e:
                     rw_error = e
                     self.db_manager.connect_master()
@@ -4381,6 +4457,7 @@ class MainWindow(tk.Tk):
                         print(f"🔄 Przełączanie do trybu READ-WRITE...")
                         self.db_manager.reconnect_master_rw()
                         print(f"✅ Zalogowano automatycznie: {username} (ID={uid}, Rola={role}) - tryb READ-WRITE")
+                        self._ensure_suppliers_nip_column()
                     except Exception as e:
                         print(f"⚠️  Błąd trybu ADMIN/USER$$: {e}")
                         messagebox.showwarning("Ostrzeżenie", f"Nie można włączyć trybu zapisu.\nPracujesz w trybie READ-ONLY.")
@@ -12796,7 +12873,7 @@ class MainWindow(tk.Tk):
     # KONIEC MODUŁU AKTUALIZUJ ILOŚCI
     # ========================================================================
 
-    def menu_import_ceny_ksef(self):
+    def menu_import_ceny_ksef(self, preselected_path=None):
         """
         Import cen jednostkowych z pliku XML faktury KSeF (FA(2)/FA(3)).
 
@@ -12808,11 +12885,20 @@ class MainWindow(tk.Tk):
         Ilość z faktury jest pokazywana wyłącznie informacyjnie (porównanie
         z ilością zamówioną), nic z niej nie jest zapisywane.
 
-        Przebieg: wybór XML → parsowanie → dopasowanie po kodzie rysunku
-        (fallback: nazwa) → okno podglądu (cena do wpisania edytowalna,
-        decyzja Akceptuj/Pomiń na wiersz) → backup projektu → UPDATE
-        w jednej transakcji → zapis do audit logu i do stosu UNDO
-        (typ 'bulk_price', tak jak przy ręcznej masowej zmianie ceny).
+        Przed dopasowaniem pozycji sprzedawca faktury (NIP) jest sprawdzany
+        względem tabeli suppliers. Jeśli NIP jest podany na fakturze, ale
+        nie pasuje do żadnego znanego dostawcy — import jest przerywany
+        z komunikatem (faktura "nierozpoznana"), zamiast ryzykować błędne
+        dopasowanie pozycji do przypadkowego dostawcy. Gdy dostawca zostanie
+        rozpoznany, pozycje do dopasowania są dodatkowo zawężone do jego
+        supplier_id w items.
+
+        Przebieg: wybór XML → parsowanie → sprawdzenie NIP dostawcy →
+        dopasowanie po kodzie rysunku (fallback: nazwa) → okno podglądu
+        (cena do wpisania edytowalna, decyzja Akceptuj/Pomiń na wiersz) →
+        backup projektu → UPDATE w jednej transakcji → zapis do audit
+        logu i do stosu UNDO (typ 'bulk_price', jak przy ręcznej masowej
+        zmianie ceny).
         """
         if self.current_user_role not in ("ADMIN", "USER$$"):
             messagebox.showinfo(
@@ -12827,10 +12913,13 @@ class MainWindow(tk.Tk):
             messagebox.showwarning("Brak projektu", "Wybierz projekt najpierw!")
             return
 
-        xml_path = filedialog.askopenfilename(
-            title="Wybierz plik XML faktury KSeF (FA(2)/FA(3))",
-            filetypes=[("XML", "*.xml"), ("Wszystkie pliki", "*.*")]
-        )
+        if preselected_path:
+            xml_path = preselected_path
+        else:
+            xml_path = filedialog.askopenfilename(
+                title="Wybierz plik XML faktury KSeF (FA(2)/FA(3))",
+                filetypes=[("XML", "*.xml"), ("Wszystkie pliki", "*.*")]
+            )
         if not xml_path:
             return
 
@@ -12842,6 +12931,74 @@ class MainWindow(tk.Tk):
             return
         except Exception as e:
             messagebox.showerror("Błąd wczytywania faktury", f"Nie udało się wczytać pliku:\n{e}")
+            return
+
+        # --- Rozpoznanie dostawcy po NIP sprzedawcy (Podmiot1) ---
+        def _nip_key(s):
+            if s is None:
+                return ""
+            return re.sub(r"[\s-]", "", str(s).strip())
+
+        invoice_nip = _nip_key(invoice.sprzedawca_nip)
+        matched_supplier_id = None
+        matched_supplier_name = None
+        if invoice_nip:
+            try:
+                cur_sup = self.db_manager.master_con.execute(
+                    "SELECT supplier_id, name, nip FROM suppliers WHERE nip IS NOT NULL AND nip != ''"
+                ).fetchall()
+                for sup_id, sup_name, sup_nip in cur_sup:
+                    if _nip_key(sup_nip) == invoice_nip:
+                        matched_supplier_id = sup_id
+                        matched_supplier_name = sup_name
+                        break
+            except Exception as e:
+                print(f"⚠️  Błąd sprawdzania NIP dostawcy: {e}")
+
+        _ksef_base_dir = self._ksef_base_dir
+
+        import shutil
+
+        def _move_invoice_file(dest_dir):
+            """Przenosi plik faktury do dest_dir, dopisując znacznik czasu przy kolizji nazw."""
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / Path(xml_path).name
+            if dest.exists():
+                dest = dest_dir / f"{Path(xml_path).stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{Path(xml_path).suffix}"
+            shutil.move(xml_path, dest)
+            return dest
+
+        # --- Rozpoznany dostawca: archiwizuj fakturę w jego folderze (zawsze, niezależnie
+        #     od tego czy user zaakceptuje ceny w oknie podglądu) ---
+        if matched_supplier_id is not None:
+            try:
+                supplier_dir_name = self._safe_filename_part(matched_supplier_name) or f"dostawca_{matched_supplier_id}"
+                supplier_dir = _ksef_base_dir() / "dostawcy" / supplier_dir_name
+                new_xml_path = _move_invoice_file(supplier_dir)
+                xml_path = str(new_xml_path)
+            except Exception as e:
+                print(f"⚠️  Nie udało się zarchiwizować faktury w folderze dostawcy: {e}")
+
+        if invoice_nip and matched_supplier_id is None:
+            unrecognized_path = None
+            try:
+                unrecognized_dir = _ksef_base_dir() / "nierozpoznane"
+                unrecognized_path = _move_invoice_file(unrecognized_dir)
+            except Exception as e:
+                print(f"⚠️  Nie udało się skopiować nierozpoznanej faktury do katalogu wspólnego: {e}")
+
+            messagebox.showwarning(
+                "Nieznany dostawca",
+                f"Sprzedawca z faktury nie jest znanym dostawcą w RM_BAZA:\n\n"
+                f"  {invoice.sprzedawca_nazwa or '(brak nazwy)'}\n"
+                f"  NIP: {format_nip(invoice.sprzedawca_nip) if invoice.sprzedawca_nip else '(brak NIP)'}\n\n"
+                f"Uzupełnij NIP dla właściwego dostawcy w menu\n"
+                f"'Dostawcy → Lista / edycja podwykonawców…', albo dodaj\n"
+                f"nowego dostawcę, a następnie spróbuj zaimportować ponownie.\n\n"
+                + (f"Faktura zapisana do katalogu wspólnego:\n{unrecognized_path}"
+                   if unrecognized_path else
+                   "⚠️  Nie udało się zapisać kopii faktury do katalogu wspólnego.")
+            )
             return
 
         _ws_re = re.compile(r"\s+")
@@ -12878,19 +13035,33 @@ class MainWindow(tk.Tk):
                 return first, rest
             return "", s
 
-        # --- Pobierz pozycje z bazy ---
-        rows = self.db_manager.project_con.execute(
-            """
-            SELECT id,
-                   COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) AS dn,
-                   COALESCE(NULLIF(work_name, ''),         src_name)     AS nm,
-                   price_pln,
-                   order_qty
-            FROM items
-            WHERE project_id = ?
-            """,
-            (self.current_project_id,)
-        ).fetchall()
+        # --- Pobierz pozycje z bazy (zawężone do dostawcy z faktury, jeśli rozpoznany po NIP) ---
+        if matched_supplier_id is not None:
+            rows = self.db_manager.project_con.execute(
+                """
+                SELECT id,
+                       COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) AS dn,
+                       COALESCE(NULLIF(work_name, ''),         src_name)     AS nm,
+                       price_pln,
+                       order_qty
+                FROM items
+                WHERE project_id = ? AND supplier_id = ?
+                """,
+                (self.current_project_id, matched_supplier_id)
+            ).fetchall()
+        else:
+            rows = self.db_manager.project_con.execute(
+                """
+                SELECT id,
+                       COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) AS dn,
+                       COALESCE(NULLIF(work_name, ''),         src_name)     AS nm,
+                       price_pln,
+                       order_qty
+                FROM items
+                WHERE project_id = ?
+                """,
+                (self.current_project_id,)
+            ).fetchall()
 
         by_name = {}
         by_dn = {}
@@ -13200,6 +13371,289 @@ class MainWindow(tk.Tk):
             self.refresh_data()
         except Exception:
             pass
+
+    def menu_ksef_check_new_invoices(self):
+        """
+        Łączy się z API KSeF (token + NIP z Ustawień), pobiera listę faktur
+        zakupowych z ostatnich N dni i dla każdej nowej (numer KSeF jeszcze
+        nie zapisany na dysku w faktury_ksef/) zapisuje jej XML i przepuszcza
+        przez ten sam flow co ręczny import (menu_import_ceny_ksef) — okno
+        podglądu z decyzją Akceptuj/Pomiń per pozycja, nic nie zapisuje się
+        do bazy bez potwierdzenia użytkownika.
+
+        Deduplikacja jest oparta o stan plików na dysku (numer KSeF w nazwie
+        pliku), nie o zapamiętaną datę ostatniego sprawdzenia — odporne na
+        przerwane sesje i pracę z wielu komputerów na tym samym archiwum.
+        """
+        if not self.current_project_id:
+            messagebox.showwarning("Brak projektu", "Wybierz projekt najpierw!")
+            return
+
+        try:
+            with open(CONFIG_FILE) as f:
+                ksef_cfg = json.load(f).get("ksef", {})
+        except Exception:
+            ksef_cfg = {}
+
+        nip = re.sub(r"\D", "", ksef_cfg.get("nip", ""))
+        token = ksef_cfg.get("token", "")
+        environment = ksef_cfg.get("environment", "test")
+
+        if not nip or not token:
+            messagebox.showwarning(
+                "Brak konfiguracji KSEF",
+                "Uzupełnij NIP firmy i token API KSEF w menu\n"
+                "'Ustawienia → Ścieżki do baz danych' (sekcja KSEF)."
+            )
+            return
+
+        from tkinter import simpledialog
+        days_back = simpledialog.askinteger(
+            "Sprawdź nowe faktury KSEF",
+            "Sprawdź faktury z ilu ostatnich dni?",
+            initialvalue=30, minvalue=1, maxvalue=365, parent=self
+        )
+        if not days_back:
+            return
+
+        import ksef_api_client as ksef_api
+
+        base_url = ksef_api.BASE_URL_PRODUCTION if environment == "production" else ksef_api.BASE_URL_TEST
+
+        try:
+            session = ksef_api.authenticate_with_token(nip, token, base_url=base_url)
+        except ksef_api.KsefApiError as e:
+            messagebox.showerror("Błąd uwierzytelnienia KSEF", str(e))
+            return
+        except Exception as e:
+            messagebox.showerror("Błąd uwierzytelnienia KSEF", f"Nieoczekiwany błąd:\n{e}")
+            return
+
+        try:
+            from datetime import timedelta
+            date_to = datetime.now().strftime("%Y-%m-%d")
+            date_from = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+
+            all_meta = []
+            page_offset = 0
+            while True:
+                page, has_more = ksef_api.query_purchase_invoices(session, date_from, date_to, page_offset=page_offset)
+                all_meta.extend(page)
+                if not has_more:
+                    break
+                page_offset += len(page)
+
+            if not all_meta:
+                messagebox.showinfo("Sprawdź nowe faktury KSEF", f"Brak faktur zakupowych z ostatnich {days_back} dni.")
+                return
+
+            # Deduplikacja: pomiń faktury, których numer KSeF już jest zapisany na dysku
+            base_dir = self._ksef_base_dir()
+            existing_ksef_numbers = set()
+            if base_dir.exists():
+                for xml_file in base_dir.rglob("*.xml"):
+                    existing_ksef_numbers.add(xml_file.stem.split("__", 1)[0])
+
+            new_meta = [m for m in all_meta if m.ksef_number not in existing_ksef_numbers]
+            skipped = len(all_meta) - len(new_meta)
+
+            if not new_meta:
+                messagebox.showinfo(
+                    "Sprawdź nowe faktury KSEF",
+                    f"Znaleziono {len(all_meta)} faktur, wszystkie już były wcześniej pobrane."
+                )
+                return
+
+            if not messagebox.askyesno(
+                "Sprawdź nowe faktury KSEF",
+                f"Znaleziono {len(new_meta)} nowych faktur (pominięto {skipped} już pobranych wcześniej).\n\n"
+                f"Dla każdej zostanie pokazane osobne okno podglądu cen do potwierdzenia.\n\n"
+                f"Kontynuować?"
+            ):
+                return
+
+            # Pobierz XML-e nowych faktur do katalogu "nierozpoznane" — dalszy flow
+            # (rozpoznanie dostawcy po NIP, przeniesienie do folderu dostawcy albo
+            # pozostawienie w nierozpoznanych) jest identyczny jak przy ręcznym imporcie.
+            unrecognized_dir = base_dir / "nierozpoznane"
+            unrecognized_dir.mkdir(parents=True, exist_ok=True)
+
+            downloaded_paths = []
+            failed = []
+            for meta in new_meta:
+                try:
+                    xml_bytes = ksef_api.download_invoice_xml(session, meta.ksef_number)
+                    safe_seller = self._safe_filename_part(meta.seller_name) or "nieznany"
+                    dest = unrecognized_dir / f"{meta.ksef_number}__{safe_seller}.xml"
+                    dest.write_bytes(xml_bytes)
+                    downloaded_paths.append(dest)
+                except Exception as e:
+                    failed.append((meta.ksef_number, str(e)))
+
+            if failed:
+                print(f"⚠️  Nie udało się pobrać {len(failed)} faktur: {failed}")
+
+        finally:
+            try:
+                ksef_api.close_session(session)
+            except Exception:
+                pass
+
+        print(f"✅ Pobrano {len(downloaded_paths)} nowych faktur KSEF ({skipped} pominięto jako już znane).")
+
+        for path in downloaded_paths:
+            self.menu_import_ceny_ksef(preselected_path=str(path))
+
+        if failed:
+            messagebox.showwarning(
+                "Sprawdź nowe faktury KSEF",
+                f"Nie udało się pobrać {len(failed)} faktur (patrz konsola)."
+            )
+
+    def _list_unrecognized_ksef_invoices(self):
+        """Zwraca listę (path, KsefInvoice|None) dla plików XML w katalogu nierozpoznane/."""
+        from ksef_invoice_parser import parse_ksef_invoice_xml
+        unrecognized_dir = self._ksef_base_dir() / "nierozpoznane"
+        if not unrecognized_dir.exists():
+            return []
+        results = []
+        for path in sorted(unrecognized_dir.glob("*.xml")):
+            try:
+                invoice = parse_ksef_invoice_xml(path)
+            except Exception as e:
+                print(f"⚠️  Nie udało się wczytać {path.name}: {e}")
+                invoice = None
+            results.append((path, invoice))
+        return results
+
+    def menu_ksef_scan_unrecognized_list(self):
+        """
+        Skanuj katalog nierozpoznane/ i pokaż listę faktur do ręcznego
+        wyboru — np. gdy dopisano nowego dostawcę z NIP-em pasującym do
+        faktury, która wcześniej trafiła tam jako nieznana.
+        """
+        if not self.current_project_id:
+            messagebox.showwarning("Brak projektu", "Wybierz projekt najpierw!")
+            return
+
+        entries = self._list_unrecognized_ksef_invoices()
+        if not entries:
+            messagebox.showinfo("Skanuj nierozpoznane", "Katalog faktur nierozpoznanych jest pusty.")
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("📂 Nierozpoznane faktury KSEF")
+        dlg.geometry("800x420")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        tk.Label(
+            dlg, text="Zaznacz fakturę i kliknij 'Spróbuj ponownie' — np. po dopisaniu NIP dostawcy.",
+            font=("Arial", 9, "italic"), pady=8
+        ).pack(anchor='w', padx=10)
+
+        cols = ('plik', 'sprzedawca', 'nip', 'data')
+        tv = ttk.Treeview(dlg, columns=cols, show='headings', selectmode='browse')
+        for c, txt, w in [('plik', 'Plik', 220), ('sprzedawca', 'Sprzedawca', 260),
+                           ('nip', 'NIP', 120), ('data', 'Data faktury', 110)]:
+            tv.heading(c, text=txt)
+            tv.column(c, width=w, anchor='w')
+        vsb = ttk.Scrollbar(dlg, orient='vertical', command=tv.yview)
+        tv.configure(yscrollcommand=vsb.set)
+        tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0), pady=8)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y, pady=8)
+
+        path_by_iid = {}
+        for path, invoice in entries:
+            if invoice is None:
+                values = (path.name, "(błąd wczytania pliku)", "", "")
+            else:
+                values = (path.name, invoice.sprzedawca_nazwa or "", format_nip(invoice.sprzedawca_nip), invoice.data_wystawienia or "")
+            iid = tv.insert('', 'end', values=values)
+            path_by_iid[iid] = path
+
+        bottom = tk.Frame(dlg, padx=10, pady=8)
+        bottom.pack(fill=tk.X)
+
+        def _retry_selected():
+            sel = tv.selection()
+            if not sel:
+                messagebox.showwarning("Brak wyboru", "Zaznacz fakturę do ponowienia.", parent=dlg)
+                return
+            path = path_by_iid[sel[0]]
+            dlg.destroy()
+            self.menu_import_ceny_ksef(preselected_path=str(path))
+
+        tk.Button(bottom, text="Zamknij", width=14, command=dlg.destroy).pack(side=tk.RIGHT, padx=4)
+        tk.Button(
+            bottom, text="🔄 Spróbuj ponownie", width=20, bg='#c8e6c9', command=_retry_selected
+        ).pack(side=tk.RIGHT, padx=4)
+
+    def menu_ksef_scan_unrecognized_auto(self):
+        """
+        Skanuj cały katalog nierozpoznane/ automatycznie — dla każdej
+        faktury sprawdza NIP na nowo; te które teraz pasują do dostawcy
+        trafiają razem do jednego okna podglądu z pozycjami z wszystkich
+        rozpoznanych faktur naraz (reużywa logiki menu_import_ceny_ksef,
+        wywoływanej sekwencyjnie per faktura — każda ma własne okno
+        podglądu i decyzję Akceptuj/Pomiń, więc nic nie jest importowane
+        bez potwierdzenia użytkownika).
+        """
+        if not self.current_project_id:
+            messagebox.showwarning("Brak projektu", "Wybierz projekt najpierw!")
+            return
+
+        entries = self._list_unrecognized_ksef_invoices()
+        if not entries:
+            messagebox.showinfo("Skanuj nierozpoznane", "Katalog faktur nierozpoznanych jest pusty.")
+            return
+
+        # Sprawdź z góry, które faktury teraz pasują do znanego dostawcy (po NIP),
+        # żeby nie otwierać okna podglądu dla tych, które nadal są nierozpoznane.
+        def _nip_key(s):
+            if s is None:
+                return ""
+            return re.sub(r"[\s-]", "", str(s).strip())
+
+        try:
+            known_nips = {
+                _nip_key(row[0]) for row in self.db_manager.master_con.execute(
+                    "SELECT nip FROM suppliers WHERE nip IS NOT NULL AND nip != ''"
+                ).fetchall()
+            }
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Nie udało się odczytać listy dostawców:\n{e}")
+            return
+
+        to_process = [path for path, invoice in entries
+                      if invoice is not None and _nip_key(invoice.sprzedawca_nip) in known_nips]
+        still_unrecognized = len(entries) - len(to_process)
+
+        if not to_process:
+            messagebox.showinfo(
+                "Skanuj nierozpoznane",
+                f"Żadna z {len(entries)} faktur w katalogu nierozpoznanych nie pasuje\n"
+                f"obecnie do znanego dostawcy (po NIP)."
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Skanuj nierozpoznane",
+            f"Znaleziono {len(to_process)} faktur pasujących teraz do znanego dostawcy\n"
+            f"(z {len(entries)} w katalogu). Dla każdej zostanie pokazane osobne\n"
+            f"okno podglądu cen do potwierdzenia.\n\n"
+            f"Kontynuować?"
+        ):
+            return
+
+        for path in to_process:
+            self.menu_import_ceny_ksef(preselected_path=str(path))
+
+        if still_unrecognized:
+            messagebox.showinfo(
+                "Skanuj nierozpoznane",
+                f"Zostało {still_unrecognized} faktur nadal nierozpoznanych w katalogu."
+            )
 
     # ========================================================================
     # KONIEC MODUŁU IMPORT CEN Z FAKTURY KSEF
@@ -18279,7 +18733,7 @@ class MainWindow(tk.Tk):
         
         dlg = tk.Toplevel(self)
         dlg.title("➕ Dodaj podwykonawcę")
-        dlg.geometry("500x280")
+        dlg.geometry("500x320")
         dlg.transient(self)
         dlg.grab_set()
         dlg.resizable(False, False)
@@ -18297,28 +18751,34 @@ class MainWindow(tk.Tk):
         e_name = tk.Entry(main_frame, width=35, font=("Arial", 10))
         e_name.grid(row=0, column=1, padx=10, pady=8, sticky="ew")
         
-        tk.Label(main_frame, text="Kontakt:", bg="#f0f0f0", font=("Arial", 10)).grid(row=1, column=0, sticky="e", padx=10, pady=8)
+        tk.Label(main_frame, text="NIP:", bg="#f0f0f0", font=("Arial", 10)).grid(row=1, column=0, sticky="e", padx=10, pady=8)
+        e_nip = tk.Entry(main_frame, width=35, font=("Arial", 10))
+        e_nip.grid(row=1, column=1, padx=10, pady=8, sticky="ew")
+        bind_nip_mask(e_nip)
+
+        tk.Label(main_frame, text="Kontakt:", bg="#f0f0f0", font=("Arial", 10)).grid(row=2, column=0, sticky="e", padx=10, pady=8)
         e_contact = tk.Entry(main_frame, width=35, font=("Arial", 10))
-        e_contact.grid(row=1, column=1, padx=10, pady=8, sticky="ew")
-        
-        tk.Label(main_frame, text="Telefon:", bg="#f0f0f0", font=("Arial", 10)).grid(row=2, column=0, sticky="e", padx=10, pady=8)
+        e_contact.grid(row=2, column=1, padx=10, pady=8, sticky="ew")
+
+        tk.Label(main_frame, text="Telefon:", bg="#f0f0f0", font=("Arial", 10)).grid(row=3, column=0, sticky="e", padx=10, pady=8)
         e_phone = tk.Entry(main_frame, width=35, font=("Arial", 10))
-        e_phone.grid(row=2, column=1, padx=10, pady=8, sticky="ew")
-        
-        tk.Label(main_frame, text="Email:", bg="#f0f0f0", font=("Arial", 10)).grid(row=3, column=0, sticky="e", padx=10, pady=8)
+        e_phone.grid(row=3, column=1, padx=10, pady=8, sticky="ew")
+
+        tk.Label(main_frame, text="Email:", bg="#f0f0f0", font=("Arial", 10)).grid(row=4, column=0, sticky="e", padx=10, pady=8)
         e_email = tk.Entry(main_frame, width=35, font=("Arial", 10))
-        e_email.grid(row=3, column=1, padx=10, pady=8, sticky="ew")
-        
-        tk.Label(main_frame, text="Opis:", bg="#f0f0f0", font=("Arial", 10)).grid(row=4, column=0, sticky="e", padx=10, pady=8)
+        e_email.grid(row=4, column=1, padx=10, pady=8, sticky="ew")
+
+        tk.Label(main_frame, text="Opis:", bg="#f0f0f0", font=("Arial", 10)).grid(row=5, column=0, sticky="e", padx=10, pady=8)
         e_desc = tk.Entry(main_frame, width=35, font=("Arial", 10))
-        e_desc.grid(row=4, column=1, padx=10, pady=8, sticky="ew")
-        
+        e_desc.grid(row=5, column=1, padx=10, pady=8, sticky="ew")
+
         def save():
             name = e_name.get().strip()
             if not name:
                 messagebox.showwarning("Błąd", "Podaj nazwę dostawcy!")
                 return
-            
+
+            nip = e_nip.get().strip().replace("-", "").replace(" ", "") or None
             contact = e_contact.get().strip() or None
             phone = e_phone.get().strip() or None
             email = e_email.get().strip() or None
@@ -18330,23 +18790,28 @@ class MainWindow(tk.Tk):
                 cols_db = [desc[0] for desc in cursor.description]
                 
                 name_col = next((c for c in ["name", "nazwa", "supplier_name"] if c in cols_db), "name")
+                nip_col = next((c for c in ["nip"] if c in cols_db), None)
                 contact_col = next((c for c in ["contact", "contact_info"] if c in cols_db), None)
                 phone_col = next((c for c in ["phone", "phone_default"] if c in cols_db), None)
                 email_col = next((c for c in ["email", "email_default"] if c in cols_db), None)
                 desc_col = next((c for c in ["description", "desc", "opis", "note", "notes"] if c in cols_db), None)
                 active_col = next((c for c in ["is_active", "active", "enabled"] if c in cols_db), None)
-                
+
                 # Sprawdź czy istnieje
                 cursor = self.db_manager.master_con.execute(
                     f"SELECT {cols_db[0]} FROM suppliers WHERE {name_col} = ?", (name,))
                 if cursor.fetchone():
                     messagebox.showwarning("Błąd", f"Dostawca '{name}' już istnieje!")
                     return
-                
+
                 # Buduj INSERT
                 insert_cols = [name_col]
                 insert_vals = [name]
-                
+
+                if nip_col and nip:
+                    insert_cols.append(nip_col)
+                    insert_vals.append(nip)
+
                 if contact_col and contact:
                     insert_cols.append(contact_col)
                     insert_vals.append(contact)
@@ -18439,7 +18904,7 @@ class MainWindow(tk.Tk):
         frame_tree = tk.Frame(dlg)
         frame_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        cols = ("ID", "Nazwa", "Kontakt", "Telefon", "Email", "Opis", "Aktywny")
+        cols = ("ID", "Nazwa", "NIP", "Kontakt", "Telefon", "Email", "Opis", "Aktywny")
         tree = ttk.Treeview(frame_tree, columns=cols, show="headings", height=15)
         
         for col in cols:
@@ -18475,14 +18940,17 @@ class MainWindow(tk.Tk):
                 # Znajdź kolumny
                 id_col = next((c for c in ["id", "supplier_id", "sup_id"] if c in cols_db), cols_db[0] if cols_db else "id")
                 name_col = next((c for c in ["name", "nazwa", "supplier_name"] if c in cols_db), "name")
+                nip_col = next((c for c in ["nip"] if c in cols_db), None)
                 contact_col = next((c for c in ["contact", "contact_info"] if c in cols_db), None)
                 phone_col = next((c for c in ["phone", "phone_default"] if c in cols_db), None)
                 email_col = next((c for c in ["email", "email_default"] if c in cols_db), None)
                 desc_col = next((c for c in ["description", "desc", "opis", "note", "notes"] if c in cols_db), None)
                 active_col = next((c for c in ["is_active", "active", "enabled"] if c in cols_db), None)
-                
+
                 # Buduj SELECT
                 select_cols = [id_col, name_col]
+                if nip_col: select_cols.append(nip_col)
+                else: select_cols.append("NULL")
                 if contact_col: select_cols.append(contact_col)
                 else: select_cols.append("NULL")
                 if phone_col: select_cols.append(phone_col)
@@ -18493,14 +18961,14 @@ class MainWindow(tk.Tk):
                 else: select_cols.append("NULL")
                 if active_col: select_cols.append(active_col)
                 else: select_cols.append("1")
-                
+
                 sql = f"SELECT {', '.join(select_cols)} FROM suppliers ORDER BY {name_col} COLLATE NOCASE"
                 cursor = self.db_manager.master_con.execute(sql)
-                
+
                 for row in cursor.fetchall():
-                    sid, name, contact, phone, email, description, active = row
+                    sid, name, nip, contact, phone, email, description, active = row
                     active_str = "TAK" if active else "NIE"
-                    tree.insert("", tk.END, values=(sid, name or "", contact or "", phone or "", email or "", description or "", active_str))
+                    tree.insert("", tk.END, values=(sid, name or "", format_nip(nip), contact or "", phone or "", email or "", description or "", active_str))
             
             except Exception as e:
                 messagebox.showerror("Błąd", f"Nie udało się załadować:\n{e}")
@@ -18517,7 +18985,7 @@ class MainWindow(tk.Tk):
             
             item = tree.item(sel[0])
             values = item['values']
-            sid, name, contact, phone, email, description, active_str = values
+            sid, name, nip, contact, phone, email, description, active_str = values
             
             # Dialog edycji
             edit_dlg = tk.Toplevel(dlg)
@@ -18533,37 +19001,44 @@ class MainWindow(tk.Tk):
             e_name = tk.Entry(edit_frame, width=30, font=("Arial", 10))
             e_name.insert(0, name)
             e_name.grid(row=0, column=1, padx=5, pady=8, sticky="ew")
-            
-            tk.Label(edit_frame, text="Kontakt:", bg="#f0f0f0", font=("Arial", 10)).grid(row=1, column=0, sticky="e", padx=5, pady=8)
+
+            tk.Label(edit_frame, text="NIP:", bg="#f0f0f0", font=("Arial", 10)).grid(row=1, column=0, sticky="e", padx=5, pady=8)
+            e_nip = tk.Entry(edit_frame, width=30, font=("Arial", 10))
+            e_nip.insert(0, format_nip(nip) if nip else "")
+            e_nip.grid(row=1, column=1, padx=5, pady=8, sticky="ew")
+            bind_nip_mask(e_nip)
+
+            tk.Label(edit_frame, text="Kontakt:", bg="#f0f0f0", font=("Arial", 10)).grid(row=2, column=0, sticky="e", padx=5, pady=8)
             e_contact = tk.Entry(edit_frame, width=30, font=("Arial", 10))
             e_contact.insert(0, contact if contact else "")
-            e_contact.grid(row=1, column=1, padx=5, pady=8, sticky="ew")
-            
-            tk.Label(edit_frame, text="Telefon:", bg="#f0f0f0", font=("Arial", 10)).grid(row=2, column=0, sticky="e", padx=5, pady=8)
+            e_contact.grid(row=2, column=1, padx=5, pady=8, sticky="ew")
+
+            tk.Label(edit_frame, text="Telefon:", bg="#f0f0f0", font=("Arial", 10)).grid(row=3, column=0, sticky="e", padx=5, pady=8)
             e_phone = tk.Entry(edit_frame, width=30, font=("Arial", 10))
             e_phone.insert(0, phone if phone else "")
-            e_phone.grid(row=2, column=1, padx=5, pady=8, sticky="ew")
-            
-            tk.Label(edit_frame, text="Email:", bg="#f0f0f0", font=("Arial", 10)).grid(row=3, column=0, sticky="e", padx=5, pady=8)
+            e_phone.grid(row=3, column=1, padx=5, pady=8, sticky="ew")
+
+            tk.Label(edit_frame, text="Email:", bg="#f0f0f0", font=("Arial", 10)).grid(row=4, column=0, sticky="e", padx=5, pady=8)
             e_email = tk.Entry(edit_frame, width=30, font=("Arial", 10))
             e_email.insert(0, email if email else "")
-            e_email.grid(row=3, column=1, padx=5, pady=8, sticky="ew")
-            
-            tk.Label(edit_frame, text="Opis:", bg="#f0f0f0", font=("Arial", 10)).grid(row=4, column=0, sticky="e", padx=5, pady=8)
+            e_email.grid(row=4, column=1, padx=5, pady=8, sticky="ew")
+
+            tk.Label(edit_frame, text="Opis:", bg="#f0f0f0", font=("Arial", 10)).grid(row=5, column=0, sticky="e", padx=5, pady=8)
             e_desc = tk.Entry(edit_frame, width=30, font=("Arial", 10))
             e_desc.insert(0, description if description else "")
-            e_desc.grid(row=4, column=1, padx=5, pady=8, sticky="ew")
-            
-            tk.Label(edit_frame, text="Aktywny:", bg="#f0f0f0", font=("Arial", 10)).grid(row=5, column=0, sticky="e", padx=5, pady=8)
+            e_desc.grid(row=5, column=1, padx=5, pady=8, sticky="ew")
+
+            tk.Label(edit_frame, text="Aktywny:", bg="#f0f0f0", font=("Arial", 10)).grid(row=6, column=0, sticky="e", padx=5, pady=8)
             var_active = tk.BooleanVar(value=(active_str == "TAK"))
-            tk.Checkbutton(edit_frame, variable=var_active, bg="#f0f0f0").grid(row=5, column=1, sticky="w", padx=5, pady=8)
-            
+            tk.Checkbutton(edit_frame, variable=var_active, bg="#f0f0f0").grid(row=6, column=1, sticky="w", padx=5, pady=8)
+
             def save_edit():
                 new_name = e_name.get().strip()
                 if not new_name:
                     messagebox.showwarning("Błąd", "Podaj nazwę!")
                     return
-                
+
+                new_nip = e_nip.get().strip().replace("-", "").replace(" ", "") or None
                 new_contact = e_contact.get().strip() or None
                 new_phone = e_phone.get().strip() or None
                 new_email = e_email.get().strip() or None
@@ -18578,16 +19053,21 @@ class MainWindow(tk.Tk):
                     # Znajdź kolumny
                     id_col = next((c for c in ["id", "supplier_id", "sup_id"] if c in cols_db), "id")
                     name_col = next((c for c in ["name", "nazwa", "supplier_name"] if c in cols_db), "name")
+                    nip_col = next((c for c in ["nip"] if c in cols_db), None)
                     contact_col = next((c for c in ["contact", "contact_info"] if c in cols_db), None)
                     phone_col = next((c for c in ["phone", "phone_default"] if c in cols_db), None)
                     email_col = next((c for c in ["email", "email_default"] if c in cols_db), None)
                     desc_col = next((c for c in ["description", "desc", "opis", "note", "notes"] if c in cols_db), None)
                     active_col = next((c for c in ["is_active", "active", "enabled"] if c in cols_db), None)
-                    
+
                     # Buduj UPDATE dynamicznie
                     set_parts = [f"{name_col} = ?"]
                     params = [new_name]
-                    
+
+                    if nip_col:
+                        set_parts.append(f"{nip_col} = ?")
+                        params.append(new_nip)
+
                     if contact_col:
                         set_parts.append(f"{contact_col} = ?")
                         params.append(new_contact)
@@ -23508,10 +23988,11 @@ class MainWindow(tk.Tk):
         
         dlg = tk.Toplevel(self)
         dlg.title("⚙️ Ustawienia - Ścieżki do baz danych")
-        dlg.geometry("700x700")
+        dlg.geometry("760x680")
         dlg.transient(self)
         dlg.grab_set()
-        dlg.resizable(False, False)
+        dlg.resizable(False, True)
+        dlg.minsize(760, 400)
         
         # Wycentruj
         dlg.update_idletasks()
@@ -23536,7 +24017,11 @@ class MainWindow(tk.Tk):
             bg="#f0f0f0",
             fg="#e67e22"
         ).pack(pady=(0, 10))
-        
+
+        # Pasek przycisków — zawsze widoczny na dole, poza scrollowalnym obszarem pól
+        btn_frame = tk.Frame(main_frame, bg="#f0f0f0")
+        btn_frame.pack(side=tk.BOTTOM, pady=15)
+
         # Wczytaj aktualne wartości z configu
         try:
             with open(CONFIG_FILE) as f:
@@ -23555,11 +24040,47 @@ class MainWindow(tk.Tk):
         current_copy_files_exe = paths.get("copy_files_exe", str(Path(DEFAULT_LOCAL_DIR) / "RM_COPY.EXE"))
         current_import_exe = paths.get("import_exe", str(Path(DEFAULT_LOCAL_DIR) / "RM_IMPORT.EXE"))
         current_monitor_exe = paths.get("monitor_exe", str(Path(DEFAULT_LOCAL_DIR) / "monitor.exe"))
+
+        ksef_cfg = config.get("ksef", {})
+        default_unrecognized_dir = str(Path(current_master).parent / "faktury_ksef" / "nierozpoznane")
+        current_ksef_nip = ksef_cfg.get("nip", "")
+        current_ksef_token = ksef_cfg.get("token", "")
+        current_ksef_unrecognized_dir = ksef_cfg.get("unrecognized_dir", default_unrecognized_dir)
+        current_ksef_env = ksef_cfg.get("environment", "test")
         
-        # Pola
-        fields_frame = tk.Frame(main_frame, bg="#f0f0f0")
-        fields_frame.pack(fill=tk.BOTH, expand=True, pady=10)
-        
+        # Pola (scrollowalne — okno mogło nie mieścić wszystkich pól na mniejszych ekranach)
+        scroll_canvas = tk.Canvas(main_frame, bg="#f0f0f0", highlightthickness=0)
+        scroll_vsb = ttk.Scrollbar(main_frame, orient="vertical", command=scroll_canvas.yview)
+        scroll_canvas.configure(yscrollcommand=scroll_vsb.set)
+        scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, pady=10)
+        scroll_vsb.pack(side=tk.RIGHT, fill=tk.Y, pady=10)
+
+        fields_frame = tk.Frame(scroll_canvas, bg="#f0f0f0")
+        fields_window = scroll_canvas.create_window((0, 0), window=fields_frame, anchor="nw")
+
+        def _on_fields_configure(event):
+            scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
+
+        def _on_canvas_configure(event):
+            scroll_canvas.itemconfig(fields_window, width=event.width)
+
+        fields_frame.bind("<Configure>", _on_fields_configure)
+        scroll_canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            scroll_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        scroll_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _close_dlg():
+            try:
+                scroll_canvas.unbind_all("<MouseWheel>")
+            except Exception:
+                pass
+            dlg.destroy()
+
+        dlg.protocol("WM_DELETE_WINDOW", _close_dlg)
+
         # Master DB
         tk.Label(fields_frame, text="Baza Master:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=0, column=0, sticky="w", pady=8)
         e_master = tk.Entry(fields_frame, width=50, font=("Arial", 9))
@@ -23640,7 +24161,51 @@ class MainWindow(tk.Tk):
         e_monitor_exe.insert(0, current_monitor_exe)
         e_monitor_exe.grid(row=11, column=1, sticky="ew", padx=5, pady=8)
         tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_file(e_monitor_exe, "MONITOR.EXE", [("Pliki EXE", "*.exe"), ("Wszystkie pliki", "*.*")])).grid(row=11, column=2, pady=8)
-        
+
+        # Separator
+        tk.Frame(fields_frame, height=2, bg="#bdc3c7").grid(row=12, column=0, columnspan=3, sticky="ew", pady=10)
+
+        tk.Label(fields_frame, text="KSEF", font=("Arial", 11, "bold"), bg="#f0f0f0", fg="#2c3e50").grid(row=13, column=0, sticky="w", pady=(0, 4))
+
+        # NIP firmy (do autoryzacji API KSEF)
+        tk.Label(fields_frame, text="NIP firmy (KSEF):", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=14, column=0, sticky="w", pady=8)
+        e_ksef_nip = tk.Entry(fields_frame, width=50, font=("Arial", 9))
+        e_ksef_nip.insert(0, format_nip(current_ksef_nip) if current_ksef_nip else "")
+        e_ksef_nip.grid(row=14, column=1, sticky="ew", padx=5, pady=8)
+        bind_nip_mask(e_ksef_nip)
+
+        # Token API KSEF (pole hasła — nie pokazuj wprost na ekranie)
+        tk.Label(fields_frame, text="Token API KSEF:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=15, column=0, sticky="w", pady=8)
+        e_ksef_token = tk.Entry(fields_frame, width=50, font=("Arial", 9), show="•")
+        e_ksef_token.insert(0, current_ksef_token)
+        e_ksef_token.grid(row=15, column=1, sticky="ew", padx=5, pady=8)
+        var_show_token = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            fields_frame, text="pokaż", variable=var_show_token, bg="#f0f0f0",
+            command=lambda: e_ksef_token.config(show="" if var_show_token.get() else "•")
+        ).grid(row=15, column=2, pady=8)
+
+        # Środowisko KSEF (test/produkcja)
+        tk.Label(fields_frame, text="Środowisko KSEF:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=16, column=0, sticky="w", pady=8)
+        var_ksef_env = tk.StringVar(value=current_ksef_env)
+        env_frame = tk.Frame(fields_frame, bg="#f0f0f0")
+        env_frame.grid(row=16, column=1, sticky="w", padx=5, pady=8)
+        tk.Radiobutton(env_frame, text="Testowe (ksef-test)", variable=var_ksef_env, value="test", bg="#f0f0f0").pack(side=tk.LEFT, padx=(0, 15))
+        tk.Radiobutton(env_frame, text="Produkcyjne", variable=var_ksef_env, value="production", bg="#f0f0f0").pack(side=tk.LEFT)
+
+        # Katalog na nierozpoznane faktury (dostawca bez NIP w RM_BAZA)
+        tk.Label(fields_frame, text="Katalog faktur nierozpoznanych:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=17, column=0, sticky="w", pady=8)
+        e_ksef_unrecognized_dir = tk.Entry(fields_frame, width=50, font=("Arial", 9))
+        e_ksef_unrecognized_dir.insert(0, current_ksef_unrecognized_dir)
+        e_ksef_unrecognized_dir.grid(row=17, column=1, sticky="ew", padx=5, pady=8)
+        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_ksef_unrecognized_dir, "Katalog faktur nierozpoznanych")).grid(row=17, column=2, pady=8)
+
+        tk.Label(
+            fields_frame,
+            text="Token KSEF jest zapisywany lokalnie w pliku konfiguracyjnym poza repozytorium git.",
+            font=("Arial", 8, "italic"), bg="#f0f0f0", fg="#888", wraplength=560, justify="left"
+        ).grid(row=18, column=0, columnspan=3, sticky="w", pady=(0, 4))
+
         fields_frame.columnconfigure(1, weight=1)
         
         def browse_file(entry, title, filetypes=None):
@@ -23675,16 +24240,25 @@ class MainWindow(tk.Tk):
             new_copy_files_exe = e_copy_files_exe.get().strip()
             new_import_exe = e_import_exe.get().strip()
             new_monitor_exe = e_monitor_exe.get().strip()
-            
+
+            new_ksef_nip = re.sub(r"\D", "", e_ksef_nip.get().strip())
+            new_ksef_token = e_ksef_token.get().strip()
+            new_ksef_env = var_ksef_env.get()
+            new_ksef_unrecognized_dir = e_ksef_unrecognized_dir.get().strip()
+
             if not all([new_master, new_projects, new_local, new_locks, new_backup]):
                 messagebox.showwarning("Błąd", "Wymagane są wszystkie podstawowe ścieżki (bazy danych i foldery)!")
                 return
-            
+
+            if new_ksef_nip and len(new_ksef_nip) != 10:
+                messagebox.showwarning("Błąd", "NIP firmy (KSEF) musi mieć 10 cyfr!")
+                return
+
             try:
                 # Wczytaj config
                 with open(CONFIG_FILE) as f:
                     config = json.load(f)
-                
+
                 # Zaktualizuj ścieżki
                 config["paths"] = {
                     "master": new_master,
@@ -23699,7 +24273,14 @@ class MainWindow(tk.Tk):
                     "import_exe": new_import_exe,
                     "monitor_exe": new_monitor_exe
                 }
-                
+
+                config["ksef"] = {
+                    "nip": new_ksef_nip,
+                    "token": new_ksef_token,
+                    "environment": new_ksef_env,
+                    "unrecognized_dir": new_ksef_unrecognized_dir,
+                }
+
                 # Zapisz
                 with open(CONFIG_FILE, 'w') as f:
                     json.dump(config, f, indent=2)
@@ -23710,9 +24291,9 @@ class MainWindow(tk.Tk):
                     "Zmiany będą widoczne po ponownym uruchomieniu aplikacji.\n\n" +
                     "Czy chcesz zamknąć aplikację teraz?"
                 )
-                
-                dlg.destroy()
-                
+
+                _close_dlg()
+
                 # Zapytaj czy zamknąć aplikację
                 if messagebox.askyesno("Zamknąć aplikację?", "Zamknąć aplikację aby zastosować nowe ustawienia?"):
                     self.on_closing()
@@ -23745,11 +24326,10 @@ class MainWindow(tk.Tk):
                 e_import_exe.insert(0, str(Path(DEFAULT_LOCAL_DIR) / "RM_IMPORT.EXE"))
                 e_monitor_exe.delete(0, tk.END)
                 e_monitor_exe.insert(0, str(Path(DEFAULT_LOCAL_DIR) / "monitor.exe"))
-        
-        # Przyciski
-        btn_frame = tk.Frame(main_frame, bg="#f0f0f0")
-        btn_frame.pack(pady=20)
-        
+                e_ksef_unrecognized_dir.delete(0, tk.END)
+                e_ksef_unrecognized_dir.insert(0, default_unrecognized_dir)
+
+        # Przyciski (btn_frame utworzony wcześniej, poza scrollowalnym obszarem)
         tk.Button(
             btn_frame,
             text="✔ Zapisz",
@@ -23773,7 +24353,7 @@ class MainWindow(tk.Tk):
         tk.Button(
             btn_frame,
             text="✖ Anuluj",
-            command=dlg.destroy,
+            command=_close_dlg,
             width=15,
             bg="#95a5a6",
             fg="white",
