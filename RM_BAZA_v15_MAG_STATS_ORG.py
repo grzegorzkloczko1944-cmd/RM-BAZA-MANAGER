@@ -12801,16 +12801,18 @@ class MainWindow(tk.Tk):
         Import cen jednostkowych z pliku XML faktury KSeF (FA(2)/FA(3)).
 
         Aktualizuje WYŁĄCZNIE kolumnę price_pln w tabeli items. Pozycje
-        z faktury są dopasowywane do pozycji w bazie po znormalizowanej
-        nazwie (brak numeru rysunku na fakturze). Ilość z faktury jest
-        pokazywana wyłącznie informacyjnie (porównanie z ilością zamówioną),
-        nic z niej nie jest zapisywane.
+        z faktury dopasowywane są do pozycji w bazie NAJPIERW po kodzie
+        rysunku wykrytym na początku nazwy pozycji faktury (P_7ma format
+        "KOD Nazwa", np. "ROTO-100.01 Boki transportera 2mb minus 8 ROTO"),
+        a jeśli kodu nie ma / nie pasuje — po znormalizowanej pełnej nazwie.
+        Ilość z faktury jest pokazywana wyłącznie informacyjnie (porównanie
+        z ilością zamówioną), nic z niej nie jest zapisywane.
 
-        Przebieg: wybór XML → parsowanie → dopasowanie po nazwie → okno
-        podglądu (cena do wpisania edytowalna, decyzja Akceptuj/Pomiń na
-        wiersz) → backup projektu → UPDATE w jednej transakcji → zapis
-        do audit logu i do stosu UNDO (typ 'bulk_price', tak jak przy
-        ręcznej masowej zmianie ceny).
+        Przebieg: wybór XML → parsowanie → dopasowanie po kodzie rysunku
+        (fallback: nazwa) → okno podglądu (cena do wpisania edytowalna,
+        decyzja Akceptuj/Pomiń na wiersz) → backup projektu → UPDATE
+        w jednej transakcji → zapis do audit logu i do stosu UNDO
+        (typ 'bulk_price', tak jak przy ręcznej masowej zmianie ceny).
         """
         if self.current_user_role not in ("ADMIN", "USER$$"):
             messagebox.showinfo(
@@ -12849,6 +12851,33 @@ class MainWindow(tk.Tk):
                 return ""
             return _ws_re.sub(" ", str(s).strip()).upper()
 
+        def _dn_key(s):
+            """Klucz kodu rysunku: usuwa spacje, porównanie bez wielkości liter."""
+            if s is None:
+                return ""
+            return _ws_re.sub("", str(s).strip()).upper()
+
+        def _split_code_name(nazwa):
+            """
+            Pozycja faktury (P_7) ma zwykle format "KOD Nazwa", np.
+            "ROTO-100.01 Boki transportera 2mb minus 8 ROTO". Zwraca
+            (kod, reszta_nazwy). Kod to pierwszy token, jeśli zawiera cyfrę
+            i znak z zestawu -/._ (typowy kod katalogowy/rysunku). Gdy
+            pierwszy token nie wygląda na kod, zwraca ("", cała_nazwa).
+            """
+            s = (nazwa or "").strip()
+            if not s:
+                return "", ""
+            parts = s.split(None, 1)
+            first = parts[0]
+            rest = parts[1] if len(parts) > 1 else ""
+            looks_like_code = any(c.isdigit() for c in first) and any(
+                c in "-/._" for c in first
+            )
+            if looks_like_code:
+                return first, rest
+            return "", s
+
         # --- Pobierz pozycje z bazy ---
         rows = self.db_manager.project_con.execute(
             """
@@ -12864,10 +12893,14 @@ class MainWindow(tk.Tk):
         ).fetchall()
 
         by_name = {}
+        by_dn = {}
         for r in rows:
             it = {'id': r[0], 'drawing_no': r[1] or '', 'name': r[2] or '',
                   'price_pln': r[3], 'order_qty': r[4]}
             by_name.setdefault(_norm_key(it['name']), []).append(it)
+            dnk = _dn_key(it['drawing_no'])
+            if dnk:
+                by_dn.setdefault(dnk, []).append(it)
 
         TOL = 1e-6
 
@@ -12881,7 +12914,17 @@ class MainWindow(tk.Tk):
         matched = []     # (line, item, cur_price, new_price, changed)
         not_matched = []  # line
         for line in invoice.pozycje:
-            cands = by_name.get(_norm_key(line.nazwa), [])
+            code, rest = _split_code_name(line.nazwa)
+            cands = []
+            # 1) dopasowanie po kodzie rysunku wykrytym w prefiksie P_7
+            if code:
+                cands = by_dn.get(_dn_key(code), [])
+            # 2) fallback: pełna nazwa faktury (P_7) == nazwa w bazie
+            if not cands:
+                cands = by_name.get(_norm_key(line.nazwa), [])
+            # 3) fallback: nazwa faktury bez prefiksu-kodu == nazwa w bazie
+            if not cands and code and rest:
+                cands = by_name.get(_norm_key(rest), [])
             if not cands:
                 not_matched.append(line)
                 continue
