@@ -1413,7 +1413,7 @@ class MainWindow(tk.Tk):
                 "Ilość BOM", "Ilość (zam.)", "Δ", "Ilość dostarczonych",
                 "Typ", "Materiał", "Grubość [mm]", "Dostawca",
                 "Cena 1szt PLN", "Zamówiono", "Termin dostawy", "ALARM",
-                "Uwagi", "DWF_BIB", "ODEBRANE", "Moduł"
+                "Uwagi", "DWF_BIB", "ODEBRANE", "Moduł", "Casting"
             ],
             column_width=100,
             height=600,
@@ -4107,7 +4107,7 @@ class MainWindow(tk.Tk):
         # dehighlight_cells kasuje wpis w cell_options zamiast dopisywać bg="white",
         # co utrzymuje cell_options małym (mniej obciąża silnik canvas Tk przy dużych arkuszach).
         try:
-            self.sheet.dehighlight_cells(row=row_idx, cells=[(row_idx, col) for col in range(19)], redraw=False)
+            self.sheet.dehighlight_cells(row=row_idx, cells=[(row_idx, col) for col in range(20)], redraw=False)
         except Exception:
             pass
 
@@ -4260,8 +4260,8 @@ class MainWindow(tk.Tk):
             bg = getattr(self, "_selected_row_bg", "#DDEEFF")
             fg = getattr(self, "_selected_row_fg", None)
             
-            # 19 kolumn w arkuszu (0-18, włącznie z Moduł)
-            for c in range(19):
+            # 20 kolumn w arkuszu (0-19, włącznie z Casting)
+            for c in range(20):
                 # Pomiń komórki ze specjalnymi kolorami
                 if (r, c) in (getattr(self, '_cells_special_bg', set()) or set()):
                     continue
@@ -5453,7 +5453,30 @@ class MainWindow(tk.Tk):
                 print(f"✅ Migracja schemy zakończona - dodano {migrated_count} kolumn")
             else:
                 print("✅ Schema aktualna - brak potrzeby migracji")
-        
+
+            # Tabela casting_entries (poddostawcy/oferty castingu dla danego item)
+            try:
+                con.execute("""
+                    CREATE TABLE IF NOT EXISTS casting_entries (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        item_id INTEGER NOT NULL,
+                        supplier_name TEXT,
+                        proposed_price REAL,
+                        comment TEXT,
+                        offer_sent INTEGER DEFAULT 0,
+                        offer_sent_at TEXT,
+                        created_at TEXT,
+                        updated_at TEXT
+                    )
+                """)
+                con.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_casting_entries_item_id
+                    ON casting_entries(item_id)
+                """)
+                con.commit()
+            except Exception as e:
+                print(f"⚠️  Błąd migracji casting_entries: {e}")
+
         except Exception as e:
             print(f"⚠️  Błąd migracji schemy: {e}")
     
@@ -5494,6 +5517,20 @@ class MainWindow(tk.Tk):
             except:
                 return str(val)
         
+        # Pobierz liczby ofert castingu dla wszystkich items na raz (unikamy N+1 zapytań)
+        casting_counts = {}
+        try:
+            if self.db_manager and self.db_manager.project_con:
+                cursor = self.db_manager.project_con.execute(
+                    """SELECT item_id, COUNT(*), SUM(offer_sent),
+                              SUM(CASE WHEN proposed_price IS NOT NULL THEN 1 ELSE 0 END)
+                       FROM casting_entries GROUP BY item_id"""
+                )
+                for iid, cnt, sent_cnt, priced_cnt in cursor.fetchall():
+                    casting_counts[iid] = (cnt or 0, sent_cnt or 0, priced_cnt or 0)
+        except Exception:
+            casting_counts = {}
+
         # Helper: parse date
         def parse_date(d):
             if not d:
@@ -5930,7 +5967,16 @@ class MainWindow(tk.Tk):
                 # Więcej niż jeden moduł w WAREHOUSE - pokaż symbol
                 qty_bom_display = "●"
             
-            # Wiersz danych (19 kolumn)
+            # Casting: licznik ofert / ile z ceną / status wysłania zapytania
+            casting_disp = ""
+            cnt, sent_cnt, priced_cnt = casting_counts.get(item['id'], (0, 0, 0))
+            if cnt:
+                casting_disp = f"{cnt} oferta" if cnt == 1 else f"{cnt} ofert"
+                casting_disp += f" ({priced_cnt} z ceną)"
+                if sent_cnt:
+                    casting_disp += " ✉"
+
+            # Wiersz danych (20 kolumn)
             row = [
                 item['drawing_no'] or "",                   # 0: Nr rysunku (bez emoji)
                 item['name'] or "",                          # 1: Nazwa
@@ -5950,7 +5996,8 @@ class MainWindow(tk.Tk):
                 item['notes'] or "",                        # 15: Uwagi
                 str(int(item['dwf_biblioteka'] or 0)),      # 16: DWF_BIB
                 received_flag,                              # 17: ODEBRANE
-                modul_disp                                  # 18: Moduł
+                modul_disp,                                 # 18: Moduł
+                casting_disp                                # 19: Casting
             ]
             
             data.append(row)
@@ -6544,8 +6591,11 @@ class MainWindow(tk.Tk):
                 try:
                     row = self.sheet.identify_row(event, exclude_index=True)
                     col = self.sheet.identify_column(event, exclude_header=True)
-                    
+
                     if row is not None and col is not None and row >= 0 and col >= 0:
+                        # KONWERSJA INDEKSU: Kolumna 16 (DWF_BIB) jest ukryta, więc visual != physical
+                        if col >= 16:
+                            col += 1
                         # Kolumna 10 = Dostawca
                         if col == 10:
                             self._show_supplier_context_menu(row, col, event)
@@ -6568,7 +6618,11 @@ class MainWindow(tk.Tk):
                 
                 if row is None or col is None or row < 0 or col < 0:
                     return
-                
+
+                # KONWERSJA INDEKSU: Kolumna 16 (DWF_BIB) jest ukryta, więc visual != physical
+                if col >= 16:
+                    col += 1
+
                 # Kolumna 10 = Dostawca - pokaż menu wyboru (jak prawy klik)
                 if col == 10:
                     if not self.have_lock:
@@ -6601,7 +6655,13 @@ class MainWindow(tk.Tk):
                     if not self.have_lock:
                         return
                     self._handle_zamowiono_click(row, col)
-        
+                    return
+
+                # Kolumna 19 = Casting
+                if col == 19:
+                    self._open_casting_dialog(row, col)
+                    return
+
         except Exception as e:
             print(f"⚠️  Błąd on_sheet_click: {e}")
     
@@ -19660,7 +19720,352 @@ class MainWindow(tk.Tk):
     # ========================================================================
     # KONIEC MODUŁU DOSTAWCY
     # ========================================================================
-    
+
+    # ========================================================================
+    # MODUŁ CASTING
+    # ========================================================================
+
+    def _refresh_casting_cell(self, row, item_id):
+        """Odśwież zawartość komórki Casting (licznik ofert / z ceną / status wysłania)"""
+        try:
+            cursor = self.db_manager.project_con.execute(
+                """SELECT COUNT(*), SUM(offer_sent),
+                          SUM(CASE WHEN proposed_price IS NOT NULL THEN 1 ELSE 0 END)
+                   FROM casting_entries WHERE item_id = ?""",
+                (item_id,)
+            )
+            count, sent_count, priced_count = cursor.fetchone()
+            count = count or 0
+            sent_count = sent_count or 0
+            priced_count = priced_count or 0
+
+            if count == 0:
+                display = ""
+            else:
+                display = f"{count} oferta" if count == 1 else f"{count} ofert"
+                display += f" ({priced_count} z ceną)"
+                if sent_count > 0:
+                    display += " ✉"
+
+            self.sheet.set_cell_data(row, 19, display)
+        except Exception as e:
+            print(f"⚠️  Błąd odświeżania komórki Casting: {e}")
+
+    def _ensure_casting_table(self):
+        """Upewnij się, że tabela casting_entries istnieje (twórz w locie, jeśli mamy zapis)"""
+        try:
+            self.db_manager.project_con.execute("SELECT 1 FROM casting_entries LIMIT 1")
+            return True
+        except Exception:
+            pass
+
+        if not self.have_lock:
+            return False
+
+        try:
+            con = self.db_manager.project_con
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS casting_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL,
+                    supplier_name TEXT,
+                    proposed_price REAL,
+                    comment TEXT,
+                    offer_sent INTEGER DEFAULT 0,
+                    offer_sent_at TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            """)
+            con.execute("""
+                CREATE INDEX IF NOT EXISTS idx_casting_entries_item_id
+                ON casting_entries(item_id)
+            """)
+            con.commit()
+            return True
+        except Exception as e:
+            print(f"⚠️  Błąd tworzenia tabeli casting_entries: {e}")
+            return False
+
+    def _open_casting_dialog(self, row, col):
+        """Otwórz okno zarządzania ofertami castingu (poddostawcy) dla danego wiersza"""
+        # Nie pozwól na więcej niż jedno okno Casting jednocześnie
+        existing = getattr(self, "_casting_dialog", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except Exception:
+                pass
+            self._casting_dialog = None
+
+        if row >= len(self._sheet_row_ids):
+            return
+
+        item_id = self._sheet_row_ids[row]
+        if not item_id:
+            return
+
+        if not self._ensure_casting_table():
+            messagebox.showwarning(
+                "Casting",
+                "Tabela ofert castingu nie została jeszcze utworzona w tym projekcie.\n"
+                "Przejmij blokadę (Lock) projektu, aby ją utworzyć, a następnie spróbuj ponownie."
+            )
+            return
+
+        drawing_no = ""
+        try:
+            drawing_no = str(self.sheet.get_cell_data(row, 0) or "")
+        except Exception:
+            pass
+
+        dialog = tk.Toplevel(self)
+        dialog.title(f"Casting — {drawing_no}" if drawing_no else "Casting")
+        dialog.transient(self)
+        self._casting_dialog = dialog
+
+        def on_dialog_close():
+            self._casting_dialog = None
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", on_dialog_close)
+
+        dlg_w, dlg_h = 820, 560
+        try:
+            self.update_idletasks()
+            parent_x = self.winfo_rootx()
+            parent_y = self.winfo_rooty()
+            parent_w = self.winfo_width()
+            parent_h = self.winfo_height()
+            pos_x = parent_x + (parent_w - dlg_w) // 2
+            pos_y = parent_y + (parent_h - dlg_h) // 2
+        except Exception:
+            pos_x, pos_y = 200, 100
+        dialog.geometry(f"{dlg_w}x{dlg_h}+{pos_x}+{pos_y}")
+
+        header = tk.Label(
+            dialog,
+            text=f"Casting: {drawing_no}" if drawing_no else "Casting",
+            font=("Arial", 11, "bold")
+        )
+        header.pack(pady=(8, 4))
+
+        list_frame = tk.Frame(dialog)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        columns = ("supplier", "price", "comment", "sent")
+        tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=12)
+        tree.heading("supplier", text="Poddostawca")
+        tree.heading("price", text="Cena zaproponowana [PLN]")
+        tree.heading("comment", text="Komentarz")
+        tree.heading("sent", text="Zapytanie wysłane")
+        tree.column("supplier", width=180)
+        tree.column("price", width=140, anchor="e")
+        tree.column("comment", width=300)
+        tree.column("sent", width=140, anchor="center")
+
+        vsb = tk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        entries_map = {}
+
+        def load_entries():
+            tree.delete(*tree.get_children())
+            entries_map.clear()
+            try:
+                cursor = self.db_manager.project_con.execute(
+                    """SELECT id, supplier_name, proposed_price, comment, offer_sent, offer_sent_at
+                       FROM casting_entries WHERE item_id = ? ORDER BY id""",
+                    (item_id,)
+                )
+                for eid, supplier_name, price, comment, sent, sent_at in cursor.fetchall():
+                    price_disp = f"{price:.2f}" if price is not None else ""
+                    sent_disp = f"✓ {sent_at[:10]}" if sent and sent_at else ("✓" if sent else "")
+                    iid = tree.insert("", tk.END, values=(supplier_name or "", price_disp, comment or "", sent_disp))
+                    entries_map[iid] = eid
+            except Exception as e:
+                print(f"⚠️  Błąd wczytywania ofert castingu: {e}")
+
+        load_entries()
+
+        # --- Formularz dodawania / edycji wpisu ---
+        form_frame = tk.LabelFrame(dialog, text="Poddostawca / oferta")
+        form_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
+
+        tk.Label(form_frame, text="Poddostawca:").grid(row=0, column=0, sticky="w", padx=4, pady=3)
+        var_supplier = tk.StringVar()
+        supplier_names = sorted(self.suppliers_map.values(), key=lambda x: x.lower())
+        cmb_supplier = ttk.Combobox(form_frame, textvariable=var_supplier, values=supplier_names, width=25)
+        cmb_supplier.grid(row=0, column=1, sticky="w", padx=4, pady=3)
+
+        tk.Label(form_frame, text="Cena [PLN]:").grid(row=0, column=2, sticky="w", padx=4, pady=3)
+        var_price = tk.StringVar()
+        tk.Entry(form_frame, textvariable=var_price, width=15).grid(row=0, column=3, sticky="w", padx=4, pady=3)
+
+        var_sent = tk.BooleanVar()
+        tk.Checkbutton(form_frame, text="Zapytanie wysłane", variable=var_sent).grid(row=0, column=4, sticky="w", padx=4, pady=3)
+
+        tk.Label(form_frame, text="Komentarz:").grid(row=1, column=0, sticky="nw", padx=4, pady=3)
+        txt_comment = tk.Text(form_frame, width=70, height=3)
+        txt_comment.grid(row=1, column=1, columnspan=4, sticky="w", padx=4, pady=3)
+
+        editing_iid = [None]
+
+        def clear_form():
+            editing_iid[0] = None
+            var_supplier.set("")
+            var_price.set("")
+            var_sent.set(False)
+            txt_comment.delete("1.0", tk.END)
+            btn_save.config(text="Dodaj")
+
+        def on_tree_select(event=None):
+            sel = tree.selection()
+            if not sel:
+                return
+            iid = sel[0]
+            vals = tree.item(iid, "values")
+            editing_iid[0] = iid
+            var_supplier.set(vals[0])
+            var_price.set(vals[1])
+            txt_comment.delete("1.0", tk.END)
+            txt_comment.insert("1.0", vals[2])
+            var_sent.set(bool(vals[3]))
+            btn_save.config(text="Zapisz zmiany")
+
+        tree.bind("<<TreeviewSelect>>", on_tree_select)
+
+        def save_entry():
+            supplier_name = var_supplier.get().strip()
+            comment = txt_comment.get("1.0", tk.END).strip()
+            sent = 1 if var_sent.get() else 0
+
+            price_raw = var_price.get().strip().replace(",", ".")
+            price_val = None
+            if price_raw:
+                try:
+                    price_val = float(price_raw)
+                except ValueError:
+                    messagebox.showerror("Błąd", "Cena musi być liczbą.")
+                    return
+
+            if not supplier_name:
+                messagebox.showerror("Błąd", "Podaj nazwę poddostawcy.")
+                return
+
+            now = datetime.now().isoformat()
+
+            try:
+                if editing_iid[0] is not None and editing_iid[0] in entries_map:
+                    eid = entries_map[editing_iid[0]]
+                    cursor = self.db_manager.project_con.execute(
+                        "SELECT offer_sent, offer_sent_at FROM casting_entries WHERE id = ?", (eid,)
+                    )
+                    old_row = cursor.fetchone()
+                    old_sent = old_row[0] if old_row else 0
+                    old_sent_at = old_row[1] if old_row else None
+                    sent_at = old_sent_at
+                    if sent and not old_sent:
+                        sent_at = now
+                    elif not sent:
+                        sent_at = None
+
+                    self.db_manager.project_con.execute(
+                        """UPDATE casting_entries
+                           SET supplier_name = ?, proposed_price = ?, comment = ?,
+                               offer_sent = ?, offer_sent_at = ?, updated_at = ?
+                           WHERE id = ?""",
+                        (supplier_name, price_val, comment, sent, sent_at, now, eid)
+                    )
+                else:
+                    sent_at = now if sent else None
+                    self.db_manager.project_con.execute(
+                        """INSERT INTO casting_entries
+                           (item_id, supplier_name, proposed_price, comment, offer_sent, offer_sent_at, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (item_id, supplier_name, price_val, comment, sent, sent_at, now, now)
+                    )
+
+                self.db_manager.project_con.commit()
+                load_entries()
+                clear_form()
+                self._refresh_casting_cell(row, item_id)
+            except Exception as e:
+                messagebox.showerror("Błąd", f"Nie udało się zapisać wpisu:\n{e}")
+
+        def delete_entry():
+            sel = tree.selection()
+            if not sel:
+                return
+            iid = sel[0]
+            eid = entries_map.get(iid)
+            if eid is None:
+                return
+            if not messagebox.askyesno("Potwierdź", "Usunąć wybraną ofertę castingu?"):
+                return
+            try:
+                self.db_manager.project_con.execute("DELETE FROM casting_entries WHERE id = ?", (eid,))
+                self.db_manager.project_con.commit()
+                load_entries()
+                clear_form()
+                self._refresh_casting_cell(row, item_id)
+            except Exception as e:
+                messagebox.showerror("Błąd", f"Nie udało się usunąć wpisu:\n{e}")
+
+        btn_frame = tk.Frame(dialog)
+        btn_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        btn_save = tk.Button(btn_frame, text="Dodaj", command=save_entry, bg="#d4edda", padx=10)
+        btn_save.pack(side=tk.LEFT, padx=4)
+
+        btn_delete = tk.Button(btn_frame, text="Usuń zaznaczoną", command=delete_entry, bg="#f8d7da", padx=10)
+        btn_delete.pack(side=tk.LEFT, padx=4)
+
+        btn_clear = tk.Button(btn_frame, text="Wyczyść formularz", command=clear_form, padx=10)
+        btn_clear.pack(side=tk.LEFT, padx=4)
+
+        tk.Button(btn_frame, text="Zamknij", command=on_dialog_close, padx=10).pack(side=tk.RIGHT, padx=4)
+
+        readonly_label = tk.Label(
+            dialog,
+            text="Tryb tylko do odczytu — przejmij blokadę (Lock) projektu, aby edytować oferty.",
+            fg="#a94442"
+        )
+
+        # Śledzenie przejęcia locka podczas gdy okno jest otwarte - odśwież stan bez zamykania okna
+        last_lock_state = [None]
+
+        def sync_lock_state():
+            if not dialog.winfo_exists():
+                return
+            current = bool(self.have_lock)
+            if current != last_lock_state[0]:
+                last_lock_state[0] = current
+                btn_state = tk.NORMAL if current else tk.DISABLED
+                btn_save.config(state=btn_state)
+                btn_delete.config(state=btn_state)
+                btn_clear.config(state=btn_state)
+                if current:
+                    readonly_label.pack_forget()
+                    # Tabela mogła zostać utworzona dopiero po przejęciu locka
+                    self._ensure_casting_table()
+                else:
+                    readonly_label.pack(pady=(0, 6))
+                load_entries()
+                clear_form()
+            dialog.after(1000, sync_lock_state)
+
+        sync_lock_state()
+
+    # ========================================================================
+    # KONIEC MODUŁU CASTING
+    # ========================================================================
+
     # ========================================================================
     # MODUŁ UŻYTKOWNICY
     # ========================================================================
