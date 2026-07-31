@@ -34382,7 +34382,13 @@ Kod: {unlock_code}
             'conflicts': {},  # (cat, day_index) -> licznik
             'months_drawn': set(),
             'sel_row': None,  # podświetlony wiersz (indeks pracownika)
+            'ext_job': None,  # after() na odroczone doładowanie miesięcy
         }
+        # Ile miesięcy trzymamy naraz na Canvas. Scrollowanie w bok bez końca
+        # doładowuje miesiące, a Tkinter przewija WSZYSTKIE narysowane figury —
+        # więc bez limitu Canvas puchnie do dziesiątek tysięcy elementów i scroll
+        # ślimaczeje. Przycinamy miesiące poza tym oknem (patrz _prune_months).
+        MAX_MONTHS = 8
 
         def _idx_to_date(idx):
             return base_date + timedelta(days=idx)
@@ -34439,6 +34445,9 @@ Kod: {unlock_code}
             if key in cal['months_drawn']:
                 return
             cal['months_drawn'].add(key)
+            # Wspólny tag na wszystkie figury tego miesiąca — pozwala je hurtem
+            # usunąć przy przycinaniu (_prune_months), bez czyszczenia całości.
+            mtag = f"m_{midx_year}_{midx_month}"
             import calendar as __cal
             ndays = __cal.monthrange(midx_year, midx_month)[1]
             first_idx = (date(midx_year, midx_month, 1) - base_date).days
@@ -34491,10 +34500,10 @@ Kod: {unlock_code}
             month_w = ndays * CELL_W
             # Pasek z nazwą miesiąca (górny poziom nagłówka)
             header.create_rectangle(month_x0, 0, month_x0 + month_w, HDR_H / 2,
-                                    fill="#2c3e50", outline="#1a252f")
+                                    fill="#2c3e50", outline="#1a252f", tags=mtag)
             header.create_text(month_x0 + month_w / 2, HDR_H / 4,
                                text=f"{self.MONTH_NAMES_PL[midx_month]} {midx_year}",
-                               fill="white", font=self.FONT_BOLD)
+                               fill="white", font=self.FONT_BOLD, tags=mtag)
             _today_date = datetime.now().date()
             # Numery dni (dolny poziom) + kolumny siatki
             for dd in range(1, ndays + 1):
@@ -34504,9 +34513,9 @@ Kod: {unlock_code}
                 is_today = (date(midx_year, midx_month, dd) == _today_date)
                 bg = "#e67e22" if is_today else ("#7f8c8d" if wd >= 5 else hdr_bg)
                 header.create_rectangle(x0, HDR_H / 2, x0 + CELL_W, HDR_H,
-                                        fill=bg, outline="#2c3e50")
+                                        fill=bg, outline="#2c3e50", tags=mtag)
                 header.create_text(x0 + CELL_W / 2, HDR_H * 0.75, text=str(dd),
-                                   fill="white",
+                                   fill="white", tags=mtag,
                                    font=("Segoe UI", 7, "bold") if is_today else ("Segoe UI", 7))
                 _iso = f"{midx_year:04d}-{midx_month:02d}-{dd:02d}"
                 _is_workday = (_workdays is None) or (_iso in _workdays)
@@ -34530,14 +34539,14 @@ Kod: {unlock_code}
                         else:
                             fill_c = c
                         grid.create_rectangle(x0, y0, x0 + CELL_W, y0 + ROW_H,
-                                              fill=fill_c, outline="#bdc3c7")
+                                              fill=fill_c, outline="#bdc3c7", tags=mtag)
                         if st == 'ODRZUCONY':
                             grid.create_line(x0 + 2, y0 + 2, x0 + CELL_W - 2, y0 + ROW_H - 2,
-                                             fill="#c0392b")
+                                             fill="#c0392b", tags=mtag)
                         elif st == 'OCZEKUJE':
                             grid.create_text(x0 + CELL_W / 2, y0 + ROW_H / 2,
                                              text=self.STATUS_ICONS.get(st, ''),
-                                             font=("Segoe UI", 7))
+                                             font=("Segoe UI", 7), tags=mtag)
                         cal['tips'][(gi, ri)] = (
                             f"{e['name']}\n{self.REASON_LABELS.get(code, code)}"
                             f"\nStatus: {self.STATUS_LABELS.get(st, st)}\n"
@@ -34545,17 +34554,75 @@ Kod: {unlock_code}
                     else:
                         cbg = "#dfe4ea" if wd >= 5 else "white"
                         grid.create_rectangle(x0, y0, x0 + CELL_W, y0 + ROW_H,
-                                              fill=cbg, outline="#eeeeee")
+                                              fill=cbg, outline="#eeeeee", tags=mtag)
 
             # Oś dnia bieżącego — pionowa linia na kolumnie dzisiejszej daty.
             if midx_year == _today_date.year and midx_month == _today_date.month:
                 gi_today = first_idx + (_today_date.day - 1)
                 xt = gi_today * CELL_W
                 grid.create_rectangle(xt, 0, xt + CELL_W, len(cal['emps']) * ROW_H,
-                                      outline="#e67e22", width=2, fill='', tags='today')
+                                      outline="#e67e22", width=2, fill='', tags=('today', mtag))
 
             cal['lo'] = min(cal['lo'], first_idx)
             cal['hi'] = max(cal['hi'], first_idx + ndays)
+            _update_scrollregion()
+            _update_conflicts()
+            _draw_selection()
+
+        def _recompute_bounds():
+            """Ustaw lo/hi na skrajne dni faktycznie narysowanych miesięcy."""
+            if not cal['months_drawn']:
+                cal['lo'] = cal['hi'] = 0
+                return
+            import calendar as __cal
+            los, his = [], []
+            for (yy, mm) in cal['months_drawn']:
+                fi = (date(yy, mm, 1) - base_date).days
+                los.append(fi)
+                his.append(fi + __cal.monthrange(yy, mm)[1])
+            cal['lo'], cal['hi'] = min(los), max(his)
+
+        def _prune_months():
+            """Usuń miesiące odległe od widoku, by Canvas nie puchł bez końca.
+
+            Trzymamy najwyżej MAX_MONTHS miesięcy wokół aktualnie oglądanego.
+            Bez tego przewijanie w bok dokłada figury w nieskończoność i każdy
+            tik scrolla przerysowuje ich coraz więcej → drastyczne spowolnienie.
+            """
+            if len(cal['months_drawn']) <= MAX_MONTHS:
+                return
+            # Środek widoku w indeksie dnia.
+            try:
+                lo_frac, hi_frac = grid.xview()
+            except Exception:
+                return
+            span = (cal['hi'] - cal['lo'])
+            center_idx = cal['lo'] + (lo_frac + hi_frac) / 2 * span
+            # Posortuj miesiące wg odległości ich środka od środka widoku.
+            import calendar as __cal
+            scored = []
+            for (yy, mm) in cal['months_drawn']:
+                fi = (date(yy, mm, 1) - base_date).days
+                mid = fi + __cal.monthrange(yy, mm)[1] / 2
+                scored.append((abs(mid - center_idx), yy, mm))
+            scored.sort()
+            keep = {(yy, mm) for _d, yy, mm in scored[:MAX_MONTHS]}
+            drop = [(yy, mm) for (yy, mm) in cal['months_drawn'] if (yy, mm) not in keep]
+            if not drop:
+                return
+            for (yy, mm) in drop:
+                mtag = f"m_{yy}_{mm}"
+                grid.delete(mtag)
+                header.delete(mtag)
+                cal['months_drawn'].discard((yy, mm))
+                # Wyczyść tooltips/konflikty należące do dni tego miesiąca.
+                fi = (date(yy, mm, 1) - base_date).days
+                nd = __cal.monthrange(yy, mm)[1]
+                gis = set(range(fi, fi + nd))
+                cal['tips'] = {k: v for k, v in cal['tips'].items() if k[0] not in gis}
+                cal['conflicts'] = {k: v for k, v in cal['conflicts'].items()
+                                    if k[1] not in gis}
+            _recompute_bounds()
             _update_scrollregion()
             _update_conflicts()
             _draw_selection()
@@ -34638,9 +34705,11 @@ Kod: {unlock_code}
             d = _idx_to_date(cal['lo'] - 1)  # ostatni dzień przed narysowanym
             _draw_month(d.year, d.month)
 
-        def _maybe_extend():
-            # Jeśli widok blisko lewego/prawego brzegu wyrenderowanego pasa,
-            # doładuj kolejny miesiąc z tej strony.
+        def _do_extend():
+            # Właściwe doładowanie/przycięcie — kosztowne (rysowanie + zapytania do
+            # bazy), więc odpalane z opóźnieniem (after), a nie w każdym tiku
+            # scrolla. Dzięki temu samo przewijanie zostaje płynne.
+            cal['ext_job'] = None
             try:
                 lo_frac, hi_frac = grid.xview()
             except Exception:
@@ -34658,9 +34727,30 @@ Kod: {unlock_code}
                 # po dodaniu z lewej scrollregion się rozszerzył — utrzymaj pozycję
                 grid.xview_moveto((old_lo_x - cal['lo'] * CELL_W +
                                    lo_frac * total) / max((cal['hi'] - cal['lo']) * CELL_W, 1))
+            # Po doładowaniu przytnij nadmiar miesięcy poza oknem widoku.
+            _prune_months()
+
+        def _maybe_extend():
+            # Wywoływane z KAŻDEGO tiku scrolla — musi być tanie. Zamiast rysować
+            # od razu, planujemy odroczone doładowanie (debounce ~60 ms). Kolejne
+            # tiki resetują timer, więc ciężka praca leci raz, po ustaniu ruchu.
+            if cal['ext_job'] is not None:
+                try:
+                    grid.after_cancel(cal['ext_job'])
+                except Exception:
+                    pass
+            cal['ext_job'] = grid.after(60, _do_extend)
 
         def _full_reset():
             """Przerysuj od zera wokół base_date (np. po zmianie filtra)."""
+            # Anuluj ewentualne odroczone doładowanie — inaczej dorysowałoby
+            # miesiące do świeżo wyczyszczonego canvasu z nieaktualnymi granicami.
+            if cal['ext_job'] is not None:
+                try:
+                    grid.after_cancel(cal['ext_job'])
+                except Exception:
+                    pass
+                cal['ext_job'] = None
             grid.delete('all'); header.delete('all')
             cal['tips'] = {}; cal['conflicts'] = {}; cal['months_drawn'] = set()
             cal['lo'] = 0; cal['hi'] = 0
@@ -34777,6 +34867,63 @@ Kod: {unlock_code}
             _cv.bind('<Button-5>', lambda e: (_yview('scroll', 1, "units"), "break")[1])
             _cv.bind('<Shift-Button-4>', lambda e: (_xview('scroll', -1, "units"), "break")[1])
             _cv.bind('<Shift-Button-5>', lambda e: (_xview('scroll', 1, "units"), "break")[1])
+
+        # ── Przewijanie strzałkami klawiatury ──
+        # ←/→ w poziomie (dni), ↑/↓ w pionie (pracownicy). PageUp/PageDown =
+        # przeskok o widok, Home/End = początek/koniec osi czasu.
+        #
+        # WAŻNE (Tk): zdarzenie klawisza trafia do widgetu z FOCUSEM, a bindtagi
+        # propagują się widget→klasa→toplevel→all — NIE przez ramki-rodziców.
+        # Dlatego bindy muszą być bezpośrednio na widgetach, które dostają focus
+        # (grid / names_cv / header), a nie na parent (Frame nigdy nie dostanie
+        # tych zdarzeń, bo focus jest na Canvasie).
+        def _key_left(e):
+            _xview('scroll', -1, "units"); return "break"
+
+        def _key_right(e):
+            _xview('scroll', 1, "units"); return "break"
+
+        def _key_up(e):
+            _yview('scroll', -1, "units"); return "break"
+
+        def _key_down(e):
+            _yview('scroll', 1, "units"); return "break"
+
+        def _key_pgup(e):
+            _yview('scroll', -1, "pages"); return "break"
+
+        def _key_pgdn(e):
+            _yview('scroll', 1, "pages"); return "break"
+
+        def _key_home(e):
+            # Skok na początek wyrenderowanej osi (i doładuj w lewo, jeśli trzeba).
+            _xview('moveto', 0.0); return "break"
+
+        def _key_end(e):
+            _xview('moveto', 1.0); return "break"
+
+        _KEY_BINDS = (('<Left>', _key_left), ('<Right>', _key_right),
+                      ('<Up>', _key_up), ('<Down>', _key_down),
+                      ('<Prior>', _key_pgup), ('<Next>', _key_pgdn),
+                      ('<Home>', _key_home), ('<End>', _key_end))
+        for _cv in (grid, names_cv, header):
+            _cv.configure(takefocus=1)
+            for _seq, _fn in _KEY_BINDS:
+                _cv.bind(_seq, _fn, add='+')
+
+        # Najechanie myszą na siatkę/nazwiska daje im focus, więc strzałki działają
+        # od razu, bez wcześniejszego klikania (na Windows Canvas domyślnie nie
+        # bierze focusu — wymuszamy go).
+        def _grab_focus(_e=None):
+            try:
+                grid.focus_set()
+            except Exception:
+                pass
+        for _cv in (grid, names_cv, header):
+            _cv.bind('<Enter>', _grab_focus, add='+')
+        # Klik w siatkę też ustawia focus (żeby strzałki działały po kliknięciu,
+        # nawet jeśli mysz potem zjedzie poza obszar).
+        grid.bind('<Button-1>', lambda e: grid.focus_set(), add='+')
 
         # Przy zmianie rozmiaru (np. maksymalizacja) trzymaj kolumnę nazwisk
         # zsynchronizowaną z siatką: ta sama wysokość widżetu + ta sama pozycja
