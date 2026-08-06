@@ -1291,6 +1291,16 @@ def ensure_list_tables(master_db_path: str):
     except sqlite3.OperationalError:
         pass  # kolumna już istnieje
 
+    # Dodaj kolumnę user_login (2026-08-07) — powiązanie pracownika z kontem
+    # użytkownika RM_BAZA (users.username). Opcjonalna: pracownik nie musi mieć
+    # konta, a konto techniczne (ADMIN/GUEST/wspoldzielone) nie musi mieć pracownika.
+    # Trzymane po stronie employees (baza RM_MANAGER), bo users nalezy do RM_BAZA
+    # i nie chcemy zmieniac schematu tamtej bazy.
+    try:
+        con.execute("ALTER TABLE employees ADD COLUMN user_login TEXT")
+    except sqlite3.OperationalError:
+        pass  # kolumna już istnieje
+
     # priority_weights — wagi priorytetów projektów dla optymalizatora
     # (1=Turbo, 2=Pilny, 3=Normalny). Wagi konfigurowalne przez użytkownika.
     con.execute("""
@@ -6372,7 +6382,41 @@ EMPLOYEE_EDITABLE_FIELDS = {
     'name': 'Imię i nazwisko', 'category': 'Kategoria', 'phone': 'Telefon',
     'email': 'E-mail', 'description': 'Opis', 'contact_info': 'Kontakt (inne)',
     'is_active': 'Aktywny', 'podmiot': 'Podmiot',
+    'user_login': 'Konto użytkownika',
 }
+
+
+def get_employee_by_user_login(rm_master_db_path: str, user_login: str) -> Optional[Dict]:
+    """Znajdź pracownika powiązanego z danym loginem RM_BAZA.
+
+    Zwraca None, gdy login nie jest z nikim powiązany (konto techniczne,
+    wspoldzielone albo pracownik jeszcze nieprzypisany).
+    """
+    if not user_login:
+        return None
+    ensure_list_tables(rm_master_db_path)
+    con = _open_rm_connection(rm_master_db_path)
+    try:
+        row = con.execute(
+            "SELECT * FROM employees WHERE user_login = ? COLLATE NOCASE LIMIT 1",
+            (user_login,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        con.close()
+
+
+def get_user_login_owner(rm_master_db_path: str, user_login: str,
+                         exclude_employee_id: int = None) -> Optional[Dict]:
+    """Sprawdź, czy login jest już przypisany do INNEGO pracownika.
+
+    Zwraca dane tego pracownika albo None. Sluzy do ostrzegania przed
+    przypisaniem jednego konta do dwoch osob.
+    """
+    owner = get_employee_by_user_login(rm_master_db_path, user_login)
+    if owner and exclude_employee_id is not None and owner['id'] == exclude_employee_id:
+        return None
+    return owner
 
 
 def update_employee_fields(rm_master_db_path: str, employee_id: int,
@@ -6419,7 +6463,8 @@ def update_employee_fields(rm_master_db_path: str, employee_id: int,
 def save_employee(rm_master_db_path: str, data: Dict) -> int:
     """Dodaj lub aktualizuj pracownika.
     data musi zawierać: name, category.
-    Opcjonalne: description, contact_info, phone, email, is_active, id (gdy update).
+    Opcjonalne: description, contact_info, phone, email, podmiot, user_login,
+    is_active, id (gdy update).
     Zwraca id rekordu.
     """
     ensure_list_tables(rm_master_db_path)
@@ -6435,6 +6480,7 @@ def save_employee(rm_master_db_path: str, data: Dict) -> int:
                     phone        = ?,
                     email        = ?,
                     podmiot      = ?,
+                    user_login   = ?,
                     is_active    = ?,
                     updated_at   = CURRENT_TIMESTAMP
                 WHERE id = ?
@@ -6443,23 +6489,26 @@ def save_employee(rm_master_db_path: str, data: Dict) -> int:
                 data.get('description', ''), data.get('contact_info', ''),
                 data.get('phone', ''), data.get('email', ''),
                 data.get('podmiot') or None,
+                data.get('user_login') or None,
                 int(bool(data.get('is_active', True))),
                 data['id']
             ))
             row_id = data['id']
         else:
             cur = con.execute("""
-                INSERT INTO employees (name, category, description, contact_info, phone, email, podmiot, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO employees (name, category, description, contact_info, phone, email, podmiot, user_login, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 data['name'], data['category'],
                 data.get('description', ''), data.get('contact_info', ''),
                 data.get('phone', ''), data.get('email', ''),
                 data.get('podmiot') or None,
+                data.get('user_login') or None,
                 int(bool(data.get('is_active', True))),
             ))
             row_id = cur.lastrowid
-        con.commit()
+        # Commit z retry na "database is locked" — master bywa wspoldzielony po SMB
+        _rm_safe_commit(con)
         return row_id
     finally:
         con.close()

@@ -11626,12 +11626,13 @@ class RMManagerGUI:
                   bg=self.COLOR_RED, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=2)
 
         # Treeview
-        cols = ('id', 'name', 'category', 'podmiot', 'description', 'phone', 'email', 'contact', 'active')
+        cols = ('id', 'name', 'category', 'podmiot', 'user_login', 'description', 'phone', 'email', 'contact', 'active')
         tree = ttk.Treeview(dlg, columns=cols, show='headings', height=22)
         tree.heading('id',          text='ID');          tree.column('id',          width=40,  stretch=False)
         tree.heading('name',        text='Imię i nazwisko'); tree.column('name',    width=180)
         tree.heading('category',    text='Kategoria');   tree.column('category',    width=110, stretch=False)
         tree.heading('podmiot',     text='Podmiot');     tree.column('podmiot',     width=110, stretch=False)
+        tree.heading('user_login',  text='Konto (login)'); tree.column('user_login', width=110, stretch=False)
         tree.heading('description', text='Opis');        tree.column('description', width=180)
         tree.heading('phone',       text='Nr telefonu'); tree.column('phone',       width=120, stretch=False)
         tree.heading('email',       text='Email');       tree.column('email',       width=180)
@@ -11667,6 +11668,7 @@ class RMManagerGUI:
                 tree.insert('', tk.END, iid=str(r['id']), values=(
                     r['id'], r['name'], r['category'],
                     r.get('podmiot') or '',
+                    r.get('user_login') or '—',
                     r.get('description') or '',
                     r.get('phone') or '',
                     r.get('email') or '',
@@ -11776,16 +11778,84 @@ class RMManagerGUI:
                      state='readonly', font=self.FONT_DEFAULT).grid(
             row=6, column=1, sticky='ew', pady=4)
 
+        # Konto użytkownika (login z RM_BAZA) — opcjonalne powiązanie.
+        # Lista czytana na żywo z master.sqlite RM_BAZA, żeby nowo dodani
+        # użytkownicy byli od razu do wyboru i żeby nie było literówek.
+        # EDYCJA TYLKO DLA ADMIN — pozostali widzą wartość, ale nie zmienią jej.
+        _is_admin = (self.current_user_role == 'ADMIN')
+        lbl(7, "Konto użytkownika:")
+        _login_current = existing.get('user_login') or ''
+        _logins = []
+        if _is_admin:
+            try:
+                _users = rmm.get_users_from_baza(self.master_db_path)
+                _logins = [u['username'] for u in _users]
+            except Exception as e:
+                print(f"⚠️ Nie udało się pobrać użytkowników RM_BAZA: {e}")
+                _logins = []
+        # Zachowaj wartość spoza listy (np. user dezaktywowany w RM_BAZA)
+        if _login_current and _login_current not in _logins:
+            _logins = [_login_current] + _logins
+        login_var = tk.StringVar(value=_login_current or '(brak)')
+        _login_combo = ttk.Combobox(
+            body, textvariable=login_var,
+            values=['(brak)'] + _logins,
+            state=('readonly' if _is_admin else 'disabled'),
+            font=self.FONT_DEFAULT)
+        _login_combo.grid(row=7, column=1, sticky='ew', pady=4)
+        tk.Label(body,
+                 text=("(powiązanie pracownika z kontem — opcjonalne)" if _is_admin
+                       else "(zmiana powiązania dostępna tylko dla ADMIN)"),
+                 font=("Arial", 8), fg="#7f8c8d", anchor='w').grid(
+            row=8, column=1, sticky='w')
+
         # Aktywny
         active_var = tk.BooleanVar(value=bool(existing.get('is_active', True)))
         tk.Checkbutton(body, text="Aktywny", variable=active_var,
-                       font=self.FONT_DEFAULT).grid(row=7, column=1, sticky='w', pady=4)
+                       font=self.FONT_DEFAULT).grid(row=9, column=1, sticky='w', pady=4)
 
         def save():
             name = name_var.get().strip()
             if not name:
                 messagebox.showwarning("Uwaga", "Podaj imię i nazwisko.", parent=frm)
                 return
+            # Konto użytkownika: '(brak)' => brak powiązania (NULL).
+            # Nie-ADMIN nie może zmienić powiązania — wymuś wartość sprzed edycji
+            # (samo wyszarzenie pola to za mało: liczy się to, co trafia do bazy).
+            _login = login_var.get().strip()
+            if _login == '(brak)':
+                _login = ''
+            if not _is_admin:
+                _login = _login_current
+
+            # Jeden login = jedna osoba. Ostrzeż, jeśli konto jest już zajęte.
+            if _login:
+                try:
+                    owner = rmm.get_user_login_owner(
+                        self.rm_master_db_path, _login, exclude_employee_id=employee_id)
+                except Exception as e:
+                    print(f"⚠️ Sprawdzenie zajętości loginu: {e}")
+                    owner = None
+                if owner:
+                    if not messagebox.askyesno(
+                        "Konto już przypisane",
+                        f"Konto '{_login}' jest już powiązane z pracownikiem:\n"
+                        f"{owner.get('name')}\n\n"
+                        f"Przypisać je mimo to do '{name}'?\n"
+                        f"(poprzednie powiązanie zostanie usunięte)",
+                        icon='warning', parent=frm
+                    ):
+                        return
+                    try:
+                        rmm.update_employee_fields(
+                            self.rm_master_db_path, owner['id'],
+                            {'user_login': ''}, user=self.current_user)
+                    except Exception as e:
+                        messagebox.showerror(
+                            "Błąd", f"Nie udało się zwolnić poprzedniego powiązania:\n{e}",
+                            parent=frm)
+                        return
+
             data = {
                 'name': name,
                 'category': cat_var.get(),
@@ -11794,6 +11864,7 @@ class RMManagerGUI:
                 'email': email_var.get().strip(),
                 'contact_info': contact_text.get('1.0', tk.END).strip(),
                 'podmiot': podmiot_var.get().strip(),
+                'user_login': _login,
                 'is_active': active_var.get(),
             }
             if employee_id:
