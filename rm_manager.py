@@ -50,6 +50,12 @@ import time as _time
 #   - locking_mode=NORMAL  (zwalniaj lock po transakcji)
 # ============================================================================
 
+# Pliki, dla których journal_mode=DELETE zostało już zweryfikowane w tym procesie.
+# journal_mode persystuje w nagłówku bazy, więc weryfikacja (kosztowny round-trip
+# fetchone() przez SMB) wystarczy raz na plik — kolejne otwarcia tylko ustawiają PRAGMA.
+_JOURNAL_MODE_VERIFIED: set = set()
+
+
 def _open_rm_connection(db_path: str, row_factory: bool = True,
                         uri: bool = False) -> sqlite3.Connection:
     """Otwórz SMB-safe połączenie do dowolnej bazy RM_MANAGER na NAS.
@@ -66,21 +72,33 @@ def _open_rm_connection(db_path: str, row_factory: bool = True,
 
     Returns:
         sqlite3.Connection z ustawionymi PRAGMAs i row_factory
+
+    Wydajność (SMB/NAS): PRAGMA są ustawiane jednym executescript() (jeden
+    round-trip zamiast sześciu), a weryfikacja journal_mode odpala się tylko
+    raz na plik na proces (patrz _JOURNAL_MODE_VERIFIED). Na dysku sieciowym
+    o wysokiej latencji to zauważalnie skraca czas otwierania połączeń, których
+    przy wczytaniu jednego projektu jest kilkadziesiąt.
     """
     con = sqlite3.connect(db_path, timeout=10.0, uri=uri)
     if row_factory:
         con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=DELETE")
-    con.execute("PRAGMA busy_timeout=5000")
-    con.execute("PRAGMA locking_mode=NORMAL")
-    con.execute("PRAGMA synchronous=NORMAL")
-    con.execute("PRAGMA cache_size=-2000")
-    con.execute("PRAGMA temp_store=MEMORY")
-    # Weryfikuj journal_mode - WAL na SMB powoduje korupcję
-    actual_mode = con.execute("PRAGMA journal_mode").fetchone()[0]
-    if actual_mode.upper() != "DELETE":
-        print(f"🔴 OSTRZEŻENIE: journal_mode={actual_mode} zamiast DELETE dla {db_path}!")
-        print(f"   WAL mode NIE DZIAŁA przez SMB - ryzyko korupcji danych!")
+    # Wszystkie PRAGMA w jednym round-tripie SMB.
+    con.executescript(
+        "PRAGMA journal_mode=DELETE;"
+        "PRAGMA busy_timeout=5000;"
+        "PRAGMA locking_mode=NORMAL;"
+        "PRAGMA synchronous=NORMAL;"
+        "PRAGMA cache_size=-2000;"
+        "PRAGMA temp_store=MEMORY;"
+    )
+    # Weryfikuj journal_mode raz na plik - WAL na SMB powoduje korupcję.
+    if db_path not in _JOURNAL_MODE_VERIFIED:
+        actual_mode = con.execute("PRAGMA journal_mode").fetchone()[0]
+        if actual_mode.upper() != "DELETE":
+            print(f"🔴 OSTRZEŻENIE: journal_mode={actual_mode} zamiast DELETE dla {db_path}!")
+            print(f"   WAL mode NIE DZIAŁA przez SMB - ryzyko korupcji danych!")
+        else:
+            _JOURNAL_MODE_VERIFIED.add(db_path)
     return con
 
 
@@ -4230,12 +4248,12 @@ def is_milestone_set(rm_db_path: str, project_id: int, stage_code: str) -> bool:
 
 def get_milestone(rm_db_path: str, project_id: int, stage_code: str) -> dict:
     """Pobierz informacje o milestone
-    
+
     Returns:
         {'timestamp': '...', 'user': '...', 'notes': '...'} lub None
     """
     con = _open_rm_connection(rm_db_path)
-    
+
     cursor = con.execute("""
         SELECT sap.started_at as timestamp, sap.started_by as user, sap.notes
         FROM stage_actual_periods sap
@@ -4243,11 +4261,57 @@ def get_milestone(rm_db_path: str, project_id: int, stage_code: str) -> dict:
         WHERE ps.project_id = ? AND ps.stage_code = ?
         LIMIT 1
     """, (project_id, stage_code))
-    
+
     row = cursor.fetchone()
     con.close()
-    
+
     return dict(row) if row else None
+
+
+def get_milestones_bulk(con: sqlite3.Connection, project_id: int,
+                        stage_codes) -> dict:
+    """Pobierz info o wielu milestone'ach JEDNYM zapytaniem, na już otwartym połączeniu.
+
+    Zamiennik dla serii wywołań is_milestone_set()/get_milestone(), z których
+    każde otwierało osobne połączenie do bazy na NAS. Tu korzystamy z połączenia
+    przekazanego przez wołającego (reuse) i jednego SELECT ... IN (...).
+
+    Args:
+        con: otwarte połączenie (_open_rm_connection) do bazy per-projekt
+        project_id: ID projektu
+        stage_codes: iterowalny zbiór kodów etapów (np. ('PRZYJETY', 'ZAKONCZONY'))
+
+    Returns:
+        {stage_code: {'timestamp': ..., 'user': ..., 'notes': ...}} — tylko dla
+        ustawionych milestone'ów. Brak klucza == milestone nieustawiony.
+        Odporne na stary schemat bazy (brak tabel) — zwraca {}.
+    """
+    codes = list(stage_codes)
+    if not codes:
+        return {}
+    placeholders = ",".join("?" for _ in codes)
+    try:
+        rows = con.execute(f"""
+            SELECT ps.stage_code,
+                   sap.started_at as timestamp, sap.started_by as user, sap.notes
+            FROM stage_actual_periods sap
+            JOIN project_stages ps ON sap.project_stage_id = ps.id
+            WHERE ps.project_id = ? AND ps.stage_code IN ({placeholders})
+            ORDER BY sap.started_at
+        """, (project_id, *codes)).fetchall()
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e).lower():
+            return {}
+        raise
+    # LIMIT 1 semantyka is_milestone_set/get_milestone = pierwszy wiersz per kod;
+    # ORDER BY started_at + zapamiętanie pierwszego trafienia to odwzorowuje.
+    out = {}
+    for row in rows:
+        code = row['stage_code']
+        if code not in out:
+            out[code] = {'timestamp': row['timestamp'], 'user': row['user'],
+                         'notes': row['notes']}
+    return out
 
 
 def unset_milestone(rm_db_path: str, project_id: int, stage_code: str, master_db_path: str = None):

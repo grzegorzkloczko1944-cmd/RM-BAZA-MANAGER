@@ -1268,6 +1268,13 @@ class DatabaseManager:
 # ============================================================================
 
 
+# Bazy, dla których journal_mode=DELETE zweryfikowano już w tym procesie.
+# journal_mode persystuje w nagłówku bazy, więc kosztowny round-trip fetchone()
+# przez SMB wystarczy raz na plik. Klucz to znormalizowana ścieżka (bez części
+# ?mode=ro URI), żeby ro/rw wariant tej samej bazy dzielił wpis.
+_BAZA_JOURNAL_VERIFIED: set = set()
+
+
 def _open_baza_connection(db_path, row_factory=True, uri=False, timeout=30.0):
     """Otwórz połączenie SQLite z PRAGMA bezpiecznymi dla NAS/SMB.
 
@@ -1282,6 +1289,11 @@ def _open_baza_connection(db_path, row_factory=True, uri=False, timeout=30.0):
         timeout: timeout połączenia w sekundach.
     Returns:
         sqlite3.Connection z ustawionymi PRAGMA.
+
+    Wydajność (SMB/NAS): PRAGMA ustawiane jednym executescript() (jeden round-trip
+    zamiast sześciu), weryfikacja journal_mode tylko raz na plik na proces. Istotne
+    dla ścieżek skanujących wiele plików projektów, gdzie ta funkcja jest wołana
+    w pętli per plik na dysku sieciowym o wysokiej latencji.
     """
     con = sqlite3.connect(
         str(db_path) if not uri else db_path,
@@ -1291,18 +1303,27 @@ def _open_baza_connection(db_path, row_factory=True, uri=False, timeout=30.0):
     )
     if row_factory:
         con.row_factory = sqlite3.Row
-    # SMB-safe PRAGMAs
-    con.execute("PRAGMA journal_mode=DELETE")
-    con.execute("PRAGMA busy_timeout=5000")
-    con.execute("PRAGMA locking_mode=NORMAL")
-    con.execute("PRAGMA synchronous=NORMAL")
-    con.execute("PRAGMA cache_size=-2000")
-    con.execute("PRAGMA temp_store=MEMORY")
-    # Weryfikuj journal_mode - WAL na SMB powoduje korupcję
-    actual_mode = con.execute("PRAGMA journal_mode").fetchone()[0]
-    if actual_mode.upper() != "DELETE":
-        print(f"🔴 OSTRZEŻENIE: journal_mode={actual_mode} zamiast DELETE dla {db_path}!")
-        print(f"   WAL mode NIE DZIAŁA przez SMB - ryzyko korupcji danych!")
+    # SMB-safe PRAGMAs — jeden round-trip.
+    con.executescript(
+        "PRAGMA journal_mode=DELETE;"
+        "PRAGMA busy_timeout=5000;"
+        "PRAGMA locking_mode=NORMAL;"
+        "PRAGMA synchronous=NORMAL;"
+        "PRAGMA cache_size=-2000;"
+        "PRAGMA temp_store=MEMORY;"
+    )
+    # Weryfikuj journal_mode raz na plik - WAL na SMB powoduje korupcję.
+    # Klucz: sama ścieżka pliku (dla URI odetnij ?query), by ro/rw dzieliły wpis.
+    _key = str(db_path)
+    if uri and "?" in _key:
+        _key = _key.split("?", 1)[0]
+    if _key not in _BAZA_JOURNAL_VERIFIED:
+        actual_mode = con.execute("PRAGMA journal_mode").fetchone()[0]
+        if actual_mode.upper() != "DELETE":
+            print(f"🔴 OSTRZEŻENIE: journal_mode={actual_mode} zamiast DELETE dla {db_path}!")
+            print(f"   WAL mode NIE DZIAŁA przez SMB - ryzyko korupcji danych!")
+        else:
+            _BAZA_JOURNAL_VERIFIED.add(_key)
     return con
 
 

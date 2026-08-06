@@ -294,6 +294,9 @@ class MainWindow(tk.Tk):
         # Podświetlenie zaznaczonego wiersza (jak v6)
         self._selected_row_idx = None
         self._selected_row_bg = "#DDEEFF"
+        # Kotwica dla zaznaczania zakresem (Shift+klik na LP) — ostatni wiersz
+        # kliknięty pojedynczo (przez LP lub Ctrl+klik). Zakres liczony od niej.
+        self._lp_anchor_row = None
         self._selected_row_fg = None
         self._cells_special_bg = set()  # Komórki z kolorami specjalnymi (alarmy)
         self._in_row_highlight = False  # Flaga zapobiegająca rekurencji
@@ -1469,9 +1472,16 @@ class MainWindow(tk.Tk):
         # CTRL+klik - blokuj zaznaczanie w komórkach danych (tylko LP dozwolone)
         # BEZ add="+" żeby przejąć kontrolę PRZED tksheet
         self.sheet.bind("<Control-Button-1>", self.on_ctrl_click_block)
+        # SHIFT+klik na LP - zaznacz zakres wierszy (symetria do Ctrl = pojedyncze)
+        self.sheet.bind("<Shift-Button-1>", self.on_shift_click_range)
         # Klik na LP (row index) - zablokuj grube row_select, zamiast tego zaznacz komórkę w wierszu
         try:
             self.sheet.RI.bind("<Button-1>", self._on_lp_click)
+            # Modyfikatory na kolumnie LP: Ctrl = toggle pojedynczy, Shift = zakres.
+            # tksheet wysyła <Shift-Button-1>/<Control-Button-1> osobno od <Button-1>,
+            # więc trzeba je zbindować bezpośrednio na Row Index.
+            self.sheet.RI.bind("<Control-Button-1>", self.on_ctrl_click_block)
+            self.sheet.RI.bind("<Shift-Button-1>", self.on_shift_click_range)
         except Exception:
             pass
         
@@ -6430,6 +6440,8 @@ class MainWindow(tk.Tk):
             row = self.sheet.identify_row(event, exclude_index=False)
             if row is not None and row >= 0:
                 self.sheet.select_cell(row=row, column=1, redraw=True)
+                # Zapamiętaj jako kotwicę dla przyszłego Shift+klik (zakres)
+                self._lp_anchor_row = row
         except Exception as e:
             print(f"⚠️  _on_lp_click: {e}")
         return "break"
@@ -6700,7 +6712,9 @@ class MainWindow(tk.Tk):
                         # Jeśli add_row_selection nie działa, użyj MT API
                         self.sheet.MT.add_selection(row, 0, row + 1, self.sheet.total_columns(), "rows")
                         self.sheet.refresh()
-            
+                # Ustaw kotwicę na ostatni Ctrl+klik (Shift potem liczy zakres od niej)
+                self._lp_anchor_row = row
+
             return "break"  # Zawsze blokuj dalszą propagację
             
         except Exception as e:
@@ -6708,7 +6722,53 @@ class MainWindow(tk.Tk):
             import traceback
             traceback.print_exc()
             return "break"
-    
+
+    def on_shift_click_range(self, event):
+        """SHIFT+klik na LP - zaznacz ZAKRES wierszy od kotwicy do klikniętego.
+
+        Symetryczny do on_ctrl_click_block (Ctrl = pojedyncze toggle):
+        - klik w komórki danych → zablokuj (tak jak Ctrl),
+        - klik w LP (row index) → zaznacz ciągły zakres od self._lp_anchor_row
+          do klikniętego wiersza. Bez kotwicy = traktuj klik jak pojedynczy.
+        """
+        try:
+            # Klik w dane (nie w LP) - blokuj, jak przy Ctrl
+            col = self.sheet.identify_column(event, exclude_header=True)
+            if col is not None:
+                return "break"
+
+            row = self.sheet.identify_row(event, exclude_index=False)
+            if row is None or row < 0:
+                return "break"
+
+            anchor = self._lp_anchor_row
+            if anchor is None or anchor < 0:
+                # Brak kotwicy - zachowaj się jak pojedynczy klik i ustaw kotwicę
+                anchor = row
+                self._lp_anchor_row = row
+
+            lo, hi = (anchor, row) if anchor <= row else (row, anchor)
+
+            # Zaznacz cały zakres [lo, hi] - wyczyść i dodaj wiersze
+            self.sheet.deselect("all", redraw=False)
+            for r in range(lo, hi + 1):
+                try:
+                    self.sheet.add_row_selection(r, redraw=False)
+                except Exception:
+                    try:
+                        self.sheet.MT.add_selection(r, 0, r + 1, self.sheet.total_columns(), "rows")
+                    except Exception:
+                        pass
+            self.sheet.refresh()
+            # NIE zmieniamy kotwicy - kolejny Shift+klik rozszerza od tego samego punktu
+            return "break"
+
+        except Exception as e:
+            print(f"⚠️  Błąd on_shift_click_range: {e}")
+            import traceback
+            traceback.print_exc()
+            return "break"
+
     def on_sheet_left_click(self, event):
         """Obsługa lewego kliku - dla kolumn BOM pokazuj tooltip z wartością src_*"""
         try:
@@ -8215,23 +8275,45 @@ class MainWindow(tk.Tk):
                 print(f"      Przykłady: {result[:3]}")
             return result
         
+        # Uchwyt zaplanowanego (debounced) wyszukiwania — jeden na to okno.
+        _name_search_after = {'id': None}
+
         def on_name_typing(event):
-            """Aktualizuje sugestie nazw podczas wpisywania"""
+            """Aktualizuje sugestie nazw podczas wpisywania (z debounce).
+
+            Wyszukiwanie sugestii otwiera połączenie do KAŻDEJ bazy projektu na
+            dysku sieciowym — przy pisaniu znak-po-znaku to dziesiątki połączeń na
+            literę. Debounce ~300 ms sprawia, że skan rusza dopiero gdy użytkownik
+            przestanie pisać, zamiast przy każdym wciśnięciu klawisza.
+            """
             print(f"⌨️ on_name_typing event, key={event.keysym}")
             # Ignoruj klawisze specjalne
             if event.keysym in ('Up', 'Down', 'Left', 'Right', 'Return', 'Tab', 'Escape'):
                 print(f"  ⏭️ Pomijam klawisz specjalny: {event.keysym}")
                 return
-            
+
+            # Anuluj poprzednio zaplanowane wyszukiwanie (użytkownik pisze dalej).
+            if _name_search_after['id'] is not None:
+                try:
+                    e_name.after_cancel(_name_search_after['id'])
+                except Exception:
+                    pass
+                _name_search_after['id'] = None
+
+            _name_search_after['id'] = e_name.after(300, _run_name_suggestions)
+
+        def _run_name_suggestions():
+            """Faktyczny skan sugestii — odpalany po ustaniu pisania (debounce)."""
+            _name_search_after['id'] = None
             current_text = name_var.get().strip()
             print(f"  📝 Wartość z name_var: '{current_text}'")
-            
+
             if len(current_text) >= 2:
                 # Szukaj sugestii
                 print(f"  🔍 Szukam sugestii dla: '{current_text}'")
                 suggestions = search_name_suggestions(current_text)
                 print(f"  💡 Znaleziono {len(suggestions)} sugestii")
-                
+
                 if suggestions:
                     e_name['values'] = suggestions
                     # Zmiana koloru pola - wizualna informacja że są wyniki

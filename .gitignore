@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 *.sqlite
 .ai_api_key
+build_*.log
+.claude/settings.local.json

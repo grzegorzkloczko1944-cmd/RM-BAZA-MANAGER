@@ -52,3 +52,12 @@ exe = EXE(
     entitlements_file=None,
     icon=['rm_manager_icon.ico'],
 )
+
+# Po zbudowaniu EXE otwórz folder dist w Eksploratorze Windows.
+# (kod .spec wykonuje się jako Python; obiekt EXE powyżej buduje plik,
+#  więc tutaj build jest już gotowy)
+import os as _os
+try:
+    _os.startfile(_os.path.join(_os.path.abspath(DISTPATH), ''))
+except Exception as _e:
+    print(f"(spec) Nie udalo sie otworzyc folderu dist: {_e}")

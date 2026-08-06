@@ -552,6 +552,10 @@ class RMManagerGUI:
         self.selected_project_id = None
         self.projects = []
         self.project_names = {}
+        # Projekty, dla których migracje etapów (ensure_all_stages / fix_sequence /
+        # default_dependencies) wykonano już w tej sesji GUI — żeby nie powtarzać
+        # ich kosztownie przy każdym powrocie do tego samego projektu.
+        self._stages_migrated_this_session = set()
         self.read_only_mode = False  # Tryb tylko do odczytu gdy plik nieprawidłowy
         self.file_verification_message = ""  # Wiadomość o weryfikacji
         self._locked_project_id = None  # Aktualnie zablokowany projekt
@@ -4575,10 +4579,16 @@ class RMManagerGUI:
                     self.status_bar.config(text=f"👁️ Projekt {self.selected_project_id} - TYLKO ODCZYT (nie ma w RM_MANAGER)", fg="#f39c12")
                     return
             else:
-                # Projekt istnieje - upewnij się że ma wszystkie etapy, poprawne sequence i zależności
-                rmm.ensure_all_stages_for_all_projects(project_db)
-                rmm.fix_stage_sequence_for_all_projects(project_db)
-                rmm.ensure_default_dependencies_for_project(project_db, self.selected_project_id)
+                # Projekt istnieje - upewnij się że ma wszystkie etapy, poprawne sequence i zależności.
+                # Te migracje są idempotentne i kosztowne na dysku sieciowym (kilkadziesiąt
+                # zapytań SELECT/UPDATE na etap). Odpalamy je RAZ na projekt na sesję GUI —
+                # przy kolejnym wejściu w ten sam projekt (np. po powrocie z innego) już nie
+                # ma potrzeby ich powtarzać, bo dane się nie zmieniają "same z siebie".
+                if self.selected_project_id not in self._stages_migrated_this_session:
+                    rmm.ensure_all_stages_for_all_projects(project_db)
+                    rmm.fix_stage_sequence_for_all_projects(project_db)
+                    rmm.ensure_default_dependencies_for_project(project_db, self.selected_project_id)
+                    self._stages_migrated_this_session.add(self.selected_project_id)
 
         except Exception as e:
             print(f"⚠️ Błąd ensure_project_initialized dla projektu {self.selected_project_id}: {e}")
@@ -6655,39 +6665,50 @@ class RMManagerGUI:
             # Pobierz reguły enable/disable w oparciu o project status
             ui_rules = self._get_ui_button_states()
             
-            con = rmm._open_rm_connection(self.get_project_db_path(self.selected_project_id))
-            cursor = con.execute("""
-                SELECT ps.stage_code, sd.display_name, sd.color, sd.is_milestone
-                FROM project_stages ps
-                JOIN stage_definitions sd ON ps.stage_code = sd.code
-                WHERE ps.project_id = ?
-                ORDER BY ps.sequence
-            """, (self.selected_project_id,))
-            stages = cursor.fetchall()
-            con.close()
+            # Jedno wspólne połączenie do bazy projektu na cały ten blok odczytów.
+            # Na dysku sieciowym każde otwarcie to kosztowny round-trip SMB, więc
+            # zamiast otwierać osobno dla stages, completed_codes i milestone'ów,
+            # czytamy wszystko z tego samego `con`.
+            pid = self.selected_project_id
+            con = rmm._open_rm_connection(self.get_project_db_path(pid))
+            try:
+                stages = con.execute("""
+                    SELECT ps.stage_code, sd.display_name, sd.color, sd.is_milestone
+                    FROM project_stages ps
+                    JOIN stage_definitions sd ON ps.stage_code = sd.code
+                    WHERE ps.project_id = ?
+                    ORDER BY ps.sequence
+                """, (pid,)).fetchall()
 
-            active_stages = rmm.get_active_stages(self.get_project_db_path(self.selected_project_id), self.selected_project_id)
+                # Zakończone etapy (mają actual_period z ended_at, żaden bez ended_at)
+                completed_codes = [row['stage_code'] for row in con.execute("""
+                    SELECT DISTINCT ps.stage_code
+                    FROM project_stages ps
+                    WHERE ps.project_id = ?
+                      AND EXISTS (
+                          SELECT 1 FROM stage_actual_periods sap
+                          WHERE sap.project_stage_id = ps.id AND sap.ended_at IS NOT NULL
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM stage_actual_periods sap
+                          WHERE sap.project_stage_id = ps.id AND sap.ended_at IS NULL
+                      )
+                """, (pid,)).fetchall()]
+
+                # Milestone'y PRZYJETY/ZAKONCZONY jednym zapytaniem (zamiast
+                # is_milestone_set ×2 + get_milestone = 3 osobne otwarcia bazy).
+                _milestones = rmm.get_milestones_bulk(con, pid, ('PRZYJETY', 'ZAKONCZONY'))
+            finally:
+                con.close()
+
+            przyjety_info  = _milestones.get('PRZYJETY')
+            przyjety_set   = przyjety_info is not None
+            zakonczony_set = 'ZAKONCZONY' in _milestones
+
+            active_stages = rmm.get_active_stages(self.get_project_db_path(pid), pid)
             active_codes = [s['stage_code'] for s in active_stages]
-            is_suspended = rmm.is_project_paused(self.get_project_db_path(self.selected_project_id), self.selected_project_id)
+            is_suspended = rmm.is_project_paused(self.get_project_db_path(pid), pid)
             is_finished  = 'ZAKONCZONY' in active_codes
-            
-            # Pobierz zakończone etapy (wszystkie actual_periods mają ended_at)
-            con_completed = rmm._open_rm_connection(self.get_project_db_path(self.selected_project_id))
-            cursor_completed = con_completed.execute("""
-                SELECT DISTINCT ps.stage_code
-                FROM project_stages ps
-                WHERE ps.project_id = ?
-                  AND EXISTS (
-                      SELECT 1 FROM stage_actual_periods sap
-                      WHERE sap.project_stage_id = ps.id AND sap.ended_at IS NOT NULL
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM stage_actual_periods sap
-                      WHERE sap.project_stage_id = ps.id AND sap.ended_at IS NULL
-                  )
-            """, (self.selected_project_id,))
-            completed_codes = [row['stage_code'] for row in cursor_completed.fetchall()]
-            con_completed.close()
             
             print(f"📋 load_project_stages: active_codes={active_codes}, completed_codes={completed_codes}, is_suspended={is_suspended}, is_finished={is_finished}")
             print(f"📋 ui_rules: przyjety_enabled={ui_rules['przyjety_enabled']}, pause_enabled={ui_rules['pause_enabled']}")
@@ -6701,23 +6722,17 @@ class RMManagerGUI:
             )
             if has_active_regular_stages:
                 ui_rules['zakonczony_enabled'] = False  # Są aktywne etapy - blokada ZAKOŃCZONY
-            
-            # Sprawdź milestones (PRZYJĘTY, ZAKOŃCZONY)
-            przyjety_set = rmm.is_milestone_set(self.get_project_db_path(self.selected_project_id), 
-                                                 self.selected_project_id, 'PRZYJETY')
-            zakonczony_set = rmm.is_milestone_set(self.get_project_db_path(self.selected_project_id), 
-                                                   self.selected_project_id, 'ZAKONCZONY')
-            
+
+            # przyjety_set / zakonczony_set / przyjety_info policzone wyżej z
+            # get_milestones_bulk (jedno zapytanie zamiast trzech otwarć bazy).
+
             # ── 🔗 LINIA PRODUKCYJNA — kojarzenie projektów ──────────────────
             self._render_production_line_bar()
 
             # ── PRZYJĘTY – milestone (zdarzenie instant) ──────────────────────
             przyjety_frame = tk.Frame(self.stages_frame, bg="#e8f4fd", relief=tk.GROOVE, bd=2)
             przyjety_frame.pack(fill=tk.X, padx=8, pady=(8, 4))
-            
-            przyjety_info = rmm.get_milestone(self.get_project_db_path(self.selected_project_id),
-                                              self.selected_project_id, 'PRZYJETY')
-            
+
             przyjety_var = tk.BooleanVar(value=przyjety_set)
             przyjety_cb = tk.Checkbutton(
                 przyjety_frame,
