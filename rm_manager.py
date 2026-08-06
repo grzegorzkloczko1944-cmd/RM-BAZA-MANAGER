@@ -32,6 +32,8 @@ RM_MANAGER ↔ RM_BAZA:
 import os
 import glob
 import sqlite3
+import shutil
+import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
@@ -135,6 +137,124 @@ def get_project_db_path(rm_manager_dir: str, project_id: int) -> str:
     Analogicznie do project_{project_id}.sqlite w RM_BAZA.
     """
     return os.path.join(rm_manager_dir, f"rm_manager_project_{project_id}.sqlite")
+
+
+# ============================================================================
+# LOKALNA KOPIA baz per-projekt (wzorzec z RM_BAZA database_manager.py)
+# ============================================================================
+#
+# Bazy per-projekt leżą na dysku sieciowym (Y:). Każda operacja GUI otwiera
+# świeże połączenie -> koszt round-tripów SMB przy każdym odczycie i zapisie.
+# Pod lockiem jesteśmy JEDYNYM edytorem projektu, więc można pracować na kopii
+# lokalnej (dysk C:) i wgrać ją z powrotem przy zwalnianiu locka.
+#
+# ⚠️  DOTYCZY WYŁĄCZNIE baz PER-PROJEKT (rm_manager_project_*.sqlite).
+#     Master rm_manager.sqlite pracuje ZAWSZE bezpośrednio na Y: - są w nim
+#     PŁATNOŚCI (payment_milestones/payment_history) i KODY PLC, które muszą
+#     być natychmiast widoczne dla pozostałych użytkowników. Nie obejmuj
+#     mastera lokalną kopią.
+
+# Globalny wyłącznik - ustaw False, żeby wrócić do pracy bezpośrednio na Y:
+USE_LOCAL_COPY = True
+
+# Katalog na lokalne kopie (dysk lokalny, nie sieciowy)
+LOCAL_COPY_DIR = os.path.join(tempfile.gettempdir(), "RM_MANAGER_local")
+
+
+def get_local_copy_path(project_id: int) -> str:
+    """Ścieżka lokalnej kopii bazy projektu (dysk C:, katalog tymczasowy)."""
+    return os.path.join(LOCAL_COPY_DIR, f"rm_manager_project_{project_id}.sqlite")
+
+
+def _lc_log(msg: str):
+    """Log bez emoji i odporny na konsolę cp1250.
+
+    Konsola Windows (cp1250) rzuca UnicodeEncodeError na emoji. Logowanie NIGDY
+    nie może wywrócić operacji na bazie, więc błędy printa są tu połykane.
+    """
+    try:
+        print(f"[LOCAL-COPY] {msg}")
+    except Exception:
+        pass
+
+
+def copy_project_to_local(rm_manager_dir: str, project_id: int) -> str | None:
+    """Skopiuj bazę projektu z Y: na dysk lokalny. Zwraca ścieżkę lokalną.
+
+    Wywoływane po zdobyciu locka (jesteśmy jedynym edytorem).
+    Zwraca None, gdy kopiowanie się nie powiodło - wtedy GUI pracuje
+    dalej bezpośrednio na Y: (degradacja do obecnego zachowania).
+    """
+    remote = get_project_db_path(rm_manager_dir, project_id)
+    local = get_local_copy_path(project_id)
+
+    if not os.path.exists(remote):
+        _lc_log(f"brak zdalnej bazy {remote} - pracuje bezposrednio na Y:")
+        return None
+
+    try:
+        os.makedirs(LOCAL_COPY_DIR, exist_ok=True)
+        # Usuń pozostałości po journalu z ewentualnej poprzedniej sesji
+        for suffix in ("-journal", "-wal", "-shm"):
+            stale = local + suffix
+            if os.path.exists(stale):
+                try:
+                    os.remove(stale)
+                except OSError:
+                    pass
+
+        t0 = _time.time()
+        shutil.copy2(remote, local)
+        _lc_log(f"projekt {project_id}: Y: -> lokal ({_time.time() - t0:.3f}s)")
+        return local
+    except Exception as e:
+        _lc_log(f"kopiowanie nieudane ({e}) - pracuje bezposrednio na Y:")
+        return None
+
+
+def sync_project_to_network(rm_manager_dir: str, project_id: int) -> bool:
+    """Wgraj lokalną kopię z powrotem na Y:. Zwraca True przy sukcesie.
+
+    Wywoływane przy zwalnianiu locka / zamykaniu programu. Wymaga, żeby
+    wszystkie połączenia do lokalnej kopii były już zamknięte (commit).
+    """
+    local = get_local_copy_path(project_id)
+    remote = get_project_db_path(rm_manager_dir, project_id)
+
+    if not os.path.exists(local):
+        return False
+
+    try:
+        # Integralność PRZED nadpisaniem sieci - nie wypychaj uszkodzonego pliku
+        con = sqlite3.connect(local, timeout=10.0)
+        try:
+            result = con.execute("PRAGMA integrity_check").fetchone()[0]
+        finally:
+            con.close()
+
+        if str(result).lower() != "ok":
+            _lc_log(f"integrity_check={result} - NIE wgrywam na Y:! Kopia zachowana: {local}")
+            return False
+
+        t0 = _time.time()
+        shutil.copy2(local, remote)
+        _lc_log(f"projekt {project_id}: lokal -> Y: ({_time.time() - t0:.3f}s)")
+        return True
+    except Exception as e:
+        # Nie kasuj lokalnej kopii - zawiera zmiany użytkownika
+        _lc_log(f"SYNC NA Y: NIEUDANY ({e}). Zmiany zachowane lokalnie: {local}")
+        return False
+
+
+def cleanup_local_copy(project_id: int):
+    """Usuń lokalną kopię po udanym sync na Y:."""
+    local = get_local_copy_path(project_id)
+    for path in (local, local + "-journal", local + "-wal", local + "-shm"):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
 
 
 # ============================================================================
