@@ -31508,6 +31508,32 @@ Kod: {unlock_code}
                         "\n\nZapisać mimo to?", icon='warning', parent=ed):
                     return
 
+            # KOLIZJA KRZYŻOWA: czy serwisant ma w tych dniach zaplanowany wyjazd
+            # serwisowy? Jeśli tak — wielkie czerwone ostrzeżenie, bo urlop/L4
+            # koliduje z wyjazdem (trzeba skorygować jedno z dwojga). Dla
+            # pracowników spoza kategorii Serwis lista będzie pusta (brak wyjazdów).
+            try:
+                trip_conflicts = rmm.find_trips_conflicting_with_absence(
+                    self.rm_master_db_path, eid, df_iso, dt_iso)
+            except Exception:
+                trip_conflicts = []
+            if trip_conflicts:
+                t_lines = "\n".join(
+                    f"  • {self.format_date_ddmmyyyy(t['date_from'])} → "
+                    f"{self.format_date_ddmmyyyy(t['date_to'])}  "
+                    f"{rmm.SERVICE_TRIP_TYPE_BY_CODE.get(t['trip_type'], {}).get('label', t['trip_type'])}"
+                    f"  ({(t.get('client_or_place') or '').strip() or '—'})"
+                    f"  [{t.get('status', '')}]"
+                    for t in trip_conflicts)
+                if not self._confirm_cross_conflict_dialog(
+                        ed, "Nieobecność koliduje z wyjazdem serwisowym",
+                        "Ten serwisant ma w tym terminie zaplanowany WYJAZD SERWISOWY:",
+                        t_lines,
+                        "Wystawiasz nieobecność (urlop / L4 / inną) na dni, w które\n"
+                        "serwisant ma zaplanowany wyjazd. Skoryguj daty nieobecności\n"
+                        "albo najpierw przełóż / usuń wyjazd serwisowy."):
+                    return
+
             save_data = {
                 'employee_id': eid,
                 'date_from': df_iso,
@@ -32792,6 +32818,13 @@ Kod: {unlock_code}
             box.pack(side=tk.LEFT, padx=2)
             tk.Label(box, text="  ", bg=rmm.SERVICE_TRIP_STATUS_COLORS.get(status, '#7f8c8d')).pack(side=tk.LEFT)
             tk.Label(box, text=status.capitalize(), font=self.FONT_SMALL).pack(side=tk.LEFT)
+        # Legenda tła nieobecności (mdła jasnoczerwień pod wierszem B).
+        abs_box = tk.Frame(legendbar)
+        abs_box.pack(side=tk.LEFT, padx=(10, 2))
+        tk.Label(abs_box, text="  ", bg="#f2b8b8",
+                 relief='solid', bd=1).pack(side=tk.LEFT)
+        tk.Label(abs_box, text="Nieobecność (urlop/L4)", font=self.FONT_SMALL
+                 ).pack(side=tk.LEFT)
         # opcja: pokaż tylko serwisantów BEZ aktualnego/planowanego wyjazdu (B).
         # ZREALIZOWANY się nie liczy — wyjazd musi być PLANOWANY lub POTWIERDZONY.
         only_no_trip = tk.BooleanVar(value=False)
@@ -32845,10 +32878,12 @@ Kod: {unlock_code}
             'lineA': {},      # {emp_id: [entry,...]}  (cache — liczone rzadko)
             'rows': [],       # [{emp_id, emp_name, kind, project_id, sub_label}]
             'trips': [],      # wszystkie wyjazdy B (cache)
+            'absences': [],   # wszystkie nieobecności serwisantów (cache)
             'tips': {},       # (day_index, row) -> tekst tooltipa
             'trip_at': {},    # (day_index, row) -> trip_id (klik → edycja)
             'collide_days': {},  # emp_id -> set(day_index) kolizji B∩milestone
             'collide_labels': {},  # (emp_id, day_index) -> [etykiety milestone'ów]
+            'absence_days': {},   # emp_id -> {day_index: label} tło dni nieobecności
         }
 
         def _idx_to_date(idx):
@@ -32878,6 +32913,15 @@ Kod: {unlock_code}
             except Exception as e:
                 sv['trips'] = []
                 print(f"⚠️ get_service_trips: {e}")
+            # Nieobecności serwisantów (urlop/L4/…) — do wyszarzenia tła dni w
+            # wierszu B, żeby od razu widać, że wyjazd nachodzi na urlop.
+            # Bierzemy wszystkie nie-odrzucone (get_employee_availability nie
+            # filtruje statusu; ODRZUCONE odsiewamy niżej przy budowie mapy dni).
+            try:
+                sv['absences'] = rmm.get_employee_availability(self.rm_master_db_path)
+            except Exception as e:
+                sv['absences'] = []
+                print(f"⚠️ get_employee_availability: {e}")
             _rebuild_rows()
             _redraw()
 
@@ -32984,6 +33028,19 @@ Kod: {unlock_code}
                         sv['collide_days'].setdefault(eid, set()).add(gi)
                         sv['collide_labels'][(eid, gi)] = ms_days[eid][gi]
 
+            # Dni nieobecności per serwisant (do wyszarzenia tła wiersza B).
+            # Pomijamy ODRZUCONE — te nie obowiązują. To tylko warstwa wizualna:
+            # nie wpływa na kolizje, kolory ani kliknięcia, jedynie maluje tło.
+            sv['absence_days'] = {}
+            for a in sv['absences']:
+                if (a.get('status') or 'ZATWIERDZONY').upper() == 'ODRZUCONY':
+                    continue
+                eid = a['employee_id']
+                lbl = self.REASON_LABELS.get((a.get('reason') or '').upper(),
+                                             a.get('reason') or 'Nieobecność')
+                for gi in _iter_day_idx(a.get('date_from'), a.get('date_to')):
+                    sv['absence_days'].setdefault(eid, {})[gi] = lbl
+
         def _iter_day_idx(d_from, d_to):
             """Iteruj day_index od d_from do d_to (ISO)."""
             if not d_from:
@@ -33057,6 +33114,14 @@ Kod: {unlock_code}
                         cbg = "#34495e"
                     else:
                         cbg = "#dfe4ea" if wd >= 5 else "white"
+                        # Tło dnia nieobecności w wierszu B — mdła, rozmyta
+                        # jasnoczerwień. Czysto wizualne: rysowane PRZED paskami
+                        # wyjazdów (те malują się później w _paint_data), więc nie
+                        # zmienia kolorów statusów ani żadnej logiki. Weekendy
+                        # zostają szare (nie nadpisujemy — dzień wolny i tak).
+                        if (r['kind'] == 'B' and wd < 5
+                                and gi in sv['absence_days'].get(r['emp_id'], {})):
+                            cbg = "#f2b8b8"
                     grid.create_rectangle(x0, y0, x0 + CELL_W, y0 + ROW_H,
                                           fill=cbg, outline="#eeeeee")
             cal_months['lo'] = min(cal_months['lo'], first_idx)
@@ -33111,6 +33176,15 @@ Kod: {unlock_code}
                     for t in emp_trips:
                         _paint_trip(ri, y0, t, m_lo, m_hi, coll, r['emp_id'], double_days,
                                    month_workdays, first_idx)
+                    # Tooltip dni nieobecności (tło jest już namalowane w
+                    # _draw_month). Dokładamy podpowiedź TYLKO gdy dana komórka nie
+                    # ma jeszcze tipa z wyjazdu — nie nadpisujemy opisu wyjazdu.
+                    for gi, alabel in sv['absence_days'].get(r['emp_id'], {}).items():
+                        if not (m_lo <= gi < m_hi):
+                            continue
+                        key = (gi, ri)
+                        if key not in sv['tips']:
+                            sv['tips'][key] = f"🏖 Nieobecność: {alabel}"
 
         def _paint_stage(ri, y0, ent, m_lo, m_hi):
             f_s = ent.get('forecast_start')
@@ -33914,6 +33988,70 @@ Kod: {unlock_code}
         win.wait_window()
         return result['ok']
 
+    def _confirm_cross_conflict_dialog(self, parent, title, intro, conflict_lines,
+                                       hint):
+        """Wielkie czerwone ostrzeżenie o kolizji urlop ⟷ wyjazd serwisowy.
+
+        Serwisant nie może być jednocześnie na nieobecności i na wyjeździe —
+        to okno pokazuje się gdy zapis by taką kolizję stworzył. Zwraca True,
+        jeśli user świadomie potwierdził zapis mimo konfliktu.
+
+        title / intro / hint — teksty zależne od strony (nieobecność vs wyjazd).
+        conflict_lines — sformatowana lista kolidujących wpisów (drugiej tabeli).
+        """
+        result = {'ok': False}
+        win = tk.Toplevel(parent)
+        win.title(title)
+        win.transient(parent)
+        win.grab_set()
+        win.resizable(False, False)
+        win.configure(bg="#c0392b")
+
+        # Gruba czerwona ramka wokół całości — ma "krzyczeć".
+        outer = tk.Frame(win, bg="white")
+        outer.pack(padx=4, pady=4)
+
+        head = tk.Frame(outer, bg="#c0392b", padx=16, pady=12)
+        head.pack(fill=tk.X)
+        tk.Label(head, text="⛔ KOLIZJA: URLOP ⟷ WYJAZD SERWISOWY",
+                 bg="#c0392b", fg="white",
+                 font=("Arial", 14, "bold")).pack(anchor='w')
+
+        body = tk.Frame(outer, bg="white", padx=18, pady=14)
+        body.pack(fill=tk.BOTH)
+        tk.Label(body, text=intro, font=self.FONT_BOLD, bg="white",
+                 fg="#c0392b", anchor='w', justify=tk.LEFT).pack(anchor='w')
+        tk.Label(body, text=conflict_lines, font=self.FONT_SMALL, fg="#c0392b",
+                 bg="white", anchor='w', justify=tk.LEFT).pack(anchor='w', pady=(4, 10))
+        tk.Label(body, text=hint, font=self.FONT_SMALL, bg="white",
+                 fg="#333", anchor='w', justify=tk.LEFT).pack(anchor='w', pady=(0, 8))
+        tk.Label(body, text="Czy na pewno chcesz zapisać mimo kolizji?",
+                 font=self.FONT_BOLD, bg="white", anchor='w', justify=tk.LEFT
+                 ).pack(anchor='w')
+
+        btns = tk.Frame(body, bg="white")
+        btns.pack(fill=tk.X, pady=(14, 0))
+
+        def _yes():
+            result['ok'] = True
+            win.destroy()
+
+        def _no():
+            result['ok'] = False
+            win.destroy()
+
+        tk.Button(btns, text="Tak, zapisz mimo kolizji", bg="#c0392b", fg="white",
+                  font=self.FONT_BOLD, padx=12, pady=5, command=_yes
+                  ).pack(side=tk.RIGHT, padx=(6, 0))
+        tk.Button(btns, text="Nie, skoryguję", font=self.FONT_BOLD, padx=12, pady=5,
+                  command=_no).pack(side=tk.RIGHT)
+
+        win.protocol("WM_DELETE_WINDOW", _no)
+        win.update_idletasks()
+        self._center_window(win, win.winfo_reqwidth(), win.winfo_reqheight())
+        win.wait_window()
+        return result['ok']
+
     def _service_trip_editor(self, parent, trip_id=None, on_change=None,
                              preset_emp=None, preset_date=None):
         """Dialog dodania/edycji wyjazdu serwisowego (linia B).
@@ -34080,6 +34218,31 @@ Kod: {unlock_code}
                     for t in overlap)
                 if not self._confirm_overlap_dialog(win, lines):
                     return
+
+            # KOLIZJA KRZYŻOWA: czy serwisant ma w tych dniach nieobecność
+            # (urlop / L4 / dowolny typ, planowaną lub zatwierdzoną)? Jeśli tak —
+            # wielkie czerwone ostrzeżenie, bo nie może być na wyjeździe i urlopie
+            # jednocześnie. Zob. [[project_serwis_block]] / [[project_urlopy_block]].
+            try:
+                abs_conflicts = rmm.find_absences_conflicting_with_trip(
+                    self.rm_master_db_path, eid, d_from, d_to)
+            except Exception:
+                abs_conflicts = []
+            if abs_conflicts:
+                a_lines = "\n".join(
+                    f"  • {self.format_date_ddmmyyyy(a['date_from'])} → "
+                    f"{self.format_date_ddmmyyyy(a['date_to'])}  "
+                    f"{self.REASON_LABELS.get((a.get('reason') or '').upper(), a.get('reason'))}"
+                    f"  ({self.STATUS_LABELS.get((a.get('status') or 'ZATWIERDZONY').upper(), '')})"
+                    for a in abs_conflicts)
+                if not self._confirm_cross_conflict_dialog(
+                        win, "Wyjazd koliduje z nieobecnością",
+                        "Ten serwisant ma w tym terminie NIEOBECNOŚĆ (urlop / L4 / inną):",
+                        a_lines,
+                        "Ustawiasz wyjazd na dni, w które serwisant NIE JEST dostępny.\n"
+                        "Skoryguj daty wyjazdu albo najpierw popraw / odrzuć nieobecność."):
+                    return
+
             fields = {
                 'employee_id': eid,
                 'project_id': proj_by_label.get(proj_var.get()),

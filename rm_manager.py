@@ -10320,6 +10320,40 @@ def delete_service_trip(rm_master_db_path: str, trip_id: int):
         con.close()
 
 
+# ============================================================================
+# POWIĄZANIA KRZYŻOWE: nieobecności (urlop/L4/…) ⟷ wyjazdy serwisowe.
+# Serwisant nie może być jednocześnie na wyjeździe i na nieobecności — te dwie
+# funkcje wykrywają kolizję "na krzyż" (jedna tabela pyta o drugą), żeby GUI
+# mogło pokazać wielkie czerwone ostrzeżenie przy zapisie po obu stronach.
+# Nakładanie zakresów: A.date_from <= B.date_to AND A.date_to >= B.date_from.
+# ============================================================================
+
+def find_trips_conflicting_with_absence(rm_master_db_path: str, employee_id: int,
+                                        date_from: str, date_to: str) -> List[Dict]:
+    """Wyjazdy serwisowe tego pracownika nachodzące na [date_from, date_to].
+
+    Używane gdy wystawiamy nieobecność (urlop/L4/dowolny typ) — chcemy wiedzieć,
+    czy serwisant ma w tych dniach zaplanowany/potwierdzony/zrealizowany wyjazd.
+    Nie filtruje po statusie wyjazdu (każdy zaplanowany wyjazd = konflikt).
+    Zwraca listę wyjazdów (dict) z employee_name/category (przez get_service_trips).
+    """
+    return get_service_trips(rm_master_db_path, employee_id=employee_id,
+                             date_from=date_from[:10], date_to=date_to[:10])
+
+
+def find_absences_conflicting_with_trip(rm_master_db_path: str, employee_id: int,
+                                        date_from: str, date_to: str) -> List[Dict]:
+    """Nieobecności (nie-odrzucone) tego pracownika nachodzące na [date_from, date_to].
+
+    Używane gdy planujemy wyjazd serwisowy — chcemy wiedzieć, czy serwisant ma
+    w tych dniach urlop/L4/inną nieobecność (planowaną, zatwierdzoną — pomijamy
+    tylko ODRZUCONE, bo tych nie będzie). To ta sama reguła co
+    find_overlapping_absences, tylko bez wykluczania własnego wpisu.
+    """
+    return find_overlapping_absences(rm_master_db_path, employee_id,
+                                     date_from[:10], date_to[:10])
+
+
 def set_absence_status(rm_master_db_path: str, avail_id: int, status: str,
                        note: str = None, user: str = None):
     """Zmień status wpisu nieobecności (workflow wniosku).
