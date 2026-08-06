@@ -32,6 +32,8 @@ RM_MANAGER ↔ RM_BAZA:
 import os
 import glob
 import sqlite3
+import shutil
+import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
@@ -135,6 +137,217 @@ def get_project_db_path(rm_manager_dir: str, project_id: int) -> str:
     Analogicznie do project_{project_id}.sqlite w RM_BAZA.
     """
     return os.path.join(rm_manager_dir, f"rm_manager_project_{project_id}.sqlite")
+
+
+# ============================================================================
+# LOKALNA KOPIA baz per-projekt (wzorzec z RM_BAZA database_manager.py)
+# ============================================================================
+#
+# Bazy per-projekt leżą na dysku sieciowym (Y:). Każda operacja GUI otwiera
+# świeże połączenie -> koszt round-tripów SMB przy każdym odczycie i zapisie.
+# Pod lockiem jesteśmy JEDYNYM edytorem projektu, więc można pracować na kopii
+# lokalnej (dysk C:) i wgrać ją z powrotem przy zwalnianiu locka.
+#
+# ⚠️  DOTYCZY WYŁĄCZNIE baz PER-PROJEKT (rm_manager_project_*.sqlite).
+#     Master rm_manager.sqlite pracuje ZAWSZE bezpośrednio na Y: - są w nim
+#     PŁATNOŚCI (payment_milestones/payment_history) i KODY PLC, które muszą
+#     być natychmiast widoczne dla pozostałych użytkowników. Nie obejmuj
+#     mastera lokalną kopią.
+#
+#     BEZPIECZEŃSTWO ZAPISU MASTERA (świadoma decyzja, nie przeoczenie):
+#     zapis idzie od razu na Y:, ale nie "na surowo" - chroni go warstwa
+#     _open_rm_connection() + _rm_safe_commit():
+#       - journal_mode=DELETE  -> WAL nie działa przez SMB (ryzyko korupcji),
+#       - busy_timeout=5000    -> czeka na zwolnienie blokady zamiast błędu,
+#       - synchronous=NORMAL   -> dane trafiają na dysk przy commicie,
+#       - commit z retry       -> odporność na "database is locked" przy
+#                                 kilku użytkownikach naraz,
+#       - INSERT milestone + INSERT historia w JEDNEJ transakcji -> albo
+#         zapisze się komplet, albo nic (brak transzy bez wpisu w historii).
+#     Efekt: płatności i kody PLC są widoczne natychmiast dla wszystkich,
+#     a równoczesny zapis z dwóch stanowisk nie uszkadza bazy.
+
+# Globalny wyłącznik - ustaw False, żeby wrócić do pracy bezpośrednio na Y:
+USE_LOCAL_COPY = True
+
+# Katalog na lokalne kopie (dysk lokalny, nie sieciowy)
+LOCAL_COPY_DIR = os.path.join(tempfile.gettempdir(), "RM_MANAGER_local")
+
+
+def get_local_copy_path(project_id: int) -> str:
+    """Ścieżka lokalnej kopii bazy projektu (dysk C:, katalog tymczasowy)."""
+    return os.path.join(LOCAL_COPY_DIR, f"rm_manager_project_{project_id}.sqlite")
+
+
+def _lc_log(msg: str):
+    """Log bez emoji i odporny na konsolę cp1250.
+
+    Konsola Windows (cp1250) rzuca UnicodeEncodeError na emoji. Logowanie NIGDY
+    nie może wywrócić operacji na bazie, więc błędy printa są tu połykane.
+    """
+    try:
+        print(f"[LOCAL-COPY] {msg}")
+    except Exception:
+        pass
+
+
+def has_unsynced_local_copy(project_id: int) -> bool:
+    """Czy na dysku leży lokalna kopia, której NIE wgrano jeszcze na Y:?
+
+    Kopia jest kasowana (cleanup_local_copy) dopiero po udanym sync, więc
+    samo jej istnienie oznacza niezsynchronizowane zmiany użytkownika -
+    albo po nieudanym sync, albo po twardym ubiciu procesu.
+    """
+    return os.path.exists(get_local_copy_path(project_id))
+
+
+def copy_project_to_local(rm_manager_dir: str, project_id: int) -> str | None:
+    """Skopiuj bazę projektu z Y: na dysk lokalny. Zwraca ścieżkę lokalną.
+
+    Wywoływane po zdobyciu locka (jesteśmy jedynym edytorem).
+    Zwraca None, gdy kopiowanie się nie powiodło - wtedy GUI pracuje
+    dalej bezpośrednio na Y: (degradacja do obecnego zachowania).
+
+    ⚠️ NIE nadpisuje istniejącej kopii lokalnej. Kopia, która przetrwała
+    poprzednią sesję, zawiera niezsynchronizowane zmiany (sync się nie
+    powiódł albo proces padł) - nadpisanie jej wersją z Y: skasowałoby
+    pracę użytkownika, na którą wcześniej wskazywał komunikat błędu.
+    """
+    remote = get_project_db_path(rm_manager_dir, project_id)
+    local = get_local_copy_path(project_id)
+
+    if not os.path.exists(remote):
+        _lc_log(f"brak zdalnej bazy {remote} - pracuje bezposrednio na Y:")
+        return None
+
+    # Rozbieżna kopia z poprzedniej sesji - nie ruszamy jej, praca idzie na Y:.
+    # Odzyskanie danych z takiego pliku jest decyzją użytkownika (GUI o tym mówi).
+    if os.path.exists(local):
+        _lc_log(f"projekt {project_id}: istnieje NIEZSYNCHRONIZOWANA kopia {local} "
+                f"- NIE nadpisuje jej, pracuje bezposrednio na Y:")
+        return None
+
+    try:
+        os.makedirs(LOCAL_COPY_DIR, exist_ok=True)
+        # Usuń pozostałości po journalu z ewentualnej poprzedniej sesji
+        for suffix in ("-journal", "-wal", "-shm"):
+            stale = local + suffix
+            if os.path.exists(stale):
+                try:
+                    os.remove(stale)
+                except OSError:
+                    pass
+
+        t0 = _time.time()
+        shutil.copy2(remote, local)
+        _lc_log(f"projekt {project_id}: Y: -> lokal ({_time.time() - t0:.3f}s)")
+        return local
+    except Exception as e:
+        _lc_log(f"kopiowanie nieudane ({e}) - pracuje bezposrednio na Y:")
+        return None
+
+
+def sync_project_to_network(rm_manager_dir: str, project_id: int,
+                            still_owns_lock=None) -> bool:
+    """Wgraj lokalną kopię z powrotem na Y:. Zwraca True przy sukcesie.
+
+    Wywoływane przy zwalnianiu locka / zamykaniu programu. Wymaga, żeby
+    wszystkie połączenia do lokalnej kopii były już zamknięte (commit).
+
+    Args:
+        still_owns_lock: opcjonalny callable() -> bool, sprawdzany TUŻ przed
+            nadpisaniem Y:. Gdy zwróci False, sync jest przerywany - lock
+            przejął ktoś inny i nasza kopia jest już nieaktualna.
+
+    Bezpieczeństwo zapisu:
+    - PRAGMA integrity_check przed wypchnięciem (nie wysyłamy uszkodzonego pliku),
+    - weryfikacja locka tuż przed nadpisaniem (nie kasujemy cudzej pracy),
+    - zapis ATOMOWY: kopia do pliku tymczasowego obok celu + os.replace().
+      shutil.copy2() prosto na cel zeruje plik na Y: i dopiero streamuje
+      zawartość - zerwanie SMB w trakcie zostawiało uszkodzoną bazę dla
+      wszystkich. os.replace() jest atomowe w obrębie jednego wolumenu.
+    """
+    local = get_local_copy_path(project_id)
+    remote = get_project_db_path(rm_manager_dir, project_id)
+
+    if not os.path.exists(local):
+        return False
+
+    try:
+        # Integralność PRZED nadpisaniem sieci - nie wypychaj uszkodzonego pliku
+        con = sqlite3.connect(local, timeout=10.0)
+        try:
+            result = con.execute("PRAGMA integrity_check").fetchone()[0]
+            # journal_mode=DELETE (SMB-safe), ale gdyby plik trafił tu w WAL,
+            # niezcheckpointowane transakcje siedzą w sidecarze -wal, którego
+            # NIE kopiujemy. TRUNCATE wciąga je do pliku głównego.
+            try:
+                if str(con.execute("PRAGMA journal_mode").fetchone()[0]).upper() == "WAL":
+                    con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
+        finally:
+            con.close()
+
+        if str(result).lower() != "ok":
+            _lc_log(f"integrity_check={result} - NIE wgrywam na Y:! Kopia zachowana: {local}")
+            return False
+
+        # Ostatnia bramka przed nadpisaniem cudzych danych: czy lock nadal nasz?
+        if still_owns_lock is not None:
+            try:
+                owns = bool(still_owns_lock())
+            except Exception as e:
+                _lc_log(f"weryfikacja locka nieudana ({e}) - NIE wgrywam na Y:")
+                return False
+            if not owns:
+                _lc_log(f"projekt {project_id}: lock NIE jest juz nasz - NIE wgrywam na Y:! "
+                        f"Kopia zachowana: {local}")
+                return False
+
+        t0 = _time.time()
+        tmp = remote + ".rmtmp"
+        # Zapis atomowy: najpierw pełna kopia obok celu, potem podmiana nazwy.
+        # Cały blok w try: zerwanie SMB w trakcie copy2 też zostawia .rmtmp,
+        # a niedokończony plik obok bazy myli przy diagnozie i zajmuje miejsce.
+        try:
+            shutil.copy2(local, tmp)
+            os.replace(tmp, remote)
+        except Exception:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+            raise
+
+        # Stary journal obok podmienionego pliku zostałby potraktowany jako
+        # "hot journal" i wrolowany w NOWĄ bazę - to gwarantowana korupcja.
+        for suffix in ("-journal", "-wal", "-shm"):
+            stale = remote + suffix
+            try:
+                if os.path.exists(stale):
+                    os.remove(stale)
+            except OSError:
+                pass
+
+        _lc_log(f"projekt {project_id}: lokal -> Y: ({_time.time() - t0:.3f}s)")
+        return True
+    except Exception as e:
+        # Nie kasuj lokalnej kopii - zawiera zmiany użytkownika
+        _lc_log(f"SYNC NA Y: NIEUDANY ({e}). Zmiany zachowane lokalnie: {local}")
+        return False
+
+
+def cleanup_local_copy(project_id: int):
+    """Usuń lokalną kopię po udanym sync na Y:."""
+    local = get_local_copy_path(project_id)
+    for path in (local, local + "-journal", local + "-wal", local + "-shm"):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
 
 
 # ============================================================================

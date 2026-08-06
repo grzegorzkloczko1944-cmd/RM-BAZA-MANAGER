@@ -565,6 +565,7 @@ class RMManagerGUI:
         self._line_parallel_stages: set = set() # Kody etapów równoległych bieżącej linii
         self._line_snapshots: dict = {}         # {pid: {stage_code: (start, end)}} snapshoty linii
         self.viewing_backup = False      # Czy oglądamy backup (read-only podgląd)
+        self._local_copy_project_id = None  # PID projektu otwartego na kopii lokalnej (None = praca na Y:)
         self.backup_date = None          # Data backupu (np. "2026-04-12")
         self.received_percent = None     # % odebranych elementów (z RM_BAZA)
         self.backup_db_path = None       # Ścieżka do pliku backupu (gdy viewing_backup==True)
@@ -684,10 +685,171 @@ class RMManagerGUI:
 
     def get_project_db_path(self, project_id: int) -> str:
         """Zwraca ścieżkę do per-projekt bazy: RM_MANAGER_projects/rm_manager_project_{id}.sqlite
-        Jeśli viewing_backup==True, zwraca ścieżkę do backupu."""
+        Jeśli viewing_backup==True, zwraca ścieżkę do backupu.
+        Jeśli projekt jest otwarty na kopii lokalnej, zwraca ścieżkę lokalną."""
         if self.viewing_backup and self.backup_db_path:
             return self.backup_db_path
+        # Kopia lokalna tylko dla projektu, na który mamy lock (jesteśmy jedynym
+        # edytorem). Pozostałe projekty czytane są normalnie z Y:.
+        if project_id == self._local_copy_project_id:
+            return rmm.get_local_copy_path(project_id)
         return rmm.get_project_db_path(self.rm_projects_dir, project_id)
+
+    def toggle_local_copy(self):
+        """Menu Narzędzia → włącz/wyłącz pracę na kopii lokalnej."""
+        enabled = bool(self.local_copy_var.get())
+
+        # Zmiana w trakcie pracy na kopii: najpierw bezpiecznie wgraj zmiany na Y:
+        if not enabled and self._local_copy_project_id is not None:
+            self._sync_local_copy_back()
+
+        rmm.USE_LOCAL_COPY = enabled
+        # Zapamiętaj wybór w manager_sync_config.json
+        try:
+            cfg = dict(getattr(self, 'config', {}) or {})
+            cfg['use_local_copy'] = enabled
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(cfg, f, indent=4, ensure_ascii=False)
+            self.config = cfg
+        except Exception as e:
+            print(f"⚠️ Nie zapisano ustawienia use_local_copy: {e}")
+
+        if enabled:
+            messagebox.showinfo(
+                "Kopia lokalna",
+                "⚡ Szybka praca WŁĄCZONA.\n\n"
+                "Baza edytowanego projektu jest kopiowana na dysk lokalny przy "
+                "przejęciu locka i wgrywana z powrotem na Y: przy jego zwolnieniu "
+                "(oraz przy zamykaniu programu).\n\n"
+                "Płatności i kody PLC działają bez zmian — bezpośrednio na Y:.\n\n"
+                "Zadziała przy następnym przejęciu locka."
+            )
+        else:
+            messagebox.showinfo(
+                "Kopia lokalna",
+                "Szybka praca WYŁĄCZONA.\n\n"
+                "Program pracuje bezpośrednio na bazie sieciowej Y: (jak dotychczas)."
+            )
+
+    def _still_owns_lock(self, project_id: int) -> bool:
+        """Czy TERAZ nadal trzymamy lock na projekcie (sprawdzenie na żywo)?
+
+        Używane jako ostatnia bramka przed nadpisaniem bazy na Y:. Nie polega
+        na fladze self.have_lock ani na callbacku _on_lock_lost - te mogą być
+        nieaktualne, gdy komputer był uśpiony albo pętla GUI była zablokowana,
+        a ktoś w tym czasie wymusił przejęcie locka.
+        """
+        # Tryb jednoużytkownikowy (stub) - nie ma z kim kolidować
+        if getattr(self.lock_manager, '_STUB', False):
+            return True
+        try:
+            owner = self.lock_manager.get_project_lock_owner(project_id)
+        except Exception as e:
+            print(f"⚠️ Nie udało się zweryfikować locka projektu {project_id}: {e}")
+            return False
+        if not owner:
+            return False
+        if self.current_lock_id and owner.get('lock_id') != self.current_lock_id:
+            return False
+        return True
+
+    def _block_if_local_copy_active(self, operation: str) -> bool:
+        """Zablokuj operację masową/przywracanie, gdy trwa praca na kopii lokalnej.
+
+        Takie operacje piszą PROSTO na Y: (chodzą po wszystkich plikach
+        rm_manager_project_*.sqlite albo odtwarzają plik sieciowy z backupu).
+        Gdy równocześnie trzymamy kopię lokalną, późniejszy sync nadpisze
+        plik sieciowy naszą wersją i skasuje wynik tej operacji.
+
+        Zwraca True gdy operację NALEŻY przerwać.
+        """
+        pid = self._local_copy_project_id
+        if pid is None:
+            return False
+        messagebox.showwarning(
+            "Trwa praca na kopii lokalnej",
+            f"{operation} zapisuje bezpośrednio na dysku sieciowym Y:, "
+            f"a projekt {pid} jest teraz edytowany na kopii lokalnej.\n\n"
+            f"Wynik tej operacji zostałby skasowany przy wgrywaniu kopii na Y:.\n\n"
+            f"Zwolnij najpierw lock projektu {pid} (🔓 Zwolnij Lock), "
+            f"a potem powtórz operację.",
+            parent=self.root
+        )
+        return True
+
+    def _warn_unsynced_local_copy(self, project_id: int):
+        """Ostrzeż o kopii lokalnej, której nie udało się wgrać na Y:."""
+        try:
+            messagebox.showwarning(
+                "Niezsynchronizowane zmiany lokalne",
+                f"Na dysku została kopia projektu {project_id} z poprzedniej sesji, "
+                f"której NIE wgrano na dysk Y:.\n\n"
+                f"{rmm.get_local_copy_path(project_id)}\n\n"
+                f"Żeby nie nadpisać tych zmian, program pracuje teraz bezpośrednio "
+                f"na Y: (bez kopii lokalnej).\n\n"
+                f"Zabezpiecz ten plik albo usuń go, gdy zmiany są już niepotrzebne."
+            )
+        except Exception:
+            pass
+
+    def _open_local_copy(self, project_id: int):
+        """Po zdobyciu locka: skopiuj bazę projektu Y: → dysk lokalny.
+
+        Idempotentne: ponowne wywołanie dla tego samego projektu nie nadpisuje
+        kopii świeżym plikiem z Y: (skasowałoby to bieżące zmiany).
+        """
+        if not rmm.USE_LOCAL_COPY or self.viewing_backup:
+            return
+
+        # Ten projekt już pracuje lokalnie - nie kopiuj ponownie
+        if self._local_copy_project_id == project_id:
+            return
+
+        # Zmiana projektu przy niezsynchronizowanej kopii - najpierw oddaj starą
+        if self._local_copy_project_id is not None:
+            self._sync_local_copy_back()
+
+        # Kopia po nieudanym syncu/ubitym procesie = niezapisane zmiany użytkownika.
+        # copy_project_to_local jej nie nadpisze; uprzedzamy o pracy na Y:.
+        had_orphan = rmm.has_unsynced_local_copy(project_id)
+
+        local = rmm.copy_project_to_local(self.rm_projects_dir, project_id)
+        # None => kopiowanie nieudane, pracujemy dalej bezpośrednio na Y:
+        self._local_copy_project_id = project_id if local else None
+
+        if had_orphan and not local:
+            self._warn_unsynced_local_copy(project_id)
+
+    def _sync_local_copy_back(self):
+        """Przed zwolnieniem locka: wgraj lokalną kopię z powrotem na Y:.
+
+        Bezpieczne do wielokrotnego wywołania - gdy nie ma aktywnej kopii
+        lokalnej, wychodzi natychmiast. Dzięki temu można je wołać na każdej
+        ścieżce zwalniania locka bez ryzyka podwójnego zapisu.
+        """
+        pid = self._local_copy_project_id
+        if pid is None:
+            return
+
+        # Od tego momentu wszystkie zapytania mają iść znów na Y:
+        self._local_copy_project_id = None
+
+        if rmm.sync_project_to_network(self.rm_projects_dir, pid,
+                                       still_owns_lock=lambda: self._still_owns_lock(pid)):
+            rmm.cleanup_local_copy(pid)
+        else:
+            # Sync nieudany - kopia z danymi użytkownika zostaje na dysku
+            try:
+                messagebox.showerror(
+                    "Błąd zapisu na dysk sieciowy",
+                    f"Nie udało się wgrać zmian projektu {pid} na dysk Y:.\n\n"
+                    f"Twoje zmiany NIE zostały utracone — są w pliku:\n"
+                    f"{rmm.get_local_copy_path(pid)}\n\n"
+                    f"Sprawdź połączenie z dyskiem sieciowym. Nie zamykaj programu "
+                    f"bez skopiowania tego pliku, jeśli zmiany są ważne."
+                )
+            except Exception:
+                pass
 
     def _get_all_alarms(self) -> list:
         """Zbierz wszystkie alarmy ze wszystkich projektów (včetně odłożonych)"""
@@ -1355,12 +1517,16 @@ class RMManagerGUI:
             if result["action"] == "release":
                 try:
                     self.save_all_templates()  # Zapisz zmiany
+                    self._sync_local_copy_back()  # Kopia lokalna -> Y: (przed oddaniem locka)
                     self.lock_manager.release_project_lock(self._locked_project_id)
                 except Exception as e:
                     messagebox.showerror("Błąd", f"Nie można zwolnić locka:\n{e}")
                     return  # NIE zamykaj aplikacji
             elif result["action"] == "cancel":
                 try:
+                    # Program się zamyka - kopia lokalna musi wrócić na Y:,
+                    # inaczej zmiany zostałyby tylko na tej stacji.
+                    self._sync_local_copy_back()
                     self.lock_manager.release_project_lock(self._locked_project_id)
                 except Exception:
                     pass
@@ -1369,6 +1535,12 @@ class RMManagerGUI:
             else:
                 return  # Zamknięto dialog bez wyboru - NIE zamykaj
         
+        # Ostatnia szansa: jeśli jakakolwiek ścieżka ominęła sync, wgraj kopię na Y:
+        try:
+            self._sync_local_copy_back()
+        except Exception as e:
+            print(f"⚠️ Sync kopii lokalnej przy zamykaniu: {e}")
+
         # Cleanup wszystkich locków przed zamknięciem
         self.lock_manager.cleanup_all_my_locks()
         
@@ -1539,6 +1711,8 @@ class RMManagerGUI:
             self._locked_project_id = project_id
             self.have_lock = True
             self.current_lock_id = lock_id
+            # Mamy wyłączność na projekt -> pracuj na kopii lokalnej (szybciej)
+            self._open_local_copy(project_id)
         return success
 
     def _release_current_lock(self):
@@ -1546,6 +1720,12 @@ class RMManagerGUI:
         # Zapisz wszystkie niezapisane zmiany z timeline
         self.save_all_templates()
         
+        # Wgraj kopię lokalną na Y: PRZED oddaniem locka - dopóki go trzymamy,
+        # nikt inny nie pisze do pliku sieciowego.
+        # MUSI być przed backupem: backup_manager czyta plik z Y:, więc bez
+        # tego zarchiwizowałby wersję sprzed sesji edycyjnej.
+        self._sync_local_copy_back()
+
         # Backup projektu przed zwolnieniem locka
         if self._locked_project_id is not None and self.backup_manager:
             try:
@@ -1554,7 +1734,7 @@ class RMManagerGUI:
                 print(f"✅ Backup projektu {self._locked_project_id} zakończony")
             except Exception as e:
                 print(f"⚠️ Błąd backupu projektu (niegroźne): {e}")
-        
+
         if self._locked_project_id is not None:
             self.lock_manager.release_project_lock(self._locked_project_id)
             self._locked_project_id = None
@@ -1924,6 +2104,9 @@ class RMManagerGUI:
             self.have_lock = True
             self.current_lock_id = lock_id
             self.read_only_mode = False
+            # Kopia lokalna PRZED snapshotem i odczytem etapów, żeby dalsza
+            # praca (w tym snapshot do "Anuluj") szła już na kopii lokalnej.
+            self._open_local_copy(self.selected_project_id)
             self._snapshot_stage_dates()  # Snapshot dat do cofnięcia przy Anuluj
             self._try_acquire_line_locks()  # Locki na pozostałe projekty linii
             self.status_bar.config(
@@ -1992,6 +2175,8 @@ class RMManagerGUI:
             self.have_lock = True
             self.current_lock_id = lock_id
             self.read_only_mode = False
+            # Kopia lokalna PRZED snapshotem i odczytem etapów (jak w acquire_lock)
+            self._open_local_copy(self.selected_project_id)
             self._snapshot_stage_dates()  # Snapshot dat do cofnięcia przy Anuluj
             self._try_acquire_line_locks()  # Locki na pozostałe projekty linii
             self.status_bar.config(
@@ -2210,6 +2395,11 @@ class RMManagerGUI:
             restored = self._restore_stage_dates_from_snapshot()
             self._restore_line_snapshots()
 
+            # Przywrócenie dat poszło do KOPII LOKALNEJ - trzeba ją wgrać na Y:,
+            # inaczej "Anuluj" nie cofa nic na dysku sieciowym (a przy wcześniejszym
+            # syncu w tej samej sesji zostawiłby tam WŁAŚNIE anulowane zmiany).
+            self._sync_local_copy_back()
+
             # Zwolnij lock primary + locki linii
             self.lock_manager.release_project_lock(self.selected_project_id)
             self._release_line_locks()
@@ -2262,6 +2452,10 @@ class RMManagerGUI:
             # Zapisz wszystkie niezapisane zmiany przed zwolnieniem (propaguje też etapy równoległe)
             self.save_all_templates()
 
+            # save_all_templates() pisze do KOPII LOKALNEJ - wgraj ją na Y:
+            # ZANIM oddamy lock, inaczej cała sesja zostaje tylko w %TEMP%.
+            self._sync_local_copy_back()
+
             self.lock_manager.release_project_lock(self.selected_project_id)
             self._release_line_locks()
             self._locked_project_id = None
@@ -2287,6 +2481,12 @@ class RMManagerGUI:
     def _on_lock_lost(self, reason: str):
         """Obsługa utraty locka (ktoś wymuszył przejęcie)"""
         print(f"🚨 UTRATA LOCKA: {reason}")
+        # Lock przejął ktoś inny - NIE wolno wgrywać naszej kopii na Y:,
+        # bo nadpisalibyśmy jego zmiany. Kopię zachowujemy na dysku i mówimy o tym.
+        orphan_pid = self._local_copy_project_id
+        orphan_path = rmm.get_local_copy_path(orphan_pid) if orphan_pid is not None else None
+        self._local_copy_project_id = None
+
         self._locked_project_id = None
         self.have_lock = False
         self.current_lock_id = None
@@ -2302,11 +2502,19 @@ class RMManagerGUI:
             text=f"⚠️ Utracono lock projektu {self.selected_project_id} - tryb READ-ONLY",
             fg="#e74c3c"
         )
+        extra = ""
+        if orphan_path:
+            extra = (
+                f"\n\n⚠️ Pracowałeś na kopii lokalnej. Twoje zmiany NIE zostały "
+                f"wgrane na Y:, bo projekt edytuje teraz ktoś inny "
+                f"(nadpisanie skasowałoby jego pracę).\n\n"
+                f"Kopia z Twoimi zmianami:\n{orphan_path}"
+            )
         messagebox.showwarning(
             "⚠️ Utrata locka",
             f"Twój lock projektu {self.selected_project_id} został przejęty!\n\n"
             f"Powód:\n{reason}\n\n"
-            f"Tryb: READ-ONLY",
+            f"Tryb: READ-ONLY{extra}",
             parent=self.root
         )
 
@@ -2370,6 +2578,8 @@ class RMManagerGUI:
                     )
                     # server_exe_path: ścieżka do EXE na serwerze (dla auto-update)
                     self.server_exe_path = config.get('server_exe_path', '')
+                    # Szybka praca na kopii lokalnej (menu Narzędzia)
+                    rmm.USE_LOCAL_COPY = bool(config.get('use_local_copy', rmm.USE_LOCAL_COPY))
                     # ai_rules_path: wspólny plik reguł firmowych dla AI (jeden dla wszystkich userów)
                     self.ai_rules_path = config.get(
                         'ai_rules_path',
@@ -3056,6 +3266,15 @@ class RMManagerGUI:
         tools_menu.add_command(label="🐛 DEBUG — Zrzut danych projektów", command=self.debug_dump_dialog)
         tools_menu.add_separator()
         tools_menu.add_command(label="🔄 Aktualizuj definicje etapów (nazwy, kolory)", command=self.update_stage_definitions_ui)
+        tools_menu.add_separator()
+        # Przyspieszenie: praca na lokalnej kopii bazy projektu (sync na Y: przy
+        # zwolnieniu locka). Płatności i kody PLC są w masterze - zawsze na Y:.
+        self.local_copy_var = tk.BooleanVar(value=rmm.USE_LOCAL_COPY)
+        tools_menu.add_checkbutton(
+            label="⚡ Szybka praca na kopii lokalnej",
+            variable=self.local_copy_var,
+            command=self.toggle_local_copy,
+        )
 
         # Users menu
         self.user_var = tk.StringVar()
@@ -5265,6 +5484,8 @@ class RMManagerGUI:
 
     def reset_all_file_tracking_ui(self):
         """Reset śledzenia pliku dla WSZYSTKICH projektów (po zmianie ścieżki)"""
+        if self._block_if_local_copy_active("Reset śledzenia wszystkich projektów"):
+            return
         result = messagebox.askyesno(
             "🔄 Resetuj śledzenie WSZYSTKICH projektów",
             f"Czy na pewno chcesz zresetować śledzenie plików dla WSZYSTKICH projektów?\n\n"
@@ -5317,6 +5538,8 @@ class RMManagerGUI:
 
     def update_stage_definitions_ui(self):
         """Aktualizuj definicje etapów w bazie (po dodaniu nowych etapów w kodzie)"""
+        if self._block_if_local_copy_active("Aktualizacja definicji etapów"):
+            return
         result = messagebox.askyesno(
             "🔄 Aktualizuj definicje etapów",
             "Operacja:\n\n"
@@ -5407,6 +5630,8 @@ class RMManagerGUI:
 
     def fix_stage_sequence_ui(self):
         """Napraw kolejność etapów (sequence) dla wszystkich projektów"""
+        if self._block_if_local_copy_active("Naprawa kolejności etapów"):
+            return
         result = messagebox.askyesno(
             "🔢 Napraw kolejność etapów",
             "Operacja:\n\n"
@@ -5455,6 +5680,8 @@ class RMManagerGUI:
 
     def migrate_milestones_ui(self):
         """Migruj PRZYJĘTY i ZAKOŃCZONY na instant (ended_at = started_at)"""
+        if self._block_if_local_copy_active("Migracja milestones"):
+            return
         result = messagebox.askyesno(
             "⚡ Migruj milestones na instant",
             "Operacja:\n\n"
@@ -21253,6 +21480,9 @@ class RMManagerGUI:
             # datami z formularza głównego UI. Wywołujemy logikę _release_current_lock
             # bez save_all_templates().
             
+            # Kopia lokalna -> Y: przed backupem i przed oddaniem locka
+            self._sync_local_copy_back()
+
             # Backup projektu przed zwolnieniem locka
             if self._locked_project_id is not None and self.backup_manager:
                 try:
@@ -21261,7 +21491,7 @@ class RMManagerGUI:
                     print(f"✅ Backup projektu {self._locked_project_id} zakończony")
                 except Exception as e:
                     print(f"⚠️ Błąd backupu projektu (niegroźne): {e}")
-            
+
             # Zwolnij lock primary + locki linii
             self.lock_manager.release_project_lock(self._locked_project_id)
             print(f"🔓 Lock project {self._locked_project_id} zwolniony")
@@ -21310,12 +21540,15 @@ class RMManagerGUI:
             
             # Zwalniamy lock BEZ save_all_templates() — snapshot już przywrócił dane,
             # a save_all_templates nadpisałby je starymi z formularza głównego
+            self._restore_line_snapshots()
+            # Sync PO przywróceniu snapshotów - na Y: ma trafić stan po cofnięciu
+            # zmian, nie anulowane edycje.
+            self._sync_local_copy_back()
             if self._locked_project_id is not None and self.backup_manager:
                 try:
                     self.backup_manager.backup_project(self._locked_project_id, skip_checkpoint=True)
                 except Exception:
                     pass
-            self._restore_line_snapshots()
             self.lock_manager.release_project_lock(self._locked_project_id)
             print(f"🔓 Lock project {self._locked_project_id} zwolniony (anulowano)")
             self._locked_project_id = None
@@ -24181,6 +24414,11 @@ class RMManagerGUI:
                 )
                 return
             
+            # Restore nadpisuje PLIK SIECIOWY. Gdy trzymamy kopię lokalną tego
+            # (lub innego) projektu, późniejszy sync cofnąłby przywrócenie.
+            if self._block_if_local_copy_active(f"Przywrócenie backupu projektu {project_id}"):
+                return
+
             msg = (
                 f"⚠️ PRZYWRÓCENIE BAZY PROJEKTU {project_id}\n\n"
                 f"Data backupu: {date}\n\n"
@@ -35616,7 +35854,9 @@ Kod: {unlock_code}
             lines.append(f"PROJEKT {pid}: {pname}")
             lines.append("─" * 80)
 
-            db_path = rmm.get_project_db_path(self.rm_projects_dir, pid)
+            # self.get_project_db_path (nie rmm.*) - dla projektu pod lockiem
+            # czyta kopię lokalną, inaczej raport pokazywałby stan sprzed edycji.
+            db_path = self.get_project_db_path(pid)
             if not os.path.exists(db_path):
                 lines.append(f"  ⚠️ Brak bazy: {db_path}")
                 continue
