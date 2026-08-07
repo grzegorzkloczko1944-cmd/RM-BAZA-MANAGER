@@ -3868,7 +3868,14 @@ def pause_project(rm_db_path: str, project_id: int, reason: str = None,
             set_project_status(master_db_path, project_id, ProjectStatus.PAUSED)
         except Exception as e:
             print(f"⚠️  Nie można zaktualizować statusu: {e}")
-    
+        # project_status (state machine) != status (tekst wyświetlany w RM_BAZA,
+        # patrz sync_to_master). Bez tego "Wstrzymany" nie pojawia się w RM_BAZA
+        # dopóki ktoś ręcznie nie zsynchronizuje projektu.
+        try:
+            sync_to_master(rm_db_path, master_db_path, project_id)
+        except Exception as e:
+            print(f"⚠️  Nie można zsynchronizować statusu 'Wstrzymany' do RM_BAZA: {e}")
+
     return pause_id
 
 
@@ -3948,10 +3955,17 @@ def resume_project(rm_db_path: str, project_id: int, resumed_by: str = None,
                 
             set_project_status(master_db_path, project_id, new_status)
             print(f"📊 STATUS: PAUSED → {new_status}")
-            
+
         except Exception as e:
             print(f"⚠️  Nie można zaktualizować statusu: {e}")
-    
+        # project_status (state machine) != status (tekst wyświetlany w RM_BAZA,
+        # patrz sync_to_master). Bez tego wznowienie nie znika z RM_BAZA jako
+        # "Wstrzymany" dopóki ktoś ręcznie nie zsynchronizuje projektu.
+        try:
+            sync_to_master(rm_db_path, master_db_path, project_id)
+        except Exception as e:
+            print(f"⚠️  Nie można zsynchronizować statusu po wznowieniu do RM_BAZA: {e}")
+
     return pause_id
 
 
@@ -5538,31 +5552,32 @@ def sync_to_master(rm_db_path: str, master_db_path: str, project_id: int):
     #    5. NULL (projekt nie przyjęty)
     
     status_text = None
-    
+
     # Sprawdź ZAKOŃCZONY (najwyższy priorytet)
     if is_milestone_set(rm_db_path, project_id, 'ZAKONCZONY'):
         status_text = "Zakończony"
-    
+
+    # Pauza (drugi priorytet) - overlay przez project_pauses, NIE etap.
+    # WSTRZYMANY nie istnieje w STAGE_DEFINITIONS, więc szukanie go wśród
+    # aktywnych etapów nigdy nie zadziała (ta sama logika co w
+    # determine_display_status).
+    elif is_project_paused(rm_db_path, project_id):
+        status_text = "Wstrzymany"
+
     else:
         # Sprawdź aktywne etapy
         active_stages = get_active_stages(rm_db_path, project_id)
-        
+
         if active_stages:
-            # Sprawdź czy WSTRZYMANY jest aktywny (drugi priorytet)
-            wstrzymany_active = any(s['stage_code'] == 'WSTRZYMANY' for s in active_stages)
-            
-            if wstrzymany_active:
-                status_text = "Wstrzymany"
-            else:
-                # Najdalszy aktywny etap (poza WSTRZYMANY)
-                non_wstrzymany = [s for s in active_stages if s['stage_code'] != 'WSTRZYMANY']
-                if non_wstrzymany:
-                    active_sorted = sorted(non_wstrzymany, 
-                                         key=lambda x: STAGE_PRIORITY.get(x['stage_code'], 0), 
-                                         reverse=True)
-                    top_stage_code = active_sorted[0]['stage_code']
-                    status_text = get_stage_display_name(top_stage_code)
-        
+            # Najdalszy aktywny etap (poza WSTRZYMANY - legacy, patrz wyżej)
+            non_wstrzymany = [s for s in active_stages if s['stage_code'] != 'WSTRZYMANY']
+            if non_wstrzymany:
+                active_sorted = sorted(non_wstrzymany,
+                                     key=lambda x: STAGE_PRIORITY.get(x['stage_code'], 0),
+                                     reverse=True)
+                top_stage_code = active_sorted[0]['stage_code']
+                status_text = get_stage_display_name(top_stage_code)
+
         else:
             # Brak aktywnych etapów - sprawdź czy PRZYJĘTY
             if is_milestone_set(rm_db_path, project_id, 'PRZYJETY'):

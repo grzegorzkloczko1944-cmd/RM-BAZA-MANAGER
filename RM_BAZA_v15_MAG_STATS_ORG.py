@@ -3929,7 +3929,18 @@ class MainWindow(tk.Tk):
         
         active_projects.sort(key=sort_key)
         
-        # Dropdown values: Nazwy z informacją o lockach
+        # Statusy projektow (dla znacznika ✅ przy Zakonczonych) - jedno
+        # zapytanie dla wszystkich projektow, nie per-wiersz.
+        try:
+            project_statuses = self.db_manager.get_project_statuses()
+        except Exception as e:
+            print(f"⚠️  load_projects: get_project_statuses: {e}")
+            project_statuses = {}
+
+        # Dropdown values: Nazwy z informacją o lockach i statusie.
+        # UWAGA: prefiks ✅ i sufiks 🔒 [User] muszą być symetrycznie usuwane
+        # przy odczycie project_var.get() - patrz on_project_selected() (~5217)
+        # i inicjalizacja modulu magazynowego (~8003).
         values = []
         for pid, name in active_projects:
             # Sprawdź czy projekt jest zlockowany
@@ -3941,6 +3952,13 @@ class MainWindow(tk.Tk):
                 display_name = f"{name} 🔒 [{locked_by}]"
             else:
                 display_name = name
+            # Znacznik dla zakonczonych/wstrzymanych - ten sam tekst statusu
+            # co w oknie Lista maszyn (patrz sync_to_master w rm_manager.py)
+            _status = project_statuses.get(pid)
+            if _status == "Zakończony":
+                display_name = f"✅ {display_name}"
+            elif _status == "Wstrzymany":
+                display_name = f"⏸ {display_name}"
             values.append(display_name)
         
         # Zapisz dla innych metod (ID, Nazwa)
@@ -5234,7 +5252,12 @@ class MainWindow(tk.Tk):
         project_name = selected
         if " 🔒 " in selected:
             project_name = selected.split(" 🔒 ")[0]
-        
+        # Usuń prefiks ✅/⏸ (znacznik statusu "Zakończony"/"Wstrzymany") jeśli istnieje
+        if project_name.startswith("✅ "):
+            project_name = project_name[len("✅ "):]
+        elif project_name.startswith("⏸ "):
+            project_name = project_name[len("⏸ "):]
+
         # Znajdź ID po nazwie w projects_list
         project_id = None
         for pid, name in self.projects_list:
@@ -8003,6 +8026,11 @@ class MainWindow(tk.Tk):
                         project_name_for_modul = selected.split(" 🔒 ")[0]
                     else:
                         project_name_for_modul = selected
+                    # Usuń prefiks ✅/⏸ (znacznik statusu) jeśli istnieje
+                    if project_name_for_modul.startswith("✅ "):
+                        project_name_for_modul = project_name_for_modul[len("✅ "):]
+                    elif project_name_for_modul.startswith("⏸ "):
+                        project_name_for_modul = project_name_for_modul[len("⏸ "):]
                     print(f"DEBUG INIT: Nazwa projektu z dropdown: '{project_name_for_modul}'")
                 
                 # Fallback: jeśli nadal puste, użyj ID
@@ -17372,7 +17400,13 @@ class MainWindow(tk.Tk):
         tree.column("db_file", width=180, anchor="w")
         
         tree.tag_configure("inactive", foreground="#888888")
-        
+        # Kolorowanie wg statusu (projects.status, patrz rm_manager.sync_to_master):
+        # "Zakończony" - mało agresywna zieleń, "Wstrzymany" - szary.
+        # Tag "inactive" (foreground) i tagi statusu (background) nie kolidują -
+        # Tkinter łączy właściwości z wielu tagów na tym samym wierszu.
+        tree.tag_configure("status_done", background="#cdeed9")
+        tree.tag_configure("status_paused", background="#ececec")
+
         tree.pack(side=tk.LEFT, fill="both", expand=True)
         
         vsb.config(command=tree.yview)
@@ -17561,10 +17595,19 @@ class MainWindow(tk.Tk):
                     else:
                         locked_by = ""
                     
+                    # Tagi łączone: "inactive" (kolor tekstu) niezależnie od
+                    # tagu statusu (kolor tła) - projekt może być jednocześnie
+                    # nieaktywny i zakończony/wstrzymany.
+                    row_tags = [] if is_act else ["inactive"]
+                    if status == "Zakończony":
+                        row_tags.append("status_done")
+                    elif status == "Wstrzymany":
+                        row_tags.append("status_paused")
+
                     tree.insert(
                         "", "end",
                         values=(pid, "TAK" if is_act else "NIE", name, designer, status, created_at, montaz_date, fat, completed_at, locked_by, pth, db_file),
-                        tags=(() if is_act else ("inactive",))
+                        tags=tuple(row_tags)
                     )
             
             except Exception as e:

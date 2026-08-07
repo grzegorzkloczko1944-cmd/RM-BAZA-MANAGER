@@ -13,7 +13,7 @@ import sqlite3
 import shutil
 import threading
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from datetime import datetime
 
 
@@ -600,6 +600,28 @@ class DatabaseManager:
         """)
         return cursor.fetchall()
     
+    def get_project_statuses(self) -> Dict[int, str]:
+        """Pobierz status (kolumna projects.status) dla wszystkich projektow.
+
+        Osobna metoda zamiast rozszerzania get_projects() - ta druga zwraca
+        4-elementowe krotki rozpakowywane pozycyjnie w kilku miejscach kodu
+        (RM_BAZA_v15_MAG_STATS_ORG.py:2681, 8199, 19311); dolozenie kolumny
+        wywalilo by te miejsca (ValueError: too many values to unpack).
+
+        Returns: {project_id: status_text lub '' gdy NULL}
+        """
+        if not self.master_con:
+            self.connect_master()
+        self.ensure_master_alive()
+        try:
+            cursor = self.master_con.execute(
+                "SELECT project_id, COALESCE(status, '') FROM projects"
+            )
+            return {pid: status for pid, status in cursor.fetchall()}
+        except sqlite3.OperationalError as e:
+            print(f"⚠️  get_project_statuses: {e}")
+            return {}
+
     def get_suppliers(self) -> List[Tuple[int, str]]:
         """
         Pobierz listę dostawców z master
