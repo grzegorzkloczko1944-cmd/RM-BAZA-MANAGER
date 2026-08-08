@@ -1518,6 +1518,7 @@ class RMManagerGUI:
                 try:
                     self.save_all_templates()  # Zapisz zmiany
                     self._sync_local_copy_back()  # Kopia lokalna -> Y: (przed oddaniem locka)
+                    self._sync_status_to_baza(self._locked_project_id)  # Status -> RM_BAZA
                     self.lock_manager.release_project_lock(self._locked_project_id)
                 except Exception as e:
                     messagebox.showerror("Błąd", f"Nie można zwolnić locka:\n{e}")
@@ -1527,6 +1528,7 @@ class RMManagerGUI:
                     # Program się zamyka - kopia lokalna musi wrócić na Y:,
                     # inaczej zmiany zostałyby tylko na tej stacji.
                     self._sync_local_copy_back()
+                    self._sync_status_to_baza(self._locked_project_id)  # Status -> RM_BAZA
                     self.lock_manager.release_project_lock(self._locked_project_id)
                 except Exception:
                     pass
@@ -1735,12 +1737,42 @@ class RMManagerGUI:
             except Exception as e:
                 print(f"⚠️ Błąd backupu projektu (niegroźne): {e}")
 
+        # Synchronizacja statusu do RM_BAZA - JEDEN raz na sesję edycyjną,
+        # zamiast przy każdym starcie/końcu etapu (sync_to_master otwiera
+        # 7-8 połączeń SQLite, co na dysku sieciowym spowalniałoby klikanie).
+        # Po _sync_local_copy_back(), żeby czytać już zsynchronizowany plik.
+        if self._locked_project_id is not None:
+            self._sync_status_to_baza(self._locked_project_id)
+
         if self._locked_project_id is not None:
             self.lock_manager.release_project_lock(self._locked_project_id)
             self._locked_project_id = None
         self._release_line_locks()
         self.have_lock = False
         self.current_lock_id = None
+
+    def _sync_status_to_baza(self, project_id: int):
+        """Zsynchronizuj status projektu do master.sqlite (widok RM_BAZA).
+
+        Wołane przy zwalnianiu locka - patrz komentarze w rm_manager.py
+        (set_milestone/start_stage/end_stage/pause_project celowo NIE synchronizują
+        przy każdej akcji, żeby nie mnożyć połączeń po SMB).
+        """
+        try:
+            project_name = self.project_names.get(project_id, "")
+            if "[SYM]" in project_name:
+                print(f"⊘ Skip sync: {project_name} (projekt symulacyjny)")
+                return
+            if not os.path.exists(self.master_db_path):
+                return
+            rmm.sync_to_master(
+                self.get_project_db_path(project_id),
+                self.master_db_path,
+                project_id
+            )
+            print(f"🔄 Sync statusu → RM_BAZA: projekt {project_id}")
+        except Exception as e:
+            print(f"⚠️ Sync statusu do RM_BAZA nieudany (niegroźne): {e}")
 
     # ========================================================================
     # Funkcje pomocnicze dla dat DD-MM-YYYY
@@ -2400,6 +2432,10 @@ class RMManagerGUI:
             # syncu w tej samej sesji zostawiłby tam WŁAŚNIE anulowane zmiany).
             self._sync_local_copy_back()
 
+            # Status → RM_BAZA PO przywróceniu snapshotu (ma trafić stan po
+            # cofnięciu zmian, nie anulowane edycje)
+            self._sync_status_to_baza(self.selected_project_id)
+
             # Zwolnij lock primary + locki linii
             self.lock_manager.release_project_lock(self.selected_project_id)
             self._release_line_locks()
@@ -2455,6 +2491,9 @@ class RMManagerGUI:
             # save_all_templates() pisze do KOPII LOKALNEJ - wgraj ją na Y:
             # ZANIM oddamy lock, inaczej cała sesja zostaje tylko w %TEMP%.
             self._sync_local_copy_back()
+
+            # Status → RM_BAZA (raz na sesję, po wgraniu kopii lokalnej)
+            self._sync_status_to_baza(self.selected_project_id)
 
             self.lock_manager.release_project_lock(self.selected_project_id)
             self._release_line_locks()
@@ -7748,6 +7787,10 @@ class RMManagerGUI:
 
                 # Status projektu → DONE
                 rmm.set_project_status(self.master_db_path, self.selected_project_id, ProjectStatus.DONE)
+                # Zakończenie projektu to zdarzenie rzadkie i ważne - synchronizuj
+                # od razu, nie czekając na zwolnienie locka.
+                self._sync_status_to_baza(self.selected_project_id)
+
                 print(f"🏁 Projekt {self.selected_project_id} zakończony przez {self.current_user} @ {now}")
                 self.status_bar.config(text=f"🏁 Projekt zakończony", fg="#27ae60")
 
@@ -7777,6 +7820,11 @@ class RMManagerGUI:
                 # Status: jeśli PRZYJETY → IN_PROGRESS, w przeciwnym razie ACCEPTED
                 new_status = ProjectStatus.IN_PROGRESS if przyjety else ProjectStatus.ACCEPTED
                 rmm.set_project_status(self.master_db_path, self.selected_project_id, new_status)
+
+                # Sync od razu - inaczej RM_BAZA pokazywałaby "Zakończony"
+                # do czasu zwolnienia locka.
+                self._sync_status_to_baza(self.selected_project_id)
+
                 print(f"↩️ Projekt {self.selected_project_id} wznowiony → status={new_status}")
                 self.status_bar.config(text=f"↩️ Projekt wznowiony", fg="#3498db")
 
@@ -21563,6 +21611,9 @@ class RMManagerGUI:
                 except Exception as e:
                     print(f"⚠️ Błąd backupu projektu (niegroźne): {e}")
 
+            # Status → RM_BAZA (raz na sesję)
+            self._sync_status_to_baza(self._locked_project_id)
+
             # Zwolnij lock primary + locki linii
             self.lock_manager.release_project_lock(self._locked_project_id)
             print(f"🔓 Lock project {self._locked_project_id} zwolniony")
@@ -21620,6 +21671,8 @@ class RMManagerGUI:
                     self.backup_manager.backup_project(self._locked_project_id, skip_checkpoint=True)
                 except Exception:
                     pass
+            # Status → RM_BAZA (stan po cofnięciu zmian)
+            self._sync_status_to_baza(self._locked_project_id)
             self.lock_manager.release_project_lock(self._locked_project_id)
             print(f"🔓 Lock project {self._locked_project_id} zwolniony (anulowano)")
             self._locked_project_id = None

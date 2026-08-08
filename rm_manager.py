@@ -3536,10 +3536,13 @@ def start_stage(rm_db_path: str, project_id: int, stage_code: str, started_by: s
                 # � NOWA LOGIKA: Start etapu → IN_PROGRESS (bez specjalnej obsługi WSTRZYMANY)
                 if current_status in [ProjectStatus.ACCEPTED, None]:
                     set_project_status(master_db_path, project_id, ProjectStatus.IN_PROGRESS)
-                    
+
             except Exception as e:
                 print(f"⚠️  Nie można zaktualizować statusu projektu: {e}")
-        
+
+        # sync_to_master() celowo NIE tutaj - patrz komentarz w set_milestone().
+        # Synchronizacja przy zwalnianiu locka.
+
         print(f"✅ START: {stage_code} (project={project_id}, period_id={period_id})")
         return period_id
         
@@ -3673,6 +3676,8 @@ def end_stage(rm_db_path: str, project_id: int, stage_code: str, ended_by: str =
     # 🔄 AUTO-UPDATE: Aktualizuj status projektu (uproszczona logika bez WSTRZYMANY)
     if master_db_path:
         update_project_status_after_stage_end(rm_db_path, master_db_path, project_id, stage_code)
+        # sync_to_master() celowo NIE tutaj - patrz komentarz w set_milestone().
+        # Synchronizacja przy zwalnianiu locka.
 
 
 def update_project_status_after_stage_end(rm_db_path: str, master_db_path: str, project_id: int, stage_code: str = None):
@@ -3868,13 +3873,8 @@ def pause_project(rm_db_path: str, project_id: int, reason: str = None,
             set_project_status(master_db_path, project_id, ProjectStatus.PAUSED)
         except Exception as e:
             print(f"⚠️  Nie można zaktualizować statusu: {e}")
-        # project_status (state machine) != status (tekst wyświetlany w RM_BAZA,
-        # patrz sync_to_master). Bez tego "Wstrzymany" nie pojawia się w RM_BAZA
-        # dopóki ktoś ręcznie nie zsynchronizuje projektu.
-        try:
-            sync_to_master(rm_db_path, master_db_path, project_id)
-        except Exception as e:
-            print(f"⚠️  Nie można zsynchronizować statusu 'Wstrzymany' do RM_BAZA: {e}")
+        # sync_to_master() celowo NIE tutaj - patrz komentarz w set_milestone().
+        # Synchronizacja przy zwalnianiu locka.
 
     return pause_id
 
@@ -3958,13 +3958,8 @@ def resume_project(rm_db_path: str, project_id: int, resumed_by: str = None,
 
         except Exception as e:
             print(f"⚠️  Nie można zaktualizować statusu: {e}")
-        # project_status (state machine) != status (tekst wyświetlany w RM_BAZA,
-        # patrz sync_to_master). Bez tego wznowienie nie znika z RM_BAZA jako
-        # "Wstrzymany" dopóki ktoś ręcznie nie zsynchronizuje projektu.
-        try:
-            sync_to_master(rm_db_path, master_db_path, project_id)
-        except Exception as e:
-            print(f"⚠️  Nie można zsynchronizować statusu po wznowieniu do RM_BAZA: {e}")
+        # sync_to_master() celowo NIE tutaj - patrz komentarz w set_milestone().
+        # Synchronizacja przy zwalnianiu locka.
 
     return pause_id
 
@@ -4436,10 +4431,15 @@ def set_milestone(rm_db_path: str, project_id: int, stage_code: str, user: str =
                     set_project_status(master_db_path, project_id, ProjectStatus.DONE)
                 
                 print(f"   ✅ Status zaktualizowany w master.sqlite")
-                    
+
             except Exception as e:
                 print(f"   ⚠️  Nie można zaktualizować statusu projektu: {e}")
-        
+
+        # UWAGA: sync_to_master() NIE jest tu wołany celowo - otwiera 7-8 połączeń
+        # SQLite, co przy dysku sieciowym spowalniałoby każde kliknięcie.
+        # Synchronizacja odbywa się raz, przy zwalnianiu locka (patrz
+        # _release_current_lock w rm_manager_gui.py).
+
         print(f"✅ MILESTONE SET: {stage_code} @ {now} (project={project_id}, period_id={period_id})")
         return period_id
         
@@ -5545,16 +5545,27 @@ def sync_to_master(rm_db_path: str, master_db_path: str, project_id: int):
         return
     
     # 1. Określ status - priorytet:
-    #    1. ZAKOŃCZONY (milestone) -> "Zakończony"
-    #    2. WSTRZYMANY (aktywny) -> "Wstrzymany"
+    #    1. ZAKOŃCZONY (milestone "Zapłacony" LUB project_status=DONE) -> "Zakończony"
+    #    2. WSTRZYMANY (pauza) -> "Wstrzymany"
     #    3. Inne aktywne etapy (najwyższy priorytet) -> nazwa etapu
     #    4. PRZYJĘTY (milestone, brak aktywnych) -> "Przyjęty"
     #    5. NULL (projekt nie przyjęty)
-    
+
     status_text = None
 
-    # Sprawdź ZAKOŃCZONY (najwyższy priorytet)
-    if is_milestone_set(rm_db_path, project_id, 'ZAKONCZONY'):
+    # Zakończenie projektu ma DWA niezależne źródła:
+    #  - milestone ZAKONCZONY w stage_actual_periods ("Zapłacony", z płatności 100%)
+    #  - project_status=DONE w master.sqlite (ręczny checkbox "✓ ZAKOŃCZONY",
+    #    toggle_project_done() celowo NIE rusza milestone'a - pisze tylko
+    #    project_events + project_status)
+    # Bez sprawdzenia obu, ręczne zakończenie nie było widoczne w RM_BAZA.
+    _done_by_status = False
+    try:
+        _done_by_status = (get_project_status(master_db_path, project_id) == ProjectStatus.DONE)
+    except Exception as e:
+        print(f"⚠️  sync_to_master: nie można odczytać project_status: {e}")
+
+    if is_milestone_set(rm_db_path, project_id, 'ZAKONCZONY') or _done_by_status:
         status_text = "Zakończony"
 
     # Pauza (drugi priorytet) - overlay przez project_pauses, NIE etap.
