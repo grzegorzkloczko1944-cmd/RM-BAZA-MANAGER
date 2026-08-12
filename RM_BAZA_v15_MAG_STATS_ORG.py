@@ -5994,10 +5994,14 @@ class MainWindow(tk.Tk):
                 # Baza bez kolumny modul - pomiń
                 modul_disp = ""
             
-            # ILOŚĆ BOM: Jeśli jest więcej niż jeden moduł I środowisko WAREHOUSE, pokaż symbol zamiast liczby
+            # ILOŚĆ BOM: gdy pozycja należy do kilku modułów Z ILOŚCIAMI, jedna
+            # liczba nie oddaje rozbicia - pokazujemy symbol, szczegóły są w
+            # kolumnie MODUŁ. Dotyczy obu trybów (WAREHOUSE i MACHINE).
+            # Warunek na nawias jest istotny: stary format MACHINE ('300,600')
+            # nie niesie ilości, więc symbol tylko ukryłby liczbę nic nie dając.
+            # Po reimporcie importerem V17 ('300(2),600(1)') symbol pojawi się sam.
             qty_bom_display = fmt_qty(qty_bom)
-            if project_type_for_display == "WAREHOUSE" and modul_disp and ',' in modul_disp:
-                # Więcej niż jeden moduł w WAREHOUSE - pokaż symbol
+            if modul_disp and ',' in modul_disp and '(' in modul_disp:
                 qty_bom_display = "●"
             
             # Casting: licznik ofert / ile z ceną / status wysłania zapytania
@@ -25950,9 +25954,10 @@ class MainWindow(tk.Tk):
                 except (KeyError, TypeError):
                     modul = ""
                 
-                # ILOŚĆ BOM: jeśli WAREHOUSE i więcej niż jeden moduł, pokaż symbol (jak w UI)
+                # ILOŚĆ BOM: symbol gdy kilka modułów Z ILOŚCIAMI - spójnie z UI
+                # (patrz _display_items_in_sheet, tam pełne wyjaśnienie warunku).
                 qty_bom_display = fmt_qty(qty_bom)
-                if project_type == "WAREHOUSE" and modul and ',' in modul:
+                if modul and ',' in modul and '(' in modul:
                     qty_bom_display = "●"
                 
                 row = [
