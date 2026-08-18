@@ -192,19 +192,31 @@ poprawnie, a RM_BAZA by to psuła przy ręcznej edycji.
 Zmiana wspólnego kodu wpłynie też na WAREHOUSE — trzeba sprawdzić, czy
 istniejące dane magazynowe na tym nie ucierpią.
 
-### 5c. Wiersze samych modułów ZZ
+### 5c. Wiersze samych modułów ZZ — ROZWIĄZANE (2026-08-12)
 
-Moduł jako pozycja dostaje katalog **modułu nadrzędnego** — moduł najwyższego
-poziomu dostaje katalog ROOT-a (`000`). Może wyglądać nieintuicyjnie w arkuszu.
+**Problem:** podzespół ZZ o krotności > 1 (np. „Zespół rolki" występujący 106×)
+dostawał format `200(106)` — liczony względem modułu NADRZĘDNEGO (Transporter,
+krotność 1). Detale POD nim dostawały `200(1)x106` (liczone względem Zespołu
+rolki, krotność 106). Ten sam BOM (106), dwa różne zapisy → mylące.
 
-Do decyzji: czy pozycje typu MODUŁ (ZZ) mają w ogóle dostawać rozbicie, czy
-zostać przy samym numerze katalogu. Pominięcie = jedna linijka w importerze.
+**Fix (importer, `compute_total_quantities` ~3824):** jeśli element SAM jest
+modułem ZZ o własnej krotności > 1, liczymy go względem WŁASNEJ krotności:
+`qty_na_modul = total / krotnosc_wlasna`, `xN = krotnosc_wlasna`. Efekt:
+Zespół rolki → **`200(1)x106`**, spójnie z detalami pod nim. Root modułu (1×)
+i pozycje 1× zostają bez mnożnika. `totals[num]["total"]` nietknięte — zmiana
+dotyczy tylko warstwy prezentacji `per_katalog`.
 
-### 5d. Weryfikacja na większych danych
+Zweryfikowane: drzewko ZZ>ZZ>ZZ → `900(1)x2`, `950(1)x6`, detal `950(4)x6`
+(4×6=24 ✓). Moduł/root o krotności 1 → nadal `(n)` bez `xN`.
 
-Nie widzieliśmy jeszcze mnożnika `x` na prawdziwych danych — projekt Nanochem
-miał jeden moduł występujący raz. **Trzeba przepuścić przez importer V17
-projekt, w którym moduł się powtarza**, zanim uzna się format za potwierdzony.
+### 5d. Weryfikacja na większych danych — ZALICZONE (2026-08-12)
+
+Potwierdzone na realnym **project_78** („2641 4 mass etykieciarka z transporterem
+rolkowym", MACHINE). Moduł 200 (Transporter): podzespół „Zespół rolki"
+(`2641-200.03ZZ`) występuje 106×, pod nim Rolka i Oś (`200.01`/`200.02`).
+Mnożnik `x106` policzony poprawnie (`1 × 106 = 106` = BOM). Pozostałe pozycje
+`200.xx` leżą wprost pod modułem 200 (1×) → `(n)` bez mnożnika. **Format `xN`
+potwierdzony na prawdziwych danych.**
 
 ---
 
@@ -265,10 +277,13 @@ projekt, w którym moduł się powtarza**, zanim uzna się format za potwierdzon
 
 ## 8. Następny krok
 
-1. Przepuścić przez importer V17 projekt z **powtarzającym się modułem** —
-   potwierdzić `xN` na prawdziwych danych (punkt 5d)
-2. Zaimportować wynik do RM_BAZA MACHINE — zobaczyć `●` i format w kolumnie
-3. Dopiero potem wracać do decyzji z punktów 5a i 5b
+1. ~~Przepuścić przez importer V17 projekt z powtarzającym się modułem~~ —
+   ZROBIONE, project_78 (2641), punkt 5d zaliczony.
+2. ~~Ujednolicić wiersze samych modułów ZZ~~ — ZROBIONE, punkt 5c, format
+   `(1)xN` (repo NOW, `RM_IMPORT_V17_MOD.py`).
+3. **Reimport project_78 przez nowy importer V17** i sprawdzenie w RM_BAZA
+   MACHINE — czy Zespół rolki pokazuje teraz `200(1)x106` i czy `●` działa.
+4. Dopiero potem wracać do decyzji z punktów 5a i 5b.
 
 **Stan repo:** zmiany w `RM_BAZA_v15_MAG_STATS_ORG.py` są **niezacommitowane**.
 Importer V17 jest zacommitowany i wypchnięty (`69e3d2d` w repo `NOW`).
