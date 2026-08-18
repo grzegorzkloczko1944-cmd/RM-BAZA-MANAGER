@@ -495,6 +495,61 @@ def find_assembly_tree_rows(out_path: Path) -> list:
     return rows
 
 
+def find_dwf_for_drawing(v_drive_root, project_name: str, drawing_no: str) -> Optional[Path]:
+    """
+    Szuka na bieżąco pliku .dwf dla danego numeru rysunku w folderze projektu
+    na V:\\ (bez zapisu do bazy, bez cache ścieżek - katalog przeszukiwany
+    za każdym razem, żeby uwzględnić nowe/zmienione pliki).
+
+    Pliki .dwf są nazwane "<Nr rysunku> <Nazwa>.dwf" (np.
+    "DCR-100.01X Płyta główna.dwf") - dopasowanie po prefiksie nazwy pliku
+    (do pierwszej spacji), bez rozróżniania wielkości liter.
+
+    DWF leżą tylko bezpośrednio w folderze projektu i w podfolderach
+    "Rysunki ..." - inne podfoldery (Templates, Design Data, ContentCenter,
+    Workspace, Libraries, Importowane komponenty, oldversions, ...) to pliki
+    robocze/biblioteczne Inventora i są pomijane.
+
+    Returns:
+        Path do pliku .dwf, lub None jeśli nie znaleziono (brak folderu V:\\,
+        brak folderu projektu, lub brak pasującego pliku).
+    """
+    drawing_no_n = norm(drawing_no)
+    if not drawing_no_n:
+        return None
+
+    project_folder = find_project_folder(Path(v_drive_root), project_name)
+    if not project_folder:
+        return None
+
+    search_dirs = [project_folder]
+    try:
+        search_dirs += [
+            p for p in project_folder.iterdir()
+            if p.is_dir() and norm(p.name).upper().startswith("RYSUNKI")
+        ]
+    except OSError:
+        return None
+
+    candidates = []
+    for d in search_dirs:
+        try:
+            candidates += list(d.glob("*.dwf"))
+        except OSError:
+            continue
+
+    drawing_no_upper = drawing_no_n.upper()
+    for p in candidates:
+        if not p.is_file():
+            continue
+        stem = norm(p.stem)
+        file_prefix = stem.split(" ")[0].upper()
+        if file_prefix == drawing_no_upper:
+            return p
+
+    return None
+
+
 def find_assembly_for_drawing(v_drive_root, project_name: str, drawing_no: str) -> Optional[Dict]:
     """
     Szuka na bieżąco (bez zapisu do bazy), do jakiego złożenia należy dany

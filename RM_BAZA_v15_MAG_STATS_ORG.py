@@ -448,7 +448,7 @@ class MainWindow(tk.Tk):
         self.toolsm.add_separator()
         self.toolsm.add_command(label="📥 RM_IMPORT…", command=self.launch_rm_import)
         menubar.add_cascade(label="Narzędzia", menu=self.toolsm)
-        
+
         # Menu KSEF
         ksefm = tk.Menu(menubar, tearoff=0)
         ksefm.add_command(label="Import cen z faktury XML…", command=self.menu_import_ceny_ksef)
@@ -464,7 +464,7 @@ class MainWindow(tk.Tk):
         backupm.add_command(label="📋 Podgląd backupów…", command=self.menu_view_backups)
         backupm.add_command(label="💾 Wykonaj backup teraz", command=self.menu_run_backup_now)
         backupm.add_separator()
-        
+
         # Opcja backup przy release_lock (tylko ADMIN)
         # Wartość będzie wczytana z master DB w initialize()
         self.backup_on_release_var = tk.BooleanVar(value=True)
@@ -473,11 +473,11 @@ class MainWindow(tk.Tk):
             variable=self.backup_on_release_var,
             command=self.toggle_backup_on_release
         )
-        
+
         backupm.add_separator()
         backupm.add_command(label="🔄 Przywróć backup… (ADMIN)", command=self.menu_restore_backup)
         menubar.add_cascade(label="Backupy", menu=backupm)
-        
+
         # Menu Ustawienia
         settingsm = tk.Menu(menubar, tearoff=0)
         settingsm.add_command(label="� Widok UI (NORMAL/MINI)…", command=self.menu_ui_layout)
@@ -798,16 +798,11 @@ class MainWindow(tk.Tk):
             fg="#7f8c8d",
             font=("Arial", 14)
         ).pack(side=tk.LEFT, padx=5, pady=10)
-        
-        # Podgląd backupu
-        tk.Label(
-            row2_parent,
-            text="📅 Backup:",
-            bg="#2c3e50",
-            fg="white",
-            font=("Arial", 9)
-        ).pack(side=tk.LEFT, padx=(5, 3), pady=10)
-        
+
+        # Podgląd backupu — combobox NIE jest pakowany (miejsce zajmuje podgląd
+        # miniatury DWF). Widget zostaje utworzony, bo update_backup_list()
+        # i on_backup_selected() nadal go używają; wybór backupu jest dostępny
+        # z menu Backupy.
         self.backup_date_var = tk.StringVar(value="Aktualny stan")
         self.backup_combo = ttk.Combobox(
             row2_parent,
@@ -816,8 +811,28 @@ class MainWindow(tk.Tk):
             state="readonly",
             font=("Arial", 9)
         )
-        self.backup_combo.pack(side=tk.LEFT, padx=5, pady=10)
         self.backup_combo.bind("<<ComboboxSelected>>", self.on_backup_selected)
+
+        # Miniatura DWF zaznaczonego detalu — w miejscu po comboboxie backupu.
+        # Sam obrazek, bez ramek; wypełniana w _update_dwf_preview_for_row().
+        # Rodzicem jest self (nie row2_parent), bo miniatura ma sięgać w dół
+        # poza top_frame — aż do paska filtrów (top_frame2). Pozycja i wysokość
+        # ustawiane są w _place_dwf_preview() po wyliczeniu geometrii.
+        self._dwf_preview_photo = None
+        self._dwf_preview_thumb_path = None
+        self._dwf_zoom_label = None
+        self._dwf_zoom_dismiss_bound = False
+        self._dwf_preview_label = tk.Label(
+            self,
+            bg="#2c3e50",
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2"
+        )
+        # Klik w miniaturę — powiększenie 2x (toggle)
+        self._dwf_preview_label.bind("<Button-1>", self._show_dwf_preview_zoom)
+        self._dwf_preview_anchor = tk.Frame(row2_parent, bg="#2c3e50", width=1, height=1)
+        self._dwf_preview_anchor.pack(side=tk.LEFT, padx=5)
         
         # Wybór użytkownika (po prawej)
         self.user_var = tk.StringVar()
@@ -6517,7 +6532,9 @@ class MainWindow(tk.Tk):
             try:
                 selected_rows = self.sheet.get_selected_rows()
                 if selected_rows and len(selected_rows) > 1:
-                    # Multi-select aktywny - nie podświetlaj
+                    # Multi-select aktywny - nie podświetlaj i schowaj miniaturę
+                    # (dotyczy wielu pozycji, więc podgląd jednego rysunku myli)
+                    self._update_dwf_preview_for_row(None)
                     return
             except:
                 pass
@@ -6541,9 +6558,237 @@ class MainWindow(tk.Tk):
                     self._refresh_row_selection_highlight(old_row_idx, new_row_idx)
                 finally:
                     self._in_row_highlight = False
+
+                # Podmień miniaturę DWF w pasku na zaznaczony wiersz
+                self._update_dwf_preview_for_row(new_row_idx)
         except Exception as e:
             print(f"⚠️  Błąd on_sheet_cell_select: {e}")
-    
+
+    def _dwf_thumb_path_for_drawing(self, drawing_no):
+        """Ścieżka do miniatury PNG (cache) dla numeru rysunku, albo None.
+        Szuka pliku .dwf na bieżąco w folderze projektu na V:\\."""
+        if not drawing_no:
+            return None
+
+        try:
+            project_row = self.db_manager.master_con.execute(
+                "SELECT name FROM projects WHERE project_id = ?", (self.current_project_id,)
+            ).fetchone()
+            project_name = project_row[0] if project_row else None
+        except Exception:
+            return None
+
+        if not project_name:
+            return None
+
+        from pathlib import Path as _Path
+        v_root = _Path(globals().get("ASSEMBLY_TREE_ROOT", DEFAULT_ASSEMBLY_TREE_ROOT))
+        if not v_root.exists():
+            return None
+
+        try:
+            from import_bom import find_dwf_for_drawing
+            dwf_path = find_dwf_for_drawing(v_root, project_name, drawing_no)
+            if not dwf_path:
+                return None
+            import dwf_thumb
+            return dwf_thumb.get_cached_thumb_path(str(dwf_path))
+        except Exception:
+            return None
+
+    def _dwf_thumb_image(self, thumb_path, box):
+        """Wczytaj miniaturę z cache, przytnij tło i przeskaluj do kwadratu box.
+        Zwraca (PIL.Image, PhotoImage) albo (None, None)."""
+        try:
+            from PIL import Image as _PILImage, ImageChops as _PILImageChops, ImageTk as _PILImageTk
+            im = _PILImage.open(thumb_path).convert('RGB')
+            # Cache trzyma rysunek wpasowany w kwadrat 360x360 (dwf_thumb), więc
+            # pionowy rysunek ma po bokach puste tło — przycinamy je, żeby cała
+            # dostępna wysokość szła na sam rysunek.
+            _bg = im.getpixel((0, 0))
+            _bbox = _PILImageChops.difference(
+                im, _PILImage.new('RGB', im.size, _bg)
+            ).getbbox()
+            if _bbox:
+                im = im.crop(_bbox)
+            im.thumbnail((box, box), _PILImage.LANCZOS)
+            return im, _PILImageTk.PhotoImage(im)
+        except Exception:
+            return None, None
+
+    # Ile razy miniatura ma być wyższa niż przestrzeń między paskiem statusu
+    # a paskiem filtrów. Nakładka (place na self) może wystawać poniżej, na
+    # arkusz — belki zostają nietknięte, rośnie tylko obrazek.
+    DWF_PREVIEW_SCALE = 1.7
+
+    def _dwf_preview_box(self):
+        """Wysokość (px) miniatury: przestrzeń od paska statusu do paska filtrów
+        przemnożona przez DWF_PREVIEW_SCALE. Liczona z rzeczywistej geometrii,
+        bo zależy od ui_layout (NORMAL/MINI) i wysokości warning_label."""
+        try:
+            anchor = getattr(self, '_dwf_preview_anchor', None)
+            filters = getattr(self, 'top_frame2', None)
+            if anchor is None or filters is None:
+                return 44
+            top = anchor.winfo_rooty() - self.winfo_rooty()
+            bottom = filters.winfo_rooty() - self.winfo_rooty()
+            box = (bottom - top - 4) * self.DWF_PREVIEW_SCALE
+            return max(24, int(box))
+        except Exception:
+            return 44
+
+    # O ile px podnieść miniaturę względem kotwicy w pasku statusu — bez tego
+    # (przy DWF_PREVIEW_SCALE > 1) obrazek schodzi za nisko i zasłania filtry.
+    DWF_PREVIEW_OFFSET_Y = 28
+
+    def _place_dwf_preview(self, width, height):
+        """Umieść label miniatury jako nakładkę: x od anchora w pasku, y od
+        góry paska statusu minus DWF_PREVIEW_OFFSET_Y. Nakładka, bo widget
+        wychodzi poza top_frame."""
+        try:
+            anchor = self._dwf_preview_anchor
+            x = anchor.winfo_rootx() - self.winfo_rootx()
+            y = anchor.winfo_rooty() - self.winfo_rooty() - self.DWF_PREVIEW_OFFSET_Y
+            self._dwf_preview_label.place(x=x, y=max(0, y), width=width, height=height)
+            self._dwf_preview_label.lift()
+        except Exception:
+            pass
+
+    def _update_dwf_preview_for_row(self, row_idx):
+        """Podmień miniaturę DWF w pasku (w miejscu po comboboxie backupu) dla
+        wiersza row_idx. Szuka na bieżąco (bez zapisu do bazy) pliku .dwf
+        w folderze projektu na V:\\, po numerze rysunku zaznaczonego detalu.
+        Gdy nie ma czego pokazać — label zostaje pusty."""
+        img_label = getattr(self, "_dwf_preview_label", None)
+        if img_label is None:
+            return
+
+        def _hide():
+            img_label.config(image="", text="")
+            self._dwf_preview_photo = None
+            self._dwf_preview_thumb_path = None
+            img_label.place_forget()
+            self._hide_dwf_preview_zoom()
+
+        if row_idx is None or row_idx < 0 or row_idx >= len(getattr(self, "_sheet_row_ids", [])):
+            _hide()
+            return
+
+        item_id = self._sheet_row_ids[row_idx]
+        if not item_id:
+            _hide()
+            return
+
+        try:
+            cur = self.db_manager.project_con.execute(
+                "SELECT COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) FROM items WHERE id = ?",
+                (item_id,),
+            ).fetchone()
+            drawing_no = cur[0] if cur else None
+        except Exception:
+            _hide()
+            return
+
+        if not drawing_no:
+            _hide()
+            return
+
+        thumb_path = self._dwf_thumb_path_for_drawing(drawing_no)
+        if not thumb_path:
+            _hide()
+            return
+
+        # Miniatura sięga od paska statusu w dół aż do paska filtrów.
+        im, photo = self._dwf_thumb_image(thumb_path, self._dwf_preview_box())
+        if photo is None:
+            _hide()
+            return
+
+        img_label.config(image=photo, text="")
+        self._dwf_preview_photo = photo  # referencja - PhotoImage bez niej znika po GC
+        # Zapamiętane dla powiększenia po kliknięciu (_show_dwf_preview_zoom)
+        self._dwf_preview_thumb_path = thumb_path
+        self._dwf_preview_drawing_no = drawing_no
+        self._place_dwf_preview(im.width, im.height)
+
+    # Ile razy powiększenie po kliknięciu ma być większe od miniatury w pasku.
+    DWF_ZOOM_SCALE = 3
+
+    def _show_dwf_preview_zoom(self, event=None):
+        """Kliknięcie miniatury — pokaż ją w powiększeniu (DWF_ZOOM_SCALE x)
+        jako nakładkę. Zamykana dowolnym kliknięciem (na powiększeniu lub
+        gdziekolwiek w oknie)."""
+        thumb_path = getattr(self, '_dwf_preview_thumb_path', None)
+        if not thumb_path:
+            return
+
+        # Powtórne kliknięcie w miniaturę przy otwartym powiększeniu = zamknij
+        if getattr(self, '_dwf_zoom_label', None) is not None:
+            self._hide_dwf_preview_zoom()
+            return
+
+        box = int(self._dwf_preview_box() * self.DWF_ZOOM_SCALE)
+        im, photo = self._dwf_thumb_image(thumb_path, box)
+        if photo is None:
+            return
+
+        zoom = tk.Label(self, image=photo, bd=1, relief=tk.SOLID,
+                        bg="#2c3e50", highlightthickness=0)
+        zoom.image = photo  # referencja - inaczej GC czyści obraz
+
+        # Pod miniaturą, wyrównane do jej prawej krawędzi; korekta gdyby
+        # powiększenie wychodziło poza okno.
+        try:
+            anchor = self._dwf_preview_anchor
+            x = anchor.winfo_rootx() - self.winfo_rootx()
+            y = anchor.winfo_rooty() - self.winfo_rooty() - self.DWF_PREVIEW_OFFSET_Y
+            x = min(x, max(0, self.winfo_width() - im.width - 8))
+            y = min(y, max(0, self.winfo_height() - im.height - 8))
+        except Exception:
+            x, y = 40, 40
+
+        zoom.place(x=max(0, x), y=max(0, y), width=im.width, height=im.height)
+        zoom.lift()
+        self._dwf_zoom_label = zoom
+
+        # Dowolne kliknięcie zamyka — także na samym powiększeniu.
+        # Bindy globalne są zakładane RAZ (w _bind_dwf_zoom_dismiss) i zostają
+        # na stałe; handler sam sprawdza, czy powiększenie jest otwarte —
+        # unbind_all skasowałby wszystkie <Button-1> aplikacji (Ctrl/Shift+klik
+        # w arkuszu), więc nie wolno go tu użyć.
+        zoom.bind("<Button-1>", lambda e: (self._hide_dwf_preview_zoom(), "break")[1])
+        self._bind_dwf_zoom_dismiss()
+
+    def _bind_dwf_zoom_dismiss(self):
+        """Załóż (jednorazowo) globalne bindy zamykające powiększenie."""
+        if getattr(self, '_dwf_zoom_dismiss_bound', False):
+            return
+        self.bind_all("<Button-1>", self._on_any_click_hide_dwf_zoom, add="+")
+        self.bind_all("<Button-3>", self._on_any_click_hide_dwf_zoom, add="+")
+        self._dwf_zoom_dismiss_bound = True
+
+    def _on_any_click_hide_dwf_zoom(self, event=None):
+        """Klik gdziekolwiek poza powiększeniem — zamknij je."""
+        zoom = getattr(self, '_dwf_zoom_label', None)
+        if zoom is None:
+            return
+        # Klik w samo powiększenie obsługuje jego własny bind; klik w miniaturę
+        # obsługuje _show_dwf_preview_zoom (toggle).
+        if event is not None and event.widget in (zoom, getattr(self, '_dwf_preview_label', None)):
+            return
+        self._hide_dwf_preview_zoom()
+
+    def _hide_dwf_preview_zoom(self):
+        """Zamknij powiększenie miniatury."""
+        zoom = getattr(self, '_dwf_zoom_label', None)
+        if zoom is None:
+            return
+        try:
+            zoom.destroy()
+        except Exception:
+            pass
+        self._dwf_zoom_label = None
+
     def on_delivered_click_popup(self, event=None):
         """Popup z datą modyfikacji dla kolumny DOSTARCZONO (kol 6)"""
         try:
@@ -6744,6 +6989,11 @@ class MainWindow(tk.Tk):
                 # Ustaw kotwicę na ostatni Ctrl+klik (Shift potem liczy zakres od niej)
                 self._lp_anchor_row = row
 
+            # Zaznaczanie wielu pozycji przez LP — miniatura jednego rysunku
+            # byłaby myląca (i tak nie odświeża jej on_sheet_cell_select, bo
+            # tu przerywamy propagację).
+            self._update_dwf_preview_for_row(None)
+
             return "break"  # Zawsze blokuj dalszą propagację
             
         except Exception as e:
@@ -6789,6 +7039,8 @@ class MainWindow(tk.Tk):
                     except Exception:
                         pass
             self.sheet.refresh()
+            # Zakres wielu pozycji — miniatura jednego rysunku byłaby myląca
+            self._update_dwf_preview_for_row(None)
             # NIE zmieniamy kotwicy - kolejny Shift+klik rozszerza od tego samego punktu
             return "break"
 
@@ -9290,7 +9542,7 @@ class MainWindow(tk.Tk):
         # Utwórz okno
         scanner_win = tk.Toplevel(self)
         scanner_win.title("📱 SKANER - Uzupełnianie DOSTARCZONO")
-        scanner_win.geometry("700x620")
+        scanner_win.geometry("700x700")
         scanner_win.transient(self)
         # Opóźnij grab_set() - pozwól oknu się w pełni załadować
         # scanner_win.grab_set()  # Przeniesione na koniec
@@ -9354,6 +9606,15 @@ class MainWindow(tk.Tk):
         )
         entry_drawing.pack(fill=tk.X, pady=(5, 0), ipady=8)
         
+        # ===== MINIATURA DWF zeskanowanego rysunku =====
+        # Osobny podgląd, niezależny od miniatury na belce głównej.
+        # Nakładka (place) w prawym górnym rogu okna — nie zajmuje miejsca
+        # w layoucie, więc okno zachowuje swój rozmiar. Wypełniana
+        # w show_scanned_thumb(); gdy nie ma czego pokazać — place_forget().
+        SCANNER_THUMB_SIZE = 150
+        scanner_thumb_label = tk.Label(scanner_win, bg="#ecf0f1", bd=0, highlightthickness=0)
+        scanner_thumb_photo = {'img': None}  # dict — domknięcie musi móc podmienić referencję
+
         # ===== POLE: ILOŚĆ ZAMÓWIONYCH (READ-ONLY, informacyjne) =====
         frame_ordered = tk.Frame(main_frame, bg="#ecf0f1")
         frame_ordered.pack(fill=tk.X, pady=10)
@@ -9518,14 +9779,48 @@ class MainWindow(tk.Tk):
             # Zaplanuj nowe wyszukiwanie za 300ms (pozwól dokończyć wpisywanie)
             search_timer = scanner_win.after(300, perform_search)
         
+        def show_scanned_thumb(drawing_no):
+            """Miniatura DWF zeskanowanego rysunku — wyłącznie dla okna SKANUJ.
+
+            Niezależna od podglądu na belce głównej: własny label, własna
+            referencja obrazka i własny rozmiar. Brak numeru / pliku .dwf /
+            podglądu w DWF = label schowany (nie zajmuje miejsca w oknie)."""
+            def _clear():
+                scanner_thumb_label.config(image="")
+                scanner_thumb_photo['img'] = None
+                scanner_thumb_label.place_forget()
+
+            if not drawing_no:
+                _clear()
+                return
+
+            thumb_path = self._dwf_thumb_path_for_drawing(drawing_no)
+            if not thumb_path:
+                _clear()
+                return
+
+            im, photo = self._dwf_thumb_image(thumb_path, SCANNER_THUMB_SIZE)
+            if photo is None:
+                _clear()
+                return
+
+            scanner_thumb_label.config(image=photo)
+            scanner_thumb_photo['img'] = photo  # referencja - inaczej GC czyści obraz
+            # Prawy górny róg okna, wyrównane do prawej krawędzi pól formularza
+            scanner_thumb_label.place(
+                relx=1.0, x=-30, y=2, anchor="ne",
+                width=im.width, height=im.height
+            )
+            scanner_thumb_label.lift()
+
         def perform_search():
             """Wykonaj wyszukiwanie pozycji (wywoływane po debouncing)"""
             drawing_no_raw = entry_drawing.get().strip()
-            
+
             # Wyciągnij tylko numer (pierwsze słowo, przed spacją z nazwą)
             # Jeśli był auto-uzupełniony to ma format: "ABC123 Nazwa pozycji"
             drawing_no = drawing_no_raw.split()[0] if drawing_no_raw else ""
-            
+
             if not drawing_no:
                 lbl_info.config(text="TYP | MATERIAŁ | GRUBOŚĆ | DOSTAWCA | ZAMÓWIONO", fg="#7f8c8d")
                 lbl_ordered.config(text="0", bg="#fef5e7", fg="#d68910")
@@ -9533,6 +9828,7 @@ class MainWindow(tk.Tk):
                 entry_qty.delete(0, tk.END)
                 entry_qty.config(bg="#fff9e6")  # Normalny kolor
                 lbl_status.config(text="", fg="#27ae60")
+                show_scanned_thumb(None)
                 return
             
             # Znajdź pozycję
@@ -9612,10 +9908,13 @@ class MainWindow(tk.Tk):
                         fg="#27ae60"
                     )
                 
+                # Miniatura zeskanowanego rysunku
+                show_scanned_thumb(item['drawing_no'])
+
                 # Focus na pole ilości
                 entry_qty.focus()
                 entry_qty.select_range(0, tk.END)
-                
+
             else:
                 # Nie znaleziono
                 lbl_info.config(text="❌ POZYCJA NIE ZNALEZIONA", fg="#e74c3c")
@@ -9623,7 +9922,9 @@ class MainWindow(tk.Tk):
                 lbl_stock.config(text="0", bg="#e8f8f5", fg="#16a085")
                 entry_qty.config(bg="#fff9e6")  # Normalny kolor
                 lbl_status.config(text="❌ Pozycja nie istnieje! Sprawdź numer lub ESC=anuluj", fg="#e74c3c")
-        
+                # Schowaj miniaturę — inaczej zostałby rysunek z poprzedniego skanu
+                show_scanned_thumb(None)
+
         def save_delivery():
             """Zapisz ilość dostarczonych i zresetuj okno"""
             drawing_no_raw = entry_drawing.get().strip()
@@ -9716,8 +10017,10 @@ class MainWindow(tk.Tk):
                 entry_drawing.delete(0, tk.END)
                 entry_qty.delete(0, tk.END)
                 entry_qty.config(bg="#fff9e6")  # Reset koloru
+                lbl_ordered.config(text="0", bg="#fef5e7", fg="#d68910")  # Reset ilości zamówionych
                 lbl_stock.config(text="0", bg="#e8f8f5", fg="#16a085")  # Reset stanu
                 lbl_info.config(text="TYP | MATERIAŁ | GRUBOŚĆ | DOSTAWCA | ZAMÓWIONO", fg="#7f8c8d")
+                show_scanned_thumb(None)  # Schowaj miniaturę po zapisie
                 entry_drawing.focus()
                 
                 # Odśwież główne okno (żeby pokazać zaktualizowane dane)
