@@ -12440,6 +12440,7 @@ class MainWindow(tk.Tk):
 
         win = tk.Toplevel(self)
         win.title(f"Złożenie — {drawing_no}  ({out_file.name})")
+        win.attributes("-topmost", True)
 
         win_w, win_h = 640, 480
         try:
@@ -12525,12 +12526,24 @@ class MainWindow(tk.Tk):
                 tree.tag_configure("parent_assembly", background="#ffb3b3")
 
         def _on_double_click(event=None):
+            # Każda ścieżka zwraca "break": Treeview ma wbudowaną obsługę
+            # podwójnego kliku (toggle rozwinięcia), a nasz bind tylko się do
+            # niej dokłada. Bez "break" wiersz rozwijałby się mimo tego, że
+            # rozwijanie ma iść wyłącznie przez ikonkę +/-.
+            if event is not None and tree.identify_element(event.x, event.y) == "Treeitem.indicator":
+                return  # dwuklik w ikonkę +/- - zostaw natywne rozwijanie
+
+            row_id = tree.identify_row(event.y) if event is not None else None
+            if row_id:
+                tree.selection_set(row_id)
+                tree.focus(row_id)
+
             sel = tree.selection()
             if not sel:
-                return
+                return "break"
             target_drawing_no = drawing_no_by_tree_id.get(sel[0])
             if not target_drawing_no:
-                return
+                return "break"
 
             row_ids = getattr(self, "_sheet_row_ids", [])
             try:
@@ -12544,9 +12557,10 @@ class MainWindow(tk.Tk):
             if not cur or cur[0] not in row_ids:
                 messagebox.showinfo(
                     "Pokaż złożenie",
-                    f"Pozycja „{target_drawing_no}” nie znajduje się w aktualnie wyświetlonym arkuszu."
+                    f"Pozycja „{target_drawing_no}” nie znajduje się w aktualnie wyświetlonym arkuszu.",
+                    parent=win,
                 )
-                return
+                return "break"
 
             target_row = row_ids.index(cur[0])
             self.sheet.select_cell(row=target_row, column=1, redraw=True)
@@ -12555,8 +12569,26 @@ class MainWindow(tk.Tk):
             except Exception:
                 self.sheet.see(target_row, 0, redraw=True)
             win.lift()
+            return "break"
 
         tree.bind("<Double-1>", _on_double_click)
+
+        def _block_expand_outside_indicator(event):
+            # ttk.Treeview domyślnie zwija/rozwija węzeł także klikiem na
+            # tekst wiersza (nie tylko na ikonkę +/-) - to zachowanie ma iść
+            # tylko przez ikonkę ("indicator"). Klik gdzie indziej na wierszu
+            # ma tylko zaznaczać, więc odtwarzamy samo zaznaczenie ręcznie
+            # i blokujemy resztę natywnej obsługi (która zawierałaby toggle).
+            if tree.identify_element(event.x, event.y) == "Treeitem.indicator":
+                return  # ikonka +/- - pozwól na domyślne rozwinięcie/zwinięcie
+
+            row_id = tree.identify_row(event.y)
+            if row_id:
+                tree.selection_set(row_id)
+                tree.focus(row_id)
+            return "break"
+
+        tree.bind("<Button-1>", _block_expand_outside_indicator)
 
         btn_frame = tk.Frame(win)
         btn_frame.pack(fill="x", padx=8, pady=(0, 8))
