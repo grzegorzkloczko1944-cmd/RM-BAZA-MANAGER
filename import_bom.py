@@ -383,6 +383,160 @@ def iter_zbiorczy_data_rows(excel_path: Path) -> Generator[Dict[str, str], None,
         yield rec
 
 
+def find_project_folder(v_drive_root: Path, project_name: str) -> Optional[Path]:
+    """
+    Znajduje folder projektu w V:\\ na podstawie nazwy projektu z RM_BAZA.
+
+    Nazwa projektu w RM_BAZA (np. "2556 Olmaj") i nazwa folderu w V:\\
+    (np. "2556 Olmaj" lub "2556 Olmaj Wciskarka") nie muszą być identyczne
+    - dopasowanie po pierwszym członie (numerze/prefiksie projektu, do
+    pierwszej spacji).
+
+    Returns:
+        Path do folderu projektu, lub None jeśli nie znaleziono.
+    """
+    v_drive_root = Path(v_drive_root)
+    if not v_drive_root.exists():
+        return None
+
+    project_name = norm(project_name)
+    if not project_name:
+        return None
+
+    prefix = project_name.split(" ")[0].upper()
+    if not prefix:
+        return None
+
+    try:
+        candidates = [p for p in v_drive_root.iterdir() if p.is_dir()]
+    except OSError:
+        return None
+
+    # Dopasowanie dokładne po pełnej nazwie
+    for p in candidates:
+        if norm(p.name).upper() == project_name.upper():
+            return p
+
+    # Dopasowanie po prefiksie (pierwszy człon nazwy folderu)
+    for p in candidates:
+        folder_prefix = norm(p.name).split(" ")[0].upper()
+        if folder_prefix == prefix:
+            return p
+
+    return None
+
+
+def find_out_files(project_folder: Path) -> list:
+    """Zwraca listę wszystkich plików *_OUT.xlsx w folderze projektu (nierekurencyjnie)."""
+    project_folder = Path(project_folder)
+    if not project_folder.exists():
+        return []
+    return sorted(project_folder.glob("*_OUT.xlsx"))
+
+
+def find_assembly_tree_rows(out_path: Path) -> list:
+    """
+    Czyta arkusz "DRZEWKO TEKST" z pliku *_OUT.xlsx.
+
+    Zwraca listę dictów: {poziom, nr_rysunku, nazwa, ilosc_lokalna,
+    ilosc_calkowita, typ, sciezka} - sciezka to lista segmentów
+    'Nr rysunku' od korzenia do danego elementu (włącznie).
+
+    Zwraca [] jeśli arkusza brak lub plik nie da się otworzyć.
+    """
+    out_path = Path(out_path)
+    rows = []
+    wb = None
+    try:
+        wb = openpyxl.load_workbook(out_path, data_only=True)
+        if "DRZEWKO TEKST" not in wb.sheetnames:
+            return []
+        ws = wb["DRZEWKO TEKST"]
+
+        header = [norm(c.value) for c in ws[1]]
+        colmap = {v: i for i, v in enumerate(header) if v}
+        required = ("Poziom", "Nr rysunku", "Nazwa", "Ścieżka")
+        if not all(k in colmap for k in required):
+            return []
+
+        for r in range(2, (ws.max_row or 1) + 1):
+            vals = [c.value for c in ws[r]]
+            if not vals or all(v is None for v in vals):
+                continue
+
+            def get(colname):
+                idx = colmap.get(colname)
+                return vals[idx] if idx is not None and idx < len(vals) else None
+
+            nr = norm(get("Nr rysunku"))
+            sciezka_raw = norm(get("Ścieżka"))
+            if not nr or not sciezka_raw:
+                continue
+
+            rows.append({
+                "poziom": get("Poziom"),
+                "nr_rysunku": nr,
+                "nazwa": norm(get("Nazwa")),
+                "ilosc_lokalna": get("Ilość lokalna"),
+                "ilosc_calkowita": get("Ilość całkowita"),
+                "typ": norm(get("Typ")),
+                "sciezka": [norm(seg) for seg in sciezka_raw.split(">")],
+            })
+    except Exception as e:
+        print(f"⚠️  [find_assembly_tree_rows] Błąd czytania {out_path.name}: {e}")
+        return []
+    finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
+
+    return rows
+
+
+def find_assembly_for_drawing(v_drive_root, project_name: str, drawing_no: str) -> Optional[Dict]:
+    """
+    Szuka na bieżąco (bez zapisu do bazy), do jakiego złożenia należy dany
+    detal, przeszukując pliki *_OUT.xlsx w folderze projektu na V:\\.
+
+    Returns dict:
+        {
+            'out_file': Path,          # plik OUT w którym znaleziono detal
+            'row': {...},               # wpis z find_assembly_tree_rows dla tego detalu
+            'all_rows': [...],          # wszystkie wiersze drzewka z tego pliku OUT (do budowy pełnego drzewa)
+            'parent_drawing_no': str,   # bezpośredni rodzic (przedostatni segment ścieżki), None jeśli root
+        }
+    lub None, jeśli nie znaleziono (brak folderu V:\\, brak plików OUT, lub
+    detal nie występuje w żadnym drzewku).
+    """
+    drawing_no_n = norm(drawing_no)
+    if not drawing_no_n:
+        return None
+
+    project_folder = find_project_folder(Path(v_drive_root), project_name)
+    if not project_folder:
+        return None
+
+    for out_path in find_out_files(project_folder):
+        rows = find_assembly_tree_rows(out_path)
+        if not rows:
+            continue
+
+        for row in rows:
+            if row["nr_rysunku"].upper() == drawing_no_n.upper():
+                sciezka = row["sciezka"]
+                parent = sciezka[-2] if len(sciezka) >= 2 else None
+                return {
+                    "out_file": out_path,
+                    "row": row,
+                    "all_rows": rows,
+                    "parent_drawing_no": parent,
+                }
+
+    return None
+
+
 def excel_import_material_thickness(
     con,  # sqlite3.Connection
     project_id: int,

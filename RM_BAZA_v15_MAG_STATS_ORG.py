@@ -205,6 +205,7 @@ DEFAULT_LOCKS_DIR = "Y:/RM_BAZA/locks"
 DEFAULT_BACKUP_DIR = "Y:/RM_BAZA/backups"
 DEFAULT_CHAT_DIR = "Y:/RM_BAZA/chat"  # Katalog dla wiadomości chatu (JSON)
 DEFAULT_SERVER_DIR = "Y:/SERVER_PROJEKTY"  # Katalog serwera projektów (DWF, PDF, DXF, STP, STL)
+DEFAULT_ASSEMBLY_TREE_ROOT = "V:/"  # Katalog z folderami projektów CAD, zawierającymi pliki *_OUT.xlsx (drzewko złożeń)
 
 # Ścieżki - będą wczytane z configu lub użyją domyślnych
 MASTER_PATH = DEFAULT_MASTER_PATH
@@ -1495,6 +1496,7 @@ class MainWindow(tk.Tk):
         
         # Custom prawy klik - dodaj "Powrót do BOM"
         self.sheet.popup_menu_add_command("Powrót do BOM", self.on_restore_to_bom)
+        self.sheet.popup_menu_add_command("Pokaż złożenie", self.show_assembly_tree)
 
         # Home/End - przejście do pierwszego/ostatniego wiersza (PgUp/PgDn działają już
         # natywnie przez "arrowkeys" w enable_bindings, ale tksheet nie ma wbudowanej
@@ -12056,13 +12058,211 @@ class MainWindow(tk.Tk):
         
         # Odśwież dane
         self.refresh_data()
-    
+
+    def show_assembly_tree(self):
+        """Pokaż okno z drzewkiem złożeń dla zaznaczonego detalu.
+
+        Szuka NA BIEŻĄCO (bez zapisu do bazy) pliku *_OUT.xlsx w folderze
+        projektu na V:\\, czyta arkusz "DRZEWKO TEKST" i buduje z niego
+        drzewko. Klik na pozycji w drzewku przeskakuje do niej w arkuszu
+        (jeśli dana pozycja istnieje w bieżącym projekcie RM_BAZA).
+        """
+        selection = self.sheet.get_currently_selected()
+        if not selection:
+            messagebox.showinfo("Pokaż złożenie", "Zaznacz najpierw wiersz z detalem.")
+            return
+
+        row = selection[0]
+        if row >= len(self._sheet_row_ids):
+            return
+        item_id = self._sheet_row_ids[row]
+        if not item_id:
+            return
+
+        try:
+            cur = self.db_manager.project_con.execute(
+                "SELECT COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) FROM items WHERE id = ?",
+                (item_id,),
+            ).fetchone()
+            drawing_no = cur[0] if cur else None
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Nie udało się odczytać numeru rysunku:\n{e}")
+            return
+
+        if not drawing_no:
+            messagebox.showinfo("Pokaż złożenie", "Ta pozycja nie ma numeru rysunku.")
+            return
+
+        try:
+            project_row = self.db_manager.master_con.execute(
+                "SELECT name FROM projects WHERE project_id = ?", (self.current_project_id,)
+            ).fetchone()
+            project_name = project_row[0] if project_row else None
+        except Exception:
+            project_name = None
+
+        if not project_name:
+            messagebox.showwarning("Pokaż złożenie", "Nie udało się ustalić nazwy projektu.")
+            return
+
+        from pathlib import Path as _Path
+        v_root = _Path(globals().get("ASSEMBLY_TREE_ROOT", DEFAULT_ASSEMBLY_TREE_ROOT))
+
+        if not v_root.exists():
+            messagebox.showwarning(
+                "Pokaż złożenie",
+                f"Katalog {v_root} jest niedostępny.\n\n"
+                f"Sprawdź połączenie z dyskiem sieciowym."
+            )
+            return
+
+        from import_bom import find_assembly_for_drawing
+        result = find_assembly_for_drawing(v_root, project_name, drawing_no)
+
+        if not result:
+            messagebox.showinfo(
+                "Pokaż złożenie",
+                f"Nie znaleziono „{drawing_no}” w plikach *_OUT.xlsx\n"
+                f"projektu „{project_name}” w {v_root}.\n\n"
+                f"Sprawdź czy plik OUT istnieje i zawiera arkusz „DRZEWKO TEKST”."
+            )
+            return
+
+        self._open_assembly_tree_window(drawing_no, result)
+
+    def _open_assembly_tree_window(self, drawing_no, result):
+        """Zbuduj i pokaż okno z drzewkiem złożeń (ttk.Treeview) z wynikiem find_assembly_for_drawing()."""
+        all_rows = result["all_rows"]
+        out_file = result["out_file"]
+
+        win = tk.Toplevel(self)
+        win.title(f"Złożenie — {drawing_no}  ({out_file.name})")
+
+        win_w, win_h = 640, 480
+        try:
+            parent_x = self.winfo_rootx()
+            parent_y = self.winfo_rooty()
+            parent_width = self.winfo_width()
+            parent_height = self.winfo_height()
+            x = parent_x + (parent_width - win_w) // 2
+            y = parent_y + (parent_height - win_h) // 2
+        except Exception:
+            sw = win.winfo_screenwidth()
+            sh = win.winfo_screenheight()
+            x = (sw - win_w) // 2
+            y = (sh - win_h) // 2
+        win.geometry(f"{win_w}x{win_h}+{x}+{y}")
+
+        info = tk.Label(
+            win,
+            text=f"Plik: {out_file.name}",
+            anchor="w", font=("Arial", 9), fg="#555"
+        )
+        info.pack(fill="x", padx=8, pady=(8, 0))
+
+        tree_frame = tk.Frame(win)
+        tree_frame.pack(fill="both", expand=True, padx=8, pady=8)
+
+        columns = ("nazwa", "ilosc", "typ")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="tree headings")
+        tree.heading("#0", text="Nr rysunku")
+        tree.heading("nazwa", text="Nazwa")
+        tree.heading("ilosc", text="Ilość całk.")
+        tree.heading("typ", text="Typ")
+        tree.column("#0", width=140)
+        tree.column("nazwa", width=220)
+        tree.column("ilosc", width=80, anchor="center")
+        tree.column("typ", width=140)
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        # Zbuduj węzły drzewa ze ścieżek (Ścieżka = lista Nr rysunku od korzenia)
+        # tree_id_by_path: klucz to krotka ze ścieżką (tuple), wartość to id węzła w ttk.Treeview
+        tree_id_by_path = {}
+        drawing_no_by_tree_id = {}
+        highlight_tree_id = None
+
+        # Sortuj po długości ścieżki, żeby rodzice powstawali przed dziećmi
+        for rec in sorted(all_rows, key=lambda r: len(r["sciezka"])):
+            sciezka = tuple(rec["sciezka"])
+            parent_path = sciezka[:-1]
+            parent_tree_id = tree_id_by_path.get(parent_path, "")
+
+            node_id = tree.insert(
+                parent_tree_id, "end",
+                text=rec["nr_rysunku"],
+                values=(rec["nazwa"] or "", rec["ilosc_calkowita"] or "", rec["typ"] or ""),
+                open=False,
+            )
+            tree_id_by_path[sciezka] = node_id
+            drawing_no_by_tree_id[node_id] = rec["nr_rysunku"]
+
+            if rec["nr_rysunku"].upper() == drawing_no.upper():
+                highlight_tree_id = node_id
+
+        if highlight_tree_id:
+            # Rozwiń tylko gałąź prowadzącą do zaznaczonego detalu
+            parent = tree.parent(highlight_tree_id)
+            while parent:
+                tree.item(parent, open=True)
+                parent = tree.parent(parent)
+
+            tree.selection_set(highlight_tree_id)
+            tree.see(highlight_tree_id)
+            tree.item(highlight_tree_id, tags=("current",))
+            tree.tag_configure("current", background="#fff3b0")
+
+        def _on_double_click(event=None):
+            sel = tree.selection()
+            if not sel:
+                return
+            target_drawing_no = drawing_no_by_tree_id.get(sel[0])
+            if not target_drawing_no:
+                return
+
+            row_ids = getattr(self, "_sheet_row_ids", [])
+            try:
+                cur = self.db_manager.project_con.execute(
+                    "SELECT id FROM items WHERE COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) = ?",
+                    (target_drawing_no,),
+                ).fetchone()
+            except Exception:
+                cur = None
+
+            if not cur or cur[0] not in row_ids:
+                messagebox.showinfo(
+                    "Pokaż złożenie",
+                    f"Pozycja „{target_drawing_no}” nie znajduje się w aktualnie wyświetlonym arkuszu."
+                )
+                return
+
+            target_row = row_ids.index(cur[0])
+            self.sheet.select_cell(row=target_row, column=1, redraw=True)
+            try:
+                self._scroll_to_row_center(target_row)
+            except Exception:
+                self.sheet.see(target_row, 0, redraw=True)
+            win.lift()
+
+        tree.bind("<Double-1>", _on_double_click)
+
+        btn_frame = tk.Frame(win)
+        btn_frame.pack(fill="x", padx=8, pady=(0, 8))
+        tk.Button(btn_frame, text="Zamknij", command=win.destroy).pack(side="right")
+        tk.Label(
+            btn_frame, text="Podwójny klik na pozycji — przejście do niej w arkuszu",
+            fg="#777", font=("Arial", 8)
+        ).pack(side="left")
+
     # ========================================================================
     # ========================================================================
     # ========================================================================
     # MODUŁ IMPORT BOM
     # ========================================================================
-    
+
     def menu_import_bom(self):
         """
         IMPORT PEŁNY BOM z LOGISTYKA_OUT.xlsx (arkusz ZBIORCZY)
