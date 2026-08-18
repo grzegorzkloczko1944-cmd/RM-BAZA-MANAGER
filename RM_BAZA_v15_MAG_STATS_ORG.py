@@ -12205,7 +12205,8 @@ class MainWindow(tk.Tk):
 
         if highlight_tree_id:
             # Rozwiń tylko gałąź prowadzącą do zaznaczonego detalu
-            parent = tree.parent(highlight_tree_id)
+            direct_parent_id = tree.parent(highlight_tree_id)
+            parent = direct_parent_id
             while parent:
                 tree.item(parent, open=True)
                 parent = tree.parent(parent)
@@ -12214,6 +12215,11 @@ class MainWindow(tk.Tk):
             tree.see(highlight_tree_id)
             tree.item(highlight_tree_id, tags=("current",))
             tree.tag_configure("current", background="#fff3b0")
+
+            # Bezpośrednie złożenie nadrzędne - na czerwono
+            if direct_parent_id:
+                tree.item(direct_parent_id, tags=("parent_assembly",))
+                tree.tag_configure("parent_assembly", background="#ffb3b3")
 
         def _on_double_click(event=None):
             sel = tree.selection()
