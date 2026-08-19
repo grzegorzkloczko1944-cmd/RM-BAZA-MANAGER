@@ -205,8 +205,20 @@ DEFAULT_LOCKS_DIR = "Y:/RM_BAZA/locks"
 DEFAULT_BACKUP_DIR = "Y:/RM_BAZA/backups"
 DEFAULT_CHAT_DIR = "Y:/RM_BAZA/chat"  # Katalog dla wiadomości chatu (JSON)
 DEFAULT_SERVER_DIR = "Y:/SERVER_PROJEKTY"  # Katalog serwera projektów (DWF, PDF, DXF, STP, STL)
-DEFAULT_ASSEMBLY_TREE_ROOT = "V:/"  # Katalog z folderami projektów CAD, zawierającymi pliki *_OUT.xlsx (drzewko złożeń)
-LIBRARY_ROOT = "B:/"  # Biblioteka RM - komponenty wspólne (pozycje dwf_biblioteka=1); źródło DWF dla ich miniatur
+DEFAULT_ASSEMBLY_TREE_ROOT = "V:/"  # Awaryjny fallback - patrz get_assembly_tree_root()
+LIBRARY_ROOT = "B:/"  # Biblioteka RM - komponenty wspólne (pozycje dwf_biblioteka=1); źródło DWF dla ich miniatur.
+                      # Zostaje na sztywno: dysk B: jest zmapowany tak samo na każdej stacji.
+
+
+def get_assembly_tree_root():
+    """Katalog z folderami projektów CAD (drzewko złożeń *_OUT.xlsx, rysunki .dwf).
+
+    Bierze wartość z konfiguracji - pola "Serwer projekty" (server_dir), które
+    użytkownik ustawia w Ustawienia → Konfiguracja ścieżek. Userzy mają dysk
+    zmapowany różnie (V:, W:, ścieżka UNC), więc sztywne "V:/" działałoby
+    tylko u części z nich.
+    """
+    return globals().get("SERVER_DIR") or DEFAULT_ASSEMBLY_TREE_ROOT
 
 # Ścieżki - będą wczytane z configu lub użyją domyślnych
 MASTER_PATH = DEFAULT_MASTER_PATH
@@ -6616,7 +6628,7 @@ class MainWindow(tk.Tk):
             return None
 
         from pathlib import Path as _Path
-        v_root = _Path(globals().get("ASSEMBLY_TREE_ROOT", DEFAULT_ASSEMBLY_TREE_ROOT))
+        v_root = _Path(get_assembly_tree_root())
         if not v_root.exists():
             return None
 
@@ -12439,13 +12451,14 @@ class MainWindow(tk.Tk):
             return
 
         from pathlib import Path as _Path
-        v_root = _Path(globals().get("ASSEMBLY_TREE_ROOT", DEFAULT_ASSEMBLY_TREE_ROOT))
+        v_root = _Path(get_assembly_tree_root())
 
         if not v_root.exists():
             messagebox.showwarning(
                 "Pokaż złożenie",
                 f"Katalog {v_root} jest niedostępny.\n\n"
-                f"Sprawdź połączenie z dyskiem sieciowym."
+                f"Sprawdź połączenie z dyskiem sieciowym lub popraw ścieżkę w:\n"
+                f"Ustawienia → Konfiguracja ścieżek → Serwer projekty"
             )
             return
 
