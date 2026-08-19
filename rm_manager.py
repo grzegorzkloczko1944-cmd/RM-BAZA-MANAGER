@@ -31,6 +31,7 @@ RM_MANAGER ↔ RM_BAZA:
 
 import os
 import glob
+import sys
 import sqlite3
 import shutil
 import tempfile
@@ -39,6 +40,21 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 from collections import deque
 import time as _time
+
+# Logi w tym module używają emoji (✅❌🔄 itd.). Na konsoli Windows z domyślnym
+# kodowaniem cp1250 (nie UTF-8) print() z takim znakiem rzuca UnicodeEncodeError
+# - i to wewnątrz funkcji jak sync_to_master(), gdzie ten wyjątek wpadał w
+# ogólny except i cofał (rollback) już wykonany, poprawny zapis do bazy.
+# Zaobserwowane 2026-08-19: 37 z 78 projektów miało status w master.sqlite
+# rozjechany z project_status w RM_MANAGER właśnie przez to - sync się wykonywał,
+# ale commit ginął pod rollbackiem wywołanym przez print() błędu logowania.
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 
 # ============================================================================
@@ -5701,22 +5717,31 @@ def sync_to_master(rm_db_path: str, master_db_path: str, project_id: int):
             params.append(project_id)
             sql = f"UPDATE projects SET {', '.join(updates)} WHERE project_id = ?"
             con.execute(sql, params)
-            con.commit()
-            
-            print(f"✅ SYNC → master.sqlite (projekt {project_id}):")
-            print(f"   • status: {status_text}")
-            print(f"   • designer: {designer_name}")
-            print(f"   • montaz: {montaz_date} (existing: {existing_montaz})")
-            print(f"   • fat: {fat_date}")
-            print(f"   • completed_at: {completed_date}")
+            con.commit()  # commit PRZED logowaniem - błąd w print() nie może cofnąć zapisu
+
+            try:
+                print(f"✅ SYNC → master.sqlite (projekt {project_id}):")
+                print(f"   • status: {status_text}")
+                print(f"   • designer: {designer_name}")
+                print(f"   • montaz: {montaz_date} (existing: {existing_montaz})")
+                print(f"   • fat: {fat_date}")
+                print(f"   • completed_at: {completed_date}")
+            except Exception:
+                pass  # logowanie nieudane, ale sync już bezpiecznie zapisany
         else:
-            print(f"ℹ️  SYNC: Brak zmian dla projektu {project_id}")
-        
+            try:
+                print(f"ℹ️  SYNC: Brak zmian dla projektu {project_id}")
+            except Exception:
+                pass
+
     except Exception as e:
         con.rollback()
-        print(f"❌ Błąd sync_to_master (projekt {project_id}): {e}")
-        import traceback
-        traceback.print_exc()
+        try:
+            print(f"❌ Błąd sync_to_master (projekt {project_id}): {e}")
+            import traceback
+            traceback.print_exc()
+        except Exception:
+            pass
     finally:
         con.close()
 
