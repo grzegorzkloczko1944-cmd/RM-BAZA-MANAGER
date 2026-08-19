@@ -64,6 +64,21 @@ Twoje narzędzia pozwalają Ci odczytać:
 - stan etapów każdego projektu (plan vs rzeczywistość)
 - opóźnienia i konflikty
 - obciążenie pracowników
+- stan transz płatności (ile % odnotowano jako zapłacone, ile pozostaje) —
+  narzędzie get_payment_status
+- nieobecności: urlopy, L4, dni wolne firmowe — get_absences
+- wyjazdy serwisowe (kto u klienta i kiedy) — get_service_trips
+- stan kodów odblokowujących PLC — get_plc_codes
+- linie produkcyjne i etapy równoległe — get_production_lines
+
+ZANIM zaplanujesz komuś pracę lub przypiszesz go do etapu — sprawdź
+get_absences i get_service_trips. Nieobecny pracownik nie może pracować.
+
+UPRAWNIENIA: dane wrażliwe (transze płatności, kody PLC) są chronione tymi
+samymi uprawnieniami co okna w programie. Gdy narzędzie zwróci
+"error": "BRAK_UPRAWNIEN" — powiedz użytkownikowi, że nie ma uprawnień i że
+nadaje je administrator. NIE próbuj obejść tego innym narzędziem ani zgadywać
+wartości.
 
 Umiesz też RYSOWAĆ WYKRESY graficzne narzędziem render_chart (Gantt / słupki).
 Gdy użytkownik prosi o wykres, oś czasu lub graficzne obciążenie — użyj render_chart.
@@ -171,6 +186,85 @@ TOOLS: List[Dict] = [
             },
             "required": [],
         },
+    },
+    {
+        "name": "get_payment_status",
+        "description": (
+            "Pobierz stan transz płatności (payment_milestones) projektu/projektów: "
+            "jaki procent został odnotowany jako zapłacony (z datami wpłat) i ile "
+            "procent pozostaje. Użyj do pytań o płatności, transze, ile zapłacono, "
+            "które projekty są niezapłacone/niedopłacone. "
+            "Bez project_id zwraca wszystkie aktywne projekty z sumą < 100%."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "project_id": {
+                    "type": "integer",
+                    "description": "ID konkretnego projektu (opcjonalne — brak = wszystkie aktywne z niedopłatą).",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_absences",
+        "description": (
+            "Pobierz nieobecności pracowników (urlopy, L4, delegacje) oraz dni wolne "
+            "firmowe. WAŻNE: sprawdzaj to ZAWSZE przed planowaniem pracy lub "
+            "przypisaniem pracownika do etapu — nieobecny pracownik nie może pracować. "
+            "Liczone są tylko wnioski zatwierdzone."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date_from": {"type": "string", "description": "Początek zakresu YYYY-MM-DD (opcjonalny)."},
+                "date_to": {"type": "string", "description": "Koniec zakresu YYYY-MM-DD (opcjonalny)."},
+                "worker_name": {"type": "string", "description": "Filtr po nazwisku (opcjonalny)."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_service_trips",
+        "description": (
+            "Pobierz wyjazdy serwisowe (kto jest u klienta, gdzie, kiedy, typ wyjazdu). "
+            "Wyjazd blokuje dostępność pracownika tak samo jak urlop — uwzględniaj "
+            "przy planowaniu obciążenia."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date_from": {"type": "string", "description": "Początek zakresu YYYY-MM-DD (opcjonalny)."},
+                "date_to": {"type": "string", "description": "Koniec zakresu YYYY-MM-DD (opcjonalny)."},
+                "worker_name": {"type": "string", "description": "Filtr po nazwisku (opcjonalny)."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_plc_codes",
+        "description": (
+            "Pobierz STAN kodów odblokowujących PLC (typ, czy wysłany/użyty, daty, "
+            "ważność). Same wartości kodów NIE są zwracane — to klucze do maszyn. "
+            "Dostęp tylko dla użytkowników uprawnionych do funkcji 'Kody odblokowujące PLC'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "integer", "description": "ID projektu (opcjonalne — brak = wszystkie)."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "get_production_lines",
+        "description": (
+            "Pobierz linie produkcyjne: nazwy, etapy oznaczone jako równoległe "
+            "i projekty przypisane do każdej linii. Przydatne przy planowaniu "
+            "wielu projektów jednocześnie."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "get_schedule_summary",
@@ -330,10 +424,16 @@ class AIOptimizerContext:
         locks_dir: Optional[str] = None,
         current_user: str = "AI",
         rules_file: Optional[str] = None,
+        current_user_role: Optional[str] = None,
     ):
         self.master_db_path = master_db_path          # master.sqlite (projekty)
         self.rm_manager_dir = rm_manager_dir          # katalog z bazami per-projekt
         self.rm_master_db_path = rm_master_db_path    # rm_manager.sqlite (pracownicy)
+        # Kto rozmawia z agentem - agent NIE MOŻE być obejściem uprawnień z GUI
+        # (Użytkownicy → Uprawnienia kategorii): dane wrażliwe (transze płatności,
+        # kody PLC) sprawdzane tą samą funkcją has_feature_permission() co okna.
+        self.current_user = current_user
+        self.current_user_role = current_user_role
         # ai_rules.txt — wspólny plik reguł dla wszystkich userów (konfigurowalny
         # w GUI: "Konfiguracja ścieżek" → "Plik kontekstu AI"). Gdy nie podano
         # jawnie, spadamy na rm_manager_dir/ai_rules.txt (dawny domyślny wzorzec).
@@ -545,6 +645,317 @@ class AIOptimizerContext:
                 "project_name": project_name,
                 "stages": stages,
             }
+        finally:
+            con.close()
+
+    def get_payment_status(self, project_id: Optional[int] = None) -> Dict:
+        """Transze płatności (payment_milestones w rm_manager.sqlite).
+
+        Rekord powstaje dopiero po odnotowaniu wpłaty (payment_date wymagane
+        przy dodaniu) - suma percentage to zapłacony procent, 100 - suma to
+        procent jeszcze nie zarejestrowany jako zapłacony.
+
+        Bez project_id: przechodzi po wszystkich aktywnych projektach
+        (analogicznie do get_delays) i zwraca tylko te z suma < 100%.
+
+        Wymaga uprawnienia "Transze płatności" - tego samego co okno w GUI.
+        """
+        denied = self._check_feature_permission("payment_milestones", "Transze płatności")
+        if denied:
+            return denied
+
+        try:
+            con = self._open(self.rm_master_db_path)
+        except Exception as e:
+            return {"error": f"Nie można otworzyć rm_manager.sqlite: {e}"}
+
+        def _milestones_for(pid: int) -> List[Dict]:
+            try:
+                rows = con.execute(
+                    "SELECT percentage, payment_date, payment_type, created_by"
+                    " FROM payment_milestones WHERE project_id = ? ORDER BY percentage",
+                    (pid,),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+            return [dict(r) for r in rows]
+
+        try:
+            if project_id is not None:
+                milestones = _milestones_for(project_id)
+                paid_pct = sum(m["percentage"] for m in milestones)
+                return {
+                    "project_id": project_id,
+                    "milestones": milestones,
+                    "paid_percentage": paid_pct,
+                    "remaining_percentage": max(0, 100 - paid_pct),
+                }
+
+            projects_result = self.get_projects_list(status_filter="active")
+            unpaid = []
+            for proj in projects_result["projects"]:
+                pid = proj["id"]
+                milestones = _milestones_for(pid)
+                paid_pct = sum(m["percentage"] for m in milestones)
+                if paid_pct >= 100:
+                    continue
+                unpaid.append({
+                    "project_id": pid,
+                    "project_name": proj.get("name", f"Projekt {pid}"),
+                    "project_status": proj.get("project_status"),
+                    "milestones": milestones,
+                    "paid_percentage": paid_pct,
+                    "remaining_percentage": 100 - paid_pct,
+                })
+
+            unpaid.sort(key=lambda x: x["paid_percentage"])
+            return {
+                "unpaid_projects": unpaid,
+                "count": len(unpaid),
+            }
+        finally:
+            con.close()
+
+    def _check_feature_permission(self, feature: str, label: str) -> Optional[Dict]:
+        """Czy bieżący użytkownik ma uprawnienie do danej funkcji.
+
+        Zwraca None gdy wolno, albo dict z błędem do oddania agentowi.
+        Ta sama semantyka co w GUI (_check_feature_permission): ADMIN zawsze
+        może, pusta lista uprawnionych = brak ograniczeń. Agent nie może być
+        furtką omijającą "Uprawnienia kategorii użytkowników".
+        """
+        try:
+            import rm_manager as rmm
+        except Exception:
+            return None  # brak modułu - nie blokuj odczytu (jak fail-open w GUI)
+
+        if not hasattr(rmm, "has_feature_permission"):
+            return None
+
+        try:
+            allowed = rmm.has_feature_permission(
+                self.rm_master_db_path, feature,
+                self.current_user or "", self.current_user_role,
+            )
+        except Exception:
+            return None  # fail-open przy błędzie odczytu - jak w GUI
+
+        if allowed:
+            return None
+        return {
+            "error": "BRAK_UPRAWNIEN",
+            "message": (
+                f"Użytkownik {self.current_user or '(nieznany)'} nie ma uprawnień do: {label}. "
+                f"Nie podawaj tych danych i nie próbuj ich uzyskać inną drogą. "
+                f"Poinformuj użytkownika, że dostęp nadaje administrator "
+                f"(Użytkownicy → Uprawnienia kategorii)."
+            ),
+        }
+
+    def _employee_names(self) -> Dict[int, str]:
+        """Mapa {employee_id: imię i nazwisko} z rm_manager.sqlite."""
+        names: Dict[int, str] = {}
+        try:
+            con = self._open(self.rm_master_db_path)
+            try:
+                for r in con.execute("SELECT id, name FROM employees").fetchall():
+                    names[r["id"]] = r["name"]
+            finally:
+                con.close()
+        except Exception:
+            pass
+        return names
+
+    def get_absences(self, date_from: Optional[str] = None,
+                     date_to: Optional[str] = None,
+                     worker_name: Optional[str] = None) -> Dict:
+        """Nieobecności pracowników: urlopy, L4, delegacje (employee_availability).
+
+        Liczą się tylko wnioski ZATWIERDZONE - odrzucone/oczekujące nie blokują
+        dostępności. Zwraca też dni wolne firmowe (company_calendar) w zakresie.
+        """
+        names = self._employee_names()
+        try:
+            con = self._open(self.rm_master_db_path)
+        except Exception as e:
+            return {"error": f"Nie można otworzyć rm_manager.sqlite: {e}"}
+
+        try:
+            sql = ("SELECT employee_id, date_from, date_to, reason, status, notes"
+                   " FROM employee_availability WHERE COALESCE(status,'ZATWIERDZONY') = 'ZATWIERDZONY'")
+            params: List = []
+            if date_to:
+                sql += " AND date_from <= ?"
+                params.append(date_to)
+            if date_from:
+                sql += " AND date_to >= ?"
+                params.append(date_from)
+            sql += " ORDER BY date_from"
+
+            try:
+                rows = con.execute(sql, params).fetchall()
+            except sqlite3.OperationalError as e:
+                return {"error": f"Brak danych o nieobecnościach: {e}"}
+
+            absences = []
+            for r in rows:
+                name = names.get(r["employee_id"], f"ID:{r['employee_id']}")
+                if worker_name and worker_name.lower() not in name.lower():
+                    continue
+                absences.append({
+                    "employee_id": r["employee_id"],
+                    "worker": name,
+                    "date_from": r["date_from"],
+                    "date_to": r["date_to"],
+                    "reason": r["reason"],
+                    "notes": r["notes"],
+                })
+
+            holidays = []
+            try:
+                hsql = "SELECT date, day_type, description FROM company_calendar"
+                hparams: List = []
+                if date_from and date_to:
+                    hsql += " WHERE date BETWEEN ? AND ?"
+                    hparams = [date_from, date_to]
+                hsql += " ORDER BY date"
+                holidays = [dict(r) for r in con.execute(hsql, hparams).fetchall()]
+            except sqlite3.OperationalError:
+                pass
+
+            return {
+                "absences": absences,
+                "count": len(absences),
+                "company_days_off": holidays,
+            }
+        finally:
+            con.close()
+
+    def get_service_trips(self, date_from: Optional[str] = None,
+                          date_to: Optional[str] = None,
+                          worker_name: Optional[str] = None) -> Dict:
+        """Wyjazdy serwisowe (service_trips) - kto jest u klienta i kiedy.
+
+        Wyjazd blokuje dostępność pracownika tak samo jak nieobecność.
+        """
+        names = self._employee_names()
+        try:
+            con = self._open(self.rm_master_db_path)
+        except Exception as e:
+            return {"error": f"Nie można otworzyć rm_manager.sqlite: {e}"}
+
+        try:
+            sql = ("SELECT employee_id, project_id, client_or_place, trip_type,"
+                   " date_from, date_to, status, note, working_days FROM service_trips")
+            conds: List[str] = []
+            params: List = []
+            if date_to:
+                conds.append("date_from <= ?")
+                params.append(date_to)
+            if date_from:
+                conds.append("date_to >= ?")
+                params.append(date_from)
+            if conds:
+                sql += " WHERE " + " AND ".join(conds)
+            sql += " ORDER BY date_from"
+
+            try:
+                rows = con.execute(sql, params).fetchall()
+            except sqlite3.OperationalError as e:
+                return {"error": f"Brak danych o wyjazdach serwisowych: {e}"}
+
+            trips = []
+            for r in rows:
+                name = names.get(r["employee_id"], f"ID:{r['employee_id']}")
+                if worker_name and worker_name.lower() not in name.lower():
+                    continue
+                d = dict(r)
+                d["worker"] = name
+                trips.append(d)
+
+            return {"service_trips": trips, "count": len(trips)}
+        finally:
+            con.close()
+
+    def get_plc_codes(self, project_id: Optional[int] = None) -> Dict:
+        """Stan kodów odblokowujących PLC (plc_unlock_codes).
+
+        Zwraca STAN kodów (typ, czy wysłany/użyty, daty, ważność) - bez samych
+        wartości kodów: to faktyczne klucze do maszyn, agent ich nie potrzebuje
+        do analizy, a nie chcemy ich rozsiewać w treści czatu.
+
+        Wymaga uprawnienia "Kody odblokowujące PLC" - tego samego co okno w GUI.
+        """
+        denied = self._check_feature_permission("plc_codes", "Kody odblokowujące PLC")
+        if denied:
+            return denied
+
+        try:
+            con = self._open(self.rm_master_db_path)
+        except Exception as e:
+            return {"error": f"Nie można otworzyć rm_manager.sqlite: {e}"}
+
+        try:
+            sql = ("SELECT id, project_id, code_type, description, is_used, used_at,"
+                   " used_by, sent_at, sent_by, sent_via, expiry_date, created_at,"
+                   " created_by FROM plc_unlock_codes")
+            params: List = []
+            if project_id is not None:
+                sql += " WHERE project_id = ?"
+                params.append(project_id)
+            sql += " ORDER BY project_id, id"
+
+            try:
+                rows = con.execute(sql, params).fetchall()
+            except sqlite3.OperationalError as e:
+                return {"error": f"Brak danych o kodach PLC: {e}"}
+
+            codes = []
+            for r in rows:
+                d = dict(r)
+                d["code_present"] = True  # sama wartość kodu celowo nie jest zwracana
+                codes.append(d)
+
+            return {"plc_codes": codes, "count": len(codes)}
+        finally:
+            con.close()
+
+    def get_production_lines(self) -> Dict:
+        """Linie produkcyjne (production_lines) wraz z etapami równoległymi
+        i przypisanymi projektami (line_projects)."""
+        try:
+            con = self._open(self.rm_master_db_path)
+        except Exception as e:
+            return {"error": f"Nie można otworzyć rm_manager.sqlite: {e}"}
+
+        try:
+            try:
+                rows = con.execute(
+                    "SELECT id, name, description, parallel_stages_csv"
+                    " FROM production_lines ORDER BY name"
+                ).fetchall()
+            except sqlite3.OperationalError as e:
+                return {"error": f"Brak danych o liniach produkcyjnych: {e}"}
+
+            projects_by_line: Dict[int, List[int]] = {}
+            try:
+                for r in con.execute("SELECT line_id, project_id FROM line_projects").fetchall():
+                    projects_by_line.setdefault(r["line_id"], []).append(r["project_id"])
+            except sqlite3.OperationalError:
+                pass
+
+            lines = []
+            for r in rows:
+                stages_csv = r["parallel_stages_csv"] or ""
+                lines.append({
+                    "line_id": r["id"],
+                    "name": r["name"],
+                    "description": r["description"],
+                    "parallel_stages": [s for s in stages_csv.split(",") if s],
+                    "project_ids": projects_by_line.get(r["id"], []),
+                })
+
+            return {"production_lines": lines, "count": len(lines)}
         finally:
             con.close()
 
@@ -1095,6 +1506,16 @@ class AIOptimizerContext:
                 result = self.get_delays(**tool_input)
             elif tool_name == "get_worker_load":
                 result = self.get_worker_load(**tool_input)
+            elif tool_name == "get_payment_status":
+                result = self.get_payment_status(**tool_input)
+            elif tool_name == "get_absences":
+                result = self.get_absences(**tool_input)
+            elif tool_name == "get_service_trips":
+                result = self.get_service_trips(**tool_input)
+            elif tool_name == "get_plc_codes":
+                result = self.get_plc_codes(**tool_input)
+            elif tool_name == "get_production_lines":
+                result = self.get_production_lines(**tool_input)
             elif tool_name == "get_schedule_summary":
                 result = self.get_schedule_summary(**tool_input)
             elif tool_name == "render_chart":

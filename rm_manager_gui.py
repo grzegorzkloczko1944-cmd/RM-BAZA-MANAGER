@@ -28588,6 +28588,7 @@ Kod: {unlock_code}
             locks_dir=getattr(self, 'locks_dir', None),
             current_user=self.current_user or CURRENT_USER,
             rules_file=getattr(self, 'ai_rules_path', None),
+            current_user_role=getattr(self, 'current_user_role', None),
         )
         session = ai_mod.AIChatSession(ctx)
 
