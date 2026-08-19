@@ -206,6 +206,7 @@ DEFAULT_BACKUP_DIR = "Y:/RM_BAZA/backups"
 DEFAULT_CHAT_DIR = "Y:/RM_BAZA/chat"  # Katalog dla wiadomości chatu (JSON)
 DEFAULT_SERVER_DIR = "Y:/SERVER_PROJEKTY"  # Katalog serwera projektów (DWF, PDF, DXF, STP, STL)
 DEFAULT_ASSEMBLY_TREE_ROOT = "V:/"  # Katalog z folderami projektów CAD, zawierającymi pliki *_OUT.xlsx (drzewko złożeń)
+LIBRARY_ROOT = "B:/"  # Biblioteka RM - komponenty wspólne (pozycje dwf_biblioteka=1); źródło DWF dla ich miniatur
 
 # Ścieżki - będą wczytane z configu lub użyją domyślnych
 MASTER_PATH = DEFAULT_MASTER_PATH
@@ -833,6 +834,15 @@ class MainWindow(tk.Tk):
         self._dwf_preview_label.bind("<Button-1>", self._show_dwf_preview_zoom)
         self._dwf_preview_anchor = tk.Frame(row2_parent, bg="#2c3e50", width=1, height=1)
         self._dwf_preview_anchor.pack(side=tk.LEFT, padx=5)
+
+        # Indeks DWF biblioteki (B:\) budowany w tle — pełny przemarsz to ~7s
+        # na dysku sieciowym. Bez tego pierwsze zaznaczenie wiersza z pozycją
+        # biblioteczną zamrażałoby okno; potem lookup jest z pamięci (~0.05 ms).
+        try:
+            from import_bom import prewarm_library_dwf_index
+            prewarm_library_dwf_index(LIBRARY_ROOT)
+        except Exception:
+            pass
         
         # Wybór użytkownika (po prawej)
         self.user_var = tk.StringVar()
@@ -6566,10 +6576,34 @@ class MainWindow(tk.Tk):
 
     def _dwf_thumb_path_for_drawing(self, drawing_no):
         """Ścieżka do miniatury PNG (cache) dla numeru rysunku, albo None.
-        Szuka pliku .dwf na bieżąco w folderze projektu na V:\\."""
+        Szuka pliku .dwf najpierw w folderze projektu na V:\\, a gdy go tam nie
+        ma — w bibliotece na B:\\. Pozycje biblioteczne (dwf_biblioteka=1, w
+        arkuszu niebieską czcionką) nie mają rysunku w folderze projektu, więc
+        bez tego fallbacku zostawały bez miniatury."""
         if not drawing_no:
             return None
 
+        dwf_path = self._find_dwf_in_project(drawing_no)
+
+        if not dwf_path:
+            try:
+                from import_bom import find_dwf_in_library
+                dwf_path = find_dwf_in_library(drawing_no, LIBRARY_ROOT)
+            except Exception:
+                dwf_path = None
+
+        if not dwf_path:
+            return None
+
+        try:
+            import dwf_thumb
+            return dwf_thumb.get_cached_thumb_path(str(dwf_path))
+        except Exception:
+            return None
+
+    def _find_dwf_in_project(self, drawing_no):
+        """Plik .dwf dla numeru rysunku w folderze bieżącego projektu na V:\\,
+        albo None (brak projektu / brak dysku / brak pasującego pliku)."""
         try:
             project_row = self.db_manager.master_con.execute(
                 "SELECT name FROM projects WHERE project_id = ?", (self.current_project_id,)
@@ -6588,11 +6622,7 @@ class MainWindow(tk.Tk):
 
         try:
             from import_bom import find_dwf_for_drawing
-            dwf_path = find_dwf_for_drawing(v_root, project_name, drawing_no)
-            if not dwf_path:
-                return None
-            import dwf_thumb
-            return dwf_thumb.get_cached_thumb_path(str(dwf_path))
+            return find_dwf_for_drawing(v_root, project_name, drawing_no)
         except Exception:
             return None
 
@@ -27579,8 +27609,7 @@ class MainWindow(tk.Tk):
         """Szukaj plików w bibliotece (B:\\) - z wielowątkowością i progress barem"""
         category = self.file_category_var.get()
         
-        # Ścieżka biblioteki (hardcoded)
-        LIBRARY_PATH = "B:\\"
+        LIBRARY_PATH = LIBRARY_ROOT
         
         # Pobierz zaznaczony wiersz
         try:

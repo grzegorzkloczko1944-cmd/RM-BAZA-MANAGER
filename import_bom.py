@@ -5,6 +5,8 @@ Funkcje pomocnicze + konwerter CSV -> XLSX
 import csv
 import re
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Generator, Dict, Optional, Tuple
 import openpyxl
@@ -383,6 +385,19 @@ def iter_zbiorczy_data_rows(excel_path: Path) -> Generator[Dict[str, str], None,
         yield rec
 
 
+# Cache lokalizacji folderow projektow: {(root, projekt) -> Path|None}.
+# find_project_folder robi iterdir() po V:\ i V:\ZP (dysk sieciowy, setki
+# folderow) - a odpowiedz praktycznie sie nie zmienia w trakcie sesji.
+_project_folder_cache: Dict[Tuple[str, str], Optional[Path]] = {}
+_project_folder_lock = threading.Lock()
+
+
+def _reset_project_folder_cache() -> None:
+    """Wyrzuc cache lokalizacji folderow projektow."""
+    with _project_folder_lock:
+        _project_folder_cache.clear()
+
+
 def find_project_folder(v_drive_root: Path, project_name: str) -> Optional[Path]:
     """
     Znajduje folder projektu w V:\\ na podstawie nazwy projektu z RM_BAZA.
@@ -391,6 +406,9 @@ def find_project_folder(v_drive_root: Path, project_name: str) -> Optional[Path]
     (np. "2556 Olmaj" lub "2556 Olmaj Wciskarka") nie muszą być identyczne
     - dopasowanie po pierwszym członie (numerze/prefiksie projektu, do
     pierwszej spacji).
+
+    Przeszukiwany jest też podkatalog V:\\ZP\\ - projekty ZP* leżą tam, a nie
+    bezpośrednio w korzeniu (analogicznie do SERVER_DIR/ZP na serwerze).
 
     Returns:
         Path do folderu projektu, lub None jeśli nie znaleziono.
@@ -407,9 +425,35 @@ def find_project_folder(v_drive_root: Path, project_name: str) -> Optional[Path]
     if not prefix:
         return None
 
+    cache_key = (str(v_drive_root), project_name.upper())
+    with _project_folder_lock:
+        if cache_key in _project_folder_cache:
+            return _project_folder_cache[cache_key]
+
+    result = _locate_project_folder(v_drive_root, project_name, prefix)
+    with _project_folder_lock:
+        _project_folder_cache[cache_key] = result
+    return result
+
+
+def _locate_project_folder(v_drive_root: Path, project_name: str, prefix: str) -> Optional[Path]:
+    """Wlasciwe przeszukanie dyskow (bez cache) - patrz find_project_folder."""
+    search_roots = [v_drive_root]
+    zp_root = v_drive_root / "ZP"
     try:
-        candidates = [p for p in v_drive_root.iterdir() if p.is_dir()]
+        if zp_root.is_dir():
+            search_roots.append(zp_root)
     except OSError:
+        pass
+
+    candidates = []
+    for root in search_roots:
+        try:
+            candidates += [p for p in root.iterdir() if p.is_dir()]
+        except OSError:
+            continue
+
+    if not candidates:
         return None
 
     # Dopasowanie dokładne po pełnej nazwie
@@ -495,11 +539,74 @@ def find_assembly_tree_rows(out_path: Path) -> list:
     return rows
 
 
+# Indeks DWF folderu projektu: {(root, projekt) -> (czas_budowy, {PREFIKS: Path})}.
+# Bez niego kazde zaznaczenie wiersza globowalo folder projektu po sieci (~34 ms).
+# TTL jest krotki, wiec nowo dograny rysunek i tak pojawi sie po chwili - to
+# zachowuje dotychczasowa obietnice "szuka na biezaco", placac za nia raz na
+# PROJECT_INDEX_TTL zamiast przy kazdym klikniecu.
+PROJECT_INDEX_TTL = 60.0  # sekundy
+_project_dwf_index: Dict[Tuple[str, str], Tuple[float, Dict[str, Path]]] = {}
+_project_index_lock = threading.Lock()
+
+
+def _reset_project_dwf_index() -> None:
+    """Wyrzuc indeksy folderow projektow - nastepne zapytanie przeskanuje od nowa."""
+    with _project_index_lock:
+        _project_dwf_index.clear()
+
+
+def _build_project_dwf_index(project_folder: Path) -> Dict[str, Path]:
+    """Mapa {PREFIKS numeru rysunku -> Path} dla DWF w folderze projektu.
+
+    DWF leza bezposrednio w folderze projektu i w gałęziach "Rysunki ..." -
+    reszta (Templates, Design Data, OldVersions, ...) to pliki robocze Inventora.
+
+    W galezie "Rysunki ..." schodzimy REKURENCYJNIE: czesc projektow zagniezdza
+    rysunki dodatkowo ("Rysunki/Rysunki 100/..."), a plaskie przeszukanie
+    jednego poziomu gubilo takie pliki (np. 2610 Sigma - 75 rysunkow widocznych
+    jako 8). Kolejnosc: plytsze wygrywa, wiec plik lezacy wyzej ma pierwszenstwo.
+    """
+    index: Dict[str, Path] = {}
+
+    def _add_files(directory: Path) -> None:
+        try:
+            entries = list(directory.glob("*.dwf"))
+        except OSError:
+            return
+        for p in entries:
+            prefix = norm(p.stem).split(" ")[0].upper()
+            if prefix and prefix not in index:
+                index[prefix] = p
+
+    # 1) rysunki lezace bezposrednio w folderze projektu
+    _add_files(project_folder)
+
+    # 2) galezie "Rysunki ..." - przechodzone wszerz, zeby plytsze wygralo
+    try:
+        queue = [
+            p for p in project_folder.iterdir()
+            if p.is_dir() and norm(p.name).upper().startswith("RYSUNKI")
+        ]
+    except OSError:
+        return index
+
+    while queue:
+        current = queue.pop(0)
+        _add_files(current)
+        try:
+            queue += [
+                p for p in current.iterdir()
+                if p.is_dir() and p.name.lower() not in LIBRARY_EXCLUDED_DIRS
+            ]
+        except OSError:
+            continue
+
+    return index
+
+
 def find_dwf_for_drawing(v_drive_root, project_name: str, drawing_no: str) -> Optional[Path]:
     """
-    Szuka na bieżąco pliku .dwf dla danego numeru rysunku w folderze projektu
-    na V:\\ (bez zapisu do bazy, bez cache ścieżek - katalog przeszukiwany
-    za każdym razem, żeby uwzględnić nowe/zmienione pliki).
+    Szuka pliku .dwf dla danego numeru rysunku w folderze projektu na V:\\.
 
     Pliki .dwf są nazwane "<Nr rysunku> <Nazwa>.dwf" (np.
     "DCR-100.01X Płyta główna.dwf") - dopasowanie po prefiksie nazwy pliku
@@ -510,6 +617,10 @@ def find_dwf_for_drawing(v_drive_root, project_name: str, drawing_no: str) -> Op
     Workspace, Libraries, Importowane komponenty, oldversions, ...) to pliki
     robocze/biblioteczne Inventora i są pomijane.
 
+    Lista plików jest indeksowana i odświeżana co PROJECT_INDEX_TTL sekund -
+    nowy rysunek dograny na V:\\ pojawi się po tym czasie (albo od razu po
+    _reset_project_dwf_index()).
+
     Returns:
         Path do pliku .dwf, lub None jeśli nie znaleziono (brak folderu V:\\,
         brak folderu projektu, lub brak pasującego pliku).
@@ -518,36 +629,162 @@ def find_dwf_for_drawing(v_drive_root, project_name: str, drawing_no: str) -> Op
     if not drawing_no_n:
         return None
 
-    project_folder = find_project_folder(Path(v_drive_root), project_name)
-    if not project_folder:
-        return None
+    cache_key = (str(v_drive_root), norm(project_name).upper())
+    now = time.monotonic()
 
-    search_dirs = [project_folder]
-    try:
-        search_dirs += [
-            p for p in project_folder.iterdir()
-            if p.is_dir() and norm(p.name).upper().startswith("RYSUNKI")
-        ]
-    except OSError:
-        return None
+    with _project_index_lock:
+        cached = _project_dwf_index.get(cache_key)
+        if cached is not None and (now - cached[0]) < PROJECT_INDEX_TTL:
+            index = cached[1]
+        else:
+            index = None
 
-    candidates = []
-    for d in search_dirs:
+    if index is None:
+        project_folder = find_project_folder(Path(v_drive_root), project_name)
+        if not project_folder:
+            return None
+        index = _build_project_dwf_index(project_folder)
+        with _project_index_lock:
+            _project_dwf_index[cache_key] = (now, index)
+
+    return index.get(drawing_no_n.upper())
+
+
+# Katalogi biblioteki pomijane przy szukaniu DWF - stare wersje, pliki robocze
+# i systemowe Inventora. Ta sama lista co w skanowaniu biblioteki w GUI.
+LIBRARY_EXCLUDED_DIRS = {
+    "oldversions",
+    "design data",
+    "importowane komponenty",
+    "templates",
+    "$recycle.bin",
+    "system volume information",
+    "@recycle",
+    ".git",
+    ".svn",
+    "node_modules",
+}
+
+DEFAULT_LIBRARY_ROOT = "B:/"
+
+# Cache indeksu biblioteki: {prefiks numeru rysunku -> Path do .dwf}. Biblioteka
+# to ~1600 plikow DWF w glebokim drzewie na dysku sieciowym - pelny przemarsz
+# przy kazdym zaznaczeniu wiersza dawalby sekundy zwloki. Indeks budowany raz na
+# sesje; unieważnia go _reset_library_dwf_index() (przycisk odswiezania w GUI).
+_library_dwf_index: Optional[Dict[str, Path]] = None
+_library_index_lock = threading.Lock()
+_library_index_thread: Optional[threading.Thread] = None
+
+
+def _reset_library_dwf_index() -> None:
+    """Wyrzuc zbudowany indeks - kolejne zapytanie przeskanuje biblioteke na nowo."""
+    global _library_dwf_index
+    with _library_index_lock:
+        _library_dwf_index = None
+
+
+def prewarm_library_dwf_index(library_root=None) -> None:
+    """Zbuduj indeks biblioteki w tle (nieblokujaco).
+
+    Pelny przemarsz B:\\ to ~7s na dysku sieciowym. Wywolane przy starcie GUI
+    sprawia, ze pierwsze zaznaczenie wiersza nie zamraza okna - do czasu
+    gotowosci indeksu miniatury pozycji bibliotecznych sa po prostu pomijane.
+    """
+    global _library_index_thread
+
+    with _library_index_lock:
+        if _library_dwf_index is not None:
+            return
+        if _library_index_thread is not None and _library_index_thread.is_alive():
+            return
+
+        def _worker():
+            global _library_dwf_index
+            root = Path(library_root) if library_root else Path(DEFAULT_LIBRARY_ROOT)
+            try:
+                if not root.exists():
+                    return
+                built = _build_library_dwf_index(root)
+            except Exception:
+                return
+            with _library_index_lock:
+                _library_dwf_index = built
+
+        _library_index_thread = threading.Thread(
+            target=_worker, daemon=True, name="library-dwf-index"
+        )
+        _library_index_thread.start()
+
+
+def _build_library_dwf_index(library_root: Path) -> Dict[str, Path]:
+    """Zbuduj mape {PREFIKS -> Path} dla wszystkich .dwf w bibliotece.
+
+    Przy duplikatach numeru rysunku wygrywa plik nowszy (mtime) - w bibliotece
+    ten sam detal bywa w kilku podkatalogach tematycznych.
+    """
+    index: Dict[str, Path] = {}
+    mtimes: Dict[str, float] = {}
+
+    stack = [library_root]
+    while stack:
+        current = stack.pop()
         try:
-            candidates += list(d.glob("*.dwf"))
+            entries = list(current.iterdir())
         except OSError:
             continue
 
-    drawing_no_upper = drawing_no_n.upper()
-    for p in candidates:
-        if not p.is_file():
-            continue
-        stem = norm(p.stem)
-        file_prefix = stem.split(" ")[0].upper()
-        if file_prefix == drawing_no_upper:
-            return p
+        for entry in entries:
+            try:
+                if entry.is_dir():
+                    if entry.name.lower() not in LIBRARY_EXCLUDED_DIRS:
+                        stack.append(entry)
+                    continue
+                if entry.suffix.lower() != ".dwf":
+                    continue
+            except OSError:
+                continue
 
-    return None
+            prefix = norm(entry.stem).split(" ")[0].upper()
+            if not prefix:
+                continue
+            try:
+                mtime = entry.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            if prefix not in index or mtime > mtimes.get(prefix, 0.0):
+                index[prefix] = entry
+                mtimes[prefix] = mtime
+
+    return index
+
+
+def find_dwf_in_library(drawing_no: str, library_root=None) -> Optional[Path]:
+    """Szuka pliku .dwf dla numeru rysunku w bibliotece (B:\\).
+
+    Pozycje biblioteczne (dwf_biblioteka=1) nie leza w folderze projektu na
+    V:\\, tylko w bibliotece - stad osobne wyszukiwanie. Konwencja nazw ta sama
+    co w projektach: "<Nr rysunku> <Nazwa>.dwf", dopasowanie po prefiksie do
+    pierwszej spacji, bez rozroznienia wielkosci liter.
+
+    Returns:
+        Path do pliku .dwf, albo None gdy brak biblioteki lub pasujacego pliku.
+    """
+    drawing_no_n = norm(drawing_no)
+    if not drawing_no_n:
+        return None
+
+    index = _library_dwf_index
+    if index is None:
+        # Indeks jeszcze niegotowy - zamow budowe w tle i odpusc ten strzal.
+        # Blokowanie GUI na ~7s przy zaznaczeniu wiersza byloby gorsze niz
+        # brak miniatury przez pierwsze kilka sekund pracy.
+        prewarm_library_dwf_index(library_root)
+        return None
+
+    # Bez stat()/is_file() na trafieniu - to strzal po sieci (~7ms) przy kazdym
+    # zaznaczeniu wiersza. Nieaktualny wpis (plik przeniesiony po zbudowaniu
+    # indeksu) i tak konczy sie lagodnie: dwf_thumb zwroci brak podgladu.
+    return index.get(drawing_no_n.upper())
 
 
 def find_assembly_for_drawing(v_drive_root, project_name: str, drawing_no: str) -> Optional[Dict]:
