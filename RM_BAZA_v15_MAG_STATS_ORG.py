@@ -282,7 +282,9 @@ class MainWindow(tk.Tk):
         self._sheet_src_values: list = []  # src_* wartości dla tooltips (dict per row)
         self._sheet_overridden: list = []  # Które kolumny są nadpisane per row (dict per row)
         self._last_supplier_popup = None  # Cache dla tooltip dostawcy
-        self.viewing_backup: bool = False  # Czy przeglądamy backup
+        self.viewing_backup: bool = False  # Czy przeglądamy backup projektu
+        self.viewing_master_backup: bool = False  # Czy cała baza jest historyczna
+        self.master_backup_date = None     # Data backupu mastera (tryb historyczny)
         self.backup_date: str = None  # Data przeglądanego backupu
         self.active_tooltip = None  # Aktywny tooltip dla wartości BOM
         
@@ -1440,6 +1442,31 @@ class MainWindow(tk.Tk):
         self.lbl_cena_pln_stat.config(cursor="hand2")
         self.lbl_cena_pln_stat.bind("<Button-1>", self._open_price_stats_window)
         self.lbl_cena_pln_stat.pack_forget()  # ukryty do czasu logowania
+
+        # ====================================================================
+        # PASEK TRYBU PODGLĄDU BACKUPU
+        # Widoczny TYLKO gdy arkusz pokazuje dane historyczne. Bez tego
+        # nie da się odróżnić stanu sprzed tygodnia od dzisiejszego.
+        # ====================================================================
+        self.backup_banner = tk.Frame(self, bg="#f39c12")
+
+        self.backup_banner_label = tk.Label(
+            self.backup_banner,
+            text="",
+            bg="#f39c12", fg="black",
+            font=("Arial", 11, "bold"),
+            pady=8
+        )
+        self.backup_banner_label.pack(side=tk.LEFT, padx=15)
+
+        tk.Button(
+            self.backup_banner,
+            text="✖ Wróć do aktualnych danych",
+            command=self._exit_backup_view,
+            bg="#c0392b", fg="white",
+            font=("Arial", 10, "bold"),
+            cursor="hand2", relief=tk.RAISED, bd=2
+        ).pack(side=tk.RIGHT, padx=15, pady=5)
 
         # ====================================================================
         # MIDDLE - Tksheet (Tabelka)
@@ -5014,6 +5041,7 @@ class MainWindow(tk.Tk):
             if self.viewing_backup:
                 self.viewing_backup = False
                 self.backup_date = None
+                self._hide_backup_banner()
                 self.info_label.config(fg="white")
                 
                 # Przywróć właściwy tekst w zależności od stanu locka
@@ -5035,6 +5063,335 @@ class MainWindow(tk.Tk):
             self.backup_date = selected
             self.load_backup_preview(selected)
     
+    def show_backup_file_in_main_sheet(self, project_id: int, backup_path, label: str) -> bool:
+        """
+        Pokaż KONKRETNY PLIK backupu w głównym arkuszu.
+
+        Dla kopii sprzed importów, które nie występują w combo dat
+        na górnym pasku (mają godzinę i nazwę operacji, nie samą datę).
+
+        Args:
+            project_id: ID projektu
+            backup_path: Ścieżka do pliku .sqlite
+            label: Opis do paska (np. "PRZED: import_bom — 2026-08-19 14:30:22")
+
+        Returns:
+            True jeśli załadowano
+        """
+        from pathlib import Path as _P
+        backup_file = _P(backup_path)
+
+        if not backup_file.exists():
+            messagebox.showerror("Błąd", f"Brak pliku backupu:\n{backup_file}")
+            return False
+
+        if self.current_project_id != project_id:
+            if not self._switch_to_project(project_id):
+                return False
+
+        try:
+            self.viewing_backup = True
+            self.backup_date = label
+            self._load_items_from_backup(backup_file)
+
+            self.backup_banner_label.config(
+                text=f"📦 {label}   (TYLKO ODCZYT — kopia sprzed importu)"
+            )
+            self.backup_banner.pack(
+                side=tk.TOP, fill=tk.X, padx=10, pady=(0, 4),
+                before=self.sheet.master
+            )
+
+            self.btn_acquire_lock.config(state=tk.DISABLED)
+            self.btn_force_lock.config(state=tk.DISABLED)
+            self.info_label.config(text=label, fg="#f39c12")
+            return True
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Błąd", f"Nie udało się załadować backupu:\n{e}")
+            self.viewing_backup = False
+            self.backup_date = None
+            self._hide_backup_banner()
+            return False
+
+    def _switch_to_project(self, project_id: int) -> bool:
+        """Przełącz selektor na dany projekt. True jeśli się udało."""
+        project_name = None
+        for pid, pname in self.projects_list:
+            if pid == project_id:
+                project_name = pname
+                break
+
+        if project_name is None:
+            messagebox.showerror("Brak projektu", f"Projekt {project_id} nie jest na liście.")
+            return False
+
+        if self.have_lock:
+            messagebox.showwarning(
+                "Masz lock",
+                f"Trzymasz lock na projekcie {self.current_project_id}.\n"
+                f"Zwolnij go przed podglądem innego projektu."
+            )
+            return False
+
+        display_value = None
+        for val in (self.project_combo['values'] or ()):
+            if project_name in val:
+                display_value = val
+                break
+
+        if display_value is None:
+            messagebox.showerror("Brak projektu", f"'{project_name}' nie jest dostępny w selektorze.")
+            return False
+
+        self.project_combo.set(display_value)
+        self.project_var.set(display_value)
+        self.on_project_selected()
+        return self.current_project_id == project_id
+
+    def show_master_backup_state(self, backup_date: str) -> bool:
+        """
+        Pokaż STAN BAZY z dnia backupu mastera.
+
+        Selektor projektów przechodzi w tryb historyczny: lista pochodzi
+        z backupu mastera, a wybrany projekt ładuje swój backup z tej samej
+        daty. Żywa baza nie jest w żaden sposób ruszana.
+
+        Args:
+            backup_date: Data YYYY-MM-DD
+
+        Returns:
+            True jeśli włączono tryb historyczny
+        """
+        if self.have_lock:
+            messagebox.showwarning(
+                "Masz lock",
+                f"Trzymasz lock na projekcie {self.current_project_id}.\n"
+                f"Zwolnij go przed przejściem w tryb historyczny."
+            )
+            return False
+
+        backup_file = self.backup_manager.master_backup_dir / f"master_{backup_date}.sqlite"
+        if not backup_file.exists():
+            messagebox.showerror("Błąd", f"Brak backupu mastera z {backup_date}")
+            return False
+
+        try:
+            con = sqlite3.connect(f"file:{backup_file}?mode=ro&immutable=1", uri=True, timeout=10.0)
+            try:
+                cols = {r[1] for r in con.execute("PRAGMA table_info(projects)")}
+                type_col = "project_type" if "project_type" in cols else None
+                active_col = "active" if "active" in cols else None
+
+                sel = "project_id, name"
+                sel += f", {active_col}" if active_col else ", 1"
+                sel += f", {type_col}" if type_col else ", 'MACHINE'"
+
+                rows = con.execute(f"SELECT {sel} FROM projects").fetchall()
+            finally:
+                con.close()
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Nie udało się odczytać backupu mastera:\n{e}")
+            return False
+
+        wanted = self._get_internal_project_type()
+        hist = [
+            (r[0], r[1]) for r in rows
+            if (r[2] in (1, '1', None)) and (r[3] or 'MACHINE') == wanted
+        ]
+
+        if not hist:
+            messagebox.showinfo(
+                "Brak projektów",
+                f"Backup mastera z {backup_date} nie zawiera projektów typu {wanted}."
+            )
+            return False
+
+        # Włącz tryb historyczny
+        self.master_backup_date = backup_date
+        self.viewing_master_backup = True
+
+        # Podmień listę w selektorze na tę z backupu
+        self.projects_list = sorted(hist, key=lambda it: it[1].lower())
+        self.project_combo['values'] = [name for _, name in self.projects_list]
+
+        self._show_master_banner(backup_date, len(self.projects_list))
+
+        # Wyczyść arkusz - stary projekt może nie istnieć w tym backupie
+        self.sheet.set_sheet_data([])
+        self.current_project_id = None
+        self.project_combo.set("")
+        self.info_label.config(
+            text=f"STAN BAZY z {backup_date} — wybierz projekt z listy",
+            fg="#f39c12"
+        )
+
+        self.btn_acquire_lock.config(state=tk.DISABLED)
+        self.btn_force_lock.config(state=tk.DISABLED)
+
+        print(f"📅 TRYB HISTORYCZNY: master z {backup_date}, {len(hist)} projektów")
+        return True
+
+    def _show_master_banner(self, backup_date: str, count: int):
+        """Pasek informujący o trybie historycznym całej bazy"""
+        try:
+            self.backup_banner_label.config(
+                text=f"🗄️ STAN BAZY Z DNIA {backup_date}   "
+                     f"({count} projektów — tyle ich wtedy było)   "
+                     f"TYLKO ODCZYT"
+            )
+            self.backup_banner.pack(
+                side=tk.TOP, fill=tk.X, padx=10, pady=(0, 4),
+                before=self.sheet.master
+            )
+        except Exception as e:
+            print(f"⚠️  Pasek mastera: {e}")
+
+    def exit_master_backup_state(self):
+        """Wyjdź z trybu historycznego - wróć do aktualnej bazy"""
+        self.viewing_master_backup = False
+        self.master_backup_date = None
+        self.viewing_backup = False
+        self.backup_date = None
+
+        self._hide_backup_banner()
+        self.load_projects()          # przywróć aktualną listę projektów
+        self.sheet.set_sheet_data([])
+        self.current_project_id = None
+        self.project_combo.set("")
+        self.info_label.config(text="Wybierz projekt", fg="white")
+
+        if not self.have_lock:
+            self.btn_acquire_lock.config(state=tk.NORMAL)
+            self.btn_force_lock.config(state=tk.NORMAL)
+
+        print("📄 Powrót do aktualnego stanu bazy")
+
+    def _show_backup_banner(self, project_id: int, backup_date: str):
+        """Pokaż pasek informujący, że arkusz zawiera dane historyczne"""
+        try:
+            project_name = ""
+            for pid, pname in self.projects_list:
+                if pid == project_id:
+                    project_name = f" — {pname}"
+                    break
+
+            self.backup_banner_label.config(
+                text=f"📅 PODGLĄD BACKUPU z dnia {backup_date}{project_name}   "
+                     f"(TYLKO ODCZYT — to NIE są aktualne dane)"
+            )
+            # before=sheet_frame -> pasek zawsze nad tabelą, nigdy pod nią
+            self.backup_banner.pack(
+                side=tk.TOP, fill=tk.X, padx=10, pady=(0, 4),
+                before=self.sheet.master
+            )
+        except Exception as e:
+            print(f"⚠️  Nie udało się pokazać paska backupu: {e}")
+
+    def _hide_backup_banner(self):
+        """Ukryj pasek podglądu backupu"""
+        try:
+            self.backup_banner.pack_forget()
+        except Exception:
+            pass
+
+    def _exit_backup_view(self):
+        """Powrót z podglądu backupu do aktualnych danych"""
+        if getattr(self, 'viewing_master_backup', False):
+            self.exit_master_backup_state()
+            return
+
+        self.backup_combo.set("Aktualny stan")
+        self.backup_date_var.set("Aktualny stan")
+        self.on_backup_selected()
+
+    def show_backup_in_main_sheet(self, project_id: int, backup_date: str) -> bool:
+        """
+        Pokaż backup projektu w GŁÓWNYM ARKUSZU.
+
+        Używane przez okno "Podgląd backupów" - wykorzystuje ten sam
+        mechanizm co combo z datami na górnym pasku, tylko wołany z zewnątrz.
+
+        Args:
+            project_id: ID projektu z backupu
+            backup_date: Data backupu YYYY-MM-DD
+
+        Returns:
+            True jeśli załadowano
+        """
+        # Backup dotyczy innego projektu niż otwarty - najpierw przełącz
+        if self.current_project_id != project_id:
+            project_name = None
+            for pid, pname in self.projects_list:
+                if pid == project_id:
+                    project_name = pname
+                    break
+
+            if project_name is None:
+                messagebox.showerror(
+                    "Brak projektu",
+                    f"Projekt {project_id} nie istnieje już na liście.\n"
+                    f"Backup można tylko przywrócić, nie podejrzeć w arkuszu."
+                )
+                return False
+
+            if self.have_lock:
+                messagebox.showwarning(
+                    "Masz lock",
+                    f"Trzymasz lock na projekcie {self.current_project_id}.\n"
+                    f"Zwolnij go przed podglądem backupu innego projektu."
+                )
+                return False
+
+            # Combo trzyma ozdobione nazwy ("✅ Nazwa 🔒 [User]"), a
+            # projects_list czyste - znajdź wpis zawierający nazwę projektu
+            display_value = None
+            for val in (self.project_combo['values'] or ()):
+                if project_name in val:
+                    display_value = val
+                    break
+
+            if display_value is None:
+                messagebox.showerror(
+                    "Brak projektu",
+                    f"Projekt '{project_name}' nie jest dostępny w selektorze.\n"
+                    f"Sprawdź czy nie jest ukryty (inny typ / nieaktywny)."
+                )
+                return False
+
+            # Przełącz przez normalną ścieżkę selektora projektu
+            self.project_combo.set(display_value)
+            self.on_project_selected()
+
+            if self.current_project_id != project_id:
+                messagebox.showerror(
+                    "Błąd",
+                    f"Nie udało się przełączyć na projekt {project_id}."
+                )
+                return False
+
+        # Odśwież listę dat i wybierz żądaną - dalej działa istniejący mechanizm
+        self.load_backup_dates()
+
+        available = [str(v) for v in (self.backup_combo['values'] or ())]
+        backup_date = str(backup_date)
+        print(f"🔍 show_backup_in_main_sheet: szukam '{backup_date}' w {available}")
+
+        if backup_date not in available:
+            messagebox.showerror(
+                "Brak backupu",
+                f"Backup z {backup_date} nie jest dostępny dla projektu {project_id}.\n\n"
+                f"Dostępne: {', '.join(available[:8]) or 'brak'}"
+            )
+            return False
+
+        self.backup_combo.set(backup_date)
+        self.backup_date_var.set(backup_date)
+        self.on_backup_selected()
+        return True
+
     def load_backup_preview(self, backup_date: str):
         """Załaduj dane z backupu do podglądu"""
         if not self.current_project_id or not self.backup_manager:
@@ -5063,16 +5420,16 @@ class MainWindow(tk.Tk):
             
             # Użyj tej samej logiki co refresh_data, ale z inną bazą
             self._load_items_from_backup(backup_file)
-            
-            messagebox.showinfo(
-                "Podgląd backupu",
-                f"Wyświetlam dane z backupu projektu z dnia:\n{backup_date}\n\n"
-                "To jest tylko PODGLĄD - nie możesz edytować.\n"
-                "Aby wrócić do aktualnego stanu, wybierz 'Aktualny stan'."
-            )
-            
+
+            # Pasek nad tabelą zastępuje popup - widać go cały czas,
+            # a nie tylko do momentu kliknięcia OK
+            self._show_backup_banner(self.current_project_id, backup_date)
+
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             messagebox.showerror("Błąd", f"Nie udało się załadować backupu:\n{e}")
+            self._hide_backup_banner()
             self.backup_combo.set("Aktualny stan")
             self.viewing_backup = False
             self.backup_date = None
@@ -5130,9 +5487,32 @@ class MainWindow(tk.Tk):
                 FROM items
                 ORDER BY id
             """
-            
+
+            # Kolumny MODUŁ dodano później - starsze backupy ich nie mają.
+            # Arkusz oczekuje modul_disp/work_modul/src_modul, więc gdy
+            # backup je ma, dokładamy je do SELECT-a; gdy nie - podstawiamy
+            # puste wartości, żeby nie wywalić wyświetlania (KeyError).
+            backup_cols = {r[1] for r in backup_con.execute("PRAGMA table_info(items)")}
+            has_modul = 'src_modul' in backup_cols and 'work_modul' in backup_cols
+
+            if has_modul:
+                sql = sql.replace(
+                    "COALESCE(is_manual, 0) as is_manual",
+                    "COALESCE(is_manual, 0) as is_manual,\n"
+                    "                    work_modul,\n"
+                    "                    src_modul,\n"
+                    "                    COALESCE(NULLIF(work_modul,''), src_modul) AS modul_disp"
+                )
+
             cursor = backup_con.execute(sql)
             items = [dict(row) for row in cursor.fetchall()]
+
+            if not has_modul:
+                print("  ℹ️  Backup bez kolumn MODUŁ - uzupełniam pustymi")
+                for it in items:
+                    it['work_modul'] = None
+                    it['src_modul'] = None
+                    it['modul_disp'] = None
             
             # Użyj tej samej logiki co refresh_data
             # Tymczasowo podstaw backup_con jako project_con
@@ -5269,17 +5649,73 @@ class MainWindow(tk.Tk):
         self.sheet.set_sheet_data([])
         print(f"✅ Ekran wyczyszczony - zmieniono środowisko")
 
+    def _on_project_selected_historic(self) -> bool:
+        """
+        Wybór projektu w trybie historycznym (oglądamy backup mastera).
+
+        Ładuje backup projektu z TEJ SAMEJ daty co backup mastera,
+        zamiast sięgać do żywej bazy.
+
+        Returns:
+            True jeśli obsłużono (jesteśmy w trybie historycznym)
+        """
+        if not getattr(self, 'viewing_master_backup', False):
+            return False
+
+        name = self.project_var.get() or self.project_combo.get()
+        pid = None
+        for p_id, p_name in self.projects_list:
+            if p_name == name:
+                pid = p_id
+                break
+
+        if pid is None:
+            return True
+
+        self.current_project_id = pid
+        date = self.master_backup_date
+
+        subdir = self.backup_manager.projects_backup_dir / f"project_{pid}"
+        backup_file = subdir / f"project_{pid}_{date}.sqlite"
+
+        if not backup_file.exists():
+            # Projekt istniał w masterze, ale nie ma jego backupu z tego dnia
+            self.sheet.set_sheet_data([])
+            self.info_label.config(
+                text=f"Brak backupu projektu {pid} z dnia {date}", fg="#e74c3c"
+            )
+            print(f"⚠️  Brak pliku: {backup_file}")
+            return True
+
+        try:
+            self._load_items_from_backup(backup_file)
+            self.info_label.config(
+                text=f"Projekt {pid} — stan z {date} (TYLKO ODCZYT)", fg="#f39c12"
+            )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.sheet.set_sheet_data([])
+            self.info_label.config(text=f"Błąd ładowania backupu: {e}", fg="#e74c3c")
+
+        return True
+
     def on_project_selected(self, event=None):
         """Wybrano projekt z dropdown"""
         selected = self.project_var.get()
-        
+
         print(f"\n{'='*60}")
         print(f"📂 on_project_selected() wywołane")
         print(f"   Selected: {selected}")
         print(f"   Current project_id: {self.current_project_id}")
-        
+
         if not selected:
             print(f"❌ Brak wybranego projektu - kończymy")
+            return
+
+        # Tryb historyczny (oglądamy backup mastera) - ładuj backup projektu
+        # z tej samej daty zamiast sięgać do żywej bazy
+        if self._on_project_selected_historic():
             return
         
         # 🔄 Sprawdź żywotność połączenia (bezpiecznie, bez blokowania GUI)
@@ -12647,6 +13083,37 @@ class MainWindow(tk.Tk):
     # MODUŁ IMPORT BOM
     # ========================================================================
 
+    def _backup_before_import(self, operation: str) -> bool:
+        """
+        Backup projektu przed operacją importu.
+
+        Wołane po sprawdzeniu uprawnień i locka, a przed wyborem pliku -
+        żeby kopia odzwierciedlała stan sprzed jakichkolwiek zmian.
+
+        Args:
+            operation: nazwa operacji do nazwy pliku (import_bom, dodaj_bom…)
+
+        Returns:
+            True = można kontynuować import
+            False = użytkownik przerwał po nieudanym backupie
+        """
+        if not self.current_project_id or not self.backup_manager:
+            return True
+
+        try:
+            self.backup_manager.backup_before_import(self.current_project_id, operation)
+            return True
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return messagebox.askyesno(
+                "⚠️ Backup nieudany",
+                f"Nie udało się zrobić kopii przed importem:\n{e}\n\n"
+                f"Import ZMIENI dane bez możliwości cofnięcia z tej kopii.\n\n"
+                f"Kontynuować mimo to?",
+                icon='warning'
+            )
+
     def menu_import_bom(self):
         """
         IMPORT PEŁNY BOM z LOGISTYKA_OUT.xlsx (arkusz ZBIORCZY)
@@ -12691,10 +13158,14 @@ class MainWindow(tk.Tk):
             title="Wybierz LOGISTYKA_OUT.xlsx lub CSV (arkusz ZBIORCZY)",
             filetypes=[("Excel / CSV", "*.xlsx *.csv"), ("Excel", "*.xlsx"), ("CSV", "*.csv"), ("Wszystkie pliki", "*.*")]
         )
-        
+
         if not xlsx_path:
             return
-        
+
+        # Kopia sprzed importu (ta operacja kasuje wszystkie pozycje)
+        if not self._backup_before_import("import_bom"):
+            return
+
         # Workbook do zamknięcia
         wb_colors = None
         
@@ -13142,6 +13613,10 @@ class MainWindow(tk.Tk):
                        ("Wszystkie pliki", "*.*")]
         )
         if not xlsx_path:
+            return
+
+        # Kopia sprzed importu
+        if not self._backup_before_import("aktualizuj_ilosci"):
             return
         excel_path = Path(xlsx_path)
 
@@ -14454,10 +14929,14 @@ class MainWindow(tk.Tk):
             title="Wybierz plik XLSX lub CSV z modułem do importu",
             filetypes=[("Excel / CSV", "*.xlsx *.csv"), ("Excel", "*.xlsx"), ("CSV", "*.csv"), ("Wszystkie pliki", "*.*")]
         )
-        
+
         if not xlsx_path:
             return
-        
+
+        # Kopia sprzed importu
+        if not self._backup_before_import("aktualizuj_bom"):
+            return
+
         # Workbook do zamknięcia
         wb_colors = None
         
@@ -15885,10 +16364,14 @@ class MainWindow(tk.Tk):
             title="Wybierz plik XLSX lub CSV z BOM do dodania",
             filetypes=[("Excel / CSV", "*.xlsx *.csv"), ("Excel", "*.xlsx"), ("CSV", "*.csv"), ("Wszystkie pliki", "*.*")]
         )
-        
+
         if not xlsx_path:
             return
-        
+
+        # Kopia sprzed importu
+        if not self._backup_before_import("dodaj_bom"):
+            return
+
         # Pytaj o mnożnik
         multiplier = simpledialog.askinteger(
             "Mnożnik ilości",
@@ -16536,10 +17019,14 @@ class MainWindow(tk.Tk):
             title="Wybierz plik XLSX lub CSV z modułem do importu",
             filetypes=[("Excel / CSV", "*.xlsx *.csv"), ("Excel", "*.xlsx"), ("CSV", "*.csv"), ("Wszystkie pliki", "*.*")]
         )
-        
+
         if not xlsx_path:
             return
-        
+
+        # Kopia sprzed importu
+        if not self._backup_before_import("import_modul"):
+            return
+
         # Auto-konwersja CSV → XLSX
         if Path(xlsx_path).suffix.lower() == ".csv":
             from import_bom import csv_to_xlsx
@@ -17364,11 +17851,18 @@ class MainWindow(tk.Tk):
             import traceback
             traceback.print_exc()
     
-    def backups_view_dialog(self):
-        """Dialog podglądu backupów"""
+    def backups_view_dialog(self, restore_mode: bool = False):
+        """Dialog podglądu backupów
+
+        Args:
+            restore_mode: True gdy otwarty przez "Przywróć backup" - okno
+                          jest wtedy opisane jako tryb przywracania.
+                          Sam przycisk przywracania i tak wymaga ADMIN.
+        """
         win = tk.Toplevel(self)
-        win.title("📋 Podgląd backupów")
-        win.geometry("1000x650")
+        win.title("♻️ Przywracanie backupu" if restore_mode else "📋 Podgląd backupów")
+        win.geometry("1000x760")
+        win.minsize(900, 600)
         win.transient(self)
         
         # Wycentruj
@@ -17380,7 +17874,18 @@ class MainWindow(tk.Tk):
         # Główny frame
         main_frame = tk.Frame(win, bg="#f0f0f0", padx=15, pady=15)
         main_frame.pack(fill=tk.BOTH, expand=True)
-        
+
+        # Nagłówek trybu - w trybie przywracania od razu widać, że okno
+        # służy do nadpisania bazy, a nie tylko do oglądania
+        if restore_mode:
+            hdr = tk.Frame(main_frame, bg="#e74c3c")
+            hdr.pack(fill=tk.X, pady=(0, 10))
+            tk.Label(
+                hdr,
+                text="♻️ TRYB PRZYWRACANIA — wybrany backup nadpisze bieżącą bazę",
+                bg="#e74c3c", fg="white", font=("Arial", 10, "bold"), pady=6
+            ).pack()
+
         # Wybór typu backupu
         top_frame = tk.Frame(main_frame, bg="#f0f0f0")
         top_frame.pack(fill=tk.X, pady=(0, 10))
@@ -17408,7 +17913,7 @@ class MainWindow(tk.Tk):
         
         # Treeview
         columns = ("Data", "Rozmiar", "Typ")
-        tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
+        tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=10)
         tree.heading("Data", text="Data backupu")
         tree.heading("Rozmiar", text="Rozmiar (MB)")
         tree.heading("Typ", text="Typ")
@@ -17425,10 +17930,17 @@ class MainWindow(tk.Tk):
         
         # Panel podglądu
         preview_frame = tk.LabelFrame(main_frame, text="Podgląd zawartości", bg="#f0f0f0", font=("Arial", 10, "bold"))
-        preview_frame.pack(fill=tk.BOTH, pady=(0, 10))
-        
-        preview_text = tk.Text(preview_frame, height=8, bg="white", font=("Courier", 9), wrap=tk.WORD)
-        preview_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        preview_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10), side=tk.TOP)
+
+        preview_inner = tk.Frame(preview_frame, bg="#f0f0f0")
+        preview_inner.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        preview_text = tk.Text(preview_inner, height=10, bg="white", font=("Courier", 9), wrap=tk.WORD)
+        preview_scroll = ttk.Scrollbar(preview_inner, orient=tk.VERTICAL, command=preview_text.yview)
+        preview_text.configure(yscrollcommand=preview_scroll.set)
+
+        preview_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        preview_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         
         # Cache backupów
         backups_cache = {}
@@ -17466,16 +17978,32 @@ class MainWindow(tk.Tk):
                         backups_cache[b['date']] = b
                 
                 else:  # projects
-                    project_frame.pack(fill=tk.X, pady=(0, 10))
-                    
+                    # before=list_frame - inaczej po pack_forget() ramka
+                    # wraca na koniec okna, pod przyciski
+                    project_frame.pack(fill=tk.X, pady=(0, 10), before=list_frame)
+
                     # Pobierz wybrane ID projektu
                     sel = project_combo.get()
                     if not sel:
+                        preview_text.delete("1.0", tk.END)
+                        preview_text.insert("1.0", "Wybierz projekt z listy powyżej.")
                         return
                     
                     project_id = int(sel.split(':')[0])
+
+                    # Najpierw kopie sprzed importów - są najcenniejsze przy
+                    # cofaniu nieudanego importu i mają godzinę, nie tylko datę
+                    for b in self.backup_manager.list_pre_import_backups(project_id):
+                        key = f"⚠ PRZED: {b['operation']} — {b['date']}"
+                        tree.insert("", tk.END, values=(
+                            key,
+                            f"{b['size_mb']:.2f}",
+                            f"Przed importem"
+                        ))
+                        backups_cache[key] = b
+
                     backups = self.backup_manager.list_project_backups(project_id)
-                    
+
                     for b in backups:
                         tree.insert("", tk.END, values=(
                             b['date'],
@@ -17483,22 +18011,42 @@ class MainWindow(tk.Tk):
                             f"Projekt {project_id}"
                         ))
                         backups_cache[b['date']] = b
-            
+
+                # Automatycznie zaznacz i pokaż najnowszy backup.
+                # UWAGA: selection_set() NIE generuje <<TreeviewSelect>> gdy
+                # Tkinter uzna, że zaznaczenie się nie zmieniło (ten sam
+                # indeks po przebudowie drzewa) - dlatego podgląd wołamy
+                # wprost, zamiast liczyć na zdarzenie.
+                children = tree.get_children()
+                if children:
+                    tree.selection_set(children[0])
+                    tree.focus(children[0])
+                    show_preview_for_selection()
+                else:
+                    preview_text.delete("1.0", tk.END)
+                    preview_text.insert("1.0", "Brak backupów dla wybranego typu.")
+
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 messagebox.showerror("Błąd", f"Nie udało się załadować backupów:\n{e}")
         
-        def on_backup_selected(event):
-            """Podgląd backupu"""
+        def on_backup_selected(event=None):
+            """Podgląd backupu (handler zdarzenia)"""
+            show_preview_for_selection()
+
+        def show_preview_for_selection():
+            """Wypełnij panel podglądu danymi zaznaczonego backupu"""
             sel = tree.selection()
             if not sel:
                 return
             
             item = tree.item(sel[0])
-            date = item['values'][0]
-            
+            date = str(item['values'][0])
+
             if date not in backups_cache:
                 return
-            
+
             backup_info = backups_cache[date]
             
             try:
@@ -17515,24 +18063,79 @@ class MainWindow(tk.Tk):
                 
                 if backup_info['type'] == 'master':
                     preview_text.insert(tk.END, f"📊 Statystyki:\n")
-                    preview_text.insert(tk.END, f"  • Projektów: {preview_data['projects_count']}\n")
-                    preview_text.insert(tk.END, f"  • Użytkowników: {preview_data['users_count']}\n")
-                    preview_text.insert(tk.END, f"  • Dostawców: {preview_data['suppliers_count']}\n\n")
-                    
-                    if preview_data['projects']:
-                        preview_text.insert(tk.END, "📋 Lista projektów:\n")
-                        for p in preview_data['projects'][:10]:
+                    preview_text.insert(tk.END, f"  • Projektów: {preview_data.get('projects_count', '-')}\n")
+                    preview_text.insert(tk.END, f"  • Użytkowników: {preview_data.get('users_count', '-')}\n")
+                    preview_text.insert(tk.END, f"  • Dostawców: {preview_data.get('suppliers_count', '-')}\n\n")
+
+                    projects_list = preview_data.get('projects') or []
+
+                    # Porównaj z aktualnym stanem - sama lista 78 nazw nic
+                    # nie mówi, dopiero różnica pokazuje co ten backup wnosi
+                    try:
+                        cur = {}
+                        for row in self.db_manager.master_con.execute(
+                            "SELECT project_id, name FROM projects"
+                        ):
+                            cur[row[0]] = row[1]
+
+                        bak = {p['id']: p['name'] for p in projects_list}
+
+                        only_backup = sorted(set(bak) - set(cur))
+                        only_now = sorted(set(cur) - set(bak))
+                        renamed = sorted(
+                            pid for pid in (set(bak) & set(cur))
+                            if (bak[pid] or "") != (cur[pid] or "")
+                        )
+
+                        diff_count = len(only_backup) + len(only_now) + len(renamed)
+                        if diff_count:
+                            preview_text.insert(
+                                tk.END, f"🔍 Różnic wobec dziś: {diff_count} "
+                                        f"(szczegóły na końcu)\n\n")
+                        else:
+                            preview_text.insert(
+                                tk.END, "🔍 Brak różnic wobec stanu aktualnego\n\n")
+                    except Exception as cmp_err:
+                        only_backup = only_now = renamed = []
+                        cur = {}
+                        preview_text.insert(
+                            tk.END, f"⚠️ Nie udało się porównać z aktualnym stanem: {cmp_err}\n\n")
+
+                    # NAJWAŻNIEJSZE: lista projektów Z TAMTEGO DNIA.
+                    # Projekty, których dziś już nie ma, oznaczamy - bez tego
+                    # lista wygląda identycznie jak współczesna.
+                    if projects_list:
+                        preview_text.insert(
+                            tk.END,
+                            f"📋 PROJEKTY W BAZIE NA DZIEŃ {backup_info['date']} "
+                            f"({len(projects_list)}):\n")
+                        for p in projects_list:
                             status = "✅" if p['active'] else "❌"
-                            preview_text.insert(tk.END, f"  {status} #{p['id']}: {p['name']}\n")
-                
+                            mark = ""
+                            if cur and p['id'] not in cur:
+                                mark = "   ⚠️ USUNIĘTY (nie ma go dziś)"
+                            elif cur and (cur.get(p['id']) or "") != (p['name'] or ""):
+                                mark = f"   ✏️ dziś: {cur.get(p['id'])}"
+                            preview_text.insert(
+                                tk.END, f"  {status} #{p['id']}: {p['name']}{mark}\n")
+
+                    # Projekty dodane PÓŹNIEJ - nie ma ich w backupie
+                    if only_now:
+                        preview_text.insert(
+                            tk.END, f"\n➕ DODANE PO TYM BACKUPIE ({len(only_now)}) "
+                                    f"— nie ma ich w tym backupie:\n")
+                        for pid in only_now:
+                            preview_text.insert(tk.END, f"  #{pid}: {cur[pid]}\n")
+
                 elif backup_info['type'] == 'project':
                     preview_text.insert(tk.END, f"📊 Statystyki:\n")
-                    preview_text.insert(tk.END, f"  • Items: {preview_data['items_count']}\n\n")
-                    
-                    if preview_data['items_sample']:
+                    preview_text.insert(tk.END, f"  • Items: {preview_data.get('items_count', '-')}\n\n")
+
+                    items_sample = preview_data.get('items_sample') or []
+                    if items_sample:
                         preview_text.insert(tk.END, "📋 Próbka items (10 pierwszych):\n")
-                        for item in preview_data['items_sample']:
-                            preview_text.insert(tk.END, f"  • {item['drawing_no'] or '???'}: {item['name'] or 'bez nazwy'} (qty: {item['qty'] or 0})\n")
+                        for item in items_sample:
+                            preview_text.insert(tk.END, f"  • {item.get('drawing_no') or '???'}: {item.get('name') or 'bez nazwy'} (qty: {item.get('qty') or 0})\n")
             
             except Exception as e:
                 preview_text.delete("1.0", tk.END)
@@ -17541,9 +18144,11 @@ class MainWindow(tk.Tk):
         tree.bind("<<TreeviewSelect>>", on_backup_selected)
         project_combo.bind("<<ComboboxSelected>>", lambda e: load_backups())
         
-        # Przyciski
+        # Przyciski - side=BOTTOM gwarantuje, że pasek zawsze zostanie
+        # przyklejony do dolnej krawędzi i nigdy nie wypadnie poza okno,
+        # niezależnie od tego ile miejsca zajmą listy powyżej
         btn_frame = tk.Frame(main_frame, bg="#ecf0f1", height=50)
-        btn_frame.pack(fill=tk.X)
+        btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
         btn_frame.pack_propagate(False)
         
         btn_inner = tk.Frame(btn_frame, bg="#ecf0f1")
@@ -17551,8 +18156,60 @@ class MainWindow(tk.Tk):
         
         tk.Button(btn_inner, text="🔄 Odśwież", command=load_backups, width=15,
                  bg="#16a085", fg="white", font=("Arial", 10)).pack(side=tk.LEFT, padx=5)
-        
-        if self.current_user_role == "ADMIN":
+
+        def open_in_main_sheet():
+            """Załaduj wybrany backup do głównego arkusza (tylko odczyt)"""
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("Brak wyboru", "Zaznacz backup z listy!", parent=win)
+                return
+
+            date = str(tree.item(sel[0])['values'][0])
+            backup_info = backups_cache.get(date)
+            if not backup_info:
+                messagebox.showerror(
+                    "Błąd",
+                    f"Nie znaleziono danych backupu '{date}' w pamięci okna.\n"
+                    f"Kliknij 'Odśwież' i spróbuj ponownie.",
+                    parent=win
+                )
+                return
+
+            # Okno zostaje otwarte - można obejrzeć kolejne daty jedna po
+            # drugiej. Chowamy je tylko na czas ładowania, żeby nie
+            # zasłaniało arkusza, i pokazujemy z powrotem.
+            win.withdraw()
+            try:
+                if backup_info['type'] == 'master':
+                    # Master = stan CAŁEJ bazy: selektor dostaje listę
+                    # projektów z tamtego dnia
+                    ok = self.show_master_backup_state(date)
+                elif backup_info.get('operation'):
+                    # Kopia sprzed importu - ładujemy wprost z pliku,
+                    # bo nie ma jej w combo dat na pasku
+                    ok = self.show_backup_file_in_main_sheet(
+                        backup_info['project_id'], backup_info['path'],
+                        f"PRZED: {backup_info['operation']} — {backup_info['date']}"
+                    )
+                else:
+                    ok = self.show_backup_in_main_sheet(backup_info['project_id'], date)
+            finally:
+                try:
+                    win.deiconify()
+                    win.lift()
+                except Exception:
+                    pass
+
+            if ok:
+                # Zejdź z drogi - użytkownik ma teraz patrzeć na arkusz
+                win.iconify()
+
+        tk.Button(btn_inner, text="📊 Pokaż w arkuszu", command=open_in_main_sheet, width=18,
+                 bg="#2980b9", fg="white", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
+
+        # Przycisk nadpisujący bazę tylko w trybie przywracania - w oknie
+        # opisanym jako "Podgląd" nie ma prawa stać guzik kasujący dane
+        if restore_mode and self.current_user_role == "ADMIN":
             def restore_selected():
                 """Przywróć wybrany backup"""
                 sel = tree.selection()
@@ -17563,45 +18220,112 @@ class MainWindow(tk.Tk):
                 item = tree.item(sel[0])
                 date = item['values'][0]
                 backup_info = backups_cache.get(date)
-                
+
                 if not backup_info:
                     return
-                
+
+                # Ostrzeż jeśli ktokolwiek trzyma lock - przywracanie
+                # cofnie mu bazę pod rękami w trakcie pracy
+                busy = []
+                try:
+                    if backup_info['type'] == 'project':
+                        owner = self.lock_manager.get_project_lock_owner(backup_info['project_id'])
+                        if owner:
+                            busy.append(f"  • Projekt {backup_info['project_id']}: "
+                                        f"{owner.get('user', '?')}@{owner.get('computer', '?')} "
+                                        f"(od {owner.get('locked_at', '?')})")
+                    else:
+                        # Master dotyka wszystkich - sprawdź wszystkie aktywne locki
+                        locks_folder = Path(self.lock_manager.locks_folder)
+                        for lock_file in sorted(locks_folder.glob("project_*.lock")):
+                            try:
+                                with open(lock_file, 'r', encoding='utf-8') as f:
+                                    info = json.load(f)
+                                busy.append(f"  • {lock_file.stem}: "
+                                            f"{info.get('user', '?')}@{info.get('computer', '?')}")
+                            except Exception:
+                                continue
+                except Exception as e:
+                    print(f"⚠️  Nie udało się sprawdzić locków: {e}")
+
+                warn = ""
+                if busy:
+                    warn = ("\n\n🔒 UWAGA - ktoś teraz pracuje:\n"
+                            + "\n".join(busy[:10])
+                            + ("\n  … i więcej" if len(busy) > 10 else "")
+                            + "\n\nPrzywrócenie cofnie im dane!")
+
+                target = ("BAZA GŁÓWNA (master)" if backup_info['type'] == 'master'
+                          else f"PROJEKT {backup_info['project_id']}")
+
                 # Potwierdź
                 if not messagebox.askyesno(
                     "⚠️ Potwierdź przywracanie",
-                    f"Czy na pewno przywrócić backup z {date}?\n\n"
+                    f"Przywrócić {target} ze stanu z {date}?\n\n"
                     "⚠️ Bieżąca baza zostanie nadpisana!\n"
-                    "(Zostanie utworzony backup awaryjny przed nadpisaniem)",
-                    icon='warning'
+                    "(Kopia obecnego stanu zostanie zapisana przed nadpisaniem)"
+                    + warn,
+                    icon='warning',
+                    parent=win
                 ):
                     return
-                
+
                 try:
                     if backup_info['type'] == 'master':
-                        self.backup_manager.restore_master(date)
-                    
-                    elif backup_info['type'] == 'project':
-                        self.backup_manager.restore_project(backup_info['project_id'], date)
+                        self.backup_manager.restore_master(date, db_manager=self.db_manager)
+
+                        # Połączenie zostało zamknięte przed podmianą - otwórz na nowo
+                        self.db_manager.reconnect_master_rw()
                         self.refresh_data()
-                
+
+                    elif backup_info['type'] == 'project':
+                        self.backup_manager.restore_project(
+                            backup_info['project_id'], date, db_manager=self.db_manager
+                        )
+                        self.refresh_data()
+
+                    messagebox.showinfo(
+                        "✅ Przywrócono",
+                        f"{target} przywrócona ze stanu z {date}.\n\n"
+                        "Kopia poprzedniego stanu leży obok bazy\n"
+                        "jako *_before_restore_*.sqlite",
+                        parent=win
+                    )
+                    load_backups()
+
                 except Exception as e:
-                    messagebox.showerror("Błąd", f"Nie udało się przywrócić backupu:\n{e}")
+                    import traceback
+                    traceback.print_exc()
+                    messagebox.showerror(
+                        "Błąd",
+                        f"Nie udało się przywrócić backupu:\n{e}\n\n"
+                        "Baza NIE została zmieniona (lub przywrócono stan sprzed próby).",
+                        parent=win
+                    )
             
             tk.Button(btn_inner, text="🔄 Przywróć wybrany", command=restore_selected, width=18,
                      bg="#e74c3c", fg="white", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
         
+        elif restore_mode:
+            # Tryb przywracania, ale bez uprawnień
+            tk.Label(btn_inner, text="🔒 Przywracanie tylko dla ADMIN",
+                     bg="#ecf0f1", fg="#7f8c8d", font=("Arial", 9)).pack(side=tk.LEFT, padx=15)
+        elif self.current_user_role == "ADMIN":
+            # Tryb podglądu - powiedz ADMINowi gdzie szukać przywracania
+            tk.Label(btn_inner, text="ℹ️ Przywracanie: menu Backupy → Przywróć backup",
+                     bg="#ecf0f1", fg="#7f8c8d", font=("Arial", 9)).pack(side=tk.LEFT, padx=15)
+
         tk.Button(btn_inner, text="✖ Zamknij", command=win.destroy, width=15,
                  bg="#95a5a6", fg="white", font=("Arial", 10)).pack(side=tk.LEFT, padx=5)
-        
+
         # Początkowe załadowanie
         load_projects_list()
         load_backups()
     
     def backups_restore_dialog(self):
         """Dialog przywracania backupów (tylko ADMIN)"""
-        # Dla uproszczenia - użyj backups_view_dialog z przyciskiem przywracania
-        self.backups_view_dialog()
+        # To samo okno co podgląd, ale opisane jako tryb przywracania
+        self.backups_view_dialog(restore_mode=True)
     
     # ========================================================================
     # KONIEC MODUŁU BACKUPÓW

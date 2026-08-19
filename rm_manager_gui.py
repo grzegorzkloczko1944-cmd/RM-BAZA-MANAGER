@@ -24266,7 +24266,7 @@ class RMManagerGUI:
         
         # Treeview
         columns = ("Data", "Rozmiar", "Typ")
-        tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
+        tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=10)
         tree.heading("Data", text="Data backupu")
         tree.heading("Rozmiar", text="Rozmiar (MB)")
         tree.heading("Typ", text="Typ")
@@ -24283,10 +24283,17 @@ class RMManagerGUI:
         
         # Panel podglądu
         preview_frame = tk.LabelFrame(main_frame, text="Podgląd zawartości", bg="#f0f0f0", font=("Arial", 10, "bold"))
-        preview_frame.pack(fill=tk.BOTH, pady=(0, 10))
-        
-        preview_text = tk.Text(preview_frame, height=8, bg="white", font=("Courier", 9), wrap=tk.WORD)
-        preview_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        preview_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        preview_inner = tk.Frame(preview_frame, bg="#f0f0f0")
+        preview_inner.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        preview_text = tk.Text(preview_inner, height=8, bg="white", font=("Courier", 9), wrap=tk.WORD)
+        preview_scroll = ttk.Scrollbar(preview_inner, orient=tk.VERTICAL, command=preview_text.yview)
+        preview_text.configure(yscrollcommand=preview_scroll.set)
+
+        preview_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        preview_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         
         # Cache backupów
         backups_cache = {}
@@ -24420,7 +24427,16 @@ class RMManagerGUI:
                             f"Projekt {project_id}"
                         ))
                         backups_cache[b['date']] = b
-            
+
+                # Automatycznie zaznacz i pokaż najnowszy backup
+                children = tree.get_children()
+                if children:
+                    tree.selection_set(children[0])
+                    tree.focus(children[0])
+                else:
+                    preview_text.delete("1.0", tk.END)
+                    preview_text.insert("1.0", "Brak backupów dla wybranego typu.")
+
             except Exception as e:
                 messagebox.showerror("Błąd", f"Nie udało się załadować backupów:\n{e}")
         
@@ -24499,20 +24515,56 @@ class RMManagerGUI:
                     f"Operacja jest odwracalna (ręcznie z kopii bezpieczeństwa).\n\n"
                     f"Czy kontynuować?"
                 )
+                # Master dotyczy wszystkich - ostrzeż jeśli ktoś teraz pracuje
+                busy = []
+                try:
+                    from pathlib import Path as _P
+                    for lock_file in sorted(_P(self.lock_manager.locks_folder).glob("project_*.lock")):
+                        try:
+                            with open(lock_file, 'r', encoding='utf-8') as f:
+                                info = json.load(f)
+                            busy.append(f"  • {lock_file.stem}: "
+                                        f"{info.get('user', '?')}@{info.get('computer', '?')}")
+                        except Exception:
+                            continue
+                except Exception as e:
+                    print(f"⚠️  Nie udało się sprawdzić locków: {e}")
+
+                if busy:
+                    msg += ("\n\n🔒 UWAGA - ktoś teraz pracuje:\n"
+                            + "\n".join(busy[:10])
+                            + ("\n  … i więcej" if len(busy) > 10 else "")
+                            + "\n\nPrzywrócenie cofnie im dane!")
+
                 if not messagebox.askyesno("⚠️ Potwierdź przywrócenie MASTER", msg,
                                             icon='warning', parent=win):
                     return
                 try:
                     self.backup_manager.restore_master(date)
+
+                    # Przeładuj dane z przywróconej bazy
+                    try:
+                        self.refresh_all()
+                    except Exception as refresh_err:
+                        print(f"⚠️  Odświeżanie po restore: {refresh_err}")
+
                     messagebox.showinfo(
                         "✅ Przywrócono",
                         f"Baza master została przywrócona z {date}.\n\n"
-                        f"Zalecane: zrestartuj aplikację, aby załadować nowe dane.",
+                        f"Kopia poprzedniego stanu leży obok bazy\n"
+                        f"jako 'master_before_restore_*.sqlite'.\n\n"
+                        f"Jeśli coś wygląda nieaktualnie - zrestartuj aplikację.",
                         parent=win
                     )
+                    load_backups()
                 except Exception as e:
-                    messagebox.showerror("❌ Błąd", f"Nie udało się przywrócić master:\n{e}",
-                                          parent=win)
+                    messagebox.showerror(
+                        "❌ Błąd",
+                        f"Nie udało się przywrócić master:\n{e}\n\n"
+                        f"Baza NIE została zmieniona\n"
+                        f"(lub przywrócono stan sprzed próby).",
+                        parent=win
+                    )
                     import traceback; traceback.print_exc()
                 return
             
@@ -24570,12 +24622,20 @@ class RMManagerGUI:
                         pass
                 messagebox.showinfo(
                     "✅ Przywrócono",
-                    f"Projekt {project_id} został przywrócony z {date}.",
+                    f"Projekt {project_id} został przywrócony z {date}.\n\n"
+                    f"Kopia poprzedniego stanu leży obok bazy\n"
+                    f"jako 'project_{project_id}_before_restore_*.sqlite'.",
                     parent=win
                 )
+                load_backups()
             except Exception as e:
-                messagebox.showerror("❌ Błąd", f"Nie udało się przywrócić projektu:\n{e}",
-                                      parent=win)
+                messagebox.showerror(
+                    "❌ Błąd",
+                    f"Nie udało się przywrócić projektu:\n{e}\n\n"
+                    f"Baza NIE została zmieniona\n"
+                    f"(lub przywrócono stan sprzed próby).",
+                    parent=win
+                )
                 import traceback; traceback.print_exc()
         
         # Przyciski

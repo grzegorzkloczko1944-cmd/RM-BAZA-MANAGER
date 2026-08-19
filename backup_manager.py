@@ -50,6 +50,10 @@ class BackupManager:
         self.projects_backup_dir.mkdir(parents=True, exist_ok=True)
         
         self.retention_days = 30
+
+        # Backupy przedimportowe: trzymamy ostatnie N sztuk niezależnie od
+        # wieku. Rotacja dzienna (retention_days) ich nie dotyczy.
+        self.pre_import_keep = 6
         
         # Cache backupów projektu (aby uniknąć wielokrotnego skanowania przez sieć)
         # Format: {project_id: {'timestamp': float, 'backups': list}}
@@ -156,7 +160,12 @@ class BackupManager:
         
         for backup_file in backup_subdir.glob(pattern):
             try:
-                # Wyciągnij datę z nazwy: 
+                # Backupy przedimportowe mają własną rotację (po liczbie,
+                # nie po wieku) - rotacja dzienna ich nie dotyka
+                if "_PRE_" in backup_file.name or backup_file.parent.name == "pre_import":
+                    continue
+
+                # Wyciągnij datę z nazwy:
                 # master_2026-01-23.sqlite -> 2026-01-23
                 # project_9_2026-01-24_153045.sqlite -> 2026-01-24
                 filename = backup_file.stem  # Bez .sqlite
@@ -431,42 +440,259 @@ class BackupManager:
         
         return all_backups
     
-    def restore_master(self, backup_date: str) -> bool:
+    def backup_before_import(self, project_id: int, operation: str = "import") -> Path:
+        """
+        Backup projektu PRZED operacją importu.
+
+        Osobny od backupów dziennych: ma znacznik czasu (nie tylko datę),
+        więc kilka importów tego samego dnia daje kilka kopii zamiast się
+        nadpisywać. Trzymamy ostatnie `pre_import_keep` sztuk niezależnie
+        od wieku - rotacja dzienna (30 dni) ich NIE dotyczy.
+
+        Args:
+            project_id: ID projektu
+            operation: Krótka nazwa operacji (import_bom, dodaj_bom, ...)
+                       trafia do nazwy pliku
+
+        Returns:
+            Path do backupu lub None gdy baza projektu nie istnieje
+        """
+        project_filename = self.project_name_pattern.format(id=project_id)
+        project_db = self.projects_dir / project_filename
+
+        if not project_db.exists():
+            print(f"⚠️  Brak bazy projektu {project_id} - pomijam backup przedimportowy")
+            return None
+
+        # Checkpoint, żeby kopia zawierała wszystkie zapisane zmiany
+        try:
+            conn = sqlite3.connect(project_db, timeout=30.0)
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"  ⚠️  WAL checkpoint przed importem: {e}")
+
+        subdir = self.projects_backup_dir / f"project_{project_id}" / "pre_import"
+        subdir.mkdir(parents=True, exist_ok=True)
+
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        safe_op = "".join(c for c in operation if c.isalnum() or c in "_-")[:30]
+        backup_path = subdir / f"project_{project_id}_PRE_{safe_op}_{stamp}.sqlite"
+
+        print(f"📦 Backup PRZED importem ({operation}): {backup_path.name}")
+        shutil.copy2(project_db, backup_path)
+
+        # Metadane - żeby było wiadomo co i kiedy
+        meta = {
+            'source': str(project_db),
+            'created_at': datetime.now().isoformat(),
+            'operation': operation,
+            'project_id': project_id,
+            'size_bytes': backup_path.stat().st_size,
+            'kind': 'pre_import'
+        }
+        try:
+            with open(backup_path.with_suffix('.json'), 'w', encoding='utf-8') as f:
+                json.dump(meta, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"  ⚠️  Metadane: {e}")
+
+        self.cleanup_pre_import_backups(project_id)
+
+        print(f"✅ Backup przedimportowy gotowy ({backup_path.stat().st_size / 1024:.1f} KB)")
+        return backup_path
+
+    @staticmethod
+    def _pre_import_sort_key(path: Path) -> str:
+        """
+        Klucz sortowania kopii przedimportowych: znacznik YYYY-MM-DD_HHMMSS
+        z końca nazwy pliku. Rośnie leksykograficznie razem z czasem.
+        """
+        import re
+        m = re.search(r'(\d{4}-\d{2}-\d{2}_\d{6})', path.name)
+        return m.group(1) if m else ""
+
+    def cleanup_pre_import_backups(self, project_id: int):
+        """
+        Zostaw tylko `pre_import_keep` najnowszych backupów przedimportowych.
+
+        Kasujemy po LICZBIE, nie po wieku - stary backup sprzed miesiąca
+        zostaje, jeśli mieści się w limicie.
+        """
+        subdir = self.projects_backup_dir / f"project_{project_id}" / "pre_import"
+        if not subdir.exists():
+            return
+
+        # Sortujemy po znaczniku z NAZWY, nie po mtime: shutil.copy2
+        # przenosi czas modyfikacji pliku źródłowego, więc wszystkie kopie
+        # mają ten sam mtime i rotacja kasowałaby losowe sztuki.
+        files = sorted(
+            subdir.glob(f"project_{project_id}_PRE_*.sqlite"),
+            key=self._pre_import_sort_key,
+            reverse=True
+        )
+
+        for old in files[self.pre_import_keep:]:
+            try:
+                old.unlink()
+                meta = old.with_suffix('.json')
+                if meta.exists():
+                    meta.unlink()
+                print(f"🗑️  Usunięto stary backup przedimportowy: {old.name}")
+            except Exception as e:
+                print(f"⚠️  Nie udało się usunąć {old.name}: {e}")
+
+    def list_pre_import_backups(self, project_id: int) -> list:
+        """
+        Lista backupów przedimportowych projektu (od najnowszego).
+
+        Returns:
+            Lista dict: {'date', 'operation', 'path', 'size_mb', 'type', 'project_id'}
+        """
+        subdir = self.projects_backup_dir / f"project_{project_id}" / "pre_import"
+        if not subdir.exists():
+            return []
+
+        out = []
+        for f in sorted(subdir.glob(f"project_{project_id}_PRE_*.sqlite"),
+                        key=self._pre_import_sort_key, reverse=True):
+            operation, stamp = "?", f.stem
+            try:
+                rest = f.stem.split("_PRE_", 1)[1]
+                parts = rest.rsplit("_", 2)
+                if len(parts) == 3:
+                    operation = parts[0]
+                    stamp = f"{parts[1]} {parts[2][:2]}:{parts[2][2:4]}:{parts[2][4:6]}"
+            except Exception:
+                pass
+
+            out.append({
+                'date': stamp,
+                'operation': operation,
+                'path': f,
+                'size_mb': f.stat().st_size / (1024 * 1024),
+                'type': 'project',
+                'project_id': project_id
+            })
+        return out
+
+    def verify_backup_integrity(self, backup_file: Path) -> None:
+        """
+        Sprawdź czy backup nadaje się do przywrócenia.
+
+        Rzuca wyjątek jeśli plik jest pusty, nie jest bazą SQLite
+        lub nie przechodzi integrity_check. Lepiej przerwać PRZED
+        nadpisaniem żywej bazy niż zostać z uszkodzonym plikiem.
+        """
+        if not backup_file.exists():
+            raise FileNotFoundError(f"Backup nie istnieje: {backup_file}")
+
+        size = backup_file.stat().st_size
+        if size == 0:
+            raise ValueError(f"Backup jest pusty (0 bajtów): {backup_file.name}")
+
+        con = sqlite3.connect(f"file:{backup_file}?mode=ro", uri=True, timeout=10.0)
+        try:
+            result = con.execute("PRAGMA integrity_check").fetchone()[0]
+            if result != "ok":
+                raise ValueError(f"Backup uszkodzony ({backup_file.name}): {result}")
+
+            # Musi mieć jakiekolwiek tabele - pusta baza to nie jest backup
+            tables = con.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+            ).fetchone()[0]
+            if tables == 0:
+                raise ValueError(f"Backup nie zawiera żadnych tabel: {backup_file.name}")
+        finally:
+            con.close()
+
+        print(f"  ✅ Backup OK: {backup_file.name} ({size / 1024:.1f} KB, {tables} tabel)")
+
+    def _copy_over_db(self, src: Path, dst: Path):
+        """
+        Podmień plik bazy razem z osieroconymi WAL/SHM.
+
+        Zostawienie starego -wal/-shm obok nowego pliku sprawia, że SQLite
+        próbuje nałożyć dziennik poprzedniej bazy na przywrócone dane.
+        """
+        shutil.copy2(src, dst)
+
+        for suffix in ("-wal", "-shm"):
+            stale = Path(str(dst) + suffix)
+            if stale.exists():
+                try:
+                    stale.unlink()
+                    print(f"  🧹 Usunięto osierocony {stale.name}")
+                except Exception as e:
+                    print(f"  ⚠️  Nie udało się usunąć {stale.name}: {e}")
+
+    def restore_master(self, backup_date: str, db_manager=None) -> bool:
         """
         Przywróć master DB z backupu
-        
+
         Args:
             backup_date: Data w formacie YYYY-MM-DD
-        
+            db_manager: DatabaseManager z otwartym połączeniem. Połączenie
+                        MUSI zostać zamknięte przed podmianą pliku - inaczej
+                        SQLite zapisze swój cache na przywrócone dane
+                        i uszkodzi bazę.
+
         Returns:
             True jeśli sukces
         """
         backup_file = self.master_backup_dir / f"master_{backup_date}.sqlite"
-        
-        if not backup_file.exists():
-            raise FileNotFoundError(f"Backup nie istnieje: {backup_file}")
-        
+
+        # Waliduj PRZED jakąkolwiek modyfikacją żywej bazy
+        self.verify_backup_integrity(backup_file)
+
+        db_manager = db_manager or self.db_manager
+
+        # Zamknij połączenie - podmiana pliku pod otwartym uchwytem
+        # to najprostsza droga do "database disk image is malformed"
+        if db_manager is not None and getattr(db_manager, 'master_con', None):
+            print("🔌 Zamykam połączenie z master DB przed podmianą...")
+            try:
+                db_manager.master_con.commit()
+            except Exception:
+                pass
+            try:
+                db_manager.master_con.close()
+            except Exception as e:
+                print(f"  ⚠️  Błąd zamykania połączenia: {e}")
+            db_manager.master_con = None
+
         # Backup bieżącej bazy przed nadpisaniem
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         current_backup = self.master_path.with_name(f"master_before_restore_{timestamp}.sqlite")
         shutil.copy2(self.master_path, current_backup)
         print(f"💾 Backup bieżącej bazy: {current_backup.name}")
-        
+
         # Przywróć
         print(f"🔄 Przywracam master DB z {backup_date}...")
-        shutil.copy2(backup_file, self.master_path)
-        
+        try:
+            self._copy_over_db(backup_file, self.master_path)
+        except Exception as e:
+            # Podmiana się nie udała - odtwórz stan sprzed próby
+            print(f"❌ Przywracanie nieudane: {e}")
+            print(f"🔙 Przywracam stan sprzed próby z {current_backup.name}...")
+            shutil.copy2(current_backup, self.master_path)
+            raise
+
         print(f"✅ Master DB przywrócona z {backup_date}")
+        print(f"   Kopia poprzedniego stanu: {current_backup}")
         return True
     
-    def restore_project(self, project_id: int, backup_date: str) -> bool:
+    def restore_project(self, project_id: int, backup_date: str, db_manager=None) -> bool:
         """
         Przywróć projekt z backupu
-        
+
         Args:
             project_id: ID projektu
             backup_date: Data YYYY-MM-DD
-        
+            db_manager: DatabaseManager - jeśli trzyma otwartą bazę tego
+                        projektu, zostanie ona zamknięta przed podmianą pliku
+
         Returns:
             True jeśli sukces
         """
@@ -475,22 +701,50 @@ class BackupManager:
         project_db = self.projects_dir / project_filename
         project_backup_subdir = self.projects_backup_dir / f"project_{project_id}"
         backup_file = project_backup_subdir / f"project_{project_id}_{backup_date}.sqlite"
-        
-        if not backup_file.exists():
-            raise FileNotFoundError(f"Backup nie istnieje: {backup_file}")
-        
+
+        # Waliduj PRZED nadpisaniem żywej bazy
+        self.verify_backup_integrity(backup_file)
+
+        db_manager = db_manager or self.db_manager
+
+        # Zamknij połączenie z bazą projektu jeśli jest otwarte
+        if db_manager is not None:
+            for attr in ('project_con', 'current_project_con'):
+                con = getattr(db_manager, attr, None)
+                if con is not None:
+                    print(f"🔌 Zamykam połączenie z bazą projektu ({attr})...")
+                    try:
+                        con.commit()
+                    except Exception:
+                        pass
+                    try:
+                        con.close()
+                    except Exception as e:
+                        print(f"  ⚠️  Błąd zamykania: {e}")
+                    setattr(db_manager, attr, None)
+
         # Backup bieżącej bazy
+        current_backup = None
         if project_db.exists():
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             current_backup = project_db.with_name(f"project_{project_id}_before_restore_{timestamp}.sqlite")
             shutil.copy2(project_db, current_backup)
             print(f"💾 Backup bieżącej bazy: {current_backup.name}")
-        
+
         # Przywróć
         print(f"🔄 Przywracam projekt {project_id} z {backup_date}...")
-        shutil.copy2(backup_file, project_db)
-        
+        try:
+            self._copy_over_db(backup_file, project_db)
+        except Exception as e:
+            print(f"❌ Przywracanie nieudane: {e}")
+            if current_backup is not None:
+                print(f"🔙 Przywracam stan sprzed próby z {current_backup.name}...")
+                shutil.copy2(current_backup, project_db)
+            raise
+
         print(f"✅ Projekt {project_id} przywrócony z {backup_date}")
+        if current_backup is not None:
+            print(f"   Kopia poprzedniego stanu: {current_backup}")
         return True
     
     def get_backup_preview_data(self, backup_path: Path, backup_type: str) -> dict:
