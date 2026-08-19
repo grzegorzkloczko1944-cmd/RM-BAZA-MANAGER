@@ -6962,7 +6962,18 @@ class MainWindow(tk.Tk):
             top = max(0, row_idx - rows_visible // 2)
             top = min(top, max(0, total_rows - rows_visible))
             fraction = top / total_rows
-            mt.yview_moveto(fraction)
+            # set_yviews() zamiast mt.yview_moveto(): kanwa numeracji wierszy
+            # (RI) to osobny widget i samo yview_moveto na MT jej nie przewija.
+            # Numery LP zostawały wtedy przy starej pozycji i wypadały poza
+            # widoczny obszar - wyglądało to, jakby kolumna ID znikała.
+            try:
+                mt.set_yviews("moveto", fraction)
+            except Exception:
+                mt.yview_moveto(fraction)
+                try:
+                    self.sheet.RI.yview_moveto(fraction)
+                except Exception:
+                    pass
             self.sheet.refresh()
         except Exception as e:
             try:
@@ -12921,6 +12932,12 @@ class MainWindow(tk.Tk):
         win.title(f"Złożenie — {drawing_no}  ({out_file.name})")
         win.attributes("-topmost", True)
 
+        # Powiększenie miniatury zamykają globalne bindy założone przez
+        # bind_all na głównym oknie, ale Toplevel to osobne okno - jego
+        # kliknięcia tam nie docierają i powiększenie zostawało na wierzchu.
+        win.bind("<Button-1>", self._on_any_click_hide_dwf_zoom, add="+")
+        win.bind("<Button-3>", self._on_any_click_hide_dwf_zoom, add="+")
+
         win_w, win_h = 640, 480
         try:
             parent_x = self.winfo_rootx()
@@ -13058,6 +13075,10 @@ class MainWindow(tk.Tk):
             # tylko przez ikonkę ("indicator"). Klik gdzie indziej na wierszu
             # ma tylko zaznaczać, więc odtwarzamy samo zaznaczenie ręcznie
             # i blokujemy resztę natywnej obsługi (która zawierałaby toggle).
+            # Klik w drzewku ma też zamykać powiększenie miniatury - handler
+            # niżej zwraca "break", więc bind na oknie by go nie zobaczył.
+            self._on_any_click_hide_dwf_zoom(event)
+
             if tree.identify_element(event.x, event.y) == "Treeitem.indicator":
                 return  # ikonka +/- - pozwól na domyślne rozwinięcie/zwinięcie
 
