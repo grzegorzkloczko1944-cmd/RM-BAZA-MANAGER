@@ -7,4 +7,5 @@ __pycache__/
 .ai_api_key
 build_*.log
 .claude/settings.local.json
+.claude/settings.json
 .dwf_thumb_cache/
