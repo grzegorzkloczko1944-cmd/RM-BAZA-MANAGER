@@ -32,6 +32,7 @@ RM_MANAGER ↔ RM_BAZA:
 import os
 import glob
 import sys
+import json
 import sqlite3
 import shutil
 import tempfile
@@ -1550,144 +1551,142 @@ def _is_db_readonly(con: sqlite3.Connection) -> bool:
         return False
 
 
-def register_user_session(master_db_path: str, user_id: int, username: str, 
+def _sessions_dir(master_db_path: str) -> Path:
+    """Katalog plików sesji - obok rm_manager.sqlite (wspólny dla wszystkich).
+
+    Session tracking działa na PLIKACH (jak locki projektów), nie na bazie:
+    heartbeat co 30 s u każdego klienta robił UPDATE na rm_manager.sqlite
+    przez SMB, a każdy taki zapis blokował całą bazę wszystkim pozostałym
+    ("database is locked" / kilkusekundowe zamrożenia GUI).
+    """
+    d = Path(os.path.dirname(os.path.abspath(master_db_path))) / "SESSIONS"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _session_file(master_db_path: str, session_id: str) -> Path:
+    return _sessions_dir(master_db_path) / f"session_{session_id}.json"
+
+
+def _read_session_file(path: Path) -> Optional[Dict]:
+    """Wczytaj plik sesji; None gdy nieczytelny/uszkodzony."""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) and data.get('session_id') else None
+    except Exception:
+        return None
+
+
+def _write_session_file(path: Path, data: Dict):
+    """Zapis atomowy: tmp w tym samym katalogu + os.replace."""
+    tmp = path.with_suffix('.json.tmp')
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def _iter_session_files(master_db_path: str):
+    """Generator (Path, dict) po wszystkich czytelnych plikach sesji."""
+    try:
+        files = list(_sessions_dir(master_db_path).glob("session_*.json"))
+    except Exception:
+        return
+    for p in files:
+        data = _read_session_file(p)
+        if data:
+            yield p, data
+
+
+def register_user_session(master_db_path: str, user_id: int, username: str,
                          hostname: str, pid: int, app_name: str = 'rm_manager',
                          client_info: str = None,
                          stale_minutes: int = DEFAULT_STALE_SESSION_MINUTES,
                          force: bool = False):
     """
-    Atomowo zarejestruj nową sesję użytkownika w bazie.
-    
-    Algorytm (transakcja BEGIN IMMEDIATE - blokuje DB):
-    1. Cleanup starych sesji tego usera (heartbeat > stale_minutes)
-    2. Sprawdź czy są jeszcze AKTYWNE sesje na innych komputerach
-    3a. Jeśli SĄ + force=False: zwróć (None, "active_session_exists", existing_session)
-    3b. Jeśli SĄ + force=True: usuń je
-    4. INSERT nowej sesji
-    
-    To eliminuje TOCTOU race - dwa równoczesne logowania nie utworzą 2 sesji.
-    
-    Args:
-        master_db_path: Ścieżka do rm_manager.sqlite
-        user_id: ID użytkownika
-        username: Login użytkownika
-        hostname: Nazwa komputera
-        pid: PID procesu aplikacji
-        app_name: Nazwa aplikacji
-        client_info: Dodatkowe info (opcjonalne)
-        stale_minutes: Po ilu min bez heartbeat sesja uznana za martwą
-        force: Jeśli True - wymuś (usuń aktywne sesje na innych komputerach)
-    
+    Zarejestruj nową sesję użytkownika jako PLIK w SESSIONS/ (nie w bazie).
+
+    Algorytm (wzór locków projektów):
+    1. Usuń martwe pliki sesji tego usera (heartbeat > stale_minutes)
+    2. Sprawdź AKTYWNE sesje tego usera na innych komputerach
+    3a. Jeśli SĄ + force=False: zwróć (None, "active_session_exists", existing)
+    3b. Jeśli SĄ + force=True: usuń ich pliki
+    4. Usuń stare sesje tego usera na TYM komputerze (po crashu)
+    5. Zapisz plik nowej sesji (atomowo: tmp + os.replace)
+
+    Uwaga: bez transakcji bazodanowej okno wyścigu przy JEDNOCZESNYM
+    logowaniu tego samego usera z 2 maszyn istnieje (ms), ale skutek to
+    najwyżej dwie widoczne sesje - ten sam kompromis co przy lockach
+    projektów, akceptowany od miesięcy.
+
     Returns:
         Tuple (session_id, status, existing_session):
         - ("uuid...", "ok", None)                 - sesja zarejestrowana
-        - ("uuid...", "readonly", None)           - DB ro, sesja nie zapisana (zwrócono fake id)
+        - ("uuid...", "readonly", None)           - brak zapisu na udziale (GUEST)
         - (None, "active_session_exists", dict)   - inny komputer, force=False
         - (None, "error", error_msg_str)          - inny błąd
     """
     import uuid
     import socket
     from datetime import datetime, timedelta
-    
+
     if hostname is None:
         hostname = socket.gethostname()
-    
+
     session_id = str(uuid.uuid4())
     now = datetime.now()
     now_iso = now.isoformat()
     cutoff_iso = (now - timedelta(minutes=stale_minutes)).isoformat()
-    
+
     try:
-        con = _open_rm_connection(master_db_path)
-    except Exception as e:
-        print(f"⚠️ Nie można otworzyć DB do rejestracji sesji: {e}")
-        return (None, "error", str(e))
-    
-    # Sprawdź czy DB jest writable
-    if _is_db_readonly(con):
-        con.close()
-        print(f"ℹ️  Master DB read-only - sesja NIE zapisana (tryb GUEST/backup view)")
-        # Zwróć fake session_id żeby kod GUI nie crashował przy dalszej obsłudze
-        return (session_id, "readonly", None)
-    
-    try:
-        # ATOMOWA TRANSAKCJA - BEGIN IMMEDIATE blokuje DB do zapisu (eliminuje TOCTOU)
-        con.execute("BEGIN IMMEDIATE")
-        
-        # Krok 1: Usuń stare martwe sesje tego usera (zwolnij miejsce)
-        con.execute("""
-            DELETE FROM active_sessions
-            WHERE user_id = ? AND last_heartbeat < ?
-        """, (user_id, cutoff_iso))
-        
-        # Krok 2: Sprawdź AKTYWNE sesje na innych komputerach
-        active_others = con.execute("""
-            SELECT session_id, user_id, username, hostname, pid, app_name,
-                   login_at, last_heartbeat, client_info
-            FROM active_sessions
-            WHERE user_id = ? AND last_heartbeat >= ? AND hostname != ?
-            ORDER BY login_at DESC
-            LIMIT 1
-        """, (user_id, cutoff_iso, hostname)).fetchone()
-        
-        if active_others and not force:
-            # Inny komputer ma aktywną sesję - odmów
-            con.rollback()
-            con.close()
-            existing = dict(active_others)
-            print(f"⚠️  Logowanie odrzucone - {username} aktywny na {existing['hostname']}")
-            return (None, "active_session_exists", existing)
-        
-        # Krok 3: Jeśli force=True - usuń sesje na innych komputerach
-        if active_others and force:
-            con.execute("""
-                DELETE FROM active_sessions
-                WHERE user_id = ? AND hostname != ?
-            """, (user_id, hostname))
-            print(f"⚡ Force-login: usunięto sesję {username}@{active_others['hostname']}")
-        
-        # Krok 4: Usuń ewentualne stare sesje na TYM komputerze (np. po crashu)
-        con.execute("""
-            DELETE FROM active_sessions
-            WHERE user_id = ? AND hostname = ?
-        """, (user_id, hostname))
-        
-        # Krok 5: INSERT nowej sesji
-        con.execute("""
-            INSERT INTO active_sessions 
-                (session_id, user_id, username, hostname, pid, app_name, login_at, last_heartbeat, client_info)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (session_id, user_id, username, hostname, pid, app_name, now_iso, now_iso, client_info))
-        
-        _rm_safe_commit(con)
-        con.close()
-        
+        # Kroki 1-4: przegląd istniejących plików sesji
+        for path, data in _iter_session_files(master_db_path):
+            if str(data.get('user_id')) != str(user_id):
+                continue
+            hb = data.get('last_heartbeat') or data.get('login_at') or ''
+            same_host = (data.get('hostname') == hostname)
+
+            if hb < cutoff_iso or same_host:
+                # martwa albo osierocona na tym komputerze - sprzątamy
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+                continue
+
+            # żywa sesja na INNYM komputerze
+            if not force:
+                print(f"⚠️  Logowanie odrzucone - {username} aktywny na {data.get('hostname')}")
+                return (None, "active_session_exists", data)
+            try:
+                path.unlink()
+                print(f"⚡ Force-login: usunięto sesję {username}@{data.get('hostname')}")
+            except Exception:
+                pass
+
+        # Krok 5: zapis pliku nowej sesji
+        record = {
+            'session_id': session_id,
+            'user_id': user_id,
+            'username': username,
+            'hostname': hostname,
+            'pid': pid,
+            'app_name': app_name,
+            'login_at': now_iso,
+            'last_heartbeat': now_iso,
+            'client_info': client_info,
+        }
+        _write_session_file(_session_file(master_db_path, session_id), record)
+
         print(f"✅ Zarejestrowano sesję: {username}@{hostname} (session_id: {session_id[:8]}...)")
         return (session_id, "ok", None)
-    
-    except sqlite3.OperationalError as e:
-        try:
-            con.rollback()
-        except Exception:
-            pass
-        try:
-            con.close()
-        except Exception:
-            pass
-        if "readonly" in str(e).lower() or "read-only" in str(e).lower():
-            print(f"ℹ️  DB read-only przy rejestracji sesji - pomijam")
-            return (session_id, "readonly", None)
-        print(f"⚠️ Błąd rejestracji sesji: {e}")
-        return (None, "error", str(e))
+
+    except PermissionError:
+        # Udział tylko do odczytu (tryb GUEST) - zachowujemy stary kontrakt:
+        # fake session_id, żeby GUI nie crashowało przy dalszej obsłudze
+        print(f"ℹ️  Udział read-only - sesja NIE zapisana (tryb GUEST/backup view)")
+        return (session_id, "readonly", None)
     except Exception as e:
-        try:
-            con.rollback()
-        except Exception:
-            pass
-        try:
-            con.close()
-        except Exception:
-            pass
         print(f"⚠️ Błąd rejestracji sesji: {e}")
         return (None, "error", str(e))
 
@@ -1697,45 +1696,25 @@ def get_active_user_sessions(master_db_path: str, user_id: int,
     """
     Pobierz aktywne sesje użytkownika (heartbeat nie starszy niż stale_minutes).
     
-    Funkcja read-only - działa nawet na DB ro.
-    
+    Czyta pliki sesji z SESSIONS/ (zero dotykania bazy).
+
     Returns:
         Lista słowników z danymi sesji (puste gdy brak/błąd)
     """
     from datetime import datetime, timedelta
-    
-    try:
-        con = _open_rm_connection(master_db_path)
-    except Exception as e:
-        print(f"⚠️ Nie można otworzyć DB: {e}")
-        return []
-    
+
     try:
         cutoff = (datetime.now() - timedelta(minutes=stale_minutes)).isoformat()
-        rows = con.execute("""
-            SELECT session_id, user_id, username, hostname, pid, app_name, 
-                   login_at, last_heartbeat, client_info
-            FROM active_sessions
-            WHERE user_id = ? AND last_heartbeat >= ?
-            ORDER BY login_at DESC
-        """, (user_id, cutoff)).fetchall()
-        con.close()
-        return [dict(r) for r in rows]
-    except sqlite3.OperationalError as e:
-        try:
-            con.close()
-        except Exception:
-            pass
-        # Tabela może nie istnieć (stara baza) - graceful fallback
-        if "no such table" in str(e).lower():
-            return []
-        print(f"⚠️ Błąd pobierania sesji: {e}")
-        return []
+        out = []
+        for _path, data in _iter_session_files(master_db_path):
+            if str(data.get('user_id')) != str(user_id):
+                continue
+            hb = data.get('last_heartbeat') or data.get('login_at') or ''
+            if hb >= cutoff:
+                out.append(data)
+        out.sort(key=lambda d: d.get('login_at') or '', reverse=True)
+        return out
     except Exception as e:
-        try:
-            con.close()
-        except Exception:
-            pass
         print(f"⚠️ Błąd pobierania sesji: {e}")
         return []
 
@@ -1743,50 +1722,32 @@ def get_active_user_sessions(master_db_path: str, user_id: int,
 def update_session_heartbeat(master_db_path: str, session_id: str) -> bool:
     """
     Odśwież heartbeat sesji (wywołuj co ~30 s).
-    
+
+    Nadpisuje WYŁĄCZNIE własny plik sesji w SESSIONS/ - zero zapisu do
+    rm_manager.sqlite. Wcześniejszy UPDATE na bazie przez SMB blokował ją
+    wszystkim pozostałym klientom przy każdym ticku.
+
     Cicha funkcja - bez logów dla normalnych przypadków read-only.
-    
+
     Returns:
         bool: True jeśli udało się zaktualizować
     """
     from datetime import datetime
-    
+
     if not session_id:
         return False
-    
+
     try:
-        con = _open_rm_connection(master_db_path)
-    except Exception:
-        return False
-    
-    try:
-        if _is_db_readonly(con):
-            con.close()
-            return False  # Cicho - to normalna sytuacja w trybie GUEST
-        
-        con.execute("""
-            UPDATE active_sessions
-            SET last_heartbeat = ?
-            WHERE session_id = ?
-        """, (datetime.now().isoformat(), session_id))
-        updated = con.total_changes > 0
-        _rm_safe_commit(con)
-        con.close()
-        return updated
-    except sqlite3.OperationalError as e:
-        try:
-            con.close()
-        except Exception:
-            pass
-        if "readonly" in str(e).lower() or "no such table" in str(e).lower():
-            return False  # Cicho
-        print(f"⚠️ Błąd heartbeat sesji: {e}")
-        return False
+        path = _session_file(master_db_path, session_id)
+        data = _read_session_file(path)
+        if not data:
+            return False  # brak pliku = fake id (GUEST) albo sesja przejęta
+        data['last_heartbeat'] = datetime.now().isoformat()
+        _write_session_file(path, data)
+        return True
+    except PermissionError:
+        return False  # Cicho - to normalna sytuacja w trybie GUEST
     except Exception as e:
-        try:
-            con.close()
-        except Exception:
-            pass
         print(f"⚠️ Błąd heartbeat sesji: {e}")
         return False
 
@@ -1794,36 +1755,19 @@ def update_session_heartbeat(master_db_path: str, session_id: str) -> bool:
 def cleanup_user_session(master_db_path: str, session_id: str):
     """
     Usuń sesję użytkownika (przy wylogowaniu/zamknięciu aplikacji).
+    Kasuje plik sesji z SESSIONS/ - zero dotykania bazy.
     """
     if not session_id:
         return
-    
+
     try:
-        con = _open_rm_connection(master_db_path)
-    except Exception:
-        return
-    
-    try:
-        if _is_db_readonly(con):
-            con.close()
-            return
-        
-        con.execute("DELETE FROM active_sessions WHERE session_id = ?", (session_id,))
-        _rm_safe_commit(con)
-        con.close()
-        print(f"🧹 Usunięto sesję: {session_id[:8]}...")
-    except sqlite3.OperationalError as e:
-        try:
-            con.close()
-        except Exception:
-            pass
-        if "readonly" not in str(e).lower() and "no such table" not in str(e).lower():
-            print(f"⚠️ Błąd usuwania sesji: {e}")
+        path = _session_file(master_db_path, session_id)
+        if path.exists():
+            path.unlink()
+            print(f"🧹 Usunięto sesję: {session_id[:8]}...")
+    except PermissionError:
+        pass  # tryb GUEST / udział read-only
     except Exception as e:
-        try:
-            con.close()
-        except Exception:
-            pass
         print(f"⚠️ Błąd usuwania sesji: {e}")
 
 
@@ -1831,114 +1775,59 @@ def cleanup_stale_sessions(master_db_path: str,
                           stale_minutes: int = DEFAULT_STALE_SESSION_MINUTES) -> int:
     """
     Usuń nieaktywne sesje (heartbeat starszy niż stale_minutes).
-    
+    Kasuje pliki z SESSIONS/ - zero dotykania bazy.
+
     Returns:
         int: Liczba usuniętych sesji (0 gdy brak/error/readonly)
     """
     from datetime import datetime, timedelta
-    
+
+    deleted = 0
     try:
-        con = _open_rm_connection(master_db_path)
-    except Exception:
-        return 0
-    
-    try:
-        if _is_db_readonly(con):
-            con.close()
-            return 0
-        
         cutoff = (datetime.now() - timedelta(minutes=stale_minutes)).isoformat()
-        
-        # Pobierz sesje do usunięcia (dla logu)
-        to_delete = con.execute("""
-            SELECT username, hostname, session_id
-            FROM active_sessions
-            WHERE last_heartbeat < ?
-        """, (cutoff,)).fetchall()
-        
-        if not to_delete:
-            con.close()
-            return 0
-        
-        con.execute("DELETE FROM active_sessions WHERE last_heartbeat < ?", (cutoff,))
-        deleted = con.total_changes
-        _rm_safe_commit(con)
-        con.close()
-        
-        if deleted > 0:
-            print(f"🧹 Usunięto {deleted} nieaktywnych sesji:")
-            for row in to_delete:
-                print(f"   • {row[0]}@{row[1]} (ID: {row[2][:8]}...)")
+        for path, data in _iter_session_files(master_db_path):
+            hb = data.get('last_heartbeat') or data.get('login_at') or ''
+            if hb >= cutoff:
+                continue
+            try:
+                path.unlink()
+                deleted += 1
+                print(f"🧹 Usunięto nieaktywną sesję: "
+                      f"{data.get('username')}@{data.get('hostname')} "
+                      f"(ID: {str(data.get('session_id'))[:8]}...)")
+            except Exception:
+                pass
         return deleted
-    except sqlite3.OperationalError as e:
-        try:
-            con.close()
-        except Exception:
-            pass
-        if "readonly" not in str(e).lower() and "no such table" not in str(e).lower():
-            print(f"⚠️ Błąd cleanup stale sessions: {e}")
-        return 0
     except Exception as e:
-        try:
-            con.close()
-        except Exception:
-            pass
         print(f"⚠️ Błąd cleanup stale sessions: {e}")
-        return 0
+        return deleted
 
 
 def cleanup_hostname_sessions(master_db_path: str, hostname: str) -> int:
     """
     Usuń WSZYSTKIE sesje z danego komputera (przy starcie aplikacji po crashu).
-    
+    Kasuje pliki z SESSIONS/ - zero dotykania bazy.
+
     Returns:
         int: Liczba usuniętych sesji
     """
+    deleted = 0
     try:
-        con = _open_rm_connection(master_db_path)
-    except Exception:
-        return 0
-    
-    try:
-        if _is_db_readonly(con):
-            con.close()
-            return 0
-        
-        to_delete = con.execute("""
-            SELECT username, session_id
-            FROM active_sessions
-            WHERE hostname = ?
-        """, (hostname,)).fetchall()
-        
-        if not to_delete:
-            con.close()
-            return 0
-        
-        con.execute("DELETE FROM active_sessions WHERE hostname = ?", (hostname,))
-        deleted = con.total_changes
-        _rm_safe_commit(con)
-        con.close()
-        
-        if deleted > 0:
-            print(f"🧹 Startup cleanup: usunięto {deleted} osieroconych sesji z {hostname}:")
-            for row in to_delete:
-                print(f"   • {row[0]} (ID: {row[1][:8]}...)")
+        for path, data in _iter_session_files(master_db_path):
+            if data.get('hostname') != hostname:
+                continue
+            try:
+                path.unlink()
+                deleted += 1
+                print(f"🧹 Startup cleanup: usunięto osieroconą sesję "
+                      f"{data.get('username')}@{hostname} "
+                      f"(ID: {str(data.get('session_id'))[:8]}...)")
+            except Exception:
+                pass
         return deleted
-    except sqlite3.OperationalError as e:
-        try:
-            con.close()
-        except Exception:
-            pass
-        if "readonly" not in str(e).lower() and "no such table" not in str(e).lower():
-            print(f"⚠️ Błąd cleanup hostname sessions: {e}")
-        return 0
     except Exception as e:
-        try:
-            con.close()
-        except Exception:
-            pass
         print(f"⚠️ Błąd cleanup hostname sessions: {e}")
-        return 0
+        return deleted
 
 
 def update_stage_definitions(master_db_path: str):
@@ -6455,6 +6344,98 @@ def get_employee_by_user_login(rm_master_db_path: str, user_login: str) -> Optio
         return dict(row) if row else None
     finally:
         con.close()
+
+
+def _normalize_name_for_match(text: str) -> str:
+    """Normalizuj imię/nazwisko do porównania: bez polskich znaków,
+    bez spacji/kropek, małe litery. 'Grzegorz Talaga' i 'g.talaga'
+    dają w ten sposób porównywalną formę."""
+    if not text:
+        return ''
+    table = str.maketrans('ąćęłńóśźż', 'acelnoszz')
+    t = text.lower().translate(table)
+    return ''.join(ch for ch in t if ch.isalnum())
+
+
+def suggest_employee_user_matches(rm_master_db_path: str, master_baza_path: str) -> List[Dict]:
+    """Zaproponuj powiązania pracownik <-> konto RM_BAZA po podobieństwie
+    imienia/nazwiska, bez niczego zapisywać (tylko propozycje do przeglądu).
+
+    Dopasowanie: porównuje znormalizowane 'name' pracownika z
+    znormalizowanym username ORAZ display_name użytkownika. Uznajemy trafienie
+    gdy jeden ciąg zawiera drugi (obsługuje 'Grzegorz Talaga' <-> 'g.talaga',
+    'Grzegorz Talaga' <-> 'Grzegorz Talaga', ale też krótkie loginy typu
+    'DAREK' NIE dopasuje się do 'Dariusz Kowalski' - to celowe, fałszywe
+    dopasowanie jest gorsze niż brak.
+
+    Pomija:
+    - pracowników już powiązanych (user_login niepuste)
+    - loginy już przypisane do INNEGO pracownika
+    - loginy kont technicznych/ról ogólnych (ADMIN, GUEST, USER, USER$, USER$$)
+      bo to nie są konkretne osoby
+
+    Zwraca listę dict: {employee_id, employee_name, username, display_name,
+    confidence} posortowaną malejąco po confidence (1.0 = pełna zgodność
+    znormalizowanych ciągów, niżej = dopasowanie częściowe/zawieranie).
+    """
+    GENERIC_LOGINS = {'admin', 'guest', 'user', 'users', 'userss'}
+
+    employees = get_employees(rm_master_db_path, active_only=True)
+    unmatched_employees = [e for e in employees if not (e.get('user_login') or '').strip()]
+
+    users = get_users_from_baza(master_baza_path)
+    already_taken = set()
+    for e in employees:
+        login = (e.get('user_login') or '').strip()
+        if login:
+            already_taken.add(login.lower())
+
+    candidates = []
+    for u in users:
+        username = u.get('username') or ''
+        if username.lower() in GENERIC_LOGINS:
+            continue
+        if username.lower() in already_taken:
+            continue
+        candidates.append(u)
+
+    suggestions = []
+    for emp in unmatched_employees:
+        emp_norm = _normalize_name_for_match(emp.get('name') or '')
+        if not emp_norm:
+            continue
+
+        best = None
+        for u in candidates:
+            username = u.get('username') or ''
+            display_name = u.get('display_name') or ''
+            u_norm = _normalize_name_for_match(username)
+            d_norm = _normalize_name_for_match(display_name)
+
+            confidence = 0.0
+            if emp_norm == d_norm and d_norm:
+                confidence = 1.0
+            elif emp_norm == u_norm and u_norm:
+                confidence = 0.95
+            elif d_norm and (emp_norm in d_norm or d_norm in emp_norm) and min(len(emp_norm), len(d_norm)) >= 5:
+                confidence = 0.8
+            elif u_norm and len(u_norm) >= 5 and (u_norm in emp_norm or emp_norm in u_norm):
+                confidence = 0.6
+
+            if confidence and (best is None or confidence > best['confidence']):
+                best = {
+                    'employee_id': emp['id'],
+                    'employee_name': emp['name'],
+                    'username': username,
+                    'display_name': display_name,
+                    'confidence': confidence,
+                }
+
+        if best:
+            suggestions.append(best)
+
+    suggestions.sort(key=lambda s: s['confidence'], reverse=True)
+    return suggestions
 
 
 def get_user_login_owner(rm_master_db_path: str, user_login: str,
