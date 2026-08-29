@@ -300,6 +300,60 @@ class RMSyncAgent:
         self._set_setting('rfq_last_sync_id', str(changes[-1]['id']))
         return applied
 
+    def pull_activity(self) -> int:
+        """Aktywność kooperantów per pozycja → tabela rfq_activity w master.sqlite.
+        RM_BAZA pokazuje z tego tabelkę w oknie Wycena: kto dostał zapytanie,
+        czy je otworzył, czy widział TĘ pozycję i czy złożył ofertę.
+
+        Pobierane w całości (nie przyrostowo) — danych jest mało, a dzięki temu
+        znikają wiersze po odpiętych kooperantach i skasowanych pozycjach."""
+        resp = requests.get(
+            f'{self.portal_url}/api/rfq/activity',
+            headers=self._headers(), timeout=HTTP_TIMEOUT
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+
+        con = self._open_master(readonly=False)
+        try:
+            con.execute('''
+                CREATE TABLE IF NOT EXISTS rfq_activity (
+                    rfq_item_id     INTEGER NOT NULL,
+                    supplier_name   TEXT    NOT NULL,
+                    drawing_number  TEXT,
+                    item_name       TEXT,
+                    email_sent_at   TEXT,      -- kiedy poszło zaproszenie (NULL = nie wysłano)
+                    first_viewed_at TEXT,      -- pierwsze otwarcie zapytania
+                    last_viewed_at  TEXT,      -- ostatnie otwarcie
+                    view_count      INTEGER,   -- ile razy otwierał (0 = nie zajrzał)
+                    seen_this_item  INTEGER,   -- 1 = wszedł już po dodaniu tej pozycji
+                    has_offer       INTEGER,   -- 1 = złożył ofertę na tę pozycję
+                    synced_at       TEXT DEFAULT (datetime('now','localtime')),
+                    PRIMARY KEY (rfq_item_id, supplier_name)
+                )
+            ''')
+            con.execute('CREATE INDEX IF NOT EXISTS idx_rfq_activity_drawing '
+                        'ON rfq_activity(drawing_number)')
+            # pełna podmiana — patrz docstring
+            con.execute('DELETE FROM rfq_activity')
+            con.executemany('''
+                INSERT OR REPLACE INTO rfq_activity (
+                    rfq_item_id, supplier_name, drawing_number, item_name,
+                    email_sent_at, first_viewed_at, last_viewed_at,
+                    view_count, seen_this_item, has_offer, synced_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
+            ''', [
+                (r.get('rfq_item_id'), r.get('supplier_name'), r.get('drawing_number'),
+                 r.get('item_name'), r.get('email_sent_at'), r.get('first_viewed_at'),
+                 r.get('last_viewed_at'), r.get('view_count'),
+                 r.get('seen_this_item'), r.get('has_offer'))
+                for r in rows
+            ])
+            con.commit()
+        finally:
+            con.close()
+        return len(rows)
+
     @staticmethod
     def _ensure_results_table(con: sqlite3.Connection) -> None:
         """Stan ofertowania w master.sqlite — jedna pozycja RFQ = jeden wiersz.
@@ -323,6 +377,9 @@ class RMSyncAgent:
                 offers_count     INTEGER,   -- ile ofert wpłynęło
                 min_price        REAL,      -- najtańsza oferta (do stanu pośredniego)
                 invitations_sent INTEGER,   -- do ilu wysłano zaproszenia
+                viewers_count    INTEGER,   -- ilu z nich otworzyło zapytanie w portalu
+                seen_item_count  INTEGER,   -- ilu widziało TĘ pozycję (weszło po jej dodaniu)
+                last_viewed_at   TEXT,      -- ostatnie wejście któregokolwiek z przypisanych
                 supplier_id      INTEGER,   -- poniżej: dane zwycięzcy (NULL gdy brak)
                 supplier_name    TEXT,
                 price            REAL,
@@ -342,6 +399,8 @@ class RMSyncAgent:
             ('rfq_id', 'INTEGER'), ('rfq_status', 'TEXT'), ('suppliers_count', 'INTEGER'),
             ('offers_count', 'INTEGER'), ('min_price', 'REAL'),
             ('invitations_sent', 'INTEGER'),
+            ('viewers_count', 'INTEGER'), ('seen_item_count', 'INTEGER'),
+            ('last_viewed_at', 'TEXT'),
         ):
             if col not in existing:
                 con.execute(f'ALTER TABLE rfq_results ADD COLUMN {col} {decl}')
@@ -353,9 +412,10 @@ class RMSyncAgent:
                 rfq_item_id, drawing_number, item_name, revision, quantity, material,
                 project_number, rfq_id, rfq_code, rfq_title, rfq_status,
                 suppliers_count, offers_count, min_price, invitations_sent,
+                viewers_count, seen_item_count, last_viewed_at,
                 supplier_id, supplier_name, price, currency, lead_time_days,
                 offer_notes, decided_at, synced_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
             ON CONFLICT(rfq_item_id) DO UPDATE SET
                 drawing_number=excluded.drawing_number, item_name=excluded.item_name,
                 revision=excluded.revision, quantity=excluded.quantity,
@@ -365,6 +425,9 @@ class RMSyncAgent:
                 rfq_status=excluded.rfq_status, suppliers_count=excluded.suppliers_count,
                 offers_count=excluded.offers_count, min_price=excluded.min_price,
                 invitations_sent=excluded.invitations_sent,
+                viewers_count=excluded.viewers_count,
+                seen_item_count=excluded.seen_item_count,
+                last_viewed_at=excluded.last_viewed_at,
                 supplier_id=excluded.supplier_id, supplier_name=excluded.supplier_name,
                 price=excluded.price, currency=excluded.currency,
                 lead_time_days=excluded.lead_time_days, offer_notes=excluded.offer_notes,
@@ -375,6 +438,7 @@ class RMSyncAgent:
             p.get('project_number'), p.get('rfq_id'), p.get('rfq_code'), p.get('rfq_title'),
             p.get('rfq_status'), p.get('suppliers_count'), p.get('offers_count'),
             p.get('min_price'), p.get('invitations_sent'),
+            p.get('viewers_count'), p.get('seen_item_count'), p.get('last_viewed_at'),
             p.get('supplier_id'), p.get('supplier_name'), p.get('price'),
             p.get('currency'), p.get('lead_time_days'), p.get('offer_notes'),
             p.get('decided_at'),
@@ -419,6 +483,14 @@ def main() -> int:
             print(f'Wyniki pobrane: {agent.pull_results()}')
         except Exception as e:
             print(f'BLAD kanalu wynikow: {e}', file=sys.stderr)
+            exit_code = 1
+
+        # aktywność kooperantów — osobno, bo błąd tutaj nie może wywalić
+        # synchronizacji wyników (to dane pomocnicze do okna Wycena)
+        try:
+            print(f'Aktywnosc kooperantow: {agent.pull_activity()}')
+        except Exception as e:
+            print(f'BLAD kanalu aktywnosci: {e}', file=sys.stderr)
             exit_code = 1
 
     return exit_code

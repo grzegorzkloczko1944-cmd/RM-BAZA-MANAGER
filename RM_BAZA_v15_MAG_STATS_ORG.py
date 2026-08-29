@@ -21364,7 +21364,8 @@ class MainWindow(tk.Tk):
                 """SELECT drawing_number, item_name, project_number, rfq_code, rfq_title,
                           rfq_status, invitations_sent, suppliers_count, offers_count,
                           min_price, supplier_name, price, currency, lead_time_days,
-                          offer_notes, decided_at, synced_at, rfq_id
+                          offer_notes, decided_at, synced_at, rfq_id,
+                          viewers_count, seen_item_count, last_viewed_at
                    FROM rfq_results WHERE drawing_number = ?""",
                 (drawing_no,)
             ).fetchone()
@@ -21396,7 +21397,8 @@ class MainWindow(tk.Tk):
         (drawing_number, item_name, project_number, rfq_code, rfq_title, rfq_status,
          invitations_sent, suppliers_count, offers_count, min_price,
          supplier_name, price, currency, lead_time_days, offer_notes,
-         decided_at, synced_at, rfq_id) = data
+         decided_at, synced_at, rfq_id,
+         viewers_count, seen_item_count, last_viewed_at) = data
 
         # Tylko jedno okno Wyceny naraz — kliknięcie innego detalu ZASTĘPUJE
         # poprzednie (inaczej niż Casting, który podnosi istniejące): user
@@ -21412,7 +21414,9 @@ class MainWindow(tk.Tk):
 
         dialog = tk.Toplevel(self)
         dialog.title(f"Wycena — {drawing_number}")
-        dialog.geometry("560x460")
+        # szersze i wyższe niż dawne 560x460 — doszła tabelka kooperantów
+        # (pozycja ustawiana na końcu funkcji, po zbudowaniu zawartości)
+        dialog.geometry("640x580")
         dialog.transient(self)
         self._wycena_dialog = dialog
 
@@ -21428,8 +21432,9 @@ class MainWindow(tk.Tk):
                               f"{f'   (projekt {project_number})' if project_number else ''}",
                  fg="#555").pack(pady=(0, 10))
 
+        # bez expand — pod spodem jest tabelka kooperantów, która musi się zmieścić
         box = tk.Frame(dialog, bd=1, relief=tk.SOLID)
-        box.pack(fill=tk.BOTH, expand=True, padx=14, pady=6)
+        box.pack(fill=tk.X, padx=14, pady=6)
 
         def _line(label, value, bold=False):
             r = tk.Frame(box)
@@ -21460,12 +21465,88 @@ class MainWindow(tk.Tk):
                 _line("Zapytanie wysłano do:", f"{wyslano} z {widzi} kooperantów")
             else:
                 _line("Zapytanie wysłano do:", f"{wyslano} kooperantów")
+
+            # Szczegóły per kooperant są w tabelce niżej — tu tylko licznik ofert
             _line("Otrzymanych ofert:", str(offers_count or 0))
             if min_price is not None:
                 _line("Najtańsza oferta:", f"{min_price} {cur}")
 
         _line("Status RFQ:", self.RFQ_STATUS_LABELS.get(rfq_status, rfq_status) or "—")
         _line("Dane z:", str(synced_at or "—"))
+
+        # --- Tabelka aktywności kooperantów (odpowiednik panelu z portalu) ---
+        # Pokazuje, kto dostał zapytanie o TEN detal, czy je otworzył, czy
+        # widział tę konkretną pozycję i czy złożył ofertę. Bez tego nie wiadomo,
+        # czy cisza to brak zainteresowania, czy mail w spamie.
+        activity, activity_available = [], True
+        try:
+            activity = master_con.execute(
+                """SELECT supplier_name, email_sent_at, last_viewed_at, view_count,
+                          seen_this_item, has_offer
+                     FROM rfq_activity WHERE drawing_number = ?
+                    ORDER BY supplier_name""",
+                (drawing_no,)
+            ).fetchall()
+        except Exception:
+            activity_available = False   # stara baza bez tabeli rfq_activity
+
+        tk.Label(dialog, text="Kooperanci", font=("Arial", 9, "bold"),
+                 anchor="w").pack(fill=tk.X, padx=14, pady=(10, 2))
+
+        if not activity:
+            # Pusta lista nie znaczy "nikt nie otworzył" — w rfq_activity są
+            # tylko pozycje z JAKIMKOLWIEK przypisanym kooperantem. Bez tego
+            # rozróżnienia brak tabelki wyglądał jak błąd.
+            if not activity_available:
+                komunikat = ("Brak danych o aktywności — agent nie przyniósł ich "
+                             "jeszcze do RM_BAZA.")
+            elif getattr(self, "_rfq_data_stale", False):
+                komunikat = ("Brak danych o aktywności — portal lub agent nie odpowiada, "
+                             "więc stan może być niepełny.")
+            else:
+                komunikat = ("Nikt nie jest przypisany do tej pozycji — nie trafiła "
+                             "do żadnego kooperanta.\nPrzypisz kooperanta w portalu RM_RFQ "
+                             "(kolumna „Kooperanci”).")
+            tk.Label(dialog, text=komunikat, fg="#b3261e", font=("Arial", 9),
+                     anchor="w", justify=tk.LEFT).pack(fill=tk.X, padx=14, pady=(0, 6))
+
+        if activity:
+
+            cols = ("kooperant", "zaproszenie", "wejscie", "widzial", "oferta")
+            tree = ttk.Treeview(dialog, columns=cols, show="headings",
+                                height=min(len(activity), 6))
+            for col, txt, w in (("kooperant", "Kooperant", 150),
+                                ("zaproszenie", "Zaproszenie", 110),
+                                ("wejscie", "Ostatnie wejście", 110),
+                                ("widzial", "Widział", 70),
+                                ("oferta", "Oferta", 60)):
+                tree.heading(col, text=txt)
+                tree.column(col, width=w, anchor="w")
+
+            tree.tag_configure("seen", background="#eefbee")     # widział pozycję
+            tree.tag_configure("stale", background="#fff8e1")    # wchodził, ale nie po dodaniu
+            tree.tag_configure("notopened", background="#fdeceb")  # nie otworzył wcale
+
+            for a in activity:
+                nazwa, wyslane, wejscie, wejsc, widzial, oferta = a
+                if not wejsc:
+                    stan, tag = ("nie otworzył", "notopened") if wyslane else ("—", "")
+                elif widzial:
+                    stan, tag = "✓ tak", "seen"
+                else:
+                    stan, tag = "przed dodaniem", "stale"
+                tree.insert("", tk.END, tags=(tag,), values=(
+                    nazwa,
+                    str(wyslane)[:16] if wyslane else "nie wysłano",
+                    str(wejscie)[:16] if wejscie else "—",
+                    stan,
+                    "✓" if oferta else "—",
+                ))
+            tree.pack(fill=tk.X, padx=14, pady=(0, 4))
+
+            tk.Label(dialog,
+                     text="Kolumna „Widział” = czy kooperant wszedł już po dodaniu tej pozycji.",
+                     fg="#666", font=("Arial", 8), anchor="w").pack(fill=tk.X, padx=14)
 
         if getattr(self, "_rfq_data_stale", False):
             tk.Label(dialog,
