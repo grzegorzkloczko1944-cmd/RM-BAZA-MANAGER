@@ -9,3 +9,8 @@ build_*.log
 .claude/settings.local.json
 .claude/settings.json
 .dwf_thumb_cache/
+
+# runner agenta — sciezki per maszyna, git pull ma go NIE nadpisywac
+sync_agent_run.bat
+sync_agent.log
+sync_agent.log.1
