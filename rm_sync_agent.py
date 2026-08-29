@@ -164,6 +164,35 @@ class RMSyncAgent:
 
     # --- Kanał 2: rysunki → portal -----------------------------------------
 
+    def list_rfqs(self, only_active: bool = True) -> list[dict]:
+        """Lista RFQ z portalu — do okna wyboru "wyślij do którego zapytania"."""
+        resp = requests.get(
+            f'{self.portal_url}/api/rfq/list',
+            headers=self._headers(),
+            params={} if only_active else {'all': '1'},
+            timeout=HTTP_TIMEOUT
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def create_rfq(self, title: str, project_number: str | None = None,
+                   offer_start_date: str | None = None,
+                   offer_deadline: str | None = None) -> dict:
+        """Zakłada nowe RFQ w portalu. Zwraca {rfq_id, code, title}."""
+        payload = {'title': title}
+        if project_number:
+            payload['project_number'] = project_number
+        if offer_start_date:
+            payload['offer_start_date'] = offer_start_date
+        if offer_deadline:
+            payload['offer_deadline'] = offer_deadline
+        resp = requests.post(
+            f'{self.portal_url}/api/rfq',
+            headers=self._headers(), json=payload, timeout=HTTP_TIMEOUT
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def push_drawing(self, rfq_id: int, drawing_number: str, file_paths: list[str],
                      name: str | None = None, quantity: int = 1,
                      material: str | None = None, notes: str | None = None) -> dict:
@@ -286,6 +315,7 @@ class RMSyncAgent:
                 quantity         INTEGER,
                 material         TEXT,
                 project_number   TEXT,
+                rfq_id           INTEGER,   -- do linku 'Przejdź do RFQ' w RM_BAZA
                 rfq_code         TEXT,
                 rfq_title        TEXT,
                 rfq_status       TEXT,
@@ -309,7 +339,7 @@ class RMSyncAgent:
         # migracja starszej wersji tabeli (sprzed kolumny WYCENA ze stanami pośrednimi)
         existing = {r[1] for r in con.execute('PRAGMA table_info(rfq_results)')}
         for col, decl in (
-            ('rfq_status', 'TEXT'), ('suppliers_count', 'INTEGER'),
+            ('rfq_id', 'INTEGER'), ('rfq_status', 'TEXT'), ('suppliers_count', 'INTEGER'),
             ('offers_count', 'INTEGER'), ('min_price', 'REAL'),
             ('invitations_sent', 'INTEGER'),
         ):
@@ -321,15 +351,16 @@ class RMSyncAgent:
         con.execute('''
             INSERT INTO rfq_results (
                 rfq_item_id, drawing_number, item_name, revision, quantity, material,
-                project_number, rfq_code, rfq_title, rfq_status,
+                project_number, rfq_id, rfq_code, rfq_title, rfq_status,
                 suppliers_count, offers_count, min_price, invitations_sent,
                 supplier_id, supplier_name, price, currency, lead_time_days,
                 offer_notes, decided_at, synced_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
             ON CONFLICT(rfq_item_id) DO UPDATE SET
                 drawing_number=excluded.drawing_number, item_name=excluded.item_name,
                 revision=excluded.revision, quantity=excluded.quantity,
                 material=excluded.material, project_number=excluded.project_number,
+                rfq_id=excluded.rfq_id,
                 rfq_code=excluded.rfq_code, rfq_title=excluded.rfq_title,
                 rfq_status=excluded.rfq_status, suppliers_count=excluded.suppliers_count,
                 offers_count=excluded.offers_count, min_price=excluded.min_price,
@@ -341,7 +372,7 @@ class RMSyncAgent:
         ''', (
             p.get('rfq_item_id'), p.get('drawing_number'), p.get('item_name'),
             p.get('revision'), p.get('quantity'), p.get('material'),
-            p.get('project_number'), p.get('rfq_code'), p.get('rfq_title'),
+            p.get('project_number'), p.get('rfq_id'), p.get('rfq_code'), p.get('rfq_title'),
             p.get('rfq_status'), p.get('suppliers_count'), p.get('offers_count'),
             p.get('min_price'), p.get('invitations_sent'),
             p.get('supplier_id'), p.get('supplier_name'), p.get('price'),

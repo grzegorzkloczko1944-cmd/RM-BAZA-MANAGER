@@ -1561,6 +1561,8 @@ class MainWindow(tk.Tk):
         # Custom prawy klik - dodaj "Powrót do BOM"
         self.sheet.popup_menu_add_command("Powrót do BOM", self.on_restore_to_bom)
         self.sheet.popup_menu_add_command("Pokaż złożenie", self.show_assembly_tree)
+        self.sheet.popup_menu_add_command("Wyślij do RFQ", self.send_selected_to_rfq)
+        self.sheet.popup_menu_add_command("Odśwież wyceny z portalu", self._refresh_rfq_data)
 
         # Home/End - przejście do pierwszego/ostatniego wiersza (PgUp/PgDn działają już
         # natywnie przez "arrowkeys" w enable_bindings, ale tksheet nie ma wbudowanej
@@ -4205,6 +4207,18 @@ class MainWindow(tk.Tk):
         except Exception:
             pass
 
+        # === WYCENA: zielone tło gdy jest wybrany zwycięzca ===
+        # Musi być PRZED blokiem is_complete — tamten kończy się `return`,
+        # więc pozycje ukończone nie doszłyby tutaj.
+        try:
+            wycena_val = str(self.sheet.get_cell_data(row_idx, self.WYCENA_COL) or "")
+            if wycena_val.startswith("✓") or wycena_val.startswith("⚠ ✓"):
+                self.sheet.highlight_cells(row=row_idx, column=self.WYCENA_COL,
+                                           bg=GREEN_BG_BRIGHT)
+                self._cells_special_bg.add((row_idx, self.WYCENA_COL))
+        except Exception:
+            pass
+
         # === SZARE TŁO BOM ===
         overridden = self._sheet_overridden[row_idx] if row_idx < len(self._sheet_overridden) else set()
         for col in [0, 1, 2, 3, 7, 8, 9, 18]:
@@ -6051,7 +6065,8 @@ class MainWindow(tk.Tk):
             if master_con:
                 for r in master_con.execute(
                     """SELECT drawing_number, invitations_sent, suppliers_count,
-                              offers_count, min_price, supplier_name, price
+                              offers_count, min_price, supplier_name, price,
+                              rfq_status
                        FROM rfq_results"""
                 ):
                     rfq_by_drawing[r[0]] = r
@@ -6526,9 +6541,12 @@ class MainWindow(tk.Tk):
                 if sent_cnt:
                     casting_disp += " ✉"
 
-            # WYCENA: skrót stanu ofertowania w portalu RM_RFQ
+            # WYCENA: skrót stanu ofertowania w portalu RM_RFQ.
+            # Klucz jak przy wysyłce: numer rysunku, a dla elementów
+            # katalogowych (łożysko, siłownik — bez numeru) nazwa detalu.
+            rfq_key = (item['drawing_no'] or '').strip() or (item['name'] or '').strip()
             wycena_disp = self._format_wycena_cell(
-                rfq_by_drawing.get(item['drawing_no']), stale=self._rfq_data_stale
+                rfq_by_drawing.get(rfq_key), stale=self._rfq_data_stale
             )
 
             # Wiersz danych (20 kolumn)
@@ -7652,7 +7670,7 @@ class MainWindow(tk.Tk):
         try:
             row = self.sheet.identify_row(event, exclude_index=True)
             col = self.sheet.identify_column(event, exclude_header=True)
-            
+
             if row is not None and col is not None and row >= 0 and col >= 0:
                 # Kolumna 10 = Dostawca - obsłuż bezpośrednio dropdown
                 if col == 10:
@@ -21269,7 +21287,8 @@ class MainWindow(tk.Tk):
             return "⚠ brak danych" if stale else ""
         try:
             (_drawing, invitations_sent, suppliers_count,
-             offers_count, min_price, supplier_name, price) = rfq_row
+             offers_count, min_price, supplier_name, price, *rest) = rfq_row
+            rfq_status = rest[0] if rest else None
         except (TypeError, ValueError):
             return ""
 
@@ -21291,20 +21310,51 @@ class MainWindow(tk.Tk):
             cena = _money(price)
             return prefix + (f"{out} · {cena}" if cena else out)
 
+        # Mianownik to liczba faktycznie powiadomionych, nie wszystkich widzących
+        # pozycję — od kooperanta bez maila nie ma na co czekać, a "1/3 OFERT"
+        # przy dwóch wysłanych zaproszeniach sugeruje brak, którego nie ma.
         if offers_count:
-            out = f"{offers_count}/{suppliers_count} OFERT"
+            out = f"{offers_count}/{invitations_sent or suppliers_count} OFERT"
             cena = _money(min_price)
             return prefix + (f"{out} · {cena}" if cena else out)
 
         if invitations_sent:
-            return prefix + f"WYSŁANO · {suppliers_count}"
+            return prefix + f"WYSŁANO · {invitations_sent}"
+
+        # Pozycja jest w RFQ, ale zaproszenia jeszcze nie poszły. Bez tego
+        # komórka byłaby pusta i user nie wiedziałby, że detal w ogóle trafił
+        # do zapytania. Rozróżniamy: całe RFQ to szkic, czy tylko ta pozycja
+        # nie ma jeszcze przypisanego kooperanta.
+        if rfq_row:
+            if rfq_status == 'draft':
+                return prefix + "SZKIC"
+            return prefix + ("SZKIC · brak kooperanta" if not suppliers_count
+                             else f"SZKIC · {suppliers_count}")
 
         return "⚠ brak danych" if stale else ""
+
+    def _rfq_portal_url(self):
+        """Adres portalu RM_RFQ z master.sqlite → settings (ten sam, którego
+        używa RM_SYNC_AGENT). Pusty string, gdy nieskonfigurowany."""
+        try:
+            master_con = self.db_manager.master_con if self.db_manager else None
+            if not master_con:
+                return ""
+            row = master_con.execute(
+                "SELECT value FROM settings WHERE key='rfq_portal_url'"
+            ).fetchone()
+            return (row[0] or "").rstrip("/") if row else ""
+        except Exception:
+            return ""
 
     def _open_wycena_dialog(self, row, col):
         """Szczegóły wyceny detalu — pełna informacja z portalu RM_RFQ."""
         try:
-            drawing_no = self.sheet.get_cell_data(row, 0)
+            # Klucz jak przy wysyłce: numer rysunku, a gdy go brak (element
+            # katalogowy) — nazwa detalu z kolumny 1.
+            drawing_no = str(self.sheet.get_cell_data(row, 0) or "").strip()
+            if not drawing_no:
+                drawing_no = str(self.sheet.get_cell_data(row, 1) or "").strip()
             if not drawing_no:
                 return
             master_con = self.db_manager.master_con if self.db_manager else None
@@ -21314,7 +21364,7 @@ class MainWindow(tk.Tk):
                 """SELECT drawing_number, item_name, project_number, rfq_code, rfq_title,
                           rfq_status, invitations_sent, suppliers_count, offers_count,
                           min_price, supplier_name, price, currency, lead_time_days,
-                          offer_notes, decided_at, synced_at
+                          offer_notes, decided_at, synced_at, rfq_id
                    FROM rfq_results WHERE drawing_number = ?""",
                 (drawing_no,)
             ).fetchone()
@@ -21346,12 +21396,31 @@ class MainWindow(tk.Tk):
         (drawing_number, item_name, project_number, rfq_code, rfq_title, rfq_status,
          invitations_sent, suppliers_count, offers_count, min_price,
          supplier_name, price, currency, lead_time_days, offer_notes,
-         decided_at, synced_at) = data
+         decided_at, synced_at, rfq_id) = data
+
+        # Tylko jedno okno Wyceny naraz — kliknięcie innego detalu ZASTĘPUJE
+        # poprzednie (inaczej niż Casting, który podnosi istniejące): user
+        # przegląda kolejne pozycje i chce widzieć tę, w którą właśnie kliknął.
+        existing = getattr(self, "_wycena_dialog", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.destroy()
+            except Exception:
+                pass
+            self._wycena_dialog = None
 
         dialog = tk.Toplevel(self)
         dialog.title(f"Wycena — {drawing_number}")
-        dialog.geometry("560x420")
+        dialog.geometry("560x460")
         dialog.transient(self)
+        self._wycena_dialog = dialog
+
+        def _on_close():
+            self._wycena_dialog = None
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", _on_close)
 
         tk.Label(dialog, text=f"{drawing_number} — {item_name or ''}",
                  font=("Arial", 12, "bold")).pack(pady=(12, 4))
@@ -21382,7 +21451,15 @@ class MainWindow(tk.Tk):
                 _line("Uwagi kooperanta:", offer_notes)
         else:
             _line("Status:", "Trwa ofertowanie" if invitations_sent else "Nie wysłano zapytań")
-            _line("Zaproszonych:", str(suppliers_count or 0))
+            # Rozdzielamy "ilu widzi pozycję" od "do ilu poszedł mail" — to nie
+            # to samo. Pozycja bez jawnego przypisania jest widoczna dla
+            # wszystkich zaproszonych do RFQ, ale mail mógł jeszcze nie pójść.
+            widzi = suppliers_count or 0
+            wyslano = invitations_sent or 0
+            if wyslano < widzi:
+                _line("Zapytanie wysłano do:", f"{wyslano} z {widzi} kooperantów")
+            else:
+                _line("Zapytanie wysłano do:", f"{wyslano} kooperantów")
             _line("Otrzymanych ofert:", str(offers_count or 0))
             if min_price is not None:
                 _line("Najtańsza oferta:", f"{min_price} {cur}")
@@ -21400,8 +21477,722 @@ class MainWindow(tk.Tk):
         tk.Label(dialog,
                  text="Wybór kooperanta i porównanie ofert — w portalu RM_RFQ.",
                  fg="#777", font=("Arial", 8)).pack(pady=(6, 2))
-        tk.Button(dialog, text="Zamknij", command=dialog.destroy,
-                  width=14).pack(pady=(4, 12))
+
+        btns = tk.Frame(dialog)
+        btns.pack(pady=(4, 12))
+
+        def _open_portal():
+            """Otwiera porównanie ofert tego RFQ w przeglądarce."""
+            try:
+                base = self._rfq_portal_url()
+                if not base:
+                    messagebox.showwarning(
+                        "Przejdź do RFQ",
+                        "Brak adresu portalu w master.sqlite → settings.rfq_portal_url",
+                        parent=dialog)
+                    return
+                url = f"{base}/rfq/{rfq_id}/offers" if rfq_id else base
+                import webbrowser
+                webbrowser.open(url)
+            except Exception as e:
+                messagebox.showerror("Przejdź do RFQ",
+                                     f"Nie udało się otworzyć portalu:\n{e}", parent=dialog)
+
+        tk.Button(btns, text="🌐 Przejdź do RFQ", command=_open_portal,
+                  bg="#1f5fa9", fg="white", width=18).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(btns, text="Zamknij", command=_on_close, width=14).pack(side=tk.LEFT)
+
+        # Wyśrodkuj względem okna aplikacji (czyli na monitorze, na którym
+        # RM_BAZA aktualnie jest — nie zawsze na głównym).
+        dialog.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() // 2) - (dialog.winfo_width() // 2)
+        y = self.winfo_y() + (self.winfo_height() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+    # ------------------------------------------------------------------
+    # Wysyłka rysunków do portalu RM_RFQ (kanał 2 integracji)
+    #
+    # RM_BAZA zna numery rysunków i ma dostęp do serwera plików, portal nie.
+    # Pliki wyszukujemy tą samą logiką co "Szukaj w projekcie", a wysyła je
+    # RM_SYNC_AGENT (czyta lokalnie, wysyła zawartość przez HTTPS).
+    # ------------------------------------------------------------------
+
+    RFQ_FILE_EXTENSIONS = ('pdf', 'dxf', 'dwf', 'step', 'stp', 'stl')
+
+    # Detale z sufiksem X / XX idą na laser i BEZ DXF-a kooperant ich nie zetnie —
+    # sam PDF nie wystarcza. Wysyłkę blokujemy, dopóki DXF się nie znajdzie.
+    RFQ_LASER_SUFFIX_RE = re.compile(r'(XX|X)\s*$', re.IGNORECASE)
+
+    @classmethod
+    def _rfq_needs_dxf(cls, drawing_no: str) -> bool:
+        return bool(cls.RFQ_LASER_SUFFIX_RE.search((drawing_no or '').strip()))
+
+    # Domyślny materiał wstawiany przez Inventora, gdy projektant go nie ustawił —
+    # w BOM-ie to śmieć, a kooperantowi nic nie mówi. "Generic" to ta sama
+    # wartość z angielskiej wersji Inventora.
+    RFQ_JUNK_MATERIALS = {'ogólny', 'ogolny', 'generic'}
+
+    @classmethod
+    def _clean_material(cls, value):
+        """Materiał do wysłania do RFQ — bez śmieci z Inventora."""
+        mat = str(value or "").strip()
+        return "" if mat.lower() in cls.RFQ_JUNK_MATERIALS else mat
+
+    def _get_rfq_agent(self):
+        """Tworzy agenta synchronizującego. None + komunikat, gdy integracja
+        nie jest skonfigurowana (rfq_portal_url / rfq_api_key w settings)."""
+        try:
+            from rm_sync_agent import RMSyncAgent
+            return RMSyncAgent(str(MASTER_PATH))
+        except Exception as e:
+            messagebox.showerror(
+                "RFQ — brak konfiguracji",
+                f"Nie można połączyć się z portalem RM_RFQ:\n\n{e}\n\n"
+                "Sprawdź w master.sqlite → settings:\n"
+                "  rfq_portal_url, rfq_api_key",
+                parent=self
+            )
+            return None
+
+    def _selected_rows_for_rfq(self):
+        """Zaznaczone wiersze — multi-select, a gdy go nie ma, wiersz aktualnie
+        zaznaczonej komórki (tak samo jak robi to "Pokaż złożenie")."""
+        rows = []
+        try:
+            rows = sorted(self.sheet.get_selected_rows())
+        except Exception:
+            pass
+        if not rows:
+            try:
+                sel = self.sheet.get_currently_selected()
+                if isinstance(sel, dict):
+                    r = sel.get("row", sel.get("r"))
+                elif isinstance(sel, (tuple, list)) and sel:
+                    r = sel[0]
+                else:
+                    r = None
+                if r is not None and r >= 0:
+                    rows = [r]
+            except Exception:
+                pass
+        return rows
+
+    def send_selected_to_rfq(self):
+        """Pozycja "Wyślij do RFQ" w menu PPM arkusza (obok "Pokaż złożenie").
+        Działa na zaznaczonych wierszach — jednym albo wielu naraz.
+
+        Wymaga locka — to operacja zapisu (zakłada/zmienia zapytanie ofertowe
+        i wysyła dokumentację kooperantom). Sam podgląd wyceny locka nie wymaga."""
+        if not self.have_lock:
+            messagebox.showwarning(
+                "Wyślij do RFQ",
+                "Wysyłanie rysunków do zapytania ofertowego wymaga blokady projektu.\n\n"
+                "Przejmij Lock, aby kontynuować.",
+                parent=self)
+            return
+
+        rows = self._selected_rows_for_rfq()
+        if not rows:
+            messagebox.showinfo("Wyślij do RFQ",
+                                "Zaznacz najpierw wiersz z detalem.", parent=self)
+            return
+        self._send_rows_to_rfq(rows)
+
+    def _refresh_rfq_data(self):
+        """Ręczne odświeżenie stanu wycen (normalnie robi to agent w tle)."""
+        agent = self._get_rfq_agent()
+        if not agent:
+            return
+        try:
+            n = agent.pull_full_state()
+            messagebox.showinfo("RFQ", f"Zaktualizowano stan {n} pozycji.", parent=self)
+            self.refresh_data()
+        except Exception as e:
+            messagebox.showerror("RFQ", f"Nie udało się pobrać danych:\n{e}", parent=self)
+
+    def _find_files_for_drawing(self, drawing_no: str) -> list:
+        """Szuka wszystkich plików rysunku (PDF/DXF/DWF/STEP/STL) w katalogach
+        projektu na serwerze — ta sama logika co przycisk "Szukaj w projekcie"."""
+        server_path = Path(SERVER_DIR)
+        if not server_path.exists():
+            return []
+
+        project_name = None
+        for pid, pname in self.projects_list:
+            if pid == self.current_project_id:
+                project_name = pname
+                break
+        if not project_name:
+            return []
+
+        project_number = project_name.split()[0] if ' ' in project_name else project_name
+        drawing_prefix = drawing_no.split('-')[0].strip() if '-' in drawing_no else None
+
+        # projekty ZP* leżą w podkatalogu ZP/
+        search_roots = [server_path]
+        zp_root = server_path / "ZP"
+        if zp_root.exists() and zp_root.is_dir():
+            search_roots.append(zp_root)
+
+        project_dirs, seen = [], set()
+        try:
+            for root in search_roots:
+                for item in root.iterdir():
+                    if item.is_dir() and item.name.startswith(project_number) and item.name not in seen:
+                        project_dirs.append(item)
+                        seen.add(item.name)
+            if drawing_prefix and drawing_prefix != project_number:
+                for root in search_roots:
+                    for item in root.iterdir():
+                        if item.is_dir() and item.name.startswith(drawing_prefix) and item.name not in seen:
+                            project_dirs.append(item)
+                            seen.add(item.name)
+        except Exception:
+            return []
+
+        excluded = {"OldVersions", "Design Data", "Importowane komponenty", "Templates",
+                    "$RECYCLE.BIN", "System Volume Information", "@Recycle", "@recycle",
+                    ".git", ".svn", "node_modules"}
+
+        found = []
+        for proj_dir in project_dirs:
+            for ext in self.RFQ_FILE_EXTENSIONS:
+                for f in self._scan_directory_for_file(proj_dir, drawing_no, ext, excluded):
+                    if f not in found:
+                        found.append(f)
+        return found
+
+    def _rfq_deep_scan(self, root: Path, drawing_no: str, title: str, parent=None) -> list:
+        """Głębokie szukanie plików rysunku w całym drzewie (serwer B:\\ albo V:\\).
+
+        Ten sam schemat co "Szukaj na serwerze" / "Szukaj w bibliotece":
+        ThreadPoolExecutor po katalogach głównych, progress bar i przycisk
+        Anuluj. Różnica: tam szuka się jednej kategorii wybranej z listy,
+        tu od razu wszystkich rozszerzeń z RFQ_FILE_EXTENSIONS, bo do wyceny
+        kooperant dostaje komplet (PDF + DXF + STEP…).
+
+        Zwraca listę Path; pusta = nie znaleziono albo user anulował."""
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        excluded_dirs = {
+            "OldVersions", "Design Data", "Importowane komponenty", "Templates",
+            "$RECYCLE.BIN", "System Volume Information", "@Recycle", "@recycle",
+            ".git", ".svn", "node_modules"
+        }
+
+        if not root.exists():
+            messagebox.showerror("Skanowanie",
+                                 f"Ścieżka nie istnieje:\n{root}",
+                                 parent=parent or self)
+            return []
+
+        dlg = tk.Toplevel(parent or self)
+        dlg.title(title)
+        dlg.resizable(False, False)
+        dlg.transient(parent or self)
+        dlg.grab_set()
+        dlg.update_idletasks()
+        anchor = parent or self
+        dlg.geometry("500x150+%d+%d" % (
+            anchor.winfo_rootx() + (anchor.winfo_width() // 2) - 250,
+            anchor.winfo_rooty() + (anchor.winfo_height() // 2) - 75))
+
+        frame = tk.Frame(dlg, padx=20, pady=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+        status_label = tk.Label(frame, text=f"Szukam {drawing_no}…", font=("Arial", 10))
+        status_label.pack(pady=(0, 6))
+        progress_bar = ttk.Progressbar(frame, mode="determinate", length=440)
+        progress_bar.pack(pady=(0, 4))
+        detail_label = tk.Label(frame, text="", font=("Arial", 8), fg="#666")
+        detail_label.pack(pady=(0, 8))
+
+        cancelled = [False]
+        found_files, scan_error = [], [None]
+
+        def cancel_scan():
+            cancelled[0] = True
+            status_label.config(text="Anulowanie…")
+
+        dlg.protocol("WM_DELETE_WINDOW", cancel_scan)
+        tk.Button(frame, text="Anuluj", command=cancel_scan, bg="#e74c3c", fg="white",
+                  font=("Arial", 9, "bold"), padx=20, pady=4).pack()
+
+        def scan_worker():
+            try:
+                dirs_to_scan = [d for d in root.iterdir()
+                                if d.is_dir() and d.name not in excluded_dirs]
+            except Exception as e:
+                scan_error[0] = f"Nie można odczytać katalogu:\n{e}"
+                return
+            if not dirs_to_scan:
+                scan_error[0] = f"Brak katalogów do przeskanowania w:\n{root}"
+                return
+
+            # jedno zadanie = katalog × rozszerzenie, żeby postęp szedł płynnie
+            jobs = [(d, ext) for d in dirs_to_scan for ext in self.RFQ_FILE_EXTENSIONS]
+            total = len(jobs)
+            self.after(0, lambda: progress_bar.winfo_exists() and progress_bar.config(maximum=total))
+
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                futures = {
+                    executor.submit(self._scan_directory_for_file, d, drawing_no, ext, excluded_dirs): d
+                    for d, ext in jobs
+                }
+                done = 0
+                for future in as_completed(futures):
+                    if cancelled[0]:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                    d = futures[future]
+                    done += 1
+                    try:
+                        for f in future.result():
+                            if f not in found_files:
+                                found_files.append(f)
+                    except Exception:
+                        pass
+                    if not cancelled[0] and dlg.winfo_exists():
+                        self.after(0, lambda c=done: progress_bar.winfo_exists() and progress_bar.config(value=c))
+                        self.after(0, lambda c=done, t=total, n=len(found_files):
+                                   status_label.winfo_exists() and
+                                   status_label.config(text=f"Przeskanowano {c}/{t} — znaleziono {n}"))
+                        self.after(0, lambda nm=d.name:
+                                   detail_label.winfo_exists() and detail_label.config(text=f"Ostatnio: {nm}"))
+
+        thread = threading.Thread(target=scan_worker, daemon=True)
+        thread.start()
+
+        # czekamy bez blokowania GUI — wait_window wraca po zamknięciu dialogu
+        def check_done():
+            if not dlg.winfo_exists():
+                return
+            if thread.is_alive():
+                dlg.after(100, check_done)
+            else:
+                dlg.destroy()
+
+        dlg.after(100, check_done)
+        self.wait_window(dlg)
+
+        if scan_error[0]:
+            messagebox.showerror("Skanowanie", scan_error[0], parent=parent or self)
+            return []
+        return [] if cancelled[0] else found_files
+
+    def _ask_rfq_scan_source(self, drawing_no: str, parent=None):
+        """Pyta, gdzie szukać dalej: 'library' (B:\\), 'server' (cały V:\\)
+        albo None = Anuluj. Zwykły messagebox ma tylko yes/no/cancel, a tu
+        potrzebne są trzy równorzędne opcje z czytelnymi nazwami."""
+        result = [None]
+        anchor = parent or self
+
+        dlg = tk.Toplevel(anchor)
+        dlg.title("Nie znaleziono plików")
+        dlg.resizable(False, False)
+        dlg.transient(anchor)
+        dlg.grab_set()
+
+        frame = tk.Frame(dlg, padx=20, pady=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+        tk.Label(frame, text=f"Nie znaleziono plików w projekcie dla:",
+                 font=("Arial", 9)).pack(anchor="w")
+        tk.Label(frame, text=drawing_no, font=("Arial", 11, "bold")).pack(anchor="w", pady=(2, 10))
+        tk.Label(frame, text="Gdzie szukać dalej?", font=("Arial", 9)).pack(anchor="w", pady=(0, 8))
+
+        def pick(value):
+            result[0] = value
+            dlg.destroy()
+
+        btns = tk.Frame(frame)
+        btns.pack(fill=tk.X)
+        tk.Button(btns, text="Biblioteka (B:)", width=16, command=lambda: pick('library'),
+                  bg="#2a5a8c", fg="white", font=("Arial", 9, "bold"),
+                  padx=8, pady=4).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(btns, text="Cały serwer", width=16, command=lambda: pick('server'),
+                  bg="#2a5a8c", fg="white", font=("Arial", 9, "bold"),
+                  padx=8, pady=4).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(btns, text="Anuluj", width=10, command=lambda: pick(None),
+                  padx=8, pady=4).pack(side=tk.LEFT)
+
+        dlg.protocol("WM_DELETE_WINDOW", lambda: pick(None))
+        dlg.bind("<Escape>", lambda e: pick(None))
+
+        dlg.update_idletasks()
+        dlg.geometry("+%d+%d" % (
+            anchor.winfo_rootx() + (anchor.winfo_width() - dlg.winfo_width()) // 2,
+            anchor.winfo_rooty() + (anchor.winfo_height() - dlg.winfo_height()) // 2))
+
+        self.wait_window(dlg)
+        return result[0]
+
+    def _send_rows_to_rfq(self, rows):
+        """Okno wysyłki: wybór RFQ + podgląd znalezionych plików do zatwierdzenia."""
+        if not self.have_lock:   # druga bariera — gdyby ktoś wywołał to inną drogą
+            return
+        agent = self._get_rfq_agent()
+        if not agent:
+            return
+
+        # zbierz dane detali z arkusza
+        items = []
+        for r in rows:
+            try:
+                data = self.sheet.get_row_data(r)
+                drawing_no = str(data[0] or "").strip()
+                name = str(data[1] or "").strip()
+
+                # Elementy znormalizowane (łożysko, siłownik, śruba katalogowa)
+                # nie mają numeru rysunku — identyfikatorem staje się wtedy nazwa.
+                # Portal i tak wymaga jakiegoś klucza, a po nim wraca wycena.
+                is_catalog = not drawing_no
+                identifier = drawing_no or name
+                if not identifier:
+                    continue   # ani numeru, ani nazwy — nie ma czego wysłać
+
+                items.append({
+                    'row': r,
+                    'drawing_no': identifier,
+                    'name': name,
+                    'qty': str(data[4] or data[3] or "1").strip(),
+                    'material': self._clean_material(data[8]),  # kol. 8 = Materiał
+                    'notes': str(data[15] or "").strip(),      # kol. 15 = Uwagi
+                    'is_catalog': is_catalog,   # nie szukamy dla nich plików
+                })
+            except Exception:
+                continue
+
+        if not items:
+            messagebox.showwarning("Wyślij do RFQ",
+                                   "Zaznacz wiersze z numerem rysunku.", parent=self)
+            return
+
+        try:
+            rfq_list = agent.list_rfqs()
+        except Exception as e:
+            messagebox.showerror("RFQ", f"Nie udało się pobrać listy zapytań:\n{e}", parent=self)
+            return
+
+        self._open_rfq_send_dialog(agent, items, rfq_list)
+
+    def _open_rfq_send_dialog(self, agent, items, rfq_list):
+        dlg = tk.Toplevel(self)
+        dlg.title("Wyślij do RFQ")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        # Wyśrodkowanie względem okna RM_BAZA, a nie ekranu — przy dwóch
+        # monitorach samo geometry("820x620") zostawia pozycję Windowsowi
+        # i okno potrafi wyskoczyć na drugim monitorze.
+        dlg_w, dlg_h = 820, 620
+        try:
+            self.update_idletasks()
+            parent_x = self.winfo_rootx()
+            parent_y = self.winfo_rooty()
+            parent_w = self.winfo_width()
+            parent_h = self.winfo_height()
+            pos_x = parent_x + (parent_w - dlg_w) // 2
+            pos_y = parent_y + (parent_h - dlg_h) // 2
+        except Exception:
+            pos_x, pos_y = 200, 100
+        dlg.geometry(f"{dlg_w}x{dlg_h}+{pos_x}+{pos_y}")
+
+        # --- wybór RFQ ---
+        top = tk.LabelFrame(dlg, text="Zapytanie ofertowe", padx=10, pady=8)
+        top.pack(fill=tk.X, padx=12, pady=(12, 6))
+
+        rfq_var = tk.StringVar()
+        options, mapping = [], {}
+        for r in rfq_list:
+            label = f"{r['code']} — {r['title']}"
+            if r.get('project_number'):
+                label += f"  (proj. {r['project_number']})"
+            options.append(label)
+            mapping[label] = r['id']
+
+        row1 = tk.Frame(top)
+        row1.pack(fill=tk.X)
+        tk.Label(row1, text="Dodaj do:", width=10, anchor="w").pack(side=tk.LEFT)
+        combo = ttk.Combobox(row1, textvariable=rfq_var, values=options,
+                             state="readonly", width=60)
+        combo.pack(side=tk.LEFT, padx=(0, 8))
+        if options:
+            combo.current(0)
+        else:
+            tk.Label(row1, text="(brak aktywnych zapytań)", fg="#b3261e").pack(side=tk.LEFT)
+
+        def _new_rfq():
+            from tkinter import simpledialog
+            title = simpledialog.askstring("Nowe RFQ", "Tytuł zapytania:", parent=dlg)
+            if not title:
+                return
+            proj = None
+            for pid, pname in self.projects_list:
+                if pid == self.current_project_id:
+                    proj = pname.split()[0] if ' ' in pname else pname
+                    break
+            try:
+                created = agent.create_rfq(title=title, project_number=proj)
+            except Exception as e:
+                messagebox.showerror("RFQ", f"Nie udało się utworzyć zapytania:\n{e}", parent=dlg)
+                return
+            label = f"{created['code']} — {created['title']}"
+            if proj:
+                label += f"  (proj. {proj})"
+            mapping[label] = created['rfq_id']
+            combo['values'] = [label] + list(combo['values'])
+            combo.set(label)
+
+        tk.Button(row1, text="+ Nowe RFQ", command=_new_rfq).pack(side=tk.LEFT)
+
+        # --- lista pozycji z plikami ---
+        mid = tk.LabelFrame(dlg, text="Pozycje i znalezione pliki (odznacz niechciane)",
+                            padx=8, pady=6)
+        mid.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
+
+        canvas = tk.Canvas(mid, borderwidth=0, highlightthickness=0)
+        scroll = ttk.Scrollbar(mid, orient="vertical", command=canvas.yview)
+        inner = tk.Frame(canvas)
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        status = tk.Label(dlg, text="Szukam plików na serwerze…", anchor="w", fg="#555")
+        status.pack(fill=tk.X, padx=14)
+
+        file_vars = {}   # (drawing_no, path) -> BooleanVar
+
+        def _search_more(it):
+            """Pętla doszukiwania, gdy szukanie w projekcie nic nie dało:
+            pytamy skąd szukać (Biblioteka / cały Serwer / Anuluj) i wracamy
+            z pytaniem tak długo, aż coś się znajdzie albo user zrezygnuje."""
+            while True:
+                choice = self._ask_rfq_scan_source(it['drawing_no'], dlg)
+                if choice is None:
+                    return
+                root = Path(LIBRARY_ROOT) if choice == 'library' else Path(SERVER_DIR)
+                title = ("Skanowanie biblioteki" if choice == 'library'
+                         else "Skanowanie serwera")
+                found = self._rfq_deep_scan(root, it['drawing_no'], title, parent=dlg)
+
+                if found:
+                    existing = it.get('files') or []
+                    for f in found:
+                        if f not in existing:
+                            existing.append(f)
+                    it['files'] = existing
+                    it['render_files']()
+                    _refresh_total()
+                    return
+
+                # nic nie znaleziono — pytamy dalej, user może spróbować
+                # drugiego źródła albo odpuścić
+                if not messagebox.askyesno(
+                        "Nie znaleziono",
+                        f"Nie znaleziono plików dla:\n{it['drawing_no']}\n\n"
+                        f"Szukać w innym miejscu?",
+                        parent=dlg):
+                    return
+
+        def _refresh_total():
+            total = sum(len(it.get('files') or []) for it in items)
+            status.config(text=f"Znaleziono {total} plików dla {len(items)} pozycji.")
+
+        def _build_rows():
+            for it in items:
+                # Elementy katalogowe (bez nr rysunku) nie mają dokumentacji
+                # na serwerze — nie ma sensu przeszukiwać dysku.
+                files = [] if it.get('is_catalog') else self._find_files_for_drawing(it['drawing_no'])
+                box = tk.Frame(inner, bd=1, relief=tk.GROOVE, padx=8, pady=6)
+                box.pack(fill=tk.X, pady=4, padx=4)
+
+                head = f"{it['drawing_no']}"
+                if it['name'] and it['name'] != it['drawing_no']:
+                    head += f" — {it['name']}"
+                tk.Label(box, text=head, font=("Arial", 10, "bold"), anchor="w").pack(fill=tk.X)
+
+                # Pola edytowalne: wstępnie z arkusza RM_BAZA (ilość, materiał),
+                # ale można je uzupełnić/poprawić przed wysłaniem — np. materiał
+                # bywa nieuzupełniony w BOM, a kooperant musi go znać do wyceny.
+                form = tk.Frame(box)
+                form.pack(fill=tk.X, padx=12, pady=(4, 2))
+
+                tk.Label(form, text="Ilość:", width=8, anchor="w").grid(row=0, column=0, sticky="w")
+                qty_var = tk.StringVar(value=str(it['qty'] or "1"))
+                tk.Entry(form, textvariable=qty_var, width=8).grid(row=0, column=1, sticky="w")
+
+                tk.Label(form, text="Materiał:", width=9, anchor="w").grid(row=0, column=2, sticky="w", padx=(12, 0))
+                mat_var = tk.StringVar(value=it['material'] or "")
+                tk.Entry(form, textvariable=mat_var, width=22).grid(row=0, column=3, sticky="w")
+
+                tk.Label(form, text="Uwagi:", width=8, anchor="w").grid(row=1, column=0, sticky="w", pady=(4, 0))
+                notes_var = tk.StringVar(value=it.get('notes') or "")
+                tk.Entry(form, textvariable=notes_var, width=58).grid(
+                    row=1, column=1, columnspan=3, sticky="w", pady=(4, 0))
+
+                # zapamiętaj pola — przy wysyłce czytamy z nich, nie z arkusza
+                it['qty_var'] = qty_var
+                it['mat_var'] = mat_var
+                it['notes_var'] = notes_var
+
+                it['files'] = files
+
+                # Sekcja plików w ramce, którą można przerysować po doszukaniu
+                files_frame = tk.Frame(box)
+                files_frame.pack(fill=tk.X)
+                it['files_frame'] = files_frame
+
+                def _render_files(it=it, files_frame=files_frame):
+                    for child in files_frame.winfo_children():
+                        child.destroy()
+                    found = it.get('files') or []
+
+                    if not found:
+                        if it.get('is_catalog'):
+                            tk.Label(files_frame, text="element katalogowy — bez rysunku, "
+                                                       "kooperant wycenia po nazwie",
+                                     fg="#777", anchor="w").pack(fill=tk.X, padx=12)
+                            return
+                        row = tk.Frame(files_frame)
+                        row.pack(fill=tk.X, padx=12, pady=(2, 0))
+                        if self._rfq_needs_dxf(it['drawing_no']):
+                            msg, colour = ("⛔ detal na laser (X/XX) — wymagany DXF, "
+                                           "bez niego nie wyślesz"), "#b3261e"
+                        else:
+                            msg, colour = ("⚠ nie znaleziono plików "
+                                           "(pozycja i tak zostanie wysłana)"), "#b3261e"
+                        tk.Label(row, text=msg, fg=colour, anchor="w").pack(side=tk.LEFT)
+                        tk.Button(row, text="Szukaj dalej…", font=("Arial", 8),
+                                  command=lambda it=it: _search_more(it)).pack(side=tk.LEFT, padx=(8, 0))
+                        return
+
+                    for f in found:
+                        key = (it['drawing_no'], str(f))
+                        var = file_vars.get(key)
+                        if var is None:
+                            var = tk.BooleanVar(value=True)
+                            file_vars[key] = var
+                        tk.Checkbutton(files_frame, text=f"{f.suffix.upper()[1:]:5} {f.name}",
+                                       variable=var, anchor="w",
+                                       font=("Consolas", 9),
+                                       command=_render_files).pack(fill=tk.X, padx=12)
+
+                    # Detal na laser bez DXF-a — kooperant nie ma z czego ciąć.
+                    # Liczymy tylko zaznaczone pliki: odznaczenie DXF-a też jest błędem.
+                    if self._rfq_needs_dxf(it['drawing_no']):
+                        has_dxf = any(
+                            f.suffix.lower() == '.dxf'
+                            and file_vars.get((it['drawing_no'], str(f)))
+                            and file_vars[(it['drawing_no'], str(f))].get()
+                            for f in found)
+                        if not has_dxf:
+                            tk.Label(files_frame,
+                                     text="⛔ detal na laser (X/XX) — wymagany DXF, "
+                                          "bez niego nie wyślesz",
+                                     fg="#b3261e", font=("Arial", 9, "bold"),
+                                     anchor="w").pack(fill=tk.X, padx=12, pady=(2, 0))
+
+                    # po doszukaniu zostawiamy furtkę na kolejne źródło
+                    tk.Button(files_frame, text="Szukaj dalej…", font=("Arial", 8),
+                              command=lambda it=it: _search_more(it)).pack(anchor="w", padx=12, pady=(2, 0))
+
+                it['render_files'] = _render_files
+                _render_files()
+                dlg.update_idletasks()
+
+            _refresh_total()
+
+        dlg.after(50, _build_rows)
+
+        # --- akcje ---
+        bottom = tk.Frame(dlg)
+        bottom.pack(fill=tk.X, padx=12, pady=(4, 12))
+
+        def _send():
+            label = rfq_var.get()
+            if not label or label not in mapping:
+                messagebox.showwarning("Wyślij do RFQ",
+                                       "Wybierz zapytanie ofertowe.", parent=dlg)
+                return
+            rfq_id = mapping[label]
+
+            # Pozycja idzie do RFQ nawet bez plików — elementy katalogowe
+            # (łożysko, siłownik) wycenia się po nazwie, nie po rysunku.
+            to_send = []
+            for it in items:
+                chosen = [str(f) for f in (it.get('files') or [])
+                          if file_vars.get((it['drawing_no'], str(f)))
+                          and file_vars[(it['drawing_no'], str(f))].get()]
+                to_send.append((it, chosen))
+
+            if not to_send:
+                messagebox.showwarning("Wyślij do RFQ",
+                                       "Brak pozycji do wysłania.", parent=dlg)
+                return
+
+            # Twarda blokada dla detali na laser — bez DXF-a kooperant nie ma
+            # z czego ciąć, więc taka wysyłka to zmarnowane zapytanie.
+            missing_dxf = [it['drawing_no'] for it, paths in to_send
+                           if self._rfq_needs_dxf(it['drawing_no'])
+                           and not any(str(p).lower().endswith('.dxf') for p in paths)]
+            if missing_dxf:
+                messagebox.showerror(
+                    "Brak DXF",
+                    "Detale z sufiksem X / XX idą na laser i muszą mieć DXF:\n\n"
+                    + "\n".join(f"  • {d}" for d in missing_dxf)
+                    + "\n\nUżyj „Szukaj dalej…”, żeby znaleźć DXF w bibliotece "
+                      "lub na serwerze, albo odznacz te pozycje.",
+                    parent=dlg)
+                return
+
+            ok, errors = 0, []
+            for it, paths in to_send:
+                # wartości z pól okna (user mógł je poprawić), fallback na arkusz
+                qty_raw = it['qty_var'].get() if it.get('qty_var') else it['qty']
+                material = (it['mat_var'].get() if it.get('mat_var') else it['material']).strip()
+                notes = (it['notes_var'].get() if it.get('notes_var') else it.get('notes', '')).strip()
+                try:
+                    qty = int(float(str(qty_raw).replace(',', '.'))) or 1
+                except Exception:
+                    qty = 1
+                try:
+                    agent.push_drawing(
+                        rfq_id=rfq_id,
+                        drawing_number=it['drawing_no'],
+                        file_paths=paths,
+                        name=it['name'] or None,
+                        quantity=qty,
+                        material=material or None,
+                        notes=notes or None,
+                    )
+                    ok += 1
+                except Exception as e:
+                    errors.append(f"{it['drawing_no']}: {e}")
+                status.config(text=f"Wysyłanie… {ok}/{len(to_send)}")
+                dlg.update_idletasks()
+
+            dlg.destroy()
+            msg = f"Wysłano {ok} z {len(to_send)} pozycji do {label}."
+            if errors:
+                messagebox.showwarning("Wyślij do RFQ",
+                                       msg + "\n\nBłędy:\n" + "\n".join(errors[:10]),
+                                       parent=self)
+            else:
+                messagebox.showinfo("Wyślij do RFQ", msg, parent=self)
+
+            # odśwież kolumnę WYCENA — pozycje właśnie trafiły do portalu
+            try:
+                agent.pull_full_state()
+                self.refresh_data()
+            except Exception:
+                pass
+
+        tk.Button(bottom, text="Wyślij do RFQ", command=_send,
+                  bg="#2a7a2a", fg="white", width=18).pack(side=tk.RIGHT)
+        tk.Button(bottom, text="Anuluj", command=dlg.destroy,
+                  width=12).pack(side=tk.RIGHT, padx=(0, 8))
 
     # ========================================================================
     # MODUŁ CASTING
