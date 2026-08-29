@@ -92,7 +92,16 @@ class RMSyncAgent:
     def _open_master(self, readonly: bool = True) -> sqlite3.Connection:
         uri = Path(self.master_path).as_posix()
         if readonly:
-            con = sqlite3.connect(f'file:{uri}?mode=ro', uri=True, timeout=10)
+            # Ścieżki UNC (\\nic\... -> //nic/...) w SQLite URI: "file://nic/..."
+            # traktuje "nic" jako authority hosta i odrzuca. Poprawny zapis to
+            # pusta authority: file:////nic/... (4 ukośniki). Ten sam fix co
+            # auth.py/db.py — pozwala agentowi czytać przez UNC na serwerze
+            # (Task Scheduler mapuje \\nic bez litery dysku).
+            if uri.startswith('//'):
+                file_uri = 'file:////' + uri.lstrip('/')
+            else:
+                file_uri = f'file:{uri}'
+            con = sqlite3.connect(f'{file_uri}?mode=ro', uri=True, timeout=10)
         else:
             con = sqlite3.connect(self.master_path, timeout=10)
         con.row_factory = sqlite3.Row
