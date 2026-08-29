@@ -4226,6 +4226,14 @@ class MainWindow(tk.Tk):
                 self.sheet.highlight_cells(row=row_idx, column=self.WYCENA_COL,
                                            bg=GREEN_BG_BRIGHT)
                 self._cells_special_bg.add((row_idx, self.WYCENA_COL))
+            else:
+                # === WYCENA: kolor wg terminu odpowiedzi ===
+                # Tylko gdy pozycja CZEKA na oferty — po rozstrzygnięciu
+                # (zielone wyżej) termin nie ma już znaczenia.
+                bg = self._wycena_deadline_bg(row_idx)
+                if bg:
+                    self.sheet.highlight_cells(row=row_idx, column=self.WYCENA_COL, bg=bg)
+                    self._cells_special_bg.add((row_idx, self.WYCENA_COL))
         except Exception:
             pass
 
@@ -6076,7 +6084,7 @@ class MainWindow(tk.Tk):
                 for r in master_con.execute(
                     """SELECT drawing_number, invitations_sent, suppliers_count,
                               offers_count, min_price, supplier_name, price,
-                              rfq_status
+                              rfq_status, response_deadline
                        FROM rfq_results"""
                 ):
                     rfq_by_drawing[r[0]] = r
@@ -6116,7 +6124,9 @@ class MainWindow(tk.Tk):
         self._sheet_row_ids = []
         self._sheet_src_values = []
         self._sheet_overridden = []
-        
+        # termin odpowiedzi RFQ per wiersz — do kolorowania komórki WYCENA
+        self._rfq_deadline_by_row = []
+
         for item in items:
             # === Oblicz qty_bom i order_qty NAJPIERW ===
             qty_bom = item['qty_bom']
@@ -6555,9 +6565,18 @@ class MainWindow(tk.Tk):
             # Klucz jak przy wysyłce: numer rysunku, a dla elementów
             # katalogowych (łożysko, siłownik — bez numeru) nazwa detalu.
             rfq_key = (item['drawing_no'] or '').strip() or (item['name'] or '').strip()
-            wycena_disp = self._format_wycena_cell(
-                rfq_by_drawing.get(rfq_key), stale=self._rfq_data_stale
-            )
+            _rfq_row = rfq_by_drawing.get(rfq_key)
+            wycena_disp = self._format_wycena_cell(_rfq_row, stale=self._rfq_data_stale)
+
+            # Termin odpowiedzi zapamiętany per wiersz — _apply_row_highlights
+            # koloruje po nim komórkę WYCENA (pomarańcz/czerwień). Trzymamy
+            # osobno, bo w samej komórce jest tekst stanu, nie data.
+            # Kolumna 8 w SELECT (patrz zapytanie o rfq_results wyżej).
+            try:
+                _dl = _rfq_row[8] if _rfq_row is not None and len(_rfq_row) > 8 else None
+            except Exception:
+                _dl = None
+            self._rfq_deadline_by_row.append(_dl)
 
             # Wiersz danych (20 kolumn)
             row = [
@@ -21323,6 +21342,69 @@ class MainWindow(tk.Tk):
         'cancelled': 'Anulowane',
     }
 
+    def _center_on_app(self, dialog):
+        """Ustawia okno dialogowe na ŚRODKU okna RM_BAZA — także gdy aplikacja
+        stoi na drugim monitorze albo została przed chwilą przeniesiona.
+
+        Trzy pułapki, przez które okno lądowało na złym monitorze:
+
+        1. update_idletasks() trzeba wywołać na OKNIE GŁÓWNYM (self), nie na
+           dialogu. Bez tego winfo_x/y zwraca współrzędne sprzed przeniesienia
+           aplikacji i dialog leci tam, gdzie okno było wcześniej.
+        2. winfo_x/y podaje róg OBSZARU KLIENTA, a winfo_rootx/rooty róg razem
+           z ramką — mieszanie ich przesuwa okno o szerokość obramowania.
+        3. max(x, 0) wymuszał dodatnie współrzędne. Monitor ustawiony po LEWEJ
+           stronie głównego ma x ujemny, więc zerowanie wyrzucało dialog na
+           krawędź monitora głównego. Ujemne wartości są poprawne.
+        """
+        try:
+            self.update_idletasks()       # ← okno GŁÓWNE, nie dialog
+            dialog.update_idletasks()     # dialog: żeby znać jego rozmiar
+
+            app_x, app_y = self.winfo_rootx(), self.winfo_rooty()
+            app_w, app_h = self.winfo_width(), self.winfo_height()
+
+            dlg_w = dialog.winfo_width() or dialog.winfo_reqwidth()
+            dlg_h = dialog.winfo_height() or dialog.winfo_reqheight()
+
+            x = app_x + (app_w - dlg_w) // 2
+            y = app_y + (app_h - dlg_h) // 2
+            dialog.geometry(f"+{x}+{y}")   # BEZ max(...,0) — patrz pkt 3
+        except Exception:
+            pass   # nie udało się wyliczyć — zostaje domyślna pozycja Windows
+
+    # Kolory terminu w kolumnie WYCENA — jasne tła, żeby czarny tekst stanu
+    # („WYSŁANO · 2", „1/2 OFERT") pozostał czytelny.
+    WYCENA_BG_SOON = "#fff3cd"     # zostały 1–3 dni
+    WYCENA_BG_TODAY = "#ffd9d6"    # dziś ostatni dzień
+    WYCENA_BG_EXPIRED = "#ffb3ad"  # po terminie — kooperant już nie widzi pozycji
+
+    def _wycena_deadline_bg(self, row_idx):
+        """Tło komórki WYCENA wg terminu odpowiedzi. None = bez kolorowania.
+
+        Liczone po DACIE, nie po godzinach — termin zapada o 23:59:59, więc
+        „dziś" znaczy, że kooperant ma jeszcze cały dzień. Ta sama arytmetyka
+        co w portalu (_days_left_by_item w app.py)."""
+        try:
+            deadlines = getattr(self, "_rfq_deadline_by_row", None)
+            if not deadlines or row_idx >= len(deadlines):
+                return None
+            raw = deadlines[row_idx]
+            if not raw:
+                return None
+            from datetime import datetime as _dt, date as _date
+            dl = _dt.strptime(str(raw)[:10], "%Y-%m-%d").date()
+            dni = (dl - _date.today()).days
+            if dni < 0:
+                return self.WYCENA_BG_EXPIRED
+            if dni == 0:
+                return self.WYCENA_BG_TODAY
+            if dni <= 3:
+                return self.WYCENA_BG_SOON
+            return None
+        except Exception:
+            return None
+
     @staticmethod
     def _format_wycena_cell(rfq_row, stale=False):
         """Skrót stanu ofertowania do komórki WYCENA. Stany wg ustaleń:
@@ -21677,12 +21759,7 @@ class MainWindow(tk.Tk):
                   bg="#2a7a4a", fg="white", width=18).pack(side=tk.LEFT, padx=(0, 8))
         tk.Button(btns, text="Zamknij", command=_on_close, width=14).pack(side=tk.LEFT)
 
-        # Wyśrodkuj względem okna aplikacji (czyli na monitorze, na którym
-        # RM_BAZA aktualnie jest — nie zawsze na głównym).
-        dialog.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width() // 2) - (dialog.winfo_width() // 2)
-        y = self.winfo_y() + (self.winfo_height() // 2) - (dialog.winfo_height() // 2)
-        dialog.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        self._center_on_app(dialog)
 
     # ------------------------------------------------------------------
     # Wysyłka rysunków do portalu RM_RFQ (kanał 2 integracji)
