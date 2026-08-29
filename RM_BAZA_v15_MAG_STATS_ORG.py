@@ -21365,7 +21365,8 @@ class MainWindow(tk.Tk):
                           rfq_status, invitations_sent, suppliers_count, offers_count,
                           min_price, supplier_name, price, currency, lead_time_days,
                           offer_notes, decided_at, synced_at, rfq_id,
-                          viewers_count, seen_item_count, last_viewed_at
+                          viewers_count, seen_item_count, last_viewed_at,
+                          rfq_item_id
                    FROM rfq_results WHERE drawing_number = ?""",
                 (drawing_no,)
             ).fetchone()
@@ -21398,7 +21399,7 @@ class MainWindow(tk.Tk):
          invitations_sent, suppliers_count, offers_count, min_price,
          supplier_name, price, currency, lead_time_days, offer_notes,
          decided_at, synced_at, rfq_id,
-         viewers_count, seen_item_count, last_viewed_at) = data
+         viewers_count, seen_item_count, last_viewed_at, rfq_item_id) = data
 
         # Tylko jedno okno Wyceny naraz — kliknięcie innego detalu ZASTĘPUJE
         # poprzednie (inaczej niż Casting, który podnosi istniejące): user
@@ -21415,8 +21416,8 @@ class MainWindow(tk.Tk):
         dialog = tk.Toplevel(self)
         dialog.title(f"Wycena — {drawing_number}")
         # szersze i wyższe niż dawne 560x460 — doszła tabelka kooperantów
-        # (pozycja ustawiana na końcu funkcji, po zbudowaniu zawartości)
-        dialog.geometry("640x580")
+        # (5 kolumn = 590 px + marginesy; pozycja ustawiana na końcu funkcji)
+        dialog.geometry("660x580")
         dialog.transient(self)
         self._wycena_dialog = dialog
 
@@ -21482,9 +21483,10 @@ class MainWindow(tk.Tk):
         try:
             activity = master_con.execute(
                 """SELECT supplier_name, email_sent_at, last_viewed_at, view_count,
-                          seen_this_item, has_offer
+                          seen_this_item, has_offer,
+                          COALESCE(is_winner, 0), win_price
                      FROM rfq_activity WHERE drawing_number = ?
-                    ORDER BY supplier_name""",
+                    ORDER BY COALESCE(is_winner, 0) DESC, supplier_name""",
                 (drawing_no,)
             ).fetchall()
         except Exception:
@@ -21515,32 +21517,42 @@ class MainWindow(tk.Tk):
             cols = ("kooperant", "zaproszenie", "wejscie", "widzial", "oferta")
             tree = ttk.Treeview(dialog, columns=cols, show="headings",
                                 height=min(len(activity), 6))
-            for col, txt, w in (("kooperant", "Kooperant", 150),
-                                ("zaproszenie", "Zaproszenie", 110),
-                                ("wejscie", "Ostatnie wejście", 110),
-                                ("widzial", "Widział", 70),
-                                ("oferta", "Oferta", 60)):
+            for col, txt, w in (("kooperant", "Kooperant", 140),
+                                ("zaproszenie", "Zaproszenie", 105),
+                                ("wejscie", "Ostatnie wejście", 105),
+                                ("widzial", "Widział", 95),
+                                ("oferta", "Oferta", 145)):   # mieści "✓ WYGRAŁ 1234 zł"
                 tree.heading(col, text=txt)
                 tree.column(col, width=w, anchor="w")
 
+            # ciemna zieleń = zwycięzca; ma pierwszeństwo nad pozostałymi stanami
+            tree.tag_configure("winner", background="#bdeabd",
+                               font=("Arial", 9, "bold"))
             tree.tag_configure("seen", background="#eefbee")     # widział pozycję
             tree.tag_configure("stale", background="#fff8e1")    # wchodził, ale nie po dodaniu
             tree.tag_configure("notopened", background="#fdeceb")  # nie otworzył wcale
 
             for a in activity:
-                nazwa, wyslane, wejscie, wejsc, widzial, oferta = a
+                nazwa, wyslane, wejscie, wejsc, widzial, oferta, wygral, cena = a
                 if not wejsc:
                     stan, tag = ("nie otworzył", "notopened") if wyslane else ("—", "")
                 elif widzial:
                     stan, tag = "✓ tak", "seen"
                 else:
                     stan, tag = "przed dodaniem", "stale"
+
+                if wygral:
+                    tag = "winner"   # zwycięzca nadpisuje kolor stanu wejścia
+                    kol_oferta = f"✓ WYGRAŁ {cena:g} zł" if cena is not None else "✓ WYGRAŁ"
+                else:
+                    kol_oferta = "✓" if oferta else "—"
+
                 tree.insert("", tk.END, tags=(tag,), values=(
                     nazwa,
                     str(wyslane)[:16] if wyslane else "nie wysłano",
                     str(wejscie)[:16] if wejscie else "—",
                     stan,
-                    "✓" if oferta else "—",
+                    kol_oferta,
                 ))
             tree.pack(fill=tk.X, padx=14, pady=(0, 4))
 
@@ -21572,7 +21584,15 @@ class MainWindow(tk.Tk):
                         "Brak adresu portalu w master.sqlite → settings.rfq_portal_url",
                         parent=dialog)
                     return
-                url = f"{base}/rfq/{rfq_id}/offers" if rfq_id else base
+                # Kotwica #item-<id> — przeglądarka przewija od razu do TEJ
+                # pozycji i portal podświetla ją na chwilę, żeby nie trzeba
+                # było jej szukać w długiej liście.
+                if rfq_id and rfq_item_id:
+                    url = f"{base}/rfq/{rfq_id}/offers#item-{rfq_item_id}"
+                elif rfq_id:
+                    url = f"{base}/rfq/{rfq_id}/offers"
+                else:
+                    url = base
                 import webbrowser
                 webbrowser.open(url)
             except Exception as e:
