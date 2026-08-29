@@ -92,6 +92,24 @@ def norm(s) -> str:
     return re.sub(r"\s+", " ", str(s).replace("\u00A0", " ")).strip()
 
 
+# Domyślne materiały wstawiane przez Inventora, gdy projektant NIE ustawił
+# żadnego. W BOM-ie to śmieć: nic nie mówi ani nam, ani kooperantowi, a zajmuje
+# kolumnę tak, że nie widać braku danych. "Generic" to ta sama wartość
+# z angielskiej wersji Inventora.
+JUNK_MATERIALS = {"ogólny", "ogolny", "generic"}
+
+
+def clean_material(value) -> str:
+    """Materiał z BOM-u, ale bez domyślnych śmieci Inventora.
+
+    Zwraca "" dla 'Ogólny' / 'Generic' — dzięki temu kolumna zostaje PUSTA
+    i od razu widać, że materiał trzeba uzupełnić. Ta sama reguła co przy
+    wysyłce do RFQ (RFQ_JUNK_MATERIALS w RM_BAZA_v15_MAG_STATS_ORG.py) —
+    zmieniasz tu, sprawdź i tam."""
+    txt = norm(value)
+    return "" if txt.strip().lower() in JUNK_MATERIALS else txt
+
+
 def parse_thickness_mm(material_text: str) -> Optional[float]:
     """
     Wyciąga grubość z zapisu 'gr1,5mm' → 1.5
@@ -346,7 +364,7 @@ def iter_zbiorczy_data_rows(excel_path: Path) -> Generator[Dict[str, str], None,
                     ),
                     "Ilość (zam.)": norm(get("Ilość (zam.)")) if "Ilość (zam.)" in colmap else None,
                     "Typ": norm(get("Typ")),
-                    "Materiał": norm(get("Materiał")),
+                    "Materiał": clean_material(get("Materiał")),
                     "Dostawca": norm(get("Dostawca")),
                     "Pliki 3D": norm(get("Pliki 3D")),
                     "Katalog": norm(get("Katalog")),
