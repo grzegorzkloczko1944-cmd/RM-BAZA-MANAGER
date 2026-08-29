@@ -1481,7 +1481,7 @@ class MainWindow(tk.Tk):
                 "Ilość BOM", "Ilość (zam.)", "Δ", "Ilość dostarczonych",
                 "Typ", "Materiał", "Grubość [mm]", "Dostawca",
                 "Cena 1szt PLN", "Zamówiono", "Termin dostawy", "ALARM",
-                "Uwagi", "DWF_BIB", "ODEBRANE", "Moduł", "Casting"
+                "Uwagi", "DWF_BIB", "ODEBRANE", "Moduł", "WYCENA", "Casting"
             ],
             column_width=100,
             height=600,
@@ -4197,11 +4197,11 @@ class MainWindow(tk.Tk):
         # Usuń wpisy special_bg z poprzedniego stanu tego wiersza
         self._cells_special_bg = {(r, c) for (r, c) in self._cells_special_bg if r != row_idx}
 
-        # Usuń (nie: pokoloruj na biało) wszystkie 19 kolumn tego wiersza.
+        # Usuń (nie: pokoloruj na biało) wszystkie kolumny tego wiersza.
         # dehighlight_cells kasuje wpis w cell_options zamiast dopisywać bg="white",
         # co utrzymuje cell_options małym (mniej obciąża silnik canvas Tk przy dużych arkuszach).
         try:
-            self.sheet.dehighlight_cells(row=row_idx, cells=[(row_idx, col) for col in range(20)], redraw=False)
+            self.sheet.dehighlight_cells(row=row_idx, cells=[(row_idx, col) for col in range(21)], redraw=False)
         except Exception:
             pass
 
@@ -4354,8 +4354,8 @@ class MainWindow(tk.Tk):
             bg = getattr(self, "_selected_row_bg", "#DDEEFF")
             fg = getattr(self, "_selected_row_fg", None)
             
-            # 20 kolumn w arkuszu (0-19, włącznie z Casting)
-            for c in range(20):
+            # 21 kolumn w arkuszu (0-20, włącznie z Casting i WYCENA)
+            for c in range(21):
                 # Pomiń komórki ze specjalnymi kolorami
                 if (r, c) in (getattr(self, '_cells_special_bg', set()) or set()):
                     continue
@@ -6039,6 +6039,44 @@ class MainWindow(tk.Tk):
         except Exception:
             casting_counts = {}
 
+        # Stan ofertowania z portalu RM_RFQ (kolumna WYCENA). Dane wstawia
+        # RM_SYNC_AGENT do master.sqlite; RM_BAZA tylko je czyta. Klucz to numer
+        # rysunku — ten sam detal w kilku projektach dzieli wycenę (celowo:
+        # historia ceny detalu jest wspólna). Brak tabeli = agent nigdy nie
+        # wystartował, kolumna po prostu zostaje pusta.
+        rfq_by_drawing = {}
+        self._rfq_data_stale = False
+        try:
+            master_con = self.db_manager.master_con if self.db_manager else None
+            if master_con:
+                for r in master_con.execute(
+                    """SELECT drawing_number, invitations_sent, suppliers_count,
+                              offers_count, min_price, supplier_name, price
+                       FROM rfq_results"""
+                ):
+                    rfq_by_drawing[r[0]] = r
+                # Czy integracja żyje? Agent zapisuje rfq_last_contact przy
+                # KAŻDYM udanym kontakcie z portalem (nawet bez zmian), więc
+                # to wiarygodny sygnał. Nie używać rfq_results.synced_at —
+                # ten zmienia się tylko przy realnych zmianach, więc spokojne
+                # RFQ wyglądałoby jak awaria.
+                last_contact = master_con.execute(
+                    "SELECT value FROM settings WHERE key='rfq_last_contact'"
+                ).fetchone()
+                if last_contact and last_contact[0]:
+                    try:
+                        import datetime as _dt
+                        delta = _dt.datetime.now() - _dt.datetime.fromisoformat(str(last_contact[0]))
+                        self._rfq_data_stale = delta.total_seconds() > 3600
+                    except Exception:
+                        pass
+                else:
+                    # agent nigdy nie zapisał kontaktu — integracja nie działa
+                    self._rfq_data_stale = True
+        except Exception:
+            rfq_by_drawing = {}
+            self._rfq_data_stale = True  # brak tabeli = integracja nigdy nie ruszyła
+
         # Helper: parse date
         def parse_date(d):
             if not d:
@@ -6488,6 +6526,11 @@ class MainWindow(tk.Tk):
                 if sent_cnt:
                     casting_disp += " ✉"
 
+            # WYCENA: skrót stanu ofertowania w portalu RM_RFQ
+            wycena_disp = self._format_wycena_cell(
+                rfq_by_drawing.get(item['drawing_no']), stale=self._rfq_data_stale
+            )
+
             # Wiersz danych (20 kolumn)
             row = [
                 item['drawing_no'] or "",                   # 0: Nr rysunku (bez emoji)
@@ -6509,7 +6552,8 @@ class MainWindow(tk.Tk):
                 str(int(item['dwf_biblioteka'] or 0)),      # 16: DWF_BIB
                 received_flag,                              # 17: ODEBRANE
                 modul_disp,                                 # 18: Moduł
-                casting_disp                                # 19: Casting
+                wycena_disp,                                # 19: WYCENA (z portalu RM_RFQ)
+                casting_disp                                # 20: Casting
             ]
             
             data.append(row)
@@ -7432,8 +7476,13 @@ class MainWindow(tk.Tk):
                     self._handle_zamowiono_click(row, col)
                     return
 
-                # Kolumna 19 = Casting
-                if col == 19:
+                # WYCENA (portal RM_RFQ, tylko podgląd)
+                if col == self.WYCENA_COL:
+                    self._open_wycena_dialog(row, col)
+                    return
+
+                # Casting
+                if col == self.CASTING_COL:
                     self._open_casting_dialog(row, col)
                     return
 
@@ -21180,6 +21229,181 @@ class MainWindow(tk.Tk):
     # ========================================================================
 
     # ========================================================================
+    # MODUŁ WYCENA (portal RM_RFQ)
+    #
+    # Dane wstawia RM_SYNC_AGENT do master.sqlite → tabela rfq_results.
+    # RM_BAZA tylko czyta i pokazuje — cała logika ofertowania (kto, za ile,
+    # kto wygrał) żyje w portalu. Ten moduł nie wie nic o HTTP ani o schemacie
+    # portalu; gdyby agent nigdy nie wystartował, kolumna zostaje pusta.
+    # ========================================================================
+
+    # Indeksy kolumn arkusza — muszą zgadzać się z listą headers= przy Sheet()
+    WYCENA_COL = 19
+    CASTING_COL = 20
+
+    # Etykiety statusów RFQ — w bazie portal trzyma angielskie klucze,
+    # tu tłumaczymy na PL (userzy nie muszą znać angielskiego).
+    # Musi zgadzać się z RFQ_STATUS_LABELS w RM_RFQ/app.py.
+    RFQ_STATUS_LABELS = {
+        'draft': 'Szkic',
+        'sent': 'Wysłane',
+        'collecting': 'Zbieranie ofert',
+        'decided': 'Rozstrzygnięte',
+        'ordered': 'Zamówione',
+        'cancelled': 'Anulowane',
+    }
+
+    @staticmethod
+    def _format_wycena_cell(rfq_row, stale=False):
+        """Skrót stanu ofertowania do komórki WYCENA. Stany wg ustaleń:
+            (pusto)               — detal nie jest w żadnym RFQ
+            WYSŁANO · 4           — zaproszenia poszły, brak ofert
+            1/4 OFERT · 96 zł     — część kooperantów odpowiedziała
+            ✓ ABC CNC · 85 zł     — wybrano zwycięzcę
+
+        stale=True (portal/agent nie odpowiada od >1h) dokleja "⚠" — inaczej
+        user nie odróżniłby nieaktualnej wyceny od aktualnej, a pustej komórki
+        od "integracja nie działa".
+        """
+        if not rfq_row:
+            return "⚠ brak danych" if stale else ""
+        try:
+            (_drawing, invitations_sent, suppliers_count,
+             offers_count, min_price, supplier_name, price) = rfq_row
+        except (TypeError, ValueError):
+            return ""
+
+        invitations_sent = invitations_sent or 0
+        suppliers_count = suppliers_count or 0
+        offers_count = offers_count or 0
+
+        def _money(v):
+            try:
+                return f"{float(v):.0f} zł"
+            except (TypeError, ValueError):
+                return ""
+
+        prefix = "⚠ " if stale else ""   # dane nieaktualne (portal/agent milczy)
+
+        # rozstrzygnięte — zwycięzca ma pierwszeństwo nad licznikami
+        if supplier_name:
+            out = f"✓ {supplier_name}"
+            cena = _money(price)
+            return prefix + (f"{out} · {cena}" if cena else out)
+
+        if offers_count:
+            out = f"{offers_count}/{suppliers_count} OFERT"
+            cena = _money(min_price)
+            return prefix + (f"{out} · {cena}" if cena else out)
+
+        if invitations_sent:
+            return prefix + f"WYSŁANO · {suppliers_count}"
+
+        return "⚠ brak danych" if stale else ""
+
+    def _open_wycena_dialog(self, row, col):
+        """Szczegóły wyceny detalu — pełna informacja z portalu RM_RFQ."""
+        try:
+            drawing_no = self.sheet.get_cell_data(row, 0)
+            if not drawing_no:
+                return
+            master_con = self.db_manager.master_con if self.db_manager else None
+            if not master_con:
+                return
+            data = master_con.execute(
+                """SELECT drawing_number, item_name, project_number, rfq_code, rfq_title,
+                          rfq_status, invitations_sent, suppliers_count, offers_count,
+                          min_price, supplier_name, price, currency, lead_time_days,
+                          offer_notes, decided_at, synced_at
+                   FROM rfq_results WHERE drawing_number = ?""",
+                (drawing_no,)
+            ).fetchone()
+        except Exception as e:
+            print(f"⚠️  Błąd odczytu wyceny: {e}")
+            return
+
+        if not data:
+            # Przy martwej integracji NIE WIEMY, czy detal jest w RFQ — brak
+            # wiersza może oznaczać zarówno "nie ma go tam", jak i "dane nigdy
+            # nie dotarły". Nie wolno twierdzić tego pierwszego na pewno.
+            if getattr(self, "_rfq_data_stale", False):
+                messagebox.showwarning(
+                    "Wycena — brak danych",
+                    f"Brak informacji o wycenie detalu {drawing_no}.\n\n"
+                    "Portal RM_RFQ lub agent synchronizujący nie odpowiada, "
+                    "więc nie wiadomo, czy detal jest objęty zapytaniem ofertowym.\n\n"
+                    "Sprawdź stan portalu i agenta, potem odśwież widok.",
+                    parent=self
+                )
+            else:
+                messagebox.showinfo(
+                    "Wycena",
+                    f"Detal {drawing_no} nie występuje w żadnym zapytaniu ofertowym (RM_RFQ).",
+                    parent=self
+                )
+            return
+
+        (drawing_number, item_name, project_number, rfq_code, rfq_title, rfq_status,
+         invitations_sent, suppliers_count, offers_count, min_price,
+         supplier_name, price, currency, lead_time_days, offer_notes,
+         decided_at, synced_at) = data
+
+        dialog = tk.Toplevel(self)
+        dialog.title(f"Wycena — {drawing_number}")
+        dialog.geometry("560x420")
+        dialog.transient(self)
+
+        tk.Label(dialog, text=f"{drawing_number} — {item_name or ''}",
+                 font=("Arial", 12, "bold")).pack(pady=(12, 4))
+        tk.Label(dialog, text=f"{rfq_code or ''}  {rfq_title or ''}"
+                              f"{f'   (projekt {project_number})' if project_number else ''}",
+                 fg="#555").pack(pady=(0, 10))
+
+        box = tk.Frame(dialog, bd=1, relief=tk.SOLID)
+        box.pack(fill=tk.BOTH, expand=True, padx=14, pady=6)
+
+        def _line(label, value, bold=False):
+            r = tk.Frame(box)
+            r.pack(fill=tk.X, padx=10, pady=3)
+            tk.Label(r, text=label, width=22, anchor="w",
+                     font=("Arial", 9)).pack(side=tk.LEFT)
+            tk.Label(r, text=value, anchor="w",
+                     font=("Arial", 10, "bold" if bold else "normal")).pack(side=tk.LEFT)
+
+        cur = currency or "PLN"
+        if supplier_name:
+            _line("Wybrany kooperant:", supplier_name, bold=True)
+            _line("Cena:", f"{price} {cur}" if price is not None else "—", bold=True)
+            if lead_time_days:
+                _line("Termin realizacji:", f"{lead_time_days} dni")
+            if decided_at:
+                _line("Rozstrzygnięto:", str(decided_at))
+            if offer_notes:
+                _line("Uwagi kooperanta:", offer_notes)
+        else:
+            _line("Status:", "Trwa ofertowanie" if invitations_sent else "Nie wysłano zapytań")
+            _line("Zaproszonych:", str(suppliers_count or 0))
+            _line("Otrzymanych ofert:", str(offers_count or 0))
+            if min_price is not None:
+                _line("Najtańsza oferta:", f"{min_price} {cur}")
+
+        _line("Status RFQ:", self.RFQ_STATUS_LABELS.get(rfq_status, rfq_status) or "—")
+        _line("Dane z:", str(synced_at or "—"))
+
+        if getattr(self, "_rfq_data_stale", False):
+            tk.Label(dialog,
+                     text="⚠ Dane mogą być nieaktualne — portal RM_RFQ lub agent\n"
+                          "synchronizujący nie odpowiada. Pokazano ostatni znany stan.",
+                     fg="#b3261e", font=("Arial", 9, "bold"), justify=tk.CENTER
+                     ).pack(pady=(8, 0))
+
+        tk.Label(dialog,
+                 text="Wybór kooperanta i porównanie ofert — w portalu RM_RFQ.",
+                 fg="#777", font=("Arial", 8)).pack(pady=(6, 2))
+        tk.Button(dialog, text="Zamknij", command=dialog.destroy,
+                  width=14).pack(pady=(4, 12))
+
+    # ========================================================================
     # MODUŁ CASTING
     # ========================================================================
 
@@ -21205,7 +21429,7 @@ class MainWindow(tk.Tk):
                 if sent_count > 0:
                     display += " ✉"
 
-            self.sheet.set_cell_data(row, 19, display)
+            self.sheet.set_cell_data(row, self.CASTING_COL, display)
         except Exception as e:
             print(f"⚠️  Błąd odświeżania komórki Casting: {e}")
 
