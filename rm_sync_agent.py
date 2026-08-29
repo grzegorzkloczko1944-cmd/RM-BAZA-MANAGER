@@ -139,25 +139,42 @@ class RMSyncAgent:
 
             select_cols = ['supplier_id'] + [c for c in col_map.values() if c]
             rows = con.execute(f'SELECT {", ".join(select_cols)} FROM suppliers').fetchall()
+
+            # Tagi kooperantów: słownik + przypisania (RM_BAZA jest właścicielem;
+            # portal RM_RFQ tylko czyta kopię). Puste, gdy tabele jeszcze nie
+            # istnieją (starsza baza) — sync suppliers ma działać niezależnie.
+            tags_dict, tag_ids_by_supplier = [], {}
+            try:
+                tag_rows = con.execute(
+                    'SELECT id, name, label, sort_order FROM rfq_tags ORDER BY sort_order, label'
+                ).fetchall()
+                tags_dict = [dict(r) for r in tag_rows]
+                for r in con.execute('SELECT supplier_id, tag_id FROM rfq_supplier_tags'):
+                    tag_ids_by_supplier.setdefault(r['supplier_id'], []).append(r['tag_id'])
+            except Exception:
+                pass
         finally:
             con.close()
 
         suppliers = []
         for row in rows:
             values = dict(row)
+            sid = values['supplier_id']
             suppliers.append({
-                'supplier_id': values['supplier_id'],
+                'supplier_id': sid,
                 'name': values.get(col_map['name']) or '',
                 'email': values.get(col_map['email']) if col_map['email'] else None,
                 'phone': values.get(col_map['phone']) if col_map['phone'] else None,
                 'contact_person': values.get(col_map['contact_person']) if col_map['contact_person'] else None,
                 'nip': values.get(col_map['nip']) if col_map['nip'] else None,
                 'active': 1 if (values.get(col_map['active']) if col_map['active'] else 1) else 0,
+                'tag_ids': tag_ids_by_supplier.get(sid, []),
             })
 
         resp = requests.post(
             f'{self.portal_url}/api/suppliers/sync',
-            headers=self._headers(), json={'suppliers': suppliers}, timeout=HTTP_TIMEOUT
+            headers=self._headers(),
+            json={'suppliers': suppliers, 'tags': tags_dict}, timeout=HTTP_TIMEOUT
         )
         resp.raise_for_status()
         return resp.json().get('saved', 0)

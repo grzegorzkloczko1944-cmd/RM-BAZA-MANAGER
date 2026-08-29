@@ -2701,6 +2701,13 @@ class MainWindow(tk.Tk):
             except Exception as e:
                 print(f"  ⚠️  Błąd migracji suppliers: {e}")
 
+            # Tabele tagów kooperantów (dla portalu RM_RFQ) — słownik + przypisania.
+            # RM_BAZA jest WŁAŚCICIELEM tagów; RM_SYNC_AGENT wypycha je do RM_RFQ
+            # razem z kooperantami. RM_RFQ trzyma tylko kopię (czyta, nie zarządza).
+            print("  → Sprawdzam tabele tagów RFQ...")
+            self._init_rfq_tags_tables()
+            print("  ✅ Tabele tagów RFQ OK")
+
             # Inicjalizuj tabelę settings w master DB
             print("  → Inicjalizuję settings...")
             self._init_settings_table()
@@ -20320,7 +20327,7 @@ class MainWindow(tk.Tk):
         
         dlg = tk.Toplevel(self)
         dlg.title("➕ Dodaj podwykonawcę")
-        dlg.geometry("500x320")
+        dlg.geometry("500x460")
         dlg.transient(self)
         dlg.grab_set()
         dlg.resizable(False, False)
@@ -20358,6 +20365,13 @@ class MainWindow(tk.Tk):
         tk.Label(main_frame, text="Opis:", bg="#f0f0f0", font=("Arial", 10)).grid(row=5, column=0, sticky="e", padx=10, pady=8)
         e_desc = tk.Entry(main_frame, width=35, font=("Arial", 10))
         e_desc.grid(row=5, column=1, padx=10, pady=8, sticky="ew")
+
+        # Sekcja tagów — nowa firma nie ma jeszcze id, więc przypisania zapiszemy
+        # po INSERT (na świeżo utworzonym supplier_id).
+        add_tags_frame = tk.Frame(main_frame, bg="#f0f0f0")
+        add_tags_frame.grid(row=6, column=0, columnspan=2, sticky="ew", padx=10, pady=(4, 0))
+        add_tag_vars = {}
+        self._build_supplier_tags_section(add_tags_frame, None, add_tag_vars)
 
         def save():
             name = e_name.get().strip()
@@ -20431,12 +20445,21 @@ class MainWindow(tk.Tk):
                 except Exception:
                     self.db_manager.reconnect_master_rw()
                 
-                self.db_manager.master_con.execute(sql, tuple(insert_vals))
+                ins_cur = self.db_manager.master_con.execute(sql, tuple(insert_vals))
+                new_sid = ins_cur.lastrowid
                 self.db_manager.master_con.commit()
-                
+
+                # Zapis tagów nowej firmy (na świeżo utworzonym supplier_id)
+                try:
+                    chosen = [tid for tid, var in add_tag_vars.items() if var.get()]
+                    if new_sid and chosen:
+                        self._rfq_set_supplier_tags(new_sid, chosen)
+                except Exception as te:
+                    print(f"⚠️  Błąd zapisu tagów nowej firmy: {te}")
+
                 # Odśwież mapę
                 self.reload_suppliers()
-                
+
                 # Wywołaj callback jeśli podano (odświeżenie okna listy)
                 if refresh_callback:
                     try:
@@ -20455,8 +20478,8 @@ class MainWindow(tk.Tk):
                 traceback.print_exc()
         
         btn_frame = tk.Frame(main_frame, bg="#f0f0f0")
-        btn_frame.grid(row=5, column=0, columnspan=2, pady=15)
-        
+        btn_frame.grid(row=7, column=0, columnspan=2, pady=15)
+
         tk.Button(btn_frame, text="✔ Zapisz", command=save, width=12,
                  bg="#27ae60", fg="white", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=8)
         tk.Button(btn_frame, text="✖ Anuluj", command=dlg.destroy, width=12,
@@ -20491,16 +20514,17 @@ class MainWindow(tk.Tk):
         frame_tree = tk.Frame(dlg)
         frame_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        cols = ("ID", "Nazwa", "NIP", "Kontakt", "Telefon", "Email", "Opis", "Aktywny")
+        cols = ("ID", "Nazwa", "NIP", "Kontakt", "Telefon", "Email", "Opis", "Tagi", "Aktywny")
         tree = ttk.Treeview(frame_tree, columns=cols, show="headings", height=15)
-        
+
         for col in cols:
             tree.heading(col, text=col)
             tree.column(col, width=120)
-        
+
         tree.column("ID", width=50)
         tree.column("Nazwa", width=180)
-        tree.column("Opis", width=200)
+        tree.column("Opis", width=160)
+        tree.column("Tagi", width=180)
         tree.column("Aktywny", width=80)
         
         scrollbar = ttk.Scrollbar(frame_tree, orient=tk.VERTICAL, command=tree.yview)
@@ -20552,10 +20576,22 @@ class MainWindow(tk.Tk):
                 sql = f"SELECT {', '.join(select_cols)} FROM suppliers ORDER BY {name_col} COLLATE NOCASE"
                 cursor = self.db_manager.master_con.execute(sql)
 
+                # Tagi wszystkich firm jednym zapytaniem: supplier_id -> "Laser, CNC"
+                tags_by_sup = {}
+                try:
+                    for r in self.db_manager.master_con.execute(
+                        "SELECT st.supplier_id, t.label FROM rfq_supplier_tags st "
+                        "JOIN rfq_tags t ON t.id = st.tag_id "
+                        "ORDER BY t.sort_order, t.label"):
+                        tags_by_sup.setdefault(r[0], []).append(r[1])
+                except Exception:
+                    pass  # brak tabel tagów (starsza baza) — kolumna zostaje pusta
+
                 for row in cursor.fetchall():
                     sid, name, nip, contact, phone, email, description, active = row
                     active_str = "TAK" if active else "NIE"
-                    tree.insert("", tk.END, values=(sid, name or "", format_nip(nip), contact or "", phone or "", email or "", description or "", active_str))
+                    tags_str = ", ".join(tags_by_sup.get(sid, []))
+                    tree.insert("", tk.END, values=(sid, name or "", format_nip(nip), contact or "", phone or "", email or "", description or "", tags_str, active_str))
             
             except Exception as e:
                 messagebox.showerror("Błąd", f"Nie udało się załadować:\n{e}")
@@ -20572,7 +20608,7 @@ class MainWindow(tk.Tk):
             
             item = tree.item(sel[0])
             values = item['values']
-            sid, name, nip, contact, phone, email, description, active_str = values
+            sid, name, nip, contact, phone, email, description, tags_str, active_str = values
             
             # Dialog edycji
             edit_dlg = tk.Toplevel(dlg)
@@ -20618,6 +20654,12 @@ class MainWindow(tk.Tk):
             tk.Label(edit_frame, text="Aktywny:", bg="#f0f0f0", font=("Arial", 10)).grid(row=6, column=0, sticky="e", padx=5, pady=8)
             var_active = tk.BooleanVar(value=(active_str == "TAK"))
             tk.Checkbutton(edit_frame, variable=var_active, bg="#f0f0f0").grid(row=6, column=1, sticky="w", padx=5, pady=8)
+
+            # Sekcja tagów (kompetencje kooperanta) — na dole okna, pod polami
+            tags_frame = tk.Frame(edit_frame, bg="#f0f0f0")
+            tags_frame.grid(row=7, column=0, columnspan=2, sticky="ew", padx=5, pady=(4, 0))
+            edit_tag_vars = {}
+            self._build_supplier_tags_section(tags_frame, sid, edit_tag_vars)
 
             def save_edit():
                 new_name = e_name.get().strip()
@@ -20681,10 +20723,17 @@ class MainWindow(tk.Tk):
                     
                     self.db_manager.master_con.execute(sql, params)
                     self.db_manager.master_con.commit()
-                    
+
+                    # Zapis tagów kooperanta (przypisania z checkboxów)
+                    try:
+                        chosen = [tid for tid, var in edit_tag_vars.items() if var.get()]
+                        self._rfq_set_supplier_tags(sid, chosen)
+                    except Exception as te:
+                        print(f"⚠️  Błąd zapisu tagów: {te}")
+
                     # Odśwież mapę
                     self.reload_suppliers()
-                    
+
                     edit_dlg.destroy()
                     load_data()
                 
@@ -20694,8 +20743,8 @@ class MainWindow(tk.Tk):
                     traceback.print_exc()
             
             btn_frame = tk.Frame(edit_frame, bg="#f0f0f0")
-            btn_frame.grid(row=6, column=0, columnspan=2, pady=15)
-            
+            btn_frame.grid(row=8, column=0, columnspan=2, pady=15)
+
             tk.Button(btn_frame, text="✔ Zapisz", command=save_edit, width=12,
                      bg="#27ae60", fg="white", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=8)
             tk.Button(btn_frame, text="✖ Anuluj", command=edit_dlg.destroy, width=12,
@@ -22398,6 +22447,198 @@ class MainWindow(tk.Tk):
             self.sheet.set_cell_data(row, self.CASTING_COL, display)
         except Exception as e:
             print(f"⚠️  Błąd odświeżania komórki Casting: {e}")
+
+    # Seed słownika tagów — te same, co historycznie w RM_RFQ (schema.sql).
+    # (name techniczny, label widoczny). RM_BAZA staje się źródłem tego słownika.
+    RFQ_TAGS_SEED = [
+        ('laser', 'Laser'), ('cnc', 'CNC'), ('giecie', 'Gięcie'),
+        ('spawanie', 'Spawanie'), ('tworzywo', 'Tworzywo'), ('lakiernia', 'Lakiernia'),
+    ]
+
+    def _init_rfq_tags_tables(self):
+        """Tworzy w master.sqlite tabele tagów kooperantów dla portalu RM_RFQ:
+        rfq_tags (słownik) + rfq_supplier_tags (firma↔tag). RM_BAZA jest
+        właścicielem; RM_SYNC_AGENT wypycha je do RM_RFQ. Seed tylko gdy słownik
+        pusty (nie nadpisuje ręcznych zmian). Bezpieczne przy każdym starcie."""
+        try:
+            con = self.db_manager.master_con
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS rfq_tags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    label TEXT NOT NULL,
+                    sort_order INTEGER DEFAULT 0
+                )
+            """)
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS rfq_supplier_tags (
+                    supplier_id INTEGER NOT NULL,
+                    tag_id INTEGER NOT NULL,
+                    PRIMARY KEY (supplier_id, tag_id)
+                )
+            """)
+            con.execute("CREATE INDEX IF NOT EXISTS idx_rfq_supplier_tags_sup "
+                        "ON rfq_supplier_tags(supplier_id)")
+            # Seed tylko do pustego słownika
+            n = con.execute("SELECT COUNT(*) FROM rfq_tags").fetchone()[0]
+            if not n:
+                for i, (name, label) in enumerate(self.RFQ_TAGS_SEED):
+                    con.execute("INSERT OR IGNORE INTO rfq_tags (name, label, sort_order) "
+                                "VALUES (?, ?, ?)", (name, label, i))
+            con.commit()
+            return True
+        except Exception as e:
+            print(f"⚠️  Błąd tworzenia tabel tagów RFQ: {e}")
+            return False
+
+    # --- Dane tagów (używane przez GUI edytora podwykonawców i przez sync) ---
+
+    def _rfq_all_tags(self):
+        """Słownik tagów: lista (id, name, label) posortowana. [] gdy brak tabeli."""
+        try:
+            rows = self.db_manager.master_con.execute(
+                "SELECT id, name, label FROM rfq_tags ORDER BY sort_order, label"
+            ).fetchall()
+            return [(r[0], r[1], r[2]) for r in rows]
+        except Exception:
+            return []
+
+    def _rfq_supplier_tag_ids(self, supplier_id):
+        """Zbiór tag_id przypisanych danej firmie."""
+        try:
+            rows = self.db_manager.master_con.execute(
+                "SELECT tag_id FROM rfq_supplier_tags WHERE supplier_id=?", (supplier_id,)
+            ).fetchall()
+            return {r[0] for r in rows}
+        except Exception:
+            return set()
+
+    def _rfq_set_supplier_tags(self, supplier_id, tag_ids):
+        """Nadpisuje przypisania tagów firmy (DELETE wszystkich + INSERT wybranych)."""
+        con = self.db_manager.master_con
+        con.execute("DELETE FROM rfq_supplier_tags WHERE supplier_id=?", (supplier_id,))
+        for tid in tag_ids:
+            con.execute("INSERT OR IGNORE INTO rfq_supplier_tags (supplier_id, tag_id) "
+                        "VALUES (?, ?)", (supplier_id, tid))
+        con.commit()
+
+    def _rfq_add_tag(self, label):
+        """Dodaje nowy tag do słownika. Zwraca (id, name, label) albo None gdy
+        pusta nazwa/duplikat. name techniczny generowany z label."""
+        label = (label or '').strip()
+        if not label:
+            return None
+        name = re.sub(r'[^a-z0-9]+', '_', label.lower()).strip('_') or 'tag'
+        con = self.db_manager.master_con
+        try:
+            nxt = con.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM rfq_tags").fetchone()[0]
+            cur = con.execute("INSERT INTO rfq_tags (name, label, sort_order) VALUES (?,?,?)",
+                              (name, label, nxt))
+            con.commit()
+            return (cur.lastrowid, name, label)
+        except Exception:
+            return None  # duplikat (UNIQUE) lub inny błąd
+
+    def _rfq_delete_tag(self, tag_id):
+        """Usuwa tag ze słownika ORAZ jego przypisania u wszystkich firm.
+        Zwraca True gdy usunięto. Przy najbliższym sync zniknie też w RM_RFQ
+        (agent wysyła pełny słownik, portal kasuje tagi spoza listy)."""
+        con = self.db_manager.master_con
+        try:
+            con.execute("DELETE FROM rfq_supplier_tags WHERE tag_id=?", (tag_id,))
+            con.execute("DELETE FROM rfq_tags WHERE id=?", (tag_id,))
+            con.commit()
+            return True
+        except Exception as e:
+            print(f"⚠️  Błąd usuwania tagu: {e}")
+            return False
+
+    def _build_supplier_tags_section(self, parent, supplier_id, get_selected_store):
+        """Buduje sekcję tagów (checkboxy + pole '+ nowy tag') w oknie edytora
+        podwykonawcy. `parent` to Frame, `supplier_id` może być None (przy 'Dodaj'
+        — wtedy przypisania zapisze wywołujący po utworzeniu firmy).
+        `get_selected_store` to dict, do którego wpisujemy {tag_id: BooleanVar}
+        żeby wywołujący mógł odczytać zaznaczenia przy zapisie.
+        Zwraca funkcję refresh() do przerysowania po dodaniu nowego tagu."""
+        import tkinter as tk
+        from tkinter import messagebox
+        tk.Label(parent, text="Tagi (kompetencje):", bg="#f0f0f0",
+                 font=("Arial", 10, "bold")).pack(anchor="w", pady=(10, 4))
+        tk.Label(parent, text="✓ = firma ma ten tag.  × obok = usuń tag ze słownika (u wszystkich firm).",
+                 bg="#f0f0f0", fg="#888", font=("Arial", 8)).pack(anchor="w")
+        tags_wrap = tk.Frame(parent, bg="#f0f0f0")
+        tags_wrap.pack(fill=tk.X)
+
+        active = self._rfq_supplier_tag_ids(supplier_id) if supplier_id else set()
+
+        def delete_tag(tid, label):
+            # Podwójne potwierdzenie — usunięcie tagu jest globalne i nieodwracalne
+            if not messagebox.askyesno(
+                    "Usuń tag",
+                    "Usunąć tag '" + str(label) + "' ze slownika?\n\n"
+                    "Zniknie u WSZYSTKICH firm i w portalu RM_RFQ (po synchronizacji).",
+                    parent=parent):
+                return
+            if not messagebox.askyesno(
+                    "Na pewno?",
+                    "Na pewno usunac tag '" + str(label) + "'?\n"
+                    "Tej operacji nie mozna cofnac.",
+                    icon="warning", parent=parent):
+                return
+            if self._rfq_delete_tag(tid):
+                active.discard(tid)
+                refresh()
+
+        def refresh():
+            for w in tags_wrap.winfo_children():
+                w.destroy()
+            get_selected_store.clear()
+            tags = self._rfq_all_tags()
+            if not tags:
+                tk.Label(tags_wrap, text="Brak tagów — dodaj poniżej.", bg="#f0f0f0",
+                         fg="#888").pack(anchor="w")
+            col = 0
+            row = tk.Frame(tags_wrap, bg="#f0f0f0")
+            row.pack(anchor="w", fill=tk.X)
+            for tid, name, label in tags:
+                var = tk.BooleanVar(value=(tid in active))
+                get_selected_store[tid] = var
+                cell = tk.Frame(row, bg="#f0f0f0")
+                cell.grid(row=0, column=col, sticky="w", padx=(0, 10))
+                tk.Checkbutton(cell, text=label, variable=var, bg="#f0f0f0",
+                               anchor="w").pack(side=tk.LEFT)
+                tk.Button(cell, text="×", command=lambda t=tid, l=label: delete_tag(t, l),
+                          bg="#f0f0f0", fg="#b3261e", bd=0, font=("Arial", 9, "bold"),
+                          cursor="hand2", padx=2, pady=0).pack(side=tk.LEFT)
+                col += 1
+                if col >= 3:  # 3 tagi w rzędzie (× zajmuje trochę miejsca)
+                    col = 0
+                    row = tk.Frame(tags_wrap, bg="#f0f0f0")
+                    row.pack(anchor="w", fill=tk.X)
+
+        refresh()
+
+        # Pole dodawania nowego tagu do słownika (w locie, wg decyzji usera)
+        add_row = tk.Frame(parent, bg="#f0f0f0")
+        add_row.pack(fill=tk.X, pady=(8, 0))
+        new_tag_entry = tk.Entry(add_row, width=22, font=("Arial", 9))
+        new_tag_entry.pack(side=tk.LEFT)
+
+        def add_new_tag():
+            res = self._rfq_add_tag(new_tag_entry.get())
+            if res is None:
+                from tkinter import messagebox
+                messagebox.showinfo("Tag", "Pusta nazwa albo taki tag już istnieje.",
+                                    parent=parent)
+                return
+            new_tag_entry.delete(0, tk.END)
+            active.add(res[0])   # nowo dodany od razu zaznaczony
+            refresh()
+
+        tk.Button(add_row, text="+ nowy tag", command=add_new_tag,
+                  bg="#3498db", fg="white", font=("Arial", 9)).pack(side=tk.LEFT, padx=(6, 0))
+        new_tag_entry.bind("<Return>", lambda e: add_new_tag())
+        return refresh
 
     def _ensure_casting_table(self):
         """Upewnij się, że tabela casting_entries istnieje (twórz w locie, jeśli mamy zapis)"""
