@@ -429,7 +429,7 @@ class MainWindow(tk.Tk):
         self.filem.add_command(label="Import moduł…", command=self.menu_import_modul, state='disabled')
         self.filem.add_command(label="Aktualizuj ilości…", command=self.menu_aktualizuj_ilosci, state='disabled')
         self.filem.add_separator()
-        self.filem.add_command(label="Odśwież", command=self.refresh_data)
+        self.filem.add_command(label="Odśwież", command=self.refresh_data_with_rfq)
         self.filem.add_separator()
         self.filem.add_command(label="Zamknij", command=self.on_closing)
         menubar.add_cascade(label="Plik", menu=self.filem)
@@ -1265,10 +1265,12 @@ class MainWindow(tk.Tk):
             bt_r2 = bottom_frame
         
         # WIERSZ 1: Odśwież + 5 bulk akcji
+        # Główny „Odśwież" ciągnie też stan z portalu RM_RFQ (WYCENA + aktywność),
+        # cicho i best-effort — patrz refresh_data_with_rfq.
         tk.Button(
             bt_r1,
             text="🔄 Odśwież",
-            command=self.refresh_data,
+            command=self.refresh_data_with_rfq,
             bg="#3498db",
             fg="white",
             font=("Arial", 10),
@@ -21484,7 +21486,8 @@ class MainWindow(tk.Tk):
             activity = master_con.execute(
                 """SELECT supplier_name, email_sent_at, last_viewed_at, view_count,
                           seen_this_item, has_offer,
-                          COALESCE(is_winner, 0), win_price
+                          COALESCE(is_winner, 0), win_price,
+                          offer_price, offer_currency, offer_lead_time
                      FROM rfq_activity WHERE drawing_number = ?
                     ORDER BY COALESCE(is_winner, 0) DESC, supplier_name""",
                 (drawing_no,)
@@ -21533,7 +21536,8 @@ class MainWindow(tk.Tk):
             tree.tag_configure("notopened", background="#fdeceb")  # nie otworzył wcale
 
             for a in activity:
-                nazwa, wyslane, wejscie, wejsc, widzial, oferta, wygral, cena = a
+                (nazwa, wyslane, wejscie, wejsc, widzial, oferta, wygral, cena,
+                 of_cena, of_waluta, of_termin) = a
                 if not wejsc:
                     stan, tag = ("nie otworzył", "notopened") if wyslane else ("—", "")
                 elif widzial:
@@ -21544,8 +21548,17 @@ class MainWindow(tk.Tk):
                 if wygral:
                     tag = "winner"   # zwycięzca nadpisuje kolor stanu wejścia
                     kol_oferta = f"✓ WYGRAŁ {cena:g} zł" if cena is not None else "✓ WYGRAŁ"
+                elif oferta:
+                    # oferta złożona, ale jeszcze nie wybrana — ptaszek + cena/termin,
+                    # żeby było widać wycenę bez wchodzenia do portalu
+                    czesci = ["✓"]
+                    if of_cena is not None:
+                        czesci.append(f"{of_cena:g} {of_waluta or 'PLN'}")
+                    if of_termin is not None:
+                        czesci.append(f"{of_termin:g} dni")
+                    kol_oferta = " · ".join(czesci)
                 else:
-                    kol_oferta = "✓" if oferta else "—"
+                    kol_oferta = "—"
 
                 tree.insert("", tk.END, tags=(tag,), values=(
                     nazwa,
@@ -21574,8 +21587,12 @@ class MainWindow(tk.Tk):
         btns = tk.Frame(dialog)
         btns.pack(pady=(4, 12))
 
-        def _open_portal():
-            """Otwiera porównanie ofert tego RFQ w przeglądarce."""
+        def _open_portal(view):
+            """Otwiera portal RM_RFQ w przeglądarce.
+            view='rfq'    → widok zapytania (szczegóły RFQ, lista pozycji)
+            view='offers' → porównanie ofert tego RFQ.
+            W obu wypadkach kotwica #item-<id> przewija do TEJ pozycji i portal
+            podświetla ją na chwilę, żeby nie trzeba jej było szukać w liście."""
             try:
                 base = self._rfq_portal_url()
                 if not base:
@@ -21584,13 +21601,11 @@ class MainWindow(tk.Tk):
                         "Brak adresu portalu w master.sqlite → settings.rfq_portal_url",
                         parent=dialog)
                     return
-                # Kotwica #item-<id> — przeglądarka przewija od razu do TEJ
-                # pozycji i portal podświetla ją na chwilę, żeby nie trzeba
-                # było jej szukać w długiej liście.
+                suffix = "/offers" if view == 'offers' else ""
                 if rfq_id and rfq_item_id:
-                    url = f"{base}/rfq/{rfq_id}/offers#item-{rfq_item_id}"
+                    url = f"{base}/rfq/{rfq_id}{suffix}#item-{rfq_item_id}"
                 elif rfq_id:
-                    url = f"{base}/rfq/{rfq_id}/offers"
+                    url = f"{base}/rfq/{rfq_id}{suffix}"
                 else:
                     url = base
                 import webbrowser
@@ -21599,8 +21614,10 @@ class MainWindow(tk.Tk):
                 messagebox.showerror("Przejdź do RFQ",
                                      f"Nie udało się otworzyć portalu:\n{e}", parent=dialog)
 
-        tk.Button(btns, text="🌐 Przejdź do RFQ", command=_open_portal,
+        tk.Button(btns, text="🌐 Przejdź do RFQ", command=lambda: _open_portal('rfq'),
                   bg="#1f5fa9", fg="white", width=18).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(btns, text="📊 Porównanie ofert", command=lambda: _open_portal('offers'),
+                  bg="#2a7a4a", fg="white", width=18).pack(side=tk.LEFT, padx=(0, 8))
         tk.Button(btns, text="Zamknij", command=_on_close, width=14).pack(side=tk.LEFT)
 
         # Wyśrodkuj względem okna aplikacji (czyli na monitorze, na którym
@@ -21638,6 +21655,52 @@ class MainWindow(tk.Tk):
         """Materiał do wysłania do RFQ — bez śmieci z Inventora."""
         mat = str(value or "").strip()
         return "" if mat.lower() in cls.RFQ_JUNK_MATERIALS else mat
+
+    def refresh_data_with_rfq(self):
+        """Wersja odświeżania spod GŁÓWNEGO przycisku „🔄 Odśwież": odświeża
+        arkusz OD RAZU, a stan z portalu RM_RFQ (kolumna WYCENA + aktywność
+        kooperantów) dociąga w tle i przerysowuje arkusz drugi raz, gdy skończy.
+
+        Dlaczego w tle: request do portalu ma timeout 30 s. Gdyby leciał
+        synchronicznie, a portal był pod adresem, który milczy (padnięty zdalny
+        serwer), GUI zamarłoby na ~60 s. W wątku GUI nigdy nie czeka — najgorszy
+        przypadek to opóźnione pojawienie się świeżej kolumny WYCENA.
+
+        Sync jest BEST-EFFORT i CICHY — inaczej niż „Odśwież wyceny z portalu"
+        (który jawnie krzyczy popupem o błędzie konfiguracji). Brak konfiguracji
+        RFQ albo błąd sieci = po prostu pomijamy sync, arkusz i tak się odświeżył.
+
+        NIE wpinamy tego wprost w refresh_data(), bo tamta leci po każdej edycji
+        komórki (dziesiątki razy) — request HTTP w tej ścieżce dałby lagi."""
+        # 1. arkusz od razu — user nie czeka na sieć
+        self.refresh_data()
+
+        # 2. sync RFQ w tle; po sukcesie przerysuj arkusz z głównego wątku
+        def _bg_sync():
+            try:
+                from rm_sync_agent import RMSyncAgent
+                agent = RMSyncAgent(str(MASTER_PATH))
+            except Exception:
+                return  # RFQ nieskonfigurowane / brak modułu — cicho kończymy
+            changed = False
+            try:
+                agent.pull_full_state()
+                changed = True
+            except Exception:
+                pass
+            try:
+                agent.pull_activity()
+                changed = True
+            except Exception:
+                pass
+            if changed:
+                # Tkinter: dotknięcia GUI tylko z głównego wątku → after(0, ...)
+                try:
+                    self.after(0, self.refresh_data)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_bg_sync, daemon=True).start()
 
     def _get_rfq_agent(self):
         """Tworzy agenta synchronizującego. None + komunikat, gdy integracja
@@ -21700,12 +21763,23 @@ class MainWindow(tk.Tk):
         self._send_rows_to_rfq(rows)
 
     def _refresh_rfq_data(self):
-        """Ręczne odświeżenie stanu wycen (normalnie robi to agent w tle)."""
+        """Ręczne odświeżenie stanu wycen (normalnie robi to agent w tle).
+
+        Woła OBA kanały: pull_full_state() (kolumna WYCENA) ORAZ pull_activity()
+        (tabelka aktywności kooperantów w oknie Wycena). Bez tego drugiego okno
+        pokazywało sprzeczność — WYCENA aktualna, ale aktywność pusta, przez co
+        pojawiał się czerwony komunikat "Nikt nie przypisany do tej pozycji",
+        mimo że kooperant był przypisany i wchodził. pull_full_state() sięga
+        tylko po /api/rfq/state (rfq_results), aktywność jest osobnym kanałem."""
         agent = self._get_rfq_agent()
         if not agent:
             return
         try:
             n = agent.pull_full_state()
+            try:
+                agent.pull_activity()
+            except Exception:
+                pass  # aktywność to dodatek — brak nie może zablokować odświeżenia WYCENY
             messagebox.showinfo("RFQ", f"Zaktualizowano stan {n} pozycji.", parent=self)
             self.refresh_data()
         except Exception as e:

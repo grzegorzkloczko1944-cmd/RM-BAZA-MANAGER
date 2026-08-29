@@ -330,13 +330,18 @@ class RMSyncAgent:
                     has_offer       INTEGER,   -- 1 = złożył ofertę na tę pozycję
                     is_winner       INTEGER,   -- 1 = jego oferta wybrana (zwycięzca)
                     win_price       REAL,      -- cena zwycięskiej oferty
+                    offer_price     REAL,      -- cena ZŁOŻONEJ oferty (widoczna przed wyborem zwycięzcy)
+                    offer_currency  TEXT,      -- waluta złożonej oferty (np. PLN)
+                    offer_lead_time INTEGER,   -- termin realizacji w dniach ze złożonej oferty
                     synced_at       TEXT DEFAULT (datetime('now','localtime')),
                     PRIMARY KEY (rfq_item_id, supplier_name)
                 )
             ''')
             # migracja istniejącej tabeli (sprzed oznaczania zwycięzcy)
             akt_cols = {r[1] for r in con.execute('PRAGMA table_info(rfq_activity)')}
-            for col, decl in (('is_winner', 'INTEGER'), ('win_price', 'REAL')):
+            for col, decl in (('is_winner', 'INTEGER'), ('win_price', 'REAL'),
+                              ('offer_price', 'REAL'), ('offer_currency', 'TEXT'),
+                              ('offer_lead_time', 'INTEGER')):
                 if col not in akt_cols:
                     con.execute(f'ALTER TABLE rfq_activity ADD COLUMN {col} {decl}')
             con.execute('CREATE INDEX IF NOT EXISTS idx_rfq_activity_drawing '
@@ -347,14 +352,16 @@ class RMSyncAgent:
                 INSERT OR REPLACE INTO rfq_activity (
                     rfq_item_id, supplier_name, drawing_number, item_name,
                     email_sent_at, first_viewed_at, last_viewed_at,
-                    view_count, seen_this_item, has_offer, is_winner, win_price, synced_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
+                    view_count, seen_this_item, has_offer, is_winner, win_price,
+                    offer_price, offer_currency, offer_lead_time, synced_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
             ''', [
                 (r.get('rfq_item_id'), r.get('supplier_name'), r.get('drawing_number'),
                  r.get('item_name'), r.get('email_sent_at'), r.get('first_viewed_at'),
                  r.get('last_viewed_at'), r.get('view_count'),
                  r.get('seen_this_item'), r.get('has_offer'),
-                 r.get('is_winner'), r.get('win_price'))
+                 r.get('is_winner'), r.get('win_price'),
+                 r.get('offer_price'), r.get('offer_currency'), r.get('offer_lead_time'))
                 for r in rows
             ])
             con.commit()
