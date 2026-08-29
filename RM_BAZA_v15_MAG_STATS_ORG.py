@@ -22136,7 +22136,7 @@ class MainWindow(tk.Tk):
 
     def _open_rfq_send_dialog(self, agent, items, rfq_list):
         dlg = tk.Toplevel(self)
-        dlg.title("Wyślij do RFQ")
+        dlg.title("Wyślij do RFQ   (F11 = pełna wysokość okna)")
         dlg.transient(self)
         dlg.grab_set()
 
@@ -22155,6 +22155,23 @@ class MainWindow(tk.Tk):
         except Exception:
             pos_x, pos_y = 200, 100
         dlg.geometry(f"{dlg_w}x{dlg_h}+{pos_x}+{pos_y}")
+
+        # F11 = rozciągnij okno na pełną wysokość monitora (i z powrotem).
+        # Przy wielu pozycjach wygodniej zobaczyć wszystko bez scrollowania.
+        _tall_state = {'on': False, 'geom': f"{dlg_w}x{dlg_h}+{pos_x}+{pos_y}"}
+        def _toggle_tall(_=None):
+            if _tall_state['on']:
+                dlg.geometry(_tall_state['geom'])  # wróć do zapamiętanej
+                _tall_state['on'] = False
+            else:
+                _tall_state['geom'] = dlg.geometry()  # zapamiętaj obecną
+                sh = dlg.winfo_screenheight()
+                dlg.update_idletasks()
+                w = dlg.winfo_width()
+                # pełna wysokość ekranu, top blisko góry, zostaw margines na pasek zadań
+                dlg.geometry(f"{w}x{sh - 80}+{dlg.winfo_x()}+10")
+                _tall_state['on'] = True
+        dlg.bind("<F11>", _toggle_tall)
 
         # --- wybór RFQ ---
         top = tk.LabelFrame(dlg, text="Zapytanie ofertowe", padx=10, pady=8)
@@ -22213,10 +22230,28 @@ class MainWindow(tk.Tk):
         scroll = ttk.Scrollbar(mid, orient="vertical", command=canvas.yview)
         inner = tk.Frame(canvas)
         inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        # inner ma dopasowywać szerokość do canvasu (inaczej pozycje są zbyt wąskie
+        # i pojawia się poziomy rozjazd zamiast pionowego scrolla)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(inner_id, width=e.width))
         canvas.configure(yscrollcommand=scroll.set)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Scroll kółkiem myszy — bez tego działa tylko przeciąganie suwaka.
+        # Podpinamy pod canvas I jego zawartość (kółko nad kartą pozycji ma
+        # przewijać listę, nie zostawać złapane przez wewnętrzny widget).
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        def _bind_wheel(_=None):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        def _unbind_wheel(_=None):
+            canvas.unbind_all("<MouseWheel>")
+        # bind_all tylko gdy kursor nad tym oknem (żeby nie porwać scrolla całej apki)
+        canvas.bind("<Enter>", _bind_wheel)
+        canvas.bind("<Leave>", _unbind_wheel)
+        inner.bind("<Enter>", _bind_wheel)
+        dlg.bind("<Destroy>", _unbind_wheel)
 
         status = tk.Label(dlg, text="Szukam plików na serwerze…", anchor="w", fg="#555")
         status.pack(fill=tk.X, padx=14)
