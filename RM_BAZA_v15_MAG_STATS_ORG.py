@@ -22547,9 +22547,17 @@ class MainWindow(tk.Tk):
         """Tworzy w master.sqlite tabele tagów kooperantów dla portalu RM_RFQ:
         rfq_tags (słownik) + rfq_supplier_tags (firma↔tag). RM_BAZA jest
         właścicielem; RM_SYNC_AGENT wypycha je do RM_RFQ. Seed tylko gdy słownik
-        pusty (nie nadpisuje ręcznych zmian). Bezpieczne przy każdym starcie."""
+        pusty (nie nadpisuje ręcznych zmian). Bezpieczne przy każdym starcie.
+
+        WŁASNE połączenie read-write, nie self.db_manager.master_con: to ostatnie
+        jest otwierane w trybie ?mode=ro dopóki użytkownik nie weźmie locka na
+        projekcie, więc CREATE TABLE kończyło się błędem "attempt to write a
+        readonly database" przy każdym starcie. Tworzenie pustych tabel
+        słownikowych to nie edycja danych projektu, więc nie wymaga locka —
+        połączenie otwieramy na chwilę i od razu zamykamy."""
+        con = None
         try:
-            con = self.db_manager.master_con
+            con = sqlite3.connect(str(self.db_manager.master_path), timeout=10)
             con.execute("""
                 CREATE TABLE IF NOT EXISTS rfq_tags (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -22578,6 +22586,12 @@ class MainWindow(tk.Tk):
         except Exception as e:
             print(f"⚠️  Błąd tworzenia tabel tagów RFQ: {e}")
             return False
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
 
     # --- Dane tagów (używane przez GUI edytora podwykonawców i przez sync) ---
 
