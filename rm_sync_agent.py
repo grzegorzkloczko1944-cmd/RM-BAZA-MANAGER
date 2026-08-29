@@ -606,6 +606,28 @@ def main() -> int:
             print(f'BLAD kanalu aktywnosci: {e}', file=sys.stderr)
             exit_code = 1
 
+        # SIATKA BEZPIECZENSTWA: co ~10 min pelny reconcile. pull_results
+        # (przyrostowy, co cykl) lapie tylko zmiany zalogowane do sync_log —
+        # gdyby jakas trasa portalu zapomniala zalogowac (albo doszla nowa),
+        # reconcile wyrownuje CALY stan z portalem. Rzadko (10 min), zeby nie
+        # kasowac osieroconych zbyt czesto ani nie obciazac lacza (metadane, nie pliki).
+        try:
+            last = agent._setting('rfq_last_reconcile', '')
+            do_reconcile = True
+            if last:
+                try:
+                    delta = dt.datetime.now() - dt.datetime.fromisoformat(last)
+                    do_reconcile = delta.total_seconds() >= 600  # 10 min
+                except Exception:
+                    do_reconcile = True
+            if do_reconcile:
+                removed = agent.reconcile_results()
+                agent._set_setting('rfq_last_reconcile', dt.datetime.now().isoformat())
+                print(f'Reconcile (siatka bezp.): usunieto {removed} osieroconych')
+        except Exception as e:
+            print(f'BLAD reconcile (siatka): {e}', file=sys.stderr)
+            # nie podnosimy exit_code — to tylko siatka, glowny sync juz przeszedl
+
     return exit_code
 
 
