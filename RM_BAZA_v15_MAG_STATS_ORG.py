@@ -1565,6 +1565,7 @@ class MainWindow(tk.Tk):
         self.sheet.popup_menu_add_command("Pokaż złożenie", self.show_assembly_tree)
         self.sheet.popup_menu_add_command("Wyślij do RFQ", self.send_selected_to_rfq)
         self.sheet.popup_menu_add_command("Odśwież wyceny z portalu", self._refresh_rfq_data)
+        self.sheet.popup_menu_add_command("Wyczyść śmieci wycen", self._reconcile_rfq_data)
 
         # Home/End - przejście do pierwszego/ostatniego wiersza (PgUp/PgDn działają już
         # natywnie przez "arrowkeys" w enable_bindings, ale tksheet nie ma wbudowanej
@@ -21401,6 +21402,11 @@ class MainWindow(tk.Tk):
     def _open_wycena_dialog(self, row, col):
         """Szczegóły wyceny detalu — pełna informacja z portalu RM_RFQ."""
         try:
+            # Pusta komórka WYCENA = detal nie jest w żadnym RFQ. Klik w taką
+            # komórkę ma NIC nie robić (bez irytującego popupu "nie występuje").
+            wycena_val = str(self.sheet.get_cell_data(row, self.WYCENA_COL) or "").strip()
+            if not wycena_val:
+                return
             # Klucz jak przy wysyłce: numer rysunku, a gdy go brak (element
             # katalogowy) — nazwa detalu z kolumny 1.
             drawing_no = str(self.sheet.get_cell_data(row, 0) or "").strip()
@@ -21750,6 +21756,35 @@ class MainWindow(tk.Tk):
                     pass
 
         threading.Thread(target=_bg_sync, daemon=True).start()
+
+    def _reconcile_rfq_data(self):
+        """Czyści śmieci z kolumny WYCENA — usuwa z rfq_results (master.sqlite)
+        rekordy pozycji, których NIE MA już w portalu RM_RFQ (np. po lokalnych
+        testach RFQ sprzed przełączenia na produkcję). Dobre rekordy zostają
+        (są w portalu). Pobiera METADANE (JSON, nie pliki) — lekkie dla łącza,
+        wywoływane ręcznie (nie w cyklu). Bezpieczne — nie kasuje dobrych
+        rekordów (agent i tak by je odtworzył), więc dostępne dla wszystkich."""
+        if not messagebox.askyesno(
+                "Wyczyść śmieci wycen",
+                "Usunąć z kolumny WYCENA rekordy pozycji, których nie ma już\n"
+                "w portalu RM_RFQ (śmieci po testach)?\n\n"
+                "Dobre rekordy zostaną — są w portalu i zostaną odświeżone.\n"
+                "Pobiera tylko dane (nie pliki), obciążenie łącza minimalne.",
+                parent=self):
+            return
+        agent = self._get_rfq_agent()
+        if not agent:
+            return
+        try:
+            removed = agent.reconcile_results()
+            messagebox.showinfo("Wyczyść śmieci wycen",
+                                f"Usunięto {removed} osieroconych rekordów.\n"
+                                "Kolumna WYCENA odzwierciedla teraz stan portalu.",
+                                parent=self)
+            self.refresh_data()
+        except Exception as e:
+            messagebox.showerror("Wyczyść śmieci wycen",
+                                 f"Nie udało się wyczyścić:\n{e}", parent=self)
 
     def _get_rfq_agent(self):
         """Tworzy agenta synchronizującego. None + komunikat, gdy integracja
@@ -22370,6 +22405,24 @@ class MainWindow(tk.Tk):
                       "lub na serwerze, albo odznacz te pozycje.",
                     parent=dlg)
                 return
+
+            # Anty-duplikat: ostrzeż, jeśli któraś pozycja JUŻ jest w tym RFQ
+            # (ten sam numer rysunku). Portal i tak nadpisze zamiast dublować,
+            # ale lepiej powiedzieć userowi zanim wyśle — mógł kliknąć omyłkowo.
+            try:
+                existing_draw = set(agent.list_rfq_drawings(rfq_id))
+            except Exception:
+                existing_draw = set()  # brak listy = nie blokujemy (portal ma backstop)
+            dups = [it['drawing_no'] for it, _ in to_send if it['drawing_no'] in existing_draw]
+            if dups:
+                if not messagebox.askyesno(
+                        "Pozycje już w RFQ",
+                        "Te pozycje są już w tym zapytaniu:\n\n"
+                        + "\n".join(f"  • {d}" for d in dups)
+                        + "\n\nWysłać mimo to? Istniejące zostaną ZAKTUALIZOWANE "
+                          "(ilość/materiał/pliki), nie zduplikowane.",
+                        parent=dlg):
+                    return
 
             ok, errors = 0, []
             for it, paths in to_send:

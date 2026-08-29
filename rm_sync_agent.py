@@ -201,6 +201,16 @@ class RMSyncAgent:
         resp.raise_for_status()
         return resp.json()
 
+    def list_rfq_drawings(self, rfq_id: int) -> list[str]:
+        """Numery rysunków już w danym RFQ — RM_BAZA sprawdza przed wysyłką,
+        żeby ostrzec przed dublem (ta sama pozycja drugi raz)."""
+        resp = requests.get(
+            f'{self.portal_url}/api/rfq/{rfq_id}/drawings',
+            headers=self._headers(), timeout=HTTP_TIMEOUT
+        )
+        resp.raise_for_status()
+        return resp.json().get('drawings', [])
+
     def create_rfq(self, title: str, project_number: str | None = None,
                    offer_start_date: str | None = None,
                    offer_deadline: str | None = None) -> dict:
@@ -278,6 +288,58 @@ class RMSyncAgent:
             con.close()
         self._set_setting('rfq_last_contact', dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         return len(rows)
+
+    def reconcile_results(self) -> int:
+        """Pełna synchronizacja rfq_results z portalem + USUNIĘCIE osieroconych.
+
+        pull_full_state tylko dodaje/aktualizuje — nie kasuje wierszy, których
+        pozycji nie ma już w portalu (np. śmieci po lokalnych testach RFQ sprzed
+        przełączenia na produkcję). Ta metoda pobiera pełny stan produkcyjny
+        i usuwa z rfq_results (oraz rfq_activity) wszystko, czego tam nie ma —
+        po niej kolumna WYCENA odzwierciedla DOKŁADNIE stan portalu. Bezpieczne:
+        dobre rekordy zostają (są w portalu), znikają tylko osierocone.
+        Zwraca liczbę usuniętych osieroconych wierszy."""
+        resp = requests.get(
+            f'{self.portal_url}/api/rfq/state',
+            headers=self._headers(), timeout=HTTP_TIMEOUT
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+        live_item_ids = [r.get('rfq_item_id') for r in rows if r.get('rfq_item_id') is not None]
+
+        con = self._open_master(readonly=False)
+        removed = 0
+        try:
+            self._ensure_results_table(con)
+            # 1) upsert wszystkiego, co jest w portalu
+            for row in rows:
+                self._upsert_result(con, row)
+            # 2) skasuj osierocone (są w master.sqlite, nie ma ich w portalu)
+            if live_item_ids:
+                placeholders = ','.join('?' * len(live_item_ids))
+                cur = con.execute(
+                    f'DELETE FROM rfq_results WHERE rfq_item_id NOT IN ({placeholders})',
+                    live_item_ids)
+                removed = cur.rowcount
+                # rfq_activity też czyścimy dla spójności (tabelka aktywności)
+                try:
+                    con.execute(
+                        f'DELETE FROM rfq_activity WHERE rfq_item_id NOT IN ({placeholders})',
+                        live_item_ids)
+                except Exception:
+                    pass  # rfq_activity może nie istnieć w starszej bazie
+            else:
+                # portal pusty — kasujemy wszystko (same śmieci)
+                removed = con.execute('DELETE FROM rfq_results').rowcount
+                try:
+                    con.execute('DELETE FROM rfq_activity')
+                except Exception:
+                    pass
+            con.commit()
+        finally:
+            con.close()
+        self._set_setting('rfq_last_contact', dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        return removed
 
     def pull_results(self) -> int:
         """Pobiera nowe rozstrzygnięcia z portalu i zapisuje do master.sqlite.
@@ -494,6 +556,8 @@ def main() -> int:
     parser.add_argument('--results-only', action='store_true', help='tylko pobierz wyniki')
     parser.add_argument('--full-state', action='store_true',
                         help='pobierz stan WSZYSTKICH pozycji RFQ (pierwsze uruchomienie)')
+    parser.add_argument('--reconcile', action='store_true',
+                        help='pełna synchronizacja + usunięcie osieroconych rekordów (czyszczenie śmieci)')
     args = parser.parse_args()
 
     try:
@@ -509,6 +573,14 @@ def main() -> int:
             print(f'Pelny stan pobrany: {agent.pull_full_state()} pozycji')
         except Exception as e:
             print(f'BLAD pobierania pelnego stanu: {e}', file=sys.stderr)
+            exit_code = 1
+        return exit_code
+
+    if args.reconcile:
+        try:
+            print(f'Reconcile: usunieto {agent.reconcile_results()} osieroconych rekordow')
+        except Exception as e:
+            print(f'BLAD reconcile: {e}', file=sys.stderr)
             exit_code = 1
         return exit_code
 
