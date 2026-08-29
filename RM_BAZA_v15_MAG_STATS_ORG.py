@@ -21375,11 +21375,13 @@ class MainWindow(tk.Tk):
 
         # Pozycja jest w RFQ, ale zaproszenia jeszcze nie poszły. Bez tego
         # komórka byłaby pusta i user nie wiedziałby, że detal w ogóle trafił
-        # do zapytania. Rozróżniamy: całe RFQ to szkic, czy tylko ta pozycja
-        # nie ma jeszcze przypisanego kooperanta.
+        # do zapytania.
+        #
+        # Licznik przypisanych pokazujemy TAKŻE dla szkicu (rfq_status='draft').
+        # Wcześniej draft zwracał samo "SZKIC" i przypisanie kooperanta nie
+        # zostawiało śladu w arkuszu — a przygotowanie RFQ trwa i partiami,
+        # więc trzeba widzieć, które detale są już obrobione, a które czekają.
         if rfq_row:
-            if rfq_status == 'draft':
-                return prefix + "SZKIC"
             return prefix + ("SZKIC · brak kooperanta" if not suppliers_count
                              else f"SZKIC · {suppliers_count}")
 
