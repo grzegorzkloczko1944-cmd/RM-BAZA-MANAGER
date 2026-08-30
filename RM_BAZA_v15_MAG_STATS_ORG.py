@@ -21456,6 +21456,14 @@ class MainWindow(tk.Tk):
         # świadomie odmówił, zamyka temat: nie ma na co czekać.
         czeka = max(0, (invitations_sent or suppliers_count) - offers_count - declined_count)
 
+        # Przypisany, ale BEZ maila = zapytanie do niego NIE POSZŁO. Zdarza się
+        # przy przypisywaniu partiami: dokładasz kooperanta do pozycji już po
+        # wysyłce zaproszeń. Taka pozycja wymaga akcji ("Powiadom o zmianach"),
+        # więc dopisek "+N bez maila" musi być widoczny w KAŻDYM stanie —
+        # inaczej "1/1 OFERT" przy trzech przypisanych wygląda jak komplet.
+        bez_maila = max(0, suppliers_count - invitations_sent)
+        ogon = f" · +{bez_maila} bez maila" if bez_maila else ""
+
         if offers_count:
             out = f"{offers_count}/{invitations_sent or suppliers_count} OFERT"
             cena = _money(min_price)
@@ -21463,16 +21471,18 @@ class MainWindow(tk.Tk):
                 out += f" · {cena}"
             if declined_count:
                 out += f" · {declined_count} ODMOWA" if declined_count == 1 else f" · {declined_count} ODMOWY"
-            return prefix + out
+            return prefix + out + ogon
 
         if invitations_sent:
             # Same odmowy, nikt nie wycenił — najważniejsza informacja to fakt,
-            # że czekanie nie ma sensu.
+            # że czekanie nie ma sensu (chyba że ktoś jeszcze nie dostał maila).
             if declined_count and not czeka:
                 return prefix + (f"ODMOWA · {declined_count}" if declined_count > 1
-                                 else "ODMOWA")
+                                 else "ODMOWA") + ogon
             if declined_count:
-                return prefix + f"WYSŁANO · {czeka} CZEKA · {declined_count} ODMOWA"
+                return prefix + f"WYSŁANO · {czeka} CZEKA · {declined_count} ODMOWA" + ogon
+            if bez_maila:
+                return prefix + f"WYSŁANO · {invitations_sent} z {suppliers_count}"
             return prefix + f"WYSŁANO · {invitations_sent}"
 
         # Pozycja jest w RFQ, ale zaproszenia jeszcze nie poszły. Bez tego
