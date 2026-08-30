@@ -388,6 +388,25 @@ class RMSyncAgent:
         self._set_setting('rfq_last_sync_id', str(changes[-1]['id']))
         return applied
 
+    def run_auto_reminders(self) -> list:
+        """Uruchamia w portalu automatyczne ponowienia zapytań (tylko dla RFQ
+        z zaznaczonym „przypominaj automatycznie").
+
+        Portal nie ma własnego schedulera, a agent i tak chodzi co minutę —
+        wołamy to RAZ DZIENNIE, bo częściej nie ma sensu: limit jednego
+        przypomnienia na kooperanta i tak nie pozwoli wysłać drugiego.
+        Znacznik ostatniego uruchomienia trzymamy w master.sqlite → settings."""
+        dzis = dt.date.today().isoformat()
+        if self._setting('rfq_reminders_last_run', '') == dzis:
+            return []          # już dziś sprawdzone
+        resp = requests.post(
+            f'{self.portal_url}/api/reminders/run',
+            headers=self._headers(), timeout=HTTP_TIMEOUT
+        )
+        resp.raise_for_status()
+        self._set_setting('rfq_reminders_last_run', dzis)
+        return (resp.json() or {}).get('sent', [])
+
     def pull_activity(self) -> int:
         """Aktywność kooperantów per pozycja → tabela rfq_activity w master.sqlite.
         RM_BAZA pokazuje z tego tabelkę w oknie Wycena: kto dostał zapytanie,
@@ -611,6 +630,16 @@ def main() -> int:
         except Exception as e:
             print(f'BLAD kanalu aktywnosci: {e}', file=sys.stderr)
             exit_code = 1
+
+        # Automatyczne ponowienia — tylko dla RFQ z zaznaczonym auto_reminder.
+        # Raz dziennie (znacznik w settings), osobny try: blad wysylki maili
+        # nie moze wywalic synchronizacji danych.
+        try:
+            wyslane = agent.run_auto_reminders()
+            if wyslane:
+                print(f'Ponowienia automatyczne: {"; ".join(wyslane)}')
+        except Exception as e:
+            print(f'BLAD ponowien: {e}', file=sys.stderr)
 
         # SIATKA BEZPIECZENSTWA: co ~10 min pelny reconcile. pull_results
         # (przyrostowy, co cykl) lapie tylko zmiany zalogowane do sync_log —
