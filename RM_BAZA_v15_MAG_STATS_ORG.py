@@ -21459,10 +21459,14 @@ class MainWindow(tk.Tk):
         # Przypisany, ale BEZ maila = zapytanie do niego NIE POSZŁO. Zdarza się
         # przy przypisywaniu partiami: dokładasz kooperanta do pozycji już po
         # wysyłce zaproszeń. Taka pozycja wymaga akcji ("Powiadom o zmianach"),
-        # więc dopisek "+N bez maila" musi być widoczny w KAŻDYM stanie —
-        # inaczej "1/1 OFERT" przy trzech przypisanych wygląda jak komplet.
-        bez_maila = max(0, suppliers_count - invitations_sent)
-        ogon = f" · +{bez_maila} bez maila" if bez_maila else ""
+        # więc dopisek musi być widoczny w KAŻDYM stanie — inaczej "1/1 OFERT"
+        # przy trzech przypisanych wygląda jak komplet.
+        #
+        # "NIE WYSŁANO", nie "bez maila": chodzi o zapytanie, które nie poszło,
+        # a nie o kooperanta bez adresu (to osobny stan — takiego w ogóle nie
+        # da się przypisać). Konwencja spójna z resztą komórki: WYSŁANO/ODMOWA.
+        nie_wyslano = max(0, suppliers_count - invitations_sent)
+        ogon = f" · {nie_wyslano} NIE WYSŁANO" if nie_wyslano else ""
 
         if offers_count:
             out = f"{offers_count}/{invitations_sent or suppliers_count} OFERT"
@@ -21481,7 +21485,7 @@ class MainWindow(tk.Tk):
                                  else "ODMOWA") + ogon
             if declined_count:
                 return prefix + f"WYSŁANO · {czeka} CZEKA · {declined_count} ODMOWA" + ogon
-            if bez_maila:
+            if nie_wyslano:
                 return prefix + f"WYSŁANO · {invitations_sent} z {suppliers_count}"
             return prefix + f"WYSŁANO · {invitations_sent}"
 
