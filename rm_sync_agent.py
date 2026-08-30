@@ -478,6 +478,7 @@ class RMSyncAgent:
                 rfq_status       TEXT,
                 suppliers_count  INTEGER,   -- ilu kooperantów widzi tę pozycję
                 offers_count     INTEGER,   -- ile ofert wpłynęło
+                declined_count   INTEGER,   -- ilu kooperantów odmówiło wyceny
                 min_price        REAL,      -- najtańsza oferta (do stanu pośredniego)
                 invitations_sent INTEGER,   -- do ilu wysłano zaproszenia
                 response_deadline TEXT,     -- termin odpowiedzi (kolor komórki WYCENA)
@@ -505,6 +506,7 @@ class RMSyncAgent:
             ('invitations_sent', 'INTEGER'),
             ('viewers_count', 'INTEGER'), ('seen_item_count', 'INTEGER'),
             ('last_viewed_at', 'TEXT'), ('response_deadline', 'TEXT'),
+            ('declined_count', 'INTEGER'),
         ):
             if col not in existing:
                 con.execute(f'ALTER TABLE rfq_results ADD COLUMN {col} {decl}')
@@ -515,11 +517,11 @@ class RMSyncAgent:
             INSERT INTO rfq_results (
                 rfq_item_id, drawing_number, item_name, revision, quantity, material,
                 project_number, rfq_id, rfq_code, rfq_title, rfq_status,
-                suppliers_count, offers_count, min_price, invitations_sent,
+                suppliers_count, offers_count, declined_count, min_price, invitations_sent,
                 viewers_count, seen_item_count, last_viewed_at, response_deadline,
                 supplier_id, supplier_name, price, currency, lead_time_days,
                 offer_notes, decided_at, synced_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
             ON CONFLICT(rfq_item_id) DO UPDATE SET
                 drawing_number=excluded.drawing_number, item_name=excluded.item_name,
                 revision=excluded.revision, quantity=excluded.quantity,
@@ -527,7 +529,8 @@ class RMSyncAgent:
                 rfq_id=excluded.rfq_id,
                 rfq_code=excluded.rfq_code, rfq_title=excluded.rfq_title,
                 rfq_status=excluded.rfq_status, suppliers_count=excluded.suppliers_count,
-                offers_count=excluded.offers_count, min_price=excluded.min_price,
+                offers_count=excluded.offers_count, declined_count=excluded.declined_count,
+                min_price=excluded.min_price,
                 invitations_sent=excluded.invitations_sent,
                 viewers_count=excluded.viewers_count,
                 seen_item_count=excluded.seen_item_count,
@@ -542,7 +545,7 @@ class RMSyncAgent:
             p.get('revision'), p.get('quantity'), p.get('material'),
             p.get('project_number'), p.get('rfq_id'), p.get('rfq_code'), p.get('rfq_title'),
             p.get('rfq_status'), p.get('suppliers_count'), p.get('offers_count'),
-            p.get('min_price'), p.get('invitations_sent'),
+            p.get('declined_count'), p.get('min_price'), p.get('invitations_sent'),
             p.get('viewers_count'), p.get('seen_item_count'), p.get('last_viewed_at'),
             p.get('response_deadline'),
             p.get('supplier_id'), p.get('supplier_name'), p.get('price'),

@@ -6084,7 +6084,7 @@ class MainWindow(tk.Tk):
                 for r in master_con.execute(
                     """SELECT drawing_number, invitations_sent, suppliers_count,
                               offers_count, min_price, supplier_name, price,
-                              rfq_status, response_deadline
+                              rfq_status, response_deadline, declined_count
                        FROM rfq_results"""
                 ):
                     rfq_by_drawing[r[0]] = r
@@ -21423,12 +21423,16 @@ class MainWindow(tk.Tk):
             (_drawing, invitations_sent, suppliers_count,
              offers_count, min_price, supplier_name, price, *rest) = rfq_row
             rfq_status = rest[0] if rest else None
+            # rest: [rfq_status, response_deadline, declined_count] — czytamy
+            # defensywnie, bo starsza baza (przed migracją) tych kolumn nie ma
+            declined_count = rest[2] if len(rest) > 2 else 0
         except (TypeError, ValueError):
             return ""
 
         invitations_sent = invitations_sent or 0
         suppliers_count = suppliers_count or 0
         offers_count = offers_count or 0
+        declined_count = declined_count or 0
 
         def _money(v):
             try:
@@ -21447,12 +21451,28 @@ class MainWindow(tk.Tk):
         # Mianownik to liczba faktycznie powiadomionych, nie wszystkich widzących
         # pozycję — od kooperanta bez maila nie ma na co czekać, a "1/3 OFERT"
         # przy dwóch wysłanych zaproszeniach sugeruje brak, którego nie ma.
+        # Odmowy pokazujemy OSOBNO — "brak oferty" znaczyło dotąd jednocześnie
+        # "nie chce", "nie przeczytał" i "zrobi później". Kooperant, który
+        # świadomie odmówił, zamyka temat: nie ma na co czekać.
+        czeka = max(0, (invitations_sent or suppliers_count) - offers_count - declined_count)
+
         if offers_count:
             out = f"{offers_count}/{invitations_sent or suppliers_count} OFERT"
             cena = _money(min_price)
-            return prefix + (f"{out} · {cena}" if cena else out)
+            if cena:
+                out += f" · {cena}"
+            if declined_count:
+                out += f" · {declined_count} ODMOWA" if declined_count == 1 else f" · {declined_count} ODMOWY"
+            return prefix + out
 
         if invitations_sent:
+            # Same odmowy, nikt nie wycenił — najważniejsza informacja to fakt,
+            # że czekanie nie ma sensu.
+            if declined_count and not czeka:
+                return prefix + (f"ODMOWA · {declined_count}" if declined_count > 1
+                                 else "ODMOWA")
+            if declined_count:
+                return prefix + f"WYSŁANO · {czeka} CZEKA · {declined_count} ODMOWA"
             return prefix + f"WYSŁANO · {invitations_sent}"
 
         # Pozycja jest w RFQ, ale zaproszenia jeszcze nie poszły. Bez tego
