@@ -500,6 +500,8 @@ class MainWindow(tk.Tk):
         settingsm.add_command(label="�📁 Ścieżki do baz danych…", command=self.menu_settings_paths)
         settingsm.add_separator()
         settingsm.add_command(label="💻 Nazwa komputera…", command=self.menu_set_client_name)
+        settingsm.add_separator()
+        settingsm.add_command(label="🔔 Powiadomienia RFQ…", command=self.menu_rfq_watchers)
         menubar.add_cascade(label="Ustawienia", menu=settingsm)
         
         self.config(menu=menubar)
@@ -804,7 +806,18 @@ class MainWindow(tk.Tk):
             font=("Arial", 12, "bold")
         )
         self.status_label.pack(side=tk.LEFT, padx=5, pady=10)
-        
+
+        # RFQ: ilu kooperantów czeka z odpowiedzią. Liczone LOKALNIE z
+        # rfq_activity/rfq_results (agent je synchronizuje), więc badge działa
+        # nawet gdy portal chwilowo nie odpowiada. Kliknięcie otwiera panel
+        # „Do pilnowania". Ukryty, gdy nie ma na kogo czekać — pasek i tak
+        # jest zatłoczony.
+        self.rfq_badge = tk.Label(
+            row2_parent, text="", bg="#2c3e50", fg="#f39c12",
+            font=("Arial", 11, "bold"), cursor="hand2"
+        )
+        self.rfq_badge.bind("<Button-1>", lambda e: self._open_rfq_watchlist())
+
         # Separator
         tk.Label(
             row2_parent,
@@ -6109,6 +6122,20 @@ class MainWindow(tk.Tk):
         except Exception:
             rfq_by_drawing = {}
             self._rfq_data_stale = True  # brak tabeli = integracja nigdy nie ruszyła
+
+        # Badge „RFQ: N oczekuje" — odświeżamy przy każdym ładowaniu arkusza,
+        # bo i tak czytamy tu dane RFQ. Agent synchronizuje co minutę, więc
+        # badge jest aktualny bez osobnego mechanizmu odpytywania.
+        try:
+            self._refresh_rfq_badge()
+            # Panel „Do pilnowania" RAZ DZIENNIE i tylko gdy coś jest pilne
+            # (termin ≤2 dni). Świadomie nie popup co N minut — to by wkurzało
+            # bardziej użytkownika niż kooperantów. Znacznik w settings.
+            if not getattr(self, "_rfq_watchlist_checked", False):
+                self._rfq_watchlist_checked = True     # raz na uruchomienie
+                self.after(3000, self._maybe_show_rfq_watchlist)
+        except Exception:
+            pass
 
         # Helper: parse date
         def parse_date(d):
@@ -21341,6 +21368,322 @@ class MainWindow(tk.Tk):
         'ordered': 'Zamówione',
         'cancelled': 'Anulowane',
     }
+
+    # ------------------------------------------------------------------
+    # RFQ — „Do pilnowania": kto nie odpowiedział i ile czasu zostało.
+    #
+    # Liczone LOKALNIE z master.sqlite (rfq_activity + rfq_results), które
+    # wypełnia RM_SYNC_AGENT. Dzięki temu badge działa nawet przy chwilowo
+    # niedostępnym portalu, a RM_BAZA nie musi znać jego API.
+    # ------------------------------------------------------------------
+
+    def menu_rfq_watchers(self):
+        """Kto ma dostawać powiadomienia RFQ (badge w pasku + panel „Do
+        pilnowania"). Nic nie zaznaczone = wszyscy, żeby świeża instalacja
+        działała bez konfigurowania."""
+        con = self.db_manager.master_con if self.db_manager else None
+        if not con:
+            messagebox.showwarning("Powiadomienia RFQ", "Brak połączenia z bazą.", parent=self)
+            return
+        try:
+            users = con.execute(
+                "SELECT username, display_name FROM users WHERE is_active=1 ORDER BY username"
+            ).fetchall()
+        except Exception as e:
+            messagebox.showerror("Powiadomienia RFQ", f"Nie można odczytać listy kont:\n{e}", parent=self)
+            return
+
+        wybrani = {w.lower() for w in self._rfq_watchers()}
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Powiadomienia RFQ")
+        dlg.geometry("420x520")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        tk.Label(dlg, text="Kto ma widzieć powiadomienia RFQ",
+                 font=("Arial", 11, "bold")).pack(pady=(12, 2))
+        tk.Label(dlg, text="Badge „RFQ: N oczekuje” w pasku oraz panel\n"
+                           "„Do pilnowania” przy starcie programu.",
+                 fg="#666", font=("Arial", 9), justify=tk.CENTER).pack(pady=(0, 4))
+        tk.Label(dlg, text="Nikt nie zaznaczony = powiadomienia dla WSZYSTKICH.",
+                 fg="#b8860b", font=("Arial", 9, "bold")).pack(pady=(0, 8))
+
+        box = tk.Frame(dlg, bd=1, relief=tk.SOLID)
+        box.pack(fill=tk.BOTH, expand=True, padx=14)
+        canvas = tk.Canvas(box, borderwidth=0, highlightthickness=0)
+        scroll = ttk.Scrollbar(box, orient="vertical", command=canvas.yview)
+        inner = tk.Frame(canvas)
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        vars_by_user = {}
+        for username, display in users:
+            v = tk.BooleanVar(value=username.lower() in wybrani)
+            vars_by_user[username] = v
+            txt = username if not display or display == username else f"{username}  ({display})"
+            tk.Checkbutton(inner, text=txt, variable=v, anchor="w").pack(fill=tk.X, padx=8, pady=1)
+
+        def zapisz():
+            lista = ','.join(u for u, v in vars_by_user.items() if v.get())
+            try:
+                # własne połączenie RW — master_con bywa read-only bez locka
+                rw = sqlite3.connect(str(self.db_manager.master_path), timeout=10)
+                rw.execute(
+                    "INSERT INTO settings (key, value, updated_at) VALUES ('rfq_watchers', ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                    (lista, datetime.now().isoformat()))
+                rw.commit()
+                rw.close()
+            except Exception as e:
+                messagebox.showerror("Powiadomienia RFQ", f"Nie udało się zapisać:\n{e}", parent=dlg)
+                return
+            dlg.destroy()
+            try:
+                self._refresh_rfq_badge()      # od razu widać efekt
+            except Exception:
+                pass
+            messagebox.showinfo("Powiadomienia RFQ",
+                                f"Zapisano. Powiadomienia dla: {lista or 'WSZYSCY'}",
+                                parent=self)
+
+        btns = tk.Frame(dlg)
+        btns.pack(fill=tk.X, padx=14, pady=12)
+        tk.Button(btns, text="Zapisz", command=zapisz, bg="#2a7a4a", fg="white",
+                  width=14).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(btns, text="Anuluj", command=dlg.destroy, width=12).pack(side=tk.LEFT)
+
+        self._center_on_app(dlg)
+
+    def _rfq_watchers(self):
+        """Loginy, którym pokazujemy powiadomienia RFQ (badge + panel).
+
+        Trzymane w master.sqlite → settings['rfq_watchers'] jako lista rozdzielona
+        przecinkami. PUSTE = wszyscy (domyślne zachowanie, nic nie trzeba
+        konfigurować). RFQ obsługuje kilka osób, a w bazie jest ~18 kont —
+        reszcie badge tylko zaśmiecałby pasek.
+
+        Lista edytowalna z GUI: Ustawienia → Powiadomienia RFQ."""
+        try:
+            con = self.db_manager.master_con if self.db_manager else None
+            if not con:
+                return []
+            row = con.execute(
+                "SELECT value FROM settings WHERE key='rfq_watchers'"
+            ).fetchone()
+            if not row or not str(row[0]).strip():
+                return []
+            return [x.strip() for x in str(row[0]).split(',') if x.strip()]
+        except Exception:
+            return []
+
+    def _rfq_notifications_for_me(self) -> bool:
+        """Czy TEN user ma dostawać powiadomienia RFQ. Pusta lista = wszyscy."""
+        watchers = self._rfq_watchers()
+        if not watchers:
+            return True
+        me = (self.current_user or '').strip()
+        # porównanie bez wielkości liter — loginy bywają wpisywane różnie
+        return any(w.lower() == me.lower() for w in watchers)
+
+    def _rfq_pending_rows(self):
+        """[(rfq_code, rfq_id, kooperant, dni_do_terminu, wszedł?)] — kooperanci,
+        którzy dostali zapytanie i jeszcze nie odpowiedzieli.
+
+        rfq_activity ma wiersz na PARĘ (pozycja, kooperant), więc grupujemy po
+        kooperancie: interesuje nas, czy w ogóle coś odpowiedział, nie na ile
+        pozycji. has_offer=1 znaczy „złożył ofertę na tę pozycję"; odmowa
+        („Nie wyceniam") nie ma tu własnej kolumny, ale portal usuwa takiego
+        kooperanta z listy oczekujących po swojej stronie — tutaj wychodzimy
+        z tego, co widać: brak oferty = wciąż czekamy."""
+        try:
+            con = self.db_manager.master_con if self.db_manager else None
+            if not con:
+                return []
+            return con.execute("""
+                SELECT r.rfq_code, r.rfq_id, a.supplier_name,
+                       MIN(r.response_deadline) AS termin,
+                       MAX(COALESCE(a.view_count, 0)) AS wejsc
+                  FROM rfq_activity a
+                  JOIN rfq_results r ON r.rfq_item_id = a.rfq_item_id
+                 WHERE a.email_sent_at IS NOT NULL
+                   AND COALESCE(a.has_offer, 0) = 0
+                   AND r.supplier_name IS NULL          -- pozycja nierozstrzygnięta
+                 GROUP BY r.rfq_code, r.rfq_id, a.supplier_name
+                 ORDER BY termin IS NULL, termin, r.rfq_code, a.supplier_name
+            """).fetchall()
+        except Exception as e:
+            print(f"⚠️  RFQ: nie udało się policzyć oczekujących: {e}")
+            return []
+
+    def _refresh_rfq_badge(self):
+        """Odświeża badge w pasku. Ukrywa go, gdy nikt nie czeka albo gdy ten
+        user nie jest na liście obserwatorów RFQ."""
+        try:
+            if not self._rfq_notifications_for_me():
+                self.rfq_badge.pack_forget()
+                return
+            rows = self._rfq_pending_rows()
+            if not rows:
+                self.rfq_badge.pack_forget()
+                return
+            from datetime import datetime as _dt, date as _date
+            pilne = 0
+            for r in rows:
+                if not r[3]:
+                    continue
+                try:
+                    dni = (_dt.strptime(str(r[3])[:10], "%Y-%m-%d").date() - _date.today()).days
+                except (ValueError, TypeError):
+                    continue
+                if dni <= 2:
+                    pilne += 1
+            txt = f"RFQ: {len(rows)} oczekuje"
+            if pilne:
+                txt += f" ({pilne} pilne)"
+            self.rfq_badge.config(text=txt, fg="#e74c3c" if pilne else "#f39c12")
+            self.rfq_badge.pack(side=tk.LEFT, padx=(10, 5), pady=10)
+        except Exception as e:
+            print(f"⚠️  RFQ badge: {e}")
+
+    def _maybe_show_rfq_watchlist(self):
+        """Panel „Do pilnowania" raz dziennie, przy pierwszym uruchomieniu.
+
+        Znacznik daty w settings — pokazujemy najwyżej raz na dobę, nawet gdy
+        user restartuje program kilka razy. Zapis własnym połączeniem RW, bo
+        master_con bywa read-only (bez locka na projekcie)."""
+        try:
+            if not self._rfq_notifications_for_me():
+                return          # ten user nie obsługuje RFQ
+            con = self.db_manager.master_con if self.db_manager else None
+            if not con:
+                return
+            dzis = datetime.now().strftime("%Y-%m-%d")
+            row = con.execute(
+                "SELECT value FROM settings WHERE key='rfq_watchlist_shown'"
+            ).fetchone()
+            if row and str(row[0]) == dzis:
+                return                      # już dziś pokazane
+
+            self._open_rfq_watchlist(auto=True)
+
+            # zapis znacznika — osobne połączenie RW (patrz _init_rfq_tags_tables)
+            try:
+                rw = sqlite3.connect(str(self.db_manager.master_path), timeout=10)
+                rw.execute(
+                    "INSERT INTO settings (key, value, updated_at) VALUES "
+                    "('rfq_watchlist_shown', ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                    "updated_at=excluded.updated_at",
+                    (dzis, datetime.now().isoformat()))
+                rw.commit()
+                rw.close()
+            except Exception:
+                pass        # nie udało się zapisać — najwyżej pokaże się jutro ponownie
+        except Exception as e:
+            print(f"⚠️  RFQ watchlist: {e}")
+
+    def _open_rfq_watchlist(self, auto=False):
+        """Panel „Do pilnowania" — kto nie odpowiedział, ile czasu zostało.
+
+        auto=True: wywołanie automatyczne przy starcie (raz dziennie). Wtedy
+        NIE pokazujemy okna, gdy nie ma nic pilnego — żeby nie przeszkadzać.
+        Ręczne kliknięcie badge'a pokazuje zawsze."""
+        from datetime import datetime as _dt, date as _date
+
+        rows = self._rfq_pending_rows()
+        dzis = _date.today()
+
+        def dni_do(term):
+            if not term:
+                return None
+            try:
+                return (_dt.strptime(str(term)[:10], "%Y-%m-%d").date() - dzis).days
+            except (ValueError, TypeError):
+                return None
+
+        if auto and not any((dni_do(r[3]) is not None and dni_do(r[3]) <= 2) for r in rows):
+            return          # nic pilnego — cisza
+
+        if not rows:
+            messagebox.showinfo("RFQ — do pilnowania",
+                                "Wszyscy kooperanci odpowiedzieli.\n"
+                                "Nie ma na nikogo czekać.", parent=self)
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("RFQ — do pilnowania")
+        dlg.geometry("720x420")
+        dlg.transient(self)
+
+        tk.Label(dlg, text="Kooperanci, którzy nie odpowiedzieli",
+                 font=("Arial", 12, "bold")).pack(pady=(12, 2))
+        tk.Label(dlg, text="Dane z ostatniej synchronizacji z portalem RM_RFQ.",
+                 fg="#666", font=("Arial", 8)).pack(pady=(0, 8))
+
+        cols = ("rfq", "kooperant", "termin", "dni", "wejscia")
+        tree = ttk.Treeview(dlg, columns=cols, show="headings", height=12)
+        for c, t, w in (("rfq", "Zapytanie", 130), ("kooperant", "Kooperant", 160),
+                        ("termin", "Termin", 100), ("dni", "Zostało", 90),
+                        ("wejscia", "Wejścia", 110)):
+            tree.heading(c, text=t)
+            tree.column(c, width=w, anchor="w")
+
+        tree.tag_configure("pilne", background="#ffd9d6")      # ≤2 dni
+        tree.tag_configure("dzis", background="#ffb3ad")       # dziś/po terminie
+        tree.tag_configure("nieotwarte", background="#fdeceb") # nie zajrzał
+
+        rfq_ids = {}
+        for kod, rid, nazwa, term, wejsc in rows:
+            dni = dni_do(term)
+            if dni is None:
+                opis, tag = "—", ""
+            elif dni < 0:
+                opis, tag = "po terminie", "dzis"
+            elif dni == 0:
+                opis, tag = "dziś!", "dzis"
+            elif dni == 1:
+                opis, tag = "1 dzień", "pilne"
+            elif dni <= 2:
+                opis, tag = f"{dni} dni", "pilne"
+            else:
+                opis, tag = f"{dni} dni", ""
+            if not wejsc and not tag:
+                tag = "nieotwarte"
+            iid = tree.insert("", tk.END, tags=(tag,), values=(
+                kod, nazwa, str(term)[:10] if term else "—", opis,
+                f"{wejsc}×" if wejsc else "nie otworzył"))
+            rfq_ids[iid] = rid
+        tree.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 6))
+
+        tk.Label(dlg, text="„nie otworzył” po kilku dniach zwykle znaczy, "
+                           "że mail trafił do spamu — nie brak zainteresowania.",
+                 fg="#666", font=("Arial", 8), anchor="w").pack(fill=tk.X, padx=14)
+
+        btns = tk.Frame(dlg)
+        btns.pack(fill=tk.X, padx=14, pady=10)
+
+        def _idz_do_rfq():
+            """Otwiera zapytanie w portalu — tam jest przycisk ponowienia
+            (RM_BAZA nie wysyła maili; portal jest właścicielem procesu)."""
+            sel = tree.selection()
+            rid = rfq_ids.get(sel[0]) if sel else (rows[0][1] if rows else None)
+            base = self._rfq_portal_url()
+            if not base:
+                messagebox.showwarning("RFQ", "Brak adresu portalu w master.sqlite "
+                                              "→ settings.rfq_portal_url", parent=dlg)
+                return
+            import webbrowser
+            webbrowser.open(f"{base}/rfq/{rid}" if rid else base)
+
+        tk.Button(btns, text="🌐 Pokaż w RM_RFQ", command=_idz_do_rfq,
+                  bg="#1f5fa9", fg="white", width=20).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(btns, text="Zamknij", command=dlg.destroy, width=14).pack(side=tk.LEFT)
+
+        self._center_on_app(dlg)
 
     def _center_on_app(self, dialog):
         """Ustawia okno dialogowe na ŚRODKU okna RM_BAZA — także gdy aplikacja
