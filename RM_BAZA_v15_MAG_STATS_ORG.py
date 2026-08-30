@@ -5907,7 +5907,14 @@ class MainWindow(tk.Tk):
         if not self.db_manager or not self.db_manager.project_con:
             return
         
-        # Sprawdź czy baza jest READ-ONLY
+        # Sprawdź czy baza jest READ-ONLY.
+        #
+        # ⚠️ Bez locka db_manager otwiera bazę jako ?mode=ro&immutable=1, a przy
+        # immutable SQLite PRZEPUSZCZA BEGIN IMMEDIATE (baza jest "niezmienna",
+        # więc nie ma z czym kolidować) i nie ustawia też PRAGMA query_only —
+        # sprawdzone, obie metody zwracają "można pisać". Dopiero realny zapis
+        # rzuca błąd. Dlatego jedynym pewnym testem jest PRÓBA ZAPISU (niżej,
+        # przy casting_entries), a nie pytanie o tryb połączenia.
         try:
             # Test zapisu - jeśli fail to READ-ONLY
             self.db_manager.project_con.execute("BEGIN IMMEDIATE")
@@ -6007,7 +6014,14 @@ class MainWindow(tk.Tk):
             else:
                 print("✅ Schema aktualna - brak potrzeby migracji")
 
-            # Tabela casting_entries (poddostawcy/oferty castingu dla danego item)
+            # Tabela casting_entries (poddostawcy/oferty castingu dla danego item).
+            #
+            # Bez locka to się NIE UDA i tak ma być: tabelę tworzy wtedy w locie
+            # _ensure_casting_table() przy pierwszym użyciu castingu (sprawdza
+            # have_lock i grzecznie odpuszcza). Dlatego "readonly" traktujemy
+            # jako normalny stan i nie krzyczymy — wcześniej to ostrzeżenie
+            # leciało przy KAŻDYM otwarciu projektu bez locka, sugerując awarię,
+            # której nie było.
             try:
                 con.execute("""
                     CREATE TABLE IF NOT EXISTS casting_entries (
@@ -6028,7 +6042,11 @@ class MainWindow(tk.Tk):
                 """)
                 con.commit()
             except Exception as e:
-                print(f"⚠️  Błąd migracji casting_entries: {e}")
+                if "readonly" in str(e).lower():
+                    print("  ℹ️  casting_entries: brak locka — tabela powstanie "
+                          "przy pierwszym użyciu castingu")
+                else:
+                    print(f"⚠️  Błąd migracji casting_entries: {e}")
 
         except Exception as e:
             print(f"⚠️  Błąd migracji schemy: {e}")
@@ -21809,28 +21827,37 @@ class MainWindow(tk.Tk):
         # a nie o kooperanta bez adresu (to osobny stan — takiego w ogóle nie
         # da się przypisać). Konwencja spójna z resztą komórki: WYSŁANO/ODMOWA.
         nie_wyslano = max(0, suppliers_count - invitations_sent)
-        ogon = f" · {nie_wyslano} NIE WYSŁANO" if nie_wyslano else ""
+
+        # JEDNOLITA KONWENCJA: "ETYKIETA: liczba", człony rozdzielone " · ".
+        # Wcześniej liczba stała raz PO słowie ("WYSŁANO · 1"), raz PRZED
+        # ("1 ODMOWA", "2 NIE WYSŁANO") — przy kilku członach w jednym wierszu
+        # nie dało się poznać, co do czego należy. Dwukropek wiąże etykietę
+        # z wartością jednoznacznie, niezależnie od liczby członów.
+        czesci = []
 
         if offers_count:
-            out = f"{offers_count}/{invitations_sent or suppliers_count} OFERT"
+            czesci.append(f"OFERTY: {offers_count}/{invitations_sent or suppliers_count}")
             cena = _money(min_price)
             if cena:
-                out += f" · {cena}"
-            if declined_count:
-                out += f" · {declined_count} ODMOWA" if declined_count == 1 else f" · {declined_count} ODMOWY"
-            return prefix + out + ogon
+                czesci.append(f"NAJTAŃSZA: {cena}")
+        elif invitations_sent:
+            # Same odmowy i nikt nie czeka — nie ma na co czekać, więc nie
+            # pokazujemy "WYSŁANO", tylko sam fakt odmowy.
+            if not (declined_count and not czeka):
+                czesci.append(f"WYSŁANO: {invitations_sent}")
 
-        if invitations_sent:
-            # Same odmowy, nikt nie wycenił — najważniejsza informacja to fakt,
-            # że czekanie nie ma sensu (chyba że ktoś jeszcze nie dostał maila).
-            if declined_count and not czeka:
-                return prefix + (f"ODMOWA · {declined_count}" if declined_count > 1
-                                 else "ODMOWA") + ogon
-            if declined_count:
-                return prefix + f"WYSŁANO · {czeka} CZEKA · {declined_count} ODMOWA" + ogon
-            if nie_wyslano:
-                return prefix + f"WYSŁANO · {invitations_sent} z {suppliers_count}"
-            return prefix + f"WYSŁANO · {invitations_sent}"
+        if declined_count:
+            czesci.append(f"ODMOWY: {declined_count}")
+        if czeka and offers_count == 0 and declined_count:
+            czesci.append(f"CZEKA: {czeka}")
+        # NIE WYSŁANO dokładamy tylko gdy COKOLWIEK już poszło — przy szkicu
+        # (zero zaproszeń) wszyscy są "niewysłani", a to zwykły stan początkowy,
+        # nie zaległość. Tam właściwy komunikat to SZKIC (niżej).
+        if nie_wyslano and invitations_sent:
+            czesci.append(f"NIE WYSŁANO: {nie_wyslano}")
+
+        if czesci:
+            return prefix + " · ".join(czesci)
 
         # Pozycja jest w RFQ, ale zaproszenia jeszcze nie poszły. Bez tego
         # komórka byłaby pusta i user nie wiedziałby, że detal w ogóle trafił
@@ -21841,8 +21868,9 @@ class MainWindow(tk.Tk):
         # zostawiało śladu w arkuszu — a przygotowanie RFQ trwa i partiami,
         # więc trzeba widzieć, które detale są już obrobione, a które czekają.
         if rfq_row:
+            # ta sama konwencja "ETYKIETA: liczba" co wyżej
             return prefix + ("SZKIC · brak kooperanta" if not suppliers_count
-                             else f"SZKIC · {suppliers_count}")
+                             else f"SZKIC · KOOPERANCI: {suppliers_count}")
 
         return "⚠ brak danych" if stale else ""
 
@@ -22328,9 +22356,16 @@ class MainWindow(tk.Tk):
     def _find_files_for_drawing(self, drawing_no: str) -> list:
         """Szuka wszystkich plików rysunku (PDF/DXF/DWF/STEP/STL) w katalogach
         projektu na serwerze — ta sama logika co przycisk "Szukaj w projekcie"."""
+        # Brak dostępu do serwera to AWARIA, nie "nie ma plików" — obie
+        # sytuacje dawały dotąd pustą listę i wyglądały identycznie, więc przy
+        # niezamapowanym V:\ całe RFQ poszłoby bez załączników, a user widziałby
+        # tylko "nie znaleziono plików". Zwracamy znacznik, żeby okno wysyłki
+        # mogło to napisać wprost.
         server_path = Path(SERVER_DIR)
         if not server_path.exists():
+            self._rfq_server_error = f"Brak dostępu do serwera rysunków: {SERVER_DIR}"
             return []
+        self._rfq_server_error = None
 
         project_name = None
         for pid, pname in self.projects_list:
@@ -22807,7 +22842,13 @@ class MainWindow(tk.Tk):
                             return
                         row = tk.Frame(files_frame)
                         row.pack(fill=tk.X, padx=12, pady=(2, 0))
-                        if self._rfq_needs_dxf(it['drawing_no']):
+                        # Brak dostępu do serwera != brak plików. Bez tego
+                        # rozróżnienia niezamapowany V:\ wyglądał jak "detal nie
+                        # ma rysunków" i całe RFQ poszłoby bez załączników.
+                        if getattr(self, "_rfq_server_error", None):
+                            msg, colour = ("⛔ BŁĄD ODCZYTU — " + self._rfq_server_error +
+                                           "; sprawdź dysk sieciowy"), "#b3261e"
+                        elif self._rfq_needs_dxf(it['drawing_no']):
                             msg, colour = ("⛔ detal na laser (X/XX) — wymagany DXF, "
                                            "bez niego nie wyślesz"), "#b3261e"
                         else:
