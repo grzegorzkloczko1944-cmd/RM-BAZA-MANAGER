@@ -6268,16 +6268,39 @@ class MainWindow(tk.Tk):
                 last_contact = master_con.execute(
                     "SELECT value FROM settings WHERE key='rfq_last_contact'"
                 ).fetchone()
-                if last_contact and last_contact[0]:
+                self._rfq_last_contact = str(last_contact[0]) if (last_contact and last_contact[0]) else None
+                if self._rfq_last_contact:
                     try:
                         import datetime as _dt
-                        delta = _dt.datetime.now() - _dt.datetime.fromisoformat(str(last_contact[0]))
-                        self._rfq_data_stale = delta.total_seconds() > 3600
+                        delta = _dt.datetime.now() - _dt.datetime.fromisoformat(self._rfq_last_contact)
+                        # 15 min, nie godzina: agent chodzi CO MINUTĘ, więc realna
+                        # awaria jest wykrywalna po kilku minutach. Przy progu 1h
+                        # kolumna WYCENA przez pierwszą godzinę awarii wyglądała
+                        # na w pełni aktualną — najgorszy możliwy stan, bo user
+                        # podejmuje decyzje na nieaktualnych danych, nic nie widząc.
+                        # 15 min = margines na chwilowy timeout albo restart serwera.
+                        self._rfq_data_stale = delta.total_seconds() > 900
                     except Exception:
                         pass
                 else:
                     # agent nigdy nie zapisał kontaktu — integracja nie działa
                     self._rfq_data_stale = True
+
+                # Ostatni błąd agenta (zapisywany przez rm_sync_agent, bo chodzi
+                # bez okna konsoli i stderr przepada). Dzięki temu user widzi
+                # POWÓD awarii, a nie samo „brak danych".
+                try:
+                    _err = master_con.execute(
+                        "SELECT value FROM settings WHERE key='rfq_last_error'"
+                    ).fetchone()
+                    _err_at = master_con.execute(
+                        "SELECT value FROM settings WHERE key='rfq_last_error_at'"
+                    ).fetchone()
+                    self._rfq_last_error = (_err[0] or '') if _err else ''
+                    self._rfq_last_error_at = (_err_at[0] or '') if _err_at else ''
+                except Exception:
+                    self._rfq_last_error = ''
+                    self._rfq_last_error_at = ''
         except Exception:
             rfq_by_drawing = {}
             self._rfq_data_stale = True  # brak tabeli = integracja nigdy nie ruszyła
@@ -23380,6 +23403,24 @@ class MainWindow(tk.Tk):
         _line("Status RFQ:", self.RFQ_STATUS_LABELS.get(rfq_status, rfq_status) or "—")
         _line("Dane z:", str(synced_at or "—"))
 
+        # Stan integracji — „Dane z:" wyżej to znacznik TEJ pozycji (zmienia się
+        # tylko przy realnej zmianie), więc spokojne RFQ wygląda przez niego na
+        # nieaktualne. Tu pokazujemy, kiedy agent OSTATNI RAZ rozmawiał z portalem,
+        # a przy awarii — jej powód (agent zapisuje go do settings, bo chodzi bez
+        # okna konsoli i komunikaty przepadają).
+        _ost = getattr(self, "_rfq_last_contact", None)
+        _blad = getattr(self, "_rfq_last_error", "")
+        if _blad:
+            _kiedy = getattr(self, "_rfq_last_error_at", "")
+            _line("Synchronizacja:", f"⚠ BŁĄD {('· ' + str(_kiedy)[:16]) if _kiedy else ''}")
+            tk.Label(dialog, text=f"   {_blad}", fg="#b3261e", anchor="w",
+                     justify=tk.LEFT, wraplength=600,
+                     font=("Arial", 8)).pack(fill=tk.X, padx=24, pady=(0, 4))
+        elif getattr(self, "_rfq_data_stale", False):
+            _line("Synchronizacja:", f"⚠ brak kontaktu od {str(_ost)[:16] if _ost else 'nigdy'}")
+        elif _ost:
+            _line("Synchronizacja:", f"✓ {str(_ost)[:16]}")
+
         # --- Tabelka aktywności kooperantów (odpowiednik panelu z portalu) ---
         # Pokazuje, kto dostał zapytanie o TEN detal, czy je otworzył, czy
         # widział tę konkretną pozycję i czy złożył ofertę. Bez tego nie wiadomo,
@@ -23918,16 +23959,29 @@ class MainWindow(tk.Tk):
     def _refresh_rfq_data(self):
         """Ręczne odświeżenie stanu wycen (normalnie robi to agent w tle).
 
-        Woła OBA kanały: pull_full_state() (kolumna WYCENA) ORAZ pull_activity()
-        (tabelka aktywności kooperantów w oknie Wycena). Bez tego drugiego okno
-        pokazywało sprzeczność — WYCENA aktualna, ale aktywność pusta, przez co
-        pojawiał się czerwony komunikat "Nikt nie przypisany do tej pozycji",
-        mimo że kooperant był przypisany i wchodził. pull_full_state() sięga
-        tylko po /api/rfq/state (rfq_results), aktywność jest osobnym kanałem."""
+        Woła WSZYSTKIE TRZY kanały, w kolejności: push_suppliers() (nowi
+        kooperanci z RM_BAZA trafiają do portalu), pull_full_state() (kolumna
+        WYCENA) i pull_activity() (tabelka aktywności w oknie Wycena).
+
+        Każdy z nich doszedł tu po realnym błędzie:
+        - bez pull_activity okno pokazywało sprzeczność: WYCENA aktualna, ale
+          aktywność pusta, więc wyskakiwało czerwone „Nikt nie przypisany do tej
+          pozycji", choć kooperant był przypisany i wchodził,
+        - bez push_suppliers nowo dodany kooperant nie pojawiał się w portalu aż
+          do następnego cyklu agenta — a dodaje się go zwykle wtedy, gdy trzeba
+          mu wysłać zapytanie od razu."""
         agent = self._get_rfq_agent()
         if not agent:
             return
         try:
+            # Najpierw WYPCHNIJ kooperantów, potem pobieraj. Bez tego nowo dodany
+            # w RM_BAZA kooperant nie pojawiał się w portalu po ręcznym odświeżeniu
+            # — trzeba było czekać do minuty na agenta. Typowy scenariusz: dzwoni
+            # firma, chcemy jej od razu wysłać zapytanie, a jej tam jeszcze nie ma.
+            try:
+                agent.push_suppliers()
+            except Exception:
+                pass  # wypchnięcie to dodatek — nie może zablokować odczytu WYCENY
             n = agent.pull_full_state()
             try:
                 agent.pull_activity()

@@ -728,12 +728,40 @@ class RMSyncAgent:
                 except Exception:
                     pass  # rfq_activity może nie istnieć w starszej bazie
             else:
-                # portal pusty — kasujemy wszystko (same śmieci)
-                removed = con.execute('DELETE FROM rfq_results').rowcount
-                try:
-                    con.execute('DELETE FROM rfq_activity')
-                except Exception:
-                    pass
+                # PORTAL ZWRÓCIŁ PUSTO. Dwie możliwości, nie do odróżnienia
+                # z samej odpowiedzi:
+                #   a) faktycznie skasowano wszystkie RFQ — wtedy czyszczenie OK,
+                #   b) portal wystartował na PUSTEJ/INNEJ bazie (nieudany deploy,
+                #      config.json wskazujący nie ten plik, świeża instalacja).
+                #
+                # Przy (b) hurtowe DELETE kasuje CAŁĄ kolumnę WYCENA — i robi to
+                # automat chodzący co 10 minut, więc user nawet tego nie kliknął.
+                # Odtworzenie wymaga ponownej wysyłki wszystkiego do portalu.
+                #
+                # Dlatego: kasujemy tylko wtedy, gdy lokalnie też jest pusto
+                # (nic do stracenia). Gdy mamy dane, a portal nie — to podejrzane,
+                # zostawiamy nietknięte i zapisujemy ślad. Kosztem jest ewentualne
+                # przetrzymanie śmieci do czasu, aż ktoś to sprawdzi; korzyścią —
+                # brak cichej utraty danych.
+                ile_lokalnie = con.execute(
+                    'SELECT COUNT(*) FROM rfq_results').fetchone()[0]
+                if ile_lokalnie:
+                    print(f'reconcile: portal zwrocil 0 pozycji, a lokalnie jest '
+                          f'{ile_lokalnie} — NIE kasuje (podejrzenie pustej bazy '
+                          f'portalu). Sprawdz portal i config.json.', file=sys.stderr)
+                    self._set_setting(
+                        'rfq_last_error',
+                        f'reconcile wstrzymany: portal zwrocil 0 pozycji, '
+                        f'lokalnie {ile_lokalnie} — mozliwa pusta baza portalu')
+                    self._set_setting('rfq_last_error_at',
+                                      dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                    removed = 0
+                else:
+                    removed = con.execute('DELETE FROM rfq_results').rowcount
+                    try:
+                        con.execute('DELETE FROM rfq_activity')
+                    except Exception:
+                        pass
             con.commit()
         finally:
             con.close()
@@ -1015,11 +1043,36 @@ def main() -> int:
 
     exit_code = 0
 
+    # Agent chodzi z Task Schedulera przez sync_agent_hidden.vbs — BEZ OKNA
+    # KONSOLI, więc wszystko, co leci na stderr, przepada. Bez zapisu do bazy
+    # awaria (403 na kluczu, padnięty portal, zablokowany master.sqlite) jest
+    # dla użytkownika NIEWIDOCZNA: RM_BAZA umiało pokazać tylko „minęła godzina
+    # od ostatniego kontaktu", nigdy powodu. Zapisujemy więc ostatni błąd do
+    # settings — RM_BAZA czyta to i pokazuje konkret zamiast „brak danych".
+    def _zapisz_blad(opis: str, wyjatek: Exception) -> None:
+        tekst = f'{opis}: {type(wyjatek).__name__}: {wyjatek}'
+        print(f'BLAD {tekst}', file=sys.stderr)
+        try:
+            agent._set_setting('rfq_last_error', tekst[:500])
+            agent._set_setting('rfq_last_error_at',
+                               dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        except Exception:
+            pass        # nie udało się zapisać błędu — nie maskujemy nim pierwotnego
+
+    def _wyczysc_blad() -> None:
+        """Pełny cykl bez wpadki — kasujemy ślad, żeby stary błąd nie straszył."""
+        try:
+            if agent._setting('rfq_last_error', ''):
+                agent._set_setting('rfq_last_error', '')
+                agent._set_setting('rfq_last_error_at', '')
+        except Exception:
+            pass
+
     if args.full_state:
         try:
             print(f'Pelny stan pobrany: {agent.pull_full_state()} pozycji')
         except Exception as e:
-            print(f'BLAD pobierania pelnego stanu: {e}', file=sys.stderr)
+            _zapisz_blad('pobierania pelnego stanu', e)
             exit_code = 1
         return exit_code
 
@@ -1027,7 +1080,7 @@ def main() -> int:
         try:
             print(f'Reconcile: usunieto {agent.reconcile_results()} osieroconych rekordow')
         except Exception as e:
-            print(f'BLAD reconcile: {e}', file=sys.stderr)
+            _zapisz_blad('reconcile', e)
             exit_code = 1
         return exit_code
 
@@ -1035,14 +1088,14 @@ def main() -> int:
         try:
             print(f'Kooperanci wyslani: {agent.push_suppliers()}')
         except Exception as e:
-            print(f'BLAD kanalu kooperantow: {e}', file=sys.stderr)
+            _zapisz_blad('kanalu kooperantow', e)
             exit_code = 1
 
     if not args.suppliers_only:
         try:
             print(f'Wyniki pobrane: {agent.pull_results()}')
         except Exception as e:
-            print(f'BLAD kanalu wynikow: {e}', file=sys.stderr)
+            _zapisz_blad('kanalu wynikow', e)
             exit_code = 1
 
         # aktywność kooperantów — osobno, bo błąd tutaj nie może wywalić
@@ -1050,7 +1103,7 @@ def main() -> int:
         try:
             print(f'Aktywnosc kooperantow: {agent.pull_activity()}')
         except Exception as e:
-            print(f'BLAD kanalu aktywnosci: {e}', file=sys.stderr)
+            _zapisz_blad('kanalu aktywnosci', e)
             exit_code = 1
 
         # Automatyczne ponowienia — tylko dla RFQ z zaznaczonym auto_reminder.
@@ -1084,6 +1137,12 @@ def main() -> int:
         except Exception as e:
             print(f'BLAD reconcile (siatka): {e}', file=sys.stderr)
             # nie podnosimy exit_code — to tylko siatka, glowny sync juz przeszedl
+
+    # Cykl bez wpadki — kasujemy ślad po poprzednim błędzie, żeby RM_BAZA nie
+    # pokazywało nieaktualnego ostrzeżenia po tym, jak problem sam minął
+    # (np. portal wrócił po restarcie).
+    if exit_code == 0:
+        _wyczysc_blad()
 
     return exit_code
 
