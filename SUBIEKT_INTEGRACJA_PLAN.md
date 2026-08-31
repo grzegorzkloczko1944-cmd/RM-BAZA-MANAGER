@@ -1,8 +1,14 @@
-# Integracja RM_BAZA ↔ Subiekt GT — plan
+# Integracja RM_BAZA ↔ Subiekt nexo PRO — plan
 
-> **Status:** projekt, nic jeszcze nie zaimplementowane (stan 31.08.2026).
+> **Status:** projekt, nic jeszcze nie zaimplementowane (stan 31.08.2026,
+> zaktualizowano 01.09.2026 — użytkownik ma **nexo PRO**, nie GT, patrz sekcja 2).
 > Dokument powstał z rozmowy ustalającej zakres — zapisany, żeby nie zaczynać
 > od zera. Przed pisaniem kodu przeczytaj sekcję 5 (do rozstrzygnięcia).
+>
+> ⚠️ Ten plik pierwotnie zakładał Subiekt **GT** (Sfera, COM, 32-bit). Program
+> to **nexo PRO** — inny produkt InsERT, inna architektura integracji. Sekcja 2
+> i 6 przepisane pod nexo; reszta (4, 5, cel biznesowy) nie zależy od wersji
+> produktu i została bez zmian.
 
 ## 1. Po co to
 
@@ -27,26 +33,54 @@ RM_BAZA  ◄──(3) co wydano / co przyszło──┘
 3. **Subiekt → RM_BAZA** — dokumenty magazynowe: wydania do montażu (RW/WZ)
    i przyjęcia od poddostawców (PZ).
 
-## 2. Czym się łączyć — Sfera czy SQL
+## 2. Czym się łączyć — nexo PRO API, nie Sfera
 
-**Zasada: odczyt po SQL, zapis przez Sferę.**
+**Program to Subiekt nexo PRO — inny produkt niż GT, ze zupełnie innym
+mechanizmem integracji.** Sfera (COM, 32-bit) należy do linii GT i **dla nexo
+nie istnieje**. Właściwym i jedynym oficjalnym kanałem jest **nexo PRO API**
+(REST/HTTP), do którego dostęp jest już wykupiony (klucz API na koncie —
+sprawdzone 01.09.2026).
+
+**Zasada zostaje ta sama co dla GT, zmienia się tylko narzędzie: odczyt
+najprostszą dostępną drogą, zapis wyłącznie przez oficjalne API.**
 
 | operacja | kierunek | narzędzie | dlaczego |
 |---|---|---|---|
-| kartoteki towarów, ceny, stany | Subiekt → RM_BAZA | **SQL read-only** | szybkie, bez licencji, nic nie psuje |
-| kontrahenci (dostawcy) | Subiekt → RM_BAZA | **SQL read-only** | jw. |
-| dokumenty RW / WZ / PZ | Subiekt → RM_BAZA | **SQL read-only** | jw. |
-| **tworzenie kartoteki towaru** | RM_BAZA → Subiekt | **SFERA (COM)** | patrz niżej |
-| **zamówienia do dostawców** | RM_BAZA → Subiekt | **SFERA (COM)** | patrz niżej |
+| kartoteki towarów, ceny, stany | Subiekt → RM_BAZA | **nexo PRO API (GET)** | oficjalne, udokumentowane, bez ograniczeń bitowości |
+| kontrahenci (dostawcy) | Subiekt → RM_BAZA | **nexo PRO API (GET)** | jw. |
+| dokumenty RW / WZ / PZ | Subiekt → RM_BAZA | **nexo PRO API (GET)** | jw. |
+| **tworzenie kartoteki towaru** | RM_BAZA → Subiekt | **nexo PRO API (POST)** | patrz niżej |
+| **zamówienia do dostawców** | RM_BAZA → Subiekt | **nexo PRO API (POST)** | patrz niżej |
 
-**Dlaczego zapis TYLKO przez Sferę.** Dokument w Subiekcie to nie jeden wiersz
+**Dlaczego zapis TYLKO przez API.** Dokument w Subiekcie to nie jeden wiersz
 w tabeli — numeracja, stany magazynowe, rozrachunki i powiązania siedzą
-w kilkunastu tabelach, a część logiki jest w aplikacji, nie w bazie. Ręczny
-`INSERT` da dokument, który wygląda poprawnie do pierwszego remanentu.
-Insert nie wspiera takich modyfikacji: przy problemie zostajemy sami.
+w wielu tabelach, a część logiki jest w aplikacji, nie w bazie. Nawet gdyby
+dało się dobrać bezpośrednio do bazy nexo, ręczny zapis dałby dokument, który
+wygląda poprawnie do pierwszego remanentu — dokładnie ten sam problem, który
+przy GT wykluczał ręczny `INSERT`. Różnica jest tylko w narzędziu, którym się
+poprawnie zapisuje: przy GT to Sfera, przy nexo to REST API.
 
 To samo dotyczy kartotek towarów — to nie jest jeden rekord (grupy, jednostki
 miary, stawki VAT, cenniki, powiązania).
+
+**Czego NIE robimy:** bezpośredniego SQL do bazy nexo (jak przy GT).
+nexo PRO API jest projektowane jako *jedyny* wspierany kanał integracji —
+struktura bazy nexo nie jest publicznym kontraktem i może się zmienić między
+wersjami bez ostrzeżenia, inaczej niż w GT, gdzie odczyt SQL był
+utrwaloną, powszechnie stosowaną praktyką.
+
+**Skąd wziąć specyfikację API (do zrobienia w firmie, na miejscu z dostępem
+do konta InsERT):**
+1. `konto.insert.com.pl` → zakładka „Aplikacje" → InsERT API → specyfikacja
+   API dla poszczególnych produktów (endpointy, parametry, przykłady).
+2. Osobno: „Szczegółowa Dokumentacja Techniczna" (SDK) do nexo — struktura
+   danych i lista obiektów/metod programu, do pobrania z e-Pomocy technicznej
+   InsERT. Przydatna jako uzupełnienie specyfikacji REST, gdy trzeba
+   zrozumieć znaczenie pola, nie tylko jego nazwę w JSON.
+3. **Uwaga na starsze materiały w sieci** — od 14.06.2024 InsERT wymaga
+   nowego REST API zamiast wcześniejszych mechanizmów integracji; artykuły
+   i posty z forum sprzed tej daty mogą opisywać nieaktualny sposób
+   podłączenia.
 
 ## 3. Faktury: NIE przez Subiekta
 
@@ -121,34 +155,53 @@ Lepiej podjąć je teraz niż po pierwszym imporcie.
       tylko go odpytuje. RM_BAZA NIE MOŻE trzymać własnej wersji stanów — rozjadą
       się (por. `rfq_portal_url`, gdzie dwa źródła tej samej prawdy rozjechały się
       przy pierwszej zmianie).
-- [ ] **Licencja Sfery** — jest płatna, per stanowisko, dokupowana do Subiekta GT.
-      Bez niej zapis odpada i zostaje sam odczyt. **Sprawdzić PRZED planowaniem.**
+- [x] **Dostęp do nexo PRO API** — klucz API już wykupiony i aktywny (potwierdzone
+      01.09.2026), droga **oficjalna**: portal deweloperski InsERT przez
+      `konto.insert.com.pl` → „Moje produkty" → InsERT API → subskrypcja →
+      klucz kliencki + klucz prywatny (para kluczy, oba trzeba zachować przy
+      generowaniu). NIE przez rozwiązanie trzeciej firmy (np. Easy Nexo
+      Integrator/„Bridge" — osobna aplikacja z własnym REST API, inna droga,
+      nie tę wybrano).
+      Do zrobienia przed kodem: sprawdzić w portalu deweloperskim InsERT
+      dokładny zakres uprawnień subskrypcji (czy obejmuje zapis dokumentów
+      magazynowych i tworzenie kartotek, czy tylko odczyt — przy generowaniu
+      klucza wybiera się „Read/Write") oraz limity zapytań (rate limit).
 
-## 6. Pułapki techniczne (znane z tego środowiska)
+## 6. Pułapki techniczne (nexo PRO API)
 
-⚠️ **Sfera jest 32-bitowa i wymaga zainstalowanego Subiekta na maszynie.**
-Jeśli RM_BAZA chodzi na 64-bitowym Pythonie, wołanie COM wprost SIĘ NIE UDA —
-to ten sam problem co `tkinterdnd2` (win-x86 vs win-x64) i `Inventor32bitHost.exe`.
+**Cała ta sekcja pierwotnie opisywała pułapki Sfery (COM, 32-bit) — nie
+dotyczą nexo i zostały usunięte.** nexo PRO API to zwykłe REST/HTTP: żadnego
+problemu 32-bit vs 64-bit (jak przy `tkinterdnd2` czy `Inventor32bitHost.exe`),
+żadnego pośredniczącego procesu-mostu, żadnego ryzyka blokady przez
+Bitdefender na poziomie COM. RM_BAZA łączy się z API bezpośrednio, z tego
+samego procesu, niezależnie od bitowości Pythona.
 
-**Rozwiązanie:** osobny proces-most w 32-bit, zamiast wołania COM z RM_BAZA —
-analogicznie do `RM_SYNC_AGENT`, który pośredniczy między RM_BAZA a portalem RM_RFQ.
+Do sprawdzenia realnie dotyczące nexo:
 
-⚠️ **Bitdefender potrafi blokować operacje COM** (patrz historia z
-`Inventor32bitHost.exe`). Przy pierwszych testach sprawdzić to, zanim zacznie się
-szukać błędu w kodzie.
-
-⚠️ Python dogada się ze Sferą przez **`pywin32`** — ta sama biblioteka, której
-używa `RM_Transfer_Project_FULL.py` do Inventora. Technologia nie jest nowa
-w tym środowisku.
+- **Autoryzacja** — jak dokładnie klucz API jest przekazywany (nagłówek,
+  token OAuth, para klucz+sekret) i czy wymaga odnawiania (token z czasem
+  wygaśnięcia vs klucz stały).
+- **Format odpowiedzi i błędów** — JSON zwykle, ale trzeba sprawdzić strukturę
+  błędów walidacji (np. przy tworzeniu kartoteki z brakującym polem), żeby
+  komunikaty w RM_BAZA były czytelne, a nie surowym zrzutem odpowiedzi.
+- **Limity zapytań (rate limiting)** — jeśli API ogranicza liczbę wywołań na
+  minutę/godzinę, wpływa to na to, czy pobieranie stanów robić w pętli, czy
+  wsadowo (batch endpoint, jeśli istnieje).
+- **Środowisko testowe** — sprawdzić, czy nexo PRO API ma osobny adres/tryb
+  testowy (analogicznie do `BASE_URL_TEST` w kliencie KSeF, sekcja 3), żeby
+  pierwsze testy nie trafiały w prawdziwe dane magazynowe.
 
 ## 7. Pierwszy krok
 
-**Skrypt rozpoznawczy, nie integracja.** Podłączyć się read-only do bazy Subiekta
-i wypisać, co tam jest: struktura kartotek towarów, kontrahenci, dokumenty
-magazynowe, cenniki.
+**Skrypt rozpoznawczy, nie integracja.** Podłączyć się kluczem API (odczyt) do
+nexo PRO i wypisać, co tam jest: struktura kartotek towarów, kontrahenci,
+dokumenty magazynowe, cenniki — dokładnie jak dotąd, tylko przez wywołania
+GET zamiast zapytań SQL.
 
 Kilkanaście linijek, nic nie zmienia, a odpowiada na pytanie, czy mapowanie po
-numerze rysunku jest w ogóle wykonalne (sekcja 5). Dopiero po tym decyzja
-o Sferze i zapisie.
+numerze rysunku jest w ogóle wykonalne (sekcja 5), i przy okazji pokazuje
+realny kształt odpowiedzi API (pola, nazewnictwo) — potrzebny do zaplanowania
+zapisu w kroku drugim.
 
-Potrzebne: nazwa serwera SQL i bazy (zwykle `.\INSERTGT`, baza typu `Firma_XXX`).
+Potrzebne: dokumentacja nexo PRO API (endpointy, autoryzacja) + klucz API
+(już jest, patrz sekcja 5).
