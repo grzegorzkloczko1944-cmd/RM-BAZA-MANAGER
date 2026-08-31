@@ -22529,15 +22529,25 @@ class MainWindow(tk.Tk):
 
         rfq_activity ma wiersz na PARĘ (pozycja, kooperant), więc grupujemy po
         kooperancie: interesuje nas, czy w ogóle coś odpowiedział, nie na ile
-        pozycji. has_offer=1 znaczy „złożył ofertę na tę pozycję"; odmowa
-        („Nie wyceniam") nie ma tu własnej kolumny, ale portal usuwa takiego
-        kooperanta z listy oczekujących po swojej stronie — tutaj wychodzimy
-        z tego, co widać: brak oferty = wciąż czekamy."""
+        pozycji.
+
+        „Odpowiedział" to DWIE rzeczy: has_offer=1 (wycenił) ALBO has_declined=1
+        (świadomie odmówił, „Nie wyceniam"). Odmowa to też odpowiedź — nie ma
+        na co czekać, trzeba szukać kogoś innego. Wcześniej liczyliśmy tylko
+        oferty, więc kooperant po odmowie wisiał w „Do pilnowania" i w liczniku
+        badge'a bez końca."""
         try:
             con = self.db_manager.master_con if self.db_manager else None
             if not con:
                 return []
-            return con.execute("""
+            # has_declined dochodzi dopiero przy pierwszym cyklu agenta po
+            # aktualizacji — na starszej bazie kolumny jeszcze nie ma, więc
+            # zapytanie z nią wysypałoby całą listę. Sprawdzamy raz i budujemy
+            # warunek pasujący do tego, co jest w bazie.
+            kolumny = {r[1] for r in con.execute("PRAGMA table_info(rfq_activity)")}
+            odmowa = ("AND COALESCE(a.has_declined, 0) = 0"
+                      if 'has_declined' in kolumny else "")
+            return con.execute(f"""
                 SELECT r.rfq_code, r.rfq_id, a.supplier_name,
                        MIN(r.response_deadline) AS termin,
                        MAX(COALESCE(a.view_count, 0)) AS wejsc
@@ -22545,6 +22555,7 @@ class MainWindow(tk.Tk):
                   JOIN rfq_results r ON r.rfq_item_id = a.rfq_item_id
                  WHERE a.email_sent_at IS NOT NULL
                    AND COALESCE(a.has_offer, 0) = 0
+                   {odmowa}
                    AND r.supplier_name IS NULL          -- pozycja nierozstrzygnięta
                  GROUP BY r.rfq_code, r.rfq_id, a.supplier_name
                  ORDER BY termin IS NULL, termin, r.rfq_code, a.supplier_name
