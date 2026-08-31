@@ -6206,7 +6206,8 @@ class MainWindow(tk.Tk):
                 for r in master_con.execute(
                     """SELECT drawing_number, invitations_sent, suppliers_count,
                               offers_count, min_price, supplier_name, price,
-                              rfq_status, response_deadline, declined_count
+                              rfq_status, response_deadline, declined_count,
+                              files_updated_at, docs_notified_at
                        FROM rfq_results"""
                 ):
                     rfq_by_drawing[r[0]] = r
@@ -6703,6 +6704,36 @@ class MainWindow(tk.Tk):
             rfq_key = (item['drawing_no'] or '').strip() or (item['name'] or '').strip()
             _rfq_row = rfq_by_drawing.get(rfq_key)
             wycena_disp = self._format_wycena_cell(_rfq_row, stale=self._rfq_data_stale)
+            # Rysunek niezgodny z V:\ po wysłaniu (z ostatniego sprawdzenia
+            # świeżości) — trwały prefiks ⚠, żeby przetrwał przebudowę arkusza,
+            # nie tylko dorysowanie po wątku. Puste dopóki nic nie sprawdzono.
+            _fresh = getattr(self, '_rfq_freshness', None) or {}
+            _fi = _fresh.get(rfq_key)
+            if (wycena_disp and isinstance(_fi, dict)
+                    and not wycena_disp.startswith("⚠")):
+                # Rozróżniamy: jeśli pozycja JUŻ poszła do kooperanta (stan inny
+                # niż SZKIC), to zmieniony plik znaczy "kooperant wycenia STARĄ
+                # wersję" — komunikat wprost o ryzyku. Przy szkicu nikt jeszcze
+                # nie dostał, więc tylko "RYS ZMIENIONY".
+                _wyslano = not wycena_disp.lstrip("⚠ ").startswith("SZKIC")
+                if _fi.get('status') == 'changed':
+                    _pref = ("⚠ NIEAKTUALNY U KOOPERANTA · " if _wyslano
+                             else "⚠ RYS ZMIENIONY · ")
+                    wycena_disp = _pref + wycena_disp
+                elif _fi.get('status') == 'missing':
+                    wycena_disp = "⚠ RYS BRAK · " + wycena_disp
+
+            # Zaległe POWIADOMIENIE o aktualizacji dokumentacji (dane z portalu):
+            # dokumentację podmieniono, ale nie powiadomiono jeszcze kooperantów
+            # o TEJ wersji (files_updated_at > docs_notified_at). To osobny sygnał
+            # od zgodności plików — RM_BAZA może mieć pliki zgodne (już wysłane),
+            # a mimo to być zaległe powiadomienie. Żeby WYCENA nie wyglądała na
+            # „czysto", gdy jest coś do zrobienia. Doklejamy jako SUFFIX.
+            if wycena_disp and _rfq_row is not None and len(_rfq_row) > 11:
+                _fu = _rfq_row[10]      # files_updated_at
+                _dn = _rfq_row[11]      # docs_notified_at
+                if _fu and (not _dn or str(_dn) < str(_fu)) and "✉ DO POWIADOMIENIA" not in wycena_disp:
+                    wycena_disp = wycena_disp + " · ✉ DO POWIADOMIENIA"
 
             # Termin odpowiedzi zapamiętany per wiersz — _apply_row_highlights
             # koloruje po nim komórkę WYCENA (pomarańcz/czerwień). Trzymamy
@@ -7150,6 +7181,454 @@ class MainWindow(tk.Tk):
             traceback.print_exc()
 
         self._refresh_rmpak_calc()
+
+        # Sprawdzenie aktualności rysunków wysłanych do RFQ — ODROCZONE i w
+        # WĄTKU, żeby okno załadowało się natychmiast i można było od razu
+        # pracować. Wynik (⚠ przy zmienionych pozycjach) dorysuje się po chwili.
+        self._schedule_rfq_freshness_check()
+
+    # ------------------------------------------------------------------
+    # Aktualność rysunków wysłanych do RFQ
+    #
+    # Kooperant w portalu ma ZAMROŻONĄ KOPIĘ pliku (portal nie sięga do V:\).
+    # Gdy plik źródłowy na V:\ zmieni się po wysłaniu, portal dalej pokazuje
+    # starą wersję i NIC tego nie wykrywa. Tu sprawdzamy to lokalnie:
+    # rm_sync_agent zapisał odcisk (size/mtime/sha1) każdego wysłanego pliku,
+    # a check_drawing_freshness porównuje go z aktualnym stanem V:\ (hybryda
+    # mtime→hash: tanio, hash tylko dla podejrzanych). Portal NIETKNIĘTY.
+    #
+    # Sprawdzenie jest ODROCZONE (~4 s) i biegnie w wątku daemon — okno działa
+    # od razu. Wynik wraca do Tkinter przez self.after(0, ...).
+    # ------------------------------------------------------------------
+
+    # drawing_number → {'status','changed_files','missing_files'} z ost. sprawdzenia
+    _rfq_freshness = {}
+    _rfq_freshness_thread = None   # aktualnie biegnący checker (jeden naraz)
+
+    def _schedule_rfq_freshness_check(self):
+        """Planuje sprawdzenie aktualności rysunków RFQ za kilka sekund, w tle."""
+        try:
+            # anuluj poprzednie zaplanowane (szybkie kolejne Odśwież)
+            prev = getattr(self, '_rfq_freshness_after', None)
+            if prev:
+                self.after_cancel(prev)
+        except Exception:
+            pass
+        try:
+            self._rfq_freshness_after = self.after(4000, self._start_rfq_freshness_thread)
+        except Exception:
+            pass
+
+    def _start_rfq_freshness_thread(self):
+        """Zbiera pozycje RFQ z arkusza i odpala wątek liczący świeżość."""
+        # JEDEN checker naraz: przy kilku szybkich „Odśwież" i wolnym V:\ nie
+        # nabijamy wiszących wątków SMB. Jeśli poprzedni wciąż działa — odpuść,
+        # aktualny stan i tak zdąży się policzyć.
+        t = getattr(self, '_rfq_freshness_thread', None)
+        if t is not None and t.is_alive():
+            return
+
+        # (drawing_number, rfq_id, row_idx) dla wierszy, które SĄ w jakimś RFQ
+        pending = []
+        try:
+            master_con = self.db_manager.master_con if self.db_manager else None
+            if not master_con:
+                return
+            # liczba wierszy jak w reszcie kodu (get_total_rows nie ma w tej
+            # wersji tksheet) — _sheet_row_ids odzwierciedla widoczne wiersze
+            total_rows = len(getattr(self, '_sheet_row_ids', []) or [])
+            if not total_rows:
+                return
+        except Exception:
+            return
+
+        for row_idx in range(total_rows):
+            try:
+                wycena_val = str(self.sheet.get_cell_data(row_idx, self.WYCENA_COL) or "").strip()
+                if not wycena_val:
+                    continue   # nie w RFQ — nie ma czego sprawdzać
+                drawing_no = str(self.sheet.get_cell_data(row_idx, 0) or "").strip()
+                if not drawing_no:
+                    drawing_no = str(self.sheet.get_cell_data(row_idx, 1) or "").strip()
+                if not drawing_no:
+                    continue
+                row = master_con.execute(
+                    "SELECT rfq_id FROM rfq_results WHERE drawing_number=?",
+                    (drawing_no,)
+                ).fetchone()
+                if row and row[0] is not None:
+                    pending.append((drawing_no, int(row[0]), row_idx))
+            except Exception:
+                continue
+
+        if not pending:
+            return
+
+        t = threading.Thread(target=self._run_rfq_freshness_check,
+                             args=(pending,), daemon=True)
+        self._rfq_freshness_thread = t
+        t.start()
+
+    def _run_rfq_freshness_check(self, pending):
+        """WĄTEK: pyta agenta o świeżość per RFQ (lokalne I/O, bez sieci).
+        Wynik przekazuje z powrotem do GUI przez self.after(0, ...)."""
+        try:
+            from rm_sync_agent import RMSyncAgent
+            agent = RMSyncAgent(str(MASTER_PATH))
+        except Exception:
+            return   # integracja nieskonfigurowana — cicho, bez alarmu
+
+        # jeden call check_drawing_freshness per rfq_id (nie per pozycja)
+        by_rfq = {}
+        for _dn, rfq_id, _row in pending:
+            by_rfq.setdefault(rfq_id, None)
+        fresh_by_rfq = {}
+        for rfq_id in by_rfq:
+            try:
+                fresh_by_rfq[rfq_id] = agent.check_drawing_freshness(rfq_id) or {}
+            except Exception:
+                fresh_by_rfq[rfq_id] = {}
+
+        # drawing_number → info {status, changed_files, missing_files, rfq_id}
+        # row_idx → info (do naniesienia ⚠ na konkretną komórkę)
+        result = {}
+        rows_info = {}
+        for dn, rfq_id, row_idx in pending:
+            info = fresh_by_rfq.get(rfq_id, {}).get(dn)
+            if isinstance(info, dict) and info.get('status') in ('changed', 'missing'):
+                info = dict(info)          # kopia — dokładamy rfq_id do aktualizacji
+                info['rfq_id'] = rfq_id
+                result[dn] = info
+                rows_info[row_idx] = info
+
+        # Globalny licznik niezgodnych rysunków (wszystkie RFQ, nie tylko widoczne
+        # pozycje) — do badge'a w pasku. Ten sam wątek, więc bez dodatkowego I/O
+        # ponad to, co i tak liczymy. Błąd nie może wywalić głównego wyniku.
+        try:
+            stale_all = agent.all_stale_drawings()
+            stale_count = len(stale_all)
+        except Exception:
+            stale_count = None      # None = nie udało się policzyć, nie zmieniaj badge
+        # Globalny licznik ZALEGŁYCH POWIADOMIEŃ (tylko baza, bez SMB) — do badge'a.
+        try:
+            notify_count = len(agent.all_docs_to_notify())
+        except Exception:
+            notify_count = None
+
+        try:
+            self.after(0, lambda: self._apply_rfq_freshness(result, rows_info, stale_count, notify_count))
+        except Exception:
+            pass
+
+    def _apply_rfq_freshness(self, result, rows_info, stale_count=None, notify_count=None):
+        """GUI THREAD: nanosi ⚠ na komórki WYCENA + tooltip + zbiorczy komunikat.
+        result: {drawing_number: {status, changed_files, missing_files}}.
+        stale_count: globalna liczba niezgodnych rysunków do badge'a (None=pomiń).
+        notify_count: globalna liczba zaległych powiadomień do badge'a (None=pomiń)."""
+        self._rfq_freshness = result or {}
+        if stale_count is not None:
+            self._stale_count_global = stale_count
+        if notify_count is not None:
+            self._notify_count_global = notify_count
+        if stale_count is not None or notify_count is not None:
+            try:
+                self._refresh_rfq_badge()
+            except Exception:
+                pass
+        changed = {dn: i for dn, i in (result or {}).items() if i.get('status') == 'changed'}
+        missing = {dn: i for dn, i in (result or {}).items() if i.get('status') == 'missing'}
+
+        # ⚠ przy każdej pozycji: prefiks do komórki WYCENA (czysto wizualnie,
+        # bez ruszania bazy) + tło. RYS ZMIENIONY (żółte) vs RYS BRAK (czerwone).
+        try:
+            for row_idx, info in (rows_info or {}).items():
+                st = info.get('status')
+                val = str(self.sheet.get_cell_data(row_idx, self.WYCENA_COL) or "")
+                # "nieaktualny u kooperanta" tylko gdy pozycja już poszła (nie SZKIC)
+                _wyslano = not val.lstrip("⚠ ").startswith("SZKIC")
+                if st == 'changed':
+                    prefix = ("⚠ NIEAKTUALNY U KOOPERANTA · " if _wyslano
+                              else "⚠ RYS ZMIENIONY · ")
+                    bg, fg = "#fff3cd", "#7a5c00"
+                else:
+                    prefix = "⚠ RYS BRAK · "
+                    bg, fg = "#f8d7da", "#842029"
+                if not val.startswith("⚠"):
+                    self.sheet.set_cell_data(row_idx, self.WYCENA_COL, prefix + val)
+                try:
+                    self.sheet.highlight_cells(row=row_idx, column=self.WYCENA_COL,
+                                               bg=bg, fg=fg)
+                except Exception:
+                    pass
+            self.sheet.refresh()
+        except Exception:
+            pass
+
+        # Zamiast messageboxa — okno z TABELKĄ wszystkich niezgodnych pozycji,
+        # z zaznaczaniem i przyciskiem „Aktualizuj w RFQ" (patrz metoda niżej).
+        if result:
+            self._show_rfq_freshness_dialog(result)
+
+    def _show_rfq_freshness_dialog(self, result):
+        """Okno z tabelką pozycji niezgodnych ze stanem na dysku + akcja
+        aktualizacji. result: {drawing_number: {status, changed_files,
+        missing_files, rfq_id}}."""
+        # nie dubluj okna
+        existing = getattr(self, '_rfq_fresh_dialog', None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.destroy()
+            except Exception:
+                pass
+
+        dlg = tk.Toplevel(self)
+        self._rfq_fresh_dialog = dlg
+        dlg.title("Rysunki niezgodne ze stanem na dysku")
+        dlg.geometry("720x420")
+        dlg.transient(self)
+
+        tk.Label(dlg, text="Te pozycje różnią się od dokumentacji wysłanej do RFQ",
+                 font=("Arial", 12, "bold")).pack(pady=(12, 2))
+        tk.Label(dlg, text="Kooperant widzi jeszcze STARĄ wersję. Zaznacz i kliknij "
+                           "„Aktualizuj w RFQ”, aby wysłać aktualne pliki.",
+                 fg="#555", justify=tk.CENTER).pack(pady=(0, 8))
+
+        # tabela: [x] | Rysunek | Stan | Pliki
+        box = tk.Frame(dlg, bd=1, relief=tk.SOLID)
+        box.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+        canvas = tk.Canvas(box, borderwidth=0, highlightthickness=0)
+        scroll = ttk.Scrollbar(box, orient="vertical", command=canvas.yview)
+        inner = tk.Frame(canvas)
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # nagłówek tabeli
+        hdr = tk.Frame(inner, bg="#f0f0f0")
+        hdr.pack(fill=tk.X)
+        tk.Label(hdr, text="", width=3, bg="#f0f0f0").pack(side=tk.LEFT)
+        tk.Label(hdr, text="Rysunek", width=20, anchor="w", bg="#f0f0f0",
+                 font=("Arial", 9, "bold")).pack(side=tk.LEFT)
+        tk.Label(hdr, text="Stan", width=16, anchor="w", bg="#f0f0f0",
+                 font=("Arial", 9, "bold")).pack(side=tk.LEFT)
+        tk.Label(hdr, text="Pliki", anchor="w", bg="#f0f0f0",
+                 font=("Arial", 9, "bold")).pack(side=tk.LEFT)
+
+        row_vars = {}   # drawing_number -> (BooleanVar, info)
+        for dn in sorted(result):
+            info = result[dn]
+            st = info.get('status')
+            # missing NIE zaznaczamy domyślnie — brakującego pliku nie da się
+            # wysłać, a replace_snapshot bez niego skasowałby go w portalu; to
+            # świadoma decyzja usera, nie masowa akcja.
+            default_on = (st == 'changed')
+            files = (info.get('changed_files') if st == 'changed'
+                     else info.get('missing_files')) or []
+            stan_txt = "zmieniony" if st == 'changed' else "BRAK pliku"
+            stan_fg = "#7a5c00" if st == 'changed' else "#842029"
+
+            r = tk.Frame(inner)
+            r.pack(fill=tk.X, pady=1)
+            v = tk.BooleanVar(value=default_on)
+            row_vars[dn] = (v, info)
+            tk.Checkbutton(r, variable=v, width=2).pack(side=tk.LEFT)
+            tk.Label(r, text=dn, width=20, anchor="w").pack(side=tk.LEFT)
+            tk.Label(r, text=stan_txt, width=16, anchor="w",
+                     fg=stan_fg, font=("Arial", 9, "bold")).pack(side=tk.LEFT)
+            tk.Label(r, text=", ".join(files) or "—", anchor="w",
+                     fg="#555").pack(side=tk.LEFT)
+
+        # przyciski
+        btns = tk.Frame(dlg)
+        btns.pack(fill=tk.X, padx=12, pady=(0, 12))
+
+        def _zaznacz_wszystkie(val):
+            for v, info in row_vars.values():
+                # brakujących nie zaznaczamy hurtem — nie ma czego wysłać
+                if val and info.get('status') != 'changed':
+                    continue
+                v.set(val)
+
+        def _aktualizuj():
+            wybrane = [(dn, info) for dn, (v, info) in row_vars.items() if v.get()]
+            wybrane = [(dn, info) for dn, info in wybrane if info.get('status') == 'changed']
+            if not wybrane:
+                messagebox.showinfo("Aktualizacja RFQ",
+                                    "Nie zaznaczono pozycji do aktualizacji.\n"
+                                    "(Pozycje BRAK pliku wymagają ręcznej decyzji.)",
+                                    parent=dlg)
+                return
+            dlg.destroy()
+            self._rfq_fresh_dialog = None
+            self._update_drawings_in_rfq(wybrane)
+
+        tk.Button(btns, text="↻ Aktualizuj zaznaczone w RFQ", command=_aktualizuj,
+                  bg="#2a7a2a", fg="white").pack(side=tk.RIGHT)
+        tk.Button(btns, text="Odznacz wszystkie",
+                  command=lambda: _zaznacz_wszystkie(False)).pack(side=tk.LEFT)
+        tk.Button(btns, text="Zaznacz zmienione",
+                  command=lambda: _zaznacz_wszystkie(True)).pack(side=tk.LEFT, padx=(6, 0))
+        tk.Button(btns, text="Zamknij",
+                  command=lambda: (dlg.destroy(), setattr(self, '_rfq_fresh_dialog', None))
+                  ).pack(side=tk.RIGHT, padx=(0, 8))
+
+        try:
+            self._center_on_app(dlg)
+        except Exception:
+            pass
+
+    def _update_drawings_in_rfq(self, wybrane):
+        """Wysyła PEŁNY aktualny komplet plików wybranych pozycji do RFQ
+        (replace_snapshot). Po sukcesie proponuje mail do kooperantów.
+        wybrane: [(drawing_number, info{rfq_id,...}), ...]."""
+        agent = self._get_rfq_agent()
+        if agent is None:
+            return
+
+        ok, errors, updated = [], [], []
+        for dn, info in wybrane:
+            rfq_id = info.get('rfq_id')
+            if not rfq_id:
+                errors.append(f"{dn}: brak powiązania z RFQ")
+                continue
+            try:
+                # pełny komplet = ścieżki z odcisków, które NADAL istnieją na V:\
+                paths = [p for p in agent.pushed_paths(rfq_id, dn) if os.path.isfile(p)]
+                if not paths:
+                    errors.append(f"{dn}: brak plików na dysku do wysłania")
+                    continue
+                resp = agent.push_drawing(rfq_id=rfq_id, drawing_number=dn,
+                                          file_paths=paths, replace_snapshot=True)
+                if resp.get('errors'):
+                    errors.append(f"{dn}: {'; '.join(resp['errors'][:3])}")
+                else:
+                    ok.append(dn)
+                    updated.append((rfq_id, dn))
+            except Exception as e:
+                errors.append(f"{dn}: {e}")
+
+        # odśwież widok (⚠ znika dla zaktualizowanych — agent zapisał nowe odciski)
+        try:
+            agent.pull_full_state()
+        except Exception:
+            pass
+        try:
+            self.refresh_data()
+        except Exception:
+            pass
+
+        msg = f"Zaktualizowano {len(ok)} z {len(wybrane)} pozycji w RFQ."
+        if errors:
+            messagebox.showwarning("Aktualizacja RFQ",
+                                   msg + "\n\nBłędy:\n" + "\n".join(errors[:10]),
+                                   parent=self)
+        elif ok:
+            messagebox.showinfo("Aktualizacja RFQ", msg, parent=self)
+
+        # Mail do kooperantów — pytamy (decyzja usera), tylko dla pozycji
+        # faktycznie zaktualizowanych i tylko gdy zaproszenia już poszły.
+        if updated:
+            self._maybe_notify_suppliers_after_update(agent, updated)
+
+    def _maybe_notify_suppliers_after_update(self, agent, updated):
+        """Po udanej aktualizacji plików pyta usera, czy wysłać kooperantom mail
+        o zmianie dokumentacji. updated: [(rfq_id, drawing_number), ...]. Portal
+        sam ograniczy wysyłkę do zaproszonych — jeśli to szkic, po prostu nic nie
+        wyśle (notified=0), więc pytanie jest bezpieczne."""
+        # grupuj rysunki per RFQ
+        by_rfq = {}
+        for rfq_id, dn in updated:
+            by_rfq.setdefault(rfq_id, []).append(dn)
+
+        rysunki = sorted({dn for _r, dn in updated})
+        if not messagebox.askyesno(
+                "Powiadomić kooperantów?",
+                "Zaktualizowano dokumentację pozycji:\n\n"
+                + "\n".join(f"  • {d}" for d in rysunki[:15])
+                + ("" if len(rysunki) <= 15 else f"\n  … i {len(rysunki)-15} więcej")
+                + "\n\nWysłać kooperantom (którzy dostali już zapytanie) e-mail "
+                  "z informacją, że dokumentacja się zmieniła?",
+                parent=self):
+            return
+
+        total_sent, all_errors = 0, []
+        for rfq_id, dns in by_rfq.items():
+            try:
+                res = agent.notify_doc_update(rfq_id, dns)
+                total_sent += res.get('notified', 0)
+                all_errors.extend(res.get('errors', []) or [])
+            except Exception as e:
+                all_errors.append(f"RFQ {rfq_id}: {e}")
+
+        if all_errors:
+            messagebox.showwarning(
+                "Powiadomienie kooperantów",
+                f"Wysłano {total_sent} powiadomień.\n\nProblemy:\n"
+                + "\n".join(all_errors[:10]), parent=self)
+        elif total_sent:
+            messagebox.showinfo("Powiadomienie kooperantów",
+                                f"Wysłano {total_sent} powiadomień do kooperantów.",
+                                parent=self)
+        else:
+            messagebox.showinfo(
+                "Powiadomienie kooperantów",
+                "Nie wysłano żadnego maila — te pozycje nie były jeszcze "
+                "rozesłane do kooperantów (szkic albo brak zaproszeń).",
+                parent=self)
+
+    def _notify_doc_update_single(self, rfq_id, drawing_number, parent=None):
+        """Wyślij kooperantom mail o aktualizacji dokumentacji jednej pozycji —
+        BEZ ponownej podmiany plików. Dla przypadku „pliki już podmienione, ale
+        mail nie poszedł" (user kliknął wcześniej „nie" albo wysyłka padła)."""
+        agent = self._get_rfq_agent()
+        if agent is None:
+            return
+        if not messagebox.askyesno(
+                "Powiadomić kooperantów?",
+                f"Wysłać kooperantom (którzy dostali już zapytanie) e-mail, że "
+                f"dokumentacja pozycji {drawing_number} została zaktualizowana?",
+                parent=parent or self):
+            return
+        try:
+            res = agent.notify_doc_update(rfq_id, [drawing_number])
+        except Exception as e:
+            messagebox.showwarning("Powiadomienie kooperantów",
+                                   f"Nie udało się wysłać:\n{e}", parent=parent or self)
+            return
+        n = res.get('notified', 0)
+        errs = res.get('errors', []) or []
+        # odśwież docs_notified_at (znacznik ✉ znika z WYCENA i banera)
+        try:
+            agent.pull_full_state()
+        except Exception:
+            pass
+        # zamknij okno wyceny (baner był w nim) i przerysuj arkusz
+        try:
+            if parent is not None and parent.winfo_exists():
+                self._wycena_dialog = None
+                parent.destroy()
+        except Exception:
+            pass
+        try:
+            self.refresh_data()
+        except Exception:
+            pass
+        if errs:
+            messagebox.showwarning("Powiadomienie kooperantów",
+                                   f"Wysłano {n} powiadomień.\n\nProblemy:\n"
+                                   + "\n".join(errs[:10]), parent=self)
+        elif n:
+            messagebox.showinfo("Powiadomienie kooperantów",
+                                f"Wysłano {n} powiadomień do kooperantów.",
+                                parent=self)
+        else:
+            messagebox.showinfo("Powiadomienie kooperantów",
+                                "Nie wysłano — ta pozycja nie była jeszcze rozesłana "
+                                "do kooperantów (szkic albo brak zaproszeń).",
+                                parent=self)
 
     def _refresh_rmpak_calc(self):
         """Odśwież kolory w oknie Kalkulatora RMPAK jeśli jest otwarte."""
@@ -21908,7 +22387,11 @@ class MainWindow(tk.Tk):
                 self.rfq_badge.pack_forget()
                 return
             rows = self._rfq_pending_rows()
-            if not rows:
+            stale_n = getattr(self, '_stale_count_global', 0) or 0
+            notify_n = getattr(self, '_notify_count_global', 0) or 0
+            # Badge znika tylko gdy NIC nie wymaga uwagi: ani oczekujących
+            # kooperantów, ani rysunków do podmiany, ani zaległych powiadomień.
+            if not rows and not stale_n and not notify_n:
                 self.rfq_badge.pack_forget()
                 return
             from datetime import datetime as _dt, date as _date
@@ -21924,10 +22407,29 @@ class MainWindow(tk.Tk):
                 # „Do pilnowania" i portalem RM_RFQ.
                 if dni <= 3:
                     pilne += 1
-            txt = f"RFQ: {len(rows)} oczekuje"
-            if pilne:
-                txt += f" ({pilne} pilne)"
-            self.rfq_badge.config(text=txt, fg="#e74c3c" if pilne else "#f39c12")
+            # Nagłówek zależny od tego, co jest: przy zero oczekujących ale
+            # obecnych rysunkach do podmiany nie piszemy mylącego "0 oczekuje".
+            if rows:
+                txt = f"RFQ: {len(rows)} oczekuje"
+                if pilne:
+                    txt += f" ({pilne} pilne)"
+            else:
+                txt = "RFQ"
+            # Liczba niezgodnych rysunków (do podmiany) — GLOBALNA, po wszystkich
+            # RFQ. Liczona w tle przy Odśwież (all_stale_drawings) i zapamiętana
+            # w self._stale_count_global; badge tylko odczytuje (bez SMB I/O tutaj,
+            # żeby nie blokować paska).
+            stale_n = getattr(self, '_stale_count_global', 0) or 0
+            if stale_n:
+                txt += f" · ⚠ {stale_n} do podmiany"
+            # Zaległe powiadomienia (dokumentacja podmieniona, kooperant nie wie)
+            # — GLOBALNE, liczone w tle (all_docs_to_notify, tylko baza).
+            notify_n = getattr(self, '_notify_count_global', 0) or 0
+            if notify_n:
+                txt += f" · ✉ {notify_n} do powiadomienia"
+            # kolor: czerwony gdy pilne / do podmiany / do powiadomienia, inaczej żółty
+            self.rfq_badge.config(text=txt,
+                                  fg="#e74c3c" if (pilne or stale_n or notify_n) else "#f39c12")
             # LEFT, tuż za kalkulatorem materiału (rodzicem jest search_frame).
             # Nie RIGHT — przy mniejszych monitorach badge uciekałby poza
             # widoczny obszar okna. pady=2, bo w tym pasku przyciski też mają 2.
@@ -22002,7 +22504,10 @@ class MainWindow(tk.Tk):
 
         dlg = tk.Toplevel(self)
         dlg.title("RFQ — do pilnowania")
-        dlg.geometry("720x420")
+        # Wyższe okno — mieszczą się DWIE tabelki (kooperanci + rysunki do
+        # podmiany). minsize pozwala użytkownikowi zwęzić, ale nie ukryć sekcji.
+        dlg.geometry("760x640")
+        dlg.minsize(700, 480)
         dlg.transient(self)
 
         tk.Label(dlg, text="Kooperanci, którzy nie odpowiedzieli",
@@ -22011,7 +22516,9 @@ class MainWindow(tk.Tk):
                  fg="#666", font=("Arial", 8)).pack(pady=(0, 8))
 
         cols = ("rfq", "kooperant", "termin", "dni", "wejscia")
-        tree = ttk.Treeview(dlg, columns=cols, show="headings", height=12)
+        # height mniejsze (8) — pierwsza tabela nie zajmuje całej wysokości, żeby
+        # druga sekcja (rysunki do podmiany) miała gdzie się pokazać.
+        tree = ttk.Treeview(dlg, columns=cols, show="headings", height=8)
         for c, t, w in (("rfq", "Zapytanie", 130), ("kooperant", "Kooperant", 160),
                         ("termin", "Termin", 100), ("dni", "Zostało", 90),
                         ("wejscia", "Wejścia", 110)):
@@ -22043,14 +22550,28 @@ class MainWindow(tk.Tk):
                 kod, nazwa, str(term)[:10] if term else "—", opis,
                 f"{wejsc}×" if wejsc else "nie otworzył"))
             rfq_ids[iid] = rid
-        tree.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 6))
+        # BEZ expand — stała wysokość (height=8), żeby druga sekcja miała miejsce.
+        tree.pack(fill=tk.X, padx=14, pady=(0, 6))
 
         tk.Label(dlg, text="„nie otworzył” po kilku dniach zwykle znaczy, "
                            "że mail trafił do spamu — nie brak zainteresowania.",
                  fg="#666", font=("Arial", 8), anchor="w").pack(fill=tk.X, padx=14)
 
+        # Przyciski PRZYPIĘTE DO DOŁU (side=BOTTOM przed sekcją stale) — dzięki
+        # temu zawsze widoczne, niezależnie od tego, ile urośnie tabelka rysunków.
         btns = tk.Frame(dlg)
-        btns.pack(fill=tk.X, padx=14, pady=10)
+        btns.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=10)
+
+        # --- Sekcja: rysunki niezgodne ze stanem na dysku (do podmiany) ---
+        # Kontener wypełni wątek po policzeniu świeżości (SMB bywa wolne, nie
+        # blokujemy otwarcia panelu). expand=True — sekcja bierze wolną przestrzeń
+        # między tabelą kooperantów a przyciskami (które są przypięte do dołu).
+        stale_wrap = tk.Frame(dlg)
+        stale_wrap.pack(fill=tk.BOTH, expand=True, padx=14, pady=(4, 0))
+        _stale_loading = tk.Label(stale_wrap, text="Sprawdzam aktualność rysunków na dysku…",
+                                  fg="#888", font=("Arial", 8), anchor="w")
+        _stale_loading.pack(fill=tk.X)
+        self._build_stale_section_async(dlg, stale_wrap, _stale_loading)
 
         def _idz_do_rfq():
             """Otwiera zapytanie w portalu — tam jest przycisk ponowienia
@@ -22070,6 +22591,192 @@ class MainWindow(tk.Tk):
         tk.Button(btns, text="Zamknij", command=dlg.destroy, width=14).pack(side=tk.LEFT)
 
         self._center_on_app(dlg)
+
+    def _build_stale_section_async(self, dlg, wrap, loading_label):
+        """W wątku liczy pozycje DO PODMIANY (all_stale_drawings, SMB I/O) oraz
+        DO POWIADOMIENIA (all_docs_to_notify, tylko baza) i po fakcie dorysowuje
+        w panelu „Do pilnowania" DWIE osobne tabelki z przyciskami. Nie blokuje
+        otwarcia panelu."""
+        def worker():
+            try:
+                from rm_sync_agent import RMSyncAgent
+                agent = RMSyncAgent(str(MASTER_PATH))
+                stale = agent.all_stale_drawings()
+            except Exception:
+                stale = []
+            try:
+                agent2 = RMSyncAgent(str(MASTER_PATH))
+                notify = agent2.all_docs_to_notify()
+            except Exception:
+                notify = []
+            try:
+                self.after(0, lambda: _render(stale, notify))
+            except Exception:
+                pass
+
+        def _render(stale, notify):
+            if not (dlg.winfo_exists() and wrap.winfo_exists()):
+                return
+            try:
+                loading_label.destroy()
+            except Exception:
+                pass
+            # obie tabelki budujemy z osobnych metod (czytelniej); każda sama
+            # decyduje, czy się pokazać (pusta lista = brak sekcji).
+            self._render_stale_table(dlg, wrap, stale)
+            self._render_notify_table(dlg, wrap, notify)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _render_stale_table(self, dlg, wrap, stale):
+        """Tabelka „Do podmiany" — rysunki niezgodne ze stanem na dysku."""
+        if not stale:
+            return
+        tk.Label(wrap, text=f"⚠ Do podmiany ({len(stale)}) — rysunki niezgodne ze "
+                            f"stanem na dysku (kooperant ma starą wersję):",
+                 font=("Arial", 10, "bold"), fg="#7a5c00", anchor="w"
+                 ).pack(fill=tk.X, pady=(6, 2))
+
+        cols = ("rys", "rfq", "stan", "pliki")
+        tree = ttk.Treeview(wrap, columns=cols, show="headings", height=min(6, len(stale)))
+        for c, t, w in (("rys", "Rysunek", 150), ("rfq", "RFQ", 70),
+                        ("stan", "Stan", 110), ("pliki", "Pliki", 300)):
+            tree.heading(c, text=t); tree.column(c, width=w, anchor="w")
+        tree.tag_configure("changed", background="#fff3cd")
+        tree.tag_configure("missing", background="#f8d7da")
+
+        row_meta = {}
+        for s in sorted(stale, key=lambda x: (x['status'] != 'changed', x['drawing_number'])):
+            st = s['status']
+            files = s['changed_files'] if st == 'changed' else s['missing_files']
+            stan_txt = "zmieniony" if st == 'changed' else "BRAK pliku"
+            iid = tree.insert("", tk.END, tags=(st,), values=(
+                s['drawing_number'], s['rfq_id'], stan_txt, ", ".join(files) or "—"))
+            row_meta[iid] = s
+        tree.pack(fill=tk.X, pady=(0, 4))
+
+        sbtns = tk.Frame(wrap)
+        sbtns.pack(fill=tk.X, pady=(0, 8))
+
+        def _aktualizuj_zazn():
+            wybrane = []
+            for iid in tree.selection():
+                s = row_meta.get(iid)
+                if s and s['status'] == 'changed':
+                    wybrane.append((s['drawing_number'],
+                                    {'rfq_id': s['rfq_id'], 'status': 'changed',
+                                     'changed_files': s['changed_files']}))
+            if not wybrane:
+                messagebox.showinfo("Aktualizacja RFQ",
+                                    "Zaznacz pozycje ze stanem „zmieniony”.\n"
+                                    "(„BRAK pliku” wymaga ręcznej decyzji.)", parent=dlg)
+                return
+            dlg.destroy()
+            self._update_drawings_in_rfq(wybrane)
+
+        def _aktualizuj_wszystkie():
+            wybrane = [(s['drawing_number'],
+                        {'rfq_id': s['rfq_id'], 'status': 'changed',
+                         'changed_files': s['changed_files']})
+                       for s in stale if s['status'] == 'changed']
+            if not wybrane:
+                messagebox.showinfo("Aktualizacja RFQ",
+                                    "Brak pozycji „zmieniony” do aktualizacji.", parent=dlg)
+                return
+            dlg.destroy()
+            self._update_drawings_in_rfq(wybrane)
+
+        tk.Button(sbtns, text="↻ Aktualizuj zaznaczone", command=_aktualizuj_zazn,
+                  bg="#2a7a2a", fg="white").pack(side=tk.LEFT)
+        tk.Button(sbtns, text="↻ Aktualizuj wszystkie zmienione",
+                  command=_aktualizuj_wszystkie).pack(side=tk.LEFT, padx=(6, 0))
+
+    def _render_notify_table(self, dlg, wrap, notify):
+        """Tabelka „Do powiadomienia" — pozycje z zaległym mailem o aktualizacji
+        dokumentacji (files_updated_at > docs_notified_at). Przycisk „Powiadom"
+        wysyła (per kooperant) i zamyka panel."""
+        if not notify:
+            return
+        tk.Label(wrap, text=f"✉ Do powiadomienia ({len(notify)}) — dokumentacja "
+                            f"podmieniona, kooperant jeszcze nieinformowany:",
+                 font=("Arial", 10, "bold"), fg="#1f5fa9", anchor="w"
+                 ).pack(fill=tk.X, pady=(8, 2))
+
+        cols = ("rfq", "rys", "nazwa", "kiedy")
+        tree = ttk.Treeview(wrap, columns=cols, show="headings", height=min(6, len(notify)))
+        for c, t, w in (("rfq", "RFQ", 110), ("rys", "Rysunek", 150),
+                        ("nazwa", "Nazwa", 200), ("kiedy", "Podmieniono", 130)):
+            tree.heading(c, text=t); tree.column(c, width=w, anchor="w")
+        tree.tag_configure("todo", background="#e7f0fb")
+
+        row_meta = {}
+        for n in notify:
+            iid = tree.insert("", tk.END, tags=("todo",), values=(
+                n.get('rfq_code') or n['rfq_id'], n['drawing_number'],
+                n.get('item_name') or "—", str(n.get('files_updated_at') or "")[:16]))
+            row_meta[iid] = n
+        tree.pack(fill=tk.X, pady=(0, 4))
+
+        nbtns = tk.Frame(wrap)
+        nbtns.pack(fill=tk.X, pady=(0, 8))
+
+        def _zbierz(iids):
+            # grupuj drawing_number per rfq_id (endpoint powiadamia per RFQ)
+            by_rfq = {}
+            for iid in iids:
+                n = row_meta.get(iid)
+                if n:
+                    by_rfq.setdefault(n['rfq_id'], []).append(n['drawing_number'])
+            return by_rfq
+
+        def _powiadom(by_rfq):
+            if not by_rfq:
+                messagebox.showinfo("Powiadomienie", "Nie zaznaczono pozycji.", parent=dlg)
+                return
+            agent = self._get_rfq_agent()
+            if agent is None:
+                return
+            if not messagebox.askyesno(
+                    "Powiadomić kooperantów?",
+                    "Wysłać kooperantom e-mail o zmianie dokumentacji zaznaczonych "
+                    "pozycji? Każdy dostanie jeden mail ze swoimi pozycjami.",
+                    parent=dlg):
+                return
+            total, errs = 0, []
+            for rfq_id, dns in by_rfq.items():
+                try:
+                    res = agent.notify_doc_update(rfq_id, dns)
+                    total += res.get('notified', 0)
+                    errs.extend(res.get('errors', []) or [])
+                except Exception as e:
+                    errs.append(f"RFQ {rfq_id}: {e}")
+            try:
+                agent.pull_full_state()          # odśwież docs_notified_at
+            except Exception:
+                pass
+            dlg.destroy()
+            try:
+                self.refresh_data()              # znacznik ✉ znika z WYCENA
+            except Exception:
+                pass
+            if errs:
+                messagebox.showwarning("Powiadomienie",
+                                       f"Wysłano {total}.\n\nProblemy:\n" + "\n".join(errs[:10]),
+                                       parent=self)
+            elif total:
+                messagebox.showinfo("Powiadomienie",
+                                    f"Wysłano {total} powiadomień do kooperantów.", parent=self)
+            else:
+                messagebox.showinfo("Powiadomienie",
+                                    "Nie wysłano — te pozycje nie były jeszcze rozesłane "
+                                    "do kooperantów (szkic albo brak zaproszeń).", parent=self)
+
+        tk.Button(nbtns, text="✉ Powiadom zaznaczone",
+                  command=lambda: _powiadom(_zbierz(tree.selection())),
+                  bg="#1f5fa9", fg="white").pack(side=tk.LEFT)
+        tk.Button(nbtns, text="✉ Powiadom wszystkie",
+                  command=lambda: _powiadom(_zbierz(list(row_meta.keys())))
+                  ).pack(side=tk.LEFT, padx=(6, 0))
 
     def _center_on_app(self, dialog):
         """Ustawia okno dialogowe na ŚRODKU okna RM_BAZA — także gdy aplikacja
@@ -22295,7 +23002,7 @@ class MainWindow(tk.Tk):
                           min_price, supplier_name, price, currency, lead_time_days,
                           offer_notes, decided_at, synced_at, rfq_id,
                           viewers_count, seen_item_count, last_viewed_at,
-                          rfq_item_id
+                          rfq_item_id, files_updated_at, docs_notified_at
                    FROM rfq_results WHERE drawing_number = ?""",
                 (drawing_no,)
             ).fetchone()
@@ -22328,7 +23035,8 @@ class MainWindow(tk.Tk):
          invitations_sent, suppliers_count, offers_count, min_price,
          supplier_name, price, currency, lead_time_days, offer_notes,
          decided_at, synced_at, rfq_id,
-         viewers_count, seen_item_count, last_viewed_at, rfq_item_id) = data
+         viewers_count, seen_item_count, last_viewed_at, rfq_item_id,
+         files_updated_at, docs_notified_at) = data
 
         # Tylko jedno okno Wyceny naraz — kliknięcie innego detalu ZASTĘPUJE
         # poprzednie (inaczej niż Casting, który podnosi istniejące): user
@@ -22361,6 +23069,88 @@ class MainWindow(tk.Tk):
         tk.Label(dialog, text=f"{rfq_code or ''}  {rfq_title or ''}"
                               f"{f'   (projekt {project_number})' if project_number else ''}",
                  fg="#555").pack(pady=(0, 10))
+
+        # ⚠ Rysunek na dysku różni się od wysłanego snapshotu (z ostatniego
+        # sprawdzenia świeżości). Kooperant widzi jeszcze starą wersję — pokazujemy
+        # KTÓRE pliki, żeby user wiedział, co ponownie wysłać. Cicho, gdy zgodne.
+        _fi = (getattr(self, '_rfq_freshness', None) or {}).get(drawing_no)
+        if isinstance(_fi, dict) and _fi.get('status') in ('changed', 'missing'):
+            _is_changed = _fi['status'] == 'changed'
+            if _is_changed:
+                _files = _fi.get('changed_files') or []
+                _hdr = "⚠ Rysunek zmieniony na dysku PO wysłaniu — kooperant widzi starą wersję."
+                _bg, _fg = "#fff3cd", "#7a5c00"
+            else:
+                _files = _fi.get('missing_files') or []
+                _hdr = "⚠ Brak pliku na dysku (skasowany lub przemianowany?)."
+                _bg, _fg = "#f8d7da", "#842029"
+
+            warn = tk.Frame(dialog, bg=_bg, bd=1, relief=tk.SOLID)
+            warn.pack(fill=tk.X, padx=14, pady=(0, 8))
+            tk.Label(warn, text=_hdr, bg=_bg, fg=_fg, justify=tk.LEFT,
+                     anchor="w", font=("Arial", 9, "bold")).pack(fill=tk.X, padx=10, pady=(6, 2))
+
+            # TABELKA plików do podmiany — każdy zmieniony/brakujący plik osobno,
+            # żeby user dokładnie widział, co pójdzie na nowo (nie tylko "coś się
+            # zmieniło"). Stan pliku po prawej.
+            if _files:
+                tbl = tk.Frame(warn, bg=_bg)
+                tbl.pack(fill=tk.X, padx=10, pady=(0, 4))
+                _stan_txt = "zmieniony" if _is_changed else "BRAK na dysku"
+                for _fn in _files:
+                    _r = tk.Frame(tbl, bg=_bg)
+                    _r.pack(fill=tk.X, anchor="w")
+                    tk.Label(_r, text="• " + _fn, bg=_bg, fg=_fg, anchor="w",
+                             font=("Arial", 9)).pack(side=tk.LEFT)
+                    tk.Label(_r, text="  — " + _stan_txt, bg=_bg, fg=_fg, anchor="w",
+                             font=("Arial", 9, "italic")).pack(side=tk.LEFT)
+
+            if _is_changed:
+                tk.Label(warn, text="Kliknij „Aktualizuj w RFQ”, aby wysłać aktualną "
+                                    "dokumentację kooperantom.",
+                         bg=_bg, fg=_fg, justify=tk.LEFT, anchor="w",
+                         font=("Arial", 9)).pack(fill=tk.X, padx=10, pady=(2, 4))
+
+            # Przyciski pod banerem: aktualizacja (podmiana plików) + osobno
+            # powiadomienie (mail bez ponownej podmiany — gdy user nie wysłał
+            # maila od razu). Powiadomienie tylko gdy pozycja jest w RFQ (rfq_id).
+            if rfq_id:
+                _btnrow = tk.Frame(warn, bg=_bg)
+                _btnrow.pack(anchor="w", padx=10, pady=(0, 6))
+                if _is_changed:
+                    _info = dict(_fi); _info['rfq_id'] = rfq_id
+                    def _do_update(dn=drawing_no, inf=_info):
+                        self._wycena_dialog = None
+                        dialog.destroy()
+                        self._update_drawings_in_rfq([(dn, inf)])
+                    tk.Button(_btnrow, text="↻ Aktualizuj w RFQ", command=_do_update,
+                              bg="#2a7a2a", fg="white").pack(side=tk.LEFT)
+                # Powiadomienie o zmianie dokumentacji BEZ ponownej podmiany —
+                # przydatne, gdy pliki już podmieniono, a mail nie poszedł.
+                def _do_notify(dn=drawing_no, rid=rfq_id):
+                    self._notify_doc_update_single(rid, dn, parent=dialog)
+                tk.Button(_btnrow, text="✉ Powiadom kooperantów", command=_do_notify
+                          ).pack(side=tk.LEFT, padx=(6, 0))
+
+        # ✉ ZALEGŁE POWIADOMIENIE — osobny baner, NIEZALEŻNY od stanu plików:
+        # dokumentację podmieniono (files_updated_at), a nie powiadomiono o tej
+        # wersji (docs_notified_at brak/starsze). Pozycja może mieć pliki zgodne
+        # z V:\ (już wysłane), a mimo to zalegać z mailem — dlatego osobno.
+        _needs_notify = (files_updated_at
+                         and (not docs_notified_at or str(docs_notified_at) < str(files_updated_at)))
+        if _needs_notify and rfq_id:
+            nb_bg, nb_fg = "#e7f0fb", "#1f5fa9"
+            nbanner = tk.Frame(dialog, bg=nb_bg, bd=1, relief=tk.SOLID)
+            nbanner.pack(fill=tk.X, padx=14, pady=(0, 8))
+            tk.Label(nbanner,
+                     text=f"✉ Dokumentacja podmieniona {str(files_updated_at)[:16]} — "
+                          f"kooperant NIE został jeszcze powiadomiony.",
+                     bg=nb_bg, fg=nb_fg, justify=tk.LEFT, anchor="w",
+                     font=("Arial", 9, "bold")).pack(fill=tk.X, padx=10, pady=(6, 4))
+            def _do_notify_pending(dn=drawing_no, rid=rfq_id):
+                self._notify_doc_update_single(rid, dn, parent=dialog)
+            tk.Button(nbanner, text="✉ Powiadom kooperantów", command=_do_notify_pending,
+                      bg=nb_fg, fg="white").pack(anchor="w", padx=10, pady=(0, 6))
 
         # bez expand — pod spodem jest tabelka kooperantów, która musi się zmieścić
         box = tk.Frame(dialog, bd=1, relief=tk.SOLID)

@@ -45,7 +45,9 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -271,10 +273,17 @@ class RMSyncAgent:
 
     def push_drawing(self, rfq_id: int, drawing_number: str, file_paths: list[str],
                      name: str | None = None, quantity: int = 1,
-                     material: str | None = None, notes: str | None = None) -> dict:
-        """Wysyła rysunek jako nową pozycję RFQ. Agent CZYTA pliki lokalnie i
-        wysyła ich zawartość — portal nigdy nie dostaje ścieżki ani dostępu do
-        dysku firmowego. Wywoływane z GUI RM_BAZA."""
+                     material: str | None = None, notes: str | None = None,
+                     replace_snapshot: bool = False) -> dict:
+        """Wysyła rysunek jako pozycję RFQ. Agent CZYTA pliki lokalnie i wysyła
+        ich zawartość — portal nigdy nie dostaje ścieżki ani dostępu do dysku
+        firmowego. Wywoływane z GUI RM_BAZA.
+
+        replace_snapshot=True → file_paths to PEŁNY aktualny komplet plików tej
+        pozycji na V:\\; portal zastąpi cały dotychczasowy komplet (usunie typy,
+        których tu nie ma) i ostempluje files_updated_at. Używane przy
+        „Aktualizuj w RFQ" po wykryciu zmiany rysunku. Odciski (fingerprinty)
+        zapisujemy DOPIERO po OK serwera — patrz koniec metody."""
         missing = [p for p in file_paths if not Path(p).is_file()]
         if missing:
             raise FileNotFoundError(f'Nie znaleziono plików: {", ".join(missing)}')
@@ -286,23 +295,341 @@ class RMSyncAgent:
             data['material'] = material
         if notes:
             data['notes'] = notes
+        if replace_snapshot:
+            data['replace_snapshot'] = 'true'
 
-        handles = []
-        try:
-            files = []
-            for path in file_paths:
-                fh = open(path, 'rb')
-                handles.append(fh)
-                files.append(('files', (Path(path).name, fh)))
-            resp = requests.post(
-                f'{self.portal_url}/api/rfq/{rfq_id}/items',
-                headers=self._headers(), data=data, files=files, timeout=HTTP_TIMEOUT
+        # Wczytujemy bajty RAZ: idą do POST i przy okazji liczymy sha1 + zbieramy
+        # stat (size/mtime_ns). Zero dodatkowego I/O względem samej wysyłki — te
+        # bajty i tak trzeba przeczytać. Odciski trafiają do rfq_pushed_files
+        # (lokalnie, master.sqlite), żeby RM_BAZA mógł potem TANIO wykryć, że plik
+        # źródłowy na V:\ zmienił się po wysłaniu (kooperant ma zamrożoną kopię).
+        # mtime_ns (nie int(mtime)) — pełna rozdzielczość, mniej trafień do
+        # drogiej ścieżki hash z powodu zaokrągleń.
+        files = []
+        fingerprints = []   # (filename, size, mtime_ns, sha1)
+        for path in file_paths:
+            # stabilny odczyt: stat → read → stat. Jeśli size/mtime drgnęły w
+            # trakcie (plik właśnie zapisywany, np. przez Inventora), bajty mogą
+            # być częściowe — bierzemy stat SPRZED odczytu tylko gdy plik był
+            # spójny, inaczej ufamy stanowi PO odczycie (zgodny z przeczytanymi
+            # bajtami). Wysyłamy i tak to, co przeczytaliśmy — user świadomie
+            # kliknął wyślij; odcisk ma tylko wiernie opisywać wysłane bajty.
+            st1 = os.stat(path)
+            raw = Path(path).read_bytes()
+            st2 = os.stat(path)
+            st = st2 if (st1.st_size != st2.st_size or st1.st_mtime_ns != st2.st_mtime_ns) else st1
+            files.append(('files', (Path(path).name, raw)))
+            fingerprints.append((Path(path).name, st.st_size,
+                                 st.st_mtime_ns, hashlib.sha1(raw).hexdigest()))
+
+        resp = requests.post(
+            f'{self.portal_url}/api/rfq/{rfq_id}/items',
+            headers=self._headers(), data=data, files=files, timeout=HTTP_TIMEOUT
+        )
+        resp.raise_for_status()
+        result = resp.json()
+
+        # Zapis odcisków (fingerprintów) DOPIERO gdy serwer POTWIERDZIŁ pełny
+        # sukces. Przy replace_snapshot portal robi podmianę tylko gdy WSZYSTKIE
+        # pliki zapisały się bez błędu (files_replaced=True, brak errors) — jeśli
+        # errors niepuste, snapshot NIE został podmieniony, więc odcisków NIE
+        # zapisujemy: ⚠ RYS ZMIENIONY ma zostać, bo kooperant dalej ma starą
+        # wersję. Dla zwykłej wysyłki (bez replace) zachowujemy się jak dotąd.
+        srv_errors = result.get('errors') if isinstance(result, dict) else None
+        replace_ok = (not replace_snapshot) or (
+            isinstance(result, dict) and result.get('files_replaced') and not srv_errors)
+        if replace_ok:
+            try:
+                self._store_pushed_fingerprints(rfq_id, drawing_number, file_paths, fingerprints)
+            except Exception as e:
+                print(f'push_drawing: nie zapisano odciskow plikow ({drawing_number}): {e}',
+                      file=sys.stderr)
+        return result
+
+    @staticmethod
+    def _ensure_pushed_files_table(con: sqlite3.Connection) -> None:
+        """Odciski plików wysłanych do RFQ — do wykrywania, że źródło na V:\\
+        zmieniło się po wysłaniu. Jedna para (rfq_id, path) = jeden wiersz;
+        ponowna wysyłka tego samego pliku NADPISUJE odcisk (INSERT OR REPLACE)."""
+        con.execute('''
+            CREATE TABLE IF NOT EXISTS rfq_pushed_files (
+                rfq_id          INTEGER NOT NULL,
+                drawing_number  TEXT    NOT NULL,
+                path            TEXT    NOT NULL,   -- ścieżka źródłowa na V:\\/bibliotece
+                filename        TEXT    NOT NULL,
+                size            INTEGER,
+                mtime_ns        INTEGER,            -- st_mtime_ns źródła w chwili wysyłki
+                sha1            TEXT,               -- sha1 zawartości wysłanej do portalu
+                pushed_at       TEXT DEFAULT (datetime('now','localtime')),
+                PRIMARY KEY (rfq_id, path)
             )
+        ''')
+        # migracja starych baz (kolumna mtime INTEGER → mtime_ns): dodaj kolumnę
+        # jeśli brak. Starych wartości nie konwertujemy — przy pierwszym
+        # sprawdzeniu mtime_ns=NULL wymusi hash (bezpiecznie), a udane 'ok'
+        # zaktualizuje mtime_ns do bieżącej wartości.
+        cols = {r[1] for r in con.execute('PRAGMA table_info(rfq_pushed_files)')}
+        if 'mtime_ns' not in cols:
+            con.execute('ALTER TABLE rfq_pushed_files ADD COLUMN mtime_ns INTEGER')
+        con.execute('CREATE INDEX IF NOT EXISTS idx_rfq_pushed_drawing '
+                    'ON rfq_pushed_files(rfq_id, drawing_number)')
+
+    def _store_pushed_fingerprints(self, rfq_id: int, drawing_number: str,
+                                   file_paths: list[str], fingerprints: list) -> None:
+        con = self._open_master(readonly=False)
+        try:
+            self._ensure_pushed_files_table(con)
+            # Odciski dla tej pozycji zastępujemy w całości: jeśli user wyśle ją
+            # ponownie z innym zestawem plików, stare (odpięte) pliki nie mają
+            # już wisieć jako "zmienione".
+            con.execute('DELETE FROM rfq_pushed_files WHERE rfq_id=? AND drawing_number=?',
+                        (rfq_id, drawing_number))
+            con.executemany(
+                'INSERT OR REPLACE INTO rfq_pushed_files '
+                '(rfq_id, drawing_number, path, filename, size, mtime_ns, sha1) '
+                'VALUES (?,?,?,?,?,?,?)',
+                [(rfq_id, drawing_number, str(path), fn, size, mtime_ns, sha1)
+                 for path, (fn, size, mtime_ns, sha1) in zip(file_paths, fingerprints)]
+            )
+            con.commit()
         finally:
-            for fh in handles:
-                fh.close()
+            con.close()
+
+    def notify_doc_update(self, rfq_id: int, drawing_numbers: list[str]) -> dict:
+        """Prosi portal o wysyłkę maili „zaktualizowano dokumentację" do
+        kooperantów przypisanych do wskazanych pozycji (którzy dostali już
+        zaproszenie). Wołane po „Aktualizuj w RFQ", gdy user zgodzi się na mail.
+        Zwraca {sent:[nazwy], errors:[...], notified:N}."""
+        resp = requests.post(
+            f'{self.portal_url}/api/rfq/{rfq_id}/notify-doc-update',
+            headers=self._headers(), json={'drawing_numbers': drawing_numbers},
+            timeout=HTTP_TIMEOUT
+        )
         resp.raise_for_status()
         return resp.json()
+
+    def all_stale_drawings(self) -> list[dict]:
+        """WSZYSTKIE pozycje niezgodne ze stanem na dysku, po wszystkich RFQ,
+        które mają zapisane odciski. Do panelu „Do pilnowania" w RM_BAZA.
+
+        Zwraca listę {rfq_id, drawing_number, status, changed_files,
+        missing_files} tylko dla status in ('changed','missing'). Robi lokalne
+        I/O (per plik stat, ewent. hash) — wołać w wątku, nie blokować GUI."""
+        con = self._open_master(readonly=False)
+        try:
+            self._ensure_pushed_files_table(con)
+            rfq_ids = [r['rfq_id'] for r in con.execute(
+                'SELECT DISTINCT rfq_id FROM rfq_pushed_files').fetchall()]
+        finally:
+            con.close()
+
+        out = []
+        for rfq_id in rfq_ids:
+            try:
+                fresh = self.check_drawing_freshness(rfq_id) or {}
+            except Exception:
+                continue
+            for dn, info in fresh.items():
+                if isinstance(info, dict) and info.get('status') in ('changed', 'missing'):
+                    out.append({
+                        'rfq_id': rfq_id,
+                        'drawing_number': dn,
+                        'status': info.get('status'),
+                        'changed_files': info.get('changed_files') or [],
+                        'missing_files': info.get('missing_files') or [],
+                    })
+        return out
+
+    def all_docs_to_notify(self) -> list[dict]:
+        """WSZYSTKIE pozycje z ZALEGŁYM powiadomieniem o aktualizacji
+        dokumentacji: dokumentację podmieniono (files_updated_at), ale nie
+        powiadomiono jeszcze o tej wersji (docs_notified_at brak lub starsze).
+
+        Czyta z rfq_results w master.sqlite (dane z portalu, bez SMB I/O — szybko).
+        Zwraca [{rfq_id, drawing_number, item_name, rfq_code, files_updated_at}].
+        Do tabelki „Do powiadomienia" w RM_BAZA."""
+        con = self._open_master(readonly=True)
+        try:
+            cols = {r[1] for r in con.execute('PRAGMA table_info(rfq_results)')}
+            if 'files_updated_at' not in cols or 'docs_notified_at' not in cols:
+                return []          # stara baza sprzed migracji — nic do pokazania
+            rows = con.execute('''
+                SELECT rfq_id, drawing_number, item_name, rfq_code, files_updated_at
+                  FROM rfq_results
+                 WHERE files_updated_at IS NOT NULL
+                   AND (docs_notified_at IS NULL OR docs_notified_at < files_updated_at)
+                 ORDER BY rfq_code, drawing_number
+            ''').fetchall()
+            out = [dict(r) for r in rows]
+
+            # Nazwa detalu: portal często NIE ma jej w rfq_items.name (jest tylko
+            # sklejana z nazwy pliku), więc item_name z bazy bywa NULL. Wyciągamy
+            # ją z nazwy WYSŁANEGO pliku (rfq_pushed_files) — te dane są lokalnie,
+            # zero dodatkowego I/O. Format pliku: "<numer rysunku> <nazwa>.<ext>".
+            self._ensure_pushed_files_table(con)
+            for d in out:
+                if d.get('item_name'):
+                    continue
+                d['item_name'] = self._name_from_pushed_files(
+                    con, d['rfq_id'], d['drawing_number']) or None
+            return out
+        finally:
+            con.close()
+
+    @staticmethod
+    def _name_from_pushed_files(con, rfq_id, drawing_number) -> str:
+        """Wydłubuje nazwę detalu z nazwy wysłanego pliku (rfq_pushed_files).
+        Preferuje PDF/DWF (czysta nazwa bez dopisków typu ", 304 gr8mm" na DXF).
+        Zwraca '' gdy nie da się wyznaczyć."""
+        rows = con.execute(
+            'SELECT filename FROM rfq_pushed_files WHERE rfq_id=? AND drawing_number=?',
+            (rfq_id, drawing_number)
+        ).fetchall()
+        if not rows:
+            return ''
+        names = [r['filename'] for r in rows if r['filename']]
+        # PDF/DWF mają nazwę bez technicznych dopisków — wybierz je najpierw
+        preferred = [n for n in names if n.lower().rsplit('.', 1)[-1] in ('pdf', 'dwf')]
+        cand = (preferred or names)[0]
+        stem = cand.rsplit('.', 1)[0]                      # bez rozszerzenia
+        # zdejmij numer rysunku z początku (dokładnie ten drawing_number)
+        if stem.startswith(drawing_number):
+            stem = stem[len(drawing_number):]
+        return stem.strip(' -_,')
+
+    def pushed_paths(self, rfq_id: int, drawing_number: str) -> list[str]:
+        """Ścieżki plików wysłanych ostatnio dla tej pozycji (z odcisków).
+        Do „Aktualizuj w RFQ": wyznacza komplet do ponownej wysyłki. Zwraca
+        ścieżki niezależnie od tego, czy plik nadal istnieje — filtruje
+        dopiero wywołujący (istniejące → wysyłamy, brakujące → portal skasuje
+        przez replace_snapshot)."""
+        # RW, bo _ensure_pushed_files_table może zrobić ALTER (read-only by padło).
+        con = self._open_master(readonly=False)
+        try:
+            self._ensure_pushed_files_table(con)
+            rows = con.execute(
+                'SELECT path FROM rfq_pushed_files WHERE rfq_id=? AND drawing_number=? '
+                'ORDER BY filename', (rfq_id, drawing_number)
+            ).fetchall()
+            return [r['path'] for r in rows]
+        finally:
+            con.close()
+
+    def check_drawing_freshness(self, rfq_id: int) -> dict:
+        """Sprawdza, czy pliki źródłowe na V:\\ zmieniły się od wysłania do RFQ.
+
+        Zwraca {drawing_number: {'status': 'ok'|'changed'|'missing',
+                                 'changed_files': [nazwy...],
+                                 'missing_files': [nazwy...]}}
+        — tylko dla pozycji z zapisanymi odciskami (wysłanych z tego RM_BAZA).
+
+        Hybryda tania→pewna: najpierw size+mtime_ns (sam os.stat, bez czytania
+        zawartości). Gdy się różnią, liczy sha1 zawartości:
+        - hash TAKI SAM  → to samo (plik skopiowany/przywrócony) → nie alarmuj,
+          cicho aktualizujemy size/mtime_ns, żeby następnym razem było tanio;
+        - hash INNY       → treść realnie zmieniona → 'changed', plik na liście.
+
+        Hash liczymy ze STABILNEGO odczytu (stat→read→stat): jeśli size/mtime_ns
+        drgnęły w trakcie (plik właśnie zapisywany, np. Inventor), NIE oceniamy —
+        pomijamy tym razem, sprawdzi się przy następnym Odśwież.
+
+        'missing' (RYS BRAK) rozróżniamy od padniętego V:\\: brak pliku liczy się
+        jako missing TYLKO gdy jakiś inny plik dał się odczytać (zasób żyje →
+        plik skasowano/przemianowano). Gdy ŻADEN plik nie do odczytu → cały
+        zasób niedostępny → pusty wynik (brak alarmu).
+
+        Status per pozycja: 'changed' > 'missing' > 'ok'. Wyłącznie lokalne I/O
+        (dysk), bez sieci/portalu. Wołana z GUI w wątku z opóźnieniem."""
+        con = self._open_master(readonly=False)
+        try:
+            self._ensure_pushed_files_table(con)
+            rows = con.execute(
+                'SELECT path, filename, drawing_number, size, mtime_ns, sha1 '
+                'FROM rfq_pushed_files WHERE rfq_id=?', (rfq_id,)
+            ).fetchall()
+            if not rows:
+                return {}
+
+            # per drawing_number: zbieramy flagi i listy zmienionych/brakujących
+            agg: dict = {}   # dn -> {'changed': bool, 'missing': bool, 'ok': bool,
+                             #        'changed_files': [], 'missing_files': []}
+            fixes = []       # (size, mtime_ns, path) — cicha aktualizacja odcisku
+            any_readable = False
+
+            def _slot(dn):
+                return agg.setdefault(dn, {'changed': False, 'missing': False,
+                                          'ok': False, 'changed_files': [],
+                                          'missing_files': []})
+
+            for r in rows:
+                path, fn, dn = r['path'], r['filename'], r['drawing_number']
+                slot = _slot(dn)
+                try:
+                    st1 = os.stat(path)
+                except OSError:
+                    slot['missing'] = True          # kandydat — rozstrzygniemy po pętli
+                    if fn not in slot['missing_files']:
+                        slot['missing_files'].append(fn)
+                    continue
+
+                any_readable = True
+                # tania ścieżka: metadane zgadzają się → plik nietknięty
+                if st1.st_size == r['size'] and r['mtime_ns'] is not None \
+                        and st1.st_mtime_ns == r['mtime_ns']:
+                    slot['ok'] = True
+                    continue
+
+                # różnica metadanych — potwierdzamy hashem, ale STABILNIE
+                try:
+                    raw = Path(path).read_bytes()
+                    st2 = os.stat(path)
+                except OSError:
+                    slot['missing'] = True
+                    if fn not in slot['missing_files']:
+                        slot['missing_files'].append(fn)
+                    continue
+
+                if st1.st_size != st2.st_size or st1.st_mtime_ns != st2.st_mtime_ns:
+                    # plik zmieniał się PODCZAS odczytu (zapis w toku) — nie
+                    # oceniaj teraz, żeby nie policzyć hasha częściowego pliku
+                    slot['ok'] = True   # neutralnie; następny Odśwież rozstrzygnie
+                    continue
+
+                if hashlib.sha1(raw).hexdigest() == r['sha1']:
+                    # ta sama treść, tylko metadane inne (kopia) — nie alarmuj,
+                    # podmień odcisk, by następnym razem trafić w tanią ścieżkę
+                    fixes.append((st2.st_size, st2.st_mtime_ns, path))
+                    slot['ok'] = True
+                else:
+                    slot['changed'] = True
+                    if fn not in slot['changed_files']:
+                        slot['changed_files'].append(fn)
+
+            # cały zasób niedostępny (nic się nie odczytało) → brak alarmu
+            if not any_readable:
+                return {}
+
+            if fixes:
+                con.executemany(
+                    'UPDATE rfq_pushed_files SET size=?, mtime_ns=? WHERE path=?',
+                    fixes)
+                con.commit()
+
+            # spłaszcz do statusu wg priorytetu changed > missing > ok
+            result = {}
+            for dn, s in agg.items():
+                if s['changed']:
+                    status = 'changed'
+                elif s['missing']:
+                    status = 'missing'
+                else:
+                    status = 'ok'
+                result[dn] = {'status': status,
+                              'changed_files': s['changed_files'],
+                              'missing_files': s['missing_files']}
+            return result
+        finally:
+            con.close()
 
     # --- Kanał 3: wyniki portal → RM_BAZA ----------------------------------
 
@@ -541,6 +868,8 @@ class RMSyncAgent:
                 min_price        REAL,      -- najtańsza oferta (do stanu pośredniego)
                 invitations_sent INTEGER,   -- do ilu wysłano zaproszenia
                 response_deadline TEXT,     -- termin odpowiedzi (kolor komórki WYCENA)
+                files_updated_at TEXT,      -- kiedy podmieniono dokumentację (replace_snapshot)
+                docs_notified_at TEXT,      -- kiedy powiadomiono kooperantów o tej wersji
                 viewers_count    INTEGER,   -- ilu z nich otworzyło zapytanie w portalu
                 seen_item_count  INTEGER,   -- ilu widziało TĘ pozycję (weszło po jej dodaniu)
                 last_viewed_at   TEXT,      -- ostatnie wejście któregokolwiek z przypisanych
@@ -566,6 +895,7 @@ class RMSyncAgent:
             ('viewers_count', 'INTEGER'), ('seen_item_count', 'INTEGER'),
             ('last_viewed_at', 'TEXT'), ('response_deadline', 'TEXT'),
             ('declined_count', 'INTEGER'),
+            ('files_updated_at', 'TEXT'), ('docs_notified_at', 'TEXT'),
         ):
             if col not in existing:
                 con.execute(f'ALTER TABLE rfq_results ADD COLUMN {col} {decl}')
@@ -578,9 +908,10 @@ class RMSyncAgent:
                 project_number, rfq_id, rfq_code, rfq_title, rfq_status,
                 suppliers_count, offers_count, declined_count, min_price, invitations_sent,
                 viewers_count, seen_item_count, last_viewed_at, response_deadline,
+                files_updated_at, docs_notified_at,
                 supplier_id, supplier_name, price, currency, lead_time_days,
                 offer_notes, decided_at, synced_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
             ON CONFLICT(rfq_item_id) DO UPDATE SET
                 drawing_number=excluded.drawing_number, item_name=excluded.item_name,
                 revision=excluded.revision, quantity=excluded.quantity,
@@ -595,6 +926,8 @@ class RMSyncAgent:
                 seen_item_count=excluded.seen_item_count,
                 last_viewed_at=excluded.last_viewed_at,
                 response_deadline=excluded.response_deadline,
+                files_updated_at=excluded.files_updated_at,
+                docs_notified_at=excluded.docs_notified_at,
                 supplier_id=excluded.supplier_id, supplier_name=excluded.supplier_name,
                 price=excluded.price, currency=excluded.currency,
                 lead_time_days=excluded.lead_time_days, offer_notes=excluded.offer_notes,
@@ -607,6 +940,7 @@ class RMSyncAgent:
             p.get('declined_count'), p.get('min_price'), p.get('invitations_sent'),
             p.get('viewers_count'), p.get('seen_item_count'), p.get('last_viewed_at'),
             p.get('response_deadline'),
+            p.get('files_updated_at'), p.get('docs_notified_at'),
             p.get('supplier_id'), p.get('supplier_name'), p.get('price'),
             p.get('currency'), p.get('lead_time_days'), p.get('offer_notes'),
             p.get('decided_at'),
