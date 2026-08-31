@@ -502,6 +502,10 @@ class MainWindow(tk.Tk):
         settingsm.add_command(label="💻 Nazwa komputera…", command=self.menu_set_client_name)
         settingsm.add_separator()
         settingsm.add_command(label="🔔 Powiadomienia RFQ…", command=self.menu_rfq_watchers)
+        settingsm.add_separator()
+        # Sama pozycja jest widoczna zawsze — kontrola roli w menu_app_urls,
+        # żeby nie-ADMIN dostał czytelny komunikat zamiast znikającego menu.
+        settingsm.add_command(label="🌐 Adresy aplikacji… (ADMIN)", command=self.menu_app_urls)
         menubar.add_cascade(label="Ustawienia", menu=settingsm)
         
         self.config(menu=menubar)
@@ -747,6 +751,53 @@ class MainWindow(tk.Tk):
         )
         self.btn_material_calc.pack(side=tk.LEFT, padx=(0, 5), pady=2)
 
+        # Aplikacje webowe środowiska RM — jedno menu zamiast szukania
+        # adresów po zakładkach przeglądarki. Adresy konfigurowalne
+        # (Ustawienia → Adresy aplikacji), bo lokalnie/serwer/rm-app.pl
+        # to różne hosty.
+        self.btn_apps = tk.Menubutton(
+            search_frame,
+            text="🌐 Aplikacje",
+            bg="#2980b9",
+            fg="white",
+            font=("Arial", 9),
+            padx=10,
+            pady=4,
+            relief=tk.RAISED,
+            bd=2,
+            cursor="hand2",
+        )
+        apps_menu = tk.Menu(self.btn_apps, tearoff=0)
+        for klucz, etykieta, _port, opis in self.RM_APPS:
+            apps_menu.add_command(
+                label=f"{etykieta}  —  {opis}",
+                command=lambda k=klucz: self._open_rm_app(k),
+            )
+        apps_menu.add_separator()
+        apps_menu.add_command(label="⚙ Adresy aplikacji…  (ADMIN)",
+                              command=self.menu_app_urls)
+        self.btn_apps["menu"] = apps_menu
+        self.btn_apps.pack(side=tk.LEFT, padx=(0, 5), pady=2)
+
+        # RFQ: ilu kooperantów czeka z odpowiedzią. Liczone LOKALNIE z
+        # rfq_activity/rfq_results (agent je synchronizuje), więc badge działa
+        # nawet gdy portal chwilowo nie odpowiada. Kliknięcie otwiera panel
+        # „Do pilnowania". Ukryty, gdy nie ma na kogo czekać.
+        #
+        # Miejsce: TUŻ ZA kalkulatorem materiału, dosunięty do LEWEJ.
+        # Nie w pasku niżej (row2_parent), bo tam po lewej leży nakładka z
+        # miniaturą DWF — siedzi na place() i wychodzi poza swój 1-pikselowy
+        # ślad, więc zasłaniała tekst. Nie po PRAWEJ stronie okna, bo przy
+        # mniejszych monitorach badge uciekał poza widok.
+        # Font 13 — badge ma rzucać się w oczy, a nie zlewać z przyciskami
+        # (te mają 9). Pasek ma stałą wysokość 35 px przy pack_propagate(False):
+        # 13 bold to 19 px + 4 px pady, więc mieści się z zapasem.
+        self.rfq_badge = tk.Label(
+            search_frame, text="", bg=search_frame.cget("bg"), fg="#f39c12",
+            font=("Arial", 13, "bold"), cursor="hand2"
+        )
+        self.rfq_badge.bind("<Button-1>", lambda e: self._open_rfq_watchlist())
+
         # WIERSZ 2 (lub dalsza część wiersza 1 w NORMAL): ALARMY, EXPORT, etc.
         # Przycisk do RM_ALARM.EXE
         alarm_link = tk.Button(
@@ -807,16 +858,8 @@ class MainWindow(tk.Tk):
         )
         self.status_label.pack(side=tk.LEFT, padx=5, pady=10)
 
-        # RFQ: ilu kooperantów czeka z odpowiedzią. Liczone LOKALNIE z
-        # rfq_activity/rfq_results (agent je synchronizuje), więc badge działa
-        # nawet gdy portal chwilowo nie odpowiada. Kliknięcie otwiera panel
-        # „Do pilnowania". Ukryty, gdy nie ma na kogo czekać — pasek i tak
-        # jest zatłoczony.
-        self.rfq_badge = tk.Label(
-            row2_parent, text="", bg="#2c3e50", fg="#f39c12",
-            font=("Arial", 11, "bold"), cursor="hand2"
-        )
-        self.rfq_badge.bind("<Button-1>", lambda e: self._open_rfq_watchlist())
+        # (badge RFQ jest wyżej, w search_frame za kalkulatorem materiału —
+        #  patrz komentarz tam: tu kolidował z nakładką miniatury DWF)
 
         # Separator
         tk.Label(
@@ -1534,6 +1577,24 @@ class MainWindow(tk.Tk):
         # Ukryj kolumnę DWF_BIB (indeks 16)
         self.sheet.hide_columns(columns=[16])
         
+        # Zapamiętanie ręcznie rozciągniętej kolumny.
+        #
+        # set_sheet_data() (każdy refresh) RESETUJE szerokości, a przywracamy je
+        # z config.json — więc dopóki nowa szerokość tam nie trafi, refresh cofa
+        # kolumnę do poprzedniej wartości. Wcześniej zapis leciał tylko przy
+        # zmianie projektu / lock / zamknięciu programu, czyli rozciągnięcie
+        # ginęło przy pierwszym odświeżeniu.
+        #
+        # tksheet 7.5.19 nie ma zdarzenia "kolumna zmieniła szerokość"
+        # (extra_bindings go nie zna, brak wirtualnego eventu), więc łapiemy
+        # puszczenie myszy na PASKU NAGŁÓWKÓW — tam kończy się przeciąganie.
+        # after_idle, bo w momencie release tksheet jeszcze nie zapisał nowej
+        # szerokości do swojego stanu.
+        try:
+            self.sheet.CH.bind("<ButtonRelease-1>", self._on_column_resized, add="+")
+        except Exception as e:
+            print(f"⚠️  Nie podpięto autozapisu szerokości kolumn: {e}")
+
         # Bind edycji
         self.sheet.bind("<<SheetModified>>", self.on_cell_edited)
         
@@ -3157,12 +3218,41 @@ class MainWindow(tk.Tk):
             import traceback
             traceback.print_exc()
     
-    def _save_column_widths(self):
-        """Zapisz szerokości kolumn do lokalnego pliku JSON"""
+    def _on_column_resized(self, event=None):
+        """Po puszczeniu myszy na nagłówku — zapisz szerokości, jeśli się zmieniły.
+
+        Wywoływane przy KAŻDYM kliknięciu w nagłówek (nie tylko przy resize),
+        bo tksheet 7.5.19 nie rozróżnia tych zdarzeń. Dlatego najpierw
+        porównujemy z ostatnio zapisanym stanem i zapisujemy tylko przy realnej
+        zmianie — inaczej zwykłe klikanie po nagłówkach waliłoby w dysk.
+
+        after_idle: w momencie ButtonRelease tksheet jeszcze nie zaktualizował
+        swojego stanu szerokości."""
+        def _sprawdz():
+            try:
+                if not self.current_project_id:
+                    return
+                obecne = list(self.sheet.get_column_widths())
+                if obecne and obecne != getattr(self, "_last_saved_col_widths", None):
+                    self._last_saved_col_widths = obecne
+                    self._save_column_widths(quiet=True)
+            except Exception:
+                pass      # szerokości kolumn nie są warte psucia UI wyjątkiem
+        try:
+            self.after_idle(_sprawdz)
+        except Exception:
+            pass
+
+    def _save_column_widths(self, quiet=False):
+        """Zapisz szerokości kolumn do lokalnego pliku JSON.
+
+        quiet=True — bez logów na konsolę (autozapis po rozciągnięciu kolumny
+        potrafi lecieć często, a zaśmiecałby log)."""
         try:
             # Nie zapisuj jeśli nie ma wybranego projektu (wtedy są domyślne szerokości)
             if not self.current_project_id:
-                print("  ℹ️  Brak wybranego projektu - pomijam zapis szerokości kolumn")
+                if not quiet:
+                    print("  ℹ️  Brak wybranego projektu - pomijam zapis szerokości kolumn")
                 return
             
             # Pobierz aktualne szerokości kolumn z sheet
@@ -3234,7 +3324,8 @@ class MainWindow(tk.Tk):
             with open(CONFIG_FILE, 'w') as f:
                 json.dump(config, f, indent=2)
             
-            print(f"  ✅ Zapisano szerokości kolumn do {CONFIG_FILE} (metoda: {method_used})")
+            if not quiet:
+                print(f"  ✅ Zapisano szerokości kolumn do {CONFIG_FILE} (metoda: {method_used})")
             
         except Exception as e:
             print(f"⚠️  Błąd zapisu szerokości kolumn: {e}")
@@ -21476,6 +21567,202 @@ class MainWindow(tk.Tk):
 
         self._center_on_app(dlg)
 
+    # Nazwy komputerów uznawanych za SERWEROWE — te same, co w config.json
+    # aplikacji webowych (server_hostnames). Dopasowanie „zawiera", nie równość.
+    SERVER_HOSTNAMES = ('W2019S', 'SERWER')
+
+    def _is_server_machine(self) -> bool:
+        """Czy RM_BAZA działa na maszynie firmowej (serwerowej).
+
+        Ten sam mechanizm co config_mode.py w RM_RFQ/RM_PRINT: rozpoznanie po
+        nazwie komputera. Dzięki temu JEDEN zestaw ustawień w master.sqlite
+        obsługuje dom i firmę — nie trzeba nic przełączać ręcznie po dojeździe
+        do pracy."""
+        try:
+            host = socket.gethostname().upper()
+            return any(h in host for h in self.SERVER_HOSTNAMES)
+        except Exception:
+            return False
+
+    def _app_urls(self) -> dict:
+        """Adresy aplikacji webowych: {klucz: url} — dla BIEŻĄCEJ maszyny.
+
+        Trzymane w master.sqlite → settings['app_urls'] jako JSON, w dwóch
+        sekcjach: {"local": {...}, "server": {...}}. Wybór sekcji następuje
+        automatycznie po nazwie komputera (patrz _is_server_machine).
+
+        Powód: master.sqlite jest WSPÓLNY dla domu i firmy, a tam apki wiszą
+        pod innymi adresami (localhost vs serwer). Jedna płaska mapa oznaczałaby
+        przestawianie adresów przy każdej zmianie miejsca pracy.
+
+        Format płaski (bez sekcji) jest nadal czytany — to stare wpisy, traktujemy
+        je jako sekcję dla obu maszyn."""
+        zapisane = {}
+        try:
+            con = self.db_manager.master_con if self.db_manager else None
+            if con:
+                row = con.execute(
+                    "SELECT value FROM settings WHERE key='app_urls'"
+                ).fetchone()
+                if row and str(row[0]).strip():
+                    dane = json.loads(row[0])
+                    if isinstance(dane, dict) and ('local' in dane or 'server' in dane):
+                        sekcja = 'server' if self._is_server_machine() else 'local'
+                        zapisane = dane.get(sekcja) or {}
+                    else:
+                        zapisane = dane      # stary format płaski
+        except Exception:
+            pass      # zła/niekompletna wartość — lecimy na domyślnych
+
+        # RM_RFQ ma WŁASNY, starszy klucz settings['rfq_portal_url'] — używa go
+        # RM_SYNC_AGENT do synchronizacji. Nie duplikujemy adresu w app_urls:
+        # dwa źródła tej samej prawdy rozjechałyby się przy pierwszej zmianie
+        # i menu otwierałoby inny portal niż ten, z którym RM_BAZA gada.
+        portal = self._rfq_portal_url()
+        if portal:
+            zapisane.setdefault('rm_rfq', portal)
+
+        return {klucz: (zapisane.get(klucz) or f'http://localhost:{port}').rstrip('/')
+                for klucz, _label, port, _opis in self.RM_APPS}
+
+    def _save_app_urls(self, mapa: dict) -> None:
+        """Zapis adresów aplikacji — TYLKO dla sekcji bieżącej maszyny.
+
+        Druga sekcja (local/server) zostaje nietknięta: ustawiasz adresy w domu,
+        jutro w firmie ustawiasz tamtejsze i oba komplety żyją obok siebie
+        w jednym master.sqlite.
+
+        Własne połączenie RW — master_con jest read-only dopóki nie ma locka
+        projektu, a to ustawienie ma działać zawsze (wzorzec z rfq_watchers)."""
+        rw = sqlite3.connect(str(self.db_manager.master_path), timeout=10)
+        try:
+            rw.execute("CREATE TABLE IF NOT EXISTS settings ("
+                       "key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
+            teraz = datetime.now().isoformat()
+
+            # Doczytujemy CAŁOŚĆ i podmieniamy tylko swoją sekcję.
+            wszystko = {}
+            row = rw.execute("SELECT value FROM settings WHERE key='app_urls'").fetchone()
+            if row and str(row[0]).strip():
+                try:
+                    stare = json.loads(row[0])
+                    if isinstance(stare, dict):
+                        wszystko = (stare if ('local' in stare or 'server' in stare)
+                                    else {'local': stare, 'server': stare})
+                except Exception:
+                    pass
+            wszystko[('server' if self._is_server_machine() else 'local')] = mapa
+
+            rw.execute(
+                "INSERT INTO settings (key, value, updated_at) VALUES ('app_urls', ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (json.dumps(wszystko, ensure_ascii=False), teraz)
+            )
+            # Adres RM_RFQ czyta też RM_SYNC_AGENT — zapisujemy go dodatkowo
+            # pod kluczem per-maszyna (rfq_portal_url_local/_server), inaczej
+            # user zmieniłby adres w menu, a synchronizacja dalej gadałaby ze
+            # starym portalem. Wspólnego 'rfq_portal_url' NIE ruszamy: to
+            # fallback dla maszyn, które nie mają własnego wpisu.
+            rfq = (mapa.get('rm_rfq') or '').rstrip('/')
+            if rfq:
+                klucz = ('rfq_portal_url_server' if self._is_server_machine()
+                         else 'rfq_portal_url_local')
+                rw.execute(
+                    f"INSERT INTO settings (key, value, updated_at) VALUES ('{klucz}', ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                    (rfq, teraz)
+                )
+            rw.commit()
+        finally:
+            rw.close()
+
+    def _open_rm_app(self, klucz: str) -> None:
+        """Otwórz aplikację webową w domyślnej przeglądarce."""
+        url = self._app_urls().get(klucz)
+        if not url:
+            return
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception as e:
+            messagebox.showerror("Aplikacje", f"Nie udało się otworzyć:\n{url}\n\n{e}",
+                                 parent=self)
+
+    def menu_app_urls(self):
+        """Edycja adresów aplikacji webowych — TYLKO ADMIN.
+
+        Ograniczone do ADMIN, bo zły adres popsułby dostęp wszystkim naraz
+        (to ustawienie globalne w master.sqlite, nie per stanowisko)."""
+        if self.current_user_role != "ADMIN":
+            messagebox.showinfo(
+                "Adresy aplikacji",
+                "Zmiana adresów jest dostępna tylko dla użytkownika ADMIN.\n\n"
+                "Same aplikacje otworzysz z menu „🌐 Aplikacje”.",
+                parent=self)
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Adresy aplikacji webowych")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.geometry("660x360")
+        self._center_on_app(dlg)      # sama pozycja — rozmiar wyżej
+
+        tryb = "SERWER (firma)" if self._is_server_machine() else "LOCAL (ten komputer)"
+        tk.Label(dlg, text="Adresy aplikacji RM", font=("Arial", 11, "bold")).pack(
+            anchor="w", padx=14, pady=(12, 2))
+        # Który zestaw edytujemy — bez tego nie wiadomo, czy zmiany dotkną
+        # domu czy firmy (oba komplety żyją obok siebie w master.sqlite).
+        tk.Label(dlg, font=("Arial", 9, "bold"), fg="#2980b9", anchor="w",
+                 text=f"Edytujesz zestaw: {tryb}   ·   komputer: {socket.gethostname()}").pack(
+            anchor="w", padx=14)
+        tk.Label(dlg, justify=tk.LEFT, fg="#555", font=("Arial", 8),
+                 text="Puste pole = adres domyślny (localhost z portem aplikacji).\n"
+                      "Drugi zestaw (dom/firma) zostaje nietknięty — rozpoznanie po nazwie "
+                      "komputera,\nwięc po dojeździe do pracy nie trzeba nic przestawiać.").pack(
+            anchor="w", padx=14, pady=(0, 8))
+
+        obecne = self._app_urls()
+        pola = {}
+        ramka = tk.Frame(dlg)
+        ramka.pack(fill=tk.BOTH, expand=True, padx=14)
+        for wiersz, (klucz, etykieta, port, _opis) in enumerate(self.RM_APPS):
+            tk.Label(ramka, text=etykieta, width=11, anchor="w",
+                     font=("Arial", 9, "bold")).grid(row=wiersz, column=0, sticky="w", pady=3)
+            var = tk.StringVar(value=obecne.get(klucz, ''))
+            tk.Entry(ramka, textvariable=var, width=44).grid(row=wiersz, column=1, sticky="we", pady=3)
+            tk.Label(ramka, text=f":{port}", fg="#888", font=("Arial", 8)).grid(
+                row=wiersz, column=2, sticky="w", padx=(6, 0))
+            pola[klucz] = var
+        ramka.columnconfigure(1, weight=1)
+
+        def _zapisz():
+            mapa = {}
+            for klucz, var in pola.items():
+                adres = var.get().strip().rstrip('/')
+                if adres and not adres.startswith(('http://', 'https://')):
+                    adres = 'http://' + adres      # user wpisze "serwer:5070"
+                mapa[klucz] = adres
+            try:
+                self._save_app_urls(mapa)
+            except Exception as e:
+                messagebox.showerror("Adresy aplikacji", f"Nie udało się zapisać:\n{e}",
+                                     parent=dlg)
+                return
+            dlg.destroy()
+
+        def _domyslne():
+            for klucz, var in pola.items():
+                var.set('')
+
+        dolny = tk.Frame(dlg)
+        dolny.pack(fill=tk.X, padx=14, pady=12)
+        tk.Button(dolny, text="Zapisz", command=_zapisz, bg="#2a7a2a", fg="white",
+                  width=12).pack(side=tk.RIGHT)
+        tk.Button(dolny, text="Anuluj", command=dlg.destroy, width=10).pack(
+            side=tk.RIGHT, padx=(0, 8))
+        tk.Button(dolny, text="Przywróć domyślne", command=_domyslne).pack(side=tk.LEFT)
+
     def _rfq_watchers(self):
         """Loginy, którym pokazujemy powiadomienia RFQ (badge + panel).
 
@@ -21557,13 +21844,18 @@ class MainWindow(tk.Tk):
                     dni = (_dt.strptime(str(r[3])[:10], "%Y-%m-%d").date() - _date.today()).days
                 except (ValueError, TypeError):
                     continue
-                if dni <= 2:
+                # ≤3 dni = pilne, wspólny próg z kolumną WYCENA, panelem
+                # „Do pilnowania" i portalem RM_RFQ.
+                if dni <= 3:
                     pilne += 1
             txt = f"RFQ: {len(rows)} oczekuje"
             if pilne:
                 txt += f" ({pilne} pilne)"
             self.rfq_badge.config(text=txt, fg="#e74c3c" if pilne else "#f39c12")
-            self.rfq_badge.pack(side=tk.LEFT, padx=(10, 5), pady=10)
+            # LEFT, tuż za kalkulatorem materiału (rodzicem jest search_frame).
+            # Nie RIGHT — przy mniejszych monitorach badge uciekałby poza
+            # widoczny obszar okna. pady=2, bo w tym pasku przyciski też mają 2.
+            self.rfq_badge.pack(side=tk.LEFT, padx=(12, 5), pady=2)
         except Exception as e:
             print(f"⚠️  RFQ badge: {e}")
 
@@ -21650,7 +21942,7 @@ class MainWindow(tk.Tk):
             tree.heading(c, text=t)
             tree.column(c, width=w, anchor="w")
 
-        tree.tag_configure("pilne", background="#ffd9d6")      # ≤2 dni
+        tree.tag_configure("pilne", background="#ffd9d6")      # 1–3 dni
         tree.tag_configure("dzis", background="#ffb3ad")       # dziś/po terminie
         tree.tag_configure("nieotwarte", background="#fdeceb") # nie zajrzał
 
@@ -21663,10 +21955,10 @@ class MainWindow(tk.Tk):
                 opis, tag = "po terminie", "dzis"
             elif dni == 0:
                 opis, tag = "dziś!", "dzis"
-            elif dni == 1:
-                opis, tag = "1 dzień", "pilne"
-            elif dni <= 2:
-                opis, tag = f"{dni} dni", "pilne"
+            elif dni <= 3:
+                # 1–3 dni to samo tło; „dziś"/po terminie mają mocniejsze wyżej.
+                # Progi wspólne z kolumną WYCENA i portalem RM_RFQ.
+                opis, tag = ("1 dzień" if dni == 1 else f"{dni} dni"), "pilne"
             else:
                 opis, tag = f"{dni} dni", ""
             if not wejsc and not tag:
@@ -21736,8 +22028,8 @@ class MainWindow(tk.Tk):
 
     # Kolory terminu w kolumnie WYCENA — jasne tła, żeby czarny tekst stanu
     # („WYSŁANO · 2", „1/2 OFERT") pozostał czytelny.
-    WYCENA_BG_SOON = "#fff3cd"     # zostały 1–3 dni
-    WYCENA_BG_TODAY = "#ffd9d6"    # dziś ostatni dzień
+    WYCENA_BG_SOON = "#fff3cd"     # zostały 2–3 dni
+    WYCENA_BG_TODAY = "#ffd9d6"    # dziś ostatni dzień ALBO jutro (0–1 dnia)
     WYCENA_BG_EXPIRED = "#ffb3ad"  # po terminie — kooperant już nie widzi pozycji
 
     def _wycena_deadline_bg(self, row_idx):
@@ -21758,7 +22050,12 @@ class MainWindow(tk.Tk):
             dni = (dl - _date.today()).days
             if dni < 0:
                 return self.WYCENA_BG_EXPIRED
-            if dni == 0:
+            # 0 i 1 dzień = CZERWONY. Przy jednym dniu nie ma już czasu na
+            # „zajmę się jutro" — jutro jest ostatni dzień. Żółty (2–3 dni)
+            # znaczy „miej na oku". Te same progi co w portalu RM_RFQ
+            # (renderDaysLeft i szablony) — inaczej ta sama pozycja ma inny
+            # kolor w RM_BAZA niż na stronie kooperanta.
+            if dni <= 1:
                 return self.WYCENA_BG_TODAY
             if dni <= 3:
                 return self.WYCENA_BG_SOON
@@ -21876,15 +22173,25 @@ class MainWindow(tk.Tk):
 
     def _rfq_portal_url(self):
         """Adres portalu RM_RFQ z master.sqlite → settings (ten sam, którego
-        używa RM_SYNC_AGENT). Pusty string, gdy nieskonfigurowany."""
+        używa RM_SYNC_AGENT). Pusty string, gdy nieskonfigurowany.
+
+        Najpierw klucz dla TEJ maszyny (rfq_portal_url_local/_server), potem
+        wspólny rfq_portal_url jako fallback — identyczna kolejność jak
+        w rm_sync_agent._portal_url_for_machine(), żeby GUI i agent nigdy nie
+        pokazywały innego adresu."""
         try:
             master_con = self.db_manager.master_con if self.db_manager else None
             if not master_con:
                 return ""
-            row = master_con.execute(
-                "SELECT value FROM settings WHERE key='rfq_portal_url'"
-            ).fetchone()
-            return (row[0] or "").rstrip("/") if row else ""
+            klucz = ('rfq_portal_url_server' if self._is_server_machine()
+                     else 'rfq_portal_url_local')
+            for k in (klucz, 'rfq_portal_url'):
+                row = master_con.execute(
+                    "SELECT value FROM settings WHERE key=?", (k,)
+                ).fetchone()
+                if row and (row[0] or "").strip():
+                    return row[0].rstrip("/")
+            return ""
         except Exception:
             return ""
 
@@ -22184,6 +22491,31 @@ class MainWindow(tk.Tk):
     def _rfq_needs_dxf(cls, drawing_no: str) -> bool:
         return bool(cls.RFQ_LASER_SUFFIX_RE.search((drawing_no or '').strip()))
 
+    # Aplikacje webowe środowiska RM — przycisk „Aplikacje" w pasku.
+    # (klucz, etykieta, domyślny port, opis w podpowiedzi)
+    #
+    # Adresy są KONFIGUROWALNE (Ustawienia → Adresy aplikacji, tylko ADMIN),
+    # bo w domu apki chodzą na localhost, a w firmie na serwerze — i docelowo
+    # przez rm-app.pl. Tu są tylko wartości domyślne, gdy nikt nic nie ustawił.
+    #
+    # UWAGA: RM_PRINT ma 8060, NIE 5060. Port 5060 to SIP z listy zastrzeżonych
+    # przez przeglądarki — Firefox/Chrome odmawiają połączenia. W kodzie
+    # RM_PRINT 5060 siedzi jako fallback, ale realnie działa na 8060.
+    RM_APPS = [
+        ('rm_rfq',    'RM_RFQ',    5070, 'Zapytania ofertowe dla kooperantów'),
+        ('rm_print',  'RM_PRINT',  8060, 'Drukowanie PDF ze stemplem'),
+        ('rm_stats',  'RM_STATS',  5050, 'Środowisko RM_MANAGER'),
+        ('rm_serwis', 'RM_SERWIS', 5055, 'Aplikacja SERWIS'),
+        ('rm_video',  'RM_VIDEO',  5000, 'Przeglądarka nagrań wideo'),
+        ('rm_dwf',    'RM_DWF',    5057, 'Przeglądarka rysunków DWF'),
+    ]
+
+    # Rozszerzenia, które PRZYJMUJE portal RM_RFQ (ALLOWED_EXTS w jego app.py).
+    # Plik spoza tej listy portal po cichu pomija przy zapisie snapshotu —
+    # user widziałby "dodano i wysłano", a kooperant nie dostałby nic.
+    # Dlatego odsiewamy je już tutaj, z czytelnym komunikatem.
+    RFQ_PORTAL_EXTS = {'pdf', 'dwf', 'dxf', 'stp', 'step', 'stl'}
+
     # Domyślny materiał wstawiany przez Inventora, gdy projektant go nie ustawił —
     # w BOM-ie to śmieć, a kooperantowi nic nie mówi. "Generic" to ta sama
     # wartość z angielskiej wersji Inventora.
@@ -22194,6 +22526,79 @@ class MainWindow(tk.Tk):
         """Materiał do wysłania do RFQ — bez śmieci z Inventora."""
         mat = str(value or "").strip()
         return "" if mat.lower() in cls.RFQ_JUNK_MATERIALS else mat
+
+    def _ensure_tkdnd(self):
+        """Doładuj bibliotekę tkdnd do interpretera Tcl. Zwraca True, gdy się udało.
+
+        RM_BAZA startuje na zwykłym tk.Tk (nie TkinterDnD.Tk), więc nie możemy
+        użyć tkinterdnd2 w zwykły sposób — ale samą bibliotekę Tcl da się
+        doładować do już działającego okna i to wystarcza do zarejestrowania
+        drop targetu. Dzięki temu NIE ruszamy klasy głównego okna, co przy
+        tej wielkości aplikacji byłoby zmianą ryzykowną.
+
+        Wynik zapamiętujemy — próba ładowania kosztuje, a odpowiedź się nie
+        zmienia w trakcie życia procesu."""
+        cached = getattr(self, "_tkdnd_ready", None)
+        if cached is not None:
+            return cached
+
+        self._tkdnd_ready = False
+        try:
+            import tkinterdnd2, os as _os, platform as _plat
+            # Import samej klasy TkinterDnD wstrzykuje do tkinter.BaseWidget
+            # metody drop_target_register / dnd_bind / _substitute_dnd.
+            # Dzięki temu ma je KAŻDY widget, także w aplikacji startującej
+            # na zwykłym tk.Tk — i nie musimy przerabiać klasy głównego okna.
+            from tkinterdnd2 import TkinterDnD  # noqa: F401  (efekt uboczny importu)
+            # Katalog zależy od architektury — win-x86 na 64-bitowym Pythonie
+            # kończy się "Bad exe format" (sprawdzone).
+            arch = {'AMD64': 'win-x64', 'ARM64': 'win-arm64'}.get(
+                _plat.machine().upper(), 'win-x86')
+            lib = _os.path.join(_os.path.dirname(tkinterdnd2.__file__), 'tkdnd', arch)
+            self.tk.eval(f'global auto_path; lappend auto_path {{{lib}}}')
+            self.tk.call('package', 'require', 'tkdnd')
+            self._tkdnd_ready = True
+        except Exception as e:
+            # Brak DnD to nie powód, żeby okno nie działało — zostaje
+            # przycisk „Dodaj plik…", więc funkcja jest osiągalna zawsze.
+            print(f"ℹ️  Drag & drop plików niedostępny ({e}) — użyj przycisku „Dodaj plik…”")
+        return self._tkdnd_ready
+
+    def _register_file_drop(self, widget, on_files):
+        """Podepnij upuszczanie plików z Eksploratora na `widget`.
+
+        on_files dostaje listę obiektów Path. Zwraca True, gdy podpięcie się
+        udało. Ścieżki rozbijamy przez splitlist, bo tkdnd zwraca je jako listę
+        Tcl — ścieżka ze spacją przychodzi w nawiasach klamrowych i naiwny
+        split(' ') rozerwałby ją na kawałki."""
+        if not self._ensure_tkdnd():
+            return False
+        try:
+            widget.drop_target_register('DND_Files')
+
+            def _on_drop(event):
+                try:
+                    # getattr, bo zdarzenie <<Drop>> wygenerowane nie przez
+                    # tkdnd nie ma pola .data — wtedy po prostu nic nie robimy.
+                    dane = getattr(event, 'data', None)
+                    if not dane:
+                        return 'refuse_drop'
+                    sciezki = [Path(p) for p in self.tk.splitlist(dane)]
+                    on_files([p for p in sciezki if p.is_file()])
+                except Exception as e:
+                    print(f"⚠️  Upuszczanie pliku: {e}")
+                return 'copy'
+
+            # dnd_bind, NIE zwykłe bind — zdarzenia tkdnd niosą własny zestaw
+            # pól (%D ze ścieżkami itd.), a standardowy mechanizm Tk próbuje je
+            # wczytać jak zwykłe zdarzenie myszy i wywala się na
+            # 'expected integer but got "%#"'. dnd_bind podstawia własny
+            # substytutor, który buduje z tego obiekt z polem .data.
+            widget.dnd_bind('<<Drop>>', _on_drop)
+            return True
+        except Exception as e:
+            print(f"⚠️  Nie podpięto drag & drop: {e}")
+            return False
 
     def refresh_data_with_rfq(self):
         """Wersja odświeżania spod GŁÓWNEGO przycisku „🔄 Odśwież": odświeża
@@ -22670,12 +23075,14 @@ class MainWindow(tk.Tk):
 
         rfq_var = tk.StringVar()
         options, mapping = [], {}
+        intro_by_rfq = {}      # rfq_id -> tekst już zapisany w portalu
         for r in rfq_list:
             label = f"{r['code']} — {r['title']}"
             if r.get('project_number'):
                 label += f"  (proj. {r['project_number']})"
             options.append(label)
             mapping[label] = r['id']
+            intro_by_rfq[r['id']] = (r.get('intro_note') or '')
 
         row1 = tk.Frame(top)
         row1.pack(fill=tk.X)
@@ -22707,10 +23114,56 @@ class MainWindow(tk.Tk):
             if proj:
                 label += f"  (proj. {proj})"
             mapping[label] = created['rfq_id']
+            intro_by_rfq[created['rfq_id']] = ''   # świeże RFQ — bez wiadomości
             combo['values'] = [label] + list(combo['values'])
             combo.set(label)
+            _load_intro()
 
         tk.Button(row1, text="+ Nowe RFQ", command=_new_rfq).pack(side=tk.LEFT)
+
+        # --- wiadomość dla kooperantów (wspólna dla całego zapytania) ---
+        # Kooperant zobaczy ją w ramce NAD listą pozycji. Na to, co dotyczy
+        # całego zlecenia: termin dostawy, wymagania jakościowe, pakowanie,
+        # kontakt techniczny. Uwagi do JEDNEGO detalu wpisuje się przy pozycji.
+        #
+        # Pole pokazuje treść JUŻ ZAPISANĄ w portalu i pozwala ją poprawić —
+        # zapisujemy tylko wtedy, gdy user faktycznie coś zmienił (patrz
+        # _intro_changed w _send), żeby samo otwarcie okna nie ruszało tekstu.
+        note_row = tk.Frame(top)
+        note_row.pack(fill=tk.X, pady=(8, 0))
+        tk.Label(note_row, text="Wiadomość:", width=10, anchor="nw").pack(side=tk.LEFT, anchor="n")
+        note_box = tk.Frame(note_row)
+        note_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        intro_txt = tk.Text(note_box, height=3, wrap=tk.WORD, font=("Arial", 9),
+                            relief=tk.SOLID, bd=1)
+        intro_txt.pack(fill=tk.X)
+        intro_hint = tk.Label(note_box, fg="#777", font=("Arial", 8), anchor="w",
+                              text="Widoczna dla kooperantów na górze zapytania.")
+        intro_hint.pack(fill=tk.X)
+
+        # Stan wczytany z portalu — do porównania „czy user coś zmienił".
+        _intro_state = {'loaded': ''}
+
+        def _load_intro(*_):
+            """Wstaw do pola tekst zapisany w wybranym RFQ."""
+            rfq_id = mapping.get(rfq_var.get())
+            tekst = intro_by_rfq.get(rfq_id, '') or ''
+            _intro_state['loaded'] = tekst
+            intro_txt.delete('1.0', tk.END)
+            if tekst:
+                intro_txt.insert('1.0', tekst)
+                intro_hint.config(
+                    text="Widoczna dla kooperantów na górze zapytania. "
+                         "Możesz poprawić — zapiszemy przy wysyłce.")
+            else:
+                intro_hint.config(
+                    text="Widoczna dla kooperantów na górze zapytania. "
+                         "Puste = bez wiadomości.")
+
+        # Przeładowanie przy zmianie zapytania — inaczej user edytowałby tekst
+        # jednego RFQ, a zapisał go do drugiego.
+        combo.bind("<<ComboboxSelected>>", _load_intro, add="+")
+        _load_intro()
 
         # --- lista pozycji z plikami ---
         mid = tk.LabelFrame(dlg, text="Pozycje i znalezione pliki (odznacz niechciane)",
@@ -22785,6 +23238,48 @@ class MainWindow(tk.Tk):
             total = sum(len(it.get('files') or []) for it in items)
             status.config(text=f"Znaleziono {total} plików dla {len(items)} pozycji.")
 
+        def _file_actions_row(parent, it):
+            """Jeden wiersz akcji na pliki:
+            [Szukaj dalej…] [⬇ przeciągnij tu plik] [Dodaj plik…]
+
+            Razem, bo to trzy warianty tej samej czynności — „dorzuć
+            dokumentację do TEJ pozycji". W osobnych wierszach zjadały tyle
+            pionu, że przy kilkunastu pozycjach lista robiła się nieczytelna.
+
+            Przycisk „Dodaj plik…" jest ZAWSZE, bo drag & drop może być
+            niedostępny (brak tkinterdnd2) — inaczej przy braku biblioteki
+            funkcja znikałaby bez śladu."""
+            row = tk.Frame(parent)
+            row.pack(fill=tk.X, padx=12, pady=(3, 1))
+
+            tk.Button(row, text="Szukaj dalej…", font=("Arial", 8),
+                      command=lambda it=it: _search_more(it)).pack(side=tk.LEFT)
+
+            # Strefa zrzutu w środku — rozciąga się na wolne miejsce, żeby
+            # było w co celować myszą.
+            strip = tk.Frame(row, bd=1, relief=tk.RIDGE, bg="#f4f6f8")
+            strip.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+            lbl = tk.Label(strip, bg="#f4f6f8", fg="#666", font=("Arial", 8),
+                           text="⬇ przeciągnij tu plik z Eksploratora", anchor="center")
+            lbl.pack(fill=tk.X, pady=2)
+
+            # UWAGA: wołamy przez it['pick_manual_files'], nie przez nazwę
+            # lokalną — te funkcje powstają w pętli `for it in items`, więc
+            # domknięcie po nazwie złapałoby OSTATNIĄ pozycję i pliki lądowałyby
+            # przy złym detalu.
+            tk.Button(row, text="Dodaj plik…", font=("Arial", 8),
+                      command=lambda it=it: it['pick_manual_files']()).pack(side=tk.LEFT)
+
+            def _dodaj(paths, it=it):
+                it['add_manual_files'](paths)
+
+            # Pasek I etykieta jako cel upuszczenia: user celuje w napis,
+            # nie w niewidoczną ramkę pod nim.
+            ok = self._register_file_drop(strip, _dodaj)
+            self._register_file_drop(lbl, _dodaj)
+            if not ok:
+                lbl.config(text="(przeciąganie niedostępne — użyj „Dodaj plik…”)")
+
         def _build_rows():
             for it in items:
                 # Elementy katalogowe (bez nr rysunku) nie mają dokumentacji
@@ -22829,6 +23324,57 @@ class MainWindow(tk.Tk):
                 files_frame.pack(fill=tk.X)
                 it['files_frame'] = files_frame
 
+                def _add_manual_files(paths, it=it):
+                    """Dorzucenie plików ręcznie (drag & drop albo przycisk).
+
+                    Awaryjna furtka na wypadek, gdy automat nie trafi: rysunek
+                    leży poza strukturą projektu, ma inną nazwę niż numer, albo
+                    kooperant potrzebuje czegoś spoza standardowych rozszerzeń."""
+                    if not paths:
+                        return
+                    # Odsiew rozszerzeń, których portal nie zapisze (patrz
+                    # RFQ_PORTAL_EXTS) — inaczej user dodaje plik, wysyła
+                    # i nikt nie zauważa, że kooperant go nie dostał.
+                    odrzucone = [p for p in paths
+                                 if p.suffix.lstrip('.').lower() not in self.RFQ_PORTAL_EXTS]
+                    paths = [p for p in paths if p not in odrzucone]
+                    if odrzucone:
+                        messagebox.showwarning(
+                            "Nieobsługiwany format",
+                            "Portal RFQ przyjmuje tylko: "
+                            + ", ".join(sorted(self.RFQ_PORTAL_EXTS)).upper()
+                            + ".\n\nPominięto:\n"
+                            + "\n".join(f"  • {p.name}" for p in odrzucone),
+                            parent=dlg)
+                    if not paths:
+                        return
+                    existing = it.get('files') or []
+                    dodane = 0
+                    for p in paths:
+                        if p not in existing:
+                            existing.append(p)
+                            dodane += 1
+                    it['files'] = existing
+                    if dodane:
+                        # Nowe pliki zaznaczamy do wysyłki — user dodał je
+                        # świadomie, więc domyślne odznaczenie byłoby pułapką.
+                        for p in paths:
+                            file_vars.setdefault((it['drawing_no'], str(p)),
+                                                 tk.BooleanVar(value=True))
+                        it['render_files']()
+                        _refresh_total()
+
+                def _pick_manual_files(it=it):
+                    wybrane = filedialog.askopenfilenames(
+                        parent=dlg, title=f"Dodaj pliki do {it['drawing_no']}",
+                        filetypes=[("Dokumentacja",
+                                    " ".join(f"*.{e}" for e in sorted(self.RFQ_PORTAL_EXTS))),
+                                   ("Wszystkie pliki", "*.*")])
+                    _add_manual_files([Path(p) for p in wybrane], it)
+
+                it['add_manual_files'] = _add_manual_files
+                it['pick_manual_files'] = _pick_manual_files
+
                 def _render_files(it=it, files_frame=files_frame):
                     for child in files_frame.winfo_children():
                         child.destroy()
@@ -22855,8 +23401,9 @@ class MainWindow(tk.Tk):
                             msg, colour = ("⚠ nie znaleziono plików "
                                            "(pozycja i tak zostanie wysłana)"), "#b3261e"
                         tk.Label(row, text=msg, fg=colour, anchor="w").pack(side=tk.LEFT)
-                        tk.Button(row, text="Szukaj dalej…", font=("Arial", 8),
-                                  command=lambda it=it: _search_more(it)).pack(side=tk.LEFT, padx=(8, 0))
+                        # „Szukaj dalej…" jest w jednym wierszu ze strefą
+                        # zrzutu i przyciskiem wyboru pliku — patrz niżej.
+                        _file_actions_row(files_frame, it)
                         return
 
                     for f in found:
@@ -22885,9 +23432,8 @@ class MainWindow(tk.Tk):
                                      fg="#b3261e", font=("Arial", 9, "bold"),
                                      anchor="w").pack(fill=tk.X, padx=12, pady=(2, 0))
 
-                    # po doszukaniu zostawiamy furtkę na kolejne źródło
-                    tk.Button(files_frame, text="Szukaj dalej…", font=("Arial", 8),
-                              command=lambda it=it: _search_more(it)).pack(anchor="w", padx=12, pady=(2, 0))
+                    # furtka na kolejne źródło + ręczne dorzucenie pliku
+                    _file_actions_row(files_frame, it)
 
                 it['render_files'] = _render_files
                 _render_files()
@@ -22908,6 +23454,28 @@ class MainWindow(tk.Tk):
                                        "Wybierz zapytanie ofertowe.", parent=dlg)
                 return
             rfq_id = mapping[label]
+
+            # Wiadomość dla kooperantów — ZAPISUJEMY NAJPIERW, przed blokadami
+            # (brak DXF, duplikaty). Wcześniej zapis stał za nimi i każde
+            # przerwanie wysyłki kasowało wpisany przed chwilą tekst, mimo że
+            # user go widział w polu.
+            #
+            # Zapis tylko przy realnej zmianie: samo otwarcie okna i kliknięcie
+            # „Wyślij" nie ma ruszać treści, a pustego pola nie zapisujemy jako
+            # skasowania, gdy nic w nim nie było. mode='replace', bo pole
+            # pokazuje PEŁNĄ obecną treść — user widzi, co nadpisuje.
+            nowy_intro = intro_txt.get('1.0', tk.END).strip()
+            if nowy_intro != _intro_state['loaded'].strip():
+                try:
+                    agent.set_rfq_intro_note(rfq_id, nowy_intro, mode='replace')
+                    intro_by_rfq[rfq_id] = nowy_intro
+                    _intro_state['loaded'] = nowy_intro   # zapisane = nowy punkt odniesienia
+                except Exception as e:
+                    if not messagebox.askyesno(
+                            "Wiadomość dla kooperantów",
+                            f"Nie udało się zapisać wiadomości:\n{e}\n\n"
+                            "Wysłać same pozycje?", parent=dlg):
+                        return
 
             # Pozycja idzie do RFQ nawet bez plików — elementy katalogowe
             # (łożysko, siłownik) wycenia się po nazwie, nie po rysunku.
@@ -22934,7 +23502,8 @@ class MainWindow(tk.Tk):
                     "Detale z sufiksem X / XX idą na laser i muszą mieć DXF:\n\n"
                     + "\n".join(f"  • {d}" for d in missing_dxf)
                     + "\n\nUżyj „Szukaj dalej…”, żeby znaleźć DXF w bibliotece "
-                      "lub na serwerze, albo odznacz te pozycje.",
+                      "lub na serwerze, przeciągnij plik na pozycję "
+                      "(albo „Dodaj plik…”), lub odznacz te pozycje.",
                     parent=dlg)
                 return
 
