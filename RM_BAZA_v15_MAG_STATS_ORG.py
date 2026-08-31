@@ -21676,6 +21676,53 @@ class MainWindow(tk.Tk):
         finally:
             rw.close()
 
+    def _sprawdz_portal_rfq(self, url: str):
+        """Czy pod tym adresem faktycznie odpowiada portal RM_RFQ?
+
+        Zwraca (True, opis) albo (False, powód). Sprawdzamy TYM SAMYM
+        endpointem, którego używa RM_SYNC_AGENT — więc test potwierdza nie
+        tylko, że coś tam żyje, ale że agent się z tym dogada (adres + klucz
+        API + uprawnienia naraz).
+
+        Powód istnienia: adres RM_RFQ z okna trafia do settings, z którego
+        czyta agent. Literówka = cicha śmierć synchronizacji, bez błędu na
+        ekranie — RM_BAZA i portal po prostu przestają wymieniać dane."""
+        import urllib.request, urllib.error, json as _json
+        try:
+            api_key = ''
+            con = self.db_manager.master_con if self.db_manager else None
+            if con:
+                row = con.execute(
+                    "SELECT value FROM settings WHERE key='rfq_api_key'").fetchone()
+                api_key = (row[0] or '') if row else ''
+            req = urllib.request.Request(
+                f"{url.rstrip('/')}/api/rfq/list",
+                headers={'X-API-Key': api_key})
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                dane = _json.loads(resp.read())
+            if not isinstance(dane, list):
+                return False, "Odpowiedział serwer, ale to nie jest portal RM_RFQ."
+            return True, f"Portal odpowiada, widzi {len(dane)} aktywnych zapytań."
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                # 401 daje też INNA aplikacja RM na wskazanym porcie (np.
+                # RM_STATS na 5050 odpowiada {"auth_required": true}).
+                # Bez tego rozróżnienia user szukałby problemu z kluczem API,
+                # a naprawdę wpisał adres innej apki.
+                try:
+                    tresc = e.read(400).decode('utf-8', 'replace')
+                except Exception:
+                    tresc = ''
+                if 'auth_required' in tresc or 'Wymagane logowanie' in tresc:
+                    return False, ("Pod tym adresem odpowiada INNA aplikacja RM "
+                                   "(prosi o logowanie), nie portal RM_RFQ. "
+                                   "Sprawdź numer portu.")
+                return False, ("Portal odpowiada, ale ODRZUCA klucz API "
+                               "(settings.rfq_api_key). Sync nie zadziała.")
+            return False, f"Portal zwrócił HTTP {e.code}."
+        except Exception as e:
+            return False, f"Brak odpowiedzi: {type(e).__name__} — {e}"
+
     def _open_rm_app(self, klucz: str) -> None:
         """Otwórz aplikację webową w domyślnej przeglądarce."""
         url = self._app_urls().get(klucz)
@@ -21743,6 +21790,25 @@ class MainWindow(tk.Tk):
                 if adres and not adres.startswith(('http://', 'https://')):
                     adres = 'http://' + adres      # user wpisze "serwer:5070"
                 mapa[klucz] = adres
+
+            # RM_RFQ to nie tylko link w menu — ten sam adres czyta
+            # RM_SYNC_AGENT. Literówka zabiłaby synchronizację po cichu, więc
+            # zanim zapiszemy, pytamy portal, czy tam w ogóle jest.
+            # Pozostałych aplikacji nie sprawdzamy: zły adres = najwyżej pusta
+            # karta w przeglądarce, widać od razu.
+            rfq_url = mapa.get('rm_rfq', '')
+            if rfq_url and rfq_url != (obecne.get('rm_rfq') or ''):
+                ok, opis = self._sprawdz_portal_rfq(rfq_url)
+                if not ok:
+                    if not messagebox.askyesno(
+                            "Portal RM_RFQ nie odpowiada",
+                            f"{rfq_url}\n\n{opis}\n\n"
+                            "Ten adres jest używany także przez synchronizację "
+                            "RM_BAZA ↔ RM_RFQ — jeśli jest błędny, dane przestaną "
+                            "się wymieniać (bez żadnego komunikatu).\n\n"
+                            "Zapisać mimo to?",
+                            parent=dlg, icon='warning'):
+                        return
             try:
                 self._save_app_urls(mapa)
             except Exception as e:
@@ -21761,7 +21827,17 @@ class MainWindow(tk.Tk):
                   width=12).pack(side=tk.RIGHT)
         tk.Button(dolny, text="Anuluj", command=dlg.destroy, width=10).pack(
             side=tk.RIGHT, padx=(0, 8))
+        def _testuj():
+            adres = pola['rm_rfq'].get().strip().rstrip('/')
+            if adres and not adres.startswith(('http://', 'https://')):
+                adres = 'http://' + adres
+            adres = adres or f'http://localhost:5070'
+            ok, opis = self._sprawdz_portal_rfq(adres)
+            (messagebox.showinfo if ok else messagebox.showwarning)(
+                "Test połączenia z RM_RFQ", f"{adres}\n\n{opis}", parent=dlg)
+
         tk.Button(dolny, text="Przywróć domyślne", command=_domyslne).pack(side=tk.LEFT)
+        tk.Button(dolny, text="Sprawdź RM_RFQ", command=_testuj).pack(side=tk.LEFT, padx=(8, 0))
 
     def _rfq_watchers(self):
         """Loginy, którym pokazujemy powiadomienia RFQ (badge + panel).
