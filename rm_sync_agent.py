@@ -79,7 +79,7 @@ def _pick_column(available: set, aliases: list) -> str | None:
 class RMSyncAgent:
     def __init__(self, master_path: str = MASTER_DB_DEFAULT):
         self.master_path = master_path
-        self.portal_url = self._setting('rfq_portal_url', '').rstrip('/')
+        self.portal_url = self._portal_url_for_machine()
         self.api_key = self._setting('rfq_api_key', '')
         if not self.portal_url or not self.api_key:
             raise RuntimeError(
@@ -106,6 +106,31 @@ class RMSyncAgent:
             con = sqlite3.connect(self.master_path, timeout=10)
         con.row_factory = sqlite3.Row
         return con
+
+    # Nazwy maszyn serwerowych — te same co SERVER_HOSTNAMES w RM_BAZA
+    # i server_hostnames w config.json aplikacji webowych.
+    SERVER_HOSTNAMES = ('W2019S', 'SERWER')
+
+    def _portal_url_for_machine(self) -> str:
+        """Adres portalu dla TEJ maszyny.
+
+        W domu portal stoi na localhost, w firmie na serwerze — a master.sqlite
+        jest wspólny, więc jeden adres nie wystarcza. Kolejność:
+
+          1. settings['rfq_portal_url_server'] / '..._local' — jeśli ustawione,
+          2. settings['rfq_portal_url'] — wspólny/starszy klucz (zgodność wstecz).
+
+        Bez tego agent uruchomiony w firmie próbowałby gadać z domowym
+        localhostem i cicho nic by nie synchronizował."""
+        import socket as _socket
+        try:
+            host = _socket.gethostname().upper()
+            serwer = any(h in host for h in self.SERVER_HOSTNAMES)
+        except Exception:
+            serwer = False
+        specyficzny = self._setting(
+            'rfq_portal_url_server' if serwer else 'rfq_portal_url_local', '')
+        return (specyficzny or self._setting('rfq_portal_url', '')).rstrip('/')
 
     def _setting(self, key: str, default: str = '') -> str:
         con = self._open_master()
@@ -225,6 +250,21 @@ class RMSyncAgent:
         resp = requests.post(
             f'{self.portal_url}/api/rfq',
             headers=self._headers(), json=payload, timeout=HTTP_TIMEOUT
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def set_rfq_intro_note(self, rfq_id: int, text: str,
+                           mode: str = 'append') -> dict:
+        """Ustawia wspólną informację widoczną dla kooperantów nad listą pozycji.
+
+        mode='append' (domyślnie) DOPISUJE do już istniejącej treści — do
+        jednego RFQ wysyła się partiami i nadpisywanie kasowałoby tekst
+        z poprzedniej wysyłki. mode='replace' podmienia całość."""
+        resp = requests.post(
+            f'{self.portal_url}/api/rfq/{rfq_id}/intro-note',
+            headers=self._headers(), json={'intro_note': text, 'mode': mode},
+            timeout=HTTP_TIMEOUT
         )
         resp.raise_for_status()
         return resp.json()
