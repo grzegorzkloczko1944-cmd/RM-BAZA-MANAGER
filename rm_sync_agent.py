@@ -238,11 +238,37 @@ class RMSyncAgent:
         resp.raise_for_status()
         return resp.json().get('drawings', [])
 
+    @staticmethod
+    def _contact_fields(contact: dict | None) -> dict:
+        """Dane osoby prowadzącej zapytanie → pola contact_* dla portalu.
+
+        Kooperant dostawał zapytanie „od RMPAK", bez nazwiska — przy pytaniu
+        technicznym musiał szukać kontaktu sam. Portal pokazuje te dane nad
+        listą pozycji i w stopce maila.
+
+        `contact` przychodzi z RM_BAZA (employees w RM_MANAGER, po loginie
+        zalogowanego). Pusty dict/None → nie wysyłamy nic i portal ZOSTAWIA
+        zapisany kontakt bez zmian (nie kasuje go).
+        """
+        if not contact:
+            return {}
+        out = {}
+        for src, dst in (('login', 'contact_login'), ('name', 'contact_name'),
+                         ('email', 'contact_email'), ('phone', 'contact_phone')):
+            val = (contact.get(src) or '').strip()
+            if val:
+                out[dst] = val
+        return out
+
     def create_rfq(self, title: str, project_number: str | None = None,
                    offer_start_date: str | None = None,
-                   offer_deadline: str | None = None) -> dict:
-        """Zakłada nowe RFQ w portalu. Zwraca {rfq_id, code, title}."""
+                   offer_deadline: str | None = None,
+                   contact: dict | None = None) -> dict:
+        """Zakłada nowe RFQ w portalu. Zwraca {rfq_id, code, title}.
+
+        contact — patrz _contact_fields()."""
         payload = {'title': title}
+        payload.update(self._contact_fields(contact))
         if project_number:
             payload['project_number'] = project_number
         if offer_start_date:
@@ -257,7 +283,8 @@ class RMSyncAgent:
         return resp.json()
 
     def set_rfq_intro_note(self, rfq_id: int, text: str,
-                           mode: str = 'append') -> dict:
+                           mode: str = 'append',
+                           contact: dict | None = None) -> dict:
         """Ustawia wspólną informację widoczną dla kooperantów nad listą pozycji.
 
         mode='append' (domyślnie) DOPISUJE do już istniejącej treści — do
@@ -265,7 +292,8 @@ class RMSyncAgent:
         z poprzedniej wysyłki. mode='replace' podmienia całość."""
         resp = requests.post(
             f'{self.portal_url}/api/rfq/{rfq_id}/intro-note',
-            headers=self._headers(), json={'intro_note': text, 'mode': mode},
+            headers=self._headers(),
+            json={'intro_note': text, 'mode': mode, **self._contact_fields(contact)},
             timeout=HTTP_TIMEOUT
         )
         resp.raise_for_status()
@@ -274,7 +302,8 @@ class RMSyncAgent:
     def push_drawing(self, rfq_id: int, drawing_number: str, file_paths: list[str],
                      name: str | None = None, quantity: int = 1,
                      material: str | None = None, notes: str | None = None,
-                     replace_snapshot: bool = False) -> dict:
+                     replace_snapshot: bool = False,
+                     contact: dict | None = None) -> dict:
         """Wysyła rysunek jako pozycję RFQ. Agent CZYTA pliki lokalnie i wysyła
         ich zawartość — portal nigdy nie dostaje ścieżki ani dostępu do dysku
         firmowego. Wywoływane z GUI RM_BAZA.
@@ -297,6 +326,9 @@ class RMSyncAgent:
             data['notes'] = notes
         if replace_snapshot:
             data['replace_snapshot'] = 'true'
+        # Kontakt idzie z KAŻDĄ wysyłką i aktualizacją — portal odświeża snapshot,
+        # więc pokazuje osobę, która ostatnio prowadzi sprawę (patrz schema.sql).
+        data.update(self._contact_fields(contact))
 
         # Wczytujemy bajty RAZ: idą do POST i przy okazji liczymy sha1 + zbieramy
         # stat (size/mtime_ns). Zero dodatkowego I/O względem samej wysyłki — te
@@ -807,6 +839,14 @@ class RMSyncAgent:
                     offer_price     REAL,      -- cena ZŁOŻONEJ oferty (widoczna przed wyborem zwycięzcy)
                     offer_currency  TEXT,      -- waluta złożonej oferty (np. PLN)
                     offer_lead_time INTEGER,   -- termin realizacji w dniach ze złożonej oferty
+                    -- ODMOWA wyceny: 1 = kooperant świadomie odmówił. Bez tego
+                    -- "brak oferty" i "odmowa" wyglądały w RM_BAZA identycznie
+                    -- ("—"), a to różnica między "czekamy" a "szukaj kogoś innego".
+                    has_declined    INTEGER,
+                    decline_reason  TEXT,      -- kod z listy zamkniętej (brak_mocy, termin, …)
+                    decline_label   TEXT,      -- gotowa etykieta PL z portalu (nie tłumaczymy u siebie)
+                    decline_notes   TEXT,      -- własne wyjaśnienie kooperanta (zwykle przy „inne")
+                    declined_at     TEXT,      -- kiedy odmówił
                     synced_at       TEXT DEFAULT (datetime('now','localtime')),
                     PRIMARY KEY (rfq_item_id, supplier_name)
                 )
@@ -815,7 +855,10 @@ class RMSyncAgent:
             akt_cols = {r[1] for r in con.execute('PRAGMA table_info(rfq_activity)')}
             for col, decl in (('is_winner', 'INTEGER'), ('win_price', 'REAL'),
                               ('offer_price', 'REAL'), ('offer_currency', 'TEXT'),
-                              ('offer_lead_time', 'INTEGER')):
+                              ('offer_lead_time', 'INTEGER'),
+                              ('has_declined', 'INTEGER'), ('decline_reason', 'TEXT'),
+                              ('decline_label', 'TEXT'), ('decline_notes', 'TEXT'),
+                              ('declined_at', 'TEXT')):
                 if col not in akt_cols:
                     con.execute(f'ALTER TABLE rfq_activity ADD COLUMN {col} {decl}')
             con.execute('CREATE INDEX IF NOT EXISTS idx_rfq_activity_drawing '
@@ -827,15 +870,20 @@ class RMSyncAgent:
                     rfq_item_id, supplier_name, drawing_number, item_name,
                     email_sent_at, first_viewed_at, last_viewed_at,
                     view_count, seen_this_item, has_offer, is_winner, win_price,
-                    offer_price, offer_currency, offer_lead_time, synced_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
+                    offer_price, offer_currency, offer_lead_time,
+                    has_declined, decline_reason, decline_label, decline_notes,
+                    declined_at, synced_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
             ''', [
                 (r.get('rfq_item_id'), r.get('supplier_name'), r.get('drawing_number'),
                  r.get('item_name'), r.get('email_sent_at'), r.get('first_viewed_at'),
                  r.get('last_viewed_at'), r.get('view_count'),
                  r.get('seen_this_item'), r.get('has_offer'),
                  r.get('is_winner'), r.get('win_price'),
-                 r.get('offer_price'), r.get('offer_currency'), r.get('offer_lead_time'))
+                 r.get('offer_price'), r.get('offer_currency'), r.get('offer_lead_time'),
+                 r.get('has_declined'), r.get('decline_reason'),
+                 r.get('decline_reason_label'), r.get('decline_notes'),
+                 r.get('declined_at'))
                 for r in rows
             ])
             con.commit()

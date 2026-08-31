@@ -4343,12 +4343,39 @@ class MainWindow(tk.Tk):
         except Exception:
             pass
 
+        # === WYCENA: ⚠ niezgodność z dyskiem (RYS ZMIENIONY / RYS BRAK) ===
+        # MUSI być pierwsze: dehighlight_cells wyżej skasował tło CAŁEGO wiersza,
+        # a ta metoda leci przy każdym kliknięciu w wiersz (_refresh_row_selection_
+        # _highlight). Bez odtworzenia tutaj żółte/czerwone oznaczenie znikało
+        # przy pierwszym kliknięciu w inną komórkę i wracało dopiero po Odśwież.
+        # Źródłem prawdy jest self._rfq_freshness (ustawiane przez
+        # _apply_rfq_freshness), nie sam tekst komórki — prefiks ⚠ bywa już
+        # w wartości, ale kolor trzeba nałożyć od nowa.
+        _rfq_marked = False
+        try:
+            fresh = getattr(self, "_rfq_freshness", None) or {}
+            if fresh:
+                dn = str(self.sheet.get_cell_data(row_idx, 0) or "").strip() \
+                     or str(self.sheet.get_cell_data(row_idx, 1) or "").strip()
+                st = (fresh.get(dn) or {}).get("status") if dn else None
+                if st in ("changed", "missing"):
+                    _bg, _fg = (("#fff3cd", "#7a5c00") if st == "changed"
+                                else ("#f8d7da", "#842029"))
+                    self.sheet.highlight_cells(row=row_idx, column=self.WYCENA_COL,
+                                               bg=_bg, fg=_fg)
+                    self._cells_special_bg.add((row_idx, self.WYCENA_COL))
+                    _rfq_marked = True      # kolor RFQ ma pierwszeństwo
+        except Exception:
+            pass
+
         # === WYCENA: zielone tło gdy jest wybrany zwycięzca ===
         # Musi być PRZED blokiem is_complete — tamten kończy się `return`,
         # więc pozycje ukończone nie doszłyby tutaj.
         try:
             wycena_val = str(self.sheet.get_cell_data(row_idx, self.WYCENA_COL) or "")
-            if wycena_val.startswith("✓") or wycena_val.startswith("⚠ ✓"):
+            if _rfq_marked:
+                pass                       # oznaczenie ⚠ już nałożone wyżej
+            elif wycena_val.startswith("✓") or wycena_val.startswith("⚠ ✓"):
                 self.sheet.highlight_cells(row=row_idx, column=self.WYCENA_COL,
                                            bg=GREEN_BG_BRIGHT)
                 self._cells_special_bg.add((row_idx, self.WYCENA_COL))
@@ -7447,17 +7474,49 @@ class MainWindow(tk.Tk):
         """Okno z tabelką pozycji niezgodnych ze stanem na dysku + akcja
         aktualizacji. result: {drawing_number: {status, changed_files,
         missing_files, rfq_id}}."""
-        # nie dubluj okna
+        # Nie dubluj okna. Dwa przebiegi sprawdzania pod rząd (np. „Odśwież"
+        # zaraz po aktualizacji w RFQ, która sama woła refresh_data) dawały
+        # efekt „okno wyskakuje dwa razy": pierwsze było niszczone, drugie
+        # tworzone od zera — razem z utratą zaznaczeń usera.
+        #
+        # Gdy okno JUŻ stoi i dotyczy tego samego zestawu pozycji, zostawiamy je
+        # w spokoju. Zestaw się zmienił → przebudowa (stara lista byłaby myląca).
+        # Wyciszenie na dziś („Nie powiadamiaj dzisiaj" na dole okna). Trzymane
+        # TYLKO w pamięci procesu — patrz komentarz przy checkboksie. Oznaczenia
+        # ⚠ w arkuszu i badge działają dalej, wyciszone jest samo wyskakiwanie.
+        try:
+            _do = getattr(self, '_rfq_fresh_muted_until', None)
+            if _do and datetime.now() < _do:
+                return
+        except Exception:
+            pass
+
+        sygnatura = tuple(sorted(
+            (dn, (info or {}).get('status')) for dn, info in (result or {}).items()))
         existing = getattr(self, '_rfq_fresh_dialog', None)
         if existing is not None:
             try:
                 if existing.winfo_exists():
+                    if getattr(self, '_rfq_fresh_sig', None) == sygnatura:
+                        try:
+                            existing.lift()      # to samo — tylko przypomnij
+                        except Exception:
+                            pass
+                        return
                     existing.destroy()
             except Exception:
                 pass
 
         dlg = tk.Toplevel(self)
         self._rfq_fresh_dialog = dlg
+        self._rfq_fresh_sig = sygnatura
+        # Zamknięcie krzyżykiem musi czyścić stan tak samo jak przycisk „Zamknij" —
+        # inaczej zostaje sygnatura po nieistniejącym oknie i kolejne sprawdzenie
+        # uznaje, że okno „już stoi".
+        dlg.protocol("WM_DELETE_WINDOW", lambda: (
+            setattr(self, '_rfq_fresh_dialog', None),
+            setattr(self, '_rfq_fresh_sig', None),
+            dlg.destroy()))
         dlg.title("Rysunki niezgodne ze stanem na dysku")
         dlg.geometry("720x420")
         dlg.transient(self)
@@ -7545,8 +7604,34 @@ class MainWindow(tk.Tk):
                   command=lambda: _zaznacz_wszystkie(False)).pack(side=tk.LEFT)
         tk.Button(btns, text="Zaznacz zmienione",
                   command=lambda: _zaznacz_wszystkie(True)).pack(side=tk.LEFT, padx=(6, 0))
+
+        # „Nie powiadamiaj przez 3 h" — wyciszenie samego wyskakiwania okna.
+        #
+        # ŚWIADOMIE bez zapisu do bazy: to decyzja na teraz („wiem, robię coś
+        # innego"), a nie ustawienie. Restart RM_BAZA kasuje wyciszenie i okno
+        # wraca — tak ma być, żeby nieaktualna dokumentacja u kooperanta nie
+        # została wyciszona na stałe i po cichu.
+        #
+        # Trzymamy MOMENT WYGAŚNIĘCIA, nie flagę: inaczej przy programie
+        # chodzącym cały dzień wyciszenie zostałoby na zawsze.
+        # Oznaczenia ⚠ w arkuszu i badge zostają — wyciszamy TYLKO wyskakiwanie.
+        mute_var = tk.BooleanVar(value=False)
+
+        def _przelacz_mute():
+            # timedelta importowane lokalnie — w tym module globalnie jest tylko
+            # `datetime` (patrz import na górze pliku), reszta kodu robi tak samo.
+            from datetime import timedelta as _td
+            self._rfq_fresh_muted_until = (
+                datetime.now() + _td(hours=3) if mute_var.get() else None)
+
+        tk.Checkbutton(btns, text="Nie powiadamiaj przez 3 h", variable=mute_var,
+                       command=_przelacz_mute, anchor="w").pack(side=tk.LEFT, padx=(16, 0))
+        # Sygnaturę też zerujemy — inaczej po ręcznym zamknięciu okno z tym samym
+        # zestawem pozycji już by się nie pokazało (uznane za „to samo, już stoi").
         tk.Button(btns, text="Zamknij",
-                  command=lambda: (dlg.destroy(), setattr(self, '_rfq_fresh_dialog', None))
+                  command=lambda: (dlg.destroy(),
+                                   setattr(self, '_rfq_fresh_dialog', None),
+                                   setattr(self, '_rfq_fresh_sig', None))
                   ).pack(side=tk.RIGHT, padx=(0, 8))
 
         try:
@@ -7560,6 +7645,12 @@ class MainWindow(tk.Tk):
         wybrane: [(drawing_number, info{rfq_id,...}), ...]."""
         agent = self._get_rfq_agent()
         if agent is None:
+            return
+        # Kontakt odświeżamy też przy aktualizacji dokumentacji — kooperant ma
+        # widzieć osobę, która ostatnio dotykała sprawy, a nie autora sprzed
+        # miesiąca. Brak kompletu = blokada (patrz _rfq_contact).
+        contact = self._rfq_contact()
+        if contact is None:
             return
 
         ok, errors, updated = [], [], []
@@ -7575,7 +7666,8 @@ class MainWindow(tk.Tk):
                     errors.append(f"{dn}: brak plików na dysku do wysłania")
                     continue
                 resp = agent.push_drawing(rfq_id=rfq_id, drawing_number=dn,
-                                          file_paths=paths, replace_snapshot=True)
+                                          file_paths=paths, replace_snapshot=True,
+                                          contact=contact)
                 if resp.get('errors'):
                     errors.append(f"{dn}: {'; '.join(resp['errors'][:3])}")
                 else:
@@ -23286,13 +23378,29 @@ class MainWindow(tk.Tk):
                 """SELECT supplier_name, email_sent_at, last_viewed_at, view_count,
                           seen_this_item, has_offer,
                           COALESCE(is_winner, 0), win_price,
-                          offer_price, offer_currency, offer_lead_time
+                          offer_price, offer_currency, offer_lead_time,
+                          COALESCE(has_declined, 0), decline_label, decline_notes
                      FROM rfq_activity WHERE drawing_number = ?
                     ORDER BY COALESCE(is_winner, 0) DESC, supplier_name""",
                 (drawing_no,)
             ).fetchall()
         except Exception:
-            activity_available = False   # stara baza bez tabeli rfq_activity
+            # Kolumny odmowy dochodzą dopiero przy pierwszym cyklu agenta po
+            # aktualizacji. Zanim to nastąpi, pytamy bez nich — inaczej cała
+            # tabelka znikałaby z komunikatem „agent nie przyniósł danych",
+            # choć reszta jest w bazie od dawna.
+            try:
+                activity = [tuple(r) + (0, None, None) for r in master_con.execute(
+                    """SELECT supplier_name, email_sent_at, last_viewed_at, view_count,
+                              seen_this_item, has_offer,
+                              COALESCE(is_winner, 0), win_price,
+                              offer_price, offer_currency, offer_lead_time
+                         FROM rfq_activity WHERE drawing_number = ?
+                        ORDER BY COALESCE(is_winner, 0) DESC, supplier_name""",
+                    (drawing_no,)
+                ).fetchall()]
+            except Exception:
+                activity_available = False   # stara baza bez tabeli rfq_activity
 
         tk.Label(dialog, text="Kooperanci", font=("Arial", 9, "bold"),
                  anchor="w").pack(fill=tk.X, padx=14, pady=(10, 2))
@@ -23323,7 +23431,9 @@ class MainWindow(tk.Tk):
                                 ("zaproszenie", "Zaproszenie", 105),
                                 ("wejscie", "Ostatnie wejście", 105),
                                 ("widzial", "Widział", 95),
-                                ("oferta", "Oferta", 145)):   # mieści "✓ WYGRAŁ 1234 zł"
+                                # mieści "✓ WYGRAŁ 1234 zł" oraz
+                                # "✖ ODMOWA — Brak mocy przerobowych"
+                                ("oferta", "Oferta", 260)):
                 tree.heading(col, text=txt)
                 tree.column(col, width=w, anchor="w")
 
@@ -23333,10 +23443,15 @@ class MainWindow(tk.Tk):
             tree.tag_configure("seen", background="#eefbee")     # widział pozycję
             tree.tag_configure("stale", background="#fff8e1")    # wchodził, ale nie po dodaniu
             tree.tag_configure("notopened", background="#fdeceb")  # nie otworzył wcale
+            # ODMOWA — szary, wyraźnie inny od czerwieni „nie otworzył".
+            # Czerwień znaczy „czekamy, coś poszło nie tak"; odmowa to zamknięty
+            # temat: kooperant odpowiedział, tylko negatywnie. Szarość mówi
+            # „ten wiersz jest już załatwiony, szukaj gdzie indziej".
+            tree.tag_configure("declined", background="#e4e6e9", foreground="#5f6368")
 
             for a in activity:
                 (nazwa, wyslane, wejscie, wejsc, widzial, oferta, wygral, cena,
-                 of_cena, of_waluta, of_termin) = a
+                 of_cena, of_waluta, of_termin, odmowil, odm_powod, odm_uwagi) = a
                 if not wejsc:
                     stan, tag = ("nie otworzył", "notopened") if wyslane else ("—", "")
                 elif widzial:
@@ -23347,6 +23462,15 @@ class MainWindow(tk.Tk):
                 if wygral:
                     tag = "winner"   # zwycięzca nadpisuje kolor stanu wejścia
                     kol_oferta = f"✓ WYGRAŁ {cena:g} zł" if cena is not None else "✓ WYGRAŁ"
+                elif odmowil:
+                    # Odmowa PRZED sprawdzeniem oferty: kooperant, który najpierw
+                    # wycenił, a potem się wycofał, ma być pokazany jako odmowa.
+                    tag = "declined"
+                    powod = (odm_powod or "").strip()
+                    uwagi = (odm_uwagi or "").strip()
+                    kol_oferta = "✖ ODMOWA" + (f" — {powod}" if powod else "")
+                    if uwagi:
+                        kol_oferta += f" ({uwagi})"
                 elif oferta:
                     # oferta złożona, ale jeszcze nie wybrana — ptaszek + cena/termin,
                     # żeby było widać wycenę bez wchodzenia do portalu
@@ -23638,6 +23762,88 @@ class MainWindow(tk.Tk):
                 parent=self
             )
             return None
+
+    # Pola wymagane, żeby kooperant miał komplet kontaktu do osoby prowadzącej.
+    # Telefon JEST wymagany świadomie — sprawy techniczne załatwia się telefonem,
+    # a mail do RFQ i tak wychodzi z konta firmowego.
+    _RFQ_CONTACT_REQUIRED = (('name', 'imię i nazwisko'),
+                             ('email', 'e-mail'),
+                             ('phone', 'telefon'))
+
+    @staticmethod
+    def _rm_manager_db_path():
+        """Ścieżka do rm_manager.sqlite — bazy RM_MANAGER z tabelą employees.
+
+        ⚠️ To NIE jest master.sqlite. `users` (logowanie) siedzi w master.sqlite
+        RM_BAZA, a `employees` (imię, mail, telefon, user_login) — w OSOBNEJ
+        bazie RM_MANAGER. Podanie tu MASTER_PATH kończy się „no such table:
+        employees", czyli twardą blokadą wysyłki dla wszystkich.
+
+        Wyprowadzamy z MASTER_PATH, bo obie bazy leżą obok siebie:
+        <root>/RM_BAZA/master.sqlite → <root>/RM_MANAGER/rm_manager.sqlite
+        (w domu C:\\RMPAK_CLIENT\\RM_BAZY\\, w firmie Y:\\).
+        """
+        return str(Path(MASTER_PATH).parent.parent / 'RM_MANAGER' / 'rm_manager.sqlite')
+
+    def _rfq_contact(self, parent=None):
+        """Dane kontaktowe zalogowanego użytkownika do wysłania razem z RFQ.
+
+        Źródło: employees w bazie RM_MANAGER (rm_manager.sqlite), po user_login
+        równym loginowi zalogowanego w RM_BAZA. Portal dostaje je gotowe — nie ma
+        i nie może mieć dostępu do RM_MANAGER (patrz RM_RFQ/STATUS.md sekcja 1).
+
+        Zwraca dict {login,name,email,phone} albo None + komunikat, gdy czegoś
+        brakuje. None = TWARDA BLOKADA wysyłki (decyzja 31.08): zapytanie bez
+        kontaktu zmusza kooperanta do szukania osoby na własną rękę, a to
+        właśnie ten problem miało rozwiązać.
+        """
+        parent = parent or self
+        login = (self.current_user or '').strip()
+        if not login:
+            messagebox.showerror(
+                "RFQ — brak zalogowanego użytkownika",
+                "Nie wiadomo, kto wysyła zapytanie.\n\n"
+                "Zaloguj się w RM_BAZA i spróbuj ponownie.", parent=parent)
+            return None
+
+        rm_db = self._rm_manager_db_path()
+        try:
+            from rm_manager import get_employee_by_user_login
+            emp = get_employee_by_user_login(rm_db, login) or {}
+        except Exception as e:
+            messagebox.showerror(
+                "RFQ — błąd odczytu danych pracownika",
+                f"Nie udało się pobrać danych kontaktowych z RM_MANAGER:\n\n{e}\n\n"
+                f"Baza: {rm_db}",
+                parent=parent)
+            return None
+
+        contact = {
+            'login': login,
+            'name': (emp.get('name') or '').strip(),
+            'email': (emp.get('email') or '').strip(),
+            'phone': (emp.get('phone') or '').strip(),
+        }
+        braki = [etykieta for klucz, etykieta in self._RFQ_CONTACT_REQUIRED
+                 if not contact[klucz]]
+        if braki:
+            # Rozróżniamy „nie ma pracownika przypiętego do konta" od „jest, ale
+            # z pustymi polami" — to dwa różne miejsca do poprawienia.
+            gdzie = (f"Pracownicy → wskaż pracownika, ustaw pole "
+                     f"„Konto użytkownika” na login {login} i uzupełnij dane."
+                     if not emp else
+                     "Pracownicy → znajdź swój wpis i uzupełnij brakujące pola.")
+            messagebox.showerror(
+                "RFQ — brak danych kontaktowych",
+                f"Nie można wysłać zapytania: brak danych kontaktowych osoby\n"
+                f"prowadzącej ({login}).\n\n"
+                f"Brakuje: {', '.join(braki)}.\n\n"
+                f"Kooperant zobaczy te dane w zapytaniu i w stopce maila —\n"
+                f"bez nich nie ma do kogo zadzwonić w sprawie technicznej.\n\n"
+                f"Uzupełnij w RM_MANAGER:\n{gdzie}",
+                parent=parent)
+            return None
+        return contact
 
     def _selected_rows_for_rfq(self):
         """Zaznaczone wiersze — multi-select, a gdy go nie ma, wiersz aktualnie
@@ -23936,6 +24142,11 @@ class MainWindow(tk.Tk):
         agent = self._get_rfq_agent()
         if not agent:
             return
+        # Kontakt pobierany RAZ, przed otwarciem okna — brak kompletu blokuje
+        # wysyłkę od razu, zamiast dopiero po wyklikaniu pozycji i kooperantów.
+        contact = self._rfq_contact()
+        if contact is None:
+            return
 
         # zbierz dane detali z arkusza
         items = []
@@ -23976,9 +24187,12 @@ class MainWindow(tk.Tk):
             messagebox.showerror("RFQ", f"Nie udało się pobrać listy zapytań:\n{e}", parent=self)
             return
 
-        self._open_rfq_send_dialog(agent, items, rfq_list)
+        self._open_rfq_send_dialog(agent, items, rfq_list, contact)
 
-    def _open_rfq_send_dialog(self, agent, items, rfq_list):
+    def _open_rfq_send_dialog(self, agent, items, rfq_list, contact=None):
+        """contact — dane osoby prowadzącej (z _rfq_contact w wywołującym).
+        Domyślne None, żeby ewentualne inne wywołanie nie wybuchło; portal przy
+        pustym komplecie zostawia zapisany kontakt bez zmian."""
         dlg = tk.Toplevel(self)
         dlg.title("Wyślij do RFQ   (F11 = pełna wysokość okna)")
         dlg.transient(self)
@@ -24054,7 +24268,8 @@ class MainWindow(tk.Tk):
                     proj = pname.split()[0] if ' ' in pname else pname
                     break
             try:
-                created = agent.create_rfq(title=title, project_number=proj)
+                created = agent.create_rfq(title=title, project_number=proj,
+                                           contact=contact)
             except Exception as e:
                 messagebox.showerror("RFQ", f"Nie udało się utworzyć zapytania:\n{e}", parent=dlg)
                 return
@@ -24468,7 +24683,8 @@ class MainWindow(tk.Tk):
             nowy_intro = intro_txt.get('1.0', tk.END).strip()
             if nowy_intro != _intro_state['loaded'].strip():
                 try:
-                    agent.set_rfq_intro_note(rfq_id, nowy_intro, mode='replace')
+                    agent.set_rfq_intro_note(rfq_id, nowy_intro, mode='replace',
+                                             contact=contact)
                     intro_by_rfq[rfq_id] = nowy_intro
                     _intro_state['loaded'] = nowy_intro   # zapisane = nowy punkt odniesienia
                 except Exception as e:
@@ -24545,6 +24761,7 @@ class MainWindow(tk.Tk):
                         quantity=qty,
                         material=material or None,
                         notes=notes or None,
+                        contact=contact,
                     )
                     ok += 1
                 except Exception as e:
