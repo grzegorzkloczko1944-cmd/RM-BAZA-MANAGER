@@ -290,6 +290,11 @@ class MainWindow(tk.Tk):
         
         # Zmienne filtrów
         self.filter_class_var = tk.StringVar(value="(WSZYSTKO)")
+        # Nowy filtr TYP multi-select (kafelek OBOK starego Combobox). Stary
+        # zostaje nietknięty; oba działają jednocześnie (AND). NEGACJA PER
+        # POZYCJA: każdy typ ma tryb 'show' (pokaż) albo 'hide' (ukryj); brak
+        # klucza = obojętny. Można naraz pokazać X,Z i ukryć ZNORM.
+        self.filter_class_modes = {}      # {typ: 'show'|'hide'}
         self.filter_supplier_var = tk.StringVar(value=FILTER_SUPPLIER_ALL)
         self.search_var = tk.StringVar(value="")  # Filtr tekstowy (szukaj)
         self._refresh_after_id = None  # debounce dla auto-odświeżania
@@ -1053,9 +1058,26 @@ class MainWindow(tk.Tk):
             width=14,
             font=("Arial", 8)
         )
-        self.cmb_filter_class.pack(side=tk.LEFT, padx=2, pady=8)
-        self.cmb_filter_class.bind("<<ComboboxSelected>>", lambda e: self.refresh_data())
-        
+        self.cmb_filter_class.pack(side=tk.LEFT, padx=(2, 0), pady=8)
+        # Każda zmiana STAREGO filtra czyści NOWY kafelek (stary ma priorytet).
+        self.cmb_filter_class.bind("<<ComboboxSelected>>",
+                                   lambda e: self._on_old_class_filter_changed())
+
+        # KAFELEK: filtr TYP multi-select z negacją — sklejony ze starym Combobox
+        # (padx (0,x)), mały. Działa RÓWNOLEGLE do starego (oba muszą się zgadzać).
+        self.btn_filter_class_multi = tk.Button(
+            t2r1,
+            text="✚",
+            command=self.open_class_filter_dialog,
+            bg="#7f8c8d",
+            fg="white",
+            font=("Arial", 8),
+            width=3,
+            relief=tk.RAISED,
+            bd=1
+        )
+        self.btn_filter_class_multi.pack(side=tk.LEFT, padx=(0, 2), pady=8)
+
         tk.Label(
             t2r1,
             text="Dostawca:",
@@ -6818,6 +6840,20 @@ class MainWindow(tk.Tk):
         
         # Pobierz wartości filtrów
         filter_class = self.filter_class_var.get()
+        # Nowy filtr TYP (kafelek) — trójstan PER TYP. Budujemy dwa zbiory
+        # realnych class_effective: SHOW (pokaż tylko te) i HIDE (ukryj te).
+        # LASER/LASER EXPORT rozwijamy do {X,XX}; "(bez typu)" = "".
+        _modes = getattr(self, 'filter_class_modes', {}) or {}
+        def _expand(t):
+            if t in ("LASER", "LASER EXPORT"):
+                return ("X", "XX")
+            if t == "(bez typu)":
+                return ("",)
+            return (t,)
+        class_show = set()
+        class_hide = set()
+        for _t, _m in _modes.items():
+            (class_show if _m == 'show' else class_hide).update(_expand(_t))
         filter_supplier = self.filter_supplier_var.get()
         search_text = (self.search_var.get() or "").strip().lower()  # Filtr tekstowy
         only_missing_supplier = bool(self.only_missing_supplier_var.get())
@@ -6911,7 +6947,17 @@ class MainWindow(tk.Tk):
                 else:
                     if class_eff != filter_class:
                         continue
-            
+
+            # Nowy filtr TYP (kafelek) — trójstan, RÓWNOLEGLE do starego (AND).
+            # HIDE ma pierwszeństwo: jeśli typ jest oznaczony do ukrycia, odrzuć.
+            # Gdy są jakieś SHOW: pokazujemy TYLKO te (typ spoza SHOW odrzucony).
+            if class_show or class_hide:
+                _ce = item.get('class_effective') or item.get('class_manual') or item.get('class_auto') or ""
+                if _ce in class_hide:
+                    continue
+                if class_show and _ce not in class_show:
+                    continue
+
             # Filtr Dostawca
             if filter_supplier and filter_supplier != FILTER_SUPPLIER_ALL:
                 supplier_id = item.get('supplier_id')
@@ -7261,13 +7307,41 @@ class MainWindow(tk.Tk):
             except Exception:
                 continue
 
+        # Globalne liczniki badge'a (do podmiany / do powiadomienia) dotyczą
+        # WSZYSTKICH RFQ, nie tylko widocznych pozycji — liczymy je ZAWSZE,
+        # nawet gdy w bieżącym widoku nie ma pozycji RFQ (pending puste), bo
+        # inaczej badge nie pokazywałby "✉ N do powiadomienia" w projektach bez
+        # widocznych RFQ (albo gdy filtr TYP je ukrył).
         if not pending:
+            threading.Thread(target=self._run_rfq_badge_counts, daemon=True).start()
             return
 
         t = threading.Thread(target=self._run_rfq_freshness_check,
                              args=(pending,), daemon=True)
         self._rfq_freshness_thread = t
         t.start()
+
+    def _run_rfq_badge_counts(self):
+        """WĄTEK: przelicza SAME globalne liczniki badge'a (bez sprawdzania
+        świeżości widocznych pozycji). Używane gdy nie ma widocznych pozycji RFQ,
+        żeby badge i tak pokazał 'do podmiany' / 'do powiadomienia'."""
+        try:
+            from rm_sync_agent import RMSyncAgent
+            agent = RMSyncAgent(str(MASTER_PATH))
+        except Exception:
+            return
+        try:
+            stale_count = len(agent.all_stale_drawings())
+        except Exception:
+            stale_count = None
+        try:
+            notify_count = len(agent.all_docs_to_notify())
+        except Exception:
+            notify_count = None
+        try:
+            self.after(0, lambda: self._apply_rfq_freshness({}, {}, stale_count, notify_count))
+        except Exception:
+            pass
 
     def _run_rfq_freshness_check(self, pending):
         """WĄTEK: pyta agenta o świeżość per RFQ (lokalne I/O, bez sieci).
@@ -7842,8 +7916,16 @@ class MainWindow(tk.Tk):
         wychodzi poza top_frame."""
         try:
             anchor = self._dwf_preview_anchor
+            # Wymuś aktualną geometrię — bez tego winfo_rootx/y kotwicy potrafi
+            # zwrócić ~0 (widget jeszcze nie w pełni zmapowany albo layer paska
+            # filtrów się przelicza), przez co miniatura ląduje w rogu okna.
+            self.update_idletasks()
             x = anchor.winfo_rootx() - self.winfo_rootx()
             y = anchor.winfo_rooty() - self.winfo_rooty() - self.DWF_PREVIEW_OFFSET_Y
+            # Sanity: gdyby kotwica wciąż była niezmapowana (rootx==0), NIE
+            # stawiamy w rogu — pomijamy ten przebieg, kolejny (po layoutcie) trafi.
+            if anchor.winfo_rootx() <= 0:
+                return
             self._dwf_preview_label.place(x=x, y=max(0, y), width=width, height=height)
             self._dwf_preview_label.lift()
         except Exception:
@@ -24031,6 +24113,17 @@ class MainWindow(tk.Tk):
         combo.bind("<<ComboboxSelected>>", _load_intro, add="+")
         _load_intro()
 
+        # Pasek postępu szukania plików — przy wielu pozycjach × wolny V:\
+        # przeszukiwanie trwa; bez tego okno wygląda jak zawieszone. Znika po
+        # zbudowaniu wszystkich wierszy (pack_forget w _build_rows).
+        prog_frame = tk.Frame(dlg)
+        prog_frame.pack(fill=tk.X, padx=12, pady=(0, 2))
+        prog_label = tk.Label(prog_frame, text="", anchor="w", fg="#555",
+                              font=("Arial", 9))
+        prog_label.pack(fill=tk.X)
+        prog_bar = ttk.Progressbar(prog_frame, mode="determinate", maximum=len(items))
+        prog_bar.pack(fill=tk.X, pady=(1, 0))
+
         # --- lista pozycji z plikami ---
         mid = tk.LabelFrame(dlg, text="Pozycje i znalezione pliki (odznacz niechciane)",
                             padx=8, pady=6)
@@ -24063,8 +24156,15 @@ class MainWindow(tk.Tk):
         inner.bind("<Enter>", _bind_wheel)
         dlg.bind("<Destroy>", _unbind_wheel)
 
-        status = tk.Label(dlg, text="Szukam plików na serwerze…", anchor="w", fg="#555")
-        status.pack(fill=tk.X, padx=14)
+        status_row = tk.Frame(dlg)
+        status_row.pack(fill=tk.X, padx=14)
+        status = tk.Label(status_row, text="Szukam plików na serwerze…", anchor="w", fg="#555")
+        status.pack(side=tk.LEFT)
+        # Osobna, CZERWONA etykieta na braki (ile pozycji bez plików). Pusta
+        # gdy wszystko znalezione — wtedy nie zajmuje uwagi.
+        status_warn = tk.Label(status_row, text="", anchor="w", fg="#b3261e",
+                               font=("Arial", 9, "bold"))
+        status_warn.pack(side=tk.LEFT, padx=(10, 0))
 
         file_vars = {}   # (drawing_no, path) -> BooleanVar
 
@@ -24102,7 +24202,17 @@ class MainWindow(tk.Tk):
 
         def _refresh_total():
             total = sum(len(it.get('files') or []) for it in items)
-            status.config(text=f"Znaleziono {total} plików dla {len(items)} pozycji.")
+            # Pozycje bez plików — POMIJAMY katalogowe (łożysko, siłownik itd.),
+            # bo one z założenia nie mają dokumentacji rysunkowej, więc brak plików
+            # to dla nich norma, nie problem.
+            with_docs = [it for it in items if not it.get('is_catalog')]
+            empty = [it for it in with_docs if not (it.get('files') or [])]
+            found_for = len(with_docs) - len(empty)
+            status.config(text=f"Znaleziono {total} plików dla {found_for}/{len(with_docs)} pozycji.")
+            if empty:
+                status_warn.config(text=f"⚠ brak plików dla {len(empty)} pozycji!")
+            else:
+                status_warn.config(text="")
 
         def _file_actions_row(parent, it):
             """Jeden wiersz akcji na pliki:
@@ -24146,8 +24256,8 @@ class MainWindow(tk.Tk):
             if not ok:
                 lbl.config(text="(przeciąganie niedostępne — użyj „Dodaj plik…”)")
 
-        def _build_rows():
-            for it in items:
+        def _build_one(it):
+            if True:
                 # Elementy katalogowe (bez nr rysunku) nie mają dokumentacji
                 # na serwerze — nie ma sensu przeszukiwać dysku.
                 files = [] if it.get('is_catalog') else self._find_files_for_drawing(it['drawing_no'])
@@ -24305,9 +24415,34 @@ class MainWindow(tk.Tk):
                 _render_files()
                 dlg.update_idletasks()
 
-            _refresh_total()
+        # Budujemy wiersze PO JEDNYM przez after — dzięki temu okno się nie
+        # zawiesza, a pasek postępu pokazuje "szukam X/Y". Szukanie plików
+        # (_find_files_for_drawing) na wolnym V:\ przy wielu pozycjach potrafi
+        # trwać, więc user musi widzieć, że coś się dzieje i ile zostało.
+        def _build_next(idx=0):
+            try:
+                if not dlg.winfo_exists():
+                    return
+            except Exception:
+                return
+            if idx >= len(items):
+                # koniec — schowaj pasek, przelicz sumę
+                try:
+                    prog_frame.pack_forget()
+                except Exception:
+                    pass
+                _refresh_total()
+                return
+            it = items[idx]
+            prog_label.config(text=f"Szukam plików…  {idx + 1}/{len(items)}   "
+                                   f"({it.get('drawing_no', '')})")
+            prog_bar['value'] = idx
+            dlg.update_idletasks()
+            _build_one(it)
+            prog_bar['value'] = idx + 1
+            dlg.after(1, lambda: _build_next(idx + 1))   # oddaj sterowanie GUI
 
-        dlg.after(50, _build_rows)
+        dlg.after(50, _build_next)
 
         # --- akcje ---
         bottom = tk.Frame(dlg)
@@ -25976,9 +26111,15 @@ class MainWindow(tk.Tk):
         self.only_not_delivered_var.set(0)
         self.filter_modul_selected.clear()
         self.filter_grub_selected.clear()
+        # nowy kafelek TYP multi-select (trójstan)
+        self.filter_class_modes = {}
         self._update_modul_filter_button()
         self._update_grub_filter_button()
-    
+        try:
+            self._update_class_filter_button()
+        except Exception:
+            pass
+
     def clear_filters(self):
         """Wyczyść wszystkie filtry"""
         try:
@@ -26272,6 +26413,244 @@ class MainWindow(tk.Tk):
             traceback.print_exc()
             return {}
     
+    # Typy dostępne w kafelku multi-select (bez "(WSZYSTKO)" — brak zaznaczenia
+    # = brak filtra). "(bez typu)" łapie pozycje z pustym class_effective.
+    CLASS_MULTI_VALUES = ["X", "XX", "Z", "ZZ", "STANDARD", "ZNORMALIZOWANE",
+                          "LASER", "LASER EXPORT", "(bez typu)"]
+
+    def _on_old_class_filter_changed(self):
+        """Zmiana STAREGO Combobox TYP: czyści nowy kafelek (stary ma priorytet),
+        zamyka jego okno jeśli otwarte, odświeża widok."""
+        self.filter_class_modes = {}
+        try:
+            self._update_class_filter_button()
+        except Exception:
+            pass
+        win = getattr(self, '_class_filter_win', None)
+        if win is not None:
+            try:
+                if win.winfo_exists():
+                    win.destroy()
+            except Exception:
+                pass
+            self._class_filter_win = None
+        self.refresh_data()
+
+    def _update_class_filter_button(self):
+        """Aktualizuje wygląd kafelka filtra TYP multi-select (trójstan per typ)."""
+        try:
+            modes = getattr(self, 'filter_class_modes', {}) or {}
+            n_show = sum(1 for m in modes.values() if m == 'show')
+            n_hide = sum(1 for m in modes.values() if m == 'hide')
+            if not n_show and not n_hide:
+                self.btn_filter_class_multi.config(text="✚", bg="#7f8c8d")
+                return
+            parts = []
+            if n_show:
+                parts.append(f"✓{n_show}")
+            if n_hide:
+                parts.append(f"✕{n_hide}")
+            # kolor: zielony gdy tylko pokazywanie, czerwony gdy jest jakieś ukrycie
+            self.btn_filter_class_multi.config(
+                text=" ".join(parts),
+                bg="#c0392b" if n_hide else "#27ae60")
+        except Exception as e:
+            print(f"⚠️  Błąd aktualizacji kafelka TYP: {e}")
+
+    def open_class_filter_dialog(self):
+        """Okno filtra TYP — trójstan PER POZYCJA (obojętny / pokaż ✓ / ukryj ✕),
+        filtrowanie W CZASIE RZECZYWISTYM (bez OK). Wyskakuje POD kafelkiem.
+        Działa RÓWNOLEGLE do starego filtra TYP (AND — obie reguły muszą się
+        zgadzać)."""
+        # jedno okno naraz — ponowny klik zamyka
+        existing = getattr(self, '_class_filter_win', None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.destroy()
+                    self._class_filter_win = None
+                    return
+            except Exception:
+                pass
+
+        dialog = tk.Toplevel(self)
+        self._class_filter_win = dialog
+        dialog.title("Filtr Typ")
+        dialog.configure(bg="#2c3e50", bd=1, relief=tk.SOLID)
+        # pozycję i overrideredirect ustawiamy DOPIERO po zbudowaniu treści
+        # (na końcu metody), gdy okno zna swój rozmiar — inaczej ląduje w (0,0)
+        # albo poza ekranem.
+
+        # nagłówek + podpowiedź
+        tk.Label(dialog, text="Filtr Typ — zaznacz pokaż lub ukryj przy typach:",
+                 bg="#2c3e50", fg="#ecf0f1", font=("Arial", 8), anchor="w"
+                 ).pack(fill=tk.X, padx=8, pady=(6, 4))
+
+        body = tk.Frame(dialog, bg="white")
+        body.pack(fill=tk.BOTH, expand=True, padx=1, pady=(0, 1))
+
+        # Nagłówek kolumn: nazwa | pokaż | ukryj
+        hdr = tk.Frame(body, bg="#f0f0f0")
+        hdr.pack(fill=tk.X)
+        tk.Label(hdr, text="", bg="#f0f0f0", width=16, anchor="w").pack(side=tk.LEFT)
+        tk.Label(hdr, text="pokaż", bg="#f0f0f0", fg="#27ae60", width=6,
+                 font=("Arial", 8, "bold")).pack(side=tk.LEFT)
+        tk.Label(hdr, text="ukryj", bg="#f0f0f0", fg="#c0392b", width=6,
+                 font=("Arial", 8, "bold")).pack(side=tk.LEFT)
+
+        _row_vars = {}   # typ -> (show_var, hide_var) — do przycisku Resetuj
+
+        def _make_row(typ):
+            row = tk.Frame(body, bg="white")
+            row.pack(fill=tk.X, padx=4, pady=1)
+            label = typ + ("  (laser)" if typ in ("LASER", "LASER EXPORT") else "")
+            tk.Label(row, text=label, bg="white", anchor="w", width=16,
+                     font=("Arial", 9)).pack(side=tk.LEFT)
+
+            cur = self.filter_class_modes.get(typ)
+            show_var = tk.IntVar(value=1 if cur == 'show' else 0)
+            hide_var = tk.IntVar(value=1 if cur == 'hide' else 0)
+            _row_vars[typ] = (show_var, hide_var)
+
+            def _apply(t=typ, sv=show_var, hv=hide_var):
+                if sv.get():
+                    self.filter_class_modes[t] = 'show'
+                elif hv.get():
+                    self.filter_class_modes[t] = 'hide'
+                else:
+                    self.filter_class_modes.pop(t, None)
+                self._update_class_filter_button()
+                self.refresh_data()          # REAL-TIME
+
+            def _on_show(t=typ, sv=show_var, hv=hide_var):
+                if sv.get():
+                    hv.set(0)                # pokaż i ukryj wykluczają się
+                _apply()
+
+            def _on_hide(t=typ, sv=show_var, hv=hide_var):
+                if hv.get():
+                    sv.set(0)
+                _apply()
+
+            tk.Checkbutton(row, variable=show_var, bg="white", width=5,
+                           command=_on_show).pack(side=tk.LEFT)
+            tk.Checkbutton(row, variable=hide_var, bg="white", width=5,
+                           command=_on_hide).pack(side=tk.LEFT)
+
+        for typ in self.CLASS_MULTI_VALUES:
+            _make_row(typ)
+
+        foot = tk.Frame(dialog, bg="#2c3e50")
+        foot.pack(fill=tk.X, padx=8, pady=(2, 6))
+        def _resetuj():
+            # odznacz wszystkie checkboxy NA ŻYWO (bez zamykania okna) + wyczyść stan
+            for sv, hv in _row_vars.values():
+                sv.set(0); hv.set(0)
+            self.filter_class_modes = {}
+            self._update_class_filter_button()
+            self.refresh_data()
+        tk.Button(foot, text="Resetuj", command=_resetuj, font=("Arial", 8)).pack(side=tk.LEFT)
+        tk.Button(foot, text="Zamknij", font=("Arial", 8),
+                  command=lambda: (dialog.destroy(), setattr(self, '_class_filter_win', None))
+                  ).pack(side=tk.RIGHT)
+
+        # --- pozycjonowanie POD kafelkiem + wymuszenie widoczności ---
+        # Najpierw policz rozmiar (idletasks), potem ustaw pozycję. Fallback:
+        # jeśli współrzędne kafelka są niepoprawne (0/ujemne), stawiamy okno pod
+        # kursorem, a w ostateczności na środku głównego okna. Bez tego przy
+        # overrideredirect okno bywa w (0,0) i „znika".
+        try:
+            dialog.update_idletasks()
+            w = dialog.winfo_reqwidth() or 220
+            h = dialog.winfo_reqheight() or 300
+            bx = self.btn_filter_class_multi.winfo_rootx()
+            by = self.btn_filter_class_multi.winfo_rooty() + self.btn_filter_class_multi.winfo_height()
+            # sanity: kafelek musi mieć sensowne współrzędne
+            if bx <= 0 and by <= 0:
+                bx, by = self.winfo_pointerx(), self.winfo_pointery() + 10
+            # nie wyjeżdżaj poza ekran
+            sw, sh = dialog.winfo_screenwidth(), dialog.winfo_screenheight()
+            bx = max(0, min(bx, sw - w))
+            by = max(0, min(by, sh - h))
+            dialog.geometry(f"{w}x{h}+{bx}+{by}")
+        except Exception:
+            # ostateczny fallback — środek głównego okna
+            try:
+                dialog.geometry(f"+{self.winfo_rootx()+200}+{self.winfo_rooty()+120}")
+            except Exception:
+                pass
+
+        # dopiero teraz bezramkowy dymek + wyniesienie na wierzch
+        try:
+            dialog.overrideredirect(True)
+            dialog.transient(self)
+            dialog.lift()
+            dialog.attributes("-topmost", True)
+            dialog.after(10, lambda: dialog.attributes("-topmost", False))
+        except Exception:
+            pass
+        dialog.focus_set()
+
+        # Klik POZA dymkiem zamyka go (typowy popup). WAŻNE: zdejmujemy TYLKO
+        # nasz bind (po funcid), nie unbind_all — aplikacja ma inne globalne
+        # <Button-1> (ukrywanie zoomu DWF itd.), które unbind_all by skasował.
+        def _on_global_click(e):
+            try:
+                if not dialog.winfo_exists():
+                    return
+                x, y = e.x_root, e.y_root
+                dx, dy = dialog.winfo_rootx(), dialog.winfo_rooty()
+                dw, dh = dialog.winfo_width(), dialog.winfo_height()
+                inside = (dx <= x <= dx + dw) and (dy <= y <= dy + dh)
+                # klik w sam kafelek NIE zamyka tutaj — toggle obsłuży otwarcie
+                btn = self.btn_filter_class_multi
+                bx0, by0 = btn.winfo_rootx(), btn.winfo_rooty()
+                on_btn = (bx0 <= x <= bx0 + btn.winfo_width()) and (by0 <= y <= by0 + btn.winfo_height())
+                if not inside and not on_btn:
+                    _close()
+            except Exception:
+                pass
+
+        def _close():
+            bid = getattr(dialog, '_click_binding_id', None)
+            if bid:
+                try:
+                    self.unbind_all("<Button-1>", bid)   # tylko NASZ bind
+                except Exception:
+                    pass
+                dialog._click_binding_id = None
+            try:
+                if dialog.winfo_exists():
+                    dialog.destroy()
+            except Exception:
+                pass
+            self._class_filter_win = None
+
+        # rejestrujemy po krótkim czasie, żeby otwierające kliknięcie kafelka
+        # samo nie zamknęło od razu okna; zapamiętujemy funcid do precyzyjnego unbind
+        def _arm():
+            try:
+                if dialog.winfo_exists():
+                    dialog._click_binding_id = self.bind_all("<Button-1>", _on_global_click, add="+")
+            except Exception:
+                pass
+        dialog.after(200, _arm)
+
+        # Sprzątanie binda przy KAŻDYM zamknięciu (Zamknij / Resetuj nie zamyka /
+        # stary filtr / Esc) — zawsze zdejmij TYLKO nasz funcid.
+        def _cleanup(e):
+            if e.widget is not dialog:
+                return
+            bid = getattr(dialog, '_click_binding_id', None)
+            if bid:
+                try:
+                    self.unbind_all("<Button-1>", bid)
+                except Exception:
+                    pass
+                dialog._click_binding_id = None
+        dialog.bind("<Destroy>", _cleanup)
+        dialog.bind("<Escape>", lambda e: _close())
+
     def open_modul_filter_dialog(self):
         """Otwórz okno dialogowe wyboru modułów"""
         if not self.current_project_id:
