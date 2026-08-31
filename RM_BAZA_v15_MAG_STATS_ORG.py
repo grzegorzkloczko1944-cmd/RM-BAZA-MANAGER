@@ -23237,8 +23237,10 @@ class MainWindow(tk.Tk):
 
         dialog = tk.Toplevel(self)
         dialog.title(f"Wycena — {drawing_number}")
-        # szersze i wyższe niż dawne 560x460 — doszła tabelka kooperantów
-        # (5 kolumn = 590 px + marginesy; pozycja ustawiana na końcu funkcji)
+        # Szerokość na stałe (5 kolumn tabelki = 590 px + marginesy), WYSOKOŚĆ
+        # liczona z zawartości na końcu funkcji — patrz _dopasuj_wysokosc().
+        # Sztywne 580 px przycinało dół tabelki, gdy doszedł żółty baner
+        # „rysunek zmieniony" albo długi tekst odmowy: okno nie rosło.
         dialog.geometry("660x580")
         dialog.transient(self)
         self._wycena_dialog = dialog
@@ -23296,26 +23298,25 @@ class MainWindow(tk.Tk):
                          bg=_bg, fg=_fg, justify=tk.LEFT, anchor="w",
                          font=("Arial", 9)).pack(fill=tk.X, padx=10, pady=(2, 4))
 
-            # Przyciski pod banerem: aktualizacja (podmiana plików) + osobno
-            # powiadomienie (mail bez ponownej podmiany — gdy user nie wysłał
-            # maila od razu). Powiadomienie tylko gdy pozycja jest w RFQ (rfq_id).
-            if rfq_id:
+            # TYLKO „Aktualizuj w RFQ" — bo tu pliki NIE są jeszcze podmienione.
+            #
+            # ⚠️ Świadomie BEZ przycisku „Powiadom kooperantów" w tym banerze:
+            # wysłałby mail o aktualizacji, której nie było — kooperant kliknąłby
+            # w link i zobaczył tę samą starą wersję. Sam „Aktualizuj" i tak pyta
+            # o wysyłkę maila po udanej podmianie (_maybe_notify_suppliers_after_update),
+            # więc osobny przycisk tutaj tylko dublował ścieżkę i mylił.
+            # Przypadek „pliki podmienione, ale mail nie poszedł" obsługuje
+            # NIEBIESKI baner niżej (_needs_notify) — z własnym przyciskiem.
+            if rfq_id and _is_changed:
                 _btnrow = tk.Frame(warn, bg=_bg)
                 _btnrow.pack(anchor="w", padx=10, pady=(0, 6))
-                if _is_changed:
-                    _info = dict(_fi); _info['rfq_id'] = rfq_id
-                    def _do_update(dn=drawing_no, inf=_info):
-                        self._wycena_dialog = None
-                        dialog.destroy()
-                        self._update_drawings_in_rfq([(dn, inf)])
-                    tk.Button(_btnrow, text="↻ Aktualizuj w RFQ", command=_do_update,
-                              bg="#2a7a2a", fg="white").pack(side=tk.LEFT)
-                # Powiadomienie o zmianie dokumentacji BEZ ponownej podmiany —
-                # przydatne, gdy pliki już podmieniono, a mail nie poszedł.
-                def _do_notify(dn=drawing_no, rid=rfq_id):
-                    self._notify_doc_update_single(rid, dn, parent=dialog)
-                tk.Button(_btnrow, text="✉ Powiadom kooperantów", command=_do_notify
-                          ).pack(side=tk.LEFT, padx=(6, 0))
+                _info = dict(_fi); _info['rfq_id'] = rfq_id
+                def _do_update(dn=drawing_no, inf=_info):
+                    self._wycena_dialog = None
+                    dialog.destroy()
+                    self._update_drawings_in_rfq([(dn, inf)])
+                tk.Button(_btnrow, text="↻ Aktualizuj w RFQ", command=_do_update,
+                          bg="#2a7a2a", fg="white").pack(side=tk.LEFT)
 
         # ✉ ZALEGŁE POWIADOMIENIE — osobny baner, NIEZALEŻNY od stanu plików:
         # dokumentację podmieniono (files_updated_at), a nie powiadomiono o tej
@@ -23553,6 +23554,20 @@ class MainWindow(tk.Tk):
         tk.Button(btns, text="📊 Porównanie ofert", command=lambda: _open_portal('offers'),
                   bg="#2a7a4a", fg="white", width=18).pack(side=tk.LEFT, padx=(0, 8))
         tk.Button(btns, text="Zamknij", command=_on_close, width=14).pack(side=tk.LEFT)
+
+        # Wysokość Z ZAWARTOŚCI, nie na sztywno: okno puchnie o żółty baner
+        # („rysunek zmieniony" + lista plików + 2 przyciski) i o wiersze
+        # kooperantów, a przy odmowie dochodzi długi tekst powodu. Przy
+        # sztywnych 580 px dół tabelki i przyciski wypadały poza kadr.
+        # Ograniczone do 90% wysokości ekranu, żeby na niskich monitorach
+        # okno nie wyszło poza pulpit.
+        try:
+            dialog.update_idletasks()
+            wys = dialog.winfo_reqheight() + 8      # +8: zapas na ramkę okna
+            wys = max(480, min(wys, int(dialog.winfo_screenheight() * 0.9)))
+            dialog.geometry(f"660x{wys}")
+        except Exception:
+            pass                                    # zostaje wartość z geometry()
 
         self._center_on_app(dialog)
 
