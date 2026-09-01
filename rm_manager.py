@@ -11334,6 +11334,7 @@ def polish_public_holidays(year: int) -> Dict[str, str]:
         f"{year}-08-15": "Wniebowzięcie NMP",
         f"{year}-11-01": "Wszystkich Świętych",
         f"{year}-11-11": "Narodowe Święto Niepodległości",
+        f"{year}-12-24": "Wigilia Bożego Narodzenia",
         f"{year}-12-25": "Boże Narodzenie (1. dzień)",
         f"{year}-12-26": "Boże Narodzenie (2. dzień)",
     }

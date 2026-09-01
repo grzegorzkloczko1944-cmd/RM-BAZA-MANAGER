@@ -35706,9 +35706,9 @@ Kod: {unlock_code}
         vsb.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 8))
 
         type_labels = {
-            'holiday': '🔴 Święto / dzień wolny',
-            'day_off': '🟠 Dzień wolny (firmowy)',
-            'saturday_work': '🟢 Sobota pracująca',
+            'HOLIDAY': '🔴 Święto / dzień wolny',
+            'COMPANY_DAY_OFF': '🟠 Dzień wolny (firmowy)',
+            'SATURDAY_WORK': '🟢 Sobota pracująca',
         }
 
         def refresh():
@@ -35750,9 +35750,14 @@ Kod: {unlock_code}
             tk.Entry(f, textvariable=date_var, width=14).grid(row=0, column=1, sticky='w', pady=3)
 
             tk.Label(f, text="Typ:", font=self.FONT_BOLD).grid(row=1, column=0, sticky='w', pady=3)
-            dtype_var = tk.StringVar(value='holiday')
+            # Wartości WIELKIMI literami - company_calendar.day_type ma CHECK
+            # constraint akceptujący tylko HOLIDAY/COMPANY_DAY_OFF/SATURDAY_WORK.
+            # Małe litery przechodziły walidację combobox, ale INSERT rzucał
+            # IntegrityError połykany cicho przez pętlę zdarzeń Tk - z zewnątrz
+            # wyglądało to jak "klikam Zapisz i nic się nie dzieje".
+            dtype_var = tk.StringVar(value='HOLIDAY')
             ttk.Combobox(f, textvariable=dtype_var, state='readonly', width=25,
-                         values=['holiday', 'day_off', 'saturday_work']).grid(row=1, column=1, sticky='w', pady=3)
+                         values=['HOLIDAY', 'COMPANY_DAY_OFF', 'SATURDAY_WORK']).grid(row=1, column=1, sticky='w', pady=3)
 
             tk.Label(f, text="Opis:", font=self.FONT_BOLD).grid(row=2, column=0, sticky='w', pady=3)
             desc_var = tk.StringVar()
