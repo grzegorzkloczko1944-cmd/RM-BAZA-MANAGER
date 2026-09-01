@@ -727,6 +727,30 @@ class RMSyncAgent:
                         live_item_ids)
                 except Exception:
                     pass  # rfq_activity może nie istnieć w starszej bazie
+
+                # 3) ODCISKI PLIKÓW po RFQ, których nie ma już w portalu.
+                #
+                # rfq_pushed_files jest kluczowane po rfq_id (nie rfq_item_id),
+                # więc czyścimy osobno. Bez tego odciski skasowanego zapytania
+                # zostawały na zawsze, a all_stale_drawings() iteruje po
+                # DISTINCT rfq_id z tej tabeli — czyli sprawdzała pliki
+                # nieistniejącego RFQ i doliczała je do badge'a „do podmiany".
+                # Efekt: licznik pokazywał pozycje, których nie ma już w panelu,
+                # a każde sprawdzenie świeżości czytało te pliki z dysku
+                # sieciowego (najwolniejsza operacja w tym mechanizmie).
+                live_rfq_ids = {r.get('rfq_id') for r in rows
+                                if r.get('rfq_id') is not None}
+                if live_rfq_ids:
+                    try:
+                        ph_rfq = ','.join('?' * len(live_rfq_ids))
+                        cur2 = con.execute(
+                            f'DELETE FROM rfq_pushed_files WHERE rfq_id NOT IN ({ph_rfq})',
+                            list(live_rfq_ids))
+                        if cur2.rowcount:
+                            print(f'reconcile: usunieto {cur2.rowcount} odciskow plikow '
+                                  f'po skasowanych RFQ')
+                    except Exception:
+                        pass  # tabela może nie istnieć (agent nigdy nic nie wysłał)
             else:
                 # PORTAL ZWRÓCIŁ PUSTO. Dwie możliwości, nie do odróżnienia
                 # z samej odpowiedzi:
