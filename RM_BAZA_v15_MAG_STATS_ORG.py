@@ -24393,15 +24393,20 @@ class MainWindow(tk.Tk):
                 for dn, (kod, ofert) in list(_dubel.items())[:8])
             if len(_dubel) > 8:
                 _lista += f"\n... i {len(_dubel) - 8} innych"
+            # Ton INFORMACYJNY, nie alarmowy: ponowna wycena bywa celowa i
+            # korzystna (dostawca pytany drugi raz potrafi zejść z ceną),
+            # a przy kilku RFQ i tak widać obie wyceny. Komunikat ma dać wiedzę,
+            # nie odradzać — stąd 'question', nie 'warning'.
             if not messagebox.askyesno(
-                    "Detal już w zapytaniu",
+                    "Detal jest już w zapytaniu",
                     f"{len(_dubel)} z zaznaczonych pozycji jest już w aktywnym RFQ:\n\n"
                     f"{_lista}\n\n"
-                    "Wysłanie ich do kolejnego zapytania jest możliwe (np. gdy pytasz\n"
-                    "inną grupę kooperantów), ale w kolumnie WYCENA zobaczysz wtedy\n"
-                    "wycenę z NOWSZEGO zapytania — ze znacznikiem, że jest ich więcej.\n\n"
-                    "Wysłać mimo to?",
-                    parent=self, icon='warning'):
+                    "Możesz wysłać je do kolejnego zapytania — np. gdy pytasz inną\n"
+                    "grupę kooperantów albo chcesz sprawdzić, czy ktoś zejdzie z ceny.\n\n"
+                    "W kolumnie WYCENA zobaczysz wtedy stan NOWSZEGO zapytania\n"
+                    "ze znacznikiem „+N RFQ”; wszystkie wyceny są w oknie Wycena.\n\n"
+                    "Wysłać?",
+                    parent=self, icon='question'):
                 return
 
         try:
