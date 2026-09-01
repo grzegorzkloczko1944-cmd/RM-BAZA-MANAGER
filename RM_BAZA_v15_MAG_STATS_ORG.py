@@ -6248,17 +6248,28 @@ class MainWindow(tk.Tk):
         # historia ceny detalu jest wspólna). Brak tabeli = agent nigdy nie
         # wystartował, kolumna po prostu zostaje pusta.
         rfq_by_drawing = {}
+        self._rfq_multi = {}          # {numer: ile_dodatkowych_RFQ}
         self._rfq_data_stale = False
         try:
             master_con = self.db_manager.master_con if self.db_manager else None
             if master_con:
+                # ⚠️ Ten sam detal MOŻE być w kilku RFQ naraz (np. pytamy drugą
+                # grupę kooperantów). Wcześniej `rfq_by_drawing[nr] = r` nadpisywał
+                # po cichu — jeden wiersz wygrywał w kolejności z bazy, o drugim
+                # user się nie dowiadywał. Teraz sortujemy po rfq_id ROSNĄCO, więc
+                # ostatni zapis to NAJNOWSZE zapytanie, a liczbę pozostałych
+                # trzymamy w _rfq_multi (znacznik w komórce, patrz
+                # _format_wycena_cell). Ostrzeżenie o dublu pada już przy wysyłce.
                 for r in master_con.execute(
                     """SELECT drawing_number, invitations_sent, suppliers_count,
                               offers_count, min_price, supplier_name, price,
                               rfq_status, response_deadline, declined_count,
                               files_updated_at, docs_notified_at
-                       FROM rfq_results"""
+                       FROM rfq_results
+                      ORDER BY COALESCE(rfq_id, 0) ASC"""
                 ):
+                    if r[0] in rfq_by_drawing:
+                        self._rfq_multi[r[0]] = self._rfq_multi.get(r[0], 0) + 1
                     rfq_by_drawing[r[0]] = r
                 # Czy integracja żyje? Agent zapisuje rfq_last_contact przy
                 # KAŻDYM udanym kontakcie z portalem (nawet bez zmian), więc
@@ -6775,7 +6786,9 @@ class MainWindow(tk.Tk):
             # katalogowych (łożysko, siłownik — bez numeru) nazwa detalu.
             rfq_key = (item['drawing_no'] or '').strip() or (item['name'] or '').strip()
             _rfq_row = rfq_by_drawing.get(rfq_key)
-            wycena_disp = self._format_wycena_cell(_rfq_row, stale=self._rfq_data_stale)
+            wycena_disp = self._format_wycena_cell(
+                _rfq_row, stale=self._rfq_data_stale,
+                innych_rfq=(getattr(self, '_rfq_multi', None) or {}).get(rfq_key, 0))
             # Rysunek niezgodny z V:\ po wysłaniu (z ostatniego sprawdzenia
             # świeżości) — trwały prefiks ⚠, żeby przetrwał przebudowę arkusza,
             # nie tylko dorysowanie po wątku. Puste dopóki nic nie sprawdzono.
@@ -13446,7 +13459,22 @@ class MainWindow(tk.Tk):
             msg += f"... i {count - 3} innych\n"
         
         msg += "\n⚠️ UWAGA: Tej operacji nie można cofnąć!"
-        
+
+        # Czy któraś z kasowanych pozycji jest W TRAKCIE WYCENY w RFQ?
+        # Kasowanie w RM_BAZA nie usuwa pozycji z portalu — kooperanci dalej ją
+        # widzą i wyceniają, a wiersz w rfq_results osieroca się po cichu.
+        # Odwrotny kierunek (portal → RM_BAZA) jest zabezpieczony, ten nie był.
+        w_rfq = self._pozycje_w_rfq([i['drawing_no'] for i in items_to_delete])
+        if w_rfq:
+            msg += "\n\n🔴 UWAGA — te pozycje są w zapytaniach ofertowych:\n"
+            for dn, (kod, ofert) in list(w_rfq.items())[:6]:
+                _of = f", {ofert} ofert(y)" if ofert else ""
+                msg += f"• {dn} → {kod}{_of}\n"
+            if len(w_rfq) > 6:
+                msg += f"... i {len(w_rfq) - 6} innych\n"
+            msg += ("\nUsunięcie tutaj NIE usuwa ich z portalu — kooperanci dalej\n"
+                    "będą je wyceniać. Skasuj je najpierw w RM_RFQ.")
+
         if not messagebox.askyesno("Potwierdź usunięcie", msg):
             return
         
@@ -22546,6 +22574,39 @@ class MainWindow(tk.Tk):
         # porównanie bez wielkości liter — loginy bywają wpisywane różnie
         return any(w.lower() == me.lower() for w in watchers)
 
+    def _pozycje_w_rfq(self, numery, tylko_aktywne=True):
+        """{numer_rysunku: (kod_rfq, liczba_ofert)} dla tych z `numery`, które są
+        w zapytaniu ofertowym. Pusty słownik, gdy żadna nie jest (albo brak danych).
+
+        Używane przed operacjami, które w RM_BAZA są nieodwracalne, a w portalu
+        niewidoczne: kasowanie detalu z BOM i ponowna wysyłka do innego RFQ.
+        Czyta lokalny cache (rfq_results), więc działa też przy padniętym portalu.
+        """
+        numery = [str(n).strip() for n in numery if str(n or "").strip()]
+        if not numery:
+            return {}
+        try:
+            con = self.db_manager.master_con if self.db_manager else None
+            if not con:
+                return {}
+            placeholders = ",".join("?" * len(numery))
+            # rfq_status: pomijamy zamknięte/zarchiwizowane — o nie nie ma sporu
+            warunek = ""
+            if tylko_aktywne:
+                warunek = ("AND COALESCE(rfq_status,'') NOT IN "
+                           "('archived','cancelled','decided','ordered')")
+            return {
+                r[0]: (r[1] or "?", r[2] or 0)
+                for r in con.execute(
+                    f"""SELECT drawing_number, rfq_code, COALESCE(offers_count, 0)
+                          FROM rfq_results
+                         WHERE drawing_number IN ({placeholders}) {warunek}""",
+                    numery).fetchall()
+            }
+        except Exception as e:
+            print(f"⚠️  RFQ: nie udało się sprawdzić pozycji w zapytaniach: {e}")
+            return {}
+
     def _rfq_pending_rows(self):
         """[(rfq_code, rfq_id, kooperant, dni_do_terminu, wszedł?)] — kooperanci,
         którzy dostali zapytanie i jeszcze nie odpowiedzieli.
@@ -23055,16 +23116,20 @@ class MainWindow(tk.Tk):
             return None
 
     @staticmethod
-    def _format_wycena_cell(rfq_row, stale=False):
+    def _format_wycena_cell(rfq_row, stale=False, innych_rfq=0):
         """Skrót stanu ofertowania do komórki WYCENA. Stany wg ustaleń:
             (pusto)               — detal nie jest w żadnym RFQ
             WYSŁANO · 4           — zaproszenia poszły, brak ofert
             1/4 OFERT · 96 zł     — część kooperantów odpowiedziała
             ✓ ABC CNC · 85 zł     — wybrano zwycięzcę
 
-        stale=True (portal/agent nie odpowiada od >1h) dokleja "⚠" — inaczej
-        user nie odróżniłby nieaktualnej wyceny od aktualnej, a pustej komórki
-        od "integracja nie działa".
+        stale=True (portal/agent nie odpowiada) dokleja "⚠" — inaczej user nie
+        odróżniłby nieaktualnej wyceny od aktualnej, a pustej komórki od
+        "integracja nie działa".
+
+        innych_rfq>0 dokleja "+N RFQ": detal jest w kilku zapytaniach naraz,
+        a pokazujemy stan NAJNOWSZEGO. Bez tego znacznika pozostałe wyceny
+        znikały bez śladu i user nie miał jak się o nich dowiedzieć.
         """
         if not rfq_row:
             return "⚠ brak danych" if stale else ""
@@ -23090,12 +23155,15 @@ class MainWindow(tk.Tk):
                 return ""
 
         prefix = "⚠ " if stale else ""   # dane nieaktualne (portal/agent milczy)
+        # Doklejane na SAMYM KOŃCU każdego wariantu — stąd sufiks, a nie
+        # powtarzanie warunku przy kilkunastu return-ach niżej.
+        sufiks = f"  +{innych_rfq} RFQ" if innych_rfq else ""
 
         # rozstrzygnięte — zwycięzca ma pierwszeństwo nad licznikami
         if supplier_name:
             out = f"✓ {supplier_name}"
             cena = _money(price)
-            return prefix + (f"{out} · {cena}" if cena else out)
+            return prefix + (f"{out} · {cena}" if cena else out) + sufiks
 
         # Mianownik to liczba faktycznie powiadomionych, nie wszystkich widzących
         # pozycję — od kooperanta bez maila nie ma na co czekać, a "1/3 OFERT"
@@ -23145,7 +23213,7 @@ class MainWindow(tk.Tk):
             czesci.append(f"NIE WYSŁANO: {nie_wyslano}")
 
         if czesci:
-            return prefix + " · ".join(czesci)
+            return prefix + " · ".join(czesci) + sufiks
 
         # Pozycja jest w RFQ, ale zaproszenia jeszcze nie poszły. Bez tego
         # komórka byłaby pusta i user nie wiedziałby, że detal w ogóle trafił
@@ -23158,7 +23226,7 @@ class MainWindow(tk.Tk):
         if rfq_row:
             # ta sama konwencja "ETYKIETA: liczba" co wyżej
             return prefix + ("SZKIC · brak kooperanta" if not suppliers_count
-                             else f"SZKIC · KOOPERANCI: {suppliers_count}")
+                             else f"SZKIC · KOOPERANCI: {suppliers_count}") + sufiks
 
         return "⚠ brak danych" if stale else ""
 
@@ -23204,16 +23272,22 @@ class MainWindow(tk.Tk):
             master_con = self.db_manager.master_con if self.db_manager else None
             if not master_con:
                 return
-            data = master_con.execute(
+            # Detal MOŻE być w kilku RFQ naraz. Pokazujemy NAJNOWSZE (najwyższe
+            # rfq_id) — bez ORDER BY wybór był arbitralny, zależny od kolejności
+            # z bazy. Pozostałe zbieramy do sekcji „Ten detal w innych zapytaniach".
+            _wszystkie = master_con.execute(
                 """SELECT drawing_number, item_name, project_number, rfq_code, rfq_title,
                           rfq_status, invitations_sent, suppliers_count, offers_count,
                           min_price, supplier_name, price, currency, lead_time_days,
                           offer_notes, decided_at, synced_at, rfq_id,
                           viewers_count, seen_item_count, last_viewed_at,
                           rfq_item_id, files_updated_at, docs_notified_at
-                   FROM rfq_results WHERE drawing_number = ?""",
+                   FROM rfq_results WHERE drawing_number = ?
+                  ORDER BY COALESCE(rfq_id, 0) DESC""",
                 (drawing_no,)
-            ).fetchone()
+            ).fetchall()
+            data = _wszystkie[0] if _wszystkie else None
+            inne_rfq = _wszystkie[1:] if len(_wszystkie) > 1 else []
         except Exception as e:
             print(f"⚠️  Błąd odczytu wyceny: {e}")
             return
@@ -23421,6 +23495,42 @@ class MainWindow(tk.Tk):
         elif _ost:
             _line("Synchronizacja:", f"✓ {str(_ost)[:16]}")
 
+        # --- Ten sam detal w INNYCH zapytaniach ---------------------------
+        # Historia wycen tego detalu: ile kosztował poprzednio i czy gdzieś
+        # jeszcze trwa. Bez tego druga wycena istniała, ale nie było jak jej
+        # zobaczyć — okno pokazywało tylko najnowsze RFQ.
+        if inne_rfq:
+            ib_bg, ib_fg = "#eef2f7", "#33506e"
+            ibox = tk.Frame(dialog, bg=ib_bg, bd=1, relief=tk.SOLID)
+            ibox.pack(fill=tk.X, padx=14, pady=(0, 8))
+            tk.Label(ibox, text=f"Ten detal jest też w {len(inne_rfq)} innym zapytaniu"
+                               f"{'ach' if len(inne_rfq) > 1 else ''}:",
+                     bg=ib_bg, fg=ib_fg, anchor="w",
+                     font=("Arial", 9, "bold")).pack(fill=tk.X, padx=10, pady=(6, 2))
+            for _r in inne_rfq[:4]:
+                (_, _, _, _kod, _tyt, _st, _inv, _sup, _of, _min_p,
+                 _win, _win_p, _cur, _lead, *_rest) = _r
+                _cur = _cur or "PLN"
+                if _win:
+                    # rozstrzygnięte — twarda informacja, cena ostateczna
+                    _opis = f"✓ {_win}" + (f" · {_win_p:g} {_cur}" if _win_p is not None else "")
+                elif _of:
+                    # trwa — cena niepełna, może się jeszcze zmienić
+                    _opis = (f"w toku: {_of}/{_inv or _sup or 0} ofert"
+                             + (f" · od {_min_p:g} {_cur}" if _min_p is not None else ""))
+                else:
+                    _opis = f"w toku: brak ofert ({_inv or _sup or 0} zapytań)"
+                tk.Label(ibox, text=f"• {_kod or '?'} — {_opis}", bg=ib_bg, fg=ib_fg,
+                         anchor="w", font=("Arial", 9)).pack(fill=tk.X, padx=18, pady=1)
+            if len(inne_rfq) > 4:
+                tk.Label(ibox, text=f"… i {len(inne_rfq) - 4} więcej", bg=ib_bg,
+                         fg=ib_fg, anchor="w",
+                         font=("Arial", 8, "italic")).pack(fill=tk.X, padx=18)
+            tk.Label(ibox, text="Ceny z zapytań „w toku” są niepełne — część "
+                               "kooperantów może jeszcze odpowiedzieć.",
+                     bg=ib_bg, fg=ib_fg, anchor="w", justify=tk.LEFT,
+                     font=("Arial", 8, "italic")).pack(fill=tk.X, padx=10, pady=(2, 6))
+
         # --- Tabelka aktywności kooperantów (odpowiednik panelu z portalu) ---
         # Pokazuje, kto dostał zapytanie o TEN detal, czy je otworzył, czy
         # widział tę konkretną pozycję i czy złożył ofertę. Bez tego nie wiadomo,
@@ -23432,7 +23542,8 @@ class MainWindow(tk.Tk):
                           seen_this_item, has_offer,
                           COALESCE(is_winner, 0), win_price,
                           offer_price, offer_currency, offer_lead_time,
-                          COALESCE(has_declined, 0), decline_label, decline_notes
+                          COALESCE(has_declined, 0), decline_label, decline_notes,
+                          offer_notes
                      FROM rfq_activity WHERE drawing_number = ?
                     ORDER BY COALESCE(is_winner, 0) DESC, supplier_name""",
                 (drawing_no,)
@@ -23443,7 +23554,8 @@ class MainWindow(tk.Tk):
             # tabelka znikałaby z komunikatem „agent nie przyniósł danych",
             # choć reszta jest w bazie od dawna.
             try:
-                activity = [tuple(r) + (0, None, None) for r in master_con.execute(
+                # +4 puste: has_declined, decline_label, decline_notes, offer_notes
+                activity = [tuple(r) + (0, None, None, None) for r in master_con.execute(
                     """SELECT supplier_name, email_sent_at, last_viewed_at, view_count,
                               seen_this_item, has_offer,
                               COALESCE(is_winner, 0), win_price,
@@ -23504,7 +23616,8 @@ class MainWindow(tk.Tk):
 
             for a in activity:
                 (nazwa, wyslane, wejscie, wejsc, widzial, oferta, wygral, cena,
-                 of_cena, of_waluta, of_termin, odmowil, odm_powod, odm_uwagi) = a
+                 of_cena, of_waluta, of_termin, odmowil, odm_powod, odm_uwagi,
+                 of_uwagi) = a
                 if not wejsc:
                     stan, tag = ("nie otworzył", "notopened") if wyslane else ("—", "")
                 elif widzial:
@@ -23533,6 +23646,12 @@ class MainWindow(tk.Tk):
                     if of_termin is not None:
                         czesci.append(f"{of_termin:g} dni")
                     kol_oferta = " · ".join(czesci)
+                    # Uwagi kooperanta ZMIENIAJĄ SENS ceny („bez obróbki cieplnej",
+                    # „termin po potwierdzeniu materiału") — bez nich user porównuje
+                    # kwoty, które dotyczą różnego zakresu. Pełna treść w tooltipie.
+                    if (of_uwagi or "").strip():
+                        _u = of_uwagi.strip().replace("\n", " ")
+                        kol_oferta += f"  ⓘ {_u[:40]}{'…' if len(_u) > 40 else ''}"
                 else:
                     kol_oferta = "—"
 
@@ -24260,6 +24379,30 @@ class MainWindow(tk.Tk):
             messagebox.showwarning("Wyślij do RFQ",
                                    "Zaznacz wiersze z numerem rysunku.", parent=self)
             return
+
+        # Czy któryś detal jest JUŻ w innym aktywnym zapytaniu? Zwykle to pomyłka
+        # (ktoś nie wiedział, że pozycja już poszła), czasem świadome pytanie
+        # drugiej grupy kooperantów — więc ostrzegamy, nie blokujemy.
+        #
+        # Bez tego dubel wychodził dopiero w kolumnie WYCENA, gdzie jedna z dwóch
+        # wycen wygrywała arbitralnie i o drugiej user się nie dowiadywał.
+        _dubel = self._pozycje_w_rfq([i['drawing_no'] for i in items])
+        if _dubel:
+            _lista = "\n".join(
+                f"• {dn} → {kod}" + (f", {ofert} ofert(y)" if ofert else "")
+                for dn, (kod, ofert) in list(_dubel.items())[:8])
+            if len(_dubel) > 8:
+                _lista += f"\n... i {len(_dubel) - 8} innych"
+            if not messagebox.askyesno(
+                    "Detal już w zapytaniu",
+                    f"{len(_dubel)} z zaznaczonych pozycji jest już w aktywnym RFQ:\n\n"
+                    f"{_lista}\n\n"
+                    "Wysłanie ich do kolejnego zapytania jest możliwe (np. gdy pytasz\n"
+                    "inną grupę kooperantów), ale w kolumnie WYCENA zobaczysz wtedy\n"
+                    "wycenę z NOWSZEGO zapytania — ze znacznikiem, że jest ich więcej.\n\n"
+                    "Wysłać mimo to?",
+                    parent=self, icon='warning'):
+                return
 
         try:
             rfq_list = agent.list_rfqs()

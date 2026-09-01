@@ -867,6 +867,11 @@ class RMSyncAgent:
                     offer_price     REAL,      -- cena ZŁOŻONEJ oferty (widoczna przed wyborem zwycięzcy)
                     offer_currency  TEXT,      -- waluta złożonej oferty (np. PLN)
                     offer_lead_time INTEGER,   -- termin realizacji w dniach ze złożonej oferty
+                    -- Uwagi kooperanta do oferty: zastrzeżenia zmieniające sens
+                    -- ceny („bez obróbki cieplnej", „termin po potwierdzeniu
+                    -- materiału"). Bez nich user widział samą kwotę.
+                    offer_notes     TEXT,
+                    offer_submitted_at TEXT,   -- kiedy wpłynęła (vs files_updated_at)
                     -- ODMOWA wyceny: 1 = kooperant świadomie odmówił. Bez tego
                     -- "brak oferty" i "odmowa" wyglądały w RM_BAZA identycznie
                     -- ("—"), a to różnica między "czekamy" a "szukaj kogoś innego".
@@ -886,7 +891,8 @@ class RMSyncAgent:
                               ('offer_lead_time', 'INTEGER'),
                               ('has_declined', 'INTEGER'), ('decline_reason', 'TEXT'),
                               ('decline_label', 'TEXT'), ('decline_notes', 'TEXT'),
-                              ('declined_at', 'TEXT')):
+                              ('declined_at', 'TEXT'),
+                              ('offer_notes', 'TEXT'), ('offer_submitted_at', 'TEXT')):
                 if col not in akt_cols:
                     con.execute(f'ALTER TABLE rfq_activity ADD COLUMN {col} {decl}')
             con.execute('CREATE INDEX IF NOT EXISTS idx_rfq_activity_drawing '
@@ -900,8 +906,8 @@ class RMSyncAgent:
                     view_count, seen_this_item, has_offer, is_winner, win_price,
                     offer_price, offer_currency, offer_lead_time,
                     has_declined, decline_reason, decline_label, decline_notes,
-                    declined_at, synced_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
+                    declined_at, offer_notes, offer_submitted_at, synced_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
             ''', [
                 (r.get('rfq_item_id'), r.get('supplier_name'), r.get('drawing_number'),
                  r.get('item_name'), r.get('email_sent_at'), r.get('first_viewed_at'),
@@ -911,7 +917,8 @@ class RMSyncAgent:
                  r.get('offer_price'), r.get('offer_currency'), r.get('offer_lead_time'),
                  r.get('has_declined'), r.get('decline_reason'),
                  r.get('decline_reason_label'), r.get('decline_notes'),
-                 r.get('declined_at'))
+                 r.get('declined_at'),
+                 r.get('offer_notes'), r.get('offer_submitted_at'))
                 for r in rows
             ])
             con.commit()
