@@ -143,14 +143,19 @@ nieaktywny. Kartoteka zostaje dla historii, ale nie zaśmieca list wyboru.
 To nie są pytania techniczne — to decyzje o tym, jak ma działać firma.
 Lepiej podjąć je teraz niż po pierwszym imporcie.
 
-- [ ] **Co jest symbolem kartoteki?** Numer rysunku RM_BAZA to naturalny kandydat,
-      ale: czy `2602-100.41X` po zmianie konstrukcyjnej to nadal ten sam towar?
-      Jeśli zmieniła się geometria, a numer został — dostawca dostanie zamówienie
-      na coś innego niż poprzednio.
-- [ ] **Czy sufiks X/XX wchodzi w symbol?** Ten sam detal cięty laserem i frezowany
-      to dla magazynu dwie różne rzeczy.
-- [ ] **Materiały (blacha, profile)** mają kartoteki w Subiekcie, ale nie mają
-      numerów rysunków — jak je mapować?
+- [x] **Co jest symbolem kartoteki?** Numer rysunku RM_BAZA — **rozstrzygnięte
+      02.09.2026**: numery rysunków są niepowtarzalne, zmiana konstrukcyjna
+      zawsze dostaje nowy numer, nigdy nie nadpisuje starego pod tym samym
+      symbolem. Ryzyko z pierwotnego pytania (numer zostaje, geometria się
+      zmienia) nie występuje w praktyce firmy. Numer rysunku = symbol
+      kartoteki, bez dodatkowego wersjonowania/rewizji.
+- [x] **Czy sufiks X/XX wchodzi w symbol?** — **rozstrzygnięte 02.09.2026**:
+      sufiks jest integralną częścią numeru rysunku, więc wchodzi w symbol
+      automatycznie, bez dodatkowej logiki — laser i frez na tym samym detalu
+      mają różne numery, więc dostają różne kartoteki.
+- [x] **Materiały (blacha, profile)** mają kartoteki w Subiekcie, ale nie mają
+      numerów rysunków — **rozstrzygnięte 02.09.2026**: materiały nie wchodzą
+      w zakres tej integracji, nie mapujemy ich.
 - [ ] **Kto jest źródłem prawdy o stanie magazynu?** Powinien być Subiekt, a RM_BAZA
       tylko go odpytuje. RM_BAZA NIE MOŻE trzymać własnej wersji stanów — rozjadą
       się (por. `rfq_portal_url`, gdzie dwa źródła tej samej prawdy rozjechały się
