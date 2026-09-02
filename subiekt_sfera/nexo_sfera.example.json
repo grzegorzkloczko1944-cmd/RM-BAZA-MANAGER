@@ -1,0 +1,11 @@
+{
+  "_komentarz": "Skopiuj do C:\\RMPAK_CLIENT\\.nexo_sfera.json i uzupelnij hasla. NIGDY nie commituj pliku z haslami.",
+  "serwer": "192.168.100.4",
+  "baza": "Nexo_RM PRODUKCJA",
+  "sqlWindowsAuth": false,
+  "sqlUser": "sa",
+  "sqlHaslo": "TU_HASLO_SA",
+  "nexoLogin": "TU_LOGIN_UZYTKOWNIKA_NEXO",
+  "nexoHaslo": "TU_HASLO_UZYTKOWNIKA_NEXO",
+  "sdkBin": "C:\\iLogic\\Subiekt_nexo_PRO_dokumentacja\\SDK\\Bin\\"
+}

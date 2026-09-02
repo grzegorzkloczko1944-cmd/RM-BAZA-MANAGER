@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    NexoRecon: skrypt ROZPOZNAWCZY Sfery nexo (tylko odczyt, nic nie zapisuje).
+    Przepis z SDK: import SferaConsoleApp.targets ustawia net8.0-windows / win-x64 /
+    referencje do Bin SDK i kopiuje ijwhost.dll + Xml.pak + SNI.dll do wyjscia.
+    SDK lezy w C:\iLogic\Subiekt_nexo_PRO_dokumentacja\SDK (patrz SUBIEKT_INTEGRACJA_PLAN.md).
+  -->
+  <PropertyGroup>
+    <nexoSdkBinPath>C:\iLogic\Subiekt_nexo_PRO_dokumentacja\SDK\Bin\</nexoSdkBinPath>
+    <nexoSdkNarzedziaPath>C:\iLogic\Subiekt_nexo_PRO_dokumentacja\SDK\Narzedzia\</nexoSdkNarzedziaPath>
+    <AssemblyName>NexoRecon</AssemblyName>
+    <RootNamespace>NexoRecon</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <SelfContained>false</SelfContained>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <SatelliteResourceLanguages>pl;en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <Import Project="$(nexoSdkNarzedziaPath)Targets\SferaConsoleApp.targets" />
+</Project>

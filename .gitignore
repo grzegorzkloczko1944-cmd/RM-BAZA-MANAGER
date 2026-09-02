@@ -14,3 +14,15 @@ build_*.log
 sync_agent_run.bat
 sync_agent.log
 sync_agent.log.1
+
+# nexo SDK — 466 MB instalatora + ~650 plikow Bin, NIE do repo.
+# Pobierany z ftp.insert.com.pl (patrz SUBIEKT_INTEGRACJA_PLAN.md sekcja 2).
+nexoSDK*.exe
+nexoSDK_*/
+sdk/
+*.chm
+
+# most Sfera nexo (C#) - artefakty budowania i lokalny konfig z haslami
+subiekt_sfera/**/bin/
+subiekt_sfera/**/obj/
+.nexo_sfera.json
