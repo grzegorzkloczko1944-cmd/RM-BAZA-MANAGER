@@ -16,29 +16,54 @@
 > odmianach**: GT (COM) i nexo (.NET/SDK). Ta druga jest wprost wymieniona
 > przez InsERT jako cecha wersji PRO i to jest właściwa droga.
 
-## 1. Po co to
+## 1. Po co to — docelowy obieg (doprecyzowane 02.09.2026)
 
-Dziś RM_BAZA prowadzi projekty i BOM-y, a magazyn żyje osobno w Subiekcie GT.
+Dziś RM_BAZA prowadzi projekty i BOM-y, a magazyn żyje osobno w Subiekcie.
 Skutek: zamówienia do dostawców powstają ręcznie, a informacja „co już mamy,
 a co trzeba dokupić" wymaga ręcznego porównania dwóch systemów.
 
-Docelowy obieg:
-
 ```
-RM_BAZA  ──(1) lista zamówień──►  SUBIEKT GT
-                                     │
-                                     ├─ (2) porównuje z magazynem:
-                                     │      co wydać do montażu,
-                                     │      co zamówić u dostawcy
-                                     │
-RM_BAZA  ◄──(3) co wydano / co przyszło──┘
+RM_BAZA: lista detali z projektu
+        │
+        ├─(1) MAPOWANIE: dla każdej pozycji sprawdź symbol w Subiekcie
+        │       ├─ jest kartoteka  → użyj jej (id towaru do dalszych kroków)
+        │       └─ brak kartoteki  → ZAŁÓŻ na żądanie (symbol=nr rysunku,
+        │                            nazwa z BOM) — tylko dla tej pozycji,
+        │                            nie hurtem; patrz sekcja 4
+        │
+        ├─(2) ZAMÓWIENIE / WYDANIE — Subiekt decyduje z magazynu:
+        │       co wydać od ręki (WZ/RW), co zamówić u dostawcy
+        │       ⚠️ forma zamówienia (ZD czy „lista + FZ jak dziś") to
+        │       DECYZJA PROCESOWA, świadomie otwarta — patrz sekcja 12.1
+        │
+        └─(3) WYDANIE Z MAGAZYNU → RM_BAZA
+                Subiekt potwierdza wydanie → RM_BAZA dostaje sygnał
+                „dostarczono" na pozycji projektu.
 ```
 
-1. **RM_BAZA → Subiekt** — lista zamówień (zapotrzebowanie z projektu).
-2. **Subiekt** — sam liczy, co pokryje z magazynu, a co zamówić. Nic nie budujemy.
-3. **Subiekt → RM_BAZA** — wydania do montażu (RW/WZ) i przyjęcia od
-   poddostawców. ⚠️ W praktyce firmy przyjęcia idą **bezpośrednio na FZ**
-   (faktura zakupu ze skutkiem magazynowym), nie na PZ — patrz sekcja 12.1.
+Trzy operacje, różny profil ryzyka:
+
+1. **Mapowanie (odczyt)** — dla listy numerów z RM_BAZA sprawdzić symbol
+   w Subiekcie z normalizacją (TRIM + bez wielkości liter, sekcja 12.2 —
+   rozpoznanie znalazło 16 takich przypadków). Zero ryzyka, czysty odczyt.
+2. **Zakładanie brakujących kartotek (zapis, wąski zakres)** — TYLKO gdy
+   symbol ma kształt poprawnego numeru rysunku (regex z sekcji 12.2).
+   Pozycje o innym kształcie (rozpoznanie znalazło m.in. `Przygotowanie
+   powietrza`, `Elektrozawór 5/3` wpisane w pole numeru) **NIE dostają
+   kartoteki automatycznie** — trafiają na listę do ręcznego sprawdzenia,
+   żeby nie zaśmiecić Subiekta. Decyzja użytkownika 02.09.2026.
+3. **Wydanie z magazynu → RM_BAZA (odczyt zwrotny)** — jeszcze nierozpoznane
+   technicznie, do zbadania w SDK razem z krokiem 2 (jaki dokument realnie
+   potwierdza wydanie, skoro PZ/WZ/RW wygasły na rzecz FZ/FS — sekcja 12.1).
+   **Decyzja 02.09.2026: DWA osobne sygnały, nie jeden.** „Wydano z magazynu"
+   (mieli na stanie, WZ/RW albo ich następca) i „przyszło od dostawcy" (FZ)
+   to różna informacja dla planowania — RM_BAZA ma widzieć, skąd pozycja
+   się wzięła, nie tylko że jest gotowa. Do zbadania: jaki dokument/status
+   w Subiekcie odpowiada każdemu z tych dwóch przypadków przy obecnym
+   sposobie prowadzenia magazynu (sekcja 12.1).
+
+⚠️ Krok (2) „zamówienie i wydanie" pozostaje decyzją procesową firmy, nie
+techniczną — zapisane świadomie jako otwarte, nie jako zaległość.
 
 ## 2. Czym się łączyć — SFERA dla nexo (nexo SDK)
 
@@ -504,6 +529,76 @@ zbudują historię cen.
   dostać kartoteki po „numerze"; filtr kształtu numeru przed wysyłką.
 * `cenaEwid=0` na sprawdzanych kartotekach — ceny ewidencyjne nieprowadzone;
   historia cen będzie się budować dopiero z FZ/ZD tworzonych przez integrację.
+
+**Skalowanie — czy 8 s z rozpoznania to problem, gdy Subiekt urośnie? Nie.**
+Te 8 s to tryb rozpoznawczy (`Asortymenty().Dane.Wszystkie()` — ściąga
+i grupuje CAŁĄ tabelę, `Program.cs`), używany jednorazowo do zwiedzenia bazy.
+Docelowy tryb produkcyjny to **`stan`** (`Stan.cs`, patrz sekcja 11): dla listy
+symboli z RM_BAZA robi punktowe `WyszukajPoSymbolu(s)` — wyszukanie po indeksie,
+nie przegląd tabeli. Koszt zależy od **liczby symboli, które podajemy**
+(rozmiar projektu w RM_BAZA, dziś ~300), praktycznie NIE od tego, ile kartotek
+ma Subiekt. Różnica między 3 tys. a 30 tys. pozycji w Subiekcie będzie
+niezauważalna, bo i tak pytamy punktowo o konkretne numery.
+
+⚠️ Jedyne miejsce, gdzie skalowanie zależy od TEGO, co piszemy, nie od
+Subiekta: zakładanie kartotek (krok 2 zapisu) rób pojedynczo, symbol po
+symbolu, z potwierdzeniem — nie masową pętlą bez limitu w jednej transakcji.
+
+**⚠️ NIEZMIERZONE — do sprawdzenia w firmie, zanim zacznie się optymalizować:**
+tryb `stan` z pełną listą ~300 symboli projektu jeszcze nie był uruchomiony
+(rozpoznanie w sekcji 12 użyło trybu ogólnego, nie `stan`). Szacunek z rozmowy
+(300 × pojedyncze `WyszukajPoSymbolu`) to rząd **15–30 s** — ale to zgadywanie,
+nie pomiar, i dotyczy INNEJ operacji niż 8 s rozpoznania (punktowe szukanie
+300 numerów ≠ przegląd całej tabeli 2745 kartotek — nie są bezpośrednio
+porównywalne, mimo że 15–30 s "brzmi" na więcej niż 8 s).
+
+Zmierzyć realnie:
+```
+NexoRecon.exe stan --symbols-file=lista_300.txt --out=wynik.json
+```
+Dopiero jeśli realny czas okaże się za wolny przy codziennym użyciu (nie sam
+fakt, że jest dłuższy niż 8 s) — sprawdzić w SDK, czy Sfera ma odpowiednik
+zapytania wsadowego (`symbol IN (...)` na całej liście naraz) zamiast pętli
+300 pojedynczych wywołań. To ścięłoby narzut mnożony przez 300 do jednego
+zapytania. Nie komplikować kodu z góry bez pomiaru.
+
+**⚠️ NIEUSTALONE — częstotliwość użycia i cache (pytanie zadane 02.09.2026,
+świadomie odłożone „do ustalenia w firmie", nie rozstrzygnięte na wyrost).**
+Czas 15–30 s ma sens tylko w kontekście tego, JAK CZĘSTO RM_BAZA będzie o to
+pytać:
+* raz przy otwarciu projektu → 15–30 s jednorazowo jest do przyjęcia bez cache,
+* przy każdym otwarciu okna „stan magazynowy” / „wyślij do Subiekta” → 15–30 s
+  za każdym razem jest zbyt wolne, cache staje się koniecznością.
+
+**Jeśli cache — to NIE jeden mechanizm dla wszystkiego.** Zastrzeżenie
+użytkownika: *„cache trzymać może nieaktualne dane”* — realne ryzyko przy
+stanach magazynowych (user widzi „15 szt. dostępne”, klika zamówienie, a ktoś
+inny w międzyczasie je wydał). Dwa rodzaje danych mają różny profil starzenia
+się, więc prawdopodobnie różną politykę cache:
+* **mapowanie symbol → istnieje/nie istnieje kartoteka** — zmienia się rzadko
+  (tylko gdy ktoś świadomie zakłada nową), bezpieczny kandydat do dłuższego
+  cache;
+* **stan magazynowy (ilość dostępna)** — zmienia się przy każdej fakturze,
+  ryzykowny do cache'owania bez jawnego znacznika wieku.
+
+Do rozstrzygnięcia w firmie, PO zmierzeniu realnego czasu i zobaczeniu, jak
+często dane faktycznie się zmieniają w praktyce: czy w ogóle cache'ować stany,
+a jeśli tak — jak pokazać userowi wiek danych (np. „stan z 14:32” + przycisk
+Odśwież), żeby nie działał na liczbach, którym nie może ufać.
+
+**Utarty wzorzec z integracji ERP — punkt wyjścia do dyskusji, nie gotowa
+decyzja:** rozdział nie po TYPIE danych, tylko po TYPIE operacji.
+* **Przeglądanie/planowanie** → cache normalny, zawsze ze znacznikiem czasu
+  odczytu i przyciskiem odśwież. User widzi „stan z 14:32” i sam ocenia,
+  czy ufać liczbie — jak saldo w aplikacji bankowej.
+* **Operacja ze skutkiem (zamówienie, rezerwacja, zapis)** → „weryfikacja na
+  końcu”: user działa na cache'owanym widoku, ale w momencie kliknięcia
+  „zamów”/„zapisz” system pyta Subiekta na ŻYWO o tę JEDNĄ pozycję, tuż przed
+  zapisem. Jeśli stan się nie zgadza z tym, co user widział — komunikat
+  „stan się zmienił, sprawdź ponownie”, nigdy cichy zapis na starych danych.
+
+To eliminuje ryzyko zapisu na nieaktualnych danych bez wymogu, żeby całe
+przeglądanie było wolne (przeglądanie nie ma nieodwracalnego skutku, zapis ma).
 
 ### 12.3 Co dalej (krok 2 — zapis)
 
