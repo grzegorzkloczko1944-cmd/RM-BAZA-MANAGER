@@ -6,7 +6,9 @@
 > SDK pobrane (`C:\iLogic\Subiekt_nexo_PRO_dokumentacja\SDK`), dokumentacja czytelna
 > narzędziem (sekcja 9), **skrypt rozpoznawczy NexoRecon zbudowany i przetestowany**
 > (sekcja 11) i **uruchomiony na żywej bazie** — wyniki i wnioski w sekcji 12.
-> Następny krok to decyzja procesowa (ZD czy lista?) i dopiero potem zapis.
+> Proces od strony usera zaprojektowany — sekcja 13 (wzorowany na oknie
+> „Wyślij do RFQ"). Następny krok to decyzja procesowa (ZD czy lista?) i
+> dopiero potem zapis.
 >
 > ⚠️ **Historia błędów tego dokumentu — czytaj, zanim coś tu przepiszesz:**
 > wersja z 31.08 zakładała Subiekt **GT** (Sfera COM/32-bit) — zły produkt.
@@ -611,3 +613,84 @@ przeglądanie było wolne (przeglądanie nie ma nieodwracalnego skutku, zapis ma
    budowania pozycji).
 4. Kartoteka na żądanie: `WypelnijNaPodstawieSzablonu(DaneDomyslne.Towar)`
    + `Symbol` = numer rysunku + `Nazwa` z BOM + jednostka `szt`.
+
+## 13. Proces od strony użytkownika RM_BAZA (zaprojektowane 02.09.2026)
+
+Wzorowane na istniejącym oknie **„Wyślij do RFQ"** (`_open_rfq_send_dialog`,
+`RM_BAZA_v15_MAG_STATS_ORG.py:24440`) — ten sam kształt: zaznaczenie w arkuszu,
+okno modalne z listą i checkboxami, wysyłka. Nie wymyślamy nowego wzorca UX,
+tylko powielamy sprawdzony. Decyzje 02.09.2026: **cały BOM projektu na raz**
+(nie filtrowanie z góry), **jedno okno, dwie sekcje** (nie osobne kroki).
+
+### Krok 1 — start: zaznaczenie w arkuszu
+
+User zaznacza wiersze BOM-u (albo całe zaznaczenie, jak dziś przy RFQ) →
+PPM → **„Sprawdź w Subiekcie"**. Lista ~300 pozycji, ale można wywołać też
+dla mniejszego zaznaczenia — mechanizm ten sam niezależnie od liczby.
+
+### Krok 2 — okno: mapowanie w tle, dwie sekcje na wyniku
+
+Okno otwiera się od razu (jak przy RFQ — `dlg = tk.Toplevel(self)`), a
+zapytanie do Subiekta (`NexoRecon.exe stan --symbols-file=...`) leci w
+**osobnym wątku**, żeby GUI się nie zamroziło — ten sam wzorzec co
+`_start_rfq_freshness_thread` przy sprawdzaniu świeżości rysunków RFQ.
+Podczas ładowania: spinner/pasek postępu (jak „Szukam plików… X/Y” w oknie
+wysyłki RFQ).
+
+Po powrocie wyniku — **jedno okno, dwie sekcje**, bez osobnych kroków do
+potwierdzania:
+
+```
+┌─ Sprawdzenie w Subiekcie — projekt 2627 (300 pozycji) ──────┐
+│                                                                │
+│ ✅ MAJĄ KARTOTEKĘ (287)                          [zwiń/rozwiń] │
+│   ☑ 013-100.22X   Tuleja formatów        dostępne: 12 szt.   │
+│   ☑ 013-100.20X   Płyta łożyskowa        dostępne: 0 szt.    │
+│   ...                                                          │
+│                                                                │
+│ ⚠️ BRAK KARTOTEKI — do założenia (11)                          │
+│   ☑ 2609-450.42   Tuleja formatów X       (nowa pozycja)      │
+│   ...                                                          │
+│                                                                │
+│ 🔴 NIE DA SIĘ DOPASOWAĆ (2)          [pokaż listę / pomiń]    │
+│   „Przygotowanie powietrza” — brak kształtu numeru rysunku    │
+│                                                                │
+│         [Odznacz wszystkie]  [Załóż zaznaczone i dalej →]    │
+└────────────────────────────────────────────────────────────┘
+```
+
+* **„MAJĄ KARTOTEKĘ”** — czysty odczyt, checkbox zaznaczony domyślnie:
+  te pozycje idą dalej do zamówienia/wydania bez zmian w Subiekcie.
+* **„BRAK KARTOTEKI”** — checkbox zaznaczony domyślnie, ale to jest zapis
+  (zakładanie kartoteki). Klik w „Załóż zaznaczone i dalej” wykonuje zapis
+  **pojedynczo, symbol po symbolu**, z paskiem postępu (patrz zastrzeżenie
+  o skalowaniu w sekcji 12.2 — nie masowa transakcja).
+* **„NIE DA SIĘ DOPASOWAĆ”** — pozycje bez kształtu numeru rysunku (regex
+  z sekcji 12.2). Odznaczone i wyszarzone: NIE wchodzą automatycznie do
+  zapisu (decyzja użytkownika 02.09.2026, patrz sekcja 1 pkt 2). User widzi
+  listę i może je pominąć albo poprawić numer w RM_BAZA i spróbować ponownie
+  — ale kliknięcie „Dalej” nigdy nie zakłada kartoteki dla tej grupy po cichu.
+
+### Krok 3 — zamówienie / wydanie
+
+⚠️ **Świadomie niezaprojektowane w tym kroku** — zależy od decyzji procesowej
+z sekcji 1 pkt 3 (ZD w Subiekcie czy „lista + FZ jak dziś”), która jest
+otwarta. Gdy zapadnie, ten krok dostanie swój ekran w tym samym oknie
+(kontynuacja przepływu, nie osobna aplikacja) albo osobne wywołanie — do
+ustalenia razem z decyzją.
+
+### Krok 4 — sygnał zwrotny do RM_BAZA
+
+Zgodnie z sekcją 1 pkt 4: **dwa osobne stany na pozycji BOM**, nie jeden
+„dostarczono”. Wizualnie — analogicznie do kolumny WYCENA z integracji RFQ
+(ten sam wzorzec: kolumna w arkuszu, kolor/prefiks, klik pokazuje szczegóły):
+
+| Stan | Skąd się bierze | Jak w arkuszu |
+|---|---|---|
+| „na stanie, wydano z magazynu” | WZ/RW (albo ich odpowiednik przy obecnym sposobie prowadzenia magazynu) | zielony prefiks, jak `✓` w WYCENA |
+| „zamówione u dostawcy” | FZ | żółty/w trakcie, jak `WYSŁANO ·` w WYCENA |
+
+Mechanizm odświeżania — do zaprojektowania razem z decyzją o cache
+(sekcja 12.2): albo ręczny przycisk „Sprawdź dostawy” per projekt, albo
+odpytywanie przy otwarciu projektu, w zależności od tego, co pokaże pomiar
+częstotliwości i realnego czasu zapytań.
