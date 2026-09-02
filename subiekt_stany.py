@@ -147,8 +147,8 @@ class SubiektStanyWindow(tk.Toplevel):
     COLS = [
         ("nr",     "Nr rysunku",     140, "w"),
         ("bom",    "Ilość BOM",       75, "e"),
-        ("stan",   "Stan Subiekt",    90, "e"),
-        ("brak",   "Brakuje",         80, "e"),
+        ("stan",   "Stan Subiekt",    95, "e"),
+        ("brak",   "Do zamówienia",   95, "e"),
         ("nazwa",  "Nazwa w Subiekcie", 260, "w"),
         ("cena",   "Ost. cena zak.",  95, "e"),
         ("data",   "Data zakupu",      90, "c"),
@@ -310,14 +310,19 @@ class SubiektStanyWindow(tk.Toplevel):
                 need_f = float(need) if need not in (None, "") else None
             except (TypeError, ValueError):
                 need_f = None
+            # Brakuje = ile trzeba dokupic. Bez kartoteki nie ma nic na stanie,
+            # wiec brakuje calej ilosci z BOM (wczesniej zostawialo pusto, co
+            # wygladalo, jakby modul nic nie policzyl).
             missing = ""
-            if r["istnieje"] and need_f is not None and r["stan"] < need_f:
-                missing = f"{need_f - r['stan']:g}"
+            if need_f is not None:
+                brak = need_f - (r["stan"] if r["istnieje"] else 0)
+                if brak > 0:
+                    missing = f"{brak:g}"
 
             self.tree.insert("", "end", values=(
                 r["nr"],
                 "" if need in (None, "") else f"{need:g}" if isinstance(need, (int, float)) else need,
-                f"{r['stan']:g}" if r["istnieje"] else "—",
+                f"{r['stan']:g}" if r["istnieje"] else "brak kart.",
                 missing,
                 r["nazwa"] or (r["bom_name"] if not r["istnieje"] else ""),
                 f"{r['cena']:.2f}" if r["cena"] is not None else "",

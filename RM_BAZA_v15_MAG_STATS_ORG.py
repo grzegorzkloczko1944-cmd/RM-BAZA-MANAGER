@@ -784,6 +784,26 @@ class MainWindow(tk.Tk):
         self.btn_apps["menu"] = apps_menu
         self.btn_apps.pack(side=tk.LEFT, padx=(0, 5), pady=2)
 
+        # SUBIEKT — stany magazynowe z Subiekt nexo PRO (TYLKO ODCZYT).
+        # Logika w osobnym module subiekt_stany.py; tu samo wywołanie, żeby ten
+        # plik nie puchł. Zaznaczenie w arkuszu zawęża listę pozycji.
+        # Miejsce: obok „Aplikacje", przed badge'em RFQ — to też jest wejście
+        # do zewnętrznego systemu, a nie operacja na arkuszu.
+        self.btn_subiekt = tk.Button(
+            search_frame,
+            text="📦 SUBIEKT",
+            command=self.open_subiekt_stany,
+            bg="#8e44ad",
+            fg="white",
+            font=("Arial", 9),
+            padx=10,
+            pady=4,
+            relief=tk.RAISED,
+            bd=2,
+            cursor="hand2",
+        )
+        self.btn_subiekt.pack(side=tk.LEFT, padx=(0, 5), pady=2)
+
         # RFQ: ilu kooperantów czeka z odpowiedzią. Liczone LOKALNIE z
         # rfq_activity/rfq_results (agent je synchronizuje), więc badge działa
         # nawet gdy portal chwilowo nie odpowiada. Kliknięcie otwiera panel
@@ -1031,23 +1051,6 @@ class MainWindow(tk.Tk):
             state=tk.DISABLED
         )
         self.btn_restore_hidden.pack(side=tk.LEFT, padx=2, pady=8)
-
-        # Przycisk: SUBIEKT — stany magazynowe z Subiekt nexo PRO (tylko odczyt).
-        # Logika siedzi w osobnym module subiekt_stany.py; tutaj tylko wywołanie,
-        # żeby ten plik nie puchł. Zaznaczenie w arkuszu zawęża listę pozycji.
-        self.btn_subiekt = tk.Button(
-            t2r1,
-            text="📦 SUBIEKT",
-            command=self.open_subiekt_stany,
-            bg="#8e44ad",
-            fg="white",
-            font=("Arial", 8, "bold"),
-            padx=8,
-            pady=2,
-            relief=tk.RAISED,
-            bd=1
-        )
-        self.btn_subiekt.pack(side=tk.LEFT, padx=2, pady=8)
 
         # Separator
         tk.Label(
