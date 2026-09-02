@@ -5,7 +5,8 @@
 > Warunki spełnione: Subiekt nexo **PRO** ✅, aktywny abonament ✅.
 > SDK pobrane (`C:\iLogic\Subiekt_nexo_PRO_dokumentacja\SDK`), dokumentacja czytelna
 > narzędziem (sekcja 9), **skrypt rozpoznawczy NexoRecon zbudowany i przetestowany**
-> (sekcja 11). Do pierwszego realnego odczytu brakuje tylko haseł: SQL `sa` + użytkownik nexo.
+> (sekcja 11) i **uruchomiony na żywej bazie** — wyniki i wnioski w sekcji 12.
+> Następny krok to decyzja procesowa (ZD czy lista?) i dopiero potem zapis.
 >
 > ⚠️ **Historia błędów tego dokumentu — czytaj, zanim coś tu przepiszesz:**
 > wersja z 31.08 zakładała Subiekt **GT** (Sfera COM/32-bit) — zły produkt.
@@ -35,8 +36,9 @@ RM_BAZA  ◄──(3) co wydano / co przyszło──┘
 
 1. **RM_BAZA → Subiekt** — lista zamówień (zapotrzebowanie z projektu).
 2. **Subiekt** — sam liczy, co pokryje z magazynu, a co zamówić. Nic nie budujemy.
-3. **Subiekt → RM_BAZA** — dokumenty magazynowe: wydania do montażu (RW/WZ)
-   i przyjęcia od poddostawców (PZ).
+3. **Subiekt → RM_BAZA** — wydania do montażu (RW/WZ) i przyjęcia od
+   poddostawców. ⚠️ W praktyce firmy przyjęcia idą **bezpośrednio na FZ**
+   (faktura zakupu ze skutkiem magazynowym), nie na PZ — patrz sekcja 12.1.
 
 ## 2. Czym się łączyć — SFERA dla nexo (nexo SDK)
 
@@ -236,7 +238,8 @@ Lepiej podjąć je teraz niż po pierwszym imporcie.
 - [x] **Materiały (blacha, profile)** mają kartoteki w Subiekcie, ale nie mają
       numerów rysunków — **rozstrzygnięte 02.09.2026**: materiały nie wchodzą
       w zakres tej integracji, nie mapujemy ich.
-- [ ] **Kto jest źródłem prawdy o stanie magazynu?** Powinien być Subiekt, a RM_BAZA
+- [x] **Kto jest źródłem prawdy o stanie magazynu?** — **Subiekt, potwierdzone
+      02.09.2026** (stany żywe, ruszane przez FZ/FS — sekcja 12.1). Powinien być Subiekt, a RM_BAZA
       tylko go odpytuje. RM_BAZA NIE MOŻE trzymać własnej wersji stanów — rozjadą
       się (por. `rfq_portal_url`, gdzie dwa źródła tej samej prawdy rozjechały się
       przy pierwszej zmianie).
@@ -418,7 +421,11 @@ oraz sprawdzenie konkretnych symboli (`--symbol=`) z ich stanami.
 `192.168.100.4` i dostał `Login failed for user 'sa'`. Cały łańcuch
 (build → ijwhost → Sfera → sieć → SQL) działa. **Brakuje tylko danych logowania.**
 
-**Do uruchomienia na żywo potrzebne (od użytkownika, do konfigu, nie do repo):**
+**Uruchomiony na żywo 02.09.2026 — działa; wyniki w sekcji 12.** Dwie literówki
+w hasłach (O↔0) kosztowały godzinę — przy `Login failed` najpierw goły test SQL
+(`SqlConnectionStringBuilder`), on rozdziela hasło od Sfery.
+
+**Konfig (poza repo) wymaga:**
 1. hasło SQL `sa` do `192.168.100.4` (albo `sqlWindowsAuth: true`, jeśli konto
    Windows ma dostęp — na Linuksowym SQL Serverze raczej nie);
 2. login + hasło **użytkownika nexo** (Konfiguracja → Użytkownicy → pole *Login*),
@@ -428,3 +435,84 @@ Ryzyka do sprawdzenia przy pierwszym realnym uruchomieniu (FAQ SDK): licencja PR
 Subiekta **na tej bazie** (`InvalidOperationException: Licencja zabrania...`),
 oczekujące aktualizacje bazy (uruchomić Subiekta), pola własne zaawansowane v1
 (wtedy `InsERT.Moria.ModelDanych.dll` z `%LOCALAPPDATA%\InsERT\Deployments\Nexo\RM PRODUKCJA...\Binaries` zamiast z SDK).
+
+## 12. Wyniki pierwszego rozpoznania na żywej bazie (02.09.2026)
+
+`NexoRecon.exe` uruchomiony na `Nexo_RM PRODUKCJA` jako operator `GKI` — 9 s,
+wyłącznie odczyt. Liczby poniżej to stan na 02.09.2026.
+
+### 12.1 Która baza żyje i jak prowadzony jest magazyn
+
+| | `Nexo_RM PRODUKCJA` | `Nexo_RMPAK SPZOO` |
+|---|---|---|
+| kartotek asortymentu | **2745** (2599 towar, 83 usługa, 63 komplet) | 185 |
+| dokumentów 2026 | **1699** (FZ 1408, FS 263, KFZ/KFS) | 436 (FL, ZK, FZ, WZ, PW, FS) |
+| magazyny | `MAG` (podstawowy), `KOSZT` (pusty) | — |
+| stany > 0 | 795 pozycji, zadysponowane = 0 (rezerwacje nieużywane) | — |
+| użytkownik GKI | ✅ jest | ❌ **brak** (tylko `GDziedzic`, `Szef`) |
+
+**Magazyn w RM PRODUKCJA jest prowadzony na bieżąco, ale bezpośrednio przez
+faktury:** FZ 2026 mają status *„Przyjęty towar i odebrane usługi"*, FS *„Wydany
+towar i wykonane usługi"*. Osobne dokumenty magazynowe wygasły: PZ ostatni
+11.2023, WZ 09.2024, RW 07.2023, PW 06.2024. **ZD (zamówienia do dostawców):
+0 sztuk w obu bazach — nigdy nie używane.**
+
+Konsekwencje dla planu:
+* **Sekcja 1, strzałka (3) „Subiekt → RM_BAZA: co przyszło"** = **FZ**, nie PZ.
+  Menedżer: `sfera.DokumentyZakupu()` (`IDokumentyZakupu`), filtr po statusie
+  ze skutkiem przyjęcia (`StatusDokumentu.SkutekMagazynowyPrzyjecia`).
+* **Sekcja 5 „źródło prawdy o stanie" — potwierdzone: Subiekt.** Stany są żywe
+  (FZ/FS je ruszają), więc RM_BAZA może je odpytywać bez własnej kopii.
+* **Sekcja 1, strzałka (1) „RM_BAZA → ZD"** wprowadza typ dokumentu, którego
+  firma **nigdy nie używała**. To zmiana procesu, nie tylko integracja — do
+  decyzji, czy zamówienia mają powstawać jako ZD w Subiekcie, czy RM_BAZA ma
+  tylko przygotowywać listę, a zakup dalej idzie „FZ przy dostawie".
+* `SPZOO` jest poza zasięgiem Sfery na koncie GKI — jeśli ma być objęta,
+  potrzebne konto w tej bazie (decyzja organizacyjna).
+
+### 12.2 Symbole kartotek vs numery rysunków RM_BAZA
+
+Porównanie pełnych zbiorów: 2744 symbole Subiekta vs **4425 unikalnych
+numerów rysunków** z 79 projektów na `Y:\RM_BAZA\projects` (`work_drawing_no`
+> `norm_drawing_no` > `src_drawing_no`).
+
+| | |
+|---|---|
+| numerów RM_BAZA **z kartoteką** w Subiekcie | **135** (119 dokładnie + 16 po normalizacji spacji/wielkości) — **3 %** |
+| numerów RM_BAZA **bez kartoteki** | 4290 |
+| symboli Subiekta o kształcie numeru rysunku (`NNN-NNN.NN[X]`, `NNNN-NNN.NN[X]`, `AAnnn-nnn.nn`) | **891 z 2744** |
+
+**Oba systemy używają tego samego formatu numeru** (`013-100.22X`,
+`2559-666.02X`, `ZP159-100.05X`) — mapowanie 1:1 po symbolu jest wykonalne
+i sensowne, sufiks X/XX wchodzi w symbol (zgodnie z sekcją 5).
+
+**Części powtarzalne istnieją i NIE mają kartotek** — dokładnie przypadek,
+dla którego jest reguła „kartoteka na żądanie" (sekcja 4): `013-100.22X`
+w 15 projektach, `013-100.20X` w 12, `027-100.00Z` w 11, `EWTR-820.*` w 6–8.
+Przy pierwszym zamówieniu przez RM_BAZA dostaną kartotekę i od tej pory
+zbudują historię cen.
+
+**Jakość danych do ogarnięcia przed zapisem (obie strony):**
+* Subiekt: 16 dopasowań tylko po normalizacji — np. `'8025354 '` (spacja na
+  końcu), `'624 ZZ'` vs `624ZZ`, `011-100.39A` vs `011-100.39a`. Przy szukaniu
+  kartoteki porównywać `TRIM` + bez rozróżniania wielkości; przy zakładaniu —
+  zapisywać numer dokładnie jak w RM_BAZA.
+* Subiekt: 9 symboli 1-znakowych, 90 dwucyfrowych (`10`, `28`…), 1 kartoteka
+  z pustą nazwą — śmieci historyczne, nie dotykać, ale nie mapować.
+* RM_BAZA: w polu numeru rysunku bywają nazwy (`Przygotowanie powietrza`
+  w 3 projektach, `Elektrozawór 5/3`, `Obejma`) — takie pozycje nie mogą
+  dostać kartoteki po „numerze"; filtr kształtu numeru przed wysyłką.
+* `cenaEwid=0` na sprawdzanych kartotekach — ceny ewidencyjne nieprowadzone;
+  historia cen będzie się budować dopiero z FZ/ZD tworzonych przez integrację.
+
+### 12.3 Co dalej (krok 2 — zapis)
+
+1. **Decyzja procesowa** (właściciel: firma): ZD w Subiekcie czy tylko lista?
+2. Most rozszerzyć o tryb `--json` (wyjście maszynowe dla Pythona) i komendy:
+   `stan <symbol...>`, `kartoteka-utworz`, `zd-utworz` — każda osobno testowana
+   na **kopii bazy** (sekcja 6: tryb testowy), nie na produkcji.
+3. `IZamowieniaDoDostawcow.UtworzNaPodstawieZapotrzebowania` — sprawdzić
+   w SDK, czy pasuje do „listy zamówień z projektu" (może oszczędzić ręcznego
+   budowania pozycji).
+4. Kartoteka na żądanie: `WypelnijNaPodstawieSzablonu(DaneDomyslne.Towar)`
+   + `Symbol` = numer rysunku + `Nazwa` z BOM + jednostka `szt`.

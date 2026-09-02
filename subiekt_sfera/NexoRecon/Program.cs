@@ -103,7 +103,7 @@ using (sfera)
 
         Console.WriteLine($"  próbka {limit} (alfabetycznie):");
         foreach (var a in q.OrderBy(a => a.Symbol).Take(limit).ToList())
-            Console.WriteLine($"    {a.Symbol,-25} {Skroc(a.Nazwa, 45),-45} rodzaj={Bezp(() => a.Rodzaj?.Nazwa)} grupa={Bezp(() => a.Grupa?.Nazwa)}");
+            Console.WriteLine($"    {a.Symbol,-25} {Skroc(a.Nazwa, 45),-45} rodzaj={Bezp(() => a.Rodzaj?.Nazwa)} jm={Bezp(() => a.JednostkaMagazynowa?.JednostkaMiary?.Symbol)}");
 
         Console.WriteLine($"  próbka {limit} (najnowsze Id):");
         foreach (var a in q.OrderByDescending(a => a.Id).Take(limit).ToList())
@@ -170,13 +170,13 @@ void Dokumenty(string tytul, Func<IQueryable<Dokument>> zrodlo, bool pokazPozycj
     Console.WriteLine($"  razem: {q.Count()}");
     var ostatnie = q.OrderByDescending(d => d.DataWprowadzenia).Take(Math.Min(limit, 8)).ToList();
     foreach (var d in ostatnie)
-        Console.WriteLine($"    {Bezp(() => d.NumerWewnetrzny?.PelnaSygnatura),-22} wyst={d.DataWydaniaWystawienia:yyyy-MM-dd} wprow={d.DataWprowadzenia:yyyy-MM-dd}  {Skroc(Bezp(() => d.Podmiot?.NazwaSkrocona), 30),-30} mag={Bezp(() => d.Magazyn?.Symbol),-6} poz={Bezp(() => d.Pozycje.Count().ToString())}  status={Bezp(() => d.StatusDokumentu?.ToString())}");
+        Console.WriteLine($"    {Bezp(() => d.NumerWewnetrzny?.PelnaSygnatura),-22} wyst={d.DataWydaniaWystawienia:yyyy-MM-dd} wprow={d.DataWprowadzenia:yyyy-MM-dd}  {Skroc(Bezp(() => d.Podmiot?.NazwaSkrocona), 30),-30} mag={Bezp(() => d.Magazyn?.Symbol),-6} poz={Bezp(() => d.Pozycje.Count().ToString())}  status={Bezp(() => d.StatusDokumentu?.Nazwa)}");
     if (pokazPozycje && ostatnie.Count > 0)
     {
         var d = ostatnie[0];
         Console.WriteLine($"  pozycje najnowszego ({Bezp(() => d.NumerWewnetrzny?.PelnaSygnatura)}):");
         foreach (var p in d.Pozycje.Take(limit))
-            Console.WriteLine($"     {Bezp(() => p.AsortymentAktualny?.Symbol),-25} {Skroc(Bezp(() => p.AsortymentAktualny?.Nazwa), 40),-40} ilość={p.Ilosc,10} {Bezp(() => p.JednostkaMiaryAs?.ToString())}");
+            Console.WriteLine($"     {Bezp(() => p.AsortymentAktualny?.Symbol),-25} {Skroc(Bezp(() => p.AsortymentAktualny?.Nazwa), 40),-40} ilość={p.Ilosc,10} {Bezp(() => p.JednostkaMiaryAs?.JednostkaMiary?.Symbol)}");
     }
 });
 
