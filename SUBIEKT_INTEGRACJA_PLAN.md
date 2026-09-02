@@ -718,12 +718,27 @@ konstrukcyjne (nazwa, opis z BOM) mają źródło prawdy w RM_BAZA, tak samo jak
 Subiekt jest źródłem prawdy TYLKO dla stanów magazynowych. Nadpisanie
 odwróciłoby to tam, gdzie nie powinno być odwrócone.
 
-Zamiast tego: **osobna tabela mapowań w SQLite projektu** (nie w kolumnie
-BOM — to metadana integracji, nie dana konstrukcyjna, więc nie miesza się
-z polami typu numer/nazwa/materiał). Kolumny co najmniej: numer rysunku,
-symbol Subiekta, sposób trafienia (automat po symbolu / ręczny wybór fuzzy),
-kto i kiedy wybrał. Krok 2 przy kolejnym projekcie sprawdza najpierw tę
-tabelę, dopiero potem `WyszukajPoSymbolu`.
+Zamiast tego: **globalna tabela mapowań w warstwie RM_BAZA** (nie SQLite
+konkretnego projektu, nie kolumna BOM). Poprawka 02.09.2026 wieczór: część
+powtarzalna (sekcja 12.2 — `013-100.22X` w 15 projektach, `013-100.20X`
+w 12) trafia w wiele projektów, więc mapowanie per-projekt kazałoby wybierać
+tę samą kartotekę ręcznie po raz N-ty. Kolumny co najmniej: numer rysunku,
+symbol/ID Subiekta, sposób trafienia (automat po symbolu / ręczny wybór
+fuzzy), kto i kiedy wybrał. Konkretne miejsce (nowa tabela w `master.sqlite`,
+gdzie już jest reszta danych współdzielonych, czy osobny plik integracji) —
+do ustalenia w firmie, ale **nie per projekt**.
+
+**Dlaczego to nie zwalnia kroku 2, tylko go przyspiesza (pytanie z rozmowy:
+"czy SQLite da taką samą prędkość jak SQL Subiekta?").** Błędne porównanie —
+to dwie różne operacje w łańcuchu, nie konkurenci. Krok 2 dla każdego numeru
+najpierw sprawdza tabelę mapowań (`SELECT ... WHERE numer_rysunku = ?` na
+lokalnym pliku, z indeksem: mikrosekundy, zero sieci) i **tylko przy braku
+trafienia** leci do Sfery/SQL Subiekta przez sieć (to jest ten wolniejszy,
+mierzony krok — sekcja 12.2 wyżej, 15–30 s dla 300 wywołań). Im więcej
+trafień w tabeli mapowań, tym mniej zapytań sieciowych do Subiekta w ogóle —
+SQLite działa jak warstwa filtrująca przed kosztowną operacją, nie jak jej
+zamiennik. Nie trzeba więc, żeby SQLite "dogonił" prędkość Sfery — ich role
+w łańcuchu są różne.
 
 ⚠️ **Problem zgłoszony w rozmowie, jeszcze nierozwiązany: sama tabela w bazie
 nie wystarczy — user patrzący na arkusz BOM musi WIDZIEĆ, że pozycja została
