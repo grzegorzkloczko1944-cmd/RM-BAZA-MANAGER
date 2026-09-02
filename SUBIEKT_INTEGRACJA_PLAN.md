@@ -708,10 +708,32 @@ punktowym) i osobny przycisk, nie automat.
   wyboru, plus zawsze opcja „żadna z tych, załóż nową”.
 * **Wynik wyboru:** jeśli user wskaże istniejącą kartotekę — pozycja
   przechodzi z „brak kartoteki” do „ma kartotekę” z tym symbolem (jak trafienie
-  w kroku 2), zamiast zakładać nową. RM_BAZA powinna zapamiętać to skojarzenie
-  (numer rysunku → symbol Subiekta), żeby przy kolejnym projekcie z tym samym
-  detalem trafienie było już automatyczne w kroku 2, nie wymagało ponownego
-  szukania ręcznego.
+  w kroku 2), zamiast zakładać nową.
+
+**Zapamiętanie skojarzenia — gdzie i jak (rozstrzygnięte 02.09.2026, częściowo).**
+
+⚠️ **Nie nadpisywać nazwy/opisu detalu w RM_BAZA danymi z Subiekta.** Pytanie
+padło w rozmowie — odrzucone, bo łamie kierunek prawdy z sekcji 1/12.1: dane
+konstrukcyjne (nazwa, opis z BOM) mają źródło prawdy w RM_BAZA, tak samo jak
+Subiekt jest źródłem prawdy TYLKO dla stanów magazynowych. Nadpisanie
+odwróciłoby to tam, gdzie nie powinno być odwrócone.
+
+Zamiast tego: **osobna tabela mapowań w SQLite projektu** (nie w kolumnie
+BOM — to metadana integracji, nie dana konstrukcyjna, więc nie miesza się
+z polami typu numer/nazwa/materiał). Kolumny co najmniej: numer rysunku,
+symbol Subiekta, sposób trafienia (automat po symbolu / ręczny wybór fuzzy),
+kto i kiedy wybrał. Krok 2 przy kolejnym projekcie sprawdza najpierw tę
+tabelę, dopiero potem `WyszukajPoSymbolu`.
+
+⚠️ **Problem zgłoszony w rozmowie, jeszcze nierozwiązany: sama tabela w bazie
+nie wystarczy — user patrzący na arkusz BOM musi WIDZIEĆ, że pozycja została
+dopasowana, i to jak.** Trzy stany do rozróżnienia wizualnie (analogicznie do
+kolumny WYCENA z integracji RFQ, która ma różne kolory/prefiksy dla różnych
+stanów): dopasowanie automatyczne po symbolu (pewne) vs dopasowanie ręczne
+przez fuzzy match (decyzja człowieka, mogła być pomyłka, może wymagać
+weryfikacji) vs brak dopasowania. **Konkretny wygląd (kolumna w arkuszu?
+kolor? klik pokazujący szczegóły?) świadomie NIEZAPROJEKTOWANY — do ustalenia
+w firmie**, patrząc na realny arkusz, nie w ciemno.
 
 ⚠️ **Szczegóły algorytmu dopasowania (próg podobieństwa, biblioteka)
 NIEUSTALONE** — do dobrania w firmie, mając pod ręką realne przykłady nazw
