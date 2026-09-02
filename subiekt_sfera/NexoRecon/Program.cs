@@ -21,9 +21,22 @@ using InsERT.Mox.Product;
 
 Console.OutputEncoding = Encoding.UTF8;
 
-var cfgPath = args.FirstOrDefault(a => a.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+// Konfig = argument pozycyjny konczacy sie .json. Wyklucz przelaczniki (--out=... tez konczy sie .json).
+var cfgPath = args.FirstOrDefault(a => !a.StartsWith("--") && a.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
               ?? @"C:\RMPAK_CLIENT\.nexo_sfera.json";
 var szukane = args.Where(a => a.StartsWith("--symbol=")).Select(a => a["--symbol=".Length..]).ToList();
+
+// Tryb "stan": wyjscie JSON dla RM_BAZA (patrz Stan.cs). Symbole z pliku
+// (po jednym w linii) albo z --symbol=. Plik, bo BOM potrafi miec setki pozycji,
+// a wiersz polecenia Windows ma limit dlugosci.
+var trybStan = args.Length > 0 && args[0].Equals("stan", StringComparison.OrdinalIgnoreCase);
+var symbolsFile = args.FirstOrDefault(a => a.StartsWith("--symbols-file="))?["--symbols-file=".Length..];
+var outPath = args.FirstOrDefault(a => a.StartsWith("--out="))?["--out=".Length..];
+if (symbolsFile != null)
+{
+    if (!File.Exists(symbolsFile)) { Console.WriteLine($"BRAK PLIKU Z SYMBOLAMI: {symbolsFile}"); return 1; }
+    szukane.AddRange(File.ReadAllLines(symbolsFile).Select(x => x.Trim()).Where(x => x.Length > 0));
+}
 var limit = int.TryParse(args.FirstOrDefault(a => a.StartsWith("--limit="))?["--limit=".Length..], out var l) ? l : 15;
 
 if (!File.Exists(cfgPath))
@@ -43,8 +56,11 @@ AssemblyLoadContext.Default.Resolving += (ctx, name) =>
     return File.Exists(p) ? ctx.LoadFromAssemblyPath(p) : null;
 };
 
-Console.WriteLine($"Sfera {DanePolaczenia.WersjaSfery}  ->  serwer={cfg.Serwer}  baza={cfg.Baza}  auth={(cfg.SqlWindowsAuth ? "Windows" : "SQL:" + cfg.SqlUser)}");
-Console.WriteLine($"Proces 64-bit: {Environment.Is64BitProcess}   (Sfera nexo >=57 wymaga 64-bit)");
+if (!trybStan || outPath != null)
+{
+    Console.WriteLine($"Sfera {DanePolaczenia.WersjaSfery}  ->  serwer={cfg.Serwer}  baza={cfg.Baza}  auth={(cfg.SqlWindowsAuth ? "Windows" : "SQL:" + cfg.SqlUser)}");
+    Console.WriteLine($"Proces 64-bit: {Environment.Is64BitProcess}   (Sfera nexo >=57 wymaga 64-bit)");
+}
 
 var dane = cfg.SqlWindowsAuth
     ? DanePolaczenia.Jawne(cfg.Serwer, cfg.Baza, true)
@@ -70,7 +86,13 @@ using (sfera)
         Console.WriteLine($"BŁĄD: logowanie operatora nexo '{cfg.NexoLogin}' nie powiodło się (login = pole Login w Konfiguracja -> Użytkownicy).");
         return 3;
     }
-    Console.WriteLine($"Zalogowano operatora: {cfg.NexoLogin}");
+    if (!trybStan || outPath != null) Console.WriteLine($"Zalogowano operatora: {cfg.NexoLogin}");
+
+    if (trybStan)
+    {
+        if (szukane.Count == 0) { Console.WriteLine("Tryb stan: brak symboli (--symbol= albo --symbols-file=)."); return 1; }
+        return NexoRecon.Stan.Uruchom(sfera, szukane, outPath);
+    }
 
     // ───────────────────────── MAGAZYNY ─────────────────────────
     var magazyny = new List<Magazyn>();

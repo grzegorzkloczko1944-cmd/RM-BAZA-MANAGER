@@ -1031,7 +1031,24 @@ class MainWindow(tk.Tk):
             state=tk.DISABLED
         )
         self.btn_restore_hidden.pack(side=tk.LEFT, padx=2, pady=8)
-        
+
+        # Przycisk: SUBIEKT — stany magazynowe z Subiekt nexo PRO (tylko odczyt).
+        # Logika siedzi w osobnym module subiekt_stany.py; tutaj tylko wywołanie,
+        # żeby ten plik nie puchł. Zaznaczenie w arkuszu zawęża listę pozycji.
+        self.btn_subiekt = tk.Button(
+            t2r1,
+            text="📦 SUBIEKT",
+            command=self.open_subiekt_stany,
+            bg="#8e44ad",
+            fg="white",
+            font=("Arial", 8, "bold"),
+            padx=8,
+            pady=2,
+            relief=tk.RAISED,
+            bd=1
+        )
+        self.btn_subiekt.pack(side=tk.LEFT, padx=2, pady=8)
+
         # Separator
         tk.Label(
             t2r1,
@@ -28541,6 +28558,49 @@ class MainWindow(tk.Tk):
     # UKRYWANIE POZYCJI
     # ====================================================================
     
+    def open_subiekt_stany(self):
+        """Okno „Stany w Subiekcie" (przycisk 📦 SUBIEKT).
+
+        Cała logika jest w subiekt_stany.py — ten moduł gada z Subiektem przez
+        most C# (Sfera nexo). TYLKO ODCZYT, nic nie zapisuje.
+
+        Zaznaczone wiersze zawężają listę; bez zaznaczenia leci cały BOM.
+        """
+        if not self.current_project_id:
+            messagebox.showwarning("Subiekt", "Najpierw wybierz projekt.", parent=self)
+            return
+
+        try:
+            import subiekt_stany
+        except ImportError as e:
+            messagebox.showerror(
+                "Subiekt",
+                f"Nie znaleziono modułu subiekt_stany.py\n\n{e}",
+                parent=self)
+            return
+
+        # Zaznaczenie w arkuszu → lista numerów rysunków (kolumna 0).
+        only = None
+        try:
+            rows = self.sheet.get_selected_rows()
+            if not rows:
+                row_idx = getattr(self, '_selected_row_idx', None)
+                rows = [row_idx] if row_idx is not None else []
+            numery = []
+            for row_idx in sorted(rows):
+                try:
+                    nr = (self.sheet.get_cell_data(row_idx, 0) or "").strip()
+                except Exception:
+                    continue
+                if nr:
+                    numery.append(nr)
+            if numery:
+                only = numery
+        except Exception:
+            only = None   # zaznaczenie to udogodnienie, nie warunek działania
+
+        subiekt_stany.open_window(self, self.current_project_id, only_drawings=only)
+
     def toggle_show_hidden(self):
         """Przełącz wyświetlanie ukrytych pozycji"""
         show_hidden = self.show_hidden_var.get()
