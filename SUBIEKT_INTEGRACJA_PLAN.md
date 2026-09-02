@@ -2,9 +2,11 @@
 
 > **Status:** integracja produkcyjna jeszcze niezaimplementowana (stan 02.09.2026); rozpoznanie Sfery i NexoRecon już działa na żywej bazie.
 > Droga integracji z Subiektem: **RM_BAZA → Sfera dla nexo (nexo SDK)** — patrz sekcja 2.
-> **Granica architektury na teraz:** RM_RFQ **nie łączy się bezpośrednio z Subiektem**.
-> Po rozstrzygnięciu / utworzeniu zamówienia RM_RFQ zwraca wynik do **RM_BAZA**,
-> a dopiero RM_BAZA wykonuje mapowanie kartotek i ewentualny zapis do Subiekta.
+> **Granica architektury na teraz:** RM_RFQ **nie łączy się bezpośrednio z Subiektem i nie wysyła zamówień do dostawców**.
+> RM_BAZA przekazuje do RM_RFQ pozycje do ofertowania, kooperanci odpowiadają przez RM_RFQ,
+> a po zakończeniu RFQ **RM_RFQ zwraca wynik ofertowania do RM_BAZA**. Dopiero RM_BAZA,
+> uwzględniając wynik RFQ, tworzy i wysyła właściwe zamówienie do dostawcy oraz wykonuje
+> mapowanie kartotek i ewentualny zapis do Subiekta.
 > Warunki spełnione: Subiekt nexo **PRO** ✅, aktywny abonament ✅.
 > SDK pobrane (`C:\iLogic\Subiekt_nexo_PRO_dokumentacja\SDK`), dokumentacja czytelna
 > narzędziem (sekcja 9), **skrypt rozpoznawczy NexoRecon zbudowany i przetestowany**
@@ -44,12 +46,17 @@ RM_BAZA: lista detali z projektu / BOM
         │          (dokładny mechanizm do rozstrzygnięcia; patrz sekcja 5)
         │
         └─(3B) DO KUPIENIA
-                ├─ RFQ: RM_BAZA → RM_RFQ → oferty → wybór → zamówienie
-                │        └─ RM_RFQ → RM_BAZA: wynik/zamówienie
+                ├─ z RFQ:
+                │    RM_BAZA → RM_RFQ: pozycje do wyceny
+                │    RM_RFQ → kooperanci: zapytania ofertowe
+                │    kooperanci → RM_RFQ: oferty / terminy / odmowy
+                │    RM_RFQ → RM_BAZA: wynik RFQ
                 │
-                └─ bez RFQ: RM_BAZA tworzy zamówienie bezpośrednie
-                         (cena może być znana, uzgodniona telefonicznie
-                          albo nieznana / „wg faktury")
+                └─ bez RFQ:
+                     RM_BAZA: dostawca + ilość + termin + cena opcjonalna
+
+                RM_BAZA, uwzględniając wynik RFQ albo dane bezpośrednie,
+                tworzy i wysyła właściwe ZAMÓWIENIE do dostawcy
                               │
                               └─ RM_BAZA → Subiekt przez Sferę
                                  (kartoteka na żądanie + opcjonalnie ZD)
@@ -62,11 +69,13 @@ Subiekt → RM_BAZA:
 
 **Ważna granica odpowiedzialności:**
 
-* **RM_RFQ** zna RFQ, oferty, wybranego kooperanta, ceny/terminy i zamówienie.
-  Na tym etapie **nie zna Sfery, nie zakłada kartotek i nie tworzy dokumentów
-  w Subiekcie**.
-* **RM_BAZA** scala BOM/projekt z wynikiem z RM_RFQ, zna mapowanie na kartoteki
-  Subiekta i jako jedyna warstwa woła most C#/Sferę.
+* **RM_RFQ** zna RFQ, zaproszenia, odpowiedzi kooperantów, oferty, ceny/terminy
+  oraz wynik/rozstrzygnięcie ofertowania. **Nie tworzy i nie wysyła właściwego
+  zamówienia do dostawcy**, nie zna Sfery, nie zakłada kartotek i nie tworzy
+  dokumentów w Subiekcie.
+* **RM_BAZA** scala BOM/projekt z wynikiem z RM_RFQ, na tej podstawie tworzy
+  i wysyła właściwe zamówienie do dostawcy, zna mapowanie na kartoteki Subiekta
+  i jako jedyna warstwa woła most C#/Sferę.
 * **Subiekt** pozostaje źródłem prawdy o stanie magazynu i dokumentach
   magazynowo-handlowych.
 
@@ -80,17 +89,21 @@ Operacje mają różny profil ryzyka:
    numeru rysunku (regex z sekcji 12.2). Pozycje o innym kształcie
    (`Przygotowanie powietrza`, `Elektrozawór 5/3` itd.) nie dostają kartoteki
    automatycznie.
-3. **Zamówienie** — może powstać po RFQ albo bez RFQ. Jeśli źródłem jest RFQ,
-   **RM_RFQ zwraca zamówienie do RM_BAZA**, a RM_BAZA dopiero przekłada je na
-   model Subiekta. Forma w Subiekcie (ZD czy bez ZD i dopiero FZ przy dostawie)
-   pozostaje decyzją procesową firmy — sekcja 12.1.
+3. **Zamówienie** — właściwe zamówienie zawsze tworzy i wysyła **RM_BAZA**.
+   Jeśli potrzebna była wycena, RM_RFQ zwraca do RM_BAZA **wynik RFQ**
+   (kooperant/oferta/cena/termin), a RM_BAZA uwzględnia ten wynik przy tworzeniu
+   zamówienia. Przy zakupie bez RFQ RM_BAZA tworzy zamówienie bezpośrednio.
+   Forma w Subiekcie (ZD czy bez ZD i dopiero FZ przy dostawie) pozostaje
+   decyzją procesową firmy — sekcja 12.1.
 4. **Sygnał zwrotny Subiekt → RM_BAZA** — rozróżniamy co najmniej:
    „wydano ze stanu", „zamówiono u dostawcy" oraz „przyszło od dostawcy".
    FZ oznacza **przyjęcie od dostawcy**, nie samo złożenie zamówienia.
 
 ⚠️ Forma dokumentu zamówienia w Subiekcie (ZD czy obecny proces bez ZD) pozostaje
-decyzją procesową firmy, nie techniczną. Niezależnie od tej decyzji przepływ
-pozostaje: **RM_RFQ → RM_BAZA → Subiekt**, nigdy RM_RFQ → Subiekt bezpośrednio.
+decyzją procesową firmy, nie techniczną. Pełny przepływ zakupowy jest taki:
+**RM_BAZA → RM_RFQ → kooperanci → RM_RFQ → RM_BAZA → zamówienie do dostawcy**.
+Integracja z Subiektem zawsze idzie osobnym kanałem **RM_BAZA ↔ Subiekt**;
+nigdy RM_RFQ → Subiekt bezpośrednio.
 
 ## 2. Czym się łączyć — SFERA dla nexo (nexo SDK)
 
@@ -107,8 +120,8 @@ opisana w **nexo SDK**. To dokładnie ta funkcja, za którą płaci się za wers
 
 **Kto wywołuje Sferę:** wyłącznie **RM_BAZA / most C# uruchamiany przez RM_BAZA**.
 RM_RFQ komunikuje się z RM_BAZA swoim dotychczasowym mechanizmem synchronizacji
-i zwraca dane zakupowe do RM_BAZA; nie dostaje połączenia ani danych logowania
-do Subiekta.
+i zwraca **wynik ofertowania** do RM_BAZA; nie wysyła zamówienia do dostawcy,
+nie dostaje połączenia ani danych logowania do Subiekta.
 
 > „Sfera dla Subiekta nexo – możliwość tworzenia własnych rozwiązań
 > (szczegółowy opis i dokumentacja techniczna w nexo SDK)"
@@ -140,8 +153,9 @@ najprostszą dostępną drogą, zapis wyłącznie przez Sferę.**
 | **zamówienia do dostawców** | RM_BAZA → Subiekt | **Sfera / nexo SDK (zapis)** | patrz niżej |
 
 Poza tabelą Sfery istnieje osobny kanał aplikacyjny:
-**RM_RFQ → RM_BAZA** — zwrot rozstrzygnięcia/zamówienia. To nie jest integracja
-z Subiektem; dopiero RM_BAZA na podstawie tych danych wykonuje operacje z tabeli wyżej.
+**RM_RFQ → RM_BAZA** — zwrot wyniku/rozstrzygnięcia ofertowania. To nie jest
+integracja z Subiektem ani wysłanie zamówienia. Dopiero RM_BAZA na podstawie
+tych danych tworzy właściwe zamówienie i wykonuje operacje z tabeli wyżej.
 
 **Dlaczego zapis TYLKO przez API.** Dokument w Subiekcie to nie jeden wiersz
 w tabeli — numeracja, stany magazynowe, rozrachunki i powiązania siedzą
@@ -539,9 +553,10 @@ Konsekwencje dla planu:
 * **ZD nadal jest decyzją procesową.** Firma nigdy go nie używała, więc jego
   wprowadzenie byłoby zmianą procesu. Jeśli zostanie przyjęte, ZD tworzy
   **RM_BAZA przez Sferę** — zarówno dla zamówień bezpośrednich, jak i dla
-  zamówień, które przyszły z RM_RFQ. RM_RFQ nie tworzy ZD sam.
-* Bez ZD stan „zamówione u dostawcy" nadal istnieje w RM_BAZA/RM_RFQ na podstawie
-  własnego zamówienia, a **FZ dopiero potwierdza, że towar faktycznie przyszedł**.
+  zamówień utworzonych przez RM_BAZA na podstawie wyniku RFQ. RM_RFQ nie tworzy ZD.
+* Bez ZD stan „zamówione u dostawcy" istnieje w RM_BAZA na podstawie właściwego
+  zamówienia utworzonego i wysłanego przez RM_BAZA, a **FZ dopiero potwierdza,
+  że towar faktycznie przyszedł**.
 * `SPZOO` jest poza zasięgiem Sfery na koncie GKI — jeśli ma być objęta,
   potrzebne konto w tej bazie (decyzja organizacyjna).
 
@@ -653,19 +668,24 @@ przeglądanie było wolne (przeglądanie nie ma nieodwracalnego skutku, zapis ma
 ### 12.3 Co dalej (krok 2 — zapis)
 
 1. **Decyzja procesowa** (właściciel: firma): ZD w Subiekcie czy zachowanie
-   obecnego procesu bez ZD. Ta decyzja nie zmienia kierunku integracji:
-   **RM_RFQ → RM_BAZA → Subiekt**.
+   obecnego procesu bez ZD. Ta decyzja nie zmienia podziału odpowiedzialności:
+   **RM_BAZA wysyła pozycje do RFQ → RM_RFQ zbiera odpowiedzi → wynik wraca
+   do RM_BAZA → RM_BAZA tworzy i wysyła zamówienie do dostawcy**, a z Subiektem
+   komunikuje się wyłącznie RM_BAZA.
 2. Most rozszerzyć o tryb `--json` (wyjście maszynowe dla Pythona) i komendy:
    `stan <symbol...>`, `kartoteka-utworz`, a jeśli zapadnie decyzja o ZD —
    `zd-utworz`. Każdą komendę testować osobno na **kopii bazy** (sekcja 6),
    nie na produkcji.
-3. Zdefiniować kontrakt **RM_RFQ → RM_BAZA** dla zamówienia: co najmniej
-   `order_number`, `supplier_id`, `drawing_number`, `quantity`, cena (opcjonalna),
-   waluta, `order_date`, `lead_time_days`/`pickup_date`, źródło (`rfq`/`direct`)
-   i status. RM_BAZA po odebraniu danych wykonuje mapowanie do kartoteki Subiekta.
+3. Zdefiniować kontrakt **RM_RFQ → RM_BAZA dla wyniku ofertowania**, nie dla
+   zamówienia. Co najmniej: `rfq_id`, `rfq_item_id`, `offer_id`, `supplier_id`,
+   `drawing_number`, `quantity`, zaoferowana cena (opcjonalna), waluta,
+   `lead_time_days` / zaoferowany termin oraz status rozstrzygnięcia.
+   Po odebraniu wyniku **RM_BAZA tworzy własne zamówienie**, nadaje `order_number`,
+   zapisuje `order_date`, wylicza `pickup_date` i dopiero potem wykonuje mapowanie
+   do kartoteki Subiekta.
 4. `IZamowieniaDoDostawcow.UtworzNaPodstawieZapotrzebowania` — sprawdzić
-   w SDK, czy pasuje do dokumentu budowanego przez RM_BAZA z zamówienia
-   (niezależnie, czy zamówienie pochodzi z RFQ czy jest bezpośrednie).
+   w SDK, czy pasuje do dokumentu budowanego przez RM_BAZA z **własnego zamówienia**
+   (utworzonego na podstawie wyniku RFQ albo bezpośrednio bez RFQ).
 5. Kartoteka na żądanie: `WypelnijNaPodstawieSzablonu(DaneDomyslne.Towar)`
    + `Symbol` = numer rysunku + `Nazwa` z BOM + jednostka `szt`.
 
@@ -822,35 +842,70 @@ w ogóle jest tu problemem wartym rozwiązania, czy normalizacja wystarczy).
 
 ### Krok 3 — co zrobić z ilością „KUPIĆ"
 
-Po policzeniu `kupić > 0` użytkownik ma dwie równoległe ścieżki:
+Po policzeniu `kupić > 0` użytkownik ma dwie ścieżki. **RM_RFQ służy wyłącznie
+do zebrania i rozstrzygnięcia ofert. Właściwe zamówienie do dostawcy zawsze
+tworzy i wysyła RM_BAZA.**
 
 ```
 KUPIĆ > 0
    │
-   ├─► WYŚLIJ DO RFQ
-   │      RM_BAZA → RM_RFQ
-   │      RM_RFQ: zaproszenia → oferty → wybór → zamówienie
-   │      RM_RFQ → RM_BAZA: gotowe dane zamówienia
-   │
-   └─► ZAMÓW BEZ RFQ
-          RM_BAZA: kooperant + ilość + termin
-          cena: znana / uzgodniona / nieznana („wg faktury")
+   ├─► 4A. ZAMÓW BEZ RFQ
+   │      RM_BAZA: wybór dostawcy + ilość + termin
+   │      cena: znana / uzgodniona / nieznana („wg faktury")
+   │      │
+   │      └──────────────────────────────────────┐
+   │                                             │
+   └─► 4B. WYŚLIJ DO RFQ                        │
+          RM_BAZA → RM_RFQ:                     │
+          pozycje + ilości + dokumentacja       │
+                    │                            │
+                    ▼                            │
+          RM_RFQ → KOOPERANCI: zapytania        │
+                    │                            │
+                    ▼                            │
+          KOOPERANCI → RM_RFQ:                  │
+          oferty / ceny / terminy / odmowy      │
+                    │                            │
+                    ▼                            │
+          RM_RFQ → RM_BAZA: WYNIK RFQ           │
+          (wybrana oferta / dostawca /           │
+           cena / termin / odniesienie do oferty)
+                    │                            │
+                    └──────────────────────┐     │
+                                           ▼     ▼
+                         10. UTWORZENIE I WYSŁANIE
+                             ZAMÓWIENIA W RM_BAZA
 ```
 
-**Na tym etapie obowiązuje jedna twarda zasada architektoniczna:**
-RM_RFQ **kończy swoją odpowiedzialność na zwrocie zamówienia do RM_BAZA**.
-Nie wywołuje Sfery i nie zna modelu dokumentów Subiekta.
+**4B jest wyłącznie akcją „wyślij pozycje do ofertowania w RM_RFQ".**
+RM_RFQ wysyła zapytania do kooperantów, odbiera ich odpowiedzi i po zakończeniu
+procesu zwraca **wynik RFQ do RM_BAZA**. Wynik nie wraca do 4B i RM_RFQ nie wysyła
+właściwego zamówienia do dostawcy.
 
-Po otrzymaniu zamówienia z RM_RFQ (albo po utworzeniu zamówienia bezpośredniego)
+**Twarda zasada architektoniczna:**
+* **RM_RFQ kończy swoją odpowiedzialność na zwrocie wyniku ofertowania do RM_BAZA.**
+* **RM_BAZA jest systemem, który tworzy, numeruje i wysyła właściwe zamówienie
+  do dostawcy** — zarówno po RFQ, jak i bez RFQ.
+* RM_RFQ nie wywołuje Sfery, nie mapuje kartotek i nie zna modelu dokumentów Subiekta.
+
+Dopiero we wspólnym kroku **10. Utworzenie i wysłanie zamówienia w RM_BAZA**
 RM_BAZA:
-1. rozwiązuje mapowanie `drawing_number → kartoteka Subiekta`,
-2. zakłada brakującą kartotekę na żądanie, jeśli spełnia reguły,
-3. zapisuje datę zamówienia i termin odbioru,
-4. **jeśli firma zdecyduje się na ZD** — tworzy ZD przez Sferę,
-5. jeśli ZD nie będzie używane — pozostawia stan zamówienia po swojej stronie
-   i czeka na FZ jako potwierdzenie fizycznego przyjęcia.
+1. scala projekt/BOM z wynikiem RFQ albo z danymi zakupu bezpośredniego,
+2. ustala finalnego dostawcę i warunki handlowe,
+3. tworzy właściwe zamówienie w RM_BAZA i nadaje mu `order_number`,
+4. zapisuje `order_date` i wylicza/zapisuje `pickup_date`,
+5. **wysyła zamówienie do dostawcy**,
+6. rozwiązuje mapowanie `drawing_number → kartoteka Subiekta`,
+7. zakłada brakującą kartotekę na żądanie, jeśli spełnia reguły,
+8. **jeśli firma zdecyduje się na ZD** — tworzy ZD przez Sferę,
+9. jeśli ZD nie będzie używane — stan „zamówiono u dostawcy" pozostaje w RM_BAZA,
+   a FZ później potwierdza fizyczne przyjęcie.
 
-Dzięki temu później można zmienić sposób obsługi Subiekta bez ruszania RM_RFQ.
+**Dopiero z kroku 10 mogą wychodzić operacje zapisu RM_BAZA → Subiekt.**
+Sam zwrot wyniku z RM_RFQ jest tylko przepływem danych ofertowych do RM_BAZA.
+
+Dzięki temu później można zmienić sposób obsługi Subiekta albo sposób generowania
+zamówień bez ruszania mechanizmu ofertowania RM_RFQ.
 
 ### Krok 4 — sygnały zwrotne i stany w RM_BAZA
 
@@ -860,7 +915,7 @@ co najmniej trzy różne stany:
 | Stan | Źródło | Znaczenie w RM_BAZA |
 |---|---|---|
 | **wydano ze stanu** | Subiekt: rezerwacja/wydanie (dokładny dokument do ustalenia) | ilość zabezpieczona z własnego magazynu |
-| **zamówiono u dostawcy** | RM_RFQ → RM_BAZA albo zamówienie bezpośrednie w RM_BAZA; opcjonalnie potwierdzone ZD | istnieje zobowiązanie/zamówienie, towar jeszcze nie przyszedł |
+| **zamówiono u dostawcy** | **RM_BAZA** — właściwe zamówienie utworzone i wysłane na podstawie wyniku RFQ albo bez RFQ; opcjonalnie potwierdzone ZD | istnieje zobowiązanie/zamówienie, towar jeszcze nie przyszedł |
 | **przyszło od dostawcy** | **FZ** ze skutkiem magazynowym przyjęcia | dostawa faktycznie weszła na magazyn |
 
 Wizualnie warto użyć tego samego wzorca co kolumna **WYCENA**: krótki prefiks,
