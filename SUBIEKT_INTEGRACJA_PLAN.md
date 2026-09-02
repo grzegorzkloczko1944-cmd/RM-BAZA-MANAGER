@@ -655,21 +655,69 @@ potwierdzania:
 │ 🔴 NIE DA SIĘ DOPASOWAĆ (2)          [pokaż listę / pomiń]    │
 │   „Przygotowanie powietrza” — brak kształtu numeru rysunku    │
 │                                                                │
-│         [Odznacz wszystkie]  [Załóż zaznaczone i dalej →]    │
+│ [Odznacz wszystkie] [Szukaj podobnych w Subiekcie] [Dalej →] │
 └────────────────────────────────────────────────────────────┘
 ```
+
+„Szukaj podobnych w Subiekcie” działa na zaznaczeniu (patrz krok 2b niżej) —
+przydatne zwłaszcza dla pozycji z sekcji „nie da się dopasować” i „brak
+kartoteki”, zanim klikniesz „Dalej” i założysz coś, co już istnieje pod inną
+nazwą.
 
 * **„MAJĄ KARTOTEKĘ”** — czysty odczyt, checkbox zaznaczony domyślnie:
   te pozycje idą dalej do zamówienia/wydania bez zmian w Subiekcie.
 * **„BRAK KARTOTEKI”** — checkbox zaznaczony domyślnie, ale to jest zapis
-  (zakładanie kartoteki). Klik w „Załóż zaznaczone i dalej” wykonuje zapis
-  **pojedynczo, symbol po symbolu**, z paskiem postępu (patrz zastrzeżenie
-  o skalowaniu w sekcji 12.2 — nie masowa transakcja).
+  (zakładanie kartoteki). Klik w „Dalej” wykonuje zapis **pojedynczo, symbol
+  po symbolu**, z paskiem postępu (patrz zastrzeżenie o skalowaniu w sekcji
+  12.2 — nie masowa transakcja).
 * **„NIE DA SIĘ DOPASOWAĆ”** — pozycje bez kształtu numeru rysunku (regex
   z sekcji 12.2). Odznaczone i wyszarzone: NIE wchodzą automatycznie do
   zapisu (decyzja użytkownika 02.09.2026, patrz sekcja 1 pkt 2). User widzi
   listę i może je pominąć albo poprawić numer w RM_BAZA i spróbować ponownie
   — ale kliknięcie „Dalej” nigdy nie zakłada kartoteki dla tej grupy po cichu.
+
+### Krok 2b — szukanie po podobnej nazwie (na żądanie, przycisk na zaznaczeniu)
+
+**Decyzje 02.09.2026.** Problem: część detali może już mieć kartotekę
+w Subiekcie pod **innym symbolem albo bez symbolu-numeru** (np. założona
+ręcznie kiedyś, zanim istniała reguła „symbol = numer rysunku") — dopasowanie
+1:1 po symbolu (krok 2) tego nie wyłapie i pchnie prosto do „załóż nową”,
+tworząc duplikat kartoteki dla tego samego fizycznego detalu.
+
+**SDK nie ma zapytania „podobna nazwa” po stronie Sfery** — jest tylko
+`WyszukajPoSymbolu` (dokładne trafienie) i `Wszystkie()` (pełna lista,
+patrz sekcja 10/`Program.cs:110`). Dopasowanie fuzzy musi więc działać
+**lokalnie**, na ściągniętej liście asortymentu, nie jako kolejne zapytanie
+do bazy — stąd oddzielenie od kroku 2 (który jest szybkim odczytem
+punktowym) i osobny przycisk, nie automat.
+
+* **Jeden wspólny przycisk pod listą** (nie osobny przy każdym wierszu) —
+  **„Szukaj podobnych w Subiekcie”**, działa na zaznaczeniu: jedna zaznaczona
+  pozycja albo wiele naraz, tak samo jak checkboxy w reszcie okna sterują
+  „Załóż zaznaczone”. Dostępne dla KAŻDEJ sekcji (nie tylko „brak kartoteki”)
+  — user sam decyduje, kiedy sprawdzić duplikat pod inną nazwą/symbolem;
+  nie zaśmieca domyślnego widoku okna, bo trzeba go świadomie kliknąć.
+  Dla wielu zaznaczonych pozycji naraz: wynik pokazuje się per pozycja
+  (każda dostaje własną listę top-N kandydatów), jedno przejście przez listę
+  asortymentu w pamięci starcza dla całego zaznaczenia — nie trzeba ściągać
+  jej ponownie za każdym razem.
+* **Algorytm:** dopasowanie tekstowe (fuzzy match) pola `Nazwa` — np. część
+  wspólna słów / odległość Levenshteina — na liście asortymentu ściągniętej
+  raz do pamięci (koszt ~8 s, jak w rozpoznaniu sekcji 12, ale JEDNORAZOWO
+  na sesję okna, nie per pozycja). Top-N (3–5) najbardziej podobnych do
+  wyboru, plus zawsze opcja „żadna z tych, załóż nową”.
+* **Wynik wyboru:** jeśli user wskaże istniejącą kartotekę — pozycja
+  przechodzi z „brak kartoteki” do „ma kartotekę” z tym symbolem (jak trafienie
+  w kroku 2), zamiast zakładać nową. RM_BAZA powinna zapamiętać to skojarzenie
+  (numer rysunku → symbol Subiekta), żeby przy kolejnym projekcie z tym samym
+  detalem trafienie było już automatyczne w kroku 2, nie wymagało ponownego
+  szukania ręcznego.
+
+⚠️ **Szczegóły algorytmu dopasowania (próg podobieństwa, biblioteka)
+NIEUSTALONE** — do dobrania w firmie, mając pod ręką realne przykłady nazw
+z obu systemów (dziś widziane różnice to głównie normalizacja pisowni,
+patrz sekcja 12.2, nie parafrazy nazw — trzeba sprawdzić, czy fuzzy match
+w ogóle jest tu problemem wartym rozwiązania, czy normalizacja wystarczy).
 
 ### Krok 3 — zamówienie / wydanie
 
