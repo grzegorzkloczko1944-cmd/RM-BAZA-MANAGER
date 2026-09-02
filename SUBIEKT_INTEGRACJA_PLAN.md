@@ -1,14 +1,18 @@
 # Integracja RM_BAZA ↔ Subiekt nexo PRO — plan
 
-> **Status:** projekt, nic jeszcze nie zaimplementowane (stan 02.09.2026).
-> Droga integracji: **Sfera dla nexo (nexo SDK)** — patrz sekcja 2.
+> **Status:** integracja produkcyjna jeszcze niezaimplementowana (stan 02.09.2026); rozpoznanie Sfery i NexoRecon już działa na żywej bazie.
+> Droga integracji z Subiektem: **RM_BAZA → Sfera dla nexo (nexo SDK)** — patrz sekcja 2.
+> **Granica architektury na teraz:** RM_RFQ **nie łączy się bezpośrednio z Subiektem**.
+> Po rozstrzygnięciu / utworzeniu zamówienia RM_RFQ zwraca wynik do **RM_BAZA**,
+> a dopiero RM_BAZA wykonuje mapowanie kartotek i ewentualny zapis do Subiekta.
 > Warunki spełnione: Subiekt nexo **PRO** ✅, aktywny abonament ✅.
 > SDK pobrane (`C:\iLogic\Subiekt_nexo_PRO_dokumentacja\SDK`), dokumentacja czytelna
 > narzędziem (sekcja 9), **skrypt rozpoznawczy NexoRecon zbudowany i przetestowany**
 > (sekcja 11) i **uruchomiony na żywej bazie** — wyniki i wnioski w sekcji 12.
 > Proces od strony usera zaprojektowany — sekcja 13 (wzorowany na oknie
-> „Wyślij do RFQ"). Następny krok to decyzja procesowa (ZD czy lista?) i
-> dopiero potem zapis.
+> „Wyślij do RFQ"). Otwarte: decyzja procesowa (ZD czy lista?) oraz **jak
+> zabezpieczyć stan magazynowy przed dwoma projektami rezerwującymi te same
+> sztuki naraz** (sekcja 5, `zadysponowane = 0` — firma dziś nie rezerwuje).
 >
 > ⚠️ **Historia błędów tego dokumentu — czytaj, zanim coś tu przepiszesz:**
 > wersja z 31.08 zakładała Subiekt **GT** (Sfera COM/32-bit) — zły produkt.
@@ -18,54 +22,75 @@
 > odmianach**: GT (COM) i nexo (.NET/SDK). Ta druga jest wprost wymieniona
 > przez InsERT jako cecha wersji PRO i to jest właściwa droga.
 
-## 1. Po co to — docelowy obieg (doprecyzowane 02.09.2026)
+## 1. Po co to — docelowy obieg (doprecyzowane 02.09.2026, routing RM_RFQ → RM_BAZA)
 
-Dziś RM_BAZA prowadzi projekty i BOM-y, a magazyn żyje osobno w Subiekcie.
-Skutek: zamówienia do dostawców powstają ręcznie, a informacja „co już mamy,
-a co trzeba dokupić" wymaga ręcznego porównania dwóch systemów.
+Dziś RM_BAZA prowadzi projekty i BOM-y, RM_RFQ obsługuje zapytania ofertowe,
+a magazyn żyje osobno w Subiekcie. Docelowo te trzy elementy mają się połączyć,
+ale **RM_BAZA pozostaje jedyną bramą do Subiekta**.
 
 ```
-RM_BAZA: lista detali z projektu
+RM_BAZA: lista detali z projektu / BOM
         │
-        ├─(1) MAPOWANIE: dla każdej pozycji sprawdź symbol w Subiekcie
-        │       ├─ jest kartoteka  → użyj jej (id towaru do dalszych kroków)
-        │       └─ brak kartoteki  → ZAŁÓŻ na żądanie (symbol=nr rysunku,
-        │                            nazwa z BOM) — tylko dla tej pozycji,
-        │                            nie hurtem; patrz sekcja 4
+        ├─(1) SPRAWDŹ SUBIEKT: mapowanie symbolu + aktualny stan magazynu
+        │       ├─ jest kartoteka  → użyj jej
+        │       └─ brak kartoteki  → oznacz „do założenia" (kartoteka powstaje
+        │                            dopiero przy realnym zamówieniu; sekcja 4)
         │
-        ├─(2) ZAMÓWIENIE / WYDANIE — Subiekt decyduje z magazynu:
-        │       co wydać od ręki (WZ/RW), co zamówić u dostawcy
-        │       ⚠️ forma zamówienia (ZD czy „lista + FZ jak dziś") to
-        │       DECYZJA PROCESOWA, świadomie otwarta — patrz sekcja 12.1
+        ├─(2) ROZLICZ POTRZEBĘ:
+        │       potrzeba / dostępne / ze stanu / do kupienia
         │
-        └─(3) WYDANIE Z MAGAZYNU → RM_BAZA
-                Subiekt potwierdza wydanie → RM_BAZA dostaje sygnał
-                „dostarczono" na pozycji projektu.
+        ├─(3A) ZE STANU
+        │       └─ RM_BAZA → Subiekt: rezerwacja/zadysponowanie albo wydanie
+        │          (dokładny mechanizm do rozstrzygnięcia; patrz sekcja 5)
+        │
+        └─(3B) DO KUPIENIA
+                ├─ RFQ: RM_BAZA → RM_RFQ → oferty → wybór → zamówienie
+                │        └─ RM_RFQ → RM_BAZA: wynik/zamówienie
+                │
+                └─ bez RFQ: RM_BAZA tworzy zamówienie bezpośrednie
+                         (cena może być znana, uzgodniona telefonicznie
+                          albo nieznana / „wg faktury")
+                              │
+                              └─ RM_BAZA → Subiekt przez Sferę
+                                 (kartoteka na żądanie + opcjonalnie ZD)
+
+Subiekt → RM_BAZA:
+    • stan magazynowy — odczyt na żywo / cache ze znacznikiem czasu,
+    • przyjęcie od dostawcy — FZ,
+    • wydanie ze stanu — dokument/status magazynowy do rozpoznania.
 ```
 
-Trzy operacje, różny profil ryzyka:
+**Ważna granica odpowiedzialności:**
 
-1. **Mapowanie (odczyt)** — dla listy numerów z RM_BAZA sprawdzić symbol
+* **RM_RFQ** zna RFQ, oferty, wybranego kooperanta, ceny/terminy i zamówienie.
+  Na tym etapie **nie zna Sfery, nie zakłada kartotek i nie tworzy dokumentów
+  w Subiekcie**.
+* **RM_BAZA** scala BOM/projekt z wynikiem z RM_RFQ, zna mapowanie na kartoteki
+  Subiekta i jako jedyna warstwa woła most C#/Sferę.
+* **Subiekt** pozostaje źródłem prawdy o stanie magazynu i dokumentach
+  magazynowo-handlowych.
+
+Operacje mają różny profil ryzyka:
+
+1. **Mapowanie i stan (odczyt)** — dla listy numerów z RM_BAZA sprawdzić symbol
    w Subiekcie z normalizacją (TRIM + bez wielkości liter, sekcja 12.2 —
    rozpoznanie znalazło 16 takich przypadków). Zero ryzyka, czysty odczyt.
-2. **Zakładanie brakujących kartotek (zapis, wąski zakres)** — TYLKO gdy
-   symbol ma kształt poprawnego numeru rysunku (regex z sekcji 12.2).
-   Pozycje o innym kształcie (rozpoznanie znalazło m.in. `Przygotowanie
-   powietrza`, `Elektrozawór 5/3` wpisane w pole numeru) **NIE dostają
-   kartoteki automatycznie** — trafiają na listę do ręcznego sprawdzenia,
-   żeby nie zaśmiecić Subiekta. Decyzja użytkownika 02.09.2026.
-3. **Wydanie z magazynu → RM_BAZA (odczyt zwrotny)** — jeszcze nierozpoznane
-   technicznie, do zbadania w SDK razem z krokiem 2 (jaki dokument realnie
-   potwierdza wydanie, skoro PZ/WZ/RW wygasły na rzecz FZ/FS — sekcja 12.1).
-   **Decyzja 02.09.2026: DWA osobne sygnały, nie jeden.** „Wydano z magazynu"
-   (mieli na stanie, WZ/RW albo ich następca) i „przyszło od dostawcy" (FZ)
-   to różna informacja dla planowania — RM_BAZA ma widzieć, skąd pozycja
-   się wzięła, nie tylko że jest gotowa. Do zbadania: jaki dokument/status
-   w Subiekcie odpowiada każdemu z tych dwóch przypadków przy obecnym
-   sposobie prowadzenia magazynu (sekcja 12.1).
+2. **Zakładanie brakujących kartotek (zapis, wąski zakres)** — dopiero gdy
+   pozycja naprawdę idzie do zamówienia i TYLKO gdy symbol ma kształt poprawnego
+   numeru rysunku (regex z sekcji 12.2). Pozycje o innym kształcie
+   (`Przygotowanie powietrza`, `Elektrozawór 5/3` itd.) nie dostają kartoteki
+   automatycznie.
+3. **Zamówienie** — może powstać po RFQ albo bez RFQ. Jeśli źródłem jest RFQ,
+   **RM_RFQ zwraca zamówienie do RM_BAZA**, a RM_BAZA dopiero przekłada je na
+   model Subiekta. Forma w Subiekcie (ZD czy bez ZD i dopiero FZ przy dostawie)
+   pozostaje decyzją procesową firmy — sekcja 12.1.
+4. **Sygnał zwrotny Subiekt → RM_BAZA** — rozróżniamy co najmniej:
+   „wydano ze stanu", „zamówiono u dostawcy" oraz „przyszło od dostawcy".
+   FZ oznacza **przyjęcie od dostawcy**, nie samo złożenie zamówienia.
 
-⚠️ Krok (2) „zamówienie i wydanie" pozostaje decyzją procesową firmy, nie
-techniczną — zapisane świadomie jako otwarte, nie jako zaległość.
+⚠️ Forma dokumentu zamówienia w Subiekcie (ZD czy obecny proces bez ZD) pozostaje
+decyzją procesową firmy, nie techniczną. Niezależnie od tej decyzji przepływ
+pozostaje: **RM_RFQ → RM_BAZA → Subiekt**, nigdy RM_RFQ → Subiekt bezpośrednio.
 
 ## 2. Czym się łączyć — SFERA dla nexo (nexo SDK)
 
@@ -80,6 +105,11 @@ opisana w **nexo SDK**. To dokładnie ta funkcja, za którą płaci się za wers
 **PRO** — zwykły Subiekt nexo jej nie ma. Cytat ze strony produktowej InsERT
 (`subiekt_nexo_pro/opis.html`):
 
+**Kto wywołuje Sferę:** wyłącznie **RM_BAZA / most C# uruchamiany przez RM_BAZA**.
+RM_RFQ komunikuje się z RM_BAZA swoim dotychczasowym mechanizmem synchronizacji
+i zwraca dane zakupowe do RM_BAZA; nie dostaje połączenia ani danych logowania
+do Subiekta.
+
 > „Sfera dla Subiekta nexo – możliwość tworzenia własnych rozwiązań
 > (szczegółowy opis i dokumentacja techniczna w nexo SDK)"
 
@@ -93,7 +123,7 @@ najczęściej GT — nie stosują się tutaj.
 |---|---|
 | Subiekt nexo **PRO** (nie zwykły nexo) | ✅ zainstalowany |
 | aktywny abonament na nexo PRO | ✅ jest |
-| **nexo SDK** (dokumentacja techniczna Sfery) | ⬜ do pobrania z e-Pomocy InsERT |
+| **nexo SDK** (dokumentacja techniczna Sfery) | ✅ pobrane, rozpakowane i użyte do NexoRecon |
 
 Nic poza tym nie jest potrzebne: **żadnego klucza API, portalu deweloperskiego
 ani dokupowania czegokolwiek.**
@@ -108,6 +138,10 @@ najprostszą dostępną drogą, zapis wyłącznie przez Sferę.**
 | dokumenty RW / WZ / PZ | Subiekt → RM_BAZA | **Sfera / nexo SDK (odczyt)** | jw. |
 | **tworzenie kartoteki towaru** | RM_BAZA → Subiekt | **Sfera / nexo SDK (zapis)** | patrz niżej |
 | **zamówienia do dostawców** | RM_BAZA → Subiekt | **Sfera / nexo SDK (zapis)** | patrz niżej |
+
+Poza tabelą Sfery istnieje osobny kanał aplikacyjny:
+**RM_RFQ → RM_BAZA** — zwrot rozstrzygnięcia/zamówienia. To nie jest integracja
+z Subiektem; dopiero RM_BAZA na podstawie tych danych wykonuje operacje z tabeli wyżej.
 
 **Dlaczego zapis TYLKO przez API.** Dokument w Subiekcie to nie jeden wiersz
 w tabeli — numeracja, stany magazynowe, rozrachunki i powiązania siedzą
@@ -168,9 +202,10 @@ w `.gitignore` (`nexoSDK*.exe`, `nexoSDK_*/`, `sdk/`, `*.chm`). SDK celowo leży
 
 **Sfera nexo to .NET, potwierdzone:** `Bin/` to biblioteki .NET (WPF, pakiety
 NuGet — `WersjePakietowNuget.txt`), a w `Narzedzia/` jest `SferaDotnetUpgrade.exe`.
-Czyli z Pythona **nie** przez `win32com` (to droga GT/COM), tylko przez
-`pythonnet` (`clr`) albo mały most w C#. Do rozstrzygnięcia na `InsERT.nexo.Sfera.chm`
-— patrz sekcja 6.
+Czyli z Pythona **nie** przez `win32com` (to droga GT/COM). **Rozstrzygnięte
+02.09.2026: most w C# (.NET 8, x64) uruchamiany jako osobny proces, NIE
+`pythonnet`** — uzasadnienie (mieszany C++/CLI, `ijwhost.dll`, 554 zależności)
+i stan (NexoRecon zbudowany i działa na żywej bazie) w sekcji 11.
 
 **Dlaczego NIE REST API (InsERT API) — ślepy zaułek, sprawdzone 02.09.2026.**
 Poprzednia wersja planu kierowała tam całą integrację. Powody odrzucenia:
@@ -270,10 +305,17 @@ Lepiej podjąć je teraz niż po pierwszym imporcie.
       tylko go odpytuje. RM_BAZA NIE MOŻE trzymać własnej wersji stanów — rozjadą
       się (por. `rfq_portal_url`, gdzie dwa źródła tej samej prawdy rozjechały się
       przy pierwszej zmianie).
+- [ ] **Jak zabezpieczamy stan magazynowy dla projektu?** — **DO ROZSTRZYGNIĘCIA.**
+      Rozpoznanie pokazało `zadysponowane = 0`, czyli firma nie używa dziś
+      rezerwacji. Sam odczyt „dostępne 10 szt." nie wystarcza: dwa projekty mogą
+      równocześnie uznać te same 10 szt. za swoje. Przy zatwierdzeniu zapotrzebowania
+      trzeba więc albo zadysponować/rezerwować ilość w Subiekcie, albo od razu
+      wykonać właściwe wydanie na projekt. Nie tworzyć osobnej „rezerwacji" tylko
+      w RM_BAZA, bo wtedy przestałby obowiązywać Subiekt jako źródło prawdy.
 - [x] **Dostęp do integracji** — **rozstrzygnięte 02.09.2026: Sfera, w cenie
       posiadanej licencji.** Warunki wejścia spełnione: Subiekt nexo **PRO**
-      zainstalowany ✅, abonament aktywny ✅. Zostaje pobrać **nexo SDK**
-      z e-Pomocy InsERT (za darmo dla PRO z abonamentem).
+      zainstalowany ✅, abonament aktywny ✅, **nexo SDK pobrane, rozpakowane
+      i użyte do NexoRecon** ✅ — warunek spełniony, nic nie zostaje do pobrania.
       Nie trzeba: klucza API, portalu deweloperskiego, dokupowania.
       Szczegóły i dlaczego REST API odpada — sekcja 2.
 
@@ -308,8 +350,10 @@ zaplanowania zapisu w kroku drugim.
 
 Nic nie zapisuje, więc jest bezpieczny na produkcyjnej bazie.
 
-**Stan 02.09.2026: ZBUDOWANY i przetestowany** — patrz sekcja 11 (NexoRecon).
-Do uruchomienia na żywo brakuje tylko haseł (SQL `sa` + użytkownik nexo).
+**Stan 02.09.2026: uruchomione na żywej bazie, odczyt działa** — patrz sekcja 11
+(NexoRecon) i sekcja 12 (wyniki rozpoznania na `Nexo_RM PRODUKCJA`). Następny
+krok: komendy produkcyjne (`stan`, `--json`) i test zapisu na kopii bazy —
+sekcja 12.3.
 
 ## 8. Infrastruktura — gdzie faktycznie siedzi baza (ustalone 02.09.2026)
 
@@ -344,10 +388,10 @@ API nie widzi tempdb ani collation na tym poziomie.
 
 Osobny, drobny objaw z tego samego uruchomienia: InsLauncher zgłosił brak
 pliku `Windows.dll` wymaganego przez `Microsoft.Data.Sqlite` przy próbie
-załadowania Sfery — dotyczy pakietu `Nexo-61.1.0.9431` lokalnie na stacji
-klienckiej, nie serwera; naprawia się zwykle przez "Napraw instalację"
-w Launcherze. Nieistotne dla integracji API (Sfera to mechanizm GT, patrz
-sekcja 2 — nexo PRO w ogóle jej nie używa do integracji zewnętrznej).
+załadowania pakietu nexo/Sfery — dotyczy pakietu `Nexo-61.1.0.9431` lokalnie
+na stacji klienckiej, nie serwera; naprawia się zwykle przez „Napraw instalację"
+w Launcherze. Nie zmienia to architektury integracji: właściwym kanałem jest
+**Sfera dla nexo (.NET/SDK)**, wywoływana przez most C# opisany w sekcji 11.
 
 ## 9. System czytania dokumentacji Sfery (zrobione 02.09.2026)
 
@@ -446,7 +490,9 @@ oraz sprawdzenie konkretnych symboli (`--symbol=`) z ich stanami.
 **Test dymny przeszedł:** z celowo błędnym hasłem SQL program załadował Sferę
 61.1.0.9431 (= wersja bazy), potwierdził proces 64-bit, dotarł do
 `192.168.100.4` i dostał `Login failed for user 'sa'`. Cały łańcuch
-(build → ijwhost → Sfera → sieć → SQL) działa. **Brakuje tylko danych logowania.**
+(build → ijwhost → Sfera → sieć → SQL) działa. Na tym etapie brakowało jeszcze
+poprawnych danych logowania; późniejsze uruchomienie na żywej bazie zakończyło
+się sukcesem — patrz niżej.
 
 **Uruchomiony na żywo 02.09.2026 — działa; wyniki w sekcji 12.** Dwie literówki
 w hasłach (O↔0) kosztowały godzinę — przy `Login failed` najpierw goły test SQL
@@ -485,15 +531,17 @@ towar i wykonane usługi"*. Osobne dokumenty magazynowe wygasły: PZ ostatni
 0 sztuk w obu bazach — nigdy nie używane.**
 
 Konsekwencje dla planu:
-* **Sekcja 1, strzałka (3) „Subiekt → RM_BAZA: co przyszło"** = **FZ**, nie PZ.
-  Menedżer: `sfera.DokumentyZakupu()` (`IDokumentyZakupu`), filtr po statusie
-  ze skutkiem przyjęcia (`StatusDokumentu.SkutekMagazynowyPrzyjecia`).
-* **Sekcja 5 „źródło prawdy o stanie" — potwierdzone: Subiekt.** Stany są żywe
-  (FZ/FS je ruszają), więc RM_BAZA może je odpytywać bez własnej kopii.
-* **Sekcja 1, strzałka (1) „RM_BAZA → ZD"** wprowadza typ dokumentu, którego
-  firma **nigdy nie używała**. To zmiana procesu, nie tylko integracja — do
-  decyzji, czy zamówienia mają powstawać jako ZD w Subiekcie, czy RM_BAZA ma
-  tylko przygotowywać listę, a zakup dalej idzie „FZ przy dostawie".
+* **„Przyszło od dostawcy" = FZ**, nie PZ. Menedżer:
+  `sfera.DokumentyZakupu()` (`IDokumentyZakupu`), filtr po statusie ze skutkiem
+  przyjęcia (`StatusDokumentu.SkutekMagazynowyPrzyjecia`).
+* **Źródło prawdy o stanie = Subiekt.** Stany są żywe (FZ/FS je ruszają), więc
+  RM_BAZA może je odpytywać bez utrzymywania drugiej, niezależnej wersji stanu.
+* **ZD nadal jest decyzją procesową.** Firma nigdy go nie używała, więc jego
+  wprowadzenie byłoby zmianą procesu. Jeśli zostanie przyjęte, ZD tworzy
+  **RM_BAZA przez Sferę** — zarówno dla zamówień bezpośrednich, jak i dla
+  zamówień, które przyszły z RM_RFQ. RM_RFQ nie tworzy ZD sam.
+* Bez ZD stan „zamówione u dostawcy" nadal istnieje w RM_BAZA/RM_RFQ na podstawie
+  własnego zamówienia, a **FZ dopiero potwierdza, że towar faktycznie przyszedł**.
 * `SPZOO` jest poza zasięgiem Sfery na koncie GKI — jeśli ma być objęta,
   potrzebne konto w tej bazie (decyzja organizacyjna).
 
@@ -604,14 +652,21 @@ przeglądanie było wolne (przeglądanie nie ma nieodwracalnego skutku, zapis ma
 
 ### 12.3 Co dalej (krok 2 — zapis)
 
-1. **Decyzja procesowa** (właściciel: firma): ZD w Subiekcie czy tylko lista?
+1. **Decyzja procesowa** (właściciel: firma): ZD w Subiekcie czy zachowanie
+   obecnego procesu bez ZD. Ta decyzja nie zmienia kierunku integracji:
+   **RM_RFQ → RM_BAZA → Subiekt**.
 2. Most rozszerzyć o tryb `--json` (wyjście maszynowe dla Pythona) i komendy:
-   `stan <symbol...>`, `kartoteka-utworz`, `zd-utworz` — każda osobno testowana
-   na **kopii bazy** (sekcja 6: tryb testowy), nie na produkcji.
-3. `IZamowieniaDoDostawcow.UtworzNaPodstawieZapotrzebowania` — sprawdzić
-   w SDK, czy pasuje do „listy zamówień z projektu" (może oszczędzić ręcznego
-   budowania pozycji).
-4. Kartoteka na żądanie: `WypelnijNaPodstawieSzablonu(DaneDomyslne.Towar)`
+   `stan <symbol...>`, `kartoteka-utworz`, a jeśli zapadnie decyzja o ZD —
+   `zd-utworz`. Każdą komendę testować osobno na **kopii bazy** (sekcja 6),
+   nie na produkcji.
+3. Zdefiniować kontrakt **RM_RFQ → RM_BAZA** dla zamówienia: co najmniej
+   `order_number`, `supplier_id`, `drawing_number`, `quantity`, cena (opcjonalna),
+   waluta, `order_date`, `lead_time_days`/`pickup_date`, źródło (`rfq`/`direct`)
+   i status. RM_BAZA po odebraniu danych wykonuje mapowanie do kartoteki Subiekta.
+4. `IZamowieniaDoDostawcow.UtworzNaPodstawieZapotrzebowania` — sprawdzić
+   w SDK, czy pasuje do dokumentu budowanego przez RM_BAZA z zamówienia
+   (niezależnie, czy zamówienie pochodzi z RFQ czy jest bezpośrednie).
+5. Kartoteka na żądanie: `WypelnijNaPodstawieSzablonu(DaneDomyslne.Towar)`
    + `Symbol` = numer rysunku + `Nazwa` z BOM + jednostka `szt`.
 
 ## 13. Proces od strony użytkownika RM_BAZA (zaprojektowane 02.09.2026)
@@ -644,8 +699,8 @@ potwierdzania:
 ┌─ Sprawdzenie w Subiekcie — projekt 2627 (300 pozycji) ──────┐
 │                                                                │
 │ ✅ MAJĄ KARTOTEKĘ (287)                          [zwiń/rozwiń] │
-│   ☑ 013-100.22X   Tuleja formatów        dostępne: 12 szt.   │
-│   ☑ 013-100.20X   Płyta łożyskowa        dostępne: 0 szt.    │
+│   ☑ 013-100.22X  Tuleja   potrzeba 20 | dostępne 12 | kupić 8 │
+│   ☑ 013-100.20X  Płyta    potrzeba  5 | dostępne 20 | kupić 0 │
 │   ...                                                          │
 │                                                                │
 │ ⚠️ BRAK KARTOTEKI — do założenia (11)                          │
@@ -664,12 +719,21 @@ przydatne zwłaszcza dla pozycji z sekcji „nie da się dopasować” i „brak
 kartoteki”, zanim klikniesz „Dalej” i założysz coś, co już istnieje pod inną
 nazwą.
 
+Dla pozycji z kartoteką wynik powinien od razu policzyć cztery wartości:
+**potrzeba**, **dostępne**, **ze stanu** i **kupić**. To nie jest jeszcze
+rezerwacja — to plan. Przed operacją ze skutkiem RM_BAZA ponownie sprawdza
+stan na żywo, a po zatwierdzeniu musi go zabezpieczyć w Subiekcie zgodnie
+z decyzją z sekcji 5 (rezerwacja/zadysponowanie albo wydanie).
+
 * **„MAJĄ KARTOTEKĘ”** — czysty odczyt, checkbox zaznaczony domyślnie:
   te pozycje idą dalej do zamówienia/wydania bez zmian w Subiekcie.
-* **„BRAK KARTOTEKI”** — checkbox zaznaczony domyślnie, ale to jest zapis
-  (zakładanie kartoteki). Klik w „Dalej” wykonuje zapis **pojedynczo, symbol
-  po symbolu**, z paskiem postępu (patrz zastrzeżenie o skalowaniu w sekcji
-  12.2 — nie masowa transakcja).
+* **„BRAK KARTOTEKI”** — checkbox zaznaczony domyślnie, ale zaznaczenie tu
+  oznacza tylko „weź tę pozycję dalej", **nie zakłada niczego w Subiekcie**.
+  Klik w „Dalej” niczego nie zapisuje — pozycja zostaje oznaczona jako
+  „do założenia" i idzie do kroku 3 (RFQ / zamówienie bezpośrednie). Kartoteka
+  powstaje dopiero, gdy pozycja faktycznie trafi do zamówienia — po powrocie
+  z RFQ albo przy „Zamów bez RFQ" (zgodnie z regułą „na żądanie" z sekcji 4;
+  zapis wtedy i tak leci pojedynczo, symbol po symbolu, patrz sekcja 12.2).
 * **„NIE DA SIĘ DOPASOWAĆ”** — pozycje bez kształtu numeru rysunku (regex
   z sekcji 12.2). Odznaczone i wyszarzone: NIE wchodzą automatycznie do
   zapisu (decyzja użytkownika 02.09.2026, patrz sekcja 1 pkt 2). User widzi
@@ -718,15 +782,15 @@ konstrukcyjne (nazwa, opis z BOM) mają źródło prawdy w RM_BAZA, tak samo jak
 Subiekt jest źródłem prawdy TYLKO dla stanów magazynowych. Nadpisanie
 odwróciłoby to tam, gdzie nie powinno być odwrócone.
 
-Zamiast tego: **globalna tabela mapowań w warstwie RM_BAZA** (nie SQLite
-konkretnego projektu, nie kolumna BOM). Poprawka 02.09.2026 wieczór: część
-powtarzalna (sekcja 12.2 — `013-100.22X` w 15 projektach, `013-100.20X`
-w 12) trafia w wiele projektów, więc mapowanie per-projekt kazałoby wybierać
-tę samą kartotekę ręcznie po raz N-ty. Kolumny co najmniej: numer rysunku,
-symbol/ID Subiekta, sposób trafienia (automat po symbolu / ręczny wybór
-fuzzy), kto i kiedy wybrał. Konkretne miejsce (nowa tabela w `master.sqlite`,
-gdzie już jest reszta danych współdzielonych, czy osobny plik integracji) —
-do ustalenia w firmie, ale **nie per projekt**.
+Zamiast tego: **globalna tabela mapowań w warstwie RM_BAZA** (nie w SQLite
+konkretnego projektu i nie w kolumnie BOM). To metadana integracji, która ma
+działać między projektami: jeśli `013-100.22X` został raz ręcznie połączony
+z kartoteką Subiekta, następny projekt powinien znać to skojarzenie od razu.
+Kolumny co najmniej: numer rysunku, ID/symbol Subiekta, sposób trafienia
+(automat po symbolu / ręczny wybór fuzzy), kto i kiedy wybrał. Konkretne
+miejsce przechowywania (np. centralna baza RM_BAZA albo osobny plik integracji)
+do ustalenia, ale **nie per projekt**. Krok 2 sprawdza najpierw tę tabelę,
+dopiero potem `WyszukajPoSymbolu`.
 
 **Dlaczego to nie zwalnia kroku 2, tylko go przyspiesza (pytanie z rozmowy:
 "czy SQLite da taką samą prędkość jak SQL Subiekta?").** Błędne porównanie —
@@ -736,8 +800,8 @@ lokalnym pliku, z indeksem: mikrosekundy, zero sieci) i **tylko przy braku
 trafienia** leci do Sfery/SQL Subiekta przez sieć (to jest ten wolniejszy,
 mierzony krok — sekcja 12.2 wyżej, 15–30 s dla 300 wywołań). Im więcej
 trafień w tabeli mapowań, tym mniej zapytań sieciowych do Subiekta w ogóle —
-SQLite działa jak warstwa filtrująca przed kosztowną operacją, nie jak jej
-zamiennik. Nie trzeba więc, żeby SQLite "dogonił" prędkość Sfery — ich role
+lokalna baza działa jak warstwa filtrująca przed kosztowną operacją, nie jak
+jej zamiennik. Nie trzeba więc, żeby ona "dogoniła" prędkość Sfery — role
 w łańcuchu są różne.
 
 ⚠️ **Problem zgłoszony w rozmowie, jeszcze nierozwiązany: sama tabela w bazie
@@ -756,26 +820,54 @@ z obu systemów (dziś widziane różnice to głównie normalizacja pisowni,
 patrz sekcja 12.2, nie parafrazy nazw — trzeba sprawdzić, czy fuzzy match
 w ogóle jest tu problemem wartym rozwiązania, czy normalizacja wystarczy).
 
-### Krok 3 — zamówienie / wydanie
+### Krok 3 — co zrobić z ilością „KUPIĆ"
 
-⚠️ **Świadomie niezaprojektowane w tym kroku** — zależy od decyzji procesowej
-z sekcji 1 pkt 3 (ZD w Subiekcie czy „lista + FZ jak dziś”), która jest
-otwarta. Gdy zapadnie, ten krok dostanie swój ekran w tym samym oknie
-(kontynuacja przepływu, nie osobna aplikacja) albo osobne wywołanie — do
-ustalenia razem z decyzją.
+Po policzeniu `kupić > 0` użytkownik ma dwie równoległe ścieżki:
 
-### Krok 4 — sygnał zwrotny do RM_BAZA
+```
+KUPIĆ > 0
+   │
+   ├─► WYŚLIJ DO RFQ
+   │      RM_BAZA → RM_RFQ
+   │      RM_RFQ: zaproszenia → oferty → wybór → zamówienie
+   │      RM_RFQ → RM_BAZA: gotowe dane zamówienia
+   │
+   └─► ZAMÓW BEZ RFQ
+          RM_BAZA: kooperant + ilość + termin
+          cena: znana / uzgodniona / nieznana („wg faktury")
+```
 
-Zgodnie z sekcją 1 pkt 4: **dwa osobne stany na pozycji BOM**, nie jeden
-„dostarczono”. Wizualnie — analogicznie do kolumny WYCENA z integracji RFQ
-(ten sam wzorzec: kolumna w arkuszu, kolor/prefiks, klik pokazuje szczegóły):
+**Na tym etapie obowiązuje jedna twarda zasada architektoniczna:**
+RM_RFQ **kończy swoją odpowiedzialność na zwrocie zamówienia do RM_BAZA**.
+Nie wywołuje Sfery i nie zna modelu dokumentów Subiekta.
 
-| Stan | Skąd się bierze | Jak w arkuszu |
+Po otrzymaniu zamówienia z RM_RFQ (albo po utworzeniu zamówienia bezpośredniego)
+RM_BAZA:
+1. rozwiązuje mapowanie `drawing_number → kartoteka Subiekta`,
+2. zakłada brakującą kartotekę na żądanie, jeśli spełnia reguły,
+3. zapisuje datę zamówienia i termin odbioru,
+4. **jeśli firma zdecyduje się na ZD** — tworzy ZD przez Sferę,
+5. jeśli ZD nie będzie używane — pozostawia stan zamówienia po swojej stronie
+   i czeka na FZ jako potwierdzenie fizycznego przyjęcia.
+
+Dzięki temu później można zmienić sposób obsługi Subiekta bez ruszania RM_RFQ.
+
+### Krok 4 — sygnały zwrotne i stany w RM_BAZA
+
+Nie sprowadzać wszystkiego do jednego „dostarczono”. W praktyce potrzebne są
+co najmniej trzy różne stany:
+
+| Stan | Źródło | Znaczenie w RM_BAZA |
 |---|---|---|
-| „na stanie, wydano z magazynu” | WZ/RW (albo ich odpowiednik przy obecnym sposobie prowadzenia magazynu) | zielony prefiks, jak `✓` w WYCENA |
-| „zamówione u dostawcy” | FZ | żółty/w trakcie, jak `WYSŁANO ·` w WYCENA |
+| **wydano ze stanu** | Subiekt: rezerwacja/wydanie (dokładny dokument do ustalenia) | ilość zabezpieczona z własnego magazynu |
+| **zamówiono u dostawcy** | RM_RFQ → RM_BAZA albo zamówienie bezpośrednie w RM_BAZA; opcjonalnie potwierdzone ZD | istnieje zobowiązanie/zamówienie, towar jeszcze nie przyszedł |
+| **przyszło od dostawcy** | **FZ** ze skutkiem magazynowym przyjęcia | dostawa faktycznie weszła na magazyn |
+
+Wizualnie warto użyć tego samego wzorca co kolumna **WYCENA**: krótki prefiks,
+kolor oraz klik pokazujący szczegóły (numer zamówienia, kooperant, data
+zamówienia, termin odbioru, data przyjęcia).
 
 Mechanizm odświeżania — do zaprojektowania razem z decyzją o cache
-(sekcja 12.2): albo ręczny przycisk „Sprawdź dostawy” per projekt, albo
-odpytywanie przy otwarciu projektu, w zależności od tego, co pokaże pomiar
-częstotliwości i realnego czasu zapytań.
+(sekcja 12.2): ręczny „Sprawdź dostawy” per projekt albo odpytywanie przy
+otwarciu projektu. Dla operacji ze skutkiem nadal obowiązuje weryfikacja
+aktualnego stanu w Subiekcie tuż przed zapisem.
