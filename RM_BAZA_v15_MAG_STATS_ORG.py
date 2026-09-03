@@ -7022,6 +7022,13 @@ class MainWindow(tk.Tk):
             
             return 'none'
         
+        # Kody handlowe bywają zapisane różnie ('UCFL 201' / 'UCFL-201' /
+        # 'UCFL201'), więc szukanie po surowym tekście gubiło trafienia:
+        # wpisany 'ucfl201' nie pasował do 'UCFL 201'. Drugie, znormalizowane
+        # porównanie (bez spacji, myślników, kropek) łapie wszystkie warianty.
+        # Ta sama reguła co w scalaniu kodów — subiekt_scalanie.norm_kod.
+        search_norm = re.sub(r"[\s\-_./]+", "", search_text) if search_text else ""
+
         filtered = []
         for item in items:
             # Filtr tekstowy (szukaj w: drawing_no, name, descr)
@@ -7030,7 +7037,11 @@ class MainWindow(tk.Tk):
                 name = str(item.get('name') or '').lower()
                 descr = str(item.get('descr') or '').lower()
                 if search_text not in drawing_no and search_text not in name and search_text not in descr:
-                    continue
+                    if not search_norm:
+                        continue
+                    zbite = re.sub(r"[\s\-_./]+", "", f"{drawing_no}\x00{name}\x00{descr}")
+                    if search_norm not in zbite:
+                        continue
             
             # Filtr Typ
             if filter_class and filter_class != "(WSZYSTKO)":
@@ -7094,7 +7105,9 @@ class MainWindow(tk.Tk):
                     # Obsługa dwóch formatów:
                     # 1. Z nawiasami (WAREHOUSE): "NAZWA(10)x2, MODUŁ1(5)"
                     # 2. Bez nawiasów (MACHINES): "MODUŁ1, MODUŁ2"
-                    import re
+                    # (re jest importowane globalnie — lokalny import robił z
+                    # 're' zmienną lokalną CAŁEJ funkcji, więc użycie wcześniej,
+                    # w filtrze tekstowym, wywalało UnboundLocalError)
                     parts = [p.strip() for p in modul_val.split(',') if p.strip()]
                     modul_names = []
                     for part in parts:
@@ -28675,6 +28688,15 @@ class MainWindow(tk.Tk):
         """
         if not self.current_project_id:
             messagebox.showwarning("Scalanie", "Najpierw wybierz projekt.", parent=self)
+            return
+
+        # Jak „Ukryj zaznaczone": zapis idzie przez db_manager.project_con na
+        # lokalną kopię projektu, a ta istnieje tylko przy locku. Zapis do
+        # pliku na serwerze bez locka nie byłby widoczny w arkuszu, a przy
+        # zwolnieniu locka przez kogoś innego zostałby nadpisany.
+        if not self.have_lock:
+            messagebox.showwarning("Brak uprawnień",
+                                   "Przejmij lock, żeby scalać pozycje!", parent=self)
             return
 
         try:

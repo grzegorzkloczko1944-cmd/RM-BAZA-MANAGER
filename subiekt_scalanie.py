@@ -159,12 +159,51 @@ def _kolumny(con):
     return {r[1] for r in con.execute("PRAGMA table_info('items')")}
 
 
-def zbierz_warianty(project_ids=None):
-    """{klucz: {wariant: {"projekty": set, "ile": int}}}"""
+def _nazwy_handlowe(con):
+    """[nazwa] — pozycje BEZ numeru rysunku z jednego połączenia do bazy projektu."""
+    cols = _kolumny(con)
+    name_cols = [c for c in KOLUMNY_NAZW if c in cols]
+    if not name_cols:
+        return []
+    sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols
+    where = " WHERE COALESCE(is_hidden, 0) = 0" if "is_hidden" in cols else ""
+    out = []
+    for r in con.execute(f"SELECT {', '.join(sel)} FROM items{where}"):
+        r = tuple(r)          # połączenie arkusza ma row_factory=Row
+        nr = next((v for v in r[0:3] if v not in (None, "") and str(v).strip()), None)
+        # Ma numer rysunku → detal własny, ma swój klucz. Nie dotykamy.
+        if nr is not None and looks_like_drawing_no(str(nr)):
+            continue
+        nazwa = next((v for v in r[3:] if v not in (None, "") and str(v).strip()), None)
+        if nazwa:
+            out.append(str(nazwa).strip())
+    return out
+
+
+def zbierz_warianty(project_ids=None, biezacy=None):
+    """{klucz: {wariant: {"projekty": set, "ile": int}}}
+
+    `biezacy` = (project_id, con): ten jeden projekt czytany jest z podanego
+    połączenia zamiast z pliku na serwerze. Konieczne przy locku — arkusz
+    RM_BAZA pracuje wtedy na LOKALNEJ kopii (db_manager.open_project_local)
+    i to ona jest aktualna; plik zdalny zostanie nadpisany dopiero przy
+    zwolnieniu locka.
+    """
     if not os.path.isdir(PROJECTS_DIR):
         raise RuntimeError(f"Katalog projektów niedostępny: {PROJECTS_DIR}")
+    biezacy_id, biezacy_con = biezacy if biezacy else (None, None)
 
     wg = {}
+
+    def dodaj(pid, nazwy):
+        for nazwa in nazwy:
+            k = norm_kod(nazwa)
+            if not k:
+                continue
+            w = wg.setdefault(k, {}).setdefault(nazwa, {"projekty": set(), "ile": 0})
+            w["projekty"].add(pid)
+            w["ile"] += 1
+
     for fn in sorted(os.listdir(PROJECTS_DIR)):
         m = re.fullmatch(r"project_(\d+)\.sqlite", fn)
         if not m:
@@ -172,38 +211,22 @@ def zbierz_warianty(project_ids=None):
         pid = int(m.group(1))
         if project_ids and pid not in project_ids:
             continue
+        if pid == biezacy_id:
+            continue          # ten czytamy z żywego połączenia, niżej
         try:
             con = sqlite3.connect(f"file:{os.path.join(PROJECTS_DIR, fn)}?mode=ro", uri=True)
         except sqlite3.DatabaseError:
             continue
         try:
-            cols = _kolumny(con)
-            name_cols = [c for c in KOLUMNY_NAZW if c in cols]
-            if not name_cols:
-                continue
-            sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols
-            where = " WHERE COALESCE(is_hidden, 0) = 0" if "is_hidden" in cols else ""
-            rows = con.execute(f"SELECT {', '.join(sel)} FROM items{where}").fetchall()
+            nazwy = _nazwy_handlowe(con)
         except sqlite3.DatabaseError:
             continue
         finally:
             con.close()
+        dodaj(pid, nazwy)
 
-        for r in rows:
-            nr = next((v for v in r[0:3] if v not in (None, "") and str(v).strip()), None)
-            # Ma numer rysunku → detal własny, ma swój klucz. Nie dotykamy.
-            if nr is not None and looks_like_drawing_no(str(nr)):
-                continue
-            nazwa = next((v for v in r[3:] if v not in (None, "") and str(v).strip()), None)
-            if not nazwa:
-                continue
-            nazwa = str(nazwa).strip()
-            k = norm_kod(nazwa)
-            if not k:
-                continue
-            w = wg.setdefault(k, {}).setdefault(nazwa, {"projekty": set(), "ile": 0})
-            w["projekty"].add(pid)
-            w["ile"] += 1
+    if biezacy_con is not None and (not project_ids or biezacy_id in project_ids):
+        dodaj(biezacy_id, _nazwy_handlowe(biezacy_con))
     return wg
 
 
@@ -257,6 +280,223 @@ def _backup(pid, backup_dir):
     cel = os.path.join(backup_dir, f"project_{pid}_{stamp}.sqlite")
     shutil.copy2(_sciezka(pid), cel)
     return cel
+
+
+# Pola, które przy scalaniu wierszy trzeba ZSUMOWAĆ, a nie nadpisać —
+# dwie pozycje tego samego elementu to łącznie tyle sztuk, ile w obu.
+KOLUMNY_ILOSCI = ("src_qty", "work_qty", "order_qty", "delivered_qty", "min_qty")
+
+# Materiał — pusto w jednym z wierszy nie ma kasować wartości z drugiego,
+# więc te kolumny mają własną regułę scalania (patrz scal_wiersze).
+KOLUMNY_MATERIALU = ("mat_manual_text", "mat_effective_text", "mat_auto_text",
+                     "src_material_text", "mat_grade")
+
+# Pola, których wypełnienie znaczy, że na wierszu ktoś już pracował.
+# Scalanie ma się odbywać na świeżym arkuszu (zaraz po imporcie), więc
+# normalnie są puste; jeśli nie są, okno o tym uprzedza, zamiast po cichu
+# skasować czyjąś robotę.
+KOLUMNY_PRACY = ("supplier_id", "price_pln", "notes", "ordered_flag", "ordered_at",
+                 "delivered_qty", "deadline_date", "status")
+
+
+def wiersze_kodu(project_id, kody, con=None):
+    """[{id, nazwa, kolumna, ...}] — wiersze BOM o podanych zapisach nazwy.
+
+    Potrzebne przed scaleniem: pokazać, co dokładnie zostanie połączone
+    i czy któryś z wierszy ma już wypełnione dane robocze.
+
+    `con` — połączenie arkusza (db_manager.project_con); bez niego czytamy
+    plik z serwera, co przy locku daje NIEAKTUALNE dane (patrz zbierz_warianty).
+    """
+    szukane = {(k or "").strip() for k in kody if (k or "").strip()}
+    if not szukane:
+        return []
+
+    wlasne = con is None
+    if wlasne:
+        path = _sciezka(project_id)
+        if not os.path.isfile(path):
+            raise RuntimeError(f"Brak bazy projektu: {path}")
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+    try:
+        cols = _kolumny(con)
+        name_cols = [c for c in KOLUMNY_NAZW if c in cols]
+        ilosci = [c for c in KOLUMNY_ILOSCI if c in cols]
+        praca = [c for c in KOLUMNY_PRACY if c in cols]
+        # Materiał w kolejności ważności: ręczny > wyliczony > z importu.
+        # Różny materiał przy podobnej nazwie zwykle znaczy, że to jednak
+        # RÓŻNE elementy — user musi to widzieć przed scaleniem.
+        mat_cols = [c for c in ("mat_manual_text", "mat_effective_text",
+                                "mat_auto_text", "src_material_text") if c in cols]
+        extra = [c for c in ("src_modul", "src_row") if c in cols]
+
+        out = []
+        for col in name_cols:
+            sel = ["id", col] + ilosci + praca + mat_cols + extra
+            q = f"SELECT {', '.join(dict.fromkeys(sel))} FROM items"
+            if "is_hidden" in cols:
+                q += " WHERE COALESCE(is_hidden, 0) = 0"
+            for r in con.execute(q):
+                nazwa = (r[col] or "").strip()
+                if nazwa not in szukane:
+                    continue
+                material = next((str(r[c]).strip() for c in mat_cols
+                                 if r[c] not in (None, "") and str(r[c]).strip()), "")
+                out.append({
+                    "id": r["id"],
+                    "kolumna": col,
+                    "nazwa": nazwa,
+                    "material": material,
+                    "ilosci": {c: r[c] for c in ilosci},
+                    # Co na wierszu jest już wypełnione — do ostrzeżenia.
+                    "praca": {c: r[c] for c in praca if r[c] not in (None, "", 0)},
+                    "modul": r["src_modul"] if "src_modul" in r.keys() else None,
+                })
+        return sorted(out, key=lambda w: w["id"])
+    finally:
+        if wlasne:
+            con.close()
+
+
+def scal_wiersze(project_id, wiersze_ids, nazwa_docelowa, backup_dir=None,
+                 tylko_probnie=False, con=None):
+    """Zastępuje kilka wierszy BOM JEDNYM nowym: suma ilości, wspólna nazwa.
+
+    Stare wiersze są USUWANE, a na ich miejsce wstawiany jest nowy — nie
+    dziedziczy więc przypadkowych pól po żadnym z nich (dostawca, moduł,
+    numer wiersza w pliku źródłowym). Przenoszone są tylko: nazwa docelowa,
+    zsumowane ilości i pola wspólne dla wszystkich scalanych wierszy
+    (np. project_id, klasa) — jeśli różnią się, pole zostaje puste.
+
+    Dwa tryby:
+      * `con` podane — pracujemy na połączeniu arkusza RM_BAZA (lokalna
+        kopia przy locku). Kopię zapasową i odświeżenie robi wtedy okno,
+        które ma dostęp do ścieżki lokalnej. To tryb produkcyjny.
+      * bez `con` — otwieramy plik z serwera; `backup_dir` WYMAGANY.
+        Tryb do skryptów/testów, gdy nikt nie trzyma locka.
+
+    Operacja NIEODWRACALNA poza kopią. Pomyślana na świeży arkusz zaraz po
+    imporcie, zanim ktokolwiek wpisze dostawców i ceny.
+    """
+    ids = sorted(set(int(i) for i in wiersze_ids))
+    if len(ids) < 2:
+        raise ValueError("Do scalenia trzeba co najmniej dwóch wierszy.")
+
+    raport = {"project_id": project_id, "usuniete": ids, "nowy_id": None,
+              "sumy": {}, "backup": None, "probnie": tylko_probnie}
+
+    wlasne = con is None
+    if wlasne:
+        if not backup_dir:
+            raise ValueError("backup_dir jest wymagany — bez kopii nie zapisujemy.")
+        path = _sciezka(project_id)
+        if not os.path.isfile(path):
+            raise RuntimeError(f"Brak bazy projektu: {path}")
+        if not tylko_probnie:
+            raport["backup"] = _backup(project_id, backup_dir)
+        con = sqlite3.connect(f"file:{path}?mode={'ro' if tylko_probnie else 'rw'}", uri=True)
+        con.row_factory = sqlite3.Row
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info('items')")}
+        ilosci = [c for c in KOLUMNY_ILOSCI if c in cols]
+        name_cols = [c for c in KOLUMNY_NAZW if c in cols]
+
+        znaki = ",".join("?" * len(ids))
+        rows = con.execute(f"SELECT * FROM items WHERE id IN ({znaki})", ids).fetchall()
+        if len(rows) < 2:
+            raise RuntimeError("Nie znaleziono wszystkich wierszy do scalenia.")
+
+        def _liczba(v):
+            try:
+                return float(v) if v not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+
+        def _ladnie(s):
+            # Bez ułamka, jeśli wychodzi całkowita — 5.0 sztuk wygląda
+            # w arkuszu dziwnie.
+            return int(s) if float(s).is_integer() else s
+
+        # Suma ilości ze wszystkich scalanych wierszy.
+        for c in ilosci:
+            wartosci = [_liczba(r[c]) for r in rows]
+            wartosci = [v for v in wartosci if v is not None]
+            if wartosci:
+                raport["sumy"][c] = _ladnie(sum(wartosci))
+
+        # work_qty to RĘCZNA korekta ilości BOM, a arkusz pokazuje
+        # COALESCE(work_qty, src_qty) — czyli work_qty PRZESŁANIA src_qty.
+        # Sumowanie każdej kolumny osobno dawało więc złą liczbę na ekranie:
+        # gdy tylko jeden z wierszy miał work_qty=1, scalony wiersz miał
+        # src_qty=6 (poprawnie), ale work_qty=1 i arkusz pokazywał 1.
+        # Sumujemy więc to, co widać: dla każdego wiersza bierzemy jego
+        # wartość efektywną i dopiero to składamy.
+        if "work_qty" in cols and any(_liczba(r["work_qty"]) is not None for r in rows):
+            efektywne = []
+            for r in rows:
+                v = _liczba(r["work_qty"])
+                if v is None and "src_qty" in cols:
+                    v = _liczba(r["src_qty"])
+                if v is not None:
+                    efektywne.append(v)
+            if efektywne:
+                raport["sumy"]["work_qty"] = _ladnie(sum(efektywne))
+
+        # Nowy wiersz: pola wspólne dla wszystkich scalanych zostają, różniące
+        # się (moduł, src_row, dostawca…) celowo NIE — nowa pozycja nie ma
+        # udawać żadnej z poprzednich.
+        nowy = {}
+        for c in cols:
+            if c == "id":
+                continue
+            if c in ilosci or c in name_cols:
+                continue
+            wartosci = {r[c] for r in rows}
+            if len(wartosci) == 1:
+                nowy[c] = rows[0][c]
+
+        # Materiał osobno: pusto w jednym wierszu to NIE sprzeciw wobec
+        # wartości z drugiego. Reguła „identyczne we wszystkich" gubiła
+        # materiał, gdy jeden z wierszy go po prostu nie miał ('Ogólny' +
+        # brak → puste). Bierzemy więc niepuste wartości; przy realnym
+        # konflikcie łączymy je, żeby żadna nie zniknęła po cichu — user
+        # widzi rozbieżność w arkuszu i rozstrzyga ją sam.
+        for c in KOLUMNY_MATERIALU:
+            if c not in cols:
+                continue
+            wartosci = []
+            for r in rows:
+                v = r[c]
+                if v in (None, ""):
+                    continue
+                v = str(v).strip()
+                if v and v not in wartosci:
+                    wartosci.append(v)
+            if wartosci:
+                nowy[c] = wartosci[0] if len(wartosci) == 1 else " / ".join(wartosci)
+
+        for c in name_cols:
+            # Nazwę wpisujemy tam, gdzie którykolwiek wiersz ją miał, żeby
+            # pozycja nie zniknęła z widoku filtrującego po tej kolumnie.
+            if any(r[c] not in (None, "") for r in rows):
+                nowy[c] = nazwa_docelowa
+        nowy.update(raport["sumy"])
+
+        if not tylko_probnie:
+            kolumny = list(nowy)
+            cur = con.execute(
+                f"INSERT INTO items ({', '.join(kolumny)}) "
+                f"VALUES ({', '.join('?' * len(kolumny))})",
+                [nowy[c] for c in kolumny])
+            raport["nowy_id"] = cur.lastrowid
+            con.execute(f"DELETE FROM items WHERE id IN ({znaki})", ids)
+            con.commit()
+    finally:
+        if wlasne:
+            con.close()
+
+    return raport
 
 
 def zastosuj_podmiany(podmiany, project_id, backup_dir, tylko_probnie=False):
@@ -472,7 +712,7 @@ def znajdz_kandydatow(project_id, min_prefiks=4):
     return [(zapisy(a), zapisy(b), n, zawiera) for a, b, n, zawiera in pary]
 
 
-def pozycje_z_podobnymi(project_id, min_prefiks=4):
+def pozycje_z_podobnymi(project_id, min_prefiks=4, con=None):
     """[{"kod", "ile", "identyczne", "podobne"}] — kody handlowe projektu.
 
     Jeden wpis na kod występujący w tym projekcie, a w nim:
@@ -484,9 +724,12 @@ def pozycje_z_podobnymi(project_id, min_prefiks=4):
 
     Dzięki temu user widzi przy każdej pozycji cały jej kontekst i sam
     decyduje, co do niej należy — zamiast oglądać dwie rozłączne listy.
+
+    `con` — połączenie arkusza; przy locku to jedyne aktualne źródło.
     """
-    wg = zbierz_warianty({project_id})
-    cala_baza = zbierz_warianty()
+    biezacy = (project_id, con) if con is not None else None
+    wg = zbierz_warianty({project_id}, biezacy=biezacy)
+    cala_baza = zbierz_warianty(biezacy=biezacy)
     klucze = sorted(wg)
     oryginal = {k: sorted(wg[k])[0] for k in klucze}
 
@@ -509,14 +752,34 @@ def pozycje_z_podobnymi(project_id, min_prefiks=4):
             sasiedzi[a].append((b, n, zawiera))
             sasiedzi[b].append((a, n, zawiera))
 
+    # Materiał i ilości per zapis — różny materiał przy podobnej nazwie
+    # zwykle znaczy, że to jednak inne elementy (uwaga użytkownika).
+    szczegoly = {}
+    for w in wiersze_kodu(project_id, [oryginal[k] for k in klucze], con=con):
+        d = szczegoly.setdefault(norm_kod(w["nazwa"]), {"materialy": set(), "ilosc": 0})
+        if w["material"]:
+            d["materialy"].add(w["material"])
+        # Jak arkusz: COALESCE(work_qty, src_qty) — work_qty to ręczna korekta
+        # i przesłania wartość z importu (database_manager.get_project_items).
+        q = w["ilosci"].get("work_qty")
+        if q in (None, ""):
+            q = w["ilosci"].get("src_qty") or 0
+        try:
+            d["ilosc"] += float(q)
+        except (TypeError, ValueError):
+            pass
+
     out = []
     for k in klucze:
         zapisy = sorted(wg[k])
         w_bazie = cala_baza.get(k, {})
+        sz = szczegoly.get(k, {"materialy": set(), "ilosc": 0})
         out.append({
             "klucz": k,
             "kod": zapisy[0],
             "ile": sum(v["ile"] for v in wg[k].values()),
+            "material": " / ".join(sorted(sz["materialy"])),
+            "ilosc_bom": sz["ilosc"],
             # Kilka zapisów tego samego klucza = pewny duplikat wewnątrz projektu.
             "identyczne": zapisy[1:],
             "podobne": [
