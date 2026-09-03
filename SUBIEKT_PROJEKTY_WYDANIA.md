@@ -122,23 +122,40 @@ bo dalej wszystko wisi na zamówieniu, nie na pojedynczych pozycjach.
 
 ## 4. DO ROZSTRZYGNIĘCIA PRZED KODEM
 
-- [ ] **Podmiot na ZK.** ZK to „zamówienie *od klienta*", wymaga podmiotu.
-      Projekty to produkcja własna. Dwa wyjścia: **RMPAK** (własna firma — tak
-      już robiliście, historyczne RW mają podmiot „RMPAK SPÓŁKA Z O.O.")
-      albo **klient końcowy**, gdy projekt jest dla konkretnego odbiorcy.
-- [ ] **Czy wracacie do wystawiania RW.** Ostatnie RW przed dzisiejszym:
-      lipiec 2023. Bez wydań magazynowych nie da się śledzić, co poszło na
-      projekt — całe to rozwiązanie zakłada, że RW są wystawiane.
-      ⚠️ Dzisiejsze `RW 1/09/2026` (uwagi `2453`) **nie ma ani jednej pozycji** —
-      sam nagłówek. Do wyjaśnienia, czy to test, czy dokument w trakcie.
-- [ ] **Kopia bazy do testów.** To pierwszy **zapis** do Subiekta. Kopia:
-      archiwizacja podmiotu → odtworzenie jako np. „RM PRODUKCJA TEST".
-      Na produkcji dopiero po sprawdzeniu na kopii.
-- [ ] **Co z pozycjami bez kartoteki.** Z 4425 numerów rysunków RM_BAZA
-      kartotekę ma **135 (3 %)** — patrz plan, sekcja 12.2. ZK nie powstanie na
-      nieistniejącej kartotece, więc albo zakładamy kartoteki przy eksporcie
-      („kartoteka na żądanie", plan sekcja 4), albo ZK obejmuje tylko to,
-      co już istnieje.
+- [x] **Podmiot na ZK — rozstrzygnięte 03.09.2026: RMPAK.** RM_BAZA jest
+      klientem (produkcja własna) — zgodne z historycznymi RW, które mają
+      podmiot „RMPAK SPÓŁKA Z O.O.".
+- [x] **Dzisiejsze `RW 1/09/2026` bez pozycji — wyjaśnione: to były testy.**
+      Nie dokument w trakcie, nie błąd — świadomy test kogoś w firmie.
+- [ ] **Czy wracacie do wystawiania RW — TAK, ale to nie jest tylko
+      przełącznik.** Ostatnie realne RW przed testowym z 03.09.2026: lipiec
+      2023. **Powód porzucenia RW nie był techniczny ani procesowy — magazynier
+      po prostu robił wydania na karteczkach**, bo wypełnianie dokumentu
+      w Subiekcie było wolniejsze/mniej wygodne niż kartka, i nikt tego nie
+      egzekwował. Przez dwa lata nie bolało, bo nikt nie potrzebował realnych
+      danych „co poszło z magazynu na który projekt" — dopóki nie zaczęła
+      powstawać ta integracja.
+      ⚠️ **Konsekwencja dla projektu: samo przywrócenie mechanizmu RW go nie
+      utrwali.** Jeśli droga „otwieram ZK projektu → RW" będzie dla
+      magazyniera wolniejsza albo bardziej kłopotliwa niż kartka, za pół roku
+      wrócą karteczki — tylko teraz z integracją, która cicho pokazuje
+      nieaktualne dane (dokładnie to ryzyko, przed którym ostrzega sekcja
+      o cache w planie integracji). **Dlatego „RW jednym kliknięciem z ZK"
+      (`WypelnijNaPodstawieZK`) to nie tylko wygoda funkcjonalna, tylko
+      wymaganie UX konieczne do adopcji:** ścieżka od „otwieram ZK projektu"
+      do „RW wystawione" musi być realnie krótsza i mniej kłopotliwa niż
+      napisanie czegoś na kartce, inaczej mechanizm zaprojektowany poprawnie
+      w dokumentacji będzie martwy w praktyce tak samo jak poprzednie RW.
+- [x] **Kopia bazy do testów — rozstrzygnięte 03.09.2026.** Dwa środowiska
+      testowe: Subiekt demo instalowany w domu do prac offline, oraz
+      w firmie realna „baza widmo" w Subiekcie, jeszcze nieużywana
+      produkcyjnie — bezpieczne miejsce do testów zapisu przed dotknięciem
+      `Nexo_RM PRODUKCJA`.
+- [x] **Co z pozycjami bez kartoteki — rozstrzygnięte 03.09.2026: obie opcje
+      zaimplementowane.** Eksport BOM-u do Subiekta ma teraz dwa tryby: z
+      automatycznym zakładaniem brakujących kartotek („kartoteka na żądanie",
+      plan sekcja 4) i bez zakładania (ZK obejmuje tylko to, co już istnieje
+      w Subiekcie) — wybór zależny od kontekstu użycia.
 
 ## 5. Zespoły spawane (kilka pozycji = jedna pozycja) — kartoteka typu Komplet
 
