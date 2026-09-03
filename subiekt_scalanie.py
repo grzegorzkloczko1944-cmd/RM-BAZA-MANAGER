@@ -102,7 +102,15 @@ class Grupa:
         self.warianty = warianty
         # {wariant: ile wystąpień} — tylko bieżący projekt
         self.w_projekcie = w_projekcie
+        # Docelowy zapis. Domyślnie najczęstszy wariant, ale user może wpisać
+        # WŁASNY — czasem żaden istniejący nie jest dobry ('Nakrętka TR16x4..'
+        # z kropkami, 'CFM-TR-G-B.60-SH-' z wiszącym myślnikiem).
         self.kanoniczny = self._domyslny()
+
+    @property
+    def wlasny(self):
+        """Czy docelowy zapis został wpisany ręcznie, a nie wybrany z listy."""
+        return self.kanoniczny not in self.warianty
 
     def _domyslny(self):
         """Najczęstszy wariant w CAŁEJ bazie (po projektach, potem wystąpieniach).
@@ -249,6 +257,60 @@ def _backup(pid, backup_dir):
     cel = os.path.join(backup_dir, f"project_{pid}_{stamp}.sqlite")
     shutil.copy2(_sciezka(pid), cel)
     return cel
+
+
+def zastosuj_podmiany(podmiany, project_id, backup_dir, tylko_probnie=False):
+    """Zapisuje wprost pary (stary_zapis, nowy_zapis) — TYLKO w tym projekcie.
+
+    Wariant dla GUI, gdzie user sam decyduje, co z czym scalić i pod jaką
+    nazwą — nowa nazwa nie musi istnieć w żadnym BOM-ie (bywa, że każdy
+    dotychczasowy zapis jest zły: 'Nakrętka TR16x4..' z kropkami).
+
+    `backup_dir` jest WYMAGANY — plik projektu jest najpierw kopiowany.
+    """
+    if not backup_dir:
+        raise ValueError("backup_dir jest wymagany — bez kopii nie zapisujemy.")
+    if not project_id:
+        raise ValueError("project_id jest wymagany — scalamy jeden projekt naraz.")
+
+    path = _sciezka(project_id)
+    if not os.path.isfile(path):
+        raise RuntimeError(f"Brak bazy projektu: {path}")
+
+    raport = {"project_id": project_id, "zmienionych": 0,
+              "szczegoly": [], "backup": None, "probnie": tylko_probnie}
+    podmiany = [(s, n) for s, n in podmiany if s != n]
+    if not podmiany:
+        return raport
+
+    if not tylko_probnie:
+        raport["backup"] = _backup(project_id, backup_dir)
+
+    tryb = "ro" if tylko_probnie else "rw"
+    con = sqlite3.connect(f"file:{path}?mode={tryb}", uri=True)
+    try:
+        cols = _kolumny(con)
+        name_cols = [c for c in KOLUMNY_NAZW if c in cols]
+        for stary, nowy in podmiany:
+            for col in name_cols:
+                # TRIM w warunku, bo zapisy bywają z białymi znakami na końcu.
+                n = con.execute(
+                    f"SELECT COUNT(*) FROM items WHERE TRIM({col}) = ?",
+                    (stary,)).fetchone()[0]
+                if not n:
+                    continue
+                if not tylko_probnie:
+                    con.execute(
+                        f"UPDATE items SET {col} = ? WHERE TRIM({col}) = ?",
+                        (nowy, stary))
+                raport["zmienionych"] += n
+                raport["szczegoly"].append((col, stary, nowy, n))
+        if not tylko_probnie:
+            con.commit()
+    finally:
+        con.close()
+
+    return raport
 
 
 def zastosuj(grupy, project_id, backup_dir, tylko_probnie=False):
@@ -408,6 +470,66 @@ def znajdz_kandydatow(project_id, min_prefiks=4):
         return sorted(wg[k])
 
     return [(zapisy(a), zapisy(b), n, zawiera) for a, b, n, zawiera in pary]
+
+
+def pozycje_z_podobnymi(project_id, min_prefiks=4):
+    """[{"kod", "ile", "identyczne", "podobne"}] — kody handlowe projektu.
+
+    Jeden wpis na kod występujący w tym projekcie, a w nim:
+
+      * `identyczne` — inne zapisy TEGO SAMEGO kodu (różnica separatorów
+        albo wielkości liter); to pewne duplikaty,
+      * `podobne`    — kody o wspólnym początku, które MOGĄ być tą samą
+        rzeczą, ale równie dobrze innym rozmiarem (KFL001/KFL002).
+
+    Dzięki temu user widzi przy każdej pozycji cały jej kontekst i sam
+    decyduje, co do niej należy — zamiast oglądać dwie rozłączne listy.
+    """
+    wg = zbierz_warianty({project_id})
+    cala_baza = zbierz_warianty()
+    klucze = sorted(wg)
+    oryginal = {k: sorted(wg[k])[0] for k in klucze}
+
+    # Pary podobnych — te same reguły co znajdz_kandydatow (długości odpadają).
+    sasiedzi = {k: [] for k in klucze}
+    for i, a in enumerate(klucze):
+        for b in klucze[i + 1:]:
+            n = _wspolny_prefiks(a, b)
+            if n < min_prefiks:
+                continue
+            oa, ob = oryginal[a], oryginal[b]
+            if _rozni_sie_tylko_dlugoscia(oa, ob):
+                continue
+            krotszy, dluzszy = (oa, ob) if len(oa) <= len(ob) else (ob, oa)
+            if norm_kod(dluzszy).startswith(norm_kod(krotszy)):
+                reszta = dluzszy[len(krotszy):].strip()
+                if reszta and _DLUGOSC.fullmatch(reszta):
+                    continue
+            zawiera = a.startswith(b) or b.startswith(a)
+            sasiedzi[a].append((b, n, zawiera))
+            sasiedzi[b].append((a, n, zawiera))
+
+    out = []
+    for k in klucze:
+        zapisy = sorted(wg[k])
+        w_bazie = cala_baza.get(k, {})
+        out.append({
+            "klucz": k,
+            "kod": zapisy[0],
+            "ile": sum(v["ile"] for v in wg[k].values()),
+            # Kilka zapisów tego samego klucza = pewny duplikat wewnątrz projektu.
+            "identyczne": zapisy[1:],
+            "podobne": [
+                {"kod": oryginal[b], "wspolne": n, "prefiks": z}
+                for b, n, z in sorted(sasiedzi[k], key=lambda t: (-t[2], -t[1]))
+            ],
+            # Jak ten kod zapisuje reszta firmy — podpowiedź do nazwy docelowej.
+            "w_bazie": {w: len(v["projekty"]) for w, v in w_bazie.items()},
+        })
+
+    # Najpierw te, przy których jest co decydować.
+    out.sort(key=lambda p: (-(len(p["identyczne"]) * 10 + len(p["podobne"])), p["kod"]))
+    return out
 
 
 # ── Dopasowanie do kartoteki Subiekta ───────────────────────────────────────

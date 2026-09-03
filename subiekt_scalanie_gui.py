@@ -9,8 +9,15 @@ Wywołanie z RM_BAZA (menu 📦 SUBIEKT):
 
 Co robi: elementy handlowe nie mają numeru rysunku, więc ich identyfikatorem
 jest kod katalogowy wpisywany ręcznie — a ten sam kod bywa zapisany różnie
-('UCFL 201' / 'UCFL-201' / 'UCFL201'). Okno pokazuje takie rozbieżności
-w BIEŻĄCYM projekcie i pozwala ujednolicić zapis.
+('UCFL 201' / 'UCFL-201' / 'UCFL201'). Każdy wariant zakłada w Subiekcie
+osobną kartotekę, z rozbitą historią cen i stanem w kilku miejscach.
+
+Układ: drzewko. Wiersz nadrzędny to kod z projektu, pod nim WSZYSTKIE jego
+podobne z tego samego projektu — żeby decyzja zapadała z pełnym kontekstem,
+a nie na podstawie dwóch rozłącznych list. Kolumna „Docelowa nazwa" jest
+edytowalna (dwuklik): można wybrać istniejący wariant albo wpisać własny,
+bo czasem żaden zapis w bazie nie jest dobry ('Nakrętka TR16x4..' z kropkami,
+'CFM-TR-G-B.60-SH-' z wiszącym myślnikiem).
 
 Zasięg: podpowiedź liczona z całej bazy (który zapis jest w firmie przyjęty),
 ZAPIS tylko w tym projekcie — patrz uzasadnienie w subiekt_scalanie.py.
@@ -33,24 +40,26 @@ BACKUP_DIR = os.path.join(os.path.dirname(S.PROJECTS_DIR), "backups", "scalanie_
 
 class ScalanieWindow(tk.Toplevel):
     COLS = [
-        ("zostaje", "Zostaje (kanoniczny)", 300, "w"),
-        ("zmiana",  "Zmieniane warianty",   300, "w"),
-        ("tu",      "Tutaj",                 60, "e"),
-        ("baza",    "W bazie",              110, "w"),
+        ("docelowa", "Docelowa nazwa (dwuklik = edycja)", 300, "w"),
+        ("ile",      "Szt.",                               50, "e"),
+        ("info",     "Skąd / podobieństwo",               240, "w"),
     ]
 
     def __init__(self, parent, project_id, project_name=None):
         super().__init__(parent)
         self.project_id = project_id
-        self.grupy = []
-        self.kandydaci = []          # pary podobne — do oceny, nie do scalenia
-        self._pominiete = set()      # klucze grup wyłączonych przez usera
+        self.pozycje = []
+        # {klucz pozycji: docelowa nazwa} — tylko to, co user zmienił.
+        self._docelowe = {}
+        # {klucz pozycji: {kody podpięte do scalenia z tą pozycją}}
+        self._podpiete = {}
+        self._edytor = None
 
         tytul = f"Scal kody handlowe — projekt {project_id}"
         if project_name:
             tytul += f" ({project_name})"
         self.title(tytul)
-        self.geometry("980x560")
+        self.geometry("1040x620")
         self.transient(parent)
 
         self._build_ui()
@@ -69,6 +78,12 @@ class ScalanieWindow(tk.Toplevel):
                                      padx=8, pady=2, relief=tk.RAISED, bd=1)
         self.btn_refresh.pack(side=tk.RIGHT, padx=10, pady=8)
 
+        self.var_tylko_kolizje = tk.BooleanVar(value=True)
+        tk.Checkbutton(top, text="Tylko z podobnymi", variable=self.var_tylko_kolizje,
+                       command=self._refill, bg="#34495e", fg="white",
+                       selectcolor="#e67e22", font=("Arial", 8),
+                       activebackground="#34495e", activeforeground="white").pack(side=tk.RIGHT, padx=4)
+
         self.summary = tk.Label(self, text="Wczytywanie…", bg="#ecf0f1", fg="#2c3e50",
                                 font=("Arial", 9), anchor="w", padx=12, pady=6,
                                 justify=tk.LEFT)
@@ -76,31 +91,33 @@ class ScalanieWindow(tk.Toplevel):
 
         wrap = tk.Frame(self)
         wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(6, 4))
-        self.tree = ttk.Treeview(wrap, columns=[c[0] for c in self.COLS], show="headings")
+        self.tree = ttk.Treeview(wrap, columns=[c[0] for c in self.COLS], show="tree headings")
+        self.tree.heading("#0", text="Kod w projekcie")
+        self.tree.column("#0", width=300, minwidth=120, stretch=True)
         for key, label, width, anchor in self.COLS:
             self.tree.heading(key, text=label)
             self.tree.column(key, width=width, anchor=anchor,
-                             stretch=(key in ("zostaje", "zmiana")), minwidth=50)
+                             stretch=(key == "docelowa"), minwidth=45)
         vs = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vs.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vs.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self.tree.tag_configure("naglowek",   background="#34495e", foreground="white")
-        self.tree.tag_configure("remis",      background="#fdebd0")
-        self.tree.tag_configure("pominiete",  background="#eaecee", foreground="#7f8c8d")
-        # Kandydaci na szaro — mają wyglądać jak informacja, nie jak coś,
-        # co zaraz zostanie zmienione.
-        self.tree.tag_configure("kand",       foreground="#7f8c8d")
-        self.tree.tag_configure("kand_mocny", background="#eaf2f8")
-        self.tree.bind("<Double-1>", self._zmien_kanoniczny)
+        self.tree.tag_configure("duplikat", background="#fdebd0")   # ten sam kod
+        self.tree.tag_configure("podobny",  foreground="#7f8c8d")   # może być inny element
+        self.tree.tag_configure("podpiety", background="#d5f5e3")   # user scala z rodzicem
+        self.tree.tag_configure("zmieniona", background="#eaf2f8")  # własna nazwa docelowa
+
+        self.tree.bind("<Double-1>", self._on_double)
+        self.tree.bind("<space>", self._toggle_podpiecie)
 
         hint = tk.Label(
             self,
-            text=("Dwuklik na wierszu = wybierz inny wariant jako kanoniczny "
-                  "(albo pomiń grupę).    Pomarańczowe = remis: automat nie ma "
-                  "podstaw do wyboru, sprawdź ręcznie."),
-            anchor="w", padx=12, pady=2, fg="#555", font=("Arial", 8))
+            text=("Dwuklik na „Docelowa nazwa” = edycja (wpisz własną albo wybierz istniejącą).    "
+                  "Dwuklik / spacja na podobnym = podepnij go do scalenia z pozycją wyżej.    "
+                  "Pomarańczowe = ten sam kod, inny zapis.    Szare = podobne, może być innym elementem."),
+            anchor="w", padx=12, pady=2, fg="#555", font=("Arial", 8),
+            wraplength=1000, justify=tk.LEFT)
         hint.pack(side=tk.TOP, fill=tk.X)
 
         dol = tk.Frame(self)
@@ -119,117 +136,209 @@ class ScalanieWindow(tk.Toplevel):
 
     # ── wczytywanie ────────────────────────────────────────────────────────
     def _load_async(self):
+        self._zamknij_edytor()
         self.btn_refresh.config(state=tk.DISABLED)
         self.btn_scal.config(state=tk.DISABLED)
-        self.status.config(text="Przeglądam BOM-y wszystkich projektów…")
+        self.status.config(text="Przeglądam BOM-y…")
         threading.Thread(target=self._load_worker, daemon=True).start()
 
     def _load_worker(self):
         try:
-            grupy = S.zaproponuj_dla_projektu(self.project_id)
-            kandydaci = S.znajdz_kandydatow(self.project_id)
-            self.after(0, lambda: self._done(grupy, kandydaci, None))
+            poz = S.pozycje_z_podobnymi(self.project_id)
+            self.after(0, lambda: self._done(poz, None))
         except Exception as e:
             err = str(e)
-            self.after(0, lambda: self._done([], [], err))
+            self.after(0, lambda: self._done([], err))
 
-    def _done(self, grupy, kandydaci, error):
+    def _done(self, pozycje, error):
         self.btn_refresh.config(state=tk.NORMAL)
         if error:
             self.status.config(text="Błąd.")
             self.summary.config(text=error.split("\n")[0])
             messagebox.showerror("Scalanie", error, parent=self)
             return
-        self.grupy = grupy
-        self.kandydaci = kandydaci
-        self._pominiete.clear()
+        self.pozycje = pozycje
+        self._docelowe.clear()
+        self._podpiete.clear()
+        # Kilka zapisów tego samego kodu to pewny duplikat — podpinamy od razu.
+        for p in pozycje:
+            if p["identyczne"]:
+                self._podpiete[p["klucz"]] = set(p["identyczne"])
         self._refill()
         self.status.config(text="Nic jeszcze nie zmieniono — zapis dopiero po kliknięciu „Scal”.")
 
     # ── prezentacja ────────────────────────────────────────────────────────
+    def _docelowa(self, p):
+        """Nazwa, na którą pójdzie scalenie: wybór usera albo domyślny kod."""
+        return self._docelowe.get(p["klucz"], p["kod"])
+
     def _refill(self):
+        self._zamknij_edytor()
         self.tree.delete(*self.tree.get_children())
-        aktywne = 0
+        tylko_kolizje = self.var_tylko_kolizje.get()
 
-        # ── Sekcja 1: pewne duplikaty (identyczne po normalizacji) ──────────
-        if self.grupy:
-            self.tree.insert("", "end", iid="hdr_pewne", values=(
-                "▼ DO SCALENIA — ten sam kod, inny zapis", "", "", ""),
-                tags=("naglowek",))
-        for i, g in enumerate(self.grupy):
-            pominieta = g.klucz in self._pominiete
-            if not pominieta:
-                aktywne += g.wystapien_do_zmiany
-            w_bazie = len(g.warianty.get(g.kanoniczny, {}).get("projekty", ()))
-            tag = "pominiete" if pominieta else ("remis" if g.remis else "")
-            zostaje = g.kanoniczny + ("   (pominięte)" if pominieta else "")
-            self.tree.insert("", "end", iid=str(i), values=(
-                zostaje,
-                "   ·   ".join(sorted(g.do_zmiany)),
-                g.wystapien_do_zmiany,
-                f"{w_bazie} proj." if w_bazie else "tylko tutaj",
-            ), tags=(tag,) if tag else ())
+        pokazane = 0
+        do_zmiany = 0
+        for i, p in enumerate(self.pozycje):
+            ma_co = bool(p["identyczne"] or p["podobne"])
+            if tylko_kolizje and not ma_co:
+                continue
+            pokazane += 1
+            podpiete = self._podpiete.get(p["klucz"], set())
+            docelowa = self._docelowa(p)
+            wlasna = docelowa != p["kod"]
 
-        # ── Sekcja 2: podobne — do oceny, NIE do automatycznego scalenia ────
-        if self.kandydaci:
-            self.tree.insert("", "end", iid="hdr_kand", values=(
-                "▼ DO SPRAWDZENIA — podobne kody (mogą być różnymi elementami)",
-                "", "", ""), tags=("naglowek",))
-            for j, (zapisy_a, zapisy_b, n, zawiera) in enumerate(self.kandydaci):
-                # Para, gdzie jeden kod jest początkiem drugiego, częściej
-                # bywa duplikatem — stąd wyróżnienie.
-                self.tree.insert("", "end", iid=f"k{j}", values=(
-                    zapisy_a[0],
-                    zapisy_b[0],
-                    "",
-                    "prefiks" if zawiera else f"wspólne {n} zn.",
-                ), tags=("kand_mocny" if zawiera else "kand",))
+            # Ile wystąpień faktycznie zmieni nazwę: podpięte kody + sama
+            # pozycja, jeśli user wpisał dla niej inną nazwę.
+            zmieni = sum(self._ile(kod) for kod in podpiete)
+            if wlasna:
+                zmieni += p["ile"]
+            do_zmiany += zmieni
 
-        remisy = sum(1 for g in self.grupy if g.remis and g.klucz not in self._pominiete)
-        if not self.grupy and not self.kandydaci:
-            self.summary.config(text=(
-                "Brak kodów do scalenia — zapis w tym projekcie jest spójny "
-                "z resztą bazy."))
-            self.btn_scal.config(state=tk.DISABLED)
-        else:
-            self.summary.config(text=(
-                f"Do scalenia: {len(self.grupy)}    "
-                f"wystąpień do zmiany: {aktywne}    "
-                f"⚠ remisów: {remisy}    "
-                f"do sprawdzenia: {len(self.kandydaci)}\n"
-                f"Zmieniany jest TYLKO projekt {self.project_id}. Sekcja "
-                f"„do sprawdzenia” NIE jest scalana — to podpowiedź, wiele z tych "
-                f"par to różne rozmiary (KFL001/KFL002)."))
-            self.btn_scal.config(state=tk.NORMAL if aktywne else tk.DISABLED)
+            skad = ""
+            if p["w_bazie"]:
+                naj = max(p["w_bazie"].items(), key=lambda t: t[1])
+                skad = f"w bazie: {naj[0]} ({naj[1]} proj.)"
+            rid = f"p{i}"
+            self.tree.insert("", "end", iid=rid, text=p["kod"], open=bool(podpiete),
+                             values=(docelowa + ("   ✎" if wlasna else ""),
+                                     p["ile"], skad),
+                             tags=("zmieniona",) if wlasna else ())
 
-    def _zmien_kanoniczny(self, _event):
+            for j, kod in enumerate(p["identyczne"]):
+                jest = kod in podpiete
+                self.tree.insert(rid, "end", iid=f"{rid}i{j}", text=f"   = {kod}",
+                                 values=("→ " + docelowa if jest else "(nie scalane)",
+                                         self._ile(kod), "ten sam kod, inny zapis"),
+                                 tags=("podpiety",) if jest else ("duplikat",))
+
+            for j, s in enumerate(p["podobne"]):
+                jest = s["kod"] in podpiete
+                opis = f"wspólne {s['wspolne']} zn." + (", prefiks" if s["prefiks"] else "")
+                self.tree.insert(rid, "end", iid=f"{rid}s{j}", text=f"   ~ {s['kod']}",
+                                 values=("→ " + docelowa if jest else "(nie scalane)",
+                                         self._ile(s["kod"]), opis),
+                                 tags=("podpiety",) if jest else ("podobny",))
+
+        z_kolizja = sum(1 for p in self.pozycje if p["identyczne"] or p["podobne"])
+        self.summary.config(text=(
+            f"Kodów handlowych w projekcie: {len(self.pozycje)}    "
+            f"z podobnymi: {z_kolizja}    "
+            f"pokazanych: {pokazane}    "
+            f"wystąpień do zmiany: {do_zmiany}\n"
+            f"Zmieniany jest TYLKO projekt {self.project_id}. Podpięte pozycje "
+            f"(zielone) dostaną nazwę docelową rodzica."))
+        self.btn_scal.config(state=tk.NORMAL if do_zmiany else tk.DISABLED)
+
+    def _ile(self, kod):
+        """Ile razy dany zapis występuje w tym projekcie."""
+        k = S.norm_kod(kod)
+        for p in self.pozycje:
+            if p["klucz"] == k:
+                return p["ile"]
+        return 0
+
+    # ── interakcja ─────────────────────────────────────────────────────────
+    def _on_double(self, event):
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        kol = self.tree.identify_column(event.x)
+        parent = self.tree.parent(iid)
+        # Dwuklik na dziecku = podpięcie/odpięcie, niezależnie od kolumny.
+        if parent:
+            self._przelacz(parent, iid)
+            return
+        # Na rodzicu edytujemy tylko kolumnę „Docelowa nazwa".
+        if kol == "#1":
+            self._edytuj(iid)
+
+    def _toggle_podpiecie(self, _event):
         sel = self.tree.selection()
         if not sel:
             return
-        g = self.grupy[int(sel[0])]
-        WyborWariantu(self, g, self._po_wyborze)
+        parent = self.tree.parent(sel[0])
+        if parent:
+            self._przelacz(parent, sel[0])
 
-    def _po_wyborze(self, g, wybrany, pomin):
-        if pomin:
-            self._pominiete.add(g.klucz)
+    def _przelacz(self, rid, child_iid):
+        p = self.pozycje[int(rid[1:])]
+        kod = self.tree.item(child_iid, "text").strip()[2:].strip()   # bez '= ' / '~ '
+        zbior = self._podpiete.setdefault(p["klucz"], set())
+        if kod in zbior:
+            zbior.discard(kod)
         else:
-            self._pominiete.discard(g.klucz)
-            g.kanoniczny = wybrany
+            zbior.add(kod)
         self._refill()
+        self.tree.see(rid)
+
+    def _zamknij_edytor(self):
+        if self._edytor is not None:
+            self._edytor.destroy()
+            self._edytor = None
+
+    def _edytuj(self, rid):
+        """Pole edycji nazwy docelowej wprost w komórce."""
+        self._zamknij_edytor()
+        p = self.pozycje[int(rid[1:])]
+        box = self.tree.bbox(rid, "docelowa")
+        if not box:
+            return
+        x, y, w, h = box
+
+        var = tk.StringVar(value=self._docelowa(p))
+        # Combobox, nie Entry: user ma pod ręką istniejące zapisy (własne
+        # i z całej bazy), ale pole zostaje edytowalne, żeby dało się wpisać
+        # nazwę, której jeszcze nigdzie nie ma.
+        propozycje = list(dict.fromkeys(
+            [p["kod"]] + p["identyczne"] +
+            [s["kod"] for s in p["podobne"]] +
+            list(p["w_bazie"])))
+        ed = ttk.Combobox(self.tree, textvariable=var, values=propozycje,
+                          font=("Consolas", 9))
+        ed.place(x=x, y=y, width=w, height=h)
+        ed.focus_set()
+        ed.selection_range(0, tk.END)
+        self._edytor = ed
+
+        def zatwierdz(_e=None):
+            nowa = var.get().strip()
+            if nowa and nowa != p["kod"]:
+                self._docelowe[p["klucz"]] = nowa
+            else:
+                self._docelowe.pop(p["klucz"], None)
+            self._zamknij_edytor()
+            self._refill()
+
+        ed.bind("<Return>", zatwierdz)
+        ed.bind("<<ComboboxSelected>>", zatwierdz)
+        ed.bind("<Escape>", lambda _e: self._zamknij_edytor())
+        ed.bind("<FocusOut>", lambda _e: zatwierdz())
 
     # ── zapis ──────────────────────────────────────────────────────────────
-    def _scal(self):
-        do_zapisu = [g for g in self.grupy if g.klucz not in self._pominiete and g.do_zmiany]
-        if not do_zapisu:
-            return
-        ile = sum(g.wystapien_do_zmiany for g in do_zapisu)
+    def _zbierz_podmiany(self):
+        """[(stary_zapis, nowy_zapis)] — co faktycznie pójdzie do UPDATE."""
+        podmiany = []
+        for p in self.pozycje:
+            docelowa = self._docelowa(p)
+            for kod in sorted(self._podpiete.get(p["klucz"], ())):
+                if kod != docelowa:
+                    podmiany.append((kod, docelowa))
+            if docelowa != p["kod"]:
+                podmiany.append((p["kod"], docelowa))
+        return podmiany
 
-        linie = [f"Projekt {self.project_id}: zmienić {ile} wystąpień w {len(do_zapisu)} kodach?", ""]
-        for g in do_zapisu[:12]:
-            linie.append(f"  {' · '.join(sorted(g.do_zmiany))}  →  {g.kanoniczny}")
-        if len(do_zapisu) > 12:
-            linie.append(f"  … i {len(do_zapisu) - 12} więcej")
-        linie += ["", f"Kopia pliku projektu trafi do:", BACKUP_DIR]
+    def _scal(self):
+        podmiany = self._zbierz_podmiany()
+        if not podmiany:
+            return
+
+        linie = [f"Projekt {self.project_id} — zmienić {len(podmiany)} zapisów?", ""]
+        for stary, nowy in podmiany[:14]:
+            linie.append(f"  {stary}   →   {nowy}")
+        if len(podmiany) > 14:
+            linie.append(f"  … i {len(podmiany) - 14} więcej")
+        linie += ["", "Kopia pliku projektu trafi do:", BACKUP_DIR]
         if not messagebox.askyesno("Scalanie — potwierdzenie", "\n".join(linie),
                                    parent=self, icon="warning"):
             return
@@ -237,7 +346,8 @@ class ScalanieWindow(tk.Toplevel):
         self.btn_scal.config(state=tk.DISABLED)
         self.status.config(text="Zapisuję…")
         try:
-            r = S.zastosuj(do_zapisu, project_id=self.project_id, backup_dir=BACKUP_DIR)
+            r = S.zastosuj_podmiany(podmiany, project_id=self.project_id,
+                                    backup_dir=BACKUP_DIR)
         except Exception as e:
             self.status.config(text="Błąd zapisu.")
             messagebox.showerror("Scalanie", str(e), parent=self)
@@ -251,58 +361,6 @@ class ScalanieWindow(tk.Toplevel):
             parent=self)
         self.status.config(text=f"Zapisano {r['zmienionych']} zmian. Kopia: {r['backup']}")
         self._load_async()
-
-
-class WyborWariantu(tk.Toplevel):
-    """Który wariant zostawić — albo pominąć grupę."""
-
-    def __init__(self, parent, grupa, callback):
-        super().__init__(parent)
-        self.grupa = grupa
-        self.callback = callback
-        self.title("Który zapis zostawić?")
-        self.transient(parent)
-        self.grab_set()
-
-        tk.Label(self, text="Wybierz zapis, który ma zostać w BOM-ie:",
-                 font=("Arial", 9, "bold"), anchor="w").pack(fill=tk.X, padx=12, pady=(12, 6))
-
-        self.var = tk.StringVar(value=grupa.kanoniczny)
-        ramka = tk.Frame(self)
-        ramka.pack(fill=tk.BOTH, expand=True, padx=12)
-        # Kolejność jak w propozycji: najczęstszy w bazie na górze.
-        for w in sorted(grupa.warianty,
-                        key=lambda x: (-len(grupa.warianty[x]["projekty"]), x)):
-            v = grupa.warianty[w]
-            tu = grupa.w_projekcie.get(w, 0)
-            opis = f"{w}      [w bazie: {len(v['projekty'])} proj."
-            opis += f", tutaj: {tu}x]" if tu else ", nie ma w tym projekcie]"
-            tk.Radiobutton(ramka, text=opis, variable=self.var, value=w,
-                           anchor="w", justify=tk.LEFT,
-                           font=("Consolas", 9)).pack(fill=tk.X, anchor="w")
-
-        if grupa.remis:
-            tk.Label(self, text="⚠ Remis — kilka zapisów jest równie częstych. "
-                                "Automat wybrał alfabetycznie.",
-                     fg="#c0392b", font=("Arial", 8), anchor="w",
-                     wraplength=520, justify=tk.LEFT).pack(fill=tk.X, padx=12, pady=(6, 0))
-
-        dol = tk.Frame(self)
-        dol.pack(fill=tk.X, padx=12, pady=12)
-        tk.Button(dol, text="Zatwierdź", command=self._ok, bg="#27ae60", fg="white",
-                  font=("Arial", 9, "bold"), padx=12, pady=4).pack(side=tk.RIGHT)
-        tk.Button(dol, text="Pomiń tę grupę", command=self._pomin,
-                  font=("Arial", 9), padx=12, pady=4).pack(side=tk.RIGHT, padx=(0, 8))
-        tk.Button(dol, text="Anuluj", command=self.destroy,
-                  font=("Arial", 9), padx=12, pady=4).pack(side=tk.LEFT)
-
-    def _ok(self):
-        self.callback(self.grupa, self.var.get(), False)
-        self.destroy()
-
-    def _pomin(self):
-        self.callback(self.grupa, self.grupa.kanoniczny, True)
-        self.destroy()
 
 
 def open_window(parent, project_id, project_name=None):
