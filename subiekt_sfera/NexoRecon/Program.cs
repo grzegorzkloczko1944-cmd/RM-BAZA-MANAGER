@@ -33,6 +33,9 @@ var trybStan = args.Length > 0 && args[0].Equals("stan", StringComparison.Ordina
 // Tryb "projekt": zaklada kartoteki/komplety i ZK (patrz Projekt.cs). Jako jedyny
 // tryb ZAPISUJE - i tylko z jawnym --zapisz; bez niego to suchy przebieg.
 var trybProjekt = args.Length > 0 && args[0].Equals("projekt", StringComparison.OrdinalIgnoreCase);
+// Tryb "katalog": pelna lista {Symbol, Nazwa} do dopasowania po nazwie
+// po stronie Pythona (patrz Katalog.cs). Odczyt, jak "stan".
+var trybKatalog = args.Length > 0 && args[0].Equals("katalog", StringComparison.OrdinalIgnoreCase);
 var planFile = args.FirstOrDefault(a => a.StartsWith("--plan="))?["--plan=".Length..];
 var zapisz = args.Any(a => a.Equals("--zapisz", StringComparison.OrdinalIgnoreCase));
 var symbolsFile = args.FirstOrDefault(a => a.StartsWith("--symbols-file="))?["--symbols-file=".Length..];
@@ -61,7 +64,7 @@ AssemblyLoadContext.Default.Resolving += (ctx, name) =>
     return File.Exists(p) ? ctx.LoadFromAssemblyPath(p) : null;
 };
 
-if ((!trybStan && !trybProjekt) || outPath != null)
+if ((!trybStan && !trybProjekt && !trybKatalog) || outPath != null)
 {
     Console.WriteLine($"Sfera {DanePolaczenia.WersjaSfery}  ->  serwer={cfg.Serwer}  baza={cfg.Baza}  auth={(cfg.SqlWindowsAuth ? "Windows" : "SQL:" + cfg.SqlUser)}");
     Console.WriteLine($"Proces 64-bit: {Environment.Is64BitProcess}   (Sfera nexo >=57 wymaga 64-bit)");
@@ -91,13 +94,16 @@ using (sfera)
         Console.WriteLine($"BŁĄD: logowanie operatora nexo '{cfg.NexoLogin}' nie powiodło się (login = pole Login w Konfiguracja -> Użytkownicy).");
         return 3;
     }
-    if ((!trybStan && !trybProjekt) || outPath != null) Console.WriteLine($"Zalogowano operatora: {cfg.NexoLogin}");
+    if ((!trybStan && !trybProjekt && !trybKatalog) || outPath != null) Console.WriteLine($"Zalogowano operatora: {cfg.NexoLogin}");
 
     if (trybStan)
     {
         if (szukane.Count == 0) { Console.WriteLine("Tryb stan: brak symboli (--symbol= albo --symbols-file=)."); return 1; }
         return NexoRecon.Stan.Uruchom(sfera, szukane, outPath);
     }
+
+    if (trybKatalog)
+        return NexoRecon.Katalog.Uruchom(sfera, outPath);
 
     if (trybProjekt)
     {

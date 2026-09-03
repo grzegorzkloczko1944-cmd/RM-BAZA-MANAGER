@@ -768,6 +768,66 @@ z decyzją z sekcji 5 (rezerwacja/zadysponowanie albo wydanie).
 
 ### Krok 2b — szukanie po podobnej nazwie (na żądanie, przycisk na zaznaczeniu)
 
+> ## ⛔ ROZSTRZYGNIĘTE 04.09.2026 — fuzzy match po nazwie ODRZUCONY
+>
+> Opis poniżej (z 02.09.2026) jest **nieaktualny w części dotyczącej fuzzy
+> match**. Pomiar na realnych danych pokazał, że dopasowanie rozmyte po
+> nazwie nie nadaje się do kojarzenia pozycji — zostawiamy go tu jako zapis
+> rozumowania, ale **nie implementować**.
+>
+> **Pomiar** (projekt 2627, 161 pozycji, `difflib.SequenceMatcher` po
+> normalizacji ogonków/spacji/wielkości liter, próg 0.55):
+> **389 par RÓŻNYCH detali** przekroczyło próg.
+>
+> | wynik | detal A | detal B | co je różni |
+> |---|---|---|---|
+> | 0.933 | `Płyta zewnętrzna` | `Płyta wewnętrzna` | **przeciwieństwa** |
+> | 0.909 | `WSQ_06_30 L120` | `WSQ_06_30 L103` | długość |
+> | 0.889 | `Korek 14mm` | `Korek 64mm` | wymiar |
+> | 0.889 | `Szuflada 1` | `Szuflada 2` | wariant |
+> | 0.867 | `Chwytak potrójny` | `Chwytak podwójny` | liczba chwytów |
+>
+> Podniesienie progu nie pomaga: prawdziwe trafienia (różnica samej pisowni,
+> `Kątownik`/`Katownik`) dają **1.000**, a fałszywe siedzą tuż pod nimi.
+> Dodatkowo `Uchwyt czujnika` to nazwa **dwóch różnych detali**
+> (`2627-270.12ZZ` i `027-300.06Z`) — **nazwa nie jest kluczem**, nawet po
+> normalizacji. Odpowiada to przewidywaniu z sekcji 12.2 („sprawdzić, czy
+> fuzzy match w ogóle jest tu problemem wartym rozwiązania").
+>
+> **Dlaczego to groźne, a nie tylko nieskuteczne:** wybór użytkownika trafia
+> do globalnej tabeli mapowań (sekcja niżej), więc jedno pomyłkowe
+> zatwierdzenie działa po cichu we **wszystkich przyszłych projektach**.
+>
+> ### Prawdziwy problem leżał gdzie indziej: elementy BEZ numeru rysunku
+>
+> Detale własne mają numer rysunku — jednoznaczny klucz, mapowanie 1:1
+> działa (sekcja 12.2). Problem dotyczy **elementów handlowych**, których
+> „nazwa" w BOM-ie to **kod katalogowy producenta**, wpisywany ręcznie
+> i dlatego niespójnie:
+>
+> ```
+> 'UCFL 201'  |  'UCFL-201'  |  'UCFL201'          ← jedno łożysko, 3 zapisy
+> 'KFL 001'   |  'KFL001'
+> 'EBP-L-335-8-C6' | 'EBP-L.335-8-C6' | 'EBP-L_335-8-C6'
+> 'Oring 16x3' |  'oring_16x3'
+> ```
+>
+> Skala (64 projekty, 909 unikalnych kodów): **28 kodów zapisanych na kilka
+> sposobów**; `UCFL 201` w trzech wariantach rozsianych po 20 projektach.
+> Bez ujednolicenia każdy wariant zakłada **osobną kartotekę** w Subiekcie —
+> rozbita historia cen i stan magazynowy w kilku miejscach.
+>
+> Tu normalizacja **rozstrzyga pewnie**, bo warianty różnią się wyłącznie
+> separatorami i wielkością liter — inaczej niż przy nazwach opisowych,
+> gdzie jedna litera zmienia znaczenie (`zewnętrzna`/`wewnętrzna`).
+>
+> **Decyzja:** naprawiać **u źródła, w BOM-ach**, nie przy wysyłce do
+> Subiekta — inaczej RM_BAZA nadal pokazuje warianty jako różne pozycje
+> w wycenach, RFQ i arkuszu. Narzędzie: `subiekt_raport_duplikatow.py`
+> (tylko odczyt, wypisuje warianty z numerami projektów do poprawienia).
+> Kod pomiarowy: `subiekt_podobne.py` (z ostrzeżeniem w nagłówku),
+> tryb `NexoRecon.exe katalog` zrzuca kartotekę Subiekta do JSON.
+
 **Decyzje 02.09.2026.** Problem: część detali może już mieć kartotekę
 w Subiekcie pod **innym symbolem albo bez symbolu-numeru** (np. założona
 ręcznie kiedyś, zanim istniała reguła „symbol = numer rysunku") — dopasowanie
