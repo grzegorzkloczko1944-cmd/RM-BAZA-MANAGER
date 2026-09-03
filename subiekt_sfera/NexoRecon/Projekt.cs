@@ -78,7 +78,12 @@ internal static class Projekt
                 using var ob = asort.Utworz();
                 // Bez szablonu brakuje domyślnej jednostki miary (plan, krok 12).
                 // Wzorzec z SDK\Przyklady\PrzykladyKartoteki\ObslugaKartotek.cs.
-                ob.WypelnijNaPodstawieSzablonu(szablony.DaneDomyslne.Towar);
+                // Pozycje typu Z/ZZ muszą dostać szablon Komplet — inaczej Sfera
+                // odmawia później dodania składników (InvalidOperationException:
+                // "Asortyment, do którego dodawane są składniki musi być kompletem",
+                // znalezione na żywej Sferze 61.1.0.9431, M-OLD 2026-09-03).
+                var jestKompletem = Rowne(p.Typ, "Z") || Rowne(p.Typ, "ZZ");
+                ob.WypelnijNaPodstawieSzablonu(jestKompletem ? szablony.DaneDomyslne.Komplet : szablony.DaneDomyslne.Towar);
                 ob.Dane.Symbol = p.Symbol.Trim();
                 ob.Dane.Nazwa = string.IsNullOrWhiteSpace(p.Nazwa) ? p.Symbol.Trim() : p.Nazwa!.Trim();
                 if (!ob.Zapisz())
