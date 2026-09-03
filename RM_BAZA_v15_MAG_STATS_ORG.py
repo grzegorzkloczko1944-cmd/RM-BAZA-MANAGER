@@ -810,6 +810,13 @@ class MainWindow(tk.Tk):
         subiekt_menu.add_separator()
         subiekt_menu.add_command(label="🏗 Załóż projekt w Subiekcie (kartoteki + komplety + ZK)…",
                                  command=self.open_subiekt_projekt)
+        # Osobna pozycja, bo to jedyna operacja z tego menu, która zapisuje do
+        # BOM-u RM_BAZA, a nie do Subiekta. Elementy handlowe nie mają numeru
+        # rysunku — ich kod katalogowy bywa wpisany różnie ('UCFL 201' /
+        # 'UCFL201'), co robi osobną kartotekę z każdego wariantu.
+        subiekt_menu.add_separator()
+        subiekt_menu.add_command(label="🔗 Scal kody handlowe w tym projekcie…",
+                                 command=self.open_subiekt_scalanie)
         self.btn_subiekt["menu"] = subiekt_menu
         self.btn_subiekt.pack(side=tk.LEFT, padx=(0, 5), pady=2)
 
@@ -28649,6 +28656,47 @@ class MainWindow(tk.Tk):
             project_name = None
 
         subiekt_projekt.open_window(self, self.current_project_id, project_name)
+
+    def open_subiekt_scalanie(self):
+        """Okno „Scal kody handlowe" (menu 📦 SUBIEKT).
+
+        Logika w subiekt_scalanie_gui.py. Jedyna pozycja z tego menu, która
+        zapisuje do BOM-u RM_BAZA, a nie do Subiekta — dlatego oddzielona
+        separatorem i wymaga potwierdzenia z kopią pliku projektu.
+
+        Elementy handlowe (łożyska, siłowniki, oringi) nie mają numeru
+        rysunku, więc ich identyfikatorem jest kod katalogowy wpisywany
+        ręcznie — i ten sam kod bywa zapisany różnie ('UCFL 201' / 'UCFL-201'
+        / 'UCFL201'). Każdy wariant zakłada osobną kartotekę w Subiekcie,
+        z rozbitą historią cen i stanem w kilku miejscach.
+
+        Zmieniany jest TYLKO bieżący projekt; pozostałe służą za podpowiedź,
+        który zapis jest w firmie przyjęty.
+        """
+        if not self.current_project_id:
+            messagebox.showwarning("Scalanie", "Najpierw wybierz projekt.", parent=self)
+            return
+
+        try:
+            import subiekt_scalanie_gui
+        except ImportError as e:
+            messagebox.showerror(
+                "Scalanie",
+                f"Nie znaleziono modułu subiekt_scalanie_gui.py\n\n{e}",
+                parent=self)
+            return
+
+        project_name = None
+        try:
+            row = self.db_manager.master_con.execute(
+                "SELECT name FROM projects WHERE project_id = ?",
+                (self.current_project_id,)).fetchone()
+            if row:
+                project_name = row[0]
+        except Exception:
+            project_name = None
+
+        subiekt_scalanie_gui.open_window(self, self.current_project_id, project_name)
 
     def toggle_show_hidden(self):
         """Przełącz wyświetlanie ukrytych pozycji"""
