@@ -36,7 +36,28 @@ EXE_CANDIDATES = [
     r"C:\RMPAK_CLIENT\NexoRecon\NexoRecon.exe",
 ]
 CONFIG_PATH = r"C:\RMPAK_CLIENT\.nexo_sfera.json"
-PROJECTS_DIR = r"Y:\RM_BAZA\projects"
+# projects_dir zalezy od maszyny (firma: Y:\RM_BAZA\projects, dom/M-OLD:
+# C:/RMPAK_CLIENT/RM_BAZY/RM_BAZA/projects) - RM_BAZA juz to rozwiazuje
+# poprawnie na kazdej maszynie przez sync_config.json (patrz np.
+# RM_BAZA_v15_MAG_STATS_ORG.py, db_manager.projects_dir). Ten modul
+# czytal wlasna, twarda sciezke Y: niezalezna od tego configu, wiec na
+# M-OLD (gdzie ten sam zasob siedzi pod V:) pekal - "Y:\RM_BAZA\projects\
+# project_71.sqlite" (znalezione 2026-09-03). Czytamy teraz ten sam
+# sync_config.json co reszta apki, zamiast duplikowac logike.
+_SYNC_CONFIG_PATH = r"C:\RMPAK_CLIENT\sync_config.json"
+_PROJECTS_DIR_FALLBACK = r"Y:\RM_BAZA\projects"
+
+
+def _projects_dir():
+    try:
+        with open(_SYNC_CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg["paths"]["projects_dir"]
+    except Exception:
+        return _PROJECTS_DIR_FALLBACK
+
+
+PROJECTS_DIR = _projects_dir()
 
 TIMEOUT_S = 180
 

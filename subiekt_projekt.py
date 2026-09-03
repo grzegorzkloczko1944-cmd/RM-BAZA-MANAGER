@@ -272,7 +272,7 @@ def zapisz_mapowania(wynik):
     try:
         return subiekt_mapowania.put_many(wpisy)
     except Exception:
-        return 0          # brak dostępu do Y: nie może wywalić całego zapisu
+        return 0          # brak dostępu do bazy mapowań nie może wywalić całego zapisu
 
 
 def save_log(project_id, wynik):

@@ -23,6 +23,7 @@ Nazwy/opisów detali NIE zapisujemy z Subiekta — źródłem prawdy dla danych
 konstrukcyjnych zostaje RM_BAZA (plan, sekcja 1/12.1).
 """
 
+import json
 import os
 import sqlite3
 import threading
@@ -30,7 +31,26 @@ from datetime import datetime
 
 # Obok master.sqlite — to metadana integracji dla całej firmy, nie pojedynczego
 # projektu. Ścieżka realna, jak reszta baz (patrz pamięć „Ścieżki do bazy danych").
-DB_PATH = r"Y:\RM_BAZA\subiekt_mapowania.sqlite"
+#
+# Zależy od maszyny (firma: Y:\RM_BAZA\, dom/M-OLD: C:/RMPAK_CLIENT/RM_BAZY/RM_BAZA/)
+# — wyprowadzana z katalogu tego samego master.sqlite z sync_config.json, którego
+# już poprawnie używa reszta RM_BAZA, zamiast twardej ścieżki Y: niezależnej od
+# configu (ta sama pułapka co w subiekt_stany.py, znaleziona 2026-09-03 na M-OLD).
+_SYNC_CONFIG_PATH = r"C:\RMPAK_CLIENT\sync_config.json"
+_DB_PATH_FALLBACK = r"Y:\RM_BAZA\subiekt_mapowania.sqlite"
+
+
+def _db_path():
+    try:
+        with open(_SYNC_CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        master = cfg["paths"]["master"]
+        return os.path.join(os.path.dirname(master), "subiekt_mapowania.sqlite")
+    except Exception:
+        return _DB_PATH_FALLBACK
+
+
+DB_PATH = _db_path()
 
 SPOSOB_AUTO = "auto"        # trafienie 1:1 po symbolu = numer rysunku
 SPOSOB_LUZNY = "luzny"      # TRIM + wielkość liter (spacje/a-A w bazie Subiekta)
