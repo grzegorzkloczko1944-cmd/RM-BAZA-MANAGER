@@ -8,6 +8,9 @@ __pycache__/
 build_*.log
 .claude/settings.local.json
 .claude/settings.json
+# blokada sesji (sessionId/pid/timestamp) — czysto runtime, zmienia sie
+# przy kazdym uruchomieniu; trafila do repo przez przypadek
+.claude/scheduled_tasks.lock
 .dwf_thumb_cache/
 
 # runner agenta — sciezki per maszyna, git pull ma go NIE nadpisywac
