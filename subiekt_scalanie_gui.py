@@ -43,6 +43,7 @@ class ScalanieWindow(tk.Toplevel):
         super().__init__(parent)
         self.project_id = project_id
         self.grupy = []
+        self.kandydaci = []          # pary podobne — do oceny, nie do scalenia
         self._pominiete = set()      # klucze grup wyłączonych przez usera
 
         tytul = f"Scal kody handlowe — projekt {project_id}"
@@ -85,8 +86,13 @@ class ScalanieWindow(tk.Toplevel):
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vs.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self.tree.tag_configure("remis",    background="#fdebd0")
-        self.tree.tag_configure("pominiete", background="#eaecee", foreground="#7f8c8d")
+        self.tree.tag_configure("naglowek",   background="#34495e", foreground="white")
+        self.tree.tag_configure("remis",      background="#fdebd0")
+        self.tree.tag_configure("pominiete",  background="#eaecee", foreground="#7f8c8d")
+        # Kandydaci na szaro — mają wyglądać jak informacja, nie jak coś,
+        # co zaraz zostanie zmienione.
+        self.tree.tag_configure("kand",       foreground="#7f8c8d")
+        self.tree.tag_configure("kand_mocny", background="#eaf2f8")
         self.tree.bind("<Double-1>", self._zmien_kanoniczny)
 
         hint = tk.Label(
@@ -121,12 +127,13 @@ class ScalanieWindow(tk.Toplevel):
     def _load_worker(self):
         try:
             grupy = S.zaproponuj_dla_projektu(self.project_id)
-            self.after(0, lambda: self._done(grupy, None))
+            kandydaci = S.znajdz_kandydatow(self.project_id)
+            self.after(0, lambda: self._done(grupy, kandydaci, None))
         except Exception as e:
             err = str(e)
-            self.after(0, lambda: self._done([], err))
+            self.after(0, lambda: self._done([], [], err))
 
-    def _done(self, grupy, error):
+    def _done(self, grupy, kandydaci, error):
         self.btn_refresh.config(state=tk.NORMAL)
         if error:
             self.status.config(text="Błąd.")
@@ -134,6 +141,7 @@ class ScalanieWindow(tk.Toplevel):
             messagebox.showerror("Scalanie", error, parent=self)
             return
         self.grupy = grupy
+        self.kandydaci = kandydaci
         self._pominiete.clear()
         self._refill()
         self.status.config(text="Nic jeszcze nie zmieniono — zapis dopiero po kliknięciu „Scal”.")
@@ -142,6 +150,12 @@ class ScalanieWindow(tk.Toplevel):
     def _refill(self):
         self.tree.delete(*self.tree.get_children())
         aktywne = 0
+
+        # ── Sekcja 1: pewne duplikaty (identyczne po normalizacji) ──────────
+        if self.grupy:
+            self.tree.insert("", "end", iid="hdr_pewne", values=(
+                "▼ DO SCALENIA — ten sam kod, inny zapis", "", "", ""),
+                tags=("naglowek",))
         for i, g in enumerate(self.grupy):
             pominieta = g.klucz in self._pominiete
             if not pominieta:
@@ -156,19 +170,36 @@ class ScalanieWindow(tk.Toplevel):
                 f"{w_bazie} proj." if w_bazie else "tylko tutaj",
             ), tags=(tag,) if tag else ())
 
+        # ── Sekcja 2: podobne — do oceny, NIE do automatycznego scalenia ────
+        if self.kandydaci:
+            self.tree.insert("", "end", iid="hdr_kand", values=(
+                "▼ DO SPRAWDZENIA — podobne kody (mogą być różnymi elementami)",
+                "", "", ""), tags=("naglowek",))
+            for j, (zapisy_a, zapisy_b, n, zawiera) in enumerate(self.kandydaci):
+                # Para, gdzie jeden kod jest początkiem drugiego, częściej
+                # bywa duplikatem — stąd wyróżnienie.
+                self.tree.insert("", "end", iid=f"k{j}", values=(
+                    zapisy_a[0],
+                    zapisy_b[0],
+                    "",
+                    "prefiks" if zawiera else f"wspólne {n} zn.",
+                ), tags=("kand_mocny" if zawiera else "kand",))
+
         remisy = sum(1 for g in self.grupy if g.remis and g.klucz not in self._pominiete)
-        if not self.grupy:
+        if not self.grupy and not self.kandydaci:
             self.summary.config(text=(
                 "Brak kodów do scalenia — zapis w tym projekcie jest spójny "
                 "z resztą bazy."))
             self.btn_scal.config(state=tk.DISABLED)
         else:
             self.summary.config(text=(
-                f"Kodów do ujednolicenia: {len(self.grupy)}    "
+                f"Do scalenia: {len(self.grupy)}    "
                 f"wystąpień do zmiany: {aktywne}    "
-                f"⚠ remisów do sprawdzenia: {remisy}\n"
-                f"Zmieniany jest TYLKO projekt {self.project_id}. "
-                f"Kolumna „W bazie” pokazuje, w ilu projektach użyto wybranego zapisu."))
+                f"⚠ remisów: {remisy}    "
+                f"do sprawdzenia: {len(self.kandydaci)}\n"
+                f"Zmieniany jest TYLKO projekt {self.project_id}. Sekcja "
+                f"„do sprawdzenia” NIE jest scalana — to podpowiedź, wiele z tych "
+                f"par to różne rozmiary (KFL001/KFL002)."))
             self.btn_scal.config(state=tk.NORMAL if aktywne else tk.DISABLED)
 
     def _zmien_kanoniczny(self, _event):

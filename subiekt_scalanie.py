@@ -304,6 +304,112 @@ def zastosuj(grupy, project_id, backup_dir, tylko_probnie=False):
     return raport
 
 
+# ── Kandydaci: kody podobne, ale NIE identyczne po normalizacji ─────────────
+# Osobna kategoria od grup scalania i celowo NIE zaznaczana domyślnie.
+#
+# Powód: w BOM-ach sąsiadują ze sobą kody, które różnią się jednym znakiem,
+# a oznaczają zupełnie inny element:
+#
+#     'KFL001'  vs  'KFL002'              inny rozmiar łożyska
+#     'GS14 10-12' / 'GS14 14-12' / 'GS14 14-16'   trzy rozmiary
+#     'DFM-20-20-P-A-GF' vs 'DFM-20-40-P-A-GF'     inny skok siłownika
+#     'UCFL 201' vs 'UCFL201-12'          201 to nie 201-12
+#     '12x14X10 SBT' vs '12x14X10 SBT E'  wersja E
+#
+# Scalenie takiej pary jest GORSZE niż zostawienie duplikatu — kończy się
+# zamówieniem złej części. Dlatego mechanizm je pokazuje jako „do
+# sprawdzenia", ale nigdy nie proponuje scalenia sam.
+
+def _wspolny_prefiks(a, b):
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+# Segment długości: 'L' + cyfry ('T5 L260 szer16', 'MGW12H L350', 'HGR15 L260',
+# 'WS-20 L1300'). Dwa kody różniące się TYLKO nim to różne elementy — inna
+# długość paska/szyny, nie inny zapis tego samego. Także 'MGW12H' vs
+# 'MGW12H L350': bez długości i z długością to nie jest ta sama pozycja.
+#
+# Porównanie musi działać na ORYGINALNYM zapisie, nie na znormalizowanym:
+# normalizacja skleja 'UCFL 201' w 'UCFL201', gdzie 'L201' wygląda jak
+# segment długości, choć 'L' jest częścią nazwy rodziny (UCFL). Stąd wymóg
+# granicy słowa przed 'L' — w oryginale przed długością zawsze stoi spacja
+# albo separator.
+#
+# Jednostka bywa dopisana ('WS-10 L240mm', 'L1300m') albo pominięta
+# ('T5 L260') — traktujemy to jak jeden segment, żeby 'L240mm' i 'L300mm'
+# rozpoznać jako tę samą różnicę co 'L240' i 'L300'.
+_DLUGOSC = re.compile(r"(?<![A-Za-z0-9])L\d+(?:mm|cm|m)?\b", re.IGNORECASE)
+
+
+def _bez_dlugosci(s):
+    return _DLUGOSC.sub("L#", s or "")
+
+
+def _rozni_sie_tylko_dlugoscia(a, b):
+    """Czy oba zapisy są tożsame po zastąpieniu segmentu długości?
+
+    Argumenty to ORYGINALNE zapisy (nie znormalizowane) — patrz wyżej.
+    """
+    return norm_kod(_bez_dlugosci(a)) == norm_kod(_bez_dlugosci(b))
+
+
+def znajdz_kandydatow(project_id, min_prefiks=4):
+    """[(kod_a, kod_b, wspolny_prefiks)] — kody podobne, do ręcznej oceny.
+
+    Kryterium: wspólny początek co najmniej `min_prefiks` znaków po
+    normalizacji, przy różnej reszcie. Prefiks, nie podobieństwo rozmyte —
+    bo kody katalogowe czyta się od lewej (rodzina, potem rozmiar), więc
+    wspólny początek to sensowna przesłanka, a rozmyte dopasowanie łapałoby
+    zbieżności bez znaczenia (pomiar: 389 fałszywych par, plan „Krok 2b").
+
+    Zwraca pary posortowane od najdłuższego wspólnego początku — te na
+    górze najczęściej są prawdziwymi duplikatami.
+    """
+    wg = zbierz_warianty({project_id})
+    klucze = sorted(wg)
+
+    # Do reguł o długości potrzebny jest ORYGINALNY zapis (patrz _DLUGOSC):
+    # po normalizacji 'UCFL 201' → 'UCFL201' i 'L201' udaje segment długości.
+    oryginal = {k: sorted(wg[k])[0] for k in klucze}
+
+    pary = []
+    for i, a in enumerate(klucze):
+        for b in klucze[i + 1:]:
+            n = _wspolny_prefiks(a, b)
+            if n < min_prefiks:
+                continue
+            oa, ob = oryginal[a], oryginal[b]
+            # Różnica wyłącznie w długości ('T5 L260' vs 'T5 L330') to inny
+            # element, nie inny zapis — pomijamy zamiast zawracać głowę.
+            if _rozni_sie_tylko_dlugoscia(oa, ob):
+                continue
+            # To samo, gdy jeden kod ma segment długości, a drugi nie
+            # ('MGW12H' vs 'MGW12H L350') — dookreślenie długości robi
+            # z tego inną pozycję.
+            krotszy, dluzszy = (oa, ob) if len(oa) <= len(ob) else (ob, oa)
+            if norm_kod(dluzszy).startswith(norm_kod(krotszy)):
+                reszta = dluzszy[len(krotszy):].strip()
+                if reszta and _DLUGOSC.fullmatch(reszta):
+                    continue
+            # Jeden kod będący początkiem drugiego ('UCFL201' w 'UCFL20112')
+            # to najczęstszy wzorzec prawdziwego duplikatu — podnosimy go wyżej.
+            zawiera = a.startswith(b) or b.startswith(a)
+            pary.append((a, b, n, zawiera))
+
+    pary.sort(key=lambda t: (-t[3], -t[2]))
+
+    # Z kluczy z powrotem na oryginalne zapisy — user ma widzieć to, co w BOM.
+    def zapisy(k):
+        return sorted(wg[k])
+
+    return [(zapisy(a), zapisy(b), n, zawiera) for a, b, n, zawiera in pary]
+
+
 # ── Dopasowanie do kartoteki Subiekta ───────────────────────────────────────
 def wczytaj_katalog_subiekta():
     """[{"symbol", "nazwa"}] — kartoteka Subiekta przez most (odczyt).
