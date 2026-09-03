@@ -24,6 +24,12 @@
 > odmianach**: GT (COM) i nexo (.NET/SDK). Ta druga jest wprost wymieniona
 > przez InsERT jako cecha wersji PRO i to jest właściwa droga.
 
+## 0. Dokumenty powiązane
+
+* **[`SUBIEKT_PROJEKTY_WYDANIA.md`](SUBIEKT_PROJEKTY_WYDANIA.md)** — jak powiązać
+  pozycje Subiekta z projektami RM_BAZA i wydawać na projekt. Rozstrzygnięcie:
+  **ZK jako „lista projektu"**, nie etykieta w Uwagach (03.09.2026).
+
 ## 1. Po co to — docelowy obieg (doprecyzowane 02.09.2026, routing RM_RFQ → RM_BAZA)
 
 Dziś RM_BAZA prowadzi projekty i BOM-y, RM_RFQ obsługuje zapytania ofertowe,
