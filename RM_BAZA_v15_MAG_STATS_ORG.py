@@ -789,10 +789,12 @@ class MainWindow(tk.Tk):
         # plik nie puchł. Zaznaczenie w arkuszu zawęża listę pozycji.
         # Miejsce: obok „Aplikacje", przed badge'em RFQ — to też jest wejście
         # do zewnętrznego systemu, a nie operacja na arkuszu.
-        self.btn_subiekt = tk.Button(
+        # Menu, nie przycisk: są dwie różne operacje o bardzo różnym skutku —
+        # podgląd stanów (czyta) i założenie projektu (ZAPISUJE do Subiekta).
+        # Zlanie ich w jeden przycisk kusiłoby do przypadkowego zapisu.
+        self.btn_subiekt = tk.Menubutton(
             search_frame,
-            text="📦 SUBIEKT",
-            command=self.open_subiekt_stany,
+            text="📦 SUBIEKT ▾",
             bg="#8e44ad",
             fg="white",
             font=("Arial", 9),
@@ -802,6 +804,13 @@ class MainWindow(tk.Tk):
             bd=2,
             cursor="hand2",
         )
+        subiekt_menu = tk.Menu(self.btn_subiekt, tearoff=0)
+        subiekt_menu.add_command(label="📦 Stany magazynowe (odczyt)",
+                                 command=self.open_subiekt_stany)
+        subiekt_menu.add_separator()
+        subiekt_menu.add_command(label="🏗 Załóż projekt w Subiekcie (kartoteki + komplety + ZK)…",
+                                 command=self.open_subiekt_projekt)
+        self.btn_subiekt["menu"] = subiekt_menu
         self.btn_subiekt.pack(side=tk.LEFT, padx=(0, 5), pady=2)
 
         # RFQ: ilu kooperantów czeka z odpowiedzią. Liczone LOKALNIE z
@@ -28603,6 +28612,43 @@ class MainWindow(tk.Tk):
             only = None   # zaznaczenie to udogodnienie, nie warunek działania
 
         subiekt_stany.open_window(self, self.current_project_id, only_drawings=only)
+
+    def open_subiekt_projekt(self):
+        """Okno „Załóż projekt w Subiekcie" (menu 📦 SUBIEKT).
+
+        Logika w subiekt_projekt.py. W odróżnieniu od okna stanów ten moduł
+        ZAPISUJE do Subiekta (kartoteki, komplety Z/ZZ, ZK) — ale dopiero po
+        suchym przebiegu i jawnym potwierdzeniu w oknie.
+
+        Zawsze cały BOM, bez zawężania zaznaczeniem: ZK ma odpowiadać
+        projektowi, a komplet bez części składników byłby po prostu błędny.
+        """
+        if not self.current_project_id:
+            messagebox.showwarning("Subiekt", "Najpierw wybierz projekt.", parent=self)
+            return
+
+        try:
+            import subiekt_projekt
+        except ImportError as e:
+            messagebox.showerror(
+                "Subiekt",
+                f"Nie znaleziono modułu subiekt_projekt.py\n\n{e}",
+                parent=self)
+            return
+
+        # Nazwa projektu jest potrzebna do znalezienia plików *_OUT.xlsx na V:,
+        # z których czytane jest drzewo złożeń (skład kompletów).
+        project_name = None
+        try:
+            row = self.db_manager.master_con.execute(
+                "SELECT name FROM projects WHERE project_id = ?",
+                (self.current_project_id,)).fetchone()
+            if row:
+                project_name = row[0]
+        except Exception:
+            project_name = None
+
+        subiekt_projekt.open_window(self, self.current_project_id, project_name)
 
     def toggle_show_hidden(self):
         """Przełącz wyświetlanie ukrytych pozycji"""

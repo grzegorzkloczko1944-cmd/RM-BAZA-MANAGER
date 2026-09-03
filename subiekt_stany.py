@@ -63,8 +63,10 @@ def read_project_drawings(project_id):
         cols = {r[1] for r in con.execute("PRAGMA table_info('items')")}
         # Nazwa i ilość mają te same prefiksy co numer rysunku (work_ > src_),
         # a *_over to ręczne nadpisanie przez użytkownika — ma pierwszeństwo.
-        name_cols = [c for c in ("name_over", "work_name", "src_name") if c in cols]
-        qty_cols = [c for c in ("order_qty_over", "work_qty", "src_qty") if c in cols]
+        # Kolumny *_over to FLAGI nadpisania (INTEGER 0/1), nie wartości —
+        # brane tutaj dawały nazwę „0” i zerową „Ilość BOM”.
+        name_cols = [c for c in ("work_name", "src_name") if c in cols]
+        qty_cols = [c for c in ("order_qty", "work_qty", "src_qty") if c in cols]
         sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols + qty_cols
         rows = con.execute(f"SELECT {', '.join(sel)} FROM items").fetchall()
     finally:

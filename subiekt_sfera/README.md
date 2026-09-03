@@ -7,8 +7,12 @@ Kontekst, decyzje i ściąga API: [`../SUBIEKT_INTEGRACJA_PLAN.md`](../SUBIEKT_I
 
 | | |
 |---|---|
-| `NexoRecon/` | skrypt **rozpoznawczy** (C#, .NET 8, x64) — **tylko odczyt**, nic nie zapisuje |
+| `NexoRecon/` | most C# (.NET 8, x64): tryby `stan` (odczyt) i `projekt` (zapis) |
 | `nexo_sfera.example.json` | wzór konfigu z hasłami — skopiuj do `C:\RMPAK_CLIENT\.nexo_sfera.json` |
+
+⚠️ **Tryb `projekt` jako jedyny ZAPISUJE do Subiekta** — i tylko z jawnym
+`--zapisz`. Bez tej flagi robi suchy przebieg (czyta, mówi co by zrobił).
+Domyślny tryb rozpoznawczy i tryb `stan` pozostają wyłącznie do odczytu.
 
 W repo są **tylko źródła** (~10 KB). Wynik budowania (`bin/`, 549 MB, 554 pliki)
 i konfig z hasłami są w `.gitignore` — nie commitować.
@@ -40,6 +44,27 @@ bin\Release\NexoRecon.exe --symbol=NR-RYS-1 --symbol=NR-RYS-2 --limit=30
 Wypisuje: magazyny, kartoteki (liczba, rodzaje, kształt symboli, próbki), stany
 per magazyn, kontrahentów, ostatnie ZD/PZ/WZ/RW z pozycjami; `--symbol=` sprawdza
 konkretne numery rysunków i ich stany.
+
+### Tryb `projekt` — kartoteki, komplety i ZK
+
+```
+bin\Release\NexoRecon.exe projekt --plan=plan.json --out=wynik.json            # SUCHY przebieg
+bin\Release\NexoRecon.exe projekt --plan=plan.json --out=wynik.json --zapisz   # realny ZAPIS
+```
+
+Plan (buduje go `subiekt_projekt.py` z BOM-u projektu):
+
+```json
+{ "projekt": "2607", "tytul": "Projekt 2607 Platyn", "podmiot": "RMPAK",
+  "pozycje": [ { "symbol": "2607-200.27ZZ", "nazwa": "Łuk transportera 72",
+                 "typ": "ZZ", "ilosc": 1,
+                 "skladniki": [ { "symbol": "013-100.22X", "ilosc": 4 } ] } ] }
+```
+
+Kolejność operacji: kartoteki → komplety (**topologicznie, od najgłębszych**,
+bo `ZZ` bywa składnikiem `ZZ`) → ZK. Komplet powstaje tylko dla `typ` = `Z`/`ZZ`
+i tylko gdy ma składniki. Szczegóły i uzasadnienie:
+[`../SUBIEKT_PROJEKTY_WYDANIA.md`](../SUBIEKT_PROJEKTY_WYDANIA.md), sekcje 5 i 7.
 
 Kody wyjścia: `1` brak konfigu, `2` błąd `Polacz` (SQL/licencja/wersja), `3` złe
 logowanie operatora nexo, `0` OK.

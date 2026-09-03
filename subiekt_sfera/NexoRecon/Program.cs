@@ -30,6 +30,11 @@ var szukane = args.Where(a => a.StartsWith("--symbol=")).Select(a => a["--symbol
 // (po jednym w linii) albo z --symbol=. Plik, bo BOM potrafi miec setki pozycji,
 // a wiersz polecenia Windows ma limit dlugosci.
 var trybStan = args.Length > 0 && args[0].Equals("stan", StringComparison.OrdinalIgnoreCase);
+// Tryb "projekt": zaklada kartoteki/komplety i ZK (patrz Projekt.cs). Jako jedyny
+// tryb ZAPISUJE - i tylko z jawnym --zapisz; bez niego to suchy przebieg.
+var trybProjekt = args.Length > 0 && args[0].Equals("projekt", StringComparison.OrdinalIgnoreCase);
+var planFile = args.FirstOrDefault(a => a.StartsWith("--plan="))?["--plan=".Length..];
+var zapisz = args.Any(a => a.Equals("--zapisz", StringComparison.OrdinalIgnoreCase));
 var symbolsFile = args.FirstOrDefault(a => a.StartsWith("--symbols-file="))?["--symbols-file=".Length..];
 var outPath = args.FirstOrDefault(a => a.StartsWith("--out="))?["--out=".Length..];
 if (symbolsFile != null)
@@ -56,7 +61,7 @@ AssemblyLoadContext.Default.Resolving += (ctx, name) =>
     return File.Exists(p) ? ctx.LoadFromAssemblyPath(p) : null;
 };
 
-if (!trybStan || outPath != null)
+if ((!trybStan && !trybProjekt) || outPath != null)
 {
     Console.WriteLine($"Sfera {DanePolaczenia.WersjaSfery}  ->  serwer={cfg.Serwer}  baza={cfg.Baza}  auth={(cfg.SqlWindowsAuth ? "Windows" : "SQL:" + cfg.SqlUser)}");
     Console.WriteLine($"Proces 64-bit: {Environment.Is64BitProcess}   (Sfera nexo >=57 wymaga 64-bit)");
@@ -86,12 +91,18 @@ using (sfera)
         Console.WriteLine($"BŁĄD: logowanie operatora nexo '{cfg.NexoLogin}' nie powiodło się (login = pole Login w Konfiguracja -> Użytkownicy).");
         return 3;
     }
-    if (!trybStan || outPath != null) Console.WriteLine($"Zalogowano operatora: {cfg.NexoLogin}");
+    if ((!trybStan && !trybProjekt) || outPath != null) Console.WriteLine($"Zalogowano operatora: {cfg.NexoLogin}");
 
     if (trybStan)
     {
         if (szukane.Count == 0) { Console.WriteLine("Tryb stan: brak symboli (--symbol= albo --symbols-file=)."); return 1; }
         return NexoRecon.Stan.Uruchom(sfera, szukane, outPath);
+    }
+
+    if (trybProjekt)
+    {
+        if (planFile == null) { Console.WriteLine("Tryb projekt: brak --plan=plik.json"); return 1; }
+        return NexoRecon.Projekt.Uruchom(sfera, planFile, outPath, zapisz);
     }
 
     // ───────────────────────── MAGAZYNY ─────────────────────────
