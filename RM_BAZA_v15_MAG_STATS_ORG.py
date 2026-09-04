@@ -480,6 +480,8 @@ class MainWindow(tk.Tk):
         ksefm.add_separator()
         ksefm.add_command(label="🌐 Sprawdź nowe faktury KSEF (API)…", command=self.menu_ksef_check_new_invoices)
         ksefm.add_separator()
+        ksefm.add_command(label="📚 Archiwum faktur KSEF…", command=self.menu_ksef_archiwum)
+        ksefm.add_separator()
         ksefm.add_command(label="📂 Skanuj nierozpoznane (lista)…", command=self.menu_ksef_scan_unrecognized_list)
         ksefm.add_command(label="🔄 Skanuj nierozpoznane (auto)…", command=self.menu_ksef_scan_unrecognized_auto)
         menubar.add_cascade(label="KSEF", menu=ksefm)
@@ -3158,6 +3160,24 @@ class MainWindow(tk.Tk):
             # katalog "nierozpoznane" jest podfolderem bazowego katalogu faktury_ksef
             return Path(configured).parent
         return Path(self.db_manager.master_path).parent / "faktury_ksef"
+
+    def menu_ksef_archiwum(self):
+        """
+        Otwiera archiwum faktur KSeF — pobieranie przyrostowe + przeglądarka.
+        Nie wymaga wybranego projektu: archiwum jest firmowe, nie projektowe.
+        """
+        try:
+            with open(CONFIG_FILE) as f:
+                ksef_cfg = json.load(f).get("ksef", {})
+        except Exception:
+            ksef_cfg = {}
+        try:
+            import ksef_archiwum
+            ksef_archiwum.open_window(self, self._ksef_base_dir(), ksef_cfg)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Archiwum faktur KSEF", f"Nie udało się otworzyć archiwum:\n{e}")
 
     def _ensure_suppliers_nip_column(self):
         """
