@@ -48,7 +48,7 @@ var tryb = args.Length > 0 && !args[0].StartsWith("--") ? args[0].ToLowerInvaria
 //   dokumenty       - lista ZK/ZD/RW/WZ z pozycjami (okno przegladu)
 var trybyMaszynowe = new[] { "stan", "katalog", "kontrahenci", "zapotrzebowanie",
                              "projekt", "zd", "zd-usun", "dostawcy", "stan-pozycji",
-                             "dokumenty", "faktury", "kartoteka" };
+                             "dokumenty", "faktury", "kartoteka", "wydruk-recon", "wydruk" };
 var cicho = trybyMaszynowe.Contains(tryb);
 var trybStan = tryb == "stan";
 var trybProjekt = tryb == "projekt";
@@ -167,6 +167,18 @@ using (sfera)
     {
         if (numeryArg == null) { Console.WriteLine("Tryb zd-usun: brak --numery=\"ZD 1/09/2026;...\""); return 1; }
         return NexoRecon.ZdUsun.Uruchom(sfera, numeryArg, outPath, zapisz);
+    }
+
+    if (tryb == "wydruk-recon")
+    {
+        var pdfDir = args.FirstOrDefault(a => a.StartsWith("--pdf="))?["--pdf=".Length..];
+        return NexoRecon.WydrukRecon.Uruchom(sfera, numeryArg, outPath, pdfDir);
+    }
+
+    if (tryb == "wydruk")
+    {
+        var pdfDir = args.FirstOrDefault(a => a.StartsWith("--pdf="))?["--pdf=".Length..];
+        return NexoRecon.Wydruk.Uruchom(sfera, numeryArg, outPath, pdfDir);
     }
 
     if (trybProjekt)

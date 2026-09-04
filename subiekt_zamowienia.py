@@ -31,6 +31,7 @@ import tempfile
 import threading
 import tkinter as tk
 from datetime import datetime
+from pathlib import Path
 from tkinter import ttk, messagebox
 
 from subiekt_stany import (_find_exe, blad_mostu, wysrodkuj, podepnij_szerokosci,
@@ -192,9 +193,14 @@ def opis_stanu(info):
     return "⬜ brak"
 
 
+def _sciezka_master():
+    """Ścieżka do master.sqlite — leży obok katalogu projektów."""
+    return os.path.join(os.path.dirname(PROJECTS_DIR.rstrip("\\/")), "master.sqlite")
+
+
 def _nazwy_dostawcow():
     """{supplier_id: nazwa} z bazy głównej RM_BAZA."""
-    master = os.path.join(os.path.dirname(PROJECTS_DIR.rstrip("\\/")), "master.sqlite")
+    master = _sciezka_master()
     if not os.path.isfile(master):
         return {}
     try:
@@ -217,7 +223,7 @@ def projekty_po_numerze(numery):
     numery = {str(n).strip() for n in (numery or []) if str(n).strip()}
     if not numery:
         return {}
-    master = os.path.join(os.path.dirname(PROJECTS_DIR.rstrip("\\/")), "master.sqlite")
+    master = _sciezka_master()
     if not os.path.isfile(master):
         return {}
     out = {}
@@ -321,6 +327,15 @@ def numer_projektu_z_uwag(uwagi):
     return (uwagi or "").strip()
 
 
+def _uprosc_nazwe(x):
+    """Nazwa firmy do porównań: same znaki alfanumeryczne, małe litery.
+
+    MAJA ↔ „MA-JA”, „Sp. z o.o.” ↔ „SPÓŁKA Z O.O.” — interpunkcja i spacje
+    w nazwach firm są przypadkowe, więc do dopasowania się nie liczą.
+    """
+    return "".join(c for c in (x or "").lower() if c.isalnum())
+
+
 def dopasuj_dostawce(nazwa_rm_baza, podmioty):
     """Nazwa dostawcy z RM_BAZA → nazwa podmiotu w Subiekcie, albo "".
 
@@ -338,8 +353,7 @@ def dopasuj_dostawce(nazwa_rm_baza, podmioty):
         return low[s.lower()]
     # Bez znaków, które w RM_BAZA bywają ozdobnikami, a w Subiekcie częścią
     # nazwy (MAJA ↔ "MA-JA").
-    def uprosc(x):
-        return "".join(c for c in x.lower() if c.isalnum())
+    uprosc = _uprosc_nazwe
     su = uprosc(s)
     if not su:
         return ""
@@ -726,6 +740,7 @@ class ZamowieniaWindow(tk.Toplevel):
                                               lambda: self._zaznacz_wybrane(False))
             self.sheet.popup_menu_add_command("Ustaw dostawcę dla wierszy…",
                                               self._ustaw_dostawce_masowo)
+            self.sheet.popup_menu_add_command("✉ Wyślij ZD dostawcy…", self._wyslij_zd)
             self.sheet.popup_menu_add_command("🗑 Usuń zamówienia (ZD)…", self._usun_zd)
             self.sheet.pack(fill=tk.BOTH, expand=True)
 
@@ -736,6 +751,13 @@ class ZamowieniaWindow(tk.Toplevel):
                                 font=("Arial", 9, "bold"), padx=14, pady=5,
                                 relief=tk.RAISED, bd=2, state=tk.DISABLED)
         self.btn_zd.pack(side=tk.RIGHT)
+        # Wysyłka gotowego ZD do dostawcy: PDF z Subiekta + rysunki z serwera,
+        # otwarte jako wiadomość w programie pocztowym (nic nie wychodzi samo).
+        self.btn_mail = tk.Button(bottom, text="✉ Wyślij ZD dostawcy",
+                                  command=self._wyslij_zd, bg="#2980b9", fg="white",
+                                  font=("Arial", 9, "bold"), padx=12, pady=5,
+                                  relief=tk.RAISED, bd=2)
+        self.btn_mail.pack(side=tk.RIGHT, padx=(0, 8))
         # Pozycja spoza BOM-u i zapotrzebowania (śruby, materiał pomocniczy) —
         # wspólny formularz zakłada kartotekę i dorzuca wiersz do listy.
         tk.Button(bottom, text="➕ Dodaj pozycję spoza BOM", command=self._dodaj_reczna,
@@ -1194,6 +1216,197 @@ class ZamowieniaWindow(tk.Toplevel):
             messagebox.showinfo("Dostawca", "Zaznacz najpierw wiersze w arkuszu.", parent=self)
             return
         self._wybierz_dostawce(rows)
+
+    def _wyslij_zd(self):
+        """
+        ✉ → wybór DOKUMENTU ZD, potem okno wysyłki: PDF zamówienia z Subiekta
+        + rysunki pozycji z serwera, otwarte w programie pocztowym.
+
+        Wybieramy dokument, nie pozycje — tak samo jak przy usuwaniu, bo mail
+        dotyczy całego zamówienia. Gdy kursor stoi na wierszu z ZD, ten numer
+        jest domyślny i przy jednym kandydacie idziemy od razu dalej.
+        """
+        zd = {}
+        for w in self.wszystkie:
+            nr = w.get("zd")
+            if nr:
+                zd.setdefault(nr, {"dostawca": w.get("dostawca", ""),
+                                   "data": w.get("zd_data", ""), "poz": []})
+                zd[nr]["poz"].append(w)
+        if not zd:
+            messagebox.showinfo("Wyślij ZD",
+                                "Na liście nie ma żadnych zamówień do dostawców.\n\n"
+                                "Najpierw utwórz ZD z zaznaczonych pozycji.", parent=self)
+            return
+
+        # Numer z wiersza pod kursorem — „wyślij to, na co patrzę".
+        biezacy = None
+        try:
+            for r in self.sheet.get_selected_rows(get_cells_as_rows=True):
+                if 0 <= r < len(self.widoczne) and self.widoczne[r].get("zd"):
+                    biezacy = self.widoczne[r]["zd"]
+                    break
+        except Exception:
+            pass
+
+        if biezacy:
+            self._wyslij_dokument(biezacy, zd[biezacy])
+            return
+        if len(zd) == 1:
+            nr, dane = next(iter(zd.items()))
+            self._wyslij_dokument(nr, dane)
+            return
+
+        # Kilka dokumentów, kursor nie wskazuje żadnego — pytamy który.
+        dlg = tk.Toplevel(self)
+        dlg.title("Wyślij zamówienie do dostawcy")
+        dlg.transient(self)
+        dlg.grab_set()
+        wysrodkuj(dlg, self, 560, 340)
+
+        tk.Label(dlg, text="Wybierz zamówienie do wysłania:",
+                 font=("Arial", 9, "bold")).pack(padx=14, pady=(12, 6), anchor="w")
+
+        ramka = tk.Frame(dlg)
+        ramka.pack(fill=tk.BOTH, expand=True, padx=14, pady=4)
+        lb = tk.Listbox(ramka, font=("Consolas", 9), activestyle="none")
+        sv = ttk.Scrollbar(ramka, orient="vertical", command=lb.yview)
+        lb.configure(yscrollcommand=sv.set)
+        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sv.pack(side=tk.RIGHT, fill=tk.Y)
+
+        numery = sorted(zd.keys())
+        for nr in numery:
+            d = zd[nr]
+            lb.insert(tk.END, f"{nr:16} {d['dostawca'][:32]:34} {len(d['poz'])} poz.")
+        lb.selection_set(0)
+
+        def dalej(_ev=None):
+            sel = lb.curselection()
+            if not sel:
+                return
+            nr = numery[sel[0]]
+            dlg.destroy()
+            self._wyslij_dokument(nr, zd[nr])
+
+        lb.bind("<Double-1>", dalej)
+        stopka = tk.Frame(dlg)
+        stopka.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=10)
+        tk.Button(stopka, text="Dalej →", command=dalej, bg="#2980b9", fg="white",
+                  font=("Arial", 9, "bold"), padx=14, pady=4).pack(side=tk.RIGHT)
+        tk.Button(stopka, text="Anuluj", command=dlg.destroy,
+                  font=("Arial", 9), padx=12, pady=4).pack(side=tk.RIGHT, padx=6)
+
+    def _wyslij_dokument(self, numer_zd, dane):
+        """Otwiera okno wysyłki dla jednego ZD."""
+        try:
+            import subiekt_wyslij_zd
+        except Exception as e:
+            messagebox.showerror("Wyślij ZD", f"Brak modułu wysyłki:\n{e}", parent=self)
+            return
+
+        pozycje = [(w.get("symbol", ""), w.get("nazwa", ""),
+                    w.get("ilosc", "") or w.get("potrzeba", ""), w.get("jm", "szt."))
+                   for w in dane["poz"]]
+
+        # Adres e-mail i nadawca pochodzą z RM_BAZA — okno pozwala je poprawić.
+        email = self._email_dostawcy(dane["dostawca"])
+        nadawca = self._nadawca()
+
+        subiekt_wyslij_zd.open_window(
+            self, numer_zd, dane["dostawca"], email,
+            self.project_name or "", pozycje, nadawca,
+            szukaj_plikow=self._pliki_rysunku,
+            szukaj_maila=self._email_po_nip)
+
+    def _email_dostawcy(self, nazwa_subiekt):
+        """
+        Adres dostawcy z bazy RM_BAZA. Dopasowanie po nazwie tą samą funkcją,
+        którą okno wiąże dostawców z podmiotami Subiekta.
+        """
+        if not nazwa_subiekt:
+            return ""
+        try:
+            master = _sciezka_master()
+            con = sqlite3.connect(f"file:{master}?mode=ro", uri=True)
+            try:
+                wiersze = con.execute(
+                    "SELECT name, COALESCE(NULLIF(TRIM(email),''),"
+                    "                      NULLIF(TRIM(email_default),'')) "
+                    "FROM suppliers WHERE is_active=1").fetchall()
+            finally:
+                con.close()
+        except Exception as e:
+            print(f"⚠️  Nie udało się odczytać maili dostawców: {e}")
+            return ""
+
+        cel = _uprosc_nazwe(nazwa_subiekt)
+        for nazwa, mail in wiersze:
+            if mail and _uprosc_nazwe(nazwa or "") == cel:
+                return mail
+        # Dopasowanie luźne — nazwy w Subiekcie bywają pełne („SPÓŁKA Z O.O.”),
+        # a w RM_BAZA skrócone.
+        for nazwa, mail in wiersze:
+            u = _uprosc_nazwe(nazwa or "")
+            if mail and u and (u in cel or cel in u):
+                return mail
+        return ""
+
+    def _email_po_nip(self, nip):
+        """
+        Adres dostawcy po NIP-cie — klucz pewniejszy niż nazwa, bo firmy
+        w RM_BAZA i w Subiekcie macie już powiązane właśnie po NIP.
+        """
+        cyfry = "".join(c for c in (nip or "") if c.isdigit())
+        if not cyfry:
+            return ""
+        try:
+            con = sqlite3.connect(f"file:{_sciezka_master()}?mode=ro", uri=True)
+            try:
+                for nazwa, mail, n in con.execute(
+                        "SELECT name, COALESCE(NULLIF(TRIM(email),''),"
+                        "                      NULLIF(TRIM(email_default),'')), nip "
+                        "FROM suppliers WHERE nip IS NOT NULL AND TRIM(nip)<>''"):
+                    if mail and "".join(c for c in (n or "") if c.isdigit()) == cyfry:
+                        return mail
+            finally:
+                con.close()
+        except Exception as e:
+            print(f"⚠️  Szukanie maila po NIP {cyfry}: {e}")
+        return ""
+
+    def _nadawca(self):
+        """Imię i nazwisko zalogowanego użytkownika RM_BAZA (display_name)."""
+        try:
+            uzytkownik = getattr(self.master, "current_user", None)
+            if not uzytkownik:
+                return ""
+            master = _sciezka_master()
+            con = sqlite3.connect(f"file:{master}?mode=ro", uri=True)
+            try:
+                r = con.execute("SELECT display_name FROM users WHERE username=?",
+                                (uzytkownik,)).fetchone()
+            finally:
+                con.close()
+            return (r[0] if r and r[0] else uzytkownik) or ""
+        except Exception:
+            return ""
+
+    def _pliki_rysunku(self, symbol):
+        """
+        Pliki rysunku (PDF/DXF/STEP…) z serwera — tą samą drogą co RFQ.
+        Woła _find_files_for_drawing z arkusza głównego, żeby nie dublować
+        logiki szukania po katalogach projektu.
+        """
+        okno = self.master
+        szukaj = getattr(okno, "_find_files_for_drawing", None)
+        if not callable(szukaj) or not symbol:
+            return []
+        try:
+            return szukaj(symbol)
+        except Exception as e:
+            print(f"⚠️  Szukanie plików dla {symbol}: {e}")
+            return []
 
     def _usun_zd(self):
         """PPM → okno z listą DOKUMENTÓW ZD do usunięcia.
