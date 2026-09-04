@@ -33,9 +33,10 @@ internal static class Katalog
         // encje Asortyment (z leniwymi kolekcjami stanów), a potrzebne są
         // trzy pola tekstowe.
         var pozycje = asort.Dane.Wszystkie()
-            .Select(a => new { a.Symbol, a.Nazwa })
+            .Select(a => new { a.Id, a.Symbol, a.Nazwa })
             .ToList()
             .Select(a => new Kart(
+                a.Id,
                 (a.Symbol ?? "").Trim(),
                 (a.Nazwa ?? "").Trim()))
             .Where(k => k.Symbol.Length > 0)
@@ -53,5 +54,8 @@ internal static class Katalog
         return 0;
     }
 
-    internal record Kart(string Symbol, string Nazwa);
+    // Id kartoteki — RM_BAZA pokazuje je obok symbolu, żeby dało się
+    // jednoznacznie wskazać pozycję w Subiekcie (symbole bywają zapisane
+    // różnie, Id nie).
+    internal record Kart(int Id, string Symbol, string Nazwa);
 }

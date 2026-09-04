@@ -806,6 +806,30 @@ def wczytaj_katalog_subiekta():
     return subiekt_podobne.pobierz_katalog()
 
 
+def dopasuj_katalog(kody, katalog):
+    """{kod: kartoteka albo None} — dopasowanie wielu kodów naraz.
+
+    Jedno przejście po katalogu zamiast pełnego skanu na każdy kod (przy
+    2745 kartotekach i kilkudziesięciu pozycjach to różnica odczuwalna
+    w oknie).
+    """
+    wg_symbolu, wg_nazwy = {}, {}
+    for poz in katalog:
+        k = norm_kod(poz.get("symbol"))
+        if k:
+            wg_symbolu.setdefault(k, poz)
+        k = norm_kod(poz.get("nazwa"))
+        if k:
+            wg_nazwy.setdefault(k, poz)
+
+    out = {}
+    for kod in kody:
+        k = norm_kod(kod)
+        # Symbol przed nazwą — to on jest identyfikatorem kartoteki.
+        out[kod] = wg_symbolu.get(k) or wg_nazwy.get(k) if k else None
+    return out
+
+
 def znajdz_w_subiekcie(kod, katalog):
     """Kartoteka odpowiadająca kodowi, albo None.
 

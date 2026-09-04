@@ -162,7 +162,9 @@ def pobierz_katalog(timeout=TIMEOUT_S):
 
     with open(out, encoding="utf-8") as f:
         data = json.load(f)
-    return [{"symbol": p.get("Symbol") or "", "nazwa": p.get("Nazwa") or ""}
+    return [{"id": p.get("Id"),
+             "symbol": p.get("Symbol") or "",
+             "nazwa": p.get("Nazwa") or ""}
             for p in data.get("pozycje", [])]
 
 

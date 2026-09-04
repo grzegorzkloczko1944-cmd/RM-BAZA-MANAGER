@@ -42,11 +42,15 @@ BACKUP_DIR = os.path.join(os.path.dirname(S.PROJECTS_DIR), "backups", "scalanie_
 class ScalanieWindow(tk.Toplevel):
     COLS = [
         ("zaz",      "",                       34, "c"),
-        ("kod",      "Kod w projekcie",       250, "w"),
-        ("ilosc",    "Ilość BOM",              70, "e"),
+        ("kod",      "Kod w projekcie",       220, "w"),
+        # Materiał zaraz za kodem — różny materiał to najczęstszy sygnał,
+        # że dwa podobne kody to jednak inne elementy, więc ma być widoczny
+        # od razu przy nazwie, a nie na końcu wiersza.
         ("material", "Materiał",              110, "w"),
-        ("baza",     "Najczęściej w firmie",  230, "w"),
-        ("podobne",  "Podobne w tym projekcie", 300, "w"),
+        ("ilosc",    "Ilość BOM",              70, "e"),
+        ("subiekt",  "SUBIEKT (kartoteka)",   240, "w"),
+        ("baza",     "Najczęściej w firmie",  170, "w"),
+        ("podobne",  "Podobne w tym projekcie", 220, "w"),
     ]
 
     def __init__(self, parent, project_id, project_name=None):
@@ -54,7 +58,11 @@ class ScalanieWindow(tk.Toplevel):
         self.project_id = project_id
         self.pozycje = []
         self._zaznaczone = set()      # klucze zaznaczonych pozycji
-        self._nazwa_reczna = False    # user poprawił pole nazwy — nie nadpisuj
+        # {kod: kartoteka Subiekta albo None}; None w całości = jeszcze nie
+        # sprawdzone (odpytanie mostu trwa kilkanaście sekund, więc leci
+        # osobnym wątkiem po narysowaniu listy).
+        self._subiekt = {}
+        self._subiekt_stan = "nie sprawdzono"
 
         # Połączenie arkusza = LOKALNA kopia projektu (open_project_local przy
         # locku). Cały zapis idzie tędy; plik na serwerze aktualizuje dopiero
@@ -73,11 +81,35 @@ class ScalanieWindow(tk.Toplevel):
         if project_name:
             tytul += f" ({project_name})"
         self.title(tytul)
-        self.geometry("1060x600")
         self.transient(parent)
+        self._wysrodkuj(parent, 1100, 620)
 
         self._build_ui()
         self.after(100, self._load_async)
+
+    def _wysrodkuj(self, parent, szer, wys):
+        """Na środku okna RM_BAZA — czyli na tym monitorze, gdzie ono stoi.
+
+        winfo_screenwidth() zwraca wymiar ekranu głównego, więc przy dwóch
+        monitorach okno lądowałoby nie tam, gdzie użytkownik patrzy. Liczymy
+        od pozycji rodzica; przycinamy tylko tyle, żeby nie wyjść poza
+        krawędź jego monitora.
+        """
+        try:
+            parent.update_idletasks()
+            px, py = parent.winfo_rootx(), parent.winfo_rooty()
+            pw, ph = parent.winfo_width(), parent.winfo_height()
+            if pw <= 1 or ph <= 1:          # okno jeszcze nierozłożone
+                raise ValueError
+            x = px + (pw - szer) // 2
+            y = py + (ph - wys) // 2
+            # Górna krawędź musi zostać widoczna — inaczej nie da się okna
+            # przesunąć myszą.
+            y = max(y, py - 20 if py > 0 else 0)
+        except Exception:
+            x = (self.winfo_screenwidth() - szer) // 2
+            y = (self.winfo_screenheight() - wys) // 2
+        self.geometry(f"{szer}x{wys}+{x}+{y}")
 
     # ── UI ─────────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -121,8 +153,8 @@ class ScalanieWindow(tk.Toplevel):
 
         tk.Label(self,
                  text="Kliknij wiersz, żeby go zaznaczyć (☐ → ☑). Zaznaczone wiersze zostaną "
-                      "POŁĄCZONE w jeden z sumą ilości.   ⚠ Różny materiał zwykle znaczy, "
-                      "że to inny element.",
+                      "POŁĄCZONE w jeden z sumą ilości. Nazwę wpisz sam albo użyj przycisków "
+                      "obok pola.   ⚠ Różny materiał zwykle znaczy, że to inny element.",
                  anchor="w", padx=12, pady=2, fg="#555", font=("Arial", 8),
                  wraplength=1020, justify=tk.LEFT).pack(side=tk.TOP, fill=tk.X)
 
@@ -132,8 +164,27 @@ class ScalanieWindow(tk.Toplevel):
         tk.Label(dol, text="Nazwa po scaleniu:", font=("Arial", 9, "bold")).pack(side=tk.LEFT)
         self.var_nazwa = tk.StringVar()
         self.ent_nazwa = tk.Entry(dol, textvariable=self.var_nazwa, font=("Consolas", 10), width=40)
-        self.ent_nazwa.pack(side=tk.LEFT, padx=(8, 12), ipady=3)
-        self.ent_nazwa.bind("<KeyRelease>", lambda _e: setattr(self, "_nazwa_reczna", True))
+        self.ent_nazwa.pack(side=tk.LEFT, padx=(8, 6), ipady=3)
+        # Pole zostaje PUSTE, dopóki user sam czegoś nie wpisze albo nie użyje
+        # przycisków obok — nazwa docelowa to decyzja, nie domysł programu.
+
+        # Gdy któraś z zaznaczonych pozycji ma już kartotekę, najlepszą nazwą
+        # docelową jest ta z Subiekta — inaczej scalenie tworzy kolejny wariant
+        # zapisu tego samego elementu, czyli dokładnie to, co tu naprawiamy.
+        self.btn_z_subiekta = tk.Button(dol, text="⬅ Wklej z Subiekt",
+                                        command=self._wklej_z_subiekta,
+                                        font=("Arial", 8), padx=8, pady=3,
+                                        state=tk.DISABLED, cursor="hand2")
+        self.btn_z_subiekta.pack(side=tk.LEFT, padx=(0, 4))
+
+        # Drugie źródło nazwy: zapis, którego firma używa najczęściej w innych
+        # projektach (kolumna „Najczęściej w firmie"). Przydatne, gdy kartoteki
+        # w Subiekcie jeszcze nie ma.
+        self.btn_najczestsze = tk.Button(dol, text="⬅ Wklej najczęstsze",
+                                         command=self._wklej_najczestsze,
+                                         font=("Arial", 8), padx=8, pady=3,
+                                         state=tk.DISABLED, cursor="hand2")
+        self.btn_najczestsze.pack(side=tk.LEFT, padx=(0, 12))
 
         self.btn_scal = tk.Button(dol, text="🔗 Scal zaznaczone", command=self._scal,
                                   bg="#e67e22", fg="white", font=("Arial", 9, "bold"),
@@ -175,14 +226,138 @@ class ScalanieWindow(tk.Toplevel):
         # ustawia 'UCFL201' tuż nad 'UCFL20112'.
         self.pozycje = sorted(pozycje, key=lambda p: p["klucz"])
         self._zaznaczone.clear()
-        self._nazwa_reczna = False
         self.var_nazwa.set("")
         self._refill()
+        # Katalog Subiekta dociągamy PO narysowaniu listy — most potrzebuje
+        # kilkunastu sekund, a lista jest użyteczna także bez tej kolumny.
+        self._subiekt_stan = "sprawdzam…"
+        threading.Thread(target=self._subiekt_worker, daemon=True).start()
         if self.tylko_podglad:
             self.status.config(text="PODGLĄD — brak lokalnej kopii projektu, zapis wyłączony.")
         else:
             self.status.config(
                 text="Zapis trafia do lokalnej kopii; na serwer — przy zwolnieniu locka.")
+
+    def _kody_wszystkie(self):
+        kody = []
+        for p in self.pozycje:
+            kody.append(p["kod"])
+            kody.extend(p["identyczne"])
+        return kody
+
+    def _z_mapowan(self, kody):
+        """Kartoteki z LOKALNEJ bazy mapowań — natychmiast, bez sieci.
+
+        subiekt_mapowania.sqlite trzyma to, co już raz ustalono (numer →
+        kartoteka). Odczyt to mikrosekundy, więc kolumna SUBIEKT pojawia się
+        od razu, a most odpytujemy tylko o to, czego tam nie ma.
+        """
+        try:
+            import subiekt_mapowania as M
+            wpisy = M.get_many(kody)
+        except Exception:
+            return {}
+        if not wpisy:
+            return {}
+        # get_many kluczuje po TRIM+UPPER (_key), a my pytamy oryginalnym
+        # zapisem — mapujemy z powrotem, żeby kod z BOM-u trafił na swój wpis.
+        out = {}
+        for kod in kody:
+            w = wpisy.get((kod or "").strip().upper())
+            if not w:
+                continue
+            out[kod] = {"id": w["id_subiekt"], "symbol": w["symbol_subiekt"],
+                        "nazwa": w["nazwa_subiekt"] or "", "sposob": w["sposob"]}
+        return out
+
+    def _subiekt_worker(self):
+        """Kolumna SUBIEKT: najpierw lokalna baza, potem ewentualnie most."""
+        kody = self._kody_wszystkie()
+
+        # 1. Lokalne mapowania — natychmiast, pokazujemy je zanim ruszy most.
+        lokalne = self._z_mapowan(kody)
+        if lokalne:
+            self.after(0, lambda: self._subiekt_czesciowo(lokalne, len(kody)))
+
+        # 2. Most — tylko dla kodów bez mapowania albo bez Id/nazwy
+        #    (stare wpisy z subiekt_projekt.py mają sam symbol).
+        braki = [k for k in kody
+                 if k not in lokalne or not lokalne[k].get("id")]
+        if not braki:
+            self.after(0, lambda: self._subiekt_done(lokalne, None, None))
+            return
+        try:
+            katalog = S.wczytaj_katalog_subiekta()
+            mapa = dict(lokalne)
+            znalezione = S.dopasuj_katalog(braki, katalog)
+            mapa.update({k: v for k, v in znalezione.items() if v})
+            self._zapisz_mapowania(znalezione)
+            self.after(0, lambda: self._subiekt_done(mapa, len(katalog), None))
+        except Exception as e:
+            err = str(e)
+            # Lokalne dane zostają — brak Subiekta nie kasuje tego, co już wiemy.
+            self.after(0, lambda: self._subiekt_done(lokalne, None, err))
+
+    def _zapisz_mapowania(self, znalezione):
+        """Dopisz do lokalnej bazy to, czego most właśnie się dowiedział.
+
+        Dzięki temu następne otwarcie okna ma kolumnę SUBIEKT od razu, bez
+        czekania na most. put() nie nadpisuje ręcznych decyzji użytkownika.
+        """
+        wpisy = [(kod, poz["symbol"], "auto", poz.get("id"), poz.get("nazwa"))
+                 for kod, poz in znalezione.items() if poz]
+        if not wpisy:
+            return
+        try:
+            import subiekt_mapowania as M
+            M.put_many([(k, s, M.SPOSOB_AUTO, i, n) for k, s, _sp, i, n in wpisy])
+        except Exception:
+            pass          # cache jest udogodnieniem, nie warunkiem działania
+
+    def _subiekt_czesciowo(self, mapa, ile_kodow):
+        """Pokaż to, co już wiadomo z lokalnej bazy; most nadal leci."""
+        self._subiekt = mapa
+        trafione = sum(1 for v in mapa.values() if v)
+        self._subiekt_stan = f"{trafione}/{ile_kodow} z pamięci, sprawdzam resztę…"
+        self._refill()
+
+    def _subiekt_done(self, mapa, ile_kartotek, error):
+        self._subiekt = mapa or {}
+        trafione = sum(1 for v in self._subiekt.values() if v)
+        ile_kodow = len(self._kody_wszystkie())
+        if error:
+            # Brak Subiekta nie może blokować scalania — to informacja
+            # dodatkowa, nie warunek działania. To, co wiemy z lokalnej bazy,
+            # zostaje na ekranie.
+            self._subiekt_stan = (f"{trafione}/{ile_kodow} z pamięci "
+                                  f"(Subiekt niedostępny)")
+            self.status.config(text=f"Subiekt nieodpytany: {error.splitlines()[0]}")
+        else:
+            self._subiekt_stan = f"{trafione}/{ile_kodow} ma kartotekę"
+            if ile_kartotek:
+                self._subiekt_stan += f"  (z {ile_kartotek} w Subiekcie)"
+        self._refill()
+
+    def _opis_subiekt(self, p):
+        """Tekst do kolumny SUBIEKT dla jednej pozycji.
+
+        Bez Id — jest mało czytelne dla człowieka, a do niczego w tym oknie
+        nie służy: zapisujemy je w bazie mapowań i pokazujemy w potwierdzeniu
+        scalania, gdzie jednoznaczność faktycznie ma znaczenie.
+        """
+        if not self._subiekt:
+            return self._subiekt_stan if self._subiekt_stan != "nie sprawdzono" else ""
+        for kod in [p["kod"]] + p["identyczne"]:
+            poz = self._subiekt.get(kod)
+            if poz:
+                symbol = (poz.get("symbol") or "").strip()
+                nazwa = (poz.get("nazwa") or "").strip()
+                # Symbol pokazujemy tylko, gdy różni się od kodu w projekcie —
+                # inaczej powtarzalibyśmy to, co widać obok w kolumnie „Kod".
+                if symbol and S.norm_kod(symbol) != S.norm_kod(p["kod"]):
+                    return f"{symbol} · {nazwa}".strip(" ·")
+                return nazwa or symbol
+        return "— brak kartoteki"
 
     # ── prezentacja ────────────────────────────────────────────────────────
     def _refill(self):
@@ -206,8 +381,9 @@ class ScalanieWindow(tk.Toplevel):
             self.tree.insert("", "end", iid=p["klucz"], tags=tags, values=(
                 "☑" if zaz else "☐",
                 p["kod"],
-                f"{p['ilosc_bom']:g}",
                 p["material"],
+                f"{p['ilosc_bom']:g}",
+                self._opis_subiekt(p),
                 naj,
                 "   ·   ".join(podobne),
             ))
@@ -216,7 +392,7 @@ class ScalanieWindow(tk.Toplevel):
         suma = sum(p["ilosc_bom"] for p in wybrane)
         z_kolizja = sum(1 for p in self.pozycje if p["identyczne"] or p["podobne"])
         opis = (f"Kodów handlowych: {len(self.pozycje)}    z podobnymi: {z_kolizja}    "
-                f"pokazanych: {pokazane}    ")
+                f"pokazanych: {pokazane}    SUBIEKT: {self._subiekt_stan}    ")
         if wybrane:
             opis += f"ZAZNACZONE: {len(wybrane)}  →  jedna pozycja, ilość {suma:g}"
             mats = {p["material"] for p in wybrane if p["material"]}
@@ -226,26 +402,16 @@ class ScalanieWindow(tk.Toplevel):
             opis += "zaznacz co najmniej 2 wiersze, które są tą samą rzeczą"
         self.summary.config(text=opis)
 
-        self._zaproponuj_nazwe(wybrane)
         self.btn_scal.config(
             text=f"🔗 Scal zaznaczone ({len(wybrane)})" if wybrane else "🔗 Scal zaznaczone",
             state=tk.NORMAL if (len(wybrane) >= 2 and not self.tylko_podglad) else tk.DISABLED)
 
-    def _zaproponuj_nazwe(self, wybrane):
-        """Najczęstszy w firmie zapis spośród zaznaczonych — chyba że user już
-        wpisał własny (wtedy nie nadpisujemy mu tekstu pod palcami)."""
-        if self._nazwa_reczna and self.var_nazwa.get().strip():
-            return
-        if not wybrane:
-            self.var_nazwa.set("")
-            return
-        kandydaci = {}
-        for p in wybrane:
-            for w, n in p["w_bazie"].items():
-                kandydaci[w] = max(kandydaci.get(w, 0), n)
-            kandydaci.setdefault(p["kod"], 0)
-        najlepszy = max(kandydaci.items(), key=lambda t: (t[1], -len(t[0])))[0]
-        self.var_nazwa.set(najlepszy)
+        # Oba przyciski tylko wtedy, gdy mają co wkleić — „z Subiekt" wymaga
+        # istniejącej kartoteki, „najczęstsze" danych z innych projektów.
+        self.btn_z_subiekta.config(
+            state=tk.NORMAL if self._kartoteki_zaznaczonych() else tk.DISABLED)
+        self.btn_najczestsze.config(
+            state=tk.NORMAL if self._najczestszy_zapis() else tk.DISABLED)
 
     # ── interakcja ─────────────────────────────────────────────────────────
     def _on_click(self, event):
@@ -261,7 +427,55 @@ class ScalanieWindow(tk.Toplevel):
 
     def _odznacz(self):
         self._zaznaczone.clear()
-        self._nazwa_reczna = False
+        self.var_nazwa.set("")      # nowe zaznaczenie = nowa decyzja o nazwie
+        self._refill()
+
+    def _kartoteki_zaznaczonych(self):
+        """[(pozycja, kartoteka)] — te z zaznaczonych, które Subiekt już zna."""
+        out = []
+        for p in self.pozycje:
+            if p["klucz"] not in self._zaznaczone:
+                continue
+            for kod in [p["kod"]] + p["identyczne"]:
+                poz = self._subiekt.get(kod)
+                if poz:
+                    out.append((p, poz))
+                    break
+        return out
+
+    def _wklej_z_subiekta(self):
+        """Wstaw do pola nazwy NAZWĘ z kartoteki Subiekta.
+
+        Bez pytania o wybór: symbol bywa przypadkowy ('122UC' dla 'UCFL 201'),
+        a nazwa jest tym, co człowiek rozpoznaje — i to ona ma trafić do BOM-u.
+        Symbol zostaje w kolumnie SUBIEKT do wglądu.
+        """
+        for _p, poz in self._kartoteki_zaznaczonych():
+            nazwa = (poz.get("nazwa") or "").strip() or (poz.get("symbol") or "").strip()
+            if nazwa:
+                self._ustaw_nazwe(nazwa)
+                return
+
+    def _najczestszy_zapis(self):
+        """Zapis używany w największej liczbie projektów spośród zaznaczonych."""
+        kandydaci = {}
+        for p in self.pozycje:
+            if p["klucz"] not in self._zaznaczone:
+                continue
+            for zapis, ile in (p["w_bazie"] or {}).items():
+                kandydaci[zapis] = max(kandydaci.get(zapis, 0), ile)
+        if not kandydaci:
+            return None
+        # Przy remisie krótszy zapis — zwykle ten bez przypadkowych dopisków.
+        return max(kandydaci.items(), key=lambda t: (t[1], -len(t[0])))[0]
+
+    def _wklej_najczestsze(self):
+        zapis = self._najczestszy_zapis()
+        if zapis:
+            self._ustaw_nazwe(zapis)
+
+    def _ustaw_nazwe(self, wartosc):
+        self.var_nazwa.set(wartosc)
         self._refill()
 
     # ── zapis ──────────────────────────────────────────────────────────────
@@ -304,6 +518,14 @@ class ScalanieWindow(tk.Toplevel):
                 q = w["ilosci"].get("src_qty") or 0
             linie.append(f"   {w['nazwa']}    ({float(q):g} szt.)")
         linie += ["", f"   →  {nazwa}    ({suma:g} szt.)", ""]
+
+        # Id kartoteki dopiero tutaj — w liście byłoby szumem, ale przy
+        # zatwierdzaniu pozwala jednoznacznie wskazać pozycję w Subiekcie.
+        for _p, poz in self._kartoteki_zaznaczonych():
+            opis = " · ".join(x for x in (poz.get("symbol"), poz.get("nazwa")) if x)
+            linie.append(f"Kartoteka w Subiekcie:  id {poz['id']}   {opis}")
+        if self._kartoteki_zaznaczonych():
+            linie.append("")
         if zajete:
             linie += ["⚠ Niektóre wiersze mają już wpisane dane robocze",
                       "   (dostawca, zamówienie, termin) — po scaleniu PRZEPADNĄ.", ""]
