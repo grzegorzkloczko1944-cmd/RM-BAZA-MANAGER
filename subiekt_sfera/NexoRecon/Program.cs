@@ -45,8 +45,10 @@ var tryb = args.Length > 0 && !args[0].StartsWith("--") ? args[0].ToLowerInvaria
 //   kontrahenci     - lista firm z NIP-ami (powiazanie dostawcow RM_BAZA)
 //   dostawcy        - zaklada kontrahentow z listy RM_BAZA; ZAPISUJE (--zapisz)
 //   stan-pozycji    - kartoteka + ZK + ZD dla listy symboli (kolumna SUBIEKT)
+//   dokumenty       - lista ZK/ZD/RW/WZ z pozycjami (okno przegladu)
 var trybyMaszynowe = new[] { "stan", "katalog", "kontrahenci", "zapotrzebowanie",
-                             "projekt", "zd", "zd-usun", "dostawcy", "stan-pozycji" };
+                             "projekt", "zd", "zd-usun", "dostawcy", "stan-pozycji",
+                             "dokumenty" };
 var cicho = trybyMaszynowe.Contains(tryb);
 var trybStan = tryb == "stan";
 var trybProjekt = tryb == "projekt";
@@ -126,6 +128,9 @@ using (sfera)
 
     if (tryb == "kontrahenci")
         return NexoRecon.Katalog.Kontrahenci(sfera, outPath);
+
+    if (tryb == "dokumenty")
+        return NexoRecon.Dokumenty.Uruchom(sfera, limit > 15 ? limit : 200, outPath);
 
     if (tryb == "stan-pozycji")
     {

@@ -69,6 +69,85 @@ def _find_exe():
     return None
 
 
+# Szerokości kolumn okien Subiekta — jeden plik, klucz per okno.
+# Osobno od config.json arkusza głównego, żeby nie mieszać do cudzego pliku.
+SZEROKOSCI_PLIK = r"C:\RMPAK_CLIENT\subiekt_kolumny.json"
+
+
+def wczytaj_szerokosci(klucz):
+    """[int] albo None — zapamiętane szerokości kolumn dla danego okna."""
+    try:
+        if not os.path.isfile(SZEROKOSCI_PLIK):
+            return None
+        with open(SZEROKOSCI_PLIK, encoding="utf-8") as f:
+            return (json.load(f) or {}).get(klucz)
+    except Exception:
+        return None          # szerokości nie są warte psucia startu okna
+
+
+def zapisz_szerokosci(klucz, szerokosci):
+    try:
+        dane = {}
+        if os.path.isfile(SZEROKOSCI_PLIK):
+            try:
+                with open(SZEROKOSCI_PLIK, encoding="utf-8") as f:
+                    dane = json.load(f) or {}
+            except Exception:
+                dane = {}
+        dane[klucz] = [int(x) for x in szerokosci]
+        os.makedirs(os.path.dirname(SZEROKOSCI_PLIK), exist_ok=True)
+        with open(SZEROKOSCI_PLIK, "w", encoding="utf-8") as f:
+            json.dump(dane, f, indent=1)
+    except Exception:
+        pass
+
+
+def podepnij_szerokosci(okno, sheet, klucz, domyslne=None):
+    """Wczytuje zapamiętane szerokości i pilnuje ich zapisu przy zmianie.
+
+    Wzorzec z arkusza głównego RM_BAZA (_on_column_resized): tksheet 7.5.19
+    nie ma zdarzenia „kolumna zmieniła szerokość", więc łapiemy puszczenie
+    myszy na PASKU NAGŁÓWKÓW — tam kończy się przeciąganie. after_idle, bo
+    w momencie ButtonRelease tksheet nie zapisał jeszcze nowej szerokości;
+    porównanie z ostatnim stanem, żeby zwykłe klikanie nie waliło w dysk.
+    """
+    zapisane = wczytaj_szerokosci(klucz)
+    if zapisane:
+        for i, w in enumerate(zapisane):
+            try:
+                sheet.column_width(column=i, width=int(w))
+            except Exception:
+                break        # zmieniła się liczba kolumn — zostają domyślne
+    elif domyslne:
+        for i, w in enumerate(domyslne):
+            try:
+                sheet.column_width(column=i, width=int(w))
+            except Exception:
+                break
+
+    ostatnie = {"v": None}
+
+    def sprawdz():
+        try:
+            obecne = list(sheet.get_column_widths())
+            if obecne and obecne != ostatnie["v"]:
+                ostatnie["v"] = obecne
+                zapisz_szerokosci(klucz, obecne)
+        except Exception:
+            pass
+
+    def po_puszczeniu(_event=None):
+        try:
+            okno.after_idle(sprawdz)
+        except Exception:
+            pass
+
+    try:
+        sheet.CH.bind("<ButtonRelease-1>", po_puszczeniu, add="+")
+    except Exception:
+        pass                 # starsze tksheet — szerokości po prostu się nie zapiszą
+
+
 def jedna_linia(s):
     """Skleja tekst złamany na kilka linii w jedną.
 

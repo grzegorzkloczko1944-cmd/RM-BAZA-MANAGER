@@ -31,7 +31,7 @@ from tkinter import ttk, messagebox
 
 import subiekt_dostawcy as sd
 import subiekt_mapowania
-from subiekt_stany import wysrodkuj
+from subiekt_stany import wysrodkuj, podepnij_szerokosci
 
 try:
     from tksheet import Sheet
@@ -103,6 +103,11 @@ class DostawcyWindow(tk.Toplevel):
         cmb.pack(side=tk.LEFT, pady=6)
         cmb.bind("<<ComboboxSelected>>", lambda _e: self._refill())
 
+        # Czyszczenie filtrów — ta sama ikona i kolor co w arkuszu głównym.
+        tk.Button(f, text="🗑️", command=self._wyczysc_filtry, bg="#95a5a6", fg="white",
+                  font=("Arial", 11, "bold"), width=3, relief=tk.RAISED, bd=2,
+                  cursor="hand2").pack(side=tk.LEFT, padx=(10, 2), pady=4)
+
         # Akcje — WIDOCZNE przyciski, nie schowane w PPM. Działają na
         # zaznaczonych wierszach (kliknięcie w komórkę wystarczy).
         a = tk.Frame(self, bg="#f4ecf7")
@@ -141,8 +146,8 @@ class DostawcyWindow(tk.Toplevel):
                 "column_width_resize", "arrowkeys", "right_click_popup_menu",
                 "rc_select", "copy",
             ))
-            for i, w in enumerate(self.SZEROKOSCI):
-                self.sheet.column_width(column=i, width=w)
+            # Szerokości kolumn zapamiętywane między sesjami, jak w arkuszu głównym.
+            podepnij_szerokosci(self, self.sheet, "dostawcy", self.SZEROKOSCI)
             self.sheet.bind("<Double-Button-1>", self._on_dblclick, add="+")
             self.sheet.popup_menu_add_command("🔗 Powiąż z kontrahentem…", self._powiaz)
             self.sheet.popup_menu_add_command("➕ Załóż w Subiekcie", self._zaloz)
@@ -214,6 +219,13 @@ class DostawcyWindow(tk.Toplevel):
     # ── prezentacja ────────────────────────────────────────────────────────
     KOLEJNOSC = {ST_DO_DECYZJI: 0, ST_DO_POWIAZANIA: 1, ST_DO_ZALOZENIA: 1,
                  ST_POWIAZANY: 2, ST_NIE_FIRMA: 3}
+
+    def _wyczysc_filtry(self):
+        """Filtry do stanu wyjściowego. NIE cofa decyzji (powiązań, „nie firma") —
+        to praca użytkownika, nie ustawienie widoku."""
+        self.search_var.set("")
+        self.filter_var.set(FILTR_WSZYSCY)
+        self._refill()
 
     def _refill(self):
         if not self.sheet:

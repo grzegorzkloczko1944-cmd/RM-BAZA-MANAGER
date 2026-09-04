@@ -822,6 +822,9 @@ class MainWindow(tk.Tk):
                                  command=self.open_subiekt_zamowienia)
         subiekt_menu.add_command(label="🤝 Powiąż dostawców z kontrahentami…",
                                  command=self.open_subiekt_dostawcy)
+        subiekt_menu.add_separator()
+        subiekt_menu.add_command(label="📚 Przegląd dokumentów (ZK / ZD / RW / WZ)…",
+                                 command=self.open_subiekt_dokumenty)
         # Osobna pozycja, bo to jedyna operacja z tego menu, która zapisuje do
         # BOM-u RM_BAZA, a nie do Subiekta. Elementy handlowe nie mają numeru
         # rysunku — ich kod katalogowy bywa wpisany różnie ('UCFL 201' /
@@ -28868,6 +28871,23 @@ class MainWindow(tk.Tk):
                 parent=self)
             return
         subiekt_dostawcy_gui.open_window(self)
+
+    def open_subiekt_dokumenty(self):
+        """Okno „Przegląd dokumentów" (menu 📦 SUBIEKT).
+
+        Lista ZK/ZD/RW/WZ z pozycjami — jedyne miejsce, gdzie widać, co w
+        Subiekcie realnie jest. Tylko odczyt; zapis idzie przez pozostałe okna.
+        Nie wymaga wybranego projektu — pokazuje wszystko, z filtrem po numerze.
+        """
+        try:
+            import subiekt_dokumenty_gui
+        except ImportError as e:
+            messagebox.showerror(
+                "Subiekt",
+                f"Nie znaleziono modułu subiekt_dokumenty_gui.py\n\n{e}",
+                parent=self)
+            return
+        subiekt_dokumenty_gui.open_window(self)
 
     def open_subiekt_scalanie(self):
         """Okno „Scal kody handlowe" (menu 📦 SUBIEKT).

@@ -36,7 +36,8 @@ from tkinter import ttk, messagebox
 
 import subiekt_mapowania
 from subiekt_stany import (_find_exe, blad_mostu, jedna_linia, CONFIG_PATH,
-                           PROJECTS_DIR, looks_like_drawing_no)
+                           PROJECTS_DIR, looks_like_drawing_no,
+                           wczytaj_szerokosci, zapisz_szerokosci)
 
 TIMEOUT_S = 600          # zapis bywa wolniejszy od odczytu — kartoteki idą pojedynczo
 LOG_DIR = r"C:\RMPAK_CLIENT\subiekt_logi"
@@ -524,6 +525,11 @@ class SubiektProjektWindow(tk.Toplevel):
                                        width=3, relief=tk.RAISED, bd=1, cursor="hand2")
         self.btn_typ_multi.pack(side=tk.LEFT, padx=(0, 2), pady=4)
 
+        # Czyszczenie filtrów — ta sama ikona i kolor co w arkuszu głównym.
+        tk.Button(wid, text="🗑️", command=self._wyczysc_filtry, bg="#95a5a6", fg="white",
+                  font=("Arial", 11, "bold"), width=3, relief=tk.RAISED, bd=2,
+                  cursor="hand2").pack(side=tk.LEFT, padx=(10, 2), pady=3)
+
         self.summary = tk.Label(self, text="Wczytywanie…", bg="#ecf0f1", fg="#2c3e50",
                                 font=("Arial", 9), anchor="w", padx=12, pady=6)
         self.summary.pack(side=tk.TOP, fill=tk.X)
@@ -533,12 +539,25 @@ class SubiektProjektWindow(tk.Toplevel):
         self.tree = ttk.Treeview(wrap, columns=[c[0] for c in self.COLS], show="tree headings")
         self.tree.heading("#0", text="Struktura")
         self.tree.column("#0", width=230, stretch=False)
-        for key, label, width, anchor in self.COLS:
+        # Szerokości zapamiętane z poprzedniej sesji mają pierwszeństwo przed
+        # domyślnymi (Treeview, więc obsługa własna — nie tksheet).
+        zapamietane = wczytaj_szerokosci("projekt") or []
+        for i, (key, label, width, anchor) in enumerate(self.COLS):
             self.tree.heading(key, text=label)
+            if i < len(zapamietane):
+                try:
+                    width = int(zapamietane[i])
+                except (TypeError, ValueError):
+                    pass
             # stretch=False dla wszystkich — inaczej kolumny same dopasowują się
             # do okna i poziomy pasek nigdy nie ma czego przewijać, a długie
             # nazwy dalej się urywają.
             self.tree.column(key, width=width, anchor=anchor, stretch=False, minwidth=50)
+        if len(zapamietane) > len(self.COLS):
+            try:
+                self.tree.column("#0", width=int(zapamietane[-1]))
+            except (TypeError, ValueError):
+                pass
         # grid, nie pack: przy pack(side=LEFT, expand=True) drzewo zabiera całą
         # szerokość i pionowy pasek bywa wypychany poza kadr. Dochodzi też pasek
         # POZIOMY — kolumny są szersze niż okno (nazwy po 100 znaków).
@@ -551,6 +570,10 @@ class SubiektProjektWindow(tk.Toplevel):
         wrap.grid_rowconfigure(0, weight=1)
         wrap.grid_columnconfigure(0, weight=1)
 
+        # Zapis szerokości po przeciągnięciu — Treeview nie ma zdarzenia
+        # „kolumna zmieniła szerokość", więc łapiemy puszczenie myszy nad
+        # nagłówkiem (ta sama zasada co w arkuszu głównym RM_BAZA).
+        self.tree.bind("<ButtonRelease-1>", self._zapisz_szerokosci, add="+")
         self.tree.bind("<Button-1>", self._toggle_pozycja, add="+")
         # Długie nazwy („Zaślepka DN50 DIN 32676", „Wąż POLYPAL") nie mieszczą
         # się w kolumnie i urywają się bez śladu. Poszerzanie kolumny nie pomoże
@@ -789,6 +812,44 @@ class SubiektProjektWindow(tk.Toplevel):
                  relief=tk.SOLID, borderwidth=1, font=("Arial", 9),
                  padx=6, pady=3).pack()
         self._tip.geometry(f"+{event.x_root + 16}+{event.y_root + 12}")
+
+    def _zapisz_szerokosci(self, event=None):
+        """Zapamiętuje szerokości kolumn, gdy się zmieniły.
+
+        Wołane przy każdym puszczeniu myszy nad drzewem, więc najpierw
+        porównujemy z ostatnim stanem — inaczej zwykłe klikanie waliłoby
+        w dysk przy każdym wierszu.
+        """
+        def sprawdz():
+            try:
+                if self.tree.identify_region(event.x, event.y) not in ("separator", "heading"):
+                    return          # zwykły klik w wiersz, nie zmiana szerokości
+            except Exception:
+                pass
+            try:
+                obecne = [self.tree.column(c[0], "width") for c in self.COLS]
+                obecne.append(self.tree.column("#0", "width"))
+                if obecne != getattr(self, "_ost_szerokosci", None):
+                    self._ost_szerokosci = obecne
+                    zapisz_szerokosci("projekt", obecne)
+            except Exception:
+                pass
+        try:
+            self.after_idle(sprawdz)
+        except Exception:
+            pass
+
+    def _wyczysc_filtry(self):
+        """Filtry widoku do stanu wyjściowego. NIE rusza zaznaczeń ✓ —
+        to praca użytkownika, nie filtr."""
+        self.filter_typ_var.set(TYP_WSZYSTKO)
+        self.filter_typ_modes = {}
+        self.plaska_var.set(0)
+        try:
+            self.btn_typ_multi.config(bg="#7f8c8d")
+        except Exception:
+            pass
+        self._przerysuj()
 
     def _rozwin(self, otwarte):
         """Rozwija/zwija całe drzewo — bez tego elementy handlowe siedzą

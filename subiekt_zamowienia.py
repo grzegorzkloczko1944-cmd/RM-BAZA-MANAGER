@@ -33,7 +33,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, messagebox
 
-from subiekt_stany import (_find_exe, blad_mostu, wysrodkuj,
+from subiekt_stany import (_find_exe, blad_mostu, wysrodkuj, podepnij_szerokosci,
                            jedna_linia as _jedna_linia, CONFIG_PATH, PROJECTS_DIR)
 
 try:
@@ -653,6 +653,11 @@ class ZamowieniaWindow(tk.Toplevel):
         combo_stan.pack(side=tk.LEFT, pady=6)
         combo_stan.bind("<<ComboboxSelected>>", lambda _e: self._refill())
 
+        # Czyszczenie filtrów — ta sama ikona i kolor co w arkuszu głównym.
+        tk.Button(f, text="🗑️", command=self._wyczysc_filtry, bg="#95a5a6", fg="white",
+                  font=("Arial", 11, "bold"), width=3, relief=tk.RAISED, bd=2,
+                  cursor="hand2").pack(side=tk.LEFT, padx=(10, 2), pady=4)
+
         # ── Zaznaczanie (te same nawyki co w arkuszu głównym)
         s = tk.Frame(self, bg="#f4ecf7")
         s.pack(side=tk.TOP, fill=tk.X)
@@ -708,8 +713,8 @@ class ZamowieniaWindow(tk.Toplevel):
                 "column_width_resize", "arrowkeys", "right_click_popup_menu",
                 "rc_select", "copy", "paste", "edit_cell",
             ))
-            for i, w in enumerate(self.SZEROKOSCI):
-                self.sheet.column_width(column=i, width=w)
+            # Szerokości kolumn zapamiętywane między sesjami, jak w arkuszu głównym.
+            podepnij_szerokosci(self, self.sheet, "zamowienia", self.SZEROKOSCI)
             self.sheet.bind("<<SheetModified>>", self._on_edit)
             self.sheet.bind("<ButtonRelease-1>", self._on_click, add="+")
             self.sheet.bind("<Double-Button-1>", self._on_dblclick, add="+")
@@ -971,6 +976,21 @@ class ZamowieniaWindow(tk.Toplevel):
             dlg.geometry(f"{szer}x{wys}+{max(0, min(bx, sw - szer))}+{max(0, min(by, sh - wys))}")
         except Exception:
             dlg.geometry(f"+{self.winfo_rootx() + 200}+{self.winfo_rooty() + 120}")
+
+    def _wyczysc_filtry(self):
+        """Wszystkie filtry do stanu wyjściowego — łącznie z kafelkiem ✚."""
+        self.search_var.set("")
+        self.filter_dostawca_var.set(FILTR_WSZYSCY)
+        self.filter_projekt_var.set(FILTR_WSZYSCY)
+        self.filter_typ_var.set(TYP_WSZYSTKO)
+        self.filter_stan_var.set(STAN_WSZYSTKIE)
+        self.only_bez_dostawcy_var.set(0)
+        self.filter_typ_modes = {}
+        try:
+            self.btn_typ_multi.config(bg="#7f8c8d")
+        except Exception:
+            pass
+        self._refill()
 
     def _filtruj(self, wiersze):
         szukaj = (self.search_var.get() or "").strip().lower()
