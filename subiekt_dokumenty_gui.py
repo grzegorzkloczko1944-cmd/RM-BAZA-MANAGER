@@ -129,6 +129,12 @@ class DokumentyWindow(tk.Toplevel):
                                      bg="#3498db", fg="white", font=("Arial", 8),
                                      padx=8, pady=2, relief=tk.RAISED, bd=1)
         self.btn_refresh.pack(side=tk.RIGHT, padx=10, pady=8)
+        # Wspólny formularz nowej kartoteki (subiekt_asortyment) — tu bez
+        # callbacku, bo przegląd nic nie buduje; kartoteka pojawi się w
+        # dokumentach dopiero, gdy ktoś jej użyje.
+        tk.Button(top, text="➕ Nowa kartoteka", command=self._nowa_kartoteka,
+                  bg="#27ae60", fg="white", font=("Arial", 8),
+                  padx=8, pady=2, relief=tk.RAISED, bd=1).pack(side=tk.RIGHT, padx=(0, 4), pady=8)
 
         f = tk.Frame(self, bg="#ecf0f1")
         f.pack(side=tk.TOP, fill=tk.X)
@@ -262,6 +268,10 @@ class DokumentyWindow(tk.Toplevel):
         if w_naglowku:
             return True
         return any(szukaj in f"{p['symbol']} {p['nazwa']}".lower() for p in d["pozycje"])
+
+    def _nowa_kartoteka(self):
+        import subiekt_asortyment
+        subiekt_asortyment.okno_nowa_kartoteka(self)
 
     def _wyczysc_filtry(self):
         """Wszystkie filtry do stanu wyjściowego — jedno odświeżenie na końcu."""

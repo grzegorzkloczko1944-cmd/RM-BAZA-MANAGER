@@ -48,7 +48,7 @@ var tryb = args.Length > 0 && !args[0].StartsWith("--") ? args[0].ToLowerInvaria
 //   dokumenty       - lista ZK/ZD/RW/WZ z pozycjami (okno przegladu)
 var trybyMaszynowe = new[] { "stan", "katalog", "kontrahenci", "zapotrzebowanie",
                              "projekt", "zd", "zd-usun", "dostawcy", "stan-pozycji",
-                             "dokumenty" };
+                             "dokumenty", "faktury", "kartoteka" };
 var cicho = trybyMaszynowe.Contains(tryb);
 var trybStan = tryb == "stan";
 var trybProjekt = tryb == "projekt";
@@ -131,6 +131,15 @@ using (sfera)
 
     if (tryb == "dokumenty")
         return NexoRecon.Dokumenty.Uruchom(sfera, limit > 15 ? limit : 200, outPath);
+
+    if (tryb == "faktury")
+        return NexoRecon.Faktury.Uruchom(sfera, limit > 15 ? limit : 60, outPath);
+
+    if (tryb == "kartoteka")
+    {
+        if (planFile == null) { Console.WriteLine("Tryb kartoteka: brak --plan=plik.json"); return 1; }
+        return NexoRecon.Kartoteka.Uruchom(sfera, planFile, outPath, zapisz);
+    }
 
     if (tryb == "stan-pozycji")
     {

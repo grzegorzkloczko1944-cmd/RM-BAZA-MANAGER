@@ -66,13 +66,16 @@ internal static class Katalog
         // Projekcja na Select PRZED ToList — inaczej materializujemy pełne
         // encje Asortyment (z leniwymi kolekcjami stanów), a potrzebne są
         // trzy pola tekstowe.
+        // CenaEwidencyjna dochodzi do projekcji, bo od niej zależy, czy RW
+        // policzy koszt materiału (kartoteka bez ceny → pozycja na RW z zerem).
         var pozycje = asort.Dane.Wszystkie()
-            .Select(a => new { a.Id, a.Symbol, a.Nazwa })
+            .Select(a => new { a.Id, a.Symbol, a.Nazwa, a.CenaEwidencyjna })
             .ToList()
             .Select(a => new Kart(
                 a.Id,
                 (a.Symbol ?? "").Trim(),
-                (a.Nazwa ?? "").Trim()))
+                (a.Nazwa ?? "").Trim(),
+                decimal.Round(a.CenaEwidencyjna, 2)))
             .Where(k => k.Symbol.Length > 0)
             .ToList();
 
@@ -91,5 +94,5 @@ internal static class Katalog
     // Id kartoteki — RM_BAZA pokazuje je obok symbolu, żeby dało się
     // jednoznacznie wskazać pozycję w Subiekcie (symbole bywają zapisane
     // różnie, Id nie).
-    internal record Kart(int Id, string Symbol, string Nazwa);
+    internal record Kart(int Id, string Symbol, string Nazwa, decimal CenaEwidencyjna);
 }

@@ -736,6 +736,11 @@ class ZamowieniaWindow(tk.Toplevel):
                                 font=("Arial", 9, "bold"), padx=14, pady=5,
                                 relief=tk.RAISED, bd=2, state=tk.DISABLED)
         self.btn_zd.pack(side=tk.RIGHT)
+        # Pozycja spoza BOM-u i zapotrzebowania (śruby, materiał pomocniczy) —
+        # wspólny formularz zakłada kartotekę i dorzuca wiersz do listy.
+        tk.Button(bottom, text="➕ Dodaj pozycję spoza BOM", command=self._dodaj_reczna,
+                  bg="#27ae60", fg="white", font=("Arial", 9),
+                  padx=10, pady=5, relief=tk.RAISED, bd=1).pack(side=tk.RIGHT, padx=(0, 8))
         tk.Label(bottom, text="Powstanie osobne ZD dla każdego dostawcy.",
                  fg="#7f8c8d", font=("Arial", 8)).pack(side=tk.LEFT, pady=8)
 
@@ -1116,6 +1121,33 @@ class ZamowieniaWindow(tk.Toplevel):
             + (f"    ⚠ bez dostawcy: {len(bez_dost)}" if bez_dost else "")
             + (f"    🟡 zgadnięci przez automat: {auto}" if auto else "")
         ))
+
+    # ── pozycja ręczna ─────────────────────────────────────────────────────
+    def _dodaj_reczna(self):
+        """Dorzuca do listy pozycję, której nie ma w BOM-ie ani w zapotrzebowaniu."""
+        import subiekt_asortyment
+        projekt = self.project_name.strip().split(" ")[0] if self.project_name else ""
+
+        def po_zapisie(d):
+            sym = d["symbol"].strip()
+            if any(w["symbol"].strip().upper() == sym.upper() for w in self.wszystkie):
+                messagebox.showinfo("Pozycja", f"„{sym}” już jest na liście.", parent=self)
+                return
+            self.wszystkie.append({
+                "sel": True, "symbol": sym, "nazwa": d["nazwa"], "typ": "",
+                "potrzeba": 1.0, "dostepne": 0.0, "zarezerwowane": 0.0, "ze_stanu": 0.0,
+                "stan_min": 0.0, "stan_opt": 0.0, "ilosc": 1.0, "brak_wg_subiekta": 0.0,
+                "jm": d.get("jm") or "szt", "dostawca": "", "zrodlo_dostawcy": "",
+                "dostawca_bom": "", "projekty": projekt, "zk": "", "zd": "",
+                "zd_data": "", "zd_status": "",
+                # Nie ma jej w zapotrzebowaniu Subiekta — most dołoży ją do ZD
+                # wprost, zamiast przez UtworzNaPodstawieZapotrzebowania.
+                "reczna": True,
+            })
+            self._refill()
+            self.status.config(text=f"Dodano „{sym}” — ustaw ilość w kolumnie Kupić i dostawcę (dwuklik).")
+
+        subiekt_asortyment.okno_nowa_kartoteka(self, po_zapisie=po_zapisie)
 
     # ── zaznaczanie i edycja ───────────────────────────────────────────────
     def _on_zaznacz_combo(self, _event=None):
@@ -1501,7 +1533,8 @@ class ZamowieniaWindow(tk.Toplevel):
 
         self.btn_zd.config(state=tk.DISABLED)
         self.status.config(text="Tworzę ZD w Subiekcie — nie zamykaj okna…")
-        poz = [{"symbol": w["symbol"], "ilosc": w["ilosc"], "dostawca": w["dostawca"]}
+        poz = [{"symbol": w["symbol"], "ilosc": w["ilosc"], "dostawca": w["dostawca"],
+                "reczna": bool(w.get("reczna"))}
                for w in zazn]
         threading.Thread(target=self._zd_worker, args=(poz,), daemon=True).start()
 

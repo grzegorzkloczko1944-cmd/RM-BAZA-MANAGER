@@ -41,6 +41,7 @@ internal static class Zd
 
         var zamowieniaZk = sfera.ZamowieniaOdKlientow();
         var zamowienia = sfera.ZamowieniaDoDostawcow();
+        var asort = sfera.Asortymenty();          // do pozycji ręcznych (po symbolu)
         var kroki = new List<Krok>();
         var utworzone = new List<Zam>();
 
@@ -71,6 +72,9 @@ internal static class Zd
 
         var doRealizacji = new List<PozycjaZestawieniaZapotrzebowania>();
         var brakujace = new List<string>();
+        // Pozycje ręczne (spoza BOM-u): (podmiot, symbol, ilość) — dokładane do
+        // ZD wprost, bo w zestawieniu zapotrzebowania ich nie ma.
+        var reczne = new List<(Podmiot Podmiot, string Symbol, decimal Ilosc)>();
 
         foreach (var p in pozycje)
         {
@@ -90,6 +94,16 @@ internal static class Zd
             }
             if (!wgSymbolu.TryGetValue(symbol, out var poz))
             {
+                if (p.Reczna == true)
+                {
+                    // Pozycja dodana ręcznie w oknie — spoza BOM-u, więc nie ma
+                    // jej w zapotrzebowaniu. Trafi do ZD wprost (patrz niżej),
+                    // nie przez UtworzNaPodstawieZapotrzebowania.
+                    reczne.Add((podmiot, symbol, p.Ilosc <= 0 ? 1m : p.Ilosc));
+                    kroki.Add(new Krok("pozycja", symbol,
+                        zapisz ? "do-zamowienia (ręczna)" : "do-utworzenia (ręczna)", nazwaDostawcy));
+                    continue;
+                }
                 // Pozycji nie ma już w zapotrzebowaniu — ktoś ją w międzyczasie
                 // zamówił albo wydał. Lepiej pominąć niż utworzyć duplikat.
                 brakujace.Add(symbol);
@@ -111,7 +125,7 @@ internal static class Zd
                 zapisz ? "do-zamowienia" : "do-utworzenia", nazwaDostawcy));
         }
 
-        if (doRealizacji.Count == 0)
+        if (doRealizacji.Count == 0 && reczne.Count == 0)
         {
             kroki.Add(new Krok("zd", "", "blad", "brak pozycji do zamówienia"));
         }
@@ -121,11 +135,38 @@ internal static class Zd
             {
                 // Sfera sama grupuje po dostawcy I zakłada powiązanie z ZK —
                 // dzięki temu pozycje znikają z zapotrzebowania po zamówieniu.
-                foreach (var zd in zamowienia.UtworzNaPodstawieZapotrzebowania(doRealizacji))
+                var utworzoneZd = doRealizacji.Count > 0
+                    ? zamowienia.UtworzNaPodstawieZapotrzebowania(doRealizacji).ToList()
+                    : new List<InsERT.Moria.Dokumenty.Logistyka.IZamowienieDoDostawcy>();
+
+                // Dostawcy, którzy mają TYLKO pozycje ręczne — dla nich ZD musi
+                // powstać wprost, bo zestawienie nic dla nich nie zwróci.
+                var podmiotyZd = new HashSet<int>(utworzoneZd
+                    .Select(z => Bezp2(() => z.Dane.Podmiot?.Id ?? 0)).Where(i => i > 0));
+                var konfiguracjaZd = sfera.Konfiguracje().DaneDomyslne.ZamowienieDoDostawcy;
+                foreach (var grupa in reczne.GroupBy(r => r.Podmiot.Id))
+                {
+                    if (podmiotyZd.Contains(grupa.Key)) continue;
+                    var nowy = zamowienia.Utworz(konfiguracjaZd);
+                    nowy.Dane.Podmiot = grupa.First().Podmiot;
+                    utworzoneZd.Add(nowy);
+                    podmiotyZd.Add(grupa.Key);
+                }
+
+                foreach (var zd in utworzoneZd)
                 {
                     using (zd)
                     {
                         var dostawca = Bezp(() => zd.Dane.Podmiot?.NazwaSkrocona) ?? "";
+
+                        // Ręczne pozycje tego dostawcy — dopisane do dokumentu.
+                        var idPodm = Bezp2(() => zd.Dane.Podmiot?.Id ?? 0);
+                        foreach (var r in reczne.Where(r => r.Podmiot.Id == idPodm))
+                        {
+                            var enc = asort.Dane.WyszukajPoSymbolu(r.Symbol);
+                            if (enc != null) zd.Pozycje.Dodaj(enc.Symbol, r.Ilosc);
+                            else kroki.Add(new Krok("pozycja", r.Symbol, "blad", "brak kartoteki"));
+                        }
 
                         // ⚠️ UtworzNaPodstawieZapotrzebowania NIE wypełnia daty
                         // wystawienia ani magazynu. Dokument bez daty wystawienia
@@ -180,8 +221,9 @@ internal static class Zd
     }
 
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
+    static int Bezp2(Func<int> f) { try { return f(); } catch { return 0; } }
 
-    internal record PozPlan(string Symbol, decimal Ilosc, string? Dostawca);
+    internal record PozPlan(string Symbol, decimal Ilosc, string? Dostawca, bool? Reczna);
     internal record Plan(List<PozPlan>? Pozycje);
     internal record Zam(string Numer, string Dostawca, int Pozycji);
     internal record Krok(string Rodzaj, string Symbol, string Status, string? Szczegoly);

@@ -825,6 +825,9 @@ class MainWindow(tk.Tk):
         subiekt_menu.add_separator()
         subiekt_menu.add_command(label="📚 Przegląd dokumentów (ZK / ZD / RW / WZ)…",
                                  command=self.open_subiekt_dokumenty)
+        subiekt_menu.add_separator()
+        subiekt_menu.add_command(label="➕ Nowa kartoteka w Subiekcie…",
+                                 command=self.open_subiekt_nowa_kartoteka)
         # Osobna pozycja, bo to jedyna operacja z tego menu, która zapisuje do
         # BOM-u RM_BAZA, a nie do Subiekta. Elementy handlowe nie mają numeru
         # rysunku — ich kod katalogowy bywa wpisany różnie ('UCFL 201' /
@@ -28871,6 +28874,28 @@ class MainWindow(tk.Tk):
                 parent=self)
             return
         subiekt_dostawcy_gui.open_window(self)
+
+    def open_subiekt_nowa_kartoteka(self):
+        """Ręczne założenie kartoteki w Subiekcie (menu 📦 SUBIEKT).
+
+        Wspólny formularz z subiekt_asortyment — ten sam, który wołają okna
+        ZD i projektu. Jeśli w arkuszu zaznaczony jest wiersz, jego numer
+        rysunku i nazwa wchodzą jako podpowiedź.
+        """
+        try:
+            import subiekt_asortyment
+        except ImportError as e:
+            messagebox.showerror("Subiekt", f"Brak modułu subiekt_asortyment.py\n\n{e}", parent=self)
+            return
+        symbol = nazwa = ""
+        try:
+            row = getattr(self, "_selected_row_idx", None)
+            if row is not None:
+                symbol = str(self.sheet.get_cell_data(row, 0) or "").strip()
+                nazwa = str(self.sheet.get_cell_data(row, 1) or "").strip()
+        except Exception:
+            pass
+        subiekt_asortyment.okno_nowa_kartoteka(self, symbol=symbol, nazwa=nazwa)
 
     def open_subiekt_dokumenty(self):
         """Okno „Przegląd dokumentów" (menu 📦 SUBIEKT).

@@ -595,6 +595,13 @@ class SubiektProjektWindow(tk.Toplevel):
                                    bg="#e67e22", fg="white", font=("Arial", 9, "bold"),
                                    padx=14, pady=5, relief=tk.RAISED, bd=2, state=tk.DISABLED)
         self.btn_write.pack(side=tk.RIGHT)
+        # Pozycja spoza BOM-u do ZK — wspólny formularz zakłada kartotekę,
+        # potem plan jest przeliczany, żeby most zobaczył ją jako istniejącą.
+        self.btn_dodaj = tk.Button(bottom, text="➕ Dodaj pozycję spoza BOM",
+                                   command=self._dodaj_reczna, bg="#27ae60", fg="white",
+                                   font=("Arial", 9), padx=10, pady=5, relief=tk.RAISED, bd=1,
+                                   state=tk.DISABLED)
+        self.btn_dodaj.pack(side=tk.RIGHT, padx=(0, 8))
         tk.Label(bottom, text="Podgląd nie zmienia niczego w Subiekcie. Zapis wymaga potwierdzenia.",
                  fg="#7f8c8d", font=("Arial", 8)).pack(side=tk.LEFT, pady=8)
 
@@ -638,6 +645,7 @@ class SubiektProjektWindow(tk.Toplevel):
         self.plan, self.dry, self.items = plan, wynik, items
         self._fill_tree(plan, wynik)
         self.btn_write.config(state=tk.NORMAL)
+        self.btn_dodaj.config(state=tk.NORMAL)
 
         # Domyślnie „komplety + składniki", nie cały BOM: zakładanie wszystkich
         # kartotek naraz to zmiana reguły „kartoteka na żądanie", a kartotek nie
@@ -812,6 +820,29 @@ class SubiektProjektWindow(tk.Toplevel):
                  relief=tk.SOLID, borderwidth=1, font=("Arial", 9),
                  padx=6, pady=3).pack()
         self._tip.geometry(f"+{event.x_root + 16}+{event.y_root + 12}")
+
+    def _dodaj_reczna(self):
+        """Dorzuca do planu pozycję, której nie ma w BOM-ie RM_BAZA."""
+        if not self.plan:
+            return
+        import subiekt_asortyment
+
+        def po_zapisie(d):
+            sym = d["symbol"].strip()
+            if any(p["symbol"].strip().upper() == sym.upper() for p in self.plan["pozycje"]):
+                messagebox.showinfo("Pozycja", f"„{sym}” już jest w planie.", parent=self)
+                return
+            self.plan["pozycje"].append({
+                "symbol": sym, "nazwa": d["nazwa"],
+                "typ": "STANDARD" if d.get("rodzaj") != "komplet" else "Z",
+                "bez_numeru": True, "ilosc": 1.0, "skladniki": [],
+            })
+            # Przeliczenie: kartoteka właśnie powstała, więc suchy przebieg
+            # pokaże ją jako „istnieje" i trafi do ZK bez dodatkowych kroków.
+            self.status.config(text=f"Dodano „{sym}” — przeliczam plan…")
+            self._dry_run_async()
+
+        subiekt_asortyment.okno_nowa_kartoteka(self, po_zapisie=po_zapisie)
 
     def _zapisz_szerokosci(self, event=None):
         """Zapamiętuje szerokości kolumn, gdy się zmieniły.
