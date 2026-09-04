@@ -35,13 +35,18 @@ from datetime import datetime
 from tkinter import ttk, messagebox
 
 import subiekt_mapowania
-from subiekt_stany import _find_exe, CONFIG_PATH, PROJECTS_DIR, looks_like_drawing_no
+from subiekt_stany import (_find_exe, blad_mostu, jedna_linia, CONFIG_PATH,
+                           PROJECTS_DIR, looks_like_drawing_no)
 
 TIMEOUT_S = 600          # zapis bywa wolniejszy od odczytu — kartoteki idą pojedynczo
 LOG_DIR = r"C:\RMPAK_CLIENT\subiekt_logi"
 
 KOMPLETY = ("Z", "ZZ")   # tylko te typy zakładają komplet
 LISCIE = ("X", "XX")     # zwykłe kartoteki
+
+# Filtr typu — nazewnictwo jak w arkuszu głównym („(WSZYSTKO)").
+TYP_WSZYSTKO = "(WSZYSTKO)"
+TYP_BEZ_TYPU = "(bez typu)"
 
 
 # ── Dane projektu ───────────────────────────────────────────────────────────
@@ -82,19 +87,37 @@ def read_project_items(project_id):
                 return v
         return None
 
+
     out, seen = [], set()
+    uzyte_symbole = set()      # przycinanie nazw może dać dwa te same symbole
     for r in rows:
-        nr = first(r[0:3])
-        nr = str(nr).strip() if nr is not None else None
-        if not nr or nr in seen:
-            continue
-        seen.add(nr)
+        nr = jedna_linia(first(r[0:3]))
+        nazwa = jedna_linia(first(r[n0:q0]))
         typ = first(r[c0:])
+        typ = str(typ).strip().upper() if typ else "UNKNOWN"
+
+        # Elementy ZNORMALIZOWANE (łożyska „6004ZZ", paski „5M L2525 szer25",
+        # simmeringi) mają PUSTY numer rysunku — całą tożsamość niosą w nazwie
+        # (89 z 273 pozycji w projekcie 2621). Wcześniej wypadały tu całkowicie
+        # i w oknie widać było tylko 2 znormalizowane zamiast 89
+        # (zgłoszone 04.09.2026). Dla nich kluczem jest nazwa.
+        klucz = nr or nazwa
+        if not klucz or klucz in seen:
+            continue
+        seen.add(klucz)
+        # Symbol kartoteki: numer rysunku, a gdy go nie ma — nazwa przycięta
+        # do długości akceptowanej przez Subiekta (pełna zostaje w Nazwie).
+        symbol = nr or symbol_z_nazwy(nazwa)
+        if not nr and symbol in uzyte_symbole:
+            symbol = rozroznij_symbol(nazwa, uzyte_symbole)
+        uzyte_symbole.add(symbol)
+
         out.append({
-            "nr": nr,
-            "nazwa": str(first(r[n0:q0]) or "").strip(),
+            "nr": symbol,
+            "bez_numeru": not nr,    # do rozpoznania przy zakładaniu kartotek
+            "nazwa": nazwa,
             "qty": first(r[q0:c0]),
-            "typ": str(typ).strip().upper() if typ else "UNKNOWN",
+            "typ": typ,
         })
     return out
 
@@ -159,6 +182,88 @@ def read_tree(project_name):
     return kids, None
 
 
+# Maksymalna długość symbolu kartoteki — TYLE, CO NUMER RYSUNKU.
+#
+# Pomiar 04.09.2026 na 890 numerach z czterech projektów: 11-13 znaków
+# obejmuje 85 % (średnia 12,0; „011-100.05" to 10). Dzięki jednolitej
+# długości kody kreskowe wychodzą tej samej szerokości niezależnie od tego,
+# czy pozycja ma numer rysunku, czy symbol powstał z nazwy.
+#
+# Wpływ na ETYKIETY: w Code 128 znak to ~11 modułów, więc przy 0,33 mm/moduł
+# symbol 13-znakowy daje kod ~59 mm, a 40-znakowy ~157 mm (nie mieści się
+# na żadnej typowej etykiecie).
+#
+# Pełna nazwa zawsze zostaje w polu Nazwa kartoteki — skracamy tylko symbol.
+MAX_SYMBOL = 13
+
+
+def symbol_z_nazwy(nazwa):
+    """Nazwa → symbol kartoteki dla pozycji BEZ numeru rysunku.
+
+    Elementy znormalizowane (łożyska, paski, uszczelki) nie mają numeru
+    rysunku — identyfikuje je nazwa. Ta trafia więc w pole Symbol, ale musi
+    być przycięta i pozbawiona znaków, które w symbolu przeszkadzają
+    (`#`, backtick, `°`, przecinki). Pełna nazwa zostaje w polu Nazwa.
+    """
+    s = " ".join(str(nazwa or "").split())
+    for zly in "`#°":
+        s = s.replace(zly, "")
+    s = s.replace(",", " ").replace("/", "-")
+    s = " ".join(s.split())
+    if len(s) <= MAX_SYMBOL:
+        return s
+
+    # Usuwamy spacje zamiast ciąć na granicy słowa. Przy 13 znakach cięcie
+    # po słowie gubiło rozróżniające końcówki: „5M L2525 szer25" → „5M L2525"
+    # (znika szerokość paska), a trzy różne obejmy dawały „Obejmy TC #2/#3/#4".
+    # Bez spacji mieści się więcej treści: „5ML2525szer25", „ObejmyTCDN100".
+    bez_spacji = s.replace(" ", "")
+    if len(bez_spacji) <= MAX_SYMBOL:
+        return bez_spacji
+
+    # Co odróżnia podobne pozycje, siedzi zwykle na KOŃCU nazwy (średnica,
+    # długość, materiał): „uszczelki TC DN100 EPDM" vs „...DN50 EPDM".
+    # Samo obcięcie z przodu dawało dla wszystkich „uszczelkiTCDN" i licznik
+    # #2/#3/#4, po którym nie da się poznać, o którą chodzi. Dlatego przy
+    # kolizji zostawiamy początek i doklejamy ogon nazwy.
+    poczatek = bez_spacji[:MAX_SYMBOL]
+    return poczatek
+
+
+def rozroznij_symbol(nazwa, uzyte):
+    """Symbol dla nazwy, która po przycięciu koliduje z już użytym.
+
+    Przy 13 znakach nazwy typu „uszczelki TC DN40 EPDM" nie mieszczą się, a
+    to, co je odróżnia (średnica, długość, materiał), siedzi na KOŃCU. Proste
+    obcięcie dawało dla wszystkich „uszczelkiTCDN", a wycinanie środka —
+    nieczytelne „uszczelk0EPDM", gdzie cyfra to przypadkowy fragment.
+
+    Dlatego bierzemy WYRÓŻNIKI: człony nazwy zawierające cyfry (DN40, M6,
+    fi119, L2525) — bo to one zwykle rozróżniają warianty tej samej rzeczy.
+    """
+    pelna = " ".join(str(nazwa or "").split())
+    for zly in "`#°":
+        pelna = pelna.replace(zly, "")
+
+    czlony = pelna.split()
+    z_cyfra = [c for c in czlony if any(z.isdigit() for z in c)]
+    bez_cyfr = [c for c in czlony if c not in z_cyfra]
+
+    # Wyróżniki na końcu, reszta z przodu — tyle, ile się zmieści.
+    ogon = "".join(z_cyfra)[:MAX_SYMBOL - 3]
+    przod = "".join(bez_cyfr).replace(" ", "")
+    kandydat = (przod[:MAX_SYMBOL - len(ogon)] + ogon)[:MAX_SYMBOL]
+    if kandydat and kandydat not in uzyte:
+        return kandydat
+
+    # Nazwy nierozróżnialne po oczyszczeniu — licznik jako ostateczność.
+    baza = (kandydat or symbol_z_nazwy(nazwa))[:MAX_SYMBOL - 2]
+    i = 2
+    while f"{baza}#{i}" in uzyte:
+        i += 1
+    return f"{baza}#{i}"
+
+
 def numer_projektu(project_name, project_id=None):
     """Numer projektu do Uwag na ZK — pierwszy człon nazwy.
 
@@ -182,7 +287,11 @@ def numer_projektu(project_name, project_id=None):
 def build_plan(project_id, project_name, podmiot, tytul):
     """Buduje plan dla mostu + dane do wyświetlenia. Zwraca (plan, items, ostrzezenie)."""
     items = read_project_items(project_id)
-    items = [it for it in items if looks_like_drawing_no(it["nr"])]
+    # Pozycje z numerem rysunku muszą wyglądać jak numer (odsiewa opisy wpisane
+    # w to pole). Pozycje BEZ numeru — znormalizowane, identyfikowane nazwą —
+    # przepuszczamy, bo inaczej wypadłyby łożyska, paski i simmeringi.
+    items = [it for it in items
+             if it.get("bez_numeru") or looks_like_drawing_no(it["nr"])]
     kids, warn = read_tree(project_name)
 
     by_nr = {it["nr"].upper(): it for it in items}
@@ -203,6 +312,9 @@ def build_plan(project_id, project_name, podmiot, tytul):
             "symbol": it["nr"],
             "nazwa": it["nazwa"] or it["nr"],
             "typ": it["typ"],
+            # Pozycje bez numeru rysunku (znormalizowane) mają symbol = nazwa.
+            # Okno pokazuje to wprost, żeby nie wyglądało na błąd danych.
+            "bez_numeru": bool(it.get("bez_numeru")),
             "ilosc": qty,
             "skladniki": skladniki,
         })
@@ -249,8 +361,7 @@ def run_bridge(plan, zapisz=False, timeout=TIMEOUT_S):
         raise RuntimeError(f"Subiekt nie odpowiedział w {timeout} s.")
 
     if proc.returncode != 0 or not os.path.isfile(out_path):
-        msg = (proc.stdout or "").strip() or (proc.stderr or "").strip() or "nieznany błąd"
-        raise RuntimeError(f"Most zwrócił błąd (kod {proc.returncode}):\n\n{msg}")
+        raise RuntimeError(blad_mostu(exe, "projekt", proc, out_path))
 
     with open(out_path, encoding="utf-8") as f:
         return json.load(f)
@@ -299,9 +410,16 @@ class SubiektProjektWindow(tk.Toplevel):
         ("nr",     "Nr rysunku",   150, "w"),
         ("typ",    "Typ",           55, "c"),
         ("qty",    "Ilość",         60, "e"),
-        ("co",     "Co powstanie", 210, "w"),
-        ("nazwa",  "Nazwa",        300, "w"),
+        ("co",     "Co powstanie", 175, "w"),
+        # Nazwy bywają długie („Zaślepka DN50 DIN 32676") — ta kolumna jako
+        # jedyna się rozciąga, resztę treści pokazuje dymek.
+        ("nazwa",  "Nazwa",        420, "w"),
     ]
+
+    # Wartości filtra typu — DOKŁADNIE jak FILTER_CLASS_VALUES w arkuszu
+    # głównym RM_BAZA, razem z LASER / LASER EXPORT (rozwijane do X i XX).
+    TYPY = ["X", "XX", "Z", "ZZ", "STANDARD", "ZNORMALIZOWANE",
+            "LASER", "LASER EXPORT"]
 
     def __init__(self, parent, project_id, project_name=None):
         super().__init__(parent)
@@ -313,10 +431,18 @@ class SubiektProjektWindow(tk.Toplevel):
         # Symbole (UPPER) wybrane do założenia w Subiekcie. Pozycje, które już
         # mają kartotekę, nie są tu trzymane — nie ma czego zakładać.
         self.wybrane = set()
+        self.filter_typ_modes = {}  # {typ: 'show'|'hide'} — kafelek ✚
 
         self.title(f"Załóż projekt w Subiekcie — {self.project_name}")
         self.geometry("1080x680")
-        self.transient(parent)
+        self.minsize(900, 400)
+        # ŚWIADOMIE bez transient(): okno-dziecko z transient dostaje w Windows
+        # tylko przycisk „×", bez minimalizacji i maksymalizacji. To pełnoprawny
+        # arkusz roboczy, więc ma się zachowywać jak okno główne RM_BAZA (— □ ×).
+        try:
+            self.state("zoomed")
+        except tk.TclError:
+            pass
 
         self._build_ui()
         self.after(100, self._dry_run_async)
@@ -364,6 +490,40 @@ class SubiektProjektWindow(tk.Toplevel):
         tk.Label(sel, text="   (klik w kolumnę ✓ przełącza pojedynczą pozycję)",
                  bg="#f4ecf7", fg="#7f8c8d", font=("Arial", 8)).pack(side=tk.LEFT, padx=6)
 
+        # Widok drzewa. Domyślnie otwarty jest tylko pierwszy poziom, więc
+        # elementy handlowe (STANDARD, ZNORMALIZOWANE) siedzą schowane wewnątrz
+        # złożeń — przy 180 pozycjach wyglądało to, jakby ich w ogóle nie było
+        # (zgłoszone 04.09.2026: „nie widzę elementów handlowych").
+        wid = tk.Frame(self, bg="#eaf2f8")
+        wid.pack(side=tk.TOP, fill=tk.X)
+        tk.Label(wid, text="Widok:", bg="#eaf2f8",
+                 font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(12, 6), pady=4)
+        for txt, cmd in (("⊞ Rozwiń wszystko", lambda: self._rozwin(True)),
+                         ("⊟ Zwiń", lambda: self._rozwin(False))):
+            tk.Button(wid, text=txt, command=cmd, bg="#5499c7", fg="white",
+                      font=("Arial", 8), padx=8, pady=1, relief=tk.RAISED, bd=1,
+                      cursor="hand2").pack(side=tk.LEFT, padx=3, pady=4)
+
+        self.plaska_var = tk.IntVar(value=0)
+        tk.Checkbutton(wid, text="płaska lista (bez drzewa)", variable=self.plaska_var,
+                       command=self._przerysuj, bg="#eaf2f8", font=("Arial", 8),
+                       activebackground="#eaf2f8").pack(side=tk.LEFT, padx=(12, 0), pady=4)
+
+        # Filtr typu — skopiowany z okna zamówień (a tam z arkusza głównego).
+        tk.Label(wid, text="Typ:", bg="#eaf2f8", font=("Arial", 9)).pack(side=tk.LEFT, padx=(14, 3), pady=4)
+        self.filter_typ_var = tk.StringVar(value=TYP_WSZYSTKO)
+        self.combo_typ = ttk.Combobox(wid, textvariable=self.filter_typ_var, width=15,
+                                      state="readonly", font=("Arial", 9))
+        self.combo_typ["values"] = [TYP_WSZYSTKO] + self.TYPY + [TYP_BEZ_TYPU]
+        self.combo_typ.pack(side=tk.LEFT, pady=4)
+        self.combo_typ.bind("<<ComboboxSelected>>", lambda _e: self._przerysuj())
+
+        # Kafelek multi-select z negacją — sklejony z combo, jak w arkuszu głównym.
+        self.btn_typ_multi = tk.Button(wid, text="✚", command=self._okno_filtru_typu,
+                                       bg="#7f8c8d", fg="white", font=("Arial", 8),
+                                       width=3, relief=tk.RAISED, bd=1, cursor="hand2")
+        self.btn_typ_multi.pack(side=tk.LEFT, padx=(0, 2), pady=4)
+
         self.summary = tk.Label(self, text="Wczytywanie…", bg="#ecf0f1", fg="#2c3e50",
                                 font=("Arial", 9), anchor="w", padx=12, pady=6)
         self.summary.pack(side=tk.TOP, fill=tk.X)
@@ -375,13 +535,32 @@ class SubiektProjektWindow(tk.Toplevel):
         self.tree.column("#0", width=230, stretch=False)
         for key, label, width, anchor in self.COLS:
             self.tree.heading(key, text=label)
-            self.tree.column(key, width=width, anchor=anchor, stretch=(key == "nazwa"), minwidth=50)
+            # stretch=False dla wszystkich — inaczej kolumny same dopasowują się
+            # do okna i poziomy pasek nigdy nie ma czego przewijać, a długie
+            # nazwy dalej się urywają.
+            self.tree.column(key, width=width, anchor=anchor, stretch=False, minwidth=50)
+        # grid, nie pack: przy pack(side=LEFT, expand=True) drzewo zabiera całą
+        # szerokość i pionowy pasek bywa wypychany poza kadr. Dochodzi też pasek
+        # POZIOMY — kolumny są szersze niż okno (nazwy po 100 znaków).
         vs = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vs.set)
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vs.pack(side=tk.RIGHT, fill=tk.Y)
+        hs = ttk.Scrollbar(wrap, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vs.grid(row=0, column=1, sticky="ns")
+        hs.grid(row=1, column=0, sticky="ew")
+        wrap.grid_rowconfigure(0, weight=1)
+        wrap.grid_columnconfigure(0, weight=1)
 
         self.tree.bind("<Button-1>", self._toggle_pozycja, add="+")
+        # Długie nazwy („Zaślepka DN50 DIN 32676", „Wąż POLYPAL") nie mieszczą
+        # się w kolumnie i urywają się bez śladu. Poszerzanie kolumny nie pomoże
+        # — nazwy bywają bardzo różnej długości. Dymek pokazuje pełną treść,
+        # jak przy selektorze projektu w arkuszu głównym.
+        self._tip = None
+        self._tip_wiersz = None
+        self.tree.bind("<Motion>", self._tooltip_ruch, add="+")
+        self.tree.bind("<Leave>", lambda _e: self._tooltip_ukryj(), add="+")
+
         self.tree.tag_configure("komplet", background="#d4e6f1")   # Z / ZZ
         self.tree.tag_configure("istnieje", background="#d5f5e3")  # jest w Subiekcie
         self.tree.tag_configure("nowy",    background="#fdebd0")   # do założenia
@@ -544,13 +723,230 @@ class SubiektProjektWindow(tk.Toplevel):
             else:
                 niepelne += 1
 
+        # Rozbicie typów — od razu widać, ile jest elementów handlowych,
+        # nawet gdy siedzą schowane w złożeniach.
+        from collections import Counter
+        t = Counter(p["typ"] for p in self.plan["pozycje"])
+        handlowe = t.get("STANDARD", 0) + t.get("ZNORMALIZOWANE", 0)
+        blachy = t.get("X", 0) + t.get("XX", 0)
+        zloz = t.get("Z", 0) + t.get("ZZ", 0)
+
         self.summary.config(text=(
-            f"Pozycji: {len(self.plan['pozycje'])}    "
+            f"Pozycji: {len(self.plan['pozycje'])}"
+            f"  (złożenia {zloz} · blachy {blachy} · handlowe {handlowe})    "
             f"kartoteki — jest: {jest}, do założenia: {do_zal}"
             + (f" (pomijasz {pominiete})" if pominiete else "")
             + f"    komplety: {pelne} pełnych"
             + (f", {niepelne} niepełnych ⚠" if niepelne else "")
         ))
+
+    # ── dymek z pełną treścią uciętej komórki ──────────────────────────────
+    def _tooltip_ukryj(self):
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except Exception:
+                pass
+            self._tip = None
+            self._tip_wiersz = None
+
+    def _tooltip_ruch(self, event):
+        """Dymek nad wierszem: pełny numer i nazwa.
+
+        Kolumny mają stałą szerokość, a nazwy bywają dowolnie długie
+        („Zaślepka DN50 DIN 32676") — bez tego urywają się bez śladu.
+        """
+        try:
+            wiersz = self.tree.identify_row(event.y)
+        except Exception:
+            return
+        if not wiersz:
+            self._tooltip_ukryj()
+            return
+        if wiersz == self._tip_wiersz:
+            return                      # ten sam wiersz — nie migamy dymkiem
+
+        self._tooltip_ukryj()
+        try:
+            v = self.tree.item(wiersz)["values"]
+        except Exception:
+            return
+        if not v or len(v) < 6:
+            return
+        symbol, typ, nazwa = str(v[1]), str(v[2]), str(v[5])
+        if not symbol and not nazwa:
+            return
+
+        tekst = symbol + (f"   [{typ}]" if typ else "")
+        if nazwa and nazwa != symbol:
+            tekst += f"\n{nazwa}"
+
+        self._tip_wiersz = wiersz
+        self._tip = tk.Toplevel(self)
+        self._tip.wm_overrideredirect(True)
+        self._tip.attributes("-topmost", True)
+        tk.Label(self._tip, text=tekst, justify=tk.LEFT, bg="#ffffe0",
+                 relief=tk.SOLID, borderwidth=1, font=("Arial", 9),
+                 padx=6, pady=3).pack()
+        self._tip.geometry(f"+{event.x_root + 16}+{event.y_root + 12}")
+
+    def _rozwin(self, otwarte):
+        """Rozwija/zwija całe drzewo — bez tego elementy handlowe siedzą
+        schowane w złożeniach i wygląda, jakby ich nie było."""
+        def przejdz(node):
+            for c in self.tree.get_children(node):
+                self.tree.item(c, open=otwarte)
+                przejdz(c)
+        przejdz("")
+
+    def _przerysuj(self):
+        """Przebudowa drzewa po zmianie filtra/trybu — bez pytania Subiekta."""
+        if self.plan and self.dry:
+            self._fill_tree(self.plan, self.dry)
+
+    # ── filtr typu (skopiowany z subiekt_zamowienia, a tam z arkusza głównego)
+    @staticmethod
+    def _rozwin_typ(t):
+        """LASER / LASER EXPORT → {X, XX}; „(bez typu)" → {""} — jak w arkuszu głównym."""
+        if t in ("LASER", "LASER EXPORT"):
+            return {"X", "XX"}
+        if t == TYP_BEZ_TYPU:
+            return {""}
+        return {t}
+
+    def _typ_pasuje(self, typ):
+        """Filtr typu: combo (jeden) + kafelek ✚ (wiele, z negacją)."""
+        typ = typ or ""
+        wybrany = self.filter_typ_var.get()
+        if wybrany != TYP_WSZYSTKO and typ not in self._rozwin_typ(wybrany):
+            return False
+
+        # Kafelek działa RÓWNOLEGLE do combo — oba warunki muszą się zgadzać
+        # (ta sama zasada co w arkuszu głównym).
+        pokaz, ukryj = set(), set()
+        for t, tryb in (self.filter_typ_modes or {}).items():
+            (pokaz if tryb == "show" else ukryj).update(self._rozwin_typ(t))
+        if pokaz and typ not in pokaz:
+            return False
+        if typ in ukryj:
+            return False
+        return True
+
+    def _okno_filtru_typu(self):
+        """Kafelek ✚ — dwie kolumny checkboxów (pokaż / ukryj) per typ.
+
+        Odwzorowanie okna „Filtr Typ" z arkusza głównego RM_BAZA
+        (open_class_filter_dialog): ten sam układ, te same nazwy przycisków,
+        filtrowanie NA ŻYWO bez zatwierdzania, okno pod kafelkiem, ponowny
+        klik zamyka.
+        """
+        istniejace = getattr(self, "_okno_typu", None)
+        if istniejace is not None:
+            try:
+                if istniejace.winfo_exists():
+                    istniejace.destroy()
+                    self._okno_typu = None
+                    return
+            except Exception:
+                pass
+
+        dlg = tk.Toplevel(self)
+        self._okno_typu = dlg
+        dlg.title("Filtr Typ")
+        dlg.configure(bg="#2c3e50", bd=1, relief=tk.SOLID)
+
+        tk.Label(dlg, text="Filtr Typ — zaznacz pokaż lub ukryj przy typach:",
+                 bg="#2c3e50", fg="#ecf0f1", font=("Arial", 8), anchor="w"
+                 ).pack(fill=tk.X, padx=8, pady=(6, 4))
+
+        body = tk.Frame(dlg, bg="white")
+        body.pack(fill=tk.BOTH, expand=True, padx=1, pady=(0, 1))
+
+        hdr = tk.Frame(body, bg="#f0f0f0")
+        hdr.pack(fill=tk.X)
+        tk.Label(hdr, text="", bg="#f0f0f0", width=16, anchor="w").pack(side=tk.LEFT)
+        tk.Label(hdr, text="pokaż", bg="#f0f0f0", fg="#27ae60", width=6,
+                 font=("Arial", 8, "bold")).pack(side=tk.LEFT)
+        tk.Label(hdr, text="ukryj", bg="#f0f0f0", fg="#c0392b", width=6,
+                 font=("Arial", 8, "bold")).pack(side=tk.LEFT)
+
+        zmienne = {}
+
+        def wiersz(typ):
+            row = tk.Frame(body, bg="white")
+            row.pack(fill=tk.X, padx=4, pady=1)
+            etykieta = typ + ("  (laser)" if typ in ("LASER", "LASER EXPORT") else "")
+            tk.Label(row, text=etykieta, bg="white", anchor="w", width=16,
+                     font=("Arial", 9)).pack(side=tk.LEFT)
+
+            biezacy = self.filter_typ_modes.get(typ)
+            v_show = tk.IntVar(value=1 if biezacy == "show" else 0)
+            v_hide = tk.IntVar(value=1 if biezacy == "hide" else 0)
+            zmienne[typ] = (v_show, v_hide)
+
+            def zastosuj(t=typ, sv=v_show, hv=v_hide):
+                if sv.get():
+                    self.filter_typ_modes[t] = "show"
+                elif hv.get():
+                    self.filter_typ_modes[t] = "hide"
+                else:
+                    self.filter_typ_modes.pop(t, None)
+                self.btn_typ_multi.config(
+                    bg="#e67e22" if self.filter_typ_modes else "#7f8c8d")
+                self._przerysuj()               # NA ŻYWO, bez zatwierdzania
+
+            def on_show(sv=v_show, hv=v_hide):
+                if sv.get():
+                    hv.set(0)                # pokaż i ukryj wykluczają się
+                zastosuj()
+
+            def on_hide(sv=v_show, hv=v_hide):
+                if hv.get():
+                    sv.set(0)
+                zastosuj()
+
+            tk.Checkbutton(row, variable=v_show, bg="white", width=5,
+                           command=on_show).pack(side=tk.LEFT)
+            tk.Checkbutton(row, variable=v_hide, bg="white", width=5,
+                           command=on_hide).pack(side=tk.LEFT)
+
+        for typ in self.TYPY + [TYP_BEZ_TYPU]:
+            wiersz(typ)
+
+        foot = tk.Frame(dlg, bg="#2c3e50")
+        foot.pack(fill=tk.X, padx=8, pady=(2, 6))
+
+        def resetuj():
+            for sv, hv in zmienne.values():
+                sv.set(0)
+                hv.set(0)
+            self.filter_typ_modes = {}
+            self.btn_typ_multi.config(bg="#7f8c8d")
+            self._przerysuj()
+
+        tk.Button(foot, text="Resetuj", command=resetuj,
+                  font=("Arial", 8)).pack(side=tk.LEFT)
+        tk.Button(foot, text="Zamknij", font=("Arial", 8),
+                  command=lambda: (dlg.destroy(), setattr(self, "_okno_typu", None))
+                  ).pack(side=tk.RIGHT)
+
+        # Pod kafelkiem, z zabezpieczeniem przed wyjściem poza ekran.
+        try:
+            dlg.update_idletasks()
+            szer = dlg.winfo_reqwidth() or 220
+            wys = dlg.winfo_reqheight() or 300
+            bx = self.btn_typ_multi.winfo_rootx()
+            by = self.btn_typ_multi.winfo_rooty() + self.btn_typ_multi.winfo_height()
+            if bx <= 0 and by <= 0:
+                bx, by = self.winfo_pointerx(), self.winfo_pointery() + 10
+            sw, sh = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+            dlg.geometry(f"{szer}x{wys}+{max(0, min(bx, sw - szer))}+{max(0, min(by, sh - wys))}")
+        except Exception:
+            dlg.geometry(f"+{self.winfo_rootx() + 200}+{self.winfo_rooty() + 120}")
+
+    def _filtr_typu_aktywny(self):
+        return (self.filter_typ_var.get() != TYP_WSZYSTKO
+                or bool(self.filter_typ_modes))
 
     def _fill_tree(self, plan, wynik):
         self.tree.delete(*self.tree.get_children())
@@ -603,6 +999,23 @@ class SubiektProjektWindow(tk.Toplevel):
         # Korzenie: ZZ i Z, które same nie są niczyim składnikiem; potem reszta.
         korzenie = [p for p in plan["pozycje"]
                     if p["typ"] in KOMPLETY and p["symbol"].upper() not in dzieci]
+        # Filtr typu albo tryb płaski → jedna lista zamiast hierarchii.
+        # Przy filtrze drzewo i tak by się rozpadło (pokazanie samych STANDARD
+        # bez ich rodziców nie jest drzewem), więc świadomie pokazujemy płasko.
+        if self.plaska_var.get() or self._filtr_typu_aktywny():
+            # Płaska lista nie ma hierarchii, więc kolumna „Struktura" tylko
+            # duplikowałaby numer rysunku i zabierała 230 px nazwom.
+            self.tree.column("#0", width=0, minwidth=0, stretch=False)
+            pasujace = [p for p in plan["pozycje"] if self._typ_pasuje(p["typ"])]
+            for p in sorted(pasujace, key=lambda x: x["symbol"]):
+                self.tree.insert(
+                    "", "end", text="",
+                    values=("", p["symbol"], p["typ"], f"{p['ilosc']:g}", opis(p), p["nazwa"]),
+                    tags=(tag(p),))
+            return
+
+        self.tree.column("#0", width=230, minwidth=80, stretch=False)
+
         for p in sorted(korzenie, key=lambda x: (x["typ"] != "ZZ", x["symbol"])):
             wstaw("", p)
 
@@ -664,6 +1077,22 @@ class SubiektProjektWindow(tk.Toplevel):
                 parent=self)
             return
 
+        # Co się stanie z ZK — most już to ustalił w suchym przebiegu. Bez tego
+        # okno pisało „ZK … — 266 pozycji" nawet wtedy, gdy realnie dopisywało
+        # kilka pozycji do istniejącego dokumentu (zgłoszone 04.09.2026).
+        opis_zk = (f"  • ZK „{self.var_tytul.get().strip()}” dla podmiotu „{podmiot}”\n"
+                   f"    — {len(plan['pozycje'])} pozycji, "
+                   f"Uwagi: „{numer_projektu(self.project_name, self.project_id)}”\n")
+        for k in (self.dry or {}).get("kroki", []):
+            if k.get("Rodzaj") != "zk":
+                continue
+            if k.get("Status") == "do-dopisania":
+                opis_zk = (f"  • istniejące {k['Symbol']} — {k.get('Szczegoly') or 'dopisanie pozycji'}\n"
+                           f"    (nowy dokument NIE powstanie)\n")
+            elif k.get("Status") == "bez-zmian":
+                opis_zk = f"  • {k['Symbol']} — bez zmian, wszystko już na dokumencie\n"
+            break
+
         # Zapis idzie na bazę produkcyjną — potwierdzenie musi mówić wprost,
         # co powstanie i czego (kartotek) nie da się łatwo cofnąć.
         ok = messagebox.askyesno(
@@ -673,9 +1102,8 @@ class SubiektProjektWindow(tk.Toplevel):
             f"  • kartoteki: {nowe}"
             + (f"   (pomijasz {pominiete} pozycji bez kartoteki)" if pominiete else "") + "\n"
             f"  • komplety (Z/ZZ): {kompl}\n"
-            f"  • ZK „{self.var_tytul.get().strip()}” dla podmiotu „{podmiot}”\n"
-            f"    — {len(plan['pozycje'])} pozycji, Uwagi: „{numer_projektu(self.project_name, self.project_id)}”\n\n"
-            f"ZK można w Subiekcie usunąć. Kartotek i kompletów tak łatwo nie —\n"
+            + opis_zk +
+            f"\nZK można w Subiekcie usunąć. Kartotek i kompletów tak łatwo nie —\n"
             f"zostaną w kartotece asortymentu.\n\n"
             f"Zapisać?",
             parent=self, icon="warning")
@@ -711,10 +1139,18 @@ class SubiektProjektWindow(tk.Toplevel):
         log = save_log(self.project_id, wynik)
         zmap = zapisz_mapowania(wynik)
 
+        # Co się stało z ZK — „utworzone" i „dopisano do istniejącego" to dwie
+        # różne informacje, a użytkownik musi wiedzieć, którą dostał.
+        zk_opis = f"ZK: {zk or '—'}"
+        for k in kroki:
+            if k.get("Rodzaj") == "zk" and k.get("Status"):
+                zk_opis = f"ZK {k['Symbol']}: {k['Status']}"
+                break
+
         lines = [
             f"Kartoteki założone: {zal}",
             f"Komplety utworzone: {kom}",
-            f"ZK: {zk or '—'}",
+            zk_opis,
             f"Mapowań zapamiętanych: {zmap}",
         ]
         if bledy:

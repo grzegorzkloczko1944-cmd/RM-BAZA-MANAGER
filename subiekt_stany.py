@@ -69,6 +69,104 @@ def _find_exe():
     return None
 
 
+def jedna_linia(s):
+    """Skleja tekst złamany na kilka linii w jedną.
+
+    BOM-y importowane z Excela mają w komórkach twarde entery — nazwa
+    „CHEM UPE-\\n050" to JEDNA nazwa zawinięta w arkuszu. Bez sklejenia
+    wiersz w tabeli rozjeżdża się na dwie linie, a do Subiekta poszedłby
+    symbol ze znakiem nowej linii w środku (zgłoszone 04.09.2026).
+    Łącznik na końcu linii („CHEM UPE-\\n050") sklejamy bez spacji.
+    """
+    s = str(s or "").replace("\r\n", "\n").replace("\r", "\n")
+    czesci = [c.strip() for c in s.split("\n") if c.strip()]
+    if not czesci:
+        return ""
+    out = czesci[0]
+    for c in czesci[1:]:
+        out += c if out.endswith("-") else " " + c
+    return " ".join(out.split())          # zwielokrotnione spacje i taby
+
+
+def wysrodkuj(okno, rodzic, szerokosc=None, wysokosc=None):
+    """Ustawia okno na środku okna rodzica (nie ekranu).
+
+    Bez tego Tk stawia Toplevel w lewym górnym rogu ekranu — na dwóch
+    monitorach okno potrafi wyskoczyć zupełnie gdzie indziej niż aplikacja.
+    Wołać PO zbudowaniu zawartości, żeby okno znało swój rozmiar.
+    """
+    try:
+        okno.update_idletasks()
+        w = szerokosc or okno.winfo_width() or okno.winfo_reqwidth()
+        h = wysokosc or okno.winfo_height() or okno.winfo_reqheight()
+
+        # Rodzic zmaksymalizowany albo jeszcze nierozłożony — bierzemy ekran.
+        rw, rh = rodzic.winfo_width(), rodzic.winfo_height()
+        if rw > 1 and rh > 1:
+            x = rodzic.winfo_rootx() + (rw - w) // 2
+            y = rodzic.winfo_rooty() + (rh - h) // 2
+        else:
+            x = (okno.winfo_screenwidth() - w) // 2
+            y = (okno.winfo_screenheight() - h) // 2
+
+        # Nie wypychamy okna poza ekran (ujemne współrzędne = tytuł poza kadrem).
+        x = max(0, min(x, okno.winfo_screenwidth() - w))
+        y = max(0, min(y, okno.winfo_screenheight() - h))
+        okno.geometry(f"{w}x{h}+{x}+{y}")
+    except Exception:
+        pass          # pozycjonowanie nie może wywalić okna
+
+
+def most_starszy_niz_zrodla(exe):
+    """(True, opis) jeśli .exe jest starszy niż pliki .cs mostu.
+
+    `bin/` jest w .gitignore, więc po `git pull` przychodzą źródła BEZ
+    binarki. Python woła wtedy tryb, którego stary .exe nie zna — a ten
+    ignoruje nieznany argument i uruchamia domyślne rozpoznanie: kończy się
+    kodem 0, nie tworzy pliku --out, i wypluwa listę magazynów i kartotek.
+    Wygląda to jak problem z połączeniem, choć połączenie działa (zdarzyło
+    się realnie 04.09.2026 po pullu z trybem „katalog").
+    """
+    try:
+        if not exe or not os.path.isfile(exe):
+            return False, ""
+        t_exe = os.path.getmtime(exe)
+        src_dir = os.path.join(_HERE, "subiekt_sfera", "NexoRecon")
+        nowsze = []
+        for nazwa in os.listdir(src_dir):
+            if not nazwa.lower().endswith(".cs"):
+                continue
+            p = os.path.join(src_dir, nazwa)
+            if os.path.getmtime(p) > t_exe + 1:      # 1 s luzu na zaokrąglenia
+                nowsze.append(nazwa)
+        if not nowsze:
+            return False, ""
+        return True, ", ".join(sorted(nowsze))
+    except Exception:
+        return False, ""                              # diagnostyka nie może wywalić wywołania
+
+
+def blad_mostu(exe, tryb, proc, out_path):
+    """Czytelny komunikat błędu wywołania mostu.
+
+    Najpierw sprawdza najczęstszą przyczynę (nieaktualny .exe po pullu),
+    bo surowy wypis rozpoznania myli — wygląda jak błąd Subiekta.
+    """
+    stary, pliki = most_starszy_niz_zrodla(exe)
+    if stary and proc.returncode == 0 and not os.path.isfile(out_path):
+        return (
+            "NIEAKTUALNY MOST — trzeba go przebudować.\n\n"
+            f"NexoRecon.exe nie zna trybu „{tryb}”: jest starszy niż źródła\n"
+            f"({pliki}). Katalog bin/ nie idzie przez gita, więc po „git pull”\n"
+            "binarkę trzeba zbudować u siebie:\n\n"
+            "    cd subiekt_sfera\\NexoRecon\n"
+            "    dotnet build -c Release -nowarn:MSB3277\n\n"
+            "Połączenie z Subiektem jest sprawne — problem jest tylko w wersji mostu."
+        )
+    msg = (proc.stdout or "").strip() or (proc.stderr or "").strip() or "nieznany błąd"
+    return f"Most zwrócił błąd (kod {proc.returncode}):\n\n{msg}"
+
+
 # ── Odczyt numerów rysunków z bazy projektu ─────────────────────────────────
 def read_project_drawings(project_id):
     """[(numer, nazwa, ilosc_bom)] — jedna pozycja na numer rysunku.
@@ -161,8 +259,7 @@ def query_stock(symbols, timeout=TIMEOUT_S):
         raise RuntimeError(f"Subiekt nie odpowiedział w {timeout} s.")
 
     if proc.returncode != 0 or not os.path.isfile(out):
-        msg = (proc.stdout or "").strip() or (proc.stderr or "").strip() or "nieznany błąd"
-        raise RuntimeError(f"Most zwrócił błąd (kod {proc.returncode}):\n\n{msg}")
+        raise RuntimeError(blad_mostu(exe, "stan", proc, out))
 
     with open(out, encoding="utf-8") as f:
         data = json.load(f)

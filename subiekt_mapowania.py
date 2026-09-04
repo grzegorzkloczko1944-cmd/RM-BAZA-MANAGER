@@ -240,6 +240,68 @@ def stats(path=None):
         con.close()
 
 
+# ── Decyzje o dostawcach ────────────────────────────────────────────────────
+# Osobna tabela: które wpisy z kolumny Dostawca RM_BAZA NIE są firmami
+# („GIĘCIE", „spawanie", „?") i nie mają dostawać kontrahenta w Subiekcie.
+# Powiązania „to jest ta firma" nie wymagają tabeli — zapisują się jako NIP
+# w suppliers i następne dopasowanie idzie po NIP-ie. Ale „to nie firma" nie
+# ma gdzie żyć w RM_BAZA, a bez utrwalenia wracało po każdym odświeżeniu.
+
+def ensure_schema_dostawcy(path=None):
+    with _lock:
+        con = _connect(path)
+        try:
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS dostawcy_decyzje (
+                    supplier_id INTEGER PRIMARY KEY,
+                    nazwa       TEXT,
+                    decyzja     TEXT NOT NULL,   -- 'nie-firma'
+                    kto         TEXT,
+                    kiedy       TEXT NOT NULL
+                )
+            """)
+            con.commit()
+        finally:
+            con.close()
+
+
+def dostawcy_nie_firmy(path=None):
+    """{supplier_id} oznaczonych jako „nie firma"."""
+    try:
+        con = _connect(path, readonly=True)
+    except sqlite3.OperationalError:
+        return set()
+    try:
+        return {r[0] for r in con.execute(
+            "SELECT supplier_id FROM dostawcy_decyzje WHERE decyzja = 'nie-firma'")}
+    except sqlite3.OperationalError:
+        return set()
+    finally:
+        con.close()
+
+
+def dostawca_decyzja(supplier_id, nazwa, decyzja, path=None):
+    """Zapisuje decyzję; decyzja=None cofa ją."""
+    ensure_schema_dostawcy(path)
+    with _lock:
+        con = _connect(path)
+        try:
+            if decyzja is None:
+                con.execute("DELETE FROM dostawcy_decyzje WHERE supplier_id = ?", (supplier_id,))
+            else:
+                con.execute("""
+                    INSERT INTO dostawcy_decyzje (supplier_id, nazwa, decyzja, kto, kiedy)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(supplier_id) DO UPDATE SET
+                        decyzja = excluded.decyzja, kto = excluded.kto, kiedy = excluded.kiedy
+                """, (supplier_id, nazwa, decyzja,
+                      os.environ.get("USERNAME") or "?",
+                      datetime.now().isoformat(timespec="seconds")))
+            con.commit()
+        finally:
+            con.close()
+
+
 if __name__ == "__main__":
     ensure_schema()
     print(f"Baza mapowań: {DB_PATH}")

@@ -25,6 +25,40 @@ namespace NexoRecon;
 
 internal static class Katalog
 {
+    /// <summary>
+    /// Tryb "kontrahenci" — lista firm z NIP-ami do powiązania z dostawcami
+    /// RM_BAZA. Osobno od "katalog", bo tam chodzi o asortyment.
+    /// NIP jest kluczem twardym: nazwy pokrywają się tylko w ~55 %
+    /// (pomiar 04.09.2026 na 113 dostawcach RM_BAZA).
+    /// </summary>
+    public static int Kontrahenci(Uchwyt sfera, string? outPath)
+    {
+        // Podmiot ma NazwaSkrocona (właściwość) i NIP — pobieramy przez Bezp(),
+        // bo część pól bywa metodami/rzuca przy pustych danych.
+        var firmy = sfera.Podmioty().Dane.WszystkieFirmy().ToList()
+            .Select(p => new Kontr(
+                p.Id,
+                (Bezp(() => p.NazwaSkrocona) ?? "").Trim(),
+                (Bezp(() => (string?)p.NIP) ?? "").Replace("-", "").Replace(" ", "").Trim()))
+            .Where(k => k.NazwaSkrocona.Length > 0)
+            .OrderBy(k => k.NazwaSkrocona, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var json = JsonSerializer.Serialize(new { kontrahenci = firmy },
+            new JsonSerializerOptions
+            {
+                WriteIndented = false,
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            });
+        if (outPath is null) Console.WriteLine(json);
+        else File.WriteAllText(outPath, json, new UTF8Encoding(false));
+        return 0;
+    }
+
+    internal record Kontr(int Id, string NazwaSkrocona, string NIP);
+
+    static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
+
     public static int Uruchom(Uchwyt sfera, string? outPath)
     {
         var asort = sfera.Asortymenty();

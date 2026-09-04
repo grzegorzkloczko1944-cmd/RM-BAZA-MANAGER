@@ -29,13 +29,32 @@ var szukane = args.Where(a => a.StartsWith("--symbol=")).Select(a => a["--symbol
 // Tryb "stan": wyjscie JSON dla RM_BAZA (patrz Stan.cs). Symbole z pliku
 // (po jednym w linii) albo z --symbol=. Plik, bo BOM potrafi miec setki pozycji,
 // a wiersz polecenia Windows ma limit dlugosci.
-var trybStan = args.Length > 0 && args[0].Equals("stan", StringComparison.OrdinalIgnoreCase);
-// Tryb "projekt": zaklada kartoteki/komplety i ZK (patrz Projekt.cs). Jako jedyny
-// tryb ZAPISUJE - i tylko z jawnym --zapisz; bez niego to suchy przebieg.
-var trybProjekt = args.Length > 0 && args[0].Equals("projekt", StringComparison.OrdinalIgnoreCase);
-// Tryb "katalog": pelna lista {Symbol, Nazwa} do dopasowania po nazwie
-// po stronie Pythona (patrz Katalog.cs). Odczyt, jak "stan".
-var trybKatalog = args.Length > 0 && args[0].Equals("katalog", StringComparison.OrdinalIgnoreCase);
+// Nazwa trybu = pierwszy argument. Jeden string zamiast N zmiennych bool,
+// bo przy kazdym nowym trybie trzeba bylo dopisywac sie w trzech miejscach
+// (deklaracja + dwa warunki "czy wypisywac naglowek") i latwo bylo o tym
+// zapomniec - wtedy tryb maszynowy zasmiecal JSON tekstem powitalnym.
+var tryb = args.Length > 0 && !args[0].StartsWith("--") ? args[0].ToLowerInvariant() : "";
+// Tryby maszynowe: wyjscie czyta Python, wiec zadnych naglowkow na stdout
+// (chyba ze jest --out=, wtedy JSON idzie do pliku i stdout jest wolny).
+//   stan            - punktowe zapytania o symbole + stany (Stan.cs)
+//   katalog         - pelna lista {Symbol, Nazwa} do fuzzy match (Katalog.cs)
+//   zapotrzebowanie - czego brakuje na otwartych ZK (Zapotrzebowanie.cs)
+//   projekt         - kartoteki/komplety/ZK; JEDYNY tryb ZAPISUJACY, i tylko z --zapisz
+//   zd              - zamowienia do dostawcow z wybranych pozycji; ZAPISUJE (--zapisz)
+//   zd-usun         - kasuje ZD o podanych numerach; USUWA (--zapisz)
+//   kontrahenci     - lista firm z NIP-ami (powiazanie dostawcow RM_BAZA)
+//   dostawcy        - zaklada kontrahentow z listy RM_BAZA; ZAPISUJE (--zapisz)
+//   stan-pozycji    - kartoteka + ZK + ZD dla listy symboli (kolumna SUBIEKT)
+var trybyMaszynowe = new[] { "stan", "katalog", "kontrahenci", "zapotrzebowanie",
+                             "projekt", "zd", "zd-usun", "dostawcy", "stan-pozycji" };
+var cicho = trybyMaszynowe.Contains(tryb);
+var trybStan = tryb == "stan";
+var trybProjekt = tryb == "projekt";
+var trybKatalog = tryb == "katalog";
+var trybZapotrzebowanie = tryb == "zapotrzebowanie";
+var trybZd = tryb == "zd";
+var trybZdUsun = tryb == "zd-usun";
+var numeryArg = args.FirstOrDefault(a => a.StartsWith("--numery="))?["--numery=".Length..];
 var planFile = args.FirstOrDefault(a => a.StartsWith("--plan="))?["--plan=".Length..];
 var zapisz = args.Any(a => a.Equals("--zapisz", StringComparison.OrdinalIgnoreCase));
 var symbolsFile = args.FirstOrDefault(a => a.StartsWith("--symbols-file="))?["--symbols-file=".Length..];
@@ -64,7 +83,7 @@ AssemblyLoadContext.Default.Resolving += (ctx, name) =>
     return File.Exists(p) ? ctx.LoadFromAssemblyPath(p) : null;
 };
 
-if ((!trybStan && !trybProjekt && !trybKatalog) || outPath != null)
+if (!cicho || outPath != null)
 {
     Console.WriteLine($"Sfera {DanePolaczenia.WersjaSfery}  ->  serwer={cfg.Serwer}  baza={cfg.Baza}  auth={(cfg.SqlWindowsAuth ? "Windows" : "SQL:" + cfg.SqlUser)}");
     Console.WriteLine($"Proces 64-bit: {Environment.Is64BitProcess}   (Sfera nexo >=57 wymaga 64-bit)");
@@ -94,7 +113,7 @@ using (sfera)
         Console.WriteLine($"BŁĄD: logowanie operatora nexo '{cfg.NexoLogin}' nie powiodło się (login = pole Login w Konfiguracja -> Użytkownicy).");
         return 3;
     }
-    if ((!trybStan && !trybProjekt && !trybKatalog) || outPath != null) Console.WriteLine($"Zalogowano operatora: {cfg.NexoLogin}");
+    if (!cicho || outPath != null) Console.WriteLine($"Zalogowano operatora: {cfg.NexoLogin}");
 
     if (trybStan)
     {
@@ -104,6 +123,37 @@ using (sfera)
 
     if (trybKatalog)
         return NexoRecon.Katalog.Uruchom(sfera, outPath);
+
+    if (tryb == "kontrahenci")
+        return NexoRecon.Katalog.Kontrahenci(sfera, outPath);
+
+    if (tryb == "stan-pozycji")
+    {
+        if (szukane.Count == 0) { Console.WriteLine("Tryb stan-pozycji: brak symboli."); return 1; }
+        var projekt = args.FirstOrDefault(a => a.StartsWith("--projekt="))?["--projekt=".Length..];
+        return NexoRecon.StanPozycji.Uruchom(sfera, szukane, projekt, outPath);
+    }
+
+    if (tryb == "dostawcy")
+    {
+        if (planFile == null) { Console.WriteLine("Tryb dostawcy: brak --plan=plik.json"); return 1; }
+        return NexoRecon.Dostawcy.Uruchom(sfera, planFile, outPath, zapisz);
+    }
+
+    if (trybZapotrzebowanie)
+        return NexoRecon.Zapotrzebowanie.Uruchom(sfera, outPath);
+
+    if (trybZd)
+    {
+        if (planFile == null) { Console.WriteLine("Tryb zd: brak --plan=plik.json"); return 1; }
+        return NexoRecon.Zd.Uruchom(sfera, planFile, outPath, zapisz);
+    }
+
+    if (trybZdUsun)
+    {
+        if (numeryArg == null) { Console.WriteLine("Tryb zd-usun: brak --numery=\"ZD 1/09/2026;...\""); return 1; }
+        return NexoRecon.ZdUsun.Uruchom(sfera, numeryArg, outPath, zapisz);
+    }
 
     if (trybProjekt)
     {
@@ -183,6 +233,20 @@ using (sfera)
         Console.WriteLine($"  firm: {firmy.Count}   kontrahent=true: {firmy.Count(p => Convert.ToBoolean((object?)p.Kontrahent))}   aktywnych: {firmy.Count(p => Convert.ToBoolean((object?)p.Aktywny))}");
         foreach (var p in firmy.OrderBy(p => p.NazwaSkrocona).Take(limit))
             Console.WriteLine($"    {Skroc(p.NazwaSkrocona, 40),-40} NIP={p.NIP,-12} tel={p.Telefon}");
+
+        // Pola tekstowe podmiotu — szukamy miejsca na NIP/notatkę przy
+        // zakładaniu kontrahenta z RM_BAZA (dokumentacja CHM ich nie indeksuje).
+        if (firmy.Count > 0)
+        {
+            var t = firmy[0].GetType();
+            var tekstowe = t.GetProperties()
+                .Where(pi => pi.PropertyType == typeof(string) && pi.CanWrite)
+                .Select(pi => pi.Name)
+                .OrderBy(n => n)
+                .ToList();
+            Console.WriteLine("  zapisywalne pola tekstowe Podmiot:");
+            Console.WriteLine("     " + string.Join(", ", tekstowe));
+        }
     });
 
     // ───────────────────────── DOKUMENTY ─────────────────────────
@@ -210,6 +274,41 @@ void Dokumenty(string tytul, Func<IQueryable<Dokument>> zrodlo, bool pokazPozycj
     var ostatnie = q.OrderByDescending(d => d.DataWprowadzenia).Take(Math.Min(limit, 8)).ToList();
     foreach (var d in ostatnie)
         Console.WriteLine($"    {Bezp(() => d.NumerWewnetrzny?.PelnaSygnatura),-22} wyst={d.DataWydaniaWystawienia:yyyy-MM-dd} wprow={d.DataWprowadzenia:yyyy-MM-dd}  {Skroc(Bezp(() => d.Podmiot?.NazwaSkrocona), 30),-30} mag={Bezp(() => d.Magazyn?.Symbol),-6} poz={Bezp(() => d.Pozycje.Count().ToString())}  status={Bezp(() => d.StatusDokumentu?.Nazwa)}");
+    // Pola „kto/gdzie" — do diagnozy widoczności dokumentu u różnych operatorów.
+    // Szukamy refleksją, bo dokumentacja CHM indeksuje tylko część pól encji
+    // Dokument, a nazwy (Oddzial / Stanowisko / Wystawil) różnią się między
+    // typami dokumentów.
+    if (ostatnie.Count > 0)
+    {
+        var d0 = ostatnie[0];
+        var t = d0.GetType();
+        var interesujace = t.GetProperties()
+            .Where(pi => pi.GetIndexParameters().Length == 0)
+            .Where(pi => pi.Name.Contains("Oddzial", StringComparison.OrdinalIgnoreCase)
+                      || pi.Name.Contains("Stanowisko", StringComparison.OrdinalIgnoreCase)
+                      || pi.Name.Contains("Wystawi", StringComparison.OrdinalIgnoreCase)
+                      || pi.Name.Contains("Operator", StringComparison.OrdinalIgnoreCase)
+                      || pi.Name.Contains("Uzytkownik", StringComparison.OrdinalIgnoreCase)
+                      || pi.Name.Contains("Miejsce", StringComparison.OrdinalIgnoreCase)
+                      || pi.Name.Contains("Wprowadz", StringComparison.OrdinalIgnoreCase)
+                      || pi.Name.Contains("Flaga", StringComparison.OrdinalIgnoreCase)
+                      || pi.Name.Contains("Kategoria", StringComparison.OrdinalIgnoreCase)
+                      || pi.Name.Contains("Podtyp", StringComparison.OrdinalIgnoreCase)
+                      || pi.Name.Contains("Rodzaj", StringComparison.OrdinalIgnoreCase))
+            .Where(pi => !pi.Name.EndsWith("Id", StringComparison.Ordinal))
+            .OrderBy(pi => pi.Name)
+            .ToList();
+        if (interesujace.Count > 0)
+        {
+            Console.WriteLine($"  kontekst {Bezp(() => d0.NumerWewnetrzny?.PelnaSygnatura)}:");
+            foreach (var pi in interesujace)
+            {
+                var v = Bezp(() => pi.GetValue(d0)?.ToString());
+                Console.WriteLine($"     {pi.Name,-28} = {Skroc(v, 55) ?? "(null)"}");
+            }
+        }
+    }
+
     if (pokazPozycje && ostatnie.Count > 0)
     {
         var d = ostatnie[0];

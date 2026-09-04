@@ -85,6 +85,17 @@ def _find_exe():
     return None
 
 
+def blad_mostu(exe, tryb, proc, out_path):
+    """Czytelny komunikat błędu — wspólny z subiekt_stany (m.in. wykrywa
+    nieaktualny .exe po git pullu). Fallback, gdyby importu nie było."""
+    try:
+        from subiekt_stany import blad_mostu as _wspolny
+        return _wspolny(exe, tryb, proc, out_path)
+    except Exception:
+        msg = (proc.stdout or "").strip() or (proc.stderr or "").strip() or "nieznany błąd"
+        return f"Most zwrócił błąd (kod {proc.returncode}):\n\n{msg}"
+
+
 # ── Normalizacja ────────────────────────────────────────────────────────────
 # Różnice, które dziś realnie widać między BOM a Subiektem, to głównie
 # pisownia (wielkość liter, spacje, ogonki), nie parafrazy nazw — plan,
@@ -157,8 +168,7 @@ def pobierz_katalog(timeout=TIMEOUT_S):
         raise RuntimeError(f"Subiekt nie odpowiedział w {timeout} s.")
 
     if proc.returncode != 0 or not os.path.isfile(out):
-        msg = (proc.stdout or "").strip() or (proc.stderr or "").strip() or "nieznany błąd"
-        raise RuntimeError(f"Most zwrócił błąd (kod {proc.returncode}):\n\n{msg}")
+        raise RuntimeError(blad_mostu(exe, "katalog", proc, out))
 
     with open(out, encoding="utf-8") as f:
         data = json.load(f)

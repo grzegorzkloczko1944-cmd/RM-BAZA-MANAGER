@@ -295,6 +295,11 @@ class MainWindow(tk.Tk):
         # POZYCJA: każdy typ ma tryb 'show' (pokaż) albo 'hide' (ukryj); brak
         # klucza = obojętny. Można naraz pokazać X,Z i ukryć ZNORM.
         self.filter_class_modes = {}      # {typ: 'show'|'hide'}
+        # Kolumna SUBIEKT: {nr rysunku: tekst} + szczegóły do dymka/kliknięcia.
+        # W pamięci, nie w bazie — to widok stanu zewnętrznego systemu, który
+        # może się zmienić w każdej chwili; zapisany zestarzałby się po cichu.
+        self._subiekt_stany = {}
+        self._subiekt_szczegoly = {}
         self.filter_supplier_var = tk.StringVar(value=FILTER_SUPPLIER_ALL)
         self.search_var = tk.StringVar(value="")  # Filtr tekstowy (szukaj)
         self._refresh_after_id = None  # debounce dla auto-odświeżania
@@ -805,11 +810,18 @@ class MainWindow(tk.Tk):
             cursor="hand2",
         )
         subiekt_menu = tk.Menu(self.btn_subiekt, tearoff=0)
+        subiekt_menu.add_command(label="🔍 Sprawdź w Subiekcie (kolumna SUBIEKT)",
+                                 command=self.sprawdz_w_subiekcie)
+        subiekt_menu.add_separator()
         subiekt_menu.add_command(label="📦 Stany magazynowe (odczyt)",
                                  command=self.open_subiekt_stany)
         subiekt_menu.add_separator()
         subiekt_menu.add_command(label="🏗 Załóż projekt w Subiekcie (kartoteki + komplety + ZK)…",
                                  command=self.open_subiekt_projekt)
+        subiekt_menu.add_command(label="🛒 Zamówienia do dostawców (ZD)…",
+                                 command=self.open_subiekt_zamowienia)
+        subiekt_menu.add_command(label="🤝 Powiąż dostawców z kontrahentami…",
+                                 command=self.open_subiekt_dostawcy)
         # Osobna pozycja, bo to jedyna operacja z tego menu, która zapisuje do
         # BOM-u RM_BAZA, a nie do Subiekta. Elementy handlowe nie mają numeru
         # rysunku — ich kod katalogowy bywa wpisany różnie ('UCFL 201' /
@@ -1597,7 +1609,7 @@ class MainWindow(tk.Tk):
                 "Ilość BOM", "Ilość (zam.)", "Δ", "Ilość dostarczonych",
                 "Typ", "Materiał", "Grubość [mm]", "Dostawca",
                 "Cena 1szt PLN", "Zamówiono", "Termin dostawy", "ALARM",
-                "Uwagi", "DWF_BIB", "ODEBRANE", "Moduł", "WYCENA", "Casting"
+                "Uwagi", "DWF_BIB", "ODEBRANE", "Moduł", "WYCENA", "SUBIEKT", "Casting"
             ],
             column_width=100,
             height=600,
@@ -6888,7 +6900,10 @@ class MainWindow(tk.Tk):
                 received_flag,                              # 17: ODEBRANE
                 modul_disp,                                 # 18: Moduł
                 wycena_disp,                                # 19: WYCENA (z portalu RM_RFQ)
-                casting_disp                                # 20: Casting
+                # 20: SUBIEKT — wypełniane na żądanie, trzymane w pamięci, żeby
+                # przeżyło odświeżenie arkusza (odczyt z Subiekta trwa ~10 s).
+                self._subiekt_stany.get(item['drawing_no'] or "", ""),
+                casting_disp                                # 21: Casting
             ]
             
             data.append(row)
@@ -8400,6 +8415,11 @@ class MainWindow(tk.Tk):
                 # WYCENA (portal RM_RFQ, tylko podgląd)
                 if col == self.WYCENA_COL:
                     self._open_wycena_dialog(row, col)
+                    return
+
+                # SUBIEKT (tylko podgląd — zapis idzie przez okna z menu)
+                if col == self.SUBIEKT_COL:
+                    self._open_subiekt_dialog(row)
                     return
 
                 # Casting
@@ -22217,7 +22237,11 @@ class MainWindow(tk.Tk):
 
     # Indeksy kolumn arkusza — muszą zgadzać się z listą headers= przy Sheet()
     WYCENA_COL = 19
-    CASTING_COL = 20
+    # Kolumna SUBIEKT — wzorowana na WYCENA (prefiks + kolor + klik po szczegóły).
+    # Trzy stany: kartoteka / w ZK projektu / zamówione u dostawcy (ZD).
+    # Wypełniana NA ŻĄDANIE (przycisk w menu SUBIEKT), bo odczyt trwa ~10 s.
+    SUBIEKT_COL = 20
+    CASTING_COL = 21
 
     # Etykiety statusów RFQ — w bazie portal trzyma angielskie klucze,
     # tu tłumaczymy na PL (userzy nie muszą znać angielskiego).
@@ -28669,6 +28693,181 @@ class MainWindow(tk.Tk):
             project_name = None
 
         subiekt_projekt.open_window(self, self.current_project_id, project_name)
+
+    def open_subiekt_zamowienia(self):
+        """Okno „Zamówienia do dostawców (ZD)" (menu 📦 SUBIEKT).
+
+        Pokazuje braki, które Subiekt sam wyliczył z ZK projektów, i pozwala
+        zrobić z zaznaczonych pozycji ZD. Działa też bez wybranego projektu —
+        wtedy pokazuje braki ze wszystkich otwartych ZK (Sfera i tak nie
+        potrafi zawęzić zapotrzebowania do jednego dokumentu).
+        """
+        try:
+            import subiekt_zamowienia
+        except ImportError as e:
+            messagebox.showerror(
+                "Subiekt",
+                f"Nie znaleziono modułu subiekt_zamowienia.py\n\n{e}",
+                parent=self)
+            return
+
+        project_name = None
+        if self.current_project_id:
+            try:
+                row = self.db_manager.master_con.execute(
+                    "SELECT name FROM projects WHERE project_id = ?",
+                    (self.current_project_id,)).fetchone()
+                if row:
+                    project_name = row[0]
+            except Exception:
+                project_name = None
+
+        subiekt_zamowienia.open_window(self, self.current_project_id, project_name)
+
+    def sprawdz_w_subiekcie(self):
+        """Wypełnia kolumnę SUBIEKT dla bieżącego projektu.
+
+        NA ŻĄDANIE, nie przy otwarciu projektu — odczyt z Subiekta trwa ~10 s
+        i spowalniałby każde przełączenie projektu. Wynik żyje w pamięci do
+        zamknięcia programu; „Sprawdź" ponownie odświeża.
+        """
+        if not self.current_project_id:
+            messagebox.showwarning("Subiekt", "Najpierw wybierz projekt.", parent=self)
+            return
+        try:
+            import subiekt_zamowienia
+        except ImportError as e:
+            messagebox.showerror("Subiekt", f"Brak modułu subiekt_zamowienia.py\n\n{e}",
+                                 parent=self)
+            return
+
+        numery = []
+        for r in range(self.sheet.get_total_rows()):
+            try:
+                nr = str(self.sheet.get_cell_data(r, 0) or "").strip()
+            except Exception:
+                continue
+            if nr:
+                numery.append(nr)
+        if not numery:
+            messagebox.showinfo("Subiekt", "Arkusz jest pusty.", parent=self)
+            return
+
+        projekt = None
+        try:
+            row = self.db_manager.master_con.execute(
+                "SELECT name FROM projects WHERE project_id = ?",
+                (self.current_project_id,)).fetchone()
+            if row and row[0]:
+                projekt = str(row[0]).strip().split(" ")[0]
+        except Exception:
+            pass
+
+        import threading
+
+        def worker():
+            try:
+                dane = subiekt_zamowienia.stan_pozycji(numery, projekt)
+                self.after(0, lambda: gotowe(dane, None))
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda: gotowe(None, err))
+
+        def gotowe(dane, blad):
+            if blad:
+                messagebox.showerror("Subiekt", blad, parent=self)
+                return
+            self._subiekt_szczegoly = dane
+            self._subiekt_stany = {k: subiekt_zamowienia.opis_stanu(v)
+                                   for k, v in dane.items()}
+            self._pokaz_kolumne_subiekt()
+            n_zd = sum(1 for v in dane.values() if v.get("zd"))
+            n_zk = sum(1 for v in dane.values() if v.get("zk") and not v.get("zd"))
+            n_kart = sum(1 for v in dane.values()
+                         if v.get("kartoteka") and not v.get("zk") and not v.get("zd"))
+            n_brak = sum(1 for v in dane.values() if not v.get("kartoteka"))
+            messagebox.showinfo(
+                "Sprawdzono w Subiekcie",
+                f"Pozycji: {len(dane)}\n\n"
+                f"🛒 zamówione (ZD): {n_zd}\n"
+                f"📋 w ZK projektu: {n_zk}\n"
+                f"📇 ma kartotekę: {n_kart}\n"
+                f"⬜ brak w Subiekcie: {n_brak}",
+                parent=self)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _open_subiekt_dialog(self, row):
+        """Szczegóły stanu pozycji w Subiekcie (klik w kolumnę SUBIEKT)."""
+        try:
+            nr = str(self.sheet.get_cell_data(row, 0) or "").strip()
+        except Exception:
+            return
+        if not nr:
+            return
+        info = (self._subiekt_szczegoly or {}).get(nr)
+        if not info:
+            messagebox.showinfo(
+                "Subiekt",
+                f"{nr}\n\nBrak danych — użyj menu 📦 SUBIEKT → „Sprawdź w Subiekcie”.",
+                parent=self)
+            return
+
+        linie = [f"Nr rysunku:  {nr}"]
+        if info.get("nazwa"):
+            linie.append(f"Nazwa w Subiekcie:  {info['nazwa']}")
+        linie.append("")
+        linie.append("Kartoteka:  " + ("jest" if info.get("kartoteka") else "BRAK"))
+        if info.get("kartoteka"):
+            linie.append(f"Stan magazynowy:  {info.get('stan', 0):g}")
+        linie.append("")
+        linie.append("Na liście projektu (ZK):  " +
+                     (f"{info['zk']}   ilość {info.get('ilosc_zk', 0):g}"
+                      if info.get("zk") else "nie"))
+        if info.get("zd"):
+            linie.append(f"Zamówione u dostawcy:  {info['zd']}")
+            linie.append(f"   dostawca:  {info.get('dostawca') or '—'}")
+            linie.append(f"   ilość:  {info.get('ilosc_zd', 0):g}")
+            linie.append(f"   status:  {info.get('status_zd') or '—'}")
+        else:
+            linie.append("Zamówione u dostawcy:  nie")
+        messagebox.showinfo("Subiekt — szczegóły pozycji", "\n".join(linie), parent=self)
+
+    def _pokaz_kolumne_subiekt(self):
+        """Wpisuje stany do kolumny SUBIEKT + koloruje, jak kolumna WYCENA."""
+        kolory = {"🛒": "#d5f5e3", "📋": "#d6eaf8", "📇": "#fdebd0", "⬜": "#eaecee"}
+        for r in range(self.sheet.get_total_rows()):
+            try:
+                nr = str(self.sheet.get_cell_data(r, 0) or "").strip()
+            except Exception:
+                continue
+            txt = self._subiekt_stany.get(nr, "")
+            try:
+                self.sheet.set_cell_data(r, self.SUBIEKT_COL, txt)
+                if txt:
+                    bg = kolory.get(txt[0])
+                    if bg:
+                        self.sheet.highlight_cells(row=r, column=self.SUBIEKT_COL, bg=bg)
+            except Exception:
+                pass
+        self.sheet.refresh()
+
+    def open_subiekt_dostawcy(self):
+        """Okno „Powiąż dostawców z kontrahentami" (menu 📦 SUBIEKT).
+
+        Mapowanie listy dostawców RM_BAZA na kontrahentów Subiekta. Zapisuje
+        w dwie strony: NIP z Subiekta do RM_BAZA (żeby kolejne dopasowania szły
+        po NIP-ie, nie po nazwie) i nowych kontrahentów do Subiekta.
+        """
+        try:
+            import subiekt_dostawcy_gui
+        except ImportError as e:
+            messagebox.showerror(
+                "Subiekt",
+                f"Nie znaleziono modułu subiekt_dostawcy_gui.py\n\n{e}",
+                parent=self)
+            return
+        subiekt_dostawcy_gui.open_window(self)
 
     def open_subiekt_scalanie(self):
         """Okno „Scal kody handlowe" (menu 📦 SUBIEKT).

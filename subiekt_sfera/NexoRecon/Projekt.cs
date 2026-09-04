@@ -167,47 +167,139 @@ internal static class Projekt
         string? zkNumer = null;
         if (!zapisz)
         {
-            var doZk = pozycje.Count(p => !Rowne(p.Typ, "X-skladnik"));
-            kroki.Add(new Krok("zk", plan.Projekt ?? "", "do-utworzenia", $"{doZk} pozycji, podmiot: {plan.Podmiot}"));
+            // Podgląd musi powiedzieć, czy powstanie NOWE ZK, czy dopiszemy do
+            // istniejącego — to zupełnie inny skutek dla użytkownika.
+            DokumentZK? juzJest = null;
+            if (!string.IsNullOrWhiteSpace(plan.Projekt))
+            {
+                try
+                {
+                    juzJest = sfera.ZamowieniaOdKlientow().Dane.Wszystkie()
+                        .OrderByDescending(d => d.DataWprowadzenia).Take(100).ToList()
+                        .FirstOrDefault(d => (Bezp(() => d.Uwagi) ?? "").Trim()
+                                             .Equals(plan.Projekt!.Trim(),
+                                                     StringComparison.OrdinalIgnoreCase));
+                }
+                catch { }
+            }
+
+            if (juzJest != null)
+            {
+                var naZk = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    foreach (var poz in juzJest.Pozycje)
+                    {
+                        var s = Bezp(() => poz.AsortymentAktualny?.Symbol)?.Trim();
+                        if (!string.IsNullOrEmpty(s)) naZk.Add(s!);
+                    }
+                }
+                catch { }
+                var nowe = pozycje.Count(p =>
+                {
+                    var e = Znajdz(p.Symbol);
+                    return e != null && !naZk.Contains((e.Symbol ?? "").Trim());
+                });
+                var numer = Bezp(() => juzJest.NumerWewnetrzny?.PelnaSygnatura) ?? "";
+                kroki.Add(new Krok("zk", numer, "do-dopisania",
+                    $"dopisze {nowe} poz. ({naZk.Count} już na dokumencie)"));
+            }
+            else
+            {
+                var doZk = pozycje.Count;
+                kroki.Add(new Krok("zk", plan.Projekt ?? "", "do-utworzenia",
+                    $"{doZk} pozycji, podmiot: {plan.Podmiot}"));
+            }
         }
         else
         {
             try
             {
                 var zam = sfera.ZamowieniaOdKlientow();
-                using var ob = zam.UtworzZamowienieOdKlienta();
+
+                // Czy ten projekt ma już ZK? Szukamy po Uwagach — tam wpisujemy
+                // numer projektu. Bez tego ponowne uruchomienie robiło DRUGI
+                // dokument dla tego samego projektu i rozbijało zapotrzebowanie
+                // na dwa (zgłoszone 04.09.2026: „chcę dorzucić resztę").
+                DokumentZK? istniejace = null;
+                if (!string.IsNullOrWhiteSpace(plan.Projekt))
+                {
+                    try
+                    {
+                        istniejace = zam.Dane.Wszystkie()
+                            .OrderByDescending(d => d.DataWprowadzenia)
+                            .Take(100).ToList()
+                            .FirstOrDefault(d => (Bezp(() => d.Uwagi) ?? "").Trim()
+                                                 .Equals(plan.Projekt!.Trim(),
+                                                         StringComparison.OrdinalIgnoreCase));
+                    }
+                    catch { }
+                }
 
                 var podm = ZnajdzPodmiot(sfera, plan.Podmiot);
-                if (podm == null)
+                if (podm == null && istniejace == null)
                 {
                     kroki.Add(new Krok("zk", plan.Projekt ?? "", "blad", $"nie znaleziono podmiotu: {plan.Podmiot}"));
                 }
                 else
                 {
-                    ob.Dane.Podmiot = podm;
-                    if (!string.IsNullOrWhiteSpace(plan.Tytul)) ob.Dane.Tytul = plan.Tytul;
-                    // Numer projektu też w Uwagach — tak firma już oznacza dokumenty
-                    // (628 dokumentów z wypełnionym polem Uwagi, sekcja 2.1).
-                    ob.Dane.Uwagi = string.IsNullOrWhiteSpace(plan.Uwagi) ? $"Projekt {plan.Projekt}" : plan.Uwagi;
+                    // Dopisujemy do istniejącego ZK albo tworzymy nowe.
+                    using var ob = istniejace != null
+                        ? zam.Znajdz(istniejace)
+                        : zam.UtworzZamowienieOdKlienta();
+
+                    if (istniejace == null)
+                    {
+                        ob.Dane.Podmiot = podm;
+                        if (!string.IsNullOrWhiteSpace(plan.Tytul)) ob.Dane.Tytul = plan.Tytul;
+                        // Numer projektu też w Uwagach — tak firma już oznacza dokumenty
+                        // (628 dokumentów z wypełnionym polem Uwagi, sekcja 2.1).
+                        ob.Dane.Uwagi = string.IsNullOrWhiteSpace(plan.Uwagi) ? $"Projekt {plan.Projekt}" : plan.Uwagi;
+                    }
+
+                    // Co już jest na dokumencie — nie dublujemy pozycji.
+                    var juzNaZk = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    try
+                    {
+                        foreach (var poz in ob.Dane.Pozycje)
+                        {
+                            var s = Bezp(() => poz.AsortymentAktualny?.Symbol)?.Trim();
+                            if (!string.IsNullOrEmpty(s)) juzNaZk.Add(s!);
+                        }
+                    }
+                    catch { }
 
                     var dodane = 0;
+                    var pominietoJest = 0;
                     foreach (var p in pozycje)
                     {
                         var enc = Znajdz(p.Symbol);
                         if (enc == null) continue;
+                        if (juzNaZk.Contains((enc.Symbol ?? "").Trim())) { pominietoJest++; continue; }
                         // Dodaj(String symbol, Decimal ilosc) — symbol realny z Subiekta,
                         // nie pytany, bo dopasowanie mogło być luźne (spacje/wielkość liter).
                         ob.Pozycje.Dodaj(enc.Symbol, p.Ilosc <= 0 ? 1m : p.Ilosc);
                         dodane++;
                     }
-                    if (!ob.Zapisz())
+
+                    if (dodane == 0 && istniejace != null)
+                    {
+                        zkNumer = Bezp(() => ob.Dane.NumerWewnetrzny?.PelnaSygnatura);
+                        kroki.Add(new Krok("zk", zkNumer ?? "", "bez-zmian",
+                            $"wszystkie {pominietoJest} pozycji już są na dokumencie"));
+                    }
+                    else if (!ob.Zapisz())
                     {
                         kroki.Add(new Krok("zk", plan.Projekt ?? "", "blad", Bezp(ob.PodajBledy)));
                     }
                     else
                     {
                         zkNumer = Bezp(() => ob.Dane.NumerWewnetrzny?.PelnaSygnatura);
-                        kroki.Add(new Krok("zk", zkNumer ?? plan.Projekt ?? "", $"utworzone ({dodane} poz.)", null));
+                        var co = istniejace != null
+                            ? $"dopisano {dodane} poz."
+                              + (pominietoJest > 0 ? $" ({pominietoJest} już było)" : "")
+                            : $"utworzone ({dodane} poz.)";
+                        kroki.Add(new Krok("zk", zkNumer ?? plan.Projekt ?? "", co, null));
                     }
                 }
             }
