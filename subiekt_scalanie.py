@@ -68,10 +68,12 @@ Użycie
     S.znajdz_w_subiekcie('UCFL 201', kat)     # -> kartoteka albo None
 """
 
+import json
 import os
 import re
 import shutil
 import sqlite3
+import time
 from datetime import datetime
 
 from subiekt_stany import PROJECTS_DIR, looks_like_drawing_no
@@ -357,6 +359,61 @@ def wiersze_kodu(project_id, kody, con=None):
     finally:
         if wlasne:
             con.close()
+
+
+def zmien_nazwy(project_id, zmiany, backup_dir=None, tylko_probnie=False, con=None):
+    """Zmienia nazwę wierszy BEZ łączenia ich — każdy zostaje osobno.
+
+    `zmiany` to [(stary_zapis, nowy_zapis)]. W odróżnieniu od scal_wiersze()
+    nic nie znika i nic się nie sumuje: to operacja porządkowa, używana gdy
+    element ma już kartotekę w Subiekcie i chcemy, żeby BOM nazywał go tak
+    samo jak ona.
+
+    Tryby jak w scal_wiersze: z `con` piszemy do lokalnej kopii projektu
+    (arkusz RM_BAZA przy locku), bez `con` — do pliku, i wtedy `backup_dir`
+    jest wymagany.
+    """
+    zmiany = [(s, n) for s, n in zmiany
+              if (s or "").strip() and (n or "").strip() and s != n]
+    raport = {"project_id": project_id, "zmienionych": 0,
+              "szczegoly": [], "backup": None, "probnie": tylko_probnie}
+    if not zmiany:
+        return raport
+
+    wlasne = con is None
+    if wlasne:
+        if not backup_dir:
+            raise ValueError("backup_dir jest wymagany — bez kopii nie zapisujemy.")
+        path = _sciezka(project_id)
+        if not os.path.isfile(path):
+            raise RuntimeError(f"Brak bazy projektu: {path}")
+        if not tylko_probnie:
+            raport["backup"] = _backup(project_id, backup_dir)
+        con = sqlite3.connect(f"file:{path}?mode={'ro' if tylko_probnie else 'rw'}", uri=True)
+        con.row_factory = sqlite3.Row
+
+    try:
+        cols = _kolumny(con)
+        name_cols = [c for c in KOLUMNY_NAZW if c in cols]
+        for stary, nowy in zmiany:
+            for c in name_cols:
+                # TRIM w warunku — zapisy bywają z białymi znakami na końcu.
+                n = con.execute(
+                    f"SELECT COUNT(*) FROM items WHERE TRIM({c}) = ?", (stary,)).fetchone()[0]
+                if not n:
+                    continue
+                if not tylko_probnie:
+                    con.execute(f"UPDATE items SET {c} = ? WHERE TRIM({c}) = ?",
+                                (nowy, stary))
+                raport["zmienionych"] += n
+                raport["szczegoly"].append((c, stary, nowy, n))
+        if not tylko_probnie:
+            con.commit()
+    finally:
+        if wlasne:
+            con.close()
+
+    return raport
 
 
 def scal_wiersze(project_id, wiersze_ids, nazwa_docelowa, backup_dir=None,
@@ -796,14 +853,57 @@ def pozycje_z_podobnymi(project_id, min_prefiks=4, con=None):
 
 
 # ── Dopasowanie do kartoteki Subiekta ───────────────────────────────────────
-def wczytaj_katalog_subiekta():
-    """[{"symbol", "nazwa"}] — kartoteka Subiekta przez most (odczyt).
+# Kopia kartoteki Subiekta na dysku. Pobranie przez most kosztuje ~15 s
+# (start Sfery + przelot po Wszystkie()), a kartoteki zmieniają się rzadko —
+# bez cache każde pierwsze kliknięcie w oknie oznaczało kilkanaście sekund
+# czekania.
+KATALOG_CACHE = os.path.join(os.path.dirname(PROJECTS_DIR), "subiekt_katalog.json")
+KATALOG_WAZNY_H = 12          # po tylu godzinach odświeżamy w tle
 
-    Kosztowne (jeden przelot po Wszystkie()), więc woła się raz i trzyma
-    wynik, nie per pozycja.
+
+def wczytaj_katalog_subiekta(tylko_cache=False, max_wiek_h=None):
+    """[{"id", "symbol", "nazwa"}] — kartoteka Subiekta.
+
+    Domyślnie: cache z dysku, jeśli jest świeży; inaczej pyta most i zapisuje
+    wynik. `tylko_cache=True` nigdy nie sięga do Subiekta — zwraca to, co jest
+    na dysku (albo pustą listę), żeby okno mogło pokazać dane natychmiast.
     """
+    wiek_ok = None
+    try:
+        if os.path.isfile(KATALOG_CACHE):
+            wiek_h = (time.time() - os.path.getmtime(KATALOG_CACHE)) / 3600.0
+            limit = KATALOG_WAZNY_H if max_wiek_h is None else max_wiek_h
+            wiek_ok = wiek_h <= limit
+            if tylko_cache or wiek_ok:
+                with open(KATALOG_CACHE, encoding="utf-8") as f:
+                    dane = json.load(f)
+                if isinstance(dane, list) and dane:
+                    return dane
+    except Exception:
+        pass          # uszkodzony cache nie może blokować pobrania
+
+    if tylko_cache:
+        return []
+
     import subiekt_podobne
-    return subiekt_podobne.pobierz_katalog()
+    katalog = subiekt_podobne.pobierz_katalog()
+    try:
+        os.makedirs(os.path.dirname(KATALOG_CACHE), exist_ok=True)
+        with open(KATALOG_CACHE, "w", encoding="utf-8") as f:
+            json.dump(katalog, f, ensure_ascii=False)
+    except Exception:
+        pass          # brak zapisu cache to strata prędkości, nie błąd
+    return katalog
+
+
+def katalog_wiek_h():
+    """Wiek cache w godzinach albo None, gdy go nie ma."""
+    try:
+        if os.path.isfile(KATALOG_CACHE):
+            return (time.time() - os.path.getmtime(KATALOG_CACHE)) / 3600.0
+    except Exception:
+        pass
+    return None
 
 
 def dopasuj_katalog(kody, katalog):
