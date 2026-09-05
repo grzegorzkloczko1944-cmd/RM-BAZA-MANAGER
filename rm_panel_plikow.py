@@ -458,16 +458,25 @@ class PanelPlikow:
             return
 
         istniejace = it.get("files") or []
-        dodane = 0
+        # Dedup po NAZWIE, nie po ścieżce: „Szukaj dalej…" trafia zwykle w tę
+        # samą kopię rysunku, którą automat znalazł w innym katalogu — dwie
+        # ścieżki, jeden plik. Ręcznie wskazanego pliku (przycisk, drag&drop)
+        # nie odsiewamy, bo user wie, co dokłada.
+        znane = {Path(f).name.lower() for f in istniejace}
+        dodane = []
         for p in sciezki:
-            if p not in istniejace:
-                istniejace.append(p)
-                dodane += 1
+            if p in istniejace:
+                continue
+            if not sprawdzaj_ext and p.name.lower() in znane:
+                continue                    # ta sama nazwa z innego katalogu
+            istniejace.append(p)
+            znane.add(p.name.lower())
+            dodane.append(p)
         it["files"] = istniejace
         if dodane:
             # Nowe pliki zaznaczamy do wysyłki — user dodał je świadomie,
             # więc domyślne odznaczenie byłoby pułapką.
-            for p in sciezki:
+            for p in dodane:
                 self.file_vars.setdefault((it["drawing_no"], str(p)),
                                           tk.BooleanVar(value=True))
             self._rysuj_pliki(it)

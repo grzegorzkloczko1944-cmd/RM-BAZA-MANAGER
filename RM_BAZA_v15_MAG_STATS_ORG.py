@@ -239,6 +239,42 @@ SUPPLIER_EMPTY = "(brak)"
 FILTER_SUPPLIER_ALL = "(WSZYSCY)"
 
 
+def tylko_najnowsze(pliki):
+    """Z kilku KOPII tego samego rysunku zostawia NAJNOWSZĄ.
+
+    Ten sam detal leży zwykle w kilku katalogach naraz (projekt macierzysty,
+    projekt, który go pożyczył, katalog roboczy), a szukanie po numerze
+    rysunku trafia we wszystkie kopie. Do maila szło wtedy po dwa PDF-y,
+    dwa DXF-y i dwa STP o identycznej nazwie — dostawca nie wie, który jest
+    obowiązujący (zgłoszone 05.09.2026: ZD 6/09/2026, 37 załączników,
+    2632-100.14XX po dwa razy każdy format).
+
+    Kopie rozpoznajemy po nazwie pliku (bez wielkości liter) — bo to nazwa,
+    nie ścieżka, mówi „to ten sam rysunek". Zwycięża najpóźniejszy czas
+    modyfikacji; przy remisie (kopiowanie zachowuje mtime) — krótsza
+    ścieżka, czyli kopia bliżej korzenia, mniej zagrzebana w archiwum.
+
+    Kolejność WEJŚCIOWA jest zachowana: funkcja tylko usuwa nadmiar, więc
+    pierwszeństwo katalogów ustalone przez szukanie nie ginie.
+    """
+    grupy = {}
+    for p in (pliki or []):
+        p = Path(p)
+        klucz = p.name.lower()
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            # Plik zniknął albo brak dostępu — przegra z każdą kopią,
+            # którą da się obejrzeć.
+            mtime = float("-inf")
+        rank = (mtime, -len(str(p)))
+        stara = grupy.get(klucz)
+        if stara is None or rank > stara[0]:
+            pozycja = stara[2] if stara else len(grupy)
+            grupy[klucz] = (rank, p, pozycja)
+    return [p for _, p, _ in sorted(grupy.values(), key=lambda g: g[2])]
+
+
 # ============================================================================
 # MAIN WINDOW
 # ============================================================================
@@ -24292,7 +24328,9 @@ class MainWindow(tk.Tk):
                 for f in self._scan_directory_for_file(proj_dir, drawing_no, ext, excluded):
                     if f not in found:
                         found.append(f)
-        return found
+        # Ten sam rysunek leży w kilku katalogach projektów — bierzemy tylko
+        # najnowszą kopię każdej nazwy, inaczej do maila idą duplikaty.
+        return tylko_najnowsze(found)
 
     def _rfq_deep_scan(self, root: Path, drawing_no: str, title: str, parent=None) -> list:
         """Głębokie szukanie plików rysunku w całym drzewie (serwer B:\\ albo V:\\).
@@ -24410,7 +24448,7 @@ class MainWindow(tk.Tk):
         if scan_error[0]:
             messagebox.showerror("Skanowanie", scan_error[0], parent=parent or self)
             return []
-        return [] if cancelled[0] else found_files
+        return [] if cancelled[0] else tylko_najnowsze(found_files)
 
     def _rfq_deep_scan_wiele(self, root: Path, numery: list, title: str, parent=None) -> dict:
         """Jedno przejście po drzewie, WIELE numerów rysunku naraz.
@@ -24555,7 +24593,11 @@ class MainWindow(tk.Tk):
         if scan_error[0]:
             messagebox.showerror("Skanowanie", scan_error[0], parent=parent or self)
             return {}
-        return {} if cancelled[0] else wynik
+        if cancelled[0]:
+            return {}
+        # Skan idzie po CAŁYM drzewie, więc kopii tego samego rysunku bywa
+        # tu najwięcej — zostawiamy po jednej, najnowszej.
+        return {numer: tylko_najnowsze(pliki) for numer, pliki in wynik.items()}
 
     def _ask_rfq_scan_source(self, drawing_no: str, parent=None):
         """Pyta, gdzie szukać dalej: 'library' (B:\\), 'server' (cały V:\\)
