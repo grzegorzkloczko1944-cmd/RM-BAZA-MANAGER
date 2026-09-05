@@ -191,11 +191,63 @@ def zapisz_wyslanie(numer_zd, adresat, nadawca, zalacznikow, termin=None, tryb="
 # sieci go nie gubią, następny lock nałoży go ponownie. Nakładanie jest
 # idempotentne, więc powtórka nic nie psuje.
 
-def odloz_zamowienia(bom_refy, termin, numer_zd):
+def supplier_id_dostawcy(nazwa_subiekt, nip=None):
+    """supplier_id z RM_BAZA dla dostawcy z ZD (patrz dostawca_rm_baza)."""
+    return dostawca_rm_baza(nazwa_subiekt, nip)[0]
+
+
+def dostawca_rm_baza(nazwa_subiekt, nip=None):
+    """(supplier_id, nazwa) z listy dostawców RM_BAZA dla dostawcy z ZD.
+    (None, "") gdy nie da się ustalić.
+
+    Nazwa jest ta z RM_BAZA („QUAY"), nie z Subiekta („„QUAY" BIURO
+    HANDLOWO-USŁUGOWE SPÓŁKA…") — to ją widać w arkuszu i to ją pokazujemy
+    użytkownikowi, żeby wiedział, co dokładnie wejdzie do kolumny Dostawca.
+
+    Najpierw NIP (z kartoteki kontrahentów Subiekta) — jedyny pewny klucz;
+    nazwy w Subiekcie są pełne („… SPÓŁKA Z OGRANICZONĄ…"), w RM_BAZA
+    skrócone („QUAY"). Awaryjnie nazwa tą samą regułą co adres e-mail
+    (_uprosc_nazwe: dokładnie, potem zawieranie). Gdy nic nie pasuje —
+    dostawcy w arkuszu NIE ruszamy: lepiej zostawić starego niż wpisać złego.
+    """
+    import sqlite3
+    try:
+        from subiekt_zamowienia import _uprosc_nazwe
+        con = sqlite3.connect(f"file:{_master()}?mode=ro", uri=True, timeout=10)
+        try:
+            if nip:
+                r = con.execute(
+                    "SELECT supplier_id, name FROM suppliers WHERE is_active=1"
+                    " AND REPLACE(REPLACE(COALESCE(nip,''),'-',''),' ','')=?",
+                    (str(nip).replace("-", "").replace(" ", ""),)).fetchone()
+                if r:
+                    return r[0], r[1] or ""
+            cel = _uprosc_nazwe(nazwa_subiekt or "")
+            if not cel:
+                return None, ""
+            wiersze = con.execute(
+                "SELECT supplier_id, name FROM suppliers WHERE is_active=1").fetchall()
+        finally:
+            con.close()
+    except Exception as e:
+        print(f"⚠️  Nie ustalono dostawcy RM_BAZA dla „{nazwa_subiekt}”: {e}")
+        return None, ""
+    for sid, name in wiersze:
+        if _uprosc_nazwe(name or "") == cel:
+            return sid, name or ""
+    luzne = [(sid, name or "") for sid, name in wiersze
+             if (u := _uprosc_nazwe(name or "")) and (u in cel or cel in u)]
+    return luzne[0] if len(luzne) == 1 else (None, "")   # kilka kandydatów = nie zgadujemy
+
+
+def odloz_zamowienia(bom_refy, termin, numer_zd, supplier_id=None):
     """Zapisuje do master, które pozycje BOM-u poszły w ZD i z jakim terminem.
 
     `bom_refy`: [(project_id, item_id)]. Klucz (project_id, item_id) —
     ponowna wysyłka tego samego ZD nie mnoży wpisów, obowiązuje ostatni termin.
+    `supplier_id`: dostawca z ZD (RM_BAZA) — trafia do kolumny Dostawca
+    w arkuszu, bo to ZD mówi, u kogo naprawdę zamówiono; BOM mógł mieć
+    innego (zgłoszone 05.09.2026). None = nie ruszać.
     Zwraca liczbę odłożonych.
     """
     import sqlite3
@@ -214,11 +266,16 @@ def odloz_zamowienia(bom_refy, termin, numer_zd):
                     kiedy       TEXT NOT NULL,
                     PRIMARY KEY (project_id, item_id)
                 )""")
+            # Kolumna doszła później (05.09.2026) — tabela mogła już istnieć.
+            if "supplier_id" not in {r[1] for r in con.execute(
+                    "PRAGMA table_info(zd_zamowione_pozycje)")}:
+                con.execute("ALTER TABLE zd_zamowione_pozycje ADD COLUMN supplier_id INTEGER")
             teraz = datetime.now().isoformat(timespec="seconds")
             con.executemany(
                 "INSERT OR REPLACE INTO zd_zamowione_pozycje"
-                " (project_id, item_id, termin, numer_zd, kiedy) VALUES (?,?,?,?,?)",
-                [(pid, iid, str(termin) if termin else None, numer_zd, teraz)
+                " (project_id, item_id, termin, numer_zd, kiedy, supplier_id)"
+                " VALUES (?,?,?,?,?,?)",
+                [(pid, iid, str(termin) if termin else None, numer_zd, teraz, supplier_id)
                  for pid, iid in refy])
             # Sprzątanie przy okazji — to jedyne miejsce, które i tak otwiera
             # master do zapisu; osobny cykl sprzątający byłby przerostem formy.
@@ -262,9 +319,15 @@ def naloz_zamowienia(project_con, project_id, log=None):
             if not m.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
                              " AND name='zd_zamowione_pozycje'").fetchone():
                 return 0
+            ma_dostawce = "supplier_id" in {r[1] for r in m.execute(
+                "PRAGMA table_info(zd_zamowione_pozycje)")}
             wiersze = m.execute(
-                "SELECT item_id, termin, kiedy FROM zd_zamowione_pozycje"
-                " WHERE project_id=?", (project_id,)).fetchall()
+                "SELECT item_id, termin, kiedy, "
+                + ("supplier_id" if ma_dostawce else "NULL")
+                + " FROM zd_zamowione_pozycje WHERE project_id=?",
+                (project_id,)).fetchall()
+            # Nazwy do audytu — historia pozycji pokazuje nazwy, nie id.
+            nazwy_dost = dict(m.execute("SELECT supplier_id, name FROM suppliers"))
         finally:
             m.close()
     except Exception as e:
@@ -276,10 +339,10 @@ def naloz_zamowienia(project_con, project_id, log=None):
     teraz = datetime.now().isoformat(timespec="seconds")
     ile = 0
     try:
-        for item_id, termin, kiedy in wiersze:
+        for item_id, termin, kiedy, supplier_id in wiersze:
             stare = project_con.execute(
-                "SELECT ordered_flag, ordered_at, deadline_date FROM items WHERE id=?",
-                (item_id,)).fetchone()
+                "SELECT ordered_flag, ordered_at, deadline_date, supplier_id"
+                " FROM items WHERE id=?", (item_id,)).fetchone()
             if stare is None:
                 continue                # pozycja usunięta z BOM-u po wysyłce
             data_zam = (kiedy or teraz)[:10]
@@ -291,16 +354,27 @@ def naloz_zamowienia(project_con, project_id, log=None):
                 project_con.execute(
                     "UPDATE items SET ordered_flag=1, ordered_at=?, updated_at=?"
                     " WHERE id=?", (data_zam, teraz, item_id))
+            # DOSTAWCA z ZD nadpisuje BOM — to zamówienie mówi, u kogo
+            # naprawdę kupiono; dotąd arkusz pokazywał starego i dane się
+            # rozjeżdżały (ostrzeżenie z 978ed60 przestaje być potrzebne).
+            zmiana_dost = supplier_id is not None and supplier_id != stare[3]
+            if zmiana_dost:
+                project_con.execute(
+                    "UPDATE items SET supplier_id=?, updated_at=? WHERE id=?",
+                    (supplier_id, teraz, item_id))
             ile += 1
             # Audyt: „Zamówiono" tylko gdy faktycznie się zmieniło (powtórka po
-            # Anuluj nie dubluje wpisów), ale zmianę TERMINU logujemy zawsze —
-            # ponowna wysyłka z nowym terminem to realna zmiana w historii.
+            # Anuluj nie dubluje wpisów), ale zmianę TERMINU i DOSTAWCY logujemy
+            # zawsze — ponowna wysyłka z nowym terminem to realna zmiana.
             if callable(log):
                 try:
                     if not int(stare[0] or 0):
                         log(item_id, 'EDIT', 'ordered_at', stare[1], data_zam)
                     if termin and stare[2] != termin:
                         log(item_id, 'EDIT', 'deadline_date', stare[2], termin)
+                    if zmiana_dost:
+                        log(item_id, 'EDIT', 'supplier_id',
+                            nazwy_dost.get(stare[3]), nazwy_dost.get(supplier_id))
                 except Exception:
                     pass                # audyt to dodatek, nie warunek zapisu
         project_con.commit()
@@ -1150,7 +1224,13 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
         # „Zamówiono" + termin → do master; arkusz nałoży to na projekt przy
         # najbliższym locku. Gdy projekt jest przejęty TERAZ u nas, nakładamy
         # od razu — inaczej wysyłamy z własnego projektu i nic nie widzimy.
-        odlozone = odloz_zamowienia(self._bom_refy, termin, self.numer_zd)
+        # Dostawca z ZD → kolumna Dostawca w arkuszu. NIP z kartoteki Subiekta
+        # (ustalony w _zbierz_worker), awaryjnie nazwa.
+        sid, nazwa_rm = dostawca_rm_baza(self.dostawca, self.nip_dostawcy)
+        if sid is None and self.dostawca:
+            print(f"⚠️  Dostawca „{self.dostawca}” nie pasuje do żadnego w RM_BAZA "
+                  "— kolumna Dostawca w arkuszu zostaje bez zmian.")
+        odlozone = odloz_zamowienia(self._bom_refy, termin, self.numer_zd, sid)
         if odlozone:
             arkusz = getattr(self.master, "master", None)   # okno ZD → zamówienia → arkusz
             pid = getattr(arkusz, "current_project_id", None)
@@ -1176,6 +1256,8 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
                           + "\nLock na projekt, z którego pochodzą.")
             if termin:
                 tresc += f"\n\nTermin dostawy: {termin}"
+            if sid is not None:
+                tresc += f"\nDostawca w arkuszu: {nazwa_rm}"
             messagebox.showinfo("Zamówiono", tresc, parent=self)
 
         self.status.config(text="Wiadomość otwarta w programie pocztowym — wyślij ją stamtąd.")

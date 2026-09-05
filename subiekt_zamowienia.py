@@ -2190,19 +2190,21 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         dlg.grab_set()
         wysrodkuj(dlg, self, 520, 505)   # +75 px na ramkę ostrzeżenia (3 linie)
 
-        # ⚠️ Wybór stąd trafia DO ZD W SUBIEKCIE (przez _utworz_zd → most), więc
-        # zapisuje się na trwałe. Nie wraca natomiast do BOM-u projektu
-        # w RM_BAZA — i stąd rozjazd: zamówione jest u jednego dostawcy,
-        # a arkusz główny nadal pokazuje poprzedniego (zgłoszone 05.09.2026).
+        # Wybór stąd trafia DO ZD W SUBIEKCIE (przez _utworz_zd → most). Do
+        # arkusza RM_BAZA wraca dopiero PO WYSŁANIU ZD — razem z „Zamówiono"
+        # i terminem (zd_zamowione_pozycje, nakładane przy locku projektu).
+        # Do tego czasu arkusz pokazuje poprzedniego dostawcę — stąd
+        # informacja, nie już czerwone ostrzeżenie (złagodzone 05.09.2026;
+        # wcześniej dostawca nie wracał wcale).
         ostrz = tk.Frame(dlg, bg="#fdf2e0")
         ostrz.pack(fill=tk.X, padx=14, pady=(10, 0))
-        tk.Label(ostrz, text="⚠ UŻYWAĆ AWARYJNIE — dostawcę ustawia się w arkuszu RM_BAZA.",
-                 bg="#fdf2e0", fg="#b3261e", font=("Arial", 9, "bold"),
+        tk.Label(ostrz, text="ℹ Dostawca wybrany tutaj trafi do ZD w Subiekcie.",
+                 bg="#fdf2e0", fg="#8a5a00", font=("Arial", 9, "bold"),
                  anchor="w").pack(fill=tk.X, padx=8, pady=(5, 0))
-        tk.Label(ostrz, text="Wybór stąd zapisze się w ZD w Subiekcie na stałe, ale NIE "
-                             "wróci do BOM-u\nprojektu — arkusz RM_BAZA będzie dalej "
-                             "pokazywał poprzedniego dostawcę.\nŻeby dane się zgadzały, "
-                             "popraw go także w arkuszu (kolumna Dostawca).",
+        tk.Label(ostrz, text="Do arkusza projektu (kolumna Dostawca) wróci razem "
+                             "z „Zamówiono” i terminem\ndopiero po WYSŁANIU zamówienia — "
+                             "do tego czasu arkusz pokazuje poprzedniego.\n"
+                             "Na stałe dostawcę ustawia się w arkuszu RM_BAZA.",
                  bg="#fdf2e0", fg="#8a5a00", font=("Arial", 8), justify="left",
                  anchor="w").pack(fill=tk.X, padx=8, pady=(0, 5))
 
