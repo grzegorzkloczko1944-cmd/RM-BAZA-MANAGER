@@ -130,7 +130,13 @@ internal static class Rw
             }
         }
 
-        var json = JsonSerializer.Serialize(new { zapisano = zapisz, numer, kroki },
+        // zapisano = czy RW FAKTYCZNIE powstalo, nie "czy proszono o zapis".
+        // Wczesniej szlo tu samo `zapisz`, wiec odrzucony zapis raportowal
+        // zapisano=true przy numer=null. GUI ratowalo sie sprawdzaniem numeru,
+        // ale kazdy inny konsument tego JSON-a (skrypt, log, przyszle okno)
+        // wyciagnalby z tego, ze RW przeszlo.
+        var json = JsonSerializer.Serialize(
+            new { zapisano = zapisz && !string.IsNullOrEmpty(numer), numer, kroki },
             new JsonSerializerOptions
             {
                 WriteIndented = true,
