@@ -19,6 +19,7 @@ ręcznie (katalog otwieramy w Eksploratorze).
 """
 
 import os
+import re
 import subprocess
 import threading
 import tkinter as tk
@@ -26,6 +27,7 @@ import urllib.parse
 from pathlib import Path
 from tkinter import ttk, messagebox
 
+import rm_panel_plikow
 from subiekt_stany import _find_exe, blad_mostu, wysrodkuj
 
 TIMEOUT_S = 180
@@ -69,6 +71,31 @@ def eksportuj_pdf(numery, katalog, timeout=TIMEOUT_S):
     return wynik, bledy
 
 
+#: Format numeru rysunku RMPAK: prefiks-KKK.NN (+ opcjonalny sufiks X/XX/Z/ZZ).
+#: Wzięty wprost z RM_IMPORT (RE_RMPAK_BASE w RM_IMPORT_V17_MOD.py) — to ta
+#: sama definicja, której używa import BOM-u, więc oba narzędzia rozumieją
+#: „numer rysunku" identycznie.
+RE_NUMER_RYSUNKU = re.compile(r"^[A-Za-z0-9]{2,8}-\d{3}\.\d{2}")
+
+
+def _ma_numer_rysunku(symbol):
+    """Czy symbol jest numerem rysunku RMPAK?
+
+    Decyduje FORMAT numeru, nie jego „wygląd". Wcześniejsza reguła („ma
+    myślnik i cyfrę") uznawała za rysunki kody handlowe — 'A-8-10-10',
+    'DSNU-25-100-P', 'GS14 14-16' — i panel przeczesywał dla nich serwer,
+    kończąc czerwonym „nie znaleziono plików" (zgłoszone 05.09.2026).
+
+    Obowiązkowa jest część `.NN` po trzycyfrowym katalogu; to ona odróżnia
+    '2627-100.01' od 'A-8-10-10'. Sprawdzone na 24 realnych symbolach
+    (10 produkowanych, 14 handlowych) — wszystkie sklasyfikowane poprawnie.
+    """
+    s = (symbol or "").strip()
+    # Spacje wokół myślnika bywają wklejone z Excela ('2556 - 100.07XX').
+    s = re.sub(r"\s*-\s*", "-", re.sub(r"\s+", " ", s))
+    return bool(RE_NUMER_RYSUNKU.match(s))
+
+
 def otworz_maila(do, temat, tresc, zalaczniki, dw=""):
     """
     Otwiera wiadomość w domyślnym programie pocztowym. Zwraca nazwę użytej
@@ -107,7 +134,10 @@ def tresc_wiadomosci(numer_zd, dostawca, projekt, pozycje, nadawca, firma="RM PR
     linie.append("")
     if pozycje:
         linie.append("Zamawiane pozycje:")
-        for i, (symbol, nazwa, ilosc, jm) in enumerate(pozycje, 1):
+        # Krotki mają 4 pola, a od 2026-09-05 opcjonalnie piąte (ma_rysunek) —
+        # rozpakowanie na sztywno wywalałoby się na dłuższej krotce.
+        for i, wiersz in enumerate(pozycje, 1):
+            symbol, nazwa, ilosc, jm = (list(wiersz) + ["", "", "", ""])[:4]
             opis = f"{symbol}" + (f" — {nazwa}" if nazwa and nazwa != symbol else "")
             linie.append(f"  {i}. {opis}: {ilosc} {jm}".rstrip())
         linie.append("")
@@ -129,21 +159,38 @@ class OknoWysylki(tk.Toplevel):
     """
 
     def __init__(self, parent, numer_zd, dostawca, email, projekt, pozycje,
-                 nadawca, szukaj_plikow=None, katalog_pdf=None, szukaj_maila=None):
+                 nadawca, szukaj_plikow=None, katalog_pdf=None, szukaj_maila=None,
+                 szukaj_dalej=None, needs_dxf=None, register_drop=None,
+                 dozwolone_ext=None, blad_serwera=None):
         super().__init__(parent)
         self.numer_zd = numer_zd
         self.dostawca = dostawca
         self.projekt = projekt
         self.pozycje = pozycje              # [(symbol, nazwa, ilosc, jm)]
         self.nadawca = nadawca
-        self.szukaj_plikow = szukaj_plikow  # callable(symbol) -> [Path]
+        self.szukaj_plikow = szukaj_plikow  # callable(symbol[, projekty]) -> [Path]
+        #: symbol → [numery projektów]; wypełniane w _pozycje_dla_panelu,
+        #: używane przez _szukaj_w_projektach do ustalenia kolejności katalogów.
+        self._projekty_pozycji = {}
         self.szukaj_maila = szukaj_maila    # callable(nip) -> str
+        # Zależności panelu plików — te same, których używa okno RFQ.
+        # Wszystkie opcjonalne: bez nich panel po prostu nie pokazuje
+        # „Szukaj dalej…" ani nie przyjmuje przeciągania.
+        self.szukaj_dalej = szukaj_dalej
+        self.needs_dxf = needs_dxf
+        self.register_drop = register_drop
+        self.dozwolone_ext = dozwolone_ext
+        self.blad_serwera = blad_serwera or (lambda: None)
         self.katalog_pdf = katalog_pdf or Path(os.environ.get("TEMP", ".")) / "rm_baza_zd"
-        self.pliki = {}                     # {ścieżka: BooleanVar}
         self.pdf_zd = None
+        self._blad_pdf = ""
+        self.panel = None
 
         self.title(f"Wyślij zamówienie {numer_zd}")
         self.geometry("860x680")
+        # Panel podpina globalny bind kółka myszy na czas, gdy kursor jest nad
+        # listą — zamknięcie okna musi go zdjąć, inaczej uchwyt przeżywa okno.
+        self.protocol("WM_DELETE_WINDOW", self._zamknij)
         self._buduj(email)
         wysrodkuj(self, parent, 860, 680)
         self.after(80, self._zbierz_async)
@@ -172,6 +219,26 @@ class OknoWysylki(tk.Toplevel):
         tk.Entry(f, textvariable=self.var_temat, width=68, font=("Arial", 9)).grid(
             row=1, column=1, columnspan=2, sticky="w", pady=(0, 6))
 
+        # Stopka i pasek stanu MUSZĄ być spakowane przed rozciągliwym panelem.
+        # Tk rozdziela miejsce w kolejności pakowania: gdy panel z expand=True
+        # idzie pierwszy, zabiera całą wysokość, a przyciski wyjeżdżają poza
+        # dolną krawędź okna (zgłoszone 05.09.2026: „pozycja sobie jeździ
+        # i psuje dolne klawisze"). Przypięte pierwsze — zostają na miejscu,
+        # a kurczy się panel.
+        self.status = tk.Label(self, text="Przygotowywanie…", anchor="w", padx=12,
+                               pady=3, bg="#34495e", fg="#ecf0f1", font=("Arial", 8))
+        self.status.pack(side=tk.BOTTOM, fill=tk.X)
+
+        stopka = tk.Frame(self, bg="#ecf0f1")
+        stopka.pack(side=tk.BOTTOM, fill=tk.X)
+        self.btn_wyslij = tk.Button(stopka, text="📧 Otwórz w programie pocztowym",
+                                    command=self._wyslij, bg="#27ae60", fg="white",
+                                    font=("Arial", 9, "bold"), padx=14, pady=5,
+                                    state=tk.DISABLED)
+        self.btn_wyslij.pack(side=tk.RIGHT, padx=10, pady=8)
+        tk.Button(stopka, text="Anuluj", command=self._zamknij,
+                  font=("Arial", 9), padx=12, pady=5).pack(side=tk.RIGHT, pady=8)
+
         panel = ttk.PanedWindow(self, orient=tk.VERTICAL)
         panel.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
 
@@ -196,45 +263,121 @@ class OknoWysylki(tk.Toplevel):
         tk.Button(naglowek, text="📂 Katalog", command=self._otworz_katalog,
                   font=("Arial", 7), padx=6).pack(side=tk.RIGHT, padx=6, pady=2)
 
-        obszar = tk.Frame(dol)
-        obszar.pack(fill=tk.BOTH, expand=True)
-        self.canvas = tk.Canvas(obszar, highlightthickness=0)
-        sp = ttk.Scrollbar(obszar, orient="vertical", command=self.canvas.yview)
-        self.lista = tk.Frame(self.canvas)
-        self.lista.bind("<Configure>",
-                        lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-        self.canvas.create_window((0, 0), window=self.lista, anchor="nw")
-        self.canvas.configure(yscrollcommand=sp.set)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        sp.pack(side=tk.RIGHT, fill=tk.Y)
+        # Panel „pozycje i znalezione pliki" — ten sam, którego używa okno
+        # „Wyślij do RFQ". Wcześniej była tu płaska lista wszystkich plików;
+        # nie dało się dorzucić brakującego rysunku ani zobaczyć, której
+        # pozycji brakuje dokumentacji.
+        self.panel = rm_panel_plikow.PanelPlikow(
+            dol,
+            pozycje=self._pozycje_dla_panelu(),
+            szukaj_plikow=self._szukaj_w_projektach,
+            szukaj_dalej=self.szukaj_dalej,
+            needs_dxf=self.needs_dxf,
+            register_drop=self.register_drop,
+            dozwolone_ext=self.dozwolone_ext,
+            blad_serwera=self.blad_serwera,
+            okno=self,
+            on_zmiana=self._po_zmianie_plikow,
+        )
+        self.panel.zbuduj_ramke().pack(fill=tk.BOTH, expand=True)
 
-        stopka = tk.Frame(self, bg="#ecf0f1")
-        stopka.pack(side=tk.BOTTOM, fill=tk.X)
-        self.btn_wyslij = tk.Button(stopka, text="📧 Otwórz w programie pocztowym",
-                                    command=self._wyslij, bg="#27ae60", fg="white",
-                                    font=("Arial", 9, "bold"), padx=14, pady=5,
-                                    state=tk.DISABLED)
-        self.btn_wyslij.pack(side=tk.RIGHT, padx=10, pady=8)
-        tk.Button(stopka, text="Anuluj", command=self.destroy,
-                  font=("Arial", 9), padx=12, pady=5).pack(side=tk.RIGHT, pady=8)
+    # ── pozycje dla panelu ─────────────────────────────────────────────────
+    def _pozycje_dla_panelu(self):
+        """Krotki (symbol, nazwa, ilosc, jm) → słowniki, których chce panel.
 
-        self.status = tk.Label(self, text="Przygotowywanie…", anchor="w", padx=12,
-                               pady=3, bg="#34495e", fg="#ecf0f1", font=("Arial", 8))
-        self.status.pack(side=tk.BOTTOM, fill=tk.X)
+        `is_catalog` dla pozycji bez numeru rysunku: łożysko czy siłownik nie
+        ma dokumentacji na serwerze, więc brak plików to dla nich norma —
+        panel nie liczy ich do ostrzeżenia „brak plików".
+        """
+        out = []
+        for wiersz in self.pozycje:
+            pola = list(wiersz) + [None] * 6
+            symbol, nazwa, ilosc, jm, ma_rysunek, projekty = pola[:6]
+            # Czy szukać rysunków na serwerze:
+            #   1. `ma_rysunek` z BOM-u — dowód wprost (wiersz miał *_drawing_no),
+            #      gdy pozycja dopasowała się do BOM-u,
+            #   2. w przeciwnym razie FORMAT numeru (RE_NUMER_RYSUNKU) — ta sama
+            #      definicja, której używa import BOM-u.
+            # Poprzednia reguła („ma myślnik i cyfrę") brała za rysunki kody
+            # handlowe 'A-8-10-10', 'DSNU-25-100-P', 'GS14 14-16' i panel
+            # przeczesywał dla nich serwer, kończąc czerwonym „nie znaleziono
+            # plików" (zgłoszone 05.09.2026).
+            if ma_rysunek is not None:
+                katalogowy = not ma_rysunek
+            else:
+                katalogowy = not _ma_numer_rysunku(symbol)
+            # Numery projektów pozycji — po nich szukanie zaczyna od katalogu
+            # projektu, w którym detal powstał. ZD zbiera z kilku projektów,
+            # więc bez tego trafiało najpierw do projektu otwartego w arkuszu.
+            self._projekty_pozycji[str(symbol).strip().upper()] = [
+                p.strip() for p in str(projekty or "").split(",") if p.strip()
+            ]
+            out.append({
+                "drawing_no": symbol,
+                "name": nazwa or symbol,
+                "qty": ilosc,
+                "jm": jm,
+                "is_catalog": katalogowy,
+            })
+        return out
+
+    def _szukaj_w_projektach(self, numer):
+        """Pliki rysunku — najpierw w katalogach projektów Z KOLUMNY „Projekt".
+
+        Panel woła szukanie jednoargumentowo (tak samo dla RFQ), więc numery
+        projektów dokładamy tutaj, z mapy zbudowanej w `_pozycje_dla_panelu`.
+        Gdy w projektach pozycji nic nie ma, spada do zwykłego szukania —
+        czyli do zachowania sprzed zmiany.
+        """
+        if not self.szukaj_plikow:
+            return []
+        projekty = self._projekty_pozycji.get(str(numer).strip().upper()) or []
+        # `szukaj_plikow` przyjmuje opcjonalne `projekty`; starsze okno główne
+        # może go nie znać — wtedy lecimy po staremu.
+        if projekty:
+            try:
+                znalezione = self.szukaj_plikow(numer, projekty) or []
+                if znalezione:
+                    return znalezione
+            except TypeError:
+                pass                    # stara sygnatura — niżej wariant bez projektów
+            except Exception as e:
+                print(f"⚠️  Szukanie plików {numer} w projektach {projekty}: {e}")
+        try:
+            return self.szukaj_plikow(numer) or []
+        except Exception as e:
+            print(f"⚠️  Szukanie plików {numer}: {e}")
+            return []
+
+    def _po_zmianie_plikow(self):
+        """Panel zmienił listę plików — odśwież licznik w pasku stanu."""
+        try:
+            pliki = self.panel.wszystkie_zaznaczone() if self.panel else []
+        except Exception:
+            return
+        ile = len(pliki) + (1 if self.pdf_zd else 0)
+        tekst = f"Załączników: {ile}"
+        if self.pdf_zd:
+            tekst += "   (w tym PDF zamówienia)"
+        elif self._blad_pdf:
+            tekst += f"   |   brak PDF zamówienia: {self._blad_pdf}"
+        self.status.config(text=tekst)
 
     # ── zbieranie plików ───────────────────────────────────────────────────
     def _zbierz_async(self):
+        # Panel sam szuka rysunków (z paskiem postępu). W tle zostaje tylko
+        # PDF zamówienia z Subiekta — to osobne, wolne wywołanie mostu.
+        self.panel.start()
         threading.Thread(target=self._zbierz_worker, daemon=True).start()
 
     def _zbierz_worker(self):
-        znalezione, bledy = [], []
+        bledy = []
         try:
-            self.after(0, lambda: self.status.config(text="Generowanie PDF zamówienia z Subiekta…"))
+            self.after(0, lambda: self.status.config(
+                text="Generowanie PDF zamówienia z Subiekta…"))
             pdfy, bl = eksportuj_pdf([self.numer_zd], self.katalog_pdf)
             dane = pdfy.get(self.numer_zd) or {}
             self.pdf_zd = dane.get("plik")
-            if self.pdf_zd:
-                znalezione.append(Path(self.pdf_zd))
             # Adres z RM_BAZA po NIP-cie — pewniejszy klucz niż nazwa firmy,
             # która w Subiekcie bywa pełna, a w RM_BAZA skrócona. Ustawiamy
             # tylko wtedy, gdy pole jest jeszcze puste (user mógł już wpisać).
@@ -250,52 +393,19 @@ class OknoWysylki(tk.Toplevel):
         except Exception as e:
             bledy.append(f"PDF zamówienia: {e}")
 
-        if self.szukaj_plikow:
-            for i, (symbol, *_rest) in enumerate(self.pozycje, 1):
-                self.after(0, lambda s=symbol, i=i: self.status.config(
-                    text=f"Szukanie rysunków {i}/{len(self.pozycje)}: {s}"))
-                try:
-                    for p in self.szukaj_plikow(symbol) or []:
-                        if Path(p) not in znalezione:
-                            znalezione.append(Path(p))
-                except Exception as e:
-                    bledy.append(f"{symbol}: {e}")
+        self.after(0, lambda: self._zbierz_done(bledy))
 
-        self.after(0, lambda: self._zbierz_done(znalezione, bledy))
-
-    def _zbierz_done(self, pliki, bledy):
-        for w in self.lista.winfo_children():
-            w.destroy()
-        self.pliki.clear()
-
-        for p in pliki:
-            var = tk.BooleanVar(value=True)
-            self.pliki[str(p)] = var
-            wiersz = tk.Frame(self.lista)
-            wiersz.pack(fill=tk.X, anchor="w")
-            tk.Checkbutton(wiersz, variable=var, font=("Arial", 8)).pack(side=tk.LEFT)
-            czy_pdf_zd = self.pdf_zd and str(p) == str(self.pdf_zd)
-            tk.Label(wiersz, text=("📄 " if czy_pdf_zd else "📐 ") + Path(p).name,
-                     font=("Arial", 8, "bold" if czy_pdf_zd else "normal"),
-                     anchor="w").pack(side=tk.LEFT, padx=2)
-            try:
-                kb = Path(p).stat().st_size / 1024
-                tk.Label(wiersz, text=f"{kb:,.0f} kB".replace(",", " "), fg="#7f8c8d",
-                         font=("Arial", 7)).pack(side=tk.LEFT, padx=6)
-            except Exception:
-                pass
-
-        if not pliki:
-            tk.Label(self.lista, text="Nie znaleziono żadnych plików.",
-                     fg="#c0392b", font=("Arial", 8), padx=8, pady=6).pack(anchor="w")
-
+    def _zbierz_done(self, bledy):
+        self._blad_pdf = "; ".join(bledy) if bledy else ""
+        for b in bledy:
+            print(f"⚠️  {b}")
         self.btn_wyslij.config(state=tk.NORMAL)
-        komunikat = f"Załączników: {len(pliki)}"
-        if bledy:
-            komunikat += f"   |   problemy: {len(bledy)} (patrz konsola)"
-            for b in bledy:
-                print(f"⚠️  {b}")
-        self.status.config(text=komunikat)
+        self._po_zmianie_plikow()
+
+    def _zamknij(self):
+        if self.panel:
+            self.panel.sprzataj()
+        self.destroy()
 
     def _otworz_katalog(self):
         try:
@@ -313,7 +423,23 @@ class OknoWysylki(tk.Toplevel):
                     "Otworzyć wiadomość bez adresata?", parent=self):
                 return
 
-        wybrane = [p for p, v in self.pliki.items() if v.get()]
+        # Załączniki: PDF zamówienia (jeśli powstał) + rysunki zaznaczone
+        # w panelu. PDF jako pierwszy — to główny dokument wiadomości.
+        wybrane = []
+        if self.pdf_zd:
+            wybrane.append(str(self.pdf_zd))
+        wybrane += [str(p) for p in (self.panel.wszystkie_zaznaczone() if self.panel else [])]
+
+        # Detal cięty laserem bez DXF-a — kooperant nie ma z czego ciąć.
+        braki = self.panel.brakujace_dxf() if self.panel else []
+        if braki and not messagebox.askyesno(
+                "Brak DXF",
+                "Te pozycje są cięte laserem, ale nie mają zaznaczonego DXF-a:\n\n"
+                + "\n".join(f"  • {b}" for b in braki[:10])
+                + ("\n  …" if len(braki) > 10 else "")
+                + "\n\nWysłać mimo to?", parent=self, icon="warning"):
+            return
+
         try:
             droga = otworz_maila(do, self.var_temat.get().strip(),
                                  self.txt.get("1.0", "end-1c"), wybrane)
@@ -336,10 +462,15 @@ class OknoWysylki(tk.Toplevel):
                 pass
 
         self.status.config(text="Wiadomość otwarta w programie pocztowym — wyślij ją stamtąd.")
-        self.destroy()
+        self._zamknij()
 
 
 def open_window(parent, numer_zd, dostawca, email, projekt, pozycje, nadawca,
-                szukaj_plikow=None, katalog_pdf=None, szukaj_maila=None):
+                szukaj_plikow=None, katalog_pdf=None, szukaj_maila=None,
+                szukaj_dalej=None, needs_dxf=None, register_drop=None,
+                dozwolone_ext=None, blad_serwera=None):
     return OknoWysylki(parent, numer_zd, dostawca, email, projekt, pozycje,
-                       nadawca, szukaj_plikow, katalog_pdf, szukaj_maila)
+                       nadawca, szukaj_plikow, katalog_pdf, szukaj_maila,
+                       szukaj_dalej=szukaj_dalej, needs_dxf=needs_dxf,
+                       register_drop=register_drop, dozwolone_ext=dozwolone_ext,
+                       blad_serwera=blad_serwera)

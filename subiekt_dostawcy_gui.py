@@ -31,6 +31,7 @@ from tkinter import ttk, messagebox
 
 import subiekt_dostawcy as sd
 import subiekt_mapowania
+from rm_kreciolek import Kreciolek
 from subiekt_stany import wysrodkuj, podepnij_szerokosci
 
 try:
@@ -52,7 +53,7 @@ FILTR_ZAPLANOWANE = "🔗➕ zaplanowane"
 FILTR_NIE_FIRMY = "🚫 nie-firmy"
 
 
-class DostawcyWindow(tk.Toplevel):
+class DostawcyWindow(tk.Toplevel, Kreciolek):
     HEADERS = ["Status", "Dostawca RM_BAZA", "Kontrahent w Subiekcie",
                "NIP", "Jak dopasowano"]
     (COL_ST, COL_RM, COL_SUB, COL_NIP, COL_JAK) = range(5)
@@ -82,6 +83,10 @@ class DostawcyWindow(tk.Toplevel):
         top.pack_propagate(False)
         tk.Label(top, text="🤝 Powiązanie dostawców RM_BAZA z kontrahentami Subiekta",
                  bg="#34495e", fg="white", font=("Arial", 11, "bold")).pack(side=tk.LEFT, padx=12)
+        # Wiek odczytu — dane z Subiekta starzeją się, a nic tego nie pokazywało.
+        self.lbl_wiek = tk.Label(top, text="", bg="#34495e", fg="#e74c3c",
+                                 font=("Arial", 13, "bold"))
+        self.lbl_wiek.pack(side=tk.LEFT, padx=(16, 0))
         self.btn_refresh = tk.Button(top, text="🔄 Odśwież", command=self._load_async,
                                      bg="#3498db", fg="white", font=("Arial", 8),
                                      padx=8, pady=2, relief=tk.RAISED, bd=1)
@@ -173,7 +178,7 @@ class DostawcyWindow(tk.Toplevel):
     def _load_async(self):
         self.btn_refresh.config(state=tk.DISABLED)
         self.btn_wykonaj.config(state=tk.DISABLED)
-        self.status.config(text="Czytam dostawców RM_BAZA i kontrahentów Subiekta (~10 s)…")
+        self.start_kreciolek("Czytam dostawców RM_BAZA i kontrahentów Subiekta (~10 s)")
         threading.Thread(target=self._load_worker, daemon=True).start()
 
     def _load_worker(self):
@@ -204,6 +209,8 @@ class DostawcyWindow(tk.Toplevel):
             self.after(0, lambda: self._load_done([], [], err))
 
     def _load_done(self, wiersze, kontrahenci, error):
+        self.stop_kreciolek()      # także przy błędzie — inaczej kręci się dalej
+        self.zaznacz_odczyt(self.lbl_wiek)
         self.btn_refresh.config(state=tk.NORMAL)
         if error:
             self.status.config(text="Błąd.")
@@ -456,7 +463,9 @@ class DostawcyWindow(tk.Toplevel):
         if not ok:
             return
         self.btn_wykonaj.config(state=tk.DISABLED)
-        self.status.config(text="Zapisuję…")
+        # ZAPIS też idzie przez most i trwa — bez kręciołka okno wygląda,
+        # jakby zawisło w połowie zakładania kontrahentów.
+        self.start_kreciolek("Zapisuję do Subiekta")
         threading.Thread(target=self._wykonaj_worker, args=(nipy, zaloz), daemon=True).start()
 
     def _wykonaj_worker(self, nipy, zaloz):
@@ -493,6 +502,7 @@ class DostawcyWindow(tk.Toplevel):
             self.after(0, lambda: self._wykonaj_done("", err, False))
 
     def _wykonaj_done(self, raport, error, byli_nowi):
+        self.stop_kreciolek()
         self.btn_wykonaj.config(state=tk.NORMAL)
         if error:
             self.status.config(text="Zapis nieudany.")

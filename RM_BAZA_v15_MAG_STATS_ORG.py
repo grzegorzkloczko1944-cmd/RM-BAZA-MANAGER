@@ -24210,9 +24210,15 @@ class MainWindow(tk.Tk):
         except Exception as e:
             messagebox.showerror("RFQ", f"Nie udało się pobrać danych:\n{e}", parent=self)
 
-    def _find_files_for_drawing(self, drawing_no: str) -> list:
+    def _find_files_for_drawing(self, drawing_no: str, projects=None) -> list:
         """Szuka wszystkich plików rysunku (PDF/DXF/DWF/STEP/STL) w katalogach
-        projektu na serwerze — ta sama logika co przycisk "Szukaj w projekcie"."""
+        projektu na serwerze — ta sama logika co przycisk "Szukaj w projekcie".
+
+        `projects` — numery projektów, od których zacząć (kolumna "Projekt"
+        w oknie ZD). Bez nich punktem wyjścia jest projekt otwarty w arkuszu,
+        co dla ZD zbierającego detale z kilku projektów oznaczało szukanie
+        nie w tym katalogu (zgłoszone 05.09.2026). RFQ woła bez tego
+        parametru i działa jak dotąd."""
         # Brak dostępu do serwera to AWARIA, nie "nie ma plików" — obie
         # sytuacje dawały dotąd pustą listę i wyglądały identycznie, więc przy
         # niezamapowanym V:\ całe RFQ poszłoby bez załączników, a user widziałby
@@ -24229,11 +24235,26 @@ class MainWindow(tk.Tk):
             if pid == self.current_project_id:
                 project_name = pname
                 break
-        if not project_name:
-            return []
 
-        project_number = project_name.split()[0] if ' ' in project_name else project_name
+        project_number = None
+        if project_name:
+            project_number = project_name.split()[0] if ' ' in project_name else project_name
         drawing_prefix = drawing_no.split('-')[0].strip() if '-' in drawing_no else None
+
+        # Kolejność szukania — od najbardziej prawdopodobnego katalogu:
+        #   1. projekty podane wprost (kolumna "Projekt" w ZD),
+        #   2. projekt otwarty w arkuszu (dotychczasowe zachowanie, RFQ),
+        #   3. prefiks numeru rysunku (detal z innego projektu).
+        prefixes = []
+        for p in (projects or []):
+            p = str(p).strip()
+            if p and p not in prefixes:
+                prefixes.append(p)
+        for p in (project_number, drawing_prefix):
+            if p and p not in prefixes:
+                prefixes.append(p)
+        if not prefixes:
+            return []
 
         # projekty ZP* leżą w podkatalogu ZP/
         search_roots = [server_path]
@@ -24243,15 +24264,12 @@ class MainWindow(tk.Tk):
 
         project_dirs, seen = [], set()
         try:
-            for root in search_roots:
-                for item in root.iterdir():
-                    if item.is_dir() and item.name.startswith(project_number) and item.name not in seen:
-                        project_dirs.append(item)
-                        seen.add(item.name)
-            if drawing_prefix and drawing_prefix != project_number:
+            # Pętla po prefiksach W KOLEJNOŚCI — katalogi projektu pozycji
+            # trafiają na początek listy, więc są przeszukiwane najpierw.
+            for prefix in prefixes:
                 for root in search_roots:
                     for item in root.iterdir():
-                        if item.is_dir() and item.name.startswith(drawing_prefix) and item.name not in seen:
+                        if item.is_dir() and item.name.startswith(prefix) and item.name not in seen:
                             project_dirs.append(item)
                             seen.add(item.name)
         except Exception:

@@ -34,6 +34,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import ttk, messagebox
 
+from rm_kreciolek import Kreciolek
 from subiekt_stany import (_find_exe, blad_mostu, wysrodkuj, podepnij_szerokosci,
                            jedna_linia as _jedna_linia, CONFIG_PATH, PROJECTS_DIR)
 
@@ -318,6 +319,11 @@ def dane_z_bom(project_id, numer_projektu=None):
             # Numer projektu — dla pozycji już zamówionych to jedyne źródło
             # przypisania do projektu (nie mają już powiązania przez ZK).
             "projekt": numer_projektu or "",
+            # Czy pozycja ma numer rysunku w BOM. To FAKT z danych, nie
+            # zgadywanie z kształtu napisu: 'A-8-10-10' czy '6304ZZ' wyglądają
+            # jak numery, a są kodami katalogowymi. Panel plików używa tego,
+            # żeby nie zgłaszać braku rysunku dla łożyska.
+            "ma_rysunek": bool(nr),
         }
     return out
 
@@ -325,6 +331,39 @@ def dane_z_bom(project_id, numer_projektu=None):
 def numer_projektu_z_uwag(uwagi):
     """Numer projektu z Uwag na ZK — tam RM_BAZA go wpisuje przy zakładaniu."""
     return (uwagi or "").strip()
+
+
+def _zd_z_iloscia(zamowione):
+    """„ZD 4/CENTRALA/2026 (8)" — numery ZD z ilościami, jak kolumna ZK.
+
+    Ten sam detal bywa w kilku zamówieniach (dokładka, drugi dostawca),
+    a sam numer nie mówił, ile z którego pochodzi.
+    """
+    wg_numeru = {}
+    for z in zamowione or ():
+        numer = (z.get("zd") or "").strip()
+        if not numer:
+            continue
+        wg_numeru[numer] = wg_numeru.get(numer, 0.0) + float(z.get("ilosc") or 0)
+    return ", ".join(f"{n} ({il:g})" if il else n
+                     for n, il in sorted(wg_numeru.items()))
+
+
+def _zk_z_iloscia(zk):
+    """„ZK 7/CENTRALA/2026 (4), ZK 8/CENTRALA/2026 (4)".
+
+    Subiekt liczy zapotrzebowanie ze wszystkich ZK naraz, więc jedna pozycja
+    bywa sumą kilku dokumentów. Ilość przy numerze pokazuje, ile z tej sumy
+    pochodzi z którego zamówienia — sam numer tego nie mówił.
+    """
+    wg_numeru = {}
+    for z in zk or ():
+        numer = (z.get("Numer") or "").strip()
+        if not numer:
+            continue
+        wg_numeru[numer] = wg_numeru.get(numer, 0.0) + float(z.get("Ilosc") or 0)
+    return ", ".join(f"{n} ({il:g})" if il else n
+                     for n, il in sorted(wg_numeru.items()))
 
 
 def _uprosc_nazwe(x):
@@ -401,6 +440,17 @@ def zbuduj_wiersze(zapotrzebowanie, bom, podmioty=(), tylko_projekt=None, zamowi
         # Potrzeba: suma z pozycji ZK. Bywa pusta (Sfera nie zawsze wypełnia
         # PozycjeZK) — wtedy najbliższą prawdy wartością jest samo zapotrzebowanie.
         potrzeba = sum(float(z.get("Ilosc") or 0) for z in p["zk"]) or p["ilosc"]
+
+        # Ilość per projekt — Subiekt zwraca JEDNĄ pozycję na detal, więc
+        # 2602-100.45ZZ po 4 szt. w ZK 7 (proj. 2627) i ZK 8 (proj. 3500) ma
+        # ilość 8. Przy filtrze projektu wyglądało to, jakby całe 8 szło na
+        # ten jeden projekt (zgłoszone 05.09.2026). Rozbicie liczy się przy
+        # wyświetlaniu, bo wtedy dopiero wiadomo, który projekt jest wybrany.
+        zk_ilosci = {}
+        for z in p["zk"]:
+            pr = numer_projektu_z_uwag(z.get("Uwagi"))
+            if pr:
+                zk_ilosci[pr] = zk_ilosci.get(pr, 0.0) + float(z.get("Ilosc") or 0)
         dostepne = p.get("dostepne", 0.0)
         ze_stanu = min(potrzeba, dostepne) if dostepne > 0 else 0.0
 
@@ -421,6 +471,8 @@ def zbuduj_wiersze(zapotrzebowanie, bom, podmioty=(), tylko_projekt=None, zamowi
             "nazwa": b.get("nazwa") or p["nazwa_subiekt"],
             "typ": b.get("typ", ""),
             "potrzeba": potrzeba,
+            # {numer projektu: ilość} — do rozbicia potrzeby przy filtrze.
+            "zk_ilosci": zk_ilosci,
             "dostepne": dostepne,
             "zarezerwowane": p.get("zarezerwowane", 0.0) + p.get("zadysponowane", 0.0),
             "ze_stanu": ze_stanu,
@@ -436,18 +488,28 @@ def zbuduj_wiersze(zapotrzebowanie, bom, podmioty=(), tylko_projekt=None, zamowi
             # user wiedział, czego szukać na liście.
             "dostawca_bom": z_bom,
             "projekty": ", ".join(projekty),
-            "zk": ", ".join(sorted({z.get("Numer", "") for z in p["zk"] if z.get("Numer")})),
+            # Numery ZK z ILOŚCIAMI — bez nich widać było tylko, że potrzeba
+            # wynika z dwóch dokumentów, ale nie ile z którego.
+            "zk": _zk_z_iloscia(p["zk"]),
             # Numer ZD wpisywany po utworzeniu — zostaje w arkuszu, żeby było
             # widać, co już zamówione, zanim odświeżenie usunie pozycję.
             "zd": "",
         })
     # Zamówione — tylko te, których nie ma już w zapotrzebowaniu (te same
     # symbole mogą tam wisieć, jeśli ZD pokryło część ilości).
-    juz = {w["symbol"].strip().upper() for w in wiersze}
+    #
+    # Ten sam detal bywa w KILKU ZD (dwa zamówienia u różnych dostawców albo
+    # dokładka po pierwszym). Grupujemy je po symbolu, żeby kolumna ZD mogła
+    # pokazać komplet z ilościami — jak kolumna ZK.
+    wg_symbolu = {}
     for z in zamowione or ():
-        sym = z["symbol"].strip().upper()
+        wg_symbolu.setdefault(z["symbol"].strip().upper(), []).append(z)
+
+    juz = {w["symbol"].strip().upper() for w in wiersze}
+    for sym, grupa in wg_symbolu.items():
         if sym in juz:
             continue
+        z = grupa[0]
         b = bom.get(sym, {})
         projekt = b.get("projekt", "") if b else ""
         if tylko_projekt and projekt != tylko_projekt:
@@ -458,21 +520,23 @@ def zbuduj_wiersze(zapotrzebowanie, bom, podmioty=(), tylko_projekt=None, zamowi
             "nazwa": b.get("nazwa") or z["nazwa_subiekt"],
             "typ": b.get("typ", ""),
             # Pozycji nie ma już w zapotrzebowaniu (pokryta przez ZD), więc
-            # „potrzeba" = ilość, którą realnie zamówiono. Stanu magazynowego
-            # zapotrzebowanie już dla niej nie zwraca.
-            "potrzeba": z["ilosc"],
+            # „potrzeba" = ilość, którą realnie zamówiono — suma ze WSZYSTKICH
+            # ZD tego detalu, nie z pierwszego napotkanego.
+            "potrzeba": sum(float(x.get("ilosc") or 0) for x in grupa),
             "dostepne": 0.0,
             "zarezerwowane": 0.0,
             "ze_stanu": 0.0,
             "stan_min": 0.0,
             "stan_opt": 0.0,
-            "ilosc": z["ilosc"],
+            "ilosc": sum(float(x.get("ilosc") or 0) for x in grupa),
             "jm": "szt",
             "dostawca": z["dostawca"],
             "dostawca_bom": b.get("dostawca", ""),
             "projekty": projekt,
             "zk": "",
-            "zd": z["zd"],
+            # Numery ZD z ilościami — ten sam format co kolumna ZK, żeby było
+            # widać, ile z której dostawy pochodzi.
+            "zd": _zd_z_iloscia(grupa),
             "zd_status": z.get("status", ""),
             "zd_data": z.get("data", ""),
         })
@@ -555,7 +619,7 @@ def zapisz_log(wynik):
 
 
 # ── Okno ────────────────────────────────────────────────────────────────────
-class ZamowieniaWindow(tk.Toplevel):
+class ZamowieniaWindow(tk.Toplevel, Kreciolek):
     # Kolumny arkusza. Indeksy muszą się zgadzać z COL_* niżej.
     # Cztery ilości z kroku 3 przepływu: potrzeba / dostępne / ze stanu / kupić.
     # „Kupić" (= Brakuje) to ta, którą realnie zamawiamy — jest edytowalna.
@@ -607,6 +671,12 @@ class ZamowieniaWindow(tk.Toplevel):
         top.pack_propagate(False)
         tk.Label(top, text="🛒 Zamówienia do dostawców — braki z ZK projektów",
                  bg="#34495e", fg="white", font=("Arial", 11, "bold")).pack(side=tk.LEFT, padx=12)
+        # Wiek odczytu dużą czcionką — dane z Subiekta starzeją się (ktoś
+        # w firmie zakłada ZD, zmienia stany), a nic tego nie sygnalizowało.
+        # Kolor rośnie od zielonego do czerwonego wraz z upływem czasu.
+        self.lbl_wiek = tk.Label(top, text="", bg="#34495e", fg="#e74c3c",
+                                 font=("Arial", 13, "bold"))
+        self.lbl_wiek.pack(side=tk.LEFT, padx=(16, 0))
         self.btn_refresh = tk.Button(top, text="🔄 Odśwież", command=self._load_async,
                                      bg="#3498db", fg="white", font=("Arial", 8),
                                      padx=8, pady=2, relief=tk.RAISED, bd=1)
@@ -701,6 +771,17 @@ class ZamowieniaWindow(tk.Toplevel):
             tk.Label(leg, text=opis, bg="#f8f9f9", fg="#7f8c8d",
                      font=("Arial", 8)).pack(side=tk.LEFT, pady=2)
 
+        # Tło CAŁEGO wiersza znaczy co innego niż kolor komórki dostawcy —
+        # bez tego rozdziału user widział jednolitą zieleń i nie umiał
+        # odczytać źródła dostawcy.
+        tk.Label(leg, text="   Wiersz:", bg="#f8f9f9", font=("Arial", 8, "bold")
+                 ).pack(side=tk.LEFT, padx=(18, 4), pady=2)
+        for kolor, opis in (("#dfeaf7", "zamówione (jest ZD)"),
+                            ("#eef1f3", "pokryte ze stanu — nic nie kupujemy")):
+            tk.Label(leg, text="  ", bg=kolor, relief=tk.SOLID, bd=1).pack(side=tk.LEFT, padx=(6, 2), pady=2)
+            tk.Label(leg, text=opis, bg="#f8f9f9", fg="#7f8c8d",
+                     font=("Arial", 8)).pack(side=tk.LEFT, pady=2)
+
         self.summary = tk.Label(self, text="Wczytywanie…", bg="#ecf0f1", fg="#2c3e50",
                                 font=("Arial", 9), anchor="w", padx=12, pady=6)
         self.summary.pack(side=tk.TOP, fill=tk.X)
@@ -732,6 +813,10 @@ class ZamowieniaWindow(tk.Toplevel):
             self.sheet.bind("<<SheetModified>>", self._on_edit)
             self.sheet.bind("<ButtonRelease-1>", self._on_click, add="+")
             self.sheet.bind("<Double-Button-1>", self._on_dblclick, add="+")
+            # Kolumny z długą treścią (ZK/ZD z ilościami, pełne nazwy) nie
+            # mieszczą się w szerokości arkusza — dymek pokazuje całość bez
+            # zmiany układu (zgłoszone 05.09.2026: „jest ciasno, mało widać").
+            self._podepnij_tooltip()
             # Shift+klik zaznacza zakres w arkuszu — te akcje przekładają go
             # na kolumnę ✓ (co realnie idzie do ZD).
             self.sheet.popup_menu_add_command("✓ Zaznacz wiersze",
@@ -774,7 +859,7 @@ class ZamowieniaWindow(tk.Toplevel):
     def _load_async(self):
         self.btn_refresh.config(state=tk.DISABLED)
         self.btn_zd.config(state=tk.DISABLED)
-        self.status.config(text="Pytam Subiekta o zapotrzebowanie (~10 s)…")
+        self.start_kreciolek("Pytam Subiekta o zapotrzebowanie (~10 s)")
         threading.Thread(target=self._load_worker, daemon=True).start()
 
     def _load_worker(self):
@@ -819,6 +904,8 @@ class ZamowieniaWindow(tk.Toplevel):
             self.after(0, lambda: self._load_done([], err, []))
 
     def _load_done(self, wiersze, error, podmioty=()):
+        self.stop_kreciolek()      # także przy błędzie — inaczej kręci się dalej
+        self.zaznacz_odczyt(self.lbl_wiek)
         self.btn_refresh.config(state=tk.NORMAL)
         if error:
             self.status.config(text="Błąd.")
@@ -1043,12 +1130,148 @@ class ZamowieniaWindow(tk.Toplevel):
                 continue
             if proj != FILTR_WSZYSCY and proj not in w["projekty"].split(", "):
                 continue
+            # Ile z sumarycznej potrzeby przypada na WYBRANY projekt. Liczone
+            # tutaj, a nie w zbuduj_wiersze, bo wiersze powstają raz (bez
+            # filtra), a projekt wybiera się później — inaczej rozbicie nigdy
+            # się nie pokazywało.
+            w["potrzeba_tu"] = self._potrzeba_na_projekt(w, proj)
             if not self._typ_pasuje(w):
                 continue
             if tylko_bez and w["dostawca"]:
                 continue
             out.append(w)
         return out
+
+    # ── dymek z pełną treścią komórki ──────────────────────────────────────
+    def _podepnij_tooltip(self):
+        """Dymek dla kolumn, których treść nie mieści się w szerokości.
+
+        Tylko te kolumny, gdzie realnie brakuje miejsca — dla liczb dymek
+        byłby szumem. tksheet nie ma własnych tooltipów, więc robimy je na
+        Toplevel bez ramki, jak podpowiedzi w podpowiedziach nazw.
+        """
+        self._tip = None
+        self._tip_kom = None          # (wiersz, kolumna) — żeby nie mrugał
+        self._tip_after = None
+        self.sheet.bind("<Motion>", self._tip_ruch, add="+")
+        self.sheet.bind("<Leave>", lambda _e: self._tip_ukryj(), add="+")
+        # Kliknięcie i przewijanie chowają dymek — inaczej wisi nad zmienioną
+        # już zawartością.
+        self.sheet.bind("<Button-1>", lambda _e: self._tip_ukryj(), add="+")
+        self.sheet.bind("<MouseWheel>", lambda _e: self._tip_ukryj(), add="+")
+        # Dymek to osobne okno — bez tego zostałby na ekranie po zamknięciu
+        # arkusza (i po zamknięciu całego okna zamówień).
+        self.bind("<Destroy>", lambda _e: self._tip_ukryj(), add="+")
+
+    #: nagłówki kolumn z dymkiem (reszta to liczby, daty i znaczniki).
+    #: Dopasowanie DOKŁADNE — „zd" jako fragment łapało też „Data ZD",
+    #: gdzie dymek jest zbędny.
+    TOOLTIP_KOLUMNY = {"nazwa", "dostawca (subiekt)", "projekt", "zk", "zd",
+                       "wg bom"}
+
+    def _tip_ukryj(self):
+        if self._tip_after:
+            try:
+                self.after_cancel(self._tip_after)
+            except Exception:
+                pass
+            self._tip_after = None
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except tk.TclError:
+                pass
+            self._tip = None
+        self._tip_kom = None
+
+    def _tip_ruch(self, event):
+        try:
+            r = self.sheet.identify_row(event, allow_end=False)
+            c = self.sheet.identify_column(event, allow_end=False)
+        except Exception:
+            return
+        if r is None or c is None:
+            self._tip_ukryj()
+            return
+        if (r, c) == self._tip_kom:
+            return                     # ta sama komórka — nie przerysowuj
+        self._tip_ukryj()
+
+        # Które kolumny mają dymek: po nagłówku, nie po indeksie — kolumny
+        # bywają przestawiane, a indeksy zmieniają się przy zmianach układu.
+        try:
+            naglowek = self.HEADERS[c].strip().lower()
+        except Exception:
+            return
+        if naglowek not in self.TOOLTIP_KOLUMNY:
+            return
+
+        try:
+            tekst = str(self.sheet.get_cell_data(r, c) or "").strip()
+        except Exception:
+            return
+        if not tekst:
+            return
+
+        self._tip_kom = (r, c)
+        # Krótka zwłoka — bez niej dymki migoczą przy przesuwaniu myszy.
+        self._tip_after = self.after(
+            400, lambda: self._tip_pokaz(tekst, event.x_root, event.y_root))
+
+    def _tip_pokaz(self, tekst, x, y):
+        self._tip_after = None
+        if self._tip is not None:
+            return
+        tip = tk.Toplevel(self)
+        tip.overrideredirect(True)     # bez ramki okna — to dymek
+        tip.attributes("-topmost", True)
+        tk.Label(tip, text=tekst, bg="#ffffe0", fg="#2c3e50",
+                 relief=tk.SOLID, bd=1, justify=tk.LEFT, anchor="w",
+                 font=("Arial", 9), padx=6, pady=3,
+                 wraplength=520).pack()
+        # Poniżej kursora, żeby nie zasłaniać komórki, na którą patrzysz.
+        tip.update_idletasks()
+        szer, wys = tip.winfo_width(), tip.winfo_height()
+        ekran_x = tip.winfo_screenwidth()
+        tip.geometry(f"+{min(x + 14, ekran_x - szer - 8)}+{y + 20}")
+        self._tip = tip
+
+    @staticmethod
+    def _potrzeba_na_projekt(w, proj):
+        """Część potrzeby przypadająca na `proj`, albo None gdy nie ma o czym mówić.
+
+        None, gdy filtr wyłączony albo pozycja dotyczy jednego projektu —
+        wtedy kolumna pokazuje samą liczbę, bez dopisku.
+        """
+        if not proj or proj == FILTR_WSZYSCY:
+            return None
+        projekty = [p for p in (w.get("projekty") or "").split(", ") if p]
+        if len(projekty) < 2:
+            return None
+        # Ilości per dokument ZK — zapamiętane przy budowaniu wiersza.
+        wg_zk = w.get("zk_ilosci") or {}
+        if not wg_zk:
+            return None
+        suma = sum(il for pr, il in wg_zk.items() if pr == proj)
+        return suma or None
+
+    @staticmethod
+    def _potrzeba_tekst(w):
+        """Ilość w kolumnie „Potrzeba"; przy kilku projektach też część na ten.
+
+        Subiekt liczy zapotrzebowanie ze WSZYSTKICH otwartych ZK naraz, więc
+        detal używany w dwóch projektach ma jedną, sumaryczną pozycję:
+        2602-100.45ZZ po 4 szt. w ZK 7 (proj. 2627) i ZK 8 (proj. 3500) daje
+        jeden wiersz z ilością 8. Przy włączonym filtrze projektu sama liczba
+        „8" sugerowała, że tyle idzie na ten projekt (zgłoszone 05.09.2026).
+        """
+        potrzeba = w.get("potrzeba") or 0
+        if not potrzeba:
+            return ""
+        tu = w.get("potrzeba_tu")
+        if tu is not None and tu != potrzeba:
+            return f"{potrzeba:g}  (tutaj {tu:g})"
+        return f"{potrzeba:g}"
 
     @staticmethod
     def _min_opt(w):
@@ -1073,7 +1296,7 @@ class ZamowieniaWindow(tk.Toplevel):
 
         self.sheet.set_sheet_data(
             [[("✓" if w["sel"] else "☐"), w["symbol"], w["nazwa"], w.get("typ", ""),
-              f"{w.get('potrzeba', 0):g}" if w.get("potrzeba") else "",
+              self._potrzeba_tekst(w),
               f"{w.get('dostepne', 0):g}" if w.get("dostepne") else "",
               f"{w.get('zarezerwowane', 0):g}" if w.get("zarezerwowane") else "",
               self._min_opt(w),
@@ -1090,39 +1313,50 @@ class ZamowieniaWindow(tk.Toplevel):
         # Wyłącznie highlight_cells — mieszanie z highlight_rows dawało
         # niespójny efekt przy zmianie filtra (kolory wierszy i komórek
         # czyszczą się inaczej).
+        # Kolor WIERSZA i kolor KOMÓRKI muszą się różnić, inaczej znaczenie
+        # ginie: zamówiony wiersz malowany tym samym zielonym co „dostawca
+        # z Subiekta" dawał jednolitą planszę, na której nie dało się odczytać
+        # źródła dostawcy (zgłoszone 04.09.2026 — „w poziomie i pionie ten sam
+        # kolor"). Stąd wiersze na chłodnym niebieskim, komórki dostawcy na
+        # zielono/żółto/różowo.
         ostatnia = len(self.HEADERS) - 1
         for i, w in enumerate(self.widoczne):
             if w.get("zd"):
-                # Zamówione — cały wiersz na zielono, jak „na stanie" w oknie stanów.
+                # Zamówione — cały wiersz na niebiesko (stan pozycji).
                 for c in range(ostatnia + 1):
-                    self.sheet.highlight_cells(row=i, column=c, bg="#d5f5e3")
-            else:
-                if w["ilosc"] <= 0:
-                    # Cała potrzeba pokryta ze stanu — nie ma czego zamawiać.
-                    for c in range(ostatnia + 1):
-                        self.sheet.highlight_cells(row=i, column=c, bg="#eafaf1")
-                # Kolor kolumny Dostawca mówi, SKĄD się wziął — bo od tego
-                # zależy, czy trzeba go sprawdzić okiem:
-                #   różowy  — brak, ZD nie powstanie
-                #   żółty   — zgadnięty z nazwy w BOM (~55 % trafień), do weryfikacji
-                #   zielony — wskazany ręcznie albo wzięty z kartoteki Subiekta
-                zrodlo = w.get("zrodlo_dostawcy", "")
-                if not w["dostawca"]:
-                    self.sheet.highlight_cells(row=i, column=self.COL_DOSTAWCA, bg="#fdedec")
-                elif zrodlo == "automat":
-                    self.sheet.highlight_cells(row=i, column=self.COL_DOSTAWCA, bg="#fcf3cf")
-                elif zrodlo in ("reczny", "subiekt"):
-                    self.sheet.highlight_cells(row=i, column=self.COL_DOSTAWCA, bg="#d5f5e3")
-                if w.get("ze_stanu"):
-                    # Część potrzeby pokryta z magazynu — nie trzeba tego kupować.
-                    self.sheet.highlight_cells(row=i, column=self.COL_ZE_STANU, bg="#d5f5e3")
-                if w.get("stan_min") and w.get("dostepne", 0) <= w["stan_min"]:
-                    # Stan spadł do progu — trzeba domówić niezależnie od projektu.
-                    self.sheet.highlight_cells(row=i, column=self.COL_MINOPT, bg="#fdebd0")
-                if w.get("zarezerwowane"):
-                    # Część stanu zajęta — „mam 63" znaczy co innego niż
-                    # „mam 63, ale 60 zarezerwowane".
-                    self.sheet.highlight_cells(row=i, column=self.COL_REZERW, bg="#fdebd0")
+                    self.sheet.highlight_cells(row=i, column=c, bg="#dfeaf7")
+            elif w["ilosc"] <= 0:
+                # Cała potrzeba pokryta ze stanu — nie ma czego zamawiać.
+                for c in range(ostatnia + 1):
+                    self.sheet.highlight_cells(row=i, column=c, bg="#eef1f3")
+
+            # Kolor kolumny Dostawca mówi, SKĄD się wziął — bo od tego zależy,
+            # czy trzeba go sprawdzić okiem. Malowany PO tle wiersza i także
+            # dla pozycji zamówionych: „skąd dostawca" trzeba widzieć również
+            # wtedy, gdy ZD już powstało.
+            #   różowy  — brak, ZD nie powstanie
+            #   żółty   — zgadnięty z nazwy w BOM (~55 % trafień), do weryfikacji
+            #   zielony — wskazany ręcznie albo wzięty z kartoteki Subiekta
+            zrodlo = w.get("zrodlo_dostawcy", "")
+            if not w["dostawca"]:
+                self.sheet.highlight_cells(row=i, column=self.COL_DOSTAWCA, bg="#fdedec")
+            elif zrodlo == "automat":
+                self.sheet.highlight_cells(row=i, column=self.COL_DOSTAWCA, bg="#fcf3cf")
+            elif zrodlo in ("reczny", "subiekt"):
+                self.sheet.highlight_cells(row=i, column=self.COL_DOSTAWCA, bg="#d5f5e3")
+
+            # Wyróżnienia liczbowe — niezależne od tego, skąd wziął się
+            # dostawca, więc poza łańcuchem if/elif powyżej.
+            if w.get("ze_stanu"):
+                # Część potrzeby pokryta z magazynu — nie trzeba tego kupować.
+                self.sheet.highlight_cells(row=i, column=self.COL_ZE_STANU, bg="#d5f5e3")
+            if w.get("stan_min") and w.get("dostepne", 0) <= w["stan_min"]:
+                # Stan spadł do progu — trzeba domówić niezależnie od projektu.
+                self.sheet.highlight_cells(row=i, column=self.COL_MINOPT, bg="#fdebd0")
+            if w.get("zarezerwowane"):
+                # Część stanu zajęta — „mam 63" znaczy co innego niż
+                # „mam 63, ale 60 zarezerwowane".
+                self.sheet.highlight_cells(row=i, column=self.COL_REZERW, bg="#fdebd0")
         self.sheet.redraw()
         self._przelicz()
 
@@ -1305,19 +1539,36 @@ class ZamowieniaWindow(tk.Toplevel):
             messagebox.showerror("Wyślij ZD", f"Brak modułu wysyłki:\n{e}", parent=self)
             return
 
+        # Piąty element: czy pozycja ma numer rysunku (z BOM-u, nie z kształtu
+        # symbolu). Panel plików nie zgłasza wtedy braku dokumentacji dla
+        # łożysk i innych elementów katalogowych.
+        # Szósty element: numery projektów pozycji (kolumna „Projekt"). ZD
+        # zbiera detale z KILKU projektów, a szukanie plików startowało od
+        # projektu otwartego w arkuszu — czyli często nie tego (zgłoszone
+        # 05.09.2026). Mając je, szukamy najpierw tam, gdzie detal powstał.
         pozycje = [(w.get("symbol", ""), w.get("nazwa", ""),
-                    w.get("ilosc", "") or w.get("potrzeba", ""), w.get("jm", "szt."))
+                    w.get("ilosc", "") or w.get("potrzeba", ""), w.get("jm", "szt."),
+                    w.get("ma_rysunek"), w.get("projekty", ""))
                    for w in dane["poz"]]
 
         # Adres e-mail i nadawca pochodzą z RM_BAZA — okno pozwala je poprawić.
         email = self._email_dostawcy(dane["dostawca"])
         nadawca = self._nadawca()
 
+        # Panel plików ten sam co w oknie „Wyślij do RFQ" — stąd komplet
+        # zależności z arkusza głównego. getattr, bo starsze wersje okna
+        # mogą ich nie mieć; panel działa wtedy w okrojonym trybie.
+        okno = self.master
         subiekt_wyslij_zd.open_window(
             self, numer_zd, dane["dostawca"], email,
             self.project_name or "", pozycje, nadawca,
             szukaj_plikow=self._pliki_rysunku,
-            szukaj_maila=self._email_po_nip)
+            szukaj_maila=self._email_po_nip,
+            szukaj_dalej=self._szukaj_dalej_rysunku,
+            needs_dxf=getattr(okno, "_rfq_needs_dxf", None),
+            register_drop=getattr(okno, "_register_file_drop", None),
+            dozwolone_ext=getattr(okno, "RFQ_PORTAL_EXTS", None),
+            blad_serwera=lambda: getattr(okno, "_rfq_server_error", None))
 
     def _email_dostawcy(self, nazwa_subiekt):
         """
@@ -1392,21 +1643,76 @@ class ZamowieniaWindow(tk.Toplevel):
         except Exception:
             return ""
 
-    def _pliki_rysunku(self, symbol):
+    def _pliki_rysunku(self, symbol, projekty=None):
         """
         Pliki rysunku (PDF/DXF/STEP…) z serwera — tą samą drogą co RFQ.
         Woła _find_files_for_drawing z arkusza głównego, żeby nie dublować
         logiki szukania po katalogach projektu.
+
+        `projekty` — numery z kolumny „Projekt". Szukanie w arkuszu startuje
+        od projektu tam otwartego, a ZD zbiera detale z kilku projektów naraz,
+        więc bez tego rysunek bywał szukany nie tam, gdzie powstał
+        (zgłoszone 05.09.2026). Przekazujemy je dalej; gdy arkusz jest starszy
+        i ich nie przyjmuje, szukanie leci po staremu.
         """
         okno = self.master
         szukaj = getattr(okno, "_find_files_for_drawing", None)
         if not callable(szukaj) or not symbol:
             return []
         try:
+            if projekty:
+                try:
+                    return szukaj(symbol, projekty)
+                except TypeError:
+                    pass                # starsza sygnatura bez `projekty`
             return szukaj(symbol)
         except Exception as e:
             print(f"⚠️  Szukanie plików dla {symbol}: {e}")
             return []
+
+    def _szukaj_dalej_rysunku(self, pozycja):
+        """Alternatywne źródło plików — biblioteka albo głęboki skan serwera.
+
+        Ta sama droga co „Szukaj dalej…" w oknie RFQ: pytamy SKĄD szukać,
+        potem skanujemy i — gdy nic nie ma — pytamy ponownie, żeby user mógł
+        spróbować drugiego źródła bez zamykania okna.
+        """
+        okno = self.master
+        pytaj = getattr(okno, "_ask_rfq_scan_source", None)
+        skanuj = getattr(okno, "_rfq_deep_scan", None)
+        if not callable(pytaj) or not callable(skanuj):
+            return []
+
+        # Ścieżki biorę z modułu głównego przez sys.modules, a nie importem —
+        # subiekt_zamowienia jest importowane PRZEZ RM_BAZA, więc import
+        # w drugą stronę zrobiłby cykl.
+        glowny = sys.modules.get(type(okno).__module__)
+        biblioteka = getattr(glowny, "LIBRARY_ROOT", None)
+        serwer = getattr(glowny, "SERVER_DIR", None)
+
+        numer = pozycja.get("drawing_no", "")
+        while True:
+            try:
+                zrodlo = pytaj(numer, self)
+                if zrodlo is None:
+                    return []
+                korzen = Path(biblioteka if zrodlo == "library" else serwer or "")
+                if not korzen or str(korzen) in ("", "."):
+                    print(f"⚠️  Brak ścieżki dla źródła {zrodlo!r}")
+                    return []
+                tytul = ("Skanowanie biblioteki" if zrodlo == "library"
+                         else "Skanowanie serwera")
+                znalezione = skanuj(korzen, numer, tytul, parent=self) or []
+            except Exception as e:
+                print(f"⚠️  Szukanie dalej dla {numer}: {e}")
+                return []
+            if znalezione:
+                return znalezione
+            if not messagebox.askyesno(
+                    "Nie znaleziono",
+                    f"Nie znaleziono plików dla:\n{numer}\n\nSzukać w innym miejscu?",
+                    parent=self):
+                return []
 
     def _usun_zd(self):
         """PPM → okno z listą DOKUMENTÓW ZD do usunięcia.
