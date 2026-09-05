@@ -1,4 +1,4 @@
-// NexoRecon — rozpoznanie bazy Subiekt nexo PRO przez Sferę. TYLKO ODCZYT.
+﻿// NexoRecon — rozpoznanie bazy Subiekt nexo PRO przez Sferę. TYLKO ODCZYT.
 //
 // Użycie:  NexoRecon.exe [sciezka\do\konfig.json] [--symbol=ABC-123 ...] [--limit=20]
 // Konfig domyślnie: C:\RMPAK_CLIENT\.nexo_sfera.json  (poza repo! wzór: ..\nexo_sfera.example.json)
@@ -44,13 +44,14 @@ var tryb = args.Length > 0 && !args[0].StartsWith("--") ? args[0].ToLowerInvaria
 //   zd-usun         - kasuje ZD o podanych numerach; USUWA (--zapisz)
 //   kontrahenci     - lista firm z NIP-ami (powiazanie dostawcow RM_BAZA)
 //   dostawcy        - zaklada kontrahentow z listy RM_BAZA; ZAPISUJE (--zapisz)
+//   progi           - stany min/opt kartotek: odczyt, a z --plan ZAPISUJE (--zapisz)
 //   stan-pozycji    - kartoteka + ZK + ZD dla listy symboli (kolumna SUBIEKT)
 //   dokumenty       - lista ZK/ZD/RW/WZ z pozycjami (okno przegladu)
 //   magazyn         - stany CALEGO magazynu (bez wiazania z projektem)
 var trybyMaszynowe = new[] { "stan", "katalog", "kontrahenci", "zapotrzebowanie",
                              "projekt", "zd", "zd-usun", "dostawcy", "stan-pozycji",
                              "dokumenty", "faktury", "kartoteka", "wydruk-recon", "wydruk",
-                             "magazyn", "symbole", "termin" };
+                             "magazyn", "symbole", "termin", "progi" };
 var cicho = trybyMaszynowe.Contains(tryb);
 var trybStan = tryb == "stan";
 var trybProjekt = tryb == "projekt";
@@ -194,6 +195,13 @@ using (sfera)
     {
         if (planFile == null) { Console.WriteLine("Tryb symbole: brak --plan=plik.json"); return 1; }
         return NexoRecon.Symbole.Uruchom(sfera, planFile, outPath, zapisz);
+    }
+
+    if (tryb == "progi")
+    {
+        // Bez --plan to ODCZYT progow; z planem zapis (dopiero z --zapisz).
+        var magArg = args.FirstOrDefault(a => a.StartsWith("--magazyn="))?["--magazyn=".Length..];
+        return NexoRecon.Progi.Uruchom(sfera, planFile, outPath, zapisz, magArg);
     }
 
     if (tryb == "wydruk")
