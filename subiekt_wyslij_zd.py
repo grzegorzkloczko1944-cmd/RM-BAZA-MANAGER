@@ -175,6 +175,40 @@ def zapisz_wyslanie(numer_zd, adresat, nadawca, zalacznikow, termin=None, tryb="
         print(f"⚠️  Nie zapisano śladu wysyłki {numer_zd}: {e}")
 
 
+def kontakt_prowadzacego(arkusz):
+    """Dane osoby prowadzącej zamówienie: {login, name, email, phone} albo None.
+
+    Ta sama droga co przy RFQ (employees w RM_MANAGER po loginie zalogowanego
+    w RM_BAZA) — portal pokazuje je dostawcy nad listą pozycji, żeby wiedział,
+    do kogo dzwonić w sprawie terminu.
+
+    Czytamy CICHO, bez okien: `_rfq_contact` arkusza przy brakach pokazuje
+    błąd i twardo blokuje wysyłkę zapytania. Przy zamówieniu to za dużo —
+    ZD idzie także mailem, w którym nadawca jest widoczny, więc brak wpisu
+    w kadrach nie może zatrzymać wysyłki. Zwracamy, co jest; portal pokazuje
+    blok kontaktu tylko gdy ma nazwisko.
+    """
+    login = (getattr(arkusz, "current_user", "") or "").strip()
+    if not login:
+        return None
+    try:
+        from rm_manager import get_employee_by_user_login
+        emp = get_employee_by_user_login(arkusz._rm_manager_db_path(), login) or {}
+    except Exception as e:
+        print(f"⚠️  Nie odczytano danych prowadzącego ({login}): {e}")
+        return None
+    dane = {"login": login,
+            "name": (emp.get("name") or "").strip(),
+            "email": (emp.get("email") or "").strip(),
+            "phone": (emp.get("phone") or "").strip()}
+    if not dane["name"]:
+        # Bez nazwiska blok kontaktu w portalu i tak się nie pokaże.
+        print(f"⚠️  Brak danych kontaktowych dla {login} "
+              "— zamówienie pójdzie bez bloku kontaktu (uzupełnij w RM_MANAGER → Pracownicy).")
+        return None
+    return dane
+
+
 # ── „Zamówiono" w arkuszu projektu ──────────────────────────────────────────
 #
 # Wysyłka ZD ma postawić ☑ Zamówiono i termin dostawy w BOM-ie każdego
@@ -1080,11 +1114,20 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
         self.update_idletasks()
 
         try:
+            # Kontakt prowadzącego — ten sam mechanizm co przy RFQ
+            # (_rfq_contact: employees z RM_MANAGER po loginie zalogowanego).
+            # Bez tego dostawca dostaje zamówienie „od RMPAK", bez nazwiska,
+            # i przy pytaniu o termin musi szukać osoby na własną rękę.
+            # Brak danych NIE blokuje wysyłki, inaczej niż w RFQ: zamówienie
+            # idzie też mailem, w którym nadawca jest widoczny.
+            kontakt = kontakt_prowadzacego(getattr(self.master, "master", None))
+
             zam = agent.create_order(
                 code=self.numer_zd,
                 title=f"Zamówienie {self.numer_zd}",
                 project_number=self.projekt or None,
-                supplier_name=self.dostawca or None)
+                supplier_name=self.dostawca or None,
+                contact=kontakt)
             order_id = zam["order_id"]
 
             for i, it in enumerate(pozycje, 1):
