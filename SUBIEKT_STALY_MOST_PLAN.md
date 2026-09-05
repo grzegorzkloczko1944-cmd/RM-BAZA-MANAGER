@@ -49,12 +49,45 @@ Jedno logowanie do Sfery na wszystkie komendy. Dane porównane ze starą ścież
 identyczne. **To nie jest benchmark z sekcji 33** — ten trzeba powtórzyć w firmie
 na 3444 kartotekach.
 
+## Zapisy — przetestowane na żywo (demo M-OLD)
+
+| Tryb | Test | Wynik |
+|---|---|---|
+| `rw` | zdjęcie 1 szt. | `RW 1/MAG/2026`, stan 259 → 258 |
+| `kartoteka` | założenie `TEST-MOST-001` | `zalozona` |
+| `progi` | min 5 / opt 20 | zapisane, potwierdzone odczytem zwrotnym |
+| `zd` | zamówienie z zapotrzebowania | `ZD 4/CENTRALA/2026` |
+| `termin` | 2026-10-15 na tym ZD | ustawiony, potwierdzony odczytem |
+| `zd-usun` | usunięcie tego ZD | usunięte, potwierdzone |
+| `kartoteka-usun` | sprzątnięcie kartoteki | usunięta |
+| `dostawcy` | podgląd (`zapisz=False`) | `do-zalozenia` |
+| `projekt` | podgląd | — |
+
+Dane testowe posprzątane.
+
+## Wieloużytkownikowość — sprawdzone
+
+Środowisko docelowe: **każdy user na swoim PC, każdy z własnym kontem nexo** —
+czyli założenie z sekcji 2. Port 51273 i mutex `Local\RMPAK_NEXO_BRIDGE_<user>`
+są lokalne dla maszyny, więc stanowiska sobie nie przeszkadzają.
+
+Dwa ryzyka specyficzne dla stałej sesji zostały zweryfikowane:
+
+1. **Czy długożyjąca sesja widzi zmiany innych userów?** TAK. Sesja żyjąca
+   17 minut natychmiast zobaczyła RW wystawione przez inny proces
+   (257 → 256). Sfera nie cachuje stanów — czyta na żywo z SQL. To był
+   największy nierozpoznany problem stałego mostu.
+2. **Co przy wyścigu o tę samą pozycję?** Subiekt odrzuca RW ponad dostępny
+   stan, więc drugi user dostanie odmowę, a nie ujemny stan. Baza jest
+   arbitrem, most tego nie zmienia.
+
+**Uwaga o terminalu:** gdyby kiedyś kilku userów pracowało na jednej maszynie
+(RDP), stały port 51273 byłby konfliktem — pierwszy most zająłby port dla
+wszystkich sesji. Wtedy trzeba portu per sesja Windows. Przy obecnym układzie
+(PC per user) problemu nie ma.
+
 ## Czego NIE zrobiono
 
-- **Krok L: prawdziwe zapisy przez most są przetestowane tylko częściowo.**
-  Potwierdzone na demo: **RW** (`RW 1/MAG/2026`, stan 259 → 258). Reszta
-  (`zd`, `kartoteka`, `dostawcy`, `projekt`, `termin`, `zd-usun`) sprawdzona
-  wyłącznie w trybie podglądu (`zapisz=False`).
 - Benchmark z sekcji 33 w firmie.
 - Cache (sekcja 20) — po pomiarach wygląda na zbędny, ale decyzja dopiero
   po benchmarku firmowym.
@@ -92,12 +125,20 @@ copy NexoRecon.exe.dziala-20260906 NexoRecon.exe
 
 Kopia binarki leży poza gitem, w `bin/Release`.
 
-## Do ustalenia przed wdrożeniem w firmie
+## Wdrożenie w firmie — kolejność
 
-Most loguje się kontem z `C:\RMPAK_CLIENT\.nexo_sfera.json`. Sekcja 2 zakłada,
-że każde stanowisko używa **swojego** operatora nexo — jeśli w firmie wszystkie
-stanowiska mają ten sam plik konfiguracyjny, dokumenty będą wystawiane na jedno
-konto. Do sprawdzenia.
+1. `git pull` na stanowisku, potem **obowiązkowo** `dotnet build -c Release
+   -nowarn:MSB3277` w `subiekt_sfera\NexoRecon` (`bin/` nie idzie przez gita).
+2. Sprawdzić, że `.nexo_sfera.json` ma konto **tego** operatora, nie wspólne.
+3. Uruchomić RM_BAZA, otworzyć dowolne okno Subiekta — most wstanie sam
+   (~15 s przy pierwszym uruchomieniu), kolejne operacje idą w milisekundach.
+4. Diagnostyka: `python -c "import subiekt_bridge as b; print(b.status())"` —
+   `logins` powinno zostać na `1` przez cały dzień pracy.
+5. Log: `C:\RMPAK_CLIENT\subiekt_logi\bridge_RRRRMMDD.log`.
+
+Warto zrobić na **jednym** stanowisku i popracować dzień, zanim pójdzie
+na wszystkie — most żyje długo, więc problemy z długą sesją (jeśli jakieś
+zostały) ujawnią się dopiero po godzinach pracy, nie w pierwszych minutach.
 
 ---
 
