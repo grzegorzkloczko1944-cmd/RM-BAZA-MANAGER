@@ -50,6 +50,11 @@ if (symbolsFile != null)
 }
 var limit = int.TryParse(args.FirstOrDefault(a => a.StartsWith("--limit="))?["--limit=".Length..], out var l) ? l : 15;
 
+// Tryb "server" — staly most. Sam zarzadza cyklem zycia sesji (loguje raz
+// i utrzymuje ja miedzy komendami), wiec wchodzi przed zwyklym Wczytaj/Connect.
+if (tryb == "server")
+    return ServerHost.Uruchom(cfgPath, args.Any(a => a.Equals("--console", StringComparison.OrdinalIgnoreCase)));
+
 NexoSession sesja;
 try
 {
