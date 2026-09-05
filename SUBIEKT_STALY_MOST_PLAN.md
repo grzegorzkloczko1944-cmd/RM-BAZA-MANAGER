@@ -13,6 +13,94 @@ Nie należy przy okazji przebudowywać logiki biznesowej zamówień, magazynu, p
 
 ---
 
+---
+
+# 0. Stan realizacji (06.09.2026)
+
+Kroki **A–J zrobione** na branchu `most-server` (7 commitów, niescalone z `main`).
+
+## Co powstało
+
+| Plik | Rola |
+|---|---|
+| `subiekt_sfera/NexoRecon/NexoSession.cs` | cykl życia sesji: `Connect` / `Reconnect` / `CzyZywa` |
+| `subiekt_sfera/NexoRecon/CommandDispatcher.cs` | mapa tryb → handler, wspólna dla CLI i servera |
+| `subiekt_sfera/NexoRecon/ServerHost.cs` | `NexoRecon.exe server`: TCP, kolejka, jeden worker |
+| `subiekt_sfera/NexoRecon/Rozpoznanie.cs` | domyślny tryb raportu, przeniesiony z `Program.cs` |
+| `subiekt_bridge.py` | klient: `call()`, `wywolaj()`, autostart, fallback |
+| `subiekt_sfera/bridge_test.py` | klient testowy (`python bridge_test.py bench`) |
+
+Handlery (`Stan.cs`, `Katalog.cs`, …) **nie były zmieniane** — server materializuje
+plik tymczasowy na `--out` i przechwytuje `Console.Out`, więc kontrakt „plan
+z pliku, JSON do pliku" został nienaruszony.
+
+## Pomiary (baza demo M-OLD, 247 kartotek)
+
+| Komenda | Stare CLI | Most |
+|---|---:|---:|
+| katalog (2. i kolejne) | ~13 500 ms | **8–50 ms** |
+| kontrahenci | 14 368 ms | **104 ms** |
+| stan | 14 135 ms | **296 ms** |
+| stan-pozycji | 13 951 ms | **233 ms** |
+| magazyn | 14 218 ms | **753 ms** |
+| dokumenty | 14 343 ms | **873 ms** |
+
+Jedno logowanie do Sfery na wszystkie komendy. Dane porównane ze starą ścieżką —
+identyczne. **To nie jest benchmark z sekcji 33** — ten trzeba powtórzyć w firmie
+na 3444 kartotekach.
+
+## Czego NIE zrobiono
+
+- **Krok L: prawdziwe zapisy przez most są przetestowane tylko częściowo.**
+  Potwierdzone na demo: **RW** (`RW 1/MAG/2026`, stan 259 → 258). Reszta
+  (`zd`, `kartoteka`, `dostawcy`, `projekt`, `termin`, `zd-usun`) sprawdzona
+  wyłącznie w trybie podglądu (`zapisz=False`).
+- Benchmark z sekcji 33 w firmie.
+- Cache (sekcja 20) — po pomiarach wygląda na zbędny, ale decyzja dopiero
+  po benchmarku firmowym.
+- Token lokalny (sekcja 12) — do rozważenia przed wdrożeniem na wszystkie
+  stanowiska.
+
+## Pułapki wykryte przy wdrożeniu
+
+**Tryb server padał natychmiast pod `DETACHED_PROCESS`.** Bez konsoli
+`Console.OutputEncoding = Encoding.UTF8` rzuca `IOException` i proces ginął
+z `0xE0434352`, **zanim cokolwiek zdążył zalogować**. Ręcznie z konsoli działał
+bez zarzutu, więc błąd ujawniłby się dopiero u użytkownika. Dlatego każdy
+komunikat w `ServerHost` idzie przez `Powiedz()`, które zawsze pisze też do logu.
+
+**Most blokuje plik `NexoRecon.exe`.** Przed `dotnet build` trzeba go zatrzymać:
+
+```
+python -c "import subiekt_bridge as b; b.zatrzymaj_most()"
+```
+
+To nowa konsekwencja stałego procesu — wcześniej proces kończył się sam.
+
+**Kolizja nazw `Magazyn`.** Encja SDK vs handler `Magazyn.cs`: wewnątrz
+`namespace NexoRecon` wygrywa handler. `Rozpoznanie.cs` używa aliasu
+`MagazynSfera`.
+
+## Powrót do starego mostu
+
+```
+git checkout main
+cd subiekt_sfera\NexoRecon\bin\Release
+copy NexoRecon.dll.dziala-20260906 NexoRecon.dll
+copy NexoRecon.exe.dziala-20260906 NexoRecon.exe
+```
+
+Kopia binarki leży poza gitem, w `bin/Release`.
+
+## Do ustalenia przed wdrożeniem w firmie
+
+Most loguje się kontem z `C:\RMPAK_CLIENT\.nexo_sfera.json`. Sekcja 2 zakłada,
+że każde stanowisko używa **swojego** operatora nexo — jeśli w firmie wszystkie
+stanowiska mają ten sam plik konfiguracyjny, dokumenty będą wystawiane na jedno
+konto. Do sprawdzenia.
+
+---
+
 # 1. Stan obecny
 
 RM_BAZA jest aplikacją Python/Tkinter. Komunikacja z Subiektem odbywa się przez most C#:
