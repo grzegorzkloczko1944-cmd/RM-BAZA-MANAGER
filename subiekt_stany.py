@@ -382,6 +382,16 @@ def _query_stock_cli(symbols, timeout=TIMEOUT_S):
 
 # ── Okno ────────────────────────────────────────────────────────────────────
 class SubiektStanyWindow(tk.Toplevel, Kreciolek):
+    #: Kolor tła wiersza per kategoria. Jedno źródło prawdy dla tagów
+    #: Treeview i dla próbek w legendzie — inaczej rozjechałyby się przy
+    #: pierwszej zmianie odcienia.
+    KOLORY = {
+        "ok":     "#d5f5e3",   # starczy na magazynie
+        "czesc":  "#fdebd0",   # jest, ale za mało
+        "brak":   "#fadbd8",   # jest kartoteka, stan 0
+        "nokart": "#eaecee",   # brak kartoteki
+    }
+
     COLS = [
         ("nr",     "Nr rysunku",     140, "w"),
         ("bom",    "Ilość BOM",       75, "e"),
@@ -425,10 +435,17 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
                        font=("Arial", 8), activebackground="#34495e",
                        activeforeground="white").pack(side=tk.RIGHT, padx=4)
 
-        # Pasek podsumowania — punkt 3: ile ma kartotekę, ile na stanie, ile brakuje
-        self.summary = tk.Label(self, text="Wczytywanie…", bg="#ecf0f1", fg="#2c3e50",
-                                font=("Arial", 9), anchor="w", padx=12, pady=6)
+        # Pasek podsumowania: ile ma kartotekę, ile na stanie, ile brakuje.
+        #
+        # Liczniki kategorii są zarazem LEGENDĄ kolorów wierszy — każdy dostaje
+        # próbkę w tym samym kolorze co tło wiersza w tabeli. Wcześniej pasek
+        # używał symboli (✅ ⚠ ❌), których w tabeli nie ma, więc nie dało się
+        # powiązać kategorii z kolorem inaczej niż zgadywaniem (zgłoszone
+        # 06.09.2026).
+        self.summary = tk.Frame(self, bg="#ecf0f1")
         self.summary.pack(side=tk.TOP, fill=tk.X)
+        self._summary_wnetrze = None
+        self._summary_tekst("Wczytywanie…")
 
         wrap = tk.Frame(self)
         wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(6, 8))
@@ -443,10 +460,8 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vs.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self.tree.tag_configure("ok",      background="#d5f5e3")   # starczy na magazynie
-        self.tree.tag_configure("czesc",   background="#fdebd0")   # jest, ale za mało
-        self.tree.tag_configure("brak",    background="#fadbd8")   # jest kartoteka, stan 0
-        self.tree.tag_configure("nokart",  background="#eaecee")   # brak kartoteki
+        for tag, kolor in self.KOLORY.items():
+            self.tree.tag_configure(tag, background=kolor)
         self.tree.bind("<Double-1>", self._show_details)
 
         self.status = tk.Label(self, text="", anchor="w", padx=12, pady=3,
@@ -498,7 +513,7 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
         if error:
             self.stop_kreciolek()
             self.status.config(text="Błąd.")
-            self.summary.config(text=error.split("\n")[0])
+            self._summary_tekst(error.split("\n")[0])
             messagebox.showerror("Subiekt", error, parent=self)
             return
         self._refill()
@@ -572,15 +587,46 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
 
         total = len(self.rows)
         pct = (n_kart / total * 100) if total else 0
-        self.summary.config(text=(
-            f"Pozycji: {total}    "
-            f"z kartoteką: {n_kart} ({pct:.0f}%)    "
-            f"✅ na stanie: {n_ok}    "
-            f"⚠ za mało: {n_czesc}    "
-            f"❌ stan 0: {n_brak}    "
-            f"⬜ brak kartoteki: {n_nokart}    "
-            f"→ do zamówienia: {n_czesc + n_brak + n_nokart}"
-        ))
+        self._summary_liczniki(total, n_kart, pct, n_ok, n_czesc, n_brak, n_nokart)
+
+    # ── pasek podsumowania / legenda ────────────────────────────────────────
+    def _summary_czysc(self):
+        if self._summary_wnetrze is not None:
+            self._summary_wnetrze.destroy()
+        self._summary_wnetrze = tk.Frame(self.summary, bg="#ecf0f1")
+        self._summary_wnetrze.pack(fill=tk.X, padx=12, pady=6)
+        return self._summary_wnetrze
+
+    def _summary_tekst(self, tekst):
+        """Pasek jako zwykły komunikat — przy wczytywaniu i przy błędzie."""
+        ramka = self._summary_czysc()
+        tk.Label(ramka, text=tekst, bg="#ecf0f1", fg="#2c3e50",
+                 font=("Arial", 9), anchor="w").pack(side=tk.LEFT)
+
+    def _summary_liczniki(self, total, n_kart, pct, n_ok, n_czesc, n_brak, n_nokart):
+        """Liczniki kategorii z próbką koloru — zarazem legenda tabeli."""
+        ramka = self._summary_czysc()
+
+        def tekst(t, bold=False):
+            tk.Label(ramka, text=t, bg="#ecf0f1", fg="#2c3e50",
+                     font=("Arial", 9, "bold" if bold else "normal")).pack(side=tk.LEFT)
+
+        def kategoria(tag, etykieta, ile):
+            # Próbka w kolorze tła wiersza — to ona wiąże licznik z tabelą.
+            # Obramowanie, bo „brak kartoteki" jest jasnoszary i na jasnym
+            # pasku bez ramki wyglądałby jak puste miejsce.
+            tk.Frame(ramka, bg=self.KOLORY[tag], width=13, height=13,
+                     highlightthickness=1, highlightbackground="#95a5a6").pack(
+                         side=tk.LEFT, padx=(10, 4))
+            tk.Label(ramka, text=f"{etykieta}: {ile}", bg="#ecf0f1", fg="#2c3e50",
+                     font=("Arial", 9)).pack(side=tk.LEFT)
+
+        tekst(f"Pozycji: {total}    z kartoteką: {n_kart} ({pct:.0f}%)")
+        kategoria("ok", "na stanie", n_ok)
+        kategoria("czesc", "za mało", n_czesc)
+        kategoria("brak", "stan 0", n_brak)
+        kategoria("nokart", "brak kartoteki", n_nokart)
+        tekst(f"      → do zamówienia: {n_czesc + n_brak + n_nokart}", bold=True)
 
     def _sort_by(self, key, _state={}):
         rev = _state[key] = not _state.get(key, False)
