@@ -309,6 +309,7 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
         self.sheet.popup_menu_add_command("Ustaw dostawcę dla wierszy…",
                                           self._dostawca_dla_wybranych_wierszy)
         self.sheet.pack(fill=tk.BOTH, expand=True)
+        self._podepnij_tooltip()
 
         dol = tk.Frame(panel)
         panel.add(dol, weight=1)
@@ -1126,6 +1127,93 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
         (messagebox.showwarning if bledy else messagebox.showinfo)("Usuwanie", tekst, parent=self)
         self.status.config(text=f"Usunięto {len(usuniete)} kartotek."
                                 + (f" Pominięto {len(bledy)} (mają historię)." if bledy else ""))
+
+    # ── dymki dla obciętych kolumn ───────────────────────────────────────────
+    #: nagłówki kolumn z dymkiem — te same zasady co w subiekt_zamowienia
+    #: (TOOLTIP_KOLUMNY): tylko tam, gdzie treść realnie nie mieści się
+    #: w szerokości. „ZD” bywa zbiorcze i z ilościami („ZD 1/CENTRALA/2026 (2),
+    #: ZD 2/…”) i obcina się w wąskiej kolumnie — stąd dymek.
+    TOOLTIP_KOLUMNY = {"nazwa", "dostawca", "zd"}
+
+    def _podepnij_tooltip(self):
+        """Dymek dla kolumn, których treść nie mieści się w szerokości.
+
+        Ten sam mechanizm co w subiekt_zamowienia.py — tksheet nie ma
+        własnych tooltipów, więc robimy je na Toplevel bez ramki.
+        """
+        self._tip = None
+        self._tip_kom = None          # (wiersz, kolumna) — żeby nie mrugał
+        self._tip_after = None
+        self.sheet.bind("<Motion>", self._tip_ruch, add="+")
+        self.sheet.bind("<Leave>", lambda _e: self._tip_ukryj(), add="+")
+        self.sheet.bind("<Button-1>", lambda _e: self._tip_ukryj(), add="+")
+        self.sheet.bind("<MouseWheel>", lambda _e: self._tip_ukryj(), add="+")
+        self.bind("<Destroy>", lambda _e: self._tip_ukryj(), add="+")
+
+    def _tip_ukryj(self):
+        if self._tip_after:
+            try:
+                self.after_cancel(self._tip_after)
+            except Exception:
+                pass
+            self._tip_after = None
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except tk.TclError:
+                pass
+            self._tip = None
+        self._tip_kom = None
+
+    def _tip_ruch(self, event):
+        try:
+            r = self.sheet.identify_row(event, allow_end=False)
+            c = self.sheet.identify_column(event, allow_end=False)
+        except Exception:
+            return
+        if r is None or c is None:
+            self._tip_ukryj()
+            return
+        if (r, c) == self._tip_kom:
+            return                     # ta sama komórka — nie przerysowuj
+        self._tip_ukryj()
+
+        try:
+            naglowek = self.KOLUMNY[c][1].strip().lower()
+        except Exception:
+            return
+        if naglowek not in self.TOOLTIP_KOLUMNY:
+            return
+
+        try:
+            tekst = str(self.sheet.get_cell_data(r, c) or "").strip()
+        except Exception:
+            return
+        if not tekst:
+            return
+
+        self._tip_kom = (r, c)
+        # Krótka zwłoka — bez niej dymki migoczą przy przesuwaniu myszy.
+        self._tip_after = self.after(
+            400, lambda: self._tip_pokaz(tekst, event.x_root, event.y_root))
+
+    def _tip_pokaz(self, tekst, x, y):
+        self._tip_after = None
+        if self._tip is not None:
+            return
+        tip = tk.Toplevel(self)
+        tip.overrideredirect(True)     # bez ramki okna — to dymek
+        tip.attributes("-topmost", True)
+        tk.Label(tip, text=tekst, bg="#ffffe0", fg="#2c3e50",
+                 relief=tk.SOLID, bd=1, justify=tk.LEFT, anchor="w",
+                 font=("Arial", 9), padx=6, pady=3,
+                 wraplength=520).pack()
+        # Poniżej kursora, żeby nie zasłaniać komórki, na którą patrzysz.
+        tip.update_idletasks()
+        szer, wys = tip.winfo_width(), tip.winfo_height()
+        ekran_x = tip.winfo_screenwidth()
+        tip.geometry(f"+{min(x + 14, ekran_x - szer - 8)}+{y + 20}")
+        self._tip = tip
 
     # ── rozbicie na magazyny ───────────────────────────────────────────────
     def _wybor_pozycji(self, _event=None):
