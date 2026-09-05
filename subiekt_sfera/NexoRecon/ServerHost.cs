@@ -71,7 +71,7 @@ internal static class ServerHost
         using var mutex = new Mutex(true, $"Local\\RMPAK_NEXO_BRIDGE_{Environment.UserName}", out var pierwszy);
         if (!pierwszy)
         {
-            Console.WriteLine("Bridge already running.");
+            Powiedz("Bridge already running.");
             return 4;
         }
 
@@ -82,7 +82,7 @@ internal static class ServerHost
         }
         catch (SesjaException ex)
         {
-            Console.WriteLine(ex.Message);
+            Powiedz(ex.Message);
             return ex.KodWyjscia;
         }
 
@@ -98,12 +98,12 @@ internal static class ServerHost
             }
             catch (SocketException ex)
             {
-                Console.WriteLine($"Nie mozna nasluchiwac na 127.0.0.1:{Port}: {ex.Message}");
+                Powiedz($"Nie mozna nasluchiwac na 127.0.0.1:{Port}: {ex.Message}");
                 return 5;
             }
 
             Log($"start bridge pid={Environment.ProcessId} port={Port} wersja={Wersja} protokol={Protokol}");
-            if (konsola) Console.WriteLine($"Bridge nasluchuje na 127.0.0.1:{Port} (pid {Environment.ProcessId}). Ctrl+C konczy.");
+            if (konsola) Powiedz($"Bridge nasluchuje na 127.0.0.1:{Port} (pid {Environment.ProcessId}). Ctrl+C konczy.");
 
             // JEDEN watek roboczy — jedyny, ktory dotyka Sfery.
             var worker = new Thread(() => PetlaWorkera(sesja)) { IsBackground = true, Name = "SferaWorker" };
@@ -439,6 +439,17 @@ internal static class ServerHost
             ["retryable"] = retryable,
         },
     };
+
+    /// <summary>
+    /// Komunikat dla czlowieka. Trafia na konsole, ale ZAWSZE tez do logu:
+    /// RM_BAZA startuje most z DETACHED_PROCESS, wiec konsoli nie ma i sam
+    /// Console.WriteLine rzuca IOException, gubiac przyczyne bledu.
+    /// </summary>
+    static void Powiedz(string tekst)
+    {
+        try { Console.WriteLine(tekst); } catch (IOException) { }
+        Log(tekst.Replace("\n", " | "));
+    }
 
     // ── log wydajnosci (plan sekcja 22) ──────────────────────────────────────
     static readonly object _logLock = new();

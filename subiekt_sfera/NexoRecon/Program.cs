@@ -20,7 +20,11 @@ using System.Linq;
 using System.Text;
 using NexoRecon;
 
-Console.OutputEncoding = Encoding.UTF8;
+// Bez konsoli (DETACHED_PROCESS — tak RM_BAZA startuje tryb "server")
+// ustawienie kodowania rzuca IOException i proces pada z 0xE0434352,
+// zanim zdazy cokolwiek zalogowac. Kodowanie jest potrzebne tylko wtedy,
+// gdy ktos naprawde patrzy na stdout.
+try { Console.OutputEncoding = Encoding.UTF8; } catch (IOException) { }
 
 // Konfig = argument pozycyjny konczacy sie .json. Wyklucz przelaczniki (--out=... tez konczy sie .json).
 var cfgPath = args.FirstOrDefault(a => !a.StartsWith("--") && a.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
