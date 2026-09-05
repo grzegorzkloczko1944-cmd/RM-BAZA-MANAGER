@@ -34,6 +34,12 @@ from subiekt_stany import _find_exe, blad_mostu, wysrodkuj
 
 TIMEOUT_S = 180
 
+#: Po ilu dniach nieodebrany wpis „Zamówiono" (zd_zamowione_pozycje) jest
+#: kasowany. Wpis czeka, aż ktoś przejmie lock projektu — a dla projektu
+#: zamkniętego to może nie nastąpić nigdy. Pół roku to więcej niż cykl życia
+#: zamówienia; po tym czasie wpis jest już tylko śmieciem.
+DNI_WAZNOSCI_ZAMOWIEN = 180
+
 
 def eksportuj_pdf(numery, katalog, timeout=TIMEOUT_S):
     """
@@ -167,6 +173,170 @@ def zapisz_wyslanie(numer_zd, adresat, nadawca, zalacznikow, termin=None, tryb="
     except Exception as e:
         # Brak śladu nie może przerwać wysyłki — mail jest ważniejszy niż log.
         print(f"⚠️  Nie zapisano śladu wysyłki {numer_zd}: {e}")
+
+
+# ── „Zamówiono" w arkuszu projektu ──────────────────────────────────────────
+#
+# Wysyłka ZD ma postawić ☑ Zamówiono i termin dostawy w BOM-ie każdego
+# projektu, z którego pochodzą pozycje. Ale plik projektu wolno zmieniać
+# TYLKO pod lockiem, na kopii lokalnej — a lock jest jeden na użytkownika
+# i może go trzymać ktoś inny. Zapis wprost do pliku na Y: ginąłby pod
+# cudzą kopią przy „Zwolnij Lock".
+#
+# Dlatego wysyłka NIE dotyka plików projektów. Zapisuje FAKT do master
+# (tabela zd_zamowione_pozycje), a nakłada go ten, kto ma do tego prawo
+# z natury: arkusz przy „Przejmij Lock" (na świeżą kopię lokalną) i od razu,
+# gdy wysyłamy z projektu już przejętego. Wiersz znika dopiero przy
+# „Zwolnij Lock", po udanym wgraniu kopii na serwer — „Anuluj" ani padnięcie
+# sieci go nie gubią, następny lock nałoży go ponownie. Nakładanie jest
+# idempotentne, więc powtórka nic nie psuje.
+
+def odloz_zamowienia(bom_refy, termin, numer_zd):
+    """Zapisuje do master, które pozycje BOM-u poszły w ZD i z jakim terminem.
+
+    `bom_refy`: [(project_id, item_id)]. Klucz (project_id, item_id) —
+    ponowna wysyłka tego samego ZD nie mnoży wpisów, obowiązuje ostatni termin.
+    Zwraca liczbę odłożonych.
+    """
+    import sqlite3
+    refy = [tuple(r) for r in (bom_refy or ()) if r and r[0] and r[1]]
+    if not refy:
+        return 0
+    try:
+        con = sqlite3.connect(_master(), timeout=10)
+        try:
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS zd_zamowione_pozycje (
+                    project_id  INTEGER NOT NULL,
+                    item_id     INTEGER NOT NULL,
+                    termin      TEXT,
+                    numer_zd    TEXT,
+                    kiedy       TEXT NOT NULL,
+                    PRIMARY KEY (project_id, item_id)
+                )""")
+            teraz = datetime.now().isoformat(timespec="seconds")
+            con.executemany(
+                "INSERT OR REPLACE INTO zd_zamowione_pozycje"
+                " (project_id, item_id, termin, numer_zd, kiedy) VALUES (?,?,?,?,?)",
+                [(pid, iid, str(termin) if termin else None, numer_zd, teraz)
+                 for pid, iid in refy])
+            # Sprzątanie przy okazji — to jedyne miejsce, które i tak otwiera
+            # master do zapisu; osobny cykl sprzątający byłby przerostem formy.
+            granica = (datetime.now() - timedelta(days=DNI_WAZNOSCI_ZAMOWIEN)
+                       ).isoformat(timespec="seconds")
+            stare = con.execute("DELETE FROM zd_zamowione_pozycje WHERE kiedy < ?",
+                                (granica,)).rowcount
+            if stare:
+                print(f"🧹 Wygasło {stare} wpisów „Zamówiono” starszych niż "
+                      f"{DNI_WAZNOSCI_ZAMOWIEN} dni (projekt nigdy nie przejęty)")
+            con.commit()
+        finally:
+            con.close()
+        return len(refy)
+    except Exception as e:
+        print(f"⚠️  Nie odłożono {len(refy)} poz. „Zamówiono” do master: {e}")
+        return 0
+
+
+def naloz_zamowienia(project_con, project_id, log=None):
+    """Nakłada odłożone „Zamówiono" na OTWARTĄ POD LOCKIEM kopię projektu.
+
+    `project_con` — połączenie arkusza do kopii lokalnej (db_manager.project_con).
+    `log` — opcjonalnie arkusz._log_item_change, żeby w historii pozycji był
+    ten sam ślad co przy ręcznym odklikaniu.
+
+    ordered_at = data wysyłki (wtedy poszło do dostawcy), deadline_date =
+    termin z okna wysyłki. Gdy terminu nie było, deadline_date NIE jest
+    ruszane — mógł tam być termin wpisany w arkuszu i skasowanie go zgasiłoby
+    alarm pilnujący dostawy.
+
+    Zwraca liczbę oznaczonych pozycji. NIE kasuje wierszy z master — to robi
+    usun_zamowienia() po udanym wgraniu kopii na serwer.
+    """
+    import sqlite3
+    if project_con is None or not project_id:
+        return 0
+    try:
+        m = sqlite3.connect(f"file:{_master()}?mode=ro", uri=True, timeout=10)
+        try:
+            if not m.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
+                             " AND name='zd_zamowione_pozycje'").fetchone():
+                return 0
+            wiersze = m.execute(
+                "SELECT item_id, termin, kiedy FROM zd_zamowione_pozycje"
+                " WHERE project_id=?", (project_id,)).fetchall()
+        finally:
+            m.close()
+    except Exception as e:
+        print(f"⚠️  Nie odczytano odłożonych „Zamówiono” dla projektu {project_id}: {e}")
+        return 0
+    if not wiersze:
+        return 0
+
+    teraz = datetime.now().isoformat(timespec="seconds")
+    ile = 0
+    try:
+        for item_id, termin, kiedy in wiersze:
+            stare = project_con.execute(
+                "SELECT ordered_flag, ordered_at, deadline_date FROM items WHERE id=?",
+                (item_id,)).fetchone()
+            if stare is None:
+                continue                # pozycja usunięta z BOM-u po wysyłce
+            data_zam = (kiedy or teraz)[:10]
+            if termin:
+                project_con.execute(
+                    "UPDATE items SET ordered_flag=1, ordered_at=?, deadline_date=?,"
+                    " updated_at=? WHERE id=?", (data_zam, termin, teraz, item_id))
+            else:
+                project_con.execute(
+                    "UPDATE items SET ordered_flag=1, ordered_at=?, updated_at=?"
+                    " WHERE id=?", (data_zam, teraz, item_id))
+            ile += 1
+            # Audyt: „Zamówiono" tylko gdy faktycznie się zmieniło (powtórka po
+            # Anuluj nie dubluje wpisów), ale zmianę TERMINU logujemy zawsze —
+            # ponowna wysyłka z nowym terminem to realna zmiana w historii.
+            if callable(log):
+                try:
+                    if not int(stare[0] or 0):
+                        log(item_id, 'EDIT', 'ordered_at', stare[1], data_zam)
+                    if termin and stare[2] != termin:
+                        log(item_id, 'EDIT', 'deadline_date', stare[2], termin)
+                except Exception:
+                    pass                # audyt to dodatek, nie warunek zapisu
+        project_con.commit()
+    except Exception as e:
+        try:
+            project_con.rollback()
+        except Exception:
+            pass
+        print(f"⚠️  Nie nałożono „Zamówiono” na projekt {project_id}: {e}")
+        return 0
+    if ile:
+        print(f"✅ Projekt {project_id}: nałożono {ile} poz. „Zamówiono” z wysyłki ZD")
+    return ile
+
+
+def usun_zamowienia(project_id):
+    """Kasuje odłożone wpisy projektu — po UDANYM wgraniu kopii na serwer."""
+    import sqlite3
+    try:
+        con = sqlite3.connect(_master(), timeout=10)
+        try:
+            if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
+                               " AND name='zd_zamowione_pozycje'").fetchone():
+                return 0
+            n = con.execute("DELETE FROM zd_zamowione_pozycje WHERE project_id=?",
+                            (project_id,)).rowcount
+            con.commit()
+        finally:
+            con.close()
+        if n:
+            print(f"🧹 Projekt {project_id}: {n} wpisów „Zamówiono” zapisanych na serwer, usunięte z master")
+        return n
+    except Exception as e:
+        # Zostają — nałożą się ponownie przy następnym locku (idempotentne).
+        print(f"⚠️  Nie usunięto wpisów „Zamówiono” projektu {project_id}: {e}")
+        return 0
 
 
 def historia_wyslania(numery=None):
@@ -323,6 +493,9 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
         self.pozycje = pozycje              # [(symbol, nazwa, ilosc, jm)]
         self.nadawca = nadawca
         self.szukaj_plikow = szukaj_plikow  # callable(symbol[, projekty]) -> [Path]
+        #: [(project_id, item_id)] pozycji dopasowanych do BOM-u — po wysyłce
+        #: wraca pod nie „Zamówiono" i termin dostawy (odloz_zamowienia).
+        self._bom_refy = []
         #: symbol → [numery projektów]; wypełniane w _pozycje_dla_panelu,
         #: używane przez _szukaj_w_projektach do ustalenia kolejności katalogów.
         self._projekty_pozycji = {}
@@ -516,9 +689,12 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
         panel nie liczy ich do ostrzeżenia „brak plików".
         """
         out = []
+        self._bom_refy = []
         for wiersz in self.pozycje:
-            pola = list(wiersz) + [None] * 6
-            symbol, nazwa, ilosc, jm, ma_rysunek, projekty = pola[:6]
+            pola = list(wiersz) + [None] * 7
+            symbol, nazwa, ilosc, jm, ma_rysunek, projekty, bom_ref = pola[:7]
+            for ref in (bom_ref or ()):        # lista: pozycja może być w kilku projektach
+                self._bom_refy.append(tuple(ref))
             # Czy szukać rysunków na serwerze:
             #   1. `ma_rysunek` z BOM-u — dowód wprost (wiersz miał *_drawing_no),
             #      gdy pozycja dopasowała się do BOM-u,
@@ -970,6 +1146,37 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
             termin = None
         zapisz_wyslanie(self.numer_zd, do, self.nadawca, len(wybrane),
                         termin, self.var_tryb.get())
+
+        # „Zamówiono" + termin → do master; arkusz nałoży to na projekt przy
+        # najbliższym locku. Gdy projekt jest przejęty TERAZ u nas, nakładamy
+        # od razu — inaczej wysyłamy z własnego projektu i nic nie widzimy.
+        odlozone = odloz_zamowienia(self._bom_refy, termin, self.numer_zd)
+        if odlozone:
+            arkusz = getattr(self.master, "master", None)   # okno ZD → zamówienia → arkusz
+            pid = getattr(arkusz, "current_project_id", None)
+            w_otwartym = sum(1 for p, _ in self._bom_refy if p == pid)
+            od_razu = 0
+            if getattr(arkusz, "have_lock", False) and w_otwartym:
+                try:
+                    od_razu = naloz_zamowienia(
+                        arkusz.db_manager.project_con, pid,
+                        getattr(arkusz, "_log_item_change", None))
+                    if od_razu:
+                        arkusz.after(0, arkusz.refresh_data)
+                except Exception as e:
+                    print(f"⚠️  Nie nałożono „Zamówiono” na otwarty projekt: {e}")
+            # Okno zaraz się zamknie, więc mówimy okienkiem, nie paskiem stanu.
+            inne = odlozone - (w_otwartym if od_razu else 0)
+            tresc = ""
+            if od_razu:
+                tresc += f"W otwartym projekcie oznaczono {od_razu} poz. jako ZAMÓWIONE."
+            if inne > 0:
+                tresc += (("\n\n" if tresc else "")
+                          + f"{inne} poz. oznaczy się samo, gdy ktoś przejmie"
+                          + "\nLock na projekt, z którego pochodzą.")
+            if termin:
+                tresc += f"\n\nTermin dostawy: {termin}"
+            messagebox.showinfo("Zamówiono", tresc, parent=self)
 
         self.status.config(text="Wiadomość otwarta w programie pocztowym — wyślij ją stamtąd.")
         self._zamknij()

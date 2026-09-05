@@ -126,6 +126,8 @@ def pobierz_zapotrzebowanie(timeout=TIMEOUT_S):
         # ZK, które ta pozycja realizuje — most czyta je z powiązania
         # PozycjeRealizowane. Bez tego kolumna ZK pustoszała po zamówieniu.
         "zk": z.get("Zk") or "",
+        # Numer projektu z Uwag ZK — to ZK wie, dla kogo powstała, nie BOM.
+        "projekt": z.get("Projekt") or "",
     } for z in data.get("zamowione", [])]
 
     # Podmioty przychodzą tym samym wywołaniem — okno potrzebuje ich do listy
@@ -270,6 +272,10 @@ def dane_z_bom(project_id, numer_projektu=None):
             has_sup = "supplier_id" in cols
             if has_sup:
                 sel.append("supplier_id")
+            # `id` ZAWSZE ostatnie: para (project_id, item_id) to adres wiersza,
+            # pod który po wysyłce ZD wraca „Zamówiono". Symbol nie wystarczy —
+            # ten sam detal bywa w kilku projektach naraz.
+            sel.append("id")
             where = " WHERE COALESCE(is_hidden, 0) = 0" if "is_hidden" in cols else ""
             rows = con.execute(f"SELECT {', '.join(sel)} FROM items{where}").fetchall()
 
@@ -315,7 +321,8 @@ def dane_z_bom(project_id, numer_projektu=None):
                 klucz = rozroznij_symbol(nazwa, uzyte)
         uzyte.add(klucz)
 
-        sup = dostawcy.get(r[-1]) if has_sup else None
+        item_id = r[-1]
+        sup = dostawcy.get(r[-2]) if has_sup else None
         out[klucz.strip().upper()] = {
             "nazwa": nazwa,
             "typ": str(typ).strip().upper(),
@@ -328,6 +335,8 @@ def dane_z_bom(project_id, numer_projektu=None):
             # jak numery, a są kodami katalogowymi. Panel plików używa tego,
             # żeby nie zgłaszać braku rysunku dla łożyska.
             "ma_rysunek": bool(nr),
+            "project_id": project_id,
+            "item_id": item_id,
         }
     return out
 
@@ -430,6 +439,43 @@ def dopasuj_dostawce(nazwa_rm_baza, podmioty):
     return ""
 
 
+def scal_bom(bom, dane, numer_projektu):
+    """Dokłada BOM jednego projektu do wspólnego słownika {SYMBOL: …}.
+
+    ⚠️ NIE `bom.update()`. Ten sam symbol bywa w kilku projektach (kopia
+    testowa 3000 ma te same rysunki co 2632 Feniks) i update() zostawiał
+    adres wiersza OSTATNIEGO projektu — „Zamówiono" z wysyłki ZD trafiało
+    do 3000 zamiast do Feniksa (zgłoszone 05.09.2026). Adresy trzymamy
+    per projekt w `refs`: {numer projektu: (project_id, item_id)}, a wiersz
+    wybiera z nich te z kolumny „Projekt".
+    """
+    for sym, d in (dane or {}).items():
+        wpis = bom.setdefault(sym, d)
+        if d.get("item_id"):
+            wpis.setdefault("refs", {})[numer_projektu] = (d["project_id"], d["item_id"])
+
+
+def refy_bom(b, projekty):
+    """Adresy wierszy BOM-u dla pozycji: tylko z projektów, do których należy.
+
+    `projekty` — numery z kolumny „Projekt" (z Uwag na ZK). Gdy pozycja nie
+    ma ich wcale, a symbol jest w jednym projekcie — bierzemy ten jeden.
+    Gdy jest w kilku i nie wiadomo w którym — nie zgadujemy (lepiej nie
+    oznaczyć niż oznaczyć w cudzym projekcie) i mówimy o tym w konsoli.
+    """
+    refs = (b or {}).get("refs") or {}
+    if not refs:
+        return []
+    wybrane = [refs[p] for p in (projekty or ()) if p in refs]
+    if wybrane:
+        return wybrane
+    if len(refs) == 1:
+        return list(refs.values())
+    print(f"⚠️  Symbol w {len(refs)} projektach ({', '.join(refs)}), "
+          f"pozycja bez numeru projektu — „Zamówiono” nie zostanie oznaczone.")
+    return []
+
+
 def zbuduj_wiersze(zapotrzebowanie, bom, podmioty=(), tylko_projekt=None, zamowione=()):
     """Łączy dane z Subiekta z BOM-em. tylko_projekt=„2619" zawęża do projektu.
 
@@ -515,6 +561,9 @@ def zbuduj_wiersze(zapotrzebowanie, bom, podmioty=(), tylko_projekt=None, zamowi
             # Numer ZD wpisywany po utworzeniu — zostaje w arkuszu, żeby było
             # widać, co już zamówione, zanim odświeżenie usunie pozycję.
             "zd": "",
+            # Adresy wierszy BOM-u (po jednym na projekt z kolumny „Projekt")
+            # — po wysyłce ZD tędy wraca „Zamówiono".
+            "bom_ref": refy_bom(b, projekty),
         })
     # Zamówione — tylko te, których nie ma już w zapotrzebowaniu (te same
     # symbole mogą tam wisieć, jeśli ZD pokryło część ilości).
@@ -532,8 +581,13 @@ def zbuduj_wiersze(zapotrzebowanie, bom, podmioty=(), tylko_projekt=None, zamowi
             continue
         z = grupa[0]
         b = bom.get(sym, {})
-        projekt = b.get("projekt", "") if b else ""
-        if tylko_projekt and projekt != tylko_projekt:
+        # Projekt z UWAG ZK (przez most), BOM tylko awaryjnie: symbol bywa
+        # w kilku BOM-ach (kopia testowa 3000 ma rysunki Feniksa 2632)
+        # i BOM wskazywał zły projekt (zgłoszone 05.09.2026).
+        projekt = (next((x.get("projekt") for x in grupa if x.get("projekt")), "")
+                   or (b.get("projekt", "") if b else ""))
+        projekty_zk = [p.strip() for p in projekt.split(",") if p.strip()]
+        if tylko_projekt and tylko_projekt not in projekty_zk:
             continue
         wiersze.append({
             "sel": False,
@@ -564,6 +618,7 @@ def zbuduj_wiersze(zapotrzebowanie, bom, podmioty=(), tylko_projekt=None, zamowi
             "zd": _zd_z_iloscia(grupa),
             "zd_status": z.get("status", ""),
             "zd_data": z.get("data", ""),
+            "bom_ref": refy_bom(b, projekty_zk),
         })
 
     wiersze.sort(key=lambda w: (bool(w.get("zd")), w["dostawca"] == "",
@@ -914,14 +969,21 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             numery = {numer_projektu_z_uwag(z.get("Uwagi"))
                       for p in zap for z in p["zk"]}
             numery.discard("")
+            # Także projekty pozycji JUŻ zamówionych — ich ZK nie ma już
+            # w zapotrzebowaniu, więc bez tego BOM ich projektu się nie
+            # wczytywał i adres „Zamówiono" szedł do innego projektu z tym
+            # samym symbolem (zgłoszone 05.09.2026).
+            numery |= {p.strip() for z in zamowione
+                       for p in (z.get("projekt") or "").split(",") if p.strip()}
             if self.project_name:
                 numery.add(self.project_name.strip().split(" ")[0])
             bom = {}
             for pid, pname in projekty_po_numerze(numery).items():
-                bom.update(dane_z_bom(pid, (pname or "").strip().split(" ")[0]))
+                nr = (pname or "").strip().split(" ")[0]
+                scal_bom(bom, dane_z_bom(pid, nr), nr)
             if self.project_id and not bom:
-                bom = dane_z_bom(self.project_id,
-                                 self.project_name.strip().split(" ")[0] if self.project_name else None)
+                nr = self.project_name.strip().split(" ")[0] if self.project_name else ""
+                scal_bom(bom, dane_z_bom(self.project_id, nr), nr)
 
             wiersze = zbuduj_wiersze(zap, bom, podmioty, zamowione=zamowione)
 
@@ -1633,9 +1695,11 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         # zbiera detale z KILKU projektów, a szukanie plików startowało od
         # projektu otwartego w arkuszu — czyli często nie tego (zgłoszone
         # 05.09.2026). Mając je, szukamy najpierw tam, gdzie detal powstał.
+        # Siódmy element: adresy wierszy BOM-u [(project_id, item_id), …] — po
+        # jednym na projekt pozycji; po wysyłce okno zapisuje pod nie „Zamówiono".
         pozycje = [(w.get("symbol", ""), w.get("nazwa", ""),
                     w.get("ilosc", "") or w.get("potrzeba", ""), w.get("jm", "szt."),
-                    w.get("ma_rysunek"), w.get("projekty", ""))
+                    w.get("ma_rysunek"), w.get("projekty", ""), w.get("bom_ref"))
                    for w in dane["poz"]]
 
         # Adres e-mail i nadawca pochodzą z RM_BAZA — okno pozwala je poprawić.

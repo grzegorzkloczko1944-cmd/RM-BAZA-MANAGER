@@ -1,4 +1,4 @@
-// Tryb "zapotrzebowanie" — czego brakuje na otwartych ZK. Tylko odczyt.
+﻿// Tryb "zapotrzebowanie" — czego brakuje na otwartych ZK. Tylko odczyt.
 //
 //   NexoRecon.exe zapotrzebowanie [--out=zapotrzebowanie.json] [konfig.json]
 //
@@ -156,7 +156,7 @@ internal static class Zapotrzebowanie
                         if (string.IsNullOrWhiteSpace(sym)) continue;
                         zamowione.Add(new PozZd(sym!.Trim(),
                             Bezp(() => poz.AsortymentAktualny?.Nazwa) ?? "",
-                            poz.Ilosc, numer, dostawca, data, status, NumerZk(poz)));
+                            poz.Ilosc, numer, dostawca, data, status, NumerZk(poz), ProjektZk(poz)));
                     }
                 }
                 catch { /* dokument bez czytelnych pozycji — pomijamy */ }
@@ -191,28 +191,78 @@ internal static class Zapotrzebowanie
     /// realizować kilka pozycji ZK, więc zbieramy unikalne numery.
     static string NumerZk(object poz)
     {
+        var numery = new List<string>();
+        foreach (var dok in DokumentyZk(poz))
+        {
+            var num = Wlasc(dok, "NumerWewnetrzny");
+            var syg = num == null ? null : Wlasc(num, "PelnaSygnatura")?.ToString();
+            if (!string.IsNullOrWhiteSpace(syg) && !numery.Contains(syg!))
+                numery.Add(syg!);
+        }
+        return string.Join(", ", numery);
+    }
+
+    ///
+    /// Numer PROJEKTU pozycji już zamówionej — z Uwag na ZK, którą ta pozycja
+    /// realizuje (RM_BAZA wpisuje tam numer projektu przy zakładaniu ZK).
+    ///
+    /// Bez tego okno zamówień brało projekt z BOM-u po symbolu, a ten sam
+    /// symbol bywa w kilku BOM-ach (kopia testowa 3000 ma rysunki Feniksa
+    /// 2632) — „Zamówiono" z wysyłki ZD trafiało do 3000 zamiast do 2632
+    /// (zgłoszone 05.09.2026). ZK wie, dla jakiego projektu powstała.
+    ///
+    static string ProjektZk(object poz)
+    {
+        var projekty = new List<string>();
+        foreach (var dok in DokumentyZk(poz))
+        {
+            var u = Wlasc(dok, "Uwagi")?.ToString()?.Trim();
+            if (!string.IsNullOrWhiteSpace(u) && !projekty.Contains(u!))
+                projekty.Add(u!);
+        }
+        return string.Join(", ", projekty);
+    }
+
+    /// Dokumenty ZK realizowane przez pozycję ZD:
+    /// PozycjeRealizowane -> PozycjaRealizowana -> Dokument (ustalone refleksją).
+    static IEnumerable<object> DokumentyZk(object poz)
+    {
+        var wynik = new List<object>();
         try
         {
-            var kol = poz.GetType().GetProperty("PozycjeRealizowane")?.GetValue(poz)
-                      as System.Collections.IEnumerable;
-            if (kol == null) return "";
-            var numery = new List<string>();
+            if (Wlasc(poz, "PozycjeRealizowane") is not System.Collections.IEnumerable kol)
+                return wynik;
             foreach (var r in kol)
             {
-                var pz = r.GetType().GetProperty("PozycjaRealizowana")?.GetValue(r);
-                var dok = pz?.GetType().GetProperty("Dokument")?.GetValue(pz);
-                var num = dok?.GetType().GetProperty("NumerWewnetrzny")?.GetValue(dok);
-                var syg = num?.GetType().GetProperty("PelnaSygnatura")?.GetValue(num)?.ToString();
-                if (!string.IsNullOrWhiteSpace(syg) && !numery.Contains(syg!))
-                    numery.Add(syg!);
+                var pz = Wlasc(r, "PozycjaRealizowana");
+                var dok = pz == null ? null : Wlasc(pz, "Dokument");
+                if (dok != null) wynik.Add(dok);
             }
-            return string.Join(", ", numery);
         }
-        catch { return ""; }   // brak powiązania nie może wywalić odczytu
+        catch { /* brak powiązania nie może wywalić odczytu */ }
+        return wynik;
+    }
+
+    /// Właściwość po nazwie, także przy JAWNEJ implementacji interfejsu
+    /// (GetType().GetProperty() zwraca wtedy null, choć składowa istnieje).
+    static object? Wlasc(object o, string nazwa)
+    {
+        try
+        {
+            var p = o.GetType().GetProperty(nazwa);
+            if (p != null) return p.GetValue(o);
+            foreach (var i in o.GetType().GetInterfaces())
+            {
+                p = i.GetProperty(nazwa);
+                if (p != null) return p.GetValue(o);
+            }
+        }
+        catch { }
+        return null;
     }
 
     internal record PozZd(string Symbol, string Nazwa, decimal Ilosc, string Numer,
-                          string Dostawca, string Data, string Status, string Zk);
+                          string Dostawca, string Data, string Status, string Zk, string Projekt);
     internal record Poz(string Symbol, string Nazwa, decimal Ilosc,
                         decimal Dostepne, decimal Zadysponowane, decimal Zarezerwowane,
                         decimal StanMinimalny, decimal StanOptymalny,

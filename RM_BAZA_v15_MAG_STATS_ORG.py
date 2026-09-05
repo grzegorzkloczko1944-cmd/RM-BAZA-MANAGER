@@ -8932,6 +8932,33 @@ class MainWindow(tk.Tk):
         self.wait_window(dialog)
         return result["val"]
     
+    def _naloz_zamowienia_zd(self):
+        """Nakłada na świeżą kopię lokalną „Zamówiono" odłożone przez wysyłkę ZD.
+
+        Wysyłka ZD z okna Subiekta nie dotyka plików projektów (nie ma do nich
+        prawa — lock może trzymać ktoś inny). Zapisuje fakt do master, a my
+        nakładamy go tutaj, bo w tej chwili MAMY lock i kopię lokalną.
+        Wiersze z master kasuje release_lock po udanym wgraniu na serwer —
+        „Anuluj" ich nie gubi, następny lock nałoży je ponownie.
+        """
+        try:
+            from subiekt_wyslij_zd import naloz_zamowienia
+        except Exception:
+            return
+        try:
+            ile = naloz_zamowienia(self.db_manager.project_con,
+                                   self.current_project_id, self._log_item_change)
+        except Exception as e:
+            print(f"⚠️  Nie nałożono „Zamówiono” z wysyłki ZD: {e}")
+            return
+        if ile:
+            # Dane zmieniły się bez udziału użytkownika — musi to zobaczyć.
+            messagebox.showinfo(
+                "Zamówienia z Subiekta",
+                f"Oznaczono {ile} poz. jako ZAMÓWIONE.\n\n"
+                "Poszły do dostawcy zamówieniem ZD, gdy projekt nie był przejęty.",
+                parent=self)
+
     def acquire_lock(self):
         """Przejmij lock projektu"""
         # GUEST nie może edytować!
@@ -8985,6 +9012,9 @@ class MainWindow(tk.Tk):
             print("  → Inicjalizuję items_changes_log...")
             self._init_items_audit_log()
             print("  ✅ Items audit log OK")
+
+            # „Zamówiono" odłożone przez wysyłkę ZD — teraz mamy lock i kopię.
+            self._naloz_zamowienia_zd()
             
             # Update UI
             self.status_label.config(text="🟢 WRITER", fg="#27ae60")
@@ -9078,6 +9108,9 @@ class MainWindow(tk.Tk):
             print("  → Inicjalizuję items_changes_log (FORCE)...")
             self._init_items_audit_log()
             print("  ✅ Items audit log OK")
+
+            # „Zamówiono" odłożone przez wysyłkę ZD — teraz mamy lock i kopię.
+            self._naloz_zamowienia_zd()
             
             # Update UI
             self.status_label.config(text="🟢 WRITER", fg="#27ae60")
@@ -9362,6 +9395,12 @@ class MainWindow(tk.Tk):
             self.btn_scanner.config(state=tk.DISABLED)
             
             # >>> KROK 2: Sync i backup (jeśli teraz cos się zwali, lock już jest zwolniony!) <<<
+            # „Zamówiono" z wysyłki ZD, które przyszły, GDY TRZYMALIŚMY lock —
+            # hook przy przejęciu ich nie widział (jeszcze ich nie było). Bez
+            # tego kopia szła na serwer bez ptaszków, a wpisy z master były
+            # kasowane niżej jako „zapisane" — zgubione 6 poz. (05.09.2026).
+            self._naloz_zamowienia_zd()
+
             # 1. Zamknij połączenie przed sync (wymuś zapis wszystkiego)
             if self.db_manager.project_con:
                 print(f"💾 Zamykam połączenie i zapisuję zmiany...")
@@ -9458,6 +9497,15 @@ class MainWindow(tk.Tk):
                 print(f"   Item ID={item[0]}: rysun={item[1]}, ilość={item[2]}, mat={item[3]}, grubość={item[4]}")
             
             verify_con.close()
+
+            # Kopia z „Zamówiono" z wysyłki ZD jest już na serwerze i sprawdzona
+            # — dopiero TERAZ wolno skasować wpisy z master. Wcześniej „Anuluj"
+            # albo padnięcie sieci w trakcie kopiowania zgubiłoby je bez śladu.
+            try:
+                from subiekt_wyslij_zd import usun_zamowienia
+                usun_zamowienia(self.current_project_id)
+            except Exception as e:
+                print(f"⚠️  Nie wyczyszczono wpisów „Zamówiono” z master: {e}")
             
             # KROK D: Poczekaj żeby być pewnym że plik jest zamknięty
             time.sleep(0.3)
