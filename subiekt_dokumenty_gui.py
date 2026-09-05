@@ -93,6 +93,9 @@ def pobierz_dokumenty(limit=200, timeout=TIMEOUT_S):
             "ilosc": float(p.get("Ilosc") or 0),
             "jm": p.get("Jm") or "szt",
             "cena": float(p.get("Cena") or 0),
+            # Projekt pozycji z Uwag ZK, którą realizuje — „2632, 3000" gdy
+            # jedno ZD zbiera detale z kilku projektów. Tylko przy ZD.
+            "projekt": p.get("Projekt") or "",
         } for p in (d.get("Pozycje") or [])],
     } for d in data.get("dokumenty", [])]
 
@@ -526,43 +529,57 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
     def _pozycje_z_bomem(self, dok):
         """
         Pozycje ZD w formacie oczekiwanym przez okno wysyłki:
-        (symbol, nazwa, ilość, j.m., ma_rysunek, projekty).
+        (symbol, nazwa, ilość, j.m., ma_rysunek, projekty, bom_ref).
 
-        Symbol, nazwa i ilość są z dokumentu w Subiekcie. Dwa ostatnie pola
-        pochodzą z BOM-u RM_BAZA i są potrzebne panelowi plików: `ma_rysunek`
-        wycisza fałszywe „brak dokumentacji" dla elementów katalogowych,
-        a `projekty` mówi, gdzie zacząć szukać rysunków (ZD zbiera detale
-        z kilku projektów). Subiekt tych danych nie zna — stąd doczytanie.
+        Symbol, nazwa i ilość są z dokumentu w Subiekcie. Reszta z BOM-u
+        RM_BAZA: `ma_rysunek` wycisza fałszywe „brak dokumentacji" dla
+        elementów katalogowych, `projekty` mówi, gdzie szukać rysunków,
+        a `bom_ref` [(project_id, item_id), …] to adresy, pod które po
+        wysyłce wraca „Zamówiono" — po jednym na projekt pozycji.
+
+        Projekt POZYCJI idzie z Uwag ZK, którą realizuje (most, tryb
+        dokumenty). Wcześniej brany był z Uwag samego ZD — a te są puste,
+        więc okno wysyłało bez adresów i „Zamówiono" nie trafiało nigdzie
+        (05.09.2026). Ten sam mechanizm co w oknie zamówień: scal_bom/refy_bom.
 
         Gdy BOM-u nie da się wczytać, zostają same dane z Subiekta: wysyłka
-        działa, tylko szukanie plików jest słabsze.
+        działa, tylko szukanie plików i „Zamówiono" są słabsze.
         """
         surowe = dok.get("pozycje") or []
+        projekt_dok = (dok.get("projekt") or "").strip()
+
+        def _lista(tekst):
+            return [x.strip() for x in (tekst or "").split(",") if x.strip()]
+
         bom = {}
         try:
             import subiekt_zamowienia as sz
-            numer = (dok.get("projekt") or "").strip()
-            if numer:
-                # Numer projektu z Uwag → id bazy projektowej → BOM.
-                for pid in sz.projekty_po_numerze([numer]):
-                    for sym, info in (sz.dane_z_bom(pid, numer) or {}).items():
-                        bom.setdefault(sym.upper(), (info, numer))
+            numery = {n for p in surowe for n in _lista(p.get("projekt"))}
+            if projekt_dok:
+                numery.add(projekt_dok)
+            for pid, pname in sz.projekty_po_numerze(numery).items():
+                nr = (pname or "").strip().split(" ")[0]
+                sz.scal_bom(bom, sz.dane_z_bom(pid, nr), nr)
         except Exception as e:
             print(f"⚠️  Nie udało się doczytać BOM-u dla {dok.get('numer')}: {e}")
+            sz = None
 
         pozycje = []
         for p in surowe:
             symbol = p.get("symbol") or ""
-            info, projekt = bom.get(symbol.upper(), ({}, ""))
+            info = bom.get(symbol.strip().upper()) or {}
+            projekty = _lista(p.get("projekt")) or _lista(projekt_dok)
+            refy = sz.refy_bom(info, projekty) if (sz and info) else []
             pozycje.append((
                 symbol,
-                p.get("nazwa") or (info.get("nazwa") if info else "") or "",
+                p.get("nazwa") or info.get("nazwa") or "",
                 p.get("ilosc") or "",
                 p.get("jm") or "szt.",
                 # Bez wpisu w BOM-ie nie wiemy — None znaczy „nie orzekam",
                 # a nie „nie ma rysunku".
                 info.get("ma_rysunek") if info else None,
-                projekt,
+                ", ".join(projekty),
+                refy,
             ))
         return pozycje
 

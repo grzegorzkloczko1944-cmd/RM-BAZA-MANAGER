@@ -211,7 +211,7 @@ internal static class Zapotrzebowanie
     /// 2632) — „Zamówiono" z wysyłki ZD trafiało do 3000 zamiast do 2632
     /// (zgłoszone 05.09.2026). ZK wie, dla jakiego projektu powstała.
     ///
-    static string ProjektZk(object poz)
+    internal static string ProjektZk(object poz)
     {
         var projekty = new List<string>();
         foreach (var dok in DokumentyZk(poz))
@@ -225,7 +225,7 @@ internal static class Zapotrzebowanie
 
     /// Dokumenty ZK realizowane przez pozycję ZD:
     /// PozycjeRealizowane -> PozycjaRealizowana -> Dokument (ustalone refleksją).
-    static IEnumerable<object> DokumentyZk(object poz)
+    internal static IEnumerable<object> DokumentyZk(object poz)
     {
         var wynik = new List<object>();
         try
@@ -245,7 +245,7 @@ internal static class Zapotrzebowanie
 
     /// Właściwość po nazwie, także przy JAWNEJ implementacji interfejsu
     /// (GetType().GetProperty() zwraca wtedy null, choć składowa istnieje).
-    static object? Wlasc(object o, string nazwa)
+    internal static object? Wlasc(object o, string nazwa)
     {
         try
         {

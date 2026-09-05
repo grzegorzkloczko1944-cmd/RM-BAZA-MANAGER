@@ -1,4 +1,4 @@
-// Tryb "dokumenty" — lista ZK i ZD z pozycjami. Tylko odczyt.
+﻿// Tryb "dokumenty" — lista ZK i ZD z pozycjami. Tylko odczyt.
 //
 //   NexoRecon.exe dokumenty [--out=w.json] [--limit=200]
 //
@@ -68,7 +68,12 @@ internal static class Dokumenty
                             Bezp(() => p.AsortymentAktualny?.Nazwa) ?? "",
                             p.Ilosc,
                             Bezp(() => p.JednostkaMiaryAs?.JednostkaMiary?.Symbol) ?? "szt",
-                            decimal.Round(cena, 2)));
+                            decimal.Round(cena, 2),
+                            // Projekt POZYCJI — z Uwag ZK, którą realizuje (tylko ZD).
+                            // Uwagi samego ZD są puste, a jedno ZD zbiera detale
+                            // z kilku projektów; bez tego okno dokumentów nie
+                            // wiedziało, gdzie postawić „Zamówiono" (05.09.2026).
+                            Zapotrzebowanie.ProjektZk(p)));
                     }
                 }
                 catch { /* dokument bez czytelnych pozycji — nagłówek zostaje */ }
@@ -119,7 +124,7 @@ internal static class Dokumenty
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
 
     internal record PozDok(string Symbol, string Nazwa, decimal Ilosc, string Jm,
-                           decimal Cena);
+                           decimal Cena, string Projekt);
 
     internal record Dok(string Rodzaj, string Numer, string Data, string Podmiot,
                         string Tytul, string Uwagi, string Status, string Termin,
