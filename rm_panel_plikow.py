@@ -181,6 +181,15 @@ class PanelPlikow:
                 pass
             self._zbudowane = True
             self._przelicz()
+            # Szukanie plików trwa i okno potrafi w tym czasie zejść pod
+            # arkusz (update_idletasks przy każdym wierszu). Na koniec
+            # przywracamy je na wierzch — inaczej wygląda, jakby zniknęło.
+            wroc = getattr(self.okno, "_na_wierzch", None)
+            if callable(wroc):
+                try:
+                    self.okno.after(1, wroc)
+                except Exception:
+                    pass
             return
         self._prog_label.config(
             text=f"szukam plików… {idx + 1}/{len(self.pozycje)}   "
@@ -412,6 +421,11 @@ class PanelPlikow:
             "Szukanie",
             f"Znaleziono pliki dla {ile} z {len(brakujace)} pozycji.",
             parent=self.okno)
+        # Skan całego dysku trwa najdłużej — okno wysyłki wraca na wierzch
+        # razem z komunikatem, żeby nie zostało pod arkuszem.
+        wroc = getattr(self.okno, "_na_wierzch", None)
+        if callable(wroc):
+            wroc()
 
     def _szukaj_dalej(self, it):
         nowe = self.szukaj_dalej(it) or []

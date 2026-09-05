@@ -52,6 +52,7 @@ FILTR_BRAK_DOSTAWCY = "(bez dostawcy)"
 
 # Filtr stanu pozycji. Domyślnie WSZYSTKIE — arkusz nigdy nic sam nie chowa,
 # widocznością steruje wyłącznie belka filtrów.
+ZD_WSZYSTKIE = "— wszystkie ZD —"
 STAN_WSZYSTKIE = "— wszystkie —"
 STAN_DO_ZAMOWIENIA = "do zamówienia"
 STAN_ZAMOWIONE = "zamówione (ZD)"
@@ -361,6 +362,19 @@ def _numery_zd(tekst):
         if nr and nr not in out:
             out.append(nr)
     return out
+
+
+def _klucz_zd(numer):
+    """Sortowanie numerów ZD: „ZD 6/09/2026" → (2026, 9, 6).
+
+    Zwykłe sortowanie tekstem dawało „ZD 10/09" przed „ZD 6/09", a przy
+    zmianie miesiąca mieszało kolejność.
+    """
+    cyfry = [int(x) for x in re.findall(r"\d+", numer or "")]
+    nr = cyfry[0] if cyfry else 0
+    mies = cyfry[1] if len(cyfry) > 1 else 0
+    rok = cyfry[-1] if len(cyfry) > 2 else 0
+    return (rok, mies, nr)
 
 
 def _zd_z_iloscia(zamowione):
@@ -708,11 +722,11 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
     # zamawiania z kartoteki (np. „10/15" = domawiaj przy 10, uzupełnij do 15).
     HEADERS = ["✓", "Nr rysunku", "Nazwa", "Typ", "Potrzeba", "Na stanie", "Rezerw.",
                "Min/Opt", "Ze stanu", "Kupić", "J.m.", "Dostawca (Subiekt)",
-               "wg BOM", "Projekt", "ZK", "ZD", "Data ZD"]
+               "wg BOM", "Projekt", "ZK", "ZD", "Data ZD", "PDF"]
     (COL_SEL, COL_SYMBOL, COL_NAZWA, COL_TYP, COL_POTRZEBA, COL_DOSTEPNE, COL_REZERW,
      COL_MINOPT, COL_ZE_STANU, COL_ILOSC, COL_JM, COL_DOSTAWCA, COL_DOST_BOM,
-     COL_PROJ, COL_ZK, COL_ZD, COL_DATA_ZD) = range(17)
-    SZEROKOSCI = [30, 115, 165, 48, 60, 60, 56, 60, 56, 50, 34, 145, 88, 56, 88, 92, 74]
+     COL_PROJ, COL_ZK, COL_ZD, COL_DATA_ZD, COL_PDF) = range(18)
+    SZEROKOSCI = [30, 115, 165, 48, 60, 60, 56, 60, 56, 50, 34, 145, 88, 56, 88, 92, 74, 40]
 
     # Wartości filtra typu — DOKŁADNIE jak FILTER_CLASS_VALUES w arkuszu
     # głównym RM_BAZA, razem z LASER / LASER EXPORT (rozwijane do X i XX).
@@ -778,7 +792,35 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
                                            width=24, state="readonly", font=("Arial", 9))
         self.combo_dostawca["values"] = [FILTR_WSZYSCY]
         self.combo_dostawca.pack(side=tk.LEFT, pady=6)
-        self.combo_dostawca.bind("<<ComboboxSelected>>", lambda _e: self._refill())
+        self.combo_dostawca.bind("<<ComboboxSelected>>", self._dostawca_wybrany)
+        #: pełna lista dostawców — do zawężania listy rozwijanej wyszukiwarką
+        self._dostawcy_wszyscy = [FILTR_WSZYSCY]
+
+        # Szukanie dostawcy: OSOBNE pole, nie edytowalne combo. Dostawców bywa
+        # ponad sto i przewijanie listy do „QUAY” trwało dłużej niż wpisanie
+        # trzech liter (zgłoszone 05.09.2026). Wpisywanie wprost w combo
+        # mieszało się z wyświetlaną wartością („maja— wszyscy —”), więc filtr
+        # jest tutaj, a combo tylko pokazuje wynik.
+        self._dost_placeholder = "szukaj…"
+        self.dostawca_szukaj_var = tk.StringVar(value=self._dost_placeholder)
+        self.dostawca_szukaj_var.trace_add("write", lambda *_: self._szukaj_dostawcy())
+        self.ent_dost_szukaj = tk.Entry(f, textvariable=self.dostawca_szukaj_var,
+                                        width=10, font=("Arial", 9), fg="#95a5a6")
+        self.ent_dost_szukaj.pack(side=tk.LEFT, padx=(3, 0), pady=6)
+
+        def _wejscie(_e=None):
+            if self.dostawca_szukaj_var.get() == self._dost_placeholder:
+                self.dostawca_szukaj_var.set("")
+            self.ent_dost_szukaj.config(fg="#2c3e50")
+
+        def _wyjscie(_e=None):
+            if not self.dostawca_szukaj_var.get().strip():
+                self.ent_dost_szukaj.config(fg="#95a5a6")
+                self.dostawca_szukaj_var.set(self._dost_placeholder)
+
+        self.ent_dost_szukaj.bind("<FocusIn>", _wejscie)
+        self.ent_dost_szukaj.bind("<FocusOut>", _wyjscie)
+        self.ent_dost_szukaj.bind("<Escape>", lambda _e: self.dostawca_szukaj_var.set(""))
 
         # Typ pozycji — jak filtr „Typ" w arkuszu głównym RM_BAZA.
         tk.Label(f, text="Typ:", bg="#ecf0f1", font=("Arial", 9)).pack(side=tk.LEFT, padx=(14, 3), pady=6)
@@ -817,6 +859,19 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         combo_stan["values"] = [STAN_WSZYSTKIE, STAN_DO_ZAMOWIENIA, STAN_ZAMOWIONE]
         combo_stan.pack(side=tk.LEFT, pady=6)
         combo_stan.bind("<<ComboboxSelected>>", lambda _e: self._refill())
+
+        # Filtr po KONKRETNYM zamówieniu — „pokaż, co poszło w ZD 6/09/2026”.
+        # Lista buduje się z tego, co realnie jest na liście (patrz _load_done),
+        # więc nie ma tu numerów, których nie da się wybrać. Numer z ilością
+        # („ZD 6/09/2026 (4)”) jest zapisem DLA OKA, więc do filtra idzie sam
+        # numer dokumentu (_numery_zd) — jedna pozycja bywa w kilku ZD naraz.
+        tk.Label(f, text="ZD:", bg="#ecf0f1", font=("Arial", 9)).pack(side=tk.LEFT, padx=(14, 3), pady=6)
+        self.filter_zd_var = tk.StringVar(value=ZD_WSZYSTKIE)
+        self.combo_zd = ttk.Combobox(f, textvariable=self.filter_zd_var, width=20,
+                                     state="readonly", font=("Arial", 9))
+        self.combo_zd["values"] = [ZD_WSZYSTKIE]
+        self.combo_zd.pack(side=tk.LEFT, pady=6)
+        self.combo_zd.bind("<<ComboboxSelected>>", lambda _e: self._refill())
 
         # Czyszczenie filtrów — ta sama ikona i kolor co w arkuszu głównym.
         tk.Button(f, text="🗑️", command=self._wyczysc_filtry, bg="#95a5a6", fg="white",
@@ -908,6 +963,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             self.sheet.popup_menu_add_command("Ustaw dostawcę dla wierszy…",
                                               self._ustaw_dostawce_masowo)
             self.sheet.popup_menu_add_command("✉ Wyślij ZD dostawcy…", self._wyslij_zd)
+            self.sheet.popup_menu_add_command("👁 Podgląd PDF zamówienia", self._podglad_pdf)
             self.sheet.popup_menu_add_command("🗑 Usuń zamówienia (ZD)…", self._usun_zd)
             self.sheet.pack(fill=tk.BOTH, expand=True)
 
@@ -925,6 +981,15 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
                                   font=("Arial", 9, "bold"), padx=12, pady=5,
                                   relief=tk.RAISED, bd=2)
         self.btn_mail.pack(side=tk.RIGHT, padx=(0, 8))
+        # Podgląd wydruku ZD — ten sam plik, który idzie w mailu. Gotowy
+        # otwiera się od razu; „Nowy PDF” wymusza świeży (~11 s przez most).
+        tk.Button(bottom, text="👁 Podgląd PDF", command=self._podglad_pdf,
+                  bg="#7f8c8d", fg="white", font=("Arial", 9), padx=10, pady=5,
+                  relief=tk.RAISED, bd=1).pack(side=tk.RIGHT, padx=(0, 6))
+        tk.Button(bottom, text="🔁 Nowy PDF",
+                  command=lambda: self._podglad_pdf(wymus_nowy=True),
+                  bg="#95a5a6", fg="white", font=("Arial", 9), padx=10, pady=5,
+                  relief=tk.RAISED, bd=1).pack(side=tk.RIGHT, padx=(0, 8))
         # Pozycja spoza BOM-u i zapotrzebowania (śruby, materiał pomocniczy) —
         # wspólny formularz zakłada kartotekę i dorzuca wiersz do listy.
         tk.Button(bottom, text="➕ Dodaj pozycję spoza BOM", command=self._dodaj_reczna,
@@ -1019,9 +1084,21 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         self.wszystkie = wiersze
         self.podmioty = list(podmioty or [])
         dostawcy = sorted({w["dostawca"] for w in wiersze if w["dostawca"]})
-        self.combo_dostawca["values"] = [FILTR_WSZYSCY] + dostawcy + [FILTR_BRAK_DOSTAWCY]
+        self._dostawcy_wszyscy = [FILTR_WSZYSCY] + dostawcy + [FILTR_BRAK_DOSTAWCY]
+        self.combo_dostawca["values"] = self._dostawcy_wszyscy
         projekty = sorted({p for w in wiersze for p in w["projekty"].split(", ") if p})
         self.combo_projekt["values"] = [FILTR_WSZYSCY] + projekty
+
+        # Numery ZD obecne na liście — sortowane od najnowszego (numer rośnie
+        # w obrębie miesiąca), bo szuka się zwykle tego, co przed chwilą
+        # powstało. Wybrany numer przeżywa odświeżenie, o ile dokument nadal
+        # istnieje — inaczej filtr wskazywałby na skasowane ZD i lista
+        # wyglądałaby na pustą.
+        zdki = sorted({nr for w in wiersze for nr in _numery_zd(w.get("zd"))},
+                      key=_klucz_zd, reverse=True)
+        self.combo_zd["values"] = [ZD_WSZYSTKIE] + zdki
+        if self.filter_zd_var.get() not in ([ZD_WSZYSTKIE] + zdki):
+            self.filter_zd_var.set(ZD_WSZYSTKIE)
 
         # Lista typów jest STAŁA — dokładnie ta sama co w arkuszu głównym
         # (FILTER_CLASS_VALUES). Ograniczanie jej do typów obecnych w danych
@@ -1201,7 +1278,14 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         self.filter_projekt_var.set(FILTR_WSZYSCY)
         self.filter_typ_var.set(TYP_WSZYSTKO)
         self.filter_stan_var.set(STAN_WSZYSTKIE)
+        self.filter_zd_var.set(ZD_WSZYSTKIE)
         self.only_bez_dostawcy_var.set(0)
+        try:
+            self.dostawca_szukaj_var.set(self._dost_placeholder)
+            self.ent_dost_szukaj.config(fg="#95a5a6")
+            self.combo_dostawca["values"] = self._dostawcy_wszyscy
+        except Exception:
+            pass
         self.filter_typ_modes = {}
         try:
             self.btn_typ_multi.config(bg="#7f8c8d")
@@ -1216,6 +1300,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         tylko_bez = bool(self.only_bez_dostawcy_var.get())
 
         stan = self.filter_stan_var.get()
+        zd_filtr = self.filter_zd_var.get()
 
         out = []
         for w in wiersze:
@@ -1223,6 +1308,8 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             if stan == STAN_DO_ZAMOWIENIA and w.get("zd"):
                 continue
             if stan == STAN_ZAMOWIONE and not w.get("zd"):
+                continue
+            if zd_filtr != ZD_WSZYSTKIE and zd_filtr not in _numery_zd(w.get("zd")):
                 continue
             if szukaj and szukaj not in f"{w['symbol']} {w['nazwa']}".lower():
                 continue
@@ -1413,7 +1500,8 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
               self._min_opt(w),
               f"{w.get('ze_stanu', 0):g}" if w.get("ze_stanu") else "",
               f"{w['ilosc']:g}", w["jm"], w["dostawca"], w.get("dostawca_bom", ""),
-              w["projekty"], w["zk"], w.get("zd", ""), w.get("zd_data", "")]
+              w["projekty"], w["zk"], w.get("zd", ""), w.get("zd_data", ""),
+              "📄" if self._plik_pdf(w.get("zd")) else ""]
              for w in self.widoczne],
             reset_col_positions=False, redraw=False)
 
@@ -2143,8 +2231,156 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             "Usuwanie ZD", "\n".join(lines), parent=self)
         self._load_async()      # pozycje wracają do zapotrzebowania
 
+    # ── szukanie dostawcy w filtrze ────────────────────────────────────────
+    def _szukaj_dostawcy(self):
+        """Wpisany tekst zawęża listę dostawców w combo obok.
+
+        Dopasowanie po FRAGMENCIE, nie od początku: „quay” trafia w „QUAY”
+        BIURO HANDLOWO-USŁUGOWE…, a „sasin” w ADR-CNC Adrian Sasin.
+        Jedno trafienie ustawia filtr od razu — po to się szuka; przy wielu
+        combo pokazuje tylko pasujące i wybiera się z rozwinięcia.
+        Puste pole przywraca pełną listę, nie ruszając bieżącego filtra.
+        """
+        if not hasattr(self, "combo_dostawca"):
+            return
+        tekst = self.dostawca_szukaj_var.get().strip().lower()
+        if tekst == getattr(self, "_dost_placeholder", "").lower():
+            tekst = ""
+        if not tekst:
+            self.combo_dostawca["values"] = self._dostawcy_wszyscy
+            return
+        pasuje = [d for d in self._dostawcy_wszyscy
+                  if tekst in d.lower() and d not in (FILTR_WSZYSCY, FILTR_BRAK_DOSTAWCY)]
+        if not pasuje:
+            # Brak trafień: zostawiamy pełną listę i mówimy o tym w pasku —
+            # ciche wyczyszczenie wyglądałoby jak zawieszenie.
+            self.combo_dostawca["values"] = self._dostawcy_wszyscy
+            self.status.config(text=f"Brak dostawcy pasującego do „{tekst}”.")
+            return
+        self.combo_dostawca["values"] = [FILTR_WSZYSCY] + pasuje
+        if len(pasuje) == 1:
+            self.filter_dostawca_var.set(pasuje[0])
+            # Dostawca wybrany — pole szukania spełniło rolę i się sprząta.
+            # Zostawiony tekst wyglądał, jakby filtr wciąż był zawężony
+            # (zgłoszone 05.09.2026).
+            self.after(1, self._wyczysc_szukaj_dostawcy)
+            self._refill()
+        else:
+            self.status.config(text=f"Pasuje {len(pasuje)} dostawców — wybierz z listy.")
+
+    def _dostawca_wybrany(self, _event=None):
+        """Wybór z rozwiniętej listy — pole szukania już niepotrzebne."""
+        self._wyczysc_szukaj_dostawcy()
+        self._refill()
+
+    def _wyczysc_szukaj_dostawcy(self):
+        """Czyści pole szukania i przywraca pełną listę w combo.
+
+        Wołane po wybraniu dostawcy: tekst w polu przestaje cokolwiek
+        znaczyć, a przycięta lista rozwijana utrudniałaby wybór następnego.
+        """
+        try:
+            self.combo_dostawca["values"] = self._dostawcy_wszyscy
+            if self.ent_dost_szukaj.focus_get() is not self.ent_dost_szukaj:
+                self.ent_dost_szukaj.config(fg="#95a5a6")
+                self.dostawca_szukaj_var.set(self._dost_placeholder)
+            else:
+                self.dostawca_szukaj_var.set("")   # kursor w polu — zostaw puste
+        except Exception:
+            pass
+
+    # ── wydruk ZD ──────────────────────────────────────────────────────────
+    def _katalog_pdf(self):
+        """Wspólny katalog wydruków na Y:, nie lokalny %TEMP% — ten sam,
+        z którego korzystają okna wysyłki i przeglądu dokumentów."""
+        import subiekt_wyslij_zd
+        return subiekt_wyslij_zd._katalog_pdf_domyslny()
+
+    def _plik_pdf(self, kolumna_zd):
+        """Ścieżka gotowego wydruku PIERWSZEGO ZD z kolumny albo None.
+
+        Nazwa pliku powstaje z numeru dokumentu tak samo jak w moście, więc
+        nie trzeba niczego zapamiętywać — wystarczy sprawdzić katalog.
+        Kolumna ZD trzyma numer Z ILOŚCIĄ i bywa zbiorcza, stąd _numery_zd.
+        """
+        numery = _numery_zd(kolumna_zd)
+        if not numery:
+            return None
+        try:
+            nazwa = numery[0].replace("/", "-").replace("\\", "-").replace(" ", "_") + ".pdf"
+            sciezka = self._katalog_pdf() / nazwa
+            return sciezka if sciezka.exists() else None
+        except Exception:
+            return None        # brak dostępu do Y: nie może wywalić rysowania listy
+
+    def _podglad_pdf(self, wymus_nowy=False):
+        """Wydruk ZD z wiersza pod kursorem — ten sam, który idzie mailem.
+
+        Gotowy plik otwiera się NATYCHMIAST; generowanie z Subiekta trwa ~11 s
+        (start mostu i logowanie do Sfery), więc robimy je tylko, gdy wydruku
+        jeszcze nie ma albo ktoś chce świeży.
+        """
+        w = None
+        try:
+            for r in self.sheet.get_selected_rows(get_cells_as_rows=True):
+                if 0 <= r < len(self.widoczne):
+                    w = self.widoczne[r]
+                    break
+        except Exception:
+            pass
+        numery = _numery_zd(w.get("zd")) if w else []
+        if not numery:
+            messagebox.showinfo("Podgląd PDF",
+                                "Ustaw kursor na wierszu, który ma już zamówienie (kolumna ZD).",
+                                parent=self)
+            return
+        numer = numery[0]
+
+        if not wymus_nowy:
+            gotowy = self._plik_pdf(w.get("zd"))
+            if gotowy:
+                from datetime import datetime as _dt
+                kiedy = _dt.fromtimestamp(gotowy.stat().st_mtime)
+                os.startfile(str(gotowy))
+                self.status.config(
+                    text=f"Otwarto wydruk {numer} z {kiedy:%d.%m.%Y %H:%M} "
+                         f"(gotowy plik; „Nowy PDF” wygeneruje aktualny).")
+                return
+
+        self.start_kreciolek(f"Generuję PDF {numer} z Subiekta (~11 s)")
+        threading.Thread(target=self._podglad_pdf_worker, args=(numer,),
+                         daemon=True).start()
+
+    def _podglad_pdf_worker(self, numer):
+        """Eksport wydruku w tle — most odpowiada ~11 s, GUI ma nie zamarzać."""
+        plik, blad = None, ""
+        try:
+            import subiekt_wyslij_zd
+            pdfy, bledy = subiekt_wyslij_zd.eksportuj_pdf([numer], self._katalog_pdf())
+            plik = (pdfy.get(numer) or {}).get("plik")
+            blad = bledy[0] if bledy else ""
+        except Exception as e:
+            blad = str(e)
+        self.after(0, lambda: self._podglad_pdf_done(numer, plik, blad))
+
+    def _podglad_pdf_done(self, numer, plik, blad):
+        self.stop_kreciolek()
+        if not plik or not Path(plik).exists():
+            self.status.config(text="PDF nie powstał.")
+            messagebox.showwarning("Podgląd PDF",
+                                   f"Nie udało się wygenerować wydruku {numer}."
+                                   + (f"{NL}{NL}{blad}" if blad else ""), parent=self)
+            return
+        try:
+            os.startfile(str(plik))
+        except Exception as e:
+            messagebox.showerror("Podgląd PDF", str(e), parent=self)
+            return
+        self.status.config(text=f"Otwarto podgląd {numer}.")
+        self._refill()             # kolumna PDF ma pokazać 📄 dla świeżego wydruku
+
     def _on_dblclick(self, event):
-        """Dwuklik w kolumnę Dostawca → wybór z listy podmiotów Subiekta."""
+        """Dwuklik: kolumna Dostawca → wybór podmiotu, kolumna PDF → wydruk."""
         if not self.sheet:
             return
         try:
@@ -2152,7 +2388,12 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             c = self.sheet.identify_column(event, allow_end=False)
         except Exception:
             return
-        if r is None or c != self.COL_DOSTAWCA or not (0 <= r < len(self.widoczne)):
+        if r is None or not (0 <= r < len(self.widoczne)):
+            return
+        if c == self.COL_PDF:
+            self._podglad_pdf()
+            return
+        if c != self.COL_DOSTAWCA:
             return
         self._wybierz_dostawce([r])
 

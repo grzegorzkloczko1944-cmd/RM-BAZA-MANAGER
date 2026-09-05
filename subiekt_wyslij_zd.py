@@ -595,6 +595,14 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
                  dozwolone_ext=None, blad_serwera=None, agent_portalu=None,
                  szukaj_hurtem=None):
         super().__init__(parent)
+        # Okno MUSI trzymać się nad arkuszem. Bez transient() to zwykły
+        # Toplevel: przy budowaniu listy plików (update_idletasks w pętli
+        # panelu) chowało się pod RM_BAZA i wyglądało, jakby zniknęło —
+        # user szukał go na pasku zadań (zgłoszone 05.09.2026).
+        try:
+            self.transient(parent)
+        except Exception:
+            pass
         self.numer_zd = numer_zd
         self.dostawca = dostawca
         self.projekt = projekt
@@ -715,7 +723,7 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
         self.cmb_tryb.pack(side=tk.LEFT, pady=8)
         self.cmb_tryb.bind("<<ComboboxSelected>>", lambda _e: self._tryb_zmieniony())
 
-        self.btn_wyslij = tk.Button(stopka, text="📧 Otwórz w programie pocztowym",
+        self.btn_wyslij = tk.Button(stopka, text="📧 Utwórz i wyślij email",
                                     command=self._wyslij, bg="#27ae60", fg="white",
                                     font=("Arial", 9, "bold"), padx=14, pady=5,
                                     state=tk.DISABLED)
@@ -858,6 +866,21 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
         except Exception as e:
             print(f"⚠️  Szukanie plików {numer}: {e}")
             return []
+
+    def _na_wierzch(self):
+        """Podnosi okno i oddaje mu focus — po długiej operacji w tle.
+
+        Skan serwera trwa i użytkownik w tym czasie klika gdzie indziej;
+        gdy się kończy, okno ma wrócić na wierzch, a nie zostać pod arkuszem.
+        Bez -topmost: to by je trzymało nad WSZYSTKIM, także nad Outlookiem,
+        którego zaraz otwieramy.
+        """
+        try:
+            if self.winfo_exists():
+                self.lift()
+                self.focus_force()
+        except Exception:
+            pass
 
     def _po_zmianie_plikow(self):
         """Panel zmienił listę plików — odśwież licznik w pasku stanu."""
