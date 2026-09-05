@@ -1095,7 +1095,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
     def _load_async(self):
         self.btn_refresh.config(state=tk.DISABLED)
         self.btn_zd.config(state=tk.DISABLED)
-        self.start_kreciolek("Pytam Subiekta o zapotrzebowanie (~10 s)")
+        self.start_kreciolek("Pytam Subiekta o zapotrzebowanie")
         threading.Thread(target=self._load_worker, daemon=True).start()
 
     def _load_worker(self):
@@ -2422,7 +2422,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
                          f"(gotowy plik; „Nowy PDF” wygeneruje aktualny).")
                 return
 
-        self.start_kreciolek(f"Generuję PDF {numer} z Subiekta (~11 s)")
+        self.start_kreciolek(f"Generuję PDF {numer} z Subiekta")
         threading.Thread(target=self._podglad_pdf_worker, args=(numer,),
                          daemon=True).start()
 

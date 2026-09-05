@@ -353,7 +353,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
     # ── wczytywanie ────────────────────────────────────────────────────────
     def _load_async(self):
         self.btn_refresh.config(state=tk.DISABLED)
-        self.start_kreciolek("Czytam dokumenty z Subiekta (~10 s)")
+        self.start_kreciolek("Czytam dokumenty z Subiekta")
         threading.Thread(target=self._load_worker, daemon=True).start()
 
     def _load_worker(self):
