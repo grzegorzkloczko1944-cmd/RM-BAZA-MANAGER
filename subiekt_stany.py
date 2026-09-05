@@ -325,7 +325,26 @@ def looks_like_drawing_no(s):
 
 # ── Wywołanie mostu ─────────────────────────────────────────────────────────
 def query_stock(symbols, timeout=TIMEOUT_S):
-    """Pyta Subiekta o stany. Zwraca {pytany_symbol: dict}. Rzuca RuntimeError."""
+    """Pyta Subiekta o stany. Zwraca {pytany_symbol: dict}. Rzuca RuntimeError.
+
+    Idzie przez stały most — druga i kolejna próba nie płaci ~10 s za start
+    procesu i logowanie. Gdy mostu nie ma, leci starym CLI.
+    """
+    try:
+        import subiekt_bridge
+    except ImportError:
+        return _query_stock_cli(symbols, timeout)
+
+    dane = subiekt_bridge.call(
+        "stan", {"symbols": list(symbols)}, timeout=timeout,
+        fallback=lambda: _query_stock_cli(symbols, timeout))
+    if isinstance(dane, dict) and "pozycje" in dane:
+        return {p["Pytany"]: p for p in dane.get("pozycje", [])}
+    return dane          # fallback zwrócił gotowy słownik
+
+
+def _query_stock_cli(symbols, timeout=TIMEOUT_S):
+    """Stara ścieżka: osobny proces NexoRecon.exe na każde zapytanie."""
     exe = _find_exe()
     if not exe:
         raise RuntimeError(

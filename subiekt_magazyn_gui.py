@@ -57,6 +57,33 @@ NL = chr(10)
 
 # ── most ────────────────────────────────────────────────────────────────────
 def _uruchom(tryb, argv, out, timeout):
+    """Wynik komendy mostu. Idzie przez stały most, w razie czego starym CLI.
+
+    Stały most (subiekt_bridge) trzyma jedną sesję Sfery, więc drugie i
+    kolejne wywołanie nie płaci ~10 s za start procesu i logowanie.
+    Gdy mostu nie da się uruchomić, leci `_uruchom_cli` — okno ma działać
+    także wtedy, tylko wolniej (plan, sekcja 17).
+    """
+    try:
+        import subiekt_bridge
+    except ImportError:
+        return _uruchom_cli(tryb, argv, out, timeout)
+
+    # Plan jedzie przez most jako dane, nie jako plik — wyjmujemy go z --plan=.
+    plan = None
+    for a in argv:
+        if a.startswith("--plan="):
+            with open(a[len("--plan="):], encoding="utf-8") as f:
+                plan = json.load(f)
+            break
+
+    return subiekt_bridge.wywolaj(
+        tryb, argv, timeout=timeout, plan=plan,
+        fallback=lambda: _uruchom_cli(tryb, argv, out, timeout))
+
+
+def _uruchom_cli(tryb, argv, out, timeout):
+    """Stara ścieżka: osobny proces NexoRecon.exe na każde wywołanie."""
     exe = _find_exe()
     if not exe:
         raise RuntimeError("Nie znaleziono NexoRecon.exe.")

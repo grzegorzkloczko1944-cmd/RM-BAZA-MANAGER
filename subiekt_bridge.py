@@ -291,6 +291,47 @@ def call(command, args=None, timeout=TIMEOUT_S, write=False, fallback=None):
     return odp.get("data") or {}
 
 
+def wywolaj(tryb, argv=(), timeout=TIMEOUT_S, plan=None, symbole=None,
+            fallback=None):
+    """Most z argumentami w stylu CLI.
+
+    Ułatwia przepinanie istniejących modułów: wołający podaje to samo, co
+    dotąd budował w liście `cmd`, a ta funkcja tłumaczy przełączniki na args
+    protokołu.
+
+        dane = bridge.wywolaj("magazyn", ["--tylko-niezerowe"], fallback=...)
+        dane = bridge.wywolaj("zd", ["--zapisz"], plan=pozycje)
+
+    `plan` i `symbole` idą osobno, bo w CLI są plikami (`--plan=`,
+    `--symbols-file=`), a przez most jadą jako dane w JSON-ie.
+
+    `fallback` (funkcja bez argumentów) jest wołany, gdy mostu nie da się
+    uruchomić. Dla operacji zapisujących jest bezpieczny, bo brak startu
+    mostu oznacza, że nic się nie wykonało (plan, sekcja 17).
+    """
+    args = {}
+    zapisz = False
+    for a in argv:
+        if a == "--zapisz":
+            zapisz = True
+        elif a == "--tylko-niezerowe":
+            args["tylko_niezerowe"] = True
+        elif a.startswith("--"):
+            klucz, _, wartosc = a[2:].partition("=")
+            klucz = klucz.replace("-", "_")
+            if klucz in ("out", "plan", "symbols_file"):
+                continue          # most nie używa plików pośrednich
+            args[klucz] = int(wartosc) if wartosc.isdigit() else wartosc
+    if zapisz:
+        args["zapisz"] = True
+    if plan is not None:
+        args["plan"] = plan
+    if symbole is not None:
+        args["symbols"] = list(symbole)
+
+    return call(tryb, args, timeout=timeout, write=zapisz, fallback=fallback)
+
+
 def zatrzymaj_most():
     """Kończy proces mostu. Do diagnostyki — normalnie most żyje cały dzień."""
     dane = ping()

@@ -380,6 +380,27 @@ def run_bridge(plan, zapisz=False, timeout=TIMEOUT_S):
     if not os.path.isfile(CONFIG_PATH):
         raise RuntimeError(f"Brak konfiguracji połączenia:\n{CONFIG_PATH}")
 
+    # ZAPIS, i to najcięższy — zakłada kartoteki, komplety i ZK naraz.
+    # Żadnego ponawiania (plan, sekcja 14): powtórzenie po niejednoznacznym
+    # błędzie zdublowałoby dokumenty projektu.
+    args = {"plan": plan}
+    if zapisz:
+        args["zapisz"] = True
+    try:
+        import subiekt_bridge
+        return subiekt_bridge.call(
+            "projekt", args, timeout=timeout, write=zapisz,
+            fallback=lambda: _projekt_cli(plan, zapisz, timeout))
+    except ImportError:
+        return _projekt_cli(plan, zapisz, timeout)
+
+
+def _projekt_cli(plan, zapisz, timeout):
+    """Stara ścieżka: osobny proces NexoRecon.exe."""
+    exe = _find_exe()
+    if not exe:
+        raise RuntimeError("Nie znaleziono NexoRecon.exe.")
+
     tmpdir = tempfile.mkdtemp(prefix="subiekt_proj_")
     plan_path = os.path.join(tmpdir, "plan.json")
     out_path = os.path.join(tmpdir, "wynik.json")

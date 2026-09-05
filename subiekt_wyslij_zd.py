@@ -53,16 +53,27 @@ def eksportuj_pdf(numery, katalog, timeout=TIMEOUT_S):
     katalog = Path(katalog)
     katalog.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        out = Path(tmp) / "wydruk.json"
-        proc = subprocess.run(
-            [str(exe), "wydruk", f"--numery={';'.join(numery)}",
-             f"--pdf={katalog}", f"--out={out}"],
-            capture_output=True, text=True, timeout=timeout,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if not out.exists():
-            raise RuntimeError(blad_mostu(exe, "wydruk", proc, out))
-        dane = json.loads(out.read_text(encoding="utf-8"))
+    def przez_cli():
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "wydruk.json"
+            proc = subprocess.run(
+                [str(exe), "wydruk", f"--numery={';'.join(numery)}",
+                 f"--pdf={katalog}", f"--out={out}"],
+                capture_output=True, text=True, timeout=timeout,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if not out.exists():
+                raise RuntimeError(blad_mostu(exe, "wydruk", proc, out))
+            return json.loads(out.read_text(encoding="utf-8"))
+
+    # PDF-y powstają w `katalog` po stronie mostu — ta sama maszyna, więc
+    # ścieżka jest wspólna. To nie jest zapis do bazy Subiekta, tylko eksport.
+    try:
+        import subiekt_bridge
+        dane = subiekt_bridge.call(
+            "wydruk", {"numery": ";".join(numery), "pdf": str(katalog)},
+            timeout=timeout, fallback=przez_cli)
+    except ImportError:
+        dane = przez_cli()
 
     if dane.get("blad"):
         raise RuntimeError(dane["blad"])
@@ -89,16 +100,28 @@ def ustaw_termin(numer_zd, termin, timeout=TIMEOUT_S):
 
     exe = _find_exe()
     iso = termin.isoformat() if hasattr(termin, "isoformat") else str(termin)
-    with tempfile.TemporaryDirectory() as tmp:
-        out = Path(tmp) / "termin.json"
-        proc = subprocess.run(
-            [str(exe), "termin", f"--numery={numer_zd}", f"--data={iso}",
-             f"--out={out}", "--zapisz"],
-            capture_output=True, text=True, timeout=timeout,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if not out.exists():
-            raise RuntimeError(blad_mostu(exe, "termin", proc, out))
-        return json.loads(out.read_text(encoding="utf-8"))
+
+    def przez_cli():
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "termin.json"
+            proc = subprocess.run(
+                [str(exe), "termin", f"--numery={numer_zd}", f"--data={iso}",
+                 f"--out={out}", "--zapisz"],
+                capture_output=True, text=True, timeout=timeout,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if not out.exists():
+                raise RuntimeError(blad_mostu(exe, "termin", proc, out))
+            return json.loads(out.read_text(encoding="utf-8"))
+
+    # ZAPIS — bez ponawiania (plan, sekcja 14). Termin da się odczytać
+    # i porównać, ale tę decyzję zostawiamy człowiekowi.
+    try:
+        import subiekt_bridge
+        return subiekt_bridge.call(
+            "termin", {"numery": numer_zd, "data": iso, "zapisz": True},
+            timeout=timeout, write=True, fallback=przez_cli)
+    except ImportError:
+        return przez_cli()
 
 
 def _master():
