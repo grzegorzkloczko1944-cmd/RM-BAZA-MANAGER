@@ -376,7 +376,7 @@ class SubiektStanyWindow(tk.Toplevel):
         top.pack(side=tk.TOP, fill=tk.X)
         top.pack_propagate(False)
 
-        tk.Label(top, text="📦 Stany magazynowe z Subiekt nexo PRO",
+        tk.Label(top, text="📦 Stany pozycji projektu w Subiekcie",
                  bg="#34495e", fg="white", font=("Arial", 11, "bold")).pack(side=tk.LEFT, padx=12)
 
         self.btn_refresh = tk.Button(top, text="🔄 Odśwież", command=self._load_async,

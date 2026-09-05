@@ -87,8 +87,13 @@ def okno_nowa_kartoteka(parent, symbol="", nazwa="", rodzaj="towar", po_zapisie=
 
     wiersz(0, "Symbol:")
     var_symbol = tk.StringVar(value=symbol)
-    ent_symbol = tk.Entry(body, textvariable=var_symbol, font=("Arial", 10))
-    ent_symbol.grid(row=0, column=1, sticky="ew", pady=4)
+    # Pole + przycisk generowania w jednej ramce, żeby przycisk stał TAM,
+    # gdzie działa (a nie w rzędzie akcji na dole razem z „Załóż").
+    ramka_sym = tk.Frame(body)
+    ramka_sym.grid(row=0, column=1, sticky="ew", pady=4)
+    ramka_sym.columnconfigure(0, weight=1)
+    ent_symbol = tk.Entry(ramka_sym, textvariable=var_symbol, font=("Arial", 10))
+    ent_symbol.grid(row=0, column=0, sticky="ew")
     lbl_dl = tk.Label(body, text="", font=("Arial", 8), fg="#7f8c8d", anchor="w")
     lbl_dl.grid(row=1, column=1, sticky="w")
 
@@ -96,6 +101,55 @@ def okno_nowa_kartoteka(parent, symbol="", nazwa="", rodzaj="towar", po_zapisie=
     var_nazwa = tk.StringVar(value=nazwa)
     tk.Entry(body, textvariable=var_nazwa, font=("Arial", 10)).grid(
         row=2, column=1, sticky="ew", pady=4)
+
+    def generuj_symbol():
+        """Symbol z nazwy — TĄ SAMĄ regułą, którą zakłada kartoteki
+        subiekt_projekt (symbol_z_nazwy / rozroznij_symbol).
+
+        Oba miejsca MUSZĄ generować identyczny symbol: kartoteka założona
+        tutaj ręcznie i ta sama pozycja idąca automatem z projektu inaczej
+        rozjadą się w Subiekcie na dwie różne kartoteki.
+
+        Przy kolizji z symbolem już istniejącym w Subiekcie schodzimy do
+        rozroznij_symbol, który zostawia wyróżniki z cyframi (DN40, M6,
+        L2525) — to one odróżniają warianty tej samej rzeczy.
+        """
+        n = (var_nazwa.get() or "").strip()
+        if not n:
+            messagebox.showinfo("Generuj symbol",
+                                "Najpierw wpisz nazwę — symbol powstaje z niej.",
+                                parent=dlg)
+            return
+        try:
+            from subiekt_projekt import symbol_z_nazwy, rozroznij_symbol
+        except Exception as e:
+            messagebox.showerror("Generuj symbol",
+                                 f"Brak reguły generowania symbolu:\n{e}", parent=dlg)
+            return
+
+        kandydat = symbol_z_nazwy(n)
+        # Symbole zajęte w Subiekcie — z cache katalogu, żeby nie czekać na
+        # most przy każdym kliknięciu. Gdy cache nie ma, generujemy bez
+        # sprawdzania kolizji (przycisk „Sprawdź" i tak je wyłapie).
+        zajete = set()
+        try:
+            from subiekt_scalanie import wczytaj_katalog_subiekta
+            zajete = {str(k.get("symbol") or "").strip().upper()
+                      for k in (wczytaj_katalog_subiekta(tylko_cache=True) or [])}
+        except Exception:
+            pass
+        if kandydat.upper() in zajete:
+            kandydat = rozroznij_symbol(n, zajete)
+
+        var_symbol.set(kandydat)
+        status.config(
+            text=f"Symbol z nazwy: {kandydat}"
+                 + ("   (nazwa zajęta — użyto wyróżników)" if zajete and
+                    symbol_z_nazwy(n).upper() in zajete else ""),
+            fg="#2c3e50")
+
+    tk.Button(ramka_sym, text="⚙ Generuj", command=generuj_symbol,
+              font=("Arial", 8), padx=8, pady=1).grid(row=0, column=1, padx=(6, 0))
 
     wiersz(3, "Rodzaj:")
     var_rodzaj = tk.StringVar(value=next((o for k, o in RODZAJE if k == rodzaj), RODZAJE[0][1]))

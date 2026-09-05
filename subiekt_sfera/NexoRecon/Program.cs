@@ -46,9 +46,11 @@ var tryb = args.Length > 0 && !args[0].StartsWith("--") ? args[0].ToLowerInvaria
 //   dostawcy        - zaklada kontrahentow z listy RM_BAZA; ZAPISUJE (--zapisz)
 //   stan-pozycji    - kartoteka + ZK + ZD dla listy symboli (kolumna SUBIEKT)
 //   dokumenty       - lista ZK/ZD/RW/WZ z pozycjami (okno przegladu)
+//   magazyn         - stany CALEGO magazynu (bez wiazania z projektem)
 var trybyMaszynowe = new[] { "stan", "katalog", "kontrahenci", "zapotrzebowanie",
                              "projekt", "zd", "zd-usun", "dostawcy", "stan-pozycji",
-                             "dokumenty", "faktury", "kartoteka", "wydruk-recon", "wydruk" };
+                             "dokumenty", "faktury", "kartoteka", "wydruk-recon", "wydruk",
+                             "magazyn" };
 var cicho = trybyMaszynowe.Contains(tryb);
 var trybStan = tryb == "stan";
 var trybProjekt = tryb == "projekt";
@@ -161,6 +163,13 @@ using (sfera)
     {
         if (planFile == null) { Console.WriteLine("Tryb zd: brak --plan=plik.json"); return 1; }
         return NexoRecon.Zd.Uruchom(sfera, planFile, outPath, zapisz);
+    }
+
+    if (tryb == "magazyn")
+    {
+        var tylkoNiezerowe = args.Any(a => a.Equals("--tylko-niezerowe",
+                                                    StringComparison.OrdinalIgnoreCase));
+        return NexoRecon.Magazyn.Uruchom(sfera, outPath, tylkoNiezerowe);
     }
 
     if (trybZdUsun)

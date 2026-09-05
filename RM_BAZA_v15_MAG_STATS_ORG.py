@@ -815,8 +815,15 @@ class MainWindow(tk.Tk):
         subiekt_menu.add_command(label="🔍 Sprawdź w Subiekcie (kolumna SUBIEKT)",
                                  command=self.sprawdz_w_subiekcie)
         subiekt_menu.add_separator()
-        subiekt_menu.add_command(label="📦 Stany magazynowe (odczyt)",
+        # „Stany magazynowe" sugerowało cały magazyn, a okno czyta stany
+        # WYŁĄCZNIE dla pozycji otwartego projektu (wymaga current_project_id
+        # i leci po BOM-ie). Nazwa mówi teraz, co robi (zgłoszone 05.09.2026).
+        subiekt_menu.add_command(label="📦 Stany pozycji projektu (odczyt)",
                                  command=self.open_subiekt_stany)
+        # Cały magazyn, bez wiązania z projektem — osobne okno i osobny tryb
+        # mostu, bo „stan" pyta punktowo o symbole z BOM-u.
+        subiekt_menu.add_command(label="🏬 Stany magazynowe — cały Subiekt (odczyt)",
+                                 command=self.open_subiekt_magazyn)
         subiekt_menu.add_separator()
         subiekt_menu.add_command(label="🏗 Załóż projekt w Subiekcie (kartoteki + komplety + ZK)…",
                                  command=self.open_subiekt_projekt)
@@ -28951,6 +28958,26 @@ class MainWindow(tk.Tk):
                 parent=self)
             return
         subiekt_dokumenty_gui.open_window(self)
+
+    def open_subiekt_magazyn(self):
+        """Okno „Stany magazynowe — cały Subiekt" (menu 📦 SUBIEKT).
+
+        Odpowiada na pytanie „co w ogóle mam na magazynie", w odróżnieniu od
+        „Stany pozycji projektu", które pyta punktowo o numery z BOM-u
+        otwartego projektu. Dlatego NIE wymaga wybranego projektu.
+
+        Tylko odczyt. Most czyta stany per kartoteka (najdroższa część
+        odczytu), więc okno domyślnie pomija kartoteki bez ruchu.
+        """
+        try:
+            import subiekt_magazyn_gui
+        except ImportError as e:
+            messagebox.showerror(
+                "Subiekt",
+                f"Nie znaleziono modułu subiekt_magazyn_gui.py\n\n{e}",
+                parent=self)
+            return
+        subiekt_magazyn_gui.open_window(self)
 
     def open_subiekt_scalanie(self):
         """Okno „Scal kody handlowe" (menu 📦 SUBIEKT).
