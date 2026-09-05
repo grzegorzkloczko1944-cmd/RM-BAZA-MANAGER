@@ -71,6 +71,10 @@ def eksportuj_pdf(numery, katalog, timeout=TIMEOUT_S):
     return wynik, bledy
 
 
+#: Tryby wysyłki rysunków — treść pola „Rysunki" w stopce okna.
+TRYB_MAIL = "załącznikami w mailu"
+TRYB_PORTAL = "linkiem do portalu RFQ"
+
 #: Format numeru rysunku RMPAK: prefiks-KKK.NN (+ opcjonalny sufiks X/XX/Z/ZZ).
 #: Wzięty wprost z RM_IMPORT (RE_RMPAK_BASE w RM_IMPORT_V17_MOD.py) — to ta
 #: sama definicja, której używa import BOM-u, więc oba narzędzia rozumieją
@@ -123,13 +127,19 @@ def otworz_maila(do, temat, tresc, zalaczniki, dw=""):
         return "mailto"
 
 
-def tresc_wiadomosci(numer_zd, dostawca, projekt, pozycje, nadawca, firma="RM PRODUKCJA"):
+def tresc_wiadomosci(numer_zd, dostawca, projekt, pozycje, nadawca,
+                     firma="RM PRODUKCJA", link=None):
     """
     Treść maila. Pozycje wypisane, żeby dostawca widział zamówienie także
     w treści, nie tylko w załączniku.
+
+    `link` — adres do portalu. Gdy jest, rysunki NIE idą załącznikami, tylko
+    linkiem: mail zostaje lekki, a portal liczy wejścia, więc wiadomo, czy
+    dostawca w ogóle zajrzał w dokumentację.
     """
     linie = [f"Dzień dobry,", ""]
-    linie.append(f"w załączeniu przesyłam zamówienie {numer_zd}"
+    wstep = ("przesyłam zamówienie" if link else "w załączeniu przesyłam zamówienie")
+    linie.append(f"{wstep} {numer_zd}"
                  + (f" dotyczące projektu {projekt}." if projekt else "."))
     linie.append("")
     if pozycje:
@@ -141,7 +151,13 @@ def tresc_wiadomosci(numer_zd, dostawca, projekt, pozycje, nadawca, firma="RM PR
             opis = f"{symbol}" + (f" — {nazwa}" if nazwa and nazwa != symbol else "")
             linie.append(f"  {i}. {opis}: {ilosc} {jm}".rstrip())
         linie.append("")
-    linie.append("Do wiadomości dołączam rysunki techniczne zamawianych pozycji.")
+    if link:
+        linie.append("Rysunki techniczne zamawianych pozycji są do pobrania tutaj:")
+        linie.append(f"  {link}")
+        linie.append("")
+        linie.append("Link jest przypisany do Państwa firmy — prosimy go nie przekazywać dalej.")
+    else:
+        linie.append("Do wiadomości dołączam rysunki techniczne zamawianych pozycji.")
     linie.append("")
     linie.append("Proszę o potwierdzenie przyjęcia zamówienia oraz podanie terminu realizacji.")
     linie.append("")
@@ -161,7 +177,7 @@ class OknoWysylki(tk.Toplevel):
     def __init__(self, parent, numer_zd, dostawca, email, projekt, pozycje,
                  nadawca, szukaj_plikow=None, katalog_pdf=None, szukaj_maila=None,
                  szukaj_dalej=None, needs_dxf=None, register_drop=None,
-                 dozwolone_ext=None, blad_serwera=None):
+                 dozwolone_ext=None, blad_serwera=None, agent_portalu=None):
         super().__init__(parent)
         self.numer_zd = numer_zd
         self.dostawca = dostawca
@@ -172,6 +188,11 @@ class OknoWysylki(tk.Toplevel):
         #: symbol → [numery projektów]; wypełniane w _pozycje_dla_panelu,
         #: używane przez _szukaj_w_projektach do ustalenia kolejności katalogów.
         self._projekty_pozycji = {}
+        #: NIP dostawcy z eksportu PDF — klucz wyszukania dostawcy w portalu.
+        self.nip_dostawcy = ""
+        #: Treść maila wygenerowana przez nas. Gdy użytkownik ją zmieni,
+        #: przełącznik trybu przestaje ją nadpisywać.
+        self._tresc_wzorcowa = ""
         self.szukaj_maila = szukaj_maila    # callable(nip) -> str
         # Zależności panelu plików — te same, których używa okno RFQ.
         # Wszystkie opcjonalne: bez nich panel po prostu nie pokazuje
@@ -181,6 +202,10 @@ class OknoWysylki(tk.Toplevel):
         self.register_drop = register_drop
         self.dozwolone_ext = dozwolone_ext
         self.blad_serwera = blad_serwera or (lambda: None)
+        # Fabryka agenta portalu RFQ — wstrzykiwana, bo arkusz główny jest dwa
+        # poziomy wyżej (okno ZD → okno zamówień → arkusz) i zna ścieżkę do
+        # master.sqlite TEJ maszyny. Bez niej combo „Rysunki" ma tylko mail.
+        self.agent_portalu = agent_portalu
         self.katalog_pdf = katalog_pdf or Path(os.environ.get("TEMP", ".")) / "rm_baza_zd"
         self.pdf_zd = None
         self._blad_pdf = ""
@@ -231,6 +256,20 @@ class OknoWysylki(tk.Toplevel):
 
         stopka = tk.Frame(self, bg="#ecf0f1")
         stopka.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # Jak wysłać rysunki: załącznikami czy linkiem do portalu.
+        # Załączniki bywają odbijane przez serwer dostawcy przy większym
+        # komplecie i nie wiadomo, czy ktoś je w ogóle otworzył. Portal daje
+        # jeden link i liczy wejścia — stąd wybór, a nie zamiana na sztywno.
+        tk.Label(stopka, text="Rysunki:", bg="#ecf0f1",
+                 font=("Arial", 8, "bold")).pack(side=tk.LEFT, padx=(12, 4), pady=8)
+        self.var_tryb = tk.StringVar(value=TRYB_MAIL)
+        self.cmb_tryb = ttk.Combobox(stopka, textvariable=self.var_tryb, width=30,
+                                     state="readonly", font=("Arial", 9),
+                                     values=[TRYB_MAIL, TRYB_PORTAL])
+        self.cmb_tryb.pack(side=tk.LEFT, pady=8)
+        self.cmb_tryb.bind("<<ComboboxSelected>>", lambda _e: self._tryb_zmieniony())
+
         self.btn_wyslij = tk.Button(stopka, text="📧 Otwórz w programie pocztowym",
                                     command=self._wyslij, bg="#27ae60", fg="white",
                                     font=("Arial", 9, "bold"), padx=14, pady=5,
@@ -251,8 +290,9 @@ class OknoWysylki(tk.Toplevel):
         self.txt.configure(yscrollcommand=sv.set)
         self.txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sv.pack(side=tk.RIGHT, fill=tk.Y)
-        self.txt.insert("1.0", tresc_wiadomosci(
-            self.numer_zd, self.dostawca, self.projekt, self.pozycje, self.nadawca))
+        self._tresc_wzorcowa = tresc_wiadomosci(
+            self.numer_zd, self.dostawca, self.projekt, self.pozycje, self.nadawca)
+        self.txt.insert("1.0", self._tresc_wzorcowa)
 
         dol = tk.Frame(panel)
         panel.add(dol, weight=2)
@@ -382,6 +422,9 @@ class OknoWysylki(tk.Toplevel):
             # która w Subiekcie bywa pełna, a w RM_BAZA skrócona. Ustawiamy
             # tylko wtedy, gdy pole jest jeszcze puste (user mógł już wpisać).
             nip = dane.get("nip")
+            # NIP zapamiętany — najpewniejszy klucz, po którym portal odnajdzie
+            # dostawcę przy generowaniu magic-linka.
+            self.nip_dostawcy = nip or ""
             if nip and self.szukaj_maila and not self.var_do.get().strip():
                 try:
                     mail = self.szukaj_maila(nip)
@@ -392,6 +435,25 @@ class OknoWysylki(tk.Toplevel):
             bledy.extend(bl)
         except Exception as e:
             bledy.append(f"PDF zamówienia: {e}")
+
+        # NIP Z KARTOTEKI KONTRAHENTÓW SUBIEKTA — źródło główne, nie awaryjne.
+        # ZD powstaje w Subiekcie, więc to on wie, komu zamawiamy; RM_BAZA ma
+        # NIP tylko dla 6 ze 103 dostawców. NIP jest jedynym kluczem łączącym
+        # Subiekta, RM_BAZA i portal jednoznacznie: po nazwie się nie da
+        # („ABC s.c." istnieje wyłącznie w Subiekcie), a po samym e-mailu
+        # portal wybrałby pierwszą z sześciu firm dzielących adres — 05.09.2026
+        # ZD dla „ABC s.c." poszłoby jako QUAY.
+        if self.dostawca:
+            try:
+                from subiekt_dostawcy import pobierz_kontrahentow
+                szukana = self.dostawca.strip().lower()
+                for k in pobierz_kontrahentow():
+                    if (k.get("nazwa") or "").strip().lower() == szukana:
+                        if k.get("nip"):
+                            self.nip_dostawcy = k["nip"]
+                        break
+            except Exception as e:
+                bledy.append(f"NIP dostawcy z Subiekta: {e}")
 
         self.after(0, lambda: self._zbierz_done(bledy))
 
@@ -414,6 +476,133 @@ class OknoWysylki(tk.Toplevel):
             messagebox.showwarning("Katalog", str(e), parent=self)
 
     # ── wysyłka ────────────────────────────────────────────────────────────
+    def _tryb_zmieniony(self):
+        """Przełącznik „Rysunki" — przepisuje treść maila pod wybrany tryb.
+
+        Treść jest edytowalna, więc nadpisujemy ją TYLKO gdy użytkownik jej
+        nie ruszał; inaczej zmiana trybu kasowałaby jego poprawki.
+        """
+        biezaca = self.txt.get("1.0", "end-1c")
+        if biezaca.strip() != (self._tresc_wzorcowa or "").strip():
+            return                          # ktoś pisał — nie ruszamy
+        portal = self.var_tryb.get() == TRYB_PORTAL
+        nowa = tresc_wiadomosci(
+            self.numer_zd, self.dostawca, self.projekt, self.pozycje, self.nadawca,
+            link="(link zostanie wstawiony po wysłaniu rysunków do portalu)"
+            if portal else None)
+        self._tresc_wzorcowa = nowa
+        self.txt.delete("1.0", "end")
+        self.txt.insert("1.0", nowa)
+        self.status.config(
+            text="Rysunki pójdą linkiem do portalu — do maila trafi tylko PDF zamówienia."
+            if portal else "Rysunki pójdą załącznikami w mailu.")
+
+    def _wstaw_link_do_tresci(self, link):
+        """Podmienia zapowiedź linku na prawdziwy adres z portalu."""
+        tresc = self.txt.get("1.0", "end-1c").replace(
+            "(link zostanie wstawiony po wysłaniu rysunków do portalu)", link)
+        if link not in tresc:               # ktoś przepisał treść — dopisz na końcu
+            tresc += f"\n\nRysunki do pobrania:\n  {link}\n"
+        self.txt.delete("1.0", "end")
+        self.txt.insert("1.0", tresc)
+
+    def _wyslij_do_portalu(self):
+        """Zakłada zamówienie w portalu, wysyła rysunki i zwraca magic-link.
+
+        Zwraca None, gdy coś padło (komunikat już pokazany) — wtedy okno
+        zostaje otwarte i można wysłać po staremu, załącznikami.
+
+        KOLEJNOŚĆ: zamówienie → pozycje z plikami → dopiero link. Gdyby link
+        powstawał wcześniej, awaria w połowie wysyłki zostawiłaby w mailu
+        adres do zamówienia bez rysunków.
+        """
+        # Agenta bierzemy z arkusza głównego (_get_rfq_agent) — tam jest
+        # ścieżka do master.sqlite tej maszyny i gotowy komunikat o brakującej
+        # konfiguracji. Tworzenie RMSyncAgent() tutaj celowałoby w domyślne
+        # Y:\, którego na maszynie domowej nie ma.
+        agent = None
+        fabryka = self.agent_portalu
+        if callable(fabryka):
+            try:
+                agent = fabryka()
+            except Exception as e:
+                messagebox.showerror("Portal RFQ",
+                                     f"Nie udało się połączyć z portalem:\n{e}",
+                                     parent=self)
+                return None
+        if agent is None:
+            messagebox.showwarning(
+                "Portal RFQ",
+                "Integracja z portalem RM_RFQ nie jest skonfigurowana.\n\n"
+                "Sprawdź w master.sqlite → settings:\n"
+                "  • rfq_portal_url\n  • rfq_api_key\n\n"
+                "Na razie wyślij rysunki załącznikami.",
+                parent=self)
+            return None
+
+        pozycje = self.panel.pozycje if self.panel else []
+        # zaznaczone_pliki() zwraca PARY (pozycja, pliki), nie płaską listę.
+        # id() jako klucz, bo słowniki pozycji nie są hashowalne.
+        zazn = {id(it): pliki
+                for it, pliki in (self.panel.zaznaczone_pliki() if self.panel else [])}
+        self.status.config(text="Zakładam zamówienie w portalu…")
+        self.update_idletasks()
+
+        try:
+            zam = agent.create_order(
+                code=self.numer_zd,
+                title=f"Zamówienie {self.numer_zd}",
+                project_number=self.projekt or None,
+                supplier_name=self.dostawca or None)
+            order_id = zam["order_id"]
+
+            for i, it in enumerate(pozycje, 1):
+                self.status.config(
+                    text=f"Wysyłam do portalu… {i}/{len(pozycje)} "
+                         f"({it.get('drawing_no', '')})")
+                self.update_idletasks()
+                pliki = [str(p) for p in zazn.get(id(it), [])]
+                agent.push_order_item(
+                    order_id, it.get("drawing_no", ""), file_paths=pliki,
+                    name=it.get("name"), quantity=it.get("qty") or 1,
+                    unit=it.get("jm") or "szt",
+                    is_catalog=bool(it.get("is_catalog")))
+
+            self.status.config(text="Generuję link dla dostawcy…")
+            self.update_idletasks()
+            # Nazwa OBOK e-maila: jeden adres bywa wspólny dla kilku firm
+            # (biuro rachunkowe, wspólna skrzynka) i portal wybrałby wtedy
+            # pierwszą z brzegu — ZD dla „ABC s.c." poszłoby jako QUAY.
+            wynik = agent.order_link(order_id,
+                                     nip=self.nip_dostawcy or None,
+                                     name=self.dostawca or None,
+                                     email=self.var_do.get().strip() or None)
+            return wynik["url"]
+
+        except Exception as e:
+            tresc = str(e)
+            # 404 = dostawcy nie ma w portalu. Token portal zakłada sam (tak
+            # samo jak przy RFQ), więc jedyne, czego może zabraknąć, to sam
+            # kontrahent — a tych synchronizuje agent z RM_BAZA.
+            if "404" in tresc or "409" in tresc:
+                nip = self.nip_dostawcy or "—"
+                messagebox.showwarning(
+                    "Dostawca nieznany portalowi",
+                    f"Portal nie potrafi jednoznacznie wskazać dostawcy\n"
+                    f"„{self.dostawca}” (NIP z Subiekta: {nip}).\n\n"
+                    "Powiąż go w oknie Dostawcy RM_BAZA - kontrahenci\n"
+                    "Subiekta: zapisze NIP po stronie RM_BAZA i od tej pory\n"
+                    "dopasowanie będzie działać samo.\n\n"
+                    "Na teraz: wyślij rysunki załącznikami.",
+                    parent=self)
+            else:
+                messagebox.showerror("Portal RFQ",
+                                     f"Nie udało się wysłać do portalu:\n{tresc}",
+                                     parent=self)
+            self.status.config(text="Wysyłka do portalu nieudana — "
+                                    "można wysłać załącznikami.")
+            return None
+
     def _wyslij(self):
         do = self.var_do.get().strip()
         if not do:
@@ -439,6 +628,16 @@ class OknoWysylki(tk.Toplevel):
                 + ("\n  …" if len(braki) > 10 else "")
                 + "\n\nWysłać mimo to?", parent=self, icon="warning"):
             return
+
+        # Tryb portalowy: rysunki idą do RFQ, do maila wchodzi sam link.
+        # PDF zamówienia zostaje załącznikiem — to dokument handlowy, dostawca
+        # ma go mieć u siebie, nie tylko na cudzym serwerze.
+        if self.var_tryb.get() == TRYB_PORTAL:
+            link = self._wyslij_do_portalu()
+            if link is None:
+                return                      # błąd już pokazany, okno zostaje
+            self._wstaw_link_do_tresci(link)
+            wybrane = [str(self.pdf_zd)] if self.pdf_zd else []
 
         try:
             droga = otworz_maila(do, self.var_temat.get().strip(),
@@ -468,9 +667,9 @@ class OknoWysylki(tk.Toplevel):
 def open_window(parent, numer_zd, dostawca, email, projekt, pozycje, nadawca,
                 szukaj_plikow=None, katalog_pdf=None, szukaj_maila=None,
                 szukaj_dalej=None, needs_dxf=None, register_drop=None,
-                dozwolone_ext=None, blad_serwera=None):
+                dozwolone_ext=None, blad_serwera=None, agent_portalu=None):
     return OknoWysylki(parent, numer_zd, dostawca, email, projekt, pozycje,
                        nadawca, szukaj_plikow, katalog_pdf, szukaj_maila,
                        szukaj_dalej=szukaj_dalej, needs_dxf=needs_dxf,
                        register_drop=register_drop, dozwolone_ext=dozwolone_ext,
-                       blad_serwera=blad_serwera)
+                       blad_serwera=blad_serwera, agent_portalu=agent_portalu)

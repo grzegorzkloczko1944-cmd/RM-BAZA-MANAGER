@@ -24,6 +24,7 @@ wypełniamy ją z BOM-u RM_BAZA. To jedna z rzeczy, których sam Subiekt nie ma.
 
 import json
 import os
+import re
 import subprocess
 import sqlite3
 import sys
@@ -331,6 +332,23 @@ def dane_z_bom(project_id, numer_projektu=None):
 def numer_projektu_z_uwag(uwagi):
     """Numer projektu z Uwag na ZK — tam RM_BAZA go wpisuje przy zakładaniu."""
     return (uwagi or "").strip()
+
+
+def _numery_zd(tekst):
+    """Czyste numery ZD z tego, co pokazuje kolumna ZD.
+
+    Kolumna trzyma zapis DLA OKA: numer z ilością i możliwie kilka dokumentów
+    naraz — „ZD 4/CENTRALA/2026 (8), ZD 7/CENTRALA/2026 (2)". Do wysyłki,
+    usuwania i do portalu musi iść sam numer dokumentu; inaczej ten sam ZD
+    zakłada w portalu kilka zamówień, bo ilość zmienia się między wysyłkami
+    (zgłoszone 05.09.2026: „mam różne ZD4").
+    """
+    out = []
+    for czesc in (tekst or "").split(","):
+        nr = re.sub(r"\s*\(\d+(?:[.,]\d+)?\)\s*$", "", czesc.strip()).strip()
+        if nr and nr not in out:
+            out.append(nr)
+    return out
 
 
 def _zd_z_iloscia(zamowione):
@@ -847,6 +865,20 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         # wspólny formularz zakłada kartotekę i dorzuca wiersz do listy.
         tk.Button(bottom, text="➕ Dodaj pozycję spoza BOM", command=self._dodaj_reczna,
                   bg="#27ae60", fg="white", font=("Arial", 9),
+                  padx=10, pady=5, relief=tk.RAISED, bd=1).pack(side=tk.RIGHT, padx=(0, 8))
+        # Kasowanie dokumentów WPROST na belce, nie tylko pod prawym klawiszem
+        # — po testach integracji zostają śmieci i szukanie tego w menu
+        # kontekstowym było uciążliwe (zgłoszone 05.09.2026).
+        #
+        # ⚠️ KOLEJNOŚĆ MA ZNACZENIE: najpierw ZD, potem ZK. ZD powstaje
+        # z powiązaniem do ZK (Zd.cs) — skasowanie ZK jako pierwszego zostawia
+        # osierocone zamówienie, a Subiekt potrafi wtedy odmówić usunięcia ZK.
+        # Dlatego „Usuń ZK" stoi PO „Usuń ZD" i sam o tej kolejności przypomina.
+        tk.Button(bottom, text="🗑 Usuń ZK", command=self._usun_zk,
+                  bg="#c0392b", fg="white", font=("Arial", 9),
+                  padx=10, pady=5, relief=tk.RAISED, bd=1).pack(side=tk.RIGHT, padx=(0, 8))
+        tk.Button(bottom, text="🗑 Usuń ZD", command=self._usun_zd,
+                  bg="#e74c3c", fg="white", font=("Arial", 9),
                   padx=10, pady=5, relief=tk.RAISED, bd=1).pack(side=tk.RIGHT, padx=(0, 8))
         tk.Label(bottom, text="Powstanie osobne ZD dla każdego dostawcy.",
                  fg="#7f8c8d", font=("Arial", 8)).pack(side=tk.LEFT, pady=8)
@@ -1460,10 +1492,11 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         dotyczy całego zamówienia. Gdy kursor stoi na wierszu z ZD, ten numer
         jest domyślny i przy jednym kandydacie idziemy od razu dalej.
         """
+        # Kolumna ZD pokazuje numer Z ILOŚCIĄ i bywa zbiorcza — do wysyłki
+        # i usuwania idzie CZYSTY numer dokumentu (patrz _numery_zd).
         zd = {}
         for w in self.wszystkie:
-            nr = w.get("zd")
-            if nr:
+            for nr in _numery_zd(w.get("zd")):
                 zd.setdefault(nr, {"dostawca": w.get("dostawca", ""),
                                    "data": w.get("zd_data", ""), "poz": []})
                 zd[nr]["poz"].append(w)
@@ -1568,7 +1601,11 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             needs_dxf=getattr(okno, "_rfq_needs_dxf", None),
             register_drop=getattr(okno, "_register_file_drop", None),
             dozwolone_ext=getattr(okno, "RFQ_PORTAL_EXTS", None),
-            blad_serwera=lambda: getattr(okno, "_rfq_server_error", None))
+            blad_serwera=lambda: getattr(okno, "_rfq_server_error", None),
+            # Fabryka agenta portalu — arkusz zna ścieżkę do master.sqlite tej
+            # maszyny, więc tworzy agenta sam. Bez niej combo „Rysunki"
+            # w oknie wysyłki ma tylko tryb mailowy.
+            agent_portalu=getattr(okno, "_get_rfq_agent", None))
 
     def _email_dostawcy(self, nazwa_subiekt):
         """
@@ -1714,17 +1751,130 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
                     parent=self):
                 return []
 
+    def _usun_zk(self):
+        """Okno z listą ZAMÓWIEŃ OD KLIENTÓW (ZK) do usunięcia.
+
+        ZK nie ma na liście zapotrzebowania (to zamówienia klientów, nie
+        dostawców), więc numery pobieramy wprost z Subiekta — tym samym
+        odczytem, którego używa okno przeglądu dokumentów.
+
+        ⚠️ Kasuj ZK DOPIERO PO ZD. ZD powstaje z powiązaniem do ZK, więc
+        usunięcie ZK jako pierwszego zostawia osierocone zamówienie do
+        dostawcy, a Subiekt potrafi wtedy odmówić skasowania samego ZK.
+        """
+        # Numery ZK są w kolumnie ZK tego okna (zapotrzebowanie liczy się
+        # właśnie z nich), więc nie ma po co pytać Subiekta drugi raz.
+        # Kolumna bywa zbiorcza i z ilościami — _numery_zd czyści jedno i drugie.
+        zk = {}
+        for w in self.wszystkie:
+            for nr in _numery_zd(w.get("zk")):
+                zk.setdefault(nr, {"projekty": set(), "poz": []})
+                zk[nr]["poz"].append(w)
+                for p in (w.get("projekty") or "").split(", "):
+                    if p:
+                        zk[nr]["projekty"].add(p)
+        if not zk:
+            messagebox.showinfo("Usuń ZK",
+                                "Na liście nie ma pozycji powiązanych z ZK.",
+                                parent=self)
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Usuń zamówienia od klientów (ZK)")
+        dlg.transient(self)
+        dlg.grab_set()
+        wysrodkuj(dlg, self, 620, 420)
+
+        tk.Label(dlg, text="Zaznacz dokumenty do usunięcia:",
+                 font=("Arial", 9, "bold")).pack(padx=14, pady=(12, 2), anchor="w")
+        tk.Label(dlg, text="Usuwany jest CAŁY dokument ze wszystkimi pozycjami. "
+                           "Operacja nieodwracalna.",
+                 font=("Arial", 8), fg="#c0392b").pack(padx=14, anchor="w")
+        tk.Label(dlg, text="Najpierw usuń powiązane ZD — inaczej Subiekt może "
+                           "odmówić skasowania ZK.",
+                 font=("Arial", 8), fg="#e67e22").pack(padx=14, anchor="w", pady=(2, 0))
+
+        ramka = tk.Frame(dlg)
+        ramka.pack(fill=tk.BOTH, expand=True, padx=14, pady=8)
+        canvas = tk.Canvas(ramka, borderwidth=0, highlightthickness=0)
+        sb = ttk.Scrollbar(ramka, orient="vertical", command=canvas.yview)
+        wnetrze = tk.Frame(canvas)
+        wnetrze.bind("<Configure>",
+                     lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=wnetrze, anchor="nw")
+        canvas.configure(yscrollcommand=sb.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Wstępnie zaznaczone: ZK z wiersza pod kursorem — „usuń to, na co patrzę".
+        wstepne = set()
+        try:
+            for r in self.sheet.get_selected_rows(get_cells_as_rows=True):
+                if 0 <= r < len(self.widoczne):
+                    wstepne.update(_numery_zd(self.widoczne[r].get("zk")))
+        except Exception:
+            pass
+
+        zmienne = {}
+        for nr in sorted(zk):
+            info = zk[nr]
+            v = tk.IntVar(value=1 if nr in wstepne else 0)
+            zmienne[nr] = v
+            projekty = ", ".join(sorted(info["projekty"]))
+            tekst = (f"{nr}   —   {len(info['poz'])} poz. na liście"
+                     + (f"   (projekt {projekty})" if projekty else ""))
+            tk.Checkbutton(wnetrze, text=tekst, variable=v, anchor="w",
+                           font=("Arial", 9)).pack(fill=tk.X, pady=1)
+            # Co widać na liście z tego ZK — kilka symboli dla orientacji.
+            symbole = ", ".join(w["symbol"] for w in info["poz"][:6])
+            if len(info["poz"]) > 6:
+                symbole += ", …"
+            tk.Label(wnetrze, text=f"        {symbole}", anchor="w",
+                     fg="#7f8c8d", font=("Arial", 8)).pack(fill=tk.X, pady=(0, 4))
+
+        wybrane = {}
+
+        def zatwierdz():
+            wybrane["numery"] = sorted(nr for nr, v in zmienne.items() if v.get())
+            dlg.destroy()
+
+        box = tk.Frame(dlg)
+        box.pack(pady=(0, 12))
+        tk.Button(box, text="Usuń zaznaczone", command=zatwierdz, bg="#c0392b",
+                  fg="white", font=("Arial", 9, "bold"), padx=16, pady=4).pack(side=tk.LEFT, padx=4)
+        tk.Button(box, text="Anuluj", command=dlg.destroy,
+                  font=("Arial", 9), padx=14, pady=4).pack(side=tk.LEFT, padx=4)
+
+        self.wait_window(dlg)
+        numery = wybrane.get("numery") or []
+        if not numery:
+            return
+
+        opis = "\n".join(f"  • {nr} ({len(zk[nr]['poz'])} poz. na liście)"
+                         for nr in numery)
+        if not messagebox.askyesno(
+                "Usunięcie ZK — potwierdzenie",
+                "Baza PRODUKCYJNA. Operacja NIEODWRACALNA.\n\n"
+                f"Zostaną usunięte dokumenty ({len(numery)}):\n{opis}\n\n"
+                "Zapotrzebowanie policzy się od nowa bez tych zamówień.\n\nUsunąć?",
+                parent=self, icon="warning"):
+            return
+
+        self.status.config(text="Usuwam ZK…")
+        threading.Thread(target=self._usun_worker, args=(numery,), daemon=True).start()
+
     def _usun_zd(self):
-        """PPM → okno z listą DOKUMENTÓW ZD do usunięcia.
+        """Okno z listą DOKUMENTÓW ZD do usunięcia.
 
         Zaznacza się numery ZD, nie pozycje — bo kasowany jest cały dokument.
         Wcześniej działało to na wierszach arkusza i było mylące: zaznaczałeś
         jedną pozycję, a znikało całe zamówienie (zgłoszone 04.09.2026).
         """
+        # Kolumna ZD pokazuje numer Z ILOŚCIĄ i bywa zbiorcza — do wysyłki
+        # i usuwania idzie CZYSTY numer dokumentu (patrz _numery_zd).
         zd = {}
         for w in self.wszystkie:
-            nr = w.get("zd")
-            if nr:
+            for nr in _numery_zd(w.get("zd")):
                 zd.setdefault(nr, {"dostawca": w.get("dostawca", ""),
                                    "data": w.get("zd_data", ""), "poz": []})
                 zd[nr]["poz"].append(w)
@@ -1825,16 +1975,18 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             self.after(0, lambda: self._usun_done(None, err))
 
     def _usun_done(self, wynik, error):
+        # Wspólne dla ZD i ZK — most kasuje oba typy, więc komunikaty mówią
+        # „dokumenty", a rodzaj widać przy każdym numerze w szczegółach.
         if error:
-            self.status.config(text="Nie udało się usunąć ZD.")
-            messagebox.showerror("Usuń ZD", error, parent=self)
+            self.status.config(text="Nie udało się usunąć dokumentów.")
+            messagebox.showerror("Usuwanie dokumentów", error, parent=self)
             return
         kroki = wynik.get("kroki", [])
         usuniete = [k for k in kroki if k.get("Status") == "usuniete"]
         bledy = [k for k in kroki if k.get("Status") == "blad"]
         zapisz_log(wynik)
 
-        lines = [f"Usunięte ZD: {len(usuniete)}"]
+        lines = [f"Usunięte dokumenty: {len(usuniete)}"]
         lines += [f"  • {k['Numer']} — {k.get('Szczegoly') or ''}" for k in usuniete[:12]]
         if bledy:
             lines += ["", f"Nieusunięte ({len(bledy)}):"]

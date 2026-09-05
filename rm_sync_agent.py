@@ -282,6 +282,96 @@ class RMSyncAgent:
         resp.raise_for_status()
         return resp.json()
 
+    # ── ZAMÓWIENIA (ZD z Subiekta) ─────────────────────────────────────────
+    #
+    # Ten sam kanał co rysunki RFQ: agent czyta pliki w sieci firmowej
+    # i wysyła ich zawartość, portal nie zna żadnej ścieżki do V:\ ani Y:\.
+    # Różnica jest po stronie portalu — zamówienie pokazuje się dostawcy
+    # w widoku TYLKO DO ODCZYTU, bez pól wyceny.
+    #
+    # ⚠️ KOLEJNOŚĆ MA ZNACZENIE: create_order → push_order_item (pliki) →
+    # order_link. Link powstaje NA KOŃCU, żeby nigdy nie trafił do maila
+    # adres do zamówienia bez rysunków. `sent_at` w portalu stempluje się
+    # dopiero przy generowaniu linku, więc zakładka Subiekt nie pokaże
+    # „wysłane" dla czegoś, co nie zdążyło się wysłać.
+
+    def create_order(self, code: str, title: str | None = None,
+                     project_number: str | None = None,
+                     supplier_name: str | None = None,
+                     intro_note: str | None = None,
+                     contact: dict | None = None) -> dict:
+        """Zakłada (albo aktualizuje) zamówienie w portalu. Zwraca
+        {order_id, code, title, created}.
+
+        `code` to numer ZD i jest unikalny — ponowna wysyłka tego samego ZD
+        aktualizuje istniejące zamówienie zamiast tworzyć duplikat."""
+        payload = {'code': code, 'title': title or code}
+        payload.update(self._contact_fields(contact))
+        if project_number:
+            payload['project_number'] = project_number
+        if supplier_name:
+            payload['supplier_name'] = supplier_name
+        if intro_note:
+            payload['intro_note'] = intro_note
+        resp = requests.post(f'{self.portal_url}/api/orders',
+                             headers=self._headers(), json=payload,
+                             timeout=HTTP_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+
+    def push_order_item(self, order_id: int, drawing_number: str,
+                        file_paths: list[str] | None = None,
+                        name: str | None = None, quantity: float = 1,
+                        unit: str = 'szt', material: str | None = None,
+                        notes: str | None = None,
+                        is_catalog: bool = False) -> dict:
+        """Pozycja zamówienia wraz z rysunkami. Pliki opcjonalne — elementy
+        handlowe (łożysko, siłownik) nie mają dokumentacji i to jest norma."""
+        data = {'drawing_number': drawing_number, 'quantity': str(quantity),
+                'unit': unit}
+        if name:
+            data['name'] = name
+        if material:
+            data['material'] = material
+        if notes:
+            data['notes'] = notes
+        if is_catalog:
+            data['is_catalog'] = 'true'
+
+        files = []
+        for path in (file_paths or []):
+            files.append(('files', (Path(path).name, Path(path).read_bytes())))
+
+        resp = requests.post(f'{self.portal_url}/api/orders/{order_id}/items',
+                             headers=self._headers(), data=data, files=files,
+                             timeout=HTTP_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+
+    def order_link(self, order_id: int, supplier_id: int | None = None,
+                   nip: str | None = None, email: str | None = None,
+                   name: str | None = None) -> dict:
+        """Magic-link dla dostawcy — ten adres wkleja się do maila.
+
+        Dostawcę wskazujemy przez supplier_id, NIP albo e-mail. Portal używa
+        tego samego tokenu co RFQ, więc dostawca nie zbiera osobnych linków
+        do każdego modułu. Gdy nie ma ważnego tokenu, portal zwraca 409 —
+        token generuje się w panelu, świadomie, a nie automatem z agenta."""
+        payload = {}
+        if supplier_id:
+            payload['supplier_id'] = supplier_id
+        if nip:
+            payload['nip'] = nip
+        if name:
+            payload['name'] = name
+        if email:
+            payload['email'] = email
+        resp = requests.post(f'{self.portal_url}/api/orders/{order_id}/link',
+                             headers=self._headers(), json=payload,
+                             timeout=HTTP_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+
     def set_rfq_intro_note(self, rfq_id: int, text: str,
                            mode: str = 'append',
                            contact: dict | None = None) -> dict:

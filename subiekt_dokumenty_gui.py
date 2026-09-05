@@ -140,6 +140,16 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         tk.Button(top, text="➕ Nowa kartoteka", command=self._nowa_kartoteka,
                   bg="#27ae60", fg="white", font=("Arial", 8),
                   padx=8, pady=2, relief=tk.RAISED, bd=1).pack(side=tk.RIGHT, padx=(0, 4), pady=8)
+        # Kasowanie tego, co zaznaczone w tabeli. To okno widzi WSZYSTKIE typy
+        # (ZK/ZD/RW/WZ), a most rozpoznaje rodzaj po prefiksie numeru, więc
+        # jeden przycisk sprząta mieszany zaznaczony zestaw.
+        #
+        # ⚠️ ZD kasuj PRZED powiązanym ZK — inaczej Subiekt potrafi odmówić
+        # usunięcia ZK. Okno potwierdzenia samo o tym przypomina, gdy w liście
+        # są oba typy naraz.
+        tk.Button(top, text="🗑 Usuń zaznaczone", command=self._usun_zaznaczone,
+                  bg="#c0392b", fg="white", font=("Arial", 8),
+                  padx=8, pady=2, relief=tk.RAISED, bd=1).pack(side=tk.RIGHT, padx=(0, 4), pady=8)
 
         f = tk.Frame(self, bg="#ecf0f1")
         f.pack(side=tk.TOP, fill=tk.X)
@@ -343,6 +353,80 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
             + f"    pozycji łącznie: {poz}"
             + (f"    🔍 znaleziono w pozycjach" if szukaj else "")
         ))
+
+    # ── usuwanie dokumentów ────────────────────────────────────────────────
+    def _usun_zaznaczone(self):
+        """Kasuje dokumenty zaznaczone w tabeli. Most (tryb zd-usun) rozpoznaje
+        rodzaj po prefiksie numeru, więc obsłuży mieszany zestaw ZK/ZD/RW/WZ."""
+        if not self.sheet:
+            return
+        try:
+            rows = sorted(set(self.sheet.get_selected_rows(get_cells_as_rows=True)))
+        except Exception:
+            rows = []
+        wybrane = [self.widoczne[r] for r in rows if 0 <= r < len(self.widoczne)]
+        if not wybrane:
+            messagebox.showinfo(
+                "Usuń dokumenty",
+                "Zaznacz w tabeli dokumenty do usunięcia.\n\n"
+                "Klik w wiersz zaznacza jeden, Ctrl+klik dokłada kolejne.",
+                parent=self)
+            return
+
+        numery = [d["numer"] for d in wybrane if d.get("numer")]
+        opis = "\n".join(
+            f"  • {d['rodzaj']} {d['numer']} — {d.get('podmiot') or '—'} "
+            f"({len(d.get('pozycje') or [])} poz.)" for d in wybrane[:15])
+        if len(wybrane) > 15:
+            opis += f"\n  … i {len(wybrane) - 15} więcej"
+
+        # ZD trzyma się ZK — kasowanie ZK przed jego ZD kończy się odmową
+        # Subiekta. Ostrzegamy tylko wtedy, gdy w zestawie są oba typy.
+        rodzaje = {d.get("rodzaj") for d in wybrane}
+        uwaga = ("\n⚠️ W zaznaczeniu są ZK i ZD. Jeśli są powiązane, usuń "
+                 "najpierw ZD — Subiekt może nie pozwolić skasować ZK "
+                 "z wiszącym zamówieniem.\n"
+                 if {"ZK", "ZD"} <= rodzaje else "")
+
+        if not messagebox.askyesno(
+                "Usunięcie dokumentów — potwierdzenie",
+                "Baza PRODUKCYJNA. Operacja NIEODWRACALNA.\n\n"
+                f"Zostaną usunięte ({len(numery)}):\n{opis}\n{uwaga}\nUsunąć?",
+                parent=self, icon="warning"):
+            return
+
+        self.status.config(text="Usuwam dokumenty…")
+        self.start_kreciolek("Usuwam dokumenty w Subiekcie")
+        threading.Thread(target=self._usun_worker, args=(numery,),
+                         daemon=True).start()
+
+    def _usun_worker(self, numery):
+        try:
+            from subiekt_zamowienia import usun_zd
+            wynik = usun_zd(numery, zapisz=True)
+            self.after(0, lambda: self._usun_done(wynik, None))
+        except Exception as e:
+            err = str(e)
+            self.after(0, lambda: self._usun_done(None, err))
+
+    def _usun_done(self, wynik, error):
+        self.stop_kreciolek()
+        if error:
+            self.status.config(text="Nie udało się usunąć dokumentów.")
+            messagebox.showerror("Usuwanie dokumentów", error, parent=self)
+            return
+        kroki = wynik.get("kroki", [])
+        usuniete = [k for k in kroki if k.get("Status") == "usuniete"]
+        bledy = [k for k in kroki if k.get("Status") == "blad"]
+
+        linie = [f"Usunięte dokumenty: {len(usuniete)}"]
+        linie += [f"  • {k['Numer']} — {k.get('Szczegoly') or ''}" for k in usuniete[:12]]
+        if bledy:
+            linie += ["", f"Nieusunięte ({len(bledy)}):"]
+            linie += [f"  • {k['Numer']}: {k.get('Szczegoly') or ''}" for k in bledy[:8]]
+        (messagebox.showwarning if bledy else messagebox.showinfo)(
+            "Usuwanie dokumentów", "\n".join(linie), parent=self)
+        self._load_async()      # lista musi pokazać stan po usunięciu
 
     # ── pozycje wybranego dokumentu ────────────────────────────────────────
     def _on_wybor_dokumentu(self, _event=None):
