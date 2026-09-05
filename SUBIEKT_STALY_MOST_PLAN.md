@@ -63,7 +63,9 @@ na 3444 kartotekach.
 | `dostawcy` | podgląd (`zapisz=False`) | `do-zalozenia` |
 | `projekt` | podgląd | — |
 
-Dane testowe posprzątane.
+Dane testowe posprzątane. Usuwanie RW też przeszło przez most (tryb
+`zd-usun` mimo nazwy kasuje **ZK, ZD, RW i WZ** — patrz `ZdUsun.Kolekcja`)
+i stan wrócił na kartotekę.
 
 ## Wieloużytkownikowość — sprawdzone
 
