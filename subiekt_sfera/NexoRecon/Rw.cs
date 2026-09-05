@@ -107,7 +107,16 @@ internal static class Rw
 
                 if (!rw.Zapisz())
                 {
-                    kroki.Add(new Krok("rw", "", "blad", Bezp(rw.PodajBledy) ?? "Zapisz() = false"));
+                    // RozchodWewnetrznyBO nie ma PodajBledy() — patrz
+                    // BledyDokumentu. Gdy Subiekt nie poda powodu, mowimy
+                    // przynajmniej, na czym operacja stanela.
+                    var magazyn = Bezp(() => (string?)rw.Dane.Magazyn?.Symbol) ?? "?";
+                    kroki.Add(new Krok("rw", "", "blad",
+                        BledyDokumentu((object)rw)
+                        ?? $"Subiekt odrzucil zapis RW bez podania powodu "
+                           + $"(magazyn {magazyn}, {doWydania.Count} poz.). "
+                           + "Najczestsze przyczyny: brak stanu na magazynie, "
+                           + "kartoteka bez ceny ewidencyjnej, zamkniety okres."));
                 }
                 else
                 {
@@ -178,6 +187,46 @@ internal static class Rw
     }
 
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
+
+    /// <summary>
+    /// Bledy walidacji dokumentu — o ile ten typ w ogole je udostepnia.
+    ///
+    /// RozchodWewnetrznyBO NIE ma PodajBledy(), w przeciwienstwie do BO
+    /// kartoteki czy ZD. Wywolanie `Bezp(rw.PodajBledy)` wygladalo na
+    /// zabezpieczone, ale nie bylo: konwersja `rw.PodajBledy` (dynamic) na
+    /// Func&lt;string?&gt; leci PRZED wejsciem do Bezp, wiec RuntimeBinderException
+    /// wychodzil na zewnatrz, wpadal w catch calego zapisu i PRZYKRYWAL
+    /// prawdziwy powod, dla ktorego Zapisz() zwrocilo false. Uzytkownik
+    /// widzial "does not contain a definition for 'PodajBledy'" zamiast
+    /// informacji, czego brakuje na dokumencie (zgloszone 06.09.2026).
+    ///
+    /// Dlatego pytamy refleksja: brak metody = brak dodatkowych szczegolow,
+    /// a nie wyjatek.
+    /// </summary>
+    static string? BledyDokumentu(object? bo)
+    {
+        if (bo is null) return null;
+        try
+        {
+            var met = bo.GetType().GetMethod("PodajBledy", Type.EmptyTypes);
+            if (met is null) return null;
+            var w = met.Invoke(bo, null);
+            var tekst = w switch
+            {
+                null => null,
+                string s => s,
+                System.Collections.IEnumerable e when w is not string
+                    => string.Join("; ", e.Cast<object?>().Select(x => x?.ToString())
+                                          .Where(x => !string.IsNullOrWhiteSpace(x))),
+                _ => w.ToString(),
+            };
+            return string.IsNullOrWhiteSpace(tekst) ? null : tekst;
+        }
+        catch
+        {
+            return null;      // diagnostyka nie moze przykryc wlasciwego bledu
+        }
+    }
 
     internal record PozPlan(string? Symbol, decimal Ilosc);
     internal record Plan(List<PozPlan>? Pozycje, string? Uwagi, string? Magazyn);
