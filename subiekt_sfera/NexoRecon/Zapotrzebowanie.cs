@@ -156,7 +156,7 @@ internal static class Zapotrzebowanie
                         if (string.IsNullOrWhiteSpace(sym)) continue;
                         zamowione.Add(new PozZd(sym!.Trim(),
                             Bezp(() => poz.AsortymentAktualny?.Nazwa) ?? "",
-                            poz.Ilosc, numer, dostawca, data, status));
+                            poz.Ilosc, numer, dostawca, data, status, NumerZk(poz)));
                     }
                 }
                 catch { /* dokument bez czytelnych pozycji — pomijamy */ }
@@ -179,8 +179,40 @@ internal static class Zapotrzebowanie
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
 
     internal record Zrodlo(string Numer, string Tytul, string Uwagi, decimal Ilosc);
+    /// Numer ZK, który ta pozycja ZD realizuje.
+    ///
+    /// Po zamówieniu pozycja znika z zapotrzebowania i wiersz odbudowujemy
+    /// z danych ZD — a tam numeru ZK nie było, więc kolumna ZK robiła się
+    /// pusta, choć powiązanie w Subiekcie istnieje (zgłoszone 05.09.2026:
+    /// „dlaczego po utworzeniu ZD znika mi ZK z widoku").
+    ///
+    /// Droga (ustalona refleksją): PozycjeRealizowane -> PozycjaRealizowana
+    /// -> Dokument -> NumerWewnetrzny.PelnaSygnatura. Jedna pozycja ZD może
+    /// realizować kilka pozycji ZK, więc zbieramy unikalne numery.
+    static string NumerZk(object poz)
+    {
+        try
+        {
+            var kol = poz.GetType().GetProperty("PozycjeRealizowane")?.GetValue(poz)
+                      as System.Collections.IEnumerable;
+            if (kol == null) return "";
+            var numery = new List<string>();
+            foreach (var r in kol)
+            {
+                var pz = r.GetType().GetProperty("PozycjaRealizowana")?.GetValue(r);
+                var dok = pz?.GetType().GetProperty("Dokument")?.GetValue(pz);
+                var num = dok?.GetType().GetProperty("NumerWewnetrzny")?.GetValue(dok);
+                var syg = num?.GetType().GetProperty("PelnaSygnatura")?.GetValue(num)?.ToString();
+                if (!string.IsNullOrWhiteSpace(syg) && !numery.Contains(syg!))
+                    numery.Add(syg!);
+            }
+            return string.Join(", ", numery);
+        }
+        catch { return ""; }   // brak powiązania nie może wywalić odczytu
+    }
+
     internal record PozZd(string Symbol, string Nazwa, decimal Ilosc, string Numer,
-                          string Dostawca, string Data, string Status);
+                          string Dostawca, string Data, string Status, string Zk);
     internal record Poz(string Symbol, string Nazwa, decimal Ilosc,
                         decimal Dostepne, decimal Zadysponowane, decimal Zarezerwowane,
                         decimal StanMinimalny, decimal StanOptymalny,

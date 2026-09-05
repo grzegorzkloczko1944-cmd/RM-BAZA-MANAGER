@@ -123,6 +123,9 @@ def pobierz_zapotrzebowanie(timeout=TIMEOUT_S):
         "dostawca": (z.get("Dostawca") or "").strip(),
         "data": z.get("Data") or "",
         "status": z.get("Status") or "",
+        # ZK, które ta pozycja realizuje — most czyta je z powiązania
+        # PozycjeRealizowane. Bez tego kolumna ZK pustoszała po zamówieniu.
+        "zk": z.get("Zk") or "",
     } for z in data.get("zamowione", [])]
 
     # Podmioty przychodzą tym samym wywołaniem — okno potrzebuje ich do listy
@@ -551,7 +554,11 @@ def zbuduj_wiersze(zapotrzebowanie, bom, podmioty=(), tylko_projekt=None, zamowi
             "dostawca": z["dostawca"],
             "dostawca_bom": b.get("dostawca", ""),
             "projekty": projekt,
-            "zk": "",
+            # Numery ZK z powiązania ZD→ZK. Pozycja zniknęła z zapotrzebowania,
+            # ale zamówienie klienta nadal istnieje — kolumna pokazuje je
+            # SZARO, jako informację historyczną (patrz _refill).
+            "zk": ", ".join(sorted({x.get("zk") for x in grupa if x.get("zk")})),
+            "zk_historyczne": True,
             # Numery ZD z ilościami — ten sam format co kolumna ZK, żeby było
             # widać, ile z której dostawy pochodzi.
             "zd": _zd_z_iloscia(grupa),
@@ -1367,6 +1374,13 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
                 # Zamówione — cały wiersz na niebiesko (stan pozycji).
                 for c in range(ostatnia + 1):
                     self.sheet.highlight_cells(row=i, column=c, bg="#dfeaf7")
+                # ZK odbudowane z powiązania ZD→ZK: zamówienie klienta nadal
+                # istnieje, ale ta pozycja nie jest już w zapotrzebowaniu.
+                # Szara czcionka mówi „informacja historyczna", a nie
+                # „jest do zamówienia z tego ZK".
+                if w.get("zk_historyczne") and w.get("zk"):
+                    self.sheet.highlight_cells(row=i, column=self.COL_ZK,
+                                               bg="#dfeaf7", fg="#95a5a6")
             elif w["ilosc"] <= 0:
                 # Cała potrzeba pokryta ze stanu — nie ma czego zamawiać.
                 for c in range(ostatnia + 1):
@@ -1516,19 +1530,46 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
                                 "Najpierw utwórz ZD z zaznaczonych pozycji.", parent=self)
             return
 
+        # ⚠️ Wysyłamy ISTNIEJĄCY DOKUMENT ZD, a nie pozycje zaznaczone ✓.
+        # To dwie różne rzeczy: ✓ służy do UTWORZENIA nowego ZD („Utwórz ZD
+        # z zaznaczonych"), a tu wybieramy dokument, który już jest w Subiekcie.
+        # Bez tego rozróżnienia okno pokazywało pozycje zupełnie innego
+        # zamówienia niż zaznaczone (zgłoszone 05.09.2026).
+        zaznaczone_bez_zd = [w for w in self.wszystkie
+                             if w.get("sel") and not _numery_zd(w.get("zd"))]
+
         # Numer z wiersza pod kursorem — „wyślij to, na co patrzę".
+        # _numery_zd, bo kolumna trzyma numer Z ILOŚCIĄ („ZD 4/… (8)"),
+        # a klucze słownika `zd` są czyste.
         biezacy = None
         try:
             for r in self.sheet.get_selected_rows(get_cells_as_rows=True):
-                if 0 <= r < len(self.widoczne) and self.widoczne[r].get("zd"):
-                    biezacy = self.widoczne[r]["zd"]
-                    break
+                if 0 <= r < len(self.widoczne):
+                    nry = _numery_zd(self.widoczne[r].get("zd"))
+                    if nry:
+                        biezacy = nry[0]
+                        break
         except Exception:
             pass
 
-        if biezacy:
+        if biezacy and biezacy in zd:
             self._wyslij_dokument(biezacy, zd[biezacy])
             return
+
+        if zaznaczone_bez_zd:
+            # Typowa pomyłka: user zaznacza ✓ i klika ✉, spodziewając się, że
+            # pójdą właśnie te pozycje. Mówimy wprost, czego brakuje.
+            messagebox.showinfo(
+                "Wyślij ZD",
+                f"Zaznaczono ✓ {len(zaznaczone_bez_zd)} pozycji, ale nie mają one "
+                "jeszcze zamówienia w Subiekcie.\n\n"
+                "Ten przycisk wysyła GOTOWY dokument ZD.\n"
+                "Kolejność jest taka:\n"
+                "  1. „🛒 Utwórz ZD z zaznaczonych” — powstaje dokument,\n"
+                "  2. dopiero potem „✉ Wyślij ZD dostawcy”.",
+                parent=self)
+            return
+
         if len(zd) == 1:
             nr, dane = next(iter(zd.items()))
             self._wyslij_dokument(nr, dane)
@@ -1542,7 +1583,10 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         wysrodkuj(dlg, self, 560, 340)
 
         tk.Label(dlg, text="Wybierz zamówienie do wysłania:",
-                 font=("Arial", 9, "bold")).pack(padx=14, pady=(12, 6), anchor="w")
+                 font=("Arial", 9, "bold")).pack(padx=14, pady=(12, 2), anchor="w")
+        tk.Label(dlg, text="To są dokumenty ZD istniejące już w Subiekcie — "
+                           "nie pozycje zaznaczone ✓ w arkuszu.",
+                 fg="#7f8c8d", font=("Arial", 8)).pack(padx=14, pady=(0, 6), anchor="w")
 
         ramka = tk.Frame(dlg)
         ramka.pack(fill=tk.BOTH, expand=True, padx=14, pady=4)

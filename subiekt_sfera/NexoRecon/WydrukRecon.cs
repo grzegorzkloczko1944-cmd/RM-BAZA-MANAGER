@@ -99,6 +99,62 @@ internal static class WydrukRecon
         }
         catch (Exception ex) { kroki.Add($"pola dat: {ex.Message}"); }
 
+        // ── 1c. Pola POZYCJI ZD — czy jest powiazanie z ZK? ───────────────
+        try
+        {
+            var poz1 = dok.Pozycje.FirstOrDefault();
+            if (poz1 != null)
+            {
+                raport["typ_pozycji_zd"] = poz1.GetType().FullName;
+                raport["pola_pozycji_zd"] = poz1.GetType().GetProperties()
+                    .Where(p => p.Name.Contains("Zam", StringComparison.OrdinalIgnoreCase)
+                             || p.Name.Contains("ZK", StringComparison.Ordinal)
+                             || p.Name.Contains("Powiaz", StringComparison.OrdinalIgnoreCase)
+                             || p.Name.Contains("Zrodl", StringComparison.OrdinalIgnoreCase)
+                             || p.Name.Contains("Realiz", StringComparison.OrdinalIgnoreCase))
+                    .Select(p =>
+                    {
+                        var v = SzukajWlasciwosci(poz1, p.Name);
+                        return $"{p.Name} ({p.PropertyType.Name}) = {v?.ToString() ?? "null"}";
+                    }).ToList();
+            }
+        }
+        catch (Exception ex) { kroki.Add($"pola pozycji ZD: {ex.Message}"); }
+
+        // ── 1d. Czy z PozycjeRealizowane da sie wyciagnac NUMER ZK? ───────
+        try
+        {
+            var poz1 = dok.Pozycje.FirstOrDefault();
+            var kol = poz1 == null ? null : SzukajWlasciwosci(poz1, "PozycjeRealizowane")
+                        as System.Collections.IEnumerable;
+            var opis = new List<string>();
+            if (kol != null)
+                foreach (var r in kol)
+                {
+                    opis.Add("RealizacjaPozycji: " + string.Join(", ",
+                        r.GetType().GetProperties().Select(p => p.Name)));
+                    // Sprobuj dojsc do dokumentu zrodlowego (ZK) i jego numeru.
+                    foreach (var sciezka in new[] { "PozycjaRealizowana", "Pozycja",
+                                                    "PozycjaZrodlowa", "Realizowana" })
+                    {
+                        var pz = SzukajWlasciwosci(r, sciezka);
+                        if (pz == null) continue;
+                        opis.Add($"  {sciezka} -> {pz.GetType().Name}");
+                        var dokum = SzukajWlasciwosci(pz, "Dokument")
+                                 ?? SzukajWlasciwosci(pz, "DokumentNadrzedny");
+                        if (dokum != null)
+                        {
+                            var num = SzukajWlasciwosci(dokum, "NumerWewnetrzny");
+                            opis.Add($"    Dokument -> {dokum.GetType().Name}, "
+                                   + $"numer = {(num == null ? "null" : SzukajWlasciwosci(num, "PelnaSygnatura")?.ToString())}");
+                        }
+                    }
+                    break;
+                }
+            raport["zk_z_realizacji"] = opis.Count > 0 ? opis : new List<string> { "(kolekcja pusta)" };
+        }
+        catch (Exception ex) { raport["zk_z_realizacji"] = new List<string> { "BLAD: " + ex.Message }; }
+
         // ── 2. Jaki typ wzorca wydruku ma ZD ───────────────────────────────
         // Dokumentacja: IKonfiguracjaObowiazujaca.TypWzorcaWydruku — czyli typ
         // bierze się z konfiguracji dokumentu, nie trzeba go zgadywać.
