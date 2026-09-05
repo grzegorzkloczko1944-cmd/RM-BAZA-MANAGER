@@ -2080,11 +2080,27 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         dlg.title(f"Dostawca dla {len(rows)} " + ("pozycji" if len(rows) > 1 else "pozycji"))
         dlg.transient(self)
         dlg.grab_set()
-        wysrodkuj(dlg, self, 520, 430)
+        wysrodkuj(dlg, self, 520, 505)   # +75 px na ramkę ostrzeżenia (3 linie)
+
+        # ⚠️ Wybór stąd trafia DO ZD W SUBIEKCIE (przez _utworz_zd → most), więc
+        # zapisuje się na trwałe. Nie wraca natomiast do BOM-u projektu
+        # w RM_BAZA — i stąd rozjazd: zamówione jest u jednego dostawcy,
+        # a arkusz główny nadal pokazuje poprzedniego (zgłoszone 05.09.2026).
+        ostrz = tk.Frame(dlg, bg="#fdf2e0")
+        ostrz.pack(fill=tk.X, padx=14, pady=(10, 0))
+        tk.Label(ostrz, text="⚠ UŻYWAĆ AWARYJNIE — dostawcę ustawia się w arkuszu RM_BAZA.",
+                 bg="#fdf2e0", fg="#b3261e", font=("Arial", 9, "bold"),
+                 anchor="w").pack(fill=tk.X, padx=8, pady=(5, 0))
+        tk.Label(ostrz, text="Wybór stąd zapisze się w ZD w Subiekcie na stałe, ale NIE "
+                             "wróci do BOM-u\nprojektu — arkusz RM_BAZA będzie dalej "
+                             "pokazywał poprzedniego dostawcę.\nŻeby dane się zgadzały, "
+                             "popraw go także w arkuszu (kolumna Dostawca).",
+                 bg="#fdf2e0", fg="#8a5a00", font=("Arial", 8), justify="left",
+                 anchor="w").pack(fill=tk.X, padx=8, pady=(0, 5))
 
         if z_bom:
             tk.Label(dlg, text="wg BOM: " + ", ".join(z_bom[:3]),
-                     fg="#7f8c8d", font=("Arial", 8)).pack(padx=14, pady=(10, 0), anchor="w")
+                     fg="#7f8c8d", font=("Arial", 8)).pack(padx=14, pady=(8, 0), anchor="w")
 
         tk.Label(dlg, text="Szukaj kontrahenta:", font=("Arial", 9)).pack(
             padx=14, pady=(8, 2), anchor="w")
