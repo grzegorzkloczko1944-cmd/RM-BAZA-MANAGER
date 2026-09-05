@@ -36,6 +36,7 @@ from pathlib import Path
 from tkinter import ttk, messagebox
 
 from ksef_invoice_parser import parse_ksef_invoice_xml
+from rm_kreciolek import Kreciolek
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS faktury (
@@ -285,7 +286,7 @@ def pobierz_nowe(archiwum, nip, token, srodowisko="test", dni=30, postep=None):
 #  Przeglądarka
 # ═══════════════════════════════════════════════════════════════════════════
 
-class OknoArchiwum(tk.Toplevel):
+class OknoArchiwum(tk.Toplevel, Kreciolek):
     """
     Dwa panele: lista faktur u góry, pozycje wybranej faktury u dołu.
     Wyszukiwarka przeszukuje także nazwy pozycji — użytkownik zwykle pamięta,
@@ -533,6 +534,7 @@ class OknoArchiwum(tk.Toplevel):
                 return
 
         self.btn_pobierz.config(state=tk.DISABLED)
+        self.start_kreciolek("Łączę się z KSeF")
         threading.Thread(target=self._pobierz_worker,
                          args=(nip, token, srodowisko, dni), daemon=True).start()
 
@@ -541,7 +543,9 @@ class OknoArchiwum(tk.Toplevel):
         arch = ArchiwumKsef(self.arch.katalog)
         try:
             def postep(tekst):
-                self.after(0, lambda: self.status.config(text=tekst))
+                # Przez kręciołek, nie wprost po pasku — inaczej animacja
+                # znika przy pierwszym własnym komunikacie.
+                self.after(0, lambda t=tekst: self.tekst_kreciolka(t))
             nowe, pominiete, bledy = pobierz_nowe(arch, nip, token, srodowisko, dni, postep)
             self.after(0, lambda: self._pobrano(nowe, pominiete, bledy, None))
         except Exception as e:
@@ -551,6 +555,7 @@ class OknoArchiwum(tk.Toplevel):
             arch.zamknij()
 
     def _pobrano(self, nowe, pominiete, bledy, blad):
+        self.stop_kreciolek()
         self.btn_pobierz.config(state=tk.NORMAL)
         if blad:
             self.status.config(text="Błąd pobierania.")

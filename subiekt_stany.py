@@ -24,6 +24,7 @@ import tempfile
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
+from rm_kreciolek import Kreciolek
 
 # ── Ścieżki ─────────────────────────────────────────────────────────────────
 # Most budowany jest do bin/Release obok repo. W .exe (PyInstaller) __file__
@@ -361,7 +362,7 @@ def query_stock(symbols, timeout=TIMEOUT_S):
 
 
 # ── Okno ────────────────────────────────────────────────────────────────────
-class SubiektStanyWindow(tk.Toplevel):
+class SubiektStanyWindow(tk.Toplevel, Kreciolek):
     COLS = [
         ("nr",     "Nr rysunku",     140, "w"),
         ("bom",    "Ilość BOM",       75, "e"),
@@ -436,7 +437,7 @@ class SubiektStanyWindow(tk.Toplevel):
     # ── wczytywanie ────────────────────────────────────────────────────────
     def _load_async(self):
         self.btn_refresh.config(state=tk.DISABLED)
-        self.status.config(text="Łączenie z Subiektem…")
+        self.start_kreciolek("Łączenie z Subiektem")
         threading.Thread(target=self._load_worker, daemon=True).start()
 
     def _load_worker(self):
@@ -476,12 +477,14 @@ class SubiektStanyWindow(tk.Toplevel):
         self.btn_refresh.config(state=tk.NORMAL)
         self.rows = rows
         if error:
+            self.stop_kreciolek()
             self.status.config(text="Błąd.")
             self.summary.config(text=error.split("\n")[0])
             messagebox.showerror("Subiekt", error, parent=self)
             return
         self._refill()
         note = f"   ({skipped} pozycji pominięto — w polu numeru jest opis, nie numer)" if skipped else ""
+        self.stop_kreciolek()
         self.status.config(text=f"Odczyt zakończony. Nic nie zapisano do Subiekta.{note}")
 
     # ── prezentacja ────────────────────────────────────────────────────────

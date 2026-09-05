@@ -29,6 +29,7 @@ from pathlib import Path
 from tkinter import ttk, messagebox
 
 import rm_panel_plikow
+from rm_kreciolek import Kreciolek
 from subiekt_stany import _find_exe, blad_mostu, wysrodkuj
 
 TIMEOUT_S = 180
@@ -303,7 +304,7 @@ def tresc_wiadomosci(numer_zd, dostawca, projekt, pozycje, nadawca,
     return "\n".join(linie)
 
 
-class OknoWysylki(tk.Toplevel):
+class OknoWysylki(tk.Toplevel, Kreciolek):
     """
     Podgląd przed wysłaniem: adresat, temat, treść i lista załączników
     z możliwością odznaczenia. Pliki rysunków zbierane są w tle, bo skan
@@ -598,13 +599,14 @@ class OknoWysylki(tk.Toplevel):
         # Panel sam szuka rysunków (z paskiem postępu). W tle zostaje tylko
         # PDF zamówienia z Subiekta — to osobne, wolne wywołanie mostu.
         self.panel.start()
+        self.start_kreciolek("Generuję PDF zamówienia z Subiekta (~11 s)")
         threading.Thread(target=self._zbierz_worker, daemon=True).start()
 
     def _zbierz_worker(self):
         bledy = []
         try:
-            self.after(0, lambda: self.status.config(
-                text="Generowanie PDF zamówienia z Subiekta…"))
+            # Pasek stanu należy teraz do kręciołka (start w _zbierz_async) —
+            # własny komunikat kasowałby animację przy pierwszym tiku.
             pdfy, bl = eksportuj_pdf([self.numer_zd], self.katalog_pdf)
             dane = pdfy.get(self.numer_zd) or {}
             self.pdf_zd = dane.get("plik")
@@ -648,6 +650,7 @@ class OknoWysylki(tk.Toplevel):
         self.after(0, lambda: self._zbierz_done(bledy))
 
     def _zbierz_done(self, bledy):
+        self.stop_kreciolek()
         self._blad_pdf = "; ".join(bledy) if bledy else ""
         for b in bledy:
             print(f"⚠️  {b}")

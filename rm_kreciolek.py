@@ -48,6 +48,16 @@ class Kreciolek:
         self._kreci = True
         self._kreciolek_tik()
 
+    def tekst_kreciolka(self, tekst):
+        """Zmienia opis przy kręcącym się znaku, nie przerywając animacji.
+
+        Do operacji wieloetapowych („Pobieranie 3/12…"): worker raportuje
+        postęp, a znak nadal się kręci. Pisanie wprost po pasku stanu
+        skasowałoby animację przy najbliższym tiku.
+        """
+        if getattr(self, "_kreci", False):
+            self._kreci_tekst = tekst
+
     def _kreciolek_tik(self):
         if not getattr(self, "_kreci", False):
             return

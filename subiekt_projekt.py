@@ -33,6 +33,7 @@ import threading
 import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, messagebox
+from rm_kreciolek import Kreciolek
 
 import subiekt_mapowania
 from subiekt_stany import (_find_exe, blad_mostu, jedna_linia, CONFIG_PATH,
@@ -440,7 +441,7 @@ def save_log(project_id, wynik):
 
 
 # ── Okno ────────────────────────────────────────────────────────────────────
-class SubiektProjektWindow(tk.Toplevel):
+class SubiektProjektWindow(tk.Toplevel, Kreciolek):
     COLS = [
         ("sel",    "✓",             30, "c"),
         ("nr",     "Nr rysunku",   150, "w"),
@@ -648,7 +649,7 @@ class SubiektProjektWindow(tk.Toplevel):
     def _dry_run_async(self):
         self.btn_refresh.config(state=tk.DISABLED)
         self.btn_write.config(state=tk.DISABLED)
-        self.status.config(text="Czytam BOM i pytam Subiekta (nic nie zapisuję)…")
+        self.start_kreciolek("Czytam BOM i pytam Subiekta (nic nie zapisuję)")
         threading.Thread(target=self._dry_run_worker, daemon=True).start()
 
     def _dry_run_worker(self):
@@ -671,6 +672,7 @@ class SubiektProjektWindow(tk.Toplevel):
     def _dry_done(self, plan, wynik, items, warn):
         self.btn_refresh.config(state=tk.NORMAL)
         if plan is None:
+            self.stop_kreciolek()
             self.status.config(text="Błąd.")
             self.summary.config(text=(warn or "")[:200])
             if warn:
@@ -691,6 +693,7 @@ class SubiektProjektWindow(tk.Toplevel):
                    if k["Rodzaj"] == "komplet" and k["Status"] == "pominiety-brak-skladnikow")
         note = f"   ⚠ {warn}" if warn else ""
         extra = f"   ⚠ {pust} kompletów bez składników w drzewie" if pust else ""
+        self.stop_kreciolek()
         self.status.config(text=f"Podgląd gotowy — w Subiekcie nic nie zmieniono.{extra}{note}")
 
     # ── wybór, co zakładać ─────────────────────────────────────────────────
