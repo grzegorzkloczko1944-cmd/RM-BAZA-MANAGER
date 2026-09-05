@@ -74,7 +74,7 @@ def pobierz_dokumenty(limit=200, timeout=TIMEOUT_S):
 
     with open(out, encoding="utf-8") as f:
         data = json.load(f)
-    return [{
+    wynik = [{
         "rodzaj": d.get("Rodzaj") or "",
         "numer": d.get("Numer") or "",
         "data": d.get("Data") or "",
@@ -98,6 +98,40 @@ def pobierz_dokumenty(limit=200, timeout=TIMEOUT_S):
             "projekt": p.get("Projekt") or "",
         } for p in (d.get("Pozycje") or [])],
     } for d in data.get("dokumenty", [])]
+
+    # Projekt NAGŁÓWKA dla ZD: Uwagi zamówienia do dostawcy są puste (numer
+    # projektu RM_BAZA wpisuje na ZK, nie na ZD), więc kolumna „Projekt”
+    # świeciła pustką przy wszystkich ZD poza magazynowym — nie było widać,
+    # pod co idzie zamówienie (zgłoszone 05.09.2026). Most zwraca projekt PER
+    # POZYCJA (z Uwag realizowanej ZK), więc tutaj tylko go scalamy.
+    # Jedno ZD potrafi zbierać detale z kilku projektów — stąd „2632, 3000”.
+    for d in wynik:
+        # Dokumenty MAGAZYNOWE (ZD na skład, RW zdjęcia ze stanu) mają w Uwagach
+        # „MAGAZYN" albo „MAGAZYN: powód". Do kolumny Projekt i filtra idzie
+        # sam znacznik, powód ląduje w Tytule — inaczej filtr projektów
+        # rozmnażałby się o każdy wpisany powód.
+        if d["projekt"].upper().startswith(UWAGI_MAGAZYN):
+            reszta = d["projekt"][len(UWAGI_MAGAZYN):].lstrip(" :").strip()
+            d["projekt"] = UWAGI_MAGAZYN
+            if reszta:
+                d["tytul"] = reszta
+            continue
+        if d["projekt"]:
+            continue
+        z_pozycji = []
+        for poz in d["pozycje"]:
+            for nr in (poz.get("projekt") or "").split(","):
+                nr = nr.strip()
+                if nr and nr not in z_pozycji:
+                    z_pozycji.append(nr)
+        if z_pozycji:
+            d["projekt"] = ", ".join(sorted(z_pozycji))
+    return wynik
+
+
+#: Uwagi ZD zalozonego z okna magazynu — zakup na sklad, bez projektu.
+#: Ta sama wartosc co subiekt_magazyn_gui.UWAGI_MAGAZYN.
+UWAGI_MAGAZYN = "MAGAZYN"
 
 
 class DokumentyWindow(tk.Toplevel, Kreciolek):
@@ -230,6 +264,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
                             ("#fdebd0", "RW — wydanie na produkcję"),
                             ("#f4ecf7", "WZ — wydanie zewnętrzne"),
                             ("#eaecee", "anulowany"),
+                            ("#e8daef", "📦 MAGAZYN — zakup na skład, bez projektu"),
                             ("#fcf3cf", "pasuje do wyszukiwarki")):
             tk.Label(leg, text="  ", bg=kolor, relief=tk.SOLID, bd=1).pack(
                 side=tk.LEFT, padx=(6, 3), pady=(0, 5))
@@ -323,6 +358,10 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         # wystarczy „Odśwież”, żeby zobaczyć datę.
         self._wyslane = self._historia_wyslania()
         projekty = sorted({d["projekt"] for d in dok if d["projekt"]})
+        # MAGAZYN na poczatek listy: to nie numer projektu, a szuka sie go
+        # czesto ("co zamowilem na sklad").
+        if UWAGI_MAGAZYN in projekty:
+            projekty = [UWAGI_MAGAZYN] + [p for p in projekty if p != UWAGI_MAGAZYN]
         self.cmb_proj["values"] = [PROJ_WSZYSTKIE] + projekty + [PROJ_BEZ]
         self._refill()
         from datetime import datetime
@@ -384,7 +423,12 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         except Exception:
             pass
         self.sheet.set_sheet_data(
-            [[d["rodzaj"], d["numer"], d["data"], d["projekt"], d["podmiot"],
+            [[d["rodzaj"], d["numer"], d["data"],
+              # Zamowienie na sklad nie ma projektu — surowy napis "MAGAZYN"
+              # w kolumnie Projekt wygladal jak numer projektu. Ikona odroznia
+              # go od "2632" na pierwszy rzut oka (zgloszone 05.09.2026).
+              ("📦 " + d["projekt"]) if d["projekt"] == UWAGI_MAGAZYN else d["projekt"],
+              d["podmiot"],
               d["tytul"], len(d["pozycje"]),
               f"{d['wartosc']:.2f}" if d["wartosc"] else "",
               d.get("termin", ""), self._opis_wyslania(d),
@@ -397,6 +441,10 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
             bg = kolory.get(d["rodzaj"])
             if bg:
                 self.sheet.highlight_cells(row=i, column=0, bg=bg)
+            # Zakup na sklad — wyrozniony w kolumnie Projekt, zeby nie mylil
+            # sie z zamowieniem pod konkretny projekt klienta.
+            if d["projekt"] == UWAGI_MAGAZYN:
+                self.sheet.highlight_cells(row=i, column=3, bg="#e8daef", fg="#4a235a")
             if "anulowan" in d["status"].lower():
                 for c in range(len(self.KOL_DOK)):
                     self.sheet.highlight_cells(row=i, column=c, bg="#eaecee")

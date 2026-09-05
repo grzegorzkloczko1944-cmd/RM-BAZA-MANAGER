@@ -45,13 +45,15 @@ var tryb = args.Length > 0 && !args[0].StartsWith("--") ? args[0].ToLowerInvaria
 //   kontrahenci     - lista firm z NIP-ami (powiazanie dostawcow RM_BAZA)
 //   dostawcy        - zaklada kontrahentow z listy RM_BAZA; ZAPISUJE (--zapisz)
 //   progi           - stany min/opt kartotek: odczyt, a z --plan ZAPISUJE (--zapisz)
+//   kartoteka-usun  - kasuje kartoteki asortymentu po symbolach; USUWA (--zapisz)
+//   rw              - rozchod wewnetrzny: zdejmuje towar ze stanu; ZAPISUJE (--zapisz)
 //   stan-pozycji    - kartoteka + ZK + ZD dla listy symboli (kolumna SUBIEKT)
 //   dokumenty       - lista ZK/ZD/RW/WZ z pozycjami (okno przegladu)
 //   magazyn         - stany CALEGO magazynu (bez wiazania z projektem)
 var trybyMaszynowe = new[] { "stan", "katalog", "kontrahenci", "zapotrzebowanie",
                              "projekt", "zd", "zd-usun", "dostawcy", "stan-pozycji",
                              "dokumenty", "faktury", "kartoteka", "wydruk-recon", "wydruk",
-                             "magazyn", "symbole", "termin", "progi" };
+                             "magazyn", "symbole", "termin", "progi", "kartoteka-usun", "rw" };
 var cicho = trybyMaszynowe.Contains(tryb);
 var trybStan = tryb == "stan";
 var trybProjekt = tryb == "projekt";
@@ -195,6 +197,18 @@ using (sfera)
     {
         if (planFile == null) { Console.WriteLine("Tryb symbole: brak --plan=plik.json"); return 1; }
         return NexoRecon.Symbole.Uruchom(sfera, planFile, outPath, zapisz);
+    }
+
+    if (tryb == "rw")
+    {
+        if (planFile == null) { Console.WriteLine("Tryb rw: brak --plan=plik.json"); return 1; }
+        return NexoRecon.Rw.Uruchom(sfera, planFile, outPath, zapisz);
+    }
+
+    if (tryb == "kartoteka-usun")
+    {
+        var symArg = args.FirstOrDefault(a => a.StartsWith("--symbole="))?["--symbole=".Length..];
+        return NexoRecon.KartotekaUsun.Uruchom(sfera, symArg, outPath, zapisz);
     }
 
     if (tryb == "progi")

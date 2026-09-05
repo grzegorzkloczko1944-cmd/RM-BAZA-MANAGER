@@ -89,7 +89,6 @@ internal static class Progi
                 continue;
             }
 
-            var diag = "";
             var zalozony = false;
             try
             {
@@ -155,8 +154,6 @@ internal static class Progi
                     }
                     cel = wskazany;
                 }
-                diag = $"mag={Bezp(() => (string?)cel.Magazyn?.Symbol) ?? "(null)"} " +
-                       $"zakresow={zakresy.Count} nowy={(zalozony ? "tak" : "nie")}";
                 cel.StanMinimalny = p.Min;
                 // 0 w optymalnym czyścimy do null — „brak" i „zero" to co
                 // innego, a Subiekt trzyma to pole jako nullowalne.
@@ -184,7 +181,7 @@ internal static class Progi
                     // PodajBledy() mowi, CO odrzucil Subiekt — samo „false" nic
                     // nie tlumaczy (wzorem Kartoteka.cs / Projekt.cs).
                     kroki.Add(new Krok(symbol, p.Min, p.Opt, "blad",
-                        (Bezp(ob.PodajBledy) ?? "Zapisz() zwrocil false bez podania bledow") + " | " + diag));
+                        Bezp(ob.PodajBledy) ?? "Zapisz() zwrocil false bez podania bledow"));
                 }
             }
             catch (Exception e)

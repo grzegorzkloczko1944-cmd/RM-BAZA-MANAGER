@@ -858,7 +858,7 @@ class MainWindow(tk.Tk):
                                  command=self.open_subiekt_stany)
         # Cały magazyn, bez wiązania z projektem — osobne okno i osobny tryb
         # mostu, bo „stan" pyta punktowo o symbole z BOM-u.
-        subiekt_menu.add_command(label="🏬 Stany magazynowe — cały Subiekt (odczyt)",
+        subiekt_menu.add_command(label="🏬 Magazyn — stany, progi min/opt, zamówienia na skład",
                                  command=self.open_subiekt_magazyn)
         subiekt_menu.add_separator()
         subiekt_menu.add_command(label="🏗 Załóż projekt w Subiekcie (kartoteki + komplety + ZK)…",

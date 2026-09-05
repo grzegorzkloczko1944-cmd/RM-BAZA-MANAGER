@@ -641,8 +641,13 @@ def zbuduj_wiersze(zapotrzebowanie, bom, podmioty=(), tylko_projekt=None, zamowi
 
 
 # ── Zapis ZD ────────────────────────────────────────────────────────────────
-def utworz_zd(pozycje, timeout=TIMEOUT_S):
-    """Tworzy ZD w Subiekcie. pozycje: [{symbol, ilosc, dostawca}]."""
+def utworz_zd(pozycje, timeout=TIMEOUT_S, uwagi=None):
+    """Tworzy ZD w Subiekcie. pozycje: [{symbol, ilosc, dostawca[, reczna]}].
+
+    `uwagi` — tekst do pola Uwagi każdego utworzonego ZD. Okno magazynu
+    wpisuje „MAGAZYN", żeby zamówienie na skład dało się odróżnić od
+    projektowych; zamówienia z ZK nie podają nic i Uwagi zostają puste.
+    """
     exe = _find_exe()
     if not exe:
         raise RuntimeError("Nie znaleziono NexoRecon.exe.")
@@ -651,7 +656,10 @@ def utworz_zd(pozycje, timeout=TIMEOUT_S):
     plan_path = os.path.join(tmpdir, "zd.json")
     out = os.path.join(tmpdir, "wynik.json")
     with open(plan_path, "w", encoding="utf-8") as f:
-        json.dump({"pozycje": pozycje}, f, ensure_ascii=False, indent=1)
+        plan = {"pozycje": pozycje}
+        if uwagi:
+            plan["uwagi"] = uwagi
+        json.dump(plan, f, ensure_ascii=False, indent=1)
 
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     try:

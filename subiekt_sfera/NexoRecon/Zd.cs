@@ -1,4 +1,4 @@
-// Tryb "zd" — tworzy zamówienia do dostawców z wybranych pozycji. ZAPISUJE.
+﻿// Tryb "zd" — tworzy zamówienia do dostawców z wybranych pozycji. ZAPISUJE.
 //
 //   NexoRecon.exe zd --plan=zd.json [--out=wynik.json] --zapisz
 //
@@ -181,6 +181,37 @@ internal static class Zd
                         }
                         catch { /* pole opcjonalne w niektórych konfiguracjach */ }
 
+                        // Uwagi z planu (np. "MAGAZYN") — tylko gdy podano; ZD
+                        // z zapotrzebowania ZK zostawiamy bez zmian.
+                        if (!string.IsNullOrWhiteSpace(plan.Uwagi))
+                        {
+                            // ⚠️ Pulapka Sfery: setter przy JAWNEJ implementacji
+                            // interfejsu potrafi po cichu nic nie zrobic. Pierwsza
+                            // wersja robila zd.Dane.Uwagi = ... i ZD 7/09/2026
+                            // powstalo bez "MAGAZYN". Dlatego: zwykle przypisanie,
+                            // potem settery z interfejsow, na koniec ODCZYT
+                            // z powrotem — i krok w wyniku, gdy sie nie zgadza.
+                            var chciane = plan.Uwagi.Trim();
+                            object dane = zd.Dane;
+                            try { zd.Dane.Uwagi = chciane; } catch { }
+                            string? mam = null;
+                            try { mam = zd.Dane.Uwagi; } catch { }
+                            if (mam != chciane)
+                            {
+                                foreach (var i in dane.GetType().GetInterfaces())
+                                {
+                                    var pr = i.GetProperty("Uwagi");
+                                    if (pr == null || !pr.CanWrite) continue;
+                                    try { pr.SetValue(dane, chciane); } catch { }
+                                    try { mam = pr.GetValue(dane) as string; } catch { }
+                                    if (mam == chciane) break;
+                                }
+                            }
+                            if (mam != chciane)
+                                kroki.Add(new Krok("zd", dostawca, "uwaga",
+                                    $"nie udalo sie ustawic Uwag=\"{chciane}\" (odczyt: \"{mam}\")"));
+                        }
+
                         try
                         {
                             if (zd.Dane.Magazyn == null)
@@ -224,7 +255,10 @@ internal static class Zd
     static int Bezp2(Func<int> f) { try { return f(); } catch { return 0; } }
 
     internal record PozPlan(string Symbol, decimal Ilosc, string? Dostawca, bool? Reczna);
-    internal record Plan(List<PozPlan>? Pozycje);
+    // Uwagi na ZD — okno magazynu wpisuje tu "MAGAZYN", zeby zamowienie
+    // na sklad dalo sie odroznic od projektowych (kolumna Projekt w Przegladzie
+    // dokumentow bierze sie z Uwag).
+    internal record Plan(List<PozPlan>? Pozycje, string? Uwagi);
     internal record Zam(string Numer, string Dostawca, int Pozycji);
     internal record Krok(string Rodzaj, string Symbol, string Status, string? Szczegoly);
 }
