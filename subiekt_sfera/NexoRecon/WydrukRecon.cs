@@ -81,6 +81,24 @@ internal static class WydrukRecon
         }
         catch { /* rozpoznanie — brak maila nie przerywa reszty */ }
 
+        // ── 1b. Pola DAT na dokumencie — czy jest termin realizacji? ───────
+        try
+        {
+            var polaDat = dok.GetType().GetProperties()
+                .Where(p => p.PropertyType == typeof(DateTime) ||
+                            p.PropertyType == typeof(DateTime?) ||
+                            p.Name.Contains("Data", StringComparison.OrdinalIgnoreCase) ||
+                            p.Name.Contains("Termin", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            raport["pola_dat"] = polaDat.Select(p =>
+            {
+                var v = SzukajWlasciwosci(dok, p.Name);
+                return $"{p.Name} ({p.PropertyType.Name}) = {v?.ToString() ?? "null"}"
+                       + (p.CanWrite ? " [zapisywalne]" : " [tylko odczyt]");
+            }).ToList();
+        }
+        catch (Exception ex) { kroki.Add($"pola dat: {ex.Message}"); }
+
         // ── 2. Jaki typ wzorca wydruku ma ZD ───────────────────────────────
         // Dokumentacja: IKonfiguracjaObowiazujaca.TypWzorcaWydruku — czyli typ
         // bierze się z konfiguracji dokumentu, nie trzeba go zgadywać.

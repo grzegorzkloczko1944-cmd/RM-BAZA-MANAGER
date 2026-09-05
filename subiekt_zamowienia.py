@@ -665,6 +665,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         self.widoczne = []         # to, co realnie jest w arkuszu
         self.podmioty = []         # nazwy firm z Subiekta — lista wyboru dostawcy
         self.filter_typ_modes = {}  # {typ: 'show'|'hide'} — kafelek ✚
+        self._ostatni_klik = None   # kotwica dla Shift+klik w kolumnie ✓
 
         self.title("Zamówienia do dostawców (ZD)" +
                    (f" — projekt {self.project_name}" if self.project_name else ""))
@@ -772,7 +773,8 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
                                    state="readonly", width=14, font=("Arial", 8))
         cmb_zaznacz.pack(side=tk.LEFT, padx=2, pady=4)
         cmb_zaznacz.bind("<<ComboboxSelected>>", self._on_zaznacz_combo)
-        tk.Label(s, text="   (klik w ✓ przełącza wiersz • DWUKLIK w Dostawcę = wybór z listy Subiekta "
+        tk.Label(s, text="   (klik w ✓ przełącza wiersz • SHIFT+klik w ✓ = cały zakres "
+                         "• DWUKLIK w Dostawcę = wybór z listy Subiekta "
                          "• PPM = ustaw dostawcę dla wielu naraz)",
                  bg="#f4ecf7", fg="#7f8c8d", font=("Arial", 8)).pack(side=tk.LEFT, padx=6)
 
@@ -1316,7 +1318,15 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
     def _refill(self):
         if not self.sheet:
             return
+        poprzednie = [id(w) for w in self.widoczne]
         self.widoczne = self._filtruj(self.wszystkie)
+        # Kotwica Shift+klik wskazuje POZYCJĘ w widocznej liście, więc traci
+        # sens dopiero wtedy, gdy zmieni się ZESTAW wierszy (filtr, odczyt) —
+        # nie przy zwykłym przerysowaniu po kliknięciu. Zerowanie w _filtruj
+        # kasowało ją po KAŻDYM kliknięciu i Shift nie miał od czego liczyć
+        # zakresu (zgłoszone 05.09.2026: „zaznacza tylko podświetlenie").
+        if [id(w) for w in self.widoczne] != poprzednie:
+            self._ostatni_klik = None
         # Kolory są przypisane do NUMERÓW wierszy, nie do danych — bez
         # wyczyszczenia zostają po zmianie filtra na zupełnie innych pozycjach
         # (zgłoszone 04.09.2026: po powrocie z „zamówione" na „wszystkie"
@@ -1598,6 +1608,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             szukaj_plikow=self._pliki_rysunku,
             szukaj_maila=self._email_po_nip,
             szukaj_dalej=self._szukaj_dalej_rysunku,
+            szukaj_hurtem=self._szukaj_hurtem_biblioteka,
             needs_dxf=getattr(okno, "_rfq_needs_dxf", None),
             register_drop=getattr(okno, "_register_file_drop", None),
             dozwolone_ext=getattr(okno, "RFQ_PORTAL_EXTS", None),
@@ -1706,6 +1717,35 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         except Exception as e:
             print(f"⚠️  Szukanie plików dla {symbol}: {e}")
             return []
+
+    def _szukaj_hurtem_biblioteka(self, numery, zrodlo="library"):
+        """Jedno przejście po dysku dla wszystkich brakujących pozycji.
+
+        Skan pozycja po pozycji to tyle przemiałów dysku sieciowego, ile
+        brakujących rysunków — a katalog i tak trzeba przeczytać w całości.
+
+        `zrodlo`: "library" (dysk B: — komponenty wspólne) albo "server"
+        (dysk V: — całe drzewo projektów, wolniej, ale szerzej).
+        """
+        okno = self.master
+        skanuj = getattr(okno, "_rfq_deep_scan_wiele", None)
+        if not callable(skanuj):
+            return {}
+        glowny = sys.modules.get(type(okno).__module__)
+        if zrodlo == "server":
+            korzen = getattr(glowny, "SERVER_DIR", None)
+            tytul = "Skanowanie serwera"
+        else:
+            korzen = getattr(glowny, "LIBRARY_ROOT", None)
+            tytul = "Skanowanie biblioteki"
+        if not korzen:
+            print(f"⚠️  Brak ścieżki dla źródła {zrodlo!r}")
+            return {}
+        try:
+            return skanuj(Path(korzen), numery, tytul, parent=self) or {}
+        except Exception as e:
+            print(f"⚠️  Skan zbiorczy ({zrodlo}): {e}")
+            return {}
 
     def _szukaj_dalej_rysunku(self, pozycja):
         """Alternatywne źródło plików — biblioteka albo głęboki skan serwera.
@@ -2121,16 +2161,22 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         ent.bind("<Down>", lambda _e: (lista.focus_set(), lista.selection_set(0)))
 
     def _on_click(self, event):
-        """Klik w kolumnę ✓ przełącza wiersz.
+        """Klik w kolumnę ✓ przełącza wiersz. Shift+klik przełącza CAŁY ZAKRES.
 
-        Z wciśniętym Shift/Ctrl NIE przełączamy — wtedy user zaznacza zakres
-        w arkuszu, a przełączanie ✓ przy każdym kliknięciu psułoby zaznaczanie.
-        Do zbiorczego przełączania służy „Zaznacz: widoczne/nic/odwróć" i PPM.
+        Wcześniej Shift w tej kolumnie nic nie stawiał — tylko podświetlał
+        wiersze w arkuszu, a ✓ trzeba było dostawiać osobno przez PPM. Przy
+        276 pozycjach to znaczyło klikanie jednej po drugiej (zgłoszone
+        05.09.2026). Teraz działa jak w każdej liście z checkboxami:
+        klik pierwszej, Shift+klik ostatniej i cały zakres zmienia stan.
+
+        Ctrl zostawiamy arkuszowi — to jego sposób na zaznaczanie
+        pojedynczych, rozproszonych wierszy do PPM.
         """
         if not self.sheet:
             return
-        if event.state & 0x0001 or event.state & 0x0004:      # Shift / Ctrl
+        if event.state & 0x0004:                              # Ctrl — arkusz
             return
+        shift = bool(event.state & 0x0001)
         try:
             r = self.sheet.identify_row(event, allow_end=False)
             c = self.sheet.identify_column(event, allow_end=False)
@@ -2138,7 +2184,21 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             return
         if r is None or c != self.COL_SEL or not (0 <= r < len(self.widoczne)):
             return
+
+        if shift and self._ostatni_klik is not None:
+            od, do = sorted((self._ostatni_klik, r))
+            if 0 <= od and do < len(self.widoczne):
+                # Stan bierzemy z wiersza, w który kliknięto — dzięki temu
+                # Shift+klik zarówno zaznacza, jak i odznacza cały zakres.
+                nowy = not self.widoczne[r]["sel"]
+                for i in range(od, do + 1):
+                    self.widoczne[i]["sel"] = nowy
+                self._ostatni_klik = r
+                self._refill()
+                return
+
         self.widoczne[r]["sel"] = not self.widoczne[r]["sel"]
+        self._ostatni_klik = r
         self._refill()
 
     def _on_edit(self, _event=None):

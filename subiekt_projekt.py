@@ -197,6 +197,39 @@ def read_tree(project_name):
 # Pełna nazwa zawsze zostaje w polu Nazwa kartoteki — skracamy tylko symbol.
 MAX_SYMBOL = 13
 
+# ⚠️ SYMBOL MUSI BYĆ CZYSTYM ASCII — inaczej nie da się wydrukować kodu
+# kreskowego. Code 128 koduje wyłącznie ASCII (0-127); „ł", „ś", „ę" wywalają
+# generator albo dają kod nie do odczytania skanerem. Zgłoszone 05.09.2026,
+# gdy w Subiekcie były już 14 takich kartotek — m.in. „ZaślepkaDN50D”
+# i „KróciećTC505” z tego generatora.
+#
+# Osobna pułapka: „2115‐103.60/16” w kartotece ma MYŚLNIK U+2010, nie ASCII
+# — wygląda identycznie jak zwykły, a kodu z niego nie będzie. Dlatego
+# podmieniamy też myślniki, cudzysłowy i spacje niełamliwe wklejane z Worda
+# i Excela.
+OGONKI = str.maketrans({
+    "ą": "a", "ć": "c", "ę": "e", "ł": "l", "ń": "n",
+    "ó": "o", "ś": "s", "ź": "z", "ż": "z",
+    "Ą": "A", "Ć": "C", "Ę": "E", "Ł": "L", "Ń": "N",
+    "Ó": "O", "Ś": "S", "Ź": "Z", "Ż": "Z",
+    # znaki typograficzne udające ASCII
+    "‐": "-", "‑": "-", "‒": "-", "–": "-", "—": "-",
+    "‘": "'", "’": "'", "‚": "'",
+    "“": '"', "”": '"', "„": '"', "«": '"', "»": '"',
+    " ": " ", " ": " ", " ": " ",
+})
+
+
+def do_ascii(s):
+    """Tekst → czysty ASCII nadający się na symbol kartoteki i kod kreskowy.
+
+    Najpierw transliteracja (ł→l, „–"→„-"), potem twarde odsianie tego, co
+    zostało poza ASCII — żeby żaden niespodziewany znak (µ, ±, °, alfabet
+    grecki z opisu materiału) nie przeciekł do symbolu.
+    """
+    s = str(s or "").translate(OGONKI)
+    return "".join(c for c in s if 32 <= ord(c) < 127)
+
 
 def symbol_z_nazwy(nazwa):
     """Nazwa → symbol kartoteki dla pozycji BEZ numeru rysunku.
@@ -206,8 +239,10 @@ def symbol_z_nazwy(nazwa):
     być przycięta i pozbawiona znaków, które w symbolu przeszkadzają
     (`#`, backtick, `°`, przecinki). Pełna nazwa zostaje w polu Nazwa.
     """
-    s = " ".join(str(nazwa or "").split())
-    for zly in "`#°":
+    # do_ascii PRZED resztą czyszczenia — polskie znaki i typograficzne
+    # myślniki nie mogą trafić do symbolu (kod kreskowy ich nie zakoduje).
+    s = " ".join(do_ascii(nazwa).split())
+    for zly in "`#":
         s = s.replace(zly, "")
     s = s.replace(",", " ").replace("/", "-")
     s = " ".join(s.split())
@@ -242,8 +277,8 @@ def rozroznij_symbol(nazwa, uzyte):
     Dlatego bierzemy WYRÓŻNIKI: człony nazwy zawierające cyfry (DN40, M6,
     fi119, L2525) — bo to one zwykle rozróżniają warianty tej samej rzeczy.
     """
-    pelna = " ".join(str(nazwa or "").split())
-    for zly in "`#°":
+    pelna = " ".join(do_ascii(nazwa).split())
+    for zly in "`#":
         pelna = pelna.replace(zly, "")
 
     czlony = pelna.split()

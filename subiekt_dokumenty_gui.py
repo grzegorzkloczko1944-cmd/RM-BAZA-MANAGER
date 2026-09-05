@@ -24,9 +24,11 @@ kosztowałoby tyle samo co całość.
 
 import json
 import os
+import sqlite3
 import subprocess
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk, messagebox
 
 from rm_kreciolek import Kreciolek
@@ -80,6 +82,9 @@ def pobierz_dokumenty(limit=200, timeout=TIMEOUT_S):
         "tytul": d.get("Tytul") or "",
         "projekt": (d.get("Uwagi") or "").strip(),
         "status": d.get("Status") or "",
+        # Termin dostawy — ta sama nazwa co kolumna w arkuszu głównym RM_BAZA.
+        # Mają go tylko zamówienia; przy WZ/RW zostaje pusty.
+        "termin": d.get("Termin") or "",
         "magazyn": d.get("Magazyn") or "",
         "wartosc": float(d.get("Wartosc") or 0),
         "pozycje": [{
@@ -97,7 +102,8 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
                ("data", "Data", 90), ("projekt", "Projekt", 80),
                ("podmiot", "Podmiot / dostawca", 250), ("tytul", "Tytuł", 220),
                ("pozycji", "Pozycji", 65), ("wartosc", "Wartość", 90),
-               ("status", "Status", 140)]
+               ("termin", "Termin dostawy", 100), ("wyslano", "Wysłano", 105),
+               ("pdf", "PDF", 40), ("status", "Status", 140)]
     KOL_POZ = [("symbol", "Nr rysunku / symbol", 200), ("nazwa", "Nazwa", 330),
                ("ilosc", "Ilość", 70), ("jm", "J.m.", 50),
                ("cena", "Cena netto", 90), ("wartosc", "Wartość", 90)]
@@ -107,6 +113,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         self.dokumenty = []
         self.widoczne = []
         self.biezacy = None
+        self._wyslane = {}          # {numer ZD: (kiedy, ile razy)} — kolumna „Wysłano”
 
         self.title("Subiekt — przegląd dokumentów (ZK / ZD / RW / WZ)")
         self.geometry("1250x760")
@@ -150,6 +157,10 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         tk.Button(top, text="🗑 Usuń zaznaczone", command=self._usun_zaznaczone,
                   bg="#c0392b", fg="white", font=("Arial", 8),
                   padx=8, pady=2, relief=tk.RAISED, bd=1).pack(side=tk.RIGHT, padx=(0, 4), pady=8)
+        # ⚠️ Przyciski dotyczące ZAZNACZONEGO dokumentu (Wyślij ZD, Podgląd PDF)
+        # są w pasku filtrów NIŻEJ, nie tutaj. Pasek górny mieści tylko cztery
+        # elementy — piąty wyjeżdżał poza prawą krawędź i zostawało z niego
+        # ucięte „Podg…” (zgłoszone 05.09.2026).
 
         f = tk.Frame(self, bg="#ecf0f1")
         f.pack(side=tk.TOP, fill=tk.X)
@@ -185,9 +196,45 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
                   font=("Arial", 11, "bold"), width=3, relief=tk.RAISED, bd=2,
                   cursor="hand2").pack(side=tk.LEFT, padx=(10, 2), pady=4)
 
+        # Akcje na ZAZNACZONYM dokumencie — po prawej stronie paska filtrów,
+        # bo w górnym już się nie mieściły.
+        tk.Button(f, text="👁 Podgląd PDF", command=self._podglad_pdf,
+                  bg="#7f8c8d", fg="white", font=("Arial", 8), padx=8, pady=2,
+                  relief=tk.RAISED, bd=1, cursor="hand2").pack(side=tk.RIGHT, padx=(0, 12), pady=4)
+        # Świeży wydruk — gdy dokument zmienił się po ostatnim wygenerowaniu.
+        tk.Button(f, text="🔁 Nowy PDF",
+                  command=lambda: self._podglad_pdf(wymus_nowy=True),
+                  bg="#95a5a6", fg="white", font=("Arial", 8), padx=8, pady=2,
+                  relief=tk.RAISED, bd=1, cursor="hand2").pack(side=tk.RIGHT, padx=(0, 4), pady=4)
+        tk.Button(f, text="✉ Wyślij ZD", command=self._wyslij_zd,
+                  bg="#2980b9", fg="white", font=("Arial", 8), padx=8, pady=2,
+                  relief=tk.RAISED, bd=1, cursor="hand2").pack(side=tk.RIGHT, padx=(0, 4), pady=4)
+
         self.summary = tk.Label(self, text="Wczytywanie…", bg="#ecf0f1", fg="#2c3e50",
                                 font=("Arial", 9), anchor="w", padx=12, pady=6)
         self.summary.pack(side=tk.TOP, fill=tk.X)
+
+        # Legenda — kolory same w sobie nic nie mówią, a jest ich sześć.
+        # Próbki, nie opis słowny: kolor obok znaczenia czyta się od razu.
+        # ⚠️ Wartości MUSZĄ się zgadzać ze słownikiem `kolory` w _refill()
+        # i z tłem anulowanych/trafień — inaczej legenda kłamie.
+        leg = tk.Frame(self, bg="#ecf0f1")
+        leg.pack(side=tk.TOP, fill=tk.X)
+        tk.Label(leg, text="Legenda:", bg="#ecf0f1", fg="#7f8c8d",
+                 font=("Arial", 8, "bold")).pack(side=tk.LEFT, padx=(12, 6), pady=(0, 5))
+        for kolor, opis in (("#d6eaf8", "ZK — zamówienie od klienta"),
+                            ("#d5f5e3", "ZD — zamówienie do dostawcy"),
+                            ("#fdebd0", "RW — wydanie na produkcję"),
+                            ("#f4ecf7", "WZ — wydanie zewnętrzne"),
+                            ("#eaecee", "anulowany"),
+                            ("#fcf3cf", "pasuje do wyszukiwarki")):
+            tk.Label(leg, text="  ", bg=kolor, relief=tk.SOLID, bd=1).pack(
+                side=tk.LEFT, padx=(6, 3), pady=(0, 5))
+            tk.Label(leg, text=opis, bg="#ecf0f1", fg="#2c3e50",
+                     font=("Arial", 8)).pack(side=tk.LEFT, pady=(0, 5))
+        tk.Label(leg, text="📄 = jest gotowy wydruk PDF (dwuklik otwiera)",
+                 bg="#ecf0f1", fg="#7f8c8d", font=("Arial", 8)).pack(
+            side=tk.LEFT, padx=(16, 0), pady=(0, 5))
 
         # Dwa panele: dokumenty u góry, pozycje klikniętego na dole.
         paned = ttk.PanedWindow(self, orient=tk.VERTICAL)
@@ -218,6 +265,8 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         podepnij_szerokosci(self, self.sheet, "dokumenty",
                             [k[2] for k in self.KOL_DOK])
         self.sheet.bind("<ButtonRelease-1>", self._on_wybor_dokumentu, add="+")
+        # Dwuklik w kolumnę PDF otwiera gotowy wydruk — bez sięgania po przycisk.
+        self.sheet.bind("<Double-Button-1>", self._on_dwuklik, add="+")
         self.sheet.pack(fill=tk.BOTH, expand=True)
 
         self.lbl_poz = tk.Label(dol, text="Pozycje — kliknij dokument powyżej",
@@ -266,6 +315,10 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
             messagebox.showerror("Subiekt", error, parent=self)
             return
         self.dokumenty = dok
+        # Ślad wysyłki z RM_BAZA — do kolumny „Wysłano”. Odczyt tanio (jedno
+        # zapytanie), a odświeża się razem z listą, więc po wysłaniu maila
+        # wystarczy „Odśwież”, żeby zobaczyć datę.
+        self._wyslane = self._historia_wyslania()
         projekty = sorted({d["projekt"] for d in dok if d["projekt"]})
         self.cmb_proj["values"] = [PROJ_WSZYSTKIE] + projekty + [PROJ_BEZ]
         self._refill()
@@ -330,7 +383,9 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         self.sheet.set_sheet_data(
             [[d["rodzaj"], d["numer"], d["data"], d["projekt"], d["podmiot"],
               d["tytul"], len(d["pozycje"]),
-              f"{d['wartosc']:.2f}" if d["wartosc"] else "", d["status"]]
+              f"{d['wartosc']:.2f}" if d["wartosc"] else "",
+              d.get("termin", ""), self._opis_wyslania(d),
+              "📄" if self._plik_pdf(d) else "", d["status"]]
              for d in out], reset_col_positions=False, redraw=False)
 
         # Kolor po rodzaju — od razu widać, co jest zamówieniem, a co wydaniem.
@@ -355,6 +410,253 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         ))
 
     # ── usuwanie dokumentów ────────────────────────────────────────────────
+    def _zaznaczony_dokument(self, tylko_zd=False, akcja="tej operacji"):
+        """Jeden dokument spod kursora. None + komunikat, gdy nic nie wybrano."""
+        if not self.sheet:
+            return None
+        try:
+            rows = sorted(set(self.sheet.get_selected_rows(get_cells_as_rows=True)))
+        except Exception:
+            rows = []
+        wybrane = [self.widoczne[r] for r in rows if 0 <= r < len(self.widoczne)]
+        if not wybrane:
+            messagebox.showinfo("Subiekt", f"Zaznacz w tabeli dokument do {akcja}.",
+                                parent=self)
+            return None
+        d = wybrane[0]
+        if tylko_zd and d.get("rodzaj") != "ZD":
+            messagebox.showinfo(
+                "Wyślij ZD",
+                f"To działa tylko dla zamówień do dostawcy (ZD).\n\n"
+                f"Zaznaczony dokument to {d.get('rodzaj')} {d.get('numer')}.",
+                parent=self)
+            return None
+        return d
+
+    def _podglad_pdf(self, wymus_nowy=False):
+        """
+        Otwiera PDF zaznaczonego dokumentu — ten sam wydruk, który idzie mailem.
+
+        Gotowy plik z katalogu wydruków otwiera się NATYCHMIAST; generowanie
+        z Subiekta trwa ~11 s (uruchomienie mostu i zalogowanie do Sfery), więc
+        robimy je tylko, gdy wydruku jeszcze nie ma albo ktoś chce świeży
+        (zgłoszone 05.09.2026: „długo otwiera te PDF").
+        """
+        d = self._zaznaczony_dokument(akcja="podglądu")
+        if not d:
+            return
+        numer = d.get("numer") or ""
+
+        if not wymus_nowy:
+            gotowy = self._plik_pdf(d)
+            if gotowy:
+                from datetime import datetime as _dt
+                kiedy = _dt.fromtimestamp(gotowy.stat().st_mtime)
+                os.startfile(str(gotowy))
+                self.status.config(
+                    text=f"Otwarto wydruk {numer} z {kiedy:%d.%m.%Y %H:%M} "
+                         f"(gotowy plik; „Nowy PDF” wygeneruje aktualny).")
+                return
+
+        self.status.config(text=f"Generowanie PDF {numer}… (~11 s)")
+        self.update_idletasks()
+        try:
+            import subiekt_wyslij_zd
+            pdfy, bledy = subiekt_wyslij_zd.eksportuj_pdf([numer], self._katalog_pdf())
+        except Exception as e:
+            self.status.config(text="Nie udało się wygenerować PDF.")
+            messagebox.showerror("Podgląd PDF", str(e), parent=self)
+            return
+        dane = pdfy.get(numer) or {}
+        plik = dane.get("plik")
+        if not plik or not Path(plik).exists():
+            self.status.config(text="PDF nie powstał.")
+            messagebox.showwarning("Podgląd PDF",
+                                   "Nie udało się wygenerować wydruku tego dokumentu."
+                                   + (f"\n\n{bledy[0]}" if bledy else ""), parent=self)
+            return
+        os.startfile(plik)
+        self.status.config(text=f"Otwarto podgląd {numer}.")
+
+    def _plik_pdf(self, dok):
+        """
+        Ścieżka gotowego wydruku tego dokumentu albo None.
+
+        Nazwa pliku powstaje z numeru dokumentu tak samo jak w moście
+        (ukośniki i spacje zamienione), więc nie trzeba niczego zapamiętywać
+        — wystarczy sprawdzić, czy plik jest w katalogu wydruków.
+        """
+        numer = (dok.get("numer") or "").strip()
+        if not numer:
+            return None
+        nazwa = numer.replace("/", "-").replace("\\", "-").replace(" ", "_") + ".pdf"
+        sciezka = self._katalog_pdf() / nazwa
+        return sciezka if sciezka.exists() else None
+
+    def _katalog_pdf(self):
+        """Wspólny katalog wydruków na dysku Y:, nie lokalny %TEMP%."""
+        import subiekt_wyslij_zd
+        return subiekt_wyslij_zd._katalog_pdf_domyslny()
+
+    def _historia_wyslania(self):
+        """{numer ZD: (kiedy, ile razy)} — pusty słownik, gdy nic nie wysyłano."""
+        try:
+            import subiekt_wyslij_zd
+            return subiekt_wyslij_zd.historia_wyslania()
+        except Exception as e:
+            print(f"⚠️  Historia wysyłek niedostępna: {e}")
+            return {}
+
+    def _opis_wyslania(self, dok):
+        """
+        Treść kolumny „Wysłano": data ostatniej wysyłki, a przy powtórkach
+        licznik („2026-09-05 ×2").
+
+        Ślad pochodzi z RM_BAZA, nie z Subiekta — status dokumentu w Subiekcie
+        („Do realizacji") mówi o stanie magazynowym i nie zmienia się po
+        wysłaniu maila.
+        """
+        wpis = (getattr(self, "_wyslane", None) or {}).get(dok.get("numer") or "")
+        if not wpis:
+            return ""
+        kiedy, ile = wpis
+        data = (kiedy or "")[:10]
+        return f"{data} ×{ile}" if ile > 1 else data
+
+    def _pozycje_z_bomem(self, dok):
+        """
+        Pozycje ZD w formacie oczekiwanym przez okno wysyłki:
+        (symbol, nazwa, ilość, j.m., ma_rysunek, projekty).
+
+        Symbol, nazwa i ilość są z dokumentu w Subiekcie. Dwa ostatnie pola
+        pochodzą z BOM-u RM_BAZA i są potrzebne panelowi plików: `ma_rysunek`
+        wycisza fałszywe „brak dokumentacji" dla elementów katalogowych,
+        a `projekty` mówi, gdzie zacząć szukać rysunków (ZD zbiera detale
+        z kilku projektów). Subiekt tych danych nie zna — stąd doczytanie.
+
+        Gdy BOM-u nie da się wczytać, zostają same dane z Subiekta: wysyłka
+        działa, tylko szukanie plików jest słabsze.
+        """
+        surowe = dok.get("pozycje") or []
+        bom = {}
+        try:
+            import subiekt_zamowienia as sz
+            numer = (dok.get("projekt") or "").strip()
+            if numer:
+                # Numer projektu z Uwag → id bazy projektowej → BOM.
+                for pid in sz.projekty_po_numerze([numer]):
+                    for sym, info in (sz.dane_z_bom(pid, numer) or {}).items():
+                        bom.setdefault(sym.upper(), (info, numer))
+        except Exception as e:
+            print(f"⚠️  Nie udało się doczytać BOM-u dla {dok.get('numer')}: {e}")
+
+        pozycje = []
+        for p in surowe:
+            symbol = p.get("symbol") or ""
+            info, projekt = bom.get(symbol.upper(), ({}, ""))
+            pozycje.append((
+                symbol,
+                p.get("nazwa") or (info.get("nazwa") if info else "") or "",
+                p.get("ilosc") or "",
+                p.get("jm") or "szt.",
+                # Bez wpisu w BOM-ie nie wiemy — None znaczy „nie orzekam",
+                # a nie „nie ma rysunku".
+                info.get("ma_rysunek") if info else None,
+                projekt,
+            ))
+        return pozycje
+
+    def _email_dostawcy(self, dok):
+        """Adres dostawcy z RM_BAZA — po nazwie z dokumentu."""
+        try:
+            import subiekt_zamowienia as sz
+            nazwa = (dok.get("podmiot") or "").strip()
+            if not nazwa:
+                return ""
+            con = sqlite3.connect(f"file:{sz._sciezka_master()}?mode=ro", uri=True)
+            try:
+                wiersze = con.execute(
+                    "SELECT name, COALESCE(NULLIF(TRIM(email),''),"
+                    "                      NULLIF(TRIM(email_default),'')) "
+                    "FROM suppliers WHERE is_active=1").fetchall()
+            finally:
+                con.close()
+            cel = sz._uprosc_nazwe(nazwa)
+            for n, mail in wiersze:
+                if mail and sz._uprosc_nazwe(n or "") == cel:
+                    return mail
+            for n, mail in wiersze:
+                u = sz._uprosc_nazwe(n or "")
+                if mail and u and (u in cel or cel in u):
+                    return mail
+        except Exception as e:
+            print(f"⚠️  Mail dostawcy: {e}")
+        return ""
+
+    def _nadawca(self):
+        """Imię i nazwisko zalogowanego użytkownika RM_BAZA."""
+        try:
+            import subiekt_zamowienia as sz
+            uzytkownik = getattr(self.master, "current_user", None)
+            if not uzytkownik:
+                return ""
+            con = sqlite3.connect(f"file:{sz._sciezka_master()}?mode=ro", uri=True)
+            try:
+                r = con.execute("SELECT display_name FROM users WHERE username=?",
+                                (uzytkownik,)).fetchone()
+            finally:
+                con.close()
+            return (r[0] if r and r[0] else uzytkownik) or ""
+        except Exception:
+            return ""
+
+    def _wyslij_zd(self):
+        """
+        ✉ → okno wysyłki dla zaznaczonego ZD. To samo okno co w „Zamówieniach
+        do dostawców”, tylko dane pozycji pochodzą z dokumentu w Subiekcie,
+        a nie z BOM-u — dlatego dobieramy je z RM_BAZA po numerze rysunku
+        (patrz _pozycje_z_bomem), żeby panel plików szukał tak samo dobrze.
+        """
+        d = self._zaznaczony_dokument(tylko_zd=True, akcja="wysłania")
+        if not d:
+            return
+        try:
+            import subiekt_wyslij_zd
+        except Exception as e:
+            messagebox.showerror("Wyślij ZD", f"Brak modułu wysyłki:\n{e}", parent=self)
+            return
+
+        pozycje = self._pozycje_z_bomem(d)
+        okno = self.master
+        subiekt_wyslij_zd.open_window(
+            self, d.get("numer") or "", d.get("podmiot") or "",
+            self._email_dostawcy(d), d.get("projekt") or "", pozycje, self._nadawca(),
+            szukaj_plikow=getattr(okno, "_find_files_for_drawing", None),
+            # „Szukaj dalej…" to nie jest samo _rfq_deep_scan — najpierw trzeba
+            # zapytać, SKĄD szukać (biblioteka czy serwer), i podać korzeń.
+            # Całą tę drogę ma już okno zamówień, więc ją pożyczamy zamiast
+            # pisać drugą. Podpięcie _rfq_deep_scan wprost dawało przycisk,
+            # który nic nie robił (zgłoszone 05.09.2026).
+            szukaj_dalej=self._szukaj_dalej_rysunku,
+            szukaj_hurtem=self._szukaj_hurtem_biblioteka,
+            needs_dxf=getattr(okno, "_rfq_needs_dxf", None),
+            # ⚠️ metoda nazywa się _register_file_drop, nie _register_drop_target
+            # — zła nazwa cicho wyłączała przeciąganie plików.
+            register_drop=getattr(okno, "_register_file_drop", None),
+            dozwolone_ext=getattr(okno, "RFQ_PORTAL_EXTS", None),
+            blad_serwera=lambda: getattr(okno, "_rfq_server_error", None),
+            agent_portalu=getattr(okno, "_get_rfq_agent", None))
+
+    def _szukaj_dalej_rysunku(self, pozycja):
+        """Alternatywne źródło plików — ta sama droga co w oknie zamówień."""
+        import subiekt_zamowienia as sz
+        return sz.ZamowieniaWindow._szukaj_dalej_rysunku(self, pozycja)
+
+    def _szukaj_hurtem_biblioteka(self, numery, zrodlo="library"):
+        """Skan zbiorczy (biblioteka albo serwer) — pożyczony z okna zamówień."""
+        import subiekt_zamowienia as sz
+        return sz.ZamowieniaWindow._szukaj_hurtem_biblioteka(self, numery, zrodlo)
+
     def _usun_zaznaczone(self):
         """Kasuje dokumenty zaznaczone w tabeli. Most (tryb zd-usun) rozpoznaje
         rodzaj po prefiksie numeru, więc obsłuży mieszany zestaw ZK/ZD/RW/WZ."""
@@ -429,6 +731,20 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         self._load_async()      # lista musi pokazać stan po usunięciu
 
     # ── pozycje wybranego dokumentu ────────────────────────────────────────
+    def _on_dwuklik(self, _event=None):
+        """Dwuklik w kolumnie PDF → otwiera gotowy wydruk zaznaczonego dokumentu."""
+        if not self.sheet:
+            return
+        try:
+            komorki = self.sheet.get_selected_cells()
+            kolumna = next(iter(komorki))[1] if komorki else None
+        except Exception:
+            kolumna = None
+        indeks_pdf = [k for k, *_ in self.KOL_DOK].index("pdf")
+        if kolumna != indeks_pdf:
+            return
+        self._podglad_pdf()
+
     def _on_wybor_dokumentu(self, _event=None):
         if not self.sheet or not self.sheet_poz:
             return

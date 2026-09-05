@@ -112,12 +112,27 @@ def podepnij_szerokosci(okno, sheet, klucz, domyslne=None):
     porównanie z ostatnim stanem, żeby zwykłe klikanie nie waliło w dysk.
     """
     zapisane = wczytaj_szerokosci(klucz)
+
+    # ⚠️ Zapamiętane szerokości pasują TYLKO do tego układu kolumn, w którym
+    # powstały. Po dołożeniu kolumny stara lista nakładała się z przesunięciem:
+    # nowa kolumna dostawała szerokość sąsiada, a ostatnia wypadała poza ekran
+    # — wyglądało to, jakby kolumny w ogóle nie było (zgłoszone 05.09.2026,
+    # brak kolumny „PDF"). Przy niezgodnej długości bierzemy domyślne.
+    try:
+        ile_kolumn = len(sheet.headers())
+    except Exception:
+        ile_kolumn = len(domyslne or zapisane or [])
+    if zapisane and ile_kolumn and len(zapisane) != ile_kolumn:
+        print(f"ℹ️  Układ kolumn „{klucz}” zmienił się "
+              f"({len(zapisane)} → {ile_kolumn}) — szerokości ustawiam domyślne.")
+        zapisane = None
+
     if zapisane:
         for i, w in enumerate(zapisane):
             try:
                 sheet.column_width(column=i, width=int(w))
             except Exception:
-                break        # zmieniła się liczba kolumn — zostają domyślne
+                break        # węższa tabela niż zapis — reszta zostaje domyślna
     elif domyslne:
         for i, w in enumerate(domyslne):
             try:

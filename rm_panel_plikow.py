@@ -49,7 +49,7 @@ class PanelPlikow:
     def __init__(self, rodzic, pozycje, szukaj_plikow,
                  szukaj_dalej=None, needs_dxf=None, register_drop=None,
                  dozwolone_ext=None, blad_serwera=None, pola_edycji=False,
-                 okno=None, on_zmiana=None):
+                 okno=None, on_zmiana=None, szukaj_hurtem=None):
         """
         `pozycje` — lista słowników; wymagane klucze: 'drawing_no', 'name'.
                     Opcjonalne: 'qty', 'material', 'notes', 'is_catalog'.
@@ -64,6 +64,9 @@ class PanelPlikow:
         `register_drop(widget, callback)` -> bool — podpięcie drag & drop.
         `blad_serwera()` -> str|None — komunikat, gdy dysk sieciowy jest
                     niedostępny; odróżnia awarię od „detal nie ma rysunków".
+        `szukaj_hurtem(numery)` -> {numer: [Path]} — JEDNO przejście po
+                    bibliotece dla wszystkich brakujących pozycji naraz.
+                    Bez tego przycisk „Szukaj wszystkich…" się nie pokazuje.
         """
         self.rodzic = rodzic
         self.pozycje = pozycje
@@ -74,6 +77,7 @@ class PanelPlikow:
         self.dozwolone_ext = {e.lower().lstrip(".")
                               for e in (dozwolone_ext or DOMYSLNE_EXT)}
         self.blad_serwera = blad_serwera or (lambda: None)
+        self.szukaj_hurtem = szukaj_hurtem
         self.pola_edycji = pola_edycji
         self.okno = okno or rodzic          # rodzic dla okien dialogowych
         self.on_zmiana = on_zmiana          # wołane po każdej zmianie plików
@@ -280,10 +284,19 @@ class PanelPlikow:
             if var is None:
                 var = tk.BooleanVar(value=True)
                 self.file_vars[klucz] = var
-            tk.Checkbutton(ramka, text=f"{f.suffix.upper()[1:]:5} {f.name}",
+            wiersz_pliku = tk.Frame(ramka)
+            wiersz_pliku.pack(fill=tk.X, padx=12)
+            tk.Checkbutton(wiersz_pliku, text=f"{f.suffix.upper()[1:]:5} {f.name}",
                            variable=var, anchor="w", font=("Consolas", 9),
                            command=lambda it=it: self._rysuj_pliki(it)
-                           ).pack(fill=tk.X, padx=12)
+                           ).pack(side=tk.LEFT)
+            # Otwarcie pliku — inaczej nie da się sprawdzić, CZY to ten rysunek,
+            # bez szukania go w Eksploratorze. Ikona zależy od typu, żeby po
+            # rzucie oka widać było PDF-y wśród DXF-ów i STEP-ów.
+            ikona = "📄" if f.suffix.lower() == ".pdf" else "📐"
+            tk.Button(wiersz_pliku, text=ikona, font=("Arial", 7),
+                      relief=tk.FLAT, cursor="hand2", padx=2, pady=0,
+                      command=lambda p=f: self._otworz_plik(p)).pack(side=tk.LEFT, padx=(4, 0))
 
         # Detal na laser bez DXF-a — kooperant nie ma z czego ciąć. Liczymy
         # tylko ZAZNACZONE pliki: odznaczenie DXF-a to też błąd.
@@ -340,6 +353,65 @@ class PanelPlikow:
                 etykieta.config(text="(przeciąganie niedostępne — użyj „Dodaj plik…”)")
         else:
             etykieta.config(text="(przeciąganie niedostępne — użyj „Dodaj plik…”)")
+
+    def _otworz_plik(self, sciezka):
+        """Otwiera plik domyślnym programem — podgląd przed wysłaniem."""
+        import os
+        try:
+            if not Path(sciezka).exists():
+                messagebox.showwarning("Otwieranie",
+                                       f"Plik już nie istnieje:\n{sciezka}",
+                                       parent=self.okno)
+                return
+            os.startfile(str(sciezka))
+        except Exception as e:
+            messagebox.showerror("Otwieranie", f"Nie udało się otworzyć:\n{e}",
+                                 parent=self.okno)
+
+    def brakujace_numery(self):
+        """Numery pozycji, dla których nie ma jeszcze żadnego pliku."""
+        return [it["drawing_no"] for it in self.pozycje
+                if it.get("drawing_no") and not it.get("files")]
+
+    def szukaj_wszystkich(self, zrodlo="library"):
+        """
+        Jedno przejście po wybranym dysku dla WSZYSTKICH pozycji bez plików.
+
+        Pozycja po pozycji oznaczałaby tyle skanów wolnego dysku sieciowego,
+        ile brakujących rysunków — stąd jedno wspólne przeszukanie.
+
+        `zrodlo`: "library" (dysk B:) albo "server" (dysk V:).
+        """
+        if not self.szukaj_hurtem:
+            return
+        brakujace = self.brakujace_numery()
+        if not brakujace:
+            messagebox.showinfo("Szukanie",
+                                "Wszystkie pozycje mają już pliki.",
+                                parent=self.okno)
+            return
+
+        gdzie = "bibliotece" if zrodlo == "library" else "serwerze"
+        znalezione = self.szukaj_hurtem(brakujace, zrodlo) or {}
+        if not znalezione:
+            messagebox.showinfo(
+                "Szukanie",
+                f"Nie znaleziono plików na {gdzie} dla żadnej "
+                f"z {len(brakujace)} pozycji.", parent=self.okno)
+            return
+
+        # sprawdzaj_ext=False — z biblioteki bierzemy to, co znalazł skan;
+        # filtr rozszerzeń zadziałał już przy przeszukiwaniu.
+        ile = 0
+        for it in self.pozycje:
+            pliki = znalezione.get(it.get("drawing_no"))
+            if pliki:
+                self._dodaj_reczne(it, pliki, sprawdzaj_ext=False)
+                ile += 1
+        messagebox.showinfo(
+            "Szukanie",
+            f"Znaleziono pliki dla {ile} z {len(brakujace)} pozycji.",
+            parent=self.okno)
 
     def _szukaj_dalej(self, it):
         nowe = self.szukaj_dalej(it) or []

@@ -81,6 +81,7 @@ internal static class Dokumenty
                     Bezp(() => d.Tytul) ?? "",
                     (Bezp(() => d.Uwagi) ?? "").Trim(),
                     Bezp(() => d.StatusDokumentu?.Nazwa) ?? "",
+                    Termin(d),
                     Bezp(() => d.Magazyn?.Symbol) ?? "",
                     decimal.Round(wartosc, 2),
                     pozycje));
@@ -100,12 +101,28 @@ internal static class Dokumenty
         }) ?? "";
     }
 
+    /// Termin dostawy (pole TerminRealizacji). Mają go tylko zamówienia — WZ
+    /// i RW nie — więc czytamy refleksją: brak pola daje pusty łańcuch, a nie
+    /// błąd kompilacji ani wyjątek.
+    static string Termin(Dokument d)
+    {
+        try
+        {
+            var p = d.GetType().GetProperty("TerminRealizacji");
+            if (p?.GetValue(d) is DateTime dt)
+                return dt.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+        catch { /* dokument bez terminu — kolumna zostaje pusta */ }
+        return "";
+    }
+
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
 
     internal record PozDok(string Symbol, string Nazwa, decimal Ilosc, string Jm,
                            decimal Cena);
 
     internal record Dok(string Rodzaj, string Numer, string Data, string Podmiot,
-                        string Tytul, string Uwagi, string Status, string Magazyn,
+                        string Tytul, string Uwagi, string Status, string Termin,
+                        string Magazyn,
                         decimal Wartosc, List<PozDok> Pozycje);
 }

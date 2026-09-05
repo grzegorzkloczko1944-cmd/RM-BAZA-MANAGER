@@ -50,7 +50,7 @@ var tryb = args.Length > 0 && !args[0].StartsWith("--") ? args[0].ToLowerInvaria
 var trybyMaszynowe = new[] { "stan", "katalog", "kontrahenci", "zapotrzebowanie",
                              "projekt", "zd", "zd-usun", "dostawcy", "stan-pozycji",
                              "dokumenty", "faktury", "kartoteka", "wydruk-recon", "wydruk",
-                             "magazyn" };
+                             "magazyn", "symbole", "termin" };
 var cicho = trybyMaszynowe.Contains(tryb);
 var trybStan = tryb == "stan";
 var trybProjekt = tryb == "projekt";
@@ -182,6 +182,18 @@ using (sfera)
     {
         var pdfDir = args.FirstOrDefault(a => a.StartsWith("--pdf="))?["--pdf=".Length..];
         return NexoRecon.WydrukRecon.Uruchom(sfera, numeryArg, outPath, pdfDir);
+    }
+
+    if (tryb == "termin")
+    {
+        var dataArg = args.FirstOrDefault(a => a.StartsWith("--data="))?["--data=".Length..];
+        return NexoRecon.Termin.Uruchom(sfera, numeryArg, dataArg, outPath, zapisz);
+    }
+
+    if (tryb == "symbole")
+    {
+        if (planFile == null) { Console.WriteLine("Tryb symbole: brak --plan=plik.json"); return 1; }
+        return NexoRecon.Symbole.Uruchom(sfera, planFile, outPath, zapisz);
     }
 
     if (tryb == "wydruk")

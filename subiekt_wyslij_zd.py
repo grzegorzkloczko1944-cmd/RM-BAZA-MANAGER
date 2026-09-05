@@ -24,6 +24,7 @@ import subprocess
 import threading
 import tkinter as tk
 import urllib.parse
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from tkinter import ttk, messagebox
 
@@ -69,6 +70,122 @@ def eksportuj_pdf(numery, katalog, timeout=TIMEOUT_S):
     if not wynik:
         raise RuntimeError("Nie udało się wyeksportować żadnego PDF-a.\n" + "\n".join(bledy))
     return wynik, bledy
+
+
+def ustaw_termin(numer_zd, termin, timeout=TIMEOUT_S):
+    """
+    Most: tryb "termin". Zapisuje termin dostawy na ZD (pole TerminRealizacji
+    w Subiekcie). `termin` to date albo tekst RRRR-MM-DD. Zwraca wynik z mostu.
+    """
+    import json
+    import tempfile
+
+    exe = _find_exe()
+    iso = termin.isoformat() if hasattr(termin, "isoformat") else str(termin)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "termin.json"
+        proc = subprocess.run(
+            [str(exe), "termin", f"--numery={numer_zd}", f"--data={iso}",
+             f"--out={out}", "--zapisz"],
+            capture_output=True, text=True, timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if not out.exists():
+            raise RuntimeError(blad_mostu(exe, "termin", proc, out))
+        return json.loads(out.read_text(encoding="utf-8"))
+
+
+def _master():
+    """Ścieżka do master.sqlite — jedna definicja, ta z okna zamówień."""
+    from subiekt_zamowienia import _sciezka_master
+    return _sciezka_master()
+
+
+def _katalog_pdf_domyslny():
+    """
+    Katalog wydruków ZD: Y:\\RM_BAZA\\zd_pdf\\ — obok archiwum faktur KSeF.
+
+    ⚠️ NIE %TEMP%. Katalog tymczasowy jest LOKALNY, więc wydruk zamówienia
+    wysłanego z jednego stanowiska nie istniał dla nikogo innego, a Windows
+    i tak go kasuje. Wysłany PDF to dowód tego, co poszło do dostawcy —
+    musi być wspólny i trwały (zgłoszone 05.09.2026).
+
+    Gdy dysk sieciowy jest niedostępny, schodzimy do %TEMP%: lepiej wysłać
+    zamówienie z lokalnego wydruku niż nie wysłać wcale.
+    """
+    try:
+        katalog = Path(_master()).parent / "zd_pdf"
+        katalog.mkdir(parents=True, exist_ok=True)
+        return katalog
+    except Exception as e:
+        print(f"⚠️  Katalog wydruków na dysku sieciowym niedostępny ({e}) "
+              f"— używam lokalnego %TEMP%.")
+        zapasowy = Path(os.environ.get("TEMP", ".")) / "rm_baza_zd"
+        zapasowy.mkdir(parents=True, exist_ok=True)
+        return zapasowy
+
+
+def zapisz_wyslanie(numer_zd, adresat, nadawca, zalacznikow, termin=None, tryb=""):
+    """
+    Odnotowuje, że zamówienie poszło mailem — w RM_BAZA, nie w Subiekcie.
+
+    Status dokumentu w Subiekcie („Do realizacji") mówi o stanie MAGAZYNOWYM,
+    nie o wysyłce: nie zmienia się po wysłaniu maila i nie odróżnia zamówienia
+    wysłanego od czekającego. Stąd własny ślad.
+
+    Zapisujemy moment OTWARCIA wiadomości w programie pocztowym — bo tylko to
+    wiemy na pewno. Czy użytkownik faktycznie kliknął „Wyślij", wie już tylko
+    Outlook; dlatego kolumna nazywa się „Wysłano", ale znaczy „przygotowano
+    i otwarto do wysłania".
+    """
+    import sqlite3
+    try:
+        con = sqlite3.connect(_master(), timeout=10)
+        try:
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS zd_wyslane (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    numer_zd     TEXT NOT NULL,
+                    adresat      TEXT,
+                    nadawca      TEXT,
+                    zalacznikow  INTEGER,
+                    termin       TEXT,
+                    tryb         TEXT,
+                    kiedy        TEXT NOT NULL
+                )""")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_zd_wyslane_nr "
+                        "ON zd_wyslane(numer_zd)")
+            con.execute(
+                "INSERT INTO zd_wyslane (numer_zd, adresat, nadawca, zalacznikow,"
+                " termin, tryb, kiedy) VALUES (?,?,?,?,?,?,?)",
+                (numer_zd, adresat, nadawca, int(zalacznikow or 0),
+                 str(termin) if termin else None, tryb,
+                 datetime.now().isoformat(timespec="seconds")))
+            con.commit()
+        finally:
+            con.close()
+    except Exception as e:
+        # Brak śladu nie może przerwać wysyłki — mail jest ważniejszy niż log.
+        print(f"⚠️  Nie zapisano śladu wysyłki {numer_zd}: {e}")
+
+
+def historia_wyslania(numery=None):
+    """
+    {numer ZD: (data ostatniej wysyłki, ile razy)} — do kolumny „Wysłano".
+    Pusty słownik, gdy tabeli jeszcze nie ma (nikt nic nie wysyłał).
+    """
+    import sqlite3
+    try:
+        con = sqlite3.connect(f"file:{_master()}?mode=ro", uri=True)
+        try:
+            wiersze = con.execute(
+                "SELECT numer_zd, MAX(kiedy), COUNT(*) FROM zd_wyslane"
+                " GROUP BY numer_zd").fetchall()
+        finally:
+            con.close()
+    except Exception:
+        return {}
+    chciane = {str(n) for n in numery} if numery else None
+    return {n: (k, c) for n, k, c in wiersze if not chciane or n in chciane}
 
 
 #: Tryby wysyłki rysunków — treść pola „Rysunki" w stopce okna.
@@ -127,8 +244,21 @@ def otworz_maila(do, temat, tresc, zalaczniki, dw=""):
         return "mailto"
 
 
+def parsuj_termin(tekst):
+    """
+    „2026-09-08" → date. Zwraca None dla pustego, rzuca ValueError dla złego.
+
+    Format RRRR-MM-DD — ten sam, w którym termin dostawy zapisuje arkusz
+    główny RM_BAZA (kolumna deadline_date).
+    """
+    s = (tekst or "").strip()
+    if not s:
+        return None
+    return datetime.strptime(s, "%Y-%m-%d").date()
+
+
 def tresc_wiadomosci(numer_zd, dostawca, projekt, pozycje, nadawca,
-                     firma="RM PRODUKCJA", link=None):
+                     firma="RM PRODUKCJA", link=None, termin=None):
     """
     Treść maila. Pozycje wypisane, żeby dostawca widział zamówienie także
     w treści, nie tylko w załączniku.
@@ -159,7 +289,13 @@ def tresc_wiadomosci(numer_zd, dostawca, projekt, pozycje, nadawca,
     else:
         linie.append("Do wiadomości dołączam rysunki techniczne zamawianych pozycji.")
     linie.append("")
-    linie.append("Proszę o potwierdzenie przyjęcia zamówienia oraz podanie terminu realizacji.")
+    if termin:
+        # Termin podany — prosimy o dostawę na konkretną datę, nie pytamy o nią.
+        linie.append(f"Termin dostawy: {termin}")
+        linie.append("")
+        linie.append("Proszę o potwierdzenie przyjęcia zamówienia i tego terminu.")
+    else:
+        linie.append("Proszę o potwierdzenie przyjęcia zamówienia oraz podanie terminu dostawy.")
     linie.append("")
     linie.append("Pozdrawiam,")
     linie.append(nadawca)
@@ -177,7 +313,8 @@ class OknoWysylki(tk.Toplevel):
     def __init__(self, parent, numer_zd, dostawca, email, projekt, pozycje,
                  nadawca, szukaj_plikow=None, katalog_pdf=None, szukaj_maila=None,
                  szukaj_dalej=None, needs_dxf=None, register_drop=None,
-                 dozwolone_ext=None, blad_serwera=None, agent_portalu=None):
+                 dozwolone_ext=None, blad_serwera=None, agent_portalu=None,
+                 szukaj_hurtem=None):
         super().__init__(parent)
         self.numer_zd = numer_zd
         self.dostawca = dostawca
@@ -198,6 +335,7 @@ class OknoWysylki(tk.Toplevel):
         # Wszystkie opcjonalne: bez nich panel po prostu nie pokazuje
         # „Szukaj dalej…" ani nie przyjmuje przeciągania.
         self.szukaj_dalej = szukaj_dalej
+        self.szukaj_hurtem = szukaj_hurtem
         self.needs_dxf = needs_dxf
         self.register_drop = register_drop
         self.dozwolone_ext = dozwolone_ext
@@ -206,7 +344,9 @@ class OknoWysylki(tk.Toplevel):
         # poziomy wyżej (okno ZD → okno zamówień → arkusz) i zna ścieżkę do
         # master.sqlite TEJ maszyny. Bez niej combo „Rysunki" ma tylko mail.
         self.agent_portalu = agent_portalu
-        self.katalog_pdf = katalog_pdf or Path(os.environ.get("TEMP", ".")) / "rm_baza_zd"
+        # Uwaga: parametr nazywa się tak samo jak funkcja modułowa, więc
+        # wołamy ją przez moduł — inaczej przesłania ją parametr (None).
+        self.katalog_pdf = Path(katalog_pdf) if katalog_pdf else _katalog_pdf_domyslny()
         self.pdf_zd = None
         self._blad_pdf = ""
         self.panel = None
@@ -243,6 +383,29 @@ class OknoWysylki(tk.Toplevel):
         self.var_temat = tk.StringVar(value=temat)
         tk.Entry(f, textvariable=self.var_temat, width=68, font=("Arial", 9)).grid(
             row=1, column=1, columnspan=2, sticky="w", pady=(0, 6))
+
+        # Termin dostawy — ta sama nazwa co kolumna w arkuszu głównym RM_BAZA
+        # (deadline_date). Data trafia w DWA miejsca: do treści maila i na
+        # dokument ZD w Subiekcie (pole TerminRealizacji), żeby nie było tak,
+        # że dostawca wie, na kiedy zamawiamy, a Subiekt nie.
+        tk.Label(f, text="Termin dostawy:", bg="#ecf0f1",
+                 font=("Arial", 8, "bold")).grid(row=2, column=0, sticky="e",
+                                                 padx=(12, 4), pady=(0, 7))
+        ramka_dat = tk.Frame(f, bg="#ecf0f1")
+        ramka_dat.grid(row=2, column=1, columnspan=2, sticky="w", pady=(0, 7))
+        self.var_termin = tk.StringVar()
+        self.ent_termin = tk.Entry(ramka_dat, textvariable=self.var_termin, width=12,
+                                   font=("Arial", 9))
+        self.ent_termin.pack(side=tk.LEFT)
+        tk.Label(ramka_dat, text="RRRR-MM-DD", bg="#ecf0f1", fg="#7f8c8d",
+                 font=("Arial", 7)).pack(side=tk.LEFT, padx=(4, 10))
+        for etykieta, dni in (("+1 tydz.", 7), ("+2 tyg.", 14), ("+3 tyg.", 21)):
+            tk.Button(ramka_dat, text=etykieta, font=("Arial", 7), padx=5,
+                      command=lambda d=dni: self._ustaw_termin_za(d)).pack(side=tk.LEFT, padx=2)
+        self.lbl_termin = tk.Label(ramka_dat, text="", bg="#ecf0f1", fg="#7f8c8d",
+                                   font=("Arial", 7))
+        self.lbl_termin.pack(side=tk.LEFT, padx=8)
+        self.var_termin.trace_add("write", self._termin_zmieniony)
 
         # Stopka i pasek stanu MUSZĄ być spakowane przed rozciągliwym panelem.
         # Tk rozdziela miejsce w kolejności pakowania: gdy panel z expand=True
@@ -302,6 +465,27 @@ class OknoWysylki(tk.Toplevel):
                  font=("Arial", 8, "bold"), padx=8, pady=3).pack(side=tk.LEFT)
         tk.Button(naglowek, text="📂 Katalog", command=self._otworz_katalog,
                   font=("Arial", 7), padx=6).pack(side=tk.RIGHT, padx=6, pady=2)
+        # PDF samego zamówienia — ten, który idzie mailem. Wcześniej był tylko
+        # wzmiankowany w pasku stanu („w tym PDF zamówienia") i nie dało się go
+        # obejrzeć przed wysłaniem. Włącza się, gdy wydruk się wygeneruje.
+        self.btn_pdf = tk.Button(naglowek, text="📄 PDF zamówienia",
+                                 command=self._otworz_pdf_zd,
+                                 font=("Arial", 7), padx=6, state=tk.DISABLED)
+        self.btn_pdf.pack(side=tk.RIGHT, padx=(0, 4), pady=2)
+        # Skan zbiorczy: jedno przejście po bibliotece dla wszystkich pozycji
+        # bez plików. Osobne „Szukaj dalej…" przy każdej pozycji oznaczało
+        # tyle przemiałów wolnego dysku, ile brakujących rysunków.
+        # Dwa źródła, bo różnią się kosztem i zawartością: biblioteka B:\ to
+        # komponenty wspólne (szybciej), serwer V:\ to całe drzewo projektów
+        # (wolniej, ale tam leżą rysunki detali z innych zleceń).
+        self.btn_hurt = tk.Button(naglowek, text="🔍 Wszystkie w bibliotece",
+                                  command=lambda: self._szukaj_wszystkich("library"),
+                                  font=("Arial", 7), padx=6)
+        self.btn_hurt.pack(side=tk.RIGHT, padx=(0, 4), pady=2)
+        self.btn_hurt_v = tk.Button(naglowek, text="🔍 Wszystkie na V:",
+                                    command=lambda: self._szukaj_wszystkich("server"),
+                                    font=("Arial", 7), padx=6)
+        self.btn_hurt_v.pack(side=tk.RIGHT, padx=(0, 4), pady=2)
 
         # Panel „pozycje i znalezione pliki" — ten sam, którego używa okno
         # „Wyślij do RFQ". Wcześniej była tu płaska lista wszystkich plików;
@@ -316,6 +500,7 @@ class OknoWysylki(tk.Toplevel):
             register_drop=self.register_drop,
             dozwolone_ext=self.dozwolone_ext,
             blad_serwera=self.blad_serwera,
+            szukaj_hurtem=self.szukaj_hurtem,
             okno=self,
             on_zmiana=self._po_zmianie_plikow,
         )
@@ -396,6 +581,11 @@ class OknoWysylki(tk.Toplevel):
         except Exception:
             return
         ile = len(pliki) + (1 if self.pdf_zd else 0)
+        # Przycisk podglądu ma sens dopiero, gdy PDF istnieje.
+        try:
+            self.btn_pdf.config(state=tk.NORMAL if self.pdf_zd else tk.DISABLED)
+        except Exception:
+            pass
         tekst = f"Załączników: {ile}"
         if self.pdf_zd:
             tekst += "   (w tym PDF zamówienia)"
@@ -476,8 +666,86 @@ class OknoWysylki(tk.Toplevel):
             messagebox.showwarning("Katalog", str(e), parent=self)
 
     # ── wysyłka ────────────────────────────────────────────────────────────
-    def _tryb_zmieniony(self):
-        """Przełącznik „Rysunki" — przepisuje treść maila pod wybrany tryb.
+    def _otworz_pdf_zd(self):
+        """Podgląd PDF-a zamówienia — dokładnie tego, co pójdzie w załączniku."""
+        if not self.pdf_zd or not Path(self.pdf_zd).exists():
+            szczegol = f"\n\n{self._blad_pdf}" if self._blad_pdf else ""
+            messagebox.showinfo(
+                "PDF zamówienia",
+                "Wydruk zamówienia nie został jeszcze wygenerowany." + szczegol,
+                parent=self)
+            return
+        try:
+            os.startfile(str(self.pdf_zd))
+        except Exception as e:
+            messagebox.showerror("PDF zamówienia", str(e), parent=self)
+
+    def _szukaj_wszystkich(self, zrodlo="library"):
+        """🔍 Jedno przejście po wybranym dysku dla wszystkich brakujących.
+
+        `zrodlo`: "library" (dysk B: — komponenty wspólne, szybciej) albo
+        "server" (dysk V: — całe drzewo projektów, wolniej, ale szerzej).
+        """
+        if not self.szukaj_hurtem:
+            messagebox.showinfo(
+                "Szukanie",
+                "Skan zbiorczy nie jest tu dostępny.\n\n"
+                "Użyj „Szukaj dalej…” przy pojedynczej pozycji.", parent=self)
+            return
+        if self.panel:
+            self.panel.szukaj_wszystkich(zrodlo)
+
+    def _zapisz_termin(self, termin):
+        """
+        Zapisuje termin dostawy na dokumencie ZD (pole TerminRealizacji).
+        Zwraca "" przy powodzeniu, treść błędu przy niepowodzeniu.
+        """
+        self.status.config(text=f"Zapisywanie terminu dostawy {termin} w Subiekcie…")
+        self.update_idletasks()
+        try:
+            wynik = ustaw_termin(self.numer_zd, termin)
+        except Exception as e:
+            return str(e)
+        kroki = wynik.get("kroki") or []
+        for k in kroki:
+            if (k.get("Status") or k.get("status")) == "ustawiono":
+                self.status.config(text=f"Termin dostawy {termin} zapisany na {self.numer_zd}.")
+                return ""
+        szczegol = ""
+        if kroki:
+            k = kroki[0]
+            szczegol = k.get("Szczegoly") or k.get("szczegoly") or (
+                k.get("Status") or k.get("status") or "")
+        return szczegol or "most nie potwierdził zapisu"
+
+    def _ustaw_termin_za(self, dni):
+        """Skrót „+2 tyg." — data robocza liczona od dziś."""
+        self.var_termin.set((date.today() + timedelta(days=dni)).isoformat())
+
+    def _termin_zmieniony(self, *_):
+        """Waliduje wpisaną datę i odświeża treść maila."""
+        s = self.var_termin.get().strip()
+        if not s:
+            self.lbl_termin.config(text="")
+            self.ent_termin.config(bg="white")
+            self._odswiez_tresc()
+            return
+        try:
+            d = parsuj_termin(s)
+        except ValueError:
+            self.lbl_termin.config(text="zła data (RRRR-MM-DD)", fg="#c0392b")
+            self.ent_termin.config(bg="#fadbd8")
+            return
+        self.ent_termin.config(bg="white")
+        ile = (d - date.today()).days
+        if ile < 0:
+            self.lbl_termin.config(text=f"{-ile} dni temu — data z przeszłości", fg="#c0392b")
+        else:
+            self.lbl_termin.config(text=f"za {ile} dni" if ile else "dzisiaj", fg="#7f8c8d")
+        self._odswiez_tresc()
+
+    def _odswiez_tresc(self):
+        """Przepisuje treść maila pod bieżący tryb rysunków i termin dostawy.
 
         Treść jest edytowalna, więc nadpisujemy ją TYLKO gdy użytkownik jej
         nie ruszał; inaczej zmiana trybu kasowałaby jego poprawki.
@@ -486,13 +754,23 @@ class OknoWysylki(tk.Toplevel):
         if biezaca.strip() != (self._tresc_wzorcowa or "").strip():
             return                          # ktoś pisał — nie ruszamy
         portal = self.var_tryb.get() == TRYB_PORTAL
+        try:
+            termin = parsuj_termin(self.var_termin.get())
+        except ValueError:
+            termin = None                   # niedokończona data — nie psujemy treści
         nowa = tresc_wiadomosci(
             self.numer_zd, self.dostawca, self.projekt, self.pozycje, self.nadawca,
             link="(link zostanie wstawiony po wysłaniu rysunków do portalu)"
-            if portal else None)
+            if portal else None,
+            termin=termin.isoformat() if termin else None)
         self._tresc_wzorcowa = nowa
         self.txt.delete("1.0", "end")
         self.txt.insert("1.0", nowa)
+
+    def _tryb_zmieniony(self):
+        """Przełącznik „Rysunki" — treść plus komunikat o sposobie wysyłki."""
+        self._odswiez_tresc()
+        portal = self.var_tryb.get() == TRYB_PORTAL
         self.status.config(
             text="Rysunki pójdą linkiem do portalu — do maila trafi tylko PDF zamówienia."
             if portal else "Rysunki pójdą załącznikami w mailu.")
@@ -612,6 +890,26 @@ class OknoWysylki(tk.Toplevel):
                     "Otworzyć wiadomość bez adresata?", parent=self):
                 return
 
+        # Termin dostawy → pole TerminRealizacji na ZD w Subiekcie. Zapis PRZED
+        # otwarciem maila: gdyby się nie udał, użytkownik dowiaduje się o tym,
+        # zanim wyśle wiadomość obiecującą dostawcy termin, którego dokument
+        # nie zna. Niepowodzenie nie blokuje wysyłki — to osobna decyzja.
+        try:
+            termin = parsuj_termin(self.var_termin.get())
+        except ValueError:
+            messagebox.showwarning("Termin dostawy",
+                                   "Termin dostawy ma zły format.\n"
+                                   "Wpisz datę jako RRRR-MM-DD albo zostaw puste.",
+                                   parent=self)
+            return
+        if termin:
+            blad = self._zapisz_termin(termin)
+            if blad and not messagebox.askyesno(
+                    "Termin dostawy",
+                    f"Nie udało się zapisać terminu w Subiekcie:\n{blad}\n\n"
+                    "Otworzyć mimo to wiadomość z terminem w treści?", parent=self):
+                return
+
         # Załączniki: PDF zamówienia (jeśli powstał) + rysunki zaznaczone
         # w panelu. PDF jako pierwszy — to główny dokument wiadomości.
         wybrane = []
@@ -660,6 +958,16 @@ class OknoWysylki(tk.Toplevel):
             except Exception:
                 pass
 
+        # Ślad wysyłki w RM_BAZA — stąd kolumna „Wysłano” w przeglądzie
+        # dokumentów. Zapisujemy PO udanym otwarciu wiadomości, żeby nie
+        # odnotować wysyłki, która się nie odbyła.
+        try:
+            termin = parsuj_termin(self.var_termin.get())
+        except ValueError:
+            termin = None
+        zapisz_wyslanie(self.numer_zd, do, self.nadawca, len(wybrane),
+                        termin, self.var_tryb.get())
+
         self.status.config(text="Wiadomość otwarta w programie pocztowym — wyślij ją stamtąd.")
         self._zamknij()
 
@@ -667,9 +975,11 @@ class OknoWysylki(tk.Toplevel):
 def open_window(parent, numer_zd, dostawca, email, projekt, pozycje, nadawca,
                 szukaj_plikow=None, katalog_pdf=None, szukaj_maila=None,
                 szukaj_dalej=None, needs_dxf=None, register_drop=None,
-                dozwolone_ext=None, blad_serwera=None, agent_portalu=None):
+                dozwolone_ext=None, blad_serwera=None, agent_portalu=None,
+                szukaj_hurtem=None):
     return OknoWysylki(parent, numer_zd, dostawca, email, projekt, pozycje,
                        nadawca, szukaj_plikow, katalog_pdf, szukaj_maila,
                        szukaj_dalej=szukaj_dalej, needs_dxf=needs_dxf,
                        register_drop=register_drop, dozwolone_ext=dozwolone_ext,
-                       blad_serwera=blad_serwera, agent_portalu=agent_portalu)
+                       blad_serwera=blad_serwera, agent_portalu=agent_portalu,
+                       szukaj_hurtem=szukaj_hurtem)

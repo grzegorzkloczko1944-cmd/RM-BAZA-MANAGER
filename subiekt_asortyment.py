@@ -33,6 +33,10 @@ TIMEOUT_S = 180
 # długość kodów kreskowych (numery rysunku mają 11-13 znaków).
 MAX_SYMBOL = 13
 
+# Symbol musi być czystym ASCII — Code 128 nie zakoduje „ł", „ś", „ę".
+# Ta sama reguła i ta sama funkcja co przy symbolach z nazwy.
+from subiekt_projekt import do_ascii
+
 RODZAJE = [("towar", "Towar (materiał, część)"),
            ("usluga", "Usługa (robocizna, transport)"),
            ("komplet", "Komplet (złożenie ze składników)")]
@@ -175,8 +179,15 @@ def okno_nowa_kartoteka(parent, symbol="", nazwa="", rodzaj="towar", po_zapisie=
     status.pack(fill=tk.X)
 
     def licznik(*_):
-        n = len(var_symbol.get().strip())
-        if n > MAX_SYMBOL:
+        s = var_symbol.get().strip()
+        n = len(s)
+        # Kolejność ostrzeżeń: najpierw znaki spoza ASCII, bo one kod kreskowy
+        # UNIEMOŻLIWIAJĄ, a nadmiar znaków tylko go rozciąga.
+        poza = "".join(sorted({c for c in s if ord(c) > 127}))
+        if poza:
+            lbl_dl.config(text=f"znaki spoza ASCII ({poza}) — kod kreskowy ich nie zakoduje; "
+                               "przy zapisie zamienię je na odpowiedniki", fg="#c0392b")
+        elif n > MAX_SYMBOL:
             lbl_dl.config(text=f"{n} znaków — za długi (max {MAX_SYMBOL}, jak numer rysunku; "
                                "dłuższy da kod kreskowy nie do wydruku)", fg="#c0392b")
         else:
@@ -189,6 +200,28 @@ def okno_nowa_kartoteka(parent, symbol="", nazwa="", rodzaj="towar", po_zapisie=
         if not s:
             messagebox.showwarning("Kartoteka", "Podaj symbol.", parent=dlg)
             return None
+
+        # Symbol z polskimi znakami zapisze się do Subiekta bez protestu, ale
+        # kodu kreskowego z niego nie będzie — i wyjdzie to dopiero przy
+        # drukowaniu etykiety. Dlatego prostujemy tu, za zgodą użytkownika.
+        czysty = do_ascii(s)
+        if czysty != s:
+            if not messagebox.askyesno(
+                    "Symbol a kod kreskowy",
+                    f"Symbol „{s}” zawiera znaki, których kod kreskowy\n"
+                    f"(Code 128) nie zakoduje — etykiety nie da się wydrukować.\n\n"
+                    f"Zapisać jako „{czysty}”?\n\n"
+                    "Pełna nazwa z polskimi znakami zostaje w polu Nazwa.",
+                    parent=dlg):
+                return None
+            s = czysty
+            var_symbol.set(s)
+        if not s:
+            messagebox.showwarning("Kartoteka",
+                                   "Po usunięciu znaków spoza ASCII symbol jest pusty.\n"
+                                   "Wpisz symbol z liter i cyfr.", parent=dlg)
+            return None
+
         if len(s) > MAX_SYMBOL:
             messagebox.showwarning("Kartoteka",
                                    f"Symbol ma {len(s)} znaków — max {MAX_SYMBOL}.\n\n"

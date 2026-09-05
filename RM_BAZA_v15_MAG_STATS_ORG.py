@@ -24412,6 +24412,151 @@ class MainWindow(tk.Tk):
             return []
         return [] if cancelled[0] else found_files
 
+    def _rfq_deep_scan_wiele(self, root: Path, numery: list, title: str, parent=None) -> dict:
+        """Jedno przejście po drzewie, WIELE numerów rysunku naraz.
+
+        _rfq_deep_scan szuka jednego numeru, więc dla ZD z kilkunastoma
+        pozycjami trzeba było przeskanować bibliotekę tyleż razy — a to ten
+        sam, wolny dysk sieciowy. Tutaj katalog czytamy RAZ i dopasowujemy po
+        drodze wszystkie szukane numery (zgłoszone 05.09.2026: „szukaj
+        wszystkich w bibliotece").
+
+        Zwraca {numer rysunku: [Path, …]} — tylko dla numerów, które coś mają.
+        Pusty słownik = nic nie znaleziono albo user anulował.
+        """
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        excluded_dirs = {
+            "OldVersions", "Design Data", "Importowane komponenty", "Templates",
+            "$RECYCLE.BIN", "System Volume Information", "@Recycle", "@recycle",
+            ".git", ".svn", "node_modules"
+        }
+        numery = [str(n).strip() for n in (numery or []) if str(n).strip()]
+        if not numery:
+            return {}
+        if not root.exists():
+            messagebox.showerror("Skanowanie", f"Ścieżka nie istnieje:\n{root}",
+                                 parent=parent or self)
+            return {}
+
+        anchor = parent or self
+        dlg = tk.Toplevel(anchor)
+        dlg.title(title)
+        dlg.resizable(False, False)
+        dlg.transient(anchor)
+        dlg.grab_set()
+        dlg.update_idletasks()
+        dlg.geometry("500x150+%d+%d" % (
+            anchor.winfo_rootx() + (anchor.winfo_width() // 2) - 250,
+            anchor.winfo_rooty() + (anchor.winfo_height() // 2) - 75))
+
+        frame = tk.Frame(dlg, padx=20, pady=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+        status_label = tk.Label(frame, text=f"Szukam {len(numery)} pozycji…",
+                                font=("Arial", 10))
+        status_label.pack(pady=(0, 6))
+        progress_bar = ttk.Progressbar(frame, mode="determinate", length=440)
+        progress_bar.pack(pady=(0, 4))
+        detail_label = tk.Label(frame, text="", font=("Arial", 8), fg="#666")
+        detail_label.pack(pady=(0, 8))
+
+        cancelled = [False]
+        wynik, scan_error = {}, [None]
+
+        def cancel_scan():
+            cancelled[0] = True
+            status_label.config(text="Anulowanie…")
+
+        dlg.protocol("WM_DELETE_WINDOW", cancel_scan)
+        tk.Button(frame, text="Anuluj", command=cancel_scan, bg="#e74c3c", fg="white",
+                  font=("Arial", 9, "bold"), padx=20, pady=4).pack()
+
+        def przeszukaj(katalog):
+            """Jeden katalog → {numer: [pliki]}. Czyta drzewo RAZ dla wszystkich."""
+            trafienia = {}
+            szukane = [(n, n.lower()) for n in numery]
+            rozszerzenia = {f".{e.lower()}" for e in self.RFQ_FILE_EXTENSIONS}
+            stos = [katalog]
+            while stos:
+                biezacy = stos.pop()
+                try:
+                    for item in biezacy.iterdir():
+                        if item.is_dir():
+                            if item.name not in excluded_dirs:
+                                stos.append(item)
+                        elif item.suffix.lower() in rozszerzenia:
+                            nazwa = item.stem.lower()
+                            for numer, maly in szukane:
+                                if maly in nazwa:
+                                    trafienia.setdefault(numer, []).append(item)
+                except PermissionError:
+                    pass
+                except Exception:
+                    pass
+            return trafienia
+
+        def scan_worker():
+            try:
+                dirs_to_scan = [d for d in root.iterdir()
+                                if d.is_dir() and d.name not in excluded_dirs]
+            except Exception as e:
+                scan_error[0] = f"Nie można odczytać katalogu:\n{e}"
+                return
+            if not dirs_to_scan:
+                scan_error[0] = f"Brak katalogów do przeskanowania w:\n{root}"
+                return
+
+            total = len(dirs_to_scan)
+            self.after(0, lambda: progress_bar.winfo_exists() and
+                       progress_bar.config(maximum=total))
+
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                futures = {executor.submit(przeszukaj, d): d for d in dirs_to_scan}
+                done = 0
+                for future in as_completed(futures):
+                    if cancelled[0]:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                    d = futures[future]
+                    done += 1
+                    try:
+                        for numer, pliki in (future.result() or {}).items():
+                            for f in pliki:
+                                if f not in wynik.setdefault(numer, []):
+                                    wynik[numer].append(f)
+                    except Exception:
+                        pass
+                    if not cancelled[0] and dlg.winfo_exists():
+                        self.after(0, lambda c=done: progress_bar.winfo_exists() and
+                                   progress_bar.config(value=c))
+                        self.after(0, lambda c=done, t=total, n=len(wynik):
+                                   status_label.winfo_exists() and
+                                   status_label.config(
+                                       text=f"Przeskanowano {c}/{t} — "
+                                            f"znaleziono {n} z {len(numery)} pozycji"))
+                        self.after(0, lambda nm=d.name: detail_label.winfo_exists() and
+                                   detail_label.config(text=f"Ostatnio: {nm}"))
+
+        thread = threading.Thread(target=scan_worker, daemon=True)
+        thread.start()
+
+        def check_done():
+            if not dlg.winfo_exists():
+                return
+            if thread.is_alive():
+                dlg.after(100, check_done)
+            else:
+                dlg.destroy()
+
+        dlg.after(100, check_done)
+        self.wait_window(dlg)
+
+        if scan_error[0]:
+            messagebox.showerror("Skanowanie", scan_error[0], parent=parent or self)
+            return {}
+        return {} if cancelled[0] else wynik
+
     def _ask_rfq_scan_source(self, drawing_no: str, parent=None):
         """Pyta, gdzie szukać dalej: 'library' (B:\\), 'server' (cały V:\\)
         albo None = Anuluj. Zwykły messagebox ma tylko yes/no/cancel, a tu
