@@ -108,6 +108,25 @@ Ponowienie po `SESSION_LOST` jest bezpieczne dla zapisu **tylko dlatego**, że
 ten kod wraca wyłącznie z pre-checku, czyli sprzed startu handlera. Gdyby ktoś
 kiedyś zwrócił `SESSION_LOST` z wnętrza ścieżki zapisu, ta gwarancja pęknie.
 
+**Sprawdzone na żywo (06.09.2026, zatrzymany SQL Server na M-OLD):**
+
+| Krok | Log mostu | Efekt |
+|---|---|---|
+| SQL stop, komenda po 187 s idle | `session_check DEAD` → `reconnect_FAIL (pre-check)` ×2 | `SESSION_LOST` po jednym ponowieniu Pythona, komunikat „Operacja NIE została wykonana" |
+| SQL start, komenda | `session_check DEAD stan=Error` → `reconnect_ok (pre-check) ms=7693` | dane po 8,5 s, następna komenda 640 ms, `logins=2` |
+
+Czas do błędu przy leżącym SQL: **~2 min** — każde `Polacz()` wisi ~45 s na
+timeoucie sterownika SQL (dwie próby: pre-check + ponowienie Pythona). To
+timeout sterownika, nie mostu; po wybudzeniu ta druga próba jest właśnie tą,
+która ma trafić w powrót sieci.
+
+Ten test obnażył błąd w `subiekt_bridge.zapewnij_most`: po padzie sesji most
+ma `Stan=Error` i `ping` mówi `ready=false`; Python czekał 40 s na `ready`,
+ale **bez komendy nikt sesji nie odbudowuje** → timeout → `_most_niedostepny`
+→ RM_BAZA do końca życia procesu jechała starym CLI, choć SQL dawno wrócił.
+Teraz żywy most wystarcza, żeby wysłać komendę — na `ready` Python czeka tylko
+po własnym uruchomieniu mostu.
+
 **Uwaga o terminalu:** gdyby kiedyś kilku userów pracowało na jednej maszynie
 (RDP), stały port 51273 byłby konfliktem — pierwszy most zająłby port dla
 wszystkich sesji. Wtedy trzeba portu per sesja Windows. Przy obecnym układzie

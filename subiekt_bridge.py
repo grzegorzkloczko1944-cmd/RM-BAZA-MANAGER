@@ -182,15 +182,23 @@ def _czekaj_na_gotowosc(limit_s):
 
 
 def zapewnij_most():
-    """Upewnia się, że most działa i jest zalogowany.
+    """Upewnia się, że most działa (uruchamia go, gdy trzeba).
 
-    Rzuca BridgeUnavailable, gdy mostu nie da się uruchomić — wołający
-    ma wtedy użyć starego CLI.
+    NIE gwarantuje zalogowanej sesji — to robi worker mostu przed każdą
+    komendą. Rzuca BridgeUnavailable, gdy mostu nie da się uruchomić —
+    wołający ma wtedy użyć starego CLI.
     """
     global _most_niedostepny
 
+    # Most ŻYJE = wystarczy, żeby wysłać komendę — nawet gdy ready=False.
+    # Sesję Sfery odbudowuje worker w pre-checku przed komendą, a bez komendy
+    # nikt jej nie odbuduje. Czekanie tu na ready (jak dawniej) po padzie
+    # SQL kończyło się timeoutem, _most_niedostepny=True i RM_BAZA do końca
+    # życia procesu jechała starym CLI, choć SQL dawno wrócił (znalezione
+    # 06.09.2026 przy teście z zatrzymanym SQL). Na ready czekamy tylko po
+    # własnym uruchomieniu mostu — niżej.
     dane = ping()
-    if dane and dane.get("ready"):
+    if dane:
         _sprawdz_protokol(dane)
         return
 
@@ -198,7 +206,7 @@ def zapewnij_most():
         # Drugie sprawdzenie pod blokadą: kilka okien RM_BAZA startuje
         # równocześnie i bez tego każde próbowałoby uruchomić własny most.
         dane = ping()
-        if dane and dane.get("ready"):
+        if dane:
             _sprawdz_protokol(dane)
             return
 
