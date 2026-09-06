@@ -154,8 +154,10 @@ Weryfikacja:
 NexoRecon.exe komplet-napraw --out=C:\RMPAK_CLIENT\komplety_po.json
 ```
 
-Ma być `do_naprawy: 0`. `niejednoznacznych` może zostać > 0 — to te
-z kroku 5.
+Ma być `do_naprawy: 0` i **pusta lista `kroki`** — naprawa porządkuje też Lp,
+więc po niej nie powinno zostać żadne `do-przenumerowania`. `niejednoznacznych`
+może zostać > 0 — to te z kroku 5 (one same nie są przenumerowywane, bo
+narzędzie ich nie dotyka).
 
 ---
 
@@ -209,8 +211,9 @@ już przyszło i co jest w drodze.
 1. Binarka: ścieżka + sha z wersja.json (albo "zbudowana lokalnie z <sha>")
 2. Krok 1: sprawdzono / do_naprawy / niejednoznacznych
 3. Krok 3: symbol próbny, wynik kontroli (OK / co się nie zgadzało)
-4. Krok 4: naprawionych, błędy (jeśli były — treść)
-5. Weryfikacja: do_naprawy po naprawie
+4. Krok 4: naprawionych, przenumerowanych, błędy (jeśli były — treść)
+5. Weryfikacja: do_naprawy po naprawie i liczba kroków (ma być 0 —
+   także zero "do-przenumerowania")
 6. Sporne do ręcznej decyzji: lista symboli z ilościami
 7. Otwarte ZD z pozycjami z naprawianych kompletów: lista
 8. Czy było cokolwiek nieoczekiwanego
