@@ -679,19 +679,17 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         return ""
 
     def _nadawca(self):
-        """Imię i nazwisko zalogowanego użytkownika RM_BAZA."""
+        """Podpis pod mailem: imię i nazwisko, e-mail, telefon prowadzącego.
+
+        Delegujemy do okna zamówień zamiast powtarzać zapytanie do bazy —
+        obie drogi do wysyłki (Zamówienia i Przegląd dokumentów) mają dać
+        ten sam podpis. Wcześniej była tu kopia czytająca samo display_name
+        i po poprawieniu tamtej wersji ta nadal podpisywała maile „ADMIN”
+        (zgłoszone 06.09.2026).
+        """
         try:
             import subiekt_zamowienia as sz
-            uzytkownik = getattr(self.master, "current_user", None)
-            if not uzytkownik:
-                return ""
-            con = sqlite3.connect(f"file:{sz._sciezka_master()}?mode=ro", uri=True)
-            try:
-                r = con.execute("SELECT display_name FROM users WHERE username=?",
-                                (uzytkownik,)).fetchone()
-            finally:
-                con.close()
-            return (r[0] if r and r[0] else uzytkownik) or ""
+            return sz.podpis_nadawcy(getattr(self.master, "current_user", None))
         except Exception:
             return ""
 

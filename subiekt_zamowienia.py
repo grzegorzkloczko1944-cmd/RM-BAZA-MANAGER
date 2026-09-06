@@ -233,6 +233,28 @@ def _sciezka_master():
     return os.path.join(os.path.dirname(PROJECTS_DIR.rstrip("\\/")), "master.sqlite")
 
 
+def pracownik_rm_manager(login):
+    """{name, email, phone} zalogowanego pracownika albo None.
+
+    Funkcja modułowa, nie metoda — korzystają z niej OBA okna prowadzące do
+    wysyłki ZD (Zamówienia i Przegląd dokumentów), a każde ma inną klasę.
+
+    ⚠️ Źródłem jest rm_manager.sqlite (baza RM_MANAGER), NIE master.sqlite:
+    tam siedzą tylko `users` do logowania, a `employees` z imieniem, mailem
+    i telefonem — w osobnej bazie obok. Ta sama zasada co w RFQ
+    (_rm_manager_db_path w arkuszu głównym).
+    """
+    try:
+        rm_db = os.path.join(os.path.dirname(os.path.dirname(_sciezka_master())),
+                             "RM_MANAGER", "rm_manager.sqlite")
+        if not os.path.isfile(rm_db):
+            return None
+        from rm_manager import get_employee_by_user_login
+        return get_employee_by_user_login(rm_db, login) or None
+    except Exception:
+        return None            # brak kontaktu nie może zablokować wysyłki ZD
+
+
 def _nazwy_dostawcow():
     """{supplier_id: nazwa} z bazy głównej RM_BAZA."""
     master = _sciezka_master()
@@ -1946,68 +1968,53 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         return ""
 
     def _nadawca(self):
-        """Podpis pod mailem do dostawcy: imię i nazwisko, e-mail, telefon.
+        """Podpis pod mailem — patrz podpis_nadawcy()."""
+        return podpis_nadawcy(getattr(self.master, "current_user", None))
 
-        Kontakt bierzemy z tego samego miejsca co zapytanie ofertowe (RFQ) —
-        z tabeli `employees` w rm_manager.sqlite, po loginie zalogowanego.
-        Dostawca ma wiedzieć, do kogo zadzwonić w sprawie zamówienia, tak samo
-        jak przy RFQ; wcześniej pod mailem stało samo `display_name` z
-        master.sqlite, czyli u części kont po prostu „ADMIN”
-        (zgłoszone 06.09.2026).
 
-        Gdy pracownika nie ma w RM_MANAGER albo brakuje pól, schodzimy do
-        display_name — mail ma wyjść tak czy inaczej, w przeciwieństwie do
-        RFQ, gdzie brak kontaktu blokuje wysyłkę.
-        """
-        uzytkownik = (getattr(self.master, "current_user", None) or "").strip()
-        if not uzytkownik:
-            return ""
+def podpis_nadawcy(uzytkownik):
+    """Podpis pod mailem do dostawcy: imię i nazwisko, e-mail, telefon.
 
-        # Nazwa wyświetlana z master.sqlite — podstawa podpisu i zapas,
-        # gdyby RM_MANAGER nie miał tego pracownika.
-        nazwa = uzytkownik
+    Kontakt bierzemy z tego samego miejsca co zapytanie ofertowe (RFQ) —
+    z tabeli `employees` w rm_manager.sqlite, po loginie zalogowanego.
+    Dostawca ma wiedzieć, do kogo zadzwonić w sprawie zamówienia, tak samo
+    jak przy RFQ; wcześniej pod mailem stało samo `display_name` z
+    master.sqlite, czyli u części kont po prostu „ADMIN”
+    (zgłoszone 06.09.2026).
+
+    Gdy pracownika nie ma w RM_MANAGER albo brakuje pól, schodzimy do
+    display_name — mail ma wyjść tak czy inaczej, w przeciwieństwie do
+    RFQ, gdzie brak kontaktu blokuje wysyłkę.
+    """
+    uzytkownik = (uzytkownik or "").strip()
+    if not uzytkownik:
+        return ""
+
+    # Nazwa wyświetlana z master.sqlite — podstawa podpisu i zapas,
+    # gdyby RM_MANAGER nie miał tego pracownika.
+    nazwa = uzytkownik
+    try:
+        con = sqlite3.connect(f"file:{_sciezka_master()}?mode=ro", uri=True)
         try:
-            con = sqlite3.connect(f"file:{_sciezka_master()}?mode=ro", uri=True)
-            try:
-                r = con.execute("SELECT display_name FROM users WHERE username=?",
-                                (uzytkownik,)).fetchone()
-            finally:
-                con.close()
-            if r and r[0]:
-                nazwa = r[0]
-        except Exception:
-            pass
+            r = con.execute("SELECT display_name FROM users WHERE username=?",
+                            (uzytkownik,)).fetchone()
+        finally:
+            con.close()
+        if r and r[0]:
+            nazwa = r[0]
+    except Exception:
+        pass
 
-        emp = self._pracownik_rm_manager(uzytkownik)
-        if not emp:
-            return nazwa
+    emp = pracownik_rm_manager(uzytkownik)
+    if not emp:
+        return nazwa
 
-        linie = [(emp.get("name") or "").strip() or nazwa]
-        for pole in ("email", "phone"):
-            wartosc = (emp.get(pole) or "").strip()
-            if wartosc:
-                linie.append(wartosc)
-        return "\n".join(linie)
-
-    @staticmethod
-    def _pracownik_rm_manager(login):
-        """{name, email, phone} z rm_manager.sqlite albo None.
-
-        ⚠️ To NIE jest master.sqlite: `users` (logowanie) siedzi w bazie
-        RM_BAZA, a `employees` (imię, mail, telefon) — w OSOBNEJ bazie
-        RM_MANAGER, obok niej. Ta sama zasada co w RFQ (_rm_manager_db_path
-        w arkuszu głównym).
-        """
-        try:
-            import os
-            rm_db = os.path.join(os.path.dirname(os.path.dirname(_sciezka_master())),
-                                 "RM_MANAGER", "rm_manager.sqlite")
-            if not os.path.isfile(rm_db):
-                return None
-            from rm_manager import get_employee_by_user_login
-            return get_employee_by_user_login(rm_db, login) or None
-        except Exception:
-            return None        # brak kontaktu nie może zablokować wysyłki ZD
+    linie = [(emp.get("name") or "").strip() or nazwa]
+    for pole in ("email", "phone"):
+        wartosc = (emp.get(pole) or "").strip()
+        if wartosc:
+            linie.append(wartosc)
+    return "\n".join(linie)
 
     def _pliki_rysunku(self, symbol, projekty=None):
         """
