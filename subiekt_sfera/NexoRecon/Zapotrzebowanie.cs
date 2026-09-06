@@ -8,7 +8,15 @@
 //
 // ⚠️ ZapotrzebowanieNaAsortyment() NIE przyjmuje parametrów — liczy zapotrzebowanie
 // ze WSZYSTKICH niezrealizowanych ZK naraz, nie da się go zawęzić do jednego
-// projektu po stronie Sfery. Dlatego zwracamy `zk` (numery i tytuły dokumentów,
+// projektu po stronie Sfery.
+//
+// To ona jest podłogą czasową tego trybu: pomiar 06.09.2026 (721 pozycji)
+// dał 3,3 s na samo jej wywołanie z 3,7 s całości — reszta to słownik stanów
+// (90 ms), pętla po pozycjach (242 ms) i ZD (93 ms). Jest to gotowa metoda
+// SDK InsERT-a, nie nasze zapytanie, więc projekcje tu nic nie dadzą.
+// Gdyby ten tryb miał kiedyś zejść niżej, jedyna droga to policzyć
+// zapotrzebowanie samodzielnie z pozycji ZK — czyli powtórzyć logikę
+// Subiekta, z ryzykiem, że wyjdą inne liczby niż w programie. Dlatego zwracamy `zk` (numery i tytuły dokumentów,
 // z których wynika dana potrzeba) i filtrowanie per projekt robi RM_BAZA.
 //
 // `Dostawca` bywa pusty — to podpowiedź z kartoteki asortymentu, nie obowiązek.
@@ -43,6 +51,59 @@ internal static class Zapotrzebowanie
             .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+        // ⚠️ STANY I PROGI JEDNYM ZAPYTANIEM, NIE PER POZYCJA.
+        // Nawigacja p.Asortyment.StanyMagazynowe / .StanyWMagazynachZakresy
+        // wewnatrz petli to osobne zapytanie na kazda z ~720 pozycji —
+        // 3,5 s na caly tryb (06.09.2026). Jedna projekcja po kartotekach
+        // daje te same liczby w ~0,2 s; ten sam wzorzec co w Magazyn.cs.
+        //
+        // Klucz to SYMBOL, nie Id: Poz i tak identyfikuje kartoteke symbolem,
+        // a symbol jest w Subiekcie unikalny.
+        var stanySlownik = new Dictionary<string, decimal[]>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (dynamic a in (IEnumerable<dynamic>)sfera.Asortymenty().Dane.Wszystkie()
+                .Select(x => new
+                {
+                    x.Symbol,
+                    Stany = x.StanyMagazynowe.Select(st => new
+                    {
+                        st.IloscDostepna,
+                        st.IloscZadysponowana,
+                        st.IloscZarezerwowanaIlosciowo,
+                        st.IloscZarezerwowanaDostawowo,
+                    }),
+                    Zakresy = x.StanyWMagazynachZakresy.Select(z => new
+                    {
+                        z.StanMinimalny,
+                        z.StanOptymalny,
+                    }),
+                })
+                .ToList())
+            {
+                var sym = ((string?)a.Symbol ?? "").Trim();
+                if (sym.Length == 0) continue;
+                // [dostepne, zadysponowane, zarezerwowane, min, opt]
+                var w = new decimal[5];
+                foreach (dynamic st in (IEnumerable<dynamic>)a.Stany)
+                {
+                    w[0] += (decimal)st.IloscDostepna;
+                    w[1] += (decimal)st.IloscZadysponowana;
+                    w[2] += (decimal)st.IloscZarezerwowanaIlosciowo
+                          + (decimal)st.IloscZarezerwowanaDostawowo;
+                }
+                foreach (dynamic z in (IEnumerable<dynamic>)a.Zakresy)
+                {
+                    // StanMinimalny jest zawsze wypelniony (0 = nie pilnujemy),
+                    // StanOptymalny bywa pusty — stad rozne traktowanie.
+                    w[3] += (decimal)z.StanMinimalny;
+                    w[4] += (decimal)(z.StanOptymalny ?? 0m);
+                }
+                stanySlownik[sym] = w;
+            }
+        }
+        catch { /* bez stanow tryb dziala dalej, tyle ze z zerami */ }
+
         var pozycje = new List<Poz>();
         foreach (var p in zam.ZapotrzebowanieNaAsortyment())
         {
@@ -72,38 +133,25 @@ internal static class Zapotrzebowanie
             // i dyspozycje — czyli to, co realnie można wziąć. Zwracamy też
             // składniki osobno, bo „mam 63 szt" i „mam 63, ale 60 zarezerwowane"
             // to dwie różne decyzje zakupowe.
+            //
+            // Progi zamawiania: StanMinimalny = próg, poniżej którego
+            // domawiamy; StanOptymalny = poziom, do którego uzupełniamy
+            // (użytkownik zapisuje to jako „10/15"). Jedno i drugie policzone
+            // wyżej, hurtem — patrz stanySlownik.
+            var symbol = (Bezp(() => p.Asortyment?.Symbol) ?? "").Trim();
             decimal dostepne = 0, zadysponowane = 0, zarezerwowane = 0;
-            try
-            {
-                foreach (var s in p.Asortyment.StanyMagazynowe)
-                {
-                    dostepne += s.IloscDostepna;
-                    zadysponowane += s.IloscZadysponowana;
-                    zarezerwowane += s.IloscZarezerwowanaIlosciowo
-                                   + s.IloscZarezerwowanaDostawowo;
-                }
-            }
-            catch { /* kartoteka bez ruchu magazynowego */ }
-
-            // Progi zamawiania z kartoteki: StanMinimalny = próg, poniżej
-            // którego domawiamy; StanOptymalny = poziom, do którego uzupełniamy
-            // (użytkownik zapisuje to jako „10/15"). Definiowane PER MAGAZYN,
-            // więc sumujemy — firma ma jeden magazyn towarowy (MAG).
             decimal stanMin = 0, stanOpt = 0;
-            try
+            if (symbol.Length > 0 && stanySlownik.TryGetValue(symbol, out var w))
             {
-                foreach (var z in p.Asortyment.StanyWMagazynachZakresy)
-                {
-                    // StanMinimalny jest zawsze wypełniony (0 = nie pilnujemy),
-                    // StanOptymalny bywa pusty — stąd różne traktowanie.
-                    stanMin += z.StanMinimalny;
-                    stanOpt += z.StanOptymalny.GetValueOrDefault();
-                }
+                dostepne = w[0];
+                zadysponowane = w[1];
+                zarezerwowane = w[2];
+                stanMin = w[3];
+                stanOpt = w[4];
             }
-            catch { /* progi są opcjonalne — większość kartotek ich nie ma */ }
 
             pozycje.Add(new Poz(
-                Bezp(() => p.Asortyment?.Symbol) ?? "",
+                symbol,
                 Bezp(() => p.Asortyment?.Nazwa) ?? "",
                 p.Ilosc,
                 dostepne,
@@ -125,12 +173,33 @@ internal static class Zapotrzebowanie
         var zamowione = new List<PozZd>();
         try
         {
+            // ⚠️ PROJEKCJA, NIE NAWIGACJA W PĘTLI — jak w Dokumenty.cs.
+            // AsortymentAktualny per pozycja to osobne zapytanie na każdą
+            // z ~1000 pozycji tych 200 ZD. Pozycję trzymamy też jako encję
+            // (Pozycja), bo NumerZk/ProjektZk schodzą po powiązaniach ZD→ZK
+            // refleksją i potrzebują żywego obiektu.
             foreach (var d in sfera.ZamowieniaDoDostawcow().Dane.Wszystkie()
                                    .OrderByDescending(d => d.DataWprowadzenia)
-                                   .Take(200).ToList())
+                                   .Take(200)
+                                   .Select(d => new
+                                   {
+                                       Numer = d.NumerWewnetrzny.PelnaSygnatura,
+                                       d.DataWydaniaWystawienia,
+                                       d.DataWprowadzenia,
+                                       Podmiot = d.Podmiot.NazwaSkrocona,
+                                       Status = d.StatusDokumentu.Nazwa,
+                                       Pozycje = d.Pozycje.Select(poz => new
+                                       {
+                                           Symbol = poz.AsortymentAktualny.Symbol,
+                                           Nazwa = poz.AsortymentAktualny.Nazwa,
+                                           poz.Ilosc,
+                                           Pozycja = poz,
+                                       }),
+                                   })
+                                   .ToList())
             {
-                var numer = Bezp(() => d.NumerWewnetrzny?.PelnaSygnatura) ?? "";
-                var dostawca = Bezp(() => d.Podmiot?.NazwaSkrocona) ?? "";
+                var numer = d.Numer ?? "";
+                var dostawca = d.Podmiot ?? "";
                 // Data WYSTAWIENIA, nie wprowadzenia — to ją widać w Subiekcie
                 // i po niej filtrują się listy dokumentów. Starsze ZD z RM_BAZA
                 // mogą jej nie mieć (błąd naprawiony 04.09.2026) — wtedy
@@ -147,16 +216,17 @@ internal static class Zapotrzebowanie
                             System.Globalization.CultureInfo.InvariantCulture);
                     return s;
                 }) ?? "";
-                var status = Bezp(() => d.StatusDokumentu?.Nazwa) ?? "";
+                var status = d.Status ?? "";
                 try
                 {
                     foreach (var poz in d.Pozycje)
                     {
-                        var sym = Bezp(() => poz.AsortymentAktualny?.Symbol);
+                        var sym = poz.Symbol;
                         if (string.IsNullOrWhiteSpace(sym)) continue;
                         zamowione.Add(new PozZd(sym!.Trim(),
-                            Bezp(() => poz.AsortymentAktualny?.Nazwa) ?? "",
-                            poz.Ilosc, numer, dostawca, data, status, NumerZk(poz), ProjektZk(poz)));
+                            poz.Nazwa ?? "",
+                            poz.Ilosc, numer, dostawca, data, status,
+                            NumerZk(poz.Pozycja), ProjektZk(poz.Pozycja)));
                     }
                 }
                 catch { /* dokument bez czytelnych pozycji — pomijamy */ }

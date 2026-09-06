@@ -43,7 +43,7 @@ internal static class Progi
 
         // ODCZYT — bez planu zwracamy progi wszystkich kartotek, które je mają.
         if (string.IsNullOrWhiteSpace(planPath))
-            return Odczyt(asort, outPath);
+            return Odczyt(sfera, outPath);
 
         if (!File.Exists(planPath)) { Console.WriteLine($"BRAK PLANU: {planPath}"); return 1; }
         var plan = JsonSerializer.Deserialize<List<Poz>>(File.ReadAllText(planPath),
@@ -194,40 +194,50 @@ internal static class Progi
         return 0;
     }
 
-    static int Odczyt(dynamic asort, string? outPath)
+    static int Odczyt(Uchwyt sfera, string? outPath)
     {
-        // Wzorem Magazyn.cs: projekcja symboli PRZED ToList, potem
-        // WyszukajPoSymbolu per kartoteka. Encje z Wszystkie() NIE doladowuja
-        // kolekcji zakresow (po udanym zapisie odczyt pokazywal "brak progu"),
-        // a te z WyszukajPoSymbolu — tak. ~10 s na 3442 kartoteki.
-        var pozycje = new List<Odczytana>();
-        IEnumerable<object> symbole = ((IEnumerable<dynamic>)asort.Dane.Wszystkie())
-            .Select(a => (object)new { Symbol = (string?)a.Symbol, Nazwa = (string?)a.Nazwa })
-            .ToList();
-        foreach (dynamic k in symbole)
-        {
-            var symbol = ((string?)k.Symbol ?? "").Trim();
-            if (symbol.Length == 0) continue;
-            dynamic? enc = null;
-            try { enc = asort.Dane.WyszukajPoSymbolu(symbol); } catch { }
-            if (enc == null) continue;
-            decimal min = 0, opt = 0;
-            var ma = false;
-            try
+        // Uchwyt, nie dynamic: na dynamicznym odbiorniku lambdy
+        // w .Select() sie nie kompiluja (CS1977), a wlasnie o
+        // projekcje tu chodzi.
+        var asort = sfera.Asortymenty();
+        // ⚠️ JEDNA PROJEKCJA, NIE WyszukajPoSymbolu PER KARTOTEKA.
+        // Poprzednia wersja wolala WyszukajPoSymbolu dla kazdej z 3444
+        // kartotek, zeby znalezc te nieliczne z progiem — 3,8 s na zwrocenie
+        // JEDNEGO rekordu (06.09.2026). Projekcja z zagniezdzona kolekcja
+        // zakresow idzie do bazy jako jedno zapytanie z JOIN-em; ten sam
+        // wzorzec co w Magazyn.cs i Dokumenty.cs.
+        //
+        // Komentarz z poprzedniej wersji mowil, ze encje z Wszystkie() nie
+        // doladowuja kolekcji zakresow — to prawda dla LENIWEJ nawigacji po
+        // materializowanej encji, ale nie dla projekcji: tam kolekcja jest
+        // czescia zapytania i wraca razem z reszta.
+        var pozycje = ((IEnumerable<dynamic>)asort.Dane.Wszystkie()
+            .Select(a => new
             {
-                foreach (var z in enc.StanyWMagazynachZakresy)
+                a.Symbol,
+                a.Nazwa,
+                Zakresy = a.StanyWMagazynachZakresy.Select(z => new
                 {
-                    min += (decimal)z.StanMinimalny;
-                    opt += (decimal)(z.StanOptymalny ?? 0m);
-                    ma = true;
-                }
-            }
-            catch { /* kartoteka bez zakresow — progow nie ma */ }
-            // Zwracamy TYLKO te z ustawionym progiem: 3442 kartoteki z zerami
+                    z.StanMinimalny,
+                    z.StanOptymalny,
+                }),
+            })
+            .ToList())
+            .Select(a => new
+            {
+                Symbol = ((string?)a.Symbol ?? "").Trim(),
+                Nazwa = (string?)a.Nazwa ?? "",
+                Min = (decimal)Enumerable.Sum(
+                    Enumerable.Select((IEnumerable<dynamic>)a.Zakresy, z => (decimal)z.StanMinimalny)),
+                Opt = (decimal)Enumerable.Sum(
+                    Enumerable.Select((IEnumerable<dynamic>)a.Zakresy, z => (decimal)(z.StanOptymalny ?? 0m))),
+            })
+            // Zwracamy TYLKO te z ustawionym progiem: 3444 kartoteki z zerami
             // to same smieci w JSON-ie, a okno i tak czyta stany osobno.
-            if (ma && (min > 0 || opt > 0))
-                pozycje.Add(new Odczytana(symbol, (string?)k.Nazwa ?? "", min, opt));
-        }
+            .Where(a => a.Symbol.Length > 0 && (a.Min > 0 || a.Opt > 0))
+            .Select(a => new Odczytana(a.Symbol, a.Nazwa, a.Min, a.Opt))
+            .ToList();
+
         Wypisz(new { pozycje }, outPath);
         return 0;
     }

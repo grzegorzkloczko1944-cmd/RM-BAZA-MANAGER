@@ -49,45 +49,75 @@ internal static class Dokumenty
     {
         try
         {
-            foreach (var d in zrodlo().OrderByDescending(x => x.DataWprowadzenia)
-                                      .Take(limit).ToList())
+            // ⚠️ JEDNA PROJEKCJA, NIE NAWIGACJE W PĘTLI. Wcześniej ToList()
+            // materializował dokumenty, a potem dla KAŻDEJ z ~1400 pozycji
+            // szło osobne zapytanie po AsortymentAktualny, Cena i
+            // JednostkaMiaryAs — 3,6 s na 109 dokumentów (06.09.2026).
+            // Projekcja z zagnieżdżoną kolekcją idzie do bazy jako jedno
+            // zapytanie z JOIN-ami (ten sam wzorzec co w Magazyn.cs).
+            //
+            // Pozycje ZD trzymamy jako ENCJE (PozEnc), bo ProjektZk schodzi
+            // po powiązaniach ZD→ZK refleksją i potrzebuje żywego obiektu.
+            // Reszta rodzajów tego nie używa, więc płaci tylko ZD.
+            var czyZd = rodzaj == "ZD";
+            var dane = zrodlo()
+                .OrderByDescending(x => x.DataWprowadzenia)
+                .Take(limit)
+                .Select(d => new
+                {
+                    Numer = d.NumerWewnetrzny.PelnaSygnatura,
+                    d.DataWydaniaWystawienia,
+                    d.DataWprowadzenia,
+                    Podmiot = d.Podmiot.NazwaSkrocona,
+                    d.Tytul,
+                    d.Uwagi,
+                    Status = d.StatusDokumentu.Nazwa,
+                    Magazyn = d.Magazyn.Symbol,
+                    Dokument = d,           // do Termin() i ProjektZk()
+                    Pozycje = d.Pozycje.Select(p => new
+                    {
+                        Symbol = p.AsortymentAktualny.Symbol,
+                        Nazwa = p.AsortymentAktualny.Nazwa,
+                        p.Ilosc,
+                        Jm = p.JednostkaMiaryAs.JednostkaMiary.Symbol,
+                        Cena = p.Cena.NettoPoRabacie,
+                        Pozycja = p,        // do ProjektZk() przy ZD
+                    }),
+                })
+                .ToList();
+
+            foreach (var d in dane)
             {
                 var pozycje = new List<PozDok>();
                 decimal wartosc = 0;
-                try
+                foreach (var p in d.Pozycje)
                 {
-                    foreach (var p in d.Pozycje)
-                    {
-                        var sym = Bezp(() => p.AsortymentAktualny?.Symbol);
-                        if (string.IsNullOrWhiteSpace(sym)) continue;
-                        decimal cena = 0;
-                        try { cena = p.Cena.NettoPoRabacie; } catch { }
-                        wartosc += cena * p.Ilosc;
-                        pozycje.Add(new PozDok(
-                            sym!.Trim(),
-                            Bezp(() => p.AsortymentAktualny?.Nazwa) ?? "",
-                            p.Ilosc,
-                            Bezp(() => p.JednostkaMiaryAs?.JednostkaMiary?.Symbol) ?? "szt",
-                            decimal.Round(cena, 2),
-                            // Projekt POZYCJI — z Uwag ZK, którą realizuje (tylko ZD).
-                            // Uwagi samego ZD są puste, a jedno ZD zbiera detale
-                            // z kilku projektów; bez tego okno dokumentów nie
-                            // wiedziało, gdzie postawić „Zamówiono" (05.09.2026).
-                            Zapotrzebowanie.ProjektZk(p)));
-                    }
+                    var sym = (p.Symbol ?? "").Trim();
+                    if (sym.Length == 0) continue;
+                    wartosc += p.Cena * p.Ilosc;
+                    pozycje.Add(new PozDok(
+                        sym,
+                        p.Nazwa ?? "",
+                        p.Ilosc,
+                        p.Jm ?? "szt",
+                        decimal.Round(p.Cena, 2),
+                        // Projekt POZYCJI — z Uwag ZK, którą realizuje (tylko ZD).
+                        // Uwagi samego ZD są puste, a jedno ZD zbiera detale
+                        // z kilku projektów; bez tego okno dokumentów nie
+                        // wiedziało, gdzie postawić „Zamówiono" (05.09.2026).
+                        czyZd ? Zapotrzebowanie.ProjektZk(p.Pozycja) : ""));
                 }
-                catch { /* dokument bez czytelnych pozycji — nagłówek zostaje */ }
 
                 wynik.Add(new Dok(
                     rodzaj,
-                    Bezp(() => d.NumerWewnetrzny?.PelnaSygnatura) ?? "",
-                    Data(d),
-                    Bezp(() => d.Podmiot?.NazwaSkrocona) ?? "",
-                    Bezp(() => d.Tytul) ?? "",
-                    (Bezp(() => d.Uwagi) ?? "").Trim(),
-                    Bezp(() => d.StatusDokumentu?.Nazwa) ?? "",
-                    Termin(d),
-                    Bezp(() => d.Magazyn?.Symbol) ?? "",
+                    d.Numer ?? "",
+                    Data(d.DataWydaniaWystawienia, d.DataWprowadzenia),
+                    d.Podmiot ?? "",
+                    d.Tytul ?? "",
+                    (d.Uwagi ?? "").Trim(),
+                    d.Status ?? "",
+                    Termin(d.Dokument),
+                    d.Magazyn ?? "",
                     decimal.Round(wartosc, 2),
                     pozycje));
             }
@@ -95,13 +125,16 @@ internal static class Dokumenty
         catch { /* brak dostępu do typu dokumentu nie może wywalić reszty */ }
     }
 
-    static string Data(Dokument d)
+    static string Data(object? wystawienia, DateTime wprowadzenia)
     {
         // Data wystawienia, a gdy pusta (starsze ZD z RM_BAZA) — wprowadzenia.
+        // Typ pola rozni sie miedzy wersjami SDK (DateTime / DateOnly), stad
+        // object + Convert — tak samo jak w Zapotrzebowanie.cs.
         return Bezp(() =>
         {
-            var w = d.DataWydaniaWystawienia;
-            var dt = w == default ? d.DataWprowadzenia : Convert.ToDateTime(w);
+            var dt = wystawienia == null || wystawienia.Equals(default(DateTime))
+                ? wprowadzenia
+                : Convert.ToDateTime(wystawienia);
             return dt.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         }) ?? "";
     }

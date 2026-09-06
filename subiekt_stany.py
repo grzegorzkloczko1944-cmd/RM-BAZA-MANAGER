@@ -34,6 +34,13 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 EXE_CANDIDATES = [
     os.path.join(_HERE, "subiekt_sfera", "NexoRecon", "bin", "Release", "NexoRecon.exe"),
     r"C:\RMPAK_CLIENT\Repozytoria\RM-BAZA-MANAGER\subiekt_sfera\NexoRecon\bin\Release\NexoRecon.exe",
+    # Stanowisko usera: most lezy OBOK SDK Sfery, ktorego i tak potrzebuje
+    # w runtime (C:\iLogic\SUBIEKT\Bin — 435 bibliotek InsERT doladowywanych
+    # w locie przez NexoSession.PodepnijSdk). Jedno miejsce na wszystko,
+    # co dotyczy Subiekta.
+    r"C:\iLogic\Subiekt\MOST\NexoRecon.exe",
+    # Poprzednia lokalizacja (do 06.09.2026) — zostaje, zeby stanowiska,
+    # ktore zdazyly pobrac most przed zmiana, nie przestaly dzialac.
     r"C:\RMPAK_CLIENT\NexoRecon\NexoRecon.exe",
 ]
 CONFIG_PATH = r"C:\RMPAK_CLIENT\.nexo_sfera.json"
