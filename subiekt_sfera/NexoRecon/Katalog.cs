@@ -94,6 +94,13 @@ internal static class Katalog
                 a.CenaEwidencyjna,
                 Rodzaj = a.Rodzaj.Nazwa,
                 WKompletach = a.SkladnikiWKompletach.Count(),
+                // Liczba wlasnych skladnikow — okno Asortyment pokazuje ja
+                // w kolumnie od razu. Wczesniej komorka byla pusta, dopoki
+                // sie w komplet nie kliknelo (sklad czyta sie leniwie), wiec
+                // komplet z 6 skladnikami wygladal na pusty (07.09.2026).
+                // Sam Count() jest tania agregacja w tej samej projekcji —
+                // nie sciagamy skladnikow, tylko ich liczbe.
+                Skladnikow = a.SkladnikiKompletu.Count(),
             })
             .ToList()
             .Select(a => new Kart(
@@ -102,7 +109,8 @@ internal static class Katalog
                 (a.Nazwa ?? "").Trim(),
                 decimal.Round(a.CenaEwidencyjna, 2),
                 (a.Rodzaj ?? "").Trim(),
-                a.WKompletach))
+                a.WKompletach,
+                a.Skladnikow))
             .Where(k => k.Symbol.Length > 0)
             .ToList();
 
@@ -122,5 +130,5 @@ internal static class Katalog
     // jednoznacznie wskazać pozycję w Subiekcie (symbole bywają zapisane
     // różnie, Id nie).
     internal record Kart(int Id, string Symbol, string Nazwa, decimal CenaEwidencyjna,
-                         string Rodzaj, int WKompletach);
+                         string Rodzaj, int WKompletach, int Skladnikow);
 }

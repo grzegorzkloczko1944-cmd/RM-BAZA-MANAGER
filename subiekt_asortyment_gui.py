@@ -414,6 +414,8 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
             # None wyłącza filtr duchów; zero z nowego mostu to prawdziwe zero.
             p["WKompletach"] = (None if p.get("WKompletach") is None
                                 else int(p["WKompletach"]))
+            p["Skladnikow"] = (None if p.get("Skladnikow") is None
+                               else int(p["Skladnikow"]))
             p["nazwa"] = (p.get("Nazwa") or "").strip()
             p["nazwa_subiekt"] = p["nazwa"]
             p["netto"] = float(p.get("CenaEwidencyjna") or 0)
@@ -621,7 +623,12 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
             komorka_stanu(p, "stan"), komorka_stanu(p, "zarezerwowane"),
             komorka_stanu(p, "dostepne"),
             f"{p['netto']:.2f}",
-            ("" if p["sklad"] is None else str(len(p["sklad"]))) if _czy_komplet(p) else "",
+            # Liczba składników: z modelu, gdy skład już wczytany (bo mogła się
+            # zmienić edycją), inaczej z katalogu. Pusto tylko dla pozycji,
+            # które składu mieć nie mogą — komplet z 6 składnikami ma pokazać
+            # 6 od razu, a nie dopiero po kliknięciu (07.09.2026).
+            (str(len(p["sklad"])) if p["sklad"] is not None
+             else ("" if p.get("Skladnikow") is None else str(p["Skladnikow"] or ""))),
             # „Użyta w" — w ilu kompletach ta pozycja jest składnikiem.
             # Pusto zamiast zera: zero i tak rzuca się w oczy podświetleniem
             # ducha, a kolumna pełna zer tylko szumi.

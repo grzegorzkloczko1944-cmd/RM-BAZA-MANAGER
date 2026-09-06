@@ -788,7 +788,24 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
         nr_up = (nr or "").strip().upper()
         z_drzewka = {(c[0] or "").strip().upper() for c in self.kids.get(nr_up, [])}
         z_subiekta = {(x.get("Symbol") or "").strip().upper() for x in skladniki}
-        if not z_drzewka and not z_subiekta:
+
+        # PUSTE DRZEWKO = "nie ma z czym porownac", a NIE "w Inventorze nic
+        # nie ma". Bez tego kazdy skladnik z Subiekta wypadal jako "nadmiar",
+        # bo nie znajdowal sie w pustym zbiorze — i komplet z poprawnym
+        # skladem dostawal ostrzezenie na wszystkie pozycje naraz
+        # (zgloszone 07.09.2026: 2627-200.08ZZ, 6 skladnikow, wszystkie OK).
+        #
+        # Drzewko bywa puste z powodow niezaleznych od danych: okno otwarte
+        # bez projektu, pozycja spoza tego BOM-u, brak pliku *_OUT.xlsx.
+        # W kazdym z tych przypadkow porownanie jest bez podstaw i nie wolno
+        # go pokazywac jako rozjazdu.
+        if not z_drzewka:
+            if z_subiekta:
+                self._wiersz_kv(s, "Zgodność z Inventorem",
+                                "nie porównano — brak drzewka dla tej pozycji "
+                                "(otwórz projekt, żeby sprawdzić skład)")
+            return
+        if not z_subiekta:
             return
         # Numery w Inventorze i w Subiekcie roznia sie koncowka typu
         # (2632-350.22X vs 2632-350.22) — porownujemy rdzenie.
