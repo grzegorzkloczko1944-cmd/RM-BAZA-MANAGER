@@ -347,6 +347,8 @@ class PanelSubiekt(tk.Toplevel):
                  "odczyt", "open_subiekt_dokumenty", "dokumenty"),
             ]),
             ("Kartoteki i mapowania", "Porządkowanie danych podstawowych", [
+                ("🗂", "Asortyment", "wszystkie kartoteki, ceny, skład kompletów",
+                 "zapis", "open_subiekt_asortyment", "asortyment"),
                 ("➕", "Nowa kartoteka", "dodaj do Subiekta",
                  "nieodwracalny", "open_subiekt_nowa_kartoteka", None),
                 ("🤝", "Powiąż dostawców", "z kontrahentami",
@@ -526,6 +528,19 @@ class PanelSubiekt(tk.Toplevel):
 
         for klucz in self.kafle:
             ustaw(klucz, "…")
+
+        # Katalog idzie PIERWSZY, bo jest najtańszy z odczytów (~9 s bez
+        # stanów) — kafel dostaje liczbę, zanim magazyn dopyta o stany.
+        if self._przerwane:
+            return
+        try:
+            import subiekt_asortyment_gui as ag
+            kart = ag.pobierz_katalog()
+            komplety = sum(1 for p in kart if ag._czy_komplet(p))
+            ustaw("asortyment", f"{len(kart)} kartotek"
+                                + (f" · {komplety} kompletów" if komplety else ""))
+        except Exception:
+            ustaw("asortyment", "")
 
         if self._przerwane:
             return

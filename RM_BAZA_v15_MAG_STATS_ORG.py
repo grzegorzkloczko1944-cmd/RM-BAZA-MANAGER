@@ -29350,6 +29350,28 @@ class MainWindow(tk.Tk):
             return
         subiekt_magazyn_gui.open_window(self)
 
+    def open_subiekt_asortyment(self):
+        """Okno „Asortyment — pełna kartoteka Subiekta" (panel 📦 SUBIEKT).
+
+        Odpowiednik listy Asortymentu w Subiekcie: WSZYSTKIE kartoteki, także
+        te bez żadnego ruchu. Czym się różni od okna „Magazyn": tamto jest dla
+        magazyniera i pokazuje tylko pozycje ze stanem albo z progiem, bo jego
+        tematem są progi i domawianie. Tutaj tematem jest sama kartoteka —
+        nazwa, cena ewidencyjna i skład kompletu — więc widać całość.
+
+        Stany doczytują się NA ŻĄDANIE (przyciskiem albo dla zaznaczonych):
+        liczone są per kartoteka i przy całej bazie okno wisiałoby minutami.
+        """
+        try:
+            import subiekt_asortyment_gui
+        except ImportError as e:
+            messagebox.showerror(
+                "Subiekt",
+                f"Nie znaleziono modułu subiekt_asortyment_gui.py\n\n{e}",
+                parent=self)
+            return
+        subiekt_asortyment_gui.open_window(self)
+
     def open_subiekt_scalanie(self):
         """Okno „Scal kody handlowe" (menu 📦 SUBIEKT).
 

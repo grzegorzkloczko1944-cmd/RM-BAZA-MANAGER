@@ -68,14 +68,31 @@ internal static class Katalog
         // trzy pola tekstowe.
         // CenaEwidencyjna dochodzi do projekcji, bo od niej zależy, czy RW
         // policzy koszt materiału (kartoteka bez ceny → pozycja na RW z zerem).
+        //
+        // Rodzaj doszedł pod okno „Asortyment" (07.09.2026): tam lista ma
+        // wyglądać jak w Subiekcie (TW/KT/US), a stany doczytywane są OSOBNO
+        // na żądanie — dlatego ich tu dalej nie ma, katalog musi zostać tanim
+        // odczytem (~9 s na 3444 kartotekach).
+        // Rodzaj idzie przez nawigację W PROJEKCJI, nie po materializacji —
+        // sięgnięcie po niego z gotowej encji to zapytanie na kartotekę.
+        // Jednostki miary tu nie ma świadomie: okno Asortyment jej nie
+        // pokazuje, a każde dodatkowe pole to koszt na całej liście.
         var pozycje = asort.Dane.Wszystkie()
-            .Select(a => new { a.Id, a.Symbol, a.Nazwa, a.CenaEwidencyjna })
+            .Select(a => new
+            {
+                a.Id,
+                a.Symbol,
+                a.Nazwa,
+                a.CenaEwidencyjna,
+                Rodzaj = a.Rodzaj.Nazwa,
+            })
             .ToList()
             .Select(a => new Kart(
                 a.Id,
                 (a.Symbol ?? "").Trim(),
                 (a.Nazwa ?? "").Trim(),
-                decimal.Round(a.CenaEwidencyjna, 2)))
+                decimal.Round(a.CenaEwidencyjna, 2),
+                (a.Rodzaj ?? "").Trim()))
             .Where(k => k.Symbol.Length > 0)
             .ToList();
 
@@ -94,5 +111,6 @@ internal static class Katalog
     // Id kartoteki — RM_BAZA pokazuje je obok symbolu, żeby dało się
     // jednoznacznie wskazać pozycję w Subiekcie (symbole bywają zapisane
     // różnie, Id nie).
-    internal record Kart(int Id, string Symbol, string Nazwa, decimal CenaEwidencyjna);
+    internal record Kart(int Id, string Symbol, string Nazwa, decimal CenaEwidencyjna,
+                         string Rodzaj);
 }

@@ -48,7 +48,7 @@ internal static class CommandDispatcher
     /// </summary>
     static readonly HashSet<string> Zapisujace = new(StringComparer.OrdinalIgnoreCase)
     {
-        "kartoteka", "kartoteka-usun", "projekt", "zd", "zd-usun",
+        "kartoteka", "kartoteka-usun", "kartoteka-edytuj", "projekt", "zd", "zd-usun",
         "dostawcy", "progi", "rw", "termin", "symbole", "komplet-napraw",
     };
 
@@ -67,7 +67,7 @@ internal static class CommandDispatcher
         "stan", "katalog", "kontrahenci", "dokumenty", "faktury", "kartoteka",
         "stan-pozycji", "dostawcy", "zapotrzebowanie", "zd", "magazyn",
         "zd-usun", "wydruk-recon", "termin", "symbole", "rw", "kartoteka-usun",
-        "progi", "wydruk", "projekt", "komplet", "komplet-napraw",
+        "progi", "wydruk", "projekt", "komplet", "komplet-napraw", "kartoteka-edytuj",
     };
 
     public static bool Zna(string tryb) => Tryby.Contains(tryb, StringComparer.OrdinalIgnoreCase);
@@ -159,6 +159,12 @@ internal static class CommandDispatcher
 
             case "kartoteka-usun":
                 return KartotekaUsun.Uruchom(sfera, k.SymboleCsv, k.OutPath, k.Zapisz);
+
+            // Zmiana ISTNIEJACYCH kartotek (nazwa, cena, opis, sklad kompletu).
+            // Symbolu NIE rusza — od tego jest tryb "symbole".
+            case "kartoteka-edytuj":
+                if (k.PlanPath is null) return Brak("kartoteka-edytuj: brak --plan=plik.json");
+                return KartotekaEdytuj.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
 
             // Bez --plan to ODCZYT progow; z planem zapis (dopiero z --zapisz).
             case "progi":
