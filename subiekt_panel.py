@@ -50,7 +50,9 @@ class Kafel(tk.Frame):
                          highlightbackground=styl["ramka"], cursor="hand2")
         self._styl = styl
         self._akcja = akcja
-        self.configure(width=szerokosc)
+        # ŻADNEGO configure(width=…): kafle stoją w pack(expand=True), więc
+        # szerokość ustala rząd. Zadeklarowana szerokość walczyła z packiem
+        # przy każdym przerysowaniu (np. gdy dochodził licznik) i okno drżało.
 
         gora = tk.Frame(self, bg=styl["tlo"])
         gora.pack(fill=tk.X, padx=10, pady=(10, 0))
@@ -84,16 +86,86 @@ class Kafel(tk.Frame):
         self._podepnij(self)
 
     def _podepnij(self, widget):
-        """Klik i podświetlenie działają na całym kaflu, nie tylko na ramce."""
+        """Cały kafel ma się zachowywać jak JEDEN przycisk.
+
+        Tkinter wysyła Leave także wtedy, gdy kursor wchodzi na dziecko
+        (etykietę, ikonę) — kafel „gubił” wtedy obramowanie, choć mysz
+        wciąż była nad nim. Dlatego Enter/Leave podpinamy pod WSZYSTKIE
+        widgety, a decyzję podejmujemy po tym, gdzie kursor faktycznie
+        jest (winfo_containing), nie po tym, który widget zgłosił zdarzenie
+        (zgłoszone 06.09.2026).
+        """
         widget.bind("<Button-1>", lambda _e: self._akcja())
         widget.bind("<Enter>", lambda _e: self._podswietl(True))
-        widget.bind("<Leave>", lambda _e: self._podswietl(False))
+        # Zdarzenie niesie widget, NA KTÓRY kursor wszedł — to pewniejsze niż
+        # pytanie o pozycję myszy po fakcie, bo przy szybkim ruchu kursor
+        # bywa już gdzie indziej, zanim zdążymy sprawdzić.
+        widget.bind("<Leave>", self._sprawdz_wyjscie)
+        # Łapka nad CAŁYM kaflem, także nad tekstem — inaczej kursor
+        # zmieniał się w strzałkę i kafel przestawał wyglądać na klikalny.
+        try:
+            widget.configure(cursor="hand2")
+        except tk.TclError:
+            pass                        # nie każdy widget przyjmuje cursor
         for dziecko in widget.winfo_children():
             self._podepnij(dziecko)
 
+    def _sprawdz_wyjscie(self, event):
+        """Gaś podświetlenie tylko, gdy kursor opuścił CAŁY kafel.
+
+        Przy przejściu na dziecko tkinter wysyła Leave z rodzica, ale pole
+        `event.widget` zdarzenia Enter, które zaraz nastąpi, wskazuje na to
+        dziecko. Zamiast zgadywać kolejność, pytamy wprost, co jest teraz
+        pod kursorem — a gdy tkinter nie potrafi odpowiedzieć (kursor
+        „pomiędzy”), zostawiamy podświetlenie i sprawdzamy jeszcze raz
+        po chwili.
+        """
+        def sprawdz():
+            try:
+                if not self.winfo_exists():
+                    return
+                pod = self.winfo_containing(self.winfo_pointerx(),
+                                            self.winfo_pointery())
+            except (tk.TclError, KeyError):
+                return                  # obcy widget albo kafel zniknął
+            if pod is None:
+                # Tkinter nie wie, co jest pod kursorem (mysz nad granicą
+                # widgetów albo poza oknem). Nie zgadujemy — zostawiamy
+                # obramowanie i sprawdzimy przy następnym ruchu; gaszenie
+                # „na wszelki wypadek” dawało migotanie w połowie ruchu.
+                return
+            self._podswietl(self._moje(pod))
+        try:
+            # Krótka zwłoka, nie after_idle: w chwili Leave kursor bywa
+            # jeszcze nad granicą widgetów i winfo_containing zwraca None,
+            # co gasiło obramowanie w połowie ruchu.
+            self.after(30, sprawdz)
+        except tk.TclError:
+            pass
+
+    def _moje(self, widget):
+        """Czy ten widget to kafel albo cokolwiek w jego środku."""
+        while widget is not None:
+            if widget is self:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
     def _podswietl(self, wlaczone):
-        self.configure(highlightbackground="#2980b9" if wlaczone
-                       else self._styl["ramka"])
+        """Podświetlenie zmienia KOLOR obramowania, nigdy jego grubość.
+
+        Wcześniej to samo robiło configure() na całym kaflu, a kafle stoją
+        w pack(fill=BOTH, expand=True) — każda zmiana wymuszała przeliczenie
+        układu rzędu i sąsiednie kafle skakały o piksel (zgłoszone
+        06.09.2026). Zmiana samego koloru nie rusza geometrii.
+        """
+        kolor = "#2980b9" if wlaczone else self._styl["ramka"]
+        try:
+            if self.cget("highlightbackground") != kolor:
+                self.configure(highlightbackground=kolor,
+                               highlightcolor=kolor)
+        except tk.TclError:
+            pass                        # kafel zniknął razem z panelem
 
     def licznik(self, tekst):
         try:
@@ -112,6 +184,8 @@ class PanelSubiekt(tk.Toplevel):
         self.configure(bg=TLO)
         self.transient(arkusz)
         self.kafle = {}
+        #: Wszystkie kafle — do zgaszenia podświetleń, gdy mysz opuści panel.
+        self._wszystkie_kafle = []
         #: Ustawiane przy zamykaniu — wątek liczników sprawdza to między
         #: zapytaniami i przerywa, zamiast trzymać most zajęty dla okna,
         #: którego już nie ma.
@@ -128,9 +202,21 @@ class PanelSubiekt(tk.Toplevel):
         # Samo after() też dotyka tkintera, więc wołane spoza wątku głównego
         # rzuca „main thread is not in main loop” — a wtedy panel zostaje
         # z pustymi licznikami i nikt nie wie dlaczego.
+        # Mysz poza panelem = żaden kafel nie może zostać podświetlony.
+        # Bez tego obramowanie potrafiło „zawisnąć”, gdy kursor wyjechał
+        # z okna zbyt szybko, żeby złapać to zdarzeniem Leave kafla.
+        self.bind("<Leave>", self._zgas_wszystkie)
+
         self._wyniki = queue.Queue()
         self.after(120, self._odbierz_wyniki)
         threading.Thread(target=self._policz_w_tle, daemon=True).start()
+
+    def _zgas_wszystkie(self, _event=None):
+        for k in self._wszystkie_kafle:
+            try:
+                k._podswietl(False)
+            except tk.TclError:
+                pass
 
     def _odbierz_wyniki(self):
         """Puls z wątku głównego: nakłada to, co policzył wątek roboczy."""
@@ -240,6 +326,7 @@ class PanelSubiekt(tk.Toplevel):
                 k.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4)
                 if klucz:
                     self.kafle[klucz] = k
+                self._wszystkie_kafle.append(k)
 
     def _stopka(self):
         s = tk.Frame(self, bg=TLO)

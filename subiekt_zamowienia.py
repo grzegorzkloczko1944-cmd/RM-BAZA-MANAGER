@@ -1971,51 +1971,6 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         """Podpis pod mailem — patrz podpis_nadawcy()."""
         return podpis_nadawcy(getattr(self.master, "current_user", None))
 
-
-def podpis_nadawcy(uzytkownik):
-    """Podpis pod mailem do dostawcy: imię i nazwisko, e-mail, telefon.
-
-    Kontakt bierzemy z tego samego miejsca co zapytanie ofertowe (RFQ) —
-    z tabeli `employees` w rm_manager.sqlite, po loginie zalogowanego.
-    Dostawca ma wiedzieć, do kogo zadzwonić w sprawie zamówienia, tak samo
-    jak przy RFQ; wcześniej pod mailem stało samo `display_name` z
-    master.sqlite, czyli u części kont po prostu „ADMIN”
-    (zgłoszone 06.09.2026).
-
-    Gdy pracownika nie ma w RM_MANAGER albo brakuje pól, schodzimy do
-    display_name — mail ma wyjść tak czy inaczej, w przeciwieństwie do
-    RFQ, gdzie brak kontaktu blokuje wysyłkę.
-    """
-    uzytkownik = (uzytkownik or "").strip()
-    if not uzytkownik:
-        return ""
-
-    # Nazwa wyświetlana z master.sqlite — podstawa podpisu i zapas,
-    # gdyby RM_MANAGER nie miał tego pracownika.
-    nazwa = uzytkownik
-    try:
-        con = sqlite3.connect(f"file:{_sciezka_master()}?mode=ro", uri=True)
-        try:
-            r = con.execute("SELECT display_name FROM users WHERE username=?",
-                            (uzytkownik,)).fetchone()
-        finally:
-            con.close()
-        if r and r[0]:
-            nazwa = r[0]
-    except Exception:
-        pass
-
-    emp = pracownik_rm_manager(uzytkownik)
-    if not emp:
-        return nazwa
-
-    linie = [(emp.get("name") or "").strip() or nazwa]
-    for pole in ("email", "phone"):
-        wartosc = (emp.get(pole) or "").strip()
-        if wartosc:
-            linie.append(wartosc)
-    return "\n".join(linie)
-
     def _pliki_rysunku(self, symbol, projekty=None):
         """
         Pliki rysunku (PDF/DXF/STEP…) z serwera — tą samą drogą co RFQ.
@@ -2819,6 +2774,51 @@ def podpis_nadawcy(uzytkownik):
         self.status.config(
             text=f"Utworzono {len(utworzone)} ZD ({oznaczone} pozycji oznaczonych). "
                  "„Odśwież” pobierze aktualne zapotrzebowanie — zamówione pozycje z niego znikną.")
+
+
+def podpis_nadawcy(uzytkownik):
+    """Podpis pod mailem do dostawcy: imię i nazwisko, e-mail, telefon.
+
+    Kontakt bierzemy z tego samego miejsca co zapytanie ofertowe (RFQ) —
+    z tabeli `employees` w rm_manager.sqlite, po loginie zalogowanego.
+    Dostawca ma wiedzieć, do kogo zadzwonić w sprawie zamówienia, tak samo
+    jak przy RFQ; wcześniej pod mailem stało samo `display_name` z
+    master.sqlite, czyli u części kont po prostu „ADMIN”
+    (zgłoszone 06.09.2026).
+
+    Gdy pracownika nie ma w RM_MANAGER albo brakuje pól, schodzimy do
+    display_name — mail ma wyjść tak czy inaczej, w przeciwieństwie do
+    RFQ, gdzie brak kontaktu blokuje wysyłkę.
+    """
+    uzytkownik = (uzytkownik or "").strip()
+    if not uzytkownik:
+        return ""
+
+    # Nazwa wyświetlana z master.sqlite — podstawa podpisu i zapas,
+    # gdyby RM_MANAGER nie miał tego pracownika.
+    nazwa = uzytkownik
+    try:
+        con = sqlite3.connect(f"file:{_sciezka_master()}?mode=ro", uri=True)
+        try:
+            r = con.execute("SELECT display_name FROM users WHERE username=?",
+                            (uzytkownik,)).fetchone()
+        finally:
+            con.close()
+        if r and r[0]:
+            nazwa = r[0]
+    except Exception:
+        pass
+
+    emp = pracownik_rm_manager(uzytkownik)
+    if not emp:
+        return nazwa
+
+    linie = [(emp.get("name") or "").strip() or nazwa]
+    for pole in ("email", "phone"):
+        wartosc = (emp.get(pole) or "").strip()
+        if wartosc:
+            linie.append(wartosc)
+    return "\n".join(linie)
 
 
 def open_window(parent, project_id=None, project_name=None):
