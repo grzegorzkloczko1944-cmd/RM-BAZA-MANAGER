@@ -655,7 +655,7 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
                  nadawca, szukaj_plikow=None, katalog_pdf=None, szukaj_maila=None,
                  szukaj_dalej=None, needs_dxf=None, register_drop=None,
                  dozwolone_ext=None, blad_serwera=None, agent_portalu=None,
-                 szukaj_hurtem=None):
+                 szukaj_hurtem=None, po_wyslaniu=None):
         super().__init__(parent)
         # Okno MUSI trzymać się nad arkuszem. Bez transient() to zwykły
         # Toplevel: przy budowaniu listy plików (update_idletasks w pętli
@@ -670,6 +670,10 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
         self.projekt = projekt
         self.pozycje = pozycje              # [(symbol, nazwa, ilosc, jm)]
         self.nadawca = nadawca
+        #: Wołane po POTWIERDZONEJ wysyłce — okno, które nas otworzyło,
+        #: odświeża wtedy swoją listę (kolumny „Wysłano” i „Termin”).
+        #: Nie po samym otwarciu draftu: wtedy nic się jeszcze nie zmieniło.
+        self.po_wyslaniu = po_wyslaniu
         self.szukaj_plikow = szukaj_plikow  # callable(symbol[, projekty]) -> [Path]
         #: [(project_id, item_id)] pozycji dopasowanych do BOM-u — po wysyłce
         #: wraca pod nie „Zamówiono" i termin dostawy (odloz_zamowienia).
@@ -1452,6 +1456,17 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
             messagebox.showinfo("Zamówiono", tresc, parent=self)
 
         self.status.config(text=f"{self.numer_zd} oznaczone jako wysłane.")
+
+        # Okno, które nas otworzyło, ma teraz nieaktualną listę: doszła data
+        # wysyłki i termin. Wołamy PRZED destroy(), ale przez after na
+        # rodzicu — inaczej odświeżanie startowałoby w oknie, które właśnie
+        # znika.
+        if callable(self.po_wyslaniu):
+            rodzic = self.master
+            try:
+                rodzic.after(0, self.po_wyslaniu)
+            except Exception:
+                pass                        # rodzic zamknięty — trudno
         self._zamknij()
 
 
@@ -1459,10 +1474,10 @@ def open_window(parent, numer_zd, dostawca, email, projekt, pozycje, nadawca,
                 szukaj_plikow=None, katalog_pdf=None, szukaj_maila=None,
                 szukaj_dalej=None, needs_dxf=None, register_drop=None,
                 dozwolone_ext=None, blad_serwera=None, agent_portalu=None,
-                szukaj_hurtem=None):
+                szukaj_hurtem=None, po_wyslaniu=None):
     return OknoWysylki(parent, numer_zd, dostawca, email, projekt, pozycje,
                        nadawca, szukaj_plikow, katalog_pdf, szukaj_maila,
                        szukaj_dalej=szukaj_dalej, needs_dxf=needs_dxf,
                        register_drop=register_drop, dozwolone_ext=dozwolone_ext,
                        blad_serwera=blad_serwera, agent_portalu=agent_portalu,
-                       szukaj_hurtem=szukaj_hurtem)
+                       szukaj_hurtem=szukaj_hurtem, po_wyslaniu=po_wyslaniu)

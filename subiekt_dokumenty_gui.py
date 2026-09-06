@@ -728,7 +728,11 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
             register_drop=getattr(okno, "_register_file_drop", None),
             dozwolone_ext=getattr(okno, "RFQ_PORTAL_EXTS", None),
             blad_serwera=lambda: getattr(okno, "_rfq_server_error", None),
-            agent_portalu=getattr(okno, "_get_rfq_agent", None))
+            agent_portalu=getattr(okno, "_get_rfq_agent", None),
+            # Po potwierdzonej wysyłce lista ma pokazać nową datę w kolumnie
+            # „Wysłano” i termin — bez tego trzeba było klikać „Odśwież”
+            # ręcznie, żeby zobaczyć skutek własnej operacji.
+            po_wyslaniu=self._load_async)
 
     def _szukaj_dalej_rysunku(self, pozycja):
         """Alternatywne źródło plików — ta sama droga co w oknie zamówień."""
