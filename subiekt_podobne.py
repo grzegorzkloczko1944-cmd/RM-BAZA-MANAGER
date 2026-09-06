@@ -59,7 +59,10 @@ EXE_CANDIDATES = [
     r"C:\RMPAK_CLIENT\Repozytoria\RM-BAZA-MANAGER\subiekt_sfera\NexoRecon\bin\Release\NexoRecon.exe",
     r"C:\RMPAK_CLIENT\NexoRecon\NexoRecon.exe",
 ]
-CONFIG_PATH = r"C:\RMPAK_CLIENT\.nexo_sfera.json"
+# Sciezka konfiguracji trzymana w subiekt_konfig — to samo miejsce, z ktorego
+# okno logowania ja ZAPISUJE. Trzy niezalezne kopie tej stalej grozily
+# rozjazdem, gdy doszedl zapis (06.09.2026).
+from subiekt_konfig import CONFIG_PATH
 
 TIMEOUT_S = 180
 

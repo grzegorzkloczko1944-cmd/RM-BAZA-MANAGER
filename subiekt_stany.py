@@ -43,7 +43,10 @@ EXE_CANDIDATES = [
     # ktore zdazyly pobrac most przed zmiana, nie przestaly dzialac.
     r"C:\RMPAK_CLIENT\NexoRecon\NexoRecon.exe",
 ]
-CONFIG_PATH = r"C:\RMPAK_CLIENT\.nexo_sfera.json"
+# Sciezka konfiguracji trzymana w subiekt_konfig — to samo miejsce, z ktorego
+# okno logowania ja ZAPISUJE. Trzy niezalezne kopie tej stalej grozily
+# rozjazdem, gdy doszedl zapis (06.09.2026).
+from subiekt_konfig import CONFIG_PATH
 # projects_dir zalezy od maszyny (firma: Y:\RM_BAZA\projects, dom/M-OLD:
 # C:/RMPAK_CLIENT/RM_BAZY/RM_BAZA/projects) - RM_BAZA juz to rozwiazuje
 # poprawnie na kazdej maszynie przez sync_config.json (patrz np.

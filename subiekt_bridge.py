@@ -834,6 +834,23 @@ def wywolaj(tryb, argv=(), timeout=TIMEOUT_S, plan=None, symbole=None,
     return call(tryb, args, timeout=timeout, write=zapisz, fallback=fallback)
 
 
+def pozwol_na_ponowna_probe():
+    """Zdejmuje pamięć o tym, że most nie wstał.
+
+    `_most_niedostepny` żyje do końca procesu RM_BAZA: raz nieudany start
+    i wszystkie kolejne wywołania lecą starym CLI, bez ponawiania. To dobre,
+    gdy powód się nie zmienia (stara binarka, brak pliku), ale ZŁE po zmianie
+    danych logowania — user poprawia hasło, a okno dalej odpowiada „most jest
+    oznaczony jako niedostępny" i nie ma jak z tego wyjść bez restartu
+    aplikacji (zgłoszone 06.09.2026).
+
+    Woła to okno „Połączenie z Subiektem" przed ponownym startem mostu.
+    """
+    global _most_niedostepny, _ostrzezono_o_buildzie
+    _most_niedostepny = False
+    _ostrzezono_o_buildzie = False
+
+
 def zatrzymaj_most():
     """Kończy proces mostu. Do diagnostyki — normalnie most żyje cały dzień."""
     dane = ping()

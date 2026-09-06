@@ -423,6 +423,16 @@ class PanelSubiekt(tk.Toplevel):
             self.btn_buduj.pack_forget()
         threading.Thread(target=self._policz_w_tle, daemon=True).start()
 
+    def odswiez_stan_mostu(self):
+        """Przerysowuje stan mostu i liczniki. Wola to okno logowania po
+        zmianie danych polaczenia albo wylogowaniu — bez tego panel zostaje
+        z napisem ONLINE po ubiciu mostu (06.09.2026)."""
+        try:
+            self.lbl_most.config(text="⏳  sprawdzam…")
+        except tk.TclError:
+            return                      # panel zamkniety
+        threading.Thread(target=self._policz_w_tle, daemon=True).start()
+
     def _policz_w_tle(self):
         """Stan mostu i liczniki kafli. W wątku, żeby panel otwierał się od razu."""
         import subiekt_bridge as b

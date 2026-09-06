@@ -554,6 +554,12 @@ class MainWindow(tk.Tk):
         # Sama pozycja jest widoczna zawsze — kontrola roli w menu_app_urls,
         # żeby nie-ADMIN dostał czytelny komunikat zamiast znikającego menu.
         settingsm.add_command(label="🌐 Adresy aplikacji… (ADMIN)", command=self.menu_app_urls)
+        settingsm.add_separator()
+        # Dane logowania do Subiekta. Odblokowywane HASLEM ADMIN-a, a nie
+        # rola sesji: administrator zaklada stanowisko siedzac na koncie
+        # zwyklego usera i nie ma go po co przelogowywac (06.09.2026).
+        settingsm.add_command(label="🔗 Polaczenie z Subiektem… (ADMIN)",
+                              command=self.menu_subiekt_polaczenie)
         menubar.add_cascade(label="Ustawienia", menu=settingsm)
         
         self.config(menu=menubar)
@@ -22646,6 +22652,23 @@ class MainWindow(tk.Tk):
         except Exception as e:
             messagebox.showerror("Aplikacje", f"Nie udało się otworzyć:\n{url}\n\n{e}",
                                  parent=self)
+
+    def menu_subiekt_polaczenie(self):
+        """Okno danych logowania do Subiekta — po podaniu hasla ADMIN-a.
+
+        Nie sprawdzamy `current_user_role`, tylko haslo: normalny scenariusz
+        to administrator konfigurujacy stanowisko ZALOGOWANE NA USERA. Sesja
+        RM_BAZA zostaje nietknieta — odblokowane jest wylacznie to okno,
+        i tylko do jego zamkniecia (ponowne otwarcie = ponowne haslo).
+        """
+        try:
+            import subiekt_polaczenie_gui
+        except ImportError as e:
+            messagebox.showerror("Polaczenie z Subiektem",
+                                 f"Nie udalo sie wczytac okna:\n{e}", parent=self)
+            return
+        subiekt_polaczenie_gui.otworz(
+            self, self.db_manager.master_con, self.current_user_role)
 
     def menu_app_urls(self):
         """Edycja adresów aplikacji webowych — TYLKO ADMIN.
