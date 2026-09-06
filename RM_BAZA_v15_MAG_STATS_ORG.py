@@ -832,12 +832,20 @@ class MainWindow(tk.Tk):
         # plik nie puchł. Zaznaczenie w arkuszu zawęża listę pozycji.
         # Miejsce: obok „Aplikacje", przed badge'em RFQ — to też jest wejście
         # do zewnętrznego systemu, a nie operacja na arkuszu.
-        # Menu, nie przycisk: są dwie różne operacje o bardzo różnym skutku —
-        # podgląd stanów (czyta) i założenie projektu (ZAPISUJE do Subiekta).
-        # Zlanie ich w jeden przycisk kusiłoby do przypadkowego zapisu.
+        # Lewy klik otwiera PANEL z kaflami (subiekt_panel), prawy — stare menu.
+        #
+        # Menu podawało dziewięć nazw bez żadnego kontekstu: nie było widać,
+        # co czyta, a co ZAPISUJE do produkcyjnej bazy, ani ile jest do
+        # zamówienia. Panel pokazuje jedno i drugie, więc decyzja „które
+        # narzędzie otworzyć” zapada przed kliknięciem, a nie po. Żywe liczby
+        # są możliwe dopiero od stałego mostu — wcześniej każda kosztowałaby
+        # ~10 s (zgłoszone 06.09.2026).
+        #
+        # Menu zostaje pod prawym klawiszem: kto zna pozycje na pamięć, ma je
+        # dalej jednym kliknięciem, bez otwierania okna.
         self.btn_subiekt = tk.Menubutton(
             search_frame,
-            text="📦 SUBIEKT ▾",
+            text="📦 SUBIEKT",
             bg="#8e44ad",
             fg="white",
             font=("Arial", 9),
@@ -880,7 +888,17 @@ class MainWindow(tk.Tk):
         subiekt_menu.add_separator()
         subiekt_menu.add_command(label="🔗 Scal kody handlowe w tym projekcie…",
                                  command=self.open_subiekt_scalanie)
-        self.btn_subiekt["menu"] = subiekt_menu
+        # Menu pod PRAWYM klawiszem — lewy otwiera panel z kaflami.
+        #
+        # ⚠️ Menu NIE jest przypisane przez btn_subiekt["menu"]: Menubutton
+        # rozwija je wtedy sam przy lewym kliknięciu, PRZED naszym bindem,
+        # więc menu wyskakiwało NA panelu (zgłoszone 06.09.2026). Trzymamy je
+        # w polu i pokazujemy ręcznie tylko prawym klawiszem.
+        self._subiekt_menu = subiekt_menu
+        self.btn_subiekt.bind("<Button-1>", lambda _e: self.open_subiekt_panel())
+        self.btn_subiekt.bind(
+            "<Button-3>",
+            lambda e: subiekt_menu.tk_popup(e.x_root, e.y_root))
         self.btn_subiekt.pack(side=tk.LEFT, padx=(0, 5), pady=2)
 
         # RFQ: ilu kooperantów czeka z odpowiedzią. Liczone LOKALNIE z
@@ -28942,6 +28960,25 @@ class MainWindow(tk.Tk):
             only = None   # zaznaczenie to udogodnienie, nie warunek działania
 
         subiekt_stany.open_window(self, self.current_project_id, only_drawings=only)
+
+    def open_subiekt_panel(self):
+        """Panel narzędzi Subiekta (lewy klik na „SUBIEKT”).
+
+        Gdyby modułu zabrakło, spadamy na stare menu — przycisk ma działać
+        zawsze, nawet po niepełnym „git pull”.
+        """
+        try:
+            import subiekt_panel
+        except Exception as e:
+            try:
+                self._subiekt_menu.tk_popup(
+                    self.btn_subiekt.winfo_rootx(),
+                    self.btn_subiekt.winfo_rooty() + self.btn_subiekt.winfo_height())
+            except Exception:
+                messagebox.showerror("SUBIEKT", f"Brak panelu narzędzi:\n{e}",
+                                     parent=self)
+            return
+        subiekt_panel.open_window(self)
 
     def open_subiekt_projekt(self):
         """Okno „Załóż projekt w Subiekcie" (menu 📦 SUBIEKT).
