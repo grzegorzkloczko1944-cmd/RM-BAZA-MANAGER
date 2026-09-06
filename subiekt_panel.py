@@ -171,7 +171,16 @@ class Kafel(tk.Frame):
         try:
             self.lbl_licznik.config(text=tekst)
         except tk.TclError:
-            pass                    # panel zamknięty w trakcie liczenia
+            return                  # panel zamknięty w trakcie liczenia
+        # Licznik („109 dokumentów · 7 ZD") jest szerszy niż tytuł kafla,
+        # a dochodzi PO wysrodkowaniu okna — geometria byla juz zamrozona
+        # na rozmiarze sprzed liczenia, wiec ostatni kafel w rzedzie
+        # wychodzil poza kadr (zgloszone 06.09.2026). Panel sam sie
+        # dociaga, gdy uklad zaczyna zadac wiecej miejsca.
+        try:
+            self.winfo_toplevel().dociagnij_szerokosc()
+        except (tk.TclError, AttributeError):
+            pass
 
 
 def _etykieta_aktualizacji():
@@ -206,6 +215,12 @@ class PanelSubiekt(tk.Toplevel):
 
         self.update_idletasks()
         wysrodkuj(self, arkusz)
+        # Okno nie moze zejsc ponizej tego, czego zada uklad kafli — inaczej
+        # ostatni kafel w rzedzie wychodzi poza kadr i widac go w polowie.
+        try:
+            self.minsize(self.winfo_reqwidth(), self.winfo_reqheight())
+        except tk.TclError:
+            pass
 
         # Wyniki z wątku roboczego wracają KOLEJKĄ, nie przez after().
         # Samo after() też dotyka tkintera, więc wołane spoza wątku głównego
@@ -245,6 +260,28 @@ class PanelSubiekt(tk.Toplevel):
                 self.after(120, self._odbierz_wyniki)
         except tk.TclError:
             pass
+
+    def dociagnij_szerokosc(self):
+        """Poszerza okno, gdy uklad zaczal zadac wiecej niz okno ma teraz.
+
+        Wolane przez kafle po nalozeniu licznika. Tylko POSZERZA i tylko
+        w poziomie: zwezanie szarpaloby oknem przy kazdym liczniku, a wysokosc
+        ustala liczba sekcji, ktora sie nie zmienia. Pozycja zostaje ta sama,
+        zeby okno nie odskakiwalo uzytkownikowi spod myszy.
+        """
+        try:
+            self.update_idletasks()
+            trzeba = self.winfo_reqwidth()
+            if trzeba <= self.winfo_width():
+                return
+            # Nie wypychamy poza ekran — przy bardzo dlugich licznikach
+            # lepiej lekko sciesnic kafle niz schowac brzeg okna.
+            trzeba = min(trzeba, self.winfo_screenwidth() - 40)
+            x = min(self.winfo_x(), max(0, self.winfo_screenwidth() - trzeba - 20))
+            self.geometry(f"{trzeba}x{self.winfo_height()}+{x}+{self.winfo_y()}")
+            self.minsize(trzeba, self.winfo_reqheight())
+        except tk.TclError:
+            pass                        # panel zamkniety w trakcie liczenia
 
     # ── budowa ──────────────────────────────────────────────────────────────
     def _naglowek(self):
