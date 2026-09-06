@@ -169,7 +169,12 @@ internal static class ServerHost
         }
 
         var argsNode = zad["args"] as JsonObject ?? new JsonObject();
-        var komenda = ZbudujKomende(cmd, argsNode);
+        // Jeden katalog na cale zadanie: plan wejsciowy i wynik handlera.
+        // Kasowany w finally WykonajRaz, wiec %TEMP% nie rosnie.
+        var katalogRoboczy = Path.Combine(Path.GetTempPath(), "nexo_bridge",
+                                          Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(katalogRoboczy);
+        var komenda = ZbudujKomende(cmd, argsNode, katalogRoboczy);
         var zapis = CommandDispatcher.CzyZapis(komenda);
 
         // Sesja po dluzszej przerwie (uspiony komputer, restart SQL) bywa
@@ -188,7 +193,7 @@ internal static class ServerHost
         if (blad != null) return blad;
 
         var zegar = Stopwatch.StartNew();
-        var wynik = WykonajZReconnect(sesja, komenda, zapis);
+        var wynik = WykonajZReconnect(sesja, komenda, zapis, katalogRoboczy);
         zegar.Stop();
         _ostatniaAktywnosc = DateTime.UtcNow;
 
@@ -255,11 +260,11 @@ internal static class ServerHost
     /// Przy zapisie nie wiadomo, czy operacja przeszla, wiec zwracamy
     /// UNKNOWN_COMMIT_STATE i pozwalamy zdecydowac czlowiekowi/handlerowi.
     /// </summary>
-    static JsonObject WykonajZReconnect(NexoSession sesja, Komenda k, bool zapis)
+    static JsonObject WykonajZReconnect(NexoSession sesja, Komenda k, bool zapis, string katalog)
     {
         try
         {
-            return WykonajRaz(sesja, k);
+            return WykonajRaz(sesja, k, katalog);
         }
         catch (Exception ex)
         {
@@ -295,7 +300,7 @@ internal static class ServerHost
 
             try
             {
-                return WykonajRaz(sesja, k);
+                return WykonajRaz(sesja, k, katalog);
             }
             catch (Exception ex2)
             {
@@ -310,10 +315,8 @@ internal static class ServerHost
     /// wiec server materializuje plik tymczasowy i przechwytuje stdout.
     /// Dzieki temu Krok E nie wymaga zmian w zadnym handlerze.
     /// </summary>
-    static JsonObject WykonajRaz(NexoSession sesja, Komenda k)
+    static JsonObject WykonajRaz(NexoSession sesja, Komenda k, string katalog)
     {
-        var katalog = Path.Combine(Path.GetTempPath(), "nexo_bridge", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(katalog);
         var outPath = Path.Combine(katalog, "out.json");
 
         var stary = Console.Out;
@@ -350,20 +353,21 @@ internal static class ServerHost
     }
 
     /// <summary>Mapuje args JSON na Komende — odpowiednik parsowania --flag w CLI.</summary>
-    static Komenda ZbudujKomende(string tryb, JsonObject a)
+    static Komenda ZbudujKomende(string tryb, JsonObject a, string katalogRoboczy)
     {
         List<string>? symbole = null;
         if (a["symbols"] is JsonArray arr)
             symbole = arr.Select(x => x?.GetValue<string>() ?? "").Where(s => s.Length > 0).ToList();
 
         // Plany przychodza jako obiekt/tablica JSON, a handlery czytaja je
-        // z pliku. Zapisujemy do %TEMP% zamiast przerabiac handlery.
+        // z pliku. Zapisujemy wiec do %TEMP% zamiast przerabiac handlery —
+        // ale do TEGO SAMEGO katalogu, ktory WykonajRaz kasuje w finally.
+        // Wczesniej plan mial wlasny katalog, ktorego nikt nie sprzatal:
+        // 27 pozostalosci z plan.json po trzech dniach (znalezione 06.09.2026).
         string? planPath = null;
         if (a["plan"] is JsonNode plan)
         {
-            var kat = Path.Combine(Path.GetTempPath(), "nexo_bridge", Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(kat);
-            planPath = Path.Combine(kat, "plan.json");
+            planPath = Path.Combine(katalogRoboczy, "plan.json");
             File.WriteAllText(planPath, plan.ToJsonString(), new UTF8Encoding(false));
         }
 

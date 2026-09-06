@@ -32,6 +32,7 @@ import os
 import socket
 import struct
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -137,6 +138,55 @@ def status(timeout=5):
     return odp["data"]
 
 
+#: Po ilu dniach katalog roboczy w %TEMP% uznajemy za śmieć. Doba z zapasem:
+#: najdłuższa operacja (wydruk PDF, zakładanie projektu) trwa minuty, więc nic
+#: żywego nie ma prawa być starsze.
+SMIECI_STARSZE_NIZ_DNI = 1
+
+
+def posprzataj_temp():
+    """Kasuje stare katalogi robocze w %TEMP%. Zwraca liczbę usuniętych.
+
+    Moduły tworzą je przez `tempfile.mkdtemp(prefix="subiekt_…")` i nie
+    sprzątają — pliki wejściowe i wyniki muszą przeżyć wywołanie mostu,
+    a nikt nie wie, kiedy przestają być potrzebne. Przy jednym wywołaniu
+    dziennie to nie problem; przy stałym moście i szybkich operacjach
+    katalogów przybywa setkami (185 po trzech dniach testów, 06.09.2026).
+
+    Sprzątamy tutaj, bo to jedyne miejsce, przez które przechodzi każda
+    operacja Subiekta — także ta, która poleci starym CLI.
+    """
+    import shutil
+
+    granica = time.time() - SMIECI_STARSZE_NIZ_DNI * 86400
+    usuniete = 0
+    try:
+        baza = tempfile.gettempdir()
+        for nazwa in os.listdir(baza):
+            if not (nazwa.startswith("subiekt_") or nazwa == "nexo_bridge"):
+                continue
+            sciezka = os.path.join(baza, nazwa)
+            if not os.path.isdir(sciezka):
+                continue
+            try:
+                if nazwa == "nexo_bridge":
+                    # Katalog mostu: kasujemy stare PODkatalogi, nie sam
+                    # kontener — most może go właśnie używać.
+                    for pod in os.listdir(sciezka):
+                        p = os.path.join(sciezka, pod)
+                        if os.path.isdir(p) and os.path.getmtime(p) < granica:
+                            shutil.rmtree(p, ignore_errors=True)
+                            usuniete += 1
+                elif os.path.getmtime(sciezka) < granica:
+                    shutil.rmtree(sciezka, ignore_errors=True)
+                    usuniete += 1
+            except OSError:
+                pass          # zajęty albo zniknął w międzyczasie — trudno
+    except OSError:
+        pass                  # brak dostępu do %TEMP% nie może wywalić mostu
+    return usuniete
+
+
 def _uruchom_most():
     """Startuje `NexoRecon.exe server` w tle. Zwraca True, gdy się udało."""
     exe = _find_exe()
@@ -144,6 +194,11 @@ def _uruchom_most():
         return False
     if not os.path.isfile(CONFIG_PATH):
         return False
+
+    # Przy okazji startu mostu (raz na uruchomienie RM_BAZA) — sprzątanie
+    # wczorajszych katalogów roboczych. Tu, bo to moment, w którym i tak
+    # czekamy kilkanaście sekund na sesję Sfery.
+    posprzataj_temp()
 
     # Bez konsoli i odczepiony od RM_BAZA — most ma przeżyć zamknięcie
     # programu i obsługiwać kolejne uruchomienia tego samego dnia
