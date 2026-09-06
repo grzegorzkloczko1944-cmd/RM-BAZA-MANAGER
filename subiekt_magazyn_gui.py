@@ -225,9 +225,11 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
         tk.Label(f, text="(symbol albo nazwa)", bg="#ecf0f1", fg="#7f8c8d",
                  font=("Arial", 8)).pack(side=tk.LEFT, padx=(4, 0))
 
-        # Domyślny widok magazyniera: „co jest do domówienia". Przełącznik
-        # ustawia się sam po wczytaniu — gdy żadna kartoteka nie ma progu,
-        # lista „poniżej progu" byłaby pusta i wyglądałaby na zepsutą.
+        # Domyślnie WYŁĄCZONY — okno otwiera się na pełnej liście magazynu.
+        # Wcześniej włączał się sam, gdy cokolwiek było poniżej progu, przez
+        # co po otwarciu widać było kilka pozycji zamiast całego magazynu
+        # i wyglądało to na uciętą listę (zgłoszone 06.09.2026). Filtrowanie
+        # to decyzja użytkownika, nie domysł okna.
         self.var_ponizej = tk.IntVar(value=0)
         self.chk_ponizej = tk.Checkbutton(
             f, text="tylko poniżej progu (do domówienia)", variable=self.var_ponizej,
@@ -372,7 +374,12 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
         self.after(0, lambda: self._wczytaj_done(poz, None))
 
     def _wczytaj_done(self, poz, error):
-        self.stop_kreciolek()
+        # stop_kreciolek() BEZ tekstu zatrzymuje tylko animacje — na pasku
+        # zostawala ostatnia klatka („◐ Czytam stany…"), wiec po wczytaniu
+        # okno dalej twierdzilo, ze czyta (zgloszone 06.09.2026). Licznik
+        # pozycji i tak idzie do lbl_info, wiec pasek zwyczajnie czyscimy;
+        # jest od komunikatow o akcjach (zapis progow, RW, ZD).
+        self.stop_kreciolek("")
         try:
             self.btn_refresh.config(state=tk.NORMAL)
         except tk.TclError:
@@ -413,9 +420,6 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
         self.pozycje = nowe
         self.zaznacz_odczyt(self.lbl_wiek)
 
-        # Filtr „poniżej progu" włącza się sam, gdy jest co pokazać.
-        if not poprzednie:
-            self.var_ponizej.set(1 if any(self._ponizej(p) for p in self.pozycje) else 0)
         self._odswiez_liste()
 
     # ── model ──────────────────────────────────────────────────────────────

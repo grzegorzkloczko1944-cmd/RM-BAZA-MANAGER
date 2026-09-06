@@ -171,7 +171,16 @@ class Kafel(tk.Frame):
         try:
             self.lbl_licznik.config(text=tekst)
         except tk.TclError:
-            pass                    # panel zamknięty w trakcie liczenia
+            return                  # panel zamknięty w trakcie liczenia
+        # Licznik („109 dokumentów · 7 ZD") jest szerszy niż tytuł kafla,
+        # a dochodzi PO wysrodkowaniu okna — geometria byla juz zamrozona
+        # na rozmiarze sprzed liczenia, wiec ostatni kafel w rzedzie
+        # wychodzil poza kadr (zgloszone 06.09.2026). Panel sam sie
+        # dociaga, gdy uklad zaczyna zadac wiecej miejsca.
+        try:
+            self.winfo_toplevel().dociagnij_szerokosc()
+        except (tk.TclError, AttributeError):
+            pass
 
 
 def _etykieta_aktualizacji():
@@ -206,6 +215,12 @@ class PanelSubiekt(tk.Toplevel):
 
         self.update_idletasks()
         wysrodkuj(self, arkusz)
+        # Okno nie moze zejsc ponizej tego, czego zada uklad kafli — inaczej
+        # ostatni kafel w rzedzie wychodzi poza kadr i widac go w polowie.
+        try:
+            self.minsize(self.winfo_reqwidth(), self.winfo_reqheight())
+        except tk.TclError:
+            pass
 
         # Wyniki z wątku roboczego wracają KOLEJKĄ, nie przez after().
         # Samo after() też dotyka tkintera, więc wołane spoza wątku głównego
@@ -245,6 +260,28 @@ class PanelSubiekt(tk.Toplevel):
                 self.after(120, self._odbierz_wyniki)
         except tk.TclError:
             pass
+
+    def dociagnij_szerokosc(self):
+        """Poszerza okno, gdy uklad zaczal zadac wiecej niz okno ma teraz.
+
+        Wolane przez kafle po nalozeniu licznika. Tylko POSZERZA i tylko
+        w poziomie: zwezanie szarpaloby oknem przy kazdym liczniku, a wysokosc
+        ustala liczba sekcji, ktora sie nie zmienia. Pozycja zostaje ta sama,
+        zeby okno nie odskakiwalo uzytkownikowi spod myszy.
+        """
+        try:
+            self.update_idletasks()
+            trzeba = self.winfo_reqwidth()
+            if trzeba <= self.winfo_width():
+                return
+            # Nie wypychamy poza ekran — przy bardzo dlugich licznikach
+            # lepiej lekko sciesnic kafle niz schowac brzeg okna.
+            trzeba = min(trzeba, self.winfo_screenwidth() - 40)
+            x = min(self.winfo_x(), max(0, self.winfo_screenwidth() - trzeba - 20))
+            self.geometry(f"{trzeba}x{self.winfo_height()}+{x}+{self.winfo_y()}")
+            self.minsize(trzeba, self.winfo_reqheight())
+        except tk.TclError:
+            pass                        # panel zamkniety w trakcie liczenia
 
     # ── budowa ──────────────────────────────────────────────────────────────
     def _naglowek(self):
@@ -386,6 +423,16 @@ class PanelSubiekt(tk.Toplevel):
             self.btn_buduj.pack_forget()
         threading.Thread(target=self._policz_w_tle, daemon=True).start()
 
+    def odswiez_stan_mostu(self):
+        """Przerysowuje stan mostu i liczniki. Wola to okno logowania po
+        zmianie danych polaczenia albo wylogowaniu — bez tego panel zostaje
+        z napisem ONLINE po ubiciu mostu (06.09.2026)."""
+        try:
+            self.lbl_most.config(text="⏳  sprawdzam…")
+        except tk.TclError:
+            return                      # panel zamkniety
+        threading.Thread(target=self._policz_w_tle, daemon=True).start()
+
     def _policz_w_tle(self):
         """Stan mostu i liczniki kafli. W wątku, żeby panel otwierał się od razu."""
         import subiekt_bridge as b
@@ -413,9 +460,40 @@ class PanelSubiekt(tk.Toplevel):
             s = {}
         self._wyniki.put(lambda: self._most_online(s))
 
+        # Most dziala, ale na serwerze moze lezec NOWSZY. Bez tego user
+        # zostawal na wersji sprzed optymalizacji i nie mial jak sie
+        # dowiedziec, ze istnieje szybsza — ostrzezenie o buildzie wypada
+        # tylko wtedy, gdy most w ogole nie wstaje (06.09.2026).
+        # Sam odczyt jest bramkowany dobowo w subiekt_bridge, wiec to nie
+        # oznacza ruchu po dysku sieciowym przy kazdym otwarciu panelu.
+        try:
+            nowszy, opis = b.dostepna_nowsza()
+        except Exception:
+            nowszy, opis = False, ""
+        if nowszy and not self._przerwane:
+            self._wyniki.put(lambda: self._proponuj_aktualizacje(opis))
+
         # Liczniki dopiero po potwierdzeniu, że most żyje — inaczej każdy
         # kafel czekałby na timeout osobno.
         self._liczniki()
+
+    def _proponuj_aktualizacje(self, opis):
+        """Dopisuje informacje o nowszej wersji i pokazuje przycisk pobrania.
+
+        NIE pobieramy sami: most restartuje sie przy aktualizacji, a user
+        moze byc w srodku operacji na Subiekcie. Decyzja nalezy do niego,
+        tak jak przy budowaniu.
+        """
+        try:
+            self.lbl_most.config(
+                text=self.lbl_most.cget("text") + "\n\u2b06  " + opis)
+            # Etykieta z mostu: u usera "Pobierz most", u budujacego
+            # "Zbuduj teraz" - zaktualizuj_most() i tak rozpoznaje,
+            # co zrobic na tym stanowisku.
+            self.btn_buduj.config(text=_etykieta_aktualizacji())
+            self.btn_buduj.pack(padx=12, pady=(0, 12))
+        except tk.TclError:
+            pass                    # panel zamkniety w miedzyczasie
 
     def _most_offline(self, binarka_aktualna):
         self.lbl_most.config(

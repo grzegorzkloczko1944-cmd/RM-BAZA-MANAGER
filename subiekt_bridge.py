@@ -62,6 +62,20 @@ TIMEOUT_S = 180
 _most_niedostepny = False
 _lock = threading.Lock()
 
+#: Jak czesto wolno zagladac na serwer po nowszy most.
+#:
+#: To odczyt z DYSKU SIECIOWEGO, a panel Subiekta otwiera sie wiele razy
+#: dziennie — sprawdzanie za kazdym razem oznaczaloby staly ruch po Y:
+#: dla informacji, ktora zmienia sie moze raz na kilka dni. Raz na dobe
+#: wystarczy: most wystawia jedna osoba, planowo (zgloszone 06.09.2026 —
+#: "skanowanie ma byc jakies rzadkie, nie co chwila").
+SPRAWDZAJ_NOWSZY_CO_S = 24 * 3600
+
+#: Plik ze znacznikiem ostatniego zajrzenia na serwer. NIE zmienna w pamieci:
+#: RM_BAZA bywa uruchamiana kilka razy dziennie, a przy zmiennej kazdy start
+#: liczylby sie od zera i sprawdzanie wracaloby do "przy kazdym otwarciu".
+ZNACZNIK_SPRAWDZENIA = r"C:\RMPAK_CLIENT\.most_sprawdzony"
+
 
 class BridgeUnavailable(Exception):
     """Mostu nie ma i nie udało się go uruchomić — wołający ma użyć CLI."""
@@ -489,6 +503,82 @@ def _wersja_zrodla(folder):
         return None
 
 
+def wersja_lokalna():
+    """{'protokol','zbudowano','sha'} mostu uzywanego na tym stanowisku.
+
+    Czytane z wersja.json LEZACEGO OBOK dzialajacej binarki, nie z ustalonej
+    sciezki: most bywa w MOST\\, w starym C:\\RMPAK_CLIENT\\NexoRecon albo
+    (u budujacego) wprost w bin\\Release repozytorium.
+    """
+    exe = _find_exe()
+    if not exe:
+        return None
+    return _wersja_zrodla(os.path.dirname(exe))
+
+
+def _czas_na_sprawdzenie():
+    """Czy minela doba od ostatniego zajrzenia na serwer."""
+    import time
+    try:
+        return (time.time() - os.path.getmtime(ZNACZNIK_SPRAWDZENIA)
+                ) >= SPRAWDZAJ_NOWSZY_CO_S
+    except OSError:
+        return True                 # brak znacznika = jeszcze nie sprawdzalismy
+
+
+def _odnotuj_sprawdzenie():
+    """Zapisuje moment zajrzenia na serwer."""
+    try:
+        with open(ZNACZNIK_SPRAWDZENIA, "w", encoding="utf-8") as f:
+            f.write("ostatnie sprawdzenie nowszego mostu\n")
+    except OSError:
+        pass                        # brak zapisu = sprawdzimy ponownie, nic zlego
+
+
+def dostepna_nowsza(timeout_s=3, wymuszone=False):
+    """Czy na serwerze lezy NOWSZA binarka niz uzywana. (bool, opis).
+
+    ⚠️ POWSTALO, BO AUTOMAT REAGOWAL TYLKO NA MOST CALKIEM ZEPSUTY.
+    Ostrzezenie o buildzie wypada wylacznie wtedy, gdy most nie wstaje —
+    brak .exe albo binarka tak stara, ze nie zna trybu "server". Dopoki most
+    dziala, nikt nie sprawdzal, czy na serwerze nie ma nowszego: userzy
+    zostawali na wersji sprzed optymalizacji i nie mieli jak sie dowiedziec,
+    ze istnieje szybsza (06.09.2026 — serwer miał e2c26d8, gdy zbudowane
+    bylo juz 9e6838a).
+
+    Porownujemy `zbudowano` (tekst "RRRR-MM-DD GG:MM", wiec sortuje sie
+    leksykograficznie), a nie `sha` — skrot mowi tylko, ze COS sie rozni,
+    nie ktora strona jest starsza. Rozny protokol = nie proponujemy nic:
+    binarka niezgodna z tym klientem zrobilaby wiecej szkody niz stara.
+
+    `timeout_s` nie jest tu egzekwowany — zostaje w sygnaturze, bo wolajacy
+    (panel) robi to w watku i moze chciec limitowac; odczyt to jeden maly
+    plik z dysku sieciowego.
+    """
+    if not czy_z_binarki():
+        return False, ""            # u budujacego zrodlem prawdy jest repo
+    if not wymuszone and not _czas_na_sprawdzenie():
+        return False, ""            # zagladalismy niedawno — patrz SPRAWDZAJ_NOWSZY_CO_S
+    zrodlo = _zrodlo_mostu()
+    if not zrodlo:
+        return False, ""            # serwer nieosiagalny — nie zawracamy glowy
+    zdalna = _wersja_zrodla(zrodlo)
+    lokalna = wersja_lokalna()
+    # Znacznik stawiamy po UDANYM dosiegnieciu serwera. Gdy dysk byl
+    # odlaczony, nie ma czego odkladac na dobe — sprobujemy nastepnym razem.
+    if zdalna:
+        _odnotuj_sprawdzenie()
+    if not zdalna or not lokalna:
+        return False, ""
+    if zdalna.get("protokol") != lokalna.get("protokol"):
+        return False, ""            # inny protokol — patrz pobierz_most()
+    tam = (zdalna.get("zbudowano") or "").strip()
+    tu = (lokalna.get("zbudowano") or "").strip()
+    if not tam or not tu or tam <= tu:
+        return False, ""
+    return True, f"Na serwerze jest nowszy most (z {tam}, masz z {tu})."
+
+
 def pobierz_most():
     """Kopiuje gotowy most z folderu sieciowego. Zwraca (ok, komunikat).
 
@@ -832,6 +922,23 @@ def wywolaj(tryb, argv=(), timeout=TIMEOUT_S, plan=None, symbole=None,
         args["symbols"] = list(symbole)
 
     return call(tryb, args, timeout=timeout, write=zapisz, fallback=fallback)
+
+
+def pozwol_na_ponowna_probe():
+    """Zdejmuje pamięć o tym, że most nie wstał.
+
+    `_most_niedostepny` żyje do końca procesu RM_BAZA: raz nieudany start
+    i wszystkie kolejne wywołania lecą starym CLI, bez ponawiania. To dobre,
+    gdy powód się nie zmienia (stara binarka, brak pliku), ale ZŁE po zmianie
+    danych logowania — user poprawia hasło, a okno dalej odpowiada „most jest
+    oznaczony jako niedostępny" i nie ma jak z tego wyjść bez restartu
+    aplikacji (zgłoszone 06.09.2026).
+
+    Woła to okno „Połączenie z Subiektem" przed ponownym startem mostu.
+    """
+    global _most_niedostepny, _ostrzezono_o_buildzie
+    _most_niedostepny = False
+    _ostrzezono_o_buildzie = False
 
 
 def zatrzymaj_most():
