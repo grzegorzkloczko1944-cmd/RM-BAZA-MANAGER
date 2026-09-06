@@ -375,7 +375,7 @@ def numer_projektu(project_name, project_id=None):
 def build_plan(project_id, project_name, podmiot, tytul):
     """Buduje plan dla mostu + dane do wyświetlenia.
 
-    Zwraca (plan, items, ostrzezenie, poza_bom), gdzie `poza_bom` to
+    Zwraca (plan, items, ostrzezenie, poza_bom, ukryte_cale_galezie), gdzie `poza_bom` to
     {rodzic: [numer, …]} — składniki obecne w DRZEWKU, ale nieobecne w BOM-ie.
     Nie trafią do Subiekta, więc okno musi je pokazać (patrz komentarz przy
     zbieraniu tej mapy).
@@ -441,7 +441,14 @@ def build_plan(project_id, project_name, podmiot, tytul):
         "uwagi": numer,
         "pozycje": pozycje,
     }
-    return plan, items, warn, poza_bom
+    # Ile ukrytych pozycji jest składnikami złożeń, których i tak nie ma
+    # w projekcie (ukryta cała gałąź). To NIE jest problem — służy tylko do
+    # wyjaśnienia, czemu przy setkach ukrytych ostrzeżenie wymienia kilka.
+    poza_zgloszone = {n.strip().upper() for lst in poza_bom.values() for n, _, _ in lst}
+    w_drzewku = {c[0].strip().upper() for lst in kids.values() for c in lst}
+    ukryte_cale_galezie = sum(
+        1 for nr in ukryte if nr in w_drzewku and nr not in poza_zgloszone)
+    return plan, items, warn, poza_bom, ukryte_cale_galezie
 
 
 # ── Wywołanie mostu ─────────────────────────────────────────────────────────
@@ -562,6 +569,8 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         self.poza_bom = {}
         #: powód nieczytania drzewka (None = wczytane) — bez niego brak kompletów
         self.brak_drzewka = None
+        #: ukryte pozycje będące składnikami złożeń, których też nie ma w BOM-ie
+        self.ukryte_cale_galezie = 0
         self.plan = None
         self.items = []
         self.dry = None
@@ -754,22 +763,22 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
 
     def _dry_run_worker(self):
         try:
-            plan, items, warn, poza_bom = build_plan(
+            plan, items, warn, poza_bom, ukryte_galezie = build_plan(
                 self.project_id, self.project_name,
                 self.var_podmiot.get().strip(), self.var_tytul.get().strip())
             if not plan["pozycje"]:
-                self.after(0, lambda: self._dry_done(None, None, [], "Brak pozycji z numerem rysunku.", {}))
+                self.after(0, lambda: self._dry_done(None, None, [], "Brak pozycji z numerem rysunku.", {}, 0))
                 return
             wynik = run_bridge(plan, zapisz=False)
             # Suchy przebieg też jest okazją do zapamiętania trafień — kolejny
             # projekt z tymi numerami nie będzie musiał pytać Subiekta.
             zapisz_mapowania(wynik)
-            self.after(0, lambda: self._dry_done(plan, wynik, items, warn, poza_bom))
+            self.after(0, lambda: self._dry_done(plan, wynik, items, warn, poza_bom, ukryte_galezie))
         except Exception as e:
             err = str(e)
-            self.after(0, lambda: self._dry_done(None, None, [], err, {}))
+            self.after(0, lambda: self._dry_done(None, None, [], err, {}, 0))
 
-    def _dry_done(self, plan, wynik, items, warn, poza_bom=None):
+    def _dry_done(self, plan, wynik, items, warn, poza_bom=None, ukryte_galezie=0):
         self.btn_refresh.config(state=tk.NORMAL)
         if plan is None:
             self.stop_kreciolek()
@@ -799,6 +808,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         note = f"   ⚠ {warn}" if warn else ""
         extra = f"   ⚠ {pust} kompletów bez składników w drzewie" if pust else ""
         self.poza_bom = poza_bom or {}
+        self.ukryte_cale_galezie = ukryte_galezie
         ile_poza = sum(len(v) for v in self.poza_bom.values())
         rozjazd = f"   ⚠ {ile_poza} składników z drzewka NIE wejdzie do kompletów" if ile_poza else ""
         self.stop_kreciolek()
@@ -845,6 +855,16 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         if n_ukryte:
             opis += [f"• {n_ukryte} UKRYTYCH w arkuszu — odkryj je w RM_BAZA,",
                      "  jeśli mają wejść w skład kompletu."]
+        # Ukrytych pozycji bywają setki, ale liczą się tylko te, których
+        # rodzic ZOSTAŁ w projekcie. Ukryte całe gałęzie (złożenie razem ze
+        # składnikami) nie są problemem — tych kompletów i tak nie zakładamy.
+        # Bez tego zdania „1 składników" przy 127 ukrytych wygląda podejrzanie
+        # (zgłoszone 06.09.2026).
+        if self.ukryte_cale_galezie:
+            opis += ["",
+                     f"Pozostałe ukryte pozycje ({self.ukryte_cale_galezie}) to całe złożenia",
+                     "ukryte razem ze składnikami — tych kompletów nie zakładasz,",
+                     "więc nic tam nie brakuje."]
         if n_nieznane:
             opis += [f"• {n_nieznane} NIEZNANYCH — nie ma ich w projekcie pod tym numerem.",
                      "  Zwykle numer zmieniony ręcznie albo drzewko z innej wersji;",
