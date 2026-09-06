@@ -562,27 +562,28 @@ def parsuj_termin(tekst):
 def tresc_wiadomosci(numer_zd, dostawca, projekt, pozycje, nadawca,
                      firma="RM PRODUKCJA", link=None, termin=None):
     """
-    Treść maila. Pozycje wypisane, żeby dostawca widział zamówienie także
-    w treści, nie tylko w załączniku.
+    Treść maila — krótkie wprowadzenie, bez listy pozycji: komplet jest
+    w załączonym PDF-ie zamówienia i to on jest dokumentem handlowym.
+
+    `pozycje` zostaje w sygnaturze, choć treść ich nie wypisuje — wołający
+    je przekazują, a lista może się jeszcze przydać (np. przy krótkim
+    zamówieniu albo w innym szablonie).
 
     `link` — adres do portalu. Gdy jest, rysunki NIE idą załącznikami, tylko
     linkiem: mail zostaje lekki, a portal liczy wejścia, więc wiadomo, czy
     dostawca w ogóle zajrzał w dokumentację.
+
+    `nadawca` — podpis: imię i nazwisko, e-mail i telefon osoby prowadzącej
+    (z RM_MANAGER, tak samo jak kontakt przy zapytaniu ofertowym).
     """
     linie = [f"Dzień dobry,", ""]
     wstep = ("przesyłam zamówienie" if link else "w załączeniu przesyłam zamówienie")
     linie.append(f"{wstep} {numer_zd}"
                  + (f" dotyczące projektu {projekt}." if projekt else "."))
     linie.append("")
-    if pozycje:
-        linie.append("Zamawiane pozycje:")
-        # Krotki mają 4 pola, a od 2026-09-05 opcjonalnie piąte (ma_rysunek) —
-        # rozpakowanie na sztywno wywalałoby się na dłuższej krotce.
-        for i, wiersz in enumerate(pozycje, 1):
-            symbol, nazwa, ilosc, jm = (list(wiersz) + ["", "", "", ""])[:4]
-            opis = f"{symbol}" + (f" — {nazwa}" if nazwa and nazwa != symbol else "")
-            linie.append(f"  {i}. {opis}: {ilosc} {jm}".rstrip())
-        linie.append("")
+    # Lista pozycji NIE idzie do treści: przy kilkunastu pozycjach zalewała
+    # maila, a komplet i tak jest w załączonym PDF-ie zamówienia — to on jest
+    # dokumentem handlowym, treść ma tylko wprowadzać (zgłoszone 06.09.2026).
     if link:
         linie.append("Rysunki techniczne zamawianych pozycji są do pobrania tutaj:")
         linie.append(f"  {link}")
