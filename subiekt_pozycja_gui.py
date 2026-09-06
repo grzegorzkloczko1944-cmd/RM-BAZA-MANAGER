@@ -35,6 +35,16 @@ TEKST_SZARY = "#7f8c8d"
 OBRAMOWANIE = "#bdc3c7"
 LINK = "#1f618d"
 
+#: Kolory ZRODLA danych. Karta laczy trzy rozne bazy i bez oznaczenia
+#: nie bylo widac, co skad pochodzi (zgloszone 06.09.2026) - a to ma
+#: znaczenie: rozjazd miedzy Inventorem a Subiektem to realny problem,
+#: nie kosmetyka. Pasek w kolorze zrodla + etykieta w naglowku sekcji.
+ZRODLA = {
+    "inventor": ("#8e44ad", "#f4ecf7", "INVENTOR", "drzewko *_OUT.xlsx"),
+    "rmbaza":   ("#1e8449", "#eafaf1", "RM_BAZA",  "arkusz projektu"),
+    "subiekt":  ("#1f618d", "#eaf2f8", "SUBIEKT",  "przez most, na zywo"),
+}
+
 #: Log diagnostyczny karty - pythonw nie ma konsoli, wiec wyjatki z watkow
 #: i z petli odbioru gina bez sladu. Ten sam katalog co logi mostu.
 LOG = r"C:\RMPAK_CLIENT\subiekt_logi\karta.log"
@@ -48,6 +58,14 @@ def _log(tekst):
             f.write(datetime.datetime.now().strftime("%H:%M:%S ") + tekst + "\n")
     except OSError:
         pass
+
+#: Jedyne otwarte okno karty. Karta jest nawigatorem — z kazdej pozycji
+#: da sie przejsc do rodzica, skladnika i do innego projektu, wiec przy
+#: kilkunastu klikach robil sie stos identycznych okien, kazde z wlasnymi
+#: watkami pytajacymi most (zgloszone 06.09.2026). Jedno okno, ktore
+#: przelacza tresc, zamiast wielu.
+_OTWARTA = None
+
 
 #: Cache struktur per nazwa projektu — read_tree czyta Excela z dysku
 #: sieciowego, a nawigacja w obrębie jednego projektu wraca do niego
@@ -221,7 +239,18 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
         except Exception:
             pass
         self._odbierz_wyniki()
+        # Zamkniecie karty (X albo Alt+F4) musi zwolnic uchwyt, inaczej
+        # kolejne wywolanie probowaloby ozywic martwe okno.
+        self.protocol("WM_DELETE_WINDOW", self._zamknij)
+        global _OTWARTA
+        _OTWARTA = self
         self.pokaz(nr, zapamietaj=False)
+
+    def _zamknij(self):
+        global _OTWARTA
+        if _OTWARTA is self:
+            _OTWARTA = None
+        self.destroy()
 
     def _odbierz_wyniki(self):
         """Puls z watku glownego: wykonuje to, co odlozyly watki robocze."""
@@ -286,25 +315,69 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.wnetrze = tk.Frame(self.canvas, bg=TLO)
         self._okno_canvas = self.canvas.create_window((0, 0), window=self.wnetrze, anchor="nw")
-        self.wnetrze.bind("<Configure>",
-                          lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.wnetrze.bind("<Configure>", lambda _e: self._przelicz_scroll())
         self.canvas.bind("<Configure>",
                          lambda e: self.canvas.itemconfigure(self._okno_canvas, width=e.width))
-        self.canvas.bind_all("<MouseWheel>",
-                             lambda e: self.canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+        # ⚠️ bind() na canvasie i na wnetrzu, NIE bind_all(). bind_all zaklada
+        # binding GLOBALNY — karta przechwytywala kolko myszy takze nad innymi
+        # oknami, a po jej zamknieciu handler zostawal i sypal bledami.
+        # Kolko musi tez dzialac nad dziecmi wnetrza (etykiety zajmuja
+        # praktycznie cala powierzchnie), stad _podepnij_kolko rekurencyjnie.
+        for w in (self.canvas, self.wnetrze):
+            w.bind("<MouseWheel>", self._kolko)
 
         self.status = tk.Label(self, text="", anchor="w", padx=12, pady=3,
                                bg="#d6dbdf", fg=TEKST, font=("Arial", 8))
         self.status.pack(side=tk.BOTTOM, fill=tk.X)
 
-    def _sekcja(self, tytul, podtytul=""):
-        ramka = tk.Frame(self.wnetrze, bg=TLO_SEKCJI, highlightthickness=1,
-                         highlightbackground=OBRAMOWANIE)
-        ramka.pack(fill=tk.X, padx=12, pady=(10, 0))
+    def _kolko(self, event):
+        self.canvas.yview_scroll(-1 * (event.delta // 120), "units")
+        return "break"
+
+    def _podepnij_kolko(self, widget):
+        """Kolko myszy nad KAZDYM widgetem tresci.
+
+        Etykiety i ramki sekcji zakrywaja canvas, a zdarzenie <MouseWheel>
+        nie propaguje sie w gore do rodzica — bez tego przewijanie dzialalo
+        tylko nad waskim marginesem (06.09.2026, po dodaniu kolorowych ramek).
+        """
+        try:
+            widget.bind("<MouseWheel>", self._kolko)
+            for dziecko in widget.winfo_children():
+                self._podepnij_kolko(dziecko)
+        except tk.TclError:
+            pass
+
+    def _przelicz_scroll(self):
+        """Aktualizuje obszar przewijania po zmianie tresci."""
+        try:
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        except tk.TclError:
+            pass
+
+    def _sekcja(self, tytul, podtytul="", zrodlo=None):
+        """Sekcja z paskiem w kolorze ZRODLA danych i plakietka.
+
+        `zrodlo`: "inventor" | "rmbaza" | "subiekt" (patrz ZRODLA).
+        Bez niego sekcja jest neutralna.
+        """
+        kolor, tlo_plakietki, nazwa, opis = ZRODLA.get(zrodlo, (OBRAMOWANIE, TLO_SEKCJI, "", ""))
+        zewnetrzna = tk.Frame(self.wnetrze, bg=kolor, highlightthickness=1,
+                              highlightbackground=OBRAMOWANIE)
+        zewnetrzna.pack(fill=tk.X, padx=12, pady=(10, 0))
+        # Pasek 4 px po lewej — w kolorze zrodla.
+        ramka = tk.Frame(zewnetrzna, bg=TLO_SEKCJI)
+        ramka.pack(fill=tk.X, padx=(4 if zrodlo else 0, 0), pady=0)
+
         naglowek = tk.Frame(ramka, bg=TLO_SEKCJI)
         naglowek.pack(fill=tk.X, padx=12, pady=(8, 4))
         tk.Label(naglowek, text=tytul, bg=TLO_SEKCJI, fg=TEKST,
                  font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+        if zrodlo:
+            tk.Label(naglowek, text=f" {nazwa} ", bg=tlo_plakietki, fg=kolor,
+                     font=("Arial", 8, "bold")).pack(side=tk.LEFT, padx=(8, 0))
+            tk.Label(naglowek, text="  " + opis, bg=TLO_SEKCJI, fg=kolor,
+                     font=("Arial", 8)).pack(side=tk.LEFT)
         if podtytul:
             tk.Label(naglowek, text="   " + podtytul, bg=TLO_SEKCJI, fg=TEKST_SZARY,
                      font=("Arial", 8)).pack(side=tk.LEFT)
@@ -381,6 +454,13 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
             w.destroy()
         self.canvas.yview_moveto(0)
         self._wypelnij(nr)
+        # Tresc dopiero co powstala — podpinamy kolko do nowych widgetow
+        # i przeliczamy obszar przewijania (bbox liczy sie po ulozeniu).
+        self.after_idle(self._po_zbudowaniu)
+
+    def _po_zbudowaniu(self):
+        self._podepnij_kolko(self.wnetrze)
+        self._przelicz_scroll()
 
     def wstecz(self):
         if self.historia:
@@ -417,33 +497,33 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
 
         # ── należy do ──
         if droga:
-            s = self._sekcja("Należy do", "ścieżka od korzenia złożenia — klik przenosi")
+            s = self._sekcja("Należy do", "ścieżka od korzenia — klik przenosi", "inventor")
             for glebokosc, wezel in enumerate(droga):
                 self._link(s, wezel, self.nazwy.get(wezel, ""), wciecie=glebokosc * 3)
             tk.Label(s, text=" " * (len(droga) * 3) + f"└ {nr}   ← ta pozycja",
                      bg=TLO_SEKCJI, fg=TEKST, font=("Consolas", 9, "bold"),
                      anchor="w").pack(fill=tk.X, pady=(1, 0))
         elif self.kids and nr_up not in self.kids:
-            s = self._sekcja("Należy do")
+            s = self._sekcja("Należy do", "", "inventor")
             tk.Label(s, text="poza strukturą złożeń Inventora (np. normalia — łożyska, paski)",
                      bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 9),
                      anchor="w").pack(fill=tk.X)
         elif not self.kids:
-            s = self._sekcja("Należy do")
+            s = self._sekcja("Należy do", "", "inventor")
             tk.Label(s, text="brak struktury — nie znaleziono arkusza „DRZEWKO TEKST” (*_OUT.xlsx)",
                      bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 9),
                      anchor="w").pack(fill=tk.X)
 
         # ── zawiera ──
         if skladniki:
-            s = self._sekcja("Zawiera", f"{len(skladniki)} składników — klik przenosi")
+            s = self._sekcja("Zawiera", f"{len(skladniki)} składników — klik przenosi", "inventor")
             for dziecko, qty in skladniki:
                 d = dziecko.strip().upper()
                 ile = f"× {qty:g}" if isinstance(qty, (int, float)) else f"× {qty}"
                 self._link(s, d, f"{self.nazwy.get(d, '')}    {ile}")
 
         # ── RM_BAZA ──
-        s = self._sekcja("RM_BAZA", "dane z arkusza projektu")
+        s = self._sekcja("Dane pozycji", "", "rmbaza")
         if bom:
             typ = _pierwsze(bom.get("class_manual"), bom.get("class_effective"),
                             bom.get("class_auto"))
@@ -484,7 +564,7 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
                      bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 9), anchor="w").pack(fill=tk.X)
 
         # ── Subiekt (w tle) ──
-        self.sekcja_subiekt = self._sekcja("Subiekt", "kartoteka i stany — z mostu")
+        self.sekcja_subiekt = self._sekcja("Kartoteka i stany", "", "subiekt")
         self.lbl_subiekt = tk.Label(self.sekcja_subiekt, text="",
                                     bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 9), anchor="w")
         self.lbl_subiekt.pack(fill=tk.X)
@@ -630,6 +710,10 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
         else:
             self._wiersz_kv(s, "Stany per magazyn", "kartoteka bez ruchu magazynowego")
         self._sklad_subiekta(sklad, nr)
+        # Sekcje Subiekta dochodza PO zbudowaniu karty, wiec obszar
+        # przewijania trzeba przeliczyc ponownie — inaczej dolne sekcje
+        # sa poza zasiegiem suwaka.
+        self.after_idle(self._po_zbudowaniu)
 
         # Wszystko, czego nie wypisaliśmy jawnie — żeby żadne pole z mostu
         # nie przepadło, gdy dojdzie nowe.
@@ -654,7 +738,7 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
         a struktura w Subiekcie znaczy, ze zlozenie zalozono przed zmiana
         konstrukcji albo czesc skladnikow nie miala kartotek.
         """
-        s = self._sekcja("Struktura w Subiekcie", "składniki i komplety nadrzędne")
+        s = self._sekcja("Struktura złożenia", "składniki i komplety nadrzędne", "subiekt")
         if sklad is None:
             tk.Label(s, text="nie sprawdzono (most nie odpowiedział na zapytanie o skład)",
                      bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 9),
@@ -738,11 +822,49 @@ def _bez_ogona(symbol):
 
 
 def otworz(rodzic, nr, project_id=None, project_name=None):
-    """Otwiera kartę pozycji. Bez numeru — nic."""
+    """Pokazuje pozycję w karcie. JEDNO okno na całą aplikację.
+
+    Gdy karta już jest otwarta — przełącza ją na nową pozycję i podnosi,
+    zamiast otwierać duplikat. Historia „Wstecz" jest wtedy zachowana, więc
+    wejście z innego okna dokłada się do ścieżki nawigacji.
+    """
     if not (nr or "").strip():
         return None
+    global _OTWARTA
+    karta = _OTWARTA
+    if karta is not None:
+        try:
+            if not karta.winfo_exists():
+                karta = _OTWARTA = None
+        except tk.TclError:
+            karta = _OTWARTA = None
+    if karta is not None:
+        try:
+            # Inny projekt niz dotad — przestawiamy kontekst karty, zeby BOM
+            # i struktura zlozen byly z wlasciwego projektu.
+            if project_id is not None and project_id != karta.project_id:
+                karta.project_id = project_id
+                karta.project_name = project_name or (
+                    nazwa_projektu_bezpiecznie(project_id))
+                karta.kids, karta.nazwy = drzewo(karta.project_name)
+            karta.deiconify()
+            karta.lift()
+            karta.focus_force()
+            karta.pokaz(nr)
+            return karta
+        except tk.TclError:
+            _OTWARTA = None         # okno padlo w miedzyczasie — tworzymy nowe
     try:
         return KartaPozycji(rodzic, nr, project_id, project_name)
     except Exception as e:
-        messagebox.showerror("Karta pozycji", f"Nie udało się otworzyć karty:\n{e}", parent=rodzic)
+        messagebox.showerror("Karta pozycji", "Nie udało się otworzyć karty:\n" + str(e),
+                             parent=rodzic)
         return None
+
+
+def nazwa_projektu_bezpiecznie(project_id):
+    try:
+        from subiekt_stany import nazwa_projektu
+        return nazwa_projektu(project_id)
+    except Exception:
+        return ""
