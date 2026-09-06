@@ -170,9 +170,10 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
                ("nazwa", "Nazwa", 320), ("stan", "Stan", 78),
                ("zarezerwowane", "Zarezerwowane", 100),
                ("dostepne", "Dostępne", 80), ("netto", "Netto", 90),
-               ("sklad", "Składników", 78), ("opis", "Opis", 200)]
+               ("sklad", "Składników", 78), ("wkompletach", "Użyta w", 70),
+               ("opis", "Opis", 200)]
     (COL_RODZAJ, COL_SYMBOL, COL_NAZWA, COL_STAN, COL_REZERW,
-     COL_DOSTEPNE, COL_NETTO, COL_SKLAD, COL_OPIS) = range(9)
+     COL_DOSTEPNE, COL_NETTO, COL_SKLAD, COL_WKOMPL, COL_OPIS) = range(10)
     #: Nazwa i Netto — te dwie rzeczy poprawia się z ręki. Symbol NIE
     #: (jest kluczem), stany NIE (biorą się z dokumentów).
     EDYTOWALNE = (COL_NAZWA, COL_NETTO)
@@ -234,7 +235,22 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
         self.cb_rodzaj.pack(side=tk.LEFT, pady=6)
         self.cb_rodzaj.bind("<<ComboboxSelected>>", lambda _e: self._odswiez_liste())
 
-        self.btn_stany = tk.Button(f, text="📊 Dociągnij stany dla widocznych",
+        tk.Label(f, text="Stan:", bg="#ecf0f1",
+                 font=("Arial", 9)).pack(side=tk.LEFT, padx=(16, 3), pady=6)
+        # Filtr „duchów": kartoteki bez stanu i bez ruchu to zwykle indeksy
+        # zalozone kiedys i nigdy nieuzyte — przy porzadkowaniu kartoteki
+        # chodzi wlasnie o to, zeby je odnalezc. Dziala DOPIERO po wczytaniu
+        # stanow (bez nich nie wiadomo, co jest duchem), stad osobna pozycja
+        # „stan niewczytany" zamiast udawania, ze zero to pewnik.
+        self.var_stan = tk.StringVar(value="wszystkie")
+        self.cb_stan = ttk.Combobox(
+            f, textvariable=self.var_stan, width=18, state="readonly",
+            font=("Arial", 9),
+            values=["wszystkie", "ze stanem", "bez stanu (duchy)", "stan niewczytany"])
+        self.cb_stan.pack(side=tk.LEFT, pady=6)
+        self.cb_stan.bind("<<ComboboxSelected>>", lambda _e: self._odswiez_liste())
+
+        self.btn_stany = tk.Button(f, text="📊 Pokaż stany (tylko widoczne)",
                                    command=self._dociagnij_stany, bg="#16a085",
                                    fg="white", font=("Arial", 8), padx=8, pady=2,
                                    relief=tk.RAISED, bd=1)
@@ -243,11 +259,14 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
         leg = tk.Frame(self, bg="#ecf0f1")
         leg.pack(side=tk.TOP, fill=tk.X)
         tk.Label(leg, text="Edycja wprost w tabeli: Nazwa, Netto.  Symbol jest kluczem — "
-                           "nie zmienia się tutaj.  DWUKLIK w komplet = skład do edycji.",
+                           "nie zmienia się tutaj.  DWUKLIK w komplet = skład do edycji.  "
+                           "Duch = zero stanu i nieużywana w żadnym komplecie "
+                           "(usług nie dotyczy); widać go po wczytaniu stanów.",
                  bg="#ecf0f1", fg="#7f8c8d", font=("Arial", 8), anchor="w",
                  padx=12).pack(side=tk.LEFT, pady=(0, 2))
         for kolor, opis in (("#f9e79f", "zmienione — do zapisu"),
-                            ("#eaeded", "stan niewczytany")):
+                            ("#eaeded", "stan niewczytany"),
+                            ("#f2f3f4", "duch — zero stanu i nieużywana")):
             tk.Label(leg, text="  ", bg=kolor, relief=tk.SOLID, bd=1).pack(side=tk.LEFT, padx=(10, 2))
             tk.Label(leg, text=opis, bg="#ecf0f1", fg="#7f8c8d",
                      font=("Arial", 8)).pack(side=tk.LEFT)
@@ -389,6 +408,12 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
             symbol = (p.get("Symbol") or "").strip()
             if not symbol:
                 continue
+            # Starszy most nie zwraca WKompletach. Brak pola oznacza „nie wiem",
+            # a NIE „w niczym nie siedzi" — inaczej po odczycie starą binarką
+            # składniki kompletów pokazałyby się jako duchy do skasowania.
+            # None wyłącza filtr duchów; zero z nowego mostu to prawdziwe zero.
+            p["WKompletach"] = (None if p.get("WKompletach") is None
+                                else int(p["WKompletach"]))
             p["nazwa"] = (p.get("Nazwa") or "").strip()
             p["nazwa_subiekt"] = p["nazwa"]
             p["netto"] = float(p.get("CenaEwidencyjna") or 0)
@@ -531,17 +556,58 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
                 or p["netto"] != p["netto_subiekt"]
                 or (p["sklad"] is not None and p["sklad"] != p["sklad_subiekt"]))
 
+    @staticmethod
+    def _ma_ruch(p):
+        """Czy kartoteka do czegokolwiek służy.
+
+        Zwraca None, gdy stan nie został jeszcze wczytany: „nie wiem" to co
+        innego niż „nie ma", a bez tego rozróżnienia cała lista wyglądałaby
+        na duchy zaraz po otwarciu okna.
+
+        Sam zerowy stan NIE wystarcza, żeby uznać kartotekę za ducha. Część
+        kupowana pod zamówienie stoi na zerze przez większość roku, a jest
+        potrzebna — bo siedzi w składzie kompletu. Dlatego liczy się też
+        WKompletach z mostu: użyta gdziekolwiek kartoteka duchem nie jest.
+        """
+        # Usługa nie ma stanu magazynowego Z DEFINICJI (transport, robocizna,
+        # prowizja), więc zerowy stan nie znaczy przy niej nic. Uznanie jej za
+        # ducha byłoby zaproszeniem do skasowania pozycji, która jest w użyciu
+        # na dokumentach — trzymamy je poza tym filtrem.
+        if (p.get("Rodzaj") or "").strip().lower() in ("usługa", "usluga"):
+            return True
+        if p["stan"] is None:
+            return None
+        uzyta = p.get("WKompletach")
+        if uzyta is None:
+            return None                 # stary most: nie wiadomo, nie zgadujemy
+        if uzyta > 0:
+            return True
+        return bool(p["stan"] or p["zarezerwowane"] or p["dostepne"])
+
     def _odswiez_liste(self):
         if not self.sheet:
             return
         szukaj = (self.var_szukaj.get() or "").strip().lower()
         rodzaj = self.var_rodzaj.get()
+        stan = self.var_stan.get()
+
+        def pasuje_stan(p):
+            ruch = self._ma_ruch(p)
+            if stan == "ze stanem":
+                return ruch is True
+            if stan == "bez stanu (duchy)":
+                return ruch is False
+            if stan == "stan niewczytany":
+                return ruch is None
+            return True
+
         self.widoczne = [
             p for p in self.pozycje
             if (not szukaj
                 or szukaj in str(p.get("Symbol", "")).lower()
                 or szukaj in str(p.get("nazwa", "")).lower())
             and (rodzaj == "wszystkie" or (p.get("Rodzaj") or "").strip() == rodzaj)
+            and pasuje_stan(p)
         ]
 
         def komorka_stanu(p, klucz):
@@ -556,6 +622,10 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
             komorka_stanu(p, "dostepne"),
             f"{p['netto']:.2f}",
             ("" if p["sklad"] is None else str(len(p["sklad"]))) if _czy_komplet(p) else "",
+            # „Użyta w" — w ilu kompletach ta pozycja jest składnikiem.
+            # Pusto zamiast zera: zero i tak rzuca się w oczy podświetleniem
+            # ducha, a kolumna pełna zer tylko szumi.
+            (str(p["WKompletach"]) if p.get("WKompletach") else ""),
             (p.get("Opis") or "").strip(),
         ] for p in self.widoczne], reset_col_positions=False, redraw=False)
 
@@ -567,6 +637,12 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
             if p["stan"] is None:
                 for c in (self.COL_STAN, self.COL_REZERW, self.COL_DOSTEPNE):
                     self.sheet.highlight_cells(row=i, column=c, bg="#eaeded", fg="#95a5a6")
+            elif self._ma_ruch(p) is False:
+                # Duch: sprawdzony i pusty — ani stanu, ani użycia w komplecie.
+                # Kolorujemy symbol, nie cały wiersz: to kandydat do przejrzenia,
+                # a nie błąd, i nie ma zasłaniać żółtych zmian do zapisu.
+                self.sheet.highlight_cells(row=i, column=self.COL_SYMBOL,
+                                           bg="#f2f3f4", fg="#85929e")
             if p["nazwa"] != p["nazwa_subiekt"]:
                 self.sheet.highlight_cells(row=i, column=self.COL_NAZWA,
                                            bg="#f9e79f", fg="#7d6608")
@@ -581,13 +657,22 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
 
     def _przelicz_podsumowanie(self):
         do_zapisu = sum(1 for p in self.pozycje if self._zmieniona(p))
-        bez_stanu = sum(1 for p in self.widoczne if p["stan"] is None)
+        niewczytane = sum(1 for p in self.widoczne if p["stan"] is None)
         komplety = sum(1 for p in self.widoczne if _czy_komplet(p))
-        self.podsumowanie.config(
-            text=f"Pozycji: {len(self.widoczne)} z {len(self.pozycje)}    "
-                 f"kompletów: {komplety}    "
-                 + (f"bez wczytanego stanu: {bez_stanu}    " if bez_stanu else "")
-                 + f"zmienionych do zapisu: {do_zapisu}")
+        # Duchy liczymy z CAŁEJ kartoteki, nie z widoku: filtr „bez stanu"
+        # sam zawęża listę do duchów, więc liczba z widoku zawsze równałaby
+        # się liczbie wierszy i nic by nie mówiła.
+        duchy = sum(1 for p in self.pozycje if self._ma_ruch(p) is False)
+        zbadane = sum(1 for p in self.pozycje if p["stan"] is not None)
+
+        tekst = (f"Pozycji: {len(self.widoczne)} z {len(self.pozycje)}    "
+                 f"kompletów: {komplety}    ")
+        if zbadane:
+            tekst += f"duchów (bez stanu): {duchy} z {zbadane} sprawdzonych    "
+        if niewczytane:
+            tekst += f"bez wczytanego stanu: {niewczytane}    "
+        tekst += f"zmienionych do zapisu: {do_zapisu}"
+        self.podsumowanie.config(text=tekst)
         try:
             self.btn_zapisz.config(text=f"💾 Zapisz zmiany ({do_zapisu})",
                                    state=tk.NORMAL if do_zapisu else tk.DISABLED)

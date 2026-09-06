@@ -77,6 +77,14 @@ internal static class Katalog
         // sięgnięcie po niego z gotowej encji to zapytanie na kartotekę.
         // Jednostki miary tu nie ma świadomie: okno Asortyment jej nie
         // pokazuje, a każde dodatkowe pole to koszt na całej liście.
+        // WKompletach — w ilu kompletach ta kartoteka jest skladnikiem.
+        // Potrzebne, zeby okno Asortyment umialo wskazac "duchy": kartoteki
+        // bez stanu I nieuzywane nigdzie. Sam zerowy stan nie wystarcza —
+        // czesc kupowana pod zamowienie stoi na zerze, a duchem nie jest,
+        // bo siedzi w skladzie kompletu (07.09.2026).
+        // Relacja odwrotna jest w SDK gotowa (SkladnikiWKompletach, tak samo
+        // jak w Komplet.cs), wiec liczymy ja w TEJ SAMEJ projekcji — bez
+        // drugiego przelotu po bazie i bez kosztu na kartoteke.
         var pozycje = asort.Dane.Wszystkie()
             .Select(a => new
             {
@@ -85,6 +93,7 @@ internal static class Katalog
                 a.Nazwa,
                 a.CenaEwidencyjna,
                 Rodzaj = a.Rodzaj.Nazwa,
+                WKompletach = a.SkladnikiWKompletach.Count(),
             })
             .ToList()
             .Select(a => new Kart(
@@ -92,7 +101,8 @@ internal static class Katalog
                 (a.Symbol ?? "").Trim(),
                 (a.Nazwa ?? "").Trim(),
                 decimal.Round(a.CenaEwidencyjna, 2),
-                (a.Rodzaj ?? "").Trim()))
+                (a.Rodzaj ?? "").Trim(),
+                a.WKompletach))
             .Where(k => k.Symbol.Length > 0)
             .ToList();
 
@@ -112,5 +122,5 @@ internal static class Katalog
     // jednoznacznie wskazać pozycję w Subiekcie (symbole bywają zapisane
     // różnie, Id nie).
     internal record Kart(int Id, string Symbol, string Nazwa, decimal CenaEwidencyjna,
-                         string Rodzaj);
+                         string Rodzaj, int WKompletach);
 }
