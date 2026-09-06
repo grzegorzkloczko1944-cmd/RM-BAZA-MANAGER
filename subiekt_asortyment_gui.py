@@ -141,6 +141,19 @@ def pobierz_sklad(symbol, timeout=TIMEOUT_S):
     return poz[0] if poz else None
 
 
+def usun_kartoteki(symbole, zapisz=False, timeout=TIMEOUT_S):
+    """Kasuje kartoteki z Subiekta. Zwraca {zapisano, usuniete, kroki}.
+
+    Subiekt odmawia dla kartotek z dokumentami, stanem albo będących
+    składnikiem kompletu — most raportuje to per symbol PO WERYFIKACJI,
+    bo Usun() potrafi milczeć o odmowie. Ta sama funkcja co w oknie Magazyn.
+    """
+    tmp = tempfile.mkdtemp(prefix="subiekt_ku_")
+    argv = ["--symbole=" + ";".join(symbole)] + (["--zapisz"] if zapisz else [])
+    return _uruchom("kartoteka-usun", argv, os.path.join(tmp, "wynik.json"),
+                    timeout, write=zapisz)
+
+
 def zapisz_kartoteki(pozycje, zapisz=False, timeout=TIMEOUT_S):
     """Zmiana istniejących kartotek. pozycje: [{symbol, nazwa?, cena?, sklad?}].
     Zwraca {zapisano, zmienionych, kroki}. zapisz=False = suchy przebieg."""
@@ -179,6 +192,10 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
     EDYTOWALNE = (COL_NAZWA, COL_NETTO)
     KOL_SKLAD = [("symbol", "Symbol", 150), ("nazwa", "Nazwa", 300),
                  ("ilosc", "Ilość", 80), ("rodzaj", "Rodzaj", 70)]
+    #: Te same kolumny, odwrotne znaczenie: nie „co zawiera", tylko
+    #: „w czym siedzi". Ilość = ile sztuk tej pozycji wchodzi w komplet.
+    KOL_UZYCIE = [("symbol", "Komplet", 150), ("nazwa", "Nazwa kompletu", 300),
+                  ("ilosc", "Ilość w nim", 80), ("rodzaj", "Rodzaj", 70)]
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -293,6 +310,14 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
         tk.Button(bottom, text="➕ Nowa kartoteka…", command=self._nowa_kartoteka,
                   bg="#2980b9", fg="white", font=("Arial", 9), padx=10, pady=5,
                   relief=tk.RAISED, bd=1).pack(side=tk.RIGHT, padx=(0, 8))
+        # Kasowanie kartotek jest TU, a nie tylko w Magazynie: duchy (zero
+        # stanu, nieuzywane nigdzie) widac wlasnie w tym oknie, wiec kazanie
+        # przechodzic do innego, zeby je skasowac, bylo droga naokolo
+        # (07.09.2026). Szary, nie czerwony — to nie jest akcja glowna.
+        tk.Button(bottom, text="🗑 Usuń kartoteki z Subiekta…",
+                  command=self._usun_kartoteki, bg="#7f8c8d", fg="white",
+                  font=("Arial", 9), padx=10, pady=5,
+                  relief=tk.RAISED, bd=1).pack(side=tk.RIGHT, padx=(0, 8))
         tk.Label(bottom, text="Zapis idzie do bazy PRODUKCYJNEJ — przed nim zobaczysz "
                               "listę zmian do potwierdzenia.",
                  fg="#7f8c8d", font=("Arial", 8)).pack(side=tk.LEFT)
@@ -340,10 +365,14 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
         self.lbl_sklad = tk.Label(pasek, text="Skład kompletu", bg="#ecf0f1", anchor="w",
                                   font=("Arial", 8, "bold"), padx=8, pady=3)
         self.lbl_sklad.pack(side=tk.LEFT)
-        self.btn_skl_dodaj = tk.Button(pasek, text="➕ składnik", command=self._sklad_dodaj,
+        # „ze składu", nie samo „usuń" — obok jest przycisk kasujący CAŁĄ
+        # kartotekę z Subiekta i te dwie operacje nie mogą się mylić.
+        self.btn_skl_dodaj = tk.Button(pasek, text="➕ dodaj do składu",
+                                       command=self._sklad_dodaj,
                                        font=("Arial", 8), padx=6, pady=1, state=tk.DISABLED)
         self.btn_skl_dodaj.pack(side=tk.RIGHT, padx=(0, 8), pady=2)
-        self.btn_skl_usun = tk.Button(pasek, text="➖ usuń składnik", command=self._sklad_usun,
+        self.btn_skl_usun = tk.Button(pasek, text="➖ wyjmij ze składu",
+                                      command=self._sklad_usun,
                                       font=("Arial", 8), padx=6, pady=1, state=tk.DISABLED)
         self.btn_skl_usun.pack(side=tk.RIGHT, padx=(0, 6), pady=2)
 
@@ -422,6 +451,7 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
             p["netto_subiekt"] = p["netto"]
             p["sklad"] = None           # None = jeszcze nieczytany z Subiekta
             p["sklad_subiekt"] = None
+            p["wchodzi_w"] = None       # komplety, w których ta pozycja siedzi
             p["stan"] = None            # None = stan niewczytany
             p["zarezerwowane"] = None
             p["dostepne"] = None
@@ -739,33 +769,88 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
         self._pokaz_sklad(p)
 
     def _pokaz_sklad(self, p):
-        """Dolna tabela: skład, jeśli to komplet. Czyta z Subiekta raz."""
+        """Dolna tabela — zależnie od rodzaju pozycji:
+
+        * KOMPLET → jego skład (edytowalny),
+        * cokolwiek innego → komplety, W KTÓRYCH ta pozycja siedzi.
+
+        Kolumna „Użyta w" mówi ILE, a przy kasowaniu kartoteki liczy się
+        GDZIE (zgłoszone 07.09.2026). Dla towaru dolna tabela i tak stała
+        pusta, więc pokazujemy tam listę zamiast niczego. Jedno wywołanie
+        mostu wystarcza na oba przypadki: tryb „komplet" zwraca dla każdej
+        pozycji i Skladniki, i WchodziW.
+        """
         self._biezacy = p
         if not self.sheet_sklad:
             return
-        if p is None or not _czy_komplet(p):
+        if p is None:
             self.sheet_sklad.set_sheet_data([], reset_col_positions=False)
-            self.lbl_sklad.config(text="Skład kompletu — zaznacz komplet (KT) na liście")
+            self.lbl_sklad.config(text="Zaznacz pozycję na liście")
             self.btn_skl_dodaj.config(state=tk.DISABLED)
             self.btn_skl_usun.config(state=tk.DISABLED)
             return
 
-        self.btn_skl_dodaj.config(state=tk.NORMAL)
-        self.btn_skl_usun.config(state=tk.NORMAL)
-        if p["sklad"] is None:
-            self.lbl_sklad.config(text=f"Skład: {p['Symbol']} — czytam…")
+        # Skład edytuje się TYLKO w komplecie — towar składu nie ma.
+        # Wcześniej pasek mówił samo „zaznacz komplet", więc po kliknięciu
+        # w towar wyglądało to na zepsuty przycisk, a nie na brak przedmiotu
+        # operacji (zgłoszone 07.09.2026 przy przeglądaniu duchów).
+        komplet = _czy_komplet(p)
+        stan = tk.NORMAL if komplet else tk.DISABLED
+        self.btn_skl_dodaj.config(state=stan)
+        self.btn_skl_usun.config(state=stan)
+
+        if p["sklad"] is None or p.get("wchodzi_w") is None:
+            self.lbl_sklad.config(text=f"{p['Symbol']} — czytam…")
             self.sheet_sklad.set_sheet_data([], reset_col_positions=False)
             self._czytaj_sklad(p)
             return
         self._rysuj_sklad(p)
 
     def _rysuj_sklad(self, p):
-        self.lbl_sklad.config(
-            text=f"Skład: {p['Symbol']} — {p['nazwa']}   ({len(p['sklad'])} składników)")
+        if _czy_komplet(p):
+            self._naglowki_dolnej(self.KOL_SKLAD)
+            self.lbl_sklad.config(
+                text=f"Skład: {p['Symbol']} — {p['nazwa']}   "
+                     f"({len(p['sklad'])} składników)")
+            self.sheet_sklad.set_sheet_data([[
+                s.get("Symbol", ""), s.get("Nazwa", ""),
+                f"{float(s.get('Ilosc') or 0):g}", _kod_rodzaju(s.get("Rodzaj")),
+            ] for s in p["sklad"]], reset_col_positions=False)
+            return
+
+        # Nie komplet: pokazujemy, gdzie ta pozycja jest używana.
+        wchodzi = p.get("wchodzi_w") or []
+        self._naglowki_dolnej(self.KOL_UZYCIE)
+        if wchodzi:
+            self.lbl_sklad.config(
+                text=f"{p['Symbol']} — {p['nazwa']}   "
+                     f"używana w {len(wchodzi)} kompletach "
+                     f"(kartoteki używanej Subiekt nie pozwoli usunąć)")
+        else:
+            self.lbl_sklad.config(
+                text=f"{p['Symbol']} — {p['nazwa']}   "
+                     f"nie wchodzi w żaden komplet")
         self.sheet_sklad.set_sheet_data([[
             s.get("Symbol", ""), s.get("Nazwa", ""),
             f"{float(s.get('Ilosc') or 0):g}", _kod_rodzaju(s.get("Rodzaj")),
-        ] for s in p["sklad"]], reset_col_positions=False)
+        ] for s in wchodzi], reset_col_positions=False)
+
+    def _naglowki_dolnej(self, kolumny):
+        """Nagłówki dolnej tabeli — te same kolumny, inne znaczenie.
+
+        Widok „w czym siedzi" jest wyłącznie do odczytu: ilość w komplecie
+        nadrzędnym poprawia się na TAMTEJ kartotece, nie stąd.
+        """
+        try:
+            self.sheet_sklad.headers([k[1] for k in kolumny])
+        except Exception:
+            pass
+        try:
+            tylko_odczyt = (kolumny is not self.KOL_SKLAD)
+            self.sheet_sklad.readonly_columns(
+                columns=[0, 1, 2, 3] if tylko_odczyt else [0, 1, 3])
+        except Exception:
+            pass
 
     def _czytaj_sklad(self, p):
         if self._zajete:
@@ -788,18 +873,28 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
         self._zajete = False
         try:
             if blad:
-                self.lbl_sklad.config(text=f"Skład: {p['Symbol']} — błąd odczytu")
+                self.lbl_sklad.config(text=f"{p['Symbol']} — błąd odczytu")
                 self.status.config(text=blad)
                 return
-            sklad = [{"Symbol": (s.get("Symbol") or "").strip(),
-                      "Nazwa": (s.get("Nazwa") or "").strip(),
-                      "Ilosc": float(s.get("Ilosc") or 0),
-                      "Rodzaj": s.get("Rodzaj") or ""}
-                     for s in ((dane or {}).get("Skladniki") or [])]
+
+            def lista(klucz):
+                return [{"Symbol": (s.get("Symbol") or "").strip(),
+                         "Nazwa": (s.get("Nazwa") or "").strip(),
+                         "Ilosc": float(s.get("Ilosc") or 0),
+                         "Rodzaj": s.get("Rodzaj") or ""}
+                        for s in ((dane or {}).get(klucz) or [])]
+
+            sklad = lista("Skladniki")
             p["sklad"] = sklad
             # Kopia GŁĘBOKA jako punkt odniesienia — inaczej edycja ilości
             # zmieniałaby też „stan z Subiekta" i zmiana nigdy nie byłaby widoczna.
             p["sklad_subiekt"] = [dict(s) for s in sklad]
+            # Relacja odwrotna z tego samego wywołania — „w czym ta pozycja
+            # siedzi". Dla towaru to jedyna treść dolnej tabeli.
+            p["wchodzi_w"] = lista("WchodziW")
+            # Licznik z katalogu bywa starszy niż to, co właśnie przeczytaliśmy
+            # (ktoś mógł zmienić skład w międzyczasie) — prostujemy kolumnę.
+            p["WKompletach"] = len(p["wchodzi_w"])
             if self._biezacy is p:
                 self._rysuj_sklad(p)
             self._odswiez_liste()
@@ -807,9 +902,15 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
             pass
 
     def _on_edit_sklad(self, _event=None):
-        """Ilość składnika z dolnej tabeli wraca do modelu."""
+        """Ilość składnika z dolnej tabeli wraca do modelu.
+
+        Tylko dla KOMPLETU. Przy innej pozycji dolna tabela pokazuje komplety
+        nadrzędne — wpisanie tam ilości nie może trafić w skład tej pozycji,
+        bo ona składu nie ma.
+        """
         p = self._biezacy
-        if not p or p.get("sklad") is None or not self.sheet_sklad:
+        if not p or not _czy_komplet(p) or p.get("sklad") is None \
+                or not self.sheet_sklad:
             return
         try:
             dane = self.sheet_sklad.get_sheet_data()
@@ -958,6 +1059,126 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
         import subiekt_asortyment
         subiekt_asortyment.okno_nowa_kartoteka(
             self, po_zapisie=lambda _w: self._wczytaj_async())
+
+    # ── usuwanie kartotek ──────────────────────────────────────────────────
+    def _usun_kartoteki(self):
+        """Kasuje ZAZNACZONE kartoteki z Subiekta — nieodwracalnie.
+
+        Subiekt sam odmawia, gdy kartoteka ma dokument, stan albo jest
+        składnikiem kompletu, i to jest główna siatka bezpieczeństwa. Ale
+        odmowa przychodzi PO próbie, więc to, co da się sprawdzić wcześniej
+        (stan, użycie w komplecie, niewczytany stan), mówimy tutaj — inaczej
+        użytkownik dowiaduje się dopiero z raportu, że połowa listy odpadła.
+        """
+        try:
+            rows = sorted(self.sheet.get_selected_rows(get_cells_as_rows=True))
+        except Exception:
+            rows = []
+        zazn = [self.widoczne[r] for r in rows if 0 <= r < len(self.widoczne)]
+        if not zazn:
+            messagebox.showinfo(
+                "Usuwanie",
+                "Zaznacz w tabeli wiersze do usunięcia." + NL + NL
+                + "Podpowiedź: ustaw filtr Stan na „bez stanu (duchy)”, "
+                  "żeby zobaczyć kartoteki bez stanu i nieużywane w żadnym komplecie.",
+                parent=self)
+            return
+
+        # Blokady: to są przypadki, w których Subiekt i tak odmówi.
+        ze_stanem = [p["Symbol"] for p in zazn
+                     if p["stan"] is not None and (p["stan"] or p["dostepne"])]
+        w_kompletach = [f"{p['Symbol']} (w {p['WKompletach']} kompl.)" for p in zazn
+                        if p.get("WKompletach")]
+        if ze_stanem or w_kompletach:
+            czesci = []
+            if ze_stanem:
+                czesci.append("MAJĄ STAN:" + NL
+                              + NL.join(f"  • {x}" for x in ze_stanem[:10]))
+            if w_kompletach:
+                czesci.append("SĄ SKŁADNIKIEM KOMPLETU:" + NL
+                              + NL.join(f"  • {x}" for x in w_kompletach[:10]))
+            messagebox.showwarning(
+                "Usuwanie",
+                "Tych kartotek Subiekt nie pozwoli usunąć:" + NL + NL
+                + (NL + NL).join(czesci) + NL + NL
+                + "Zdejmij stan (RW w oknie Magazyn) albo wyjmij pozycję ze składu "
+                  "kompletu, a kartotekę kasuj dopiero wtedy." + NL + NL
+                + "Odznacz je i spróbuj ponownie.",
+                parent=self)
+            return
+
+        # Stan niewczytany = nie wiemy, czy pusta. Subiekt odmówi, ale lepiej
+        # powiedzieć to teraz, niż kazać czytać raport z samymi błędami.
+        niepewne = [p["Symbol"] for p in zazn if p["stan"] is None]
+        if niepewne:
+            if not messagebox.askyesno(
+                    "Usuwanie",
+                    f"Dla {len(niepewne)} z {len(zazn)} kartotek NIE WCZYTANO stanu — "
+                    "nie wiadomo, czy są puste." + NL + NL
+                    + "Zalecane: najpierw „📊 Pokaż stany (tylko widoczne)”." + NL + NL
+                    + "Subiekt i tak odmówi usunięcia tych ze stanem. Kontynuować?",
+                    parent=self, icon="warning"):
+                return
+
+        symbole = [p["Symbol"] for p in zazn]
+        if not messagebox.askyesno(
+                "Usuwanie kartotek — NIEODWRACALNE",
+                "Baza PRODUKCYJNA Subiekta." + NL + NL
+                + f"Usunąć {len(symbole)} kartotek z katalogu?" + NL
+                + NL.join(f"  • {x}" for x in symbole[:12])
+                + ("" if len(symbole) <= 12 else NL + f"  … i {len(symbole) - 12} więcej")
+                + NL + NL
+                + "Kartoteki z dokumentami Subiekt pominie i poda powód." + NL
+                + "Usuniętych NIE da się przywrócić. Kontynuować?",
+                parent=self, icon="warning"):
+            return
+
+        self._zajete = True
+        self.start_kreciolek(f"Usuwam {len(symbole)} kartotek z Subiekta")
+        threading.Thread(target=self._usun_worker, args=(symbole,), daemon=True).start()
+
+    def _usun_worker(self, symbole):
+        try:
+            wynik = usun_kartoteki(symbole, zapisz=True)
+        except Exception as e:
+            err = str(e)
+            self.after(0, lambda: self._usun_done(None, err))
+            return
+        self.after(0, lambda: self._usun_done(wynik, None))
+
+    def _usun_done(self, wynik, blad):
+        self._zajete = False
+        self.stop_kreciolek("")
+        try:
+            if blad:
+                self.status.config(text="Nie udało się usunąć kartotek.")
+                messagebox.showerror("Usuwanie", blad, parent=self)
+                return
+        except tk.TclError:
+            return
+
+        kroki = wynik.get("kroki") or []
+        usuniete = {k["Symbol"].strip().upper() for k in kroki
+                    if k.get("Status") == "usunieta"}
+        bledy = [k for k in kroki if k.get("Status") not in ("usunieta", None)]
+
+        self.pozycje = [p for p in self.pozycje
+                        if p["Symbol"].strip().upper() not in usuniete]
+        self.stany_wczytane -= usuniete
+        if self._biezacy is not None and \
+                self._biezacy["Symbol"].strip().upper() in usuniete:
+            self._pokaz_sklad(None)
+        self._odswiez_liste()
+
+        tekst = f"Usunięto kartotek: {len(usuniete)}"
+        if bledy:
+            tekst += (NL + NL + f"Pominięte ({len(bledy)}) — Subiekt odmówił:" + NL
+                      + NL.join(f"  • {b.get('Symbol')}: {b.get('Szczegoly') or b.get('Status')}"
+                                for b in bledy[:10]))
+        (messagebox.showwarning if bledy else messagebox.showinfo)(
+            "Usuwanie", tekst, parent=self)
+        self.status.config(text=f"Usunięto {len(usuniete)} kartotek."
+                                + (f" Pominięto {len(bledy)} (mają historię)." if bledy else ""))
 
     # ── zapis ──────────────────────────────────────────────────────────────
     def _zapisz(self):
