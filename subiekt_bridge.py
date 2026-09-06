@@ -283,6 +283,23 @@ def call(command, args=None, timeout=TIMEOUT_S, write=False, fallback=None):
                 return fallback()
             raise BridgeError(f"Most nie odpowiada: {e2}", code="BRIDGE_LOST")
 
+    # SESSION_LOST retryable=True przychodzi TYLKO wtedy, gdy most sprawdził
+    # sesję PRZED handlerem i nie zdołał jej odbudować — nic się nie
+    # wykonało, więc ponowienie jest bezpieczne także dla zapisu. Typowo po
+    # uśpieniu komputera: sieć wraca kilka sekund po wybudzeniu, pierwszy
+    # reconnect trafia w tę dziurę, drugi już przechodzi. Jedno ponowienie
+    # z odstępem — nie pętla, bo jeśli SQL naprawdę leży, user ma to
+    # zobaczyć, a nie czekać.
+    err = odp.get("error") or {}
+    if not odp.get("ok") and err.get("code") == "SESSION_LOST" and err.get("retryable"):
+        time.sleep(3)
+        try:
+            odp = _zapytaj(command, args, timeout=timeout)
+        except socket.timeout:
+            raise BridgeError(f"Subiekt nie odpowiedział w {timeout} s.", code="TIMEOUT")
+        except (OSError, ConnectionError) as e:
+            raise BridgeError(f"Most nie odpowiada: {e}", code="BRIDGE_LOST")
+
     if not odp.get("ok"):
         err = odp.get("error") or {}
         raise BridgeError(_komunikat_bledu(odp),

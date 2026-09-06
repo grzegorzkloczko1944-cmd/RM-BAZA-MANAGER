@@ -157,6 +157,7 @@ internal static class ServerHost
             {
                 var t = Stopwatch.StartNew();
                 sesja.Connect();
+                _ostatniaAktywnosc = DateTime.UtcNow;
                 Log($"session_start ok ms={t.ElapsedMilliseconds} operator={sesja.Operator}");
                 return Ok(new JsonObject());
             }
@@ -171,15 +172,81 @@ internal static class ServerHost
         var komenda = ZbudujKomende(cmd, argsNode);
         var zapis = CommandDispatcher.CzyZapis(komenda);
 
+        // Sesja po dluzszej przerwie (uspiony komputer, restart SQL) bywa
+        // martwa, choc Stan mowi Ready. Sprawdzamy to PRZED handlerem, nie
+        // dopiero po jego wyjatku — z dwoch powodow:
+        //  * wyjatek z martwej sesji potrafi przyjsc po timeoutcie TCP,
+        //    czyli po kilkudziesieciu sekundach zamiast od razu;
+        //  * dla ZAPISU pad przed startem handlera jest jednoznaczny (nic sie
+        //    nie wykonalo), a pad w trakcie — nie. Wykrycie go tutaj
+        //    pozwala odpowiedziec SESSION_LOST retryable=true zamiast
+        //    UNKNOWN_COMMIT_STATE i odsylania usera do Subiekta.
+        // Tylko po bezczynnosci, zeby nie placic zapytania przy kazdym
+        // klknieciu — przy zywej sesji jedna komenda po drugiej nie ma
+        // szans jej zerwac.
+        var blad = UpewnijSieZeSesjaZyje(sesja);
+        if (blad != null) return blad;
+
         var zegar = Stopwatch.StartNew();
         var wynik = WykonajZReconnect(sesja, komenda, zapis);
         zegar.Stop();
+        _ostatniaAktywnosc = DateTime.UtcNow;
 
         _ostatniaKomenda = cmd;
         Interlocked.Exchange(ref _ostatniaMs, zegar.ElapsedMilliseconds);
         Interlocked.Increment(ref _obsluzonych);
         Log($"cmd={cmd} zapis={zapis} ms={zegar.ElapsedMilliseconds} ok={wynik["ok"]?.GetValue<bool>()}");
         return wynik;
+    }
+
+    /// <summary>Kiedy worker ostatnio z powodzeniem dotykal Sfery (UTC).</summary>
+    static DateTime _ostatniaAktywnosc = DateTime.UtcNow;
+
+    /// <summary>
+    /// Po tylu sekundach bez komendy worker sprawdza sesje przed nastepna.
+    /// Minuta: uspienie komputera trwa dluzej, a zwykla praca w oknie
+    /// (klik, klik) miesci sie ponizej — wtedy nie placimy za sprawdzenie.
+    /// </summary>
+    const int BezczynnoscProgS = 60;
+
+    /// <summary>
+    /// Sprawdza sesje po dluzszej bezczynnosci i w razie potrzeby odbudowuje
+    /// ja ZANIM ruszy handler. Null = mozna jechac. Blad = odpowiedz dla
+    /// klienta; zawsze retryable, bo nic sie jeszcze nie wykonalo — takze
+    /// dla zapisu (patrz komentarz w Obsluz).
+    /// </summary>
+    static JsonObject? UpewnijSieZeSesjaZyje(NexoSession sesja)
+    {
+        var bezczynnaS = (DateTime.UtcNow - _ostatniaAktywnosc).TotalSeconds;
+        if (sesja.Stan == StanSesji.Ready && bezczynnaS < BezczynnoscProgS)
+            return null;
+
+        var t = Stopwatch.StartNew();
+        if (sesja.CzyZywa())
+        {
+            Log($"session_check ok idle_s={bezczynnaS:F0} ms={t.ElapsedMilliseconds}");
+            _ostatniaAktywnosc = DateTime.UtcNow;
+            return null;
+        }
+
+        Log($"session_check DEAD idle_s={bezczynnaS:F0} stan={sesja.Stan} — reconnect przed komenda");
+        try
+        {
+            t.Restart();
+            sesja.Reconnect();
+            Log($"reconnect_ok (pre-check) ms={t.ElapsedMilliseconds}");
+            _ostatniaAktywnosc = DateTime.UtcNow;
+            return null;
+        }
+        catch (SesjaException ex)
+        {
+            Log($"reconnect_FAIL (pre-check) {ex.Message.Replace("\n", " | ")}");
+            // Nic nie ruszylo, wiec klient moze bezpiecznie ponowic — takze zapis.
+            return Blad("SESSION_LOST",
+                "Sesja Sfery padla (np. po uspieniu komputera) i nie udalo sie jej odbudowac. " +
+                "Operacja NIE zostala wykonana — mozna ponowic.\n\n" + ex.Message,
+                retryable: true);
+        }
     }
 
     /// <summary>
@@ -203,11 +270,13 @@ internal static class ServerHost
 
             if (zapis)
             {
-                // Nie wiemy, czy zapis sie wykonal. Zadnego automatycznego
-                // powtorzenia — od tego sa duplikaty ZD i kartotek.
+                // Sesja byla zywa na starcie (pre-check w Obsluz), a padla
+                // W TRAKCIE handlera — to jedyny naprawde niejednoznaczny
+                // przypadek: nie wiemy, czy zapis przeszedl. Zadnego
+                // automatycznego powtorzenia — od tego sa duplikaty ZD.
                 try { sesja.Reconnect(); Log("reconnect_ok (po zapisie)"); } catch { /* zglosimy nizej */ }
                 return Blad("UNKNOWN_COMMIT_STATE",
-                    "Utracono sesje Sfery w trakcie operacji zapisujacej. Nie wiadomo, czy zmiana " +
+                    "Utracono sesje Sfery W TRAKCIE operacji zapisujacej. Nie wiadomo, czy zmiana " +
                     "zostala zapisana. Sprawdz stan w Subiekcie przed ponowieniem.\n\n" + ex.Message,
                     retryable: false);
             }

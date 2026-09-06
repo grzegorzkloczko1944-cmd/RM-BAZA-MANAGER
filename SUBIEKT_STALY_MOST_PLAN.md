@@ -83,6 +83,31 @@ Dwa ryzyka specyficzne dla stałej sesji zostały zweryfikowane:
    stan, więc drugi user dostanie odmowę, a nie ujemny stan. Baza jest
    arbitrem, most tego nie zmienia.
 
+## Uśpienie komputera / restart SQL — jak most to przeżywa
+
+Proces mostu nie ginie przy uśpieniu, ale sesja Sfery (połączenie SQL) tak.
+Reconnect uruchamiany dopiero po wyjątku z handlera miał dwie wady: wyjątek
+z martwej sesji potrafi przyjść po timeoucie TCP (kilkadziesiąt sekund),
+a dla ZAPISU pad „gdzieś w handlerze" jest niejednoznaczny.
+
+Dlatego worker **sprawdza sesję PRZED handlerem**, gdy od ostatniej komendy
+minęło ponad 60 s (`ServerHost.UpewnijSieZeSesjaZyje`):
+
+| Sytuacja | Odpowiedź | Python |
+|---|---|---|
+| sesja żywa | komenda idzie normalnie | — |
+| martwa, reconnect OK | komenda idzie na nowej sesji (płacisz ~15 s raz) | — |
+| martwa, reconnect FAIL | `SESSION_LOST` retryable=true — **nic nie ruszyło** | ponawia raz po 3 s, także zapis |
+| padła W TRAKCIE handlera (zapis) | `UNKNOWN_COMMIT_STATE` | nigdy nie ponawia — user sprawdza w Subiekcie |
+
+Próg 60 s: uśpienie trwa dłużej, a klik-klik w oknie mieści się poniżej, więc
+przy normalnej pracy sprawdzenie nie kosztuje nic. `ping` nadal nie dotyka
+Sfery — leci poza kolejką, a Sfery wolno używać tylko workerowi.
+
+Ponowienie po `SESSION_LOST` jest bezpieczne dla zapisu **tylko dlatego**, że
+ten kod wraca wyłącznie z pre-checku, czyli sprzed startu handlera. Gdyby ktoś
+kiedyś zwrócił `SESSION_LOST` z wnętrza ścieżki zapisu, ta gwarancja pęknie.
+
 **Uwaga o terminalu:** gdyby kiedyś kilku userów pracowało na jednej maszynie
 (RDP), stały port 51273 byłby konfliktem — pierwszy most zająłby port dla
 wszystkich sesji. Wtedy trzeba portu per sesja Windows. Przy obecnym układzie
