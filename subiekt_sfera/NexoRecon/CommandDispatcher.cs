@@ -49,7 +49,7 @@ internal static class CommandDispatcher
     static readonly HashSet<string> Zapisujace = new(StringComparer.OrdinalIgnoreCase)
     {
         "kartoteka", "kartoteka-usun", "projekt", "zd", "zd-usun",
-        "dostawcy", "progi", "rw", "termin", "symbole",
+        "dostawcy", "progi", "rw", "termin", "symbole", "komplet-napraw",
     };
 
     /// <summary>
@@ -67,7 +67,7 @@ internal static class CommandDispatcher
         "stan", "katalog", "kontrahenci", "dokumenty", "faktury", "kartoteka",
         "stan-pozycji", "dostawcy", "zapotrzebowanie", "zd", "magazyn",
         "zd-usun", "wydruk-recon", "termin", "symbole", "rw", "kartoteka-usun",
-        "progi", "wydruk", "projekt", "komplet",
+        "progi", "wydruk", "projekt", "komplet", "komplet-napraw",
     };
 
     public static bool Zna(string tryb) => Tryby.Contains(tryb, StringComparer.OrdinalIgnoreCase);
@@ -91,6 +91,11 @@ internal static class CommandDispatcher
 
             // Sklad kompletu i relacja odwrotna ("w czym to siedzi") — do
             // sprawdzenia, czy komplety projektu nie wisza w powietrzu.
+            // Sprzatanie zdublowanych skladnikow (patrz KompletNapraw.cs).
+            // Bez --zapisz tylko raport; bez symboli — wszystkie komplety.
+            case "komplet-napraw":
+                return KompletNapraw.Uruchom(sfera, k.Symbole, k.OutPath, k.Zapisz);
+
             case "komplet":
                 if (k.Symbole is not { Count: > 0 })
                     return Brak("komplet: brak symboli (--symbol= albo --symbols-file=).");

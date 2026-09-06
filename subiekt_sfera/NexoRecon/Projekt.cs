@@ -133,6 +133,24 @@ internal static class Projekt
                     if (enc == null) { kroki.Add(new Krok("komplet", p.Symbol, "blad", "brak kartoteki")); continue; }
 
                     using var ob = asort.Znajdz(enc);
+
+                    // SKLAD = PLAN, nie "plan dopisany do tego, co juz bylo".
+                    //
+                    // Dodaj() nie sprawdza, czy skladnik juz jest — dopisuje
+                    // kolejny wiersz. Drugie zalozenie tego samego kompletu
+                    // (poprawka projektu albo drugi projekt z tymi samymi
+                    // numerami rysunkow — u nas normalne, zespoly sie
+                    // powtarzaja) dawalo wiec kazdy skladnik PODWOJNIE, a
+                    // Subiekt liczyl z tego podwojne zapotrzebowanie. Znalezione
+                    // 06.09.2026: 25 kompletow, wszystkie x2, zero czystych.
+                    //
+                    // Kartoteka opisuje, z czego sklada sie CZESC — to fakt
+                    // konstrukcyjny z drzewka Inventora, nie projektowy. Wiec
+                    // zrodlem prawdy jest plan: czyscimy i wpisujemy od nowa.
+                    // Operacja jest przez to powtarzalna: drugi raz da ten sam
+                    // wynik, a nie podwojony.
+                    var wyczyszczono = WyczyscSklad(ob);
+
                     var dodane = 0;
                     var pominiete = new List<string>();
                     foreach (var s in skl)
@@ -155,7 +173,11 @@ internal static class Projekt
                         continue;
                     }
                     var uwaga = pominiete.Count > 0 ? $"pominięto bez kartoteki: {string.Join(", ", pominiete)}" : null;
-                    kroki.Add(new Krok("komplet", p.Symbol, $"utworzony ({dodane} skl.)", uwaga));
+                    // "zaktualizowany" mowi, ze komplet JUZ mial sklad i zostal
+                    // nadpisany — user widzi, ze to nie pierwsze zalozenie.
+                    kroki.Add(new Krok("komplet", p.Symbol,
+                        wyczyszczono > 0 ? $"zaktualizowany ({dodane} skl., zastąpiono {wyczyszczono})"
+                                         : $"utworzony ({dodane} skl.)", uwaga));
                 }
                 catch (Exception ex)
                 {
@@ -350,6 +372,42 @@ internal static class Projekt
         return komplety.OrderBy(p => glebokosc.TryGetValue(p.Symbol.Trim(), out var g) ? g : 0)
                        .ThenBy(p => p.Symbol)
                        .ToList();
+    }
+
+    /// <summary>
+    /// Usuwa WSZYSTKIE skladniki kompletu. Zwraca, ile wierszy bylo.
+    ///
+    /// ISkladnikiKompletu nie ma "wyczysc" — jest tylko Usun(symbol) : bool
+    /// (sprawdzone refleksja 06.09.2026). Nie wiadomo, czy Usun zdejmuje jedno
+    /// wystapienie, czy wszystkie o tym symbolu, wiec wolamy w petli az zwroci
+    /// false. Limit iteracji to bezpiecznik na wypadek, gdyby kiedys zaczelo
+    /// zwracac true w nieskonczonosc.
+    /// </summary>
+    internal static int WyczyscSklad(dynamic ob)
+    {
+        var symbole = new List<string>();
+        int bylo;
+        try
+        {
+            IEnumerable<dynamic> sklad = ob.Dane.SkladnikiKompletu;
+            var lista = sklad.ToList();
+            bylo = lista.Count;
+            foreach (var s in lista)
+            {
+                string? sym = s.Skladnik?.Symbol;
+                if (!string.IsNullOrWhiteSpace(sym) && !symbole.Contains(sym)) symbole.Add(sym);
+            }
+        }
+        catch
+        {
+            return 0;                 // brak kolekcji = nie ma czego czyscic
+        }
+        foreach (var sym in symbole)
+        {
+            var straznik = 0;
+            while (straznik++ < 200 && (bool)ob.Skladniki.Usun(sym)) { }
+        }
+        return bylo;
     }
 
     static Podmiot? ZnajdzPodmiot(Uchwyt sfera, string? szukany)

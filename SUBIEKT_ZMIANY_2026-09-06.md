@@ -546,6 +546,47 @@ Normalia (`6001RS`, `5M 25 CP`) i pozycje bez cyfry w nazwie („Filtr", „Zame
 283 z 354 pozycji bez żadnego śladu po reszcie. Ustalone: nazwa bez numeru
 **jest** symbolem katalogowym; brak kartoteki oznacza pozycję nową.
 
+## 12b. Komplety zakładane dwa razy miały podwójny skład
+
+Wyszło przy próbie usunięcia kartoteki `2627-200.22`: Subiekt odmówił, bo to
+składnik kompletu, a odczyt trybem `komplet` pokazał, że wchodzi w
+`2627-200.28ZZ` **dwa razy** — jako dwa osobne wiersze po 1 szt. Sprawdzenie
+całej bazy: **25 kompletów, każdy składnik ×2, zero czystych**. Potwierdzone
+w oknie Subiekta (zakładka Składniki: 22 wiersze zamiast 11).
+
+**Przyczyna:** `Projekt.cs` dopisywał składniki przez `Skladniki.Dodaj()` bez
+sprawdzenia, czy już są. Drugie założenie tego samego kompletu — u nas
+normalne, bo **dwa projekty miały te same listy części** (powtarzalne zespoły
+mają te same numery rysunków) — dokładało wszystko od nowa obok.
+
+**Skutek:** Subiekt liczył z tego **podwójne zapotrzebowanie** na składniki
+tych kompletów. To realny błąd w zamówieniach, nie kosmetyka.
+
+**Naprawa w kodzie:** skład = plan, nie „plan dopisany do tego, co było".
+`Projekt.cs` czyści skład przed wpisaniem (`WyczyscSklad`), więc operacja jest
+powtarzalna — drugi raz daje ten sam wynik. Krok raportuje `zaktualizowany
+(N skl., zastąpiono M)` zamiast `utworzony`, żeby było widać, że to nie
+pierwsze założenie.
+
+**Naprawa bazy:** nowy tryb `komplet-napraw` — bez `--zapisz` tylko raport,
+bez symboli przegląda wszystkie komplety. Naprawia **wyłącznie duplikaty
+jednoznaczne** (te same symbole z tą samą ilością); przy różnych ilościach
+raportuje i pomija, bo nie wiadomo, która jest prawdziwa. Na demo: 25 do
+naprawy → najpierw jeden (kontrola odczytem), potem 24 → weryfikacja
+`do_naprawy = 0`.
+
+**Zasada na przyszłość — każda operacja zapisu ma być powtarzalna.** Dodaj-bez-
+sprawdzenia to ten sam błąd co ślepe ponawianie: działa raz, psuje za drugim.
+
+**SDK:** `ISkladnikiKompletu` ma tylko `Dodaj(...)` i `Usun(symbol) : bool` —
+ani „wyczyść", ani „ustaw" (sprawdzone refleksją). `Usun` w pętli aż zwróci
+`false`, z bezpiecznikiem na 200 iteracji.
+
+> ⚠️ **W firmie trzeba to sprawdzić** — jeśli jakikolwiek projekt był zakładany
+> dwa razy albo dwa projekty dzielą złożenia, produkcyjna baza ma ten sam
+> problem. Suchy przebieg jest bezpieczny:
+> `NexoRecon.exe komplet-napraw --out=raport.json` (bez `--zapisz`).
+
 ## 12. Co zostało
 
 - ~~**Benchmark w firmie**~~ — ZROBIONY 06.09, patrz 12a. Cache niepotrzebny.
