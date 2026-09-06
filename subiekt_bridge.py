@@ -213,6 +213,15 @@ def zapewnij_most():
         if _most_niedostepny:
             raise BridgeUnavailable("Most jest oznaczony jako niedostępny.")
 
+        # Nieaktualną binarkę widać OD RAZU (data pliku), więc nie ma po co
+        # uruchamiać jej i czekać 40 s na „ready", którego nigdy nie będzie.
+        # Bez tego user przez trzy kwadranse minuty patrzy na kręciołek,
+        # zanim zobaczy okienko z przyciskiem — i uznaje, że nic się nie
+        # dzieje (zgłoszone 06.09.2026).
+        if not _zna_tryb_server(_find_exe()):
+            _most_niedostepny = True
+            raise BridgeUnavailable(_powod_niewstania())
+
         # Most może już wstawać (inne okno go uruchomiło) — wtedy tylko czekamy.
         if dane is None and not _uruchom_most():
             _most_niedostepny = True
@@ -409,6 +418,12 @@ def _okno_buildu(parent, powod):
                 return
             ok, komunikat = wynik.get("r", (False, "Budowanie przerwane."))
             stan.config(text="")
+            # topmost zdejmujemy przed messageboxem — inaczej komunikat
+            # wyniku potrafi wylądować POD tym oknem i nie da się go kliknąć.
+            try:
+                okno.attributes("-topmost", False)
+            except Exception:
+                pass
             (messagebox.showinfo if ok else messagebox.showerror)(
                 "Budowanie mostu", komunikat, parent=okno)
             if ok:
@@ -429,6 +444,38 @@ def _okno_buildu(parent, powod):
         wysrodkuj(okno, parent)
     except Exception:
         pass
+
+    # NA WIERZCH I Z FOKUSEM — bezwarunkowo. Okno wyskakuje samo, w reakcji
+    # na kliknięcie w zupełnie innym miejscu programu, więc bez tego ląduje
+    # pod oknem, które user właśnie otworzył, i przepada niezauważone.
+    try:
+        okno.grab_set()             # modalne: reszta RM_BAZA nie przejmie zdarzeń
+        okno.attributes("-topmost", True)
+        okno.lift()
+        okno.focus_force()
+        btn_buduj.focus_set()       # Enter = zbuduj, bo po to tu jesteśmy
+        okno.bell()
+        # Powtórka po chwili: tkinter potrafi oddać fokus oknu, które
+        # dopiero się rysuje (to ono nas tu w ogóle wywołało).
+        okno.after(150, lambda: _wymus_fokus(okno, btn_buduj))
+        okno.after(600, lambda: _wymus_fokus(okno, btn_buduj))
+    except Exception:
+        pass                        # to nie może wywalić ostrzeżenia
+
+    okno.bind("<Return>", lambda _e: buduj())
+    okno.bind("<Escape>", lambda _e: okno.destroy())
+
+
+def _wymus_fokus(okno, przycisk):
+    """Ponawia wyniesienie okna — jednorazowe lift() bywa cofane."""
+    try:
+        if not okno.winfo_exists():
+            return
+        okno.lift()
+        okno.focus_force()
+        przycisk.focus_set()
+    except Exception:
+        pass                        # okno mogło już zostać zamknięte
 
 
 def _sprawdz_protokol(dane_ping):
