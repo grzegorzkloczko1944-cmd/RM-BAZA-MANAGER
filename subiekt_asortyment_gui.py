@@ -356,6 +356,16 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
                                           self._karta_pozycji)
         self.sheet.popup_menu_add_command("📊 Dociągnij stan dla wierszy",
                                           self._stan_dla_wybranych)
+        # To samo co w dolnej tabeli: „rc_select" zaznacza wiersz dopiero po
+        # otwarciu menu, wiec bez tego PPM w NIEZAZNACZONY wiersz nie mialby
+        # czego odczytac.
+        self._wiersz_ppm_gora = None
+        self.sheet.MT.bind("<Button-3>", self._zapamietaj_wiersz_gora, add="+")
+        # Lewy klik konczy „kontekst PPM" — inaczej wiersz zapamietany przy
+        # ostatnim prawym kliknieciu przykleilby sie do pozniejszych akcji
+        # wolanych z przyciskow, ktore maja isc po ZAZNACZENIU.
+        self.sheet.MT.bind(
+            "<Button-1>", lambda _e: setattr(self, "_wiersz_ppm_gora", None), add="+")
         self.sheet.pack(fill=tk.BOTH, expand=True)
 
         dol = tk.Frame(panel)
@@ -392,6 +402,13 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
             "🔍 Karta pozycji (złożenie, BOM, Subiekt)", self._karta_z_dolnej)
         self.sheet_sklad.popup_menu_add_command(
             "⬆ Pokaż tę pozycję na liście powyżej", self._skocz_z_dolnej)
+        # Wiersz spod kursora zapamietujemy PRZED otwarciem menu — patrz
+        # _zapamietaj_wiersz_ppm. Bind na MT, bo to on odbiera klikniecia
+        # w obszarze komorek.
+        self._wiersz_ppm = None
+        self.sheet_sklad.MT.bind("<Button-3>", self._zapamietaj_wiersz_ppm, add="+")
+        self.sheet_sklad.MT.bind(
+            "<Button-1>", lambda _e: setattr(self, "_wiersz_ppm", None), add="+")
         try:
             # Ilość edytowalna; symbol/nazwa/rodzaj to dane składnika z jego
             # własnej kartoteki — poprawia się je na TAMTEJ pozycji, nie tu.
@@ -516,10 +533,16 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
         self._czytaj_stany(brak)
 
     def _stan_dla_wybranych(self):
+        # Tu zaznaczenie WIELU wierszy ma sens (odczyt idzie porcjami), więc
+        # bierzemy je w całości; wiersz spod kursora dochodzi, gdy PPM padł
+        # poza zaznaczeniem albo gdy nic nie było zaznaczone.
         try:
-            rows = self.sheet.get_selected_rows(get_cells_as_rows=True)
+            rows = set(self.sheet.get_selected_rows(get_cells_as_rows=True))
         except Exception:
-            rows = []
+            rows = set()
+        r = getattr(self, "_wiersz_ppm_gora", None)
+        if r is not None and r not in rows:
+            rows.add(r)
         sym = [self.widoczne[r]["Symbol"] for r in sorted(rows)
                if 0 <= r < len(self.widoczne)]
         if sym:
@@ -843,22 +866,59 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
             f"{float(s.get('Ilosc') or 0):g}", _kod_rodzaju(s.get("Rodzaj")),
         ] for s in wchodzi], reset_col_positions=False)
 
-    def _symbol_z_dolnej(self):
-        """Symbol z zaznaczonego wiersza dolnej tabeli albo None.
+    def _zapamietaj_wiersz_gora(self, event):
+        """Wiersz pod kursorem PPM w GÓRNEJ tabeli — patrz niżej."""
+        try:
+            self._wiersz_ppm_gora = self.sheet.identify_row(event, allow_end=False)
+        except Exception:
+            self._wiersz_ppm_gora = None
 
+    def _wiersze_gora(self):
+        """Wiersze do akcji z PPM/menu: spod kursora, inaczej zaznaczone."""
+        r = getattr(self, "_wiersz_ppm_gora", None)
+        if r is not None:
+            return [r]
+        try:
+            return sorted(self.sheet.get_selected_rows(get_cells_as_rows=True))
+        except Exception:
+            return []
+
+    def _zapamietaj_wiersz_ppm(self, event):
+        """Wiersz pod kursorem w chwili kliknięcia PPM.
+
+        Potrzebne, bo „rc_select" zaznacza wiersz DOPIERO po otwarciu menu —
+        pierwsze kliknięcie prawym w niezaznaczony wiersz nie miałoby więc
+        czego odczytać i pozycja menu trafiałaby w pustkę (07.09.2026).
+        """
+        try:
+            self._wiersz_ppm = self.sheet_sklad.identify_row(event, allow_end=False)
+        except Exception:
+            self._wiersz_ppm = None
+
+    def _symbol_z_dolnej(self):
+        """Symbol z wiersza dolnej tabeli albo None.
+
+        Najpierw wiersz spod kursora PPM, dopiero potem zaznaczenie — dzięki
+        temu menu działa też na wierszu, w który dopiero co kliknięto.
         Działa w obu trybach: przy komplecie to składnik, przy innej pozycji
         komplet nadrzędny. W obu w kolumnie 0 stoi symbol kartoteki.
         """
         if not self.sheet_sklad:
             return None
-        try:
-            rows = sorted(self.sheet_sklad.get_selected_rows(get_cells_as_rows=True))
-        except Exception:
-            rows = []
-        if not rows:
+        wiersze = []
+        r = getattr(self, "_wiersz_ppm", None)
+        if r is not None:
+            wiersze = [r]
+        else:
+            try:
+                wiersze = sorted(
+                    self.sheet_sklad.get_selected_rows(get_cells_as_rows=True))
+            except Exception:
+                wiersze = []
+        if not wiersze:
             return None
         try:
-            return str(self.sheet_sklad.get_cell_data(rows[0], 0) or "").strip()
+            return str(self.sheet_sklad.get_cell_data(wiersze[0], 0) or "").strip()
         except Exception:
             return None
 
@@ -1114,10 +1174,7 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
         if not self.sheet:
             return
         if rows is None:
-            try:
-                rows = sorted(self.sheet.get_selected_rows(get_cells_as_rows=True))
-            except Exception:
-                rows = []
+            rows = self._wiersze_gora()
         rows = [r for r in rows if 0 <= r < len(self.widoczne)]
         if not rows:
             return
