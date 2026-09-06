@@ -57,6 +57,33 @@ NL = chr(10)
 
 # ── most ────────────────────────────────────────────────────────────────────
 def _uruchom(tryb, argv, out, timeout):
+    """Wynik komendy mostu. Idzie przez stały most, w razie czego starym CLI.
+
+    Stały most (subiekt_bridge) trzyma jedną sesję Sfery, więc drugie i
+    kolejne wywołanie nie płaci ~10 s za start procesu i logowanie.
+    Gdy mostu nie da się uruchomić, leci `_uruchom_cli` — okno ma działać
+    także wtedy, tylko wolniej (plan, sekcja 17).
+    """
+    try:
+        import subiekt_bridge
+    except ImportError:
+        return _uruchom_cli(tryb, argv, out, timeout)
+
+    # Plan jedzie przez most jako dane, nie jako plik — wyjmujemy go z --plan=.
+    plan = None
+    for a in argv:
+        if a.startswith("--plan="):
+            with open(a[len("--plan="):], encoding="utf-8") as f:
+                plan = json.load(f)
+            break
+
+    return subiekt_bridge.wywolaj(
+        tryb, argv, timeout=timeout, plan=plan,
+        fallback=lambda: _uruchom_cli(tryb, argv, out, timeout))
+
+
+def _uruchom_cli(tryb, argv, out, timeout):
+    """Stara ścieżka: osobny proces NexoRecon.exe na każde wywołanie."""
     exe = _find_exe()
     if not exe:
         raise RuntimeError("Nie znaleziono NexoRecon.exe.")
@@ -329,7 +356,7 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
     # ── wczytywanie ────────────────────────────────────────────────────────
     def _wczytaj_async(self):
         self.btn_refresh.config(state=tk.DISABLED)
-        self.start_kreciolek("Czytam stany, progi i otwarte ZD z Subiekta (~15 s)")
+        self.start_kreciolek("Czytam stany, progi i otwarte ZD z Subiekta")
         threading.Thread(target=self._wczytaj_worker, daemon=True).start()
 
     def _wczytaj_worker(self):
@@ -586,7 +613,7 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
         skoro większość wejść tu to tylko przegląd stanów.
         """
         if self.kontrahenci is None:
-            self.start_kreciolek("Pobieram listę kontrahentów z Subiekta (~10 s)")
+            self.start_kreciolek("Pobieram listę kontrahentów z Subiekta")
 
             def worker():
                 try:
@@ -672,7 +699,7 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
         stanie, więc katalog jest tutaj: bez stanów, za to cały i szybki (~9 s).
         """
         if self.katalog is None:
-            self.start_kreciolek("Czytam katalog kartotek z Subiekta (~9 s)")
+            self.start_kreciolek("Czytam katalog kartotek z Subiekta")
 
             def worker():
                 try:
@@ -812,7 +839,7 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
             return
         plan = [{"symbol": p["Symbol"], "min": p["min"], "opt": p["opt"]} for p in zmienione]
         self.btn_progi.config(state=tk.DISABLED)
-        self.start_kreciolek(f"Zapisuję progi {len(plan)} kartotek w Subiekcie (~10 s)")
+        self.start_kreciolek(f"Zapisuję progi {len(plan)} kartotek w Subiekcie")
         threading.Thread(target=self._progi_worker, args=(plan,), daemon=True).start()
 
     def _progi_worker(self, plan):
@@ -919,6 +946,12 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
             "ZD utworzone", "\n".join(lines), parent=self)
         self.status.config(text=f"Utworzono {len(utworzone)} ZD na magazyn. "
                                 "Wyślij je dostawcom z okna Przegląd dokumentów.")
+        # Numery ZD wpisaliśmy wyżej z odpowiedzi mostu, ale zamówienie zmienia
+        # też stan zadysponowany, którego okno nie policzy samo. Przez stały
+        # most odczyt to ~1 s, więc dociągamy prawdę zamiast pokazywać liczby
+        # sprzed zamówienia.
+        if utworzone:
+            self._wczytaj_async()
 
     # ── zdjęcie ze stanu (RW) ──────────────────────────────────────────────
     def _zdejmij_rw(self):
@@ -1027,7 +1060,7 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
                     parent=dlg, icon="warning"):
                 return
             dlg.destroy()
-            self.start_kreciolek("Wystawiam RW w Subiekcie (~10 s)")
+            self.start_kreciolek("Wystawiam RW w Subiekcie")
             threading.Thread(target=self._rw_worker, args=(poz, f"{UWAGI_MAGAZYN}: {powod}"),
                              daemon=True).start()
 
@@ -1052,12 +1085,18 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
         if numer:
             messagebox.showinfo("RW wystawione",
                                 f"Utworzono {numer}." + NL + NL
-                                + "Stan w Subiekcie zszedł. Kliknij „Odśwież”, żeby zobaczyć nowe ilości.",
+                                + "Stan w Subiekcie zszedł — odświeżam listę.",
                                 parent=self)
-            self.status.config(text=f"Wystawiono {numer}. Odśwież, żeby zobaczyć stany po RW.")
+            self.status.config(text=f"Wystawiono {numer}. Odświeżam stany…")
             for p in self.pozycje:
                 p["sel"] = False
             self._odswiez_liste()
+            # Stany po RW ściągamy od razu. Wcześniej okno prosiło o ręczne
+            # „Odśwież”, bo odczyt kosztował ~15 s i zmuszanie do czekania po
+            # każdym RW było gorsze niż nieaktualna liczba. Przez stały most
+            # to ~1 s, więc lepiej pokazać prawdę od razu — user i tak
+            # odświeżał ręcznie, tylko z dodatkowym kliknięciem.
+            self._wczytaj_async()
         else:
             messagebox.showerror("RW", "RW nie powstało:" + NL + NL
                                  + NL.join(f"  • {b.get('Symbol', '')}: {b.get('Szczegoly', '')}"
@@ -1095,7 +1134,7 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
                 + "Usuniętych NIE da się przywrócić. Kontynuować?",
                 parent=self, icon="warning"):
             return
-        self.start_kreciolek(f"Usuwam {len(symbole)} kartotek z Subiekta (~10 s)")
+        self.start_kreciolek(f"Usuwam {len(symbole)} kartotek z Subiekta")
         threading.Thread(target=self._usun_worker, args=(symbole,), daemon=True).start()
 
     def _usun_worker(self, symbole):

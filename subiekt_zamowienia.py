@@ -76,30 +76,13 @@ def pobierz_zapotrzebowanie(timeout=TIMEOUT_S):
     zawęzić go do jednego dokumentu. Filtr per projekt robimy niżej, po
     Uwagach na ZK (tam RM_BAZA wpisuje numer projektu).
     """
-    exe = _find_exe()
-    if not exe:
-        raise RuntimeError(
-            "Nie znaleziono NexoRecon.exe.\n\n"
-            "Zbuduj most:\n  cd subiekt_sfera\\NexoRecon\n  dotnet build -c Release")
-    if not os.path.isfile(CONFIG_PATH):
-        raise RuntimeError(f"Brak konfiguracji połączenia:\n{CONFIG_PATH}")
-
-    tmpdir = tempfile.mkdtemp(prefix="subiekt_zap_")
-    out = os.path.join(tmpdir, "zap.json")
-    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     try:
-        proc = subprocess.run(
-            [exe, "zapotrzebowanie", f"--out={out}"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout, creationflags=flags)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"Subiekt nie odpowiedział w {timeout} s.")
-
-    if proc.returncode != 0 or not os.path.isfile(out):
-        raise RuntimeError(blad_mostu(exe, "zapotrzebowanie", proc, out))
-
-    with open(out, encoding="utf-8") as f:
-        data = json.load(f)
+        import subiekt_bridge
+        data = subiekt_bridge.call(
+            "zapotrzebowanie", timeout=timeout,
+            fallback=lambda: _zapotrzebowanie_cli(timeout))
+    except ImportError:
+        data = _zapotrzebowanie_cli(timeout)
 
     pozycje = [{
         "symbol": p.get("Symbol") or "",
@@ -136,6 +119,34 @@ def pobierz_zapotrzebowanie(timeout=TIMEOUT_S):
     return pozycje, data.get("podmioty", []), zamowione
 
 
+def _zapotrzebowanie_cli(timeout):
+    """Stara ścieżka: osobny proces NexoRecon.exe na każde wywołanie."""
+    exe = _find_exe()
+    if not exe:
+        raise RuntimeError(
+            "Nie znaleziono NexoRecon.exe.\n\n"
+            "Zbuduj most:\n  cd subiekt_sfera\\NexoRecon\n  dotnet build -c Release")
+    if not os.path.isfile(CONFIG_PATH):
+        raise RuntimeError(f"Brak konfiguracji połączenia:\n{CONFIG_PATH}")
+
+    tmpdir = tempfile.mkdtemp(prefix="subiekt_zap_")
+    out = os.path.join(tmpdir, "zap.json")
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        proc = subprocess.run(
+            [exe, "zapotrzebowanie", f"--out={out}"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, creationflags=flags)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Subiekt nie odpowiedział w {timeout} s.")
+
+    if proc.returncode != 0 or not os.path.isfile(out):
+        raise RuntimeError(blad_mostu(exe, "zapotrzebowanie", proc, out))
+
+    with open(out, encoding="utf-8") as f:
+        return json.load(f)
+
+
 def stan_pozycji(symbole, projekt=None, timeout=TIMEOUT_S):
     """{symbol: {kartoteka, stan, zk, zd, dostawca, status_zd}} — dla kolumny
     SUBIEKT w arkuszu głównym RM_BAZA.
@@ -144,14 +155,41 @@ def stan_pozycji(symbole, projekt=None, timeout=TIMEOUT_S):
     czy asortyment w ogóle istnieje w Subiekcie, czy jest na liście projektu
     (ZK) i czy zamówiony u dostawcy (ZD).
     """
+    symbole = [str(s).strip() for s in (symbole or []) if str(s).strip()]
+    if not symbole:
+        return {}
+
+    args = {"symbols": symbole}
+    if projekt:
+        args["projekt"] = projekt
+    try:
+        import subiekt_bridge
+        data = subiekt_bridge.call(
+            "stan-pozycji", args, timeout=timeout,
+            fallback=lambda: _stan_pozycji_cli(symbole, projekt, timeout))
+    except ImportError:
+        data = _stan_pozycji_cli(symbole, projekt, timeout)
+
+    return {p["Pytany"]: {
+        "kartoteka": bool(p.get("MaKartoteke")),
+        "nazwa": p.get("Nazwa") or "",
+        "stan": float(p.get("Stan") or 0),
+        "zk": p.get("Zk") or "",
+        "ilosc_zk": float(p.get("IloscZk") or 0),
+        "zd": p.get("Zd") or "",
+        "dostawca": (p.get("Dostawca") or "").strip(),
+        "ilosc_zd": float(p.get("IloscZd") or 0),
+        "status_zd": p.get("StatusZd") or "",
+    } for p in data.get("pozycje", [])}
+
+
+def _stan_pozycji_cli(symbole, projekt, timeout):
+    """Stara ścieżka: osobny proces NexoRecon.exe na każde wywołanie."""
     exe = _find_exe()
     if not exe:
         raise RuntimeError("Nie znaleziono NexoRecon.exe.")
     if not os.path.isfile(CONFIG_PATH):
         raise RuntimeError(f"Brak konfiguracji połączenia:\n{CONFIG_PATH}")
-    symbole = [str(s).strip() for s in (symbole or []) if str(s).strip()]
-    if not symbole:
-        return {}
 
     tmpdir = tempfile.mkdtemp(prefix="subiekt_sp_")
     lst = os.path.join(tmpdir, "symbole.txt")
@@ -169,18 +207,7 @@ def stan_pozycji(symbole, projekt=None, timeout=TIMEOUT_S):
         raise RuntimeError(blad_mostu(exe, "stan-pozycji", proc, out))
 
     with open(out, encoding="utf-8") as f:
-        data = json.load(f)
-    return {p["Pytany"]: {
-        "kartoteka": bool(p.get("MaKartoteke")),
-        "nazwa": p.get("Nazwa") or "",
-        "stan": float(p.get("Stan") or 0),
-        "zk": p.get("Zk") or "",
-        "ilosc_zk": float(p.get("IloscZk") or 0),
-        "zd": p.get("Zd") or "",
-        "dostawca": (p.get("Dostawca") or "").strip(),
-        "ilosc_zd": float(p.get("IloscZd") or 0),
-        "status_zd": p.get("StatusZd") or "",
-    } for p in data.get("pozycje", [])}
+        return json.load(f)
 
 
 def opis_stanu(info):
@@ -652,13 +679,33 @@ def utworz_zd(pozycje, timeout=TIMEOUT_S, uwagi=None):
     if not exe:
         raise RuntimeError("Nie znaleziono NexoRecon.exe.")
 
+    plan = {"pozycje": pozycje}
+    if uwagi:
+        plan["uwagi"] = uwagi
+
+    # ZAPIS — most nie ponawia operacji po niejednoznacznym błędzie, bo
+    # powtórzone „zd" to drugi dokument w Subiekcie (plan, sekcja 14).
+    # Fallback do CLI jest bezpieczny tylko dlatego, że wchodzi wyłącznie
+    # wtedy, gdy most w ogóle nie wystartował — czyli nic się nie wykonało.
+    try:
+        import subiekt_bridge
+        return subiekt_bridge.call(
+            "zd", {"plan": plan, "zapisz": True}, timeout=timeout, write=True,
+            fallback=lambda: _utworz_zd_cli(plan, timeout))
+    except ImportError:
+        return _utworz_zd_cli(plan, timeout)
+
+
+def _utworz_zd_cli(plan, timeout):
+    """Stara ścieżka: osobny proces NexoRecon.exe."""
+    exe = _find_exe()
+    if not exe:
+        raise RuntimeError("Nie znaleziono NexoRecon.exe.")
+
     tmpdir = tempfile.mkdtemp(prefix="subiekt_zd_")
     plan_path = os.path.join(tmpdir, "zd.json")
     out = os.path.join(tmpdir, "wynik.json")
     with open(plan_path, "w", encoding="utf-8") as f:
-        plan = {"pozycje": pozycje}
-        if uwagi:
-            plan["uwagi"] = uwagi
         json.dump(plan, f, ensure_ascii=False, indent=1)
 
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -688,6 +735,26 @@ def usun_zd(numery, zapisz=False, timeout=TIMEOUT_S):
         raise RuntimeError("Nie znaleziono NexoRecon.exe.")
     if not numery:
         raise RuntimeError("Nie podano numerów ZD do usunięcia.")
+
+    # USUWANIE — nieodwracalne, więc żadnego automatycznego ponawiania
+    # (plan, sekcja 14). zapisz=False to sam podgląd i wtedy nic nie znika.
+    args = {"numery": ";".join(numery)}
+    if zapisz:
+        args["zapisz"] = True
+    try:
+        import subiekt_bridge
+        return subiekt_bridge.call(
+            "zd-usun", args, timeout=timeout, write=zapisz,
+            fallback=lambda: _usun_zd_cli(numery, zapisz, timeout))
+    except ImportError:
+        return _usun_zd_cli(numery, zapisz, timeout)
+
+
+def _usun_zd_cli(numery, zapisz, timeout):
+    """Stara ścieżka: osobny proces NexoRecon.exe."""
+    exe = _find_exe()
+    if not exe:
+        raise RuntimeError("Nie znaleziono NexoRecon.exe.")
 
     tmpdir = tempfile.mkdtemp(prefix="subiekt_zdu_")
     out = os.path.join(tmpdir, "wynik.json")
@@ -1028,7 +1095,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
     def _load_async(self):
         self.btn_refresh.config(state=tk.DISABLED)
         self.btn_zd.config(state=tk.DISABLED)
-        self.start_kreciolek("Pytam Subiekta o zapotrzebowanie (~10 s)")
+        self.start_kreciolek("Pytam Subiekta o zapotrzebowanie")
         threading.Thread(target=self._load_worker, daemon=True).start()
 
     def _load_worker(self):
@@ -2355,7 +2422,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
                          f"(gotowy plik; „Nowy PDF” wygeneruje aktualny).")
                 return
 
-        self.start_kreciolek(f"Generuję PDF {numer} z Subiekta (~11 s)")
+        self.start_kreciolek(f"Generuję PDF {numer} z Subiekta")
         threading.Thread(target=self._podglad_pdf_worker, args=(numer,),
                          daemon=True).start()
 

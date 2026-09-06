@@ -141,8 +141,40 @@ def podobienstwo(a, b):
 def pobierz_katalog(timeout=TIMEOUT_S):
     """[{"symbol": ..., "nazwa": ...}] — pełna kartoteka Subiekta.
 
-    Kosztowne (jeden przelot po Wszystkie(): ~8–15 s), więc woła się to RAZ
-    na otwarcie okna i trzyma wynik w pamięci, nie per pozycja.
+    Idzie przez stały most (subiekt_bridge), więc drugie i kolejne wywołanie
+    kosztuje milisekundy zamiast ~10 s — nie trzeba już płacić za start
+    procesu i logowanie do Sfery przy każdym otwarciu okna.
+    Gdy mostu nie da się uruchomić, leci starym CLI (_pobierz_katalog_cli).
+    """
+    def przez_cli():
+        return _pobierz_katalog_cli(timeout)
+
+    try:
+        import subiekt_bridge
+    except ImportError:
+        return przez_cli()
+
+    dane = subiekt_bridge.call("katalog", timeout=timeout, fallback=przez_cli)
+    # Fallback zwraca gotową listę, most — surowe {"pozycje": [...]}.
+    if isinstance(dane, list):
+        return dane
+    return _przelicz(dane)
+
+
+def _przelicz(data):
+    """Surowa odpowiedź mostu -> lista kartotek w formacie tego modułu."""
+    return [{"id": p.get("Id"),
+             "symbol": p.get("Symbol") or "",
+             "nazwa": p.get("Nazwa") or ""}
+            for p in data.get("pozycje", [])]
+
+
+def _pobierz_katalog_cli(timeout=TIMEOUT_S):
+    """Stara ścieżka: osobny proces NexoRecon.exe na każde wywołanie.
+
+    Zostaje na czas migracji jako fallback (plan, sekcja 17) — most bywa
+    niedostępny (nie zbudowany po „git pull”, zajęty port), a wtedy okno
+    ma dalej działać, tylko wolniej.
     """
     exe = _find_exe()
     if not exe:
@@ -171,11 +203,7 @@ def pobierz_katalog(timeout=TIMEOUT_S):
         raise RuntimeError(blad_mostu(exe, "katalog", proc, out))
 
     with open(out, encoding="utf-8") as f:
-        data = json.load(f)
-    return [{"id": p.get("Id"),
-             "symbol": p.get("Symbol") or "",
-             "nazwa": p.get("Nazwa") or ""}
-            for p in data.get("pozycje", [])]
+        return _przelicz(json.load(f))
 
 
 # ── Dopasowanie ─────────────────────────────────────────────────────────────

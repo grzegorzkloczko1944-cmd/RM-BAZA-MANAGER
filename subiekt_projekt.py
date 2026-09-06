@@ -37,7 +37,7 @@ from rm_kreciolek import Kreciolek
 
 import subiekt_mapowania
 from subiekt_stany import (_find_exe, blad_mostu, jedna_linia, CONFIG_PATH,
-                           PROJECTS_DIR, looks_like_drawing_no,
+                           PROJECTS_DIR, looks_like_drawing_no, wysrodkuj,
                            wczytaj_szerokosci, zapisz_szerokosci)
 
 TIMEOUT_S = 600          # zapis bywa wolniejszy od odczytu — kartoteki idą pojedynczo
@@ -124,17 +124,64 @@ def read_project_items(project_id):
     return out
 
 
+def read_hidden_drawings(project_id):
+    """{NUMER: nazwa} — pozycje UKRYTE w arkuszu (is_hidden = 1).
+
+    Potrzebne, żeby odróżnić dwie zupełnie różne przyczyny tego samego
+    objawu „składnika z drzewka nie ma w BOM-ie":
+      * pozycja UKRYTA  → wystarczy ją odkryć w arkuszu,
+      * numer ZMIENIONY → trzeba poprawić w Inventorze i przeimportować.
+    Bez tego okno zgadywało drugą przyczynę także wtedy, gdy chodziło
+    o pierwszą (zgłoszone 06.09.2026).
+
+    Nazwy, bo sam numer nie mówi, co to za część — a ukrytej pozycji nie ma
+    w BOM-ie, więc okno nie ma skąd jej nazwy wziąć.
+    """
+    path = os.path.join(PROJECTS_DIR, f"project_{project_id}.sqlite")
+    if not os.path.isfile(path):
+        return {}
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info('items')")}
+        if "is_hidden" not in cols:
+            return {}
+        nr_cols = [c for c in ("work_drawing_no", "norm_drawing_no", "src_drawing_no") if c in cols]
+        nm_cols = [c for c in ("work_name", "src_name") if c in cols]
+        rows = con.execute(
+            f"SELECT {', '.join(nr_cols + nm_cols)} FROM items "
+            "WHERE COALESCE(is_hidden, 0) = 1").fetchall()
+    finally:
+        con.close()
+
+    def pierwsza(vals):
+        for v in vals:
+            if v is not None and str(v).strip():
+                return jedna_linia(v).strip()
+        return ""
+
+    ukryte = {}
+    n = len(nr_cols)
+    for r in rows:                       # ta sama kolejność co przy czytaniu BOM-u
+        nr = pierwsza(r[:n])
+        if nr:
+            ukryte[nr.upper()] = pierwsza(r[n:])
+    return ukryte
+
+
 def read_tree(project_name):
     """{rodzic: [(dziecko, ilosc_lokalna)]} z arkusza „DRZEWKO TEKST".
 
-    Zwraca ({}, powod) jeśli drzewa nie da się wczytać — wtedy komplety nie
-    powstaną (nie ma z czego zbudować składu), ale kartoteki i ZK owszem.
+    Zwraca (kids, powod, nazwy), gdzie `nazwy` to {NUMER: nazwa z drzewka} —
+    dla składników spoza BOM-u jedyne źródło nazwy, bo w BOM-ie ich nie ma.
+
+    Przy niepowodzeniu ({}, powod, {}) — wtedy komplety nie powstaną (nie ma
+    z czego zbudować składu), ale kartoteki i ZK owszem.
     """
     try:
         from pathlib import Path
         from import_bom import find_project_folder, find_out_files, find_assembly_tree_rows
     except Exception as e:
-        return {}, f"brak import_bom: {e}"
+        return {}, f"brak import_bom: {e}", {}
 
     # Projekty (pliki *_OUT.xlsx) leżą na V:. Ścieżka z konfiguracji ma
     # pierwszeństwo, ale gdy wskazuje na nieistniejący katalog — a tak bywa,
@@ -149,13 +196,14 @@ def read_tree(project_name):
 
     v_root = next((p for p in kandydaci if p.exists()), None)
     if v_root is None:
-        return {}, f"katalog projektów niedostępny (próbowano: {', '.join(str(p) for p in kandydaci)})"
+        return {}, f"katalog projektów niedostępny (próbowano: {', '.join(str(p) for p in kandydaci)})", {}
 
     folder = find_project_folder(v_root, project_name)
     if not folder:
-        return {}, f"nie znaleziono folderu projektu „{project_name}” w {v_root}"
+        return {}, f"nie znaleziono folderu projektu „{project_name}” w {v_root}", {}
 
     kids = {}
+    nazwy = {}          # {NUMER: nazwa z drzewka}
     found = False
     for out_path in find_out_files(folder):
         rows = find_assembly_tree_rows(out_path)
@@ -175,13 +223,16 @@ def read_tree(project_name):
                 qty = float(str(qty).replace(",", ".")) if qty not in (None, "") else 1.0
             except (TypeError, ValueError):
                 qty = 1.0
+            # Nazwa z drzewka — dla składników spoza BOM-u to jedyne miejsce,
+            # z którego okno może ją wziąć (w BOM-ie ich nie ma).
+            nazwy.setdefault(child.upper(), (row.get("nazwa") or "").strip())
             kids.setdefault(parent, [])
             if not any(c[0].upper() == child.upper() for c in kids[parent]):
                 kids[parent].append((child, qty))
 
     if not found:
-        return {}, "nie znaleziono arkusza „DRZEWKO TEKST” w plikach *_OUT.xlsx"
-    return kids, None
+        return {}, "nie znaleziono arkusza „DRZEWKO TEKST” w plikach *_OUT.xlsx", {}
+    return kids, None, nazwy
 
 
 # Maksymalna długość symbolu kartoteki — TYLE, CO NUMER RYSUNKU.
@@ -322,16 +373,32 @@ def numer_projektu(project_name, project_id=None):
 
 
 def build_plan(project_id, project_name, podmiot, tytul):
-    """Buduje plan dla mostu + dane do wyświetlenia. Zwraca (plan, items, ostrzezenie)."""
+    """Buduje plan dla mostu + dane do wyświetlenia.
+
+    Zwraca (plan, items, ostrzezenie, poza_bom, ukryte_cale_galezie), gdzie `poza_bom` to
+    {rodzic: [numer, …]} — składniki obecne w DRZEWKU, ale nieobecne w BOM-ie.
+    Nie trafią do Subiekta, więc okno musi je pokazać (patrz komentarz przy
+    zbieraniu tej mapy).
+    """
     items = read_project_items(project_id)
     # Pozycje z numerem rysunku muszą wyglądać jak numer (odsiewa opisy wpisane
     # w to pole). Pozycje BEZ numeru — znormalizowane, identyfikowane nazwą —
     # przepuszczamy, bo inaczej wypadłyby łożyska, paski i simmeringi.
     items = [it for it in items
              if it.get("bez_numeru") or looks_like_drawing_no(it["nr"])]
-    kids, warn = read_tree(project_name)
+    kids, warn, nazwy_drzewka = read_tree(project_name)
 
     by_nr = {it["nr"].upper(): it for it in items}
+    # Składniki z DRZEWKA, których NIE MA w BOM-ie:
+    #   {rodzic: [(numer, "ukryta" | "nieznana"), …]}
+    # Dwie różne przyczyny, dwa różne lekarstwa: pozycję UKRYTĄ wystarczy
+    # odkryć w arkuszu, a numer NIEZNANY (zmieniony ręcznie albo z innej
+    # wersji projektu) trzeba poprawić w Inventorze i przeimportować —
+    # drzewko siedzi w pliku *_OUT.xlsx na V: i o zmianach w RM_BAZA nie wie.
+    # Wcześniej takie pozycje wypadały po cichu i komplet powstawał NIEPEŁNY
+    # ze statusem „utworzony”, czyli wyglądał na sukces (zgłoszone 06.09.2026).
+    poza_bom = {}
+    ukryte = read_hidden_drawings(project_id)
     pozycje = []
     for it in items:
         skladniki = []
@@ -341,6 +408,14 @@ def build_plan(project_id, project_name, podmiot, tytul):
                 # inaczej wpisalibyśmy do Subiekta pozycję, której RM_BAZA nie zna.
                 if child_nr.upper() in by_nr:
                     skladniki.append({"symbol": child_nr, "ilosc": child_qty})
+                else:
+                    # Ukryta czy nieznana? To decyduje, co user ma zrobić.
+                    klucz_ch = child_nr.strip().upper()
+                    if klucz_ch in ukryte:
+                        powod, nazwa_ch = "ukryta", ukryte[klucz_ch]
+                    else:
+                        powod, nazwa_ch = "nieznana", nazwy_drzewka.get(klucz_ch, "")
+                    poza_bom.setdefault(it["nr"], []).append((child_nr, powod, nazwa_ch))
         try:
             qty = float(str(it["qty"]).replace(",", ".")) if it["qty"] not in (None, "") else 1.0
         except (TypeError, ValueError):
@@ -366,7 +441,14 @@ def build_plan(project_id, project_name, podmiot, tytul):
         "uwagi": numer,
         "pozycje": pozycje,
     }
-    return plan, items, warn
+    # Ile ukrytych pozycji jest składnikami złożeń, których i tak nie ma
+    # w projekcie (ukryta cała gałąź). To NIE jest problem — służy tylko do
+    # wyjaśnienia, czemu przy setkach ukrytych ostrzeżenie wymienia kilka.
+    poza_zgloszone = {n.strip().upper() for lst in poza_bom.values() for n, _, _ in lst}
+    w_drzewku = {c[0].strip().upper() for lst in kids.values() for c in lst}
+    ukryte_cale_galezie = sum(
+        1 for nr in ukryte if nr in w_drzewku and nr not in poza_zgloszone)
+    return plan, items, warn, poza_bom, ukryte_cale_galezie
 
 
 # ── Wywołanie mostu ─────────────────────────────────────────────────────────
@@ -379,6 +461,27 @@ def run_bridge(plan, zapisz=False, timeout=TIMEOUT_S):
             "Zbuduj most:\n  cd subiekt_sfera\\NexoRecon\n  dotnet build -c Release")
     if not os.path.isfile(CONFIG_PATH):
         raise RuntimeError(f"Brak konfiguracji połączenia:\n{CONFIG_PATH}")
+
+    # ZAPIS, i to najcięższy — zakłada kartoteki, komplety i ZK naraz.
+    # Żadnego ponawiania (plan, sekcja 14): powtórzenie po niejednoznacznym
+    # błędzie zdublowałoby dokumenty projektu.
+    args = {"plan": plan}
+    if zapisz:
+        args["zapisz"] = True
+    try:
+        import subiekt_bridge
+        return subiekt_bridge.call(
+            "projekt", args, timeout=timeout, write=zapisz,
+            fallback=lambda: _projekt_cli(plan, zapisz, timeout))
+    except ImportError:
+        return _projekt_cli(plan, zapisz, timeout)
+
+
+def _projekt_cli(plan, zapisz, timeout):
+    """Stara ścieżka: osobny proces NexoRecon.exe."""
+    exe = _find_exe()
+    if not exe:
+        raise RuntimeError("Nie znaleziono NexoRecon.exe.")
 
     tmpdir = tempfile.mkdtemp(prefix="subiekt_proj_")
     plan_path = os.path.join(tmpdir, "plan.json")
@@ -462,6 +565,12 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         super().__init__(parent)
         self.project_id = project_id
         self.project_name = project_name or str(project_id)
+        #: {rodzic: [numer, …]} — składniki z drzewka spoza BOM-u (rozjazd numerów)
+        self.poza_bom = {}
+        #: powód nieczytania drzewka (None = wczytane) — bez niego brak kompletów
+        self.brak_drzewka = None
+        #: ukryte pozycje będące składnikami złożeń, których też nie ma w BOM-ie
+        self.ukryte_cale_galezie = 0
         self.plan = None
         self.items = []
         self.dry = None
@@ -654,22 +763,22 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
 
     def _dry_run_worker(self):
         try:
-            plan, items, warn = build_plan(
+            plan, items, warn, poza_bom, ukryte_galezie = build_plan(
                 self.project_id, self.project_name,
                 self.var_podmiot.get().strip(), self.var_tytul.get().strip())
             if not plan["pozycje"]:
-                self.after(0, lambda: self._dry_done(None, None, [], "Brak pozycji z numerem rysunku."))
+                self.after(0, lambda: self._dry_done(None, None, [], "Brak pozycji z numerem rysunku.", {}, 0))
                 return
             wynik = run_bridge(plan, zapisz=False)
             # Suchy przebieg też jest okazją do zapamiętania trafień — kolejny
             # projekt z tymi numerami nie będzie musiał pytać Subiekta.
             zapisz_mapowania(wynik)
-            self.after(0, lambda: self._dry_done(plan, wynik, items, warn))
+            self.after(0, lambda: self._dry_done(plan, wynik, items, warn, poza_bom, ukryte_galezie))
         except Exception as e:
             err = str(e)
-            self.after(0, lambda: self._dry_done(None, None, [], err))
+            self.after(0, lambda: self._dry_done(None, None, [], err, {}, 0))
 
-    def _dry_done(self, plan, wynik, items, warn):
+    def _dry_done(self, plan, wynik, items, warn, poza_bom=None, ukryte_galezie=0):
         self.btn_refresh.config(state=tk.NORMAL)
         if plan is None:
             self.stop_kreciolek()
@@ -680,6 +789,11 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
             return
 
         self.plan, self.dry, self.items = plan, wynik, items
+        # Powód, dla którego drzewko się nie wczytało (brak folderu na V:,
+        # brak arkusza „DRZEWKO TEKST”). Bez drzewka NIE POWSTANIE ŻADEN
+        # komplet, więc informacja musi dojść też do potwierdzenia zapisu —
+        # sam dopisek w pasku statusu ginie (zgłoszone 06.09.2026).
+        self.brak_drzewka = warn
         self._fill_tree(plan, wynik)
         self.btn_write.config(state=tk.NORMAL)
         self.btn_dodaj.config(state=tk.NORMAL)
@@ -693,8 +807,111 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
                    if k["Rodzaj"] == "komplet" and k["Status"] == "pominiety-brak-skladnikow")
         note = f"   ⚠ {warn}" if warn else ""
         extra = f"   ⚠ {pust} kompletów bez składników w drzewie" if pust else ""
+        self.poza_bom = poza_bom or {}
+        self.ukryte_cale_galezie = ukryte_galezie
+        ile_poza = sum(len(v) for v in self.poza_bom.values())
+        rozjazd = f"   ⚠ {ile_poza} składników z drzewka NIE wejdzie do kompletów" if ile_poza else ""
         self.stop_kreciolek()
-        self.status.config(text=f"Podgląd gotowy — w Subiekcie nic nie zmieniono.{extra}{note}")
+        self.status.config(
+            text=f"Podgląd gotowy — w Subiekcie nic nie zmieniono.{extra}{rozjazd}{note}")
+
+        # Rozjazd numerów między RM_BAZA a drzewkiem jest cichy i kosztowny:
+        # komplet powstaje ze statusem „utworzony”, tylko niepełny. Dlatego
+        # pełna lista idzie osobnym oknem, a nie dopiskiem w pasku.
+        if ile_poza:
+            self._pokaz_poza_bom()
+
+    # ── rozjazd RM_BAZA ↔ drzewko ──────────────────────────────────────────
+    def _pokaz_poza_bom(self):
+        """Pełna lista składników z drzewka, których nie ma w BOM-ie.
+
+        Osobne okno, nie messagebox: lista bywa długa, a użytkownik musi móc
+        ją skopiować i porównać z arkuszem. Tekst jest zaznaczalny.
+        """
+        wszystkie = [(r, n, p) for r, lst in self.poza_bom.items() for n, p, _ in lst]
+        ile = len(wszystkie)
+        n_ukryte = sum(1 for _, _, p in wszystkie if p == "ukryta")
+        n_nieznane = ile - n_ukryte
+        # Nazwy kompletów (rodziców) z BOM-u — sam numer nie mówi, co to za zespół.
+        nazwy_rodzicow = {it["nr"].upper(): (it.get("nazwa") or "")
+                          for it in (self.items or [])}
+
+        okno = tk.Toplevel(self)
+        okno.title("Uwaga: składniki, których nie będzie w kompletach")
+        okno.geometry("660x480")
+        okno.transient(self)
+
+        naglowek = tk.Frame(okno, bg="#c0392b")
+        naglowek.pack(fill=tk.X)
+        tk.Label(naglowek, text=f"⚠ {ile} składników z drzewka NIE wejdzie do kompletów",
+                 bg="#c0392b", fg="white", font=("Arial", 11, "bold"),
+                 anchor="w", padx=12, pady=8).pack(fill=tk.X)
+
+        # Porada zależy od przyczyny — ukrytą pozycję wystarczy odkryć,
+        # zmieniony numer wymaga poprawki w Inventorze i reimportu.
+        opis = ["Te numery są w drzewku (arkusz „DRZEWKO TEKST” w pliku *_OUT.xlsx),",
+                "ale nie ma ich w BOM-ie, więc nie trafią do składu kompletów",
+                "w Subiekcie. Komplety powstaną, tylko NIEPEŁNE.", ""]
+        if n_ukryte:
+            opis += [f"• {n_ukryte} UKRYTYCH w arkuszu — odkryj je w RM_BAZA,",
+                     "  jeśli mają wejść w skład kompletu."]
+        # Ukrytych pozycji bywają setki, ale liczą się tylko te, których
+        # rodzic ZOSTAŁ w projekcie. Ukryte całe gałęzie (złożenie razem ze
+        # składnikami) nie są problemem — tych kompletów i tak nie zakładamy.
+        # Bez tego zdania „1 składników" przy 127 ukrytych wygląda podejrzanie
+        # (zgłoszone 06.09.2026).
+        if self.ukryte_cale_galezie:
+            opis += ["",
+                     f"Pozostałe ukryte pozycje ({self.ukryte_cale_galezie}) to całe złożenia",
+                     "ukryte razem ze składnikami — tych kompletów nie zakładasz,",
+                     "więc nic tam nie brakuje."]
+        if n_nieznane:
+            opis += [f"• {n_nieznane} NIEZNANYCH — nie ma ich w projekcie pod tym numerem.",
+                     "  Zwykle numer zmieniony ręcznie albo drzewko z innej wersji;",
+                     "  popraw w Inventorze i przeimportuj projekt."]
+        tk.Label(okno, justify="left", anchor="w", padx=12, pady=8, wraplength=620,
+                 text="\n".join(opis)).pack(fill=tk.X)
+
+        ramka = tk.Frame(okno)
+        ramka.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+        txt = tk.Text(ramka, wrap="none", font=("Consolas", 9), bg="#fdfefe")
+        vs = tk.Scrollbar(ramka, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vs.set)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+
+        for rodzic in sorted(self.poza_bom):
+            dzieci = self.poza_bom[rodzic]
+            nazwa_r = nazwy_rodzicow.get(rodzic.upper(), "")
+            txt.insert("end", f"{rodzic}  {nazwa_r}".rstrip()
+                              + f"   (brakuje {len(dzieci)}):\n")
+            for numer, powod, nazwa in sorted(dzieci):
+                znacznik = "ukryta  " if powod == "ukryta" else "nieznana"
+                txt.insert("end", f"      [{znacznik}] {numer:<18} {nazwa}\n")
+            txt.insert("end", "\n")
+        txt.config(state="disabled")      # do czytania i kopiowania, nie do edycji
+
+        stopka = tk.Frame(okno)
+        stopka.pack(fill=tk.X, padx=12, pady=(0, 10))
+        tk.Button(stopka, text="Kopiuj listę", command=lambda: self._kopiuj_poza_bom(okno),
+                  bg="#7f8c8d", fg="white", relief=tk.FLAT, padx=12).pack(side=tk.LEFT)
+        tk.Button(stopka, text="Rozumiem", command=okno.destroy,
+                  bg="#2c3e50", fg="white", relief=tk.FLAT, padx=18).pack(side=tk.RIGHT)
+
+        wysrodkuj(okno, self)
+        okno.grab_set()
+
+    def _kopiuj_poza_bom(self, okno):
+        # TSV z nagłówkiem — do wklejenia wprost w Excel i porównania z arkuszem.
+        nazwy_rodzicow = {it["nr"].upper(): (it.get("nazwa") or "")
+                          for it in (self.items or [])}
+        linie = ["Komplet\tNazwa kompletu\tSkładnik\tPrzyczyna\tNazwa składnika"]
+        for rodzic in sorted(self.poza_bom):
+            nazwa_r = nazwy_rodzicow.get(rodzic.upper(), "")
+            for numer, powod, nazwa in sorted(self.poza_bom[rodzic]):
+                linie.append(f"{rodzic}\t{nazwa_r}\t{numer}\t{powod}\t{nazwa}")
+        okno.clipboard_clear()
+        okno.clipboard_append("\n".join(linie))
 
     # ── wybór, co zakładać ─────────────────────────────────────────────────
     def _do_zalozenia(self):
@@ -1225,17 +1442,48 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
 
         # Zapis idzie na bazę produkcyjną — potwierdzenie musi mówić wprost,
         # co powstanie i czego (kartotek) nie da się łatwo cofnąć.
+        #
+        # Trwałe (kartoteki, komplety) i odwracalne (ZK) są rozdzielone, bo
+        # wcześniej lista zaczynała się od „Powstanie: kartoteki 0, komplety 0"
+        # i brzmiała jak „nic się nie stanie", choć niżej zapowiadała ZK na
+        # 81 pozycji (zgłoszone 06.09.2026). Gdy nic trwałego nie powstaje,
+        # mówimy to wprost zamiast wypisywać zera.
+        trwale = []
+        if nowe:
+            trwale.append(f"  • kartoteki: {nowe}")
+        if kompl:
+            trwale.append(f"  • komplety (Z/ZZ): {kompl}")
+
+        if trwale:
+            czesc_trwala = (
+                "TRWALE (w Subiekcie zostaną — nie da się ich łatwo usunąć):\n"
+                + "\n".join(trwale) + "\n\n")
+        else:
+            czesc_trwala = "Żadna kartoteka ani komplet NIE powstanie.\n\n"
+
+        uwagi = []
+        # Brak drzewka jest najważniejszy: bez niego NIE POWSTANIE ŻADEN
+        # komplet, choć pozycje Z/ZZ są w projekcie i wyglądają na gotowe.
+        zzz = sum(1 for p in plan["pozycje"] if p["typ"] in KOMPLETY)
+        if getattr(self, "brak_drzewka", None) and zzz:
+            uwagi.append(f"BRAK DRZEWKA — {self.brak_drzewka}.\n"
+                         f"   Żaden z {zzz} kompletów (Z/ZZ) nie powstanie — nie wiadomo,\n"
+                         f"   co ma w sobie zawierać. Powstaną same kartoteki.")
+        if pominiete:
+            uwagi.append(f"Pomijasz {pominiete} pozycji bez kartoteki — nie trafią na ZK.")
+        ile_poza = sum(len(v) for v in getattr(self, "poza_bom", {}).values())
+        if ile_poza:
+            uwagi.append(f"{ile_poza} składników z drzewka nie ma w BOM-ie — "
+                         "komplety powstaną niepełne.")
+
         ok = messagebox.askyesno(
             "Zapis do Subiekta — potwierdzenie",
-            f"Baza PRODUKCYJNA.\n\n"
-            f"Powstanie:\n"
-            f"  • kartoteki: {nowe}"
-            + (f"   (pomijasz {pominiete} pozycji bez kartoteki)" if pominiete else "") + "\n"
-            f"  • komplety (Z/ZZ): {kompl}\n"
-            + opis_zk +
-            f"\nZK można w Subiekcie usunąć. Kartotek i kompletów tak łatwo nie —\n"
-            f"zostaną w kartotece asortymentu.\n\n"
-            f"Zapisać?",
+            "Baza PRODUKCYJNA.\n\n"
+            + czesc_trwala
+            + "ODWRACALNE (da się usunąć w Subiekcie):\n"
+            + opis_zk
+            + ("\n⚠ " + "\n⚠ ".join(uwagi) + "\n" if uwagi else "")
+            + "\nZapisać?",
             parent=self, icon="warning")
         if not ok:
             return

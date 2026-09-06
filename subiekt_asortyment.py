@@ -52,12 +52,34 @@ def zaloz_kartoteke(symbol, nazwa, rodzaj="towar", jm="szt", cena=None, opis="",
     if not os.path.isfile(CONFIG_PATH):
         raise RuntimeError(f"Brak konfiguracji połączenia:\n{CONFIG_PATH}")
 
+    plan = {"symbol": symbol, "nazwa": nazwa, "rodzaj": rodzaj, "jm": jm,
+            "cena": cena, "opis": opis}
+
+    # ZAPIS — bez ponawiania (plan, sekcja 14): powtórzenie próbowałoby
+    # założyć kartotekę o tym samym symbolu drugi raz.
+    args = {"plan": plan}
+    if zapisz:
+        args["zapisz"] = True
+    try:
+        import subiekt_bridge
+        return subiekt_bridge.call(
+            "kartoteka", args, timeout=timeout, write=zapisz,
+            fallback=lambda: _kartoteka_cli(plan, zapisz, timeout))
+    except ImportError:
+        return _kartoteka_cli(plan, zapisz, timeout)
+
+
+def _kartoteka_cli(plan_dane, zapisz, timeout):
+    """Stara ścieżka: osobny proces NexoRecon.exe."""
+    exe = _find_exe()
+    if not exe:
+        raise RuntimeError("Nie znaleziono NexoRecon.exe.")
+
     tmpdir = tempfile.mkdtemp(prefix="subiekt_kart_")
     plan = os.path.join(tmpdir, "k.json")
     out = os.path.join(tmpdir, "w.json")
     with open(plan, "w", encoding="utf-8") as f:
-        json.dump({"symbol": symbol, "nazwa": nazwa, "rodzaj": rodzaj, "jm": jm,
-                   "cena": cena, "opis": opis}, f, ensure_ascii=False)
+        json.dump(plan_dane, f, ensure_ascii=False)
 
     cmd = [exe, "kartoteka", f"--plan={plan}", f"--out={out}"]
     if zapisz:

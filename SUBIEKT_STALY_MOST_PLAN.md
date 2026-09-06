@@ -13,6 +13,137 @@ Nie należy przy okazji przebudowywać logiki biznesowej zamówień, magazynu, p
 
 ---
 
+---
+
+# 0. Stan realizacji (06.09.2026)
+
+Kroki **A–J zrobione** na branchu `most-server` (7 commitów, niescalone z `main`).
+
+## Co powstało
+
+| Plik | Rola |
+|---|---|
+| `subiekt_sfera/NexoRecon/NexoSession.cs` | cykl życia sesji: `Connect` / `Reconnect` / `CzyZywa` |
+| `subiekt_sfera/NexoRecon/CommandDispatcher.cs` | mapa tryb → handler, wspólna dla CLI i servera |
+| `subiekt_sfera/NexoRecon/ServerHost.cs` | `NexoRecon.exe server`: TCP, kolejka, jeden worker |
+| `subiekt_sfera/NexoRecon/Rozpoznanie.cs` | domyślny tryb raportu, przeniesiony z `Program.cs` |
+| `subiekt_bridge.py` | klient: `call()`, `wywolaj()`, autostart, fallback |
+| `subiekt_sfera/bridge_test.py` | klient testowy (`python bridge_test.py bench`) |
+
+Handlery (`Stan.cs`, `Katalog.cs`, …) **nie były zmieniane** — server materializuje
+plik tymczasowy na `--out` i przechwytuje `Console.Out`, więc kontrakt „plan
+z pliku, JSON do pliku" został nienaruszony.
+
+## Pomiary (baza demo M-OLD, 247 kartotek)
+
+| Komenda | Stare CLI | Most |
+|---|---:|---:|
+| katalog (2. i kolejne) | ~13 500 ms | **8–50 ms** |
+| kontrahenci | 14 368 ms | **104 ms** |
+| stan | 14 135 ms | **296 ms** |
+| stan-pozycji | 13 951 ms | **233 ms** |
+| magazyn | 14 218 ms | **753 ms** |
+| dokumenty | 14 343 ms | **873 ms** |
+
+Jedno logowanie do Sfery na wszystkie komendy. Dane porównane ze starą ścieżką —
+identyczne. **To nie jest benchmark z sekcji 33** — ten trzeba powtórzyć w firmie
+na 3444 kartotekach.
+
+## Zapisy — przetestowane na żywo (demo M-OLD)
+
+| Tryb | Test | Wynik |
+|---|---|---|
+| `rw` | zdjęcie 1 szt. | `RW 1/MAG/2026`, stan 259 → 258 |
+| `kartoteka` | założenie `TEST-MOST-001` | `zalozona` |
+| `progi` | min 5 / opt 20 | zapisane, potwierdzone odczytem zwrotnym |
+| `zd` | zamówienie z zapotrzebowania | `ZD 4/CENTRALA/2026` |
+| `termin` | 2026-10-15 na tym ZD | ustawiony, potwierdzony odczytem |
+| `zd-usun` | usunięcie tego ZD | usunięte, potwierdzone |
+| `kartoteka-usun` | sprzątnięcie kartoteki | usunięta |
+| `dostawcy` | podgląd (`zapisz=False`) | `do-zalozenia` |
+| `projekt` | podgląd | — |
+
+Dane testowe posprzątane. Usuwanie RW też przeszło przez most (tryb
+`zd-usun` mimo nazwy kasuje **ZK, ZD, RW i WZ** — patrz `ZdUsun.Kolekcja`)
+i stan wrócił na kartotekę.
+
+## Wieloużytkownikowość — sprawdzone
+
+Środowisko docelowe: **każdy user na swoim PC, każdy z własnym kontem nexo** —
+czyli założenie z sekcji 2. Port 51273 i mutex `Local\RMPAK_NEXO_BRIDGE_<user>`
+są lokalne dla maszyny, więc stanowiska sobie nie przeszkadzają.
+
+Dwa ryzyka specyficzne dla stałej sesji zostały zweryfikowane:
+
+1. **Czy długożyjąca sesja widzi zmiany innych userów?** TAK. Sesja żyjąca
+   17 minut natychmiast zobaczyła RW wystawione przez inny proces
+   (257 → 256). Sfera nie cachuje stanów — czyta na żywo z SQL. To był
+   największy nierozpoznany problem stałego mostu.
+2. **Co przy wyścigu o tę samą pozycję?** Subiekt odrzuca RW ponad dostępny
+   stan, więc drugi user dostanie odmowę, a nie ujemny stan. Baza jest
+   arbitrem, most tego nie zmienia.
+
+**Uwaga o terminalu:** gdyby kiedyś kilku userów pracowało na jednej maszynie
+(RDP), stały port 51273 byłby konfliktem — pierwszy most zająłby port dla
+wszystkich sesji. Wtedy trzeba portu per sesja Windows. Przy obecnym układzie
+(PC per user) problemu nie ma.
+
+## Czego NIE zrobiono
+
+- Benchmark z sekcji 33 w firmie.
+- Cache (sekcja 20) — po pomiarach wygląda na zbędny, ale decyzja dopiero
+  po benchmarku firmowym.
+- Token lokalny (sekcja 12) — do rozważenia przed wdrożeniem na wszystkie
+  stanowiska.
+
+## Pułapki wykryte przy wdrożeniu
+
+**Tryb server padał natychmiast pod `DETACHED_PROCESS`.** Bez konsoli
+`Console.OutputEncoding = Encoding.UTF8` rzuca `IOException` i proces ginął
+z `0xE0434352`, **zanim cokolwiek zdążył zalogować**. Ręcznie z konsoli działał
+bez zarzutu, więc błąd ujawniłby się dopiero u użytkownika. Dlatego każdy
+komunikat w `ServerHost` idzie przez `Powiedz()`, które zawsze pisze też do logu.
+
+**Most blokuje plik `NexoRecon.exe`.** Przed `dotnet build` trzeba go zatrzymać:
+
+```
+python -c "import subiekt_bridge as b; b.zatrzymaj_most()"
+```
+
+To nowa konsekwencja stałego procesu — wcześniej proces kończył się sam.
+
+**Kolizja nazw `Magazyn`.** Encja SDK vs handler `Magazyn.cs`: wewnątrz
+`namespace NexoRecon` wygrywa handler. `Rozpoznanie.cs` używa aliasu
+`MagazynSfera`.
+
+## Powrót do starego mostu
+
+```
+git checkout main
+cd subiekt_sfera\NexoRecon\bin\Release
+copy NexoRecon.dll.dziala-20260906 NexoRecon.dll
+copy NexoRecon.exe.dziala-20260906 NexoRecon.exe
+```
+
+Kopia binarki leży poza gitem, w `bin/Release`.
+
+## Wdrożenie w firmie — kolejność
+
+1. `git pull` na stanowisku, potem **obowiązkowo** `dotnet build -c Release
+   -nowarn:MSB3277` w `subiekt_sfera\NexoRecon` (`bin/` nie idzie przez gita).
+2. Sprawdzić, że `.nexo_sfera.json` ma konto **tego** operatora, nie wspólne.
+3. Uruchomić RM_BAZA, otworzyć dowolne okno Subiekta — most wstanie sam
+   (~15 s przy pierwszym uruchomieniu), kolejne operacje idą w milisekundach.
+4. Diagnostyka: `python -c "import subiekt_bridge as b; print(b.status())"` —
+   `logins` powinno zostać na `1` przez cały dzień pracy.
+5. Log: `C:\RMPAK_CLIENT\subiekt_logi\bridge_RRRRMMDD.log`.
+
+Warto zrobić na **jednym** stanowisku i popracować dzień, zanim pójdzie
+na wszystkie — most żyje długo, więc problemy z długą sesją (jeśli jakieś
+zostały) ujawnią się dopiero po godzinach pracy, nie w pierwszych minutach.
+
+---
+
 # 1. Stan obecny
 
 RM_BAZA jest aplikacją Python/Tkinter. Komunikacja z Subiektem odbywa się przez most C#:

@@ -55,7 +55,23 @@ PROJ_BEZ = "(bez projektu)"
 
 
 def pobierz_dokumenty(limit=200, timeout=TIMEOUT_S):
-    """[{rodzaj, numer, data, podmiot, tytul, uwagi, status, wartosc, pozycje}]."""
+    """[{rodzaj, numer, data, podmiot, tytul, uwagi, status, wartosc, pozycje}].
+
+    Idzie przez stały most; gdy mostu nie ma, starym CLI.
+    """
+    try:
+        import subiekt_bridge
+    except ImportError:
+        return _przelicz_dokumenty(_pobierz_dokumenty_cli(limit, timeout))
+
+    dane = subiekt_bridge.call(
+        "dokumenty", {"limit": limit}, timeout=timeout,
+        fallback=lambda: _pobierz_dokumenty_cli(limit, timeout))
+    return _przelicz_dokumenty(dane)
+
+
+def _pobierz_dokumenty_cli(limit, timeout):
+    """Stara ścieżka: osobny proces NexoRecon.exe na każde wywołanie."""
     exe = _find_exe()
     if not exe:
         raise RuntimeError("Nie znaleziono NexoRecon.exe.")
@@ -73,7 +89,11 @@ def pobierz_dokumenty(limit=200, timeout=TIMEOUT_S):
         raise RuntimeError(blad_mostu(exe, "dokumenty", proc, out))
 
     with open(out, encoding="utf-8") as f:
-        data = json.load(f)
+        return json.load(f)
+
+
+def _przelicz_dokumenty(data):
+    """Surowa odpowiedź mostu -> format okna przeglądu dokumentów."""
     wynik = [{
         "rodzaj": d.get("Rodzaj") or "",
         "numer": d.get("Numer") or "",
@@ -333,7 +353,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
     # ── wczytywanie ────────────────────────────────────────────────────────
     def _load_async(self):
         self.btn_refresh.config(state=tk.DISABLED)
-        self.start_kreciolek("Czytam dokumenty z Subiekta (~10 s)")
+        self.start_kreciolek("Czytam dokumenty z Subiekta")
         threading.Thread(target=self._load_worker, daemon=True).start()
 
     def _load_worker(self):

@@ -38,7 +38,23 @@ def _master_path():
 
 # ── Kontrahenci z Subiekta ──────────────────────────────────────────────────
 def pobierz_kontrahentow(timeout=TIMEOUT_S):
-    """[{id, nazwa, nip}] — firmy z Subiekta."""
+    """[{id, nazwa, nip}] — firmy z Subiekta. Przez stały most, z fallbackiem."""
+    try:
+        import subiekt_bridge
+        data = subiekt_bridge.call(
+            "kontrahenci", timeout=timeout,
+            fallback=lambda: _pobierz_kontrahentow_cli(timeout))
+    except ImportError:
+        data = _pobierz_kontrahentow_cli(timeout)
+
+    return [{"id": k.get("Id"),
+             "nazwa": (k.get("NazwaSkrocona") or "").strip(),
+             "nip": (k.get("NIP") or "").strip()}
+            for k in data.get("kontrahenci", [])]
+
+
+def _pobierz_kontrahentow_cli(timeout):
+    """Stara ścieżka: osobny proces NexoRecon.exe na każde wywołanie."""
     exe = _find_exe()
     if not exe:
         raise RuntimeError("Nie znaleziono NexoRecon.exe.")
@@ -55,11 +71,7 @@ def pobierz_kontrahentow(timeout=TIMEOUT_S):
         raise RuntimeError(blad_mostu(exe, "kontrahenci", proc, out))
 
     with open(out, encoding="utf-8") as f:
-        data = json.load(f)
-    return [{"id": k.get("Id"),
-             "nazwa": (k.get("NazwaSkrocona") or "").strip(),
-             "nip": (k.get("NIP") or "").strip()}
-            for k in data.get("kontrahenci", [])]
+        return json.load(f)
 
 
 # ── Dostawcy RM_BAZA ────────────────────────────────────────────────────────
@@ -226,6 +238,26 @@ def zaloz_w_subiekcie(dostawcy_do_zalozenia, zapisz=False, timeout=TIMEOUT_S):
         "email": kontakty.get(d["name"], {}).get("email", ""),
         "telefon": kontakty.get(d["name"], {}).get("telefon", ""),
     } for d in dostawcy_do_zalozenia]}
+
+    # ZAPIS — bez ponawiania (plan, sekcja 14): powtórzenie założyłoby
+    # kontrahentów po raz drugi. zapisz=False to sam podgląd dopasowania.
+    args = {"plan": plan}
+    if zapisz:
+        args["zapisz"] = True
+    try:
+        import subiekt_bridge
+        return subiekt_bridge.call(
+            "dostawcy", args, timeout=timeout, write=zapisz,
+            fallback=lambda: _zaloz_w_subiekcie_cli(plan, zapisz, timeout))
+    except ImportError:
+        return _zaloz_w_subiekcie_cli(plan, zapisz, timeout)
+
+
+def _zaloz_w_subiekcie_cli(plan, zapisz, timeout):
+    """Stara ścieżka: osobny proces NexoRecon.exe."""
+    exe = _find_exe()
+    if not exe:
+        raise RuntimeError("Nie znaleziono NexoRecon.exe.")
 
     tmpdir = tempfile.mkdtemp(prefix="subiekt_dost_")
     plan_path = os.path.join(tmpdir, "plan.json")
