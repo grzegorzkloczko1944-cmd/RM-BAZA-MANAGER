@@ -216,17 +216,118 @@ def zapewnij_most():
         # Most może już wstawać (inne okno go uruchomiło) — wtedy tylko czekamy.
         if dane is None and not _uruchom_most():
             _most_niedostepny = True
-            raise BridgeUnavailable("Nie udało się uruchomić NexoRecon.exe server.")
+            raise BridgeUnavailable(_powod_niewstania(
+                "Nie udało się uruchomić NexoRecon.exe server."))
 
         if not _czekaj_na_gotowosc(START_TIMEOUT_S):
             _most_niedostepny = True
-            raise BridgeUnavailable(
-                f"Most nie zalogował się do Sfery w {START_TIMEOUT_S} s."
-            )
+            raise BridgeUnavailable(_powod_niewstania())
 
         dane = ping()
         if dane:
             _sprawdz_protokol(dane)
+
+
+#: Czy pokazano już w tej sesji okienko o nieaktualnym moście. Raz wystarczy —
+#: to sytuacja jednorazowa po „git pull", a nie powód do nękania przy każdym
+#: kliknięciu.
+_ostrzezono_o_buildzie = False
+
+
+def _powod_niewstania(domyslny=None):
+    """Czytelny powód, dla którego most nie wstał.
+
+    Najczęstsza przyczyna to BRAK BUILDA po „git pull": katalog bin/ nie idzie
+    przez gita, więc przychodzą nowe źródła .cs przy starym .exe. Stara binarka
+    nie zna trybu „server" — nie zgłasza błędu, tylko traktuje go jak brak
+    trybu i wypisuje domyślny raport rozpoznawczy do niewidocznego okna
+    (DETACHED_PROCESS), po czym kończy się kodem 0. Python nie doczeka się
+    „ready", schodzi na fallback CLI i wszystko DZIAŁA — tylko wolno jak przed
+    przebudową, bez jednego komunikatu. Bez tej diagnostyki nikt by nie
+    zauważył, że most w ogóle nie wstał.
+    """
+    exe = _find_exe()
+    if not exe:
+        return ("Nie znaleziono NexoRecon.exe.\n\n"
+                "Zbuduj most:\n"
+                "  cd subiekt_sfera\\NexoRecon\n"
+                "  dotnet build -c Release -nowarn:MSB3277")
+    if not _zna_tryb_server(exe):
+        try:
+            from subiekt_stany import most_starszy_niz_zrodla
+            _, pliki = most_starszy_niz_zrodla(exe)
+        except Exception:
+            pliki = ""
+        skad = f"\nŹródła nowsze od binarki: {pliki}.\n" if pliki else "\n"
+        return ("NIEAKTUALNY MOST — trzeba go przebudować.\n\n"
+                "NexoRecon.exe nie zna trybu „server”."
+                + skad +
+                "Katalog bin/ nie idzie przez gita, więc po „git pull”\n"
+                "binarkę trzeba zbudować u siebie:\n\n"
+                "    cd subiekt_sfera\\NexoRecon\n"
+                "    dotnet build -c Release -nowarn:MSB3277\n\n"
+                "Program działa dalej, ale każda operacja Subiekta trwa\n"
+                "~10 s zamiast ułamka sekundy.")
+    return domyslny or f"Most nie zalogował się do Sfery w {START_TIMEOUT_S} s."
+
+
+def _zna_tryb_server(exe):
+    """Czy binarka jest nowsza niż plik, który wprowadził tryb „server".
+
+    Uruchomienie jej z „server" byłoby pewniejsze, ale niepraktyczne: samo
+    logowanie do Sfery trwa ~14 s, więc stara binarka nie zdąży wypisać
+    raportu rozpoznawczego w rozsądnym timeoucie i wygląda tak samo jak
+    nowa, która zaczęła nasłuchiwać (sprawdzone 06.09.2026).
+
+    Porównujemy więc z ServerHost.cs — plikiem, BEZ którego trybu „server"
+    nie ma. To węższe i pewniejsze niż „którykolwiek .cs nowszy od .exe":
+    zwykła zmiana w handlerze (np. Magazyn.cs) nie unieważnia trybu server,
+    a fałszywe ostrzeżenie po każdym pullu nauczyłoby ludzi je ignorować.
+    """
+    try:
+        if not exe or not os.path.isfile(exe):
+            return False
+        server_cs = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "subiekt_sfera", "NexoRecon", "ServerHost.cs")
+        if not os.path.isfile(server_cs):
+            return True          # nie wiemy — nie strasz bez powodu
+        return os.path.getmtime(exe) + 1 >= os.path.getmtime(server_cs)
+    except Exception:
+        return True              # diagnostyka nie może wywalić wywołania
+
+
+def ostrzez_o_moscie():
+    """Pokazuje JEDNORAZOWE okienko, gdy most nie działa przez brak builda.
+
+    Wołane z modułów GUI po złapaniu BridgeUnavailable. Bez okienka jedyną
+    oznaką jest to, że „znowu wolno" — a to łatwo złożyć na karb Subiekta.
+    """
+    global _ostrzezono_o_buildzie
+    if _ostrzezono_o_buildzie:
+        return
+    powod = _powod_niewstania()
+    if "NIEAKTUALNY MOST" not in powod and "Nie znaleziono" not in powod:
+        return                      # inna przyczyna — nie zawracamy głowy
+    _ostrzezono_o_buildzie = True
+
+    # call() leci zwykle z wątku roboczego (okna robią threading.Thread),
+    # a tkinter wolno dotykać tylko z wątku głównego — stąd after(0, …) na
+    # korzeniu aplikacji zamiast messagebox wprost.
+    def pokaz():
+        try:
+            from tkinter import messagebox
+            messagebox.showwarning("Subiekt — most nieaktualny", powod)
+        except Exception:
+            pass
+    try:
+        import tkinter as tk
+        root = tk._default_root
+        if root is not None:
+            root.after(0, pokaz)
+        else:
+            pokaz()                 # brak pętli tk (skrypt) — próbujemy wprost
+    except Exception:
+        pass                        # brak GUI nie może wywalić wywołania
 
 
 def _sprawdz_protokol(dane_ping):
@@ -265,7 +366,9 @@ def call(command, args=None, timeout=TIMEOUT_S, write=False, fallback=None):
         zapewnij_most()
     except BridgeUnavailable:
         # Most nie wystartował — nic nie zostało wykonane, więc stare CLI
-        # jest bezpieczne także dla zapisu.
+        # jest bezpieczne także dla zapisu. Ale fallback jest CICHY: bez
+        # ostrzeżenia jedyną oznaką braku builda byłoby to, że „znowu wolno".
+        ostrzez_o_moscie()
         if fallback is not None:
             return fallback()
         raise
