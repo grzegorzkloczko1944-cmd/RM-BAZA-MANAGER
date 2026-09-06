@@ -1300,14 +1300,46 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
             except Exception:
                 pass
 
+        # ── Draft otwarty. To NIE znaczy, że mail poszedł. ──────────────────
+        #
+        # Wcześniej w tym miejscu zapisywał się ślad wysyłki i „Zamówiono”,
+        # czyli program utożsamiał „otwarto wiadomość w Outlooku” z „wysłano
+        # do dostawcy”. Wystarczyło zamknąć okno Outlooka bez kliknięcia
+        # Wyślij, żeby ZD wyglądało na wysłane, a pozycje na zamówione —
+        # i nikt by się nie zorientował (zgłoszone 06.09.2026).
+        #
+        # Automatyczne wykrycie zdarzenia Send przez Outlook COM jest możliwe,
+        # ale kruche (mailto go nie ma, Outlook bywa zablokowany polityką).
+        # Pytamy więc człowieka — i tak fizycznie klika Wyślij, więc wie.
+        if not self._potwierdz_wyslanie(droga, len(wybrane)):
+            self.status.config(
+                text="Wiadomość przygotowana — ZD NIE zostało oznaczone jako wysłane.")
+            return                          # okno zostaje: można poprawić i otworzyć znów
+
+        self._odnotuj_wyslanie(do, len(wybrane))
+
+    def _potwierdz_wyslanie(self, droga, ile_zalacznikow):
+        """Pyta, czy wiadomość faktycznie poszła. True = zapisujemy wysyłkę."""
+        gdzie = "Outlooku" if droga != "mailto" else "programie pocztowym"
+        return messagebox.askyesno(
+            "Czy wiadomość została wysłana?",
+            f"Wiadomość została przygotowana w {gdzie}"
+            + (f" ({ile_zalacznikow} zał.)." if ile_zalacznikow else ".")
+            + "\n\nKliknij TAK dopiero PO wysłaniu jej z programu pocztowego.\n\n"
+            "TAK  — zapisze wysyłkę i oznaczy pozycje jako ZAMÓWIONE\n"
+            "NIE  — nic nie zapisze; okno zostanie otwarte,\n"
+            "            możesz poprawić wiadomość i otworzyć ją ponownie",
+            parent=self, icon="question")
+
+    def _odnotuj_wyslanie(self, do, ile_zalacznikow):
+        """Ślad wysyłki + „Zamówiono”. Wołane TYLKO po potwierdzeniu."""
         # Ślad wysyłki w RM_BAZA — stąd kolumna „Wysłano” w przeglądzie
-        # dokumentów. Zapisujemy PO udanym otwarciu wiadomości, żeby nie
-        # odnotować wysyłki, która się nie odbyła.
+        # dokumentów.
         try:
             termin = parsuj_termin(self.var_termin.get())
         except ValueError:
             termin = None
-        zapisz_wyslanie(self.numer_zd, do, self.nadawca, len(wybrane),
+        zapisz_wyslanie(self.numer_zd, do, self.nadawca, ile_zalacznikow,
                         termin, self.var_tryb.get())
 
         # „Zamówiono" + termin → do master; arkusz nałoży to na projekt przy
@@ -1349,7 +1381,7 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
                 tresc += f"\nDostawca w arkuszu: {nazwa_rm}"
             messagebox.showinfo("Zamówiono", tresc, parent=self)
 
-        self.status.config(text="Wiadomość otwarta w programie pocztowym — wyślij ją stamtąd.")
+        self.status.config(text=f"{self.numer_zd} oznaczone jako wysłane.")
         self._zamknij()
 
 
