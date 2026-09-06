@@ -146,17 +146,33 @@ Przycisk w panelu robi więc to, co ma sens w danym miejscu (rozstrzyga
 | ze źródeł (deweloper) | 🔨 Zbuduj teraz | `dotnet build` |
 | z `.exe` (stanowiska) | ⬇ Pobierz most | kopiuje z serwera |
 
-### Struktura `C:\iLogic\SUBIEKT`
+### Struktura `C:\iLogic\Subiekt`
 
 ```
-Bin\                            1,1 GB  SDK Sfery (656 plików)
+Bin\                            1,1 GB  SDK Sfery (656 plików) — MUSI być
+                                        na każdym stanowisku
 Narzedzia\                      5,5 MB  targets do budowania
-MOST\                           590 KB  ← TO kopiujesz na serwer
+MOST\                           590 KB  most, który DZIAŁA na tej maszynie
     NexoRecon.exe, .dll, .deps.json, .runtimeconfig.json
     wersja.json                         protokół + data + sha
+MOST_STAGING\                   590 KB  ← TO kopiujesz na serwer
+                                        (tylko u osoby budującej)
 dotnet-sdk-8.0.424-win-x64.exe  216 MB  kompilator (tylko dla budującego)
 CZYTAJ_TO.txt                           instrukcja
 ```
+
+**`MOST` obok SDK, nie w `C:\RMPAK_CLIENT`** — most nie działa sam:
+`NexoSession.PodepnijSdk()` doładowuje w locie 435 bibliotek InsERT z `Bin\`,
+więc ten katalog i tak musi być na maszynie. Trzymanie binarki osobno
+rozdzielało jedną rzecz na dwie lokalizacje bez powodu (zmienione 06.09.2026;
+stara ścieżka `C:\RMPAK_CLIENT\NexoRecon` została w `EXE_CANDIDATES` jako
+zapas, żeby stanowiska sprzed zmiany nie przestały działać).
+
+**`MOST_STAGING` osobno od `MOST`** — u budującego jeden katalog pełniłby dwie
+role naraz: cel „Pobierz most" i miejsce, z którego wgrywa na serwer.
+Kliknięcie „Pobierz most" nadpisywałoby wtedy świeży build tym, co już leży
+na serwerze — czyli cofało własną pracę. Na stanowiskach userów
+`MOST_STAGING` nie występuje.
 
 **`MOST`, nie `bin`** — `bin` to katalog bibliotek SDK Sfery w tym samym
 folderze. Osobny podfolder, bo pobieranie z korzenia ciągnęłoby przez sieć
@@ -165,8 +181,10 @@ nexo i wgrywa się na stanowisko **raz**.
 
 ### Ścieżka na serwerze
 
-Szukana automatycznie pod **Y:, Z:, X:, V:** (`\RMPAK_CLIENT\Subiekt\MOST`),
-bo ten sam zasób bywa zamapowany pod różnymi literami. Gdyby był gdzie
+Szukana automatycznie pod **Y:, Z:, X:, V:**, w dwóch wariantach:
+`\RMPAK_CLIENT\iLogic\Subiekt\MOST` (tak realnie wgrane 06.09.2026 —
+z zachowaniem struktury z `C:\iLogic\`) oraz `\RMPAK_CLIENT\Subiekt\MOST`.
+Cztery litery, bo ten sam zasób bywa zamapowany różnie. Gdyby był gdzie
 indziej — **Ustawienia → Konfiguracja ścieżek → „Folder mostu Subiekta"**
 (zapisywane jako `paths.bridge_dir`). Puste = szukaj automatycznie.
 
@@ -385,8 +403,13 @@ stały port 51273 byłby konfliktem. Przy PC per user problemu nie ma.
 
 ### Aktualizacja mostu
 
-**U budującego:** `git pull` → „Zbuduj teraz" → skopiuj `bin\Release\*` do
-`C:\iLogic\SUBIEKT\MOST\` → zaktualizuj `wersja.json` → wgraj `MOST\` na serwer.
+**U budującego:** `git pull` → „Zbuduj teraz" → skopiuj cztery pliki
+`NexoRecon.*` z `bin\Release\` do `C:\iLogic\Subiekt\MOST_STAGING\` →
+zaktualizuj tam `wersja.json` (`sha` = `git rev-parse --short HEAD`) → wgraj
+zawartość `MOST_STAGING\` na serwer do `...\iLogic\Subiekt\MOST\`.
+
+Sprawdzenie przed wystawieniem: `git diff <sha z wersja.json>..HEAD --
+subiekt_sfera/NexoRecon/` — pusto znaczy, że binarka odpowiada źródłom.
 
 **U userów:** panel SUBIEKT → „Pobierz most".
 

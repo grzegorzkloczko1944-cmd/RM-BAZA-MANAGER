@@ -392,7 +392,26 @@ def ostrzez_o_moscie():
 #: Gdzie na stanowisku ma wylądować pobrana binarka. Ta sama ścieżka stoi
 #: w EXE_CANDIDATES, więc most zostanie tam znaleziony bez dodatkowej
 #: konfiguracji.
-DOCELOWY_KATALOG_MOSTU = r"C:\RMPAK_CLIENT\NexoRecon"
+#: Gdzie laduje most na stanowisku usera — OBOK SDK Sfery, nie osobno.
+#:
+#: Most nie dziala sam: NexoSession.PodepnijSdk() doladowuje w locie 435
+#: bibliotek InsERT z C:\iLogic\SUBIEKT\Bin\, wiec ten katalog i tak musi
+#: byc na kazdej maszynie. Trzymanie binarki w drugim miejscu
+#: (C:\RMPAK_CLIENT\NexoRecon) rozdzielalo jedna rzecz na dwie lokalizacje
+#: bez powodu — teraz wszystko, co dotyczy Subiekta, lezy pod
+#: C:\iLogic\Subiekt (decyzja 06.09.2026).
+DOCELOWY_KATALOG_MOSTU = r"C:\iLogic\Subiekt\MOST"
+
+#: Poczekalnia u osoby budujacej most — TO NIE JEST katalog, z ktorego
+#: cokolwiek sie uruchamia.
+#:
+#: U dewelopera MOST pelnilby dwie role naraz: cel "Pobierz most"
+#: i miejsce, z ktorego wgrywa na serwer. Klikniecie "Pobierz most"
+#: nadpisywaloby wtedy swiezy build tym, co juz lezy na serwerze —
+#: czyli cofalo wlasna prace. Staging rozdziela te role: budujesz tutaj,
+#: wgrywasz stad na serwer, a MOST zostaje wylacznie tym, co dziala
+#: na stanowisku (06.09.2026).
+KATALOG_STAGING_MOSTU = r"C:\iLogic\Subiekt\MOST_STAGING"
 
 
 #: Podfolder z samą binarką mostu wewnątrz folderu SUBIEKT.
