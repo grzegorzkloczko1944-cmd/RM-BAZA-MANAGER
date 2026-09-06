@@ -22307,27 +22307,49 @@ class MainWindow(tk.Tk):
                     self.active_tooltip = None
             
             self.after(5000, hide_tooltip)
-            
-            # Ukryj tylko przy dużym ruchu myszy (>50px od pozycji kliknięcia)
-            def on_motion(e):
-                if self.active_tooltip == tooltip:
-                    # Sprawdź odległość od pozycji początkowej
-                    try:
-                        dx = abs(e.x_root - self._tooltip_start_x)
-                        dy = abs(e.y_root - self._tooltip_start_y)
-                        if dx > 50 or dy > 50:
-                            tooltip.destroy()
-                            self.active_tooltip = None
-                    except:
-                        pass
-            
-            # Bind do sheet
-            self.sheet.bind("<Motion>", on_motion, add="+")
-            
+            self._zapewnij_obserwatora_dymka()
+
         except Exception as e:
             print(f"⚠️  Błąd _show_delivered_tooltip: {e}")
             import traceback
             traceback.print_exc()
+
+    def _zapewnij_obserwatora_dymka(self):
+        """Podpina obsługę <Motion> gaszącą dymek — DOKŁADNIE RAZ na sesję.
+
+        ⚠️ Wcześniej każdy dymek robił `self.sheet.bind("<Motion>", …, add="+")`
+        u siebie, a dymek pokazuje się przy KAŻDYM kliknięciu w kolumnę
+        ODEBRANE albo BOM. `add="+"` dokłada handler do istniejących i nikt
+        go nie odpinał: samo okienko znikało po 5 s, ale jego handler zostawał
+        na zawsze. Po stu kliknięciach każdy ruch myszy nad arkuszem odpalał
+        sto funkcji, a <Motion> sypie się dziesiątki razy na sekundę.
+
+        Zmierzone (07.09.2026, 200 ruchów myszy): 0 handlerów → 3 ms,
+        50 → 251 ms, 200 → 1028 ms, 400 → 2030 ms. Wzrost liniowy. To była
+        przyczyna tego, że arkusz „z czasem się rozłazi", a restart pomaga —
+        i że okna Subiekta chodzą szybciej, bo są świeżo otwarte.
+
+        Teraz handler jest JEDEN i czyta bieżący dymek ze stanu obiektu,
+        zamiast domykać sobie konkretne okienko.
+        """
+        if getattr(self, "_dymek_obserwator_podpiety", False):
+            return
+        self.sheet.bind("<Motion>", self._on_ruch_myszy_dymek, add="+")
+        self._dymek_obserwator_podpiety = True
+
+    def _on_ruch_myszy_dymek(self, e):
+        """Gasi dymek po odsunięciu myszy >50 px od miejsca kliknięcia."""
+        tooltip = getattr(self, "active_tooltip", None)
+        if tooltip is None:
+            return
+        try:
+            dx = abs(e.x_root - getattr(self, "_tooltip_start_x", 0))
+            dy = abs(e.y_root - getattr(self, "_tooltip_start_y", 0))
+            if dx > 50 or dy > 50:
+                tooltip.destroy()
+                self.active_tooltip = None
+        except Exception:
+            pass
     
     def _show_bom_tooltip(self, x, y, value):
         """Pokaż tooltip z wartością BOM (src_*)."""
@@ -22368,23 +22390,10 @@ class MainWindow(tk.Tk):
                     self.active_tooltip = None
             
             self.after(5000, hide_tooltip)
-            
-            # Ukryj tylko przy dużym ruchu myszy (>50px od pozycji kliknięcia)
-            def on_motion(e):
-                if self.active_tooltip == tooltip:
-                    # Sprawdź odległość od pozycji początkowej
-                    try:
-                        dx = abs(e.x_root - self._tooltip_start_x)
-                        dy = abs(e.y_root - self._tooltip_start_y)
-                        if dx > 50 or dy > 50:
-                            tooltip.destroy()
-                            self.active_tooltip = None
-                    except:
-                        pass
-            
-            # Bind do sheet
-            self.sheet.bind("<Motion>", on_motion, add="+")
-            
+            # Jeden wspólny obserwator zamiast handlera per dymek —
+            # patrz _zapewnij_obserwatora_dymka.
+            self._zapewnij_obserwatora_dymka()
+
         except Exception as e:
             print(f"⚠️  Błąd _show_bom_tooltip: {e}")
             import traceback
