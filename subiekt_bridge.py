@@ -411,6 +411,14 @@ PODFOLDER_MOSTU = "MOST"
 #: Ten sam zasób bywa zamapowany pod RÓŻNYMI literami — u większości Y:,
 #: u części Z: — więc sprawdzamy po kolei zamiast wpisywać jedną na sztywno.
 DOMYSLNE_ZRODLA_MOSTU = [
+    # Realna lokalizacja na serwerze (06.09.2026): folder SUBIEKT leży
+    # wewnątrz `iLogic\`, bo tak wygląda struktura u dewelopera i tak
+    # została skopiowana. Sprawdzamy OBA warianty — z `iLogic` i bez —
+    # żeby przeniesienie folderu nie wymagało zmiany kodu.
+    r"Y:\RMPAK_CLIENT\iLogic\Subiekt",
+    r"Z:\RMPAK_CLIENT\iLogic\Subiekt",
+    r"X:\RMPAK_CLIENT\iLogic\Subiekt",
+    r"V:\RMPAK_CLIENT\iLogic\Subiekt",
     r"Y:\RMPAK_CLIENT\Subiekt",
     r"Z:\RMPAK_CLIENT\Subiekt",
     r"X:\RMPAK_CLIENT\Subiekt",
