@@ -1336,17 +1336,41 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
 
         # Zapis idzie na bazę produkcyjną — potwierdzenie musi mówić wprost,
         # co powstanie i czego (kartotek) nie da się łatwo cofnąć.
+        #
+        # Trwałe (kartoteki, komplety) i odwracalne (ZK) są rozdzielone, bo
+        # wcześniej lista zaczynała się od „Powstanie: kartoteki 0, komplety 0"
+        # i brzmiała jak „nic się nie stanie", choć niżej zapowiadała ZK na
+        # 81 pozycji (zgłoszone 06.09.2026). Gdy nic trwałego nie powstaje,
+        # mówimy to wprost zamiast wypisywać zera.
+        trwale = []
+        if nowe:
+            trwale.append(f"  • kartoteki: {nowe}")
+        if kompl:
+            trwale.append(f"  • komplety (Z/ZZ): {kompl}")
+
+        if trwale:
+            czesc_trwala = (
+                "TRWALE (w Subiekcie zostaną — nie da się ich łatwo usunąć):\n"
+                + "\n".join(trwale) + "\n\n")
+        else:
+            czesc_trwala = "Żadna kartoteka ani komplet NIE powstanie.\n\n"
+
+        uwagi = []
+        if pominiete:
+            uwagi.append(f"Pomijasz {pominiete} pozycji bez kartoteki — nie trafią na ZK.")
+        ile_poza = sum(len(v) for v in getattr(self, "poza_bom", {}).values())
+        if ile_poza:
+            uwagi.append(f"{ile_poza} składników z drzewka nie ma w BOM-ie — "
+                         "komplety powstaną niepełne.")
+
         ok = messagebox.askyesno(
             "Zapis do Subiekta — potwierdzenie",
-            f"Baza PRODUKCYJNA.\n\n"
-            f"Powstanie:\n"
-            f"  • kartoteki: {nowe}"
-            + (f"   (pomijasz {pominiete} pozycji bez kartoteki)" if pominiete else "") + "\n"
-            f"  • komplety (Z/ZZ): {kompl}\n"
-            + opis_zk +
-            f"\nZK można w Subiekcie usunąć. Kartotek i kompletów tak łatwo nie —\n"
-            f"zostaną w kartotece asortymentu.\n\n"
-            f"Zapisać?",
+            "Baza PRODUKCYJNA.\n\n"
+            + czesc_trwala
+            + "ODWRACALNE (da się usunąć w Subiekcie):\n"
+            + opis_zk
+            + ("\n⚠ " + "\n⚠ ".join(uwagi) + "\n" if uwagi else "")
+            + "\nZapisać?",
             parent=self, icon="warning")
         if not ok:
             return
