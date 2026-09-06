@@ -163,6 +163,15 @@ def zapisz_kartoteki(pozycje, zapisz=False, timeout=TIMEOUT_S):
                     timeout, plan={"pozycje": pozycje}, write=zapisz)
 
 
+def _licznik_zapisow():
+    """Licznik zapisów mostu albo None, gdy nie da się go odczytać."""
+    try:
+        import subiekt_bridge
+        return subiekt_bridge.licznik_zapisow()
+    except Exception:
+        return None
+
+
 def _liczba(tekst, domyslna=0.0):
     try:
         return float(str(tekst).replace(",", ".").strip() or 0)
@@ -504,6 +513,11 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
         self.cb_rodzaj.config(values=["wszystkie"] + rodzaje)
         if self.var_rodzaj.get() not in ("wszystkie", *rodzaje):
             self.var_rodzaj.set("wszystkie")
+
+        # Ile zapisów przeszło przez most do chwili TEGO odczytu. Przed
+        # własnym zapisem porównamy: wyższa liczba znaczy, że ktoś inny
+        # (drugie okno, druga sesja) zdążył coś zmienić.
+        self._zapisy_przy_odczycie = _licznik_zapisow()
 
         self.zaznacz_odczyt(self.lbl_wiek)
         self._odswiez_liste()
@@ -1189,6 +1203,44 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
         subiekt_asortyment.okno_nowa_kartoteka(
             self, po_zapisie=lambda _w: self._wczytaj_async())
 
+    # ── świeżość danych ────────────────────────────────────────────────────
+    def _ostrzez_o_cudzym_zapisie(self, co_robimy):
+        """True, gdy wolno iść dalej z zapisem.
+
+        Wykrywa sytuację, w której KTOŚ INNY zapisał do Subiekta po tym, jak
+        to okno wczytało dane — drugie okno tej samej aplikacji albo druga
+        sesja RM_BAZA. Wtedy widok tutaj może być nieaktualny: pozycja mogła
+        zniknąć, zmienić cenę albo skład, a zapis stąd cicho nadpisałby
+        cudzą zmianę („ostatni wygrywa", 07.09.2026).
+
+        Ostrzegamy i pytamy, zamiast blokować: czasem nadpisanie jest właśnie
+        tym, o co chodzi, a okno nie wie, czy cudza zmiana dotyczy TYCH pozycji.
+        Licznik zlicza wszystkie zapisy przez most, także niezwiązane z tym
+        oknem — dlatego to ostrzeżenie, nie wyrok.
+
+        Gdy licznika nie da się odczytać (stary most, most nie odpowiada),
+        przepuszczamy bez pytania: brak informacji nie może blokować pracy.
+        """
+        przedtem = getattr(self, "_zapisy_przy_odczycie", None)
+        if przedtem is None:
+            return True
+        teraz = _licznik_zapisow()
+        if teraz is None or teraz <= przedtem:
+            return True
+
+        ile = teraz - przedtem
+        return messagebox.askyesno(
+            "Dane mogą być nieaktualne",
+            f"Od czasu wczytania tej listy przez Subiekta przeszło "
+            f"{ile} {'zapis' if ile == 1 else 'zapisów'}." + NL + NL
+            + "Zwykle znaczy to, że zapisywało drugie okno albo druga osoba. "
+              "Twój widok może być starszy niż stan w Subiekcie — "
+              f"{co_robimy} nadpisze to, co widzisz tutaj." + NL + NL
+            + "Zalecane: Anuluj, kliknij „🔄 Odśwież”, sprawdź zmiany i zapisz "
+              "ponownie." + NL + NL
+            + "Kontynuować mimo to?",
+            parent=self, icon="warning", default="no")
+
     # ── usuwanie kartotek ──────────────────────────────────────────────────
     def _usun_kartoteki(self):
         """Kasuje ZAZNACZONE kartoteki z Subiekta — nieodwracalnie.
@@ -1199,11 +1251,8 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
         (stan, użycie w komplecie, niewczytany stan), mówimy tutaj — inaczej
         użytkownik dowiaduje się dopiero z raportu, że połowa listy odpadła.
         """
-        try:
-            rows = sorted(self.sheet.get_selected_rows(get_cells_as_rows=True))
-        except Exception:
-            rows = []
-        zazn = [self.widoczne[r] for r in rows if 0 <= r < len(self.widoczne)]
+        zazn = [self.widoczne[r] for r in self._wiersze_gora()
+                if 0 <= r < len(self.widoczne)]
         if not zazn:
             messagebox.showinfo(
                 "Usuwanie",
@@ -1249,6 +1298,11 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
                     parent=self, icon="warning"):
                 return
 
+        # Przy kasowaniu cudzy zapis waży więcej niż przy edycji: pozycja
+        # mogła w międzyczasie trafić do kompletu albo dostać stan.
+        if not self._ostrzez_o_cudzym_zapisie("usunięcie"):
+            return
+
         symbole = [p["Symbol"] for p in zazn]
         if not messagebox.askyesno(
                 "Usuwanie kartotek — NIEODWRACALNE",
@@ -1278,6 +1332,7 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
     def _usun_done(self, wynik, blad):
         self._zajete = False
         self.stop_kreciolek("")
+        self._zapisy_przy_odczycie = _licznik_zapisow()
         try:
             if blad:
                 self.status.config(text="Nie udało się usunąć kartotek.")
@@ -1316,6 +1371,10 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
             return
         if self._zajete:
             self.status.config(text="Poczekaj — trwa inna operacja.")
+            return
+        # PRZED listą zmian, nie po: inaczej user zatwierdza zapis, a dopiero
+        # potem dowiaduje się, że dane mogą być nieaktualne.
+        if not self._ostrzez_o_cudzym_zapisie("zapis"):
             return
 
         opis = []
@@ -1368,6 +1427,10 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
     def _zapisz_done(self, wynik, blad):
         self._zajete = False
         self.stop_kreciolek("")
+        # WŁASNY zapis też podbija licznik mostu — bez przesunięcia punktu
+        # odniesienia drugi zapis z rzędu ostrzegałby o „cudzej" zmianie,
+        # którą sami zrobiliśmy.
+        self._zapisy_przy_odczycie = _licznik_zapisow()
         try:
             self.btn_zapisz.config(state=tk.NORMAL)
         except tk.TclError:

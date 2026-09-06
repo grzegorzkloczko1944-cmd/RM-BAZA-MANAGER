@@ -63,6 +63,9 @@ internal static class ServerHost
     static volatile NexoSession? _sesja;
     static int _obsluzonych;
 
+    /// <summary>Ile UDANYCH zapisow przeszlo przez most od jego startu.</summary>
+    static int _zapisow;
+
     public static int Uruchom(string cfgPath, bool konsola)
     {
         // Jeden bridge na uzytkownika Windows (plan sekcja 24). Mutex per
@@ -200,6 +203,19 @@ internal static class ServerHost
         _ostatniaKomenda = cmd;
         Interlocked.Exchange(ref _ostatniaMs, zegar.ElapsedMilliseconds);
         Interlocked.Increment(ref _obsluzonych);
+        // Licznik SAMYCH ZAPISOW — po nim okna RM_BAZA poznaja, ze ktos inny
+        // (drugie okno, druga sesja) cos zapisal od czasu ich odczytu.
+        // "handled" do tego nie wystarczy: podbija go kazdy odczyt, wiec samo
+        // odswiezenie listy wygladaloby jak cudza zmiana (07.09.2026).
+        //
+        // Warunki sa TRZY i kazdy jest potrzebny:
+        //   zapis          — tryb w ogole moze zapisywac,
+        //   komenda.Zapisz — poproszono o zapis, a nie o suchy przebieg
+        //                    (bez tego podglad podbijal licznik i okna
+        //                    ostrzegalyby o zmianie, ktorej nie bylo),
+        //   ok             — zapis sie udal; odmowa niczego nie zmienila.
+        if (zapis && komenda.Zapisz && wynik["ok"]?.GetValue<bool>() == true)
+            Interlocked.Increment(ref _zapisow);
         Log($"cmd={cmd} zapis={zapis} ms={zegar.ElapsedMilliseconds} ok={wynik["ok"]?.GetValue<bool>()}");
         return wynik;
     }
@@ -449,6 +465,7 @@ internal static class ServerHost
             ["queue_length"] = Kolejka.Count,
             ["logins"] = s?.LicznikLogowan ?? 0,
             ["handled"] = Volatile.Read(ref _obsluzonych),
+            ["writes"] = Volatile.Read(ref _zapisow),
             ["last_request"] = _ostatniaKomenda,
             ["last_request_ms"] = Interlocked.Read(ref _ostatniaMs),
             ["bridge_version"] = Wersja,

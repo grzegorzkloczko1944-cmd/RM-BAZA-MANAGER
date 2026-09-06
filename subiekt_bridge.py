@@ -153,6 +153,26 @@ def status(timeout=5):
     return odp["data"]
 
 
+def licznik_zapisow(timeout=3):
+    """Ile UDANYCH zapisów przeszło przez most od jego startu; None gdy nie wiadomo.
+
+    Służy oknom do wykrycia, że KTOŚ INNY zapisał po ich odczycie — drugie
+    okno tej samej aplikacji albo druga sesja RM_BAZA. Okno zapamiętuje ten
+    licznik przy wczytaniu danych i porównuje przed własnym zapisem: różnica
+    znaczy, że jego widok może być nieaktualny.
+
+    Zwraca None, gdy mostu nie ma albo binarka jest starsza i nie zna pola
+    „writes". To celowo NIE jest zero: „nie wiem" nie może wyglądać jak
+    „nic się nie zmieniło", bo wtedy ostrzeżenie cicho by zniknęło.
+    """
+    try:
+        dane = status(timeout=timeout)
+    except Exception:
+        return None
+    wartosc = dane.get("writes")
+    return None if wartosc is None else int(wartosc)
+
+
 #: Po ilu dniach katalog roboczy w %TEMP% uznajemy za śmieć. Doba z zapasem:
 #: najdłuższa operacja (wydruk PDF, zakładanie projektu) trwa minuty, więc nic
 #: żywego nie ma prawa być starsze.
