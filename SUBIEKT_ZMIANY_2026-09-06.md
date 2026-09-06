@@ -585,7 +585,7 @@ ani „wyczyść", ani „ustaw" (sprawdzone refleksją). `Usun` w pętli aż zw
 > ⚠️ **W firmie trzeba to sprawdzić** — jeśli jakikolwiek projekt był zakładany
 > dwa razy albo dwa projekty dzielą złożenia, produkcyjna baza ma ten sam
 > problem. Procedura krok po kroku dla agenta, z zasadami bezpieczeństwa
-> i kontrolą ZD, które mogły pójść zawyżone: **`PODWÓJNE POZYCJE DO NAPRAWY.md`**.
+> i kontrolą ZD, które mogły pójść zawyżone: **`SUBIEKT PODWÓJNE POZYCJE DO NAPRAWY.md`**.
 
 ## 12. Co zostało
 
