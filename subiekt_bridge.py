@@ -312,22 +312,123 @@ def ostrzez_o_moscie():
 
     # call() leci zwykle z wątku roboczego (okna robią threading.Thread),
     # a tkinter wolno dotykać tylko z wątku głównego — stąd after(0, …) na
-    # korzeniu aplikacji zamiast messagebox wprost.
-    def pokaz():
-        try:
-            from tkinter import messagebox
-            messagebox.showwarning("Subiekt — most nieaktualny", powod)
-        except Exception:
-            pass
+    # korzeniu aplikacji zamiast okna wprost.
     try:
         import tkinter as tk
         root = tk._default_root
         if root is not None:
-            root.after(0, pokaz)
+            root.after(0, lambda: _okno_buildu(root, powod))
         else:
-            pokaz()                 # brak pętli tk (skrypt) — próbujemy wprost
+            _okno_buildu(None, powod)   # brak pętli tk (skrypt) — próbujemy wprost
     except Exception:
         pass                        # brak GUI nie może wywalić wywołania
+
+
+def zbuduj_most():
+    """Zatrzymuje most i uruchamia `dotnet build`. Zwraca (ok, komunikat).
+
+    Kolejność ma znaczenie: działający most trzyma otwarty NexoRecon.exe,
+    więc build bez zatrzymania kończy się MSB3027 „plik jest zablokowany".
+    """
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "subiekt_sfera", "NexoRecon")
+    if not os.path.isdir(src):
+        return False, f"Nie znaleziono źródeł mostu:\n{src}"
+
+    zatrzymaj_most()
+    time.sleep(2)                   # Windows zwalnia uchwyt do pliku z opóźnieniem
+    try:
+        proc = subprocess.run(
+            ["dotnet", "build", "-c", "Release", "-nowarn:MSB3277"],
+            cwd=src, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=600,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+    except FileNotFoundError:
+        return False, ("Nie znaleziono „dotnet”.\n\n"
+                       "Na tym stanowisku brakuje .NET SDK 8 — to osobna\n"
+                       "instalacja (dotnet.microsoft.com), nie da się jej\n"
+                       "skopiować jak katalogu SDK Sfery.")
+    except subprocess.TimeoutExpired:
+        return False, "Budowanie trwało ponad 10 minut i zostało przerwane."
+
+    if proc.returncode == 0:
+        global _most_niedostepny, _ostrzezono_o_buildzie
+        _most_niedostepny = False       # spróbujemy mostu przy następnej operacji
+        _ostrzezono_o_buildzie = False
+        return True, ("Most zbudowany.\n\n"
+                      "Kolejne operacje Subiekta powinny już działać szybko.")
+
+    # Z wyjścia dotneta bierzemy same linie błędów — pełny log to setki linii.
+    bledy = [l.strip() for l in (proc.stdout or "").splitlines() if ": error" in l]
+    szczegoly = "\n".join(bledy[:6]) or (proc.stderr or "").strip()[:400] or "brak szczegółów"
+    return False, f"Budowanie nie powiodło się (kod {proc.returncode}):\n\n{szczegoly}"
+
+
+def _okno_buildu(parent, powod):
+    """Okienko z powodem i przyciskiem, który sam buduje most."""
+    import tkinter as tk
+    from tkinter import messagebox
+
+    okno = tk.Toplevel(parent) if parent is not None else tk.Tk()
+    okno.title("Subiekt — most nieaktualny")
+    okno.resizable(False, False)
+
+    tk.Label(okno, text="⚠ Most Subiekta jest nieaktualny", bg="#c0392b", fg="white",
+             font=("Arial", 11, "bold"), anchor="w", padx=12, pady=8).pack(fill=tk.X)
+    tk.Label(okno, text=powod, justify="left", anchor="w",
+             padx=14, pady=10, font=("Arial", 9)).pack(fill=tk.X)
+
+    stan = tk.Label(okno, text="", anchor="w", padx=14, fg="#7f8c8d", font=("Arial", 9))
+    stan.pack(fill=tk.X)
+
+    stopka = tk.Frame(okno)
+    stopka.pack(fill=tk.X, padx=14, pady=(6, 12))
+
+    btn_zamknij = tk.Button(stopka, text="Później", command=okno.destroy,
+                            bg="#7f8c8d", fg="white", relief=tk.FLAT, padx=14)
+    btn_zamknij.pack(side=tk.RIGHT)
+
+    def buduj():
+        btn_buduj.config(state=tk.DISABLED)
+        btn_zamknij.config(state=tk.DISABLED)
+        stan.config(text="Buduję… (kilkanaście sekund, nie zamykaj okna)")
+        okno.update_idletasks()
+
+        wynik = {}
+
+        def w_tle():
+            wynik["r"] = zbuduj_most()
+
+        # Build w osobnym wątku, żeby okno nie zamarzło na czas kompilacji.
+        w = threading.Thread(target=w_tle, daemon=True)
+        w.start()
+
+        def sprawdz():
+            if w.is_alive():
+                okno.after(200, sprawdz)
+                return
+            ok, komunikat = wynik.get("r", (False, "Budowanie przerwane."))
+            stan.config(text="")
+            (messagebox.showinfo if ok else messagebox.showerror)(
+                "Budowanie mostu", komunikat, parent=okno)
+            if ok:
+                okno.destroy()
+            else:
+                btn_buduj.config(state=tk.NORMAL)
+                btn_zamknij.config(state=tk.NORMAL)
+
+        okno.after(200, sprawdz)
+
+    btn_buduj = tk.Button(stopka, text="🔨 Zbuduj teraz", command=buduj,
+                          bg="#27ae60", fg="white", relief=tk.FLAT,
+                          padx=18, font=("Arial", 9, "bold"))
+    btn_buduj.pack(side=tk.RIGHT, padx=(0, 8))
+
+    try:
+        from subiekt_stany import wysrodkuj
+        wysrodkuj(okno, parent)
+    except Exception:
+        pass
 
 
 def _sprawdz_protokol(dane_ping):

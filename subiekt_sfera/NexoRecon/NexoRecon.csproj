@@ -3,11 +3,21 @@
     NexoRecon: skrypt ROZPOZNAWCZY Sfery nexo (tylko odczyt, nic nie zapisuje).
     Przepis z SDK: import SferaConsoleApp.targets ustawia net8.0-windows / win-x64 /
     referencje do Bin SDK i kopiuje ijwhost.dll + Xml.pak + SNI.dll do wyjscia.
-    SDK lezy w C:\iLogic\Subiekt_nexo_PRO_dokumentacja\SDK (patrz SUBIEKT_INTEGRACJA_PLAN.md).
+    SDK lezy w C:\iLogic\SUBIEKT (patrz SUBIEKT_INTEGRACJA_PLAN.md).
   -->
   <PropertyGroup>
-    <nexoSdkBinPath>C:\iLogic\Subiekt_nexo_PRO_dokumentacja\SDK\Bin\</nexoSdkBinPath>
-    <nexoSdkNarzedziaPath>C:\iLogic\Subiekt_nexo_PRO_dokumentacja\SDK\Narzedzia\</nexoSdkNarzedziaPath>
+    <!--
+      SDK Sfery: C:\iLogic\SUBIEKT\ — ten sam katalog na KAŻDYM stanowisku,
+      wgrywany przy instalacji (Bin\ + Narzedzia\, ~1,1 GB). Wcześniej
+      ścieżka wskazywała na rozpakowaną dokumentację
+      (C:\iLogic\Subiekt_nexo_PRO_dokumentacja\SDK\), której nazwa niesie
+      numer wersji i nie na każdym stanowisku wygląda tak samo.
+      Stara lokalizacja działa dalej jako zapas — patrz warunek niżej.
+    -->
+    <nexoSdkRoot Condition="Exists('C:\iLogic\SUBIEKT\Narzedzia\Targets\SferaConsoleApp.targets')">C:\iLogic\SUBIEKT\</nexoSdkRoot>
+    <nexoSdkRoot Condition="'$(nexoSdkRoot)' == ''">C:\iLogic\Subiekt_nexo_PRO_dokumentacja\SDK\</nexoSdkRoot>
+    <nexoSdkBinPath>$(nexoSdkRoot)Bin\</nexoSdkBinPath>
+    <nexoSdkNarzedziaPath>$(nexoSdkRoot)Narzedzia\</nexoSdkNarzedziaPath>
     <AssemblyName>NexoRecon</AssemblyName>
     <RootNamespace>NexoRecon</RootNamespace>
     <Nullable>enable</Nullable>

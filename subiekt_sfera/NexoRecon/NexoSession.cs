@@ -80,8 +80,23 @@ internal sealed class NexoSession : IDisposable
         // Ubezpieczenie: jesli jakiejs biblioteki nexo nie skopiowalo do bin,
         // doladuj ja z Bin SDK. Hook jest globalny i idempotentny w praktyce
         // (ten sam katalog), ale podpinamy go raz — patrz _hookPodpiety.
-        PodepnijSdk(cfg.SdkBin ?? @"C:\iLogic\Subiekt_nexo_PRO_dokumentacja\SDK\Bin\");
+        PodepnijSdk(cfg.SdkBin ?? DomyslnySdkBin());
         return new NexoSession(cfg);
+    }
+
+    /// <summary>
+    /// Katalog Bin SDK Sfery. C:\iLogic\SUBIEKT\Bin\ jest wgrywany na kazde
+    /// stanowisko przy instalacji; stara lokalizacja (rozpakowana
+    /// dokumentacja, z numerem wersji w nazwie) zostaje jako zapas dla
+    /// maszyn, na ktorych nowego katalogu jeszcze nie ma.
+    /// Konfig moze to nadpisac polem SdkBin.
+    /// </summary>
+    static string DomyslnySdkBin()
+    {
+        const string nowy = @"C:\iLogic\SUBIEKT\Bin\";
+        return Directory.Exists(nowy)
+            ? nowy
+            : @"C:\iLogic\Subiekt_nexo_PRO_dokumentacja\SDK\Bin\";
     }
 
     static bool _hookPodpiety;

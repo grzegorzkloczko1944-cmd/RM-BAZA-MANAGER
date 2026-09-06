@@ -20,7 +20,7 @@ i konfig z hasłami są w `.gitignore` — nie commitować.
 ## Wymagania (wszystko jest na tej maszynie)
 
 * Subiekt nexo **PRO** z aktywnym abonamentem (licencja PRO musi być **na bazie**, do której się łączymy)
-* nexo SDK **w tej samej wersji co baza** — `C:\iLogic\Subiekt_nexo_PRO_dokumentacja\SDK` (61.1.0.9431)
+* nexo SDK **w tej samej wersji co baza** — `C:\iLogic\SUBIEKT` (61.1.0.9431), katalogi `Bin\` + `Narzedzia\`
 * dotnet SDK (jest 10.x) + runtime .NET 8 (jest 8.0.14)
 
 ## Budowanie
