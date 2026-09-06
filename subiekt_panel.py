@@ -460,9 +460,40 @@ class PanelSubiekt(tk.Toplevel):
             s = {}
         self._wyniki.put(lambda: self._most_online(s))
 
+        # Most dziala, ale na serwerze moze lezec NOWSZY. Bez tego user
+        # zostawal na wersji sprzed optymalizacji i nie mial jak sie
+        # dowiedziec, ze istnieje szybsza — ostrzezenie o buildzie wypada
+        # tylko wtedy, gdy most w ogole nie wstaje (06.09.2026).
+        # Sam odczyt jest bramkowany dobowo w subiekt_bridge, wiec to nie
+        # oznacza ruchu po dysku sieciowym przy kazdym otwarciu panelu.
+        try:
+            nowszy, opis = b.dostepna_nowsza()
+        except Exception:
+            nowszy, opis = False, ""
+        if nowszy and not self._przerwane:
+            self._wyniki.put(lambda: self._proponuj_aktualizacje(opis))
+
         # Liczniki dopiero po potwierdzeniu, że most żyje — inaczej każdy
         # kafel czekałby na timeout osobno.
         self._liczniki()
+
+    def _proponuj_aktualizacje(self, opis):
+        """Dopisuje informacje o nowszej wersji i pokazuje przycisk pobrania.
+
+        NIE pobieramy sami: most restartuje sie przy aktualizacji, a user
+        moze byc w srodku operacji na Subiekcie. Decyzja nalezy do niego,
+        tak jak przy budowaniu.
+        """
+        try:
+            self.lbl_most.config(
+                text=self.lbl_most.cget("text") + "\n\u2b06  " + opis)
+            # Etykieta z mostu: u usera "Pobierz most", u budujacego
+            # "Zbuduj teraz" - zaktualizuj_most() i tak rozpoznaje,
+            # co zrobic na tym stanowisku.
+            self.btn_buduj.config(text=_etykieta_aktualizacji())
+            self.btn_buduj.pack(padx=12, pady=(0, 12))
+        except tk.TclError:
+            pass                    # panel zamkniety w miedzyczasie
 
     def _most_offline(self, binarka_aktualna):
         self.lbl_most.config(
