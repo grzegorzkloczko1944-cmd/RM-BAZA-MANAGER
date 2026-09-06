@@ -519,6 +519,10 @@ def _ma_numer_rysunku(symbol):
     return bool(RE_NUMER_RYSUNKU.match(s))
 
 
+class BrakProgramuPocztowego(RuntimeError):
+    """Windows nie ma czym otworzyć wiadomości — ani Outlooka, ani mailto:."""
+
+
 def otworz_maila(do, temat, tresc, zalaczniki, dw=""):
     """
     Otwiera wiadomość w domyślnym programie pocztowym. Zwraca nazwę użytej
@@ -542,8 +546,22 @@ def otworz_maila(do, temat, tresc, zalaczniki, dw=""):
         # Outlooka nie ma albo COM niedostępny — mailto niesie tylko tekst.
         url = "mailto:" + urllib.parse.quote(do or "") + "?" + urllib.parse.urlencode(
             {"subject": temat, "body": tresc}, quote_via=urllib.parse.quote)
-        os.startfile(url)
+        try:
+            os.startfile(url)
+        except OSError as e:
+            # Windows nie ma programu skojarzonego z mailto: — surowy
+            # „WinError 2 … 'mailto:98k%40wp.pl?subject=…'” z całym
+            # zakodowanym URL-em nic użytkownikowi nie mówił, a wyglądał
+            # jak awaria programu (zgłoszone 06.09.2026).
+            raise BrakProgramuPocztowego(
+                "Na tym komputerze nie ma programu pocztowego skojarzonego\n"
+                "z adresami e-mail (brak Outlooka i obsługi „mailto:”).\n\n"
+                "Treść wiadomości i adres możesz skopiować z tego okna\n"
+                "i wysłać z poczty w przeglądarce — załączniki są w katalogu\n"
+                "zamówienia (przycisk „Katalog”)."
+            ) from e
         return "mailto"
+
 
 
 def parsuj_termin(tekst):
@@ -1283,6 +1301,14 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
         try:
             droga = otworz_maila(do, self.var_temat.get().strip(),
                                  self.txt.get("1.0", "end-1c"), wybrane)
+        except BrakProgramuPocztowego as e:
+            # Przyczyna znana i opisana — pokazujemy ją zamiast surowego
+            # WinError, i dajemy od razu skopiować treść do schowka.
+            if messagebox.askyesno("Brak programu pocztowego",
+                                   f"{e}\n\nSkopiować treść wiadomości do schowka?",
+                                   parent=self, icon="warning"):
+                self._do_schowka(do)
+            return
         except Exception as e:
             messagebox.showerror("Program pocztowy",
                                  f"Nie udało się otworzyć wiadomości:\n{e}", parent=self)
@@ -1318,6 +1344,18 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
             return                          # okno zostaje: można poprawić i otworzyć znów
 
         self._odnotuj_wyslanie(do, len(wybrane))
+
+    def _do_schowka(self, do):
+        """Adres, temat i treść do schowka — ratunek, gdy nie ma czym wysłać."""
+        tekst = (f"Do: {do}\n"
+                 f"Temat: {self.var_temat.get().strip()}\n\n"
+                 + self.txt.get("1.0", "end-1c"))
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(tekst)
+            self.status.config(text="Treść wiadomości skopiowana do schowka.")
+        except tk.TclError:
+            pass                    # schowek zajęty przez inny program
 
     def _potwierdz_wyslanie(self, droga, ile_zalacznikow):
         """Pyta, czy wiadomość faktycznie poszła. True = zapisujemy wysyłkę."""
