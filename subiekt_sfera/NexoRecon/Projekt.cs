@@ -167,6 +167,9 @@ internal static class Projekt
                             "żaden składnik nie ma kartoteki: " + string.Join(", ", pominiete)));
                         continue;
                     }
+                    // Lp 1..N od razu — po wyczyszczeniu i dopisaniu Subiekt
+                    // nadalby kolejne numery po starych (np. 23..33).
+                    KompletNapraw.Przenumeruj(ob);
                     if (!ob.Zapisz())
                     {
                         kroki.Add(new Krok("komplet", p.Symbol, "blad", Bezp(ob.PodajBledy)));

@@ -98,6 +98,14 @@ Statusy w `kroki`:
 
 - `do-naprawy` — symbol, ile składników, które i ile razy
 - `pominiety-rozne-ilosci` — do decyzji człowieka, **zapisz te symbole**
+- `do-przenumerowania` — skład dobry, tylko Lp nie idzie 1..N (np. 23..33).
+  To **nie jest błąd danych** — Subiekt nadaje kolejne numery po każdym
+  Usun+Dodaj. Narzędzie porządkuje to z `--zapisz`; nie zgłaszaj tego jako
+  problemu.
+
+W wynikach z `--zapisz` pojawi się dodatkowo `przenumerowanych` — liczba
+kompletów, którym poprawiono same numery. Naprawiony komplet dostaje
+Lp 1..N automatycznie.
 
 Jeśli `do_naprawy = 0` i `niejednoznacznych = 0` → baza jest czysta, zakończ
 raportem i nie rób nic więcej.

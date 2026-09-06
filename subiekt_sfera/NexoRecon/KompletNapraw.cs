@@ -41,6 +41,7 @@ internal static class KompletNapraw
                 {
                     Symbol = s.Skladnik.Symbol,
                     s.Ilosc,
+                    s.LiczbaPorzadkowa,
                 }),
             })
             .ToList();
@@ -52,7 +53,7 @@ internal static class KompletNapraw
         }
 
         var kroki = new List<Krok>();
-        int naprawionych = 0, doNaprawy = 0, niejednoznacznych = 0;
+        int naprawionych = 0, doNaprawy = 0, niejednoznacznych = 0, przenumerowanych = 0;
 
         foreach (var k in komplety)
         {
@@ -61,7 +62,46 @@ internal static class KompletNapraw
                 .GroupBy(s => (s.Symbol ?? "").Trim(), StringComparer.OrdinalIgnoreCase)
                 .Where(g => g.Count() > 1)
                 .ToList();
-            if (grupy.Count == 0) continue;
+
+            // Lp ma isc 1..N bez dziur. Po Usun+Dodaj Subiekt nadaje kolejne
+            // numery (23..33 zamiast 1..11) — dane sa dobre, ale wyglada to
+            // na blad i myli przy porownywaniu z drzewkiem (zgloszone
+            // 06.09.2026). LiczbaPorzadkowa jest ustawialna (sprawdzone
+            // refleksja), wiec porzadkujemy przy okazji.
+            var lp = k.Sklad.Select(s => s.LiczbaPorzadkowa).OrderBy(x => x).ToList();
+            var zlaNumeracja = lp.Count > 0 && !lp.SequenceEqual(Enumerable.Range(1, lp.Count));
+
+            if (grupy.Count == 0 && !zlaNumeracja) continue;
+
+            if (grupy.Count == 0)
+            {
+                // Same numery do poprawy, sklad w porzadku.
+                if (!zapisz)
+                {
+                    kroki.Add(new Krok(symbol, "do-przenumerowania",
+                        $"Lp {lp.First()}..{lp.Last()} zamiast 1..{lp.Count}"));
+                    continue;
+                }
+                try
+                {
+                    var encN = asort.Dane.WyszukajPoSymbolu(symbol);
+                    if (encN == null) { kroki.Add(new Krok(symbol, "blad", "brak kartoteki")); continue; }
+                    using var obN = asort.Znajdz(encN);
+                    var ile = Przenumeruj(obN);
+                    if (!obN.Zapisz())
+                    {
+                        kroki.Add(new Krok(symbol, "blad", Bezp(obN.PodajBledy) ?? "Zapisz() = false"));
+                        continue;
+                    }
+                    przenumerowanych++;
+                    kroki.Add(new Krok(symbol, "przenumerowany", $"Lp 1..{ile}"));
+                }
+                catch (Exception ex)
+                {
+                    kroki.Add(new Krok(symbol, "blad", $"{ex.GetType().Name}: {ex.Message}"));
+                }
+                continue;
+            }
 
             // Duplikat jednoznaczny = wszystkie wystapienia maja ta sama ilosc.
             var jednoznaczne = grupy.Where(g => g.Select(s => s.Ilosc).Distinct().Count() == 1).ToList();
@@ -102,6 +142,9 @@ internal static class KompletNapraw
                     while (straznik++ < 200 && ob.Skladniki.Usun(g.Key)) { }
                     ob.Skladniki.Dodaj(g.Key, ilosc);
                 }
+                // Po Usun+Dodaj Lp leci dalej (23..33) — porzadkujemy od razu,
+                // zeby nie zostawiac kompletu z dziura w numeracji.
+                Przenumeruj(ob);
 
                 if (!ob.Zapisz())
                 {
@@ -119,10 +162,11 @@ internal static class KompletNapraw
 
         var json = JsonSerializer.Serialize(new
         {
-            zapisano = zapisz && naprawionych > 0,
+            zapisano = zapisz && (naprawionych > 0 || przenumerowanych > 0),
             sprawdzono = komplety.Count,
             do_naprawy = doNaprawy,
             naprawionych,
+            przenumerowanych,
             niejednoznacznych,
             kroki,
         }, new JsonSerializerOptions
@@ -133,6 +177,19 @@ internal static class KompletNapraw
         if (outPath is null) Console.WriteLine(json);
         else File.WriteAllText(outPath, json, new UTF8Encoding(false));
         return 0;
+    }
+
+    /// <summary>
+    /// Ustawia LiczbaPorzadkowa = 1..N w kolejnosci dotychczasowych numerow.
+    /// Zwraca N. Wspolne z Projekt.cs (tam po zalozeniu kompletu).
+    /// </summary>
+    internal static int Przenumeruj(dynamic ob)
+    {
+        IEnumerable<dynamic> sklad = ob.Dane.SkladnikiKompletu;
+        var lista = sklad.OrderBy(s => (int)s.LiczbaPorzadkowa).ToList();
+        var i = 1;
+        foreach (var s in lista) s.LiczbaPorzadkowa = i++;
+        return lista.Count;
     }
 
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }

@@ -582,6 +582,15 @@ sprawdzenia to ten sam błąd co ślepe ponawianie: działa raz, psuje za drugim
 ani „wyczyść", ani „ustaw" (sprawdzone refleksją). `Usun` w pętli aż zwróci
 `false`, z bezpiecznikiem na 200 iteracji.
 
+**Lp po naprawie.** `Usun`+`Dodaj` nie resetuje numerów porządkowych — Subiekt
+nadaje kolejne, więc naprawiony komplet miał Lp 23..33 zamiast 1..11. Dane
+były dobre, ale wyglądało to na błąd i myliło przy porównywaniu z drzewkiem.
+Wiersz `SkladnikKompletu` ma **ustawialne `LiczbaPorzadkowa`** (refleksja),
+więc `komplet-napraw` porządkuje Lp przy okazji, a osobno wykrywa i naprawia
+samą złą numerację (`do-przenumerowania` / `przenumerowany`). `Projekt.cs`
+robi to samo zaraz po założeniu kompletu. Na demo: 24 przenumerowane,
+weryfikacja 0.
+
 > ⚠️ **W firmie trzeba to sprawdzić** — jeśli jakikolwiek projekt był zakładany
 > dwa razy albo dwa projekty dzielą złożenia, produkcyjna baza ma ten sam
 > problem. Procedura krok po kroku dla agenta, z zasadami bezpieczeństwa
