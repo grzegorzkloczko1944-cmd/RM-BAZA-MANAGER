@@ -431,11 +431,127 @@ plus kopia binarki `NexoRecon.dll.dziala-20260906` w `bin/Release`.
 
 ---
 
+## 12a. Druga połowa dnia — optymalizacje, logowanie, karta pozycji
+
+### Odczyt: cztery tryby po N+1
+
+Po usunięciu 10 s logowania wyszedł drugi, ukryty koszt: nawigacja EF
+w pętli zamiast jednej projekcji. Zmierzone na produkcji (3444 kartoteki):
+
+| Tryb | Przed | Po |
+|---|---:|---:|
+| magazyn | 6 958 ms | **311 ms** |
+| dokumenty | 3 600 ms | **249 ms** |
+| progi | 3 843 ms | **26 ms** |
+| zapotrzebowanie | 3 490 ms | 2 941 ms |
+
+Zapotrzebowanie zatrzymuje się na ~2,9 s i **to jest podłoga**: pomiar
+z rozbiciem pokazał 3 297 ms z 3 700 na samym `ZapotrzebowanieNaAsortyment()`,
+czyli gotowej metodzie SDK. Reszta (słownik stanów 90 ms, pętla 242 ms,
+ZD 93 ms) jest już wyciśnięta. Zejść niżej dałoby się tylko licząc
+zapotrzebowanie samodzielnie z pozycji ZK — z ryzykiem innych liczb niż
+pokazuje Subiekt.
+
+**Wzorzec do sprawdzania w każdym nowym trybie:** wszystko jako proste pola
+w jednej projekcji LINQ z zagnieżdżonymi kolekcjami. Wyciągnięcie czegoś
+z materializowanej encji *po fakcie* cofa cały zysk.
+
+W `Progi.Odczyt` komentarz twierdził, że encje z `Wszystkie()` nie doładowują
+kolekcji zakresów — to prawda dla **leniwej nawigacji**, ale nie dla projekcji,
+gdzie kolekcja jest częścią zapytania. Sprawdzone: ten sam wynik, 148× szybciej.
+
+### ⚠️ Most z 5 plików nie uruchamiał się w ogóle (do `96d3dce`)
+
+Każda binarka wystawiona wcześniej (`cb5d52f`, `e2c26d8`, `9e6838a`) po pobraniu
+na stanowisko padała na `FileNotFoundException 'InsERT.Moria.Sfera'
+at Program.<Main>$` — w obu trybach. **U budującego niewidoczne**, bo RM_BAZA
+bierze most z `bin\Release`, gdzie 554 pliki leżą obok; u usera RM_BAZA cicho
+schodziła na stare CLI (~10 s/operacja) bez żadnego komunikatu.
+
+Przyczyna: hook `AssemblyLoadContext.Resolving` podpinał się w
+`NexoSession.Wczytaj()`, czyli **wewnątrz Main**. JIT rozwiązuje typy całego
+ciała `Main` **przy wejściu**, a `Main` dotykał `sesja.Sfera` (`Uchwyt` z SDK) —
+biblioteka była potrzebna, zanim hook zdążył wstać.
+
+Naprawa: `SdkLoader.cs` (klasa **bez żadnego typu InsERT**, hook jako pierwsza
+instrukcja) + `Cli.cs` (ciało CLI poza `Main`). **Zasada na przyszłość:
+`Program.cs` nie może odwoływać się do żadnego typu SDK.** Test rozstrzygający:
+uruchomić binarkę z katalogu z samymi 4–5 plikami, nie z `bin\Release`.
+
+### Automat aktualizacji: wykrywanie nowszej binarki
+
+Dotąd reagował wyłącznie na most **całkiem zepsuty**. Dopóki działał, nikt nie
+sprawdzał, czy na serwerze nie ma nowszego — userzy zostawali na wersji sprzed
+optymalizacji bez możliwości dowiedzenia się o tym. `dostepna_nowsza()` porównuje
+`zbudowano` (nie `sha` — skrót mówi tylko, że coś się różni, nie która strona
+starsza), **raz na dobę**, ze znacznikiem w pliku (nie w zmiennej: RM_BAZA bywa
+uruchamiana kilka razy dziennie). Różny protokół = nie proponujemy nic.
+
+### Okno logowania do Subiekta (Ustawienia → Połączenie z Subiektem)
+
+Hasło **ADMIN-a odblokowuje narzędzie**, nie podnosi roli: administrator siada
+na stanowisku zalogowanym na zwykłego usera, konfiguruje i odchodzi. Pytane przy
+każdym otwarciu. Weryfikacja jak przy zmianie użytkownika (sha256 z tabeli
+`users`). **Konto Subiekta należy do MASZYNY, nie do człowieka** — dlatego
+przelogowanie usera w RM_BAZA celowo nie rusza mostu.
+
+Pułapka: `icacls` z pustą nazwą konta (`os.environ['USERNAME']` bywa puste)
+tworzy regułę dla **nikogo** przy zdjętym dziedziczeniu — plik przestaje być
+czytelny dla wszystkich. Teraz nazwa z `getpass.getuser()`, SYSTEM po SID,
+i **weryfikacja odczytu po zmianie** z automatycznym cofnięciem.
+
+### Praca równoczesna z Subiektem — ROZSTRZYGNIĘTE
+
+Producent potwierdził, że RM_BAZA i Subiekt mogą działać jednocześnie.
+Sprawdzone na żywo: most zalogowany jako `GKI`, użytkownik równolegle w Subiekcie
+jako `GKI`, `logins = 1` przy 12 min uptime — sesja mostu **ani razu nie została
+wypchnięta**. Skutek: nie trzeba osobnego konta nexo dla mostu.
+
+### Karta pozycji (`subiekt_pozycja_gui.py`)
+
+Jedno okno pokazujące wszystko o jednej pozycji, otwierane dwuklikiem/PPM
+z **każdego** arkusza z pozycjami. Trzy źródła oznaczone kolorami: INVENTOR
+(drzewko `*_OUT.xlsx`), RM_BAZA (arkusz projektu), SUBIEKT (most na żywo).
+
+Zastąpiła pomysł drzewka w oknie ZD: tamto **zapisuje** (✓ → ZD, dostawca) i ~20
+miejsc adresuje wiersze arkusza wprost, więc wiersze-węzły złożeń groziły
+zaznaczeniem cudzej pozycji. Karta jest tylko do odczytu.
+
+Nowy tryb mostu **`komplet`** — most umiał tylko zapisywać składniki, nie dało
+się sprawdzić efektu. Odczyt przez gotowe relacje Sfery
+(`Asortyment.SkladnikiKompletu` / `SkladnikiWKompletach`).
+**Sprawdzone: komplety nie wiszą w powietrzu** — `2632-350.24ZZ` ma 2 składniki-
+towary i wchodzi w 3 komplety nadrzędne. Rodzaje w Subiekcie: Towar 3209,
+Komplet 152, Usługa 83 — „Komponentu" nie ma.
+
+### Pułapki GUI, które kosztowały najwięcej rund
+
+- **`self.after()` z wątku roboczego** rzuca „main thread is not in main loop" —
+  w `pythonw` **bez śladu**. Wyniki muszą wracać kolejką odpytywaną z wątku
+  głównego, a pętla odbioru nigdy nie może się przerwać.
+- **Zniszczone widgety po przebudowie treści**: `_wypelnij` padało na
+  `config()` etykiety usuniętej wcześniej — `TclError` kończył metodę przed
+  startem wątków. Znalezione dopiero **logiem do pliku**; zgadywanie zawiodło
+  trzy razy z rzędu.
+- **tksheet**: `get_selected_rows()` zwraca pusty zbiór przy pojedynczej
+  zaznaczonej komórce; `sheet.bind()` nie dociera do komórek (podpinać do `MT`
+  i `RI`); drzewo rysuje się w **nagłówku bocznym**, nie jako kolumna.
+- **`transient()`** zabiera w Windows przyciski minimalizacji i maksymalizacji.
+
+### Okno stanów: odzyskane 71 pozycji
+
+Normalia (`6001RS`, `5M 25 CP`) i pozycje bez cyfry w nazwie („Filtr", „Zamek",
+„sprężyna klawiszy" 280 szt.) mają w BOM-ie **tylko nazwę** — a
+`read_project_drawings` brała wyłącznie kolumny `*_drawing_no`. Okno pokazywało
+283 z 354 pozycji bez żadnego śladu po reszcie. Ustalone: nazwa bez numeru
+**jest** symbolem katalogowym; brak kartoteki oznacza pozycję nową.
+
 ## 12. Co zostało
 
-- **Benchmark w firmie** (sekcja 33 planu) — na 3444 kartotekach i SQL na
-  serwerze. Rozstrzygnie, czy cache jest potrzebny; na demo wygląda, że nie.
+- ~~**Benchmark w firmie**~~ — ZROBIONY 06.09, patrz 12a. Cache niepotrzebny.
 - **Licencje Sfery** — czy 20 stałych sesji mieści się w tym, co macie.
+  (Zawężone 06.09: most + Subiekt GUI na tym samym koncie na jednym
+  stanowisku już potwierdzone jako bezkolizyjne.)
 - **Ilość dostarczona z Subiekta** — czy Sfera daje powiązanie PZ → ZD →
   projekt. Jeśli tak, można czytać wprost i nie potrzeba tabeli odroczonych
   zapisów. Jeśli nie — tabela musi trzymać **wartość łączną, nie przyrost**,
