@@ -29,6 +29,12 @@ try { Console.OutputEncoding = Encoding.UTF8; } catch (IOException) { }
 // Konfig = argument pozycyjny konczacy sie .json. Wyklucz przelaczniki (--out=... tez konczy sie .json).
 var cfgPath = args.FirstOrDefault(a => !a.StartsWith("--") && a.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
               ?? @"C:\RMPAK_CLIENT\.nexo_sfera.json";
+
+// ⚠️ HOOK SDK PRZED CZYMKOLWIEK, CO DOTYKA InsERT.* — i zadnego typu SDK
+// w tym pliku. Bez tego most wystawiony jako 5 plikow (bez bibliotek
+// InsERT obok) padal na FileNotFoundException jeszcze przed pierwsza
+// instrukcja Main. Dlaczego — patrz SdkLoader.cs.
+SdkLoader.PodepnijZKonfigu(cfgPath);
 var szukane = args.Where(a => a.StartsWith("--symbol=")).Select(a => a["--symbol=".Length..]).ToList();
 
 // Nazwa trybu = pierwszy argument. Jeden string zamiast N zmiennych bool,
@@ -59,56 +65,6 @@ var limit = int.TryParse(args.FirstOrDefault(a => a.StartsWith("--limit="))?["--
 if (tryb == "server")
     return ServerHost.Uruchom(cfgPath, args.Any(a => a.Equals("--console", StringComparison.OrdinalIgnoreCase)));
 
-NexoSession sesja;
-try
-{
-    sesja = NexoSession.Wczytaj(cfgPath);
-}
-catch (SesjaException ex)
-{
-    Console.WriteLine(ex.Message);
-    return ex.KodWyjscia;
-}
-
-if (!cicho || outPath != null)
-{
-    Console.WriteLine(sesja.OpisPolaczenia);
-    Console.WriteLine($"Proces 64-bit: {Environment.Is64BitProcess}   (Sfera nexo >=57 wymaga 64-bit)");
-}
-
-using (sesja)
-{
-    try
-    {
-        sesja.Connect();
-    }
-    catch (SesjaException ex)
-    {
-        Console.WriteLine(ex.Message);
-        return ex.KodWyjscia;
-    }
-
-    if (!cicho || outPath != null) Console.WriteLine($"Zalogowano operatora: {sesja.Operator}");
-
-    // Tryb domyslny (bez nazwy trybu) — raport rozpoznawczy na stdout.
-    // Nie idzie przez dispatcher: pisze tekst dla czlowieka, nie JSON.
-    if (!cicho)
-        return Rozpoznanie.Uruchom(sesja.Sfera, limit, szukane);
-
-    var komenda = new Komenda(
-        Tryb: tryb,
-        Symbole: szukane,
-        PlanPath: planFile,
-        OutPath: outPath,
-        Zapisz: zapisz,
-        Limit: limit,
-        Numery: numeryArg,
-        Magazyn: args.FirstOrDefault(a => a.StartsWith("--magazyn="))?["--magazyn=".Length..],
-        Data: args.FirstOrDefault(a => a.StartsWith("--data="))?["--data=".Length..],
-        SymboleCsv: args.FirstOrDefault(a => a.StartsWith("--symbole="))?["--symbole=".Length..],
-        Projekt: args.FirstOrDefault(a => a.StartsWith("--projekt="))?["--projekt=".Length..],
-        PdfDir: args.FirstOrDefault(a => a.StartsWith("--pdf="))?["--pdf=".Length..],
-        TylkoNiezerowe: args.Any(a => a.Equals("--tylko-niezerowe", StringComparison.OrdinalIgnoreCase)));
-
-    return CommandDispatcher.Wykonaj(sesja.Sfera, komenda);
-}
+// Reszta (sesja, handlery) siedzi w Cli.cs, bo dotyka typow SDK,
+// a Main nie moze — patrz SdkLoader.cs.
+return Cli.Uruchom(args, cfgPath, tryb, cicho, szukane, planFile, outPath, zapisz, limit, numeryArg);

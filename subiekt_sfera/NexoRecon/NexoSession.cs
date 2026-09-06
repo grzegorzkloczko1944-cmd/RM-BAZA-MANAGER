@@ -80,37 +80,13 @@ internal sealed class NexoSession : IDisposable
         // Ubezpieczenie: jesli jakiejs biblioteki nexo nie skopiowalo do bin,
         // doladuj ja z Bin SDK. Hook jest globalny i idempotentny w praktyce
         // (ten sam katalog), ale podpinamy go raz — patrz _hookPodpiety.
-        PodepnijSdk(cfg.SdkBin ?? DomyslnySdkBin());
+        SdkLoader.Podepnij(cfg.SdkBin ?? SdkLoader.DomyslnySdkBin());
         return new NexoSession(cfg);
     }
 
-    /// <summary>
-    /// Katalog Bin SDK Sfery. C:\iLogic\SUBIEKT\Bin\ jest wgrywany na kazde
-    /// stanowisko przy instalacji; stara lokalizacja (rozpakowana
-    /// dokumentacja, z numerem wersji w nazwie) zostaje jako zapas dla
-    /// maszyn, na ktorych nowego katalogu jeszcze nie ma.
-    /// Konfig moze to nadpisac polem SdkBin.
-    /// </summary>
-    static string DomyslnySdkBin()
-    {
-        const string nowy = @"C:\iLogic\SUBIEKT\Bin\";
-        return Directory.Exists(nowy)
-            ? nowy
-            : @"C:\iLogic\Subiekt_nexo_PRO_dokumentacja\SDK\Bin\";
-    }
-
-    static bool _hookPodpiety;
-
-    static void PodepnijSdk(string sdkBin)
-    {
-        if (_hookPodpiety) return;
-        _hookPodpiety = true;
-        AssemblyLoadContext.Default.Resolving += (ctx, name) =>
-        {
-            var p = Path.Combine(sdkBin, name.Name + ".dll");
-            return File.Exists(p) ? ctx.LoadFromAssemblyPath(p) : null;
-        };
-    }
+    // DomyslnySdkBin() i PodepnijSdk() przeniesione do SdkLoader.cs — hook
+    // musi dac sie podpiac z miejsca, ktorego JIT nie wymaga bibliotek InsERT,
+    // a ta klasa ma pola typu Uchwyt/MenedzerPolaczen.
 
     /// <summary>Opis polaczenia na naglowek CLI (bez hasel).</summary>
     public string OpisPolaczenia =>
