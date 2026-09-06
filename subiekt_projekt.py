@@ -500,6 +500,8 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         self.project_name = project_name or str(project_id)
         #: {rodzic: [numer, …]} — składniki z drzewka spoza BOM-u (rozjazd numerów)
         self.poza_bom = {}
+        #: powód nieczytania drzewka (None = wczytane) — bez niego brak kompletów
+        self.brak_drzewka = None
         self.plan = None
         self.items = []
         self.dry = None
@@ -718,6 +720,11 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
             return
 
         self.plan, self.dry, self.items = plan, wynik, items
+        # Powód, dla którego drzewko się nie wczytało (brak folderu na V:,
+        # brak arkusza „DRZEWKO TEKST”). Bez drzewka NIE POWSTANIE ŻADEN
+        # komplet, więc informacja musi dojść też do potwierdzenia zapisu —
+        # sam dopisek w pasku statusu ginie (zgłoszone 06.09.2026).
+        self.brak_drzewka = warn
         self._fill_tree(plan, wynik)
         self.btn_write.config(state=tk.NORMAL)
         self.btn_dodaj.config(state=tk.NORMAL)
@@ -1356,6 +1363,13 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
             czesc_trwala = "Żadna kartoteka ani komplet NIE powstanie.\n\n"
 
         uwagi = []
+        # Brak drzewka jest najważniejszy: bez niego NIE POWSTANIE ŻADEN
+        # komplet, choć pozycje Z/ZZ są w projekcie i wyglądają na gotowe.
+        zzz = sum(1 for p in plan["pozycje"] if p["typ"] in KOMPLETY)
+        if getattr(self, "brak_drzewka", None) and zzz:
+            uwagi.append(f"BRAK DRZEWKA — {self.brak_drzewka}.\n"
+                         f"   Żaden z {zzz} kompletów (Z/ZZ) nie powstanie — nie wiadomo,\n"
+                         f"   co ma w sobie zawierać. Powstaną same kartoteki.")
         if pominiete:
             uwagi.append(f"Pomijasz {pominiete} pozycji bez kartoteki — nie trafią na ZK.")
         ile_poza = sum(len(v) for v in getattr(self, "poza_bom", {}).values())
