@@ -795,27 +795,48 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
         # skladem dostawal ostrzezenie na wszystkie pozycje naraz
         # (zgloszone 07.09.2026: 2627-200.08ZZ, 6 skladnikow, wszystkie OK).
         #
-        # Drzewko bywa puste z powodow niezaleznych od danych: okno otwarte
-        # bez projektu, pozycja spoza tego BOM-u, brak pliku *_OUT.xlsx.
-        # W kazdym z tych przypadkow porownanie jest bez podstaw i nie wolno
-        # go pokazywac jako rozjazdu.
+        # Zasada: ostrzezenie tylko wtedy, gdy porownanie ma podstawy.
+        # Brak danych nigdy nie ma udawac rozjazdu.
         if not z_drzewka:
             if z_subiekta:
-                self._wiersz_kv(s, "Zgodność z Inventorem",
-                                "nie porównano — brak drzewka dla tej pozycji "
-                                "(otwórz projekt, żeby sprawdzić skład)")
+                if not self.kids:
+                    powod = ("nie porównano — brak drzewka "
+                             + ("(okno nie zna projektu)" if not self.project_name
+                                else "(nie znaleziono arkusza „DRZEWKO TEKST”)"))
+                else:
+                    # Drzewko JEST, ale tej pozycji w nim nie ma. Drzewko zna
+                    # wylacznie numery rysunku, wiec normalia (lozyska, paski,
+                    # sruby) nie moga sie w nim znalezc z definicji.
+                    powod = ("nie porównano — tej pozycji nie ma w drzewku "
+                             "(normalia nie mają numeru rysunku)")
+                self._wiersz_kv(s, "Zgodność z Inventorem", powod)
             return
         if not z_subiekta:
             return
         # Numery w Inventorze i w Subiekcie roznia sie koncowka typu
         # (2632-350.22X vs 2632-350.22) — porownujemy rdzenie.
+        #
+        # Z porownania wypadaja skladniki BEZ NUMERU RYSUNKU. Drzewko pracuje
+        # tylko na numerach, wiec kupowana norma (lozysko, pasek, silownik)
+        # nigdy w nim nie bedzie — a to nie znaczy, ze w Subiekcie siedzi
+        # nadmiarowo. Zgloszenie ich jako "nadmiar" kazaloby usunac czesci,
+        # ktore w komplecie sa potrzebne.
+        rysunkowe = {x for x in z_subiekta if _ma_numer_rysunku(x)}
+        bez_numeru = z_subiekta - rysunkowe
+
         brak_w_sub = {x for x in z_drzewka
                       if _bez_ogona(x) not in {_bez_ogona(y) for y in z_subiekta}}
-        nadmiar = {x for x in z_subiekta
+        nadmiar = {x for x in rysunkowe
                    if _bez_ogona(x) not in {_bez_ogona(y) for y in z_drzewka}}
+        # Ile pozycji zostalo poza porownaniem — zeby "✓ zgodny" nie sugerowal,
+        # ze sprawdzono WSZYSTKO, gdy czesc skladu to kupowane normalia.
+        pominieto = (f"   (poza porównaniem: {len(bez_numeru)} bez numeru rysunku)"
+                     if bez_numeru else "")
+
         if not brak_w_sub and not nadmiar:
             if z_drzewka:
-                self._wiersz_kv(s, "Zgodność z Inventorem", "✓ skład taki sam jak w drzewku")
+                self._wiersz_kv(s, "Zgodność z Inventorem",
+                                "✓ skład taki sam jak w drzewku" + pominieto)
             return
         if brak_w_sub:
             self._wiersz_kv(s, "⚠ Brak w Subiekcie",
@@ -825,8 +846,27 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
         if nadmiar:
             self._wiersz_kv(s, "⚠ Nadmiar w Subiekcie",
                             ", ".join(sorted(nadmiar)[:8])
-                            + (f"  (+{len(nadmiar) - 8})" if len(nadmiar) > 8 else ""),
+                            + (f"  (+{len(nadmiar) - 8})" if len(nadmiar) > 8 else "")
+                            + pominieto,
                             wyroznij=True)
+
+
+def _ma_numer_rysunku(symbol):
+    """Czy symbol jest numerem rysunku RMPAK (a nie kodem handlowym)?
+
+    Reguła jest JEDNA dla całego RM_BAZA — bierzemy ją z subiekt_wyslij_zd,
+    które wzięło ją z RM_IMPORT. Druga, własna definicja „numeru rysunku"
+    rozjechałaby się z importem BOM-u przy pierwszej zmianie formatu.
+
+    Gdy modułu nie da się wczytać, mówimy „nie wiem" (False) — wtedy pozycja
+    wypada z porównania i najwyżej nie zgłosimy rozjazdu. Odwrotny domysł
+    kazałby usuwać składniki, które są potrzebne.
+    """
+    try:
+        from subiekt_wyslij_zd import _ma_numer_rysunku as regula
+    except Exception:
+        return False
+    return regula(symbol)
 
 
 def _bez_ogona(symbol):
