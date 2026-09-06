@@ -525,9 +525,17 @@ class BrakProgramuPocztowego(RuntimeError):
 
 def otworz_maila(do, temat, tresc, zalaczniki, dw=""):
     """
-    Otwiera wiadomość w domyślnym programie pocztowym. Zwraca nazwę użytej
-    drogi: "outlook" albo "mailto". NIE wysyła — użytkownik klika Wyślij sam.
+    Otwiera wiadomość w domyślnym programie pocztowym. NIE wysyła —
+    użytkownik klika Wyślij sam.
+
+    Zwraca (droga, odrzucone): droga to "outlook" albo "mailto", a
+    `odrzucone` to opisy załączników, których nie udało się dopiąć.
     """
+    # Wiadomość i załączniki w OSOBNYCH try: wcześniej jeden blok obejmował
+    # całość, więc awaria przy JEDNYM załączniku (plik zajęty, ścieżka UNC,
+    # nazwa, której Outlook nie przyjmuje) przewracała całą ścieżkę Outlooka
+    # i wysyłka spadała na mailto: — bez załączników i z zakodowanym URL-em
+    # zamiast wiadomości (zgłoszone 06.09.2026).
     try:
         import win32com.client as win32
         ol = win32.Dispatch("Outlook.Application")
@@ -537,30 +545,42 @@ def otworz_maila(do, temat, tresc, zalaczniki, dw=""):
             mail.CC = dw
         mail.Subject = temat
         mail.Body = tresc
-        for z in zalaczniki:
-            if Path(z).exists():
-                mail.Attachments.Add(str(z))
-        mail.Display(False)                     # pokaż okno, nie wysyłaj
-        return "outlook"
     except Exception:
-        # Outlooka nie ma albo COM niedostępny — mailto niesie tylko tekst.
-        url = "mailto:" + urllib.parse.quote(do or "") + "?" + urllib.parse.urlencode(
-            {"subject": temat, "body": tresc}, quote_via=urllib.parse.quote)
-        try:
-            os.startfile(url)
-        except OSError as e:
-            # Windows nie ma programu skojarzonego z mailto: — surowy
-            # „WinError 2 … 'mailto:98k%40wp.pl?subject=…'” z całym
-            # zakodowanym URL-em nic użytkownikowi nie mówił, a wyglądał
-            # jak awaria programu (zgłoszone 06.09.2026).
-            raise BrakProgramuPocztowego(
-                "Na tym komputerze nie ma programu pocztowego skojarzonego\n"
-                "z adresami e-mail (brak Outlooka i obsługi „mailto:”).\n\n"
-                "Treść wiadomości i adres możesz skopiować z tego okna\n"
-                "i wysłać z poczty w przeglądarce — załączniki są w katalogu\n"
-                "zamówienia (przycisk „Katalog”)."
-            ) from e
-        return "mailto"
+        mail = None                             # Outlooka nie ma — niżej mailto:
+
+    if mail is not None:
+        odrzucone = []
+        for z in zalaczniki:
+            try:
+                if Path(z).exists():
+                    mail.Attachments.Add(str(z))
+            except Exception as e:
+                # Lepiej mail z brakującym plikiem niż żaden — user widzi
+                # listę i może dopiąć ręcznie.
+                odrzucone.append(f"{Path(z).name}: {e}")
+        mail.Display(False)                     # pokaż okno, nie wysyłaj
+        # Odrzucone wracają OBOK drogi, nie wyjątkiem: wiadomość jest już
+        # otwarta, więc przerwanie zgubiłoby potwierdzenie wysyłki.
+        return "outlook", odrzucone
+
+    # Outlooka nie ma albo COM niedostępny — mailto niesie tylko tekst.
+    url = "mailto:" + urllib.parse.quote(do or "") + "?" + urllib.parse.urlencode(
+        {"subject": temat, "body": tresc}, quote_via=urllib.parse.quote)
+    try:
+        os.startfile(url)
+    except OSError as e:
+        # Windows nie ma programu skojarzonego z mailto: — surowy
+        # „WinError 2 … 'mailto:98k%40wp.pl?subject=…'” z całym
+        # zakodowanym URL-em nic użytkownikowi nie mówił, a wyglądał
+        # jak awaria programu (zgłoszone 06.09.2026).
+        raise BrakProgramuPocztowego(
+            "Na tym komputerze nie ma programu pocztowego skojarzonego\n"
+            "z adresami e-mail (brak Outlooka i obsługi „mailto:”).\n\n"
+            "Treść wiadomości i adres możesz skopiować z tego okna\n"
+            "i wysłać z poczty w przeglądarce — załączniki są w katalogu\n"
+            "zamówienia (przycisk „Katalog”)."
+        ) from e
+    return "mailto", []
 
 
 
@@ -1299,8 +1319,8 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
             wybrane = [str(self.pdf_zd)] if self.pdf_zd else []
 
         try:
-            droga = otworz_maila(do, self.var_temat.get().strip(),
-                                 self.txt.get("1.0", "end-1c"), wybrane)
+            droga, odrzucone = otworz_maila(do, self.var_temat.get().strip(),
+                                            self.txt.get("1.0", "end-1c"), wybrane)
         except BrakProgramuPocztowego as e:
             # Przyczyna znana i opisana — pokazujemy ją zamiast surowego
             # WinError, i dajemy od razu skopiować treść do schowka.
@@ -1313,6 +1333,17 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
             messagebox.showerror("Program pocztowy",
                                  f"Nie udało się otworzyć wiadomości:\n{e}", parent=self)
             return
+
+        if odrzucone:
+            # Wiadomość jest otwarta, brakuje w niej tylko tych plików —
+            # mówimy które, żeby user dopiął je ręcznie przed wysłaniem.
+            messagebox.showwarning(
+                "Załączniki",
+                f"Nie udało się dopiąć {len(odrzucone)} plik(ów):\n\n"
+                + "\n".join(f"  • {o}" for o in odrzucone[:8])
+                + "\n\nReszta wiadomości jest gotowa — dopnij je ręcznie\n"
+                  "albo wyślij bez nich.",
+                parent=self)
 
         if droga == "mailto":
             # mailto nie przenosi załączników — powiedz to wprost i pokaż pliki.
