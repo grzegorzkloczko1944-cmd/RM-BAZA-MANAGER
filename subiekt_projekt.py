@@ -37,7 +37,7 @@ from rm_kreciolek import Kreciolek
 
 import subiekt_mapowania
 from subiekt_stany import (_find_exe, blad_mostu, jedna_linia, CONFIG_PATH,
-                           PROJECTS_DIR, looks_like_drawing_no,
+                           PROJECTS_DIR, looks_like_drawing_no, wysrodkuj,
                            wczytaj_szerokosci, zapisz_szerokosci)
 
 TIMEOUT_S = 600          # zapis bywa wolniejszy od odczytu — kartoteki idą pojedynczo
@@ -322,7 +322,13 @@ def numer_projektu(project_name, project_id=None):
 
 
 def build_plan(project_id, project_name, podmiot, tytul):
-    """Buduje plan dla mostu + dane do wyświetlenia. Zwraca (plan, items, ostrzezenie)."""
+    """Buduje plan dla mostu + dane do wyświetlenia.
+
+    Zwraca (plan, items, ostrzezenie, poza_bom), gdzie `poza_bom` to
+    {rodzic: [numer, …]} — składniki obecne w DRZEWKU, ale nieobecne w BOM-ie.
+    Nie trafią do Subiekta, więc okno musi je pokazać (patrz komentarz przy
+    zbieraniu tej mapy).
+    """
     items = read_project_items(project_id)
     # Pozycje z numerem rysunku muszą wyglądać jak numer (odsiewa opisy wpisane
     # w to pole). Pozycje BEZ numeru — znormalizowane, identyfikowane nazwą —
@@ -332,6 +338,13 @@ def build_plan(project_id, project_name, podmiot, tytul):
     kids, warn = read_tree(project_name)
 
     by_nr = {it["nr"].upper(): it for it in items}
+    # Składniki z DRZEWKA, których NIE MA w BOM-ie: {rodzic: [numer, …]}.
+    # Powstają, gdy numer rozjedzie się między RM_BAZA a Excelem — najczęściej
+    # po ręcznej zmianie numeru w arkuszu (drzewko siedzi w pliku *_OUT.xlsx
+    # na V: i o zmianie nie wie). Wcześniej takie pozycje wypadały po cichu
+    # i komplet powstawał NIEPEŁNY ze statusem „utworzony”, czyli wyglądał na
+    # sukces (zgłoszone 06.09.2026).
+    poza_bom = {}
     pozycje = []
     for it in items:
         skladniki = []
@@ -341,6 +354,8 @@ def build_plan(project_id, project_name, podmiot, tytul):
                 # inaczej wpisalibyśmy do Subiekta pozycję, której RM_BAZA nie zna.
                 if child_nr.upper() in by_nr:
                     skladniki.append({"symbol": child_nr, "ilosc": child_qty})
+                else:
+                    poza_bom.setdefault(it["nr"], []).append(child_nr)
         try:
             qty = float(str(it["qty"]).replace(",", ".")) if it["qty"] not in (None, "") else 1.0
         except (TypeError, ValueError):
@@ -366,7 +381,7 @@ def build_plan(project_id, project_name, podmiot, tytul):
         "uwagi": numer,
         "pozycje": pozycje,
     }
-    return plan, items, warn
+    return plan, items, warn, poza_bom
 
 
 # ── Wywołanie mostu ─────────────────────────────────────────────────────────
@@ -483,6 +498,8 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         super().__init__(parent)
         self.project_id = project_id
         self.project_name = project_name or str(project_id)
+        #: {rodzic: [numer, …]} — składniki z drzewka spoza BOM-u (rozjazd numerów)
+        self.poza_bom = {}
         self.plan = None
         self.items = []
         self.dry = None
@@ -675,22 +692,22 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
 
     def _dry_run_worker(self):
         try:
-            plan, items, warn = build_plan(
+            plan, items, warn, poza_bom = build_plan(
                 self.project_id, self.project_name,
                 self.var_podmiot.get().strip(), self.var_tytul.get().strip())
             if not plan["pozycje"]:
-                self.after(0, lambda: self._dry_done(None, None, [], "Brak pozycji z numerem rysunku."))
+                self.after(0, lambda: self._dry_done(None, None, [], "Brak pozycji z numerem rysunku.", {}))
                 return
             wynik = run_bridge(plan, zapisz=False)
             # Suchy przebieg też jest okazją do zapamiętania trafień — kolejny
             # projekt z tymi numerami nie będzie musiał pytać Subiekta.
             zapisz_mapowania(wynik)
-            self.after(0, lambda: self._dry_done(plan, wynik, items, warn))
+            self.after(0, lambda: self._dry_done(plan, wynik, items, warn, poza_bom))
         except Exception as e:
             err = str(e)
-            self.after(0, lambda: self._dry_done(None, None, [], err))
+            self.after(0, lambda: self._dry_done(None, None, [], err, {}))
 
-    def _dry_done(self, plan, wynik, items, warn):
+    def _dry_done(self, plan, wynik, items, warn, poza_bom=None):
         self.btn_refresh.config(state=tk.NORMAL)
         if plan is None:
             self.stop_kreciolek()
@@ -714,8 +731,81 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
                    if k["Rodzaj"] == "komplet" and k["Status"] == "pominiety-brak-skladnikow")
         note = f"   ⚠ {warn}" if warn else ""
         extra = f"   ⚠ {pust} kompletów bez składników w drzewie" if pust else ""
+        self.poza_bom = poza_bom or {}
+        ile_poza = sum(len(v) for v in self.poza_bom.values())
+        rozjazd = f"   ⚠ {ile_poza} składników z drzewka NIE wejdzie do kompletów" if ile_poza else ""
         self.stop_kreciolek()
-        self.status.config(text=f"Podgląd gotowy — w Subiekcie nic nie zmieniono.{extra}{note}")
+        self.status.config(
+            text=f"Podgląd gotowy — w Subiekcie nic nie zmieniono.{extra}{rozjazd}{note}")
+
+        # Rozjazd numerów między RM_BAZA a drzewkiem jest cichy i kosztowny:
+        # komplet powstaje ze statusem „utworzony”, tylko niepełny. Dlatego
+        # pełna lista idzie osobnym oknem, a nie dopiskiem w pasku.
+        if ile_poza:
+            self._pokaz_poza_bom()
+
+    # ── rozjazd RM_BAZA ↔ drzewko ──────────────────────────────────────────
+    def _pokaz_poza_bom(self):
+        """Pełna lista składników z drzewka, których nie ma w BOM-ie.
+
+        Osobne okno, nie messagebox: lista bywa długa, a użytkownik musi móc
+        ją skopiować i porównać z arkuszem. Tekst jest zaznaczalny.
+        """
+        ile = sum(len(v) for v in self.poza_bom.values())
+        okno = tk.Toplevel(self)
+        okno.title("Uwaga: rozjazd numerów RM_BAZA ↔ drzewko")
+        okno.geometry("640x460")
+        okno.transient(self)
+
+        naglowek = tk.Frame(okno, bg="#c0392b")
+        naglowek.pack(fill=tk.X)
+        tk.Label(naglowek, text=f"⚠ {ile} składników z drzewka NIE wejdzie do kompletów",
+                 bg="#c0392b", fg="white", font=("Arial", 11, "bold"),
+                 anchor="w", padx=12, pady=8).pack(fill=tk.X)
+
+        tk.Label(
+            okno, justify="left", anchor="w", padx=12, pady=8, wraplength=600,
+            text="Te numery są w drzewku (arkusz „DRZEWKO TEKST” w pliku *_OUT.xlsx),\n"
+                 "ale nie ma ich w BOM-ie projektu, więc nie trafią do składu kompletów\n"
+                 "w Subiekcie. Komplety powstaną, tylko NIEPEŁNE.\n\n"
+                 "Najczęstsza przyczyna: numer zmieniony ręcznie w RM_BAZA — drzewko\n"
+                 "siedzi w Excelu i o tej zmianie nie wie. Żeby skład się zgadzał,\n"
+                 "numer trzeba poprawić w Inventorze i przeimportować projekt."
+        ).pack(fill=tk.X)
+
+        ramka = tk.Frame(okno)
+        ramka.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+        txt = tk.Text(ramka, wrap="none", font=("Consolas", 9), bg="#fdfefe")
+        vs = tk.Scrollbar(ramka, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vs.set)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+
+        for rodzic in sorted(self.poza_bom):
+            dzieci = self.poza_bom[rodzic]
+            txt.insert("end", f"{rodzic}  (komplet, brakuje {len(dzieci)}):\n")
+            for d in sorted(dzieci):
+                txt.insert("end", f"      {d}\n")
+            txt.insert("end", "\n")
+        txt.config(state="disabled")      # do czytania i kopiowania, nie do edycji
+
+        stopka = tk.Frame(okno)
+        stopka.pack(fill=tk.X, padx=12, pady=(0, 10))
+        tk.Button(stopka, text="Kopiuj listę", command=lambda: self._kopiuj_poza_bom(okno),
+                  bg="#7f8c8d", fg="white", relief=tk.FLAT, padx=12).pack(side=tk.LEFT)
+        tk.Button(stopka, text="Rozumiem", command=okno.destroy,
+                  bg="#2c3e50", fg="white", relief=tk.FLAT, padx=18).pack(side=tk.RIGHT)
+
+        wysrodkuj(okno, self)
+        okno.grab_set()
+
+    def _kopiuj_poza_bom(self, okno):
+        linie = []
+        for rodzic in sorted(self.poza_bom):
+            for d in sorted(self.poza_bom[rodzic]):
+                linie.append(f"{rodzic}\t{d}")
+        okno.clipboard_clear()
+        okno.clipboard_append("\n".join(linie))
 
     # ── wybór, co zakładać ─────────────────────────────────────────────────
     def _do_zalozenia(self):
