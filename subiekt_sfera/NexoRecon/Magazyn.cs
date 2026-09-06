@@ -33,12 +33,6 @@ internal static class Magazyn
     {
         var asort = sfera.Asortymenty();
 
-        // Projekcja PRZED ToList — jak w Katalog.cs. Materializacja pełnych
-        // encji ciągnęłaby leniwe kolekcje, których tu nie potrzebujemy.
-        var kartoteki = asort.Dane.Wszystkie()
-            .Select(a => new { a.Id, a.Symbol, a.Nazwa, a.CenaEwidencyjna })
-            .ToList();
-
         // Otwarte ZD per symbol — TU, a nie osobnym wywolaniem mostu z Pythona.
         // Start Sfery i logowanie to ~10 s NA KAZDE uruchomienie NexoRecon.exe;
         // drugi przebieg (tryb "dokumenty") kosztowal wiecej niz cala reszta
@@ -73,66 +67,84 @@ internal static class Magazyn
         }
         catch { /* brak dostepu do ZD nie moze wywalic odczytu stanow */ }
 
+        // ⚠️ JEDNO ZAPYTANIE, NIE 3444. Wczesniejsza wersja wolala
+        // WyszukajPoSymbolu per kartoteka i dla kazdej siegala po stany,
+        // zakresy i dostawcow — czyli kilkanascie tysiecy zapytan do SQL,
+        // zeby zwrocic ~800 rekordow. Na produkcji: ~7 s (06.09.2026).
+        // Projekcja anonimowa z zagniezdzonymi kolekcjami idzie do bazy jako
+        // jedno zapytanie z JOIN-ami; EF materializuje wszystko naraz.
+        //
+        // Rodzaj i dostawca sa w projekcji jako proste pola (nie encje) —
+        // wyciagniecie ich po fakcie z materializowanej encji cofneloby caly
+        // zysk, bo kazde siegniecie po nawigacje to osobne zapytanie.
+        var dane = asort.Dane.Wszystkie()
+            .Select(a => new
+            {
+                a.Id,
+                a.Symbol,
+                a.Nazwa,
+                a.CenaEwidencyjna,
+                Rodzaj = a.Rodzaj.Nazwa,
+                Stany = a.StanyMagazynowe.Select(s => new
+                {
+                    Magazyn = s.Magazyn.Symbol,
+                    s.IloscDostepna,
+                    s.IloscZadysponowana,
+                    s.IloscZarezerwowanaIlosciowo,
+                    s.IloscZarezerwowanaDostawowo,
+                }),
+                Zakresy = a.StanyWMagazynachZakresy.Select(z => new
+                {
+                    z.StanMinimalny,
+                    z.StanOptymalny,
+                }),
+                // Dostawca podstawowy: ten z ustawiona flaga, inaczej pierwszy.
+                Dostawcy = a.DaneAsortymentuDlaPodmiotow
+                    .Select(d => new
+                    {
+                        Nazwa = d.Podmiot.NazwaSkrocona,
+                        Podstawowy = d.AsortymentDlaKtoregoDostawcaPodstawowy != null,
+                    }),
+            })
+            .ToList();
+
         var wynik = new List<Poz>();
-        foreach (var k in kartoteki)
+        foreach (var k in dane)
         {
             var symbol = (k.Symbol ?? "").Trim();
             if (symbol.Length == 0) continue;
 
-            var enc = Bezp(() => asort.Dane.WyszukajPoSymbolu(symbol));
-            if (enc == null) continue;
-
             var stany = new List<StanMag>();
             decimal dostepne = 0, zadysponowane = 0, zarezerwowane = 0;
-            try
+            foreach (var s in k.Stany)
             {
-                foreach (var s in enc.StanyMagazynowe)
-                {
-                    var mag = BezpS(() => s.Magazyn?.Symbol) ?? "?";
-                    stany.Add(new StanMag(mag, s.IloscDostepna, s.IloscZadysponowana));
-                    dostepne += s.IloscDostepna;
-                    zadysponowane += s.IloscZadysponowana;
-                    zarezerwowane += s.IloscZarezerwowanaIlosciowo
-                                   + s.IloscZarezerwowanaDostawowo;
-                }
+                stany.Add(new StanMag(s.Magazyn ?? "?", s.IloscDostepna, s.IloscZadysponowana));
+                dostepne += s.IloscDostepna;
+                zadysponowane += s.IloscZadysponowana;
+                zarezerwowane += s.IloscZarezerwowanaIlosciowo + s.IloscZarezerwowanaDostawowo;
             }
-            catch { /* brak stanów = kartoteka bez ruchu */ }
 
-            // Progi zamawiania (zakres magazynowy) — okno magazynu pokazuje je
-            // i pozwala edytowac (tryb "progi" zapisuje). Encja z
-            // WyszukajPoSymbolu laduje te kolekcje; z Wszystkie() by nie.
             decimal stanMin = 0, stanOpt = 0;
-            try
+            foreach (var z in k.Zakresy)
             {
-                foreach (var z in enc.StanyWMagazynachZakresy)
-                {
-                    stanMin += z.StanMinimalny;
-                    stanOpt += z.StanOptymalny.GetValueOrDefault();
-                }
+                stanMin += z.StanMinimalny;
+                stanOpt += z.StanOptymalny.GetValueOrDefault();
             }
-            catch { /* wiekszosc kartotek nie ma zakresow */ }
 
-            // Dostawca domyslny z kartoteki — podpowiedz do ZD na magazyn.
-            // "Podstawowy" to ten z AsortymentDlaKtoregoDostawcaPodstawowy;
-            // gdy zaden nie jest oznaczony, bierzemy pierwszego z listy.
-            // Encja Asortyment NIE ma wlasciwosci "Dostawcy" (to jest na obiekcie
-            // biznesowym w SDK: asortyment.Dostawcy.Dodaj). Kolekcje
-            // DaneAsortymentuDlaPodmiotu szukamy refleksja po nazwie, bo jej
-            // nazwa na encji nie jest udokumentowana — wzorem Wlasc() z innych
-            // trybow: jawne implementacje interfejsow tez sprawdzamy.
-            var dostawca = DostawcaPodstawowy(enc);
-
-            // Kartoteki bez ruchu to zwykle martwe indeksy — przy przeglądzie
-            // magazynu tylko zaśmiecają listę. Kartoteke z PROGIEM zostawiamy
+            // Kartoteki bez ruchu to zwykle martwe indeksy — przy przegladzie
+            // magazynu tylko zasmiecaja liste. Kartoteke z PROGIEM zostawiamy
             // mimo zera: to wlasnie ona jest "do domowienia".
             if (tylkoNiezerowe && dostepne == 0 && zadysponowane == 0 && stanMin == 0) continue;
 
+            var dostawca = k.Dostawcy.FirstOrDefault(d => d.Podstawowy)?.Nazwa
+                        ?? k.Dostawcy.FirstOrDefault()?.Nazwa;
+
             wynik.Add(new Poz(
                 k.Id, symbol, (k.Nazwa ?? "").Trim(),
-                BezpS(() => enc.Rodzaj?.Nazwa),
+                k.Rodzaj,
                 dostepne, zadysponowane, zarezerwowane,
                 decimal.Round(k.CenaEwidencyjna, 2),
-                stany, stanMin, stanOpt, dostawca,
+                stany, stanMin, stanOpt, dostawca?.Trim(),
                 zdWgSymbolu.TryGetValue(symbol, out var zd) ? string.Join(", ", zd) : null));
         }
 
