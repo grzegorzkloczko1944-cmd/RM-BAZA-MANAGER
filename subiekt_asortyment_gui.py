@@ -383,7 +383,15 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
                                      empty_horizontal=0, empty_vertical=0)
         self.sheet_sklad.enable_bindings(("single_select", "drag_select",
                                           "column_width_resize", "arrowkeys",
-                                          "copy", "edit_cell"))
+                                          "copy", "edit_cell",
+                                          "right_click_popup_menu", "rc_select"))
+        # PPM w dolnej tabeli — wejscie w skladnik (albo w komplet nadrzedny)
+        # bez szukania go na gornej liscie. Dziala w obu trybach tabeli, bo
+        # w obu w kolumnie 0 stoi symbol istniejacej kartoteki (07.09.2026).
+        self.sheet_sklad.popup_menu_add_command(
+            "🔍 Karta pozycji (złożenie, BOM, Subiekt)", self._karta_z_dolnej)
+        self.sheet_sklad.popup_menu_add_command(
+            "⬆ Pokaż tę pozycję na liście powyżej", self._skocz_z_dolnej)
         try:
             # Ilość edytowalna; symbol/nazwa/rodzaj to dane składnika z jego
             # własnej kartoteki — poprawia się je na TAMTEJ pozycji, nie tu.
@@ -834,6 +842,70 @@ class AsortymentWindow(tk.Toplevel, Kreciolek):
             s.get("Symbol", ""), s.get("Nazwa", ""),
             f"{float(s.get('Ilosc') or 0):g}", _kod_rodzaju(s.get("Rodzaj")),
         ] for s in wchodzi], reset_col_positions=False)
+
+    def _symbol_z_dolnej(self):
+        """Symbol z zaznaczonego wiersza dolnej tabeli albo None.
+
+        Działa w obu trybach: przy komplecie to składnik, przy innej pozycji
+        komplet nadrzędny. W obu w kolumnie 0 stoi symbol kartoteki.
+        """
+        if not self.sheet_sklad:
+            return None
+        try:
+            rows = sorted(self.sheet_sklad.get_selected_rows(get_cells_as_rows=True))
+        except Exception:
+            rows = []
+        if not rows:
+            return None
+        try:
+            return str(self.sheet_sklad.get_cell_data(rows[0], 0) or "").strip()
+        except Exception:
+            return None
+
+    def _karta_z_dolnej(self):
+        """Karta pozycji dla wiersza z dolnej tabeli."""
+        symbol = self._symbol_z_dolnej()
+        if not symbol:
+            self.status.config(text="Zaznacz wiersz w dolnej tabeli.")
+            return
+        import subiekt_pozycja_gui
+        subiekt_pozycja_gui.otworz(self, symbol)
+
+    def _skocz_z_dolnej(self):
+        """Przenosi zaznaczenie górnej listy na pozycję z dolnej tabeli.
+
+        Bez tego wejście w składnik znaczyło szukanie go ręcznie na liście —
+        a to ta sama kartoteka, tylko oglądana z drugiej strony. Gdy pozycja
+        jest odfiltrowana, czyścimy filtry, zamiast milczeć: inaczej klik
+        wyglądałby na nieskuteczny.
+        """
+        symbol = self._symbol_z_dolnej()
+        if not symbol:
+            return
+        klucz = symbol.strip().upper()
+        if not any(p["Symbol"].strip().upper() == klucz for p in self.pozycje):
+            messagebox.showinfo(
+                "Asortyment",
+                f"„{symbol}” nie ma na wczytanej liście kartotek.",
+                parent=self)
+            return
+
+        if not any(p["Symbol"].strip().upper() == klucz for p in self.widoczne):
+            self.var_szukaj.set("")
+            self.var_rodzaj.set("wszystkie")
+            self.var_stan.set("wszystkie")
+            self._odswiez_liste()
+
+        for i, p in enumerate(self.widoczne):
+            if p["Symbol"].strip().upper() == klucz:
+                try:
+                    self.sheet.select_row(i)
+                    self.sheet.see(row=i, column=0)
+                except Exception:
+                    pass
+                self.status.config(text=f"{p['Symbol']} — {p['nazwa']}")
+                self._pokaz_sklad(p)
+                return
 
     def _naglowki_dolnej(self, kolumny):
         """Nagłówki dolnej tabeli — te same kolumny, inne znaczenie.

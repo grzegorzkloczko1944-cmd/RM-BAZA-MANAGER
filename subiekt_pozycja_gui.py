@@ -404,9 +404,82 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
         w.pack(fill=tk.X, pady=1)
         tk.Label(w, text=klucz, bg=TLO_SEKCJI, fg=TEKST_SZARY, width=22,
                  anchor="w", font=("Arial", 9)).pack(side=tk.LEFT)
-        tk.Label(w, text=str(wartosc), bg=TLO_SEKCJI, fg=TEKST, anchor="w",
-                 justify="left", wraplength=480,
-                 font=("Arial", 9, "bold" if wyroznij else "normal")).pack(side=tk.LEFT)
+
+        # WARTOSC W Text, NIE W Label — z etykiety nie da sie zaznaczyc tekstu
+        # ani skopiowac (Ctrl+C), a to wlasnie wartosci sie przeklada: symbol
+        # do wyszukania w Subiekcie, numer dokumentu, nazwa dostawcy
+        # (zgloszone 07.09.2026). Text w stanie "disabled" zachowuje sie jak
+        # etykieta — nie da sie go edytowac — ale zaznaczanie i kopiowanie
+        # dziala. Klucze zostaja etykietami: ich sie nie kopiuje.
+        tekst = str(wartosc)
+        t = tk.Text(w, bg=TLO_SEKCJI, fg=TEKST, relief=tk.FLAT, wrap="word",
+                    font=("Arial", 9, "bold" if wyroznij else "normal"),
+                    height=1, width=1, padx=0, pady=0, highlightthickness=0,
+                    cursor="xterm", takefocus=0,
+                    inactiveselectbackground="#bcd4ea")
+        t.insert("1.0", tekst)
+        t.configure(state=tk.DISABLED)
+        t.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._dopasuj_wysokosc(t)
+        self._menu_kopiuj(t)
+
+    @staticmethod
+    def _dopasuj_wysokosc(t):
+        """Text ma zajac tyle linii, ile zajmuje po zawinieciu — ani mniej,
+        ani wiecej. Bez tego dluga wartosc zostaje ucieta do jednej linii,
+        a krotka zostawia pusty pas.
+
+        Liczymy po ULOZENIU (`after`), bo przed nim szerokosc widgetu nie jest
+        jeszcze znana i `count` zwrocilby wynik dla domyslnych rozmiarow.
+        """
+        def przelicz(_e=None):
+            try:
+                t.update_idletasks()
+                linie = t.count("1.0", "end", "displaylines")
+                ile = linie[0] if isinstance(linie, tuple) else linie
+                t.configure(height=max(1, int(ile or 1)))
+            except tk.TclError:
+                pass                    # okno zamkniete w trakcie ukladania
+        t.after_idle(przelicz)
+        # Przy zmianie szerokosci okna tekst zawija sie inaczej — wysokosc
+        # musi za tym nadazyc, inaczej po rozciagnieciu zostaje pusta przerwa.
+        t.bind("<Configure>", przelicz, add="+")
+
+    def _menu_kopiuj(self, t):
+        """PPM → Kopiuj / Zaznacz wszystko dla jednej wartosci.
+
+        Ctrl+C dziala samo (Text w stanie disabled nadal kopiuje zaznaczenie),
+        ale menu podpowiada, ze tekst W OGOLE da sie zabrac — bez niego trzeba
+        zgadnac, ze to nie jest zwykla etykieta.
+        """
+        menu = tk.Menu(t, tearoff=0)
+
+        def zaznacz_wszystko():
+            t.tag_add(tk.SEL, "1.0", "end-1c")
+            t.focus_set()
+
+        menu.add_command(label="Kopiuj", command=lambda: self.kopiuj_z(t))
+        menu.add_command(label="Zaznacz wszystko", command=zaznacz_wszystko)
+        t.bind("<Button-3>", lambda e: menu.tk_popup(e.x_root, e.y_root))
+        # Ctrl+C jawnie: Text w stanie disabled nie zawsze dostaje fokus
+        # klawiatury sam z siebie, wiec domyslna obsluga bywa pomijana.
+        t.bind("<Control-c>", lambda _e: (self.kopiuj_z(t), "break")[1])
+        t.bind("<Control-C>", lambda _e: (self.kopiuj_z(t), "break")[1])
+        # Klik w wartosc ma dawac fokus, zeby Ctrl+C trafialo tam, gdzie
+        # patrzy uzytkownik, a nie w poprzednio klikniety widget.
+        t.bind("<Button-1>", lambda _e: t.focus_set(), add="+")
+
+    def kopiuj_z(self, t):
+        """Zaznaczony fragment wartosci do schowka; bez zaznaczenia — calosc."""
+        try:
+            tekst = t.get(tk.SEL_FIRST, tk.SEL_LAST)
+        except tk.TclError:
+            tekst = t.get("1.0", "end-1c")
+        if not tekst:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(tekst)
+        return tekst
 
     def _wiersz_link(self, rodzic, klucz, wartosc, akcja, podpowiedz=""):
         """Jak _wiersz_kv, ale wartosc jest klikalna."""
