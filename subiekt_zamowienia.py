@@ -1061,6 +1061,8 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
                                               self._ustaw_dostawce_masowo)
             self.sheet.popup_menu_add_command("✉ Wyślij ZD dostawcy…", self._wyslij_zd)
             self.sheet.popup_menu_add_command("👁 Podgląd PDF zamówienia", self._podglad_pdf)
+            self.sheet.popup_menu_add_command("🔍 Karta pozycji (złożenie, BOM, Subiekt)",
+                                              self._karta_pozycji)
             self.sheet.popup_menu_add_command("🗑 Usuń zamówienia (ZD)…", self._usun_zd)
             self.sheet.pack(fill=tk.BOTH, expand=True)
 
@@ -2477,9 +2479,40 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         if c == self.COL_PDF:
             self._podglad_pdf()
             return
-        if c != self.COL_DOSTAWCA:
+        if c == self.COL_DOSTAWCA:
+            self._wybierz_dostawce([r])
             return
-        self._wybierz_dostawce([r])
+        # Kazda inna kolumna: karta pozycji — gdzie detal siedzi w zlozeniu,
+        # co zawiera, dane BOM-u i Subiekta. Zamiast drzewka w tym oknie:
+        # okno zapisuje i adresuje wiersze arkusza wprost, wiersze-wezly
+        # grozily zaznaczeniem cudzej pozycji (ustalone 06.09.2026).
+        self._karta_pozycji([r])
+
+    def _karta_pozycji(self, rows=None):
+        if rows is None:
+            rows = sorted(self.sheet.get_selected_rows(get_cells_as_rows=True))
+        rows = [r for r in rows if 0 <= r < len(self.widoczne)]
+        if not rows:
+            return
+        w = self.widoczne[rows[0]]
+        refy = w.get("bom_ref") or []
+        project_id = refy[0][0] if refy else None
+        # Detal w kilku projektach: karta ma otworzyc sie na tym, ktory jest
+        # WYBRANY W FILTRZE "Projekt", a nie na pierwszym z listy (ta jest
+        # sortowana numerycznie, wiec 2632 wygrywalo z 3000 - zgloszone
+        # 06.09.2026). Numer projektu = pierwszy czlon nazwy w master.
+        wybrany = (self.filter_projekt_var.get() or "").strip()
+        if wybrany and wybrany != FILTR_WSZYSCY and len(refy) > 1:
+            try:
+                from subiekt_stany import nazwa_projektu
+                for pid, _item in refy:
+                    if (nazwa_projektu(pid) or "").split(" ")[0] == wybrany:
+                        project_id = pid
+                        break
+            except Exception:
+                pass
+        import subiekt_pozycja_gui
+        subiekt_pozycja_gui.otworz(self, w.get("symbol", ""), project_id)
 
     def _wybierz_dostawce(self, rows):
         """Okno wyboru kontrahenta z wyszukiwarką (podmiotów bywa ~600)."""

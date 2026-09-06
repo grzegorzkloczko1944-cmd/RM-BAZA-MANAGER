@@ -1091,10 +1091,12 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
                                 f"(nic nie zapisano — „Odśwież” przywraca).")
 
     def _show_details(self, _event=None):
+        """Dwuklik: karta pozycji (subiekt_pozycja_gui) — nawigator po
+        strukturze zlozen z danymi BOM-u i Subiekta. Zastapila messagebox
+        ze stanami per magazyn (06.09.2026): z karty da sie przejsc do
+        rodzica i skladnikow, messagebox byl slepa uliczka."""
         if not self.sheet:
             return
-        # Numer bierzemy z kolumny „Nr rysunku" zaznaczonego wiersza —
-        # w drzewku indeks wiersza nie odpowiada indeksowi w self.rows.
         try:
             wiersze = list(self.sheet.get_selected_rows())
             if not wiersze:
@@ -1104,38 +1106,9 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
         except Exception:
             return
         if not nr:
-            return                  # klikniety wezel zlozenia bez pozycji
-        r = next((x for x in self.rows if x["nr"] == nr), None)
-        if not r:
-            return
-        if not r["istnieje"]:
-            messagebox.showinfo(
-                "Subiekt",
-                f"{nr}\n\nBrak kartoteki w Subiekcie.\n\n"
-                "Kartoteka powstanie automatycznie przy pierwszym zamówieniu "
-                "tej pozycji (reguła „kartoteka na żądanie”).",
-                parent=self)
-            return
-        lines = [
-            f"Numer rysunku:  {nr}",
-            f"Symbol w Subiekcie:  {r['symbol']!r}" +
-            ("   ⚠ dopasowano luźno (spacje/wielkość liter)" if r["dop"] == "luzne" else ""),
-            f"Nazwa:  {r['nazwa']}",
-            "",
-            f"Ostatnia cena zakupu:  " +
-            (f"{r['cena']:.2f} PLN   (netto po rabacie, {r['data']})" if r["cena"] is not None
-             else "brak danych o zakupach"),
-            "",
-            "Stany per magazyn:",
-        ]
-        for m in r["mags"]:
-            lines.append(
-                f"   {m['Magazyn']}:  dostępne {m['Dostepne']:g}"
-                f"   zadysponowane {m['Zadysponowane']:g}"
-                f"   rezerwacje {m['RezerwacjaIlosciowa']:g}/{m['RezerwacjaDostawowa']:g}")
-        if not r["mags"]:
-            lines.append("   (kartoteka bez ruchu magazynowego)")
-        messagebox.showinfo("Subiekt — szczegóły", "\n".join(lines), parent=self)
+            return                  # wezel zlozenia bez pozycji
+        import subiekt_pozycja_gui
+        subiekt_pozycja_gui.otworz(self, nr, self.project_id, self.project_name)
 
 
 def open_window(parent, project_id, only_drawings=None):

@@ -10993,6 +10993,45 @@ class MainWindow(tk.Tk):
                               on_save_item=_save_item, on_jump_to_item=_jump_to_item)
         self._rmpak_calc_win = dlg
 
+    def jump_to_bom_item(self, project_id, item_id):
+        """Pokaz wiersz BOM-u o danym id w arkuszu - z innego okna.
+
+        Wolane z karty pozycji (subiekt_pozycja_gui) po kliknieciu w "ID
+        (wiersz BOM)". Gdy karta dotyczy innego projektu niz otwarty,
+        przelaczamy przez _switch_to_project - ono samo odmawia, gdy user
+        trzyma lock na biezacym projekcie, i mowi dlaczego. Sam skok to ta
+        sama sekwencja co _jump_to_item w kalkulatorze RMPAK (06.09.2026).
+        """
+        try:
+            project_id = int(project_id) if project_id is not None else None
+            item_id = int(item_id)
+        except (TypeError, ValueError):
+            return False
+        if project_id is not None and project_id != self.current_project_id:
+            if not self._switch_to_project(project_id):
+                return False
+
+        def skok():
+            try:
+                row_ids = getattr(self, '_sheet_row_ids', [])
+                if item_id not in row_ids:
+                    print(f"⚠️  jump_to_bom_item: wiersz id={item_id} nie jest widoczny "
+                          f"(ukryty albo odfiltrowany)")
+                    return
+                row_idx = row_ids.index(item_id)
+                self._selected_row_idx = row_idx
+                self.sheet.select_cell(row=row_idx, column=1, redraw=False)
+                self._rebuild_all_cell_colors_with_selection()
+                self._scroll_to_row_center(row_idx)
+                self.lift()
+                self.focus_force()
+            except Exception as e:
+                print(f"⚠️  jump_to_bom_item: {e}")
+        # Po przelaczeniu projektu arkusz przebudowuje sie w on_project_selected;
+        # krotka zwloka daje mu czas, zanim szukamy wiersza.
+        self.after(250, skok)
+        return True
+
     def material_calculator_dialog(self):
         """Samodzielny kalkulator materiału (na szybko, bez powiązania z pozycją)."""
         if not self.db_manager or not self.db_manager.master_con:
