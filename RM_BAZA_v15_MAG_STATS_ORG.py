@@ -1782,6 +1782,8 @@ class MainWindow(tk.Tk):
         # Custom prawy klik - dodaj "Powrót do BOM"
         self.sheet.popup_menu_add_command("Powrót do BOM", self.on_restore_to_bom)
         self.sheet.popup_menu_add_command("Pokaż złożenie", self.show_assembly_tree)
+        self.sheet.popup_menu_add_command("Karta pozycji (Subiekt, złożenie)",
+                                          self.show_position_card)
         self.sheet.popup_menu_add_command("Wyślij do RFQ", self.send_selected_to_rfq)
         self.sheet.popup_menu_add_command("Odśwież wyceny z portalu", self._refresh_rfq_data)
         self.sheet.popup_menu_add_command("Wyczyść śmieci wycen", self._reconcile_rfq_data)
@@ -10992,6 +10994,80 @@ class MainWindow(tk.Tk):
                               project_name, on_price_saved=self.refresh_data,
                               on_save_item=_save_item, on_jump_to_item=_jump_to_item)
         self._rmpak_calc_win = dlg
+
+    def show_position_card(self):
+        """Karta pozycji dla zaznaczonego wiersza arkusza (subiekt_pozycja_gui).
+
+        Ten sam widok co w oknach Subiekta: gdzie detal siedzi w zlozeniu, co
+        zawiera, dane BOM-u i kartoteka w Subiekcie. Zeby nie trzeba bylo
+        otwierac okien Subiekta tylko po to, by zobaczyc jedna pozycje.
+
+        Symbol bierzemy tak samo jak reszta integracji: numer rysunku, a gdy
+        go nie ma (normalia) - nazwa, bo ona jest wtedy symbolem katalogowym.
+        """
+        try:
+            selection = self.sheet.get_currently_selected()
+            if not selection:
+                messagebox.showinfo("Karta pozycji", "Zaznacz najpierw wiersz.")
+                return
+            row = selection[0]
+            row_ids = getattr(self, "_sheet_row_ids", [])
+            if row >= len(row_ids):
+                return
+            item_id = row_ids[row]
+            cur = self.db_manager.project_con.execute(
+                "SELECT COALESCE(NULLIF(work_drawing_no,''), NULLIF(norm_drawing_no,''), "
+                "NULLIF(src_drawing_no,''), work_name, src_name) FROM items WHERE id = ?",
+                (item_id,)).fetchone()
+        except Exception as e:
+            messagebox.showerror("Karta pozycji",
+                                 "Nie udalo sie odczytac pozycji:\n" + str(e))
+            return
+        symbol = (cur[0] or "").strip() if cur else ""
+        if not symbol:
+            messagebox.showinfo("Karta pozycji", "Ta pozycja nie ma numeru ani nazwy.")
+            return
+        import subiekt_pozycja_gui
+        subiekt_pozycja_gui.otworz(self, symbol, self.current_project_id)
+
+    def jump_to_bom_item(self, project_id, item_id):
+        """Pokaz wiersz BOM-u o danym id w arkuszu - z innego okna.
+
+        Wolane z karty pozycji (subiekt_pozycja_gui) po kliknieciu w "ID
+        (wiersz BOM)". Gdy karta dotyczy innego projektu niz otwarty,
+        przelaczamy przez _switch_to_project - ono samo odmawia, gdy user
+        trzyma lock na biezacym projekcie, i mowi dlaczego. Sam skok to ta
+        sama sekwencja co _jump_to_item w kalkulatorze RMPAK (06.09.2026).
+        """
+        try:
+            project_id = int(project_id) if project_id is not None else None
+            item_id = int(item_id)
+        except (TypeError, ValueError):
+            return False
+        if project_id is not None and project_id != self.current_project_id:
+            if not self._switch_to_project(project_id):
+                return False
+
+        def skok():
+            try:
+                row_ids = getattr(self, '_sheet_row_ids', [])
+                if item_id not in row_ids:
+                    print(f"⚠️  jump_to_bom_item: wiersz id={item_id} nie jest widoczny "
+                          f"(ukryty albo odfiltrowany)")
+                    return
+                row_idx = row_ids.index(item_id)
+                self._selected_row_idx = row_idx
+                self.sheet.select_cell(row=row_idx, column=1, redraw=False)
+                self._rebuild_all_cell_colors_with_selection()
+                self._scroll_to_row_center(row_idx)
+                self.lift()
+                self.focus_force()
+            except Exception as e:
+                print(f"⚠️  jump_to_bom_item: {e}")
+        # Po przelaczeniu projektu arkusz przebudowuje sie w on_project_selected;
+        # krotka zwloka daje mu czas, zanim szukamy wiersza.
+        self.after(250, skok)
+        return True
 
     def material_calculator_dialog(self):
         """Samodzielny kalkulator materiału (na szybko, bez powiązania z pozycją)."""

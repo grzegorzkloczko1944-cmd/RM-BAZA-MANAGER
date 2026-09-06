@@ -17,6 +17,7 @@ Szczegóły i uzasadnienie: SUBIEKT_INTEGRACJA_PLAN.md, sekcje 10–12.
 
 import json
 import os
+import re
 import subprocess
 import sqlite3
 import sys
@@ -25,6 +26,11 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 from rm_kreciolek import Kreciolek
+
+try:
+    from tksheet import Sheet
+except ImportError:                 # brak biblioteki — okno powie wprost
+    Sheet = None
 
 # ── Ścieżki ─────────────────────────────────────────────────────────────────
 # Most budowany jest do bin/Release obok repo. W .exe (PyInstaller) __file__
@@ -273,8 +279,31 @@ def blad_mostu(exe, tryb, proc, out_path):
 
 
 # ── Odczyt numerów rysunków z bazy projektu ─────────────────────────────────
+def nazwa_projektu(project_id):
+    """Nazwa projektu z master.sqlite ("3000 Testowy") albo "".
+
+    Potrzebna do struktury zlozen: read_tree() szuka folderu projektu po
+    NAZWIE, nie po id. Okno stanow dostaje z RM_BAZA samo project_id, wiec
+    dociagamy ja tutaj, zamiast zmieniac sygnature open_window i wszystkie
+    wywolania.
+    """
+    sciezka = os.path.join(os.path.dirname(PROJECTS_DIR), "master.sqlite")
+    if not os.path.isfile(sciezka):
+        return ""
+    try:
+        con = sqlite3.connect(f"file:{sciezka}?mode=ro", uri=True, timeout=5)
+        try:
+            r = con.execute("SELECT name FROM projects WHERE project_id=?",
+                            (project_id,)).fetchone()
+        finally:
+            con.close()
+        return (r[0] or "").strip() if r else ""
+    except sqlite3.Error:
+        return ""
+
+
 def read_project_drawings(project_id):
-    """[(numer, nazwa, ilosc_bom)] — jedna pozycja na numer rysunku.
+    """[(numer, nazwa, ilosc_bom, modul)] — jedna pozycja na numer rysunku.
 
     Kolejność work > norm > src jest ta sama, której użyto przy porównaniu
     zbiorów w planie (sekcja 12.2), żeby wyniki się zgadzały.
@@ -291,7 +320,11 @@ def read_project_drawings(project_id):
         # brane tutaj dawały nazwę „0” i zerową „Ilość BOM”.
         name_cols = [c for c in ("work_name", "src_name") if c in cols]
         qty_cols = [c for c in ("order_qty", "work_qty", "src_qty") if c in cols]
-        sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols + qty_cols
+        # Modul do grupowania w widoku drzewka. Kolejnosc work > src taka sama
+        # jak w arkuszu (COALESCE(NULLIF(work_modul,''), src_modul)) — inaczej
+        # drzewko rozjechaloby sie z tym, co user widzi w RM_BAZA.
+        modul_cols = [c for c in ("work_modul", "src_modul") if c in cols]
+        sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols + qty_cols + modul_cols
         # Ukryte pozycje (przycisk „Ukryj zaznaczone" w arkuszu) nie mają
         # trafiać do Subiekta — COALESCE bo starsze wiersze mogą mieć NULL
         # zamiast 0 (ten sam wzorzec co database_manager.get_project_items).
@@ -302,6 +335,7 @@ def read_project_drawings(project_id):
 
     n0 = 3
     q0 = n0 + len(name_cols)
+    m0 = q0 + len(qty_cols)
 
     def first(vals):
         for v in vals:
@@ -313,13 +347,59 @@ def read_project_drawings(project_id):
     for r in rows:
         nr = first(r[0:3])
         nr = str(nr).strip() if nr is not None else None
+        # ⚠️ POZYCJE BEZ NUMERU RYSUNKU TEZ SA TOWAREM. Normalia handlowe
+        # (lozyska „6001RS", paski „5M 25 CP") maja w BOM-ie tylko nazwe —
+        # a ta nazwa JEST symbolem katalogowym, wiec pytamy o nia Subiekta
+        # tak samo jak o numer. Wczesniej takie wiersze wypadaly tutaj i okno
+        # pokazywalo 283 z 359 pozycji projektu, bez sladu po brakujacych
+        # 76 (zgloszone 06.09.2026). Brak kartoteki nie jest bledem: znaczy,
+        # ze pozycja jest nowa i kartoteka powstanie przy pierwszym zamowieniu.
+        if not nr:
+            nazwa_zam = first(r[n0:q0])
+            nr = str(nazwa_zam).strip() if nazwa_zam is not None else None
         if not nr or nr in seen:
             continue
         seen.add(nr)
         nazwa = first(r[n0:q0])
-        qty = first(r[q0:])
-        out.append((nr, str(nazwa).strip() if nazwa is not None else "", qty))
+        qty = first(r[q0:m0])
+        modul = first(r[m0:])
+        out.append((nr, str(nazwa).strip() if nazwa is not None else "", qty,
+                    str(modul).strip() if modul is not None else ""))
     return out
+
+
+#: Pozycja bez modulu — wlasna galaz, zeby nie znikala z drzewka.
+MODUL_BRAK = "(bez modulu)"
+
+#: iid wezla zbierajacego pozycje spoza struktury zlozen.
+# Czytelny, bo tksheet POKAZUJE iid w naglowku bocznym drzewa. Kolizja
+# z numerem rysunku niemozliwa — zaden numer nie ma spacji i polskich liter.
+POZA_IID = "poza strukturą"
+
+
+def moduly_pozycji(modul):
+    """Lista modulow jednej pozycji. Pozycja bywa w KILKU naraz.
+
+    W BOM-ach spotyka sie "350,380" albo "000,200,350" — to detal wspolny dla
+    kilku modulow. Arkusz glowny rozbija to po przecinku i pokazuje pozycje
+    przy KAZDYM z nich (patrz filtr modulu w RM_BAZA_v15_MAG_STATS_ORG),
+    wiec drzewko robi tak samo. Skutek uboczny: sumy na wezlach nie zsumuja
+    sie do liczby pozycji — i tak ma byc, pisze o tym podpis pod tabela.
+
+    Format z nawiasem ("KABINA(2)x3") tez wystepuje — bierzemy sam poczatek,
+    jak arkusz.
+    """
+    surowy = (modul or "").strip()
+    if not surowy:
+        return [MODUL_BRAK]
+    czesci = []
+    for kawalek in surowy.split(","):
+        kawalek = kawalek.strip()
+        if not kawalek:
+            continue
+        dop = re.match(r"([^(]+)\s*\((\d+)\)(?:x(\d+))?", kawalek)
+        czesci.append(dop.group(1).strip() if dop else kawalek)
+    return czesci or [MODUL_BRAK]
 
 
 def looks_like_drawing_no(s):
@@ -328,9 +408,32 @@ def looks_like_drawing_no(s):
     W BOM-ach trafiają się nazwy wpisane w pole numeru („Przygotowanie
     powietrza", „Obejma") — sprawdzanie ich w Subiekcie nie ma sensu
     (plan, sekcja 12.2). Numer musi mieć cyfrę i nie może mieć spacji.
+
+    ⚠️ Warunek „bez spacji" ODRZUCA TEZ REALNE SYMBOLE normaliow („5M 25 CP",
+    „UCFL 204") — dlatego okno stanow uzywa `wyglada_na_towar`, a nie tej
+    funkcji. Ta zostaje dla miejsc, ktore naprawde chca samych numerow
+    rysunkow.
     """
     s = (s or "").strip()
     return bool(s) and any(c.isdigit() for c in s) and " " not in s
+
+
+def wyglada_na_towar(s):
+    """Czy to symbol, o ktory warto zapytac Subiekta.
+
+    Szersze niz `looks_like_drawing_no`: przepuszcza symbole katalogowe ze
+    spacjami („5M 25 CP", „61906ZZ"), bo normalia w BOM-ie siedza w polu
+    nazwy i tak wlasnie wygladaja. Odcinamy tylko opisy — zdania bez zadnej
+    cyfry („Przygotowanie powietrza") albo bardzo dlugie.
+    """
+    s = (s or "").strip()
+    # Bez warunku "ma cyfre": odrzucal "Filtr", "Zamek", "mikroguma",
+    # "sprezyna klawiszy" (280 szt.!) — pozycje BOM bez numeru rysunku
+    # i bez cyfry w nazwie, ktore trzeba zamowic tak samo jak reszte.
+    # Zasada uzytkownika (06.09.2026): nie ma symbolu = pozycja jest nowa,
+    # kartoteka powstanie przy pierwszym zamowieniu. Odcinamy juz tylko
+    # puste i absurdalnie dlugie (zdania-opisy).
+    return bool(s) and len(s) <= 60
 
 
 # ── Wywołanie mostu ─────────────────────────────────────────────────────────
@@ -403,11 +506,19 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
     }
 
     COLS = [
+        # Lp. jako ZWYKLA kolumna: w drzewku naglowek boczny zajmuje
+        # struktura (wciecia, strzalki), wiec numeracja tksheet znika.
+        # Numerujemy tylko pozycje — wezly zlozen bez pozycji zostaja puste,
+        # zeby ostatni numer mowil, ile jest realnych pozycji (06.09.2026).
+        ("lp",     "Lp.",             48, "e"),
         ("nr",     "Nr rysunku",     140, "w"),
+        # Nazwa zaraz za numerem — numer sam nic nie mowi, a szukajac pozycji
+        # czyta sie te dwie kolumny razem. Wczesniej siedziala za trzema
+        # kolumnami liczb (zgloszone 06.09.2026).
+        ("nazwa",  "Nazwa w Subiekcie", 260, "w"),
         ("bom",    "Ilość BOM",       75, "e"),
         ("stan",   "Stan Subiekt",    95, "e"),
         ("brak",   "Do zamówienia",   95, "e"),
-        ("nazwa",  "Nazwa w Subiekcie", 260, "w"),
         ("cena",   "Ost. cena zak.",  95, "e"),
         ("data",   "Data zakupu",      90, "c"),
         ("status", "Status",          150, "w"),
@@ -418,10 +529,32 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
         self.project_id = project_id
         self.only_drawings = only_drawings
         self.rows = []
+        self.project_name = nazwa_projektu(project_id)
+        #: {rodzic: [(dziecko, ilosc)]} — struktura zlozen z *_OUT.xlsx
+        self.kids = {}
+        #: tag koloru per wiersz — tksheet koloruje po indeksie, nie po tagu
+        self._tagi = []
+        #: iid wezlow majacych potomstwo — do "Rozwin wszystko"
+        self._iid_wezlow = []
+        self.blad_drzewa = None
 
         self.title(f"Stany w Subiekcie — projekt {project_id}")
-        self.geometry("1150x650")
-        self.transient(parent)
+        # Okno startuje ZMAKSYMALIZOWANE, jak Magazyn i Zamowienia — lista
+        # bywa dluga (283 pozycje w projekcie 89), a domyslny rozmiar Tk
+        # pokazywal kilkanascie wierszy. geometry() zostaje jako rozmiar po
+        # przywroceniu z maksymalizacji, minsize() pilnuje, zeby po recznym
+        # zwezeniu dalo sie jeszcze czytac naglowki kolumn.
+        # state("zoomed") jest windowsowe — gdzie indziej rzuca TclError.
+        self.geometry("1250x700")
+        self.minsize(900, 420)
+        # ŚWIADOMIE bez transient(): okno-dziecko z transient dostaje w Windows
+        # tylko przycisk „×", bez minimalizacji i maksymalizacji. To pelnoprawny
+        # arkusz roboczy (283 pozycje), wiec ma miec komplet (— □ ×) — tak samo
+        # jak Zamowienia i Magazyn (zgloszone 06.09.2026).
+        try:
+            self.state("zoomed")
+        except tk.TclError:
+            wysrodkuj(self, parent)
 
         self._build_ui()
         self.after(100, self._load_async)
@@ -438,6 +571,53 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
                                      bg="#3498db", fg="white", font=("Arial", 8),
                                      padx=8, pady=2, relief=tk.RAISED, bd=1)
         self.btn_refresh.pack(side=tk.RIGHT, padx=10, pady=8)
+
+        # Okno otwarte z zaznaczeniem w arkuszu pokazuje TYLKO te pozycje.
+        # Bez widocznego sladu wygladalo to na awarie ("stany projektu
+        # zepsules, tylko to sie wyswietla" - 06.09.2026, przy jednym
+        # zaznaczonym wierszu). Przycisk widoczny tylko wtedy, gdy filtr
+        # dziala, i znika po jego zdjeciu.
+        self.btn_wszystkie = tk.Button(top, text="📋 Pokaż cały projekt",
+                                       command=self._pokaz_caly_projekt,
+                                       bg="#8e44ad", fg="white", font=("Arial", 8),
+                                       padx=8, pady=2, relief=tk.RAISED, bd=1)
+        if self.only_drawings:
+            self.btn_wszystkie.pack(side=tk.RIGHT, padx=4, pady=8)
+
+        # Zdejmuje zaznaczone pozycje Z TEGO WIDOKU. Nic nie zapisuje — okno
+        # jest tylko do odczytu, a po "Odswiez" pozycje wracaja. Sluzy do
+        # przyciecia listy przed dalszymi krokami (np. gdy czegos swiadomie
+        # nie zamawiamy przez Subiekta), dopoki nic nie poszlo dalej.
+        # Etykieta mowi wprost, ze to tylko widok — "Usun pozycje" sugerowalo
+        # zapis do projektu (06.09.2026).
+        tk.Button(top, text="🗑 Usuń z widoku (nie zapisuje)", command=self._usun_pozycje,
+                  bg="#c0392b", fg="white", font=("Arial", 8),
+                  padx=8, pady=2, relief=tk.RAISED, bd=1
+                  ).pack(side=tk.RIGHT, padx=4, pady=8)
+
+        # Widok drzewka domyslnie i ZWINIETY: 283 pozycje to 9 wierszy modulow
+        # zamiast dlugiej listy — od razu widac, ktory modul jest niezaopatrzony
+        # (ustalone 06.09.2026). Plaska lista zostaje pod przyciskiem, bez zmian.
+        self.var_drzewko = tk.BooleanVar(value=True)
+
+        self.chk_drzewko = tk.Checkbutton(
+            top, text="Drzewko", variable=self.var_drzewko,
+            command=self._przelacz_widok, bg="#34495e", fg="white",
+            selectcolor="#27ae60", font=("Arial", 8),
+            activebackground="#34495e", activeforeground="white")
+        self.chk_drzewko.pack(side=tk.RIGHT, padx=4)
+
+        # Rozwijanie hurtem — te same przyciski co w oknie "Zaloz projekt",
+        # bo przy 49 zlozeniach klikanie kazdego z osobna to droga donikad.
+        # Chowane w widoku plaskim: tam nie ma czego rozwijac.
+        self.ramka_rozwin = tk.Frame(top, bg="#34495e")
+        self.ramka_rozwin.pack(side=tk.RIGHT, padx=4)
+        for txt, cmd in (("\u229e Rozwiń wszystko", lambda: self._rozwin(True)),
+                         ("\u229f Zwiń", lambda: self._rozwin(False))):
+            tk.Button(self.ramka_rozwin, text=txt, command=cmd, bg="#5499c7",
+                      fg="white", font=("Arial", 8), padx=8, pady=1,
+                      relief=tk.RAISED, bd=1, cursor="hand2"
+                      ).pack(side=tk.LEFT, padx=3, pady=4)
 
         self.var_only_missing = tk.BooleanVar(value=False)
         tk.Checkbutton(top, text="Tylko braki", variable=self.var_only_missing,
@@ -460,19 +640,53 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
         wrap = tk.Frame(self)
         wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(6, 8))
 
-        self.tree = ttk.Treeview(wrap, columns=[c[0] for c in self.COLS], show="headings")
-        for key, label, width, anchor in self.COLS:
-            self.tree.heading(key, text=label, command=lambda k=key: self._sort_by(k))
-            self.tree.column(key, width=width, anchor=anchor,
-                             stretch=(key == "nazwa"), minwidth=50)
-        vs = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vs.set)
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vs.pack(side=tk.RIGHT, fill=tk.Y)
-
-        for tag, kolor in self.KOLORY.items():
-            self.tree.tag_configure(tag, background=kolor)
-        self.tree.bind("<Double-1>", self._show_details)
+        # tksheet, nie ttk.Treeview — ten sam widget co w Zamowieniach
+        # i Magazynie (zgloszone 06.09.2026: "zrob w takim samym formacie").
+        # Powod techniczny: Treeview NIE MA linii siatki, a stylowanie
+        # "Treeview.Cell" nic nie daje — takiego elementu w ttk nie ma.
+        # tksheet rysuje siatke sam, numeruje wiersze w naglowku bocznym
+        # i pamieta szerokosci kolumn miedzy sesjami. Drzewko zlozen zostaje:
+        # tksheet 7.x ma tree_build() z kolumna id i kolumna rodzica.
+        if Sheet is None:
+            tk.Label(wrap, fg="#c0392b", font=("Arial", 10),
+                     text="Brak biblioteki tksheet — zainstaluj: pip install tksheet"
+                     ).pack(pady=20)
+            self.sheet = None
+        else:
+            # ⚠️ treeview=True JUZ TUTAJ. Samo tree_build() na zwyklym arkuszu
+            # buduje strukture, ale nie wlacza trybu drzewa: nie ma strzalek
+            # rozwijania i klik w naglowek boczny nic nie robi — "drzewko nie
+            # dziala" (06.09.2026). Widok plaski przelacza tryb z powrotem
+            # przez set_options(treeview=False) w _refill.
+            self.sheet = Sheet(wrap, headers=[c[1] for c in self.COLS],
+                               column_width=120, theme="light blue",
+                               treeview=True)
+            self.sheet.set_options(show_selected_cells_border=True,
+                                   enable_edit_cell_auto_resize=False,
+                                   empty_horizontal=0, empty_vertical=0)
+            self.sheet.enable_bindings((
+                "single_select", "drag_select", "ctrl_select", "select_all",
+                "column_width_resize", "arrowkeys", "right_click_popup_menu",
+                "rc_select", "copy",
+            ))
+            try:
+                self.sheet.readonly_columns(columns=list(range(len(self.COLS))))
+            except Exception:
+                pass            # starsza tksheet — tabela i tak jest do odczytu
+            podepnij_szerokosci(self, self.sheet, "stany",
+                                [c[2] for c in self.COLS])
+            # ⚠️ sheet.bind() NIE lapie klikniec w obszarze komorek — tksheet
+            # trzyma je w wewnetrznych widgetach (MT = tabela, RI = naglowek
+            # boczny). Bez podpiecia do nich dwuklik nie robil nic
+            # (zgloszone 06.09.2026). Naglowek boczny tez, bo w drzewku to
+            # tam sa numery pozycji.
+            for widget in (getattr(self.sheet, "MT", None),
+                           getattr(self.sheet, "RI", None)):
+                if widget is not None:
+                    widget.bind("<Double-Button-1>", self._show_details, add="+")
+            self.sheet.popup_menu_add_command("🔍 Karta pozycji (złożenie, BOM, Subiekt)",
+                                              self._show_details)
+            self.sheet.pack(fill=tk.BOTH, expand=True)
 
         self.status = tk.Label(self, text="", anchor="w", padx=12, pady=3,
                                bg="#34495e", fg="#ecf0f1", font=("Arial", 8))
@@ -486,12 +700,22 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
 
     def _load_worker(self):
         try:
+            # Struktura zlozen z arkusza "DRZEWKO TEKST" (*_OUT.xlsx z Inventora)
+            # — to samo zrodlo, z ktorego korzysta okno "Zaloz projekt
+            # w Subiekcie", zeby oba drzewka wygladaly tak samo. Brak plikow
+            # nie jest bledem: okno pokazuje wtedy plaska liste.
+            try:
+                from subiekt_projekt import read_tree
+                kids, blad_drzewa, _nazwy = read_tree(self.project_name or "")
+            except Exception as e:
+                kids, blad_drzewa = {}, str(e)
+
             items = read_project_drawings(self.project_id)
             if self.only_drawings:
                 wanted = {str(d).strip() for d in self.only_drawings}
                 items = [it for it in items if it[0] in wanted]
 
-            good = [it for it in items if looks_like_drawing_no(it[0])]
+            good = [it for it in items if wyglada_na_towar(it[0])]
             skipped = len(items) - len(good)
             if not good:
                 self.after(0, lambda: self._done([], 0, "Brak pozycji z numerem rysunku."))
@@ -499,10 +723,11 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
 
             stock = query_stock([it[0] for it in good])
             rows = []
-            for nr, nazwa, qty in good:
+            for nr, nazwa, qty, modul in good:
                 info = stock.get(nr, {})
                 rows.append({
                     "nr": nr, "bom_name": nazwa, "bom_qty": qty,
+                    "modul": modul,
                     "istnieje": bool(info.get("Istnieje")),
                     "symbol": info.get("Symbol"),
                     "nazwa": info.get("Nazwa") or "",
@@ -512,14 +737,20 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
                     "dop": info.get("Dopasowanie") or "brak",
                     "mags": info.get("Magazyny") or [],
                 })
-            self.after(0, lambda: self._done(rows, skipped, None))
+            self.after(0, lambda: self._done(rows, skipped, None, kids, blad_drzewa))
         except Exception as e:
             err = str(e)
             self.after(0, lambda: self._done([], 0, err))
 
-    def _done(self, rows, skipped, error):
+    def _done(self, rows, skipped, error, kids=None, blad_drzewa=None):
         self.btn_refresh.config(state=tk.NORMAL)
         self.rows = rows
+        self.kids = kids or {}
+        self.blad_drzewa = blad_drzewa
+        # Bez struktury drzewko nie ma sensu — przelaczamy na plaska liste
+        # i mowimy dlaczego, zamiast pokazywac pusta ramke.
+        if not self.kids:
+            self.var_drzewko.set(False)
         if error:
             self.stop_kreciolek()
             self.status.config(text="Błąd.")
@@ -550,13 +781,86 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
             label += "  ⚠ dopasowano luźno"
         return "ok", label
 
+    def _rozwin(self, otwarte):
+        """Rozwija albo zwija cale drzewo naraz.
+
+        Bez tego pozycje siedza schowane w zlozeniach i wyglada, jakby ich
+        nie bylo — ten sam powod co w oknie "Zaloz projekt w Subiekcie".
+        """
+        if not self.sheet:
+            return
+        try:
+            if otwarte:
+                self.sheet.tree_set_open(open_ids=list(self._iid_wezlow))
+            else:
+                self.sheet.tree_set_open(open_ids=[])
+        except Exception:
+            pass
+        self._odswiez_kolory()
+
+    def _rozwiniete_teraz(self):
+        """Numery aktualnie rozwinietych wezlow.
+
+        „Tylko braki" buduje tabele od nowa, wiec bez tego kazde klikniecie
+        filtra zwijalo wszystko do korzenia (zgloszone 06.09.2026). Stan
+        czytamy WPROST z arkusza, bez skrotu typu "rozwinieto wszystko" —
+        inaczej pozniejsze reczne zwiniecie jednej galezi byloby cofane.
+        """
+        if not self.sheet:
+            return []
+        try:
+            return list(self.sheet.tree_get_open())
+        except Exception:
+            return []
+
+    def _przelacz_widok(self):
+        """Lista <-> drzewko."""
+        self._refill()
+
+    def _wiersz_wartosci(self, r):
+        """(krotka do kolumn, tag koloru, ile brakuje) dla jednej pozycji.
+
+        Wspolne dla obu widokow — inaczej drzewko i lista rozjechalyby sie
+        przy pierwszej zmianie sposobu liczenia brakow.
+        """
+        tag, status = self._classify(r)
+        need = r["bom_qty"]
+        try:
+            need_f = float(need) if need not in (None, "") else None
+        except (TypeError, ValueError):
+            need_f = None
+        # Brakuje = ile trzeba dokupic. Bez kartoteki nie ma nic na stanie,
+        # wiec brakuje calej ilosci z BOM (wczesniej zostawialo pusto, co
+        # wygladalo, jakby modul nic nie policzyl).
+        missing, brak_f = "", 0.0
+        if need_f is not None:
+            brak = need_f - (r["stan"] if r["istnieje"] else 0)
+            if brak > 0:
+                missing, brak_f = f"{brak:g}", brak
+        wartosci = [
+            "",                     # Lp. — nadawane w _refill po zbudowaniu
+            r["nr"],
+            r["nazwa"] or (r["bom_name"] if not r["istnieje"] else ""),
+            "" if need in (None, "") else f"{need:g}" if isinstance(need, (int, float)) else need,
+            f"{r['stan']:g}" if r["istnieje"] else "brak kart.",
+            missing,
+            f"{r['cena']:.2f}" if r["cena"] is not None else "",
+            r["data"],
+            status,
+        ]
+        return wartosci, tag, brak_f
+
     def _refill(self):
-        self.tree.delete(*self.tree.get_children())
+        if not self.sheet:
+            return
+        otwarte_przed = self._rozwiniete_teraz()
         only_missing = self.var_only_missing.get()
+        drzewko = bool(self.var_drzewko.get() and self.kids)
         n_kart = n_ok = n_czesc = n_brak = n_nokart = 0
 
+        widoczne = []
         for r in self.rows:
-            tag, status = self._classify(r)
+            tag, _status = self._classify(r)
             if tag == "ok":
                 n_ok += 1
             elif tag == "czesc":
@@ -569,37 +873,172 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
                 n_kart += 1
             if only_missing and tag == "ok":
                 continue
+            widoczne.append(r)
 
-            need = r["bom_qty"]
-            try:
-                need_f = float(need) if need not in (None, "") else None
-            except (TypeError, ValueError):
-                need_f = None
-            # Brakuje = ile trzeba dokupic. Bez kartoteki nie ma nic na stanie,
-            # wiec brakuje calej ilosci z BOM (wczesniej zostawialo pusto, co
-            # wygladalo, jakby modul nic nie policzyl).
-            missing = ""
-            if need_f is not None:
-                brak = need_f - (r["stan"] if r["istnieje"] else 0)
-                if brak > 0:
-                    missing = f"{brak:g}"
+        # Kolor per wiersz trzymamy osobno: tksheet koloruje po INDEKSIE
+        # wiersza, a nie po tagu jak Treeview.
+        self._tagi = []
+        self._iid_wezlow = []
+        if drzewko:
+            dane = self._dane_drzewka(widoczne)
+        else:
+            dane = []
+            for r in widoczne:
+                wartosci, tag, _ = self._wiersz_wartosci(r)
+                dane.append([r["nr"], ""] + wartosci)
+                self._tagi.append(tag)
 
-            self.tree.insert("", "end", values=(
-                r["nr"],
-                "" if need in (None, "") else f"{need:g}" if isinstance(need, (int, float)) else need,
-                f"{r['stan']:g}" if r["istnieje"] else "brak kart.",
-                missing,
-                r["nazwa"] or (r["bom_name"] if not r["istnieje"] else ""),
-                f"{r['cena']:.2f}" if r["cena"] is not None else "",
-                r["data"],
-                status,
-            ), tags=(tag,))
+        lp = 0
+        for w, tag in zip(dane, self._tagi):
+            if tag != "modul":
+                lp += 1
+                w[2] = lp
+
+        try:
+            # ⚠️ tksheet rysuje DRZEWO W NAGLOWKU BOCZNYM (tam, gdzie w liscie
+            # sa numery wierszy): wciecia, strzalki rozwijania i tekst iid.
+            # Domyslna szerokosc tego naglowka miesci trzy znaki — numery
+            # rysunkow byly ucinane do "263", a strzalek nie bylo widac
+            # w ogole ("okno sie rozsypalo", 06.09.2026). Stad szerokosc
+            # ustawiana per widok. Przed lista trzeba tez WYLACZYC tryb
+            # drzewa (tree_reset), inaczej set_sheet_data zostawia arkusz
+            # w polowie drogi miedzy jednym a drugim.
+            if not drzewko:
+                try:
+                    self.sheet.tree_reset()
+                except Exception:
+                    pass
+                self.sheet.set_options(treeview=False)
+                # Naglowek boczny schowany: numeruje sam, a Lp. juz jest
+                # kolumna — w liscie byly dwie numeracje obok siebie.
+                self.sheet.hide(canvas="row_index")
+            else:
+                self.sheet.set_options(treeview=True)
+                self.sheet.show(canvas="row_index")
+                self.sheet.set_index_width(230)
+            if not dane:
+                self.sheet.set_sheet_data([], reset_col_positions=False)
+            elif drzewko:
+                # iid_column=0, parent_column=1 — techniczne, wiec
+                # include_*=False, zeby nie pokazaly sie w arkuszu.
+                self.sheet.tree_build(
+                    data=[list(w) for w in dane], iid_column=0, parent_column=1,
+                    include_iid_column=False, include_parent_column=False,
+                    open_ids=[x for x in otwarte_przed if x in self._iid_wezlow])
+            else:
+                self.sheet.set_sheet_data([w[2:] for w in dane],
+                                          reset_col_positions=False)
+                # ⚠️ Po tree_reset() arkusz zostaje z all_rows_displayed=False
+                # i PUSTA lista wierszy do pokazania (zwiniete wezly ukrywaly
+                # potomstwo przez displayed_rows, a reset tego nie cofa).
+                # Lista wygladala na pusta mimo 354 wierszy danych
+                # ("nie dziala plaska wersja", 06.09.2026).
+                self.sheet.display_rows("all")
+        except Exception:
+            # tree_build bywa kapryśny przy niespojnej strukturze — plaska
+            # lista zawsze zadziala i jest lepsza niz puste okno.
+            self.sheet.set_sheet_data([list(w[2:]) for w in dane],
+                                      reset_col_positions=False)
+        self._odswiez_kolory()
 
         total = len(self.rows)
         pct = (n_kart / total * 100) if total else 0
         self._summary_liczniki(total, n_kart, pct, n_ok, n_czesc, n_brak, n_nokart)
 
-    # ── pasek podsumowania / legenda ────────────────────────────────────────
+    def _odswiez_kolory(self):
+        """Tlo wierszy wg kategorii — to ono wiaze tabele z legenda."""
+        if not self.sheet:
+            return
+        try:
+            self.sheet.dehighlight_all()
+            # highlight_cells od kolumny 1, NIE highlight_rows: kolor kategorii
+            # ma byc na danych pozycji, a nie na kolumnie Lp. ani na naglowku
+            # bocznym z drzewkiem — te maja zostac neutralne, jak numeracja
+            # w Zamowieniach (zgloszone 06.09.2026).
+            kolumny = range(1, len(self.COLS))
+            for i, tag in enumerate(self._tagi):
+                kolor = self.KOLORY.get(tag)
+                if kolor:
+                    for c in kolumny:
+                        self.sheet.highlight_cells(row=i, column=c, bg=kolor)
+            self.sheet.refresh()
+        except Exception:
+            pass                    # kolory to kosmetyka, nie moga wywalic okna
+
+    def _dane_drzewka(self, widoczne):
+        """Wiersze w STRUKTURZE ZLOZEN: [iid, parent, ...kolumny].
+
+        Hierarchia pochodzi z arkusza „DRZEWKO TEKST" (`kids`: rodzic ->
+        [(dziecko, ilosc)]), a nie z pol bazy — RM_BAZA trzyma BOM plasko.
+
+        Trzy rzeczy, ktore musi ogarnac:
+          * pozycje spoza drzewa (normalia, ktorych nie ma w *_OUT.xlsx) —
+            leca do wezla „poza strukturą", zeby zadna nie zniknela;
+          * cykle w danych (A -> B -> A) — `sciezka` przerywa zejscie, bo
+            inaczej rekurencja leci w nieskonczonosc;
+          * filtr „Tylko braki" — gdy dziecko odpadlo, rodzic zostaje, jesli
+            ma jakiekolwiek widoczne potomstwo (inaczej znika kontekst).
+        """
+        wg_nr = {r["nr"].strip().upper(): r for r in widoczne}
+        dzieci_of = {k.strip().upper(): v for k, v in (self.kids or {}).items()}
+        wszystkie_dzieci = {c[0].strip().upper()
+                            for lista in dzieci_of.values() for c in lista}
+        korzenie = [k for k in dzieci_of if k not in wszystkie_dzieci]
+
+        dane, uzyte = [], set()
+
+        def wstaw(rodzic_iid, nr_up, sciezka):
+            if nr_up in sciezka or nr_up in uzyte:
+                return              # cykl albo pozycja juz wstawiona
+            r = wg_nr.get(nr_up)
+            potomstwo = dzieci_of.get(nr_up, [])
+            widoczne_dzieci = [c for c in potomstwo
+                               if self._ma_cokolwiek(c[0].strip().upper(), wg_nr,
+                                                     dzieci_of, sciezka | {nr_up})]
+            if r is None and not widoczne_dzieci:
+                return
+            if r is not None:
+                wartosci, tag = self._wiersz_wartosci(r)[:2]
+            else:
+                # Zlozenie jest w strukturze, ale nie ma go w BOM-ie (albo
+                # odpadlo na filtrze) — sam numer, zeby dzieci mialy sie
+                # pod czym zaczepic.
+                wartosci = ["", nr_up, "", "", "", "", "", "", ""]
+                tag = "modul"
+            uzyte.add(nr_up)
+            dane.append([nr_up, rodzic_iid] + list(wartosci))
+            self._tagi.append(tag)
+            if potomstwo:
+                self._iid_wezlow.append(nr_up)
+            for dziecko, _qty in potomstwo:
+                wstaw(nr_up, dziecko.strip().upper(), sciezka | {nr_up})
+
+        for k in sorted(korzenie):
+            wstaw("", k, frozenset())
+
+        poza = [r for r in widoczne if r["nr"].strip().upper() not in uzyte]
+        if poza:
+            naglowek = [POZA_IID, "", "", f"poza strukturą ({len(poza)} poz.)",
+                        "", "", "", "", "", ""]
+            dane.append(naglowek)
+            self._tagi.append("modul")
+            self._iid_wezlow.append(POZA_IID)
+            for r in poza:
+                wartosci, tag = self._wiersz_wartosci(r)[:2]
+                dane.append([r["nr"].strip().upper(), POZA_IID] + list(wartosci))
+                self._tagi.append(tag)
+        return dane
+
+    def _ma_cokolwiek(self, nr_up, wg_nr, dzieci_of, sciezka):
+        """Czy ten wezel albo cokolwiek pod nim jest widoczne."""
+        if nr_up in sciezka:
+            return False
+        if nr_up in wg_nr:
+            return True
+        return any(self._ma_cokolwiek(c[0].strip().upper(), wg_nr, dzieci_of,
+                                      sciezka | {nr_up})
+                   for c in dzieci_of.get(nr_up, []))
+
     def _summary_czysc(self):
         if self._summary_wnetrze is not None:
             self._summary_wnetrze.destroy()
@@ -637,57 +1076,98 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
         kategoria("brak", "stan 0", n_brak)
         kategoria("nokart", "brak kartoteki", n_nokart)
         tekst(f"      → do zamówienia: {n_czesc + n_brak + n_nokart}", bold=True)
+        if self.only_drawings:
+            tk.Label(ramka, text="      ⓘ tylko zaznaczone w arkuszu",
+                     bg="#ecf0f1", fg="#8e44ad",
+                     font=("Arial", 9, "bold")).pack(side=tk.LEFT)
 
     def _sort_by(self, key, _state={}):
-        rev = _state[key] = not _state.get(key, False)
-        idx = [c[0] for c in self.COLS].index(key)
-        items = [(self.tree.set(i, key), i) for i in self.tree.get_children()]
+        """Zostawione dla zgodnosci — tksheet sortuje sam po klikniecie
+        w naglowek, i robi to poprawnie takze w drzewku (w obrebie
+        rodzenstwa). Wlasne przestawianie wierszy zniszczyloby hierarchie."""
+        return
 
-        def conv(v):
+    def _pokaz_caly_projekt(self):
+        """Zdejmuje zawezenie do zaznaczonych wierszy i czyta caly BOM."""
+        self.only_drawings = None
+        try:
+            self.btn_wszystkie.pack_forget()
+        except tk.TclError:
+            pass
+        self._load_async()
+
+    def _zaznaczone_wiersze(self):
+        """Indeksy zaznaczonych wierszy arkusza.
+
+        ⚠️ get_selected_rows() zwraca PUSTY zbior, gdy zaznaczona jest
+        pojedyncza komorka (a tak konczy sie zwykly klik) — karta nie
+        otwierala sie ani dwuklikiem, ani z menu PPM (06.09.2026).
+        get_currently_selected() zna wtedy wiersz, wiec bierzemy go jako
+        uzupelnienie zaznaczenia zakresami.
+        """
+        if not self.sheet:
+            return []
+        wiersze = set()
+        try:
+            wiersze |= set(self.sheet.get_selected_rows(get_cells_as_rows=True))
+        except Exception:
+            pass
+        try:
+            biezacy = self.sheet.get_currently_selected()
+            if biezacy and getattr(biezacy, "row", None) is not None:
+                wiersze.add(biezacy.row)
+        except Exception:
+            pass
+        return sorted(wiersze)
+
+    def _usun_pozycje(self):
+        """Usuwa zaznaczone wiersze z listy w oknie (nie z projektu)."""
+        if not self.sheet:
+            return
+        wiersze = self._zaznaczone_wiersze()
+        if not wiersze:
+            self.status.config(text="Zaznacz wiersze do usunięcia (klik w numer wiersza, Shift/Ctrl = kilka).")
+            return
+        idx_nr = [c[0] for c in self.COLS].index("nr")
+        numery = set()
+        for i in wiersze:
             try:
-                return (0, float(str(v).replace(",", ".")))
-            except ValueError:
-                return (1, str(v).lower())
-        items.sort(key=lambda t: conv(t[0]), reverse=rev)
-        for pos, (_, i) in enumerate(items):
-            self.tree.move(i, "", pos)
+                nr = str(self.sheet.get_cell_data(i, idx_nr) or "").strip()
+            except Exception:
+                continue
+            if nr:
+                numery.add(nr.upper())
+        if not numery:
+            self.status.config(text="Zaznaczone wiersze to węzły złożeń — usuń konkretne pozycje.")
+            return
+        przed = len(self.rows)
+        self.rows = [r for r in self.rows if r["nr"].strip().upper() not in numery]
+        self._refill()
+        self.status.config(text=f"Usunięto {przed - len(self.rows)} poz. z widoku "
+                                f"(nic nie zapisano — „Odśwież” przywraca).")
 
-    def _show_details(self, _event):
-        sel = self.tree.selection()
-        if not sel:
+    def _show_details(self, _event=None):
+        """Dwuklik: karta pozycji (subiekt_pozycja_gui) — nawigator po
+        strukturze zlozen z danymi BOM-u i Subiekta. Zastapila messagebox
+        ze stanami per magazyn (06.09.2026): z karty da sie przejsc do
+        rodzica i skladnikow, messagebox byl slepa uliczka."""
+        if not self.sheet:
             return
-        nr = self.tree.set(sel[0], "nr")
-        r = next((x for x in self.rows if x["nr"] == nr), None)
-        if not r:
+        wiersze = self._zaznaczone_wiersze()
+        if not wiersze:
+            self.status.config(text="Zaznacz wiersz z pozycją.")
             return
-        if not r["istnieje"]:
-            messagebox.showinfo(
-                "Subiekt",
-                f"{nr}\n\nBrak kartoteki w Subiekcie.\n\n"
-                "Kartoteka powstanie automatycznie przy pierwszym zamówieniu "
-                "tej pozycji (reguła „kartoteka na żądanie”).",
-                parent=self)
+        try:
+            idx_nr = [c[0] for c in self.COLS].index("nr")
+            nr = str(self.sheet.get_cell_data(wiersze[0], idx_nr) or "").strip()
+        except Exception as e:
+            self.status.config(text=f"Nie udało się odczytać pozycji: {e}")
             return
-        lines = [
-            f"Numer rysunku:  {nr}",
-            f"Symbol w Subiekcie:  {r['symbol']!r}" +
-            ("   ⚠ dopasowano luźno (spacje/wielkość liter)" if r["dop"] == "luzne" else ""),
-            f"Nazwa:  {r['nazwa']}",
-            "",
-            f"Ostatnia cena zakupu:  " +
-            (f"{r['cena']:.2f} PLN   (netto po rabacie, {r['data']})" if r["cena"] is not None
-             else "brak danych o zakupach"),
-            "",
-            "Stany per magazyn:",
-        ]
-        for m in r["mags"]:
-            lines.append(
-                f"   {m['Magazyn']}:  dostępne {m['Dostepne']:g}"
-                f"   zadysponowane {m['Zadysponowane']:g}"
-                f"   rezerwacje {m['RezerwacjaIlosciowa']:g}/{m['RezerwacjaDostawowa']:g}")
-        if not r["mags"]:
-            lines.append("   (kartoteka bez ruchu magazynowego)")
-        messagebox.showinfo("Subiekt — szczegóły", "\n".join(lines), parent=self)
+        if not nr:
+            self.status.config(text="To węzeł złożenia bez własnej pozycji.")
+            return
+        import subiekt_pozycja_gui
+        subiekt_pozycja_gui.otworz(self, nr, self.project_id, self.project_name)
 
 
 def open_window(parent, project_id, only_drawings=None):

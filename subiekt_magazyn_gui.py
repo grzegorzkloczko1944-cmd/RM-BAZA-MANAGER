@@ -333,6 +333,8 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
         self.sheet.bind("<<SheetModified>>", self._on_edit)
         self.sheet.bind("<ButtonRelease-1>", self._on_click, add="+")
         self.sheet.bind("<Double-Button-1>", self._on_dblclick, add="+")
+        self.sheet.popup_menu_add_command("🔍 Karta pozycji (złożenie, BOM, Subiekt)",
+                                          self._karta_pozycji)
         self.sheet.popup_menu_add_command("☑ Zaznacz wiersze", lambda: self._zaznacz_wybrane(True))
         self.sheet.popup_menu_add_command("☐ Odznacz wiersze", lambda: self._zaznacz_wybrane(False))
         self.sheet.popup_menu_add_command("Ustaw dostawcę dla wierszy…",
@@ -578,9 +580,33 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
             c = self.sheet.identify_column(event, allow_end=False)
         except Exception:
             return
-        if r is None or c != self.COL_DOSTAWCA or not (0 <= r < len(self.widoczne)):
+        if r is None or not (0 <= r < len(self.widoczne)):
             return
-        self._wybierz_dostawce([self.widoczne[r]])
+        if c == self.COL_DOSTAWCA:
+            self._wybierz_dostawce([self.widoczne[r]])
+            return
+        # Kazda inna kolumna: karta pozycji. Magazyn nie zna projektu (to widok
+        # calego magazynu), wiec karta sama go znajdzie - pokaze wszystkie
+        # projekty z ta pozycja i pozwoli wybrac (06.09.2026).
+        self._karta_pozycji([r])
+
+    def _karta_pozycji(self, rows=None):
+        """Karta pozycji dla zaznaczonego wiersza."""
+        if not self.sheet:
+            return
+        if rows is None:
+            try:
+                rows = sorted(self.sheet.get_selected_rows(get_cells_as_rows=True))
+            except Exception:
+                rows = []
+        rows = [r for r in rows if 0 <= r < len(self.widoczne)]
+        if not rows:
+            return
+        symbol = (self.widoczne[rows[0]].get("Symbol") or "").strip()
+        if not symbol:
+            return
+        import subiekt_pozycja_gui
+        subiekt_pozycja_gui.otworz(self, symbol)
 
     def _zaznacz_wybrane(self, stan):
         try:
