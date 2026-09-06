@@ -344,6 +344,11 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         ))
         podepnij_szerokosci(self, self.sheet_poz, "dokumenty_pozycje",
                             [k[2] for k in self.KOL_POZ])
+        # Dwuklik w pozycje dokumentu -> karta pozycji. Z dokumentu (ZD/WZ/RW)
+        # czesto trzeba sprawdzic, do jakiego zlozenia detal nalezy.
+        self.sheet_poz.bind("<Double-Button-1>", self._karta_pozycji, add="+")
+        self.sheet_poz.popup_menu_add_command("🔍 Karta pozycji (złożenie, BOM, Subiekt)",
+                                              self._karta_pozycji)
         self.sheet_poz.pack(fill=tk.BOTH, expand=True)
 
         self.status = tk.Label(self, text="", anchor="w", padx=12, pady=3,
@@ -818,6 +823,34 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         self._load_async()      # lista musi pokazać stan po usunięciu
 
     # ── pozycje wybranego dokumentu ────────────────────────────────────────
+    def _karta_pozycji(self, _event=None):
+        """Karta pozycji dla zaznaczonego wiersza w arkuszu POZYCJI dokumentu."""
+        if not self.sheet_poz:
+            return
+        rows = set()
+        try:
+            rows |= set(self.sheet_poz.get_selected_rows(get_cells_as_rows=True))
+        except Exception:
+            pass
+        try:
+            # Pojedyncza komorka: get_selected_rows() zwraca pusty zbior,
+            # wiersz zna tylko get_currently_selected() (patrz subiekt_stany).
+            biezacy = self.sheet_poz.get_currently_selected()
+            if biezacy and getattr(biezacy, "row", None) is not None:
+                rows.add(biezacy.row)
+        except Exception:
+            pass
+        if not rows:
+            return
+        try:
+            symbol = str(self.sheet_poz.get_cell_data(sorted(rows)[0], 0) or "").strip()
+        except Exception:
+            return
+        if not symbol:
+            return
+        import subiekt_pozycja_gui
+        subiekt_pozycja_gui.otworz(self, symbol)
+
     def _on_dwuklik(self, _event=None):
         """Dwuklik w kolumnie PDF → otwiera gotowy wydruk zaznaczonego dokumentu."""
         if not self.sheet:

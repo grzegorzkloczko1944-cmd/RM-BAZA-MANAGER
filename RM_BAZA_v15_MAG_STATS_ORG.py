@@ -1782,6 +1782,8 @@ class MainWindow(tk.Tk):
         # Custom prawy klik - dodaj "Powrót do BOM"
         self.sheet.popup_menu_add_command("Powrót do BOM", self.on_restore_to_bom)
         self.sheet.popup_menu_add_command("Pokaż złożenie", self.show_assembly_tree)
+        self.sheet.popup_menu_add_command("Karta pozycji (Subiekt, złożenie)",
+                                          self.show_position_card)
         self.sheet.popup_menu_add_command("Wyślij do RFQ", self.send_selected_to_rfq)
         self.sheet.popup_menu_add_command("Odśwież wyceny z portalu", self._refresh_rfq_data)
         self.sheet.popup_menu_add_command("Wyczyść śmieci wycen", self._reconcile_rfq_data)
@@ -10992,6 +10994,41 @@ class MainWindow(tk.Tk):
                               project_name, on_price_saved=self.refresh_data,
                               on_save_item=_save_item, on_jump_to_item=_jump_to_item)
         self._rmpak_calc_win = dlg
+
+    def show_position_card(self):
+        """Karta pozycji dla zaznaczonego wiersza arkusza (subiekt_pozycja_gui).
+
+        Ten sam widok co w oknach Subiekta: gdzie detal siedzi w zlozeniu, co
+        zawiera, dane BOM-u i kartoteka w Subiekcie. Zeby nie trzeba bylo
+        otwierac okien Subiekta tylko po to, by zobaczyc jedna pozycje.
+
+        Symbol bierzemy tak samo jak reszta integracji: numer rysunku, a gdy
+        go nie ma (normalia) - nazwa, bo ona jest wtedy symbolem katalogowym.
+        """
+        try:
+            selection = self.sheet.get_currently_selected()
+            if not selection:
+                messagebox.showinfo("Karta pozycji", "Zaznacz najpierw wiersz.")
+                return
+            row = selection[0]
+            row_ids = getattr(self, "_sheet_row_ids", [])
+            if row >= len(row_ids):
+                return
+            item_id = row_ids[row]
+            cur = self.db_manager.project_con.execute(
+                "SELECT COALESCE(NULLIF(work_drawing_no,''), NULLIF(norm_drawing_no,''), "
+                "NULLIF(src_drawing_no,''), work_name, src_name) FROM items WHERE id = ?",
+                (item_id,)).fetchone()
+        except Exception as e:
+            messagebox.showerror("Karta pozycji",
+                                 "Nie udalo sie odczytac pozycji:\n" + str(e))
+            return
+        symbol = (cur[0] or "").strip() if cur else ""
+        if not symbol:
+            messagebox.showinfo("Karta pozycji", "Ta pozycja nie ma numeru ani nazwy.")
+            return
+        import subiekt_pozycja_gui
+        subiekt_pozycja_gui.otworz(self, symbol, self.current_project_id)
 
     def jump_to_bom_item(self, project_id, item_id):
         """Pokaz wiersz BOM-u o danym id w arkuszu - z innego okna.

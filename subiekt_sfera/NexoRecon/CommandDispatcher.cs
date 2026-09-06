@@ -67,7 +67,7 @@ internal static class CommandDispatcher
         "stan", "katalog", "kontrahenci", "dokumenty", "faktury", "kartoteka",
         "stan-pozycji", "dostawcy", "zapotrzebowanie", "zd", "magazyn",
         "zd-usun", "wydruk-recon", "termin", "symbole", "rw", "kartoteka-usun",
-        "progi", "wydruk", "projekt",
+        "progi", "wydruk", "projekt", "komplet",
     };
 
     public static bool Zna(string tryb) => Tryby.Contains(tryb, StringComparer.OrdinalIgnoreCase);
@@ -88,6 +88,13 @@ internal static class CommandDispatcher
 
             case "katalog":
                 return Katalog.Uruchom(sfera, k.OutPath);
+
+            // Sklad kompletu i relacja odwrotna ("w czym to siedzi") — do
+            // sprawdzenia, czy komplety projektu nie wisza w powietrzu.
+            case "komplet":
+                if (k.Symbole is not { Count: > 0 })
+                    return Brak("komplet: brak symboli (--symbol= albo --symbols-file=).");
+                return Komplet.Uruchom(sfera, k.Symbole, k.OutPath);
 
             case "kontrahenci":
                 return Katalog.Kontrahenci(sfera, k.OutPath);

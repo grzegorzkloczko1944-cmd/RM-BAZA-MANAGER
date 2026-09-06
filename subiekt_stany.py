@@ -572,6 +572,18 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
                                      padx=8, pady=2, relief=tk.RAISED, bd=1)
         self.btn_refresh.pack(side=tk.RIGHT, padx=10, pady=8)
 
+        # Okno otwarte z zaznaczeniem w arkuszu pokazuje TYLKO te pozycje.
+        # Bez widocznego sladu wygladalo to na awarie ("stany projektu
+        # zepsules, tylko to sie wyswietla" - 06.09.2026, przy jednym
+        # zaznaczonym wierszu). Przycisk widoczny tylko wtedy, gdy filtr
+        # dziala, i znika po jego zdjeciu.
+        self.btn_wszystkie = tk.Button(top, text="📋 Pokaż cały projekt",
+                                       command=self._pokaz_caly_projekt,
+                                       bg="#8e44ad", fg="white", font=("Arial", 8),
+                                       padx=8, pady=2, relief=tk.RAISED, bd=1)
+        if self.only_drawings:
+            self.btn_wszystkie.pack(side=tk.RIGHT, padx=4, pady=8)
+
         # Zdejmuje zaznaczone pozycje Z TEGO WIDOKU. Nic nie zapisuje — okno
         # jest tylko do odczytu, a po "Odswiez" pozycje wracaja. Sluzy do
         # przyciecia listy przed dalszymi krokami (np. gdy czegos swiadomie
@@ -663,7 +675,17 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
                 pass            # starsza tksheet — tabela i tak jest do odczytu
             podepnij_szerokosci(self, self.sheet, "stany",
                                 [c[2] for c in self.COLS])
-            self.sheet.bind("<Double-Button-1>", self._show_details, add="+")
+            # ⚠️ sheet.bind() NIE lapie klikniec w obszarze komorek — tksheet
+            # trzyma je w wewnetrznych widgetach (MT = tabela, RI = naglowek
+            # boczny). Bez podpiecia do nich dwuklik nie robil nic
+            # (zgloszone 06.09.2026). Naglowek boczny tez, bo w drzewku to
+            # tam sa numery pozycji.
+            for widget in (getattr(self.sheet, "MT", None),
+                           getattr(self.sheet, "RI", None)):
+                if widget is not None:
+                    widget.bind("<Double-Button-1>", self._show_details, add="+")
+            self.sheet.popup_menu_add_command("🔍 Karta pozycji (złożenie, BOM, Subiekt)",
+                                              self._show_details)
             self.sheet.pack(fill=tk.BOTH, expand=True)
 
         self.status = tk.Label(self, text="", anchor="w", padx=12, pady=3,
@@ -1054,6 +1076,10 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
         kategoria("brak", "stan 0", n_brak)
         kategoria("nokart", "brak kartoteki", n_nokart)
         tekst(f"      → do zamówienia: {n_czesc + n_brak + n_nokart}", bold=True)
+        if self.only_drawings:
+            tk.Label(ramka, text="      ⓘ tylko zaznaczone w arkuszu",
+                     bg="#ecf0f1", fg="#8e44ad",
+                     font=("Arial", 9, "bold")).pack(side=tk.LEFT)
 
     def _sort_by(self, key, _state={}):
         """Zostawione dla zgodnosci — tksheet sortuje sam po klikniecie
@@ -1061,14 +1087,44 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
         rodzenstwa). Wlasne przestawianie wierszy zniszczyloby hierarchie."""
         return
 
+    def _pokaz_caly_projekt(self):
+        """Zdejmuje zawezenie do zaznaczonych wierszy i czyta caly BOM."""
+        self.only_drawings = None
+        try:
+            self.btn_wszystkie.pack_forget()
+        except tk.TclError:
+            pass
+        self._load_async()
+
+    def _zaznaczone_wiersze(self):
+        """Indeksy zaznaczonych wierszy arkusza.
+
+        ⚠️ get_selected_rows() zwraca PUSTY zbior, gdy zaznaczona jest
+        pojedyncza komorka (a tak konczy sie zwykly klik) — karta nie
+        otwierala sie ani dwuklikiem, ani z menu PPM (06.09.2026).
+        get_currently_selected() zna wtedy wiersz, wiec bierzemy go jako
+        uzupelnienie zaznaczenia zakresami.
+        """
+        if not self.sheet:
+            return []
+        wiersze = set()
+        try:
+            wiersze |= set(self.sheet.get_selected_rows(get_cells_as_rows=True))
+        except Exception:
+            pass
+        try:
+            biezacy = self.sheet.get_currently_selected()
+            if biezacy and getattr(biezacy, "row", None) is not None:
+                wiersze.add(biezacy.row)
+        except Exception:
+            pass
+        return sorted(wiersze)
+
     def _usun_pozycje(self):
         """Usuwa zaznaczone wiersze z listy w oknie (nie z projektu)."""
         if not self.sheet:
             return
-        try:
-            wiersze = sorted(self.sheet.get_selected_rows())
-        except Exception:
-            wiersze = []
+        wiersze = self._zaznaczone_wiersze()
         if not wiersze:
             self.status.config(text="Zaznacz wiersze do usunięcia (klik w numer wiersza, Shift/Ctrl = kilka).")
             return
@@ -1097,16 +1153,19 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
         rodzica i skladnikow, messagebox byl slepa uliczka."""
         if not self.sheet:
             return
+        wiersze = self._zaznaczone_wiersze()
+        if not wiersze:
+            self.status.config(text="Zaznacz wiersz z pozycją.")
+            return
         try:
-            wiersze = list(self.sheet.get_selected_rows())
-            if not wiersze:
-                return
             idx_nr = [c[0] for c in self.COLS].index("nr")
             nr = str(self.sheet.get_cell_data(wiersze[0], idx_nr) or "").strip()
-        except Exception:
+        except Exception as e:
+            self.status.config(text=f"Nie udało się odczytać pozycji: {e}")
             return
         if not nr:
-            return                  # wezel zlozenia bez pozycji
+            self.status.config(text="To węzeł złożenia bez własnej pozycji.")
+            return
         import subiekt_pozycja_gui
         subiekt_pozycja_gui.otworz(self, nr, self.project_id, self.project_name)
 

@@ -20,6 +20,7 @@ arkusz „DRZEWKO TEKST” w *_OUT.xlsx (subiekt_projekt.read_tree).
 """
 
 import os
+import queue
 import sqlite3
 import threading
 import tkinter as tk
@@ -33,6 +34,20 @@ TEKST = "#2c3e50"
 TEKST_SZARY = "#7f8c8d"
 OBRAMOWANIE = "#bdc3c7"
 LINK = "#1f618d"
+
+#: Log diagnostyczny karty - pythonw nie ma konsoli, wiec wyjatki z watkow
+#: i z petli odbioru gina bez sladu. Ten sam katalog co logi mostu.
+LOG = r"C:\RMPAK_CLIENT\subiekt_logi\karta.log"
+
+
+def _log(tekst):
+    try:
+        import datetime
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(datetime.datetime.now().strftime("%H:%M:%S ") + tekst + "\n")
+    except OSError:
+        pass
 
 #: Cache struktur per nazwa projektu — read_tree czyta Excela z dysku
 #: sieciowego, a nawigacja w obrębie jednego projektu wraca do niego
@@ -187,6 +202,12 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
         self.kids, self.nazwy = drzewo(self.project_name)
         self.historia = []
         self._subiekt_watek = 0
+        # ⚠️ Wyniki z watkow wracaja KOLEJKA, nie przez self.after() z watku.
+        # after() dotyka tkintera i wolane spoza watku glownego rzuca
+        # "main thread is not in main loop" — bez sladu w pythonw. Sekcja
+        # Subiekt zostawala wtedy pusta (po "Wstecz", 06.09.2026). Ten sam
+        # wzorzec co w subiekt_panel._odbierz_wyniki.
+        self._wyniki = queue.Queue()
 
         self.title("Karta pozycji")
         self.configure(bg=TLO)
@@ -199,7 +220,30 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
             wysrodkuj(self, rodzic)
         except Exception:
             pass
+        self._odbierz_wyniki()
         self.pokaz(nr, zapamietaj=False)
+
+    def _odbierz_wyniki(self):
+        """Puls z watku glownego: wykonuje to, co odlozyly watki robocze."""
+        try:
+            while True:
+                akcja = self._wyniki.get_nowait()
+                try:
+                    akcja()
+                except Exception:
+                    # NIGDY nie przerywac petli odbioru. Wczesniej TclError
+                    # z jednej akcji konczyl ja "return" - i wszystkie kolejne
+                    # odpowiedzi (po "Wstecz") juz nie dochodzily: sekcja
+                    # Subiekt zostawala pusta bez zadnego komunikatu.
+                    import traceback
+                    _log("akcja z kolejki padla:" + traceback.format_exc())
+        except queue.Empty:
+            pass
+        try:
+            if self.winfo_exists():
+                self.after(120, self._odbierz_wyniki)
+        except tk.TclError:
+            pass
 
     # ── szkielet ────────────────────────────────────────────────────────────
     def _buduj_szkielet(self):
@@ -344,6 +388,7 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
 
     # ── treść ───────────────────────────────────────────────────────────────
     def _wypelnij(self, nr):
+        _log(f"wypelnij nr={nr}")
         nr_up = nr.upper()
         bom = dane_bom(self.project_id, nr)
         nazwa = _pierwsze(
@@ -443,7 +488,20 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
         self.lbl_subiekt = tk.Label(self.sekcja_subiekt, text="",
                                     bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 9), anchor="w")
         self.lbl_subiekt.pack(fill=tk.X)
-        self.lbl_projekty.config(text="Projekty: szukam…")
+        # ⚠️ NIE self.lbl_projekty.config(): _projekty_gotowe kasuje WSZYSTKIE
+        # dzieci ramki (zeby zbudowac linki), wiec ta etykieta po pierwszym
+        # wypelnieniu juz nie istnieje. config() rzucal TclError i _wypelnij
+        # konczylo sie TUTAJ - watki Subiekta nigdy nie startowaly, sekcja
+        # zostawala pusta po kazdej nawigacji (log: jeden start na cala
+        # sesje, 06.09.2026). Ramke budujemy od nowa za kazdym razem.
+        try:
+            for w in self.ramka_projekty.winfo_children():
+                w.destroy()
+            self.lbl_projekty = tk.Label(self.ramka_projekty, text="Projekty: szukam…",
+                                         bg="#d6dbdf", fg=TEKST, font=("Arial", 9), anchor="w")
+            self.lbl_projekty.pack(side=tk.LEFT)
+        except tk.TclError:
+            pass
         threading.Thread(target=self._projekty_worker, args=(nr, self._subiekt_watek + 1),
                          daemon=True).start()
         self.start_kreciolek("Pytam Subiekta o " + nr)
@@ -453,7 +511,7 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
 
     def _projekty_worker(self, nr, numer_watku):
         lista = projekty_z_pozycja(nr)
-        self.after(0, lambda: self._projekty_gotowe(numer_watku, lista))
+        self._wyniki.put(lambda: self._projekty_gotowe(numer_watku, lista))
 
     def _projekty_gotowe(self, numer_watku, lista):
         if numer_watku != self._subiekt_watek:
@@ -491,6 +549,7 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
         self.status.config(text=f"Karta pokazuje teraz projekt: {nazwa}")
 
     def _subiekt_worker(self, nr, numer_watku):
+        _log(f"subiekt_worker start nr={nr} watek={numer_watku}")
         try:
             import subiekt_bridge as most
             odp = most.wywolaj("stan", symbole=[nr], timeout=120)
@@ -499,19 +558,43 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
             blad = None
         except Exception as e:
             dane, blad = {}, str(e)
-        self.after(0, lambda: self._subiekt_gotowe(nr, numer_watku, dane, blad))
+        # Sklad kompletu i relacja odwrotna — osobne zapytanie, bo tryb "stan"
+        # ich nie zwraca. Blad tutaj nie moze przykryc stanow, wiec lapiemy
+        # osobno i pokazujemy sekcje jako "nie sprawdzono".
+        sklad = None
+        try:
+            import subiekt_bridge as most
+            odp = most.wywolaj("komplet", symbole=[nr], timeout=120)
+            poz = (odp or {}).get("pozycje") or []
+            sklad = poz[0] if poz else None
+        except Exception:
+            sklad = None
+        self._wyniki.put(lambda: self._subiekt_gotowe(nr, numer_watku, dane, blad, sklad))
 
-    def _subiekt_gotowe(self, nr, numer_watku, dane, blad):
+    def _subiekt_gotowe(self, nr, numer_watku, dane, blad, sklad=None):
+        _log(f"subiekt_gotowe nr={nr} watek={numer_watku}/{self._subiekt_watek} "
+             f"istnieje={bool(dane and dane.get('Istnieje'))} blad={blad!r} "
+             f"sklad={'tak' if sklad else 'nie'}")
         # Użytkownik mógł już przejść dalej — odpowiedź na starą pozycję
         # nie może nadpisać sekcji nowej.
         if numer_watku != self._subiekt_watek:
+            _log("  -> odrzucona (stary watek)")
             return
         self.stop_kreciolek("")
+        # ⚠️ Etykieta "czekam" moze juz nie istniec: przy "Wstecz" _wypelnij
+        # kasuje cala tresc i buduje nowa sekcje, wiec self.lbl_subiekt
+        # wskazuje na zniszczony widget. destroy() rzucalo wtedy TclError,
+        # a wyjatek konczyl metode PRZED wypelnieniem sekcji — po powrocie
+        # zakladka Subiekt zostawala pusta (zgloszone 06.09.2026).
         try:
             self.lbl_subiekt.destroy()
         except tk.TclError:
-            return                      # okno zamknięte w trakcie
+            pass
         s = self.sekcja_subiekt
+        try:
+            s.winfo_exists()
+        except tk.TclError:
+            return                      # okno zamkniete w trakcie
         if blad:
             tk.Label(s, text="nie udało się zapytać Subiekta: " + blad.split("\n")[0],
                      bg=TLO_SEKCJI, fg="#c0392b", font=("Arial", 9), anchor="w",
@@ -546,6 +629,8 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
                     f"/{float(m.get('RezerwacjaDostawowa') or 0):g}")
         else:
             self._wiersz_kv(s, "Stany per magazyn", "kartoteka bez ruchu magazynowego")
+        self._sklad_subiekta(sklad, nr)
+
         # Wszystko, czego nie wypisaliśmy jawnie — żeby żadne pole z mostu
         # nie przepadło, gdy dojdzie nowe.
         znane = {"Pytany", "Symbol", "Istnieje", "Nazwa", "Rodzaj", "Dostepne",
@@ -554,6 +639,102 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
         for k, v in dane.items():
             if k not in znane and v not in (None, "", [], {}):
                 self._wiersz_kv(s, k, v)
+
+
+    def _sklad_subiekta(self, sklad, nr):
+        """Sekcja: co komplet ZAWIERA i W CZYM SIEDZI — wg Subiekta.
+
+        To odpowiedz na obawe "czy komplety nie wisza w powietrzu"
+        (06.09.2026): rodzaj kartoteki (Komplet/Towar) nic nie mowi
+        o powiazaniach, dopiero sklad i relacja odwrotna. Dane z trybu
+        "komplet" mostu — Sfera trzyma je jako SkladnikiKompletu
+        i SkladnikiWKompletach.
+
+        Porownujemy TEZ z Inventorem: rozjazd miedzy drzewkiem *_OUT.xlsx
+        a struktura w Subiekcie znaczy, ze zlozenie zalozono przed zmiana
+        konstrukcji albo czesc skladnikow nie miala kartotek.
+        """
+        s = self._sekcja("Struktura w Subiekcie", "składniki i komplety nadrzędne")
+        if sklad is None:
+            tk.Label(s, text="nie sprawdzono (most nie odpowiedział na zapytanie o skład)",
+                     bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 9),
+                     anchor="w").pack(fill=tk.X)
+            return
+        if not sklad.get("Istnieje"):
+            tk.Label(s, text="brak kartoteki — nie ma czego wiązać",
+                     bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 9),
+                     anchor="w").pack(fill=tk.X)
+            return
+
+        skladniki = sklad.get("Skladniki") or []
+        nadrzedne = sklad.get("WchodziW") or []
+        rodzaj = sklad.get("Rodzaj") or ""
+
+        # ── zawiera ──
+        if skladniki:
+            self._wiersz_kv(s, "Zawiera", f"{len(skladniki)} składników", wyroznij=True)
+            for x in skladniki:
+                self._wiersz_link(
+                    s, "    " + str(x.get("Symbol") or ""),
+                    f"× {float(x.get('Ilosc') or 0):g}   {x.get('Rodzaj') or ''}   "
+                    f"{(x.get('Nazwa') or '')[:34]}",
+                    lambda n=x.get("Symbol"): self.pokaz(n))
+        elif rodzaj == "Komplet":
+            # Komplet BEZ skladnikow to realny problem — Subiekt nie rozbije
+            # go na wydaniu, wiec zamowienie takiego kompletu nic nie zdejmie
+            # ze stanu skladnikow.
+            self._wiersz_kv(s, "Zawiera", "⚠ NIC — komplet bez składników", wyroznij=True)
+        else:
+            self._wiersz_kv(s, "Zawiera", "— (to nie komplet)")
+
+        # ── wchodzi w ──
+        if nadrzedne:
+            self._wiersz_kv(s, "Wchodzi w skład", f"{len(nadrzedne)} kompletów", wyroznij=True)
+            for x in nadrzedne:
+                self._wiersz_link(
+                    s, "    " + str(x.get("Symbol") or ""),
+                    f"× {float(x.get('Ilosc') or 0):g}   {x.get('Rodzaj') or ''}   "
+                    f"{(x.get('Nazwa') or '')[:34]}",
+                    lambda n=x.get("Symbol"): self.pokaz(n))
+        else:
+            self._wiersz_kv(s, "Wchodzi w skład",
+                            "nie wchodzi w żaden komplet (pozycja samodzielna)")
+
+        # ── porownanie z Inventorem ──
+        nr_up = (nr or "").strip().upper()
+        z_drzewka = {(c[0] or "").strip().upper() for c in self.kids.get(nr_up, [])}
+        z_subiekta = {(x.get("Symbol") or "").strip().upper() for x in skladniki}
+        if not z_drzewka and not z_subiekta:
+            return
+        # Numery w Inventorze i w Subiekcie roznia sie koncowka typu
+        # (2632-350.22X vs 2632-350.22) — porownujemy rdzenie.
+        brak_w_sub = {x for x in z_drzewka
+                      if _bez_ogona(x) not in {_bez_ogona(y) for y in z_subiekta}}
+        nadmiar = {x for x in z_subiekta
+                   if _bez_ogona(x) not in {_bez_ogona(y) for y in z_drzewka}}
+        if not brak_w_sub and not nadmiar:
+            if z_drzewka:
+                self._wiersz_kv(s, "Zgodność z Inventorem", "✓ skład taki sam jak w drzewku")
+            return
+        if brak_w_sub:
+            self._wiersz_kv(s, "⚠ Brak w Subiekcie",
+                            ", ".join(sorted(brak_w_sub)[:8])
+                            + (f"  (+{len(brak_w_sub) - 8})" if len(brak_w_sub) > 8 else ""),
+                            wyroznij=True)
+        if nadmiar:
+            self._wiersz_kv(s, "⚠ Nadmiar w Subiekcie",
+                            ", ".join(sorted(nadmiar)[:8])
+                            + (f"  (+{len(nadmiar) - 8})" if len(nadmiar) > 8 else ""),
+                            wyroznij=True)
+
+
+def _bez_ogona(symbol):
+    """Symbol bez koncowki typu (X/XX/Z/ZZ) — do porownania z Inventorem."""
+    s = (symbol or "").strip().upper()
+    for ogon in ("ZZ", "XX", "Z", "X"):
+        if s.endswith(ogon):
+            return s[:-len(ogon)]
+    return s
 
 
 def otworz(rodzic, nr, project_id=None, project_name=None):
