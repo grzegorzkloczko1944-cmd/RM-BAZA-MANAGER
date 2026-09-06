@@ -32,6 +32,7 @@ import os
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -388,6 +389,143 @@ def ostrzez_o_moscie():
         pass                        # brak GUI nie może wywalić wywołania
 
 
+#: Gdzie na stanowisku ma wylądować pobrana binarka. Ta sama ścieżka stoi
+#: w EXE_CANDIDATES, więc most zostanie tam znaleziony bez dodatkowej
+#: konfiguracji.
+DOCELOWY_KATALOG_MOSTU = r"C:\RMPAK_CLIENT\NexoRecon"
+
+
+#: Podfolder z samą binarką mostu wewnątrz folderu SUBIEKT.
+#:
+#: Most to cztery pliki, razem ~590 KB. Folder SUBIEKT trzyma obok 1,3 GB
+#: SDK Sfery i instalkę .NET, więc pobieranie z korzenia ciągnęłoby przez
+#: sieć całość przy każdej aktualizacji — a SDK zmienia się tylko przy
+#: aktualizacji nexo i wgrywa się na stanowisko RAZ (ustalone 06.09.2026).
+#:
+#: ⚠️ NIE „bin": tak nazywa się katalog bibliotek SDK Sfery, który leży
+#: w tym samym folderze. Wrzucenie mostu do niego mieszałoby dwie zupełnie
+#: różne rzeczy w jednym miejscu.
+PODFOLDER_MOSTU = "MOST"
+
+#: Gdzie szukać folderu SUBIEKT, gdy nie ma wpisu w konfiguracji.
+#: Ten sam zasób bywa zamapowany pod RÓŻNYMI literami — u większości Y:,
+#: u części Z: — więc sprawdzamy po kolei zamiast wpisywać jedną na sztywno.
+DOMYSLNE_ZRODLA_MOSTU = [
+    r"Y:\RMPAK_CLIENT\Subiekt",
+    r"Z:\RMPAK_CLIENT\Subiekt",
+    r"X:\RMPAK_CLIENT\Subiekt",
+    r"V:\RMPAK_CLIENT\Subiekt",
+]
+
+
+def _zrodlo_mostu():
+    """Folder z gotowym mostem, albo None.
+
+    Kolejność: wpis w sync_config.json → paths.bridge_dir (jeśli ktoś ma
+    nietypową ścieżkę), potem domyślne litery dysków. Szukamy folderu,
+    w którym FAKTYCZNIE leży NexoRecon.exe — sama obecność katalogu nie
+    wystarczy, bo pusty albo cudzy folder dałby mylący komunikat.
+
+    Dlaczego w ogóle: na stanowiskach RM_BAZA chodzi jako .exe — nie ma tam
+    ani źródeł .cs, ani dotneta, więc budowanie u siebie odpada. Gotową
+    binarkę wystawia jedna osoba, reszta ją pobiera (ustalone 06.09.2026).
+    """
+    kandydaci = []
+    try:
+        with open(r"C:\RMPAK_CLIENT\sync_config.json", encoding="utf-8") as f:
+            z_configu = (json.load(f).get("paths") or {}).get("bridge_dir")
+        if z_configu:
+            kandydaci.append(z_configu)
+    except Exception:
+        pass                    # brak configu to nie błąd — mamy domyślne
+    kandydaci += DOMYSLNE_ZRODLA_MOSTU
+
+    for folder in kandydaci:
+        # Most może leżeć w podfolderze bin\ (tak wystawiamy na serwerze,
+        # żeby nie ciągnąć obok 1,3 GB SDK) albo wprost w podanym katalogu
+        # — jeśli ktoś wskazał go dokładnie.
+        for kandydat in (os.path.join(folder, PODFOLDER_MOSTU), folder):
+            try:
+                if os.path.isfile(os.path.join(kandydat, "NexoRecon.exe")):
+                    return kandydat
+            except OSError:
+                continue        # dysk odłączony albo brak uprawnień
+    return None
+
+
+def _wersja_zrodla(folder):
+    """{'protokol': int, 'zbudowano': str} z wersja.json w folderze, albo None."""
+    try:
+        with open(os.path.join(folder, "wersja.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def pobierz_most():
+    """Kopiuje gotowy most z folderu sieciowego. Zwraca (ok, komunikat).
+
+    Używane na stanowiskach, gdzie RM_BAZA chodzi z .exe. Sprawdza wersję
+    protokołu PRZED kopiowaniem: binarka niezgodna z tym klientem zrobiłaby
+    więcej szkody niż stara, bo Python wołałby tryby, których ona nie zna.
+    """
+    import shutil
+
+    zrodlo = _zrodlo_mostu()
+    if not zrodlo:
+        return False, (
+            "Nie znaleziono folderu z mostem.\n\n"
+            "Sprawdzono:\n"
+            + "\n".join(f"  • {s}" for s in DOMYSLNE_ZRODLA_MOSTU)
+            + "\n\nJeśli zasób jest pod inną literą, dopisz ścieżkę\n"
+              "w C:\\RMPAK_CLIENT\\sync_config.json:\n"
+              '  "paths": { "bridge_dir": "Y:\\\\RMPAK_CLIENT\\\\Subiekt" }')
+
+    wersja = _wersja_zrodla(zrodlo)
+    if wersja and wersja.get("protokol") not in (None, PROTOKOL_MIN):
+        return False, (f"Most w folderze mówi protokołem {wersja.get('protokol')},\n"
+                       f"a ta wersja RM_BAZA rozumie {PROTOKOL_MIN}.\n\n"
+                       "Zaktualizuj RM_BAZA albo wystaw pasujący most.")
+
+    zatrzymaj_most()
+    time.sleep(2)               # Windows zwalnia uchwyt do pliku z opóźnieniem
+    try:
+        os.makedirs(DOCELOWY_KATALOG_MOSTU, exist_ok=True)
+        skopiowane = 0
+        for nazwa in os.listdir(zrodlo):
+            if nazwa == "wersja.json":
+                continue
+            zrodlowy = os.path.join(zrodlo, nazwa)
+            if os.path.isfile(zrodlowy):
+                shutil.copy2(zrodlowy, os.path.join(DOCELOWY_KATALOG_MOSTU, nazwa))
+                skopiowane += 1
+    except OSError as e:
+        return False, (f"Nie udało się skopiować mostu:\n{e}\n\n"
+                       "Sprawdź, czy RM_BAZA nie jest otwarta w drugim oknie.")
+
+    global _most_niedostepny, _ostrzezono_o_buildzie
+    _most_niedostepny = False
+    _ostrzezono_o_buildzie = False
+    kiedy = (wersja or {}).get("zbudowano")
+    return True, (f"Most pobrany ({skopiowane} plików"
+                  + (f", wersja z {kiedy}" if kiedy else "") + ").\n\n"
+                  "Kolejne operacje Subiekta powinny już działać szybko.")
+
+
+def czy_z_binarki():
+    """Czy RM_BAZA chodzi jako .exe (PyInstaller), a nie ze źródeł.
+
+    Decyduje, CO ma zrobić przycisk: na stanowisku z .exe nie ma źródeł .cs
+    ani dotneta, więc most trzeba pobrać, a nie zbudować.
+    """
+    return getattr(sys, "frozen", False)
+
+
+def zaktualizuj_most():
+    """Buduje albo pobiera — zależnie od tego, jak działa RM_BAZA."""
+    return pobierz_most() if czy_z_binarki() else zbuduj_most()
+
+
 def zbuduj_most():
     """Zatrzymuje most i uruchamia `dotnet build`. Zwraca (ok, komunikat).
 
@@ -428,6 +566,11 @@ def zbuduj_most():
     return False, f"Budowanie nie powiodło się (kod {proc.returncode}):\n\n{szczegoly}"
 
 
+def _etykieta_przycisku():
+    """Na stanowisku z .exe most się POBIERA, u dewelopera buduje."""
+    return "⬇  Pobierz most" if czy_z_binarki() else "🔨  Zbuduj teraz"
+
+
 def _okno_buildu(parent, powod):
     """Okienko z powodem i przyciskiem, który sam buduje most."""
     import tkinter as tk
@@ -455,13 +598,14 @@ def _okno_buildu(parent, powod):
     def buduj():
         btn_buduj.config(state=tk.DISABLED)
         btn_zamknij.config(state=tk.DISABLED)
-        stan.config(text="Buduję… (kilkanaście sekund, nie zamykaj okna)")
+        stan.config(text=("Pobieram most z serwera…" if czy_z_binarki()
+                          else "Buduję… (kilkanaście sekund, nie zamykaj okna)"))
         okno.update_idletasks()
 
         wynik = {}
 
         def w_tle():
-            wynik["r"] = zbuduj_most()
+            wynik["r"] = zaktualizuj_most()
 
         # Build w osobnym wątku, żeby okno nie zamarzło na czas kompilacji.
         w = threading.Thread(target=w_tle, daemon=True)
@@ -489,7 +633,7 @@ def _okno_buildu(parent, powod):
 
         okno.after(200, sprawdz)
 
-    btn_buduj = tk.Button(stopka, text="🔨 Zbuduj teraz", command=buduj,
+    btn_buduj = tk.Button(stopka, text=_etykieta_przycisku(), command=buduj,
                           bg="#27ae60", fg="white", relief=tk.FLAT,
                           padx=18, font=("Arial", 9, "bold"))
     btn_buduj.pack(side=tk.RIGHT, padx=(0, 8))

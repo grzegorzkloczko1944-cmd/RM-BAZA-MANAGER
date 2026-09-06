@@ -30952,6 +30952,8 @@ class MainWindow(tk.Tk):
         current_copy_files_exe = paths.get("copy_files_exe", str(Path(DEFAULT_LOCAL_DIR) / "RM_COPY.EXE"))
         current_import_exe = paths.get("import_exe", str(Path(DEFAULT_LOCAL_DIR) / "RM_IMPORT.EXE"))
         current_monitor_exe = paths.get("monitor_exe", str(Path(DEFAULT_LOCAL_DIR) / "monitor.exe"))
+        # Puste = subiekt_bridge szuka automatycznie po literach dysków.
+        current_bridge_dir = paths.get("bridge_dir", "")
 
         ksef_cfg = config.get("ksef", {})
         default_unrecognized_dir = str(Path(current_master).parent / "faktury_ksef" / "nierozpoznane")
@@ -31077,46 +31079,66 @@ class MainWindow(tk.Tk):
         # Separator
         tk.Frame(fields_frame, height=2, bg="#bdc3c7").grid(row=12, column=0, columnspan=3, sticky="ew", pady=10)
 
-        tk.Label(fields_frame, text="KSEF", font=("Arial", 11, "bold"), bg="#f0f0f0", fg="#2c3e50").grid(row=13, column=0, sticky="w", pady=(0, 4))
+        tk.Label(fields_frame, text="SUBIEKT", font=("Arial", 11, "bold"), bg="#f0f0f0", fg="#2c3e50").grid(row=12, column=0, sticky="w", pady=(10, 4))
+
+        # Folder z gotowym mostem (NexoRecon.exe) na dysku sieciowym.
+        # Na stanowiskach RM_BAZA chodzi jako .exe — nie ma tam źródeł .cs
+        # ani dotneta, więc mostu nie da się zbudować u siebie. Jedna osoba
+        # wystawia binarkę tutaj, reszta pobiera ją przyciskiem w panelu
+        # Subiekta. Pole jest, bo ten sam zasób bywa zamapowany pod różnymi
+        # literami (u większości Y:, u części Z:) — bez tego trzeba by
+        # edytować sync_config.json ręcznie (zgłoszone 06.09.2026).
+        tk.Label(fields_frame, text="Folder mostu Subiekta:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=13, column=0, sticky="w", pady=8)
+        e_bridge_dir = tk.Entry(fields_frame, width=50, font=("Arial", 9))
+        e_bridge_dir.insert(0, current_bridge_dir)
+        e_bridge_dir.grid(row=13, column=1, sticky="ew", padx=5, pady=8)
+        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_bridge_dir, "Folder z NexoRecon.exe")).grid(row=13, column=2, pady=8)
+        tk.Label(fields_frame, text="np. Y:\\RMPAK_CLIENT\\Subiekt — puste = szukaj automatycznie (Y:, Z:, X:, V:)",
+                 font=("Arial", 8), bg="#f0f0f0", fg="#7f8c8d").grid(row=14, column=1, sticky="w", padx=5)
+
+        # Separator
+        tk.Frame(fields_frame, height=2, bg="#bdc3c7").grid(row=15, column=0, columnspan=3, sticky="ew", pady=10)
+
+        tk.Label(fields_frame, text="KSEF", font=("Arial", 11, "bold"), bg="#f0f0f0", fg="#2c3e50").grid(row=16, column=0, sticky="w", pady=(0, 4))
 
         # NIP firmy (do autoryzacji API KSEF)
-        tk.Label(fields_frame, text="NIP firmy (KSEF):", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=14, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="NIP firmy (KSEF):", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=17, column=0, sticky="w", pady=8)
         e_ksef_nip = tk.Entry(fields_frame, width=50, font=("Arial", 9))
         e_ksef_nip.insert(0, format_nip(current_ksef_nip) if current_ksef_nip else "")
-        e_ksef_nip.grid(row=14, column=1, sticky="ew", padx=5, pady=8)
+        e_ksef_nip.grid(row=17, column=1, sticky="ew", padx=5, pady=8)
         bind_nip_mask(e_ksef_nip)
 
         # Token API KSEF (pole hasła — nie pokazuj wprost na ekranie)
-        tk.Label(fields_frame, text="Token API KSEF:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=15, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="Token API KSEF:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=18, column=0, sticky="w", pady=8)
         e_ksef_token = tk.Entry(fields_frame, width=50, font=("Arial", 9), show="•")
         e_ksef_token.insert(0, current_ksef_token)
-        e_ksef_token.grid(row=15, column=1, sticky="ew", padx=5, pady=8)
+        e_ksef_token.grid(row=18, column=1, sticky="ew", padx=5, pady=8)
         var_show_token = tk.BooleanVar(value=False)
         tk.Checkbutton(
             fields_frame, text="pokaż", variable=var_show_token, bg="#f0f0f0",
             command=lambda: e_ksef_token.config(show="" if var_show_token.get() else "•")
-        ).grid(row=15, column=2, pady=8)
+        ).grid(row=18, column=2, pady=8)
 
         # Środowisko KSEF (test/produkcja)
-        tk.Label(fields_frame, text="Środowisko KSEF:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=16, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="Środowisko KSEF:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=19, column=0, sticky="w", pady=8)
         var_ksef_env = tk.StringVar(value=current_ksef_env)
         env_frame = tk.Frame(fields_frame, bg="#f0f0f0")
-        env_frame.grid(row=16, column=1, sticky="w", padx=5, pady=8)
+        env_frame.grid(row=19, column=1, sticky="w", padx=5, pady=8)
         tk.Radiobutton(env_frame, text="Testowe (ksef-test)", variable=var_ksef_env, value="test", bg="#f0f0f0").pack(side=tk.LEFT, padx=(0, 15))
         tk.Radiobutton(env_frame, text="Produkcyjne", variable=var_ksef_env, value="production", bg="#f0f0f0").pack(side=tk.LEFT)
 
         # Katalog na nierozpoznane faktury (dostawca bez NIP w RM_BAZA)
-        tk.Label(fields_frame, text="Katalog faktur nierozpoznanych:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=17, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="Katalog faktur nierozpoznanych:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=20, column=0, sticky="w", pady=8)
         e_ksef_unrecognized_dir = tk.Entry(fields_frame, width=50, font=("Arial", 9))
         e_ksef_unrecognized_dir.insert(0, current_ksef_unrecognized_dir)
-        e_ksef_unrecognized_dir.grid(row=17, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_ksef_unrecognized_dir, "Katalog faktur nierozpoznanych")).grid(row=17, column=2, pady=8)
+        e_ksef_unrecognized_dir.grid(row=20, column=1, sticky="ew", padx=5, pady=8)
+        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_ksef_unrecognized_dir, "Katalog faktur nierozpoznanych")).grid(row=20, column=2, pady=8)
 
         tk.Label(
             fields_frame,
             text="Token KSEF jest zapisywany lokalnie w pliku konfiguracyjnym poza repozytorium git.",
             font=("Arial", 8, "italic"), bg="#f0f0f0", fg="#888", wraplength=560, justify="left"
-        ).grid(row=18, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        ).grid(row=21, column=0, columnspan=3, sticky="w", pady=(0, 4))
 
         fields_frame.columnconfigure(1, weight=1)
         
@@ -31162,6 +31184,8 @@ class MainWindow(tk.Tk):
                 messagebox.showwarning("Błąd", "Wymagane są wszystkie podstawowe ścieżki (bazy danych i foldery)!")
                 return
 
+            new_bridge_dir = e_bridge_dir.get().strip()
+
             if new_ksef_nip and len(new_ksef_nip) != 10:
                 messagebox.showwarning("Błąd", "NIP firmy (KSEF) musi mieć 10 cyfr!")
                 return
@@ -31183,7 +31207,8 @@ class MainWindow(tk.Tk):
                     "alarms_exe": new_alarms_exe,
                     "copy_files_exe": new_copy_files_exe,
                     "import_exe": new_import_exe,
-                    "monitor_exe": new_monitor_exe
+                    "monitor_exe": new_monitor_exe,
+                    "bridge_dir": new_bridge_dir,
                 }
 
                 config["ksef"] = {
@@ -31238,6 +31263,9 @@ class MainWindow(tk.Tk):
                 e_import_exe.insert(0, str(Path(DEFAULT_LOCAL_DIR) / "RM_IMPORT.EXE"))
                 e_monitor_exe.delete(0, tk.END)
                 e_monitor_exe.insert(0, str(Path(DEFAULT_LOCAL_DIR) / "monitor.exe"))
+                # Puste, bo domyślnie most szuka się sam po literach dysków —
+                # wpisywanie tu Y:\ byłoby zgadywaniem za użytkownika.
+                e_bridge_dir.delete(0, tk.END)
                 e_ksef_unrecognized_dir.delete(0, tk.END)
                 e_ksef_unrecognized_dir.insert(0, default_unrecognized_dir)
 

@@ -174,6 +174,15 @@ class Kafel(tk.Frame):
             pass                    # panel zamknięty w trakcie liczenia
 
 
+def _etykieta_aktualizacji():
+    """„Pobierz" na stanowisku z .exe, „Zbuduj" u dewelopera."""
+    try:
+        import subiekt_bridge as b
+        return "⬇  Pobierz most" if b.czy_z_binarki() else "🔨  Zbuduj teraz"
+    except Exception:
+        return "🔨  Zbuduj teraz"
+
+
 class PanelSubiekt(tk.Toplevel):
     """Okno z kaflami. Liczniki dociągane w tle, po otwarciu."""
 
@@ -274,7 +283,9 @@ class PanelSubiekt(tk.Toplevel):
         self.lbl_most.pack(fill=tk.X, padx=12, pady=(0, 10))
         # Przycisk budowania pokazujemy TYLKO, gdy binarka jest nieaktualna —
         # widoczny zawsze kusiłby do klikania bez potrzeby.
-        self.btn_buduj = tk.Button(most, text="🔨  Zbuduj teraz",
+        # Etykieta zalezy od tego, jak dziala RM_BAZA: ze zrodel most sie
+        # BUDUJE, z .exe — POBIERA z serwera (nie ma tam ani zrodel, ani dotneta).
+        self.btn_buduj = tk.Button(most, text=_etykieta_aktualizacji(),
                                    command=self._zbuduj, bg="#27ae60", fg="white",
                                    relief=tk.FLAT, font=("Arial", 9, "bold"),
                                    padx=12, pady=5, cursor="hand2")
@@ -359,11 +370,11 @@ class PanelSubiekt(tk.Toplevel):
 
     def _zbuduj(self):
         import subiekt_bridge as b
-        self.lbl_most.config(text="⏳  buduję most…")
+        self.lbl_most.config(text="⏳  aktualizuję most…")
         self.update_idletasks()
 
         def w_tle():
-            ok, komunikat = b.zbuduj_most()
+            ok, komunikat = b.zaktualizuj_most()
             self._wyniki.put(lambda: self._po_buildzie(ok, komunikat))
         threading.Thread(target=w_tle, daemon=True).start()
 
