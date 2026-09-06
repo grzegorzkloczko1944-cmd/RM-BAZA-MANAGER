@@ -15,6 +15,10 @@ Nie należy przy okazji przebudowywać logiki biznesowej zamówień, magazynu, p
 
 ---
 
+> **Podsumowanie wykonanej pracy: `SUBIEKT_ZMIANY_2026-09-06.md`** — co się
+> zmieniło w całej integracji (most, panel, wysyłka ZD), czego nie wolno
+> cofnąć i jak to wdrożyć. Ten plik zostaje planem i opisem samego mostu.
+
 # 0. Stan realizacji (06.09.2026)
 
 Kroki **A–J zrobione** na branchu `most-server` (7 commitów, niescalone z `main`).
