@@ -283,26 +283,66 @@ def do_ascii(s):
     return "".join(c for c in s if 32 <= ord(c) < 127)
 
 
+#: Znaki dopuszczone w symbolu kartoteki, poza literami i cyframi.
+#: Tylko te trzy, bo tylko one występują w numerach rysunku RMPAK
+#: (2627-100.01, 012-100.16) i nie sprawiają kłopotu nigdzie indziej.
+DOZWOLONE_W_SYMBOLU = "-_."
+
+#: Znaki zamieniane na myślnik zamiast wycinane — niosą podział, więc ich
+#: usunięcie skleiłoby człony w nieczytelną kaszę („1/2 cala" → „12cala").
+NA_MYSLNIK = "/\\+&"
+
+
+def _tylko_bezpieczne(s):
+    """Zostawia w symbolu wyłącznie [A-Za-z0-9-_.], resztę wycina.
+
+    ⚠️ Sam ASCII NIE WYSTARCZY. Code 128 formalnie koduje 32–126, ale
+    w praktyce symbol jest też KLUCZEM: wpisywanym ręcznie, wklejanym,
+    porównywanym i szukanym. Spacja i znaki `+ & ( ) [ ] " * ; %` gubią się
+    przy skanowaniu, rozjeżdżają dopasowanie po TRIM-ie i potrafią wywalić
+    filtry w Subiekcie. Zgłoszone 07.09.2026: generator wypuszczał „+”
+    w symbolu pozycji.
+
+    Znaki niosące podział (`/`, `\\`, `+`, `&`) zamieniamy na myślnik, żeby
+    „Zawór 1/2 + korek” dało „Zawor1-2-korek”, a nie „Zawor12korek”.
+    Pełna nazwa i tak zostaje w polu Nazwa kartoteki.
+    """
+    for znak in NA_MYSLNIK:
+        s = s.replace(znak, "-")
+    s = s.replace(",", " ")
+    s = "".join(c if (c.isalnum() and c.isascii()) or c in DOZWOLONE_W_SYMBOLU
+                else (" " if c == " " else "")
+                for c in s)
+    # Myślniki z zamiany bywają zdublowane („a / + b”) — zwijamy je,
+    # tak samo jak spacje; wiodące i końcowe nie niosą nic.
+    while "--" in s:
+        s = s.replace("--", "-")
+    return " ".join(s.split()).strip("-. ")
+
+
 def symbol_z_nazwy(nazwa):
     """Nazwa → symbol kartoteki dla pozycji BEZ numeru rysunku.
 
     Elementy znormalizowane (łożyska, paski, uszczelki) nie mają numeru
     rysunku — identyfikuje je nazwa. Ta trafia więc w pole Symbol, ale musi
-    być przycięta i pozbawiona znaków, które w symbolu przeszkadzają
-    (`#`, backtick, `°`, przecinki). Pełna nazwa zostaje w polu Nazwa.
+    być przycięta i pozbawiona znaków, które w symbolu przeszkadzają.
+    Zostają wyłącznie litery, cyfry i `- _ .` — patrz _tylko_bezpieczne.
+    Pełna nazwa zostaje w polu Nazwa.
     """
     # do_ascii PRZED resztą czyszczenia — polskie znaki i typograficzne
     # myślniki nie mogą trafić do symbolu (kod kreskowy ich nie zakoduje).
     s = " ".join(do_ascii(nazwa).split())
-    for zly in "`#":
-        s = s.replace(zly, "")
-    s = s.replace(",", " ").replace("/", "-")
-    s = " ".join(s.split())
-    if len(s) <= MAX_SYMBOL:
-        return s
+    s = _tylko_bezpieczne(s)
 
-    # Usuwamy spacje zamiast ciąć na granicy słowa. Przy 13 znakach cięcie
-    # po słowie gubiło rozróżniające końcówki: „5M L2525 szer25" → „5M L2525"
+    # SPACJI NIE MA W SYMBOLU NIGDY — nie tylko przy skracaniu. Symbol jest
+    # kluczem: wpisywanym z ręki, wklejanym, skanowanym i porównywanym po
+    # TRIM-ie. Spacja w środku („Kolo 50 szer") gubi się przy skanowaniu
+    # i rozjeżdża dopasowanie tak samo jak „+" (07.09.2026). Wcześniej
+    # znikała dopiero, gdy nazwa nie mieściła się w 13 znakach — więc krótkie
+    # nazwy przepuszczały ją do Subiekta.
+    #
+    # Usuwamy je zamiast ciąć na granicy słowa. Przy 13 znakach cięcie po
+    # słowie gubiło rozróżniające końcówki: „5M L2525 szer25" → „5M L2525"
     # (znika szerokość paska), a trzy różne obejmy dawały „Obejmy TC #2/#3/#4".
     # Bez spacji mieści się więcej treści: „5ML2525szer25", „ObejmyTCDN100".
     bez_spacji = s.replace(" ", "")
@@ -329,9 +369,9 @@ def rozroznij_symbol(nazwa, uzyte):
     Dlatego bierzemy WYRÓŻNIKI: człony nazwy zawierające cyfry (DN40, M6,
     fi119, L2525) — bo to one zwykle rozróżniają warianty tej samej rzeczy.
     """
-    pelna = " ".join(do_ascii(nazwa).split())
-    for zly in "`#":
-        pelna = pelna.replace(zly, "")
+    # To samo sito co w symbol_z_nazwy — inaczej „+" czy nawias wróciłby
+    # tędy, omijając tamto czyszczenie (07.09.2026).
+    pelna = _tylko_bezpieczne(" ".join(do_ascii(nazwa).split()))
 
     czlony = pelna.split()
     z_cyfra = [c for c in czlony if any(z.isdigit() for z in c)]
@@ -345,11 +385,15 @@ def rozroznij_symbol(nazwa, uzyte):
         return kandydat
 
     # Nazwy nierozróżnialne po oczyszczeniu — licznik jako ostateczność.
+    # Rozdzielamy MYŚLNIKIEM, nie „#": ten znak sam wypadał z symbolu przy
+    # czyszczeniu, więc licznik dawał symbol niezgodny z resztą reguł
+    # („uszczelkiTC#2” → po sicie „uszczelkiTC2”, czyli co innego niż
+    # zapisano). Myślnik jest dozwolony i występuje w numerach rysunku.
     baza = (kandydat or symbol_z_nazwy(nazwa))[:MAX_SYMBOL - 2]
     i = 2
-    while f"{baza}#{i}" in uzyte:
+    while f"{baza}-{i}" in uzyte:
         i += 1
-    return f"{baza}#{i}"
+    return f"{baza}-{i}"
 
 
 def numer_projektu(project_name, project_id=None):
@@ -678,6 +722,24 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         self.summary = tk.Label(self, text="Wczytywanie…", bg="#ecf0f1", fg="#2c3e50",
                                 font=("Arial", 9), anchor="w", padx=12, pady=6)
         self.summary.pack(side=tk.TOP, fill=tk.X)
+
+        # Legenda kolorów. Bez niej trzeba było zgadywać, czy pomarańczowy
+        # znaczy „jest" czy „nie ma" — a to decyduje o tym, co się zaznaczy
+        # do założenia (zgłoszone 07.09.2026). Kolory MUSZĄ się zgadzać
+        # z tag_configure niżej; opisy mówią, co zrobić, nie tylko co to jest.
+        leg = tk.Frame(self, bg="#ecf0f1")
+        leg.pack(side=tk.TOP, fill=tk.X)
+        tk.Label(leg, text="Kolory:", bg="#ecf0f1", fg="#7f8c8d",
+                 font=("Arial", 8, "bold"), padx=12).pack(side=tk.LEFT, pady=(0, 4))
+        for kolor, opis in (
+                ("#d5f5e3", "jest w Subiekcie — nic do zrobienia"),
+                ("#d4e6f1", "złożenie (Z/ZZ), kartoteka jest — będzie komplet"),
+                ("#fdebd0", "BRAK kartoteki — zaznacz ✓, żeby założyć"),
+                ("#fadbd8", "błąd — pozycja nie przejdzie")):
+            tk.Label(leg, text="   ", bg=kolor, relief=tk.SOLID, bd=1).pack(
+                side=tk.LEFT, padx=(8, 3), pady=(0, 4))
+            tk.Label(leg, text=opis, bg="#ecf0f1", fg="#7f8c8d",
+                     font=("Arial", 8)).pack(side=tk.LEFT, pady=(0, 4))
 
         wrap = tk.Frame(self)
         wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(6, 4))
@@ -1318,11 +1380,15 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
             return "   ".join(czesci) or "—"
 
         def tag(p):
+            # BRAK KARTOTEKI MA PIERWSZEŃSTWO nad „to złożenie”. Wcześniej
+            # Z/ZZ zawsze dostawało niebieski, więc złożenie bez kartoteki
+            # wyglądało identycznie jak z kartoteką — a to właśnie ono wymaga
+            # zaznaczenia, żeby komplet w ogóle powstał (07.09.2026).
+            # Kolor ma mówić „co zrobić", a dopiero potem „czym to jest";
+            # rodzaj widać i tak w kolumnie Typ oraz po drzewku.
             kart = status.get("kartoteka", {}).get(p["symbol"].upper())
-            if p["typ"] in KOMPLETY:
-                return "komplet"
             if kart and kart["Status"] == "istnieje":
-                return "istnieje"
+                return "komplet" if p["typ"] in KOMPLETY else "istnieje"
             return "nowy"
 
         def wstaw(parent_id, p, glebokosc=0, sciezka=()):
