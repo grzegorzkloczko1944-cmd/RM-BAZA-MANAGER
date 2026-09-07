@@ -496,8 +496,13 @@ def build_plan(project_id, project_name, podmiot, tytul):
 
 
 # ── Wywołanie mostu ─────────────────────────────────────────────────────────
-def run_bridge(plan, zapisz=False, timeout=TIMEOUT_S):
-    """Suchy przebieg (zapisz=False) albo realny zapis. Zwraca dict z JSON-a."""
+def run_bridge(plan, zapisz=False, timeout=TIMEOUT_S, tryb="projekt"):
+    """Suchy przebieg (zapisz=False) albo realny zapis. Zwraca dict z JSON-a.
+
+    `tryb="projekt-cofnij"` używa tego samego planu do USUNIĘCIA tego, co
+    "projekt" założyło (subiekt_sfera/NexoRecon/ProjektCofnij.cs) — ten sam
+    kanał, ta sama obsługa błędów, inny tryb mostu.
+    """
     exe = _find_exe()
     if not exe:
         raise RuntimeError(
@@ -506,22 +511,22 @@ def run_bridge(plan, zapisz=False, timeout=TIMEOUT_S):
     if not os.path.isfile(CONFIG_PATH):
         raise RuntimeError(f"Brak konfiguracji połączenia:\n{CONFIG_PATH}")
 
-    # ZAPIS, i to najcięższy — zakłada kartoteki, komplety i ZK naraz.
+    # ZAPIS, i to najcięższy — zakłada/usuwa kartoteki, komplety i ZK naraz.
     # Żadnego ponawiania (plan, sekcja 14): powtórzenie po niejednoznacznym
-    # błędzie zdublowałoby dokumenty projektu.
+    # błędzie zdublowałoby (albo dwukrotnie próbowało skasować) dokumenty projektu.
     args = {"plan": plan}
     if zapisz:
         args["zapisz"] = True
     try:
         import subiekt_bridge
         return subiekt_bridge.call(
-            "projekt", args, timeout=timeout, write=zapisz,
-            fallback=lambda: _projekt_cli(plan, zapisz, timeout))
+            tryb, args, timeout=timeout, write=zapisz,
+            fallback=lambda: _projekt_cli(plan, zapisz, timeout, tryb))
     except ImportError:
-        return _projekt_cli(plan, zapisz, timeout)
+        return _projekt_cli(plan, zapisz, timeout, tryb)
 
 
-def _projekt_cli(plan, zapisz, timeout):
+def _projekt_cli(plan, zapisz, timeout, tryb="projekt"):
     """Stara ścieżka: osobny proces NexoRecon.exe."""
     exe = _find_exe()
     if not exe:
@@ -533,7 +538,7 @@ def _projekt_cli(plan, zapisz, timeout):
     with open(plan_path, "w", encoding="utf-8") as f:
         json.dump(plan, f, ensure_ascii=False, indent=1)
 
-    cmd = [exe, "projekt", f"--plan={plan_path}", f"--out={out_path}"]
+    cmd = [exe, tryb, f"--plan={plan_path}", f"--out={out_path}"]
     if zapisz:
         cmd.append("--zapisz")
 
@@ -545,7 +550,7 @@ def _projekt_cli(plan, zapisz, timeout):
         raise RuntimeError(f"Subiekt nie odpowiedział w {timeout} s.")
 
     if proc.returncode != 0 or not os.path.isfile(out_path):
-        raise RuntimeError(blad_mostu(exe, "projekt", proc, out_path))
+        raise RuntimeError(blad_mostu(exe, tryb, proc, out_path))
 
     with open(out_path, encoding="utf-8") as f:
         return json.load(f)
@@ -574,17 +579,49 @@ def zapisz_mapowania(wynik):
         return 0          # brak dostępu do bazy mapowań nie może wywalić całego zapisu
 
 
-def save_log(project_id, wynik):
-    """Zapisuje co powstało — bez tego nie da się potem posprzątać w Subiekcie."""
+def save_log(project_id, wynik, plan=None):
+    """Zapisuje co powstało — bez tego nie da się potem posprzątać w Subiekcie.
+
+    `plan` (gdy podany) trafia do tego samego pliku pod kluczem "plan" — to
+    DOKŁADNIE ten sam plan.json, którego most użył do założenia, więc tryb
+    "projekt-cofnij" (subiekt_sfera/NexoRecon/ProjektCofnij.cs) może go użyć
+    wprost, bez odtwarzania z samego "wynik" (który ma tylko listę kroków —
+    symbole i statusy — a nie typ/składniki potrzebne do cofnięcia w
+    poprawnej kolejności). Bez tego "cofnij po kilku dniach" nie miałoby
+    z czego korzystać, bo self.plan w oknie żyje tylko w pamięci sesji.
+    """
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(LOG_DIR, f"projekt_{project_id}_{stamp}.json")
+        zapis = dict(wynik)
+        if plan is not None:
+            zapis["plan"] = plan
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(wynik, f, ensure_ascii=False, indent=1)
+            json.dump(zapis, f, ensure_ascii=False, indent=1)
         return path
     except Exception:
         return None
+
+
+def znajdz_logi_projektu(project_id):
+    """Wszystkie logi zapisu tego projektu, najnowszy pierwszy — kandydaci do cofnięcia."""
+    try:
+        pliki = [f for f in os.listdir(LOG_DIR) if f.startswith(f"projekt_{project_id}_") and f.endswith(".json")]
+    except OSError:
+        return []
+    pliki.sort(reverse=True)
+    wyniki = []
+    for f in pliki:
+        path = os.path.join(LOG_DIR, f)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                dane = json.load(fh)
+        except Exception:
+            continue
+        if dane.get("plan"):
+            wyniki.append((path, dane))
+    return wyniki
 
 
 # ── Okno ────────────────────────────────────────────────────────────────────
@@ -1620,7 +1657,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         kom = sum(1 for k in kroki if k["Rodzaj"] == "komplet" and k["Status"].startswith("utworzony"))
         bledy = [k for k in kroki if k["Status"] == "blad"]
         zk = wynik.get("zk")
-        log = save_log(self.project_id, wynik)
+        log = save_log(self.project_id, wynik, plan=self._plan_do_zapisu())
         zmap = zapisz_mapowania(wynik)
 
         # Co się stało z ZK — „utworzone" i „dopisano do istniejącego" to dwie
@@ -1658,6 +1695,161 @@ def open_window(parent, project_id, project_name=None):
         messagebox.showwarning("Subiekt", "Najpierw wybierz projekt.", parent=parent)
         return None
     return SubiektProjektWindow(parent, project_id, project_name)
+
+
+# ── Cofnięcie projektu ───────────────────────────────────────────────────────
+# Osobne okno, nie przycisk w SubiektProjektWindow: to okno ma sens dopiero
+# PO tym, jak sesja zakładania już dawno się skończyła — "self.plan" wtedy
+# nie istnieje. Źródłem prawdy jest log z tabeli "plan" (save_log), zapisany
+# przy każdym udanym zapisie — dokładnie ten sam plan.json, którego użył
+# most do założenia, więc ProjektCofnij.cs wie, co ma szukać i w jakiej
+# kolejności usuwać (ZK → komplety od góry → kartoteki).
+class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek):
+    def __init__(self, parent, project_id, project_name=None):
+        tk.Toplevel.__init__(self, parent)
+        Kreciolek.__init__(self)
+        self.project_id = project_id
+        self.project_name = project_name or str(project_id)
+        self.title(f"Subiekt — cofnij projekt {self.project_name}")
+        self.geometry("720x480")
+        self.dry = None
+        self.plan = None
+
+        logi = znajdz_logi_projektu(project_id)
+        if not logi:
+            messagebox.showinfo(
+                "Subiekt — cofnij projekt",
+                "Brak zapisanego logu zakładania dla tego projektu\n"
+                f"(szukane w {LOG_DIR}).\n\n"
+                "Bez logu nie wiadomo, jakie symbole i w jakim typie (Z/ZZ/X/XX)\n"
+                "zostały założone — cofnięcie nie może zgadywać.",
+                parent=self)
+            self.after(10, self.destroy)
+            return
+
+        top = ttk.Frame(self, padding=8)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="Log zakładania:").pack(side=tk.LEFT)
+        self.var_log = tk.StringVar()
+        etykiety = [f"{os.path.basename(p)} — {len(d['plan'].get('pozycje', []))} poz." for p, d in logi]
+        combo = ttk.Combobox(top, textvariable=self.var_log, values=etykiety, state="readonly", width=60)
+        combo.current(0)
+        combo.pack(side=tk.LEFT, padx=6)
+        self._logi = logi
+
+        self.txt = tk.Text(self, wrap="word")
+        self.txt.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        self.txt.insert("1.0",
+            "Wybierz log i kliknij „Sprawdź” — pokaże, co dałoby się usunąć\n"
+            "(ZK projektu, komplety, kartoteki), zanim cokolwiek zniknie.\n\n"
+            "Subiekt sam odmówi usunięcia czegokolwiek, co ma powiązania spoza\n"
+            "tego planu (inny projekt używa tej samej pozycji, coś już wydano) —\n"
+            "to nie jest coś, co to okno próbuje przewidzieć, tylko uczciwie\n"
+            "zaraportuje po fakcie.")
+        self.txt.config(state=tk.DISABLED)
+
+        btns = ttk.Frame(self, padding=8)
+        btns.pack(fill=tk.X)
+        self.btn_check = ttk.Button(btns, text="Sprawdź (suchy przebieg)", command=self._check)
+        self.btn_check.pack(side=tk.LEFT)
+        self.btn_go = ttk.Button(btns, text="Usuń w Subiekcie", command=self._confirm, state=tk.DISABLED)
+        self.btn_go.pack(side=tk.LEFT, padx=6)
+        self.status = ttk.Label(btns, text="")
+        self.status.pack(side=tk.LEFT, padx=10)
+
+    def _wybrany_plan(self):
+        idx = 0
+        try:
+            idx = [f"{os.path.basename(p)} — {len(d['plan'].get('pozycje', []))} poz." for p, d in self._logi].index(self.var_log.get())
+        except ValueError:
+            pass
+        return self._logi[idx][1]["plan"]
+
+    def _pokaz(self, tekst):
+        self.txt.config(state=tk.NORMAL)
+        self.txt.delete("1.0", tk.END)
+        self.txt.insert("1.0", tekst)
+        self.txt.config(state=tk.DISABLED)
+
+    def _check(self):
+        self.plan = self._wybrany_plan()
+        self.btn_check.config(state=tk.DISABLED)
+        self.status.config(text="Sprawdzam…")
+        threading.Thread(target=self._check_worker, daemon=True).start()
+
+    def _check_worker(self):
+        try:
+            wynik = run_bridge(self.plan, zapisz=False, tryb="projekt-cofnij")
+            self.after(0, lambda: self._check_done(wynik, None))
+        except Exception as e:
+            self.after(0, lambda: self._check_done(None, str(e)))
+
+    def _check_done(self, wynik, error):
+        self.btn_check.config(state=tk.NORMAL)
+        if error:
+            self.status.config(text="Błąd.")
+            messagebox.showerror("Subiekt", error, parent=self)
+            self._na_wierzch()
+            return
+        self.dry = wynik
+        kroki = wynik.get("kroki", [])
+        linie = [f"  {k['Rodzaj']:10} {k['Symbol']:24} {k['Status']}" for k in kroki]
+        do_usun = sum(1 for k in kroki if k["Status"] == "do-usuniecia")
+        brak = sum(1 for k in kroki if k["Status"] == "brak")
+        self._pokaz(f"Do usunięcia: {do_usun}   Nie znaleziono: {brak}\n\n" + "\n".join(linie))
+        self.status.config(text=f"Do usunięcia: {do_usun}")
+        self.btn_go.config(state=tk.NORMAL if do_usun else tk.DISABLED)
+
+    def _confirm(self):
+        do_usun = sum(1 for k in (self.dry or {}).get("kroki", []) if k["Status"] == "do-usuniecia")
+        ok = messagebox.askyesno(
+            "Subiekt — potwierdzenie",
+            f"Baza PRODUKCYJNA.\n\nUsunąć {do_usun} obiektów (ZK, komplety, kartoteki)\n"
+            f"projektu {self.project_name}?\n\n"
+            "Subiekt odmówi tego, co ma powiązania spoza tego planu —\n"
+            "to zostanie i raport pokaże dlaczego.",
+            parent=self, icon="warning")
+        self._na_wierzch()
+        if not ok:
+            return
+        self.btn_go.config(state=tk.DISABLED)
+        self.status.config(text="Usuwam — nie zamykaj okna…")
+        threading.Thread(target=self._go_worker, daemon=True).start()
+
+    def _go_worker(self):
+        try:
+            wynik = run_bridge(self.plan, zapisz=True, tryb="projekt-cofnij")
+            self.after(0, lambda: self._go_done(wynik, None))
+        except Exception as e:
+            self.after(0, lambda: self._go_done(None, str(e)))
+
+    def _go_done(self, wynik, error):
+        if error:
+            self.status.config(text="Usuwanie nieudane.")
+            messagebox.showerror("Subiekt — cofnięcie", error, parent=self)
+            self._na_wierzch()
+            self.btn_go.config(state=tk.NORMAL)
+            return
+        kroki = wynik.get("kroki", [])
+        usuniete = sum(1 for k in kroki if k["Status"] in ("usuniete", "usunieta"))
+        bledy = [k for k in kroki if k["Status"] == "blad"]
+        linie = [f"  {k['Rodzaj']:10} {k['Symbol']:24} {k['Status']:12} {k.get('Szczegoly') or ''}" for k in kroki]
+        self._pokaz(f"Usunięto: {usuniete}   Błędów: {len(bledy)}\n\n" + "\n".join(linie))
+        self.status.config(text=f"Usunięto {usuniete}." + (f"   ⚠ {len(bledy)} błędów" if bledy else ""))
+        (messagebox.showwarning if bledy else messagebox.showinfo)(
+            "Subiekt — cofnięcie zakończone",
+            f"Usunięto {usuniete} obiektów." + (f"\n\n{len(bledy)} nie dało się usunąć — patrz lista w oknie."
+                                                 if bledy else ""),
+            parent=self)
+        self._na_wierzch()
+
+
+def open_cofnij_window(parent, project_id, project_name=None):
+    """Punkt wejścia dla RM_BAZA — cofnięcie projektu założonego (kiedykolwiek) w Subiekcie."""
+    if not project_id:
+        messagebox.showwarning("Subiekt", "Najpierw wybierz projekt.", parent=parent)
+        return None
+    return SubiektProjektCofnijWindow(parent, project_id, project_name)
 
 
 if __name__ == "__main__":

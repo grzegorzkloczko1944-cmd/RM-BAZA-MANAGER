@@ -895,6 +895,8 @@ class MainWindow(tk.Tk):
         subiekt_menu.add_separator()
         subiekt_menu.add_command(label="🏗 Załóż projekt w Subiekcie (kartoteki + komplety + ZK)…",
                                  command=self.open_subiekt_projekt)
+        subiekt_menu.add_command(label="↩ Cofnij projekt w Subiekcie (usuń ZK, komplety, kartoteki)…",
+                                 command=self.open_subiekt_projekt_cofnij)
         subiekt_menu.add_command(label="🛒 Zamówienia do dostawców (ZD)…",
                                  command=self.open_subiekt_zamowienia)
         subiekt_menu.add_command(label="🤝 Powiąż dostawców z kontrahentami…",
@@ -29300,6 +29302,38 @@ class MainWindow(tk.Tk):
             project_name = None
 
         subiekt_projekt.open_window(self, self.current_project_id, project_name)
+
+    def open_subiekt_projekt_cofnij(self):
+        """Okno „Cofnij projekt w Subiekcie" (menu 📦 SUBIEKT).
+
+        Osobne okno, nie przycisk w oknie zakładania: sens ma dopiero PO
+        zamknięciu tamtej sesji (np. po kilku dniach), więc źródłem prawdy
+        jest log zapisu z C:\\RMPAK_CLIENT\\subiekt_logi, nie stan pamięci.
+        """
+        if not self.current_project_id:
+            messagebox.showwarning("Subiekt", "Najpierw wybierz projekt.", parent=self)
+            return
+
+        try:
+            import subiekt_projekt
+        except ImportError as e:
+            messagebox.showerror(
+                "Subiekt",
+                f"Nie znaleziono modułu subiekt_projekt.py\n\n{e}",
+                parent=self)
+            return
+
+        project_name = None
+        try:
+            row = self.db_manager.master_con.execute(
+                "SELECT name FROM projects WHERE project_id = ?",
+                (self.current_project_id,)).fetchone()
+            if row:
+                project_name = row[0]
+        except Exception:
+            project_name = None
+
+        subiekt_projekt.open_cofnij_window(self, self.current_project_id, project_name)
 
     def open_subiekt_zamowienia(self):
         """Okno „Zamówienia do dostawców (ZD)" (menu 📦 SUBIEKT).
