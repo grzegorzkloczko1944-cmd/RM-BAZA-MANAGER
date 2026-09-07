@@ -782,14 +782,20 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         # nagłówkiem (ta sama zasada co w arkuszu głównym RM_BAZA).
         self.tree.bind("<ButtonRelease-1>", self._zapisz_szerokosci, add="+")
         self.tree.bind("<Button-1>", self._toggle_pozycja, add="+")
-        # Długie nazwy („Zaślepka DN50 DIN 32676", „Wąż POLYPAL") nie mieszczą
-        # się w kolumnie i urywają się bez śladu. Poszerzanie kolumny nie pomoże
-        # — nazwy bywają bardzo różnej długości. Dymek pokazuje pełną treść,
-        # jak przy selektorze projektu w arkuszu głównym.
+        # Dymki z pełną nazwą — WYŁĄCZONE na życzenie (07.09.2026). Wyskakiwały
+        # przy każdym przesunięciu myszy nad drzewkiem i zasłaniały wiersze,
+        # a przy przeglądaniu listy przeszkadzały bardziej, niż pomagały.
+        # Kod (_tooltip_ruch / _tooltip_ukryj) zostaje — żeby przywrócić,
+        # wystarczy zdjąć ten przełącznik.
+        #
+        # Ucięte nazwy da się zobaczyć inaczej: poszerzając kolumnę (szerokość
+        # jest zapamiętywana między sesjami) albo w karcie pozycji.
+        self.DYMKI = False
         self._tip = None
         self._tip_wiersz = None
-        self.tree.bind("<Motion>", self._tooltip_ruch, add="+")
-        self.tree.bind("<Leave>", lambda _e: self._tooltip_ukryj(), add="+")
+        if self.DYMKI:
+            self.tree.bind("<Motion>", self._tooltip_ruch, add="+")
+            self.tree.bind("<Leave>", lambda _e: self._tooltip_ukryj(), add="+")
 
         self.tree.tag_configure("komplet", background="#d4e6f1")   # Z / ZZ
         self.tree.tag_configure("istnieje", background="#d5f5e3")  # jest w Subiekcie
