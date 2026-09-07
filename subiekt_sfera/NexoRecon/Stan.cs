@@ -92,7 +92,13 @@ internal static class Stan
                 pytany!, enc.Symbol, true, enc.Nazwa,
                 Bezp(() => enc.Rodzaj?.Nazwa),
                 dostepne, zadysponowane,
-                ostCena, ostData, stany) with { Dopasowanie = dopasowanie });
+                ostCena, ostData, stany) with
+                {
+                    Dopasowanie = dopasowanie,
+                    // Polozenie (regal/polka) — proste pole wlasne PoleWlasne1.
+                    Polozenie = (Bezp(() => (string?)enc.PolaWlasne?.PoleWlasne1) ?? "").Trim(),
+                    Opis = (Bezp(() => (string?)enc.Opis) ?? "").Trim(),
+                });
         }
 
         var json = JsonSerializer.Serialize(new { pozycje = wynik },
@@ -113,5 +119,15 @@ internal static class Stan
                         string? DataOstatniegoZakupu, List<StanMag> Magazyny)
     {
         public string Dopasowanie { get; init; } = "brak";
+
+        /// Polozenie na magazynie (regal/polka) z pola wlasnego PoleWlasne1.
+        /// Jako property z wartoscia domyslna, a nie parametr konstruktora —
+        /// Poz tworzymy tez dla kartotek NIEISTNIEJACYCH (Istnieje=false),
+        /// gdzie polozenia po prostu nie ma.
+        public string? Polozenie { get; init; }
+
+        /// Opis kartoteki — rodzaj produktu, uzupelniony przy migracji
+        /// (MAGAZYN.md). Tak samo jak Polozenie: property, nie parametr.
+        public string? Opis { get; init; }
     }
 }

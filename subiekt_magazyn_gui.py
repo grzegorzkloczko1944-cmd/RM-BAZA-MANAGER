@@ -176,14 +176,20 @@ def _f(x):
 
 
 class MagazynWindow(tk.Toplevel, Kreciolek):
+    #: Kolejność Nazwa → Opis → Położenie: magazynier czyta „co to jest"
+    #: (symbol + wymiar), „jakiego rodzaju" (opis) i „gdzie leży" (regał/półka).
+    #: Opis i Położenie uzupełnione przy migracji na magazyn nr 2 — Położenie
+    #: siedzi w polu własnym PoleWlasne1 Subiekta (patrz MAGAZYN.md).
     KOLUMNY = [("sel", "✓", 30), ("symbol", "Symbol", 150), ("nazwa", "Nazwa", 260),
+               ("opis", "Opis", 180), ("polozenie", "Położenie", 90),
                ("rodzaj", "Rodzaj", 90), ("dostepne", "Dostępne", 78),
                ("zadysponowane", "Zadysp.", 70), ("zarezerwowane", "Rezerw.", 70),
                ("min", "Min", 60), ("opt", "Opt", 60), ("kupic", "Kupić", 64),
                ("dostawca", "Dostawca", 170), ("zd", "ZD", 120),
                ("cena", "Cena ewid.", 80), ("magazynow", "Mag.", 44)]
-    (COL_SEL, COL_SYMBOL, COL_NAZWA, COL_RODZAJ, COL_DOSTEPNE, COL_ZADYSP, COL_REZERW,
-     COL_MIN, COL_OPT, COL_KUPIC, COL_DOSTAWCA, COL_ZD, COL_CENA, COL_MAG) = range(14)
+    (COL_SEL, COL_SYMBOL, COL_NAZWA, COL_OPIS, COL_POLOZENIE, COL_RODZAJ,
+     COL_DOSTEPNE, COL_ZADYSP, COL_REZERW, COL_MIN, COL_OPT, COL_KUPIC,
+     COL_DOSTAWCA, COL_ZD, COL_CENA, COL_MAG) = range(16)
     EDYTOWALNE = (COL_MIN, COL_OPT, COL_KUPIC)
     KOL_MAG = [("magazyn", "Magazyn", 180), ("dostepne", "Dostępne", 110),
                ("zadysponowane", "Zadysponowane", 130)]
@@ -459,12 +465,18 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
             p for p in self.pozycje
             if (not szukaj
                 or szukaj in str(p.get("Symbol", "")).lower()
-                or szukaj in str(p.get("Nazwa", "")).lower())
+                or szukaj in str(p.get("Nazwa", "")).lower()
+                # Po Opisie i Położeniu też — „oring" znajdzie po rodzaju,
+                # „r20" wypisze wszystko z regału 20.
+                or szukaj in str(p.get("Opis", "")).lower()
+                or szukaj in str(p.get("Polozenie", "")).lower())
             and (not self.var_ponizej.get() or self._ponizej(p) or p.get("prog_zmieniony"))
         ]
         self.sheet.set_sheet_data([[
             "✓" if p["sel"] else "☐",
-            p.get("Symbol", ""), p.get("Nazwa", ""), p.get("Rodzaj") or "",
+            p.get("Symbol", ""), p.get("Nazwa", ""),
+            p.get("Opis") or "", p.get("Polozenie") or "",
+            p.get("Rodzaj") or "",
             f"{p.get('Dostepne', 0):g}", _f(p.get("Zadysponowane")), _f(p.get("Zarezerwowane")),
             _f(p["min"]), _f(p["opt"]), _f(p.get("kupic")),
             p["dostawca"], p["zd"],
@@ -827,6 +839,10 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
                 juz.add(sym.upper())
                 self.pozycje.insert(0, {
                     "Symbol": sym, "Nazwa": (k.get("Nazwa") or "").strip(),
+                    # Kartoteka dokladana recznie z katalogu — tryb "katalog"
+                    # nie czyta ani Opisu, ani pol wlasnych, wiec oba zostaja
+                    # puste do najblizszego odswiezenia z trybu "magazyn".
+                    "Opis": "", "Polozenie": "",
                     "Rodzaj": "", "Dostepne": 0, "Zadysponowane": 0, "Zarezerwowane": 0,
                     "CenaEwidencyjna": float(k.get("CenaEwidencyjna") or 0),
                     "Magazyny": [], "min": 0.0, "opt": 0.0,

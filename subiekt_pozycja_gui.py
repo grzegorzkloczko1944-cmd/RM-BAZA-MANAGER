@@ -763,6 +763,10 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
         self._wiersz_kv(s, "Symbol", str(dane.get("Symbol") or "")
                         + ("   ⚠ dopasowano luźno" if dop == "luzne" else ""), wyroznij=True)
         self._wiersz_kv(s, "Nazwa w Subiekcie", dane.get("Nazwa") or "—")
+        self._wiersz_kv(s, "Opis", dane.get("Opis") or "—")
+        # Położenie (regał/półka) z pola własnego PoleWlasne1 — wyróżnione,
+        # bo to najczęstszy powód otwierania karty przy szukaniu na magazynie.
+        self._wiersz_kv(s, "Położenie", dane.get("Polozenie") or "—", wyroznij=True)
         self._wiersz_kv(s, "Rodzaj", dane.get("Rodzaj") or "—")
         self._wiersz_kv(s, "Dostępne", f"{float(dane.get('Dostepne') or 0):g}")
         self._wiersz_kv(s, "Zadysponowane", f"{float(dane.get('Zadysponowane') or 0):g}")
@@ -792,7 +796,7 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
         # nie przepadło, gdy dojdzie nowe.
         znane = {"Pytany", "Symbol", "Istnieje", "Nazwa", "Rodzaj", "Dostepne",
                  "Zadysponowane", "OstatniaCenaZakupu", "DataOstatniegoZakupu",
-                 "Magazyny", "Dopasowanie"}
+                 "Magazyny", "Dopasowanie", "Opis", "Polozenie"}
         for k, v in dane.items():
             if k not in znane and v not in (None, "", [], {}):
                 self._wiersz_kv(s, k, v)

@@ -85,6 +85,13 @@ internal static class Magazyn
                 a.Nazwa,
                 a.CenaEwidencyjna,
                 Rodzaj = a.Rodzaj.Nazwa,
+                a.Opis,
+                // Polozenie na magazynie (regal/polka) — proste pole wlasne
+                // PoleWlasne1, wypelnione przy migracji na magazyn nr 2
+                // (07.09.2026, patrz MAGAZYN.md). W projekcji, a nie przez
+                // siegniecie po encje po fakcie: kazde takie siegniecie to
+                // osobne zapytanie i cofneloby zysk z jednego przelotu.
+                Polozenie = a.PolaWlasne.PoleWlasne1,
                 Stany = a.StanyMagazynowe.Select(s => new
                 {
                     Magazyn = s.Magazyn.Symbol,
@@ -145,7 +152,8 @@ internal static class Magazyn
                 dostepne, zadysponowane, zarezerwowane,
                 decimal.Round(k.CenaEwidencyjna, 2),
                 stany, stanMin, stanOpt, dostawca?.Trim(),
-                zdWgSymbolu.TryGetValue(symbol, out var zd) ? string.Join(", ", zd) : null));
+                zdWgSymbolu.TryGetValue(symbol, out var zd) ? string.Join(", ", zd) : null,
+                (k.Opis ?? "").Trim(), (k.Polozenie ?? "").Trim()));
         }
 
         var json = JsonSerializer.Serialize(new { pozycje = wynik },
@@ -205,5 +213,5 @@ internal static class Magazyn
                         decimal Dostepne, decimal Zadysponowane, decimal Zarezerwowane,
                         decimal CenaEwidencyjna, List<StanMag> Magazyny,
                         decimal StanMinimalny, decimal StanOptymalny, string? Dostawca,
-                        string? Zd);
+                        string? Zd, string? Opis, string? Polozenie);
 }
