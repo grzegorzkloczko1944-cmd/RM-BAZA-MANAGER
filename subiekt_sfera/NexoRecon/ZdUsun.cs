@@ -117,6 +117,36 @@ internal static class ZdUsun
                         continue;
                     }
                     obiekt.Usun();
+
+                    // ⚠️ Usun() potrafi wrocic BEZ WYJATKU, choc Subiekt
+                    // odmowil — sprawdzone 07.09.2026 na WZ w bazie demo:
+                    // tryb raportowal "usuniete" dla 12 dokumentow, a wszystkie
+                    // 12 zostawalo w bazie. MoznaUsunac tez tego nie wylapuje
+                    // (dla WZ zwracalo true). Ta sama pulapka co w
+                    // KartotekaUsun.cs i MagazynUsun.cs, wiec i to samo
+                    // lekarstwo: rozstrzyga STAN BAZY, nie wynik Usun().
+                    // Falszywy sukces jest tu gorszy niz blad — RM_BAZA na jego
+                    // podstawie cofa "Zamowiono" w arkuszu (subiekt_zamowienia.py),
+                    // wiec skasowalaby slad po ZD, ktore dalej istnieje.
+                    var nadalJest = false;
+                    try
+                    {
+                        nadalJest = ((IEnumerable<dynamic>)kolekcja.Dane.Wszystkie())
+                            .Any(x => string.Equals(
+                                Bezp(() => (string?)x.NumerWewnetrzny?.PelnaSygnatura) ?? "",
+                                numer, StringComparison.OrdinalIgnoreCase));
+                    }
+                    catch { }
+
+                    if (nadalJest)
+                    {
+                        var bledy = Bezp(() => (string?)obiekt.PodajBledy());
+                        kroki.Add(new Krok(numer, "blad",
+                            "Subiekt odmowil usuniecia — dokument ma powiazania "
+                            + "(zrealizowany, rozliczony albo powiazany z innym dokumentem)"
+                            + (string.IsNullOrWhiteSpace(bledy) ? "" : $" ({bledy})")));
+                        continue;
+                    }
                     kroki.Add(new Krok(numer, "usuniete", opis));
                 }
                 catch (Exception ex)
