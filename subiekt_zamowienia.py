@@ -1014,7 +1014,8 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         # odczytać źródła dostawcy.
         tk.Label(leg, text="   Wiersz:", bg="#f8f9f9", font=("Arial", 8, "bold")
                  ).pack(side=tk.LEFT, padx=(18, 4), pady=2)
-        for kolor, opis in (("#b3d1ec", "zamówione (jest ZD)"),
+        for kolor, opis in (("#dfeaf7", "ZD jest, ale NIEWYSŁANE — dostawca nie wie"),
+                            ("#b3d1ec", "ZD wysłane do dostawcy"),
                             ("#eef1f3", "pokryte ze stanu — nic nie kupujemy")):
             tk.Label(leg, text="  ", bg=kolor, relief=tk.SOLID, bd=1).pack(side=tk.LEFT, padx=(6, 2), pady=2)
             tk.Label(leg, text=opis, bg="#f8f9f9", fg="#7f8c8d",
@@ -1628,27 +1629,37 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         ostatnia = len(self.HEADERS) - 1
         for i, w in enumerate(self.widoczne):
             if w.get("zd"):
-                # Zamówione — cały wiersz na niebiesko (stan pozycji).
+                # DWA RÓŻNE STANY, dwa różne kolory (07.09.2026):
+                #   ZD wystawione, ale NIEWYSŁANE — jasny błękit. Dokument
+                #       leży w Subiekcie, dostawca jeszcze o nim nie wie,
+                #       czyli JEST CO ZROBIĆ.
+                #   ZD wysłane do dostawcy — mocniejszy błękit. Sprawa
+                #       załatwiona, zostaje czekanie na dostawę.
+                # Wcześniej oba wyglądały identycznie, więc nie dało się
+                # odróżnić „zamówione" od „wysłane".
                 #
-                # Kolor MUSI być wyraźnie ciemniejszy od białego tła. Poprzedni
-                # #dfeaf7 miał kontrast 1,22 wobec bieli — na monitorze wiersz
-                # zamówiony wyglądał identycznie jak niezamówiony (zgłoszone
-                # 07.09.2026). Teraz 1,59; dalej spokojny, ale widoczny.
+                # Kolor musi być wyraźnie ciemniejszy od bieli: poprzedni
+                # #dfeaf7 miał kontrast 1,22 i ginął na tle.
+                wyslane = bool(self._wyslano_data(w.get("zd")))
+                tlo = "#b3d1ec" if wyslane else "#dfeaf7"
                 for c in range(ostatnia + 1):
-                    self.sheet.highlight_cells(row=i, column=c, bg="#b3d1ec")
-                # Drugi sygnał, niezależny od koloru: numer ZD na ciemnym
-                # granacie i pogrubiony przez samą treść kolumny. Kolor bywa
-                # nieczytelny na słabym monitorze albo przy daltonizmie,
-                # a „jest ZD / nie ma ZD" to najważniejsza informacja w tym oknie.
+                    self.sheet.highlight_cells(row=i, column=c, bg=tlo)
+                # Numer ZD zawsze na ciemnym granacie — drugi sygnał
+                # „jest ZD", niezależny od koloru tła wiersza (słaby monitor,
+                # daltonizm). Sama wysyłka czytana jest z kolumny „Wysłano".
                 self.sheet.highlight_cells(row=i, column=self.COL_ZD,
                                            bg="#2e6da4", fg="white")
+                # Niewysłane ZD — data na pomarańczowo, bo to jest zaległość.
+                if not wyslane:
+                    self.sheet.highlight_cells(row=i, column=self.COL_WYSLANO,
+                                               bg="#f5b041", fg="#7d3c00")
                 # ZK odbudowane z powiązania ZD→ZK: zamówienie klienta nadal
                 # istnieje, ale ta pozycja nie jest już w zapotrzebowaniu.
                 # Szara czcionka mówi „informacja historyczna", a nie
                 # „jest do zamówienia z tego ZK".
                 if w.get("zk_historyczne") and w.get("zk"):
                     self.sheet.highlight_cells(row=i, column=self.COL_ZK,
-                                               bg="#b3d1ec", fg="#7f8c8d")
+                                               bg=tlo, fg="#7f8c8d")
             elif w["ilosc"] <= 0:
                 # Cała potrzeba pokryta ze stanu — nie ma czego zamawiać.
                 for c in range(ostatnia + 1):
@@ -2424,14 +2435,24 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         Ślad jest po stronie RM_BAZA (tabela zd_wyslane), bo status dokumentu
         w Subiekcie mówi o stanie magazynowym, nie o wysyłce.
         """
+        if not _numery_zd(kolumna_zd):
+            return ""                   # nie ma ZD — nie ma o czym mówić
+        return self._wyslano_data(kolumna_zd) or "—"
+
+    def _wyslano_data(self, kolumna_zd):
+        """Data wysyłki (RRRR-MM-DD) albo None, gdy ZD jeszcze nie poszło.
+
+        Osobno od _wyslano_tekst, bo kolorowanie wiersza potrzebuje samego
+        faktu „wysłane / niewysłane", a nie tekstu do komórki.
+        """
         numery = _numery_zd(kolumna_zd)
         if not numery:
-            return ""
+            return None
         mapa = self._mapa_wyslanych()
         daty = [mapa[n] for n in numery if n in mapa]
         if not daty:
-            return "—"                  # ZD jest, ale nikt go nie wysłał
-        # Przy zbiorczej kolumnie pokazujemy NAJWCZEŚNIEJSZĄ wysyłkę — to ona
+            return None
+        # Przy zbiorczej kolumnie bierzemy NAJWCZEŚNIEJSZĄ wysyłkę — to ona
         # mówi, od kiedy dostawca wie o zamówieniu.
         return min(daty)[:10]
 
