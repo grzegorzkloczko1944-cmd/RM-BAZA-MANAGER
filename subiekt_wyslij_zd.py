@@ -184,6 +184,7 @@ def zapisz_wyslanie(numer_zd, adresat, nadawca, zalacznikow, termin=None, tryb="
                 )""")
             con.execute("CREATE INDEX IF NOT EXISTS idx_zd_wyslane_nr "
                         "ON zd_wyslane(numer_zd)")
+            _zapewnij_kolumne_usuniete(con)
             con.execute(
                 "INSERT INTO zd_wyslane (numer_zd, adresat, nadawca, zalacznikow,"
                 " termin, tryb, kiedy) VALUES (?,?,?,?,?,?,?)",
@@ -359,6 +360,60 @@ def odloz_zamowienia(bom_refy, termin, numer_zd, supplier_id=None):
         return 0
 
 
+def _zapewnij_kolumne_usuniete(con):
+    """Kolumna `dokument_usuniety` w dzienniku wysyłek (data unieważnienia).
+
+    ⚠️ SUBIEKT UŻYWA NUMERÓW PONOWNIE. Po usunięciu ZD 4, 5 i 6 nowe
+    dokumenty dostały znów „ZD 4/CENTRALA/2026" i „ZD 5/CENTRALA/2026"
+    (07.09.2026) — a dziennik, kluczowany numerem, pamiętał wysyłki starych.
+    Świeżo wystawione ZD pokazywało się jako WYSŁANE, z cudzą datą.
+
+    Dziennik zostaje dziennikiem — historii nie kasujemy — ale wpis
+    dokumentu usuniętego przez RM_BAZA dostaje znacznik i od tej chwili nie
+    liczy się jako wysyłka. Numer użyty ponownie zaczyna z czystą kartą.
+    Nie łapie usunięcia bezpośrednio w Subiekcie; na to trzeba by kluczować
+    dziennik wewnętrznym Id dokumentu z mostu (patrz „Co zostało").
+    """
+    if "dokument_usuniety" not in {r[1] for r in con.execute("PRAGMA table_info(zd_wyslane)")}:
+        con.execute("ALTER TABLE zd_wyslane ADD COLUMN dokument_usuniety TEXT")
+
+
+def uniewaznij_wyslania(numery_zd):
+    """Znaczy wpisy dziennika usuniętych ZD jako nieaktualne. Zwraca ile.
+
+    Wołane PO cofnij_zamowienia — ono jeszcze czyta z dziennika termin
+    wysyłki, żeby zdjąć go z arkusza; po unieważnieniu już by go nie
+    znalazło. W chwili usuwania każdy ważny wpis z tym numerem należy do
+    usuwanego dokumentu (numer jest unikalny wśród ŻYWYCH dokumentów, a wpisy
+    poprzednich wcieleń numeru unieważniono przy ich usuwaniu).
+    """
+    import sqlite3
+    norm = lambda s: " ".join(str(s or "").split()).upper()
+    szukane = {norm(n) for n in (numery_zd or ()) if str(n).strip()}
+    if not szukane:
+        return 0
+    try:
+        con = sqlite3.connect(_master(), timeout=10)
+        try:
+            if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
+                               " AND name='zd_wyslane'").fetchone():
+                return 0
+            _zapewnij_kolumne_usuniete(con)
+            teraz = datetime.now().isoformat(timespec="seconds")
+            ids = [r[0] for r in con.execute(
+                "SELECT id, numer_zd FROM zd_wyslane WHERE dokument_usuniety IS NULL")
+                if norm(r[1]) in szukane]
+            con.executemany("UPDATE zd_wyslane SET dokument_usuniety=? WHERE id=?",
+                            [(teraz, i) for i in ids])
+            con.commit()
+            return len(ids)
+        finally:
+            con.close()
+    except Exception as e:
+        print(f"⚠️  Nie unieważniono wpisów dziennika wysyłek: {e}")
+        return 0
+
+
 def _zapewnij_tabele_cofniec(con):
     """Tabela odłożonych cofnięć „Zamówiono" — lustro zd_zamowione_pozycje.
 
@@ -400,7 +455,11 @@ def _terminy_wysylek(con, numery):
     # całości jest tańszy niż jedna pomyłka.
     norm = lambda s: " ".join(str(s or "").split()).upper()
     szukane = {norm(n): n for n in numery}
-    for nr, termin in con.execute("SELECT numer_zd, termin FROM zd_wyslane ORDER BY id"):
+    _zapewnij_kolumne_usuniete(con)
+    # Tylko wpisy ŻYWEGO dokumentu — po ponownym użyciu numeru przez
+    # Subiekta stare wysyłki są unieważnione i nie mogą podać terminu.
+    for nr, termin in con.execute(
+            "SELECT numer_zd, termin FROM zd_wyslane WHERE dokument_usuniety IS NULL ORDER BY id"):
         k = norm(nr)
         if k in szukane:
             out[szukane[k]] = (termin or "").strip()[:10] or None        # ostatni wygrywa
@@ -730,8 +789,13 @@ def historia_wyslania(numery=None):
     try:
         con = sqlite3.connect(f"file:{_master()}?mode=ro", uri=True)
         try:
+            # Tylko wpisy ŻYWYCH dokumentów — Subiekt używa numerów ponownie
+            # (patrz _zapewnij_kolumne_usuniete). Połączenie jest read-only,
+            # więc kolumnę tylko sprawdzamy; dokłada ją pierwszy zapis.
+            kolumny = {r[1] for r in con.execute("PRAGMA table_info(zd_wyslane)")}
+            gdzie = " WHERE dokument_usuniety IS NULL" if "dokument_usuniety" in kolumny else ""
             wiersze = con.execute(
-                "SELECT numer_zd, MAX(kiedy), COUNT(*) FROM zd_wyslane"
+                f"SELECT numer_zd, MAX(kiedy), COUNT(*) FROM zd_wyslane{gdzie}"
                 " GROUP BY numer_zd").fetchall()
         finally:
             con.close()

@@ -2358,11 +2358,23 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         # już nie ma, a to okno pokazuje ją jako brak — dwa okna mówią co
         # innego o tej samej pozycji (07.09.2026).
         # Cofamy TYLKO dla faktycznie usuniętych ZD; ZK znacznika nie zakłada.
-        cofniete = self._cofnij_zamowiono(
-            [k["Numer"] for k in usuniete
-             if str(k.get("Numer") or "").strip().upper().startswith("ZD")])
+        zd_numery = [k["Numer"] for k in usuniete
+                     if str(k.get("Numer") or "").strip().upper().startswith("ZD")]
+        cofniete = self._cofnij_zamowiono(zd_numery)
         if cofniete:
             lines += ["", cofniete]
+        # DOPIERO PO cofnięciu: ono czyta z dziennika termin wysyłki. Potem
+        # wpisy usuniętego ZD przestają liczyć się jako wysyłka — Subiekt
+        # nada ten numer następnemu dokumentowi, a ten ma zacząć na czysto.
+        if zd_numery:
+            try:
+                from subiekt_wyslij_zd import uniewaznij_wyslania
+                n = uniewaznij_wyslania(zd_numery)
+                if n:
+                    print(f"🧾 Dziennik wysyłek: unieważniono {n} wpisów usuniętych ZD")
+            except Exception as e:
+                print(f"⚠️  Nie unieważniono dziennika wysyłek: {e}")
+            self._cache_wyslane = None
 
         (messagebox.showwarning if bledy else messagebox.showinfo)(
             "Usuwanie ZD", "\n".join(lines), parent=self)
@@ -2595,10 +2607,16 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             from subiekt_wyslij_zd import _master
             con = sqlite3.connect(_master(), timeout=5)
             try:
+                # Tylko wpisy ŻYWYCH dokumentów. Subiekt używa numerów
+                # ponownie po usunięciu ZD — bez tego filtra świeżo
+                # wystawione „ZD 4" dziedziczyło wysyłkę starego „ZD 4"
+                # i pokazywało się jako wysłane (07.09.2026).
+                kolumny = {r[1] for r in con.execute("PRAGMA table_info(zd_wyslane)")}
+                gdzie = " WHERE dokument_usuniety IS NULL" if "dokument_usuniety" in kolumny else ""
                 # Najnowsza wysyłka per numer — ZD bywa wysyłane ponownie
                 # (poprawiona treść, drugi adres).
                 for numer, kiedy in con.execute(
-                        "SELECT numer_zd, MAX(kiedy) FROM zd_wyslane GROUP BY numer_zd"):
+                        f"SELECT numer_zd, MAX(kiedy) FROM zd_wyslane{gdzie} GROUP BY numer_zd"):
                     if numer:
                         mapa[numer.strip()] = kiedy or ""
             finally:
