@@ -65,6 +65,17 @@ internal static class Dokumenty
                 .Take(limit)
                 .Select(d => new
                 {
+                    // Id — TRWAŁY klucz dokumentu. Numer NIE jest kluczem:
+                    // Subiekt reużywa go po usunięciu dokumentu (sprawdzone
+                    // 07.09.2026 — po skasowaniu ZD 4/5/6 kolejne dostały te
+                    // same numery), przez co dziennik zd_wyslane kluczowany
+                    // numerem pokazywał NOWEMU dokumentowi wysyłkę starego.
+                    // Dziś obchodzimy to kolumną `dokument_usuniety`; docelowo
+                    // RM_BAZA ma trzymać ten Id i porównywać po nim.
+                    // Pole wystawiamy z wyprzedzeniem — jest darmowe (ta sama
+                    // projekcja, żadnego dodatkowego zapytania), a bez niego
+                    // przepięcie kluczy wymagałoby najpierw zmiany mostu.
+                    d.Id,
                     Numer = d.NumerWewnetrzny.PelnaSygnatura,
                     d.DataWydaniaWystawienia,
                     d.DataWprowadzenia,
@@ -119,7 +130,8 @@ internal static class Dokumenty
                     Termin(d.Dokument),
                     d.Magazyn ?? "",
                     decimal.Round(wartosc, 2),
-                    pozycje));
+                    pozycje,
+                    d.Id));
             }
         }
         catch { /* brak dostępu do typu dokumentu nie może wywalić reszty */ }
@@ -159,8 +171,12 @@ internal static class Dokumenty
     internal record PozDok(string Symbol, string Nazwa, decimal Ilosc, string Jm,
                            decimal Cena, string Projekt);
 
+    /// <param name="Id">Trwały klucz dokumentu — w odróżnieniu od Numer,
+    /// którego Subiekt używa ponownie po usunięciu (patrz komentarz przy
+    /// projekcji). RM_BAZA jeszcze go nie używa; pole czeka na przepięcie
+    /// dziennika zd_wyslane z numeru na Id.</param>
     internal record Dok(string Rodzaj, string Numer, string Data, string Podmiot,
                         string Tytul, string Uwagi, string Status, string Termin,
                         string Magazyn,
-                        decimal Wartosc, List<PozDok> Pozycje);
+                        decimal Wartosc, List<PozDok> Pozycje, int Id = 0);
 }
