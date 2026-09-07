@@ -194,19 +194,12 @@ internal static class Projekt
         {
             // Podgląd musi powiedzieć, czy powstanie NOWE ZK, czy dopiszemy do
             // istniejącego — to zupełnie inny skutek dla użytkownika.
-            DokumentZK? juzJest = null;
-            if (!string.IsNullOrWhiteSpace(plan.Projekt))
-            {
-                try
-                {
-                    juzJest = sfera.ZamowieniaOdKlientow().Dane.Wszystkie()
-                        .OrderByDescending(d => d.DataWprowadzenia).Take(100).ToList()
-                        .FirstOrDefault(d => (Bezp(() => d.Uwagi) ?? "").Trim()
-                                             .Equals(plan.Projekt!.Trim(),
-                                                     StringComparison.OrdinalIgnoreCase));
-                }
-                catch { }
-            }
+            var (juzJest, duplikaty) = ZnajdzZkProjektu(sfera, plan.Projekt);
+            if (duplikaty.Count > 0)
+                kroki.Add(new Krok("zk", plan.Projekt ?? "", "UWAGA-DUPLIKATY",
+                    $"projekt ma już {duplikaty.Count + 1} dokumenty ZK: "
+                    + string.Join(", ", new[] { NumerZk(juzJest) }.Concat(duplikaty.Select(NumerZk)))
+                    + " — zanim cokolwiek zapiszesz, ustal ręcznie z którym dokumentem pracujesz"));
 
             if (juzJest != null)
             {
@@ -246,20 +239,25 @@ internal static class Projekt
                 // numer projektu. Bez tego ponowne uruchomienie robiło DRUGI
                 // dokument dla tego samego projektu i rozbijało zapotrzebowanie
                 // na dwa (zgłoszone 04.09.2026: „chcę dorzucić resztę").
-                DokumentZK? istniejace = null;
-                if (!string.IsNullOrWhiteSpace(plan.Projekt))
+                var (istniejace, duplikaty) = ZnajdzZkProjektu(sfera, plan.Projekt);
+
+                // Dwa+ ZK dla tego samego projektu to dokładnie ten balagan,
+                // przed ktorym ma chronic dopasowanie po Uwagach — jesli mimo
+                // to powstaly (rozne zrodla: reczne zalozenie w GUI, zbieg
+                // dwoch uzytkownikow, stary limit Take(100) sprzed naprawy
+                // 07.09.2026), NIE zgadujemy do ktorego dopisac. Zatrzymujemy
+                // sie i oddajemy decyzje czlowiekowi.
+                if (duplikaty.Count > 0)
                 {
-                    try
-                    {
-                        istniejace = zam.Dane.Wszystkie()
-                            .OrderByDescending(d => d.DataWprowadzenia)
-                            .Take(100).ToList()
-                            .FirstOrDefault(d => (Bezp(() => d.Uwagi) ?? "").Trim()
-                                                 .Equals(plan.Projekt!.Trim(),
-                                                         StringComparison.OrdinalIgnoreCase));
-                    }
-                    catch { }
+                    var numery = string.Join(", ",
+                        new[] { istniejace }.Concat(duplikaty).Select(NumerZk));
+                    kroki.Add(new Krok("zk", plan.Projekt ?? "", "blad",
+                        $"projekt ma już {duplikaty.Count + 1} dokumenty ZK ({numery}) — "
+                        + "zapis wstrzymany, żeby nie pogłębić bałaganu. Scal je ręcznie "
+                        + "w Subiekcie albo usuń zbędny, potem uruchom ponownie."));
                 }
+                else
+                {
 
                 var podm = ZnajdzPodmiot(sfera, plan.Podmiot);
                 if (podm == null && istniejace == null)
@@ -327,6 +325,7 @@ internal static class Projekt
                         kroki.Add(new Krok("zk", zkNumer ?? plan.Projekt ?? "", co, null));
                     }
                 }
+                }
             }
             catch (Exception ex)
             {
@@ -347,6 +346,12 @@ internal static class Projekt
     /// zagnieżdżeniu składników, nie po typie, bo ZZ potrafi zawierać ZZ.
     /// Cykl (gdyby BOM go zawierał) nie zapętla liczenia — ścieżka jest pilnowana.
     /// </summary>
+    /// Wrapper internal dla ProjektCofnij.cs — PosortujOdDolu zostaje prywatne
+    /// dla własnej czytelności (używane tylko lokalnie przy zakładaniu),
+    /// odwrotna kolejność przy cofaniu potrzebuje tej samej logiki liczenia
+    /// głębokości, więc nie duplikujemy jej w drugim pliku.
+    internal static List<PozPlan> PosortujOdDoluDlaCofniecia(List<PozPlan> pozycje) => PosortujOdDolu(pozycje);
+
     static List<PozPlan> PosortujOdDolu(List<PozPlan> pozycje)
     {
         var komplety = pozycje.Where(p => Rowne(p.Typ, "Z") || Rowne(p.Typ, "ZZ")).ToList();
@@ -421,6 +426,62 @@ internal static class Projekt
         }
         return bylo;
     }
+
+    /// <summary>
+    /// Szuka ZK projektu po Uwagach (dopasowanie dokładne, TRIM + bez rozróżniania
+    /// wielkości liter). Zwraca NAJNOWSZE dopasowanie i listę WSZYSTKICH pozostałych
+    /// dopasowań (duplikaty) — wołający decyduje, co z nimi zrobić.
+    ///
+    /// Bez limitu Take() — poprzednia wersja brała tylko 100 ostatnich ZK i milczące
+    /// wypadanie starego dokumentu poza to okno prowadziło do DRUGIEGO ZK dla tego
+    /// samego projektu (zgłoszone 07.09.2026: "user założy projekt na projekcie
+    /// i narobi się bałagan"). Kolekcja ZK w praktyce nie jest na tyle duża, żeby
+    /// pełny przelot zaszkodził (dziesiątki-setki, nie dziesiątki tysięcy).
+    /// </summary>
+    static (DokumentZK? najnowsze, List<DokumentZK> duplikaty) ZnajdzZkProjektu(Uchwyt sfera, string? projekt)
+    {
+        if (string.IsNullOrWhiteSpace(projekt)) return (null, new List<DokumentZK>());
+        var szukany = projekt.Trim();
+        try
+        {
+            // ⚠️ ToList() PRZED Where(): Dane.Wszystkie() zwraca ObjectQuery
+            // (Entity Framework), który próbuje przetłumaczyć predykat na SQL.
+            // Wywołania własnych metod (PasujeUwagi) nie umie — i zamiast
+            // rzucić błąd zwraca po cichu pustkę. Sprawdzone 07.09.2026:
+            // filtrowanie przed materializacją nie znajdowało ŻADNEGO ZK,
+            // choć trzy istniały. Ta sama pułapka co przy .ToList() na
+            // ObjectQuery<Asortyment> w ProjektCofnij.cs.
+            var trafienia = sfera.ZamowieniaOdKlientow().Dane.Wszystkie().ToList()
+                .Where(d => PasujeUwagi(Bezp(() => d.Uwagi), szukany))
+                .OrderByDescending(d => d.DataWprowadzenia)
+                .ToList();
+            if (trafienia.Count == 0) return (null, new List<DokumentZK>());
+            return (trafienia[0], trafienia.Skip(1).ToList());
+        }
+        catch { return (null, new List<DokumentZK>()); }
+    }
+
+    /// <summary>
+    /// Dopasowanie Uwag do numeru projektu — musi rozumieć OBA formaty, w
+    /// jakich numer tam trafia: dokładnie sam numer (gdy plan.Uwagi podano
+    /// z góry) i domyślny "Projekt {numer}" (linia niżej, gdy plan.Uwagi
+    /// jest puste). Sprawdzone 07.09.2026: dopasowanie tylko "równe" nie
+    /// łapało własnego domyślnego formatu — zakładanie tego samego projektu
+    /// drugi raz tworzyło DRUGIE ZK zamiast dopisać do pierwszego, bo zapis
+    /// (ta metoda) i odczyt (dawne porównanie Equals) patrzyły na dwa różne
+    /// stringi dla tego samego numeru.
+    /// </summary>
+    internal static bool PasujeUwagi(string? uwagi, string projekt)
+    {
+        var u = (uwagi ?? "").Trim();
+        if (u.Length == 0) return false;
+        if (u.Equals(projekt, StringComparison.OrdinalIgnoreCase)) return true;
+        if (u.Equals($"Projekt {projekt}", StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    static string NumerZk(DokumentZK? d) =>
+        d is null ? "?" : (Bezp(() => d.NumerWewnetrzny?.PelnaSygnatura) ?? "?");
 
     static Podmiot? ZnajdzPodmiot(Uchwyt sfera, string? szukany)
     {

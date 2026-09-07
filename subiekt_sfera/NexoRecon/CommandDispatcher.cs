@@ -50,7 +50,7 @@ internal static class CommandDispatcher
     {
         "kartoteka", "kartoteka-usun", "kartoteka-edytuj", "projekt", "zd", "zd-usun",
         "dostawcy", "progi", "rw", "pw", "termin", "symbole", "komplet-napraw", "magazyn-zaloz",
-        "magazyn-usun",
+        "magazyn-usun", "projekt-cofnij",
     };
 
     /// <summary>
@@ -72,7 +72,7 @@ internal static class CommandDispatcher
         "stan-pozycji", "dostawcy", "zapotrzebowanie", "zd", "magazyn",
         "zd-usun", "wydruk-recon", "termin", "symbole", "rw", "kartoteka-usun",
         "progi", "wydruk", "projekt", "komplet", "komplet-napraw", "kartoteka-edytuj",
-        "pola-wlasne", "magazyn-zaloz", "magazyn-usun", "pw",
+        "pola-wlasne", "magazyn-zaloz", "magazyn-usun", "pw", "projekt-cofnij",
     };
 
     public static bool Zna(string tryb) => Tryby.Contains(tryb, StringComparer.OrdinalIgnoreCase);
@@ -196,6 +196,10 @@ internal static class CommandDispatcher
             case "projekt":
                 if (k.PlanPath is null) return Brak("projekt: brak --plan=plik.json");
                 return Projekt.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
+
+            case "projekt-cofnij":
+                if (k.PlanPath is null) return Brak("projekt-cofnij: brak --plan=plik.json");
+                return ProjektCofnij.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
 
             default:
                 return Brak($"Nieznany tryb: {k.Tryb}");
