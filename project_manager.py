@@ -24,12 +24,27 @@ def norm(s) -> str:
 
 
 def colnames(con: sqlite3.Connection, table: str) -> set:
-    """Zwraca zbiór nazw kolumn w tabeli (lowercase)."""
-    try:
-        cur = con.execute(f"PRAGMA table_info({table})")
-        return {str(r[1]).lower() for r in cur.fetchall()}
-    except Exception:
-        return set()
+    """Zwraca zbiór nazw kolumn w tabeli (lowercase).
+
+    Krotki retry na "database is locked" (dysk sieciowy, chwilowa kolizja),
+    potem — jak dawniej — pusty zbior. Wolajacy, ktorym pusty zbior szkodzi
+    (lista maszyn), sprawdzaja obowiazkowe kolumny sami i mowia wprost,
+    ze baza jest zajeta. Rzucanie stad wyjatku dotykaloby 24 miejsc naraz
+    (07.09.2026).
+    """
+    import time as _time
+    for proba in range(3):
+        try:
+            cur = con.execute(f"PRAGMA table_info({table})")
+            return {str(r[1]).lower() for r in cur.fetchall()}
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and proba < 2:
+                _time.sleep(0.1)
+                continue
+            return set()
+        except Exception:
+            return set()
+    return set()
 
 
 def pick_col(cols: set, candidates: list) -> Optional[str]:
@@ -544,10 +559,19 @@ def set_project_active(con: sqlite3.Connection, project_id: int, is_active: int)
     if not active_col:
         raise RuntimeError("Nie można znaleźć/dodać kolumny aktywności projektu.")
     
-    con.execute(
-        f"UPDATE projects SET {active_col}=? WHERE {pk}=?", 
-        (1 if int(is_active) else 0, int(project_id))
+    docelowy = 1 if int(is_active) else 0
+    cur = con.execute(
+        f"UPDATE projects SET {active_col}=? WHERE {pk}=?",
+        (docelowy, int(project_id))
     )
+    # UPDATE, ktory nic nie zmienil, NIE jest bledem dla SQLite. Bez tej
+    # kontroli "aktywuj projekt" konczylo sie bez komunikatu, a projekt
+    # zostawal nieaktywny (07.09.2026). rowcount == 0 = nie ma wiersza o tym
+    # id, np. lista pokazuje dane z innej bazy niz ta, do ktorej piszemy.
+    if cur.rowcount == 0:
+        raise RuntimeError(
+            f"Nie zmieniono zadnego wiersza: w tabeli projects nie ma "
+            f"{pk}={project_id}.")
 
 
 def delete_project(con: sqlite3.Connection, project_id: int) -> None:

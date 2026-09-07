@@ -55,6 +55,9 @@ class DatabaseManager:
         self.local_dir.mkdir(parents=True, exist_ok=True)
     
     def connect_master(self) -> bool:
+        # Tryb zapamietany dla watchdoga (ensure_master_alive): po zerwaniu
+        # ma odtworzyc TEN SAM tryb, a nie zawsze read-only.
+        self.master_wants_rw = False
         """Otwórz master.sqlite (READ ONLY)
         
         Returns:
@@ -266,6 +269,7 @@ class DatabaseManager:
     
     def reconnect_master_rw(self):
         """Otwórz master.sqlite w trybie READ-WRITE (dla ADMIN)"""
+        self.master_wants_rw = True     # patrz ensure_master_alive
         
         # ZAWSZE zamykaj i otwieraj ponownie aby sprawdzić uprawnienia
         if self.master_con:
@@ -722,10 +726,22 @@ class DatabaseManager:
                 pass
             self.master_con = None
             
-            # Próba ponownego połączenia
+            # Próba ponownego połączenia — W TYM SAMYM TRYBIE CO PRZEDTEM.
+            #
+            # ⚠️ Wczesniej zawsze connect_master(), czyli READ-ONLY
+            # (mode=ro&immutable=1). Jedna chwilowa kolizja "database is
+            # locked" (dysk sieciowy, drugi wątek) degradowala sesje ADMIN-a
+            # do odczytu NA STALE: kazdy kolejny zapis cicho padal ("nie
+            # aktywuje projektu, bez bledu"), a immutable=1 dawal do tego
+            # nieswieze odczyty. Znalezione 07.09.2026 po pol dnia szukania
+            # blokady, ktorej nie bylo — winny byl sam watchdog.
             try:
                 import time
                 time.sleep(0.05)  # Minimalne opóźnienie przed reconnect
+                if getattr(self, "master_wants_rw", False):
+                    print("🔄 Master reconnect w trybie READ-WRITE (tak jak przed zerwaniem)")
+                    self.reconnect_master_rw()
+                    return self.master_con is not None
                 return self.connect_master()
             except Exception as reconnect_err:
                 print(f"❌ Master reconnect failed: {reconnect_err}")

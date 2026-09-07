@@ -10706,9 +10706,14 @@ class RMManagerGUI:
         tree.column("path",      width=180, anchor="w")
 
         # Tagi dla kolorowania
-        tree.tag_configure("inactive", foreground="#888888")
-        tree.tag_configure("finished", foreground="#2c5aa0")  # Ciemnoniebieski
-        tree.tag_configure("paused", foreground="#888888")     # Szary
+        # ⚠️ DWIE NIEZALEZNE INFORMACJE, DWA KANALY: status na TLE,
+        # aktywnosc na KOLORZE TEKSTU. Wczesniej oba szly przez foreground,
+        # wiec "nieaktywny" i "wstrzymany" mialy ten sam szary, a projekt
+        # aktywny-ale-wstrzymany wygladal jak nieaktywny (07.09.2026).
+        # Te same odcienie co w RM_BAZA, zeby oba programy czytalo sie tak samo.
+        tree.tag_configure("inactive", foreground="#888888")   # tylko TEKST
+        tree.tag_configure("finished", background="#cdeed9")   # zielone TLO
+        tree.tag_configure("paused", background="#ececec")     # szare TLO
         tree.pack(side=tk.LEFT, fill="both", expand=True)
         vsb.config(command=tree.yview)
         hsb.config(command=tree.xview)
@@ -10884,25 +10889,28 @@ class RMManagerGUI:
                         if lock_info and lock_info.get('user'):
                             locked_by = self._get_user_display_name(lock_info['user'])
                     
-                    # Określ tag na podstawie statusu projektu
+                    # Kolor wiersza WPROST z wyliczonego wyzej `status` —
+                    # czyli z tego, co user widzi w kolumnie Status.
+                    #
+                    # ⚠️ Wczesniej kolor pytal osobno rmm.get_project_status()
+                    # i porownywal z ProjectStatus.DONE, a kolumna brala wartosc
+                    # z get_project_statuses() ("ZAKONCZONY"/"WSTRZYMANY").
+                    # To dwa ROZNE systemy statusow: przy multi-statusie projekt
+                    # mial w kolumnie "ZAKONCZONY", a get_project_status zwracalo
+                    # np. "NEW" — wiersz zostawal bez koloru. Do tego wszystko
+                    # siedzialo w try/except: pass, wiec blad nie byl widoczny
+                    # (zgloszone 07.09.2026: "nie ma kolorow").
                     tags = []
-                    try:
-                        project_db = self.get_project_db_path(pid)
-                        if os.path.exists(project_db):
-                            # Sprawdź czy zakończony (status DONE w master.sqlite)
-                            is_finished = (rmm.get_project_status(self.master_db_path, pid) == ProjectStatus.DONE)
-                            if is_finished:
-                                tags.append("finished")  # Ciemnoniebieski
-                            else:
-                                # Sprawdź czy wstrzymany
-                                is_paused = rmm.is_project_paused(project_db, pid)
-                                if is_paused:
-                                    tags.append("paused")  # Szary
-                    except Exception:
-                        pass
+                    st = (status or "").upper()
+                    if st == "ZAKONCZONY":
+                        tags.append("finished")   # Ciemnoniebieski
+                    elif st == "WSTRZYMANY":
+                        tags.append("paused")     # Szary
                     
-                    # Dodaj tag dla nieaktywnych (jeśli nie ma innych tagów)
-                    if not is_act and not tags:
+                    # Nieaktywnosc dokladamy ZAWSZE, nie "gdy nie ma innych
+                    # tagow": projekt bywa jednoczesnie nieaktywny i zakonczony,
+                    # a to dwie rozne rzeczy (tlo + kolor tekstu).
+                    if not is_act:
                         tags.append("inactive")
 
                     # 💰 Procent zapłaconych płatności (UMORZONY = traktowany jak 100%)
@@ -11013,7 +11021,9 @@ class RMManagerGUI:
                 messagebox.showerror("Błąd", f"Nie udało się usunąć projektu:\n{e}", parent=win)
 
         # --- Przyciski ---
-        btn_bar = tk.Frame(win, bg="#ecf0f1", height=60)
+        # height=92: pasek miesci przyciski I legende pod nimi. Przy 60 px
+        # z pack_propagate(False) legenda wychodzila poza kadr (07.09.2026).
+        btn_bar = tk.Frame(win, bg="#ecf0f1", height=92)
         btn_bar.pack(fill="x")
         btn_bar.pack_propagate(False)
 
@@ -11118,6 +11128,31 @@ class RMManagerGUI:
                   bg="#e74c3c", fg="white", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_inner, text="✖ Zamknij", command=on_close, width=12,
                   bg="#95a5a6", fg="white", font=("Arial", 10)).pack(side=tk.LEFT, padx=5)
+
+        # LEGENDA kolorow — te same wartosci co tree.tag_configure wyzej.
+        # ⚠️ W RM_MANAGER kolory sa na TEKSCIE (foreground), nie na tle jak
+        # w RM_BAZA — probki pokazuja wiec kolorowy napis, nie kwadrat.
+        legenda = tk.Frame(btn_bar, bg="#ecf0f1")
+        legenda.pack(pady=(0, 6))
+
+        def _probka(kolor, opis):
+            box = tk.Frame(legenda, bg="#ecf0f1")
+            box.pack(side=tk.LEFT, padx=(0, 16))
+            tk.Label(box, text="   ", bg=kolor, highlightthickness=1,
+                     highlightbackground="#bdc3c7").pack(side=tk.LEFT)
+            tk.Label(box, text=" " + opis, bg="#ecf0f1", fg="#2c3e50",
+                     font=("Arial", 8)).pack(side=tk.LEFT)
+
+        tk.Label(legenda, text="Tło:", bg="#ecf0f1", fg="#7f8c8d",
+                 font=("Arial", 8, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+        _probka("#cdeed9", "Zakonczony")
+        _probka("#ececec", "Wstrzymany")
+        tk.Label(legenda, text="   Tekst:", bg="#ecf0f1", fg="#7f8c8d",
+                 font=("Arial", 8, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(legenda, text="Nieaktywny", bg="#ecf0f1", fg="#888888",
+                 font=("Arial", 8, "bold")).pack(side=tk.LEFT, padx=(0, 16))
+        tk.Label(legenda, text='kolumna "Aktywny": TAK / NIE',
+                 bg="#ecf0f1", fg="#7f8c8d", font=("Arial", 8)).pack(side=tk.LEFT)
 
         tree.bind("<Double-1>", lambda e: edit_selected())
         reload()

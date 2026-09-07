@@ -210,6 +210,24 @@ LIBRARY_ROOT = "B:/"  # Biblioteka RM - komponenty wspólne (pozycje dwf_bibliot
                       # Zostaje na sztywno: dysk B: jest zmapowany tak samo na każdej stacji.
 
 
+def _czy_master_ro(db_manager):
+    """Czy master_con jest otwarte tylko do odczytu.
+
+    Sprawdzamy PROBA ZAPISU w transakcji, ktora natychmiast cofamy —
+    sqlite3 nie wystawia trybu otwarcia, a `PRAGMA query_only` nie wykryje
+    polaczenia otwartego jako "mode=ro" przez URI.
+    """
+    try:
+        con = db_manager.master_con
+        if con is None:
+            return False
+        con.execute("BEGIN IMMEDIATE")
+        con.rollback()
+        return False
+    except Exception as e:
+        return "readonly" in str(e).lower() or "locked" in str(e).lower()
+
+
 def get_assembly_tree_root():
     """Katalog z folderami projektów CAD (drzewko złożeń *_OUT.xlsx, rysunki .dwf).
 
@@ -19650,11 +19668,27 @@ class MainWindow(tk.Tk):
         win.transient(self)
         win.grab_set()
         
-        # Wycentruj względem głównego okna
-        win.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width() // 2) - (win.winfo_width() // 2)
-        y = self.winfo_y() + (self.winfo_height() // 2) - (win.winfo_height() // 2)
-        win.geometry(f"+{x}+{y}")
+        # Wycentruj wzgledem GLOWNEGO OKNA (czyli na monitorze, na ktorym
+        # stoi aplikacja) i podnies na wierzch.
+        #
+        # Wczesniej pozycja liczyla sie z winfo_width() PRZED zbudowaniem
+        # tresci - Tk zwraca wtedy 1, wiec okno ladowalo w losowym miejscu,
+        # a bez lift/focus chowalo sie za aplikacja (07.09.2026).
+        def _ustaw_pozycje():
+            try:
+                win.update_idletasks()
+                szer = win.winfo_width() or 1600
+                wys = win.winfo_height() or 550
+                x = self.winfo_rootx() + (self.winfo_width() - szer) // 2
+                y = self.winfo_rooty() + (self.winfo_height() - wys) // 2
+                x = max(0, min(x, win.winfo_screenwidth() - szer))
+                y = max(0, min(y, win.winfo_screenheight() - wys))
+                win.geometry(f"+{x}+{y}")
+                win.lift()
+                win.focus_force()
+            except tk.TclError:
+                pass
+        win.after_idle(_ustaw_pozycje)
         
         frm = tk.Frame(win, padx=25, pady=20, bg="#f0f0f0")
         frm.pack(fill="both", expand=True)
@@ -19922,11 +19956,25 @@ class MainWindow(tk.Tk):
         win.resizable(True, True)
         win.transient(self)
         
-        # Wycentruj względem głównego okna
-        win.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width() // 2) - (win.winfo_width() // 2)
-        y = self.winfo_y() + (self.winfo_height() // 2) - (win.winfo_height() // 2)
-        win.geometry(f"+{x}+{y}")
+        # Wycentruj wzgledem GLOWNEGO OKNA (monitor, na ktorym stoi
+        # aplikacja) i podnies na wierzch. Pozycja liczona PO zbudowaniu
+        # tresci: winfo_width() przed nia zwraca 1, wiec okno ladowalo
+        # w losowym miejscu i chowalo sie za aplikacja (07.09.2026).
+        def _ustaw_pozycje_listy():
+            try:
+                win.update_idletasks()
+                szer = win.winfo_width() or 1600
+                wys = win.winfo_height() or 550
+                x = self.winfo_rootx() + (self.winfo_width() - szer) // 2
+                y = self.winfo_rooty() + (self.winfo_height() - wys) // 2
+                x = max(0, min(x, win.winfo_screenwidth() - szer))
+                y = max(0, min(y, win.winfo_screenheight() - wys))
+                win.geometry(f"+{x}+{y}")
+                win.lift()
+                win.focus_force()
+            except tk.TclError:
+                pass
+        win.after_idle(_ustaw_pozycje_listy)
         
         # Checkbox: Pokaż nieaktywne
         var_show_inactive = tk.BooleanVar(value=False)
@@ -20016,6 +20064,20 @@ class MainWindow(tk.Tk):
                 completed_col = pick_col(cols, ["completed_at"])
                 received_percent_col = pick_col(cols, ["received_percent"])  # % odebranych (dla RM_MANAGER)
                 
+                # Kolumny obowiazkowe: bez nich nie ma sensu budowac SQL-a.
+                # Wczesniej trafialy do listy bez sprawdzenia i przy pustym
+                # `cols` (baza zajeta) join() rzucal mylace "expected str
+                # instance, NoneType found" (07.09.2026).
+                brakujace = [n for n, v in (("id", pk), ("name", name_col),
+                                            ("path", path_col), ("active", active_col),
+                                            ("project_type", type_col)) if not v]
+                if brakujace:
+                    raise RuntimeError(
+                        "Nie udalo sie odczytac schematu tabeli 'projects' "
+                        "(brak kolumn: " + ", ".join(brakujace) + ")." + NL +
+                        "Najczestsza przyczyna: baza jest chwilowo zajeta przez "
+                        "inna operacje - sprobuj ponownie za chwile.")
+
                 # Buduj SELECT dynamicznie
                 select_cols = [pk, name_col, path_col, active_col, type_col]
                 if designer_col:
@@ -20615,20 +20677,83 @@ class MainWindow(tk.Tk):
                 messagebox.showerror("Brak uprawnień", error_msg, parent=win)
                 return
             
-            try:
-                new_state = 0 if proj["active"] else 1
-                set_project_active(self.db_manager.master_con, proj["id"], new_state)
-                self.db_manager.master_con.commit()
-                
-                reload()
-                self.load_projects()  # Odśwież dropdown
-            
-            except Exception as e:
+            # RETRY na "database is locked". Master lezy na dysku sieciowym
+            # i RM_BAZA trzyma do niego kilka polaczen (arkusz, synchronizacja,
+            # okna) - pojedyncza kolizja trwa ulamek sekundy, ale bez ponowienia
+            # konczyla sie bledem i nie dalo sie przelaczyc aktywnosci
+            # (zgloszone 07.09.2026). Ten sam wzorzec co reload_suppliers.
+            new_state = 0 if proj["active"] else 1
+            ostatni_blad = None
+            for proba in range(3):
                 try:
-                    self.db_manager.master_con.rollback()
-                except:
-                    pass
-                messagebox.showerror("Błąd", f"Nie udało się zmienić statusu:\n{e}", parent=win)
+                    try:
+                        if self.db_manager.master_con.in_transaction:
+                            self.db_manager.master_con.rollback()
+                    except Exception:
+                        pass
+                    set_project_active(self.db_manager.master_con, proj["id"], new_state)
+                    self.db_manager.master_con.commit()
+                    # POTWIERDZENIE ODCZYTEM. Commit na polaczeniu, ktore cicho
+                    # stracilo tryb zapisu, nie zglasza bledu - a projekt zostaje
+                    # nieaktywny (07.09.2026).
+                    sprawdz = self.db_manager.master_con.execute(
+                        "SELECT active FROM projects WHERE project_id=?",
+                        (proj["id"],)).fetchone()
+                    if sprawdz is not None and int(sprawdz[0] or 0) != new_state:
+                        raise RuntimeError(
+                            "Zapis nie zostal utrwalony - po zapisie baza nadal "
+                            "zwraca poprzednia wartosc. Najczestsza przyczyna: "
+                            "polaczenie z master.sqlite jest tylko do odczytu.")
+                    reload()
+                    self.load_projects()  # Odswiez dropdown
+                    ostatni_blad = None
+                    break
+                except Exception as e:
+                    ostatni_blad = e
+                    try:
+                        self.db_manager.master_con.rollback()
+                    except Exception:
+                        pass
+                    tresc = str(e).lower()
+                    # ⚠️ POLACZENIE READ-ONLY UDAJE BLOKADE. master_con bywa
+                    # otwarte jako "mode=ro&immutable=1" (connect_master) —
+                    # wtedy KAZDY zapis konczy sie "database is locked" i zadne
+                    # ponawianie nie pomoze, bo to nie kolizja tylko brak trybu
+                    # zapisu. Dzieje sie tak, gdy reconnect_master_rw() padlo
+                    # przy logowaniu: kod cicho wraca wtedy do RO i user nie
+                    # dostaje zadnego ostrzezenia (07.09.2026).
+                    if ("readonly" in tresc or "locked" in tresc) and proba < 2:
+                        # Bez wlasnego reconnectu: zamykanie polaczenia stad
+                        # walczylo z watchdogiem (ensure_master_alive) i dawalo
+                        # baner "utrata polaczenia". Tryb RW pilnuje teraz sam
+                        # watchdog (master_wants_rw w database_manager).
+                        print(f"[!] aktywnosc projektu: {e} "
+                              f"(proba {proba + 1}/3), czekam 300 ms...")
+                        time.sleep(0.3)
+                        continue
+                    break
+
+            if ostatni_blad is not None:
+                tekst = str(ostatni_blad)
+                tresc = tekst.lower()
+                if "readonly" in tresc or "locked" in tresc:
+                    # Rozroznienie ma znaczenie: przy RO ponawianie nic nie da.
+                    tryb_ro = _czy_master_ro(self.db_manager)
+                    if tryb_ro:
+                        tekst = ("Baza glowna jest otwarta TYLKO DO ODCZYTU, "
+                                 "wiec zapis nie przejdzie." + NL + NL +
+                                 "Najczestsza przyczyna: przy logowaniu nie udalo sie "
+                                 "otworzyc master.sqlite w trybie zapisu (zajety plik "
+                                 "albo brak uprawnien do Y:)." + NL + NL +
+                                 "Przeloguj sie ponownie (USER -> Twoje konto). "
+                                 "Jesli to nie pomoze, sprawdz uprawnienia do pliku "
+                                 "Y:" + chr(92) + "RM_BAZA" + chr(92) + "master.sqlite.")
+                    else:
+                        tekst = ("Baza jest chwilowo zajeta przez inna operacje." + NL + NL +
+                                 "Sprobuj ponownie za chwile - jesli blad wraca, sprawdz, "
+                                 "czy RM_BAZA nie jest otwarta w drugim oknie.")
+                messagebox.showerror("Blad", "Nie udalo sie zmienic statusu:\n" + tekst,
+                                     parent=win)
         
         def delete_selected():
             """Usuń zaznaczony projekt"""
@@ -20843,12 +20968,15 @@ class MainWindow(tk.Tk):
                 messagebox.showerror("HARD KILL — niepełny", summary, parent=win)
         
         # Przyciski
-        btn_bar = tk.Frame(win, bg="#ecf0f1", height=60)
+        # height=92: pasek mieści przyciski I legendę pod nimi. Przy 60 px
+        # z pack_propagate(False) legenda wychodziła poza kadr (07.09.2026).
+        btn_bar = tk.Frame(win, bg="#ecf0f1", height=92)
         btn_bar.pack(fill="x", padx=0, pady=0)
         btn_bar.pack_propagate(False)
         
         btn_inner = tk.Frame(btn_bar, bg="#ecf0f1")
         btn_inner.pack(pady=12)
+
         
         tk.Checkbutton(
             btn_inner, text="Pokaż nieaktywne", variable=var_show_inactive,
@@ -20875,6 +21003,30 @@ class MainWindow(tk.Tk):
             ).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_inner, text="✖ Zamknij", command=win.destroy, width=12,
                  bg="#95a5a6", fg="white", font=("Arial", 10)).pack(side=tk.LEFT, padx=5)
+
+        # LEGENDA kolorow — te same wartosci co tree.tag_configure wyzej
+        # (status_done / status_paused / inactive). Bez niej trzeba bylo
+        # zgadywac, czy zielony wiersz znaczy "zakonczony" czy "aktywny"
+        # (zgloszone 07.09.2026).
+        legenda = tk.Frame(btn_bar, bg="#ecf0f1")
+        legenda.pack(pady=(8, 0))
+
+        def _probka(kolor, opis, fg="#2c3e50", ramka="#bdc3c7"):
+            box = tk.Frame(legenda, bg="#ecf0f1")
+            box.pack(side=tk.LEFT, padx=(0, 16))
+            tk.Label(box, text="   ", bg=kolor, highlightthickness=1,
+                     highlightbackground=ramka).pack(side=tk.LEFT)
+            tk.Label(box, text=" " + opis, bg="#ecf0f1", fg=fg,
+                     font=("Arial", 8)).pack(side=tk.LEFT)
+
+        tk.Label(legenda, text="Kolory:", bg="#ecf0f1", fg="#7f8c8d",
+                 font=("Arial", 8, "bold")).pack(side=tk.LEFT, padx=(0, 8))
+        _probka("#cdeed9", "Zakonczony")
+        _probka("#ececec", "Wstrzymany")
+        # "Nieaktywny" to kolor TEKSTU, nie tla — probka pokazuje wlasnie tekst.
+        _probka("#ffffff", "Nieaktywny (szary tekst)", fg="#888888")
+        tk.Label(legenda, text="  kolumna \"Aktywny\": TAK / NIE",
+                 bg="#ecf0f1", fg="#7f8c8d", font=("Arial", 8)).pack(side=tk.LEFT)
         
         # Podwójne kliknięcie = edycja
         tree.bind("<Double-1>", lambda e: edit_selected())
