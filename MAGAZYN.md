@@ -310,6 +310,36 @@ Lista „Asortyment" filtrowana na magazyn pokazuje **wszystkie** kartoteki
 uprawnione do bycia na tym magazynie, niezależnie od tego, czy tam coś leży.
 To nie jest kopiowanie danych — magazyny współdzielą jeden katalog towarów.
 
+### 6.4b. `Usun()` nie jest dowodem — trafiło trzeci raz
+
+W Sferze `Usun()` potrafi wrócić **bez wyjątku**, choć Subiekt odmówił, i
+`MoznaUsunac`/`CzyMoznaUsunac` bywają nadmiernie optymistyczne — nie łapią
+tego, co złapie dopiero ponowne wyszukanie encji po symbolu/numerze.
+
+Trafiliśmy na to trzy razy, za każdym razem w innym trybie:
+
+- `KartotekaUsun.cs` (05.09.2026) — kartoteka ze stanem 30 i otwartym ZD
+  dostała status „usunięta", a istniała dalej.
+- `MagazynUsun.cs` (07.09.2026, przy zakładaniu magazynu nr 2 na bazie demo
+  M-OLD) — napisany od razu z weryfikacją, bo wzorzec był już znany.
+- `ZdUsun.cs` (07.09.2026, tam samo) — **to jest ten poważny przypadek**.
+  Tryb zgłosił „usunięte" dla 12 dokumentów WZ, a wszystkie 12 zostały
+  w bazie (rozliczone fakturami, których most nie widzi — sekcja 6.6).
+  Naprawione dopiero po fakcie.
+
+Dlaczego akurat `zd-usun` boli najbardziej: RM_BAZA na podstawie jego
+odpowiedzi **cofa „Zamówiono" i termin w arkuszu** (`subiekt_wyslij_zd.py`,
+`subiekt_zamowienia.py`, `subiekt_dokumenty_gui.py`). Fałszywe „usunięte"
+nie jest tu tylko złym komunikatem — to fałszywa przesłanka, na podstawie
+której arkusz kasuje ślad po dokumencie, który w Subiekcie dalej istnieje.
+
+**Reguła na przyszłość:** każdy tryb, który usuwa cokolwiek w Sferze, musi
+rozstrzygać **stanem bazy po zapisie** (ponowne wyszukanie po kluczu), nie
+wynikiem `Usun()` ani odpowiedzią `MoznaUsunac` sprzed zapisu. Trzy pliki
+(`KartotekaUsun.cs`, `MagazynUsun.cs`, `ZdUsun.cs`) już to robią — nowy tryb
+usuwający powinien od razu iść tym wzorcem, a nie czekać na czwarty
+incydent.
+
 ### 6.4. Usługi nie przyjmują stanu
 
 Pozycja rodzaju „Usługa" zostanie przyjęta do dokumentu PW **bez błędu**,
@@ -361,3 +391,31 @@ i `obrob_reczne.py`.
 - [ ] Uzupełnić **636 pustych Opisów** rodzajem produktu.
 - [ ] Rozważyć osobne pole na **numer katalogowy** elementu znormalizowanego
       (dziś siedzi w Symbolu; wtedy Symbol mógłby być czysto wewnętrzny).
+
+---
+
+## 9. Powtórka na bazie demo (M-OLD, 07.09.2026)
+
+Ten sam Excel (`magazyn 28.05.2026.xlsx`) wgrany na **testową bazę demo**
+(`.\INSERTNEXO` / `Nexo_RMPRODUKCJA`, serwer lokalny), żeby stanowisko domowe
+miało ten sam magazyn co produkcja w firmie. Inny punkt startowy niż
+w sekcji 2: baza demo miała **własny, obcy asortyment** (kosmetyki, testowe
+łożyska/Festo z wcześniejszych sesji) zamiast brakujących 24 kartotek.
+
+| co | ile |
+|---|---|
+| ZK + ZD usunięte przed startem | 14 |
+| stary stan zdjęty (3 magazyny demo: MAG/GAL/OUT) | 27 179 szt → 0 |
+| kartoteki założone | 1366 (z 1376 w bazie było tylko 9) |
+| czas zakładania kartotek | **122 s** (nie ~4 min jak w firmie — stały most,
+  brak narzutu ~10 s/wywołanie na start Sfery) |
+| stan przyjęty (PW) | 1354 kartoteki, 24 373 szt. |
+| położenia | 1367 |
+| progi | 213 |
+| obce kartoteki (demo + testowe) sprzątnięte | 209 z 238 |
+| obce kartoteki nieusuwalne | 29 (rozliczone fakturami — sekcja 6.6) |
+
+Magazyny GAL i OUT **zostały** — Subiekt odmawia ich usunięcia z trzech
+powodów naraz (stany / dokumenty / magazyn główny jednostki), a jednostek
+organizacyjnych (GALAXIA, OUTLET) świadomie nie ruszaliśmy. Wyzerowane, więc
+nie fałszują sum — `pobierz_magazyn` i tak sumuje wszystkie magazyny.
