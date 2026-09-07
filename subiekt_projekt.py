@@ -629,6 +629,12 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         # ŚWIADOMIE bez transient(): okno-dziecko z transient dostaje w Windows
         # tylko przycisk „×", bez minimalizacji i maksymalizacji. To pełnoprawny
         # arkusz roboczy, więc ma się zachowywać jak okno główne RM_BAZA (— □ ×).
+        #
+        # ⚠️ Skutek uboczny: bez transient Windows nie wie, że to okno-dziecko,
+        # więc po zamknięciu modalnego messageboxa fokus wraca do OKNA GŁÓWNEGO
+        # RM_BAZA i przykrywa ten arkusz (zgłoszone 07.09.2026 przy zakładaniu
+        # projektu — po komunikacie o zapisie na wierzch wyskakiwał arkusz).
+        # Dlatego po każdym dialogu przywracamy warstwę przez _na_wierzch().
         try:
             self.state("zoomed")
         except tk.TclError:
@@ -636,6 +642,29 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
 
         self._build_ui()
         self.after(100, self._dry_run_async)
+
+    def _na_wierzch(self):
+        """Przywraca to okno na wierzch po zamknięciu modalnego dialogu.
+
+        Bez transient() Windows oddaje fokus oknu głównemu RM_BAZA, a nie temu,
+        z którego dialog wyszedł — arkusz przykrywał wtedy okno projektu
+        (07.09.2026). lift() + focus_force() na samym oknie wystarczy; NIE
+        ustawiamy „-topmost", bo to trzymałoby je nad wszystkim, także nad
+        innymi aplikacjami.
+
+        Wołane po dialogu, przez after_idle — w chwili powrotu z messageboxa
+        Windows jeszcze przestawia fokus i natychmiastowy lift() bywa zjadany.
+        """
+        def podnies():
+            try:
+                self.lift()
+                self.focus_force()
+            except tk.TclError:
+                pass            # okno zamknięte razem z dialogiem
+        try:
+            self.after_idle(podnies)
+        except tk.TclError:
+            pass
 
     def _build_ui(self):
         top = tk.Frame(self, bg="#34495e", height=42)
@@ -854,6 +883,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
             self.summary.config(text=(warn or "")[:200])
             if warn:
                 messagebox.showerror("Subiekt", warn, parent=self)
+                self._na_wierzch()
             return
 
         self.plan, self.dry, self.items = plan, wynik, items
@@ -1154,6 +1184,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
             sym = d["symbol"].strip()
             if any(p["symbol"].strip().upper() == sym.upper() for p in self.plan["pozycje"]):
                 messagebox.showinfo("Pozycja", f"„{sym}” już jest w planie.", parent=self)
+                self._na_wierzch()
                 return
             self.plan["pozycje"].append({
                 "symbol": sym, "nazwa": d["nazwa"],
@@ -1480,6 +1511,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         podmiot = self.var_podmiot.get().strip()
         if not podmiot:
             messagebox.showwarning("Subiekt", "Podaj podmiot na ZK.", parent=self)
+            self._na_wierzch()
             return
 
         plan = self._plan_do_zapisu()
@@ -1557,6 +1589,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
             + ("\n⚠ " + "\n⚠ ".join(uwagi) + "\n" if uwagi else "")
             + "\nZapisać?",
             parent=self, icon="warning")
+        self._na_wierzch()
         if not ok:
             return
 
@@ -1578,6 +1611,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         if error:
             self.status.config(text="Zapis nieudany.")
             messagebox.showerror("Subiekt — zapis", error, parent=self)
+            self._na_wierzch()
             self.btn_write.config(state=tk.NORMAL)
             return
 
@@ -1614,6 +1648,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         self.status.config(text=f"Zapisano. ZK: {zk or '—'}" + (f"   ⚠ błędów: {len(bledy)}" if bledy else ""))
         (messagebox.showwarning if bledy else messagebox.showinfo)(
             "Subiekt — zapis zakończony", "\n".join(lines), parent=self)
+        self._na_wierzch()         # inaczej arkusz główny przykryje to okno
         self._dry_run_async()      # odśwież — pokaże już założone kartoteki jako istniejące
 
 
