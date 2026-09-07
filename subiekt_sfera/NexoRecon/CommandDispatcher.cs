@@ -49,7 +49,7 @@ internal static class CommandDispatcher
     static readonly HashSet<string> Zapisujace = new(StringComparer.OrdinalIgnoreCase)
     {
         "kartoteka", "kartoteka-usun", "kartoteka-edytuj", "projekt", "zd", "zd-usun",
-        "dostawcy", "progi", "rw", "termin", "symbole", "komplet-napraw",
+        "dostawcy", "progi", "rw", "pw", "termin", "symbole", "komplet-napraw", "magazyn-zaloz",
     };
 
     /// <summary>
@@ -57,7 +57,10 @@ internal static class CommandDispatcher
     /// tylko z planem — bez niego to czysty odczyt progow.
     /// </summary>
     public static bool CzyZapis(Komenda k) =>
+        // "progi" i "pola-wlasne" licza sie jako zapis TYLKO z planem —
+        // bez planu to czysty odczyt (progow / metadanych pol wlasnych).
         k.Tryb.Equals("progi", StringComparison.OrdinalIgnoreCase)
+        || k.Tryb.Equals("pola-wlasne", StringComparison.OrdinalIgnoreCase)
             ? !string.IsNullOrWhiteSpace(k.PlanPath)
             : Zapisujace.Contains(k.Tryb);
 
@@ -68,6 +71,7 @@ internal static class CommandDispatcher
         "stan-pozycji", "dostawcy", "zapotrzebowanie", "zd", "magazyn",
         "zd-usun", "wydruk-recon", "termin", "symbole", "rw", "kartoteka-usun",
         "progi", "wydruk", "projekt", "komplet", "komplet-napraw", "kartoteka-edytuj",
+        "pola-wlasne", "magazyn-zaloz", "pw",
     };
 
     public static bool Zna(string tryb) => Tryby.Contains(tryb, StringComparer.OrdinalIgnoreCase);
@@ -88,6 +92,13 @@ internal static class CommandDispatcher
 
             case "katalog":
                 return Katalog.Uruchom(sfera, k.OutPath);
+
+            // Bez planu: odczyt metadanych (jakie pola sa i czy widoczne).
+            // Z planem: ZAPIS wartosci pola na kartotekach (--zapisz).
+            case "pola-wlasne":
+                return k.PlanPath is null
+                    ? PolaWlasne.Uruchom(sfera, k.OutPath)
+                    : PolaWlasne.Zapis(sfera, k.PlanPath, k.OutPath, k.Zapisz);
 
             // Sklad kompletu i relacja odwrotna ("w czym to siedzi") — do
             // sprawdzenia, czy komplety projektu nie wisza w powietrzu.
@@ -134,6 +145,10 @@ internal static class CommandDispatcher
                 if (k.PlanPath is null) return Brak("kartoteka: brak --plan=plik.json");
                 return Kartoteka.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
 
+            case "magazyn-zaloz":
+                if (k.PlanPath is null) return Brak("magazyn-zaloz: brak --plan=plik.json");
+                return MagazynZaloz.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
+
             case "dostawcy":
                 if (k.PlanPath is null) return Brak("dostawcy: brak --plan=plik.json");
                 return Dostawcy.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
@@ -156,6 +171,10 @@ internal static class CommandDispatcher
             case "rw":
                 if (k.PlanPath is null) return Brak("rw: brak --plan=plik.json");
                 return Rw.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
+
+            case "pw":
+                if (k.PlanPath is null) return Brak("pw: brak --plan=plik.json");
+                return Pw.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
 
             case "kartoteka-usun":
                 return KartotekaUsun.Uruchom(sfera, k.SymboleCsv, k.OutPath, k.Zapisz);

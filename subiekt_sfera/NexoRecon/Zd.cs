@@ -214,9 +214,14 @@ internal static class Zd
 
                         try
                         {
+                            // Domyslny magazyn ZD. 07.09.2026 przepiete z "MAG" na
+                            // "Magazyn" (magazyn nr 2) — stary MAG zostal wyzerowany,
+                            // cala inwentaryzacja weszla na nowy. Ten sam symbol jest
+                            // w subiekt_magazyn_gui.py (MAGAZYN) — zmieniasz tu,
+                            // zmien i tam. Patrz MAGAZYN.md.
                             if (zd.Dane.Magazyn == null)
                                 zd.Dane.Magazyn = sfera.Magazyny().Dane.Wszystkie()
-                                    .FirstOrDefault(m => m.Symbol == "MAG")
+                                    .FirstOrDefault(m => m.Symbol == "Magazyn")
                                     ?? sfera.Magazyny().Dane.Wszystkie().FirstOrDefault();
                         }
                         catch { /* ZD bywa bez magazynu — nie blokujemy zapisu */ }
