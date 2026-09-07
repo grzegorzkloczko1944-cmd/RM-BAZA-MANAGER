@@ -798,13 +798,17 @@ def _usun_zd_cli(numery, zapisz, timeout):
         return json.load(f)
 
 
-def zapisz_log(wynik):
+def zapisz_log(wynik, rodzaj="zd", **dodatkowe):
+    """Ślad operacji na ZD — do WSPÓLNEJ historii i lokalnie (subiekt_historia).
+
+    Wcześniej pisał tylko lokalnie, więc kolega z drugiego stanowiska nie
+    widział, że ktoś utworzył albo usunął ZD (zgłoszone 08.09.2026).
+    `dodatkowe` przyjmuje np. projekty=["3500"] — sam dokument ZD w Subiekcie
+    numeru projektu nie niesie (Uwagi puste, Tytuł generyczny).
+    """
     try:
-        os.makedirs(LOG_DIR, exist_ok=True)
-        p = os.path.join(LOG_DIR, f"zd_{datetime.now():%Y%m%d_%H%M%S}.json")
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(wynik, f, ensure_ascii=False, indent=1)
-        return p
+        from subiekt_historia import zapisz_historie
+        return zapisz_historie(rodzaj, wynik, **dodatkowe)
     except Exception:
         return None
 
@@ -2346,7 +2350,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         kroki = wynik.get("kroki", [])
         usuniete = [k for k in kroki if k.get("Status") == "usuniete"]
         bledy = [k for k in kroki if k.get("Status") == "blad"]
-        zapisz_log(wynik)
+        zapisz_log(wynik, rodzaj="dokument-usun")   # osobny rodzaj — to kasowanie, nie zakup
 
         lines = [f"Usunięte dokumenty: {len(usuniete)}"]
         lines += [f"  • {k['Numer']} — {k.get('Szczegoly') or ''}" for k in usuniete[:12]]
@@ -3014,7 +3018,11 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
 
         utworzone = wynik.get("zd", [])
         bledy = [k for k in wynik.get("kroki", []) if k.get("Status") == "blad"]
-        log = zapisz_log(wynik)
+        # Numery projektów z zaznaczonych wierszy — dokument ZD w Subiekcie ich
+        # nie niesie, a bez nich cofanie projektu musi zgadywać po symbolach.
+        projekty = sorted({p for w in self.wszystkie if w.get("sel")
+                           for p in (w.get("projekty") or "").split(", ") if p})
+        log = zapisz_log(wynik, projekty=projekty)
 
         # Numer ZD wprost do arkusza — user ma widzieć w tabelce, co poszło
         # i pod jakim numerem, a nie tylko w oknie komunikatu. ZD powstaje

@@ -41,7 +41,13 @@ from subiekt_stany import (_find_exe, blad_mostu, jedna_linia, CONFIG_PATH,
                            wczytaj_szerokosci, zapisz_szerokosci)
 
 TIMEOUT_S = 600          # zapis bywa wolniejszy od odczytu — kartoteki idą pojedynczo
+
+#: Lokalny log techniczny (ślad każdej operacji tej maszyny).
 LOG_DIR = r"C:\RMPAK_CLIENT\subiekt_logi"
+
+# Wspólna historia operacji na Subiekcie — patrz subiekt_historia.py.
+import subiekt_historia
+from subiekt_historia import historia_dir, zapisz_historie, znajdz_logi
 
 KOMPLETY = ("Z", "ZZ")   # tylko te typy zakładają komplet
 LISCIE = ("X", "XX")     # zwykłe kartoteki
@@ -612,38 +618,17 @@ def save_log(project_id, wynik, plan=None):
     poprawnej kolejności). Bez tego "cofnij po kilku dniach" nie miałoby
     z czego korzystać, bo self.plan w oknie żyje tylko w pamięci sesji.
     """
-    try:
-        os.makedirs(LOG_DIR, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(LOG_DIR, f"projekt_{project_id}_{stamp}.json")
-        zapis = dict(wynik)
-        if plan is not None:
-            zapis["plan"] = plan
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(zapis, f, ensure_ascii=False, indent=1)
-        return path
-    except Exception:
-        return None
+    return zapisz_historie("projekt", wynik, project_id=project_id, plan=plan)
 
 
 def znajdz_logi_projektu(project_id):
-    """Wszystkie logi zapisu tego projektu, najnowszy pierwszy — kandydaci do cofnięcia."""
-    try:
-        pliki = [f for f in os.listdir(LOG_DIR) if f.startswith(f"projekt_{project_id}_") and f.endswith(".json")]
-    except OSError:
-        return []
-    pliki.sort(reverse=True)
-    wyniki = []
-    for f in pliki:
-        path = os.path.join(LOG_DIR, f)
-        try:
-            with open(path, encoding="utf-8") as fh:
-                dane = json.load(fh)
-        except Exception:
-            continue
-        if dane.get("plan"):
-            wyniki.append((path, dane))
-    return wyniki
+    """Wszystkie logi zapisu tego projektu, najnowszy pierwszy — kandydaci do cofnięcia.
+
+    Szuka NAJPIERW we wspólnym katalogu na serwerze (tam trafiają zapisy
+    wszystkich stanowisk), potem lokalnie. Ta sama nazwa pliku w obu miejscach
+    to ten sam zapis — liczy się raz, wersja serwerowa ma pierwszeństwo.
+    """
+    return znajdz_logi("projekt", project_id=project_id, wymagaj_planu=True)
 
 
 # ── Okno ────────────────────────────────────────────────────────────────────
@@ -742,6 +727,22 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
                                      bg="#3498db", fg="white", font=("Arial", 8),
                                      padx=8, pady=2, relief=tk.RAISED, bd=1)
         self.btn_refresh.pack(side=tk.RIGHT, padx=10, pady=8)
+
+        # Na GÓRNEJ belce, nie na dole: to rzeczy, o których user ma pamiętać
+        # przez cały czas pracy z oknem, a nie dopiero przy zapisie.
+        self.btn_todo = tk.Button(top, text="📋 Do zrobienia",
+                                  command=self._okno_notatki, bg="#8e44ad", fg="white",
+                                  font=("Arial", 8), padx=8, pady=2, relief=tk.RAISED, bd=1)
+        self.btn_todo.pack(side=tk.RIGHT, padx=(0, 4), pady=8)
+        # Powrót do okna decyzji o bibliotecznych — pokazywany tylko wtedy,
+        # gdy jakaś pozycja czeka na decyzję (patrz _odswiez_stan_zapisu).
+        self.btn_bib = tk.Button(top, text="⛔ Decyzje", command=self._pokaz_biblioteczne,
+                                 bg="#c0392b", fg="white", font=("Arial", 8, "bold"),
+                                 padx=8, pady=2, relief=tk.RAISED, bd=1)
+        # Rozjazd RM_BAZA ↔ drzewko — też tylko na żądanie, nie samo z siebie.
+        self.btn_poza = tk.Button(top, text="⚠ Rozjazd drzewka", command=self._pokaz_poza_bom,
+                                  bg="#e67e22", fg="white", font=("Arial", 8),
+                                  padx=8, pady=2, relief=tk.RAISED, bd=1)
 
         # Parametry ZK — podmiot jest wymagany przez Subiekta (sekcja 4).
         par = tk.Frame(self, bg="#ecf0f1")
@@ -918,6 +919,12 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
                                bg="#34495e", fg="#ecf0f1", font=("Arial", 8))
         self.status.pack(side=tk.BOTTOM, fill=tk.X)
 
+        # Pasek blokady — nad statusem, tuż pod przyciskiem zapisu. Pokazywany
+        # tylko gdy coś blokuje zapis (patrz _odswiez_stan_zapisu).
+        self.pasek_blokady = tk.Label(self, text="", anchor="w", padx=12, pady=5,
+                                      bg="#c0392b", fg="white",
+                                      font=("Arial", 9, "bold"))
+
     # ── suchy przebieg ─────────────────────────────────────────────────────
     def _dry_run_async(self):
         self.btn_refresh.config(state=tk.DISABLED)
@@ -981,9 +988,21 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         # a okno potwierdzenia wypisuje pozycja po pozycji, co powstanie.
         self._zaznacz_tryb("wszystko")
 
-        if self.bib_bez_skladu:
-            self._pokaz_biblioteczne()
+        # Okno decyzji NIE otwiera się samo — tylko przyciskiem „⛔ Decyzje"
+        # na górnej belce. Jest modalne (grab_set), więc każde automatyczne
+        # wyskoczenie odbierało fokus i wypychało arkusz główny RM_BAZA na
+        # wierzch (zgłoszone 08.09.2026, dwukrotnie). Nic przez to nie
+        # przechodzi po cichu: zapis zostaje zablokowany do czasu decyzji,
+        # przycisk pokazuje ile ich czeka, a pasek statusu mówi wprost dlaczego.
         self._odswiez_stan_zapisu()
+
+        # Lista „do zrobienia" — dokładamy to, co ten podgląd wykrył, bez
+        # ruszania odhaczeń i zadań dopisanych ręcznie.
+        try:
+            subiekt_historia.scal_zadania(self.project_id, self._wykryte_zadania())
+        except Exception:
+            pass
+        self._odswiez_licznik_todo()
 
         pust = sum(1 for k in wynik.get("kroki", [])
                    if k["Rodzaj"] == "komplet" and k["Status"] == "pominiety-brak-skladnikow")
@@ -997,11 +1016,18 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         self.status.config(
             text=f"Podgląd gotowy — w Subiekcie nic nie zmieniono.{extra}{rozjazd}{note}")
 
-        # Rozjazd numerów między RM_BAZA a drzewkiem jest cichy i kosztowny:
-        # komplet powstaje ze statusem „utworzony”, tylko niepełny. Dlatego
-        # pełna lista idzie osobnym oknem, a nie dopiskiem w pasku.
-        if ile_poza:
-            self._pokaz_poza_bom()
+        # Rozjazd RM_BAZA ↔ drzewko też NIE wyskakuje sam (ta sama przyczyna
+        # co przy oknie decyzji: modalne okno zabiera fokus i wypycha arkusz
+        # główny na wierzch). Informacja nie ginie — jest w pasku statusu,
+        # na przycisku z licznikiem i jako zadanie na liście „Do zrobienia".
+        try:
+            if ile_poza:
+                self.btn_poza.config(text=f"⚠ Rozjazd drzewka ({ile_poza})")
+                self.btn_poza.pack(side=tk.RIGHT, padx=(0, 4), pady=8)
+            else:
+                self.btn_poza.pack_forget()
+        except (AttributeError, tk.TclError):
+            pass
 
     # ── rozjazd RM_BAZA ↔ drzewko ──────────────────────────────────────────
     def _pokaz_poza_bom(self):
@@ -1207,6 +1233,234 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         wysrodkuj(okno, self)
         okno.grab_set()
 
+    # ── notatka „do zrobienia" ─────────────────────────────────────────────
+    def _wykryte_zadania(self):
+        """Rzeczy, których okno NIE załatwia — wyliczane z aktualnego podglądu.
+
+        To jest lista tego, co po zamknięciu okna zostaje na głowie człowieka:
+        biblioteczne bez składu, złożenia bez węzła w drzewku, składniki spoza
+        BOM-u, pominięte pozycje. Wcześniej znikało razem z oknem.
+        """
+        zadania = []
+        for numer, nazwa in sorted(getattr(self, "bib_bez_skladu", {}).items()):
+            zadania.append(f"Uzupełnić skład bibliotecznego złożenia {numer} ({nazwa}) "
+                           f"— biblioteka B:\\ nie podaje, z czego się składa")
+
+        if self.plan:
+            for p in self.plan["pozycje"]:
+                if (p["typ"] in KOMPLETY and not p["skladniki"]
+                        and p["symbol"].strip().upper() not in getattr(self, "bib_bez_skladu", {})):
+                    zadania.append(f"Poprawić drzewko dla {p['symbol']} ({p.get('nazwa') or ''}) "
+                                   f"— złożenie {p['typ']} bez żadnego składnika w *_OUT.xlsx")
+
+        for rodzic, dzieci in sorted(getattr(self, "poza_bom", {}).items()):
+            ukryte = [n for n, powod, _ in dzieci if powod == "ukryta"]
+            nieznane = [n for n, powod, _ in dzieci if powod != "ukryta"]
+            if ukryte:
+                zadania.append(f"Odkryć w arkuszu {len(ukryte)} pozycji dla kompletu {rodzic}: "
+                               + ", ".join(sorted(ukryte)[:5])
+                               + (" …" if len(ukryte) > 5 else ""))
+            if nieznane:
+                zadania.append(f"Poprawić numery w Inventorze i przeimportować — komplet {rodzic} "
+                               f"nie znajduje: " + ", ".join(sorted(nieznane)[:5])
+                               + (" …" if len(nieznane) > 5 else ""))
+        return zadania
+
+    def _odswiez_licznik_todo(self):
+        """Liczba niezrobionych na przycisku — inaczej nikt tam nie zajrzy."""
+        try:
+            dane = subiekt_historia.wczytaj_notatke(self.project_id) or {}
+            ile = sum(1 for z in dane.get("zadania", []) if not z.get("zrobione"))
+            self.btn_todo.config(
+                text=f"📋 Do zrobienia ({ile})" if ile else "📋 Do zrobienia",
+                bg="#c0392b" if ile else "#8e44ad")
+        except Exception:
+            pass
+
+    def _okno_notatki(self):
+        """Lista „do zrobienia" projektu — odhaczanie, dopisywanie, notatka.
+
+        Leży we WSPÓLNYM katalogu (subiekt_historia), więc widzi ją każdy
+        użytkownik: notuje jeden, robi często ktoś inny.
+        """
+        dane = subiekt_historia.wczytaj_notatke(self.project_id) or {"zadania": [], "tekst": ""}
+        zadania = list(dane.get("zadania", []))
+
+        okno = tk.Toplevel(self)
+        okno.title(f"Do zrobienia — projekt {self.project_name}")
+        okno.geometry("820x600")
+        okno.minsize(640, 420)
+        okno.transient(self)
+        okno.bind("<Escape>", lambda e: okno.destroy())
+
+        naglowek = tk.Frame(okno, bg="#8e44ad")
+        naglowek.pack(fill=tk.X)
+        tk.Label(naglowek, text="📋 Czego okno NIE zrobiło — zostaje na Twojej głowie",
+                 bg="#8e44ad", fg="white", font=("Arial", 11, "bold"),
+                 anchor="w", padx=12, pady=8).pack(fill=tk.X)
+        tk.Label(okno, text="Lista jest wspólna dla wszystkich stanowisk — notuje jeden, robi kto inny.",
+                 fg="#7f8c8d", font=("Arial", 8), anchor="w", padx=12, pady=4).pack(fill=tk.X)
+
+        # Stopka przed listą — inaczej przy wielu zadaniach przyciski wypadają.
+        stopka = tk.Frame(okno)
+        stopka.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=10)
+
+        dodaj_ramka = tk.Frame(okno)
+        dodaj_ramka.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(0, 6))
+        var_nowe = tk.StringVar()
+        tk.Entry(dodaj_ramka, textvariable=var_nowe, font=("Arial", 9)).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, ipady=3)
+
+        ramka = tk.Frame(okno)
+        ramka.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 4))
+        kanwa = tk.Canvas(ramka, highlightthickness=0)
+        vs = ttk.Scrollbar(ramka, orient="vertical", command=kanwa.yview)
+        wnetrze = tk.Frame(kanwa)
+        wnetrze.bind("<Configure>", lambda e: kanwa.configure(scrollregion=kanwa.bbox("all")))
+        okno_id = kanwa.create_window((0, 0), window=wnetrze, anchor="nw")
+        kanwa.bind("<Configure>", lambda e: kanwa.itemconfig(okno_id, width=e.width))
+        kanwa.configure(yscrollcommand=vs.set)
+        kanwa.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+
+        zmienne = []
+
+        def zapisz_stan():
+            for z, var in zmienne:
+                nowy = bool(var.get())
+                if nowy != bool(z.get("zrobione")):
+                    z["zrobione"] = nowy
+                    if nowy:
+                        z["zrobil"] = os.environ.get("USERNAME") or "?"
+                        z["zrobione_kiedy"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    else:
+                        z.pop("zrobil", None)
+                        z.pop("zrobione_kiedy", None)
+            subiekt_historia.zapisz_notatke(self.project_id, zadania=zadania,
+                                            tekst=txt.get("1.0", tk.END).strip())
+            self._odswiez_licznik_todo()
+
+        def przeladuj():
+            for w in wnetrze.winfo_children():
+                w.destroy()
+            zmienne.clear()
+            if not zadania:
+                tk.Label(wnetrze, text="Nic do zrobienia — wszystko czysto.",
+                         fg="#7f8c8d", anchor="w", padx=6, pady=10).pack(fill=tk.X)
+            for z in zadania:
+                wiersz = tk.Frame(wnetrze, pady=3)
+                wiersz.pack(fill=tk.X, anchor="w")
+                var = tk.BooleanVar(value=bool(z.get("zrobione")))
+                zmienne.append((z, var))
+                cb = tk.Checkbutton(wiersz, variable=var, anchor="nw",
+                                    text=z.get("tekst", ""), justify="left",
+                                    wraplength=600, command=zapisz_stan)
+                if z.get("zrobione"):
+                    cb.config(fg="#95a5a6")
+                cb.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                # Dwuklik w treść = edycja. Także dla auto-zadań: user często
+                # chce dopisać ustalenie („czeka na rysunek od Kowalskiego”),
+                # a nie zaczynać od zera. Zmieniony tekst przestaje być „auto”,
+                # więc kolejny podgląd go nie nadpisze ani nie zdubluje.
+                cb.bind("<Double-Button-1>", lambda e, zz=z: edytuj(zz))
+                tk.Button(wiersz, text="✎", command=lambda zz=z: edytuj(zz),
+                          bg="#ecf0f1", fg="#2c3e50", relief=tk.FLAT,
+                          padx=6, cursor="hand2").pack(side=tk.RIGHT)
+                if z.get("zrodlo") == "reczne":
+                    tk.Button(wiersz, text="✕", command=lambda zz=z: usun(zz),
+                              bg="#ecf0f1", fg="#c0392b", relief=tk.FLAT,
+                              padx=6, cursor="hand2").pack(side=tk.RIGHT)
+                podpis = []
+                if z.get("zrobione") and z.get("zrobil"):
+                    podpis.append(f"✓ {z['zrobil']} {z.get('zrobione_kiedy','')}")
+                elif z.get("kto"):
+                    podpis.append(f"{z['kto']}")
+                if podpis:
+                    tk.Label(wiersz, text="   ".join(podpis), fg="#95a5a6",
+                             font=("Arial", 7)).pack(side=tk.RIGHT, padx=6)
+
+        def usun(z):
+            zadania.remove(z)
+            subiekt_historia.zapisz_notatke(self.project_id, zadania=zadania)
+            self._odswiez_licznik_todo()
+            przeladuj()
+
+        def edytuj(z):
+            """Zmiana treści zadania w małym oknie (tekst bywa długi)."""
+            dlg = tk.Toplevel(okno)
+            dlg.title("Edycja zadania")
+            dlg.geometry("620x220")
+            dlg.transient(okno)
+            dlg.bind("<Escape>", lambda e: dlg.destroy())
+            tk.Label(dlg, text="Treść zadania:", anchor="w", padx=12, pady=6,
+                     font=("Arial", 9, "bold")).pack(fill=tk.X)
+            pole = tk.Text(dlg, height=5, wrap="word", font=("Arial", 9))
+            pole.pack(fill=tk.BOTH, expand=True, padx=12)
+            pole.insert("1.0", z.get("tekst", ""))
+            pole.focus_set()
+
+            def ok():
+                nowy = pole.get("1.0", tk.END).strip()
+                if not nowy:
+                    messagebox.showwarning("Edycja", "Treść nie może być pusta.", parent=dlg)
+                    return
+                if nowy != z.get("tekst"):
+                    z["tekst"] = nowy
+                    # Zmieniony ręcznie — automat nie ma prawa go nadpisać,
+                    # a przy kolejnym podglądzie oryginał wróci jako nowe
+                    # zadanie tylko wtedy, gdy problem nadal istnieje.
+                    z["zrodlo"] = "reczne"
+                    z["kto"] = os.environ.get("USERNAME") or "?"
+                    z["kiedy"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    subiekt_historia.zapisz_notatke(self.project_id, zadania=zadania)
+                    self._odswiez_licznik_todo()
+                dlg.destroy()
+                przeladuj()
+
+            pasek = tk.Frame(dlg)
+            pasek.pack(fill=tk.X, padx=12, pady=10)
+            tk.Button(pasek, text="Zapisz", command=ok, bg="#2c3e50", fg="white",
+                      relief=tk.FLAT, font=("Arial", 9, "bold"), padx=18,
+                      pady=4, cursor="hand2").pack(side=tk.RIGHT)
+            tk.Button(pasek, text="Anuluj", command=dlg.destroy, bg="#95a5a6",
+                      fg="white", relief=tk.FLAT, padx=14, pady=4).pack(side=tk.RIGHT, padx=(0, 8))
+            wysrodkuj(dlg, okno)
+            dlg.grab_set()
+
+        def dodaj(event=None):
+            tekst = var_nowe.get().strip()
+            if not tekst:
+                return
+            zadania.append({"tekst": tekst, "zrobione": False, "zrodlo": "reczne",
+                            "kto": os.environ.get("USERNAME") or "?",
+                            "kiedy": datetime.now().strftime("%Y-%m-%d %H:%M")})
+            var_nowe.set("")
+            subiekt_historia.zapisz_notatke(self.project_id, zadania=zadania)
+            self._odswiez_licznik_todo()
+            przeladuj()
+
+        tk.Button(dodaj_ramka, text="➕ Dodaj", command=dodaj, bg="#27ae60", fg="white",
+                  relief=tk.FLAT, padx=14, pady=3, cursor="hand2").pack(side=tk.LEFT, padx=(8, 0))
+        okno.bind("<Return>", dodaj)
+
+        tk.Label(okno, text="Notatki:", anchor="w", padx=12,
+                 font=("Arial", 8, "bold")).pack(side=tk.BOTTOM, fill=tk.X)
+        txt = tk.Text(okno, height=4, wrap="word", font=("Arial", 9))
+        txt.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(0, 4))
+        txt.insert("1.0", dane.get("tekst", ""))
+
+        przeladuj()
+
+        tk.Button(stopka, text="Zapisz i zamknij",
+                  command=lambda: (zapisz_stan(), okno.destroy()),
+                  bg="#2c3e50", fg="white", relief=tk.FLAT,
+                  font=("Arial", 10, "bold"), padx=20, pady=5,
+                  cursor="hand2").pack(side=tk.RIGHT)
+        tk.Label(stopka, text="Zmiany zapisują się od razu; notatki przy zamknięciu.",
+                 fg="#7f8c8d", font=("Arial", 8)).pack(side=tk.LEFT)
+
+        wysrodkuj(okno, self)
+
     def _kopiuj_poza_bom(self, okno):
         # TSV z nagłówkiem — do wklejenia wprost w Excel i porównania z arkuszem.
         nazwy_rodzicow = {it["nr"].upper(): (it.get("nazwa") or "")
@@ -1394,23 +1648,82 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         """Włącza/wyłącza zapis i MÓWI DLACZEGO — szary przycisk bez powodu
         jest gorszy niż brak blokady (user nie wie, co ma zrobić)."""
         mozna = self._mozna_zapisac()
-        self.btn_write.config(state=tk.NORMAL if mozna else tk.DISABLED)
-        if mozna or not self.plan:
-            return
         nieprzy = [n for n in self.bib_bez_skladu if n not in self._bib_decyzje]
-        blad = [p["symbol"] for p in self.plan["pozycje"]
+        blad = [p["symbol"] for p in (self.plan or {}).get("pozycje", [])
                 if p["typ"] in KOMPLETY and not p["skladniki"]
                 and p["symbol"].strip().upper() not in self.bib_bez_skladu]
-        if nieprzy:
-            self.status.config(
-                text=f"⛔ ZAPIS ZABLOKOWANY — {len(nieprzy)} złożeń bibliotecznych czeka na decyzję "
-                     f"({', '.join(sorted(nieprzy)[:3])}{'…' if len(nieprzy) > 3 else ''}). "
-                     "Kliknij „Odśwież”, żeby wrócić do okna decyzji.")
+
+        # Sam przycisk mówi, CZEGO brakuje. Szary „Zapisz do Subiekta" bez
+        # słowa wyjaśnienia user po prostu klika i dziwi się, że nic się nie
+        # dzieje — a pasek statusu na samym dole łatwo przeoczyć
+        # (zgłoszone 08.09.2026: „jak zrobić, żeby user nie przegapił decyzji").
+        if mozna:
+            self.btn_write.config(state=tk.NORMAL, text="💾 Zapisz do Subiekta",
+                                  bg="#e67e22")
+        elif nieprzy:
+            self.btn_write.config(state=tk.DISABLED, bg="#95a5a6",
+                                  text=f"⛔ Najpierw decyzje ({len(nieprzy)})")
         elif blad:
-            self.status.config(
-                text=f"⛔ ZAPIS ZABLOKOWANY — {len(blad)} złożeń Z/ZZ nie ma ŻADNEGO składnika w drzewku "
-                     f"({', '.join(sorted(blad)[:3])}{'…' if len(blad) > 3 else ''}). "
-                     "To błąd danych: popraw drzewko w *_OUT.xlsx albo ukryj te pozycje w arkuszu.")
+            self.btn_write.config(state=tk.DISABLED, bg="#95a5a6",
+                                  text=f"⛔ Popraw drzewko ({len(blad)})")
+        else:
+            self.btn_write.config(state=tk.DISABLED, bg="#95a5a6",
+                                  text="💾 Zapisz do Subiekta")
+
+        # Przycisk powrotu do decyzji — okno nie wyskakuje już samo przy każdym
+        # podglądzie, więc musi być jak do niego wrócić.
+        try:
+            if nieprzy:
+                self.btn_bib.config(text=f"⛔ Decyzje ({len(nieprzy)})", state=tk.NORMAL)
+                self.btn_bib.pack(side=tk.RIGHT, padx=(0, 4), pady=8)
+                self._migaj_decyzje()
+            else:
+                self.btn_bib.pack_forget()
+        except (AttributeError, tk.TclError):
+            pass
+
+        # Pasek TUŻ NAD przyciskiem zapisu — tam patrzy oko, gdy chce zapisać.
+        try:
+            if nieprzy:
+                self.pasek_blokady.config(
+                    text=f"⛔ {len(nieprzy)} złożeń bibliotecznych czeka na decyzję "
+                         f"({', '.join(sorted(nieprzy)[:3])}{'…' if len(nieprzy) > 3 else ''})"
+                         "  —  kliknij „⛔ Decyzje” na górnej belce",
+                    bg="#c0392b")
+                self.pasek_blokady.pack(side=tk.BOTTOM, fill=tk.X, before=self.status)
+            elif blad:
+                self.pasek_blokady.config(
+                    text=f"⛔ {len(blad)} złożeń Z/ZZ nie ma ŻADNEGO składnika w drzewku "
+                         f"({', '.join(sorted(blad)[:3])}{'…' if len(blad) > 3 else ''})"
+                         "  —  popraw *_OUT.xlsx albo ukryj te pozycje w arkuszu",
+                    bg="#c0392b")
+                self.pasek_blokady.pack(side=tk.BOTTOM, fill=tk.X, before=self.status)
+            else:
+                self.pasek_blokady.pack_forget()
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _migaj_decyzje(self, ile=6):
+        """Kilka mrugnięć przyciskiem decyzji — przyciąga wzrok bez zabierania
+        fokusu (modalne okno robiło to kosztem wypchnięcia arkusza na wierzch).
+        Miga tylko po zmianie stanu, nie w kółko — irytujący element user
+        nauczy się ignorować."""
+        if getattr(self, "_miga", False):
+            return
+        self._miga = True
+
+        def krok(n):
+            try:
+                if n <= 0 or not self.btn_bib.winfo_ismapped():
+                    self.btn_bib.config(bg="#c0392b")
+                    self._miga = False
+                    return
+                self.btn_bib.config(bg="#e74c3c" if n % 2 else "#7b241c")
+                self.after(280, lambda: krok(n - 1))
+            except tk.TclError:
+                self._miga = False
+
+        krok(ile)
 
     # ── dymek z pełną treścią uciętej komórki ──────────────────────────────
     def _tooltip_ukryj(self):
@@ -1794,6 +2107,24 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
 
     def _write_async(self):
         if not self.plan:
+            return
+
+        # Ostatnia bariera — przycisk bywa wyszarzony, ale gdyby stan zdążył
+        # się rozjechać (np. „Przelicz" wykrył nowe pozycje), zapis nie może
+        # przejść bez decyzji. Zamiast samego „nie da się" prowadzimy wprost
+        # do okna, w którym się ją podejmuje.
+        czekaja = [n for n in self.bib_bez_skladu if n not in self._bib_decyzje]
+        if czekaja:
+            messagebox.showwarning(
+                "Najpierw decyzje",
+                f"{len(czekaja)} złożeń bibliotecznych czeka na decyzję:\n\n   "
+                + "\n   ".join(sorted(czekaja))
+                + "\n\nBez niej powstałby PUSTY komplet — kartoteka rodzaju Komplet\n"
+                  "bez składu, z której magazynier nic nie złoży.\n\n"
+                  "Za chwilę otworzę okno decyzji.",
+                parent=self)
+            self._na_wierzch()
+            self._pokaz_biblioteczne()
             return
 
         podmiot = self.var_podmiot.get().strip()

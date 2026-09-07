@@ -148,7 +148,18 @@ def utworz_rw(pozycje, uwagi, magazyn=MAGAZYN, zapisz=True, timeout=TIMEOUT_S):
     with open(plan_path, "w", encoding="utf-8") as f:
         json.dump({"pozycje": pozycje, "uwagi": uwagi, "magazyn": magazyn}, f, ensure_ascii=False)
     argv = [f"--plan={plan_path}"] + (["--zapisz"] if zapisz else [])
-    return _uruchom("rw", argv, os.path.join(tmp, "wynik.json"), timeout)
+    wynik = _uruchom("rw", argv, os.path.join(tmp, "wynik.json"), timeout)
+    # Ślad do WSPÓLNEJ historii — RW zdejmuje stan i dotąd nie zostawiał
+    # nigdzie żadnego zapisu po stronie RM_BAZA (zgłoszone 08.09.2026).
+    # Tylko realny zapis, suchy przebieg nic nie zmienia.
+    if zapisz:
+        try:
+            from subiekt_historia import zapisz_historie
+            zapisz_historie("rw", wynik, magazyn=magazyn, uwagi=uwagi,
+                            pozycji=len(pozycje or []))
+        except Exception:
+            pass          # historia nie może wywalić operacji, która się udała
+    return wynik
 
 
 def usun_kartoteki(symbole, zapisz=False, timeout=TIMEOUT_S):
