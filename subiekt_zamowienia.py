@@ -2380,12 +2380,14 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         # Nie z master: dla ZD, które przeszło już cykl lock→wgranie, wpisów
         # tam nie ma, a flaga w arkuszu i tak siedzi.
         zd = getattr(self, "_zd_do_usuniecia", None) or {}
+        # Trójki (projekt, pozycja, NUMER ZD): numer mówi, z której wysyłki
+        # wziąć termin do zdjęcia z arkusza.
         refy = set()
         for nr in numery_zd:
             for w in (zd.get(nr) or {}).get("poz") or []:
                 for ref in w.get("bom_ref") or []:
                     if ref and ref[0] and ref[1]:
-                        refy.add((int(ref[0]), int(ref[1])))
+                        refy.add((int(ref[0]), int(ref[1]), nr))
         arkusz = getattr(self, "master", None)
         pid = getattr(arkusz, "current_project_id", None)
         # Kopię lokalną wolno ruszać tylko pod lockiem. Bez niego cofnięcie
@@ -2409,9 +2411,9 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
                 pass
         if not odlozone:
             return ""
-        opis = f"Cofnięto „Zamówiono” dla {odlozone} poz."
+        opis = f"Cofnięto „Zamówiono” i termin z tej wysyłki dla {odlozone} poz."
         if odznaczone:
-            opis += f" (w otwartym projekcie odznaczono {odznaczone})"
+            opis += f" (w otwartym projekcie poprawiono {odznaczone})"
         elif not pod_lockiem:
             opis += " — w arkuszu zniknie przy najbliższym przejęciu projektu."
         return opis

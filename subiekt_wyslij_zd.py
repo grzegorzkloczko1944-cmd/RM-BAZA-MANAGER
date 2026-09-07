@@ -360,15 +360,45 @@ def odloz_zamowienia(bom_refy, termin, numer_zd, supplier_id=None):
 
 
 def _zapewnij_tabele_cofniec(con):
-    """Tabela odłożonych cofnięć „Zamówiono" — lustro zd_zamowione_pozycje."""
+    """Tabela odłożonych cofnięć „Zamówiono" — lustro zd_zamowione_pozycje.
+
+    `termin` to termin, z którym usuwane ZD było WYSŁANE (z dziennika
+    zd_wyslane). Przy zdejmowaniu kasujemy termin dostawy w arkuszu tylko
+    wtedy, gdy nadal równa się temu — bo wtedy wiadomo, że przyszedł z tej
+    wysyłki i pokazuje dostawę, której nie będzie. Termin zmieniony ręcznie
+    po wysyłce zostaje (zgłoszone 07.09.2026: po usunięciu ZD flagi zeszły,
+    a terminy z tych ZD stały dalej w arkuszu).
+    """
     con.execute("""
         CREATE TABLE IF NOT EXISTS zd_cofniete_pozycje (
             project_id  INTEGER NOT NULL,
             item_id     INTEGER NOT NULL,
             numer_zd    TEXT,
+            termin      TEXT,
             kiedy       TEXT NOT NULL,
             PRIMARY KEY (project_id, item_id)
         )""")
+    # Kolumna doszła tego samego dnia, ale tabela mogła już powstać bez niej.
+    if "termin" not in {r[1] for r in con.execute("PRAGMA table_info(zd_cofniete_pozycje)")}:
+        con.execute("ALTER TABLE zd_cofniete_pozycje ADD COLUMN termin TEXT")
+
+
+def _terminy_wysylek(con, numery):
+    """{numer ZD: termin z OSTATNIEJ wysyłki} — z dziennika zd_wyslane.
+
+    ZD bywa wysyłane ponownie z innym terminem; w arkuszu siedzi ten
+    z ostatniej wysyłki, więc ten porównujemy.
+    """
+    out = {}
+    if not numery or not con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='zd_wyslane'").fetchone():
+        return out
+    pyt = ",".join("?" * len(numery))
+    for nr, termin in con.execute(
+            f"SELECT numer_zd, termin FROM zd_wyslane WHERE numer_zd IN ({pyt}) ORDER BY id",
+            numery):
+        out[(nr or "").strip()] = (termin or "").strip()[:10] or None     # ostatni wygrywa
+    return out
 
 
 def cofnij_zamowienia(numery_zd, bom_refy=(), project_con=None, project_id=None, log=None):
@@ -403,16 +433,23 @@ def cofnij_zamowienia(numery_zd, bom_refy=(), project_con=None, project_id=None,
       * `zd_wyslane` — to dziennik zdarzeń („wysłano wtedy i wtedy"), a nie
         stan; historii się nie przepisuje.
 
-    Zwraca (ile_odlozonych_cofniec, ile_odznaczonych_w_otwartym_projekcie).
+    `bom_refy`: [(project_id, item_id, numer_zd)] — trzeci element mówi,
+    z KTÓREGO usuwanego ZD pozycja pochodzi; po nim bierzemy termin wysyłki.
+    Dwuelementowe krotki też przechodzą (bez terminu).
+
+    Zwraca (ile_odlozonych_cofniec, ile_poprawionych_w_otwartym_projekcie).
     """
     import sqlite3
     numery = [str(n).strip() for n in (numery_zd or ()) if str(n).strip()]
-    refy = sorted({(int(r[0]), int(r[1])) for r in (bom_refy or ())
-                   if r and r[0] and r[1]})
+    refy = {}
+    for r in (bom_refy or ()):
+        if r and r[0] and r[1]:
+            refy[(int(r[0]), int(r[1]))] = (str(r[2]).strip() if len(r) > 2 and r[2] else None)
     if not numery and not refy:
         return 0, 0
 
     odlozone = 0
+    wpisy = []                          # (pid, iid, termin) — do kopii lokalnej
     try:
         con = sqlite3.connect(_master(), timeout=10)
         try:
@@ -426,13 +463,18 @@ def cofnij_zamowienia(numery_zd, bom_refy=(), project_con=None, project_id=None,
                 pyt = ",".join("?" * len(numery))
                 con.execute(f"DELETE FROM zd_zamowione_pozycje WHERE numer_zd IN ({pyt})",
                             numery)
+            terminy = _terminy_wysylek(con, numery)
+            # Ref bez numeru dostaje termin tylko wtedy, gdy usuwane jest
+            # JEDNO ZD — inaczej nie wiadomo, który.
+            jedyny = terminy.get(numery[0]) if len(numery) == 1 else None
             teraz = datetime.now().isoformat(timespec="seconds")
-            etykieta = ", ".join(numery) or None
+            for (pid, iid), nr in sorted(refy.items()):
+                wpisy.append((pid, iid, terminy.get(nr) if nr else jedyny, nr or ", ".join(numery)))
             con.executemany(
                 "INSERT OR REPLACE INTO zd_cofniete_pozycje"
-                " (project_id, item_id, numer_zd, kiedy) VALUES (?,?,?,?)",
-                [(pid, iid, etykieta, teraz) for pid, iid in refy])
-            odlozone = len(refy)
+                " (project_id, item_id, numer_zd, termin, kiedy) VALUES (?,?,?,?,?)",
+                [(pid, iid, nr, termin, teraz) for pid, iid, termin, nr in wpisy])
+            odlozone = len(wpisy)
             con.commit()
         finally:
             con.close()
@@ -443,42 +485,69 @@ def cofnij_zamowienia(numery_zd, bom_refy=(), project_con=None, project_id=None,
     # Otwarty pod lockiem projekt poprawiamy OD RAZU — inaczej użytkownik
     # usuwa ZD z własnego projektu i nic nie widzi. Wpis w master zostaje
     # do wgrania na serwer, jak przy nakładaniu.
-    odznaczone = 0
+    poprawione = 0
     if project_con is not None and project_id:
-        odznaczone = _zdejmij_z_kopii(
-            project_con, [iid for pid, iid in refy if pid == project_id], log)
-    return odlozone, odznaczone
+        poprawione = _zdejmij_z_kopii(
+            project_con, [(iid, termin) for pid, iid, termin, _nr in wpisy if pid == project_id],
+            log)
+    return odlozone, poprawione
 
 
-def _zdejmij_z_kopii(project_con, item_ids, log=None):
-    """Zdejmuje ordered_flag z podanych pozycji kopii lokalnej. Zwraca ile."""
-    if not item_ids:
+def _zdejmij_z_kopii(project_con, wpisy, log=None):
+    """Zdejmuje „Zamówiono" (i termin z tej wysyłki) z pozycji kopii lokalnej.
+
+    `wpisy`: [(item_id, termin_wysylki)]. Dwie niezależne poprawki na pozycję:
+      * ordered_flag=1 → 0 i ordered_at → NULL,
+      * deadline_date == termin_wysylki → NULL (termin przyszedł z tej wysyłki
+        i pokazuje dostawę, której nie będzie; inny termin = ktoś zmienił
+        ręcznie, zostaje).
+    Każda z osobna i idempotentnie — przy kolejnym locku flaga może już być
+    zdjęta, a termin jeszcze nie (tak było 07.09.2026 po pierwszej wersji).
+
+    Zwraca liczbę pozycji, w których cokolwiek się zmieniło.
+    """
+    if not wpisy:
         return 0
     teraz = datetime.now().isoformat(timespec="seconds")
     ile = 0
     try:
-        for item_id in item_ids:
+        for item_id, termin in wpisy:
             stare = project_con.execute(
-                "SELECT ordered_flag, ordered_at FROM items WHERE id=?",
+                "SELECT ordered_flag, ordered_at, deadline_date FROM items WHERE id=?",
                 (item_id,)).fetchone()
-            if stare is None or not int(stare[0] or 0):
-                continue                # pozycji nie ma albo już nieoznaczona
-            project_con.execute(
-                "UPDATE items SET ordered_flag=0, ordered_at=NULL, updated_at=?"
-                " WHERE id=?", (teraz, item_id))
-            ile += 1
-            if callable(log):
-                try:
-                    log(item_id, 'EDIT', 'ordered_at', stare[1], None)
-                except Exception:
-                    pass                # audyt to dodatek, nie warunek zapisu
+            if stare is None:
+                continue                # pozycja usunięta z BOM-u
+            zmiana = False
+            if int(stare[0] or 0):
+                project_con.execute(
+                    "UPDATE items SET ordered_flag=0, ordered_at=NULL, updated_at=?"
+                    " WHERE id=?", (teraz, item_id))
+                zmiana = True
+                if callable(log):
+                    try:
+                        log(item_id, 'EDIT', 'ordered_at', stare[1], None)
+                    except Exception:
+                        pass            # audyt to dodatek, nie warunek zapisu
+            termin_ark = (str(stare[2] or "").strip()[:10]) or None
+            if termin and termin_ark == termin:
+                project_con.execute(
+                    "UPDATE items SET deadline_date=NULL, updated_at=? WHERE id=?",
+                    (teraz, item_id))
+                zmiana = True
+                if callable(log):
+                    try:
+                        log(item_id, 'EDIT', 'deadline_date', stare[2], None)
+                    except Exception:
+                        pass
+            if zmiana:
+                ile += 1
         project_con.commit()
     except Exception as e:
         try:
             project_con.rollback()
         except Exception:
             pass
-        print(f"⚠️  Nie odznaczono „Zamówiono” w kopii projektu: {e}")
+        print(f"⚠️  Nie cofnięto „Zamówiono” w kopii projektu: {e}")
         return 0
     return ile
 
@@ -504,15 +573,17 @@ def zdejmij_zamowienia(project_con, project_id, log=None):
             if not m.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
                              " AND name='zd_cofniete_pozycje'").fetchone():
                 return 0
-            item_ids = [r[0] for r in m.execute(
-                "SELECT item_id FROM zd_cofniete_pozycje WHERE project_id=?",
-                (project_id,))]
+            ma_termin = "termin" in {r[1] for r in m.execute(
+                "PRAGMA table_info(zd_cofniete_pozycje)")}
+            wpisy = [(r[0], (str(r[1] or "").strip()[:10] or None)) for r in m.execute(
+                "SELECT item_id, " + ("termin" if ma_termin else "NULL")
+                + " FROM zd_cofniete_pozycje WHERE project_id=?", (project_id,))]
         finally:
             m.close()
     except Exception as e:
         print(f"⚠️  Nie odczytano odłożonych cofnięć dla projektu {project_id}: {e}")
         return 0
-    return _zdejmij_z_kopii(project_con, item_ids, log)
+    return _zdejmij_z_kopii(project_con, wpisy, log)
 
 
 def naloz_zamowienia(project_con, project_id, log=None):

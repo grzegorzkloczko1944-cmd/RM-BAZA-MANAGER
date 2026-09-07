@@ -9004,8 +9004,9 @@ class MainWindow(tk.Tk):
                 czesci.append(f"Oznaczono {ile} poz. jako ZAMÓWIONE — poszły do "
                               "dostawcy zamówieniem ZD, gdy projekt nie był przejęty.")
             if zdjete:
-                czesci.append(f"Zdjęto ZAMÓWIONE z {zdjete} poz. — ich ZD usunięto "
-                              "z Subiekta, gdy projekt nie był przejęty.")
+                czesci.append(f"Cofnięto zamówienie dla {zdjete} poz. — ich ZD usunięto "
+                              "z Subiekta, gdy projekt nie był przejęty "
+                              "(zdjęto ZAMÓWIONO i termin dostawy z tej wysyłki).")
             messagebox.showinfo("Zamówienia z Subiekta", "\n\n".join(czesci), parent=self)
 
     def acquire_lock(self):
