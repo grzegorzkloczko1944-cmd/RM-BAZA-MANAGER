@@ -234,7 +234,14 @@ internal static class Zd
                         var numer = Bezp(() => zd.Dane.NumerWewnetrzny?.PelnaSygnatura) ?? "";
                         var ile = 0;
                         try { ile = zd.Dane.Pozycje.Count(); } catch { }
-                        utworzone.Add(new Zam(numer, dostawca, ile));
+                        // Id — TRWALY klucz dokumentu, nadany przez Subiekta przy
+                        // Zapisz(). Numer sie nie nadaje: Subiekt uzywa go ponownie
+                        // po usunieciu dokumentu, przez co dziennik wysylek
+                        // kluczowany numerem przypisywal NOWEMU ZD wysylke starego
+                        // (07.09.2026). RM_BAZA zapisuje ten Id w zd_wyslane.
+                        var id = 0;
+                        try { id = zd.Dane.Id; } catch { }
+                        utworzone.Add(new Zam(numer, dostawca, ile, id));
                         kroki.Add(new Krok("zd", dostawca, $"utworzone {numer} ({ile} poz.)", null));
                     }
                 }
@@ -264,6 +271,6 @@ internal static class Zd
     // na sklad dalo sie odroznic od projektowych (kolumna Projekt w Przegladzie
     // dokumentow bierze sie z Uwag).
     internal record Plan(List<PozPlan>? Pozycje, string? Uwagi);
-    internal record Zam(string Numer, string Dostawca, int Pozycji);
+    internal record Zam(string Numer, string Dostawca, int Pozycji, int Id = 0);
     internal record Krok(string Rodzaj, string Symbol, string Status, string? Szczegoly);
 }

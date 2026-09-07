@@ -1,4 +1,4 @@
-// Tryb "zd-usun" — kasuje wskazane dokumenty. ZAPISUJE (usuwa).
+﻿// Tryb "zd-usun" — kasuje wskazane dokumenty. ZAPISUJE (usuwa).
 //
 //   NexoRecon.exe zd-usun --numery="ZD 1/09/2026;ZK 5/CENTRALA/2026" [--out=w.json] --zapisz
 //
@@ -91,10 +91,15 @@ internal static class ZdUsun
                 var pozycji = 0;
                 try { pozycji = Enumerable.Count((IEnumerable<dynamic>)d.Pozycje); } catch { }
                 var opis = $"{rodzaj}: {podmiot}, {pozycji} poz.";
+                // Id USUWANEGO dokumentu — po nim RM_BAZA sprzata swoj dziennik
+                // wysylek. Numer sie do tego nie nadaje, bo Subiekt nada go
+                // zaraz nastepnemu dokumentowi (07.09.2026).
+                var id = 0;
+                try { id = (int)d.Id; } catch { }
 
                 if (!zapisz)
                 {
-                    kroki.Add(new Krok(numer, "do-usuniecia", opis));
+                    kroki.Add(new Krok(numer, "do-usuniecia", opis, id));
                     continue;
                 }
 
@@ -147,7 +152,7 @@ internal static class ZdUsun
                             + (string.IsNullOrWhiteSpace(bledy) ? "" : $" ({bledy})")));
                         continue;
                     }
-                    kroki.Add(new Krok(numer, "usuniete", opis));
+                    kroki.Add(new Krok(numer, "usuniete", opis, id));
                 }
                 catch (Exception ex)
                 {
@@ -183,5 +188,5 @@ internal static class ZdUsun
 
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
 
-    internal record Krok(string Numer, string Status, string? Szczegoly);
+    internal record Krok(string Numer, string Status, string? Szczegoly, int Id = 0);
 }

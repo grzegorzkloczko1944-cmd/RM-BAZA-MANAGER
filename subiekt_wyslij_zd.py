@@ -154,7 +154,8 @@ def _katalog_pdf_domyslny():
         return zapasowy
 
 
-def zapisz_wyslanie(numer_zd, adresat, nadawca, zalacznikow, termin=None, tryb=""):
+def zapisz_wyslanie(numer_zd, adresat, nadawca, zalacznikow, termin=None, tryb="",
+                    dokument_id=None):
     """
     Odnotowuje, że zamówienie poszło mailem — w RM_BAZA, nie w Subiekcie.
 
@@ -166,6 +167,12 @@ def zapisz_wyslanie(numer_zd, adresat, nadawca, zalacznikow, termin=None, tryb="
     wiemy na pewno. Czy użytkownik faktycznie kliknął „Wyślij", wie już tylko
     Outlook; dlatego kolumna nazywa się „Wysłano", ale znaczy „przygotowano
     i otwarto do wysłania".
+
+    ⚠️ KLUCZEM JEST `dokument_id`, nie numer. Subiekt używa numeru PONOWNIE
+    po usunięciu dokumentu (07.09.2026: po skasowaniu ZD 4/5/6 kolejne dostały
+    te same numery), więc dziennik kluczowany numerem pokazywał nowemu ZD
+    wysyłkę starego — z datą i podświetleniem „wysłane". `numer_zd` zostaje,
+    ale tylko do pokazania człowiekowi.
     """
     import sqlite3
     try:
@@ -175,6 +182,7 @@ def zapisz_wyslanie(numer_zd, adresat, nadawca, zalacznikow, termin=None, tryb="
                 CREATE TABLE IF NOT EXISTS zd_wyslane (
                     id           INTEGER PRIMARY KEY AUTOINCREMENT,
                     numer_zd     TEXT NOT NULL,
+                    dokument_id  INTEGER,
                     adresat      TEXT,
                     nadawca      TEXT,
                     zalacznikow  INTEGER,
@@ -184,11 +192,12 @@ def zapisz_wyslanie(numer_zd, adresat, nadawca, zalacznikow, termin=None, tryb="
                 )""")
             con.execute("CREATE INDEX IF NOT EXISTS idx_zd_wyslane_nr "
                         "ON zd_wyslane(numer_zd)")
-            _zapewnij_kolumne_usuniete(con)
+            _zapewnij_kolumne_id(con)
             con.execute(
-                "INSERT INTO zd_wyslane (numer_zd, adresat, nadawca, zalacznikow,"
-                " termin, tryb, kiedy) VALUES (?,?,?,?,?,?,?)",
-                (numer_zd, adresat, nadawca, int(zalacznikow or 0),
+                "INSERT INTO zd_wyslane (numer_zd, dokument_id, adresat, nadawca,"
+                " zalacznikow, termin, tryb, kiedy) VALUES (?,?,?,?,?,?,?,?)",
+                (numer_zd, int(dokument_id) if dokument_id else None,
+                 adresat, nadawca, int(zalacznikow or 0),
                  str(termin) if termin else None, tryb,
                  datetime.now().isoformat(timespec="seconds")))
             con.commit()
@@ -360,37 +369,53 @@ def odloz_zamowienia(bom_refy, termin, numer_zd, supplier_id=None):
         return 0
 
 
-def _zapewnij_kolumne_usuniete(con):
-    """Kolumna `dokument_usuniety` w dzienniku wysyłek (data unieważnienia).
+def _zapewnij_kolumne_id(con):
+    """Kolumna `dokument_id` w dzienniku wysyłek — TRWAŁY klucz dokumentu.
 
     ⚠️ SUBIEKT UŻYWA NUMERÓW PONOWNIE. Po usunięciu ZD 4, 5 i 6 nowe
     dokumenty dostały znów „ZD 4/CENTRALA/2026" i „ZD 5/CENTRALA/2026"
     (07.09.2026) — a dziennik, kluczowany numerem, pamiętał wysyłki starych.
     Świeżo wystawione ZD pokazywało się jako WYSŁANE, z cudzą datą.
 
-    Dziennik zostaje dziennikiem — historii nie kasujemy — ale wpis
-    dokumentu usuniętego przez RM_BAZA dostaje znacznik i od tej chwili nie
-    liczy się jako wysyłka. Numer użyty ponownie zaczyna z czystą kartą.
-    Nie łapie usunięcia bezpośrednio w Subiekcie; na to trzeba by kluczować
-    dziennik wewnętrznym Id dokumentu z mostu (patrz „Co zostało").
+    Pierwszym lekarstwem była kolumna `dokument_usuniety`: wpis dokumentu
+    usuniętego przez RM_BAZA dostawał znacznik i przestawał się liczyć. Działało,
+    ale nie łapało usunięcia zrobionego wprost w Subiekcie — numer wracał
+    „czysty" tylko wtedy, gdy kasowaliśmy go my.
+
+    Teraz kluczem jest Id dokumentu z mostu (`Dokumenty.cs`, `Zd.cs`,
+    `ZdUsun.cs`). Id nadaje Subiekt i nie używa go ponownie, więc problem
+    znika u źródła — niezależnie od tego, kto i gdzie usunął dokument.
+
+    ⚠️ Id jest LOKALNE DLA BAZY: to samo ZD ma inny Id na M-OLD i na produkcji.
+    Dziennika nie wolno przenosić między środowiskami.
+
+    Wiersze bez `dokument_id` (sprzed tej zmiany) są ignorowane przy odczycie —
+    patrz `historia_wyslania`. W firmie ich nie ma, bo wysyłka nie była tam
+    jeszcze używana (ustalone 08.09.2026).
     """
-    if "dokument_usuniety" not in {r[1] for r in con.execute("PRAGMA table_info(zd_wyslane)")}:
-        con.execute("ALTER TABLE zd_wyslane ADD COLUMN dokument_usuniety TEXT")
+    kolumny = {r[1] for r in con.execute("PRAGMA table_info(zd_wyslane)")}
+    if "dokument_id" not in kolumny:
+        con.execute("ALTER TABLE zd_wyslane ADD COLUMN dokument_id INTEGER")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_zd_wyslane_docid "
+                    "ON zd_wyslane(dokument_id)")
 
 
-def uniewaznij_wyslania(numery_zd):
-    """Znaczy wpisy dziennika usuniętych ZD jako nieaktualne. Zwraca ile.
+def uniewaznij_wyslania(dokument_idy):
+    """Usuwa wpisy dziennika dla usuniętych dokumentów. Zwraca ile.
 
-    Wołane PO cofnij_zamowienia — ono jeszcze czyta z dziennika termin
-    wysyłki, żeby zdjąć go z arkusza; po unieważnieniu już by go nie
-    znalazło. W chwili usuwania każdy ważny wpis z tym numerem należy do
-    usuwanego dokumentu (numer jest unikalny wśród ŻYWYCH dokumentów, a wpisy
-    poprzednich wcieleń numeru unieważniono przy ich usuwaniu).
+    `dokument_idy` — Id z Subiekta (z odpowiedzi trybu `zd-usun`), NIE numery.
+
+    Wołane PO cofnij_zamowienia: ono jeszcze czyta z dziennika termin wysyłki,
+    żeby zdjąć go z arkusza; po skasowaniu wpisu już by go nie znalazło.
+
+    Wpis KASUJEMY, a nie znaczamy jak wcześniej. Przy kluczu Id nie ma czego
+    chronić przed pomyleniem: Id usuniętego dokumentu nigdy nie wróci, więc
+    wpis nie ma już do czego się odnosić. Wcześniejszy `dokument_usuniety`
+    istniał tylko dlatego, że numer wracał do obiegu.
     """
     import sqlite3
-    norm = lambda s: " ".join(str(s or "").split()).upper()
-    szukane = {norm(n) for n in (numery_zd or ()) if str(n).strip()}
-    if not szukane:
+    idy = {int(i) for i in (dokument_idy or ()) if i}
+    if not idy:
         return 0
     try:
         con = sqlite3.connect(_master(), timeout=10)
@@ -398,19 +423,16 @@ def uniewaznij_wyslania(numery_zd):
             if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
                                " AND name='zd_wyslane'").fetchone():
                 return 0
-            _zapewnij_kolumne_usuniete(con)
-            teraz = datetime.now().isoformat(timespec="seconds")
-            ids = [r[0] for r in con.execute(
-                "SELECT id, numer_zd FROM zd_wyslane WHERE dokument_usuniety IS NULL")
-                if norm(r[1]) in szukane]
-            con.executemany("UPDATE zd_wyslane SET dokument_usuniety=? WHERE id=?",
-                            [(teraz, i) for i in ids])
+            _zapewnij_kolumne_id(con)
+            pyt = ",".join("?" * len(idy))
+            kur = con.execute(f"DELETE FROM zd_wyslane WHERE dokument_id IN ({pyt})",
+                              tuple(idy))
             con.commit()
-            return len(ids)
+            return kur.rowcount or 0
         finally:
             con.close()
     except Exception as e:
-        print(f"⚠️  Nie unieważniono wpisów dziennika wysyłek: {e}")
+        print(f"⚠️  Nie posprzątano dziennika wysyłek: {e}")
         return 0
 
 
@@ -455,11 +477,11 @@ def _terminy_wysylek(con, numery):
     # całości jest tańszy niż jedna pomyłka.
     norm = lambda s: " ".join(str(s or "").split()).upper()
     szukane = {norm(n): n for n in numery}
-    _zapewnij_kolumne_usuniete(con)
-    # Tylko wpisy ŻYWEGO dokumentu — po ponownym użyciu numeru przez
-    # Subiekta stare wysyłki są unieważnione i nie mogą podać terminu.
+    _zapewnij_kolumne_id(con)
+    # Wpisy usuniętych dokumentów są z dziennika KASOWANE (uniewaznij_wyslania),
+    # więc to, co tu zostało, należy do dokumentów żywych.
     for nr, termin in con.execute(
-            "SELECT numer_zd, termin FROM zd_wyslane WHERE dokument_usuniety IS NULL ORDER BY id"):
+            "SELECT numer_zd, termin FROM zd_wyslane ORDER BY id"):
         k = norm(nr)
         if k in szukane:
             out[szukane[k]] = (termin or "").strip()[:10] or None        # ostatni wygrywa
@@ -782,27 +804,36 @@ def usun_zamowienia(project_id):
 
 def historia_wyslania(numery=None):
     """
-    {numer ZD: (data ostatniej wysyłki, ile razy)} — do kolumny „Wysłano".
+    {Id dokumentu: (data ostatniej wysyłki, ile razy)} — do kolumny „Wysłano".
+
+    ⚠️ KLUCZEM JEST Id Z SUBIEKTA, nie numer — bo numer wraca do obiegu po
+    usunięciu dokumentu i nowe ZD dziedziczyło cudzą wysyłkę (07.09.2026).
+    Wołający dopasowuje po `Id` z trybu `dokumenty` mostu.
+
+    Wiersze bez `dokument_id` (zapisane przed przejściem na Id) są POMIJANE:
+    nie da się ich pewnie przypisać do dokumentu, a zgadywanie po numerze to
+    dokładnie ten błąd, który tu naprawiamy. W firmie takich nie ma.
+
     Pusty słownik, gdy tabeli jeszcze nie ma (nikt nic nie wysyłał).
     """
     import sqlite3
     try:
         con = sqlite3.connect(f"file:{_master()}?mode=ro", uri=True)
         try:
-            # Tylko wpisy ŻYWYCH dokumentów — Subiekt używa numerów ponownie
-            # (patrz _zapewnij_kolumne_usuniete). Połączenie jest read-only,
-            # więc kolumnę tylko sprawdzamy; dokłada ją pierwszy zapis.
+            # Połączenie jest read-only, więc kolumnę tylko sprawdzamy;
+            # dokłada ją pierwszy zapis (_zapewnij_kolumne_id).
             kolumny = {r[1] for r in con.execute("PRAGMA table_info(zd_wyslane)")}
-            gdzie = " WHERE dokument_usuniety IS NULL" if "dokument_usuniety" in kolumny else ""
+            if "dokument_id" not in kolumny:
+                return {}
             wiersze = con.execute(
-                f"SELECT numer_zd, MAX(kiedy), COUNT(*) FROM zd_wyslane{gdzie}"
-                " GROUP BY numer_zd").fetchall()
+                "SELECT dokument_id, MAX(kiedy), COUNT(*) FROM zd_wyslane"
+                " WHERE dokument_id IS NOT NULL GROUP BY dokument_id").fetchall()
         finally:
             con.close()
     except Exception:
         return {}
-    chciane = {str(n) for n in numery} if numery else None
-    return {n: (k, c) for n, k, c in wiersze if not chciane or n in chciane}
+    chciane = {int(n) for n in numery if n} if numery else None
+    return {i: (k, c) for i, k, c in wiersze if not chciane or i in chciane}
 
 
 #: Tryby wysyłki rysunków — treść pola „Rysunki" w stopce okna.
@@ -970,7 +1001,7 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
                  nadawca, szukaj_plikow=None, katalog_pdf=None, szukaj_maila=None,
                  szukaj_dalej=None, needs_dxf=None, register_drop=None,
                  dozwolone_ext=None, blad_serwera=None, agent_portalu=None,
-                 szukaj_hurtem=None, po_wyslaniu=None):
+                 szukaj_hurtem=None, po_wyslaniu=None, dokument_id=None):
         super().__init__(parent)
         # Okno MUSI trzymać się nad arkuszem. Bez transient() to zwykły
         # Toplevel: przy budowaniu listy plików (update_idletasks w pętli
@@ -981,6 +1012,10 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
         except Exception:
             pass
         self.numer_zd = numer_zd
+        #: Id dokumentu w Subiekcie — TRWALY klucz dziennika wysylek.
+        #: Numer sie nie nadaje: Subiekt uzywa go ponownie po usunieciu
+        #: dokumentu (patrz _zapewnij_kolumne_id).
+        self.dokument_id = dokument_id
         self.dostawca = dostawca
         self.projekt = projekt
         self.pozycje = pozycje              # [(symbol, nazwa, ilosc, jm)]
@@ -1729,7 +1764,8 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
         except ValueError:
             termin = None
         zapisz_wyslanie(self.numer_zd, do, self.nadawca, ile_zalacznikow,
-                        termin, self.var_tryb.get())
+                        termin, self.var_tryb.get(),
+                        dokument_id=getattr(self, 'dokument_id', None))
 
         # „Zamówiono" + termin → do master; arkusz nałoży to na projekt przy
         # najbliższym locku. Gdy projekt jest przejęty TERAZ u nas, nakładamy
@@ -1789,10 +1825,11 @@ def open_window(parent, numer_zd, dostawca, email, projekt, pozycje, nadawca,
                 szukaj_plikow=None, katalog_pdf=None, szukaj_maila=None,
                 szukaj_dalej=None, needs_dxf=None, register_drop=None,
                 dozwolone_ext=None, blad_serwera=None, agent_portalu=None,
-                szukaj_hurtem=None, po_wyslaniu=None):
+                szukaj_hurtem=None, po_wyslaniu=None, dokument_id=None):
     return OknoWysylki(parent, numer_zd, dostawca, email, projekt, pozycje,
                        nadawca, szukaj_plikow, katalog_pdf, szukaj_maila,
                        szukaj_dalej=szukaj_dalej, needs_dxf=needs_dxf,
                        register_drop=register_drop, dozwolone_ext=dozwolone_ext,
                        blad_serwera=blad_serwera, agent_portalu=agent_portalu,
-                       szukaj_hurtem=szukaj_hurtem, po_wyslaniu=po_wyslaniu)
+                       szukaj_hurtem=szukaj_hurtem, po_wyslaniu=po_wyslaniu,
+                       dokument_id=dokument_id)

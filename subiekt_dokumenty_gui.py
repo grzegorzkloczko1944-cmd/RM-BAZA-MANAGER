@@ -97,6 +97,9 @@ def _przelicz_dokumenty(data):
     wynik = [{
         "rodzaj": d.get("Rodzaj") or "",
         "numer": d.get("Numer") or "",
+        # Id z Subiekta — TRWAŁY klucz dokumentu. Numer wraca do obiegu po
+        # usunięciu (07.09.2026), więc dziennik wysyłek trzyma się Id.
+        "Id": d.get("Id") or 0,
         "data": d.get("Data") or "",
         "podmiot": (d.get("Podmiot") or "").strip(),
         "tytul": d.get("Tytul") or "",
@@ -170,7 +173,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         self.dokumenty = []
         self.widoczne = []
         self.biezacy = None
-        self._wyslane = {}          # {numer ZD: (kiedy, ile razy)} — kolumna „Wysłano”
+        self._wyslane = {}          # {Id dokumentu: (kiedy, ile razy)} — kolumna „Wysłano”
 
         self.title("Subiekt — przegląd dokumentów (ZK / ZD / RW / WZ)")
         self.geometry("1250x760")
@@ -471,7 +474,9 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         wyslane = getattr(self, "_wyslane", None) or {}
         for i, d in enumerate(out):
             if d["rodzaj"] == "ZD":
-                if (d.get("numer") or "") in wyslane:
+                # Dopasowanie po Id, nie po numerze — numer wraca do
+                # obiegu po usunieciu dokumentu (07.09.2026).
+                if (d.get("Id") or 0) in wyslane:
                     self.sheet.highlight_cells(row=i, column=0, bg="#b3d1ec")
                 else:
                     self.sheet.highlight_cells(row=i, column=0, bg="#dfeaf7")
@@ -608,7 +613,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         („Do realizacji") mówi o stanie magazynowym i nie zmienia się po
         wysłaniu maila.
         """
-        wpis = (getattr(self, "_wyslane", None) or {}).get(dok.get("numer") or "")
+        wpis = (getattr(self, "_wyslane", None) or {}).get(dok.get("Id") or 0)
         if not wpis:
             return ""
         kiedy, ile = wpis
@@ -733,6 +738,8 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         pozycje = self._pozycje_z_bomem(d)
         okno = self.master
         subiekt_wyslij_zd.open_window(
+            # Id z mostu — trwaly klucz dziennika wysylek (numer wraca do
+            # obiegu po usunieciu dokumentu).
             self, d.get("numer") or "", d.get("podmiot") or "",
             self._email_dostawcy(d), d.get("projekt") or "", pozycje, self._nadawca(),
             szukaj_plikow=getattr(okno, "_find_files_for_drawing", None),
@@ -742,6 +749,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
             # pisać drugą. Podpięcie _rfq_deep_scan wprost dawało przycisk,
             # który nic nie robił (zgłoszone 05.09.2026).
             szukaj_dalej=self._szukaj_dalej_rysunku,
+            dokument_id=d.get("Id") or d.get("id"),
             szukaj_hurtem=self._szukaj_hurtem_biblioteka,
             needs_dxf=getattr(okno, "_rfq_needs_dxf", None),
             # ⚠️ metoda nazywa się _register_file_drop, nie _register_drop_target
@@ -872,10 +880,15 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         norm = lambda s: " ".join(str(s or "").split()).upper()
         zapamietane = getattr(self, "_dok_do_usuniecia", None) or {}
         refy, bez_adresu, numery = set(), [], []
+        # Id usunietych dokumentow — po nich sprzatamy dziennik wysylek.
+        # Numer sie nie nadaje: Subiekt nada go zaraz nastepnemu ZD.
+        idy = []
         for nr in numery_zd:
             dok = zapamietane.get(norm(nr))
             numer = (dok or {}).get("numer") or " ".join(str(nr).split())
             numery.append(numer)
+            if (dok or {}).get("Id"):
+                idy.append(dok["Id"])
             adresow = 0
             if dok:
                 try:
@@ -904,11 +917,11 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
             odlozone, poprawione = 0, 0
         # Dopiero teraz — cofnięcie wyżej potrzebowało jeszcze żywego wpisu.
         try:
-            n = uniewaznij_wyslania(numery)
+            n = uniewaznij_wyslania(idy)
             if n:
-                print(f"🧾 Dziennik wysyłek: unieważniono {n} wpisów usuniętych ZD")
+                print(f"🧾 Dziennik wysyłek: usunięto {n} wpisów skasowanych ZD")
         except Exception as e:
-            print(f"⚠️  Nie unieważniono dziennika wysyłek: {e}")
+            print(f"⚠️  Nie posprzątano dziennika wysyłek: {e}")
         if poprawione and arkusz is not None:
             try:
                 arkusz.after(0, arkusz.refresh_data)

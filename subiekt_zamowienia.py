@@ -1901,6 +1901,29 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         tk.Button(stopka, text="Anuluj", command=dlg.destroy,
                   font=("Arial", 9), padx=12, pady=4).pack(side=tk.RIGHT, padx=6)
 
+    def _id_dokumentu(self, numer_zd):
+        """Id dokumentu w Subiekcie po numerze — z cache na czas życia okna.
+
+        Jedno wywołanie mostu na okno, nie na każdą wysyłkę: lista dokumentów
+        i tak przychodzi w całości, a numer→Id nie zmienia się w trakcie pracy.
+        Zwraca None, gdy mostu nie ma albo numeru nie znaleziono — wysyłka
+        wtedy działa, tylko bez śladu w dzienniku.
+        """
+        mapa = getattr(self, "_cache_id_dok", None)
+        if mapa is None:
+            mapa = {}
+            try:
+                import subiekt_bridge
+                dane = subiekt_bridge.call("dokumenty", {"limit": 300}, timeout=TIMEOUT_S)
+                for d in (dane or {}).get("dokumenty", []):
+                    nr = " ".join(str(d.get("Numer") or "").split()).upper()
+                    if nr and d.get("Id"):
+                        mapa[nr] = d["Id"]
+            except Exception as e:
+                print(f"⚠️  Nie pobrano Id dokumentów: {e}")
+            self._cache_id_dok = mapa
+        return mapa.get(" ".join(str(numer_zd or "").split()).upper())
+
     def _wyslij_dokument(self, numer_zd, dane):
         """Otwiera okno wysyłki dla jednego ZD."""
         try:
@@ -1908,6 +1931,12 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         except Exception as e:
             messagebox.showerror("Wyślij ZD", f"Brak modułu wysyłki:\n{e}", parent=self)
             return
+
+        # Id dokumentu — dziennik wysyłek kluczuje się nim, nie numerem
+        # (Subiekt nadaje numer ponownie po usunięciu ZD, 07.09.2026).
+        # To okno zna z arkusza sam numer, więc Id dociągamy z mostu.
+        # Bez niego wysyłka i tak się uda, tylko ślad będzie nie do dopasowania.
+        dokument_id = self._id_dokumentu(numer_zd)
 
         # Piąty element: czy pozycja ma numer rysunku (z BOM-u, nie z kształtu
         # symbolu). Panel plików nie zgłasza wtedy braku dokumentacji dla
@@ -1934,6 +1963,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         subiekt_wyslij_zd.open_window(
             self, numer_zd, dane["dostawca"], email,
             self.project_name or "", pozycje, nadawca,
+            dokument_id=dokument_id,
             szukaj_plikow=self._pliki_rysunku,
             szukaj_maila=self._email_po_nip,
             szukaj_dalej=self._szukaj_dalej_rysunku,
@@ -2362,8 +2392,12 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         # już nie ma, a to okno pokazuje ją jako brak — dwa okna mówią co
         # innego o tej samej pozycji (07.09.2026).
         # Cofamy TYLKO dla faktycznie usuniętych ZD; ZK znacznika nie zakłada.
-        zd_numery = [k["Numer"] for k in usuniete
-                     if str(k.get("Numer") or "").strip().upper().startswith("ZD")]
+        usuniete_zd = [k for k in usuniete
+                       if str(k.get("Numer") or "").strip().upper().startswith("ZD")]
+        zd_numery = [k["Numer"] for k in usuniete_zd]
+        # Id z odpowiedzi mostu — po nich sprzatamy dziennik wysylek
+        # (numer wraca do obiegu, wiec sie do tego nie nadaje).
+        zd_idy = [k.get("Id") for k in usuniete_zd if k.get("Id")]
         cofniete = self._cofnij_zamowiono(zd_numery)
         if cofniete:
             lines += ["", cofniete]
@@ -2373,11 +2407,11 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         if zd_numery:
             try:
                 from subiekt_wyslij_zd import uniewaznij_wyslania
-                n = uniewaznij_wyslania(zd_numery)
+                n = uniewaznij_wyslania(zd_idy)
                 if n:
-                    print(f"🧾 Dziennik wysyłek: unieważniono {n} wpisów usuniętych ZD")
+                    print(f"🧾 Dziennik wysyłek: usunięto {n} wpisów skasowanych ZD")
             except Exception as e:
-                print(f"⚠️  Nie unieważniono dziennika wysyłek: {e}")
+                print(f"⚠️  Nie posprzątano dziennika wysyłek: {e}")
             self._cache_wyslane = None
 
         (messagebox.showwarning if bledy else messagebox.showinfo)(
@@ -2611,16 +2645,22 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             from subiekt_wyslij_zd import _master
             con = sqlite3.connect(_master(), timeout=5)
             try:
-                # Tylko wpisy ŻYWYCH dokumentów. Subiekt używa numerów
-                # ponownie po usunięciu ZD — bez tego filtra świeżo
-                # wystawione „ZD 4" dziedziczyło wysyłkę starego „ZD 4"
-                # i pokazywało się jako wysłane (07.09.2026).
+                # To okno zna tylko NUMERY z kolumny ZD arkusza — nie pobiera
+                # dokumentów z mostu, więc nie ma Id pod ręką. Mapujemy więc
+                # numer po dzienniku, ale jest to bezpieczne: wpisy usuniętych
+                # dokumentów są z dziennika KASOWANE (uniewaznij_wyslania po
+                # Id), więc numer, który tu został, należy do dokumentu ŻYWEGO.
+                # Wcześniej wpisy zostawały ze znacznikiem i świeżo wystawione
+                # „ZD 4" dziedziczyło wysyłkę starego „ZD 4" (07.09.2026).
                 kolumny = {r[1] for r in con.execute("PRAGMA table_info(zd_wyslane)")}
-                gdzie = " WHERE dokument_usuniety IS NULL" if "dokument_usuniety" in kolumny else ""
+                if "dokument_id" not in kolumny:
+                    raise RuntimeError("dziennik sprzed przejścia na Id")
                 # Najnowsza wysyłka per numer — ZD bywa wysyłane ponownie
-                # (poprawiona treść, drugi adres).
+                # (poprawiona treść, drugi adres). Wpisy bez Id pomijamy: nie
+                # da się ich przypisać do dokumentu.
                 for numer, kiedy in con.execute(
-                        f"SELECT numer_zd, MAX(kiedy) FROM zd_wyslane{gdzie} GROUP BY numer_zd"):
+                        "SELECT numer_zd, MAX(kiedy) FROM zd_wyslane"
+                        " WHERE dokument_id IS NOT NULL GROUP BY numer_zd"):
                     if numer:
                         mapa[numer.strip()] = kiedy or ""
             finally:
