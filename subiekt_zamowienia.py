@@ -2380,14 +2380,38 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         # Nie z master: dla ZD, które przeszło już cykl lock→wgranie, wpisów
         # tam nie ma, a flaga w arkuszu i tak siedzi.
         zd = getattr(self, "_zd_do_usuniecia", None) or {}
+        # Klucze porównujemy po znormalizowaniu spacji i wielkości liter —
+        # numer z mostu i numer z kolumny okna nie muszą być bajt w bajt równe.
+        norm = lambda s: " ".join(str(s or "").split()).upper()
+        wg_numeru = {norm(k): v for k, v in zd.items()}
         # Trójki (projekt, pozycja, NUMER ZD): numer mówi, z której wysyłki
         # wziąć termin do zdjęcia z arkusza.
         refy = set()
+        bez_adresu = []             # ZD, dla których nie ustalono ŻADNEJ pozycji
+        # Dalej pracujemy na numerze w postaci z OKNA (klucz słownika), nie
+        # z mostu — to ten sam numer, który poszedł do dziennika wysyłek.
+        numery_zd = [next((k for k in zd if norm(k) == norm(nr)), " ".join(str(nr).split()))
+                     for nr in numery_zd]
         for nr in numery_zd:
-            for w in (zd.get(nr) or {}).get("poz") or []:
-                for ref in w.get("bom_ref") or []:
-                    if ref and ref[0] and ref[1]:
-                        refy.add((int(ref[0]), int(ref[1]), nr))
+            wiersze = (wg_numeru.get(norm(nr)) or {}).get("poz") or []
+            znalezione = 0
+            for w in wiersze:
+                refs = [r for r in (w.get("bom_ref") or []) if r and r[0] and r[1]]
+                # Wiersz bez adresu BOM — próbujemy po symbolu, tą samą drogą,
+                # którą _load_worker buduje słownik BOM. Tak zginęło cofnięcie
+                # ZD 6 (07.09.2026): pozycje przyszły bez bom_ref, a funkcja
+                # cicho odłożyła zero — i „Zamówiono” zostało w arkuszu.
+                if not refs:
+                    refs = self._refy_po_symbolu(w)
+                for ref in refs:
+                    refy.add((int(ref[0]), int(ref[1]), nr))
+                    znalezione += 1
+            # Ślad w konsoli ZAWSZE — żeby następnym razem było wiadomo,
+            # ile wierszy widziało okno i ile adresów z nich wyszło.
+            print(f"🧾 Cofanie „Zamówiono” {nr}: wierszy na liście={len(wiersze)}, "
+                  f"adresów BOM={znalezione}")
+            if not znalezione:
+                bez_adresu.append(nr)
         arkusz = getattr(self, "master", None)
         pid = getattr(arkusz, "current_project_id", None)
         # Kopię lokalną wolno ruszać tylko pod lockiem. Bez niego cofnięcie
@@ -2409,14 +2433,48 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
                 arkusz.after(0, arkusz.refresh_data)
             except Exception:
                 pass
+        # Brak adresu NIE może przejść bez słowa: to jedyny moment, w którym
+        # użytkownik może jeszcze odznaczyć „Zamówiono” ręcznie, wiedząc czemu.
+        ostrzezenie = ""
+        if bez_adresu:
+            ostrzezenie = ("⚠ Dla " + ", ".join(bez_adresu) + " nie ustalono pozycji "
+                           "w arkuszu RM_BAZA — „Zamówiono” i termin ZOSTAJĄ, "
+                           "odznacz je ręcznie (Odśwież listę przed kolejnym usuwaniem).")
         if not odlozone:
-            return ""
+            return ostrzezenie
         opis = f"Cofnięto „Zamówiono” i termin z tej wysyłki dla {odlozone} poz."
         if odznaczone:
             opis += f" (w otwartym projekcie poprawiono {odznaczone})"
         elif not pod_lockiem:
             opis += " — w arkuszu zniknie przy najbliższym przejęciu projektu."
-        return opis
+        return opis + ("\n" + ostrzezenie if ostrzezenie else "")
+
+    def _refy_po_symbolu(self, w):
+        """Adresy BOM [(project_id, item_id)] dla wiersza bez bom_ref — po symbolu.
+
+        Ta sama droga co w _load_worker: numery projektów z kolumny „Projekt”
+        (awaryjnie projekt otwarty w oknie) → projekty_po_numerze → dane_z_bom.
+        Symbol w kilku projektach naraz i bez numeru projektu = nie zgadujemy;
+        lepiej zostawić flagę i powiedzieć o tym, niż odznaczyć w cudzym BOM-ie.
+        """
+        sym = (w.get("symbol") or "").strip().upper()
+        if not sym:
+            return []
+        numery = {p.strip() for p in (w.get("projekty") or "").split(",") if p.strip()}
+        if not numery and self.project_name:
+            numery = {self.project_name.strip().split(" ")[0]}
+        if not numery:
+            return []
+        out = []
+        try:
+            for pid, pname in projekty_po_numerze(numery).items():
+                nr = (pname or "").strip().split(" ")[0]
+                d = (dane_z_bom(pid, nr) or {}).get(sym) or {}
+                if d.get("item_id"):
+                    out.append((d.get("project_id") or pid, d["item_id"]))
+        except Exception as e:
+            print(f"⚠️  Nie ustalono adresu BOM po symbolu {sym}: {e}")
+        return out
 
     # ── szukanie dostawcy w filtrze ────────────────────────────────────────
     def _szukaj_dostawcy(self):

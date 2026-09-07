@@ -393,11 +393,17 @@ def _terminy_wysylek(con, numery):
     if not numery or not con.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='zd_wyslane'").fetchone():
         return out
-    pyt = ",".join("?" * len(numery))
-    for nr, termin in con.execute(
-            f"SELECT numer_zd, termin FROM zd_wyslane WHERE numer_zd IN ({pyt}) ORDER BY id",
-            numery):
-        out[(nr or "").strip()] = (termin or "").strip()[:10] or None     # ostatni wygrywa
+    # Porównanie po ZNORMALIZOWANYM numerze (spacje, wielkość liter), nie
+    # przez IN (...): numer z mostu i numer zapisany przy wysyłce nie muszą
+    # być bajt w bajt równe, a wtedy termin wychodził None i zostawał
+    # w arkuszu (złapane na teście 07.09.2026). Dziennik jest mały — skan
+    # całości jest tańszy niż jedna pomyłka.
+    norm = lambda s: " ".join(str(s or "").split()).upper()
+    szukane = {norm(n): n for n in numery}
+    for nr, termin in con.execute("SELECT numer_zd, termin FROM zd_wyslane ORDER BY id"):
+        k = norm(nr)
+        if k in szukane:
+            out[szukane[k]] = (termin or "").strip()[:10] or None        # ostatni wygrywa
     return out
 
 
@@ -478,6 +484,11 @@ def cofnij_zamowienia(numery_zd, bom_refy=(), project_con=None, project_id=None,
             con.commit()
         finally:
             con.close()
+        # Zero pozycji przy podanym numerze to NIE jest sukces — to brak
+        # adresów z okna. Bez tej linii ginęło bez śladu (07.09.2026, ZD 6).
+        if numery and not odlozone:
+            print(f"⚠️  Cofnięcie „Zamówiono” dla {', '.join(numery)}: brak pozycji "
+                  "do odłożenia — flagi w arkuszu ZOSTAJĄ.")
     except Exception as e:
         print(f"⚠️  Nie odłożono cofnięcia „Zamówiono” ({', '.join(numery)}): {e}")
         return 0, 0
