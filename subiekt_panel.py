@@ -335,7 +335,7 @@ class PanelSubiekt(tk.Toplevel):
                  "odczyt", "sprawdz_w_subiekcie", None),
                 ("📊", "Stany projektu", "stany pozycji projektu",
                  "odczyt", "open_subiekt_stany", "stany"),
-                ("🏗", "Załóż projekt", "kartoteki + komplety + ZK",
+                ("🏗", "Projekt / Aktualizacja", "kartoteki + komplety + ZK",
                  "nieodwracalny", "open_subiekt_projekt", None),
             ]),
             ("Zakupy i magazyn", "Stany, zamówienia i dokumenty", [

@@ -70,7 +70,8 @@ def read_project_items(project_id):
         name_cols = [c for c in ("work_name", "src_name") if c in cols]
         qty_cols = [c for c in ("order_qty", "work_qty", "src_qty") if c in cols]
         cls_cols = [c for c in ("class_manual", "class_effective", "class_auto") if c in cols]
-        sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols + qty_cols + cls_cols
+        bib_col = ["dwf_biblioteka"] if "dwf_biblioteka" in cols else []
+        sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols + qty_cols + cls_cols + bib_col
         # Ukryte pozycje (przycisk „Ukryj zaznaczone" w arkuszu) nie mają
         # trafiać do Subiekta — COALESCE bo starsze wiersze mogą mieć NULL
         # zamiast 0 (ten sam wzorzec co database_manager.get_project_items).
@@ -82,6 +83,7 @@ def read_project_items(project_id):
     n0 = 3
     q0 = n0 + len(name_cols)
     c0 = q0 + len(qty_cols)
+    c1 = c0 + len(cls_cols)     # koniec kolumn typu, przed dwf_biblioteka
 
     def first(vals):
         for v in vals:
@@ -95,8 +97,9 @@ def read_project_items(project_id):
     for r in rows:
         nr = jedna_linia(first(r[0:3]))
         nazwa = jedna_linia(first(r[n0:q0]))
-        typ = first(r[c0:])
+        typ = first(r[c0:c1])
         typ = str(typ).strip().upper() if typ else "UNKNOWN"
+        biblioteczne = bool(bib_col) and bool(r[c1])
 
         # Elementy ZNORMALIZOWANE (łożyska „6004ZZ", paski „5M L2525 szer25",
         # simmeringi) mają PUSTY numer rysunku — całą tożsamość niosą w nazwie
@@ -120,6 +123,7 @@ def read_project_items(project_id):
             "nazwa": nazwa,
             "qty": first(r[q0:c0]),
             "typ": typ,
+            "biblioteczne": biblioteczne,
         })
     return out
 
@@ -442,6 +446,21 @@ def build_plan(project_id, project_name, podmiot, tytul):
     # Wcześniej takie pozycje wypadały po cichu i komplet powstawał NIEPEŁNY
     # ze statusem „utworzony”, czyli wyglądał na sukces (zgłoszone 06.09.2026).
     poza_bom = {}
+    # {numer: nazwa} — złożenie Z/ZZ z BIBLIOTEKI (dwf_biblioteka=1) bez ANI
+    # JEDNEGO składnika w drzewku. Inny przypadek niż poza_bom: tam dziecko
+    # jest w drzewku, tylko brak go w BOM-ie — tu drzewko (V:\...\*_OUT.xlsx)
+    # w ogóle nie zna składu, bo skład złożenia bibliotecznego mieszka
+    # w bibliotece (B:\), nie w folderze projektu. Sprawdzone na żywych danych
+    # 07.09.2026 (projekt 3500, "027-100.00Z Zespół wrzeciona" i
+    # "027-300.06Z Uchwyt czujnika" — biblioteka ma tu bałagan, więc drzewko
+    # milczy zamiast dać skład).
+    #
+    # Bez tego rozróżnienia komplet zakładał się PUSTY i wyglądał na sukces —
+    # magazynier nie miałby z czego go złożyć i nie wiedziałby o tym, dopóki
+    # nie trafiłby na realizację. Stąd osobna kategoria: user MUSI zobaczyć
+    # to jawnie i zdecydować (założyć bez składu świadomie / uzupełnić ręcznie /
+    # wyłączyć z tego zapisu), zamiast to przechodziło po cichu.
+    biblioteczne_bez_skladu = {}
     ukryte = read_hidden_drawings(project_id)
     pozycje = []
     for it in items:
@@ -460,6 +479,8 @@ def build_plan(project_id, project_name, podmiot, tytul):
                     else:
                         powod, nazwa_ch = "nieznana", nazwy_drzewka.get(klucz_ch, "")
                     poza_bom.setdefault(it["nr"], []).append((child_nr, powod, nazwa_ch))
+            if not skladniki and it.get("biblioteczne"):
+                biblioteczne_bez_skladu[it["nr"]] = it["nazwa"] or it["nr"]
         try:
             qty = float(str(it["qty"]).replace(",", ".")) if it["qty"] not in (None, "") else 1.0
         except (TypeError, ValueError):
@@ -473,6 +494,7 @@ def build_plan(project_id, project_name, podmiot, tytul):
             "bez_numeru": bool(it.get("bez_numeru")),
             "ilosc": qty,
             "skladniki": skladniki,
+            "biblioteczne": bool(it.get("biblioteczne")),
         })
 
     # W Uwagach sam numer — tak firma oznacza dokumenty i tak po nich filtruje
@@ -492,7 +514,7 @@ def build_plan(project_id, project_name, podmiot, tytul):
     w_drzewku = {c[0].strip().upper() for lst in kids.values() for c in lst}
     ukryte_cale_galezie = sum(
         1 for nr in ukryte if nr in w_drzewku and nr not in poza_zgloszone)
-    return plan, items, warn, poza_bom, ukryte_cale_galezie
+    return plan, items, warn, poza_bom, ukryte_cale_galezie, biblioteczne_bez_skladu
 
 
 # ── Wywołanie mostu ─────────────────────────────────────────────────────────
@@ -652,6 +674,12 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         self.brak_drzewka = None
         #: ukryte pozycje będące składnikami złożeń, których też nie ma w BOM-ie
         self.ukryte_cale_galezie = 0
+        #: {numer: nazwa} złożeń Z/ZZ z biblioteki bez ani jednego składnika
+        self.bib_bez_skladu = {}
+        #: numery (UPPER) bibliotecznych, dla których user podjął decyzję
+        self.bib_potwierdzone = set()
+        #: {numer: "bez_skladu"|"pomin"} — jaka to była decyzja
+        self._bib_decyzje = {}
         self.plan = None
         self.items = []
         self.dry = None
@@ -660,7 +688,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         self.wybrane = set()
         self.filter_typ_modes = {}  # {typ: 'show'|'hide'} — kafelek ✚
 
-        self.title(f"Załóż projekt w Subiekcie — {self.project_name}")
+        self.title(f"Projekt / Aktualizacja w Subiekcie — {self.project_name}")
         self.geometry("1080x680")
         self.minsize(900, 400)
         # ŚWIADOMIE bez transient(): okno-dziecko z transient dostaje w Windows
@@ -707,7 +735,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         top = tk.Frame(self, bg="#34495e", height=42)
         top.pack(side=tk.TOP, fill=tk.X)
         top.pack_propagate(False)
-        tk.Label(top, text="🏗 Załóż projekt w Subiekcie (kartoteki + komplety + ZK)",
+        tk.Label(top, text="🏗 Projekt / Aktualizacja w Subiekcie (kartoteki + komplety + ZK)",
                  bg="#34495e", fg="white", font=("Arial", 11, "bold")).pack(side=tk.LEFT, padx=12)
 
         self.btn_refresh = tk.Button(top, text="🔄 Przelicz", command=self._dry_run_async,
@@ -736,8 +764,8 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         tk.Label(sel, text="Zakładaj kartoteki dla:", bg="#f4ecf7",
                  font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(12, 6), pady=5)
         for etykieta, tryb, opis in (
-            ("komplety + składniki", "komplety", "tylko Z/ZZ i to, co w nie wchodzi"),
-            ("wszystko", "wszystko", "cały BOM"),
+            ("złożenia z zawartością", "komplety", "tylko Z/ZZ i to, co w nie wchodzi"),
+            ("złożenia z zawartością + pozostałe", "wszystko", "cały BOM"),
             ("nic", "nic", "tylko istniejące kartoteki"),
         ):
             tk.Button(sel, text=etykieta, command=lambda t=tryb: self._zaznacz_tryb(t),
@@ -897,22 +925,22 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
 
     def _dry_run_worker(self):
         try:
-            plan, items, warn, poza_bom, ukryte_galezie = build_plan(
+            plan, items, warn, poza_bom, ukryte_galezie, bib_bez_skladu = build_plan(
                 self.project_id, self.project_name,
                 self.var_podmiot.get().strip(), self.var_tytul.get().strip())
             if not plan["pozycje"]:
-                self.after(0, lambda: self._dry_done(None, None, [], "Brak pozycji z numerem rysunku.", {}, 0))
+                self.after(0, lambda: self._dry_done(None, None, [], "Brak pozycji z numerem rysunku.", {}, 0, {}))
                 return
             wynik = run_bridge(plan, zapisz=False)
             # Suchy przebieg też jest okazją do zapamiętania trafień — kolejny
             # projekt z tymi numerami nie będzie musiał pytać Subiekta.
             zapisz_mapowania(wynik)
-            self.after(0, lambda: self._dry_done(plan, wynik, items, warn, poza_bom, ukryte_galezie))
+            self.after(0, lambda: self._dry_done(plan, wynik, items, warn, poza_bom, ukryte_galezie, bib_bez_skladu))
         except Exception as e:
             err = str(e)
-            self.after(0, lambda: self._dry_done(None, None, [], err, {}, 0))
+            self.after(0, lambda: self._dry_done(None, None, [], err, {}, 0, {}))
 
-    def _dry_done(self, plan, wynik, items, warn, poza_bom=None, ukryte_galezie=0):
+    def _dry_done(self, plan, wynik, items, warn, poza_bom=None, ukryte_galezie=0, bib_bez_skladu=None):
         self.btn_refresh.config(state=tk.NORMAL)
         if plan is None:
             self.stop_kreciolek()
@@ -929,14 +957,26 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         # komplet, więc informacja musi dojść też do potwierdzenia zapisu —
         # sam dopisek w pasku statusu ginie (zgłoszone 06.09.2026).
         self.brak_drzewka = warn
+        # {numer: nazwa} — złożenia Z/ZZ z BIBLIOTEKI (B:\) bez ŻADNEGO składnika
+        # w drzewku. Skład bibliotecznych złożeń nie mieszka w folderze projektu
+        # na V:, więc drzewko o nim nie wie — inny przypadek niż poza_bom.
+        # User MUSI to jawnie potwierdzić per pozycja, inaczej zapis jest
+        # zablokowany (zgłoszone 07.09.2026: "magazynier ma z czego te dwa
+        # złożenia złożyć, ale nie ma na to papierów" — komplet zakładałby się
+        # PUSTY i wyglądałby na sukces, dopóki ktoś nie trafi na realizację).
+        self.bib_bez_skladu = bib_bez_skladu or {}
+        self.bib_potwierdzone = set()   # numery, dla których user kliknął decyzję
         self._fill_tree(plan, wynik)
-        self.btn_write.config(state=tk.NORMAL)
         self.btn_dodaj.config(state=tk.NORMAL)
 
         # Domyślnie „komplety + składniki", nie cały BOM: zakładanie wszystkich
         # kartotek naraz to zmiana reguły „kartoteka na żądanie", a kartotek nie
         # da się potem łatwo usunąć. Użytkownik może rozszerzyć jednym kliknięciem.
         self._zaznacz_tryb("komplety")
+
+        if self.bib_bez_skladu:
+            self._pokaz_biblioteczne()
+        self._odswiez_stan_zapisu()
 
         pust = sum(1 for k in wynik.get("kroki", [])
                    if k["Rodzaj"] == "komplet" and k["Status"] == "pominiety-brak-skladnikow")
@@ -1032,6 +1072,120 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
                   bg="#7f8c8d", fg="white", relief=tk.FLAT, padx=12).pack(side=tk.LEFT)
         tk.Button(stopka, text="Rozumiem", command=okno.destroy,
                   bg="#2c3e50", fg="white", relief=tk.FLAT, padx=18).pack(side=tk.RIGHT)
+
+        wysrodkuj(okno, self)
+        okno.grab_set()
+
+    def _pokaz_biblioteczne(self):
+        """Złożenia Z/ZZ z BIBLIOTEKI bez żadnego składnika w drzewku.
+
+        User MUSI zdecydować per pozycja — zapis jest zablokowany, dopóki
+        każda z nich nie dostanie jawnej decyzji. Nie ma tu przycisku
+        "Rozumiem, zamknij" bez wyboru: to dokładnie ta ścieżka, którą trzeba
+        zamknąć, żeby pusty komplet nie przeszedł po cichu.
+        """
+        okno = tk.Toplevel(self)
+        okno.title("Decyzja wymagana: złożenia biblioteczne bez składu")
+        # Wysokość rośnie z liczbą pozycji, ale nie przekracza ekranu.
+        wys = min(560, 300 + 62 * len(self.bib_bez_skladu))
+        okno.geometry(f"760x{wys}")
+        okno.minsize(680, 320)
+        okno.resizable(True, True)
+        okno.transient(self)
+        okno.protocol("WM_DELETE_WINDOW", lambda: None)  # tylko przyciskiem — patrz niżej
+
+        naglowek = tk.Frame(okno, bg="#c0392b")
+        naglowek.pack(fill=tk.X)
+        tk.Label(naglowek,
+                 text=f"⛔ {len(self.bib_bez_skladu)} złożeń z BIBLIOTEKI bez ani jednego składnika",
+                 bg="#c0392b", fg="white", font=("Arial", 11, "bold"),
+                 anchor="w", padx=12, pady=8).pack(fill=tk.X)
+
+        tk.Label(okno, justify="left", anchor="w", padx=12, pady=8, wraplength=730, text=(
+            "Skład tych złożeń pochodzi z biblioteki (B:\\), a drzewko projektu "
+            "(V:\\…_OUT.xlsx) go nie zna. Bez decyzji powstałby PUSTY komplet — "
+            "wyglądałby na sukces, a magazynier nie miałby z czego go złożyć.")).pack(fill=tk.X)
+
+        # STOPKA PAKOWANA PRZED LISTĄ — inaczej przy kilku pozycjach lista
+        # rozpycha okno i przycisk „Zatwierdź" wypada poza ekran (zgłoszone
+        # 07.09.2026: „użera przyciski w oknie").
+        stopka = tk.Frame(okno)
+        stopka.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=10)
+
+        ramka = tk.Frame(okno)
+        ramka.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 4))
+        kanwa = tk.Canvas(ramka, highlightthickness=0)
+        vs = tk.Scrollbar(ramka, orient="vertical", command=kanwa.yview)
+        wnetrze = tk.Frame(kanwa)
+        wnetrze.bind("<Configure>", lambda e: kanwa.configure(scrollregion=kanwa.bbox("all")))
+        kanwa.create_window((0, 0), window=wnetrze, anchor="nw")
+        kanwa.configure(yscrollcommand=vs.set)
+        kanwa.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._bib_decyzje = getattr(self, "_bib_decyzje", {})   # {numer: "bez_skladu"|"pomin"}
+        zmienne = {}
+        for numer, nazwa in sorted(self.bib_bez_skladu.items()):
+            # Ramka z obwódką: przy kilku pozycjach od razu widać, gdzie kończy
+            # się jedna decyzja, a zaczyna druga.
+            wiersz = tk.Frame(wnetrze, pady=6, padx=8, relief=tk.GROOVE, bd=1)
+            wiersz.pack(fill=tk.X, anchor="w", pady=(0, 6))
+            tk.Label(wiersz, text=f"{numer}   {nazwa}", anchor="w",
+                     font=("Consolas", 10, "bold")).pack(fill=tk.X)
+            # Wartość początkowa "brak", nie "" — pusty string zbiega się
+            # z domyślnym stanem Radiobuttona i OBA wyglądały na zaznaczone,
+            # choć decyzji nie było (zgłoszone 07.09.2026).
+            var = tk.StringVar(value=self._bib_decyzje.get(numer, "brak"))
+            zmienne[numer] = var
+            # Jeden pod drugim, nie obok siebie — obok siebie drugi wypadał
+            # poza szerokość okna i user widział tylko jedną opcję.
+            tk.Radiobutton(wiersz, variable=var, value="bez_skladu", anchor="w",
+                           text="Załóż jako zwykłą kartotekę (bez składu) — magazynier kompletuje ręcznie",
+                           ).pack(fill=tk.X, padx=(12, 0))
+            tk.Radiobutton(wiersz, variable=var, value="pomin", anchor="w",
+                           text="Pomiń — nie zakładaj tej pozycji w Subiekcie",
+                           ).pack(fill=tk.X, padx=(12, 0))
+
+        def zatwierdz():
+            brak = [n for n, v in zmienne.items() if v.get() not in ("bez_skladu", "pomin")]
+            if brak:
+                messagebox.showwarning(
+                    "Decyzja wymagana",
+                    f"Brakuje decyzji dla {len(brak)} pozycji:\n\n   "
+                    + "\n   ".join(sorted(brak))
+                    + "\n\nZaznacz jedną z dwóch opcji przy każdej z nich.",
+                    parent=okno)
+                return
+            for n, v in zmienne.items():
+                self._bib_decyzje[n] = v.get()
+                if v.get() == "bez_skladu":
+                    self.bib_potwierdzone.add(n.strip().upper())
+                    # Most zakłada Z/ZZ z szablonem Komplet niezależnie od tego,
+                    # czy ma składniki — bez tej zmiany typu powstałby PUSTY
+                    # komplet (kartoteka rodzaju Komplet bez zdefiniowanego
+                    # składu). "Załóż bez składu" ma dać zwykłą kartotekę-towar,
+                    # to jawna decyzja usera, nie domyślne zejście po cichu.
+                    for p in self.plan["pozycje"]:
+                        if p["symbol"].strip().upper() == n.strip().upper():
+                            p["typ"] = "STANDARD"
+                            break
+                else:
+                    self.bib_potwierdzone.discard(n.strip().upper())
+                    # "Pomiń" = ta pozycja (i jej Z/ZZ-owy status) NIE trafia do
+                    # zapisu wcale — usuwamy ją z planu, żeby nie robić z niej
+                    # ani kompletu, ani zwykłej kartoteki bez pytania.
+                    self.plan["pozycje"] = [p for p in self.plan["pozycje"]
+                                             if p["symbol"].strip().upper() != n.strip().upper()]
+            okno.destroy()
+            self._odswiez_znaczniki()
+            self.status.config(text="Decyzje o złożeniach bibliotecznych zapisane.")
+
+        tk.Label(stopka, text="Bez decyzji dla wszystkich pozycji zapis pozostanie zablokowany.",
+                 fg="#7f8c8d").pack(side=tk.LEFT)
+        tk.Button(stopka, text="Zatwierdź", command=zatwierdz,
+                  bg="#2c3e50", fg="white", relief=tk.FLAT,
+                  font=("Arial", 10, "bold"), padx=24, pady=4,
+                  cursor="hand2").pack(side=tk.RIGHT)
 
         wysrodkuj(okno, self)
         okno.grab_set()
@@ -1133,9 +1287,18 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         # Komplet powstanie tylko wtedy, gdy on sam i wszystkie jego składniki
         # będą miały kartotekę (istniejącą albo zakładaną teraz).
         dostepne = (set(p["symbol"].strip().upper() for p in self.plan["pozycje"]) - brakujace) | self.wybrane
-        pelne = niepelne = 0
+        pelne = niepelne = puste_biblioteczne = puste_blad = 0
         for p in self.plan["pozycje"]:
-            if p["typ"] not in KOMPLETY or not p["skladniki"]:
+            if p["typ"] not in KOMPLETY:
+                continue
+            if not p["skladniki"]:
+                # Bez tego rozróżnienia te pozycje znikały z liczenia (dawny
+                # `continue` tu w miejscu) — 27 złożeń, 25 "pełnych", a 2
+                # brakujące nie były ani pełne, ani zaraportowane jako błąd.
+                if p["symbol"].strip().upper() in self.bib_bez_skladu:
+                    puste_biblioteczne += 1
+                else:
+                    puste_blad += 1
                 continue
             if p["symbol"].strip().upper() not in dostepne:
                 niepelne += 1
@@ -1152,6 +1315,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         blachy = t.get("X", 0) + t.get("XX", 0)
         zloz = t.get("Z", 0) + t.get("ZZ", 0)
 
+        nieprzy = sum(1 for n in self.bib_bez_skladu if n not in self._bib_decyzje)
         self.summary.config(text=(
             f"Pozycji: {len(self.plan['pozycje'])}"
             f"  (złożenia {zloz} · blachy {blachy} · handlowe {handlowe})    "
@@ -1159,7 +1323,58 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
             + (f" (pomijasz {pominiete})" if pominiete else "")
             + f"    komplety: {pelne} pełnych"
             + (f", {niepelne} niepełnych ⚠" if niepelne else "")
+            + (f", {puste_blad} BEZ SKŁADU (błąd danych!) ⛔" if puste_blad else "")
+            + (f", {puste_biblioteczne} bibliotecznych bez składu" if puste_biblioteczne else "")
+            + (f" [{nieprzy} niepotwierdzone ⛔]" if nieprzy else "")
         ))
+        self._odswiez_stan_zapisu()
+
+    def _mozna_zapisac(self):
+        """Blokuje zapis TYLKO przy rzeczach, których nie wolno przepuścić cicho.
+
+        Blokują: złożenia biblioteczne bez decyzji usera (powstałby pusty
+        komplet) oraz złożenia bez składu nie będące bibliotecznymi (realny
+        błąd danych — brak węzła w drzewku).
+
+        NIE blokują: pominięte pozycje. Domyślny tryb „złożenia z zawartością"
+        celowo pomija to, co nie wchodzi w skład żadnego złożenia — blokada
+        na tym unieruchomiłaby okno w normalnym scenariuszu. Pominięcia są
+        widoczne w podsumowaniu i wypisane w oknie potwierdzenia zapisu.
+        """
+        if not self.plan or not self.dry:
+            return False
+        # Liczy się PODJĘCIE decyzji, nie jej treść — „pomiń" jest tak samo
+        # świadomym wyborem jak „załóż bez składu" (pozycja znika z planu,
+        # więc nie ma jej w bib_potwierdzone).
+        if any(n not in self._bib_decyzje for n in self.bib_bez_skladu):
+            return False
+        for p in self.plan["pozycje"]:
+            if (p["typ"] in KOMPLETY and not p["skladniki"]
+                    and p["symbol"].strip().upper() not in self.bib_bez_skladu):
+                return False
+        return True
+
+    def _odswiez_stan_zapisu(self):
+        """Włącza/wyłącza zapis i MÓWI DLACZEGO — szary przycisk bez powodu
+        jest gorszy niż brak blokady (user nie wie, co ma zrobić)."""
+        mozna = self._mozna_zapisac()
+        self.btn_write.config(state=tk.NORMAL if mozna else tk.DISABLED)
+        if mozna or not self.plan:
+            return
+        nieprzy = [n for n in self.bib_bez_skladu if n not in self._bib_decyzje]
+        blad = [p["symbol"] for p in self.plan["pozycje"]
+                if p["typ"] in KOMPLETY and not p["skladniki"]
+                and p["symbol"].strip().upper() not in self.bib_bez_skladu]
+        if nieprzy:
+            self.status.config(
+                text=f"⛔ ZAPIS ZABLOKOWANY — {len(nieprzy)} złożeń bibliotecznych czeka na decyzję "
+                     f"({', '.join(sorted(nieprzy)[:3])}{'…' if len(nieprzy) > 3 else ''}). "
+                     "Kliknij „Odśwież”, żeby wrócić do okna decyzji.")
+        elif blad:
+            self.status.config(
+                text=f"⛔ ZAPIS ZABLOKOWANY — {len(blad)} złożeń Z/ZZ nie ma ŻADNEGO składnika w drzewku "
+                     f"({', '.join(sorted(blad)[:3])}{'…' if len(blad) > 3 else ''}). "
+                     "To błąd danych: popraw drzewko w *_OUT.xlsx albo ukryj te pozycje w arkuszu.")
 
     # ── dymek z pełną treścią uciętej komórki ──────────────────────────────
     def _tooltip_ukryj(self):
@@ -1553,8 +1768,30 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
 
         plan = self._plan_do_zapisu()
         nowe = len(self.wybrane)
-        kompl = sum(1 for p in plan["pozycje"] if p["typ"] in KOMPLETY and p["skladniki"])
         pominiete = len(self._do_zalozenia()) - nowe
+
+        # Komplety NOWE vs AKTUALIZOWANE — most rozróżnia to w suchym przebiegu
+        # (do-utworzenia / do-aktualizacji). Bez tego rozdzielenia okno pisało
+        # „TRWALE powstaną komplety: 25" także przy ponownym zakładaniu tego
+        # samego projektu, gdzie wszystkie 25 już istniały i były tylko
+        # nadpisywane (zgłoszone 08.09.2026).
+        w_planie = {p["symbol"].strip().upper() for p in plan["pozycje"]}
+        kompl = kompl_akt = kompl_bez_zmian = 0
+        for k in (self.dry or {}).get("kroki", []):
+            if k.get("Rodzaj") != "komplet":
+                continue
+            if (k.get("Symbol") or "").strip().upper() not in w_planie:
+                continue          # pozycja wypadła z planu (np. „pomiń")
+            st = k.get("Status")
+            if st == "do-aktualizacji":
+                kompl_akt += 1
+            elif st == "bez-zmian":
+                # Skład identyczny — zapis go przepisze, ale wynik będzie ten
+                # sam. Liczymy osobno, żeby nie straszyć „25 aktualizacji",
+                # gdy realnie zmienią się dwie (zgłoszone 08.09.2026).
+                kompl_bez_zmian += 1
+            elif str(st or "").startswith("do-utworzenia"):
+                kompl += 1
 
         if not plan["pozycje"]:
             messagebox.showwarning(
@@ -1600,7 +1837,17 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
                 "TRWALE (w Subiekcie zostaną — nie da się ich łatwo usunąć):\n"
                 + "\n".join(trwale) + "\n\n")
         else:
-            czesc_trwala = "Żadna kartoteka ani komplet NIE powstanie.\n\n"
+            czesc_trwala = "Żadna NOWA kartoteka ani komplet nie powstanie.\n\n"
+
+        # Aktualizacja istniejących kompletów to co innego niż zakładanie —
+        # user musi wiedzieć, że nadpisuje skład, który już tam jest.
+        if kompl_akt:
+            czesc_trwala += (
+                f"ZMIENI SKŁAD {kompl_akt} istniejących kompletów (Z/ZZ) — "
+                "skład z BOM-u różni się od tego w Subiekcie.\n\n")
+        if kompl_bez_zmian:
+            czesc_trwala += (
+                f"{kompl_bez_zmian} kompletów ma JUŻ identyczny skład — zapis ich nie zmieni.\n\n")
 
         uwagi = []
         # Brak drzewka jest najważniejszy: bez niego NIE POWSTANIE ŻADEN
@@ -1617,15 +1864,70 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
             uwagi.append(f"{ile_poza} składników z drzewka nie ma w BOM-ie — "
                          "komplety powstaną niepełne.")
 
-        ok = messagebox.askyesno(
-            "Zapis do Subiekta — potwierdzenie",
-            "Baza PRODUKCYJNA.\n\n"
-            + czesc_trwala
-            + "ODWRACALNE (da się usunąć w Subiekcie):\n"
-            + opis_zk
-            + ("\n⚠ " + "\n⚠ ".join(uwagi) + "\n" if uwagi else "")
-            + "\nZapisać?",
-            parent=self, icon="warning")
+        # Które komplety wyjdą NIEPEŁNE przez pominięcie ich składników.
+        # Sama liczba pominiętych tego nie pokazuje: pominięta blacha wygląda
+        # niewinnie, dopóki nie wiadomo, że przez nią złożenie pojedzie do
+        # Subiekta bez części składu (zgłoszone 07.09.2026 — nic nie może
+        # przejść po cichu). Liczone na planie PO filtrowaniu, czyli na tym,
+        # co realnie poleci do mostu.
+        oberwane = []
+        pelny_sklad = {p["symbol"].strip().upper(): len(p["skladniki"])
+                       for p in self.plan["pozycje"] if p["typ"] in KOMPLETY}
+        for p in plan["pozycje"]:
+            if p["typ"] not in KOMPLETY:
+                continue
+            bylo = pelny_sklad.get(p["symbol"].strip().upper(), 0)
+            if bylo and len(p["skladniki"]) < bylo:
+                oberwane.append(f"{p['symbol']} ({len(p['skladniki'])} z {bylo})")
+        if oberwane:
+            uwagi.append("NIEPEŁNE komplety przez pominięte składniki:\n   "
+                         + "\n   ".join(oberwane[:8])
+                         + (f"\n   … i {len(oberwane) - 8} więcej" if len(oberwane) > 8 else ""))
+
+        # Złożenia biblioteczne, dla których user wybrał „załóż bez składu" —
+        # w Subiekcie powstaną jako ZWYKŁE kartoteki, nie komplety.
+        bez_skladu = [n for n, d in getattr(self, "_bib_decyzje", {}).items() if d == "bez_skladu"]
+        if bez_skladu:
+            uwagi.append("Złożenia biblioteczne bez składu (Twoja decyzja) —\n"
+                         "   powstaną jako zwykłe kartoteki, magazynier kompletuje ręcznie:\n   "
+                         + ", ".join(sorted(bez_skladu)))
+
+        # Szczegóły do tabeli: co dokładnie powstanie i co zostanie nadpisane.
+        # Same liczby („komplety: 25") nie mówiły, KTÓRE i CZYM — przy zapisie
+        # na produkcję to za mało (zgłoszone 08.09.2026).
+        w_planie = {p["symbol"].strip().upper() for p in plan["pozycje"]}
+        nazwy = {p["symbol"].strip().upper(): p.get("nazwa") or "" for p in plan["pozycje"]}
+        wiersze = []
+        for k in (self.dry or {}).get("kroki", []):
+            sym = (k.get("Symbol") or "").strip()
+            if sym.upper() not in w_planie:
+                continue
+            st = k.get("Status") or ""
+            if k.get("Rodzaj") == "kartoteka" and st == "do-zalozenia":
+                if sym.upper() in self.wybrane:
+                    wiersze.append(("NOWA KARTOTEKA", sym, nazwy.get(sym.upper(), ""), ""))
+            elif k.get("Rodzaj") == "komplet":
+                if st == "do-aktualizacji":
+                    wiersze.append(("ZMIENIA SKŁAD", sym, nazwy.get(sym.upper(), ""),
+                                    k.get("Szczegoly") or ""))
+                elif st == "bez-zmian":
+                    wiersze.append(("bez zmian", sym, nazwy.get(sym.upper(), ""),
+                                    k.get("Szczegoly") or ""))
+                elif st.startswith("do-utworzenia"):
+                    wiersze.append(("NOWY KOMPLET", sym, nazwy.get(sym.upper(), ""),
+                                    k.get("Szczegoly") or ""))
+        for n in sorted(bez_skladu):
+            wiersze.append(("BIBLIOTECZNE bez składu", n, self.bib_bez_skladu.get(n, ""),
+                            "powstanie jako zwykła kartoteka"))
+
+        # Najpierw to, co się realnie zmienia; „bez zmian" na koniec — inaczej
+        # dwie istotne zmiany giną wśród dwudziestu trzech nieistotnych wierszy.
+        waga = {"NOWA KARTOTEKA": 0, "NOWY KOMPLET": 1, "ZMIENIA SKŁAD": 2,
+                "BIBLIOTECZNE bez składu": 3, "bez zmian": 9}
+        wiersze.sort(key=lambda w: (waga.get(w[0], 5), w[1]))
+
+        ok = self._potwierdz_zapis(czesc_trwala, opis_zk, uwagi, wiersze,
+                                   nowe, kompl, kompl_akt, kompl_bez_zmian)
         self._na_wierzch()
         if not ok:
             return
@@ -1634,6 +1936,134 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         self.btn_refresh.config(state=tk.DISABLED)
         self.status.config(text="Zapisuję do Subiekta — nie zamykaj okna…")
         threading.Thread(target=self._write_worker, daemon=True).start()
+
+    def _potwierdz_zapis(self, czesc_trwala, opis_zk, uwagi, wiersze,
+                         nowe, kompl, kompl_akt, kompl_bez_zmian=0):
+        """Potwierdzenie zapisu z TABELĄ — co dokładnie powstanie i co zostanie
+        nadpisane, pozycja po pozycji.
+
+        Wąski messagebox pokazywał tylko liczby („komplety: 25"), z których nie
+        dało się wyczytać ani KTÓRE to komplety, ani że 25 z nich już istnieje
+        i zostanie nadpisanych (zgłoszone 08.09.2026).
+        """
+        okno = tk.Toplevel(self)
+        okno.title("Zapis do Subiekta — potwierdzenie")
+        # Rozmiar startowy dopasowany do liczby wierszy, ale okno JEST
+        # rozciągalne — przy dużym projekcie 12 widocznych wierszy to za mało,
+        # żeby ocenić zapis (zgłoszone 08.09.2026).
+        wys = max(600, min(900, 380 + 22 * len(wiersze)))
+        okno.geometry(f"1000x{wys}")
+        okno.minsize(760, 480)
+        okno.resizable(True, True)
+        okno.transient(self)
+        wynik = {"ok": False}
+
+        naglowek = tk.Frame(okno, bg="#c0392b")
+        naglowek.pack(fill=tk.X)
+        tk.Label(naglowek, text="BAZA PRODUKCYJNA — sprawdź, zanim zapiszesz",
+                 bg="#c0392b", fg="white", font=("Arial", 12, "bold"),
+                 anchor="w", padx=12, pady=8).pack(fill=tk.X)
+
+        # Nagłówki liczbowe DUŻYMI literami — od razu widać skalę operacji.
+        pasek = tk.Frame(okno, bg="#ecf0f1")
+        pasek.pack(fill=tk.X)
+        for tekst, liczba, kolor in (
+            ("NOWE KARTOTEKI", nowe, "#27ae60"),
+            ("NOWE KOMPLETY", kompl, "#27ae60"),
+            ("ZMIENIĄ SKŁAD", kompl_akt, "#d35400"),
+            ("BEZ ZMIAN", kompl_bez_zmian, "#95a5a6"),
+        ):
+            if not liczba:
+                continue
+            kafel = tk.Frame(pasek, bg="#ecf0f1", padx=16, pady=8)
+            kafel.pack(side=tk.LEFT)
+            tk.Label(kafel, text=str(liczba), bg="#ecf0f1", fg=kolor,
+                     font=("Arial", 20, "bold")).pack()
+            tk.Label(kafel, text=tekst, bg="#ecf0f1", fg="#2c3e50",
+                     font=("Arial", 8, "bold")).pack()
+
+        tk.Label(okno, text=opis_zk.strip() or "ZK: —", justify="left", anchor="w",
+                 padx=12, pady=6, font=("Arial", 9)).pack(fill=tk.X)
+
+        # Filtr: przy 25 kompletach dwie realne zmiany toną wśród 23 wierszy
+        # „bez zmian". Domyślnie WŁĄCZONY, gdy jest co ukrywać.
+        ile_bez_zmian = sum(1 for w in wiersze if w[0] == "bez zmian")
+        pasek_f = tk.Frame(okno)
+        pasek_f.pack(fill=tk.X, padx=12)
+        var_tylko = tk.BooleanVar(value=bool(ile_bez_zmian))
+        if ile_bez_zmian:
+            tk.Checkbutton(pasek_f, variable=var_tylko,
+                           text=f"Pokaż tylko zmiany (ukryj {ile_bez_zmian} bez zmian)",
+                           command=lambda: przeladuj()).pack(side=tk.LEFT)
+
+        # ── TABELA ────────────────────────────────────────────────────────
+        ramka = tk.Frame(okno)
+        ramka.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 6))
+        kol = ("co", "symbol", "nazwa", "szczegoly")
+        tab = ttk.Treeview(ramka, columns=kol, show="headings", height=12)
+        for c, tekst, szer in (("co", "Co się stanie", 165), ("symbol", "Symbol", 135),
+                               ("nazwa", "Nazwa", 210), ("szczegoly", "Co się zmienia", 370)):
+            tab.heading(c, text=tekst)
+            tab.column(c, width=szer, anchor="w")
+        vs = ttk.Scrollbar(ramka, orient="vertical", command=tab.yview)
+        tab.configure(yscrollcommand=vs.set)
+        tab.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+
+        tab.tag_configure("nowe", background="#d5f5e3")
+        tab.tag_configure("akt", background="#fdebd0")
+        tab.tag_configure("bib", background="#fadbd8")
+        tab.tag_configure("nic", foreground="#95a5a6")   # bez tła — to nie jest zmiana
+
+        def przeladuj():
+            tab.delete(*tab.get_children())
+            for co, sym, nazwa, szcz in wiersze:
+                if co == "bez zmian":
+                    if var_tylko.get():
+                        continue
+                    tag = "nic"
+                elif "ZMIENIA" in co:
+                    tag = "akt"
+                elif "BIBLIOTECZNE" in co:
+                    tag = "bib"
+                else:
+                    tag = "nowe"
+                tab.insert("", "end", values=(co, sym, nazwa, szcz), tags=(tag,))
+            # Widok startuje na GÓRZE — tam są zmiany po sortowaniu.
+            dzieci = tab.get_children()
+            if dzieci:
+                tab.see(dzieci[0])
+
+        przeladuj()
+
+        if uwagi:
+            tk.Label(okno, text="⚠ " + "\n⚠ ".join(uwagi), justify="left", anchor="w",
+                     padx=12, pady=6, fg="#c0392b", font=("Arial", 9),
+                     wraplength=860).pack(fill=tk.X)
+
+        # Opis trwałości NAD przyciskami, nie obok — obok wypychał przycisk
+        # „ZAPISZ" poza krawędź okna (zgłoszone 08.09.2026).
+        tk.Label(okno, text=czesc_trwala.strip(), justify="left", anchor="w",
+                 fg="#7f8c8d", font=("Arial", 8), padx=12,
+                 wraplength=860).pack(fill=tk.X)
+
+        stopka = tk.Frame(okno)
+        stopka.pack(fill=tk.X, padx=12, pady=10)
+
+        def tak():
+            wynik["ok"] = True
+            okno.destroy()
+
+        tk.Button(stopka, text="Nie, wróć", command=okno.destroy, bg="#95a5a6", fg="white",
+                  relief=tk.FLAT, padx=20, pady=6).pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Button(stopka, text="ZAPISZ do Subiekta", command=tak, bg="#c0392b", fg="white",
+                  relief=tk.FLAT, font=("Arial", 10, "bold"), padx=24, pady=6,
+                  cursor="hand2").pack(side=tk.RIGHT)
+
+        wysrodkuj(okno, self)
+        okno.grab_set()
+        self.wait_window(okno)
+        return wynik["ok"]
 
     def _write_worker(self):
         try:

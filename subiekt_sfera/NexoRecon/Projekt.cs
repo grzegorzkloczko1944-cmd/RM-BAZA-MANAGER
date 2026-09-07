@@ -120,10 +120,65 @@ internal static class Projekt
                 if (!zapisz)
                 {
                     var brakujace = skl.Where(s => Znajdz(s.Symbol) == null).Select(s => s.Symbol).ToList();
-                    kroki.Add(new Krok("komplet", p.Symbol,
-                        brakujace.Count == 0 ? "do-utworzenia" : "do-utworzenia-po-zalozeniu-skladnikow",
-                        brakujace.Count == 0 ? $"{skl.Count} składników"
-                                             : $"brak kartotek składników: {string.Join(", ", brakujace)}"));
+
+                    // Czy ten komplet JUZ ma sklad w Subiekcie i czy sklad
+                    // z BOM-u faktycznie sie od niego ROZNI?
+                    //
+                    // Zapis zawsze czysci i wpisuje od nowa (patrz "SKLAD =
+                    // PLAN" nizej), wiec technicznie kazdy istniejacy komplet
+                    // jest "zastepowany". Ale mowienie tego przy 25 kompletach,
+                    // z ktorych 23 maja DOKLADNIE ten sam sklad, to falszywy
+                    // alarm — user pyta "dlaczego zastepuje, skoro pozycje maja
+                    // te same numery i nazwy" i ma racje (zgloszone 08.09.2026).
+                    // Porownujemy wiec (symbol, ilosc) i mowimy prawde:
+                    // "bez zmian" albo co konkretnie sie zmieni.
+                    var juzMaSklad = 0;
+                    var takiSam = false;
+                    var staryOpis = new List<(string, decimal)>();
+                    var istn = Znajdz(p.Symbol);
+                    if (istn != null)
+                    {
+                        try
+                        {
+                            using var podglad = asort.Znajdz(istn);
+                            IEnumerable<dynamic> sklad = podglad.Dane.SkladnikiKompletu;
+                            var wBazie = new List<(string, decimal)>();
+                            foreach (var s in sklad)
+                            {
+                                string? sym = null;
+                                decimal ile = 0m;
+                                try { sym = (string?)s.Skladnik?.Symbol; } catch { }
+                                try { ile = (decimal)s.Ilosc; } catch { }
+                                if (!string.IsNullOrWhiteSpace(sym))
+                                    wBazie.Add((sym!.Trim().ToUpperInvariant(), ile));
+                            }
+                            juzMaSklad = wBazie.Count;
+                            staryOpis = wBazie;
+
+                            // Rozstrzyga PARA (symbol, ilosc) — sama liczba
+                            // skladnikow nie wystarczy: 4 na 4 moze znaczyc
+                            // podmienioną pozycje albo zmieniona ilosc.
+                            var zPlanu = skl
+                                .Select(s => (s.Symbol.Trim().ToUpperInvariant(),
+                                              s.Ilosc <= 0 ? 1m : s.Ilosc))
+                                .OrderBy(x => x.Item1).ThenBy(x => x.Item2).ToList();
+                            var stare = wBazie.OrderBy(x => x.Item1).ThenBy(x => x.Item2).ToList();
+                            takiSam = zPlanu.Count == stare.Count
+                                      && zPlanu.Zip(stare, (a, bb) => a.Item1 == bb.Item1 && a.Item2 == bb.Item2).All(x => x);
+                        }
+                        catch { }
+                    }
+
+                    var status = juzMaSklad > 0
+                                    ? (takiSam ? "bez-zmian" : "do-aktualizacji")
+                               : brakujace.Count == 0 ? "do-utworzenia"
+                               : "do-utworzenia-po-zalozeniu-skladnikow";
+                    var opis = juzMaSklad > 0
+                        ? (takiSam ? $"skład identyczny ({juzMaSklad} skł.) — nic się nie zmieni"
+                                   : OpiszRoznice(staryOpis, skl))
+                        : brakujace.Count == 0 ? $"{skl.Count} składników"
+                                               : $"brak kartotek składników: {string.Join(", ", brakujace)}";
+                    kroki.Add(new Krok("komplet", p.Symbol, status, opis));
                     continue;
                 }
 
@@ -471,6 +526,43 @@ internal static class Projekt
     /// (ta metoda) i odczyt (dawne porównanie Equals) patrzyły na dwa różne
     /// stringi dla tego samego numeru.
     /// </summary>
+    /// <summary>
+    /// Co dokladnie zmieni sie w skladzie kompletu: ktore rysunki doszly,
+    /// ktore znikly, ktorym zmienila sie ilosc.
+    ///
+    /// "ma 19 skl., po zapisie bedzie 20" nie mowilo, KTORY skladnik doszedl —
+    /// a przy podmianie rysunku w zlozeniu (19 -> 19) nie mowilo w ogole nic
+    /// (zgloszone 08.09.2026: "a gdy sie zmienia rysunek w zlozeniu, bedzie
+    /// pokazany?"). Sama liczba skladnikow nie jest informacja o zmianie.
+    /// </summary>
+    static string OpiszRoznice(List<(string Symbol, decimal Ilosc)> stare, List<SkladnikPlan> nowe)
+    {
+        var st = stare.ToDictionary(x => x.Symbol, x => x.Ilosc);
+        var nw = new Dictionary<string, decimal>();
+        foreach (var s in nowe)
+            nw[s.Symbol.Trim().ToUpperInvariant()] = s.Ilosc <= 0 ? 1m : s.Ilosc;
+
+        var doszlo = nw.Keys.Where(k => !st.ContainsKey(k)).OrderBy(k => k).ToList();
+        var znikly = st.Keys.Where(k => !nw.ContainsKey(k)).OrderBy(k => k).ToList();
+        var ilosci = nw.Keys.Where(k => st.ContainsKey(k) && st[k] != nw[k])
+                            .OrderBy(k => k)
+                            .Select(k => $"{k}: {st[k]:0.##}→{nw[k]:0.##}").ToList();
+
+        var czesci = new List<string>();
+        if (doszlo.Count > 0) czesci.Add("+ " + Skroc(doszlo));
+        if (znikly.Count > 0) czesci.Add("− " + Skroc(znikly));
+        if (ilosci.Count > 0) czesci.Add("ilość: " + Skroc(ilosci));
+        return czesci.Count > 0
+            ? string.Join("   ", czesci)
+            : $"{stare.Count} → {nowe.Count} skł.";
+    }
+
+    /// Trzy pozycje wystarcza, zeby zrozumiec zmiane; reszta i tak nie zmiesci
+    /// sie w kolumnie tabeli.
+    static string Skroc(List<string> lista) =>
+        lista.Count <= 3 ? string.Join(", ", lista)
+                         : string.Join(", ", lista.Take(3)) + $" … (+{lista.Count - 3})";
+
     internal static bool PasujeUwagi(string? uwagi, string projekt)
     {
         var u = (uwagi ?? "").Trim();

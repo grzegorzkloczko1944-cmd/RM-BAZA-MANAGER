@@ -893,7 +893,7 @@ class MainWindow(tk.Tk):
         subiekt_menu.add_command(label="🏬 Magazyn — stany, progi min/opt, zamówienia na skład",
                                  command=self.open_subiekt_magazyn)
         subiekt_menu.add_separator()
-        subiekt_menu.add_command(label="🏗 Załóż projekt w Subiekcie (kartoteki + komplety + ZK)…",
+        subiekt_menu.add_command(label="🏗 Projekt / Aktualizacja w Subiekcie (kartoteki + komplety + ZK)…",
                                  command=self.open_subiekt_projekt)
         subiekt_menu.add_command(label="↩ Cofnij projekt w Subiekcie (usuń ZK, komplety, kartoteki)…",
                                  command=self.open_subiekt_projekt_cofnij)
