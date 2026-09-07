@@ -805,6 +805,11 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
                 parent=self, icon="warning"):
             return
 
+        # Usuwane dokumenty (z pozycjami) trzeba zapamiętać TERAZ — po
+        # skasowaniu i przeładowaniu listy nie ma już skąd wziąć ich pozycji,
+        # a cofnięcie „Zamówiono" w arkuszu idzie po pozycjach dokumentu.
+        norm = lambda s: " ".join(str(s or "").split()).upper()
+        self._dok_do_usuniecia = {norm(d.get("numer")): d for d in wybrane if d.get("numer")}
         self.status.config(text="Usuwam dokumenty…")
         self.start_kreciolek("Usuwam dokumenty w Subiekcie")
         threading.Thread(target=self._usun_worker, args=(numery,),
@@ -834,9 +839,93 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         if bledy:
             linie += ["", f"Nieusunięte ({len(bledy)}):"]
             linie += [f"  • {k['Numer']}: {k.get('Szczegoly') or ''}" for k in bledy[:8]]
+        # To samo, co robi okno Zamówień po usunięciu ZD — TEN SAM mechanizm,
+        # ta sama kolejność. Do 07.09.2026 tylko tamto okno cofało „Zamówiono"
+        # i unieważniało dziennik wysyłek; usunięcie ZD stąd zostawiało
+        # w arkuszu flagę, datę i termin, a w dzienniku żywy wpis, który
+        # dziedziczył następny dokument pod tym samym numerem.
+        zd_numery = [k["Numer"] for k in usuniete
+                     if str(k.get("Numer") or "").strip().upper().startswith("ZD")]
+        if zd_numery:
+            opis = self._cofnij_po_usunieciu(zd_numery)
+            if opis:
+                linie += ["", opis]
         (messagebox.showwarning if bledy else messagebox.showinfo)(
             "Usuwanie dokumentów", "\n".join(linie), parent=self)
         self._load_async()      # lista musi pokazać stan po usunięciu
+
+    def _cofnij_po_usunieciu(self, numery_zd):
+        """Cofa „Zamówiono" (flaga, data, termin z tej wysyłki) w arkuszu
+        RM_BAZA dla pozycji usuniętych ZD i unieważnia ich wpisy w dzienniku
+        wysyłek. Zwraca opis do komunikatu.
+
+        Adresy BOM biorą się z _pozycje_z_bomem — tego samego, którym okno
+        wysyłki nakłada „Zamówiono", więc cofnięcie trafia dokładnie tam,
+        gdzie poszło nałożenie. KOLEJNOŚĆ: najpierw cofnięcie (czyta termin
+        z żywego wpisu dziennika), dopiero potem unieważnienie wpisu.
+        """
+        try:
+            from subiekt_wyslij_zd import cofnij_zamowienia, uniewaznij_wyslania
+        except Exception as e:
+            print(f"⚠️  Brak modułu cofania „Zamówiono”: {e}")
+            return ""
+        norm = lambda s: " ".join(str(s or "").split()).upper()
+        zapamietane = getattr(self, "_dok_do_usuniecia", None) or {}
+        refy, bez_adresu, numery = set(), [], []
+        for nr in numery_zd:
+            dok = zapamietane.get(norm(nr))
+            numer = (dok or {}).get("numer") or " ".join(str(nr).split())
+            numery.append(numer)
+            adresow = 0
+            if dok:
+                try:
+                    for poz in self._pozycje_z_bomem(dok):
+                        for ref in (poz[6] if len(poz) > 6 else None) or []:
+                            if ref and ref[0] and ref[1]:
+                                refy.add((int(ref[0]), int(ref[1]), numer))
+                                adresow += 1
+                except Exception as e:
+                    print(f"⚠️  Adresy BOM dla {numer}: {e}")
+            print(f"🧾 Cofanie „Zamówiono” {numer} (Dokumenty): "
+                  f"dokument {'znany' if dok else 'NIEZNANY na liście'}, adresów BOM={adresow}")
+            if not adresow:
+                bez_adresu.append(numer)
+
+        arkusz = getattr(self, "master", None)
+        pod_lockiem = bool(getattr(arkusz, "have_lock", False))
+        try:
+            odlozone, poprawione = cofnij_zamowienia(
+                numery, bom_refy=sorted(refy),
+                project_con=(arkusz.db_manager.project_con if pod_lockiem and arkusz else None),
+                project_id=(getattr(arkusz, "current_project_id", None) if pod_lockiem else None),
+                log=getattr(arkusz, "_log_item_change", None))
+        except Exception as e:
+            print(f"⚠️  Nie cofnięto „Zamówiono”: {e}")
+            odlozone, poprawione = 0, 0
+        # Dopiero teraz — cofnięcie wyżej potrzebowało jeszcze żywego wpisu.
+        try:
+            n = uniewaznij_wyslania(numery)
+            if n:
+                print(f"🧾 Dziennik wysyłek: unieważniono {n} wpisów usuniętych ZD")
+        except Exception as e:
+            print(f"⚠️  Nie unieważniono dziennika wysyłek: {e}")
+        if poprawione and arkusz is not None:
+            try:
+                arkusz.after(0, arkusz.refresh_data)
+            except Exception:
+                pass
+
+        opis = ""
+        if odlozone:
+            opis = f"Cofnięto „Zamówiono” i termin z tej wysyłki dla {odlozone} poz."
+            opis += (f" (w otwartym projekcie poprawiono {poprawione})" if poprawione
+                     else (" — w arkuszu zniknie przy najbliższym przejęciu projektu."
+                           if not pod_lockiem else ""))
+        if bez_adresu:
+            opis += ("\n" if opis else "") + (
+                "⚠ Dla " + ", ".join(bez_adresu) + " nie ustalono pozycji w arkuszu "
+                "RM_BAZA — „Zamówiono” i termin ZOSTAJĄ, odznacz je ręcznie.")
+        return opis
 
     # ── pozycje wybranego dokumentu ────────────────────────────────────────
     def _karta_pozycji(self, _event=None):
