@@ -756,21 +756,23 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         self.var_tytul = tk.StringVar(value=(self.project_name or str(self.project_id)).strip())
         tk.Entry(par, textvariable=self.var_tytul, width=38, font=("Arial", 9)).pack(side=tk.LEFT, pady=6)
 
-        # Wybór, co zakładać w asortymencie Subiekta. Domyślnie NIE cały BOM —
-        # zakładanie 198 kartotek jednym kliknięciem to zmiana reguły „kartoteka
-        # na żądanie", a kartotek nie da się potem łatwo usunąć.
+        # Wybór, co zakładać w asortymencie Subiekta.
         sel = tk.Frame(self, bg="#f4ecf7")
         sel.pack(side=tk.TOP, fill=tk.X)
         tk.Label(sel, text="Zakładaj kartoteki dla:", bg="#f4ecf7",
                  font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(12, 6), pady=5)
+        #: przyciski trybu — aktywny jest wyróżniony (patrz _podswietl_tryb)
+        self._btn_tryby = {}
         for etykieta, tryb, opis in (
             ("złożenia z zawartością", "komplety", "tylko Z/ZZ i to, co w nie wchodzi"),
             ("złożenia z zawartością + pozostałe", "wszystko", "cały BOM"),
             ("nic", "nic", "tylko istniejące kartoteki"),
         ):
-            tk.Button(sel, text=etykieta, command=lambda t=tryb: self._zaznacz_tryb(t),
-                      bg="#8e44ad", fg="white", font=("Arial", 8), padx=8, pady=1,
-                      relief=tk.RAISED, bd=1, cursor="hand2").pack(side=tk.LEFT, padx=3, pady=5)
+            b = tk.Button(sel, text=etykieta, command=lambda t=tryb: self._zaznacz_tryb(t),
+                          bg="#8e44ad", fg="white", font=("Arial", 8), padx=8, pady=1,
+                          relief=tk.RAISED, bd=1, cursor="hand2")
+            b.pack(side=tk.LEFT, padx=3, pady=5)
+            self._btn_tryby[tryb] = b
         tk.Label(sel, text="   (klik w kolumnę ✓ przełącza pojedynczą pozycję)",
                  bg="#f4ecf7", fg="#7f8c8d", font=("Arial", 8)).pack(side=tk.LEFT, padx=6)
 
@@ -969,10 +971,15 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         self._fill_tree(plan, wynik)
         self.btn_dodaj.config(state=tk.NORMAL)
 
-        # Domyślnie „komplety + składniki", nie cały BOM: zakładanie wszystkich
-        # kartotek naraz to zmiana reguły „kartoteka na żądanie", a kartotek nie
-        # da się potem łatwo usunąć. Użytkownik może rozszerzyć jednym kliknięciem.
-        self._zaznacz_tryb("komplety")
+        # Domyślnie WSZYSTKO — cały BOM zaznaczony.
+        #
+        # Wcześniej domyślne były „złożenia z zawartością", z obawy przed
+        # zakładaniem kartotek, których nie da się łatwo usunąć. Ale to mylące:
+        # okno pokazywało „pomijasz 44" bez wyjaśnienia, skąd te 44 się biorą,
+        # a user i tak zwykle chce cały projekt (zgłoszone 08.09.2026).
+        # Obawa jest dziś mniejsza: tryb „projekt-cofnij" usuwa to, co założone,
+        # a okno potwierdzenia wypisuje pozycja po pozycji, co powstanie.
+        self._zaznacz_tryb("wszystko")
 
         if self.bib_bez_skladu:
             self._pokaz_biblioteczne()
@@ -1092,7 +1099,14 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
         okno.minsize(680, 320)
         okno.resizable(True, True)
         okno.transient(self)
-        okno.protocol("WM_DELETE_WINDOW", lambda: None)  # tylko przyciskiem — patrz niżej
+        # X i Escape zamykają okno BEZ decyzji (jak przycisk „Anuluj") —
+        # zapis zostaje zablokowany, tak jak był, i user wraca do niego przez
+        # „Odśwież". Wcześniej X/Escape były całkiem zablokowane i jedynym
+        # wyjściem było wybranie „Pomiń" wbrew swojej woli — user nie miał
+        # jak się wycofać z całej procedury (zgłoszone 08.09.2026: „brak
+        # anulu, esc, jak chce odstąpić od procedury").
+        okno.protocol("WM_DELETE_WINDOW", okno.destroy)
+        okno.bind("<Escape>", lambda e: okno.destroy())
 
         naglowek = tk.Frame(okno, bg="#c0392b")
         naglowek.pack(fill=tk.X)
@@ -1186,6 +1200,9 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
                   bg="#2c3e50", fg="white", relief=tk.FLAT,
                   font=("Arial", 10, "bold"), padx=24, pady=4,
                   cursor="hand2").pack(side=tk.RIGHT)
+        tk.Button(stopka, text="Anuluj", command=okno.destroy,
+                  bg="#95a5a6", fg="white", relief=tk.FLAT,
+                  padx=18, pady=4).pack(side=tk.RIGHT, padx=(0, 8))
 
         wysrodkuj(okno, self)
         okno.grab_set()
@@ -1240,7 +1257,26 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
                     dodaj(p["symbol"])
             self.wybrane = chciane & brakujace
 
+        self._podswietl_tryb(tryb)
         self._odswiez_znaczniki()
+
+    def _podswietl_tryb(self, tryb):
+        """Wyróżnia aktywny przycisk trybu.
+
+        Wszystkie trzy wyglądały identycznie, więc nie było widać, który
+        jest włączony — przy „pomijasz N" user nie wiedział, skąd to N się
+        bierze (zgłoszone 08.09.2026).
+        """
+        for nazwa, b in getattr(self, "_btn_tryby", {}).items():
+            try:
+                if nazwa == tryb:
+                    b.config(bg="#4a235a", relief=tk.SUNKEN, bd=2,
+                             font=("Arial", 8, "bold"))
+                else:
+                    b.config(bg="#b07cc6", relief=tk.RAISED, bd=1,
+                             font=("Arial", 8))
+            except tk.TclError:
+                pass
 
     def _toggle_pozycja(self, event):
         """Klik w kolumnę ✓ przełącza pojedynczą pozycję."""
@@ -2187,6 +2223,59 @@ class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek):
         self.status = ttk.Label(btns, text="")
         self.status.pack(side=tk.LEFT, padx=10)
 
+    def _na_wierzch(self):
+        """To samo co w SubiektProjektWindow — przywraca okno po dialogu.
+
+        Ta klasa dziedziczy po tk.Toplevel, nie po SubiektProjektWindow, więc
+        nie dostawała tej metody. Efekt był groźny: wywołanie po messageboxie
+        potwierdzenia rzucało AttributeError PRZED usuwaniem, więc przycisk
+        „Usuń w Subiekcie" nie robił NIC, a okno nie pokazywało żadnego błędu
+        (zgłoszone 08.09.2026 — user kliknął, nic się nie usunęło).
+        """
+        def podnies():
+            try:
+                self.lift()
+                self.focus_force()
+            except tk.TclError:
+                pass
+        try:
+            self.after_idle(podnies)
+        except tk.TclError:
+            pass
+
+    def _opis_pozostalosci(self):
+        """Tekst o dokumentach do RĘCZNEGO usunięcia — z powodem, dlaczego zostają."""
+        try:
+            reszta = dokumenty_do_recznego_usuniecia(self.plan or {})
+        except Exception:
+            return ""
+        if not reszta:
+            return ""
+
+        linie = ["", "=" * 68,
+                 "DO RĘCZNEGO USUNIĘCIA — te dokumenty ZOSTAJĄ:", ""]
+        for numer, rodzaj, nasze, razem, podmiot in reszta:
+            czyje = f"{nasze} z {razem} poz. tego projektu"
+            linie.append(f"   {numer:<24} {czyje:<28} {podmiot}")
+        linie += [
+            "",
+            "DLACZEGO ZOSTAJĄ:",
+            "   Cofanie usuwa tylko to, co samo założyło: ZK, komplety i kartoteki.",
+            "   ZD/RW/WZ powstają później, osobną decyzją (zakup, wydanie na produkcję),",
+            "   i NIE mają numeru projektu w dokumencie — powiązanie z projektem liczy",
+            "   RM_BAZA z BOM-u. Jedno ZD potrafi zbierać pozycje z kilku projektów naraz,",
+            "   więc automat mógłby skasować cudze zamówienie.",
+            "",
+            "GDZIE JE USUNĄĆ:",
+            "   ZD → okno Zamówienia do dostawców → przycisk 🗑 Usuń ZD",
+            "        (albo PPM na wierszu → Usuń zamówienia (ZD)…)",
+            "   RW/WZ → okno Przegląd dokumentów",
+            "",
+            "   ⚠ Kolejność: najpierw ZD, potem ZK — odwrotnie Subiekt potrafi",
+            "     odmówić skasowania ZK powiązanego z zamówieniem do dostawcy.",
+            "=" * 68]
+        return "\n".join(linie)
+
     def _wybrany_plan(self):
         idx = 0
         try:
@@ -2226,7 +2315,8 @@ class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek):
         linie = [f"  {k['Rodzaj']:10} {k['Symbol']:24} {k['Status']}" for k in kroki]
         do_usun = sum(1 for k in kroki if k["Status"] == "do-usuniecia")
         brak = sum(1 for k in kroki if k["Status"] == "brak")
-        self._pokaz(f"Do usunięcia: {do_usun}   Nie znaleziono: {brak}\n\n" + "\n".join(linie))
+        self._pokaz(f"Do usunięcia: {do_usun}   Nie znaleziono: {brak}\n\n"
+                    + "\n".join(linie) + self._opis_pozostalosci())
         self.status.config(text=f"Do usunięcia: {do_usun}")
         self.btn_go.config(state=tk.NORMAL if do_usun else tk.DISABLED)
 
@@ -2264,14 +2354,182 @@ class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek):
         usuniete = sum(1 for k in kroki if k["Status"] in ("usuniete", "usunieta"))
         bledy = [k for k in kroki if k["Status"] == "blad"]
         linie = [f"  {k['Rodzaj']:10} {k['Symbol']:24} {k['Status']:12} {k.get('Szczegoly') or ''}" for k in kroki]
-        self._pokaz(f"Usunięto: {usuniete}   Błędów: {len(bledy)}\n\n" + "\n".join(linie))
-        self.status.config(text=f"Usunięto {usuniete}." + (f"   ⚠ {len(bledy)} błędów" if bledy else ""))
-        (messagebox.showwarning if bledy else messagebox.showinfo)(
-            "Subiekt — cofnięcie zakończone",
-            f"Usunięto {usuniete} obiektów." + (f"\n\n{len(bledy)} nie dało się usunąć — patrz lista w oknie."
-                                                 if bledy else ""),
-            parent=self)
+        # Pozostałości liczone PO usunięciu — ZK już nie ma, więc lista pokazuje
+        # dokładnie to, co realnie zostało do ręcznej roboty.
+        try:
+            reszta = dokumenty_do_recznego_usuniecia(self.plan or {})
+        except Exception:
+            reszta = []
+        self._pokaz(f"Usunięto: {usuniete}   Błędów: {len(bledy)}\n\n"
+                    + "\n".join(linie) + self._opis_pozostalosci())
+        self.status.config(text=f"Usunięto {usuniete}."
+                           + (f"   ⚠ {len(bledy)} błędów" if bledy else "")
+                           + (f"   ⚠ zostało {len(reszta)} dokumentów do ręcznego usunięcia" if reszta else ""))
+        self._raport_koncowy(usuniete, bledy, reszta)
         self._na_wierzch()
+
+    def _raport_koncowy(self, usuniete, bledy, reszta):
+        """Raport po cofnięciu — to, co WYMAGA UWAGI, na wierzchu i w całości.
+
+        Wcześniej wszystko szło do pola tekstowego pod listą 194 wierszy:
+        żeby zobaczyć 16 błędów i wiszące ZD trzeba było przewinąć na sam dół,
+        więc user by to przegapił (zgłoszone 08.09.2026). Teraz najpierw
+        podsumowanie w kolorowych panelach, a surowa lista zostaje w oknie
+        pod spodem do wglądu.
+        """
+        okno = tk.Toplevel(self)
+        okno.title("Cofnięcie zakończone")
+        okno.geometry("860x560")
+        okno.minsize(700, 400)
+        okno.transient(self)
+        okno.protocol("WM_DELETE_WINDOW", okno.destroy)
+        okno.bind("<Escape>", lambda e: okno.destroy())
+
+        czy_uwaga = bool(bledy or reszta)
+        tlo = "#c0392b" if czy_uwaga else "#27ae60"
+        naglowek = tk.Frame(okno, bg=tlo)
+        naglowek.pack(fill=tk.X)
+        tk.Label(naglowek,
+                 text=("⚠ COFNIĘTO — ale zostało coś do zrobienia ręcznie"
+                       if czy_uwaga else "✓ COFNIĘTO — wszystko usunięte"),
+                 bg=tlo, fg="white", font=("Arial", 12, "bold"),
+                 anchor="w", padx=14, pady=10).pack(fill=tk.X)
+
+        pasek = tk.Frame(okno, bg="#ecf0f1")
+        pasek.pack(fill=tk.X)
+        for tekst, liczba, kolor in (("USUNIĘTO", usuniete, "#27ae60"),
+                                     ("NIE DA SIĘ USUNĄĆ", len(bledy), "#c0392b"),
+                                     ("DOKUMENTY DO RĘCZNEGO USUNIĘCIA", len(reszta), "#d35400")):
+            if not liczba:
+                continue
+            kafel = tk.Frame(pasek, bg="#ecf0f1", padx=18, pady=8)
+            kafel.pack(side=tk.LEFT)
+            tk.Label(kafel, text=str(liczba), bg="#ecf0f1", fg=kolor,
+                     font=("Arial", 22, "bold")).pack()
+            tk.Label(kafel, text=tekst, bg="#ecf0f1", fg="#2c3e50",
+                     font=("Arial", 8, "bold")).pack()
+
+        tresc = tk.Frame(okno)
+        tresc.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+        txt = tk.Text(tresc, wrap="word", font=("Consolas", 9), bg="#fdfefe",
+                      relief=tk.FLAT, padx=8, pady=6)
+        vs = ttk.Scrollbar(tresc, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vs.set)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+
+        txt.tag_configure("h", font=("Arial", 10, "bold"), foreground="#c0392b",
+                          spacing1=8, spacing3=4)
+        txt.tag_configure("h2", font=("Arial", 9, "bold"), foreground="#2c3e50",
+                          spacing1=8, spacing3=2)
+        txt.tag_configure("poz", foreground="#c0392b")
+        txt.tag_configure("info", foreground="#555555")
+
+        if reszta:
+            txt.insert("end", f"DOKUMENTY DO RĘCZNEGO USUNIĘCIA ({len(reszta)})\n", "h")
+            for numer, rodzaj, nasze, razem, podmiot in reszta:
+                txt.insert("end", f"   {numer}   —   {nasze} z {razem} poz. tego projektu"
+                                  + (f"   ({podmiot})" if podmiot else "") + "\n", "poz")
+            txt.insert("end", "\nDlaczego zostają\n", "h2")
+            txt.insert("end",
+                       "Cofanie usuwa tylko to, co samo założyło: ZK, komplety i kartoteki.\n"
+                       "ZD/RW/WZ powstają później, osobną decyzją (zakup, wydanie na produkcję),\n"
+                       "i nie mają numeru projektu w dokumencie — powiązanie z projektem liczy\n"
+                       "RM_BAZA z BOM-u. Jedno ZD potrafi zbierać pozycje z kilku projektów\n"
+                       "naraz, więc automat mógłby skasować cudze zamówienie.\n", "info")
+            txt.insert("end", "\nGdzie je usunąć\n", "h2")
+            txt.insert("end",
+                       "   ZD      →  okno „Zamówienia do dostawców” →  przycisk 🗑 Usuń ZD\n"
+                       "   RW / WZ →  okno „Przegląd dokumentów”\n\n"
+                       "   Kolejność: najpierw ZD, potem ZK — odwrotnie Subiekt potrafi\n"
+                       "   odmówić skasowania ZK powiązanego z zamówieniem do dostawcy.\n", "info")
+
+        if bledy:
+            txt.insert("end", f"\nSUBIEKT ODMÓWIŁ USUNIĘCIA ({len(bledy)})\n", "h")
+            for b in bledy:
+                txt.insert("end", f"   {b['Symbol']}\n", "poz")
+            txt.insert("end", "\nDlaczego\n", "h2")
+            txt.insert("end",
+                       "Te kartoteki są użyte na dokumencie, mają stan magazynowy albo\n"
+                       "wchodzą w skład kompletu spoza tego projektu. To zabezpieczenie\n"
+                       "Subiekta — usunięcie rozspójniłoby dokumenty, które je wymieniają.\n"
+                       "Zwykle znikną po usunięciu dokumentów wypisanych wyżej; jeśli\n"
+                       "używa ich inny projekt, mają zostać.\n", "info")
+
+        if not czy_uwaga:
+            txt.insert("end", "\nWszystko, co ten projekt założył w Subiekcie, zostało usunięte.\n", "info")
+
+        txt.config(state="disabled")
+
+        stopka = tk.Frame(okno)
+        stopka.pack(fill=tk.X, padx=12, pady=10)
+        if reszta:
+            tk.Button(stopka, text="Otwórz Zamówienia do dostawców",
+                      command=lambda: self._otworz_zamowienia(okno),
+                      bg="#d35400", fg="white", relief=tk.FLAT,
+                      padx=16, pady=5, cursor="hand2").pack(side=tk.LEFT)
+        tk.Button(stopka, text="Zamknij", command=okno.destroy,
+                  bg="#2c3e50", fg="white", relief=tk.FLAT,
+                  font=("Arial", 10, "bold"), padx=24, pady=5,
+                  cursor="hand2").pack(side=tk.RIGHT)
+
+        wysrodkuj(okno, self)
+        okno.grab_set()
+
+    def _otworz_zamowienia(self, okno=None):
+        """Skrót do okna, w którym usuwa się ZD — żeby nie szukać go w menu."""
+        if okno is not None:
+            okno.destroy()
+        arkusz = self.master
+        metoda = getattr(arkusz, "open_subiekt_zamowienia", None)
+        if metoda is None:
+            messagebox.showinfo("Subiekt",
+                                "Otwórz okno „Zamówienia do dostawców” z menu SUBIEKT.",
+                                parent=self)
+            return
+        try:
+            metoda()
+        except Exception as e:
+            messagebox.showerror("Subiekt", str(e), parent=self)
+
+
+def dokumenty_do_recznego_usuniecia(plan, limit=300):
+    """Dokumenty, których „projekt-cofnij" NIE rusza, a zawierają pozycje projektu.
+
+    Tryb usuwa tylko to, co sam założył: ZK + komplety + kartoteki z planu.
+    ZD/RW/WZ powstają PÓŹNIEJ, osobnymi decyzjami (zakup, wydanie na produkcję)
+    i nie mają numeru projektu w dokumencie — sprawdzone 08.09.2026 na
+    ZD 1/CENTRALA/2026: Uwagi puste, Tytuł generyczny „Zamówienie do dostawcy".
+    Powiązanie z projektem liczy RM_BAZA z BOM-u, nie z Subiekta.
+
+    Automatyczne kasowanie byłoby więc ryzykowne — jedno ZD potrafi zbierać
+    pozycje z kilku projektów naraz i automat skasowałby cudze zamówienie.
+    Zamiast tego WYPISUJEMY je, żeby nie zostały niezauważone (zgłoszone
+    08.09.2026: „usunąłeś, a ZD wisi").
+
+    Zwraca [(numer, rodzaj, ile_pozycji_projektu, ile_pozycji_razem, dostawca)].
+    """
+    symbole = {p["symbol"].strip().upper() for p in (plan.get("pozycje") or [])}
+    if not symbole:
+        return []
+    try:
+        import subiekt_bridge
+        dane = subiekt_bridge.call("dokumenty", {"limit": limit}, timeout=TIMEOUT_S)
+    except Exception:
+        return []
+
+    znalezione = []
+    for d in (dane or {}).get("dokumenty", []):
+        rodzaj = str(d.get("Rodzaj") or (d.get("Numer") or "").split(" ")[0]).upper()
+        if rodzaj == "ZK":
+            continue                      # ZK usuwa sam tryb projekt-cofnij
+        pozycje = d.get("Pozycje") or []
+        nasze = sum(1 for p in pozycje
+                    if (p.get("Symbol") or "").strip().upper() in symbole)
+        if nasze:
+            znalezione.append((d.get("Numer") or "?", rodzaj, nasze, len(pozycje),
+                               d.get("Podmiot") or ""))
+    return sorted(znalezione)
 
 
 def open_cofnij_window(parent, project_id, project_name=None):
