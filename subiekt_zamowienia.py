@@ -817,13 +817,17 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
     # „Na stanie" to ilość DOSTĘPNA (Subiekt odejmuje już rezerwacje);
     # „Rezerw." pokazuje, ile z magazynu jest zajęte. „Min/Opt" to progi
     # zamawiania z kartoteki (np. „10/15" = domawiaj przy 10, uzupełnij do 15).
+    # „Data ZD" to data WYSTAWIENIA dokumentu w Subiekcie, „Wysłano" — moment
+    # wysłania go do dostawcy mailem (ślad z RM_BAZA, tabela zd_wyslane).
+    # To dwie różne rzeczy: ZD może leżeć wystawione i nikomu niewysłane,
+    # a właśnie to trzeba widzieć (07.09.2026).
     HEADERS = ["✓", "Nr rysunku", "Nazwa", "Typ", "Potrzeba", "Na stanie", "Rezerw.",
                "Min/Opt", "Ze stanu", "Kupić", "J.m.", "Dostawca (Subiekt)",
-               "wg BOM", "Projekt", "ZK", "ZD", "Data ZD", "PDF"]
+               "wg BOM", "Projekt", "ZK", "ZD", "Data ZD", "Wysłano", "PDF"]
     (COL_SEL, COL_SYMBOL, COL_NAZWA, COL_TYP, COL_POTRZEBA, COL_DOSTEPNE, COL_REZERW,
      COL_MINOPT, COL_ZE_STANU, COL_ILOSC, COL_JM, COL_DOSTAWCA, COL_DOST_BOM,
-     COL_PROJ, COL_ZK, COL_ZD, COL_DATA_ZD, COL_PDF) = range(18)
-    SZEROKOSCI = [30, 115, 165, 48, 60, 60, 56, 60, 56, 50, 34, 145, 88, 56, 88, 92, 74, 40]
+     COL_PROJ, COL_ZK, COL_ZD, COL_DATA_ZD, COL_WYSLANO, COL_PDF) = range(19)
+    SZEROKOSCI = [30, 115, 165, 48, 60, 60, 56, 60, 56, 50, 34, 145, 88, 56, 88, 92, 74, 74, 40]
 
     # Wartości filtra typu — DOKŁADNIE jak FILTER_CLASS_VALUES w arkuszu
     # głównym RM_BAZA, razem z LASER / LASER EXPORT (rozwijane do X i XX).
@@ -1010,7 +1014,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         # odczytać źródła dostawcy.
         tk.Label(leg, text="   Wiersz:", bg="#f8f9f9", font=("Arial", 8, "bold")
                  ).pack(side=tk.LEFT, padx=(18, 4), pady=2)
-        for kolor, opis in (("#dfeaf7", "zamówione (jest ZD)"),
+        for kolor, opis in (("#b3d1ec", "zamówione (jest ZD)"),
                             ("#eef1f3", "pokryte ze stanu — nic nie kupujemy")):
             tk.Label(leg, text="  ", bg=kolor, relief=tk.SOLID, bd=1).pack(side=tk.LEFT, padx=(6, 2), pady=2)
             tk.Label(leg, text=opis, bg="#f8f9f9", fg="#7f8c8d",
@@ -1117,6 +1121,9 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
 
     # ── wczytywanie ────────────────────────────────────────────────────────
     def _load_async(self):
+        # Daty wysyłki czytamy od nowa razem z resztą — w międzyczasie ktoś
+        # mógł wysłać ZD (także z drugiego okna).
+        self._cache_wyslane = None
         self.btn_refresh.config(state=tk.DISABLED)
         self.btn_zd.config(state=tk.DISABLED)
         self.start_kreciolek("Pytam Subiekta o zapotrzebowanie")
@@ -1600,6 +1607,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
               f"{w.get('ze_stanu', 0):g}" if w.get("ze_stanu") else "",
               f"{w['ilosc']:g}", w["jm"], w["dostawca"], w.get("dostawca_bom", ""),
               w["projekty"], w["zk"], w.get("zd", ""), w.get("zd_data", ""),
+              self._wyslano_tekst(w.get("zd")),
               "📄" if self._plik_pdf(w.get("zd")) else ""]
              for w in self.widoczne],
             reset_col_positions=False, redraw=False)
@@ -1621,15 +1629,26 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         for i, w in enumerate(self.widoczne):
             if w.get("zd"):
                 # Zamówione — cały wiersz na niebiesko (stan pozycji).
+                #
+                # Kolor MUSI być wyraźnie ciemniejszy od białego tła. Poprzedni
+                # #dfeaf7 miał kontrast 1,22 wobec bieli — na monitorze wiersz
+                # zamówiony wyglądał identycznie jak niezamówiony (zgłoszone
+                # 07.09.2026). Teraz 1,59; dalej spokojny, ale widoczny.
                 for c in range(ostatnia + 1):
-                    self.sheet.highlight_cells(row=i, column=c, bg="#dfeaf7")
+                    self.sheet.highlight_cells(row=i, column=c, bg="#b3d1ec")
+                # Drugi sygnał, niezależny od koloru: numer ZD na ciemnym
+                # granacie i pogrubiony przez samą treść kolumny. Kolor bywa
+                # nieczytelny na słabym monitorze albo przy daltonizmie,
+                # a „jest ZD / nie ma ZD" to najważniejsza informacja w tym oknie.
+                self.sheet.highlight_cells(row=i, column=self.COL_ZD,
+                                           bg="#2e6da4", fg="white")
                 # ZK odbudowane z powiązania ZD→ZK: zamówienie klienta nadal
                 # istnieje, ale ta pozycja nie jest już w zapotrzebowaniu.
                 # Szara czcionka mówi „informacja historyczna", a nie
                 # „jest do zamówienia z tego ZK".
                 if w.get("zk_historyczne") and w.get("zk"):
                     self.sheet.highlight_cells(row=i, column=self.COL_ZK,
-                                               bg="#dfeaf7", fg="#95a5a6")
+                                               bg="#b3d1ec", fg="#7f8c8d")
             elif w["ilosc"] <= 0:
                 # Cała potrzeba pokryta ze stanu — nie ma czego zamawiać.
                 for c in range(ostatnia + 1):
@@ -1911,7 +1930,12 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             # Fabryka agenta portalu — arkusz zna ścieżkę do master.sqlite tej
             # maszyny, więc tworzy agenta sam. Bez niej combo „Rysunki"
             # w oknie wysyłki ma tylko tryb mailowy.
-            agent_portalu=getattr(okno, "_get_rfq_agent", None))
+            agent_portalu=getattr(okno, "_get_rfq_agent", None),
+            # Po udanej wysyłce kolumna „Wysłano" ma pokazać datę OD RAZU.
+            # Bez tego trzeba było klikać „Odśwież", czyli czekać na pełny
+            # odczyt z Subiekta, żeby zobaczyć własną wysyłkę. Samo
+            # przerysowanie arkusza wystarczy — dane wysyłki są lokalne.
+            po_wyslaniu=self._po_wyslaniu_zd)
 
     def _email_dostawcy(self, nazwa_subiekt):
         """
@@ -2381,6 +2405,63 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         z którego korzystają okna wysyłki i przeglądu dokumentów."""
         import subiekt_wyslij_zd
         return subiekt_wyslij_zd._katalog_pdf_domyslny()
+
+    def _po_wyslaniu_zd(self):
+        """Wołane przez okno wysyłki po potwierdzonym wysłaniu ZD."""
+        self._cache_wyslane = None
+        try:
+            self._refill()
+        except tk.TclError:
+            pass                        # okno zamknięte w międzyczasie
+
+    def _wyslano_tekst(self, kolumna_zd):
+        """Data wysłania ZD do dostawcy albo „—”, gdy jeszcze nie poszło.
+
+        To CO INNEGO niż „Data ZD": tamta mówi, kiedy dokument wystawiono
+        w Subiekcie, ta — kiedy trafił mailem do dostawcy. ZD potrafi leżeć
+        wystawione i niewysłane, a właśnie to trzeba widzieć (07.09.2026).
+
+        Ślad jest po stronie RM_BAZA (tabela zd_wyslane), bo status dokumentu
+        w Subiekcie mówi o stanie magazynowym, nie o wysyłce.
+        """
+        numery = _numery_zd(kolumna_zd)
+        if not numery:
+            return ""
+        mapa = self._mapa_wyslanych()
+        daty = [mapa[n] for n in numery if n in mapa]
+        if not daty:
+            return "—"                  # ZD jest, ale nikt go nie wysłał
+        # Przy zbiorczej kolumnie pokazujemy NAJWCZEŚNIEJSZĄ wysyłkę — to ona
+        # mówi, od kiedy dostawca wie o zamówieniu.
+        return min(daty)[:10]
+
+    def _mapa_wyslanych(self):
+        """{numer ZD: data wysyłki} — czytane RAZ na odświeżenie listy.
+
+        Bez cache szłoby jedno zapytanie na wiersz (przy 200 pozycjach to
+        200 zapytań na każde przerysowanie arkusza).
+        """
+        mapa = getattr(self, "_cache_wyslane", None)
+        if mapa is not None:
+            return mapa
+        mapa = {}
+        try:
+            import sqlite3
+            from subiekt_wyslij_zd import _master
+            con = sqlite3.connect(_master(), timeout=5)
+            try:
+                # Najnowsza wysyłka per numer — ZD bywa wysyłane ponownie
+                # (poprawiona treść, drugi adres).
+                for numer, kiedy in con.execute(
+                        "SELECT numer_zd, MAX(kiedy) FROM zd_wyslane GROUP BY numer_zd"):
+                    if numer:
+                        mapa[numer.strip()] = kiedy or ""
+            finally:
+                con.close()
+        except Exception:
+            pass            # brak tabeli = nikt jeszcze nic nie wysłał
+        self._cache_wyslane = mapa
+        return mapa
 
     def _plik_pdf(self, kolumna_zd):
         """Ścieżka gotowego wydruku PIERWSZEGO ZD z kolumny albo None.
