@@ -334,6 +334,13 @@ def odloz_zamowienia(bom_refy, termin, numer_zd, supplier_id=None):
                 " VALUES (?,?,?,?,?,?)",
                 [(pid, iid, str(termin) if termin else None, numer_zd, teraz, supplier_id)
                  for pid, iid in refy])
+            # Nowa wysyłka unieważnia odłożone COFNIĘCIE tej samej pozycji:
+            # usunięto stare ZD, wystawiono nowe i wysłano — pozycja jest
+            # znów zamówiona, a stare cofnięcie nie ma już czego cofać.
+            _zapewnij_tabele_cofniec(con)
+            con.executemany(
+                "DELETE FROM zd_cofniete_pozycje WHERE project_id=? AND item_id=?",
+                refy)
             # Sprzątanie przy okazji — to jedyne miejsce, które i tak otwiera
             # master do zapisu; osobny cykl sprzątający byłby przerostem formy.
             granica = (datetime.now() - timedelta(days=DNI_WAZNOSCI_ZAMOWIEN)
@@ -350,6 +357,162 @@ def odloz_zamowienia(bom_refy, termin, numer_zd, supplier_id=None):
     except Exception as e:
         print(f"⚠️  Nie odłożono {len(refy)} poz. „Zamówiono” do master: {e}")
         return 0
+
+
+def _zapewnij_tabele_cofniec(con):
+    """Tabela odłożonych cofnięć „Zamówiono" — lustro zd_zamowione_pozycje."""
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS zd_cofniete_pozycje (
+            project_id  INTEGER NOT NULL,
+            item_id     INTEGER NOT NULL,
+            numer_zd    TEXT,
+            kiedy       TEXT NOT NULL,
+            PRIMARY KEY (project_id, item_id)
+        )""")
+
+
+def cofnij_zamowienia(numery_zd, bom_refy=(), project_con=None, project_id=None, log=None):
+    """Cofa „Zamówiono" dla pozycji z USUNIĘTYCH ZD — tą samą drogą, którą
+    szło nakładanie.
+
+    Nakładanie ma trzy etapy: odłożenie w master (odloz_zamowienia) →
+    nałożenie na kopię lokalną przy locku (naloz_zamowienia) → sprzątnięcie
+    master po wgraniu na serwer (usun_zamowienia). Cofnięcie MUSI iść tak
+    samo, bo flaga już siedzi w pliku projektu, a bez locka nie wolno go
+    dotykać.
+
+    Pierwsza wersja (07.09.2026, wcześniej tego dnia) tylko kasowała wpisy
+    z master i zakładała, że „najbliższy lock nic nie nałoży". Nie zadziałała
+    z dwóch powodów — oba wyszły na żywo:
+      * flaga była JUŻ zapisana w projekcie, więc skasowanie wpisu w master
+        niczego nie cofało,
+      * dla ZD, które przeszło cykl lock→wgranie, wpisów w master już nie
+        było (sprzątnięte), więc nie było nawet czego kasować.
+
+    Dlatego pozycje bierzemy z SAMEGO usuwanego dokumentu (`bom_refy`
+    z wierszy okna ZD), nie z master, i zapisujemy ODŁOŻONE COFNIĘCIE do
+    `zd_cofniete_pozycje`. Zdejmuje je zdejmij_zamowienia() przy locku,
+    sprząta usun_zamowienia() po wgraniu — „Anuluj" ich nie gubi, tak jak
+    nie gubi odłożonych „Zamówiono".
+
+    Czego NIE rusza:
+      * `supplier_id` — dostawcę ustawiono świadomie i po usunięciu ZD nadal
+        jest najlepszą wiedzą o tym, u kogo się zamawia,
+      * `deadline_date` — termin mógł być wpisany w arkuszu przed wysyłką;
+        skasowanie zgasiłoby alarm pilnujący dostawy,
+      * `zd_wyslane` — to dziennik zdarzeń („wysłano wtedy i wtedy"), a nie
+        stan; historii się nie przepisuje.
+
+    Zwraca (ile_odlozonych_cofniec, ile_odznaczonych_w_otwartym_projekcie).
+    """
+    import sqlite3
+    numery = [str(n).strip() for n in (numery_zd or ()) if str(n).strip()]
+    refy = sorted({(int(r[0]), int(r[1])) for r in (bom_refy or ())
+                   if r and r[0] and r[1]})
+    if not numery and not refy:
+        return 0, 0
+
+    odlozone = 0
+    try:
+        con = sqlite3.connect(_master(), timeout=10)
+        try:
+            _zapewnij_tabele_cofniec(con)
+            # Odłożone „Zamówiono" z tych ZD nie mogą już wejść — dokumentu
+            # nie ma. Kasujemy po NUMERZE, nie po pozycji: ta sama pozycja
+            # może siedzieć w innym, żywym ZD i tamto odłożenie ma zostać.
+            if numery and con.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table'"
+                    " AND name='zd_zamowione_pozycje'").fetchone():
+                pyt = ",".join("?" * len(numery))
+                con.execute(f"DELETE FROM zd_zamowione_pozycje WHERE numer_zd IN ({pyt})",
+                            numery)
+            teraz = datetime.now().isoformat(timespec="seconds")
+            etykieta = ", ".join(numery) or None
+            con.executemany(
+                "INSERT OR REPLACE INTO zd_cofniete_pozycje"
+                " (project_id, item_id, numer_zd, kiedy) VALUES (?,?,?,?)",
+                [(pid, iid, etykieta, teraz) for pid, iid in refy])
+            odlozone = len(refy)
+            con.commit()
+        finally:
+            con.close()
+    except Exception as e:
+        print(f"⚠️  Nie odłożono cofnięcia „Zamówiono” ({', '.join(numery)}): {e}")
+        return 0, 0
+
+    # Otwarty pod lockiem projekt poprawiamy OD RAZU — inaczej użytkownik
+    # usuwa ZD z własnego projektu i nic nie widzi. Wpis w master zostaje
+    # do wgrania na serwer, jak przy nakładaniu.
+    odznaczone = 0
+    if project_con is not None and project_id:
+        odznaczone = _zdejmij_z_kopii(
+            project_con, [iid for pid, iid in refy if pid == project_id], log)
+    return odlozone, odznaczone
+
+
+def _zdejmij_z_kopii(project_con, item_ids, log=None):
+    """Zdejmuje ordered_flag z podanych pozycji kopii lokalnej. Zwraca ile."""
+    if not item_ids:
+        return 0
+    teraz = datetime.now().isoformat(timespec="seconds")
+    ile = 0
+    try:
+        for item_id in item_ids:
+            stare = project_con.execute(
+                "SELECT ordered_flag, ordered_at FROM items WHERE id=?",
+                (item_id,)).fetchone()
+            if stare is None or not int(stare[0] or 0):
+                continue                # pozycji nie ma albo już nieoznaczona
+            project_con.execute(
+                "UPDATE items SET ordered_flag=0, ordered_at=NULL, updated_at=?"
+                " WHERE id=?", (teraz, item_id))
+            ile += 1
+            if callable(log):
+                try:
+                    log(item_id, 'EDIT', 'ordered_at', stare[1], None)
+                except Exception:
+                    pass                # audyt to dodatek, nie warunek zapisu
+        project_con.commit()
+    except Exception as e:
+        try:
+            project_con.rollback()
+        except Exception:
+            pass
+        print(f"⚠️  Nie odznaczono „Zamówiono” w kopii projektu: {e}")
+        return 0
+    return ile
+
+
+def zdejmij_zamowienia(project_con, project_id, log=None):
+    """Zdejmuje odłożone cofnięcia „Zamówiono" z OTWARTEJ POD LOCKIEM kopii.
+
+    Lustro naloz_zamowienia(): tamto nakłada flagi z zd_zamowione_pozycje,
+    to zdejmuje je wg zd_cofniete_pozycje. MUSI być wołane PRZED
+    naloz_zamowienia — gdy ta sama pozycja ma odłożone cofnięcie (ze starego,
+    usuniętego ZD) i odłożone nałożenie (z nowego ZD), wygrywa nowsze
+    nałożenie, a nie kolejność przypadkowa.
+
+    NIE kasuje wpisów z master — to robi usun_zamowienia() po udanym wgraniu.
+    Zwraca liczbę odznaczonych pozycji.
+    """
+    import sqlite3
+    if project_con is None or not project_id:
+        return 0
+    try:
+        m = sqlite3.connect(f"file:{_master()}?mode=ro", uri=True, timeout=10)
+        try:
+            if not m.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
+                             " AND name='zd_cofniete_pozycje'").fetchone():
+                return 0
+            item_ids = [r[0] for r in m.execute(
+                "SELECT item_id FROM zd_cofniete_pozycje WHERE project_id=?",
+                (project_id,))]
+        finally:
+            m.close()
+    except Exception as e:
+        print(f"⚠️  Nie odczytano odłożonych cofnięć dla projektu {project_id}: {e}")
+        return 0
+    return _zdejmij_z_kopii(project_con, item_ids, log)
 
 
 def naloz_zamowienia(project_con, project_id, log=None):
@@ -458,12 +621,18 @@ def usun_zamowienia(project_id):
                 return 0
             n = con.execute("DELETE FROM zd_zamowione_pozycje WHERE project_id=?",
                             (project_id,)).rowcount
+            # Odłożone cofnięcia sprzątamy w tym samym momencie i z tego
+            # samego powodu: dopiero teraz są na serwerze.
+            _zapewnij_tabele_cofniec(con)
+            c = con.execute("DELETE FROM zd_cofniete_pozycje WHERE project_id=?",
+                            (project_id,)).rowcount
             con.commit()
         finally:
             con.close()
-        if n:
-            print(f"🧹 Projekt {project_id}: {n} wpisów „Zamówiono” zapisanych na serwer, usunięte z master")
-        return n
+        if n or c:
+            print(f"🧹 Projekt {project_id}: {n} wpisów „Zamówiono” i {c} cofnięć "
+                  "zapisanych na serwer, usunięte z master")
+        return n + c
     except Exception as e:
         # Zostają — nałożą się ponownie przy następnym locku (idempotentne).
         print(f"⚠️  Nie usunięto wpisów „Zamówiono” projektu {project_id}: {e}")

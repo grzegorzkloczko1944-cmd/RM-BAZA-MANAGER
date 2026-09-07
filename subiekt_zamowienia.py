@@ -2315,11 +2315,16 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             "Usunięcie ZD — potwierdzenie",
             "Baza PRODUKCYJNA. Operacja NIEODWRACALNA.\n\n"
             f"Zostaną usunięte dokumenty ({len(numery)}):\n{opis}\n\n"
-            "Pozycje wrócą do zapotrzebowania jako braki.\n\nUsunąć?",
+            "Pozycje wrócą do zapotrzebowania jako braki,\n"
+            "a w arkuszu RM_BAZA zniknie z nich „Zamówiono”.\n\nUsunąć?",
             parent=self, icon="warning")
         if not ok:
             return
 
+        # Pozycje usuwanych ZD (z bom_ref do arkusza) trzeba zapamiętać TERAZ:
+        # po skasowaniu dokumentu i przeładowaniu listy nie ma już skąd ich
+        # wziąć, a cofnięcie „Zamówiono" idzie po pozycjach, nie po master.
+        self._zd_do_usuniecia = zd
         self.status.config(text="Usuwam ZD…")
         threading.Thread(target=self._usun_worker, args=(numery,), daemon=True).start()
 
@@ -2348,9 +2353,68 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         if bledy:
             lines += ["", f"Nieusunięte ({len(bledy)}):"]
             lines += [f"  • {k['Numer']}: {k.get('Szczegoly') or ''}" for k in bledy[:8]]
+        # „Zamówiono" w arkuszu RM_BAZA musi zniknąć razem z dokumentem.
+        # Inaczej pozycja zostaje oznaczona jako zamówiona, choć zamówienia
+        # już nie ma, a to okno pokazuje ją jako brak — dwa okna mówią co
+        # innego o tej samej pozycji (07.09.2026).
+        # Cofamy TYLKO dla faktycznie usuniętych ZD; ZK znacznika nie zakłada.
+        cofniete = self._cofnij_zamowiono(
+            [k["Numer"] for k in usuniete
+             if str(k.get("Numer") or "").strip().upper().startswith("ZD")])
+        if cofniete:
+            lines += ["", cofniete]
+
         (messagebox.showwarning if bledy else messagebox.showinfo)(
             "Usuwanie ZD", "\n".join(lines), parent=self)
         self._load_async()      # pozycje wracają do zapotrzebowania
+
+    def _cofnij_zamowiono(self, numery_zd):
+        """Zdejmuje „Zamówiono" z pozycji usuniętych ZD. Zwraca opis albo ''."""
+        if not numery_zd:
+            return ""
+        try:
+            from subiekt_wyslij_zd import cofnij_zamowienia
+        except Exception:
+            return ""
+        # Pozycje z SAMYCH usuwanych dokumentów — zapamiętane w _usun_zd.
+        # Nie z master: dla ZD, które przeszło już cykl lock→wgranie, wpisów
+        # tam nie ma, a flaga w arkuszu i tak siedzi.
+        zd = getattr(self, "_zd_do_usuniecia", None) or {}
+        refy = set()
+        for nr in numery_zd:
+            for w in (zd.get(nr) or {}).get("poz") or []:
+                for ref in w.get("bom_ref") or []:
+                    if ref and ref[0] and ref[1]:
+                        refy.add((int(ref[0]), int(ref[1])))
+        arkusz = getattr(self, "master", None)
+        pid = getattr(arkusz, "current_project_id", None)
+        # Kopię lokalną wolno ruszać tylko pod lockiem. Bez niego cofnięcie
+        # zostaje odłożone w master i zdejmie je najbliższe przejęcie projektu
+        # — dokładnie tak, jak odłożone „Zamówiono" nakłada się przy locku.
+        pod_lockiem = bool(getattr(arkusz, "have_lock", False))
+        try:
+            odlozone, odznaczone = cofnij_zamowienia(
+                numery_zd, bom_refy=sorted(refy),
+                project_con=(arkusz.db_manager.project_con
+                             if pod_lockiem and arkusz else None),
+                project_id=(pid if pod_lockiem else None),
+                log=getattr(arkusz, "_log_item_change", None))
+        except Exception as e:
+            print(f"⚠️  Nie cofnięto „Zamówiono”: {e}")
+            return ""
+        if odznaczone and arkusz is not None:
+            try:
+                arkusz.after(0, arkusz.refresh_data)
+            except Exception:
+                pass
+        if not odlozone:
+            return ""
+        opis = f"Cofnięto „Zamówiono” dla {odlozone} poz."
+        if odznaczone:
+            opis += f" (w otwartym projekcie odznaczono {odznaczone})"
+        elif not pod_lockiem:
+            opis += " — w arkuszu zniknie przy najbliższym przejęciu projektu."
+        return opis
 
     # ── szukanie dostawcy w filtrze ────────────────────────────────────────
     def _szukaj_dostawcy(self):

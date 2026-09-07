@@ -8979,22 +8979,34 @@ class MainWindow(tk.Tk):
         „Anuluj" ich nie gubi, następny lock nałoży je ponownie.
         """
         try:
-            from subiekt_wyslij_zd import naloz_zamowienia
+            from subiekt_wyslij_zd import naloz_zamowienia, zdejmij_zamowienia
         except Exception:
             return
+        # Kolejność NIE jest dowolna: najpierw cofnięcia (usunięte ZD), potem
+        # nałożenia (wysłane ZD). Gdy ta sama pozycja ma jedno i drugie —
+        # usunięto stare ZD, wysłano nowe — ma wygrać nowsze nałożenie.
+        try:
+            zdjete = zdejmij_zamowienia(self.db_manager.project_con,
+                                        self.current_project_id, self._log_item_change)
+        except Exception as e:
+            print(f"⚠️  Nie zdjęto „Zamówiono” po usuniętych ZD: {e}")
+            zdjete = 0
         try:
             ile = naloz_zamowienia(self.db_manager.project_con,
                                    self.current_project_id, self._log_item_change)
         except Exception as e:
             print(f"⚠️  Nie nałożono „Zamówiono” z wysyłki ZD: {e}")
             return
-        if ile:
+        if ile or zdjete:
             # Dane zmieniły się bez udziału użytkownika — musi to zobaczyć.
-            messagebox.showinfo(
-                "Zamówienia z Subiekta",
-                f"Oznaczono {ile} poz. jako ZAMÓWIONE.\n\n"
-                "Poszły do dostawcy zamówieniem ZD, gdy projekt nie był przejęty.",
-                parent=self)
+            czesci = []
+            if ile:
+                czesci.append(f"Oznaczono {ile} poz. jako ZAMÓWIONE — poszły do "
+                              "dostawcy zamówieniem ZD, gdy projekt nie był przejęty.")
+            if zdjete:
+                czesci.append(f"Zdjęto ZAMÓWIONE z {zdjete} poz. — ich ZD usunięto "
+                              "z Subiekta, gdy projekt nie był przejęty.")
+            messagebox.showinfo("Zamówienia z Subiekta", "\n\n".join(czesci), parent=self)
 
     def acquire_lock(self):
         """Przejmij lock projektu"""

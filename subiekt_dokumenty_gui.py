@@ -280,7 +280,8 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         tk.Label(leg, text="Legenda:", bg="#ecf0f1", fg="#7f8c8d",
                  font=("Arial", 8, "bold")).pack(side=tk.LEFT, padx=(12, 6), pady=(0, 5))
         for kolor, opis in (("#d6eaf8", "ZK — zamówienie od klienta"),
-                            ("#d5f5e3", "ZD — zamówienie do dostawcy"),
+                            ("#dfeaf7", "ZD niewysłane — dostawca nie wie"),
+                            ("#b3d1ec", "ZD wysłane do dostawcy"),
                             ("#fdebd0", "RW — wydanie na produkcję"),
                             ("#f4ecf7", "WZ — wydanie zewnętrzne"),
                             ("#eaecee", "anulowany"),
@@ -461,11 +462,26 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
              for d in out], reset_col_positions=False, redraw=False)
 
         # Kolor po rodzaju — od razu widać, co jest zamówieniem, a co wydaniem.
-        kolory = {"ZK": "#d6eaf8", "ZD": "#d5f5e3", "RW": "#fdebd0", "WZ": "#f4ecf7"}
+        # ZD ma DWA kolory, te same co w oknie Zamówień (07.09.2026):
+        #   jasny  — wystawione, ale NIEWYSŁANE; dostawca nie wie, jest co zrobić,
+        #   mocny  — wysłane do dostawcy.
+        # Wcześniej ZD było zielone i nie odróżniało jednego od drugiego,
+        # a to jedyna rzecz, którą w tym oknie trzeba widzieć o ZD.
+        kolory = {"ZK": "#d6eaf8", "RW": "#fdebd0", "WZ": "#f4ecf7"}
+        wyslane = getattr(self, "_wyslane", None) or {}
         for i, d in enumerate(out):
-            bg = kolory.get(d["rodzaj"])
-            if bg:
-                self.sheet.highlight_cells(row=i, column=0, bg=bg)
+            if d["rodzaj"] == "ZD":
+                if (d.get("numer") or "") in wyslane:
+                    self.sheet.highlight_cells(row=i, column=0, bg="#b3d1ec")
+                else:
+                    self.sheet.highlight_cells(row=i, column=0, bg="#dfeaf7")
+                    # Niewysłane ZD — kolumna „Wysłano" na pomarańczowo, żeby
+                    # zaległość rzucała się w oczy bez porównywania odcieni.
+                    self.sheet.highlight_cells(row=i, column=9, bg="#f5b041", fg="#7d3c00")
+            else:
+                bg = kolory.get(d["rodzaj"])
+                if bg:
+                    self.sheet.highlight_cells(row=i, column=0, bg=bg)
             # Zakup na sklad — wyrozniony w kolumnie Projekt, zeby nie mylil
             # sie z zamowieniem pod konkretny projekt klienta.
             if d["projekt"] == UWAGI_MAGAZYN:
