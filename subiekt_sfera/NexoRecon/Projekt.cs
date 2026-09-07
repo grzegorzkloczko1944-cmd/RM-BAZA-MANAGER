@@ -386,7 +386,16 @@ internal static class Projekt
     /// false. Limit iteracji to bezpiecznik na wypadek, gdyby kiedys zaczelo
     /// zwracac true w nieskonczonosc.
     /// </summary>
-    internal static int WyczyscSklad(dynamic ob)
+    /// <remarks>
+    /// Parametr MUSI byc typem statycznym (IAsortyment), NIE dynamic. Przy
+    /// dynamic binder wybiera przeciazenie Skladniki.Usun po typie runtime
+    /// i nie trafia w zadne z trzech (Asortyment / int / string) — leci
+    /// "No overload for method 'Usun' takes 1 arguments", mimo ze Usun(string)
+    /// istnieje. Kazdy komplet konczyl sie wtedy bledem i NIE POWSTAWAL
+    /// (zgloszone 07.09.2026: 25 bledow, 0 kompletow, ZK utworzone).
+    /// Ten sam blad i ta sama naprawa co w KartotekaEdytuj.cs.
+    /// </remarks>
+    internal static int WyczyscSklad(InsERT.Moria.Asortymenty.IAsortyment ob)
     {
         var symbole = new List<string>();
         int bylo;
