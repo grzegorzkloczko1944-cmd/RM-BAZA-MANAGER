@@ -240,12 +240,22 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
 
         wrap = tk.Frame(ram, bg=TLO_SEKCJI)
         wrap.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        # Wlasny styl TYLKO dla tego drzewa (osobna nazwa, zeby nie ruszyc
+        # tabel w reszcie RM_BAZA). Domyslne ~20 px wciecia na poziom bylo
+        # za male: przy komplecie w komplecie poziom 2 i 3 wygladaly tak
+        # samo i nie dalo sie odczytac, co do czego nalezy.
+        styl = ttk.Style()
+        try:
+            styl.configure("Edytor.Treeview", indent=28, rowheight=22)
+        except tk.TclError:
+            pass          # starszy Tk bez opcji indent — drzewo dziala dalej
         # "sym" to kolumna ROBOCZA (displaycolumns ja ukrywa): trzyma symbol
         # pozycji, zeby nie wyciagac go z tekstu wiersza. Symbole ze spacja
         # ("DN20 K=34") rozbijaly takie parsowanie i operacje na nich cicho
         # nie dzialaly.
         self.tree = ttk.Treeview(wrap, columns=("ilosc", "sym"), show="tree headings",
-                                 selectmode="browse", displaycolumns=("ilosc",))
+                                 selectmode="browse", displaycolumns=("ilosc",),
+                                 style="Edytor.Treeview")
         self.tree.heading("#0", text="Symbol / Nazwa")
         self.tree.heading("ilosc", text="Ilość")
         # minwidth wiekszy niz width: kolumna rosnie z oknem, a poziomy pasek
@@ -631,17 +641,24 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         return [(d, il) for (r, d, il) in self.relacje if r == symbol]
 
     def _odswiez_drzewo(self):
-        rozwiniete = {self._symbol_wezla(i)
-                      for i in self.tree.get_children("") if self.tree.item(i, "open")}
         for w in self.tree.get_children(""):
             self.tree.delete(w)
         for sym in self.korzenie:
             self._wstaw_wezel("", sym, None, set())
-        for i in self.tree.get_children(""):
-            self.tree.item(i, open=True)
+        # Rozwijamy CALE drzewo, nie tylko poziom 0. Wczesniej komplet
+        # przeciagniety do innego kompletu zostawal zwiniety i jego sklad
+        # znikal z widoku — wygladalo to na zgubienie skladnikow.
+        self._rozwin_wszystko()
         self._aktualizuj_przycisk_zapisu()
         self._odswiez_etykiete_celu()
         self._oznacz_w_liscie()
+
+    def _rozwin_wszystko(self, rodzic=""):
+        """Rozwija kazda galaz. Struktura jest tu mala, a sens tego okna
+        to widziec caly sklad naraz."""
+        for i in self.tree.get_children(rodzic):
+            self.tree.item(i, open=True)
+            self._rozwin_wszystko(i)
 
     def _wstaw_wezel(self, rodzic_id, symbol, ilosc, sciezka):
         k = self.pozycje.get(symbol)
