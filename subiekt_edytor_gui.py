@@ -1315,20 +1315,119 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         if bledy:
             messagebox.showwarning("Zapis", "\n".join(f"• {b}" for b in bledy), parent=self)
             return
-        nowe = sum(1 for k in self.pozycje.values() if not k.w_subiekcie)
-        istn = len(self.pozycje) - nowe
-        if not messagebox.askyesno(
-                "Zapis do Subiekta",
-                f"Zapisać do Subiekta?\n\n"
-                f"  nowych kartotek:      {nowe}\n"
-                f"  istniejących (edycja): {istn}\n"
-                f"  kompletów ze składem:  "
-                f"{sum(1 for s, k in self.pozycje.items() if k.czy_komplet() and self._dzieci(s))}\n\n"
-                "Symbol po zapisie nie podlega zmianie.", parent=self):
+        if not self.pozycje:
+            messagebox.showinfo("Zapis", "Drzewo jest puste.", parent=self)
+            return
+        # Potwierdzenie w osobnym oknie, nie w messageboxie: trzy liczby nie
+        # mowily, JAK sie kartoteki nazywaja ani co wejdzie w sklad kompletu,
+        # a symbol po zapisie jest juz nie do zmiany.
+        if not self._potwierdz_zapis():
             return
         self.start_kreciolek("Zapisuję do Subiekta")
         threading.Thread(target=self._zapis_worker, args=(self._zbuduj_plan(), True),
                          daemon=True).start()
+
+    def _potwierdz_zapis(self):
+        """Okno z pelna struktura do zapisu. True = user potwierdzil."""
+        okno = tk.Toplevel(self)
+        okno.title("Zapis do Subiekta — podsumowanie")
+        okno.configure(bg=TLO)
+        okno.geometry("820x620")
+        okno.transient(self)
+
+        nowe = [k for k in self.pozycje.values() if not k.w_subiekcie]
+        istn = [k for k in self.pozycje.values() if k.w_subiekcie]
+        komplety = [s for s, k in self.pozycje.items()
+                    if k.czy_komplet() and self._dzieci(s)]
+
+        tk.Label(okno, text="Co trafi do Subiekta", bg=TLO, fg=TEKST,
+                 font=("Arial", 13, "bold"), anchor="w").pack(
+            fill=tk.X, padx=14, pady=(12, 2))
+
+        pas = tk.Frame(okno, bg=TLO)
+        pas.pack(fill=tk.X, padx=14, pady=(0, 8))
+        for etykieta, ile, kolor in (
+                ("nowych kartotek", len(nowe), NOWY_NIEBIESKI),
+                ("istniejących (edycja)", len(istn), TEKST),
+                ("kompletów ze składem", len(komplety), TEKST)):
+            ramka = tk.Frame(pas, bg=TLO_SEKCJI, bd=1, relief="solid")
+            ramka.pack(side=tk.LEFT, padx=(0, 8))
+            tk.Label(ramka, text=str(ile), bg=TLO_SEKCJI, fg=kolor,
+                     font=("Arial", 18, "bold")).pack(padx=16, pady=(6, 0))
+            tk.Label(ramka, text=etykieta, bg=TLO_SEKCJI, fg=TEKST_SZARY,
+                     font=("Arial", 8)).pack(padx=16, pady=(0, 6))
+
+        wrap = tk.Frame(okno, bg=TLO_SEKCJI)
+        wrap.pack(fill=tk.BOTH, expand=True, padx=14, pady=4)
+        kol = ("nazwa", "ilosc", "co")
+        tab = ttk.Treeview(wrap, columns=kol, show="tree headings",
+                           style="Edytor.Treeview")
+        tab.heading("#0", text="Symbol")
+        tab.heading("nazwa", text="Nazwa")
+        tab.heading("ilosc", text="Ilość")
+        tab.heading("co", text="Co się stanie")
+        tab.column("#0", width=230, minwidth=230, stretch=True)
+        tab.column("nazwa", width=250, minwidth=180)
+        tab.column("ilosc", width=55, anchor="e", stretch=False)
+        tab.column("co", width=150, minwidth=150)
+        tab.tag_configure("nowa", foreground=NOWY_NIEBIESKI)
+        tab.tag_configure("komplet", font=("Arial", 9, "bold"))
+        sc = ttk.Scrollbar(wrap, orient="vertical", command=tab.yview)
+        sc_poz = ttk.Scrollbar(wrap, orient="horizontal", command=tab.xview)
+        tab.configure(yscrollcommand=sc.set, xscrollcommand=sc_poz.set)
+        sc_poz.pack(side=tk.BOTTOM, fill=tk.X)
+        tab.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sc.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def wstaw(rodzic_id, symbol, ilosc, sciezka):
+            k = self.pozycje.get(symbol)
+            if k is None or symbol in sciezka:
+                return
+            dzieci = self._dzieci(symbol)
+            if k.czy_komplet():
+                co = ("zostanie założony" if not k.w_subiekcie
+                      else "skład zostanie ustawiony")
+                co += f" — {len(dzieci)} skl."
+            else:
+                co = "zostanie założona" if not k.w_subiekcie else "edycja danych"
+            tagi = []
+            if not k.w_subiekcie:
+                tagi.append("nowa")
+            if k.czy_komplet():
+                tagi.append("komplet")
+            wid = tab.insert(
+                rodzic_id, "end", text=f"{SKROT.get(k.rodzaj, '??')}  {symbol}",
+                values=(k.nazwa, f"x{ilosc:g}" if ilosc else "", co),
+                tags=tuple(tagi), open=True)
+            for dziecko, il in dzieci:
+                wstaw(wid, dziecko, il, sciezka | {symbol})
+
+        for sym in self.korzenie:
+            wstaw("", sym, None, set())
+
+        tk.Label(okno, text="Symbol po zapisie NIE podlega zmianie — sprawdź, czy "
+                            "komplety nie zostały z roboczą nazwą typu \u201eNOWA-01\u201d.",
+                 bg="#fdf2e9", fg=TEKST, font=("Arial", 9), justify="left",
+                 anchor="w", wraplength=780).pack(fill=tk.X, padx=14, pady=(8, 4))
+
+        wynik = {"ok": False}
+
+        def zatwierdz():
+            wynik["ok"] = True
+            okno.destroy()
+
+        pb = tk.Frame(okno, bg=TLO)
+        pb.pack(fill=tk.X, padx=14, pady=(4, 12))
+        tk.Button(pb, text="Zapisz do Subiekta", command=zatwierdz,
+                  bg=OK_ZIELONY, fg="white", font=("Arial", 10, "bold"),
+                  padx=14, pady=4).pack(side=tk.RIGHT)
+        tk.Button(pb, text="Anuluj", command=okno.destroy,
+                  font=("Arial", 10), padx=14, pady=4).pack(side=tk.RIGHT, padx=8)
+
+        wysrodkuj(okno, self)
+        okno.grab_set()
+        self.wait_window(okno)
+        return wynik["ok"]
 
     def _zapis_worker(self, plan, zapisz):
         try:
