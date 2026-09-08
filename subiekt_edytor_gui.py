@@ -367,10 +367,16 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                      font=("Arial", 9), anchor="w", width=12).grid(
                 row=i, column=0, sticky="w", padx=8, pady=6)
             v = tk.StringVar()
-            e = tk.Entry(pod, textvariable=v, font=("Arial", 9), width=44)
+            # 28 zamiast 44 znakow: pole i tak rozciaga sie z oknem
+            # (sticky="we"), a sztywne 44 wypychalo zawartosc poza ramke.
+            e = tk.Entry(pod, textvariable=v, font=("Arial", 9), width=28)
             e.grid(row=i, column=1, sticky="we", padx=4, pady=6)
             v.trace_add("write", lambda *_a, k=klucz: self._pole_zmienione(k))
             self.pola[klucz] = (v, e)
+        # Auto — nadaje nastepny wolny symbol, zeby nie wymyslac go recznie.
+        self.btn_auto = tk.Button(pod, text="Auto", command=self._auto_symbol,
+                                  font=("Arial", 8), padx=6)
+        self.btn_auto.grid(row=0, column=2, sticky="w", padx=(0, 8), pady=6)
 
         tk.Label(pod, text="Rodzaj:", bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9),
                  anchor="w", width=12).grid(row=2, column=0, sticky="w", padx=8, pady=6)
@@ -789,6 +795,9 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             # Symbol istniejącej kartoteki jest kluczem — nie wolno go zmieniać.
             self.pola["symbol"][1].config(
                 state="readonly" if k.w_subiekcie else "normal")
+            # Auto tez wygaszamy — zeby nie kusilo kliknięciem, ktore i tak
+            # skonczy sie odmowa.
+            self.btn_auto.config(state="disabled" if k.w_subiekcie else "normal")
             for etykieta, wartosc in RODZAJE:
                 if wartosc == k.rodzaj:
                     self.var_rodzaj.set(etykieta)
@@ -896,6 +905,37 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             return
         k.pola_wlasne[pole] = self.pola_wlasne_var[pole].get()
         self._zmienione = True
+
+    def _auto_symbol(self):
+        """Nadaje zaznaczonej pozycji nastepny wolny symbol.
+
+        Omija tez kartoteki z Subiekta — sam _nowy_symbol patrzy wylacznie
+        na drzewo, wiec trafilby w istniejaca kartoteke i zamiast zalozyc
+        nowa, edytowalby cudza.
+        """
+        sym = self._zaznaczony
+        if not sym or sym not in self.pozycje:
+            messagebox.showinfo("Auto", "Zaznacz najpierw pozycję w drzewie.",
+                                parent=self)
+            return
+        k = self.pozycje[sym]
+        if k.w_subiekcie:
+            messagebox.showinfo(
+                "Auto", "„" + sym + "” jest już w Subiekcie — symbolu "
+                "istniejącej kartoteki nie wolno zmieniać.", parent=self)
+            return
+        zajete = {str(p.get("Symbol") or "").strip().upper()
+                  for p in self.katalog}
+        baza = "KPL" if k.czy_komplet() else "TOW"
+        i = 1
+        while True:
+            kandydat = f"{baza}-{i:03d}"
+            if kandydat not in self.pozycje and kandydat.upper() not in zajete:
+                break
+            i += 1
+        self._zmien_symbol(sym, kandydat)
+        self.status.config(text="Nadano symbol „" + kandydat + "”",
+                           fg=TEKST_SZARY)
 
     def _zmien_symbol(self, stary, nowy):
         """Zmiana symbolu pozycji, która NIE jest jeszcze w Subiekcie."""
