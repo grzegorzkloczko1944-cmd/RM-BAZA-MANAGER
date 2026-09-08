@@ -158,7 +158,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
     KOL_SKLAD = [("lp", "Lp.", 40), ("symbol", "Symbol", 130),
                  ("nazwa", "Nazwa", 220), ("ilosc", "Ilość", 70),
                  ("jm", "JM", 50)]
-    KOL_LISTA = [("symbol", "Symbol", 130), ("nazwa", "Nazwa", 200),
+    KOL_LISTA = [("w", "✓", 28), ("symbol", "Symbol", 130), ("nazwa", "Nazwa", 200),
                  ("rodzaj", "Rodzaj", 80), ("cena", "Cena netto", 80)]
 
     def __init__(self, parent, symbol=None):
@@ -462,6 +462,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             self.tab_lista.column(klucz, width=szer,
                                   anchor="e" if klucz == "cena" else "w")
         self.tab_lista.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        self.tab_lista.tag_configure("w_drzewie", foreground=TEKST_SZARY)
         self.tab_lista.bind("<Double-1>", lambda _e: self._dodaj_istniejaca())
         tk.Label(dol, text="Dwuklik = dodaj jako składnik zaznaczonego kompletu",
                  bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8), anchor="w").pack(
@@ -492,20 +493,44 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.status.config(text=f"Kartotek w Subiekcie: {len(dane)}", fg=TEKST_SZARY)
 
     def _odswiez_liste(self):
+        """Przebudowa listy 4 - WSZYSTKIE kartoteki, filtr zaweza.
+
+        Byl tu limit 400 wierszy i robil zludzenie "pozycja zniknela":
+        po skasowaniu wyszukiwania dodana kartoteka byla poza pierwsza
+        czterysetka. 3469 wierszy to dla Treeview ulamek sekundy.
+        """
         szukaj = (self.var_szukaj.get() or "").strip().lower()
         for w in self.tab_lista.get_children():
             self.tab_lista.delete(w)
-        n = 0
         for k in self.katalog:
             sym = str(k.get("Symbol") or "").strip()
             naz = str(k.get("Nazwa") or "").strip()
             if szukaj and szukaj not in sym.lower() and szukaj not in naz.lower():
                 continue
+            w_drzewie = sym in self.pozycje
             self.tab_lista.insert("", "end", values=(
-                sym, naz, k.get("Rodzaj") or "", f"{float(k.get('CenaEwidencyjna') or 0):g}"))
-            n += 1
-            if n >= 400:      # lista podglądowa — filtr zawęża, nie przewijamy tysięcy
-                break
+                "✓" if w_drzewie else "", sym, naz, k.get("Rodzaj") or "",
+                f"{float(k.get('CenaEwidencyjna') or 0):g}"),
+                tags=("w_drzewie",) if w_drzewie else ())
+
+    def _oznacz_w_liscie(self):
+        """Aktualizuje TYLKO fajki i szarosc na liscie 4, bez przebudowy.
+
+        Wolane przy kazdym odswiezeniu drzewa - przebudowa 3469 wierszy przy
+        kazdym wpisanym znaku w polu Nazwa bylaby odczuwalna, zmiana tagow nie.
+        Nie ukrywamy pozycji bedacych w drzewie: ta sama kartoteka moze isc
+        do drugiego kompletu (model grafowy).
+        """
+        for w in self.tab_lista.get_children():
+            wartosci = list(self.tab_lista.item(w, "values"))
+            if len(wartosci) < 2:
+                continue
+            w_drzewie = wartosci[1] in self.pozycje
+            fajka = "✓" if w_drzewie else ""
+            if wartosci[0] != fajka:
+                wartosci[0] = fajka
+                self.tab_lista.item(w, values=wartosci,
+                                    tags=("w_drzewie",) if w_drzewie else ())
 
     def _wczytaj_istniejaca(self, symbol):
         """Tryb edycji: wciąga kartotekę z Subiekta wraz ze składem."""
@@ -563,6 +588,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             self.tree.item(i, open=True)
         self._aktualizuj_przycisk_zapisu()
         self._odswiez_etykiete_celu()
+        self._oznacz_w_liscie()
 
     def _wstaw_wezel(self, rodzic_id, symbol, ilosc, sciezka):
         k = self.pozycje.get(symbol)
@@ -923,7 +949,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         if not wyb:
             messagebox.showinfo("Edytor", "Zaznacz kartotekę na liście (sekcja 4).", parent=self)
             return
-        sym, naz, rodzaj, cena = self.tab_lista.item(wyb[0], "values")
+        _w, sym, naz, rodzaj, cena = self.tab_lista.item(wyb[0], "values")
         rodzaj_n = ("komplet" if "omplet" in rodzaj else
                     "usluga" if "sług" in rodzaj or "slug" in rodzaj else "towar")
         if sym not in self.pozycje:
@@ -992,12 +1018,22 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         else:
             if sym in self.korzenie:
                 self.korzenie.remove(sym)
+            dzieci = [d for (r, d, _il) in self.relacje if r == sym]
             self.relacje = [(r, d, il) for (r, d, il) in self.relacje
                             if r != sym and d != sym]
+            # Skladniki usunietego kompletu, ktorych nie ma nigdzie indziej,
+            # wychodza NA WIERZCH. Wczesniej zostawaly w `pozycje` jako duchy:
+            # niewidoczne w drzewie, ale przy zapisie poszlyby do Subiekta
+            # jako osobne kartoteki. Teraz je widac i mozna usunac osobno.
+            for d in dzieci:
+                nadal_uzyty = any(dd == d for (_r, dd, _i) in self.relacje)
+                if not nadal_uzyty and d not in self.korzenie and d in self.pozycje:
+                    self.korzenie.append(d)
             uzyta = any(d == sym for (_r, d, _i) in self.relacje)
             if not uzyta and sym in self.pozycje:
                 del self.pozycje[sym]
         self._zaznaczony = None
+        self._zmienione = True
         self._odswiez_drzewo()
 
     def _przesun(self, kierunek):
