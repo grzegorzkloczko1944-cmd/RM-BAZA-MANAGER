@@ -79,9 +79,12 @@ WAGA_STATUSU = {
     "pominiety-brak-skladnikow": "uwaga",
     "do-zalozenia": "nowe",
     "zalozona": "nowe",
-    "do-zmiany": "zmiana",
+    # Nadpisanie tego, co juz jest w Subiekcie — kasuje czyjas wczesniejsza
+    # wartosc, wiec wlasna waga. "do-ustawienia" tylko wypelnia sklad
+    # swiezo zakladanego kompletu, czyli puste miejsce.
+    "do-zmiany": "nadpisanie",
+    "zmieniona": "nadpisanie",
     "do-ustawienia": "zmiana",
-    "zmieniona": "zmiana",
     "sklad-ustawiony": "zmiana",
     "bez-zmian": "info",
 }
@@ -91,7 +94,8 @@ WAGA_STATUSU = {
 KOLORY_WAGI = {
     "uwaga":  ("#f9d6d5", "#922b21"),   # czerwone — wymaga reakcji
     "nowe":   ("#d6eaf8", "#1a5276"),   # niebieskie — powstaje nowy byt
-    "zmiana": ("#fcf3cf", "#7d6608"),   # zolte — istniejace dane sie zmieniaja
+    "nadpisanie": ("#f5c6a5", "#a04000"),  # lososiowe — nadpisujemy stan z Subiekta
+    "zmiana": ("#fcf3cf", "#7d6608"),   # zolte — uzupelnienie, nic sie nie traci
     "info":   ("#ffffff", "#95a5a6"),   # szare — nic sie nie dzieje
 }
 
@@ -1567,7 +1571,8 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
 
         # Waga kazdego statusu — decyduje o kolorze tla wiersza.
         wagi = [WAGA_STATUSU.get(str(k.get("Status") or ""), "info") for k in kroki]
-        ile = {w: wagi.count(w) for w in ("uwaga", "nowe", "zmiana", "info")}
+        ile = {w: wagi.count(w)
+               for w in ("uwaga", "nadpisanie", "nowe", "zmiana", "info")}
 
         naglowek = (f"założonych: {wynik.get('zalozonych', 0)}   "
                     f"zmienionych: {wynik.get('zmienionych', 0)}   "
@@ -1580,8 +1585,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # bez przegladania wiersz po wierszu. Puste grupy pomijamy.
         leg = tk.Frame(okno, bg=TLO)
         leg.pack(fill=tk.X, padx=12, pady=(0, 6))
-        for waga, etykieta in (("uwaga", "wymaga uwagi"), ("nowe", "nowe w Subiekcie"),
-                               ("zmiana", "zmiana danych"), ("info", "bez zmian")):
+        for waga, etykieta in (("uwaga", "wymaga uwagi"),
+                               ("nadpisanie", "nadpisanie danych z Subiekta"),
+                               ("nowe", "nowe w Subiekcie"),
+                               ("zmiana", "uzupełnienie składu"),
+                               ("info", "bez zmian")):
             if not ile.get(waga):
                 continue
             tlo, kolor = KOLORY_WAGI[waga]
