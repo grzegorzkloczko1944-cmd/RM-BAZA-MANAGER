@@ -68,6 +68,10 @@ RODZAJE = [("Towar", "towar"), ("Komplet (Z)", "komplet"), ("Usługa", "usluga")
 #: Skróty przy węzłach drzewa — od razu widać, co jest czym.
 SKROT = {"towar": "TW", "komplet": "KT", "usluga": "US"}
 
+#: Zaslepka nazwy w widokach. Do Subiekta NIE trafia — tam za pusta
+#: nazwe wchodzi symbol (patrz Kartoteka.do_planu).
+BEZ_NAZWY = "(bez nazwy — uzupełnij)"
+
 #: Waga informacji w raporcie zapisu — decyduje o kolorze tla wiersza.
 #: Bez tego "bez-zmian" krzyczalo tak samo glosno jak "do-zalozenia".
 WAGA_STATUSU = {
@@ -142,7 +146,10 @@ class Kartoteka:
     def __init__(self, symbol, nazwa="", rodzaj="towar", jm="szt",
                  cena=0.0, opis="", w_subiekcie=False):
         self.symbol = symbol
-        self.nazwa = nazwa or symbol
+        #: Pusta nazwa ZOSTAJE pusta. Wczesniej podmieniala sie na symbol,
+        #: wiec drzewo pokazywalo "SKL-01  SKL-01" i nie bylo widac, ze
+        #: pozycja czeka na uzupelnienie. Zaslepke rysuje dopiero widok.
+        self.nazwa = nazwa
         self.rodzaj = rodzaj
         self.jm = jm
         self.cena = cena
@@ -164,7 +171,7 @@ class Kartoteka:
         return self.rodzaj == "komplet"
 
     def do_planu(self, skladniki):
-        d = {"symbol": self.symbol, "nazwa": self.nazwa,
+        d = {"symbol": self.symbol, "nazwa": self.nazwa or self.symbol,
              "rodzaj": self.rodzaj, "jm": self.jm,
              "cena": self.cena, "opis": self.opis}
         if skladniki:
@@ -732,7 +739,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # i robil balagan. Czytelnosc zalatwia szerszy panel + poziomy pasek.
         wid = self.tree.insert(
             rodzic_id, "end",
-            text=f"{symbol}   {k.nazwa}",
+            text=f"{symbol}   {k.nazwa or BEZ_NAZWY}",
             values=(f"x{ilosc:g}" if ilosc else "", symbol,
                     SKROT.get(k.rodzaj, "??")), tags=tuple(tagi))
         for dziecko, il in self._dzieci(symbol):
@@ -801,7 +808,9 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         if k is None:
             return
         if klucz == "nazwa":
-            k.nazwa = self.pola["nazwa"][0].get().strip() or k.symbol
+            # Skasowanie nazwy zostawia pusto (i zapala blad w walidacji),
+            # zamiast po cichu wpisywac symbol.
+            k.nazwa = self.pola["nazwa"][0].get().strip()
         elif klucz == "symbol" and not k.w_subiekcie:
             nowy = self.pola["symbol"][0].get().strip()
             if nowy and nowy != k.symbol and nowy not in self.pozycje:
@@ -1254,7 +1263,8 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         for i, (dziecko, il) in enumerate(dzieci, 1):
             kd = self.pozycje.get(dziecko)
             self.tab_sklad.insert("", "end", values=(
-                i, dziecko, kd.nazwa if kd else "", f"{il:g}", kd.jm if kd else ""))
+                i, dziecko, (kd.nazwa or BEZ_NAZWY) if kd else "", f"{il:g}",
+                kd.jm if kd else ""))
 
     def _edytuj_ilosc(self, _e=None):
         wyb = self.tab_sklad.selection()
@@ -1363,6 +1373,8 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             k = self.pozycje[sym]
             if not sym.strip():
                 bledy.append("pozycja bez symbolu")
+            if not (k.nazwa or "").strip():
+                bledy.append(f"„{sym}” nie ma nazwy — uzupełnij pole Nazwa")
             if k.czy_komplet() and not self._dzieci(sym):
                 bledy.append(f"„{sym}” to komplet bez składników — Subiekt go odrzuci")
         # Cykl: komplet zawierający sam siebie (choćby pośrednio).
@@ -1486,7 +1498,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 tagi.append("komplet")
             wid = tab.insert(
                 rodzic_id, "end", text=symbol,
-                values=(SKROT.get(k.rodzaj, "??"), k.nazwa,
+                values=(SKROT.get(k.rodzaj, "??"), k.nazwa or BEZ_NAZWY,
                         f"x{ilosc:g}" if ilosc else "", co),
                 tags=tuple(tagi), open=True)
             for dziecko, il in dzieci:
