@@ -836,9 +836,16 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         elif zrodlo in self.korzenie:
             self.korzenie.remove(zrodlo)
 
-        # Podpinamy w nowym.
+        # Podpinamy w nowym - NA POCZATKU skladu, nie na koncu. Doklejenie
+        # na koniec wygladalo jak "pozycja wypadla poza drzewko": gdy cel jest
+        # korzeniem, jego ostatnie dziecko jest ostatnim wierszem calej listy.
         if nowy_rodzic:
-            self.relacje.append((nowy_rodzic, zrodlo, ilosc))
+            wstaw = len(self.relacje)
+            for i, (r, _d, _il) in enumerate(self.relacje):
+                if r == nowy_rodzic:
+                    wstaw = i
+                    break
+            self.relacje.insert(wstaw, (nowy_rodzic, zrodlo, ilosc))
             self.status.config(
                 text="Przeniesiono \"" + zrodlo + "\" do skladu \"" + nowy_rodzic + "\"",
                 fg=TEKST_SZARY)
@@ -884,13 +891,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         rodzic = self._symbol_wezla(rodzic_item) if rodzic_item else None
         if rodzic and rodzic in self.pozycje and self.pozycje[rodzic].czy_komplet():
             return rodzic
-        # Z zaznaczenia nic nie wynika (luzny towar). Jesli w drzewie jest
-        # DOKLADNIE JEDEN komplet, nie ma czego zgadywac - to on. Bez tego
-        # kazdy dwuklik na liscie ladowal obok, bo zaznaczenie przeskakiwalo
-        # na kolejny luzny towar i pulapka sie samonapedzala.
-        komplety = [sym for sym, k in self.pozycje.items() if k.czy_komplet()]
-        if len(komplety) == 1:
-            return komplety[0]
+        # Swiadomie NIE zgadujemy celu, gdy z zaznaczenia nic nie wynika.
+        # Wczesniej "jedyny komplet w drzewie" byl domyslnym celem i swiezo
+        # dodane kartoteki same wchodzily do srodka. Nowe maja lezec luzno
+        # na dole; do skladu wklada sie je przeciagnieciem albo majac
+        # zaznaczony komplet.
         return None
 
     def _odswiez_etykiete_celu(self):
@@ -901,8 +906,9 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             self.lbl_cel.config(text="+ Skladnik / + Istniejaca  ->  do skladu: " + cel,
                                 fg=TEKST)
         else:
-            self.lbl_cel.config(text="+ Skladnik / + Istniejaca  ->  jako osobna pozycja "
-                                     "(zaznacz komplet, zeby dodawac do srodka)",
+            self.lbl_cel.config(text="+ Skladnik / + Istniejaca  ->  na dol, luzno "
+                                     "(zaznacz komplet, zeby dodawac do srodka; "
+                                     "luzne wciagniesz przeciagnieciem)",
                                 fg=TEKST_SZARY)
 
     def _nowy_symbol(self, baza="NOWA"):
@@ -981,10 +987,14 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 text="Pozycja \"" + sym + "\" dodana jako osobna - w drzewie nie byl "
                      "zaznaczony zaden komplet", fg=TEKST_SZARY)
         self._zmienione = True
+        # Zaznaczenie ZOSTAJE tam gdzie bylo: jesli dodawales do kompletu,
+        # kolejny dwuklik trafi do tego samego kompletu; jesli dokladasz
+        # luzne pozycje, kolejne tez leca na dol. Wczesniejsze przeskakiwanie
+        # zaznaczenia na dodana pozycje cicho zmienialo cel dodawania.
+        zachowane = self._zaznaczony
         self._odswiez_drzewo()
-        # Zaznaczamy dodana pozycje: cel dodawania wynika z jej rodzica,
-        # wiec kolejny dwuklik na liscie dalej trafia do tego kompletu.
-        self._zaznacz_w_drzewie(sym)
+        if zachowane and zachowane in self.pozycje:
+            self._zaznacz_w_drzewie(zachowane)
 
     def _duplikuj(self):
         sym = self._symbol_wezla()
