@@ -351,6 +351,10 @@ class PanelSubiekt(tk.Toplevel):
                  "nieodwracalny", "open_subiekt_projekt", None),
                 ("↩", "Cofnij projekt", "usuń ZK, komplety, kartoteki",
                  "nieodwracalny", "open_subiekt_projekt_cofnij", None),
+                # Maly projekt spoza RM_BAZA — caly BOM w jednym pliku CSV,
+                # wiec NIE wymaga otwartego projektu w arkuszu.
+                ("📄", "Projekt z pliku CSV", "male zlozenie spoza RM_BAZA",
+                 "nieodwracalny", "open_subiekt_projekt_csv", None),
             ]),
             ("Zakupy i magazyn", "Stany, zamówienia i dokumenty", [
                 ("🏬", "Magazyn", "stany, progi min/opt, zamówienia na skład",

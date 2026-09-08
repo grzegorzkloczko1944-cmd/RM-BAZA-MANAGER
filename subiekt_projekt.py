@@ -1323,18 +1323,49 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                 self.var_podmiot.get().strip(), self.var_tytul.get().strip(),
                 csv_path=self.csv_path)
             if not plan["pozycje"]:
-                self.after(0, lambda: self._dry_done(None, None, [], "Brak pozycji z numerem rysunku.", {}, 0, {}))
+                self._po_watku(self._dry_done, None, None, [], "Brak pozycji z numerem rysunku.", {}, 0, {})
                 return
             wynik = run_bridge(plan, zapisz=False)
             # Suchy przebieg też jest okazją do zapamiętania trafień — kolejny
             # projekt z tymi numerami nie będzie musiał pytać Subiekta.
             zapisz_mapowania(wynik)
-            self.after(0, lambda: self._dry_done(plan, wynik, items, warn, poza_bom, ukryte_galezie, bib_bez_skladu))
+            self._po_watku(self._dry_done, plan, wynik, items, warn,
+                           poza_bom, ukryte_galezie, bib_bez_skladu)
         except Exception as e:
             err = str(e)
-            self.after(0, lambda: self._dry_done(None, None, [], err, {}, 0, {}))
+            self._po_watku(self._dry_done, None, None, [], err, {}, 0, {})
+
+    def _zyje(self):
+        """Czy okno wciaz istnieje. Suchy przebieg trwa kilka sekund
+        i chodzi w watku — user moze zamknac okno, zanim watek wroci."""
+        try:
+            return bool(self.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def _po_watku(self, funkcja, *args):
+        """Wywoluje `funkcja` w GUI, ale tylko gdy okno jeszcze zyje.
+
+        Bez tego zamkniecie okna w trakcie odpytywania Subiekta konczylo sie
+        TclError „invalid command name” — callback siegal po widgety, ktore
+        Tk juz zniszczyl (08.09.2026). Wynik porzucamy: to byl suchy
+        przebieg, w Subiekcie nic sie nie zmienilo.
+        """
+        def opakowane():
+            if not self._zyje():
+                return
+            try:
+                funkcja(*args)
+            except tk.TclError:
+                pass          # okno zniknelo w trakcie rysowania wyniku
+        try:
+            self.after(0, opakowane)
+        except tk.TclError:
+            pass              # okno zamkniete, zanim zdazylismy zaplanowac
 
     def _dry_done(self, plan, wynik, items, warn, poza_bom=None, ukryte_galezie=0, bib_bez_skladu=None):
+        if not self._zyje():
+            return
         self.btn_refresh.config(state=tk.NORMAL)
         if plan is None:
             self.stop_kreciolek()
@@ -2625,10 +2656,22 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
     def _write_worker(self):
         try:
             wynik = run_bridge(self._plan_do_zapisu(), zapisz=True)
-            self.after(0, lambda: self._write_done(wynik, None))
         except Exception as e:
             err = str(e)
-            self.after(0, lambda: self._write_done(None, err))
+            self._po_watku(self._write_done, None, err)
+            return
+        # Most JUZ ZAPISAL. Jesli okno zniknelo, i tak musi zostac slad —
+        # bez logu nie ma czym cofnac projektu, a w Subiekcie sa juz
+        # kartoteki, komplety i ZK.
+        if not self._zyje():
+            try:
+                save_log(self.project_id or numer_projektu(self.project_name),
+                         wynik, plan=self._plan_do_zapisu())
+                zapisz_mapowania(wynik)
+            except Exception:
+                pass          # log nie moze przeslonic udanego zapisu
+            return
+        self._po_watku(self._write_done, wynik, None)
 
     def _write_done(self, wynik, error):
         self.btn_refresh.config(state=tk.NORMAL)
@@ -2748,6 +2791,11 @@ def open_window(parent, project_id, project_name=None):
 # most do założenia, więc ProjektCofnij.cs wie, co ma szukać i w jakiej
 # kolejności usuwać (ZK → komplety od góry → kartoteki).
 class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
+    # Te same strazniki co w oknie projektu — operacje chodza w watkach,
+    # a okno mozna zamknac w kazdej chwili.
+    _zyje = SubiektProjektWindow._zyje
+    _po_watku = SubiektProjektWindow._po_watku
+
     def __init__(self, parent, project_id, project_name=None):
         tk.Toplevel.__init__(self, parent)
         Kreciolek.__init__(self)
@@ -2883,9 +2931,9 @@ class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
     def _check_worker(self):
         try:
             wynik = run_bridge(self.plan, zapisz=False, tryb="projekt-cofnij")
-            self.after(0, lambda: self._check_done(wynik, None))
+            self._po_watku(self._check_done, wynik, None)
         except Exception as e:
-            self.after(0, lambda: self._check_done(None, str(e)))
+            self._po_watku(self._check_done, None, str(e))
 
     def _check_done(self, wynik, error):
         self.btn_check.config(state=tk.NORMAL)
@@ -2923,9 +2971,9 @@ class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
     def _go_worker(self):
         try:
             wynik = run_bridge(self.plan, zapisz=True, tryb="projekt-cofnij")
-            self.after(0, lambda: self._go_done(wynik, None))
+            self._po_watku(self._go_done, wynik, None)
         except Exception as e:
-            self.after(0, lambda: self._go_done(None, str(e)))
+            self._po_watku(self._go_done, None, str(e))
 
     def _go_done(self, wynik, error):
         if error:
