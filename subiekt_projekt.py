@@ -632,7 +632,215 @@ def znajdz_logi_projektu(project_id):
 
 
 # ── Okno ────────────────────────────────────────────────────────────────────
-class SubiektProjektWindow(tk.Toplevel, Kreciolek):
+
+# ── wspólna lista „Do zrobienia" ────────────────────────────────────────────
+class MiksinNotatki:
+    """Lista zadań projektu — używana przez OBA okna Subiekta.
+
+    Okno zakładania wpisuje tu, czego nie załatwiło (biblioteczne bez składu,
+    rozjazd drzewka), a okno cofania — dokumenty do ręcznego usunięcia.
+    Jedna lista, bo to ta sama robota do zrobienia przy tym samym projekcie.
+
+    Wymaga od klasy: `project_id`, `project_name` i przycisku `btn_todo`.
+    """
+
+    def _odswiez_licznik_todo(self):
+        """Liczba niezrobionych na przycisku — inaczej nikt tam nie zajrzy."""
+        try:
+            dane = subiekt_historia.wczytaj_notatke(self.project_id) or {}
+            ile = sum(1 for z in dane.get("zadania", []) if not z.get("zrobione"))
+            self.btn_todo.config(
+                text=f"📋 Do zrobienia ({ile})" if ile else "📋 Do zrobienia",
+                bg="#c0392b" if ile else "#8e44ad")
+        except Exception:
+            pass
+
+    def _okno_notatki(self):
+        """Lista „do zrobienia" projektu — odhaczanie, dopisywanie, notatka.
+
+        Leży we WSPÓLNYM katalogu (subiekt_historia), więc widzi ją każdy
+        użytkownik: notuje jeden, robi często ktoś inny.
+        """
+        dane = subiekt_historia.wczytaj_notatke(self.project_id) or {"zadania": [], "tekst": ""}
+        zadania = list(dane.get("zadania", []))
+
+        okno = tk.Toplevel(self)
+        okno.title(f"Do zrobienia — projekt {self.project_name}")
+        okno.geometry("820x600")
+        okno.minsize(640, 420)
+        okno.transient(self)
+        okno.bind("<Escape>", lambda e: okno.destroy())
+
+        naglowek = tk.Frame(okno, bg="#8e44ad")
+        naglowek.pack(fill=tk.X)
+        tk.Label(naglowek, text="📋 Czego okno NIE zrobiło — zostaje na Twojej głowie",
+                 bg="#8e44ad", fg="white", font=("Arial", 11, "bold"),
+                 anchor="w", padx=12, pady=8).pack(fill=tk.X)
+        tk.Label(okno, text="Lista jest wspólna dla wszystkich stanowisk — notuje jeden, robi kto inny.",
+                 fg="#7f8c8d", font=("Arial", 8), anchor="w", padx=12, pady=4).pack(fill=tk.X)
+
+        # Stopka przed listą — inaczej przy wielu zadaniach przyciski wypadają.
+        stopka = tk.Frame(okno)
+        stopka.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=10)
+
+        dodaj_ramka = tk.Frame(okno)
+        dodaj_ramka.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(0, 6))
+        var_nowe = tk.StringVar()
+        tk.Entry(dodaj_ramka, textvariable=var_nowe, font=("Arial", 9)).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, ipady=3)
+
+        ramka = tk.Frame(okno)
+        ramka.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 4))
+        kanwa = tk.Canvas(ramka, highlightthickness=0)
+        vs = ttk.Scrollbar(ramka, orient="vertical", command=kanwa.yview)
+        wnetrze = tk.Frame(kanwa)
+        wnetrze.bind("<Configure>", lambda e: kanwa.configure(scrollregion=kanwa.bbox("all")))
+        okno_id = kanwa.create_window((0, 0), window=wnetrze, anchor="nw")
+        kanwa.bind("<Configure>", lambda e: kanwa.itemconfig(okno_id, width=e.width))
+        kanwa.configure(yscrollcommand=vs.set)
+        kanwa.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+
+        zmienne = []
+
+        def zapisz_stan():
+            for z, var in zmienne:
+                nowy = bool(var.get())
+                if nowy != bool(z.get("zrobione")):
+                    z["zrobione"] = nowy
+                    if nowy:
+                        z["zrobil"] = os.environ.get("USERNAME") or "?"
+                        z["zrobione_kiedy"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    else:
+                        z.pop("zrobil", None)
+                        z.pop("zrobione_kiedy", None)
+            subiekt_historia.zapisz_notatke(self.project_id, zadania=zadania,
+                                            tekst=txt.get("1.0", tk.END).strip())
+            self._odswiez_licznik_todo()
+
+        def przeladuj():
+            for w in wnetrze.winfo_children():
+                w.destroy()
+            zmienne.clear()
+            if not zadania:
+                tk.Label(wnetrze, text="Nic do zrobienia — wszystko czysto.",
+                         fg="#7f8c8d", anchor="w", padx=6, pady=10).pack(fill=tk.X)
+            for z in zadania:
+                wiersz = tk.Frame(wnetrze, pady=3)
+                wiersz.pack(fill=tk.X, anchor="w")
+                var = tk.BooleanVar(value=bool(z.get("zrobione")))
+                zmienne.append((z, var))
+                cb = tk.Checkbutton(wiersz, variable=var, anchor="nw",
+                                    text=z.get("tekst", ""), justify="left",
+                                    wraplength=600, command=zapisz_stan)
+                if z.get("zrobione"):
+                    cb.config(fg="#95a5a6")
+                cb.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                # Dwuklik w treść = edycja. Także dla auto-zadań: user często
+                # chce dopisać ustalenie („czeka na rysunek od Kowalskiego”),
+                # a nie zaczynać od zera. Zmieniony tekst przestaje być „auto”,
+                # więc kolejny podgląd go nie nadpisze ani nie zdubluje.
+                cb.bind("<Double-Button-1>", lambda e, zz=z: edytuj(zz))
+                tk.Button(wiersz, text="✎", command=lambda zz=z: edytuj(zz),
+                          bg="#ecf0f1", fg="#2c3e50", relief=tk.FLAT,
+                          padx=6, cursor="hand2").pack(side=tk.RIGHT)
+                if z.get("zrodlo") == "reczne":
+                    tk.Button(wiersz, text="✕", command=lambda zz=z: usun(zz),
+                              bg="#ecf0f1", fg="#c0392b", relief=tk.FLAT,
+                              padx=6, cursor="hand2").pack(side=tk.RIGHT)
+                podpis = []
+                if z.get("zrobione") and z.get("zrobil"):
+                    podpis.append(f"✓ {z['zrobil']} {z.get('zrobione_kiedy','')}")
+                elif z.get("kto"):
+                    podpis.append(f"{z['kto']}")
+                if podpis:
+                    tk.Label(wiersz, text="   ".join(podpis), fg="#95a5a6",
+                             font=("Arial", 7)).pack(side=tk.RIGHT, padx=6)
+
+        def usun(z):
+            zadania.remove(z)
+            subiekt_historia.zapisz_notatke(self.project_id, zadania=zadania)
+            self._odswiez_licznik_todo()
+            przeladuj()
+
+        def edytuj(z):
+            """Zmiana treści zadania w małym oknie (tekst bywa długi)."""
+            dlg = tk.Toplevel(okno)
+            dlg.title("Edycja zadania")
+            dlg.geometry("620x220")
+            dlg.transient(okno)
+            dlg.bind("<Escape>", lambda e: dlg.destroy())
+            tk.Label(dlg, text="Treść zadania:", anchor="w", padx=12, pady=6,
+                     font=("Arial", 9, "bold")).pack(fill=tk.X)
+            pole = tk.Text(dlg, height=5, wrap="word", font=("Arial", 9))
+            pole.pack(fill=tk.BOTH, expand=True, padx=12)
+            pole.insert("1.0", z.get("tekst", ""))
+            pole.focus_set()
+
+            def ok():
+                nowy = pole.get("1.0", tk.END).strip()
+                if not nowy:
+                    messagebox.showwarning("Edycja", "Treść nie może być pusta.", parent=dlg)
+                    return
+                if nowy != z.get("tekst"):
+                    z["tekst"] = nowy
+                    # Zmieniony ręcznie — automat nie ma prawa go nadpisać,
+                    # a przy kolejnym podglądzie oryginał wróci jako nowe
+                    # zadanie tylko wtedy, gdy problem nadal istnieje.
+                    z["zrodlo"] = "reczne"
+                    z["kto"] = os.environ.get("USERNAME") or "?"
+                    z["kiedy"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    subiekt_historia.zapisz_notatke(self.project_id, zadania=zadania)
+                    self._odswiez_licznik_todo()
+                dlg.destroy()
+                przeladuj()
+
+            pasek = tk.Frame(dlg)
+            pasek.pack(fill=tk.X, padx=12, pady=10)
+            tk.Button(pasek, text="Zapisz", command=ok, bg="#2c3e50", fg="white",
+                      relief=tk.FLAT, font=("Arial", 9, "bold"), padx=18,
+                      pady=4, cursor="hand2").pack(side=tk.RIGHT)
+            tk.Button(pasek, text="Anuluj", command=dlg.destroy, bg="#95a5a6",
+                      fg="white", relief=tk.FLAT, padx=14, pady=4).pack(side=tk.RIGHT, padx=(0, 8))
+            wysrodkuj(dlg, okno)
+            dlg.grab_set()
+
+        def dodaj(event=None):
+            tekst = var_nowe.get().strip()
+            if not tekst:
+                return
+            zadania.append({"tekst": tekst, "zrobione": False, "zrodlo": "reczne",
+                            "kto": os.environ.get("USERNAME") or "?",
+                            "kiedy": datetime.now().strftime("%Y-%m-%d %H:%M")})
+            var_nowe.set("")
+            subiekt_historia.zapisz_notatke(self.project_id, zadania=zadania)
+            self._odswiez_licznik_todo()
+            przeladuj()
+
+        tk.Button(dodaj_ramka, text="➕ Dodaj", command=dodaj, bg="#27ae60", fg="white",
+                  relief=tk.FLAT, padx=14, pady=3, cursor="hand2").pack(side=tk.LEFT, padx=(8, 0))
+        okno.bind("<Return>", dodaj)
+
+        tk.Label(okno, text="Notatki:", anchor="w", padx=12,
+                 font=("Arial", 8, "bold")).pack(side=tk.BOTTOM, fill=tk.X)
+        txt = tk.Text(okno, height=4, wrap="word", font=("Arial", 9))
+        txt.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(0, 4))
+        txt.insert("1.0", dane.get("tekst", ""))
+
+        przeladuj()
+
+        tk.Button(stopka, text="Zapisz i zamknij",
+                  command=lambda: (zapisz_stan(), okno.destroy()),
+                  bg="#2c3e50", fg="white", relief=tk.FLAT,
+                  font=("Arial", 10, "bold"), padx=20, pady=5,
+                  cursor="hand2").pack(side=tk.RIGHT)
+        tk.Label(stopka, text="Zmiany zapisują się od razu; notatki przy zamknięciu.",
+                 fg="#7f8c8d", font=("Arial", 8)).pack(side=tk.LEFT)
+
+        wysrodkuj(okno, self)
+
+
+class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
     COLS = [
         ("sel",    "✓",             30, "c"),
         ("nr",     "Nr rysunku",   150, "w"),
@@ -1265,201 +1473,6 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek):
                                f"nie znajduje: " + ", ".join(sorted(nieznane)[:5])
                                + (" …" if len(nieznane) > 5 else ""))
         return zadania
-
-    def _odswiez_licznik_todo(self):
-        """Liczba niezrobionych na przycisku — inaczej nikt tam nie zajrzy."""
-        try:
-            dane = subiekt_historia.wczytaj_notatke(self.project_id) or {}
-            ile = sum(1 for z in dane.get("zadania", []) if not z.get("zrobione"))
-            self.btn_todo.config(
-                text=f"📋 Do zrobienia ({ile})" if ile else "📋 Do zrobienia",
-                bg="#c0392b" if ile else "#8e44ad")
-        except Exception:
-            pass
-
-    def _okno_notatki(self):
-        """Lista „do zrobienia" projektu — odhaczanie, dopisywanie, notatka.
-
-        Leży we WSPÓLNYM katalogu (subiekt_historia), więc widzi ją każdy
-        użytkownik: notuje jeden, robi często ktoś inny.
-        """
-        dane = subiekt_historia.wczytaj_notatke(self.project_id) or {"zadania": [], "tekst": ""}
-        zadania = list(dane.get("zadania", []))
-
-        okno = tk.Toplevel(self)
-        okno.title(f"Do zrobienia — projekt {self.project_name}")
-        okno.geometry("820x600")
-        okno.minsize(640, 420)
-        okno.transient(self)
-        okno.bind("<Escape>", lambda e: okno.destroy())
-
-        naglowek = tk.Frame(okno, bg="#8e44ad")
-        naglowek.pack(fill=tk.X)
-        tk.Label(naglowek, text="📋 Czego okno NIE zrobiło — zostaje na Twojej głowie",
-                 bg="#8e44ad", fg="white", font=("Arial", 11, "bold"),
-                 anchor="w", padx=12, pady=8).pack(fill=tk.X)
-        tk.Label(okno, text="Lista jest wspólna dla wszystkich stanowisk — notuje jeden, robi kto inny.",
-                 fg="#7f8c8d", font=("Arial", 8), anchor="w", padx=12, pady=4).pack(fill=tk.X)
-
-        # Stopka przed listą — inaczej przy wielu zadaniach przyciski wypadają.
-        stopka = tk.Frame(okno)
-        stopka.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=10)
-
-        dodaj_ramka = tk.Frame(okno)
-        dodaj_ramka.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(0, 6))
-        var_nowe = tk.StringVar()
-        tk.Entry(dodaj_ramka, textvariable=var_nowe, font=("Arial", 9)).pack(
-            side=tk.LEFT, fill=tk.X, expand=True, ipady=3)
-
-        ramka = tk.Frame(okno)
-        ramka.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 4))
-        kanwa = tk.Canvas(ramka, highlightthickness=0)
-        vs = ttk.Scrollbar(ramka, orient="vertical", command=kanwa.yview)
-        wnetrze = tk.Frame(kanwa)
-        wnetrze.bind("<Configure>", lambda e: kanwa.configure(scrollregion=kanwa.bbox("all")))
-        okno_id = kanwa.create_window((0, 0), window=wnetrze, anchor="nw")
-        kanwa.bind("<Configure>", lambda e: kanwa.itemconfig(okno_id, width=e.width))
-        kanwa.configure(yscrollcommand=vs.set)
-        kanwa.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vs.pack(side=tk.RIGHT, fill=tk.Y)
-
-        zmienne = []
-
-        def zapisz_stan():
-            for z, var in zmienne:
-                nowy = bool(var.get())
-                if nowy != bool(z.get("zrobione")):
-                    z["zrobione"] = nowy
-                    if nowy:
-                        z["zrobil"] = os.environ.get("USERNAME") or "?"
-                        z["zrobione_kiedy"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-                    else:
-                        z.pop("zrobil", None)
-                        z.pop("zrobione_kiedy", None)
-            subiekt_historia.zapisz_notatke(self.project_id, zadania=zadania,
-                                            tekst=txt.get("1.0", tk.END).strip())
-            self._odswiez_licznik_todo()
-
-        def przeladuj():
-            for w in wnetrze.winfo_children():
-                w.destroy()
-            zmienne.clear()
-            if not zadania:
-                tk.Label(wnetrze, text="Nic do zrobienia — wszystko czysto.",
-                         fg="#7f8c8d", anchor="w", padx=6, pady=10).pack(fill=tk.X)
-            for z in zadania:
-                wiersz = tk.Frame(wnetrze, pady=3)
-                wiersz.pack(fill=tk.X, anchor="w")
-                var = tk.BooleanVar(value=bool(z.get("zrobione")))
-                zmienne.append((z, var))
-                cb = tk.Checkbutton(wiersz, variable=var, anchor="nw",
-                                    text=z.get("tekst", ""), justify="left",
-                                    wraplength=600, command=zapisz_stan)
-                if z.get("zrobione"):
-                    cb.config(fg="#95a5a6")
-                cb.pack(side=tk.LEFT, fill=tk.X, expand=True)
-                # Dwuklik w treść = edycja. Także dla auto-zadań: user często
-                # chce dopisać ustalenie („czeka na rysunek od Kowalskiego”),
-                # a nie zaczynać od zera. Zmieniony tekst przestaje być „auto”,
-                # więc kolejny podgląd go nie nadpisze ani nie zdubluje.
-                cb.bind("<Double-Button-1>", lambda e, zz=z: edytuj(zz))
-                tk.Button(wiersz, text="✎", command=lambda zz=z: edytuj(zz),
-                          bg="#ecf0f1", fg="#2c3e50", relief=tk.FLAT,
-                          padx=6, cursor="hand2").pack(side=tk.RIGHT)
-                if z.get("zrodlo") == "reczne":
-                    tk.Button(wiersz, text="✕", command=lambda zz=z: usun(zz),
-                              bg="#ecf0f1", fg="#c0392b", relief=tk.FLAT,
-                              padx=6, cursor="hand2").pack(side=tk.RIGHT)
-                podpis = []
-                if z.get("zrobione") and z.get("zrobil"):
-                    podpis.append(f"✓ {z['zrobil']} {z.get('zrobione_kiedy','')}")
-                elif z.get("kto"):
-                    podpis.append(f"{z['kto']}")
-                if podpis:
-                    tk.Label(wiersz, text="   ".join(podpis), fg="#95a5a6",
-                             font=("Arial", 7)).pack(side=tk.RIGHT, padx=6)
-
-        def usun(z):
-            zadania.remove(z)
-            subiekt_historia.zapisz_notatke(self.project_id, zadania=zadania)
-            self._odswiez_licznik_todo()
-            przeladuj()
-
-        def edytuj(z):
-            """Zmiana treści zadania w małym oknie (tekst bywa długi)."""
-            dlg = tk.Toplevel(okno)
-            dlg.title("Edycja zadania")
-            dlg.geometry("620x220")
-            dlg.transient(okno)
-            dlg.bind("<Escape>", lambda e: dlg.destroy())
-            tk.Label(dlg, text="Treść zadania:", anchor="w", padx=12, pady=6,
-                     font=("Arial", 9, "bold")).pack(fill=tk.X)
-            pole = tk.Text(dlg, height=5, wrap="word", font=("Arial", 9))
-            pole.pack(fill=tk.BOTH, expand=True, padx=12)
-            pole.insert("1.0", z.get("tekst", ""))
-            pole.focus_set()
-
-            def ok():
-                nowy = pole.get("1.0", tk.END).strip()
-                if not nowy:
-                    messagebox.showwarning("Edycja", "Treść nie może być pusta.", parent=dlg)
-                    return
-                if nowy != z.get("tekst"):
-                    z["tekst"] = nowy
-                    # Zmieniony ręcznie — automat nie ma prawa go nadpisać,
-                    # a przy kolejnym podglądzie oryginał wróci jako nowe
-                    # zadanie tylko wtedy, gdy problem nadal istnieje.
-                    z["zrodlo"] = "reczne"
-                    z["kto"] = os.environ.get("USERNAME") or "?"
-                    z["kiedy"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-                    subiekt_historia.zapisz_notatke(self.project_id, zadania=zadania)
-                    self._odswiez_licznik_todo()
-                dlg.destroy()
-                przeladuj()
-
-            pasek = tk.Frame(dlg)
-            pasek.pack(fill=tk.X, padx=12, pady=10)
-            tk.Button(pasek, text="Zapisz", command=ok, bg="#2c3e50", fg="white",
-                      relief=tk.FLAT, font=("Arial", 9, "bold"), padx=18,
-                      pady=4, cursor="hand2").pack(side=tk.RIGHT)
-            tk.Button(pasek, text="Anuluj", command=dlg.destroy, bg="#95a5a6",
-                      fg="white", relief=tk.FLAT, padx=14, pady=4).pack(side=tk.RIGHT, padx=(0, 8))
-            wysrodkuj(dlg, okno)
-            dlg.grab_set()
-
-        def dodaj(event=None):
-            tekst = var_nowe.get().strip()
-            if not tekst:
-                return
-            zadania.append({"tekst": tekst, "zrobione": False, "zrodlo": "reczne",
-                            "kto": os.environ.get("USERNAME") or "?",
-                            "kiedy": datetime.now().strftime("%Y-%m-%d %H:%M")})
-            var_nowe.set("")
-            subiekt_historia.zapisz_notatke(self.project_id, zadania=zadania)
-            self._odswiez_licznik_todo()
-            przeladuj()
-
-        tk.Button(dodaj_ramka, text="➕ Dodaj", command=dodaj, bg="#27ae60", fg="white",
-                  relief=tk.FLAT, padx=14, pady=3, cursor="hand2").pack(side=tk.LEFT, padx=(8, 0))
-        okno.bind("<Return>", dodaj)
-
-        tk.Label(okno, text="Notatki:", anchor="w", padx=12,
-                 font=("Arial", 8, "bold")).pack(side=tk.BOTTOM, fill=tk.X)
-        txt = tk.Text(okno, height=4, wrap="word", font=("Arial", 9))
-        txt.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(0, 4))
-        txt.insert("1.0", dane.get("tekst", ""))
-
-        przeladuj()
-
-        tk.Button(stopka, text="Zapisz i zamknij",
-                  command=lambda: (zapisz_stan(), okno.destroy()),
-                  bg="#2c3e50", fg="white", relief=tk.FLAT,
-                  font=("Arial", 10, "bold"), padx=20, pady=5,
-                  cursor="hand2").pack(side=tk.RIGHT)
-        tk.Label(stopka, text="Zmiany zapisują się od razu; notatki przy zamknięciu.",
-                 fg="#7f8c8d", font=("Arial", 8)).pack(side=tk.LEFT)
-
-        wysrodkuj(okno, self)
 
     def _kopiuj_poza_bom(self, okno):
         # TSV z nagłówkiem — do wklejenia wprost w Excel i porównania z arkuszem.
@@ -2501,7 +2514,7 @@ def open_window(parent, project_id, project_name=None):
 # przy każdym udanym zapisie — dokładnie ten sam plan.json, którego użył
 # most do założenia, więc ProjektCofnij.cs wie, co ma szukać i w jakiej
 # kolejności usuwać (ZK → komplety od góry → kartoteki).
-class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek):
+class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
     def __init__(self, parent, project_id, project_name=None):
         tk.Toplevel.__init__(self, parent)
         Kreciolek.__init__(self)
@@ -2551,8 +2564,15 @@ class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek):
         self.btn_check.pack(side=tk.LEFT)
         self.btn_go = ttk.Button(btns, text="Usuń w Subiekcie", command=self._confirm, state=tk.DISABLED)
         self.btn_go.pack(side=tk.LEFT, padx=6)
+        # Pozostałości po cofnięciu lądują na wspólnej liście „Do zrobienia" —
+        # stąd wejście do niej także z tego okna.
+        self.btn_todo = tk.Button(btns, text="📋 Do zrobienia", command=self._okno_notatki,
+                                  bg="#8e44ad", fg="white", font=("Arial", 8),
+                                  padx=8, pady=2, relief=tk.RAISED, bd=1)
+        self.btn_todo.pack(side=tk.LEFT, padx=6)
         self.status = ttk.Label(btns, text="")
         self.status.pack(side=tk.LEFT, padx=10)
+        self._odswiez_licznik_todo()
 
     def _na_wierzch(self):
         """To samo co w SubiektProjektWindow — przywraca okno po dialogu.
@@ -2696,8 +2716,40 @@ class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek):
         self.status.config(text=f"Usunięto {usuniete}."
                            + (f"   ⚠ {len(bledy)} błędów" if bledy else "")
                            + (f"   ⚠ zostało {len(reszta)} dokumentów do ręcznego usunięcia" if reszta else ""))
+
+        # Pozostałości NA LISTĘ „Do zrobienia" projektu, a nie tylko do raportu.
+        # Raport zamyka się razem z oknem i wtedy informacja o wiszącym ZD
+        # przepada — a to jedyna rzecz, którą po cofnięciu trzeba jeszcze
+        # zrobić ręcznie (zgłoszone 08.09.2026). Lista jest wspólna dla
+        # stanowisk, więc dokasuje to także ktoś inny niż ten, kto cofał.
+        self._zapisz_pozostalosci_do_zrobienia(reszta, bledy)
+
         self._raport_koncowy(usuniete, bledy, reszta)
         self._na_wierzch()
+
+    def _zapisz_pozostalosci_do_zrobienia(self, reszta, bledy):
+        """Dokumenty i kartoteki, których cofanie nie ruszyło → lista zadań."""
+        zadania = []
+        for numer, rodzaj, nasze, razem, podmiot in (reszta or []):
+            gdzie = ("okno „Zamówienia do dostawców” → 🗑 Usuń ZD"
+                     if rodzaj == "ZD" else "okno „Przegląd dokumentów”")
+            zadania.append(
+                f"Usunąć ręcznie {numer} ({rodzaj}, {nasze} z {razem} poz. tego projektu"
+                + (f", {podmiot}" if podmiot else "") + f") — {gdzie}")
+        if bledy:
+            symbole = sorted({k.get("Symbol") or "" for k in bledy if k.get("Symbol")})
+            if symbole:
+                zadania.append(
+                    f"Sprawdzić {len(symbole)} kartotek, których Subiekt nie pozwolił usunąć "
+                    f"({', '.join(symbole[:5])}{' …' if len(symbole) > 5 else ''}) "
+                    "— zwykle znikną po usunięciu dokumentów wypisanych wyżej; "
+                    "jeśli używa ich inny projekt, mają zostać")
+        if not zadania:
+            return
+        try:
+            subiekt_historia.scal_zadania(self.project_id, zadania)
+        except Exception as e:
+            print(f"⚠️  Nie zapisano pozostałości na liście „Do zrobienia”: {e}")
 
     def _raport_koncowy(self, usuniete, bledy, reszta):
         """Raport po cofnięciu — to, co WYMAGA UWAGI, na wierzchu i w całości.

@@ -304,6 +304,18 @@ class PanelSubiekt(tk.Toplevel):
                           bg="white", fg=TEKST, relief=tk.SOLID, bd=1,
                           font=("Arial", 9), padx=12, pady=6, cursor="hand2")
             b.pack(side=tk.LEFT, padx=(0, 8))
+
+        # „Do zrobienia" po PRAWEJ, osobno od skrótów do okien: to nie jest
+        # kolejne okno Subiekta, tylko lista tego, co zostało po poprzednich
+        # operacjach (biblioteczne bez składu, dokumenty do ręcznego
+        # usunięcia). Licznik pokazuje, że coś czeka — bez niego nikt tam
+        # nie zagląda (zgłoszone 08.09.2026).
+        self.btn_todo = tk.Button(rzad, text="📋  Do zrobienia",
+                                  command=self._otworz_todo,
+                                  bg="white", fg=TEKST, relief=tk.SOLID, bd=1,
+                                  font=("Arial", 9), padx=12, pady=6, cursor="hand2")
+        self.btn_todo.pack(side=tk.RIGHT)
+        self._odswiez_licznik_todo()
         tk.Label(skroty, text="Najczęściej używane. Pełen zestaw poniżej.",
                  bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8), anchor="w"
                  ).pack(fill=tk.X, padx=12, pady=(0, 10))
@@ -391,6 +403,70 @@ class PanelSubiekt(tk.Toplevel):
                   cursor="hand2").pack(side=tk.RIGHT)
 
     # ── działanie ───────────────────────────────────────────────────────────
+    def _projekt(self):
+        """(id, nazwa) otwartego projektu albo (None, None)."""
+        pid = getattr(self.arkusz, "current_project_id", None)
+        if not pid:
+            return None, None
+        nazwa = None
+        try:
+            row = self.arkusz.db_manager.master_con.execute(
+                "SELECT name FROM projects WHERE project_id = ?", (pid,)).fetchone()
+            if row:
+                nazwa = row[0]
+        except Exception:
+            pass
+        return pid, nazwa
+
+    def _odswiez_licznik_todo(self):
+        """Liczba niezrobionych zadań na przycisku — bez niej nikt nie zagląda."""
+        try:
+            pid, _ = self._projekt()
+            if not pid:
+                self.btn_todo.config(text="📋  Do zrobienia", state=tk.DISABLED,
+                                     bg="white", fg=TEKST, font=("Arial", 9))
+                return
+            import subiekt_historia
+            dane = subiekt_historia.wczytaj_notatke(pid) or {}
+            ile = sum(1 for z in dane.get("zadania", []) if not z.get("zrobione"))
+            # Czerwone TŁO, nie sam tekst — przycisk ma rzucać się w oczy
+            # z drugiego końca paska, a czerwony napis na białym ginął
+            # (zgłoszone 08.09.2026).
+            if ile:
+                self.btn_todo.config(
+                    state=tk.NORMAL, text=f"📋  Do zrobienia ({ile})",
+                    bg="#c0392b", fg="white", activebackground="#e74c3c",
+                    activeforeground="white", font=("Arial", 9, "bold"))
+            else:
+                self.btn_todo.config(
+                    state=tk.NORMAL, text="📋  Do zrobienia",
+                    bg="white", fg=TEKST, activebackground="#ecf0f1",
+                    activeforeground=TEKST, font=("Arial", 9))
+        except Exception:
+            pass
+
+    def _otworz_todo(self):
+        """Lista „Do zrobienia" projektu — ta sama, co w oknach Subiekta."""
+        pid, nazwa = self._projekt()
+        if not pid:
+            self.status.config(text="Najpierw wybierz projekt.")
+            return
+        try:
+            import subiekt_projekt
+        except Exception as e:
+            self.status.config(text=f"Brak modułu: {e}")
+            return
+        # Panel SAM jest rodzicem okna listy — wcześniej tworzyłem ukryty
+        # Toplevel jako nośnik, ale MiksinNotatki woła na nim `after` i
+        # `wysrodkuj`, więc okno nie miało się względem czego ustawić i nie
+        # otwierało się poprawnie (zgłoszone 08.09.2026).
+        # MiksinNotatki wymaga tylko project_id / project_name / btn_todo —
+        # panel ma je wszystkie.
+        self.project_id = pid
+        self.project_name = nazwa or str(pid)
+        subiekt_projekt.MiksinNotatki._okno_notatki(self)
+        self._odswiez_licznik_todo()
+
     def _akcja(self, nazwa_metody):
         """Zamyka panel i otwiera właściwe narzędzie."""
         def uruchom():
