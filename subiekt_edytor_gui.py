@@ -174,7 +174,13 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.katalog = []        # kartoteki z Subiekta (do listy 4)
         self._zaznaczony = None  # symbol aktualnie edytowanej pozycji
         self._blokada = False    # blokada zapisu pól przy przeładowaniu
-        self._zmienione = False  # czy są niezapisane modyfikacje
+        self._zmienione = False  # czy sa niezapisane modyfikacje
+        # Ostatni KOMPLET wskazany w drzewie - cel dla przyciskow
+        # "+ Skladnik" i "+ Istniejaca". Trzymany osobno, bo zaznaczenie
+        # drzewa przeskakuje na swiezo dodana pozycje i gubiloby kontekst.
+        self._komplet_docelowy = None
+        self._dnd_zrodlo = None   # symbol przeciaganej pozycji
+        self._dnd_cel = None      # id wezla podswietlonego jako cel
 
         self._buduj()
         wysrodkuj(self, parent)
@@ -239,11 +245,17 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sc.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.bind("<<TreeviewSelect>>", self._na_wybor_wezla)
+        # Przeciaganie myszą — patrz _dnd_start / _dnd_ruch / _dnd_koniec.
+        self.tree.bind("<Button-1>", self._dnd_start, add="+")
+        self.tree.bind("<B1-Motion>", self._dnd_ruch)
+        self.tree.bind("<ButtonRelease-1>", self._dnd_koniec)
 
         # Kolory rodzajów — od razu widać komplet vs towar vs usługa.
         self.tree.tag_configure("komplet", foreground="#b9770e")
         self.tree.tag_configure("usluga", foreground="#6c3483")
         self.tree.tag_configure("nowy", foreground=NOWY_NIEBIESKI)
+        # Cel przeciagania — podswietlenie w trakcie przenoszenia.
+        self.tree.tag_configure("cel_dnd", background="#d4efdf")
 
         pa = tk.Frame(ram, bg=TLO_SEKCJI)
         pa.pack(fill=tk.X, padx=6, pady=(0, 6))
@@ -259,6 +271,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                       width=8 if len(txt) > 2 else 3).pack(side=tk.LEFT, padx=2)
         tk.Button(pb, text="Z projektu…", command=self._wczytaj_z_projektu,
                   font=("Arial", 8)).pack(side=tk.RIGHT, padx=2)
+        tk.Label(ram, text="Pozycje mozna przeciagac mysza: upusc na komplet = "
+                           "wloz do skladu, upusc obok = wyciagnij na wierzch",
+                 bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8),
+                 wraplength=320, justify="left", anchor="w").pack(
+            fill=tk.X, padx=6, pady=(0, 6))
 
     def _panel_szczegoly(self, rodzic):
         ram = tk.LabelFrame(rodzic, text=" 2. Kartoteka — szczegóły ",
@@ -576,6 +593,8 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             return
         self._zaznaczony = sym
         k = self.pozycje[sym]
+        if k.czy_komplet():
+            self._komplet_docelowy = sym
         self._blokada = True
         try:
             self.pola["symbol"][0].set(k.symbol)
@@ -668,6 +687,148 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
 
     # ── OPERACJE NA DRZEWIE ─────────────────────────────────────────────
 
+    # ── PRZECIAGANIE MYSZA ──────────────────────────────────────────────
+    #
+    # Zasada: przeciagniecie pozycji NA KOMPLET wklada ja do jego skladu,
+    # przeciagniecie na puste miejsce wyciaga ja na poziom glowny.
+    # Przenosimy WYSTAPIENIE (relacje), nie kartoteke — ta sama pozycja moze
+    # dalej byc w innych kompletach.
+
+    def _dnd_start(self, event):
+        item = self.tree.identify_row(event.y)
+        self._dnd_zrodlo = self._symbol_wezla(item) if item else None
+        self._dnd_zrodlo_item = item
+        self._dnd_cel = None
+
+    def _dnd_ruch(self, event):
+        if not self._dnd_zrodlo:
+            return
+        self.tree.config(cursor="hand2")
+        cel_item = self.tree.identify_row(event.y)
+        if cel_item == self._dnd_cel:
+            return
+        # Zdejmujemy poprzednie podswietlenie.
+        if self._dnd_cel:
+            self._odswiez_tagi(self._dnd_cel, dodaj_cel=False)
+        self._dnd_cel = None
+        if not cel_item or cel_item == self._dnd_zrodlo_item:
+            return
+        cel_sym = self._symbol_wezla(cel_item)
+        # Podswietlamy tylko komplety — reszta i tak nie przyjmie skladnika.
+        if cel_sym and cel_sym in self.pozycje and self.pozycje[cel_sym].czy_komplet():
+            self._dnd_cel = cel_item
+            self._odswiez_tagi(cel_item, dodaj_cel=True)
+
+    def _odswiez_tagi(self, item, dodaj_cel):
+        """Dokłada/zdejmuje tag podswietlenia, nie gubiac tagow rodzaju."""
+        sym = self._symbol_wezla(item)
+        k = self.pozycje.get(sym) if sym else None
+        if k is None:
+            return
+        tagi = [k.rodzaj]
+        if not k.w_subiekcie:
+            tagi.append("nowy")
+        if dodaj_cel:
+            tagi.append("cel_dnd")
+        try:
+            self.tree.item(item, tags=tuple(tagi))
+        except Exception:
+            pass
+
+    def _dnd_koniec(self, event):
+        self.tree.config(cursor="")
+        zrodlo, cel_item = self._dnd_zrodlo, self._dnd_cel
+        zrodlo_item = getattr(self, "_dnd_zrodlo_item", None)
+        self._dnd_zrodlo = self._dnd_cel = None
+        if not zrodlo or not zrodlo_item:
+            return
+        if cel_item:
+            self._odswiez_tagi(cel_item, dodaj_cel=False)
+
+        pod_kursorem = self.tree.identify_row(event.y)
+        # Puszczenie w tym samym miejscu = zwykle klikniecie, nie przenoszenie.
+        if pod_kursorem == zrodlo_item:
+            return
+
+        stary_rodzic_item = self.tree.parent(zrodlo_item)
+        stary_rodzic = self._symbol_wezla(stary_rodzic_item) if stary_rodzic_item else None
+        nowy_rodzic = self._symbol_wezla(cel_item) if cel_item else None
+
+        if nowy_rodzic == stary_rodzic:
+            return
+        # Do samego siebie ani do wlasnego potomka — zrobiloby cykl.
+        if nowy_rodzic and (nowy_rodzic == zrodlo or self._czy_potomek(zrodlo, nowy_rodzic)):
+            messagebox.showwarning(
+                "Przenoszenie",
+                "Nie mozna wlozyc pozycji do niej samej ani do jej wlasnego skladnika "
+                "- powstalby cykl, ktorego Subiekt nie przyjmie.", parent=self)
+            return
+        if nowy_rodzic and any(r == nowy_rodzic and d == zrodlo for (r, d, _i) in self.relacje):
+            messagebox.showinfo(
+                "Przenoszenie",
+                "Pozycja \"" + zrodlo + "\" jest juz w skladzie \"" + nowy_rodzic + "\".",
+                parent=self)
+            return
+
+        # Odpinamy od starego miejsca.
+        ilosc = 1.0
+        if stary_rodzic:
+            for i, (r, d, il) in enumerate(self.relacje):
+                if r == stary_rodzic and d == zrodlo:
+                    ilosc = il
+                    self.relacje.pop(i)
+                    break
+        elif zrodlo in self.korzenie:
+            self.korzenie.remove(zrodlo)
+
+        # Podpinamy w nowym.
+        if nowy_rodzic:
+            self.relacje.append((nowy_rodzic, zrodlo, ilosc))
+            self.status.config(
+                text="Przeniesiono \"" + zrodlo + "\" do skladu \"" + nowy_rodzic + "\"",
+                fg=TEKST_SZARY)
+        else:
+            if zrodlo not in self.korzenie:
+                self.korzenie.append(zrodlo)
+            self.status.config(
+                text="Pozycja \"" + zrodlo + "\" wyciagnieta na poziom glowny",
+                fg=TEKST_SZARY)
+
+        self._zmienione = True
+        self._odswiez_drzewo()
+        self._zaznacz_w_drzewie(zrodlo)
+
+    def _czy_potomek(self, przodek, szukany):
+        """Czy `szukany` jest gdzies w skladzie `przodek` (dowolnie gleboko)."""
+        odwiedzone = set()
+
+        def idz(sym):
+            if sym in odwiedzone:
+                return False
+            odwiedzone.add(sym)
+            for dziecko, _il in self._dzieci(sym):
+                if dziecko == szukany or idz(dziecko):
+                    return True
+            return False
+
+        return idz(przodek)
+
+    def _cel_dla_skladnika(self):
+        """Komplet, do ktorego trafi nowy skladnik.
+
+        Najpierw biezace zaznaczenie w drzewie (jesli to komplet), potem
+        ostatni zapamietany komplet. Dzieki temu mozna kliknac wiersz na
+        liscie kartotek (sekcja 4) i dodac go dwuklikiem - zaznaczenie
+        drzewa w miedzyczasie sie zmienia, ale cel zostaje.
+        """
+        biezacy = self._symbol_wezla()
+        if biezacy and biezacy in self.pozycje and self.pozycje[biezacy].czy_komplet():
+            return biezacy
+        cel = self._komplet_docelowy
+        if cel and cel in self.pozycje and self.pozycje[cel].czy_komplet():
+            return cel
+        return None
+
     def _nowy_symbol(self, baza="NOWA"):
         i = 1
         while f"{baza}-{i:02d}" in self.pozycje:
@@ -685,14 +846,19 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
 
     def _dodaj_skladnik(self):
         """Nowa pozycja jako SKŁADNIK zaznaczonego kompletu."""
-        rodzic = self._symbol_wezla()
-        if not rodzic or rodzic not in self.pozycje:
-            messagebox.showinfo("Edytor", "Zaznacz najpierw komplet w drzewie.", parent=self)
-            return
-        if not self.pozycje[rodzic].czy_komplet():
-            messagebox.showwarning(
-                "Edytor", f"„{rodzic}” nie jest kompletem — składniki można dodać\n"
-                          "tylko do pozycji rodzaju Komplet.", parent=self)
+        rodzic = self._cel_dla_skladnika()
+        if not rodzic:
+            wskazany = self._symbol_wezla()
+            if wskazany and wskazany in self.pozycje:
+                messagebox.showwarning(
+                    "Edytor",
+                    "Pozycja \"" + wskazany + "\" to " + self.pozycje[wskazany].rodzaj
+                    + " - skladniki mozna dodawac tylko do pozycji rodzaju Komplet.\n\n"
+                    "Zmien Rodzaj na Komplet (Z) albo zaznacz w drzewie inny komplet.",
+                    parent=self)
+            else:
+                messagebox.showinfo(
+                    "Edytor", "Zaznacz najpierw komplet w drzewie.", parent=self)
             return
         sym = self._nowy_symbol("SKL")
         self.pozycje[sym] = Kartoteka(sym, "", "towar", "szt")
@@ -717,13 +883,33 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 cena_f = 0.0
             self.pozycje[sym] = Kartoteka(sym, naz, rodzaj_n, cena=cena_f, w_subiekcie=True)
 
-        rodzic = self._symbol_wezla()
-        if rodzic and rodzic in self.pozycje and self.pozycje[rodzic].czy_komplet():
+        rodzic = self._cel_dla_skladnika()
+        if rodzic:
+            # Ten sam skladnik moze byc w komplecie tylko raz - drugie dodanie
+            # byloby duplikatem w skladzie (dokladnie ten blad naprawialismy
+            # w kartotekach Subiekta 06.09.2026).
+            if any(r == rodzic and d == sym for (r, d, _il) in self.relacje):
+                messagebox.showinfo(
+                    "Edytor",
+                    "Pozycja \"" + sym + "\" jest juz w skladzie \"" + rodzic + "\".\n\n"
+                    "Ilosc zmienia sie dwuklikiem w sekcji 3.", parent=self)
+                return
             self.relacje.append((rodzic, sym, 1.0))
-        elif sym not in self.korzenie:
-            self.korzenie.append(sym)
+            self.status.config(
+                text="Dodano \"" + sym + "\" do skladu \"" + rodzic + "\"", fg=TEKST_SZARY)
+        else:
+            if sym not in self.korzenie and not any(
+                    d == sym for (_r, d, _il) in self.relacje):
+                self.korzenie.append(sym)
+            self.status.config(
+                text="Pozycja \"" + sym + "\" dodana jako osobna - w drzewie nie byl "
+                     "zaznaczony zaden komplet", fg=TEKST_SZARY)
+        self._zmienione = True
         self._odswiez_drzewo()
-        self._zaznacz_w_drzewie(sym)
+        # Wracamy zaznaczeniem na KOMPLET, nie na dodana pozycje - dzieki temu
+        # kolejny dwuklik na liscie doklada nastepny skladnik do tego samego
+        # kompletu, zamiast gubic kontekst.
+        self._zaznacz_w_drzewie(rodzic or sym)
 
     def _duplikuj(self):
         sym = self._symbol_wezla()
