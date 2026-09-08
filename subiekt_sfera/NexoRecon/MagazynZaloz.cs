@@ -1,4 +1,5 @@
-// Tryb "magazyn-zaloz" — zakłada JEDEN magazyn. ZAPISUJE.
+// Tryb "magazyn-zaloz" — zakłada JEDEN magazyn albo zmienia nazwę istniejącego.
+// ZAPISUJE.
 //
 //   NexoRecon.exe magazyn-zaloz --plan=m.json [--out=w.json] [--zapisz]
 //
@@ -8,6 +9,13 @@
 //   { "symbol":"MASTER", "nazwa":"MASTER", "opis":"...",
 //     "jednostka":"RM PRODUKCJA" }   // Symbol albo Nazwa istniejącej
 //                                     // jednostki organizacyjnej — WYMAGANE
+//
+// ZMIANA NAZWY istniejącego magazynu — dodaj "stary":
+//   { "stary":"Magazyn", "symbol":"MASTER", "nazwa":"MASTER" }
+// Stan, dokumenty i historia zostają nietknięte; zmienia się sama etykieta.
+// ⚠️ Nazwa magazynu siedzi TAKŻE w kodzie (subiekt_magazyn_gui.MAGAZYN,
+// Zd.cs, Rw.cs, Pw.cs) — zmiana w bazie bez zmiany w kodzie sprawi, że
+// zapisy pójdą na magazyn, którego już nie ma. To zawsze para: baza + kod.
 //
 // Po co: uruchomienie magazynu nr 2 obok MAG (SUBIEKT PODWÓJNE POZYCJE DO
 // NAPRAWY.md / MAGAZYN.md) — magazyn trzeba założyć, zanim cokolwiek na niego
@@ -73,12 +81,52 @@ internal static class MagazynZaloz
         // Ta sama logika dopasowania luźnego co w Kartoteka.cs — symbole
         // magazynów w tej bazie bywają z niespodziankami (patrz naprawiona
         // spacja wiodąca w symbolu asortymentu, MAGAZYN.md).
-        var istn = magazyny.Dane.Wszystkie().ToList()
+        var wszystkie = magazyny.Dane.Wszystkie().ToList();
+        var istn = wszystkie
             .FirstOrDefault(m => string.Equals((Bezp(() => m.Symbol) ?? "").Trim(), symbol,
                                                 StringComparison.OrdinalIgnoreCase));
         if (istn != null)
             return Wynik(outPath, "istnieje", $"magazyn „{istn.Symbol}” już jest: {istn.Nazwa}",
                          istn.Symbol?.Trim());
+
+        // ZMIANA NAZWY istniejącego magazynu: plan podaje "stary" (symbol do
+        // znalezienia) i "symbol"/"nazwa" (docelowe). Bez tego jedyną drogą
+        // było klikanie w Subiekcie — a przy zmianie nazwy magazynu trzeba
+        // ruszyć TĘ SAMĄ nazwę w kodzie (subiekt_magazyn_gui.MAGAZYN, Zd.cs,
+        // Rw.cs, Pw.cs), więc operacja i tak jest parą: baza + kod.
+        // Stan, dokumenty i historia zostają — zmienia się tylko etykieta.
+        var stary = (p.Stary ?? "").Trim();
+        if (stary.Length > 0)
+        {
+            var doZmiany = wszystkie
+                .FirstOrDefault(m => string.Equals((Bezp(() => m.Symbol) ?? "").Trim(), stary,
+                                                    StringComparison.OrdinalIgnoreCase));
+            if (doZmiany == null)
+                return Wynik(outPath, "blad",
+                    $"nie ma magazynu „{stary}” do przemianowania. Dostępne: "
+                    + string.Join(", ", wszystkie.Select(m => Bezp(() => m.Symbol) ?? "?")),
+                    symbol);
+
+            if (!zapisz)
+                return Wynik(outPath, "do-zmiany",
+                    $"„{doZmiany.Symbol}” ({doZmiany.Nazwa}) → „{symbol}” ({nazwa})", symbol);
+
+            try
+            {
+                using var ob = magazyny.Znajdz(doZmiany);
+                ob.Dane.Symbol = symbol;
+                ob.Dane.Nazwa = nazwa;
+                if (!string.IsNullOrWhiteSpace(p.Opis))
+                    try { ob.Dane.Opis = p.Opis!.Trim(); } catch { }
+                if (!ob.Zapisz())
+                    return Wynik(outPath, "blad", Bezp(ob.PodajBledy) ?? "Zapisz() = false", symbol);
+                return Wynik(outPath, "zmieniony", $"„{stary}” → „{symbol}” ({nazwa})", symbol);
+            }
+            catch (Exception ex)
+            {
+                return Wynik(outPath, "blad", $"{ex.GetType().Name}: {ex.Message}", symbol);
+            }
+        }
 
         if (!zapisz) return Wynik(outPath, "do-zalozenia", nazwa, symbol);
 
@@ -172,5 +220,8 @@ internal static class MagazynZaloz
         return nip is null ? $"{symbol} / {nazwa}" : $"{symbol} / {nazwa} / NIP {nip}";
     }
 
-    internal record Plan(string? Symbol, string? Nazwa, string? Opis, string? Jednostka);
+    /// <param name="Stary">Symbol ISTNIEJĄCEGO magazynu do przemianowania na
+    /// Symbol/Nazwa z tego planu. Puste = zwykłe zakładanie nowego.</param>
+    internal record Plan(string? Symbol, string? Nazwa, string? Opis, string? Jednostka,
+                         string? Stary = null);
 }
