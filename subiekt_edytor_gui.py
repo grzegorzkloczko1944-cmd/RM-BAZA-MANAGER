@@ -1540,7 +1540,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         okno = tk.Toplevel(self)
         okno.title("Sprawdzenie całości" if not zapisz else "Wynik zapisu")
         okno.configure(bg=TLO)
-        okno.geometry("760x520")
+        okno.geometry("1040x560")
 
         # Waga kazdego statusu — decyduje o kolorze tla wiersza.
         wagi = [WAGA_STATUSU.get(str(k.get("Status") or ""), "info") for k in kroki]
@@ -1571,10 +1571,14 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         kol = ("rodzaj", "symbol", "status", "szczegoly")
         tab = ttk.Treeview(wrap_r, columns=kol, show="headings",
                            style="Edytor.Treeview")
-        for k, naz, sz in (("rodzaj", "Co", 90), ("symbol", "Symbol", 150),
-                           ("status", "Status", 150), ("szczegoly", "Szczegóły", 330)):
+        # Szczegoly rosna razem z oknem — to najdluzsza tresc i to ona
+        # odpowiada na pytanie "co sie zmieni", wiec nie moze byc obcieta.
+        for k, naz, sz, rozciag in (("rodzaj", "Co", 90, False),
+                                    ("symbol", "Symbol", 150, False),
+                                    ("status", "Status", 150, False),
+                                    ("szczegoly", "Szczegóły", 620, True)):
             tab.heading(k, text=naz)
-            tab.column(k, width=sz, minwidth=sz)
+            tab.column(k, width=sz, minwidth=70, stretch=rozciag)
         for waga, (tlo, kolor) in KOLORY_WAGI.items():
             tab.tag_configure(waga, background=tlo, foreground=kolor)
         tab.tag_configure("uwaga", background=KOLORY_WAGI["uwaga"][0],
@@ -1591,8 +1595,61 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             tab.insert("", "end", values=(k.get("Rodzaj"), k.get("Symbol"),
                                           str(k.get("Status") or ""),
                                           k.get("Szczegoly") or ""), tags=(waga,))
-        tk.Button(okno, text="Zamknij", command=okno.destroy,
-                  font=("Arial", 9)).pack(pady=10)
+        # Dymek z pelna trescia wiersza — niezalezny od szerokosci okna.
+        dymek = {"okno": None}
+
+        def schowaj_dymek(_e=None):
+            if dymek["okno"] is not None:
+                dymek["okno"].destroy()
+                dymek["okno"] = None
+
+        def pokaz_dymek(e):
+            wiersz = tab.identify_row(e.y)
+            if not wiersz:
+                schowaj_dymek()
+                return
+            if dymek.get("wiersz") == wiersz and dymek["okno"] is not None:
+                return
+            schowaj_dymek()
+            dymek["wiersz"] = wiersz
+            w_ = tab.item(wiersz, "values")
+            if len(w_) < 4:
+                return
+            tresc = f"{w_[0]}  {w_[1]}\n{w_[2]}"
+            if w_[3]:
+                tresc += f"\n\n{w_[3]}"
+            d = tk.Toplevel(tab)
+            d.wm_overrideredirect(True)
+            d.wm_geometry(f"+{e.x_root + 16}+{e.y_root + 18}")
+            tk.Label(d, text=tresc, bg="#ffffe0", fg=TEKST, font=("Arial", 9),
+                     justify="left", anchor="w", relief="solid", bd=1,
+                     wraplength=560, padx=8, pady=6).pack()
+            dymek["okno"] = d
+
+        tab.bind("<Motion>", pokaz_dymek)
+        tab.bind("<Leave>", schowaj_dymek)
+        okno.bind("<Destroy>", lambda _e: schowaj_dymek(), add="+")
+
+        def kopiuj(_e=None):
+            """Ctrl+C — zaznaczone wiersze (albo caly raport) do schowka."""
+            wybrane = tab.selection() or tab.get_children("")
+            linie = ["\t".join(str(x) for x in tab.item(i, "values"))
+                     for i in wybrane]
+            okno.clipboard_clear()
+            okno.clipboard_append("\n".join(linie))
+
+        tab.bind("<Control-c>", kopiuj)
+
+        pb = tk.Frame(okno, bg=TLO)
+        pb.pack(fill=tk.X, padx=12, pady=(0, 10))
+        tk.Label(pb, text="Najedź na wiersz, żeby zobaczyć całą treść. "
+                         "Ctrl+C kopiuje zaznaczone.",
+                 bg=TLO, fg=TEKST_SZARY, font=("Arial", 8)).pack(side=tk.LEFT)
+        tk.Button(pb, text="Kopiuj wszystko", command=lambda: (tab.selection_remove(
+                      *tab.selection()), kopiuj()), font=("Arial", 9)).pack(
+            side=tk.RIGHT, padx=(6, 0))
+        tk.Button(pb, text="Zamknij", command=okno.destroy,
+                  font=("Arial", 9), padx=10).pack(side=tk.RIGHT)
         wysrodkuj(okno, self)
 
 
