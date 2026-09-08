@@ -53,6 +53,21 @@ internal static class Kartoteki
 
         var asort = sfera.Asortymenty();
         var szablony = sfera.PodajObiektTypu<InsERT.Moria.Asortymenty.ISzablonyAsortymentu>();
+
+        // Slownik stawek VAT — StawkaVatSprzedaz/Kupno to ENCJE StawkaVat,
+        // nie liczby, wiec trzeba je znalezc po Symbolu ("23", "8", "zw").
+        // Jeden odczyt na caly przebieg zamiast per pozycja.
+        var stawkiVat = new Dictionary<string, dynamic>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var kartoteka = sfera.PodajObiektTypu<InsERT.Moria.Slowniki.IStawkiVat>();
+            foreach (var sv in kartoteka.Dane.Wszystkie())
+            {
+                var sym = (Bezp(() => (string?)sv.Symbol) ?? "").Trim();
+                if (sym.Length > 0) stawkiVat[sym] = sv;
+            }
+        }
+        catch { /* brak dostepu do slownika = pola VAT zostana pominiete */ }
         var kroki = new List<Krok>();
         int zalozonych = 0, zmienionych = 0, skladow = 0;
 
@@ -114,6 +129,9 @@ internal static class Kartoteki
                         }
                     }
 
+                    UstawVat(ob.Dane, p, stawkiVat, zmiany, zapisz);
+                    UstawPolaWlasne(ob.Dane, p, zmiany, zapisz);
+
                     if (zmiany.Count == 0)
                     {
                         kroki.Add(new Krok("kartoteka", symbol, "bez-zmian", null));
@@ -159,6 +177,9 @@ internal static class Kartoteki
                         try { ob.Dane.Opis = p.Opis!.Trim(); } catch { }
                     if (p.Cena is > 0)
                         try { ob.Dane.CenaEwidencyjna = p.Cena.Value; } catch { }
+                    var pominiete = new List<string>();
+                    UstawVat(ob.Dane, p, stawkiVat, pominiete, true);
+                    UstawPolaWlasne(ob.Dane, p, pominiete, true);
 
                     if (!ob.Zapisz())
                     {
@@ -260,6 +281,73 @@ internal static class Kartoteki
         return 0;
     }
 
+    /// Stawki VAT sprzedazy/zakupu. Wartosc w planie to SYMBOL stawki
+    /// ("23", "8", "zw") — dopasowany do slownika IStawkiVat. Nieznany symbol
+    /// zglaszamy w zmianach zamiast cicho pomijac: uzytkownik ma wiedziec,
+    /// ze stawka nie zostala ustawiona.
+    static void UstawVat(dynamic dane, PozPlan p, Dictionary<string, dynamic> stawki,
+                         List<string> zmiany, bool zapisz)
+    {
+        void Jedna(string? chciana, string nazwaPola, Func<dynamic> czytaj, Action<dynamic> ustaw)
+        {
+            var sym = (chciana ?? "").Trim();
+            if (sym.Length == 0) return;
+            if (!stawki.TryGetValue(sym, out var stawka))
+            {
+                zmiany.Add($"{nazwaPola}: nie ma stawki „{sym}” w slowniku — pominieto");
+                return;
+            }
+            var obecna = (Bezp(() => (string?)czytaj()?.Symbol) ?? "").Trim();
+            if (string.Equals(obecna, sym, StringComparison.OrdinalIgnoreCase)) return;
+            zmiany.Add($"{nazwaPola}: „{obecna}” → „{sym}”");
+            if (zapisz) try { ustaw(stawka); } catch { }
+        }
+
+        Jedna(p.VatSprzedaz, "VAT sprzedazy",
+              () => dane.StawkaVatSprzedaz, v => dane.StawkaVatSprzedaz = v);
+        Jedna(p.VatZakup, "VAT zakupu",
+              () => dane.StawkaVatKupno, v => dane.StawkaVatKupno = v);
+    }
+
+    /// Proste pola wlasne PoleWlasne2..8 (PoleWlasne1 jest zajete na Polozenie
+    /// magazynowe — patrz MAGAZYN.md). Zapis WPROST na encji:
+    /// Asortyment.PolaWlasne.PoleWlasneN — NIE przez UtworzPolaWlasneAdv2Accessor,
+    /// ktory obsluguje pola zaawansowane v2, nieobecne w tej bazie.
+    static void UstawPolaWlasne(dynamic dane, PozPlan p, List<string> zmiany, bool zapisz)
+    {
+        if (p.PolaWlasne is null || p.PolaWlasne.Count == 0) return;
+        object? pw = null;
+        try { pw = dane.PolaWlasne; } catch { }
+        if (pw is null)
+        {
+            zmiany.Add("pola wlasne: kartoteka nie ma obiektu PolaWlasne");
+            return;
+        }
+        foreach (var (pole, wartosc) in p.PolaWlasne)
+        {
+            var nazwaPola = (pole ?? "").Trim();
+            if (nazwaPola.Length == 0) continue;
+            // PoleWlasne1 jest zarezerwowane na Polozenie — nie pozwalamy go
+            // nadpisac z edytora, zeby nie skasowac danych magazynowych.
+            if (nazwaPola.Equals("PoleWlasne1", StringComparison.OrdinalIgnoreCase))
+            {
+                zmiany.Add("PoleWlasne1 zarezerwowane na Polozenie — pominieto");
+                continue;
+            }
+            var prop = pw.GetType().GetProperty(nazwaPola);
+            if (prop is null || !prop.CanWrite)
+            {
+                zmiany.Add($"brak zapisywalnego pola „{nazwaPola}”");
+                continue;
+            }
+            var stara = (Bezp(() => prop.GetValue(pw) as string) ?? "").Trim();
+            var nowa = (wartosc ?? "").Trim();
+            if (stara == nowa) continue;
+            zmiany.Add($"{nazwaPola}: „{stara}” → „{nowa}”");
+            if (zapisz) try { prop.SetValue(pw, nowa); } catch { }
+        }
+    }
+
     static bool CzyKomplet(string? rodzaj)
     {
         var r = (rodzaj ?? "").Trim();
@@ -333,7 +421,9 @@ internal static class Kartoteki
 
     internal record SkladnikPlan(string? Symbol, decimal Ilosc);
     internal record PozPlan(string? Symbol, string? Nazwa, string? Rodzaj, string? Jm,
-                            decimal? Cena, string? Opis, List<SkladnikPlan>? Skladniki);
+                            decimal? Cena, string? Opis, List<SkladnikPlan>? Skladniki,
+                            string? VatSprzedaz = null, string? VatZakup = null,
+                            Dictionary<string, string>? PolaWlasne = null);
     internal record Plan(List<PozPlan>? Pozycje);
     internal record Krok(string Rodzaj, string Symbol, string Status, string? Szczegoly);
 }

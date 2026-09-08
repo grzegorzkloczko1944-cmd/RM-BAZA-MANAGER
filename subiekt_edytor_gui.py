@@ -70,6 +70,15 @@ SKROT = {"towar": "TW", "komplet": "KT", "usluga": "US"}
 
 JEDNOSTKI = ["szt", "kpl", "usl", "m", "mb", "kg", "rbg", "kpl."]
 
+#: Symbole stawek VAT — dopasowywane w Subiekcie po polu Symbol encji
+#: StawkaVat. Pusty = „nie ruszaj", kartoteka zostaje z tym, co ma.
+STAWKI_VAT = ["", "23", "8", "5", "0", "zw", "np"]
+
+#: Pola własne dostępne w edytorze. PoleWlasne1 CELOWO pominięte —
+#: jest zajęte na Położenie magazynowe (regał/półka, patrz MAGAZYN.md),
+#: a most i tak odrzuci próbę jego nadpisania.
+POLA_WLASNE = [f"PoleWlasne{i}" for i in range(2, 9)]
+
 
 def pobierz_katalog(timeout=TIMEOUT_S):
     """[{Symbol, Nazwa, CenaEwidencyjna}] — wszystkie kartoteki Subiekta.
@@ -115,6 +124,11 @@ class Kartoteka:
         self.jm = jm
         self.cena = cena
         self.opis = opis
+        #: Symbole stawek VAT ("23", "zw"...). Pusty = nie zmieniaj w Subiekcie.
+        self.vat_sprzedaz = ""
+        self.vat_zakup = ""
+        #: {"PoleWlasne2": "Stal nierdzewna", ...} — tylko 2..8.
+        self.pola_wlasne = {}
         #: Czy kartoteka jest już w Subiekcie — blokuje zmianę symbolu
         #: i decyduje, czy to „założymy" czy „zmienimy".
         self.w_subiekcie = w_subiekcie
@@ -128,6 +142,15 @@ class Kartoteka:
              "cena": self.cena, "opis": self.opis}
         if skladniki:
             d["skladniki"] = skladniki
+        # Puste pola pomijamy — most traktuje brak klucza jako „nie ruszaj",
+        # więc nie nadpiszemy przypadkiem tego, co ktoś ustawił w Subiekcie.
+        if self.vat_sprzedaz:
+            d["vatSprzedaz"] = self.vat_sprzedaz
+        if self.vat_zakup:
+            d["vatZakup"] = self.vat_zakup
+        wypelnione = {k: v for k, v in self.pola_wlasne.items() if v.strip()}
+        if wypelnione:
+            d["polaWlasne"] = wypelnione
         return d
 
 
@@ -151,6 +174,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.katalog = []        # kartoteki z Subiekta (do listy 4)
         self._zaznaczony = None  # symbol aktualnie edytowanej pozycji
         self._blokada = False    # blokada zapisu pól przy przeładowaniu
+        self._zmienione = False  # czy są niezapisane modyfikacje
 
         self._buduj()
         wysrodkuj(self, parent)
@@ -166,7 +190,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         pasek.pack_propagate(False)
         tk.Label(pasek, text="✎  EDYTOR KARTOTEK SUBIEKTA", bg="#34495e",
                  fg="white", font=("Arial", 11, "bold")).pack(side=tk.LEFT, padx=12)
-        tk.Button(pasek, text="Anuluj", command=self.destroy,
+        tk.Button(pasek, text="Anuluj", command=self._anuluj,
                   font=("Arial", 9)).pack(side=tk.RIGHT, padx=8, pady=7)
         self.btn_zapisz = tk.Button(pasek, text="Załóż / Zapisz", state=tk.DISABLED,
                                     command=self._zapisz_calosc, bg="#2980b9", fg="white",
@@ -185,6 +209,15 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self._panel_drzewo(srodek)
         self._panel_szczegoly(srodek)
         self._panel_sklad_i_lista(srodek)
+
+    def _anuluj(self):
+        """Zamknięcie edytora — z ostrzeżeniem, jeśli są niezapisane zmiany."""
+        if self._zmienione and not messagebox.askyesno(
+                "Zamknąć edytor?",
+                "W edytorze są zmiany, których nie zapisano do Subiekta.\n\n"
+                "Zamknąć i porzucić je?", parent=self):
+            return
+        self.destroy()
 
     def _panel_drzewo(self, rodzic):
         ram = tk.LabelFrame(rodzic, text=" 1. Struktura kartoteki (drzewo) ",
@@ -287,14 +320,82 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             bg="#eaf2f8", fg=TEKST_SZARY, font=("Arial", 8), justify="left", anchor="w")
         self.lbl_info.grid(row=6, column=0, columnspan=2, sticky="we", padx=8, pady=(10, 8))
 
-        for tytul in ("Handlowe", "Magazyn", "Dodatkowe"):
-            f = tk.Frame(self.karty, bg=TLO_SEKCJI)
-            self.karty.add(f, text=tytul)
-            tk.Label(f, text=f"„{tytul}" + "” — do uzupełnienia w kolejnej wersji.\n\n"
-                             "Most przekazuje dziś: symbol, nazwa, rodzaj, jednostka,\n"
-                             "cena ewidencyjna, opis i skład kompletu.",
-                     bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 9),
-                     justify="left").pack(padx=16, pady=16, anchor="w")
+        self._karta_handlowe()
+        self._karta_magazyn()
+        self._karta_dodatkowe()
+
+    def _karta_handlowe(self):
+        """Stawki VAT — jedyne pola handlowe, które encja Asortyment ma wprost.
+
+        Cen sprzedaży netto/brutto tu nie ma świadomie: w Subiekcie idą przez
+        cenniki (osobny mechanizm), nie przez pole na kartotece.
+        """
+        f = tk.Frame(self.karty, bg=TLO_SEKCJI)
+        self.karty.add(f, text="Handlowe")
+
+        tk.Label(f, text="Domyślne stawki VAT dla dokumentów:", bg=TLO_SEKCJI,
+                 fg=TEKST, font=("Arial", 9, "bold"), anchor="w").grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(12, 8))
+
+        self.var_vat_sprzedaz = tk.StringVar()
+        self.var_vat_zakup = tk.StringVar()
+        for i, (etykieta, zmienna, klucz) in enumerate((
+                ("VAT sprzedaży:", self.var_vat_sprzedaz, "vat_sprzedaz"),
+                ("VAT zakupu:", self.var_vat_zakup, "vat_zakup")), start=1):
+            tk.Label(f, text=etykieta, bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9),
+                     anchor="w", width=14).grid(row=i, column=0, sticky="w", padx=8, pady=6)
+            cb = ttk.Combobox(f, textvariable=zmienna, values=STAWKI_VAT,
+                              width=10, font=("Arial", 9), state="readonly")
+            cb.grid(row=i, column=1, sticky="w", padx=4, pady=6)
+            cb.bind("<<ComboboxSelected>>", lambda _e, k=klucz: self._pole_zmienione(k))
+
+        tk.Label(f, text="Puste = nie zmieniaj tego, co kartoteka ma w Subiekcie.\n"
+                         "Stawka dopasowywana po symbolu — jeśli w słowniku Subiekta\n"
+                         "nie ma takiego symbolu, raport zapisu to zgłosi.",
+                 bg="#eaf2f8", fg=TEKST_SZARY, font=("Arial", 8),
+                 justify="left", anchor="w").grid(
+            row=3, column=0, columnspan=2, sticky="we", padx=8, pady=(14, 8))
+        f.grid_columnconfigure(1, weight=1)
+
+    def _karta_magazyn(self):
+        """Progi min/opt mają własny, działający mechanizm — nie dublujemy go."""
+        f = tk.Frame(self.karty, bg=TLO_SEKCJI)
+        self.karty.add(f, text="Magazyn")
+        tk.Label(f, text=
+                 "Progi zamawiania (min/opt) ustawia się w oknie Magazyn\n"
+                 "— ma własny tryb mostu i widok całej listy naraz.\n\n"
+                 "Położenie (regał/półka) siedzi w polu własnym PoleWlasne1\n"
+                 "i wypełnia je operacja magazynowa, nie ten edytor.\n\n"
+                 "Masy i objętości encja Asortyment w Sferze NIE MA —\n"
+                 "nie da się ich tu zapisać.",
+                 bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 9),
+                 justify="left").pack(padx=16, pady=16, anchor="w")
+
+    def _karta_dodatkowe(self):
+        """Proste pola własne 2..8 — na parametry konstrukcyjne."""
+        f = tk.Frame(self.karty, bg=TLO_SEKCJI)
+        self.karty.add(f, text="Dodatkowe")
+
+        tk.Label(f, text="Pola własne kartoteki (materiał, gwint, certyfikat…):",
+                 bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9, "bold"), anchor="w").grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(12, 8))
+
+        self.pola_wlasne_var = {}
+        for i, pole in enumerate(POLA_WLASNE, start=1):
+            tk.Label(f, text=f"{pole}:", bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9),
+                     anchor="w", width=14).grid(row=i, column=0, sticky="w", padx=8, pady=4)
+            v = tk.StringVar()
+            tk.Entry(f, textvariable=v, font=("Arial", 9), width=36).grid(
+                row=i, column=1, sticky="we", padx=4, pady=4)
+            v.trace_add("write", lambda *_a, p=pole: self._pole_wlasne_zmienione(p))
+            self.pola_wlasne_var[pole] = v
+
+        tk.Label(f, text="PoleWlasne1 jest zajęte na Położenie magazynowe (regał/półka)\n"
+                         "i dlatego nie ma go na tej liście — most odrzuca próby nadpisania.",
+                 bg="#fdf2e9", fg=TEKST_SZARY, font=("Arial", 8),
+                 justify="left", anchor="w").grid(
+            row=len(POLA_WLASNE) + 1, column=0, columnspan=2, sticky="we", padx=8, pady=(14, 8))
+        f.grid_columnconfigure(1, weight=1)
 
     def _panel_sklad_i_lista(self, rodzic):
         ram = tk.Frame(rodzic, bg=TLO)
@@ -489,6 +590,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             self.var_cena.set(f"{k.cena:.2f}".replace(".", ","))
             self.txt_opis.delete("1.0", "end")
             self.txt_opis.insert("1.0", k.opis or "")
+            self.var_vat_sprzedaz.set(k.vat_sprzedaz or "")
+            self.var_vat_zakup.set(k.vat_zakup or "")
+            for pole, v in self.pola_wlasne_var.items():
+                v.set(k.pola_wlasne.get(pole, ""))
         finally:
             self._blokada = False
         self._odswiez_sklad()
@@ -519,8 +624,21 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 pass
         elif klucz == "opis":
             k.opis = self.txt_opis.get("1.0", "end").strip()
+        elif klucz == "vat_sprzedaz":
+            k.vat_sprzedaz = self.var_vat_sprzedaz.get().strip()
+        elif klucz == "vat_zakup":
+            k.vat_zakup = self.var_vat_zakup.get().strip()
         self._odswiez_drzewo()
         self._zaznacz_w_drzewie(k.symbol)
+
+    def _pole_wlasne_zmienione(self, pole):
+        if self._blokada or not self._zaznaczony:
+            return
+        k = self.pozycje.get(self._zaznaczony)
+        if k is None:
+            return
+        k.pola_wlasne[pole] = self.pola_wlasne_var[pole].get()
+        self._zmienione = True
 
     def _zmien_symbol(self, stary, nowy):
         """Zmiana symbolu pozycji, która NIE jest jeszcze w Subiekcie."""
@@ -851,7 +969,13 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             # Po udanym zapisie wszystko jest już w Subiekcie — symbole blokujemy.
             for k in self.pozycje.values():
                 k.w_subiekcie = True
+            self._zmienione = False
             self._odswiez_drzewo()
+            self.status.config(
+                text=f"✔ Zapisano do Subiekta: założonych {wynik.get('zalozonych', 0)}, "
+                     f"zmienionych {wynik.get('zmienionych', 0)}, "
+                     f"składów {wynik.get('skladow', 0)}",
+                fg=OK_ZIELONY)
 
     def _pokaz_raport(self, wynik, kroki, bledy, zapisz):
         okno = tk.Toplevel(self)
