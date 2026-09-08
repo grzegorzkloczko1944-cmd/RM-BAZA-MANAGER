@@ -4343,7 +4343,21 @@ class MainWindow(tk.Tk):
         self.projects_list = active_projects
         
         self.project_combo['values'] = values
-        
+
+        # Odśwież także WYŚWIETLANĄ wartość, nie tylko listę do rozwinięcia.
+        # Bez tego etykieta locka aktualizowała się dopiero po rozwinięciu
+        # comboboxa: brałeś lock, w polu dalej stara nazwa, a na rozwiniętej
+        # liście już poprawna (zgłoszone 08.09.2026).
+        try:
+            if self.current_project_id:
+                for pid, nazwa in zip([p[0] for p in active_projects], values):
+                    if pid == self.current_project_id:
+                        if self.project_var.get() != nazwa:
+                            self.project_var.set(nazwa)
+                        break
+        except Exception as e:
+            print(f"⚠️  Nie odświeżono nazwy bieżącego projektu w selektorze: {e}")
+
         print(f"✅ Załadowano {len(active_projects)} projektów ({project_type}, sortowanie: cyfry malejąco → litery A-Z + numery malejąco)")
     
     def _get_user_display_name(self, username):
@@ -9400,7 +9414,13 @@ class MainWindow(tk.Tk):
             
             # Odśwież dane (z wersji sieciowej)
             self.refresh_data()
-            
+
+            # Odśwież listę projektów — bez tego selektor dalej pokazywał
+            # „🔒 [ADMIN]" przy projekcie, którego lock właśnie zwolniliśmy.
+            # release_lock() to robi od dawna, cancel_lock() nie robiło
+            # (zgłoszone 08.09.2026: „nie mam locka, a mi świeci, że mam").
+            self.load_projects()
+
             return True  # Sukces - lock anulowany
             
         except Exception as e:
