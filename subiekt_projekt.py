@@ -32,7 +32,7 @@ import tempfile
 import threading
 import tkinter as tk
 from datetime import datetime
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog, simpledialog
 from rm_kreciolek import Kreciolek
 
 import subiekt_mapowania
@@ -132,6 +132,149 @@ def read_project_items(project_id):
             "biblioteczne": biblioteczne,
         })
     return out
+
+
+#: Naglowki BOM-u — warianty spotykane w eksportach z Inventora.
+_KOL_CSV = {
+    "nr": ("nr rysunku", "nr_rysunku", "numer rysunku", "nr", "symbol"),
+    "nazwa": ("nazwa", "name", "description", "opis czesci"),
+    "ilosc": ("ilosc", "il", "qty", "quantity", "sztuk"),
+    "opis": ("opis", "uwagi"),
+}
+
+
+def _naglowek_csv(tekst):
+    """Naglowek → klucz porownywalny: bez ogonkow, malymi, bez kropek."""
+    return do_ascii(str(tekst or "")).strip().lower().rstrip(".:").strip()
+
+
+def czytaj_wiersze_csv(sciezka):
+    """Surowe wiersze CSV. Kodowanie i separator wykrywane.
+
+    Eksporty z Inventora bywaja cp1250 (naglowki maja polskie znaki), a
+    separatorem jest zwykle srednik. Ta sama kolejnosc prob co
+    import_bom.csv_to_xlsx, zeby oba miejsca czytaly te same pliki.
+    """
+    import csv as _csv
+    ostatni = None
+    for enc in ("utf-8-sig", "utf-8", "cp1250", "latin-1"):
+        try:
+            with open(sciezka, "r", encoding=enc, newline="") as f:
+                probka = f.read(4096)
+                f.seek(0)
+                try:
+                    dialekt = _csv.Sniffer().sniff(probka, delimiters=";,\t")
+                except _csv.Error:
+                    dialekt = _csv.excel
+                    dialekt.delimiter = ";"          # domyslnie PL
+                return [w for w in _csv.reader(f, dialekt) if any(
+                    str(c).strip() for c in w)]
+        except UnicodeDecodeError as e:
+            ostatni = e
+    raise ValueError("nie rozpoznano kodowania pliku (%s)" % ostatni)
+
+
+def read_items_csv(sciezka):
+    """BOM z CSV → [{nr, bez_numeru, nazwa, qty, typ, biblioteczne}].
+
+    Ksztalt IDENTYCZNY z read_project_items — dalsza czesc okna (klasyfikacja,
+    plan, ZK) nie musi wiedziec, skad przyszly dane.
+
+    Typ bierzemy z numeru rysunku (infer_type_from_drawing_no), bo w CSV nie ma
+    kolumny klasy; bez numeru — element znormalizowany, czyli towar (X).
+    """
+    wiersze = czytaj_wiersze_csv(sciezka)
+    if not wiersze:
+        return []
+
+    naglowki, dane = wiersze[0], wiersze[1:]
+    mapa = {}
+    for idx, h in enumerate(naglowki):
+        klucz = _naglowek_csv(h)
+        for pole, warianty in _KOL_CSV.items():
+            if pole not in mapa and klucz in warianty:
+                mapa[pole] = idx
+    if "nr" not in mapa and "nazwa" not in mapa:
+        raise ValueError("brak kolumn \u201eNr rysunku\u201d i \u201eNazwa\u201d "
+                         "\u2014 to nie wyglada na BOM")
+
+    try:
+        from import_bom import infer_type_from_drawing_no
+    except Exception:
+        infer_type_from_drawing_no = None
+
+    out, seen, uzyte = [], set(), set()
+    for w in dane:
+        def kom(pole):
+            i = mapa.get(pole)
+            if i is None or i >= len(w):
+                return ""
+            return jedna_linia(w[i]).strip()
+
+        nr, nazwa = kom("nr"), kom("nazwa")
+        klucz = nr or nazwa
+        if not klucz or klucz.upper() in seen:
+            continue
+        seen.add(klucz.upper())
+
+        # Ta sama regula co wszedzie: numer rysunku, a bez niego symbol z nazwy.
+        symbol = nr or symbol_z_nazwy(nazwa)
+        if not nr and symbol in uzyte:
+            symbol = rozroznij_symbol(nazwa, uzyte)
+        uzyte.add(symbol)
+
+        # Bez numeru = element znormalizowany (lozysko, czujnik, element
+        # handlowy) — ten sam typ, ktory nadaje im reszta systemu.
+        typ = "ZNORMALIZOWANE"
+        if nr:
+            typ = "STANDARD"
+            if infer_type_from_drawing_no is not None:
+                try:
+                    typ = (infer_type_from_drawing_no(nr) or "STANDARD").upper()
+                except Exception:
+                    pass
+
+        try:
+            qty = float(str(kom("ilosc") or "1").replace(",", ".") or 1)
+        except ValueError:
+            qty = 1.0
+
+        out.append({
+            "nr": symbol,
+            "bez_numeru": not nr,
+            "nazwa": nazwa,
+            "qty": qty,
+            "typ": typ,
+            "biblioteczne": False,
+        })
+    return out
+
+
+def tree_z_csv(sciezka, items):
+    """({rodzic: [(dziecko, ilosc)]}, {NUMER: nazwa}) — plaski sklad z CSV.
+
+    Plik BOM-u opisuje JEDNO zlozenie: komplet bierze tozsamosc z nazwy pliku
+    ("2622-200.81ZZ Zestaw Wagi.csv" → symbol "2622-200.81ZZ"), a wszystkie
+    wiersze to jego skladniki. Zagniezdzen tu nie ma — kazdy podzespol ma
+    wlasny plik CSV.
+    """
+    import os as _os
+    baza = _os.path.splitext(_os.path.basename(sciezka))[0].strip()
+    czlony = baza.split(None, 1)
+    symbol = czlony[0].strip() if czlony else baza
+    nazwa = czlony[1].strip() if len(czlony) > 1 else ""
+
+    kids, nazwy = {}, {}
+    nazwy[symbol.upper()] = nazwa or symbol
+    for it in items:
+        dziecko = it["nr"]
+        if dziecko.upper() == symbol.upper():
+            continue                     # wiersz samego zlozenia
+        kids.setdefault(symbol.upper(), [])
+        if not any(c[0].upper() == dziecko.upper() for c in kids[symbol.upper()]):
+            kids[symbol.upper()].append((dziecko, it.get("qty") or 1.0))
+        nazwy.setdefault(dziecko.upper(), it.get("nazwa") or "")
+    return kids, nazwy, symbol, nazwa
 
 
 def read_hidden_drawings(project_id):
@@ -433,7 +576,7 @@ def numer_projektu(project_name, project_id=None):
     return str(project_id) if project_id is not None else (czlon or "")
 
 
-def build_plan(project_id, project_name, podmiot, tytul):
+def build_plan(project_id, project_name, podmiot, tytul, csv_path=None):
     """Buduje plan dla mostu + dane do wyświetlenia.
 
     Zwraca (plan, items, ostrzezenie, poza_bom, ukryte_cale_galezie), gdzie `poza_bom` to
@@ -441,13 +584,35 @@ def build_plan(project_id, project_name, podmiot, tytul):
     Nie trafią do Subiekta, więc okno musi je pokazać (patrz komentarz przy
     zbieraniu tej mapy).
     """
-    items = read_project_items(project_id)
+    # csv_path — maly projekt spoza RM_BAZA: caly BOM siedzi w jednym pliku,
+    # wiec nie ma ani bazy project_*.sqlite, ani drzewka w *_OUT.xlsx.
+    if csv_path:
+        items = read_items_csv(csv_path)
+    else:
+        items = read_project_items(project_id)
     # Pozycje z numerem rysunku muszą wyglądać jak numer (odsiewa opisy wpisane
     # w to pole). Pozycje BEZ numeru — znormalizowane, identyfikowane nazwą —
     # przepuszczamy, bo inaczej wypadłyby łożyska, paski i simmeringi.
     items = [it for it in items
              if it.get("bez_numeru") or looks_like_drawing_no(it["nr"])]
-    kids, warn, nazwy_drzewka = read_tree(project_name)
+    if csv_path:
+        kids, nazwy_drzewka, _sym, _naz = tree_z_csv(csv_path, items)
+        warn = None
+        # Samo ZLOZENIE nie jest wierszem BOM-u — jego tozsamosc niesie
+        # nazwa pliku ("2622-200.81ZZ Zestaw Wagi.csv"). Bez dopisania go
+        # do pozycji powstalyby same skladniki, bez kompletu, ktory je
+        # spina. Typ z numeru: koncowka ZZ/Z decyduje, ze to komplet.
+        if _sym and not any(it["nr"].upper() == _sym.upper() for it in items):
+            try:
+                from import_bom import infer_type_from_drawing_no
+                typ_zl = (infer_type_from_drawing_no(_sym) or "ZZ").upper()
+            except Exception:
+                typ_zl = "ZZ"
+            items.insert(0, {
+                "nr": _sym, "bez_numeru": False, "nazwa": _naz or _sym,
+                "qty": 1, "typ": typ_zl, "biblioteczne": False})
+    else:
+        kids, warn, nazwy_drzewka = read_tree(project_name)
 
     by_nr = {it["nr"].upper(): it for it in items}
     # Składniki z DRZEWKA, których NIE MA w BOM-ie:
@@ -864,10 +1029,13 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
     TYPY = ["X", "XX", "Z", "ZZ", "STANDARD", "ZNORMALIZOWANE",
             "LASER", "LASER EXPORT"]
 
-    def __init__(self, parent, project_id, project_name=None):
+    def __init__(self, parent, project_id, project_name=None, csv_path=None):
         super().__init__(parent)
         self.project_id = project_id
         self.project_name = project_name or str(project_id)
+        #: Sciezka BOM-u dla projektu SPOZA RM_BAZA (maly projekt z CSV).
+        #: None = zwykly projekt, dane z bazy i z *_OUT.xlsx.
+        self.csv_path = csv_path
         #: {rodzic: [numer, …]} — składniki z drzewka spoza BOM-u (rozjazd numerów)
         self.poza_bom = {}
         #: powód nieczytania drzewka (None = wczytane) — bez niego brak kompletów
@@ -888,7 +1056,8 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         self.wybrane = set()
         self.filter_typ_modes = {}  # {typ: 'show'|'hide'} — kafelek ✚
 
-        self.title(f"Projekt / Aktualizacja w Subiekcie — {self.project_name}")
+        self.title("Projekt / Aktualizacja w Subiekcie — " + self.project_name
+                   + ("   [z pliku CSV]" if csv_path else ""))
         self.geometry("1080x680")
         self.minsize(900, 400)
         # ŚWIADOMIE bez transient(): okno-dziecko z transient dostaje w Windows
@@ -1151,7 +1320,8 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         try:
             plan, items, warn, poza_bom, ukryte_galezie, bib_bez_skladu = build_plan(
                 self.project_id, self.project_name,
-                self.var_podmiot.get().strip(), self.var_tytul.get().strip())
+                self.var_podmiot.get().strip(), self.var_tytul.get().strip(),
+                csv_path=self.csv_path)
             if not plan["pozycje"]:
                 self.after(0, lambda: self._dry_done(None, None, [], "Brak pozycji z numerem rysunku.", {}, 0, {}))
                 return
@@ -2474,7 +2644,12 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         kom = sum(1 for k in kroki if k["Rodzaj"] == "komplet" and k["Status"].startswith("utworzony"))
         bledy = [k for k in kroki if k["Status"] == "blad"]
         zk = wynik.get("zk")
-        log = save_log(self.project_id, wynik, plan=self._plan_do_zapisu())
+        # Projekt z CSV nie ma project_id, wiec log nazwalby sie samym
+        # znacznikiem czasu i nie dalo by sie go znalezc po projekcie.
+        # Zapisujemy pod nazwa projektu — to ona idzie na ZK (pole Uwagi),
+        # wiec po niej odnajdzie sie takze przy cofaniu.
+        log = save_log(self.project_id or numer_projektu(self.project_name),
+                       wynik, plan=self._plan_do_zapisu())
         zmap = zapisz_mapowania(wynik)
 
         # Co się stało z ZK — „utworzone" i „dopisano do istniejącego" to dwie
@@ -2504,6 +2679,57 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             "Subiekt — zapis zakończony", "\n".join(lines), parent=self)
         self._na_wierzch()         # inaczej arkusz główny przykryje to okno
         self._dry_run_async()      # odśwież — pokaże już założone kartoteki jako istniejące
+
+
+def open_window_csv(parent):
+    """Okno projektu dla BOM-u z pliku CSV — projekt SPOZA RM_BAZA.
+
+    Male zlozenia (pojedynczy zespol wyeksportowany z Inventora) nie maja ani
+    wpisu w RM_BAZA, ani pliku *_OUT.xlsx, wiec zwykla sciezka ich nie widzi.
+    Tu wskazujemy plik BOM-u, podajemy nazwe projektu i dalej okno dziala tak
+    samo: kartoteki, komplety, ZK.
+    """
+    sciezka = filedialog.askopenfilename(
+        parent=parent, title="Wybierz plik BOM (CSV) ma\u0142ego projektu",
+        filetypes=[("BOM \u2014 CSV", "*.csv"), ("Wszystkie pliki", "*.*")])
+    if not sciezka:
+        return None
+
+    # Szybkie sprawdzenie PRZED otwarciem okna \u2014 zeby blad pliku nie objawil
+    # sie dopiero pustym arkuszem po kilku sekundach odpytywania Subiekta.
+    try:
+        items = read_items_csv(sciezka)
+    except Exception as e:
+        messagebox.showerror("Projekt z CSV",
+                             "Nie uda\u0142o si\u0119 odczyta\u0107 pliku:\n\n%s" % e,
+                             parent=parent)
+        return None
+    if not items:
+        messagebox.showwarning(
+            "Projekt z CSV",
+            "W pliku nie ma \u017cadnych pozycji.\n\n"
+            "Sprawd\u017a, czy ma kolumny \u201eNr rysunku\u201d / \u201eNazwa\u201d / \u201eIlo\u015b\u0107\u201d.",
+            parent=parent)
+        return None
+
+    _kids, _nazwy, symbol, nazwa_zlozenia = tree_z_csv(sciezka, items)
+
+    # Nazwa projektu \u2014 idzie na ZK (pole Uwagi) i w tytul okna. Podpowiadamy
+    # z nazwy pliku, bo tak nazywaja sie eksporty z Inventora.
+    domyslna = (symbol + (" " + nazwa_zlozenia if nazwa_zlozenia else "")).strip()
+    nazwa = simpledialog.askstring(
+        "Projekt z CSV",
+        "Nazwa projektu (trafi na ZK i w tytul okna):\n\n"
+        "Plik: %s\nPozycji w BOM-ie: %d" % (os.path.basename(sciezka), len(items)),
+        initialvalue=domyslna, parent=parent)
+    if nazwa is None:
+        return None                      # Anuluj
+    nazwa = nazwa.strip() or domyslna
+
+    # project_id = None: nie ma bazy project_*.sqlite, wiec nic z niej nie
+    # czytamy. Zapis logu planu i cofanie projektu tego wymagaja \u2014 patrz
+    # ostrzezenie w oknie.
+    return SubiektProjektWindow(parent, None, nazwa, csv_path=sciezka)
 
 
 def open_window(parent, project_id, project_name=None):

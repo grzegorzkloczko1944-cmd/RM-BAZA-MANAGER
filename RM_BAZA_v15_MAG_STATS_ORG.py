@@ -895,6 +895,8 @@ class MainWindow(tk.Tk):
         subiekt_menu.add_separator()
         subiekt_menu.add_command(label="🏗 Projekt / Aktualizacja w Subiekcie (kartoteki + komplety + ZK)…",
                                  command=self.open_subiekt_projekt)
+        subiekt_menu.add_command(label="📄 Projekt z pliku CSV (małe złożenie spoza RM_BAZA)…",
+                                 command=self.open_subiekt_projekt_csv)
         subiekt_menu.add_command(label="↩ Cofnij projekt w Subiekcie (usuń ZK, komplety, kartoteki)…",
                                  command=self.open_subiekt_projekt_cofnij)
         subiekt_menu.add_command(label="🛒 Zamówienia do dostawców (ZD)…",
@@ -29297,6 +29299,23 @@ class MainWindow(tk.Tk):
                                      parent=self)
             return
         subiekt_panel.open_window(self)
+
+    def open_subiekt_projekt_csv(self):
+        """To samo okno, ale dla BOM-u z pliku CSV — projekt SPOZA RM_BAZA.
+
+        Male zlozenia (pojedynczy zespol z Inventora) nie maja ani wpisu
+        w RM_BAZA, ani pliku *_OUT.xlsx, wiec zwykla sciezka ich nie widzi.
+        Nie wymaga wybranego projektu — caly BOM jest w pliku.
+        """
+        try:
+            import subiekt_projekt
+        except ImportError as e:
+            messagebox.showerror(
+                "Subiekt",
+                f"Nie znaleziono modułu subiekt_projekt.py\n\n{e}",
+                parent=self)
+            return
+        subiekt_projekt.open_window_csv(self)
 
     def open_subiekt_projekt(self):
         """Okno „Załóż projekt w Subiekcie" (menu 📦 SUBIEKT).
