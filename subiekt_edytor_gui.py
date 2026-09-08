@@ -822,7 +822,9 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 return
         elif klucz == "rodzaj":
             etykieta = self.var_rodzaj.get()
-            k.rodzaj = dict((e, w) for e, w in RODZAJE).get(etykieta, "towar")
+            nowy_rodzaj = dict((e, w) for e, w in RODZAJE).get(etykieta, "towar")
+            if not self._zmien_rodzaj(k, nowy_rodzaj):
+                return
             self._odswiez_sklad()
         elif klucz == "jm":
             k.jm = self.var_jm.get().strip() or "szt"
@@ -844,6 +846,47 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             self._zmienione = True
         self._odswiez_drzewo()
         self._zaznacz_w_drzewie(k.symbol)
+
+    def _zmien_rodzaj(self, k, nowy_rodzaj):
+        """Zmiana rodzaju pozycji. False = user sie rozmyslil.
+
+        Tylko komplet ma sklad. Zejscie z kompletu na towar/usluge musi wiec
+        rozstrzygnac los skladnikow — wczesniej zostawaly w relacjach,
+        wisialy w drzewie, ale plan ich nie wysylal. Do Subiekta szedl towar,
+        a pozycje znikaly bez slowa.
+        """
+        if nowy_rodzaj == k.rodzaj:
+            return True
+        dzieci = self._dzieci(k.symbol)
+        if k.czy_komplet() and nowy_rodzaj != "komplet" and dzieci:
+            nazwa_rodzaju = dict((w, e) for e, w in RODZAJE).get(nowy_rodzaj,
+                                                                nowy_rodzaj)
+            if not messagebox.askyesno(
+                    "Zmiana rodzaju",
+                    f"„{k.symbol}” ma {len(dzieci)} składnik(ów), a {nazwa_rodzaju} "
+                    "nie może mieć składu.\n\n"
+                    "Odpiąć składniki? Zostaną w drzewie jako osobne pozycje "
+                    "na wierzchu — nic nie ginie.\n\n"
+                    "Nie = zostaw jako Komplet.", parent=self):
+                # Cofamy combobox do stanu faktycznego.
+                self._blokada = True
+                try:
+                    for etykieta, wartosc in RODZAJE:
+                        if wartosc == k.rodzaj:
+                            self.var_rodzaj.set(etykieta)
+                finally:
+                    self._blokada = False
+                return False
+            for dziecko, _il in dzieci:
+                if dziecko not in self.korzenie:
+                    self.korzenie.append(dziecko)
+            self.relacje = [(r, d, il) for (r, d, il) in self.relacje
+                            if r != k.symbol]
+            self.status.config(
+                text="Odpięto " + str(len(dzieci)) + " składnik(ów) — są teraz "
+                     "osobnymi pozycjami na wierzchu drzewa", fg=TEKST_SZARY)
+        k.rodzaj = nowy_rodzaj
+        return True
 
     def _pole_wlasne_zmienione(self, pole):
         if self._blokada or not self._zaznaczony:
@@ -1622,8 +1665,21 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         tab.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sc_r.pack(side=tk.RIGHT, fill=tk.Y)
 
+        # Kolumna "Co": dla kroku kartoteki pokazujemy RODZAJ POZYCJI
+        # (Towar/Komplet/Usluga), bo "kartoteka" nic nie mowilo — rodzaj
+        # kroku mostu jest tu bez znaczenia dla czytajacego.
+        etykiety = dict((w, e) for e, w in RODZAJE)
+
+        def co_to(krok):
+            rodzaj_kroku = str(krok.get("Rodzaj") or "")
+            if rodzaj_kroku != "kartoteka":
+                return "skład"
+            poz = self.pozycje.get(str(krok.get("Symbol") or ""))
+            r = poz.rodzaj if poz else ""
+            return etykiety.get(r, r or rodzaj_kroku)
+
         for k, waga in zip(kroki, wagi):
-            tab.insert("", "end", values=(k.get("Rodzaj"), k.get("Symbol"),
+            tab.insert("", "end", values=(co_to(k), k.get("Symbol"),
                                           str(k.get("Status") or ""),
                                           k.get("Szczegoly") or ""), tags=(waga,))
         # Dymek z pelna trescia wiersza — niezalezny od szerokosci okna.
