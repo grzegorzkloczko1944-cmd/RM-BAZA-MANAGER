@@ -68,6 +68,29 @@ RODZAJE = [("Towar", "towar"), ("Komplet (Z)", "komplet"), ("Usługa", "usluga")
 #: Skróty przy węzłach drzewa — od razu widać, co jest czym.
 SKROT = {"towar": "TW", "komplet": "KT", "usluga": "US"}
 
+#: Waga informacji w raporcie zapisu — decyduje o kolorze tla wiersza.
+#: Bez tego "bez-zmian" krzyczalo tak samo glosno jak "do-zalozenia".
+WAGA_STATUSU = {
+    "blad": "uwaga",
+    "pominiety-brak-skladnikow": "uwaga",
+    "do-zalozenia": "nowe",
+    "zalozona": "nowe",
+    "do-zmiany": "zmiana",
+    "do-ustawienia": "zmiana",
+    "zmieniona": "zmiana",
+    "sklad-ustawiony": "zmiana",
+    "bez-zmian": "info",
+}
+
+#: waga → (tlo, kolor tekstu). Tlo, nie sam tekst: wiersz ma byc
+#: rozpoznawalny kątem oka, bez czytania kolumny Status.
+KOLORY_WAGI = {
+    "uwaga":  ("#f9d6d5", "#922b21"),   # czerwone — wymaga reakcji
+    "nowe":   ("#d6eaf8", "#1a5276"),   # niebieskie — powstaje nowy byt
+    "zmiana": ("#fcf3cf", "#7d6608"),   # zolte — istniejace dane sie zmieniaja
+    "info":   ("#ffffff", "#95a5a6"),   # szare — nic sie nie dzieje
+}
+
 JEDNOSTKI = ["szt", "kpl", "usl", "m", "mb", "kg", "rbg", "kpl."]
 
 #: Symbole stawek VAT — dopasowywane w Subiekcie po polu Symbol encji
@@ -1462,28 +1485,55 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         okno.configure(bg=TLO)
         okno.geometry("760x520")
 
+        # Waga kazdego statusu — decyduje o kolorze tla wiersza.
+        wagi = [WAGA_STATUSU.get(str(k.get("Status") or ""), "info") for k in kroki]
+        ile = {w: wagi.count(w) for w in ("uwaga", "nowe", "zmiana", "info")}
+
         naglowek = (f"założonych: {wynik.get('zalozonych', 0)}   "
                     f"zmienionych: {wynik.get('zmienionych', 0)}   "
                     f"składów: {wynik.get('skladow', 0)}") if zapisz else \
                    f"pozycji w planie: {len(kroki)}"
         tk.Label(okno, text=naglowek, bg=TLO, fg=BLAD_CZERWONY if bledy else OK_ZIELONY,
-                 font=("Arial", 10, "bold")).pack(padx=12, pady=(12, 6), anchor="w")
+                 font=("Arial", 10, "bold")).pack(padx=12, pady=(12, 2), anchor="w")
 
+        # Legenda — przy dlugiej liscie mowi od razu, czy cos wymaga uwagi,
+        # bez przegladania wiersz po wierszu. Puste grupy pomijamy.
+        leg = tk.Frame(okno, bg=TLO)
+        leg.pack(fill=tk.X, padx=12, pady=(0, 6))
+        for waga, etykieta in (("uwaga", "wymaga uwagi"), ("nowe", "nowe w Subiekcie"),
+                               ("zmiana", "zmiana danych"), ("info", "bez zmian")):
+            if not ile.get(waga):
+                continue
+            tlo, kolor = KOLORY_WAGI[waga]
+            tk.Label(leg, text=f"  {ile[waga]} — {etykieta}  ", bg=tlo, fg=kolor,
+                     font=("Arial", 8, "bold"), bd=1, relief="solid").pack(
+                side=tk.LEFT, padx=(0, 6))
+
+        wrap_r = tk.Frame(okno, bg=TLO_SEKCJI)
+        wrap_r.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
         kol = ("rodzaj", "symbol", "status", "szczegoly")
-        tab = ttk.Treeview(okno, columns=kol, show="headings")
+        tab = ttk.Treeview(wrap_r, columns=kol, show="headings",
+                           style="Edytor.Treeview")
         for k, naz, sz in (("rodzaj", "Co", 90), ("symbol", "Symbol", 150),
                            ("status", "Status", 150), ("szczegoly", "Szczegóły", 330)):
             tab.heading(k, text=naz)
-            tab.column(k, width=sz)
-        tab.tag_configure("blad", foreground=BLAD_CZERWONY)
-        tab.tag_configure("ok", foreground=OK_ZIELONY)
-        for k in kroki:
-            st = str(k.get("Status") or "")
-            tag = "blad" if "blad" in st else ("ok" if st in
-                  ("zalozona", "zmieniona", "sklad-ustawiony") else "")
-            tab.insert("", "end", values=(k.get("Rodzaj"), k.get("Symbol"), st,
-                                          k.get("Szczegoly") or ""), tags=(tag,))
-        tab.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
+            tab.column(k, width=sz, minwidth=sz)
+        for waga, (tlo, kolor) in KOLORY_WAGI.items():
+            tab.tag_configure(waga, background=tlo, foreground=kolor)
+        tab.tag_configure("uwaga", background=KOLORY_WAGI["uwaga"][0],
+                          foreground=KOLORY_WAGI["uwaga"][1],
+                          font=("Arial", 9, "bold"))
+        sc_r = ttk.Scrollbar(wrap_r, orient="vertical", command=tab.yview)
+        sc_r_poz = ttk.Scrollbar(wrap_r, orient="horizontal", command=tab.xview)
+        tab.configure(yscrollcommand=sc_r.set, xscrollcommand=sc_r_poz.set)
+        sc_r_poz.pack(side=tk.BOTTOM, fill=tk.X)
+        tab.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sc_r.pack(side=tk.RIGHT, fill=tk.Y)
+
+        for k, waga in zip(kroki, wagi):
+            tab.insert("", "end", values=(k.get("Rodzaj"), k.get("Symbol"),
+                                          str(k.get("Status") or ""),
+                                          k.get("Szczegoly") or ""), tags=(waga,))
         tk.Button(okno, text="Zamknij", command=okno.destroy,
                   font=("Arial", 9)).pack(pady=10)
         wysrodkuj(okno, self)
