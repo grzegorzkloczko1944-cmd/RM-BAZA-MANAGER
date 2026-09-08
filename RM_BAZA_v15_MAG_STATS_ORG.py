@@ -9002,6 +9002,14 @@ class MainWindow(tk.Tk):
             from subiekt_wyslij_zd import naloz_zamowienia, zdejmij_zamowienia
         except Exception:
             return
+        # Znacznik PRZED nałożeniem — granica dla sprzątania bufora.
+        # Master jest wspólny: między nałożeniem a wgraniem kopii na serwer
+        # ktoś inny może dołożyć swój wpis dla tego projektu. Bez tej granicy
+        # usun_zamowienia() kasowało „wszystko dla project_id" i zabierało
+        # cudzy świeży wpis, zanim ktokolwiek go nałożył (08.09.2026).
+        from datetime import datetime as _dt
+        self._zd_bufor_do = _dt.now().isoformat(timespec="seconds")
+
         # Kolejność NIE jest dowolna: najpierw cofnięcia (usunięte ZD), potem
         # nałożenia (wysłane ZD). Gdy ta sama pozycja ma jedno i drugie —
         # usunięto stare ZD, wysłano nowe — ma wygrać nowsze nałożenie.
@@ -9573,7 +9581,11 @@ class MainWindow(tk.Tk):
             # albo padnięcie sieci w trakcie kopiowania zgubiłoby je bez śladu.
             try:
                 from subiekt_wyslij_zd import usun_zamowienia
-                usun_zamowienia(self.current_project_id)
+                # Tylko wpisy sprzed nałożenia — te, które są już w tej kopii.
+                # Nowsze to czyjeś świeże wysyłki: zostają i nałożą się przy
+                # następnym przejęciu projektu.
+                usun_zamowienia(self.current_project_id,
+                                do_kiedy=getattr(self, "_zd_bufor_do", None))
             except Exception as e:
                 print(f"⚠️  Nie wyczyszczono wpisów „Zamówiono” z master: {e}")
             

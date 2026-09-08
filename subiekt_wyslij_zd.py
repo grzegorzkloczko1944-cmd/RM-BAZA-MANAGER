@@ -773,8 +773,22 @@ def naloz_zamowienia(project_con, project_id, log=None):
     return ile
 
 
-def usun_zamowienia(project_id):
-    """Kasuje odłożone wpisy projektu — po UDANYM wgraniu kopii na serwer."""
+def usun_zamowienia(project_id, do_kiedy=None):
+    """Kasuje odłożone wpisy projektu — po UDANYM wgraniu kopii na serwer.
+
+    `do_kiedy` — znacznik czasu z chwili NAŁOŻENIA (naloz_zamowienia /
+    zdejmij_zamowienia). Kasujemy tylko wpisy nie nowsze niż on.
+
+    ⚠️ PO CO TA GRANICA. Master jest wspólny dla wszystkich stanowisk. Między
+    nałożeniem a wgraniem kopii na serwer mija kilka–kilkanaście sekund, a w
+    tym czasie KTOŚ INNY może wysłać ZD na ten sam projekt i dołożyć swój
+    wpis. Kasowanie „wszystkiego dla project_id" zabierało go razem ze
+    starymi — jego pozycja nie dostawała „Zamówiono", choć ZD poszło,
+    i nikt się o tym nie dowiadywał.
+
+    Bez `do_kiedy` zachowuje się jak dawniej (kasuje wszystko) — dla
+    wywołań, które nie znają momentu nałożenia.
+    """
     import sqlite3
     try:
         con = sqlite3.connect(_master(), timeout=10)
@@ -782,19 +796,37 @@ def usun_zamowienia(project_id):
             if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
                                " AND name='zd_zamowione_pozycje'").fetchone():
                 return 0
-            n = con.execute("DELETE FROM zd_zamowione_pozycje WHERE project_id=?",
-                            (project_id,)).rowcount
+            if do_kiedy:
+                warunek = " WHERE project_id=? AND kiedy<=?"
+                args = (project_id, do_kiedy)
+            else:
+                warunek = " WHERE project_id=?"
+                args = (project_id,)
+            n = con.execute("DELETE FROM zd_zamowione_pozycje" + warunek, args).rowcount
             # Odłożone cofnięcia sprzątamy w tym samym momencie i z tego
             # samego powodu: dopiero teraz są na serwerze.
             _zapewnij_tabele_cofniec(con)
-            c = con.execute("DELETE FROM zd_cofniete_pozycje WHERE project_id=?",
-                            (project_id,)).rowcount
+            c = con.execute("DELETE FROM zd_cofniete_pozycje" + warunek, args).rowcount
+            # Co zostało — czyjeś świeże wpisy, które nałożą się przy
+            # następnym locku. Mówimy o tym wprost, żeby nie wyglądało
+            # na zgubione.
+            zostalo = 0
+            if do_kiedy:
+                zostalo = (con.execute(
+                    "SELECT COUNT(*) FROM zd_zamowione_pozycje WHERE project_id=?",
+                    (project_id,)).fetchone()[0]
+                    + con.execute(
+                    "SELECT COUNT(*) FROM zd_cofniete_pozycje WHERE project_id=?",
+                    (project_id,)).fetchone()[0])
             con.commit()
         finally:
             con.close()
         if n or c:
             print(f"🧹 Projekt {project_id}: {n} wpisów „Zamówiono” i {c} cofnięć "
                   "zapisanych na serwer, usunięte z master")
+        if zostalo:
+            print(f"📌 Projekt {project_id}: {zostalo} wpisów doszło w trakcie "
+                  "(inny użytkownik) — nałożą się przy następnym przejęciu projektu")
         return n + c
     except Exception as e:
         # Zostają — nałożą się ponownie przy następnym locku (idempotentne).
