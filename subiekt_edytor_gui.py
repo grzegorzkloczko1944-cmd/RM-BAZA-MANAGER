@@ -851,15 +851,20 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         na etykiecie pod drzewem, jest jedyna prawda.
         """
         item = (self.tree.selection() or [None])[0]
-        if not item:
-            return None
-        sym = self._symbol_wezla(item)
+        sym = self._symbol_wezla(item) if item else None
         if sym and sym in self.pozycje and self.pozycje[sym].czy_komplet():
             return sym
-        rodzic_item = self.tree.parent(item)
+        rodzic_item = self.tree.parent(item) if item else ""
         rodzic = self._symbol_wezla(rodzic_item) if rodzic_item else None
         if rodzic and rodzic in self.pozycje and self.pozycje[rodzic].czy_komplet():
             return rodzic
+        # Z zaznaczenia nic nie wynika (luzny towar). Jesli w drzewie jest
+        # DOKLADNIE JEDEN komplet, nie ma czego zgadywac - to on. Bez tego
+        # kazdy dwuklik na liscie ladowal obok, bo zaznaczenie przeskakiwalo
+        # na kolejny luzny towar i pulapka sie samonapedzala.
+        komplety = [sym for sym, k in self.pozycje.items() if k.czy_komplet()]
+        if len(komplety) == 1:
+            return komplety[0]
         return None
 
     def _odswiez_etykiete_celu(self):
