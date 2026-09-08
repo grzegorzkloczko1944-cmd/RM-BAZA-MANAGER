@@ -676,6 +676,31 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self._odswiez_etykiete_celu()
         self._oznacz_w_liscie()
 
+    def _sprzatnij_osierocona(self, sym):
+        """Usuwa z modelu pozycje, ktora wypadla z drzewa.
+
+        Kartoteka Z SUBIEKTA majaca wlasny sklad zostaje — wyciagamy ja na
+        wierzch zamiast kasowac, bo user moze chciec ja dalej edytowac,
+        a razem z nia zgubilby sie caly jej sklad.
+        """
+        if sym in self.korzenie:
+            return
+        if any(d == sym for (_r, d, _il) in self.relacje):
+            return                      # wisi jeszcze w innym komplecie
+        k = self.pozycje.get(sym)
+        if k is None:
+            return
+        if k.w_subiekcie and self._dzieci(sym):
+            self.korzenie.append(sym)
+            return
+        # Zabieramy tez jej wlasny sklad — inaczej zostalby po niej
+        # osierocony ogon relacji.
+        dzieci = [d for (r, d, _il) in self.relacje if r == sym]
+        self.relacje = [(r, d, il) for (r, d, il) in self.relacje if r != sym]
+        del self.pozycje[sym]
+        for d in dzieci:
+            self._sprzatnij_osierocona(d)
+
     def _rozwin_wszystko(self, rodzic=""):
         """Rozwija kazda galaz. Struktura jest tu mala, a sens tego okna
         to widziec caly sklad naraz."""
@@ -1147,6 +1172,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 if r == rodzic and d == sym:
                     self.relacje.pop(i)
                     break
+            # ...ale jesli to bylo OSTATNIE wystapienie, pozycja nie moze
+            # zostac w modelu: znika z drzewa, a i tak szlaby do walidacji
+            # i do zapisu. Tak wlasnie pusty komplet blokowal zapis
+            # komunikatem o pozycji, ktorej na ekranie juz nie bylo.
+            self._sprzatnij_osierocona(sym)
         else:
             if sym in self.korzenie:
                 self.korzenie.remove(sym)
@@ -1288,7 +1318,9 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
 
     def _zbuduj_plan(self):
         pozycje = []
-        for sym, k in self.pozycje.items():
+        # Tylko to, co widac w drzewie — patrz _osadzone().
+        for sym in self._osadzone():
+            k = self.pozycje[sym]
             skl = [{"symbol": d, "ilosc": il} for (r, d, il) in self.relacje if r == sym]
             pozycje.append(k.do_planu(skl if k.czy_komplet() else None))
         return {"pozycje": pozycje}
@@ -1296,10 +1328,31 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
     def _aktualizuj_przycisk_zapisu(self):
         self.btn_zapisz.config(state=tk.NORMAL if self.pozycje else tk.DISABLED)
 
+    def _osadzone(self):
+        """Symbole faktycznie widoczne w drzewie — od korzeni w dol.
+
+        Model moze przejsciowo trzymac pozycje, ktora wypadla ze struktury.
+        Do walidacji i do zapisu bierzemy tylko to, co user naprawde widzi.
+        """
+        widoczne = []
+
+        def idz(sym, sciezka):
+            if sym in sciezka or sym not in self.pozycje:
+                return
+            if sym not in widoczne:
+                widoczne.append(sym)
+            for d, _il in self._dzieci(sym):
+                idz(d, sciezka | {sym})
+
+        for sym in self.korzenie:
+            idz(sym, set())
+        return widoczne
+
     def _waliduj(self):
         """Błędy, które nie mają sensu wysyłać do Subiekta."""
         bledy = []
-        for sym, k in self.pozycje.items():
+        for sym in self._osadzone():
+            k = self.pozycje[sym]
             if not sym.strip():
                 bledy.append("pozycja bez symbolu")
             if k.czy_komplet() and not self._dzieci(sym):
@@ -1313,7 +1366,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 if z:
                     return z
             return None
-        for sym in list(self.pozycje):
+        for sym in self._osadzone():
             z = cykl(sym, set())
             if z:
                 bledy.append(f"cykl w składzie: „{z}” zawiera sam siebie")
@@ -1358,10 +1411,13 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         okno.geometry("820x620")
         okno.transient(self)
 
-        nowe = [k for k in self.pozycje.values() if not k.w_subiekcie]
-        istn = [k for k in self.pozycje.values() if k.w_subiekcie]
-        komplety = [s for s, k in self.pozycje.items()
-                    if k.czy_komplet() and self._dzieci(s)]
+        # Liczniki z tego, co OSADZONE w drzewie — musza zgadzac sie
+        # z lista ponizej i z tym, co naprawde pojdzie do Subiekta.
+        osadzone = self._osadzone()
+        nowe = [s for s in osadzone if not self.pozycje[s].w_subiekcie]
+        istn = [s for s in osadzone if self.pozycje[s].w_subiekcie]
+        komplety = [s for s in osadzone
+                    if self.pozycje[s].czy_komplet() and self._dzieci(s)]
 
         tk.Label(okno, text="Co trafi do Subiekta", bg=TLO, fg=TEKST,
                  font=("Arial", 13, "bold"), anchor="w").pack(
@@ -1468,9 +1524,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         bledy = [k for k in kroki if "blad" in str(k.get("Status", ""))]
         self._pokaz_raport(wynik, kroki, bledy, zapisz)
         if zapisz and not bledy:
-            # Po udanym zapisie wszystko jest już w Subiekcie — symbole blokujemy.
-            for k in self.pozycje.values():
-                k.w_subiekcie = True
+            # Po udanym zapisie symbole blokujemy — ale tylko tym pozycjom,
+            # ktore faktycznie poszly (czyli byly osadzone w drzewie).
+            for sym in self._osadzone():
+                self.pozycje[sym].w_subiekcie = True
             self._zmienione = False
             self._odswiez_drzewo()
             self.status.config(
