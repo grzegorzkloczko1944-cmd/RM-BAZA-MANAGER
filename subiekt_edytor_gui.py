@@ -227,19 +227,27 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         ram = tk.LabelFrame(rodzic, text=" 1. Struktura kartoteki (drzewo) ",
                             bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9, "bold"))
         ram.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=(0, 6))
-        ram.configure(width=340)
+        ram.configure(width=420)
         ram.pack_propagate(False)
 
         wrap = tk.Frame(ram, bg=TLO_SEKCJI)
         wrap.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-        self.tree = ttk.Treeview(wrap, columns=("ilosc",), show="tree headings",
-                                 selectmode="browse")
+        # "sym" to kolumna ROBOCZA (displaycolumns ja ukrywa): trzyma symbol
+        # pozycji, zeby nie wyciagac go z tekstu wiersza. Symbole ze spacja
+        # ("DN20 K=34") rozbijaly takie parsowanie i operacje na nich cicho
+        # nie dzialaly.
+        self.tree = ttk.Treeview(wrap, columns=("ilosc", "sym"), show="tree headings",
+                                 selectmode="browse", displaycolumns=("ilosc",))
         self.tree.heading("#0", text="Symbol / Nazwa")
         self.tree.heading("ilosc", text="Ilość")
-        self.tree.column("#0", width=230)
+        # minwidth wiekszy niz width: kolumna rosnie z oknem, a poziomy pasek
+        # pozwala dojechac do konca glebokich wciec zamiast je scinac.
+        self.tree.column("#0", width=300, minwidth=300, stretch=True)
         self.tree.column("ilosc", width=60, anchor="e", stretch=False)
         sc = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=sc.set)
+        sc_poz = ttk.Scrollbar(wrap, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=sc.set, xscrollcommand=sc_poz.set)
+        sc_poz.pack(side=tk.BOTTOM, fill=tk.X)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sc.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.bind("<<TreeviewSelect>>", self._na_wybor_wezla)
@@ -254,6 +262,8 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.tree.tag_configure("nowy", foreground=NOWY_NIEBIESKI)
         # Cel przeciagania — podswietlenie w trakcie przenoszenia.
         self.tree.tag_configure("cel_dnd", background="#d4efdf")
+        # Rodzic zaznaczonego skladnika - zeby bylo widac, do czego nalezy.
+        self.tree.tag_configure("rodzic_zazn", background="#fdf3d0")
 
         pa = tk.Frame(ram, bg=TLO_SEKCJI)
         pa.pack(fill=tk.X, padx=6, pady=(0, 6))
@@ -578,7 +588,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         return [(d, il) for (r, d, il) in self.relacje if r == symbol]
 
     def _odswiez_drzewo(self):
-        rozwiniete = {self.tree.item(i, "text").split()[1]
+        rozwiniete = {self._symbol_wezla(i)
                       for i in self.tree.get_children("") if self.tree.item(i, "open")}
         for w in self.tree.get_children(""):
             self.tree.delete(w)
@@ -597,15 +607,18 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # Cykl (A zawiera B, B zawiera A) — pokazujemy i przerywamy, zamiast
         # zapętlić GUI. Sam Subiekt też takiego składu nie przyjmie.
         if symbol in sciezka:
-            self.tree.insert(rodzic_id, "end", text=f"⟲ {symbol} (cykl!)", values=("",))
+            self.tree.insert(rodzic_id, "end", text=f"⟲ {symbol} (cykl!)",
+                             values=("", symbol))
             return
         tagi = [k.rodzaj]
         if not k.w_subiekcie:
             tagi.append("nowy")
+        # Bez wlasnego prefiksu glebokosci: dublowal sie z wcieciami Treeview
+        # i robil balagan. Czytelnosc zalatwia szerszy panel + poziomy pasek.
         wid = self.tree.insert(
             rodzic_id, "end",
             text=f"{SKROT.get(k.rodzaj, '??')} {symbol}   {k.nazwa}",
-            values=(f"x{ilosc:g}" if ilosc else "",), tags=tuple(tagi))
+            values=(f"x{ilosc:g}" if ilosc else "", symbol), tags=tuple(tagi))
         for dziecko, il in self._dzieci(symbol):
             self._wstaw_wezel(wid, dziecko, il, sciezka | {symbol})
 
@@ -613,11 +626,29 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         item = item or (self.tree.selection() or [None])[0]
         if not item:
             return None
-        txt = self.tree.item(item, "text")
-        czesci = txt.split(None, 2)
-        return czesci[1] if len(czesci) > 1 else None
+        wartosci = self.tree.item(item, "values")
+        return wartosci[1] if len(wartosci) > 1 and wartosci[1] else None
+
+    def _podswietl_rodzica(self):
+        """Zolte tlo na komplecie-rodzicu zaznaczonego wiersza."""
+        for i in self.tree.get_children(""):
+            self._wyczysc_rodzica(i)
+        item = (self.tree.selection() or [None])[0]
+        if not item:
+            return
+        rodzic = self.tree.parent(item)
+        if rodzic:
+            self._odswiez_tagi(rodzic, dodaj_cel=False, rodzic_zazn=True)
+
+    def _wyczysc_rodzica(self, item):
+        tagi = self.tree.item(item, "tags")
+        if "rodzic_zazn" in tagi:
+            self._odswiez_tagi(item, dodaj_cel=False)
+        for c in self.tree.get_children(item):
+            self._wyczysc_rodzica(c)
 
     def _na_wybor_wezla(self, _e=None):
+        self._podswietl_rodzica()
         sym = self._symbol_wezla()
         if not sym or sym not in self.pozycje:
             return
@@ -761,7 +792,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             self._dnd_cel = cel_item
             self._odswiez_tagi(cel_item, dodaj_cel=True)
 
-    def _odswiez_tagi(self, item, dodaj_cel):
+    def _odswiez_tagi(self, item, dodaj_cel, rodzic_zazn=False):
         """Dokłada/zdejmuje tag podswietlenia, nie gubiac tagow rodzaju."""
         sym = self._symbol_wezla(item)
         k = self.pozycje.get(sym) if sym else None
@@ -772,6 +803,8 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             tagi.append("nowy")
         if dodaj_cel:
             tagi.append("cel_dnd")
+        if rodzic_zazn:
+            tagi.append("rodzic_zazn")
         try:
             self.tree.item(item, tags=tuple(tagi))
         except Exception:
