@@ -29601,6 +29601,27 @@ class MainWindow(tk.Tk):
             return
         subiekt_magazyn_gui.open_window(self)
 
+    def open_subiekt_edytor(self, symbol=None):
+        """Okno „Edytor kartotek" (panel 📦 SUBIEKT).
+
+        Duży edytor do budowania kartotek i kompletów: układasz 10-30 pozycji
+        w drzewie, określasz składy i zapisujesz CAŁOŚĆ jednym ruchem, zamiast
+        „Dodaj → zapisz → Dodaj → zapisz". Okno „Nowa kartoteka" zostaje jako
+        szybkie wrzucenie pojedynczej pozycji.
+
+        `symbol` != None otwiera edytor w trybie edycji istniejącej kartoteki
+        (wciąga ją ze składem z Subiekta).
+        """
+        try:
+            import subiekt_edytor_gui
+        except ImportError as e:
+            messagebox.showerror(
+                "Subiekt",
+                "Nie znaleziono modułu subiekt_edytor_gui.py\n\n" + str(e),
+                parent=self)
+            return
+        subiekt_edytor_gui.open_window(self, symbol=symbol)
+
     def open_subiekt_asortyment(self):
         """Okno „Asortyment — pełna kartoteka Subiekta" (panel 📦 SUBIEKT).
 

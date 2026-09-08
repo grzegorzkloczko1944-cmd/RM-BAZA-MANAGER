@@ -50,7 +50,7 @@ internal static class CommandDispatcher
     {
         "kartoteka", "kartoteka-usun", "kartoteka-edytuj", "projekt", "zd", "zd-usun",
         "dostawcy", "progi", "rw", "pw", "termin", "symbole", "komplet-napraw", "magazyn-zaloz",
-        "magazyn-usun", "projekt-cofnij",
+        "magazyn-usun", "projekt-cofnij", "kartoteki",
     };
 
     /// <summary>
@@ -73,6 +73,7 @@ internal static class CommandDispatcher
         "zd-usun", "wydruk-recon", "termin", "symbole", "rw", "kartoteka-usun",
         "progi", "wydruk", "projekt", "komplet", "komplet-napraw", "kartoteka-edytuj",
         "pola-wlasne", "magazyn-zaloz", "magazyn-usun", "pw", "projekt-cofnij",
+        "kartoteki",
     };
 
     public static bool Zna(string tryb) => Tryby.Contains(tryb, StringComparer.OrdinalIgnoreCase);
@@ -145,6 +146,12 @@ internal static class CommandDispatcher
             case "kartoteka":
                 if (k.PlanPath is null) return Brak("kartoteka: brak --plan=plik.json");
                 return Kartoteka.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
+
+            // Wsadowo: zestaw kartotek + sklady kompletow w jednym przebiegu,
+            // BEZ ZK (w odroznieniu od "projekt"). Backend Edytora kartotek.
+            case "kartoteki":
+                if (k.PlanPath is null) return Brak("kartoteki: brak --plan=plik.json");
+                return Kartoteki.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
 
             case "magazyn-zaloz":
                 if (k.PlanPath is null) return Brak("magazyn-zaloz: brak --plan=plik.json");
