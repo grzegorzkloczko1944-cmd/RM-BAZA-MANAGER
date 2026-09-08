@@ -7,7 +7,7 @@
 // plan.json:
 //   { "pozycje": [ {"symbol":"011-100.49", "ilosc": 3} ],
 //     "uwagi": "Stany startowe magazynu nr 2 - inwentaryzacja 28.05.2026",
-//     "magazyn": "Magazyn" }
+//     "magazyn": "MASTER" }
 //
 // Po co: uruchomienie magazynu nr 2 (SUBIEKT PODWÓJNE POZYCJE DO NAPRAWY.md,
 // MAGAZYN.md) — inwentaryzacja z Excela ma wejść jako stan startowy. Pozycje
@@ -91,9 +91,10 @@ internal static class Pw
                 try
                 {
                     var magazyny = sfera.Magazyny().Dane.Wszystkie().ToList();
-                    // Fallback gdy plan nie poda magazynu — "Magazyn" (nr 2),
-                    // ten sam co w Rw.cs, Zd.cs i subiekt_magazyn_gui.py.
-                    var chciany = (plan.Magazyn ?? "Magazyn").Trim();
+                    // Fallback gdy plan nie poda magazynu — "MASTER" (magazyn
+                    // nr 2, przemianowany z "Magazyn" 08.09.2026). Ten sam symbol
+                    // co w Rw.cs, Zd.cs i subiekt_magazyn_gui.py.
+                    var chciany = (plan.Magazyn ?? "MASTER").Trim();
                     pw.Dane.Magazyn = magazyny.FirstOrDefault(m =>
                             string.Equals((Bezp(() => m.Symbol) ?? "").Trim(), chciany,
                                           StringComparison.OrdinalIgnoreCase))

@@ -48,15 +48,16 @@ TIMEOUT_S = 600
 #: Magazyn, do którego zapisujemy progi i na który idzie ZD — ten sam,
 #: którego używa Zd.cs, gdy ZD nie ma magazynu.
 #:
-#: 07.09.2026: przepięte z „MAG" na „Magazyn". Stary MAG został wyzerowany
-#: (RW 4–10/09/2026), a cała inwentaryzacja weszła na nowy magazyn nr 2
-#: „Magazyn" (PW 2–8/09/2026) — patrz MAGAZYN.md. Zmieniając tu, zmień
+#: 07.09.2026: przepięte z „MAG" na magazyn nr 2 (08.09.2026 przemianowany
+#: przez użytkownika w Subiekcie na „MASTER"). Stary MAG został wyzerowany
+#: (RW 4–10/09/2026), a cała inwentaryzacja weszła na nowy magazyn
+#: (PW 2–8/09/2026) — patrz MAGAZYN.md. Zmieniając tu, zmień
 #: też Zd.cs (domyślny magazyn ZD), inaczej dokumenty się rozjadą.
 #:
 #: Uwaga: ta stała dotyczy tylko ZAPISÓW (progi, RW, ZD). Odczyt stanów
 #: (`pobierz_magazyn`) używa trybu „magazyn", który sumuje wszystkie magazyny
 #: i o symbol nie pyta.
-MAGAZYN = "Magazyn"
+MAGAZYN = "MASTER"
 #: Znacznik w Uwagach ZD na skład — kolumna „Projekt" w Przeglądzie dokumentów
 #: bierze się z Uwag, więc zamówienie magazynowe pokaże się tam jako MAGAZYN.
 UWAGI_MAGAZYN = "MAGAZYN"

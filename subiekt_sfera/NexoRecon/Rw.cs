@@ -7,7 +7,7 @@
 // plan.json:
 //   { "pozycje": [ {"symbol":"011-100.49", "ilosc": 3} ],
 //     "uwagi": "MAGAZYN: zuzyte / uszkodzone",
-//     "magazyn": "Magazyn" }
+//     "magazyn": "MASTER" }
 //
 // Po co: magazynier zdejmuje z magazynu to, czego fizycznie już nie ma —
 // zużyte, uszkodzone, wydane bez dokumentu. Do tej pory robił to na
@@ -95,9 +95,9 @@ internal static class Rw
                 {
                     var magazyny = sfera.Magazyny().Dane.Wszystkie().ToList();
                     // Fallback gdy plan nie poda magazynu. 07.09.2026 zmienione
-                    // z "MAG" na "Magazyn" razem z reszta (patrz MAGAZYN.md) —
+                    // z "MAG" na "MASTER" razem z reszta (patrz MAGAZYN.md) —
                     // stary MAG jest pusty, wiec RW na niego nie ma sensu.
-                    var chciany = (plan.Magazyn ?? "Magazyn").Trim();
+                    var chciany = (plan.Magazyn ?? "MASTER").Trim();
                     rw.Dane.Magazyn = magazyny.FirstOrDefault(m =>
                             string.Equals((Bezp(() => m.Symbol) ?? "").Trim(), chciany,
                                           StringComparison.OrdinalIgnoreCase))

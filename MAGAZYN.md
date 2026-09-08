@@ -15,7 +15,12 @@ z półką, a magazynier trzymał położenie (regał/półka) w polu **Opis**
 kartoteki — razem z czym popadnie. Decyzja: zacząć od nowa na czystym
 magazynie, z danymi z inwentaryzacji fizycznej z 28.05.2026.
 
-**Nazwa nowego magazynu: `Magazyn`.**
+**Nazwa nowego magazynu: `MASTER`.**
+
+> Uwaga historyczna: magazyn powstał 07.09.2026 jako `Magazyn` i pod tą
+> nazwą przebiegła cała migracja opisana niżej. 08.09.2026 użytkownik
+> przemianował go w Subiekcie na **`MASTER`** — kod (`subiekt_magazyn_gui.py`,
+> `Zd.cs`, `Rw.cs`, `Pw.cs`) został przepięty na nowy symbol.
 
 ---
 
@@ -24,7 +29,7 @@ magazynie, z danymi z inwentaryzacji fizycznej z 28.05.2026.
 | co | ile |
 |---|---|
 | kartoteki założone (brakujące w Subiekcie) | **24** |
-| stan przyjęty na magazyn „Magazyn" | **1353 kartoteki, 24 366 szt.** |
+| stan przyjęty na nowy magazyn | **1353 kartoteki, 24 366 szt.** |
 | dokumenty PW | **PW 2–8/09/2026** (7 dokumentów) |
 | nazwy + opisy zaktualizowane | **703** |
 | rozbieżności Excel↔Subiekt rozstrzygnięte ręcznie | 11 zmienionych / 12 zostawionych |
@@ -71,7 +76,7 @@ Tryb **`magazyn-zaloz`** (nowy, `MagazynZaloz.cs`).
 NexoRecon.exe magazyn-zaloz --plan=m.json --zapisz --out=w.json
 ```
 ```json
-{ "symbol": "Magazyn", "nazwa": "Magazyn", "opis": "...",
+{ "symbol": "MASTER", "nazwa": "MASTER", "opis": "...",
   "jednostka": "RMPRODUKCJADZIERZGOWSKI,KŁOCZKOS" }
 ```
 
@@ -117,7 +122,7 @@ NexoRecon.exe pw --plan=pw_1.json --zapisz --out=w.json
 ```json
 { "pozycje": [ {"symbol":"011-100.49", "ilosc": 3} ],
   "uwagi": "Stany startowe magazynu nr 2 - inwentaryzacja 28.05.2026",
-  "magazyn": "Magazyn" }
+  "magazyn": "MASTER" }
 ```
 
 **Kartoteki są wspólne dla magazynów** — PW nie zakłada nowych, tylko

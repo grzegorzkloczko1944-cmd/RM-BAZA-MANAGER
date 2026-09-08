@@ -5,7 +5,7 @@
 // Bez --zapisz suchy przebieg: sprawdza, czy symbol wolny, nic nie zapisuje.
 //
 // plan.json:
-//   { "symbol":"Magazyn", "nazwa":"Magazyn", "opis":"...",
+//   { "symbol":"MASTER", "nazwa":"MASTER", "opis":"...",
 //     "jednostka":"RM PRODUKCJA" }   // Symbol albo Nazwa istniejącej
 //                                     // jednostki organizacyjnej — WYMAGANE
 //
