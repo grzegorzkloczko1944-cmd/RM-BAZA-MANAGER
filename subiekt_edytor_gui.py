@@ -175,12 +175,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self._zaznaczony = None  # symbol aktualnie edytowanej pozycji
         self._blokada = False    # blokada zapisu pól przy przeładowaniu
         self._zmienione = False  # czy sa niezapisane modyfikacje
-        # Ostatni KOMPLET wskazany w drzewie - cel dla przyciskow
-        # "+ Skladnik" i "+ Istniejaca". Trzymany osobno, bo zaznaczenie
-        # drzewa przeskakuje na swiezo dodana pozycje i gubiloby kontekst.
-        self._komplet_docelowy = None
         self._dnd_zrodlo = None   # symbol przeciaganej pozycji
         self._dnd_cel = None      # id wezla podswietlonego jako cel
+        self._dnd_start_xy = None # punkt nacisniecia - prog na prawdziwy drag
+        self._dnd_aktywny = False # True dopiero po ruchu > prog
 
         self._buduj()
         wysrodkuj(self, parent)
@@ -271,8 +269,13 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                       width=8 if len(txt) > 2 else 3).pack(side=tk.LEFT, padx=2)
         tk.Button(pb, text="Z projektu…", command=self._wczytaj_z_projektu,
                   font=("Arial", 8)).pack(side=tk.RIGHT, padx=2)
-        tk.Label(ram, text="Pozycje mozna przeciagac mysza: upusc na komplet = "
-                           "wloz do skladu, upusc obok = wyciagnij na wierzch",
+        # Dokad trafi "+ Skladnik" / "+ Istniejaca" - zawsze widoczne, zeby
+        # nie zgadywac. Wynika z zaznaczenia (patrz _cel_dla_skladnika).
+        self.lbl_cel = tk.Label(ram, text="", bg="#eaf2f8", fg=TEKST,
+                                font=("Arial", 8, "bold"), anchor="w", padx=6)
+        self.lbl_cel.pack(fill=tk.X, padx=6, pady=(0, 4))
+        tk.Label(ram, text="Przeciaganie: upusc na komplet = wloz do skladu; "
+                           "upusc na puste pole pod lista = wyciagnij na wierzch",
                  bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8),
                  wraplength=320, justify="left", anchor="w").pack(
             fill=tk.X, padx=6, pady=(0, 6))
@@ -559,6 +562,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         for i in self.tree.get_children(""):
             self.tree.item(i, open=True)
         self._aktualizuj_przycisk_zapisu()
+        self._odswiez_etykiete_celu()
 
     def _wstaw_wezel(self, rodzic_id, symbol, ilosc, sciezka):
         k = self.pozycje.get(symbol)
@@ -593,8 +597,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             return
         self._zaznaczony = sym
         k = self.pozycje[sym]
-        if k.czy_komplet():
-            self._komplet_docelowy = sym
+        self._odswiez_etykiete_celu()
         self._blokada = True
         try:
             self.pola["symbol"][0].set(k.symbol)
@@ -694,15 +697,28 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
     # Przenosimy WYSTAPIENIE (relacje), nie kartoteke — ta sama pozycja moze
     # dalej byc w innych kompletach.
 
+    #: Ile pikseli trzeba przesunac mysz, zanim klikniecie stanie sie
+    #: przeciaganiem. Bez tego progu kazde drgniecie przy kliknieciu bylo
+    #: traktowane jak drag i wyciagalo skladniki z kompletow.
+    DND_PROG_PX = 8
+
     def _dnd_start(self, event):
         item = self.tree.identify_row(event.y)
         self._dnd_zrodlo = self._symbol_wezla(item) if item else None
         self._dnd_zrodlo_item = item
         self._dnd_cel = None
+        self._dnd_start_xy = (event.x, event.y)
+        self._dnd_aktywny = False
 
     def _dnd_ruch(self, event):
-        if not self._dnd_zrodlo:
+        if not self._dnd_zrodlo or not self._dnd_start_xy:
             return
+        if not self._dnd_aktywny:
+            dx = abs(event.x - self._dnd_start_xy[0])
+            dy = abs(event.y - self._dnd_start_xy[1])
+            if dx < self.DND_PROG_PX and dy < self.DND_PROG_PX:
+                return                      # to jeszcze klikniecie, nie drag
+            self._dnd_aktywny = True
         self.tree.config(cursor="hand2")
         cel_item = self.tree.identify_row(event.y)
         if cel_item == self._dnd_cel:
@@ -739,20 +755,33 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.tree.config(cursor="")
         zrodlo, cel_item = self._dnd_zrodlo, self._dnd_cel
         zrodlo_item = getattr(self, "_dnd_zrodlo_item", None)
-        self._dnd_zrodlo = self._dnd_cel = None
-        if not zrodlo or not zrodlo_item:
-            return
+        aktywny = self._dnd_aktywny
+        self._dnd_zrodlo = self._dnd_cel = self._dnd_start_xy = None
+        self._dnd_aktywny = False
         if cel_item:
             self._odswiez_tagi(cel_item, dodaj_cel=False)
+        # Nie bylo prawdziwego przeciagania -> to bylo klikniecie. Koniec.
+        if not aktywny or not zrodlo or not zrodlo_item:
+            return
 
         pod_kursorem = self.tree.identify_row(event.y)
-        # Puszczenie w tym samym miejscu = zwykle klikniecie, nie przenoszenie.
         if pod_kursorem == zrodlo_item:
             return
 
         stary_rodzic_item = self.tree.parent(zrodlo_item)
         stary_rodzic = self._symbol_wezla(stary_rodzic_item) if stary_rodzic_item else None
-        nowy_rodzic = self._symbol_wezla(cel_item) if cel_item else None
+
+        if cel_item:
+            nowy_rodzic = self._symbol_wezla(cel_item)
+        elif not pod_kursorem:
+            nowy_rodzic = None               # puste pole pod lista = na wierzch
+        else:
+            # Upuszczono na zwykly towar - to NIE jest cel. Nic nie robimy,
+            # zeby drgniecie myszy nie rozwalalo struktury.
+            self.status.config(
+                text="Upusc na KOMPLET (wloz do skladu) albo na puste pole "
+                     "pod lista (wyciagnij na wierzch)", fg=TEKST_SZARY)
+            return
 
         if nowy_rodzic == stary_rodzic:
             return
@@ -814,20 +843,36 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         return idz(przodek)
 
     def _cel_dla_skladnika(self):
-        """Komplet, do ktorego trafi nowy skladnik.
+        """Komplet, do ktorego trafi nowy skladnik - WYLACZNIE z zaznaczenia.
 
-        Najpierw biezace zaznaczenie w drzewie (jesli to komplet), potem
-        ostatni zapamietany komplet. Dzieki temu mozna kliknac wiersz na
-        liscie kartotek (sekcja 4) i dodac go dwuklikiem - zaznaczenie
-        drzewa w miedzyczasie sie zmienia, ale cel zostaje.
+        Zaznaczony komplet -> on sam. Zaznaczony skladnik -> komplet, w ktorym
+        siedzi (jestes "w srodku" tego kompletu, wiec tam dokladasz). Korzen
+        niebedacy kompletem -> brak celu. Zadnej ukrytej pamieci: to, co widac
+        na etykiecie pod drzewem, jest jedyna prawda.
         """
-        biezacy = self._symbol_wezla()
-        if biezacy and biezacy in self.pozycje and self.pozycje[biezacy].czy_komplet():
-            return biezacy
-        cel = self._komplet_docelowy
-        if cel and cel in self.pozycje and self.pozycje[cel].czy_komplet():
-            return cel
+        item = (self.tree.selection() or [None])[0]
+        if not item:
+            return None
+        sym = self._symbol_wezla(item)
+        if sym and sym in self.pozycje and self.pozycje[sym].czy_komplet():
+            return sym
+        rodzic_item = self.tree.parent(item)
+        rodzic = self._symbol_wezla(rodzic_item) if rodzic_item else None
+        if rodzic and rodzic in self.pozycje and self.pozycje[rodzic].czy_komplet():
+            return rodzic
         return None
+
+    def _odswiez_etykiete_celu(self):
+        cel = self._cel_dla_skladnika()
+        if not hasattr(self, "lbl_cel"):
+            return
+        if cel:
+            self.lbl_cel.config(text="+ Skladnik / + Istniejaca  ->  do skladu: " + cel,
+                                fg=TEKST)
+        else:
+            self.lbl_cel.config(text="+ Skladnik / + Istniejaca  ->  jako osobna pozycja "
+                                     "(zaznacz komplet, zeby dodawac do srodka)",
+                                fg=TEKST_SZARY)
 
     def _nowy_symbol(self, baza="NOWA"):
         i = 1
@@ -906,10 +951,9 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                      "zaznaczony zaden komplet", fg=TEKST_SZARY)
         self._zmienione = True
         self._odswiez_drzewo()
-        # Wracamy zaznaczeniem na KOMPLET, nie na dodana pozycje - dzieki temu
-        # kolejny dwuklik na liscie doklada nastepny skladnik do tego samego
-        # kompletu, zamiast gubic kontekst.
-        self._zaznacz_w_drzewie(rodzic or sym)
+        # Zaznaczamy dodana pozycje: cel dodawania wynika z jej rodzica,
+        # wiec kolejny dwuklik na liscie dalej trafia do tego kompletu.
+        self._zaznacz_w_drzewie(sym)
 
     def _duplikuj(self):
         sym = self._symbol_wezla()
