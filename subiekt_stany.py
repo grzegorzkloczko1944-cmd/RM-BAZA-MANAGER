@@ -199,6 +199,28 @@ def jedna_linia(s):
     return " ".join(out.split())          # zwielokrotnione spacje i taby
 
 
+def _granice_pulpitu(okno):
+    """(lewo, gora, prawo, dol) całego pulpitu — wszystkie monitory razem.
+
+    Na Windows bierzemy metryki wirtualnego ekranu: przy trzech monitorach
+    pulpit potrafi sięgać od x=-2560 do x=5120, a Tk zna tylko rozmiar
+    monitora głównego. Gdziekolwiek indziej (albo gdy Win32 zawiedzie)
+    wracamy do pojedynczego ekranu — dla jednego monitora to to samo.
+    """
+    try:
+        import ctypes
+        u = ctypes.windll.user32          # tylko Windows
+        lewo = u.GetSystemMetrics(76)     # SM_XVIRTUALSCREEN
+        gora = u.GetSystemMetrics(77)     # SM_YVIRTUALSCREEN
+        szer = u.GetSystemMetrics(78)     # SM_CXVIRTUALSCREEN
+        wys = u.GetSystemMetrics(79)      # SM_CYVIRTUALSCREEN
+        if szer > 0 and wys > 0:
+            return lewo, gora, lewo + szer, gora + wys
+    except Exception:
+        pass
+    return 0, 0, okno.winfo_screenwidth(), okno.winfo_screenheight()
+
+
 def wysrodkuj(okno, rodzic, szerokosc=None, wysokosc=None):
     """Ustawia okno na środku okna rodzica (nie ekranu).
 
@@ -220,9 +242,13 @@ def wysrodkuj(okno, rodzic, szerokosc=None, wysokosc=None):
             x = (okno.winfo_screenwidth() - w) // 2
             y = (okno.winfo_screenheight() - h) // 2
 
-        # Nie wypychamy okna poza ekran (ujemne współrzędne = tytuł poza kadrem).
-        x = max(0, min(x, okno.winfo_screenwidth() - w))
-        y = max(0, min(y, okno.winfo_screenheight() - h))
+        # Nie wypychamy okna poza pulpit — ale liczy się pulpit WIRTUALNY,
+        # czyli wszystkie monitory razem. winfo_screenwidth() zwraca szerokość
+        # monitora GŁÓWNEGO, więc przycinanie do niego ściągało okna z lewego
+        # i prawego monitora z powrotem na środkowy (stanowisko ma trzy).
+        lewo, gora, prawo, dol = _granice_pulpitu(okno)
+        x = max(lewo, min(x, prawo - w))
+        y = max(gora, min(y, dol - h))
         okno.geometry(f"{w}x{h}+{x}+{y}")
     except Exception:
         pass          # pozycjonowanie nie może wywalić okna
