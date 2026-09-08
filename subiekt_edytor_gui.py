@@ -276,11 +276,18 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # pozycji, zeby nie wyciagac go z tekstu wiersza. Symbole ze spacja
         # ("DN20 K=34") rozbijaly takie parsowanie i operacje na nich cicho
         # nie dzialaly.
-        self.tree = ttk.Treeview(wrap, columns=("ilosc", "sym"), show="tree headings",
-                                 selectmode="browse", displaycolumns=("ilosc",),
+        # "sym" to kolumna ROBOCZA (displaycolumns ja ukrywa): trzyma symbol
+        # pozycji — patrz _symbol_wezla. "typ" pokazuje skrot rodzaju wlasnym
+        # kolorem; w tekscie wezla nie da sie pokolorowac samego fragmentu.
+        self.tree = ttk.Treeview(wrap, columns=("ilosc", "sym", "typ"),
+                                 show="tree headings", selectmode="browse",
+                                 displaycolumns=("typ", "ilosc"),
                                  style="Edytor.Treeview")
         self.tree.heading("#0", text="Symbol / Nazwa")
+        self.tree.heading("typ", text="Typ")
         self.tree.heading("ilosc", text="Ilość")
+        self.tree.column("typ", width=38, minwidth=38, anchor="center",
+                         stretch=False)
         # minwidth wiekszy niz width: kolumna rosnie z oknem, a poziomy pasek
         # pozwala dojechac do konca glebokich wciec zamiast je scinac.
         self.tree.column("#0", width=300, minwidth=300, stretch=True)
@@ -716,7 +723,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # zapętlić GUI. Sam Subiekt też takiego składu nie przyjmie.
         if symbol in sciezka:
             self.tree.insert(rodzic_id, "end", text=f"⟲ {symbol} (cykl!)",
-                             values=("", symbol))
+                             values=("", symbol, "!"))
             return
         tagi = [k.rodzaj]
         if not k.w_subiekcie:
@@ -725,8 +732,9 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # i robil balagan. Czytelnosc zalatwia szerszy panel + poziomy pasek.
         wid = self.tree.insert(
             rodzic_id, "end",
-            text=f"{SKROT.get(k.rodzaj, '??')} {symbol}   {k.nazwa}",
-            values=(f"x{ilosc:g}" if ilosc else "", symbol), tags=tuple(tagi))
+            text=f"{symbol}   {k.nazwa}",
+            values=(f"x{ilosc:g}" if ilosc else "", symbol,
+                    SKROT.get(k.rodzaj, "??")), tags=tuple(tagi))
         for dziecko, il in self._dzieci(symbol):
             self._wstaw_wezel(wid, dziecko, il, sciezka | {symbol})
 
@@ -1438,10 +1446,12 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
 
         wrap = tk.Frame(okno, bg=TLO_SEKCJI)
         wrap.pack(fill=tk.BOTH, expand=True, padx=14, pady=4)
-        kol = ("nazwa", "ilosc", "co")
+        kol = ("typ", "nazwa", "ilosc", "co")
         tab = ttk.Treeview(wrap, columns=kol, show="tree headings",
                            style="Edytor.Treeview")
         tab.heading("#0", text="Symbol")
+        tab.heading("typ", text="Typ")
+        tab.column("typ", width=38, minwidth=38, anchor="center", stretch=False)
         tab.heading("nazwa", text="Nazwa")
         tab.heading("ilosc", text="Ilość")
         tab.heading("co", text="Co się stanie")
@@ -1475,8 +1485,9 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             if k.czy_komplet():
                 tagi.append("komplet")
             wid = tab.insert(
-                rodzic_id, "end", text=f"{SKROT.get(k.rodzaj, '??')}  {symbol}",
-                values=(k.nazwa, f"x{ilosc:g}" if ilosc else "", co),
+                rodzic_id, "end", text=symbol,
+                values=(SKROT.get(k.rodzaj, "??"), k.nazwa,
+                        f"x{ilosc:g}" if ilosc else "", co),
                 tags=tuple(tagi), open=True)
             for dziecko, il in dzieci:
                 wstaw(wid, dziecko, il, sciezka | {symbol})
