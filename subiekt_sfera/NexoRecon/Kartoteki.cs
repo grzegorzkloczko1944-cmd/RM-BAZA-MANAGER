@@ -131,6 +131,7 @@ internal static class Kartoteki
 
                     UstawVat(ob.Dane, p, stawkiVat, zmiany, zapisz);
                     UstawPolaWlasne(ob.Dane, p, zmiany, zapisz);
+                    UstawPolozenie(ob.Dane, p, zmiany, zapisz);
 
                     if (zmiany.Count == 0)
                     {
@@ -180,6 +181,7 @@ internal static class Kartoteki
                     var pominiete = new List<string>();
                     UstawVat(ob.Dane, p, stawkiVat, pominiete, true);
                     UstawPolaWlasne(ob.Dane, p, pominiete, true);
+                    UstawPolozenie(ob.Dane, p, pominiete, true);
 
                     if (!ob.Zapisz())
                     {
@@ -327,11 +329,12 @@ internal static class Kartoteki
         {
             var nazwaPola = (pole ?? "").Trim();
             if (nazwaPola.Length == 0) continue;
-            // PoleWlasne1 jest zarezerwowane na Polozenie — nie pozwalamy go
-            // nadpisac z edytora, zeby nie skasowac danych magazynowych.
+            // PoleWlasne1 = Polozenie magazynowe. Idzie tu tylko przez jawne
+            // pole "Polozenie" w planie (patrz nizej), nigdy przez liste pol
+            // dodatkowych — inaczej pusty formularz skasowalby regaly.
             if (nazwaPola.Equals("PoleWlasne1", StringComparison.OrdinalIgnoreCase))
             {
-                zmiany.Add("PoleWlasne1 zarezerwowane na Polozenie — pominieto");
+                zmiany.Add("PoleWlasne1: uzyj pola „Polozenie” — pominieto");
                 continue;
             }
             var prop = pw.GetType().GetProperty(nazwaPola);
@@ -346,6 +349,33 @@ internal static class Kartoteki
             zmiany.Add($"{nazwaPola}: „{stara}” → „{nowa}”");
             if (zapisz) try { prop.SetValue(pw, nowa); } catch { }
         }
+    }
+
+    /// Polozenie magazynowe (regal/polka) = PoleWlasne1. Osobna sciezka, bo
+    /// obowiazuje tu inna zasada niz przy polach dodatkowych: null oznacza
+    /// „nie ruszaj”, a nie „wyczysc”. Bez tego zapis kartoteki z pustym
+    /// formularzem skasowalby 1367 regalow wgranych przy migracji magazynu.
+    static void UstawPolozenie(dynamic dane, PozPlan p, List<string> zmiany, bool zapisz)
+    {
+        if (p.Polozenie is null) return;          // pole nieobecne w planie
+        object? pw = null;
+        try { pw = dane.PolaWlasne; } catch { }
+        if (pw is null)
+        {
+            zmiany.Add("polozenie: kartoteka nie ma obiektu PolaWlasne");
+            return;
+        }
+        var prop = pw.GetType().GetProperty("PoleWlasne1");
+        if (prop is null || !prop.CanWrite)
+        {
+            zmiany.Add("brak zapisywalnego PoleWlasne1");
+            return;
+        }
+        var stara = (Bezp(() => prop.GetValue(pw) as string) ?? "").Trim();
+        var nowa = p.Polozenie.Trim();
+        if (stara == nowa) return;
+        zmiany.Add($"Polozenie: „{stara}” → „{nowa}”");
+        if (zapisz) try { prop.SetValue(pw, nowa); } catch { }
     }
 
     static bool CzyKomplet(string? rodzaj)
@@ -423,7 +453,8 @@ internal static class Kartoteki
     internal record PozPlan(string? Symbol, string? Nazwa, string? Rodzaj, string? Jm,
                             decimal? Cena, string? Opis, List<SkladnikPlan>? Skladniki,
                             string? VatSprzedaz = null, string? VatZakup = null,
-                            Dictionary<string, string>? PolaWlasne = null);
+                            Dictionary<string, string>? PolaWlasne = null,
+                            string? Polozenie = null);
     internal record Plan(List<PozPlan>? Pozycje);
     internal record Krok(string Rodzaj, string Symbol, string Status, string? Szczegoly);
 }

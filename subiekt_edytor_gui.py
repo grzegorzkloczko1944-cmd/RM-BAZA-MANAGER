@@ -129,6 +129,10 @@ class Kartoteka:
         self.vat_zakup = ""
         #: {"PoleWlasne2": "Stal nierdzewna", ...} — tylko 2..8.
         self.pola_wlasne = {}
+        #: Położenie magazynowe (regał/półka) = PoleWlasne1. None znaczy
+        #: "nie było w formularzu, nie ruszaj" — inaczej zapis kartoteki
+        #: z pustym polem skasowałby regał wgrany przy migracji magazynu.
+        self.polozenie = None
         #: Czy kartoteka jest już w Subiekcie — blokuje zmianę symbolu
         #: i decyduje, czy to „założymy" czy „zmienimy".
         self.w_subiekcie = w_subiekcie
@@ -151,6 +155,10 @@ class Kartoteka:
         wypelnione = {k: v for k, v in self.pola_wlasne.items() if v.strip()}
         if wypelnione:
             d["polaWlasne"] = wypelnione
+        # Klucz leci tylko gdy pole było wypełniane — patrz komentarz przy
+        # self.polozenie. Most tak samo traktuje brak klucza jako "nie ruszaj".
+        if self.polozenie is not None:
+            d["polozenie"] = self.polozenie
         return d
 
 
@@ -388,18 +396,35 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         f.grid_columnconfigure(1, weight=1)
 
     def _karta_magazyn(self):
-        """Progi min/opt mają własny, działający mechanizm — nie dublujemy go."""
+        """Położenie (regał/półka). Progi min/opt zostają w oknie Magazyn."""
         f = tk.Frame(self.karty, bg=TLO_SEKCJI)
         self.karty.add(f, text="Magazyn")
-        tk.Label(f, text=
-                 "Progi zamawiania (min/opt) ustawia się w oknie Magazyn\n"
-                 "— ma własny tryb mostu i widok całej listy naraz.\n\n"
-                 "Położenie (regał/półka) siedzi w polu własnym PoleWlasne1\n"
-                 "i wypełnia je operacja magazynowa, nie ten edytor.\n\n"
-                 "Masy i objętości encja Asortyment w Sferze NIE MA —\n"
-                 "nie da się ich tu zapisać.",
+
+        tk.Label(f, text="Położenie (regał / półka):", bg=TLO_SEKCJI, fg=TEKST,
+                 font=("Arial", 9, "bold"), anchor="w").grid(
+            row=0, column=0, sticky="w", padx=8, pady=(14, 4))
+        self.var_polozenie = tk.StringVar()
+        tk.Entry(f, textvariable=self.var_polozenie, font=("Arial", 10),
+                 width=28).grid(row=0, column=1, sticky="we", padx=4, pady=(14, 4))
+        self.var_polozenie.trace_add(
+            "write", lambda *_a: self._pole_zmienione("polozenie"))
+
+        tk.Label(f, text="Siedzi w polu własnym PoleWlasne1 — tym samym, które\n"
+                         "pokazuje kolumna Położenie w oknie Magazyn.\n"
+                         "Puste pole NIE kasuje regału: żeby wyczyścić położenie,\n"
+                         "trzeba je skasować w Subiekcie.",
+                 bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8),
+                 justify="left", anchor="w").grid(
+            row=1, column=0, columnspan=2, sticky="we", padx=8, pady=(2, 12))
+
+        tk.Label(f, text="Progi zamawiania (min/opt) ustawia się w oknie Magazyn\n"
+                         "— ma własny tryb mostu i widok całej listy naraz.\n\n"
+                         "Masy i objętości encja Asortyment w Sferze NIE MA —\n"
+                         "nie da się ich tu zapisać.",
                  bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 9),
-                 justify="left").pack(padx=16, pady=16, anchor="w")
+                 justify="left", anchor="w").grid(
+            row=2, column=0, columnspan=2, sticky="we", padx=8, pady=8)
+        f.grid_columnconfigure(1, weight=1)
 
     def _karta_dodatkowe(self):
         """Proste pola własne 2..8 — na parametry konstrukcyjne."""
@@ -437,13 +462,20 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.lbl_sklad = tk.Label(gora, text="(zaznacz komplet w drzewie)",
                                   bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8), anchor="w")
         self.lbl_sklad.pack(fill=tk.X, padx=6, pady=(4, 0))
-        self.tab_sklad = ttk.Treeview(gora, columns=[k[0] for k in self.KOL_SKLAD],
+        wrap_s = tk.Frame(gora, bg=TLO_SEKCJI)
+        wrap_s.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        self.tab_sklad = ttk.Treeview(wrap_s, columns=[k[0] for k in self.KOL_SKLAD],
                                       show="headings", height=7)
         for klucz, naglowek, szer in self.KOL_SKLAD:
             self.tab_sklad.heading(klucz, text=naglowek)
-            self.tab_sklad.column(klucz, width=szer,
+            self.tab_sklad.column(klucz, width=szer, minwidth=szer,
                                   anchor="e" if klucz in ("lp", "ilosc") else "w")
-        self.tab_sklad.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        sc_s = ttk.Scrollbar(wrap_s, orient="vertical", command=self.tab_sklad.yview)
+        sc_s_poz = ttk.Scrollbar(wrap_s, orient="horizontal", command=self.tab_sklad.xview)
+        self.tab_sklad.configure(yscrollcommand=sc_s.set, xscrollcommand=sc_s_poz.set)
+        sc_s_poz.pack(side=tk.BOTTOM, fill=tk.X)
+        self.tab_sklad.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sc_s.pack(side=tk.RIGHT, fill=tk.Y)
         self.tab_sklad.bind("<Double-1>", self._edytuj_ilosc)
 
         ps = tk.Frame(gora, bg=TLO_SEKCJI)
@@ -465,13 +497,20 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             side=tk.LEFT, fill=tk.X, expand=True, padx=6)
         self.var_szukaj.trace_add("write", lambda *_a: self._odswiez_liste())
 
-        self.tab_lista = ttk.Treeview(dol, columns=[k[0] for k in self.KOL_LISTA],
+        wrap_l = tk.Frame(dol, bg=TLO_SEKCJI)
+        wrap_l.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        self.tab_lista = ttk.Treeview(wrap_l, columns=[k[0] for k in self.KOL_LISTA],
                                       show="headings", height=8)
         for klucz, naglowek, szer in self.KOL_LISTA:
             self.tab_lista.heading(klucz, text=naglowek)
-            self.tab_lista.column(klucz, width=szer,
+            self.tab_lista.column(klucz, width=szer, minwidth=szer,
                                   anchor="e" if klucz == "cena" else "w")
-        self.tab_lista.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        sc_l = ttk.Scrollbar(wrap_l, orient="vertical", command=self.tab_lista.yview)
+        sc_l_poz = ttk.Scrollbar(wrap_l, orient="horizontal", command=self.tab_lista.xview)
+        self.tab_lista.configure(yscrollcommand=sc_l.set, xscrollcommand=sc_l_poz.set)
+        sc_l_poz.pack(side=tk.BOTTOM, fill=tk.X)
+        self.tab_lista.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sc_l.pack(side=tk.RIGHT, fill=tk.Y)
         self.tab_lista.tag_configure("w_drzewie", foreground=TEKST_SZARY)
         self.tab_lista.bind("<Double-1>", lambda _e: self._dodaj_istniejaca())
         tk.Label(dol, text="Dwuklik = dodaj jako składnik zaznaczonego kompletu",
@@ -562,9 +601,13 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             return
         rodzaj = (dane.get("Rodzaj") or "Towar").lower()
         rodzaj = "komplet" if "komplet" in rodzaj else ("usluga" if "usług" in rodzaj else "towar")
-        self.pozycje[symbol] = Kartoteka(
-            symbol, dane.get("Nazwa") or symbol, rodzaj,
-            w_subiekcie=True)
+        k = Kartoteka(symbol, dane.get("Nazwa") or symbol, rodzaj,
+                      opis=str(dane.get("Opis") or "").strip(),
+                      w_subiekcie=True)
+        # Polozenie pokazujemy takie, jakie jest w Subiekcie, ale zostawiamy
+        # None dopoki user go nie tknie — plan wysyla klucz tylko przy zmianie.
+        k.polozenie = str(dane.get("Polozenie") or "").strip() or None
+        self.pozycje[symbol] = k
         if symbol not in self.korzenie:
             self.korzenie.append(symbol)
         for s in dane.get("Skladniki") or []:
@@ -673,6 +716,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             self.var_vat_zakup.set(k.vat_zakup or "")
             for pole, v in self.pola_wlasne_var.items():
                 v.set(k.pola_wlasne.get(pole, ""))
+            self.var_polozenie.set(k.polozenie or "")
         finally:
             self._blokada = False
         self._odswiez_sklad()
@@ -707,6 +751,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             k.vat_sprzedaz = self.var_vat_sprzedaz.get().strip()
         elif klucz == "vat_zakup":
             k.vat_zakup = self.var_vat_zakup.get().strip()
+        elif klucz == "polozenie":
+            # Pusty tekst zapisujemy jako None ("nie ruszaj"), nie jako "".
+            tekst = self.var_polozenie.get().strip()
+            k.polozenie = tekst or None
+            self._zmienione = True
         self._odswiez_drzewo()
         self._zaznacz_w_drzewie(k.symbol)
 

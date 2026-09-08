@@ -38,7 +38,10 @@ internal static class Komplet
             {
                 a.Symbol,
                 a.Nazwa,
+                a.Opis,
                 Rodzaj = a.Rodzaj.Nazwa,
+                // PoleWlasne1 = Polozenie magazynowe (regal/polka), patrz MAGAZYN.md.
+                Polozenie = a.PolaWlasne.PoleWlasne1,
                 Sklad = a.SkladnikiKompletu.Select(s => new
                 {
                     Symbol = s.Skladnik.Symbol,
@@ -90,7 +93,8 @@ internal static class Komplet
                 .ToList();
 
             wynik.Add(new Poz(szukany, (enc.Symbol ?? "").Trim(), true,
-                              enc.Rodzaj ?? "", skladniki, nadrzedne));
+                              enc.Rodzaj ?? "", skladniki, nadrzedne,
+                              (enc.Opis ?? "").Trim(), (enc.Polozenie ?? "").Trim()));
         }
 
         var json = JsonSerializer.Serialize(new { pozycje = wynik },
@@ -107,5 +111,6 @@ internal static class Komplet
     internal record Skladnik(string Symbol, string Nazwa, string Rodzaj, decimal Ilosc);
     internal record Nadrzedny(string Symbol, string Nazwa, string Rodzaj, decimal Ilosc);
     internal record Poz(string Pytany, string? Symbol, bool Istnieje, string Rodzaj,
-                        List<Skladnik> Skladniki, List<Nadrzedny> WchodziW);
+                        List<Skladnik> Skladniki, List<Nadrzedny> WchodziW,
+                        string? Opis = null, string? Polozenie = null);
 }
