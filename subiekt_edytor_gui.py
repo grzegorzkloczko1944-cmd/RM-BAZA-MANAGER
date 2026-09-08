@@ -907,11 +907,12 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self._zmienione = True
 
     def _auto_symbol(self):
-        """Nadaje zaznaczonej pozycji nastepny wolny symbol.
+        """Symbol Z NAZWY — ta sama regula, co w oknie Nowa kartoteka.
 
-        Omija tez kartoteki z Subiekta — sam _nowy_symbol patrzy wylacznie
-        na drzewo, wiec trafilby w istniejaca kartoteke i zamiast zalozyc
-        nowa, edytowalby cudza.
+        Uzywamy subiekt_projekt.symbol_z_nazwy / rozroznij_symbol, bo tym
+        samym generatorem zaklada kartoteki automat z projektu. Wlasna
+        numeracja (KPL-001) rozjechalaby te sama pozycje na dwie rozne
+        kartoteki w Subiekcie, zaleznie od tego, ktoredy zostala zalozona.
         """
         sym = self._zaznaczony
         if not sym or sym not in self.pozycje:
@@ -924,18 +925,47 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 "Auto", "„" + sym + "” jest już w Subiekcie — symbolu "
                 "istniejącej kartoteki nie wolno zmieniać.", parent=self)
             return
+        nazwa = (k.nazwa or "").strip()
+        if not nazwa:
+            messagebox.showinfo(
+                "Auto", "Najpierw wpisz Nazwę — symbol powstaje z niej.",
+                parent=self)
+            self.pola["nazwa"][1].focus_set()
+            return
+        try:
+            from subiekt_projekt import symbol_z_nazwy, rozroznij_symbol
+        except Exception as e:
+            messagebox.showerror("Auto", "Brak reguły generowania symbolu:\n"
+                                 + str(e), parent=self)
+            return
+
+        # Zajete = kartoteki z Subiekta ORAZ pozycje juz w drzewie (poza ta
+        # edytowana). Bez tego drugiego dwie nowe pozycje o podobnych nazwach
+        # dostalyby ten sam symbol i jedna nadpisalaby druga przy zapisie.
         zajete = {str(p.get("Symbol") or "").strip().upper()
                   for p in self.katalog}
-        baza = "KPL" if k.czy_komplet() else "TOW"
-        i = 1
-        while True:
-            kandydat = f"{baza}-{i:03d}"
-            if kandydat not in self.pozycje and kandydat.upper() not in zajete:
-                break
-            i += 1
+        zajete |= {s2.upper() for s2 in self.pozycje if s2 != sym}
+        zajete.discard("")
+
+        kandydat = symbol_z_nazwy(nazwa)
+        rozrozniony = False
+        if kandydat.upper() in zajete:
+            kandydat = rozroznij_symbol(nazwa, zajete)
+            rozrozniony = True
+        if not kandydat:
+            messagebox.showinfo(
+                "Auto", "Z tej nazwy nie da się zbudować symbolu — "
+                "wpisz go ręcznie.", parent=self)
+            return
+        if kandydat == sym:
+            self.status.config(text="Symbol „" + sym + "” już wynika z nazwy",
+                               fg=TEKST_SZARY)
+            return
         self._zmien_symbol(sym, kandydat)
-        self.status.config(text="Nadano symbol „" + kandydat + "”",
-                           fg=TEKST_SZARY)
+        self.status.config(
+            text="Symbol z nazwy: „" + kandydat + "”"
+                 + ("   (nazwa zajęta — użyto wyróżników)" if rozrozniony else ""),
+            fg=TEKST_SZARY)
 
     def _zmien_symbol(self, stary, nowy):
         """Zmiana symbolu pozycji, która NIE jest jeszcze w Subiekcie."""

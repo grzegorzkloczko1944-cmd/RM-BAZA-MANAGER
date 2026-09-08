@@ -383,6 +383,13 @@ def rozroznij_symbol(nazwa, uzyte):
     # tędy, omijając tamto czyszczenie (07.09.2026).
     pelna = _tylko_bezpieczne(" ".join(do_ascii(nazwa).split()))
 
+    # Subiekt porownuje symbole BEZ wzgledu na wielkosc liter, a wolajacy
+    # podaja `uzyte` raz jak jest, raz wielkimi literami (okno "Nowa
+    # kartoteka" — subiekt_asortyment.py). Bez normalizacji funkcja majaca
+    # ominac kolizje zwracala symbol identyczny z zajetym, tyle ze inna
+    # wielkoscia liter — czyli kartoteka trafialaby w istniejaca (08.09.2026).
+    zajete = {str(u).strip().upper() for u in (uzyte or ())}
+
     czlony = pelna.split()
     z_cyfra = [c for c in czlony if any(z.isdigit() for z in c)]
     bez_cyfr = [c for c in czlony if c not in z_cyfra]
@@ -391,7 +398,7 @@ def rozroznij_symbol(nazwa, uzyte):
     ogon = "".join(z_cyfra)[:MAX_SYMBOL - 3]
     przod = "".join(bez_cyfr).replace(" ", "")
     kandydat = (przod[:MAX_SYMBOL - len(ogon)] + ogon)[:MAX_SYMBOL]
-    if kandydat and kandydat not in uzyte:
+    if kandydat and kandydat.upper() not in zajete:
         return kandydat
 
     # Nazwy nierozróżnialne po oczyszczeniu — licznik jako ostateczność.
@@ -401,7 +408,7 @@ def rozroznij_symbol(nazwa, uzyte):
     # zapisano). Myślnik jest dozwolony i występuje w numerach rysunku.
     baza = (kandydat or symbol_z_nazwy(nazwa))[:MAX_SYMBOL - 2]
     i = 2
-    while f"{baza}-{i}" in uzyte:
+    while f"{baza}-{i}".upper() in zajete:
         i += 1
     return f"{baza}-{i}"
 
