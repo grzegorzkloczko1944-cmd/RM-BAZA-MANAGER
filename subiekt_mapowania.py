@@ -196,14 +196,57 @@ def put_many(wpisy, path=None):
     """[(numer, symbol, sposob, id, nazwa)] → liczba zapisanych.
 
     Wołane po suchym przebiegu/zapisie, żeby zapamiętać, co Subiekt potwierdził.
+
+    JEDNO połączenie i JEDEN commit na całą paczkę. Wcześniej leciało `put()`
+    w pętli, czyli na KAŻDY wpis: makedirs + connect + 3 × PRAGMA + SELECT +
+    INSERT + commit + close — a baza leży na Y: (SMB, journal_mode=DELETE, bo
+    WAL po sieci się rozpada). Przy 354 pozycjach projektu dawało to ~37 s
+    w każdym przebiegu podglądu i zapisu, i to był NAJWIĘKSZY koszt całego
+    okna „Projekt / Aktualizacja" — most odpowiadał w tym czasie w 0,5 s
+    (profil py-spy 09.09.2026: subiekt_mapowania.py:189 = 37-41 s na wątek).
     """
+    lista = list(wpisy or [])
+    if not lista:
+        return 0
+
+    ensure_schema(path)
     n = 0
-    for w in wpisy or []:
-        numer, symbol, sposob = w[0], w[1], w[2]
-        id_s = w[3] if len(w) > 3 else None
-        nazwa = w[4] if len(w) > 4 else None
-        if put(numer, symbol, sposob, id_s, nazwa, path=path):
-            n += 1
+    with _lock:
+        con = _connect(path)
+        try:
+            # Ręczne decyzje czytamy raz, zamiast SELECT-a per wpis.
+            reczne = {r["numer_rysunku"] for r in con.execute(
+                "SELECT numer_rysunku FROM mapowania WHERE sposob = ?", (SPOSOB_RECZNY,))}
+            kto = os.environ.get("USERNAME") or "?"
+            kiedy = datetime.now().isoformat(timespec="seconds")
+            for w in lista:
+                numer, symbol, sposob = w[0], w[1], w[2]
+                k = _key(numer)
+                if not k or not (symbol or "").strip():
+                    continue
+                # Ta sama reguła co w put(): decyzja człowieka ma pierwszeństwo.
+                if k in reczne and sposob != SPOSOB_RECZNY:
+                    continue
+                con.execute("""
+                    INSERT INTO mapowania
+                        (numer_rysunku, symbol_subiekt, id_subiekt, nazwa_subiekt, sposob, kto, kiedy, uwagi)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                    ON CONFLICT(numer_rysunku) DO UPDATE SET
+                        symbol_subiekt = excluded.symbol_subiekt,
+                        id_subiekt     = COALESCE(excluded.id_subiekt, mapowania.id_subiekt),
+                        nazwa_subiekt  = COALESCE(excluded.nazwa_subiekt, mapowania.nazwa_subiekt),
+                        sposob         = excluded.sposob,
+                        kto            = excluded.kto,
+                        kiedy          = excluded.kiedy,
+                        uwagi          = excluded.uwagi
+                """, (k, symbol.strip(),
+                      w[3] if len(w) > 3 else None,
+                      w[4] if len(w) > 4 else None,
+                      sposob, kto, kiedy))
+                n += 1
+            con.commit()          # JEDEN commit na całą paczkę
+        finally:
+            con.close()
     return n
 
 

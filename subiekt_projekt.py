@@ -1030,6 +1030,19 @@ def zapisz_mapowania(wynik):
 
     Dzięki temu następny projekt z tym samym numerem rysunku ma trafienie
     lokalnie, bez pytania Subiekta przez sieć (plan, „Zapamiętanie skojarzenia").
+
+    Zapisujemy TYLKO to, co niesie informację:
+
+    * mapowanie NIETRYWIALNE (symbol w Subiekcie różni się od numeru rysunku —
+      „6001ZZ" → „6001 ZZ", „013-100.04A" → „013-100.04a"). Tylko takie
+      cokolwiek dają: gdy obie strony są równe, następny przebieg i tak
+      trafi w symbol wprost, bez zaglądania do tabeli.
+    * kartoteki świeżo ZAŁOŻONE — tam liczy się ślad „to my je założyliśmy".
+
+    Reszta (symbol == numer, status „istnieje") to 700 z 830 wierszy tabeli
+    przepisywanych w kółko przy KAŻDYM podglądzie. Baza leży na Y: (SMB,
+    journal_mode=DELETE), więc kosztowało to ~37 s na przebieg — więcej niż
+    cała reszta okna razem wzięta (profil py-spy 09.09.2026).
     """
     wpisy = []
     for k in (wynik or {}).get("kroki", []):
@@ -1039,7 +1052,8 @@ def zapisz_mapowania(wynik):
         if not symbol:
             continue
         if k.get("Status") == "istnieje":
-            wpisy.append((symbol, symbol, subiekt_mapowania.SPOSOB_AUTO))
+            # symbol == numer rysunku → wpis niczego nie wnosi, pomijamy.
+            continue
         elif k.get("Status") == "zalozona":
             wpisy.append((symbol, symbol, subiekt_mapowania.SPOSOB_ZALOZONA))
     try:
