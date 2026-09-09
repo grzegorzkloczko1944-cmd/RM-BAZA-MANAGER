@@ -94,6 +94,7 @@ class RmpakCalculatorDialog:
         _ensure_calc_columns(project_con)
 
         self.supplier_ids = supplier_ids
+        self.project_name = project_name    # do Uwag na PW/RW
         self.hourly_rate = _get_hourly_rate(master_con)
         self.selected_item_id = None
         self._updating = False
@@ -348,8 +349,258 @@ class RmpakCalculatorDialog:
         tk.Label(sum_frame, textvariable=self.grand_total_var,
                  font=("", 14, "bold"), fg="darkred", anchor="e").pack(anchor="e", fill="x", pady=(4, 0))
 
+        # --- dokumenty produkcji: PW / RW ---
+        # Sekcja DOKŁADANA do istniejącego okna, nie nowa aplikacja: lista
+        # kalkulatora JEST listą produkcyjną projektu (ustalenia §7).
+        doc_frame = tk.LabelFrame(bottom_area, text="Dokumenty produkcji — Subiekt",
+                                  padx=10, pady=8, width=250)
+        doc_frame.pack(side="right", fill="y", padx=(8, 0))
+        doc_frame.pack_propagate(False)
+
+        self.pw_status_var = tk.StringVar(value="PW: —")
+        tk.Label(doc_frame, textvariable=self.pw_status_var, anchor="w",
+                 font=("", 9)).pack(anchor="w", fill="x")
+        self.rw_status_var = tk.StringVar(value="RW: —")
+        tk.Label(doc_frame, textvariable=self.rw_status_var, anchor="w",
+                 font=("", 9)).pack(anchor="w", fill="x")
+
+        # Ile pozycji faktycznie pójdzie na dokument — liczone z BAZY, nie
+        # z widocznych wierszy. User musi to widzieć ZANIM kliknie (§8).
+        self.pw_info_var = tk.StringVar(value="")
+        tk.Label(doc_frame, textvariable=self.pw_info_var, anchor="w",
+                 font=("", 8), fg="gray30", wraplength=225,
+                 justify="left").pack(anchor="w", fill="x", pady=(6, 0))
+
+        self.btn_pw = tk.Button(doc_frame, text="📥 Wystaw PW", command=self._podglad_pw,
+                                bg="#337ab7", fg="white", font=("", 9, "bold"))
+        self.btn_pw.pack(anchor="e", fill="x", pady=(8, 0))
+        self.btn_rw = tk.Button(doc_frame, text="📤 Wystaw RW", state="disabled",
+                                font=("", 9, "bold"))
+        self.btn_rw.pack(anchor="e", fill="x", pady=(4, 0))
+
         tk.Button(sum_frame, text="Zamknij", command=self._on_close,
                   width=12, bg="#d9534f", fg="white", font=("", 9, "bold")).pack(anchor="e", pady=(10, 0))
+
+        self._odswiez_status_pw()
+
+    # ── Dokumenty produkcji (PW / RW) ────────────────────────────────────
+    def _pozycje_pw(self):
+        """(pozycje, pominiete_komplety) z BAZY. (None, None) gdy się nie da."""
+        try:
+            import subiekt_produkcja
+            pid = subiekt_produkcja.project_id_z_polaczenia(self.project_con)
+            if pid is None:
+                return None, None
+            return subiekt_produkcja.lista_do_pw(pid)
+        except Exception:
+            return None, None
+
+    def _odswiez_status_pw(self):
+        """Podpis pod przyciskiem: ile pozycji i czego brakuje.
+
+        Liczone z bazy przy każdym odświeżeniu listy, żeby po zapisaniu ceny
+        licznik braków od razu malał — inaczej user poprawia i nie widzi
+        efektu, dopóki nie kliknie „Wystaw PW".
+        """
+        poz, pom = self._pozycje_pw()
+        if poz is None:
+            self.pw_info_var.set("Nie udało się odczytać listy do PW.")
+            self.btn_pw.config(state="disabled")
+            return
+        try:
+            import subiekt_produkcja
+            braki = subiekt_produkcja.braki_przed_pw(poz)
+            numer, _data = subiekt_produkcja.dokument_projektu(self.project_con, "PW")
+            self.pw_status_var.set(f"PW: {numer}" if numer else "PW: —")
+        except Exception:
+            braki = []
+        opis = f"{len(poz)} poz. na PW"
+        if pom:
+            opis += f", {len(pom)} kompletów pominiętych (powstają ze składników)"
+        if braki:
+            ile = len({s for s, _ in braki})
+            opis += f"\n⚠ {ile} poz. bez ceny/ilości — uzupełnij przed PW"
+        self.pw_info_var.set(opis)
+        self.btn_pw.config(state="normal" if poz else "disabled")
+
+    def _podglad_pw(self):
+        """Okno „co pójdzie do Subiekta". NIC nie zapisuje.
+
+        Zgodnie z zasadą „nic po cichu": user widzi pełną listę z cenami
+        i wartościami, zanim powstanie jakikolwiek dokument.
+        """
+        poz, pom = self._pozycje_pw()
+        if poz is None:
+            messagebox.showerror("PW", "Nie udało się odczytać listy pozycji z bazy projektu.",
+                                 parent=self.win)
+            return
+        import subiekt_produkcja
+        braki = subiekt_produkcja.braki_przed_pw(poz)
+
+        dlg = tk.Toplevel(self.win)
+        dlg.title("Podgląd PW — przyjęcie produkcji własnej")
+        dlg.transient(self.win)
+        dlg.geometry("820x560")
+
+        tk.Label(dlg, text=f"ZOSTANIE UTWORZONY DOKUMENT PW — {self.project_name}",
+                 bg="#337ab7", fg="white", font=("", 10, "bold"),
+                 anchor="w", padx=12, pady=8).pack(fill="x")
+
+        # Braki NA GÓRZE, nie w stopce — to one decydują, czy PW w ogóle
+        # powstanie, więc nie mogą wymagać przewijania.
+        if braki:
+            ramka = tk.Frame(dlg, bg="#f2dede", padx=12, pady=8)
+            ramka.pack(fill="x")
+            symbole = sorted({s for s, _ in braki})
+            tk.Label(ramka, bg="#f2dede", fg="#a94442", anchor="w", justify="left",
+                     font=("", 9, "bold"),
+                     text=f"⛔ NIE MOŻNA WYSTAWIĆ PW — {len(symbole)} poz. bez ceny lub ilości"
+                     ).pack(anchor="w")
+            tk.Label(ramka, bg="#f2dede", fg="#a94442", anchor="w", justify="left",
+                     wraplength=780, font=("", 8),
+                     text=", ".join(symbole[:20]) + (" …" if len(symbole) > 20 else "")
+                     ).pack(anchor="w")
+            # Najczęstsza przyczyna „BRAK" mimo policzonej ceny: kalkulacja
+            # siedzi w polach, ale nie kliknięto „Zapisz cenę/szt.". Podgląd
+            # czyta bazę OSOBNYM połączeniem read-only, więc niezapisanej
+            # transakcji nie widzi (zgłoszone 09.09.2026).
+            if self._has_unsaved_changes():
+                tk.Label(ramka, bg="#f2dede", fg="#a94442", anchor="w", justify="left",
+                         wraplength=780, font=("", 9, "bold"),
+                         text="⚠ Masz NIEZAPISANĄ kalkulację w oknie kalkulatora — "
+                              "kliknij „💾 Zapisz cenę/szt.”, potem otwórz podgląd ponownie."
+                         ).pack(anchor="w", pady=(6, 0))
+
+        cols = ("Symbol", "Nazwa", "Ilość", "Cena/szt.", "Wartość")
+        tree = ttk.Treeview(dlg, columns=cols, show="headings", height=14)
+        for c, w in zip(cols, (150, 300, 70, 90, 100)):
+            tree.heading(c, text=c)
+            tree.column(c, width=w, anchor="e" if c in ("Ilość", "Cena/szt.", "Wartość") else "w")
+        tree.pack(fill="both", expand=True, padx=10, pady=(8, 0))
+
+        razem = 0.0
+        for p in poz:
+            cena = p["cena"]
+            wart = (cena or 0) * p["ilosc"]
+            razem += wart
+            tree.insert("", "end", values=(
+                p["symbol"], p["nazwa"], f"{p['ilosc']:g}",
+                f"{cena:.2f}" if cena else "— BRAK —",
+                f"{wart:.2f}" if cena else "—"),
+                tags=() if cena else ("brak",))
+        tree.tag_configure("brak", background="#f2dede")
+
+        stopka = tk.Frame(dlg, padx=12, pady=10)
+        stopka.pack(fill="x")
+        tk.Label(stopka, text=f"RAZEM: {razem:,.2f} PLN".replace(",", " "),
+                 font=("", 12, "bold"), fg="darkred").pack(side="left")
+        tk.Label(stopka, text=f"Uwagi: RM_BAZA — PROJEKT {self.project_name}",
+                 font=("", 8), fg="gray30").pack(side="left", padx=(16, 0))
+
+        tk.Button(stopka, text="Zamknij", command=dlg.destroy, width=12).pack(side="right")
+        btn = tk.Button(stopka, text="Wystaw PW", width=14, font=("", 9, "bold"),
+                        bg="#337ab7", fg="white")
+        btn.config(command=lambda: self._wystaw_pw(poz, dlg, btn))
+        if braki:
+            btn.config(state="disabled", bg="#cccccc", fg="gray40")
+        btn.pack(side="right", padx=(0, 8))
+
+        if pom:
+            tk.Label(dlg, anchor="w", justify="left", fg="gray30", font=("", 8),
+                     wraplength=790, padx=12,
+                     text=f"Pominięte złożenia ({len(pom)}): powstają w Subiekcie ze swoich "
+                          f"składników, więc nie przyjmujemy ich osobno — "
+                          + ", ".join(p["symbol"] for p in pom[:12])
+                          + (" …" if len(pom) > 12 else "")).pack(fill="x", pady=(0, 8))
+
+    def _wystaw_pw(self, pozycje, dlg, btn):
+        """Suchy przebieg → potwierdzenie → zapis → read-back → numer w bazie.
+
+        Kolejność z ustaleń §13. Suchy przebieg PRZED pytaniem, bo dopiero on
+        wie, czy wszystkie pozycje mają kartotekę w Subiekcie — pytanie
+        „zapisać?" przed sprawdzeniem byłoby pytaniem w ciemno.
+        """
+        import subiekt_produkcja
+        numer_ist, data_ist = subiekt_produkcja.dokument_projektu(self.project_con, "PW")
+        if numer_ist:
+            # Blokada MIĘKKA (§15): pokazujemy istniejący, ale nie zamykamy drogi.
+            if not messagebox.askyesno(
+                    "PW już istnieje",
+                    f"Dla tego projektu zapisano już PW:\n\n    {numer_ist}\n    z {data_ist}\n\n"
+                    "Obowiązuje zasada 1 projekt = 1 PW.\n\n"
+                    "Wystawić mimo to KOLEJNY dokument?",
+                    icon="warning", default="no", parent=dlg):
+                return
+
+        plan = subiekt_produkcja.plan_pw(
+            subiekt_produkcja.project_id_z_polaczenia(self.project_con),
+            self.project_name, pozycje)
+
+        btn.config(state="disabled", text="Sprawdzam…")
+        dlg.update_idletasks()
+        try:
+            sucho = subiekt_produkcja.wyslij_pw(plan, zapisz=False)
+        except Exception as e:
+            btn.config(state="normal", text="Wystaw PW")
+            messagebox.showerror("PW", f"Nie udało się połączyć z Subiektem:\n\n{e}", parent=dlg)
+            return
+
+        bledy = [k for k in (sucho or {}).get("kroki", []) if k.get("Status") == "blad"]
+        if bledy:
+            btn.config(state="normal", text="Wystaw PW")
+            opis = "\n".join(f"• {k.get('Symbol') or '—'}: {k.get('Szczegoly')}" for k in bledy[:12])
+            messagebox.showerror(
+                "PW — suchy przebieg wykrył problemy",
+                f"Dokument NIE został utworzony.\n\n{opis}"
+                + ("\n…" if len(bledy) > 12 else "")
+                + "\n\nKartotekę można założyć z okna „Dodaj asortyment do Subiekta”.",
+                parent=dlg)
+            return
+
+        razem = sum((p["cena"] or 0) * p["ilosc"] for p in pozycje)
+        if not messagebox.askyesno(
+                "Potwierdź zapis PW",
+                f"Subiekt utworzy dokument PW:\n\n"
+                f"    pozycji:  {len(pozycje)}\n"
+                f"    wartość:  {razem:,.2f} PLN\n".replace(",", " ")
+                + f"    magazyn:  {plan['magazyn']}\n"
+                  f"    uwagi:    {plan['uwagi']}\n\n"
+                  "Dokumentu magazynowego nie cofa się jednym kliknięciem.\n\nZapisać?",
+                icon="question", default="no", parent=dlg):
+            btn.config(state="normal", text="Wystaw PW")
+            return
+
+        btn.config(text="Zapisuję…")
+        dlg.update_idletasks()
+        try:
+            wynik = subiekt_produkcja.wyslij_pw(plan, zapisz=True)
+        except Exception as e:
+            btn.config(state="normal", text="Wystaw PW")
+            messagebox.showerror(
+                "PW", f"Zapis nie powiódł się:\n\n{e}\n\n"
+                "NIE ponawiaj automatycznie — najpierw sprawdź w Subiekcie, "
+                "czy dokument mimo to nie powstał.", parent=dlg)
+            return
+
+        ok, numer, uwagi = subiekt_produkcja.sprawdz_pw(wynik, plan)
+        if ok:
+            subiekt_produkcja.zapisz_numer_pw(self.project_con, numer, razem)
+            self._odswiez_status_pw()
+            messagebox.showinfo(
+                "PW zapisane i potwierdzone",
+                f"✅ {numer}\n\nProjekt: {self.project_name}\n"
+                f"{len(pozycje)} pozycji\n{razem:,.2f} PLN".replace(",", " "),
+                parent=dlg)
+            dlg.destroy()
+        else:
+            messagebox.showwarning(
+                "NIE POTWIERDZONO ZAPISU PW",
+                (f"Dokument {numer} mógł zostać zapisany, ale odczyt z Subiekta "
+                 "nie zgadza się z planem:\n\n" if numer else "Zapis nieudany:\n\n")
+                + "\n".join(f"• {u}" for u in uwagi[:10])
+                + "\n\nNIE twórz drugiego PW — sprawdź dokument w Subiekcie.",
+                parent=dlg)
+            btn.config(state="normal", text="Wystaw PW")
 
     def _load_items(self):
         prev_item_id = self.selected_item_id
@@ -851,6 +1102,13 @@ class RmpakCalculatorDialog:
             except (ValueError, TypeError):
                 pass
         self.grand_total_var.set(f"{grand:,.2f} PLN")
+
+        # Licznik braków ma maleć NA OCZACH — inaczej user przelicza pozycje
+        # i nie widzi, czy zbliża się do kompletu, dopóki nie otworzy podglądu.
+        try:
+            self._odswiez_status_pw()
+        except Exception:
+            pass
 
         if self.on_price_saved:
             self.on_price_saved()
