@@ -931,8 +931,8 @@ class MainWindow(tk.Tk):
         subiekt_menu.add_separator()
         subiekt_menu.add_command(label="🔗 Scal kody handlowe w tym projekcie…",
                                  command=self.open_subiekt_scalanie)
-        subiekt_menu.add_command(label="⚙ Dopasuj znormalizowane do kartotek…",
-                                 command=self.open_subiekt_znorm)
+        subiekt_menu.add_command(label="🔎 Dopasowanie kartotek Subiekta…",
+                                 command=self.open_subiekt_dopasowanie)
         # Menu pod PRAWYM klawiszem — lewy otwiera panel z kaflami.
         #
         # ⚠️ Menu NIE jest przypisane przez btn_subiekt["menu"]: Menubutton
@@ -30383,10 +30383,12 @@ class MainWindow(tk.Tk):
 
         subiekt_scalanie_gui.open_window(self, self.current_project_id, project_name)
 
-    def open_subiekt_znorm(self):
-        """Okno „Dopasuj znormalizowane do kartotek" (menu 📦 SUBIEKT).
+    def open_subiekt_dopasowanie(self):
+        """Okno „Dopasowanie kartotek Subiekta" (menu 📦 SUBIEKT).
 
-        Logika w subiekt_znorm_gui.py / subiekt_znorm_dopasowanie.py.
+        Etap 3 pracy z elementami handlowymi (po scalaniu zapisów i kodów):
+        kanoniczny kod RM_BAZA → konkretne Id kartoteki Subiekta.
+        Logika w subiekt_dopasowanie.py, interfejs w subiekt_dopasowanie_gui.py.
 
         Pozycje ZNORMALIZOWANE nie mają numeru rysunku, więc RM_BAZA nadaje
         im symbol obcięty z nazwy do 13 znaków („Blokada GN 822.6-4-M8-C" →
@@ -30403,11 +30405,11 @@ class MainWindow(tk.Tk):
                                    "Najpierw wybierz projekt.", parent=self)
             return
         try:
-            import subiekt_znorm_gui
+            import subiekt_dopasowanie_gui
         except ImportError as e:
             messagebox.showerror(
                 "Dopasowanie",
-                f"Nie znaleziono modułu subiekt_znorm_gui.py\n\n{e}",
+                f"Nie znaleziono modułu subiekt_dopasowanie_gui.py\n\n{e}",
                 parent=self)
             return
 
@@ -30422,7 +30424,7 @@ class MainWindow(tk.Tk):
         except Exception:
             project_name = None
 
-        subiekt_znorm_gui.open_window(self, self.current_project_id, project_name)
+        subiekt_dopasowanie_gui.open_window(self, self.current_project_id, project_name)
 
     def toggle_show_hidden(self):
         """Przełącz wyświetlanie ukrytych pozycji"""

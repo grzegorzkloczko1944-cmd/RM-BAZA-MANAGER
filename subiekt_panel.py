@@ -375,8 +375,8 @@ class PanelSubiekt(tk.Toplevel):
                  "zapis", "open_subiekt_dostawcy", None),
                 ("🔗", "Scal kody handlowe", "w tym projekcie",
                  "zapis", "open_subiekt_scalanie", None),
-                ("⚙", "Dopasuj znormalizowane", "do kartotek Subiekta",
-                 "zapis", "open_subiekt_znorm", None),
+                ("🔎", "Dopasowanie kartotek", "znormalizowane → Subiekt",
+                 "zapis", "open_subiekt_dopasowanie", None),
             ]),
         ]
         for tytul, podtytul, kafle in uklad:
