@@ -3554,23 +3554,49 @@ class MainWindow(tk.Tk):
 
         ramka = tk.Frame(okno)
         ramka.pack(fill=tk.BOTH, expand=True, padx=12)
-        canvas = tk.Canvas(ramka, highlightthickness=0, width=280, height=420)
+        canvas = tk.Canvas(ramka, highlightthickness=0, width=300, height=380)
         pasek = ttk.Scrollbar(ramka, orient="vertical", command=canvas.yview)
         lista = tk.Frame(canvas)
-        lista.bind("<Configure>",
-                   lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=lista, anchor="nw")
+        okienko = canvas.create_window((0, 0), window=lista, anchor="nw")
+
+        def obszar(_e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            # Lista ma być szeroka na całe okno — inaczej kliknięcie obok
+            # tekstu (w pustce po prawej) nie trafia w checkbox.
+            canvas.itemconfigure(okienko, width=canvas.winfo_width())
+
+        lista.bind("<Configure>", obszar)
+        canvas.bind("<Configure>", obszar)
         canvas.configure(yscrollcommand=pasek.set)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         pasek.pack(side=tk.RIGHT, fill=tk.Y)
 
+        # Kółko myszy. Bind na canvasie nie wystarcza: kursor stoi zwykle nad
+        # checkboxem (dzieckiem), a ten zjada zdarzenie. Wiążemy więc na całym
+        # oknie i przewijamy, dopóki jest co przewijać.
+        def kolko(e):
+            gora, dol = canvas.yview()
+            if gora <= 0.0 and dol >= 1.0:
+                return                     # wszystko widać — nie ma czego przewijać
+            canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+
+        # NIE bind_all: aplikacja ma własny globalny bind na <MouseWheel>
+        # (wykrywanie bezczynności do zwalniania locka, linia ~2064), a
+        # unbind_all skasowałby go razem z naszym. Wiążemy więc na oknie
+        # i na każdym widgecie listy — kursor stoi zwykle nad checkboxem,
+        # a ten zjadłby zdarzenie skierowane do canvasu.
+        for w in (okno, canvas, lista):
+            w.bind("<MouseWheel>", kolko)
+
         for idx, naglowek in self._naglowki_arkusza():
             stale = idx in self.KOLUMNY_STALE
-            tk.Checkbutton(
+            cb = tk.Checkbutton(
                 lista, text=(f"{naglowek}   (zawsze widoczna)" if stale else naglowek),
                 variable=robocze[idx], anchor="w", padx=4,
                 state=tk.DISABLED if stale else tk.NORMAL,
-                font=("Arial", 9)).pack(fill=tk.X, anchor="w")
+                font=("Arial", 9))
+            cb.pack(fill=tk.X, anchor="w")
+            cb.bind("<MouseWheel>", kolko)   # inaczej checkbox zjada kółko
 
         skroty = tk.Frame(okno)
         skroty.pack(fill=tk.X, padx=12, pady=(8, 0))
