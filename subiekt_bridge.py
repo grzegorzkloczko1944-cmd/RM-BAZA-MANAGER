@@ -588,8 +588,18 @@ def dostepna_nowsza(timeout_s=3, wymuszone=False):
     # odlaczony, nie ma czego odkladac na dobe — sprobujemy nastepnym razem.
     if zdalna:
         _odnotuj_sprawdzenie()
-    if not zdalna or not lokalna:
+    if not zdalna:
         return False, ""
+    if not lokalna:
+        # Most bez wersja.json = sprzed wprowadzenia znacznika (albo pobrany
+        # recznie). Dotad oznaczalo to CISZE: user pracowal na starej binarce
+        # i nie mial jak sie dowiedziec, ze nie zna nowych trybow — az do
+        # bledu "nieznana komenda" przy konkretnej funkcji (09.09.2026:
+        # "Ilosc (zam.)" i usuwanie projektow po wystawieniu ZkIlosci).
+        # Brak wersji traktujemy wiec jak wersje najstarsza z mozliwych.
+        return True, ("Na serwerze jest most z "
+                      f"{(zdalna.get('zbudowano') or '?')}, a Twoj jest bez "
+                      "oznaczenia wersji (starszy).")
     if zdalna.get("protokol") != lokalna.get("protokol"):
         return False, ""            # inny protokol — patrz pobierz_most()
     tam = (zdalna.get("zbudowano") or "").strip()
