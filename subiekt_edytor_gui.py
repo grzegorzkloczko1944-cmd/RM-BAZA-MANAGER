@@ -44,10 +44,14 @@ import os
 import tempfile
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 from rm_kreciolek import Kreciolek
 from subiekt_stany import wysrodkuj
+# Okno komunikatu centrowane na rodzicu — messagebox (natywny dialog Tk)
+# pozycjonuje sie wzgledem monitora GLOWNEGO i przy trzech monitorach
+# wyskakuje na innym ekranie niz aplikacja (09.09.2026).
+from subiekt_projekt import komunikat as komunikat_ed
 #: Wywołanie mostu — ta sama funkcja, której używa okno „Dodaj asortyment":
 #: stały most z fallbackiem na CLI, więc nie duplikujemy tu obsługi protokołu.
 from subiekt_asortyment_gui import _uruchom
@@ -336,7 +340,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                          ("↑", lambda: self._przesun(-1)), ("↓", lambda: self._przesun(1))):
             tk.Button(pb, text=txt, command=cmd, font=("Arial", 8),
                       width=8 if len(txt) > 2 else 3).pack(side=tk.LEFT, padx=2)
-        tk.Button(pb, text="Z projektu…", command=self._wczytaj_z_projektu,
+        tk.Button(pb, text="Z pliku…", command=self._wczytaj_z_pliku,
                   font=("Arial", 8)).pack(side=tk.RIGHT, padx=2)
         # Dokad trafi "+ Skladnik" / "+ Istniejaca" - zawsze widoczne, zeby
         # nie zgadywac. Wynika z zaznaczenia (patrz _cel_dla_skladnika).
@@ -402,10 +406,24 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         ec.grid(row=4, column=1, sticky="w", padx=4, pady=6)
         self.var_cena.trace_add("write", lambda *_a: self._pole_zmienione("cena"))
 
+        # POŁOŻENIE tutaj, nie tylko w zakładce Magazyn: przy kompletowaniu
+        # trzeba wiedzieć, z której półki wziąć detal, bez klikania w zakładki
+        # (09.09.2026). To ta sama zmienna co w karcie Magazyn — jedno pole
+        # w dwóch miejscach, więc wpis widać od razu w obu.
+        tk.Label(pod, text="Położenie:", bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9),
+                 anchor="w", width=12).grid(row=5, column=0, sticky="w", padx=8, pady=6)
+        self.var_polozenie = tk.StringVar()
+        tk.Entry(pod, textvariable=self.var_polozenie, font=("Arial", 9),
+                 width=20).grid(row=5, column=1, sticky="w", padx=4, pady=6)
+        self.var_polozenie.trace_add(
+            "write", lambda *_a: self._pole_zmienione("polozenie"))
+        tk.Label(pod, text="regał / półka", bg=TLO_SEKCJI, fg=TEKST_SZARY,
+                 font=("Arial", 8), anchor="w").grid(row=5, column=2, sticky="w", padx=(0, 8))
+
         tk.Label(pod, text="Opis:", bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9),
-                 anchor="nw", width=12).grid(row=5, column=0, sticky="nw", padx=8, pady=6)
+                 anchor="nw", width=12).grid(row=6, column=0, sticky="nw", padx=8, pady=6)
         self.txt_opis = tk.Text(pod, height=5, width=44, font=("Arial", 9), wrap="word")
-        self.txt_opis.grid(row=5, column=1, sticky="we", padx=4, pady=6)
+        self.txt_opis.grid(row=6, column=1, sticky="we", padx=4, pady=6)
         self.txt_opis.bind("<KeyRelease>", lambda _e: self._pole_zmienione("opis"))
         pod.grid_columnconfigure(1, weight=1)
 
@@ -413,7 +431,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             pod, text="Symbol po zapisie do Subiekta nie podlega zmianie —\n"
                       "jest kluczem w kodach kreskowych, dokumentach i składach kompletów.",
             bg="#eaf2f8", fg=TEKST_SZARY, font=("Arial", 8), justify="left", anchor="w")
-        self.lbl_info.grid(row=6, column=0, columnspan=2, sticky="we", padx=8, pady=(10, 8))
+        self.lbl_info.grid(row=7, column=0, columnspan=2, sticky="we", padx=8, pady=(10, 8))
 
         self._karta_handlowe()
         self._karta_magazyn()
@@ -460,11 +478,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         tk.Label(f, text="Położenie (regał / półka):", bg=TLO_SEKCJI, fg=TEKST,
                  font=("Arial", 9, "bold"), anchor="w").grid(
             row=0, column=0, sticky="w", padx=8, pady=(14, 4))
-        self.var_polozenie = tk.StringVar()
+        # TA SAMA zmienna co pole „Położenie" na karcie Podstawowe — wpis
+        # w jednym miejscu widać od razu w drugim. Nie tworzymy nowej
+        # StringVar, bo nadpisałaby tamtą i pola przestałyby się zgadzać.
         tk.Entry(f, textvariable=self.var_polozenie, font=("Arial", 10),
                  width=28).grid(row=0, column=1, sticky="we", padx=4, pady=(14, 4))
-        self.var_polozenie.trace_add(
-            "write", lambda *_a: self._pole_zmienione("polozenie"))
 
         tk.Label(f, text="Siedzi w polu własnym PoleWlasne1 — tym samym, które\n"
                          "pokazuje kolumna Położenie w oknie Magazyn.\n"
@@ -1205,7 +1223,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.korzenie.append(sym)
         self._odswiez_drzewo()
         self._zaznacz_w_drzewie(sym)
-        self.pola["symbol"][1].focus_set()
+        # Fokus na NAZWĘ, nie na symbol: symbol ma już wartość roboczą
+        # („NOWA-01") i zwykle nadaje się go przyciskiem „Auto" Z NAZWY,
+        # więc to nazwa jest pierwszą rzeczą do wpisania (09.09.2026).
+        self.pola["nazwa"][1].focus_set()
 
     def _dodaj_skladnik(self):
         """Nowa pozycja jako SKŁADNIK zaznaczonego kompletu."""
@@ -1228,7 +1249,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.relacje.append((rodzic, sym, 1.0))
         self._odswiez_drzewo()
         self._zaznacz_w_drzewie(sym)
-        self.pola["symbol"][1].focus_set()
+        self.pola["nazwa"][1].focus_set()   # jak wyżej: najpierw nazwa
 
     def _dodaj_istniejaca(self):
         """Kartoteka z Subiekta jako składnik zaznaczonego kompletu."""
@@ -1440,14 +1461,162 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
 
     # ── IMPORT Z PROJEKTU ───────────────────────────────────────────────
 
-    def _wczytaj_z_projektu(self):
-        messagebox.showinfo(
-            "Z projektu",
-            "Wczytywanie struktury Z/ZZ z BOM-u projektu RM_BAZA.\n\n"
-            "Do podpięcia w kolejnym kroku — subiekt_projekt.build_plan()\n"
-            "zwraca dokładnie taką strukturę (pozycje + składniki),\n"
-            "więc wystarczy ją przepisać na model pozycje/relacje.",
-            parent=self)
+    def _wczytaj_z_pliku(self):
+        """Wczytuje strukturę z pliku BOM-u: CSV (płaskie) albo *_OUT.xlsx (drzewko).
+
+        Dwa formaty, bo tak wyglądają eksporty z Inventora:
+          * CSV  — jedno złożenie, wszystkie wiersze to jego składniki.
+            Tożsamość kompletu niesie NAZWA PLIKU („2622-200.81ZZ Zestaw
+            Wagi.csv" → symbol „2622-200.81ZZ"), bo samego złożenia nie ma
+            w wierszach.
+          * XLSX — pełne drzewko z arkusza „DRZEWKO TEKST": wielopoziomowa
+            struktura Z/ZZ z ilościami lokalnymi.
+
+        Czytamy tymi samymi funkcjami co reszta systemu (subiekt_projekt,
+        import_bom), żeby symbole i typy powstawały wszędzie tak samo.
+        """
+        sciezka = filedialog.askopenfilename(
+            parent=self, title="Wybierz plik BOM-u",
+            filetypes=[("BOM — CSV lub Excel", "*.csv *.xlsx"),
+                       ("CSV (płaskie złożenie)", "*.csv"),
+                       ("Excel *_OUT.xlsx (drzewko)", "*.xlsx"),
+                       ("Wszystkie pliki", "*.*")])
+        if not sciezka:
+            return
+
+        try:
+            if sciezka.lower().endswith(".csv"):
+                pozycje, relacje, korzenie = self._z_csv(sciezka)
+            else:
+                pozycje, relacje, korzenie = self._z_xlsx(sciezka)
+        except Exception as e:
+            komunikat_ed(self, "Z pliku",
+                         f"Nie udało się odczytać pliku:\n\n{e}", rodzaj="error")
+            return
+
+        if not pozycje:
+            komunikat_ed(self, "Z pliku",
+                         "W pliku nie ma pozycji z numerem rysunku ani nazwą.",
+                         rodzaj="warn")
+            return
+
+        # Dokładamy do tego, co już jest — user może złożyć strukturę
+        # z kilku plików. Symbol już obecny zostaje nietknięty (jego dane
+        # mogły być ręcznie poprawione), dopisujemy tylko brakujące relacje.
+        nowe = 0
+        for sym, kart in pozycje.items():
+            if sym not in self.pozycje:
+                self.pozycje[sym] = kart
+                nowe += 1
+        for r in relacje:
+            if r not in self.relacje:
+                self.relacje.append(r)
+        for k in korzenie:
+            if k not in self.korzenie and not any(d == k for _r, d, _i in self.relacje):
+                self.korzenie.append(k)
+
+        self._odswiez_drzewo()
+        self._aktualizuj_przycisk_zapisu()
+        komunikat_ed(
+            self, "Z pliku",
+            f"Wczytano {nowe} nowych pozycji z:\n{os.path.basename(sciezka)}\n\n"
+            f"Złożeń (KT): {sum(1 for k in pozycje.values() if k.czy_komplet())}\n"
+            f"Powiązań w składzie: {len(relacje)}")
+
+    def _z_csv(self, sciezka):
+        """({symbol: Kartoteka}, [(rodzic, dziecko, ilość)], [korzenie]) z CSV."""
+        from subiekt_projekt import read_items_csv, tree_z_csv
+        items = read_items_csv(sciezka)
+        kids, _nazwy, sym_zl, naz_zl = tree_z_csv(sciezka, items)
+
+        pozycje, relacje = {}, []
+        for it in items:
+            sym = (it["nr"] or "").strip()
+            if not sym:
+                continue
+            pozycje[sym] = Kartoteka(
+                sym, it.get("nazwa") or "",
+                "komplet" if str(it.get("typ", "")).upper() in ("Z", "ZZ") else "towar",
+                "kpl" if str(it.get("typ", "")).upper() in ("Z", "ZZ") else "szt")
+
+        # Samo złożenie nie jest wierszem CSV — dopisujemy je z nazwy pliku.
+        if sym_zl and sym_zl not in pozycje:
+            pozycje[sym_zl] = Kartoteka(sym_zl, naz_zl or "", "komplet", "kpl")
+        elif sym_zl:
+            pozycje[sym_zl].rodzaj = "komplet"
+            pozycje[sym_zl].jm = "kpl"
+
+        for rodzic, dzieci in (kids or {}).items():
+            r = self._symbol_jak_w(pozycje, rodzic)
+            for dziecko, ilosc in dzieci:
+                d = self._symbol_jak_w(pozycje, dziecko)
+                if r and d:
+                    relacje.append((r, d, float(ilosc or 1)))
+        return pozycje, relacje, [sym_zl] if sym_zl else []
+
+    def _z_xlsx(self, sciezka):
+        """({symbol: Kartoteka}, [(rodzic, dziecko, ilość)], [korzenie]) z *_OUT.xlsx."""
+        from pathlib import Path
+        from import_bom import find_assembly_tree_rows, infer_type_from_drawing_no
+
+        wiersze = find_assembly_tree_rows(Path(sciezka))
+        if not wiersze:
+            raise ValueError(
+                "W tym pliku nie ma arkusza „DRZEWKO TEKST”.\n"
+                "Wybierz plik *_OUT.xlsx wyeksportowany z Inventora\n"
+                "albo płaski CSV jednego złożenia.")
+
+        def rodzaj_z(nr, typ):
+            t = (typ or "").upper()
+            if "Z" in t and "ZNORMALIZOWANE" not in t:
+                return "komplet"
+            return "komplet" if str(infer_type_from_drawing_no(nr) or "").upper() in ("Z", "ZZ") else "towar"
+
+        pozycje, relacje, dzieci = {}, [], set()
+        for w in wiersze:
+            nr = (w.get("nr_rysunku") or "").strip()
+            if not nr:
+                continue
+            if nr not in pozycje:
+                rodz = rodzaj_z(nr, w.get("typ"))
+                pozycje[nr] = Kartoteka(nr, (w.get("nazwa") or "").strip(),
+                                        rodz, "kpl" if rodz == "komplet" else "szt")
+            sciezka_w = w.get("sciezka") or []
+            if len(sciezka_w) >= 2:
+                rodzic = (sciezka_w[-2] or "").strip()
+                if rodzic:
+                    try:
+                        ile = float(w.get("ilosc_lokalna") or 1)
+                    except (TypeError, ValueError):
+                        ile = 1.0
+                    if (rodzic, nr, ile) not in relacje:
+                        relacje.append((rodzic, nr, ile))
+                    dzieci.add(nr.upper())
+                    # Rodzic z drzewka musi istnieć w modelu, nawet gdy nie ma
+                    # własnego wiersza (bywa tylko w ścieżkach).
+                    if rodzic not in pozycje:
+                        pozycje[rodzic] = Kartoteka(rodzic, "", "komplet", "kpl")
+                    else:
+                        pozycje[rodzic].rodzaj = "komplet"
+                        pozycje[rodzic].jm = "kpl"
+
+        # MATKA JEST JUŻ W DRZEWKU — plik OUT zawiera całe złożenie razem
+        # z nadrzędnym, więc korzeń wychodzi naturalnie jako ten symbol,
+        # który nie jest niczyim dzieckiem. Nie dokładamy nic z nazwy pliku
+        # (inaczej niż w CSV, gdzie samego złożenia w wierszach nie ma).
+        korzenie = [s for s in pozycje if s.upper() not in dzieci]
+        return pozycje, relacje, korzenie
+
+    @staticmethod
+    def _symbol_jak_w(pozycje, symbol):
+        """Symbol w takiej postaci, w jakiej trafił do modelu (bez różnic wielkości liter)."""
+        s = (symbol or "").strip()
+        if s in pozycje:
+            return s
+        for k in pozycje:
+            if k.upper() == s.upper():
+                return k
+        return None
 
     # ── PLAN I ZAPIS ────────────────────────────────────────────────────
 

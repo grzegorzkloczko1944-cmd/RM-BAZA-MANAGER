@@ -52,6 +52,79 @@ from subiekt_historia import historia_dir, zapisz_historie, znajdz_logi
 KOMPLETY = ("Z", "ZZ")   # tylko te typy zakładają komplet
 LISCIE = ("X", "XX")     # zwykłe kartoteki
 
+
+def komunikat(rodzic, tytul, tresc, rodzaj="info", pytanie=False):
+    """Okno komunikatu centrowane na oknie rodzica.
+
+    Zamiennik messagebox: tamten jest natywnym dialogiem Tk i sam ustala
+    pozycję względem monitora GŁÓWNEGO. Przy trzech monitorach (pulpit od
+    x=-2560 do x=2560) komunikat z okna na bocznym ekranie wyskakiwał na
+    środkowym — `parent=` tego nie zmienia (zgłoszone 09.09.2026).
+
+    `pytanie=True` daje Tak/Nie i zwraca bool; inaczej samo OK (zwraca True).
+    """
+    kolory = {"info": "#2c3e50", "warn": "#d35400", "error": "#c0392b"}
+    tlo = kolory.get(rodzaj, kolory["info"])
+
+    okno = tk.Toplevel(rodzic)
+    okno.title(tytul)
+    okno.resizable(False, False)
+    try:
+        okno.transient(rodzic)
+    except tk.TclError:
+        pass
+    wynik = {"ok": False}
+
+    pasek = tk.Frame(okno, bg=tlo)
+    pasek.pack(fill=tk.X)
+    tk.Label(pasek, text=tytul, bg=tlo, fg="white", font=("Arial", 11, "bold"),
+             anchor="w", padx=14, pady=8).pack(fill=tk.X)
+
+    tk.Label(okno, text=tresc, justify="left", anchor="w", padx=16, pady=14,
+             font=("Arial", 9), wraplength=560).pack(fill=tk.BOTH, expand=True)
+
+    stopka = tk.Frame(okno)
+    stopka.pack(fill=tk.X, padx=12, pady=(0, 12))
+
+    def zamknij(ok):
+        wynik["ok"] = ok
+        okno.destroy()
+
+    if pytanie:
+        tk.Button(stopka, text="Nie", width=12,
+                  command=lambda: zamknij(False)).pack(side=tk.RIGHT, padx=(6, 0))
+        tk.Button(stopka, text="Tak", width=12, font=("Arial", 10, "bold"),
+                  command=lambda: zamknij(True)).pack(side=tk.RIGHT)
+    else:
+        tk.Button(stopka, text="OK", width=12, font=("Arial", 10, "bold"),
+                  command=lambda: zamknij(True)).pack(side=tk.RIGHT)
+
+    okno.bind("<Return>", lambda e: zamknij(True))
+    okno.bind("<Escape>", lambda e: zamknij(False))
+
+    wysrodkuj(okno, rodzic)
+    okno.grab_set()
+    okno.focus_set()
+    rodzic.wait_window(okno)
+    return wynik["ok"]
+
+
+def _log_techniczny(tekst):
+    """Dopisuje linię do lokalnego logu.
+
+    RM_BAZA chodzi pod pythonw.exe, który NIE MA konsoli — sam `print`
+    przepada bez śladu. Przy cichym `except` znaczyło to, że błąd znikał
+    zupełnie (tak przepadł pierwszy zapis znacznika zasiewu 09.09.2026).
+    """
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        stempel = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(os.path.join(LOG_DIR, "subiekt_projekt.log"), "a",
+                  encoding="utf-8") as f:
+            f.write(f"{stempel}  {tekst}\n")
+    except Exception:
+        pass                  # log nie może wywalić operacji, którą opisuje
+
 # Filtr typu — nazewnictwo jak w arkuszu głównym („(WSZYSTKO)").
 TYP_WSZYSTKO = "(WSZYSTKO)"
 TYP_BEZ_TYPU = "(bez typu)"
@@ -576,13 +649,167 @@ def numer_projektu(project_name, project_id=None):
     return str(project_id) if project_id is not None else (czlon or "")
 
 
-def build_plan(project_id, project_name, podmiot, tytul, csv_path=None):
+def drzewo_z_subiekta(symbole, timeout=120):
+    """({rodzic: [(dziecko, ilość)]}, {NUMER: nazwa}) — skład kompletów z SUBIEKTA.
+
+    Ten sam kształt co read_tree(), więc reszta kodu nie widzi różnicy — ale
+    źródłem jest stan FAKTYCZNIE założony w Subiekcie, nie plik *_OUT.xlsx.
+
+    Po co: projekt ZAKŁADAMY z OUT, ale po zasiewie właścicielem struktury
+    jest Subiekt (ANALIZA_ZK_DWA_ZRODLA_PRAWDY.md). Gdy ktoś poprawi tam skład
+    kompletu, przeliczanie ilości ma iść za tą poprawką, a nie za tym, co
+    konstruktor wyeksportował ostatnim razem.
+
+    Zwraca ({}, {}) gdy mostu nie ma — wtedy woła się read_tree jak dotąd.
+    """
+    symbole = [s.strip() for s in (symbole or []) if s and s.strip()]
+    if not symbole:
+        return {}, {}
+    if not os.path.isfile(CONFIG_PATH):
+        return {}, {}
+
+    try:
+        import subiekt_bridge
+        # Klucz "symbols" (nie "symbole") — tak czyta go ServerHost.
+        dane = subiekt_bridge.call(
+            "komplet", {"symbols": symbole}, timeout=timeout, write=False,
+            fallback=lambda: _komplet_cli(symbole, timeout))
+    except ImportError:
+        dane = _komplet_cli(symbole, timeout)
+    except Exception as e:
+        print(f"⚠️  Drzewo z Subiekta niedostępne: {e}")
+        return {}, {}
+    if not isinstance(dane, dict):
+        return {}, {}
+
+    kids, nazwy = {}, {}
+    for poz in dane.get("pozycje", []):
+        symbol = (poz.get("Symbol") or poz.get("Pytany") or "").strip()
+        if not symbol:
+            continue
+        nazwy.setdefault(symbol.upper(), (poz.get("Nazwa") or "").strip())
+        lista = []
+        for s in poz.get("Skladniki", []) or []:
+            child = (s.get("Symbol") or "").strip()
+            if not child:
+                continue
+            try:
+                ile = float(s.get("Ilosc") or 1)
+            except (TypeError, ValueError):
+                ile = 1.0
+            lista.append((child, ile))
+            nazwy.setdefault(child.upper(), (s.get("Nazwa") or "").strip())
+        if lista:
+            kids[symbol.upper()] = lista
+    return kids, nazwy
+
+
+def _komplet_cli(symbole, timeout):
+    """Zapas: tryb „komplet" osobnym procesem, gdy stały most niedostępny."""
+    exe = _find_exe()
+    if not exe:
+        return {}
+    import tempfile, subprocess, json as _json
+    out = os.path.join(tempfile.gettempdir(), "komplet_drzewo.json")
+    lst = os.path.join(tempfile.gettempdir(), "komplet_symbole.txt")
+    try:
+        with open(lst, "w", encoding="utf-8") as f:
+            f.write("\n".join(symbole))
+        subprocess.run([exe, "komplet", f"--symbols-file={lst}", f"--out={out}",
+                        CONFIG_PATH],
+                       capture_output=True, timeout=timeout,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if not os.path.isfile(out):
+            return {}
+        with open(out, encoding="utf-8") as f:
+            return _json.load(f)
+    except Exception:
+        return {}
+    finally:
+        for p in (out, lst):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+def korzenie_drzewa(kids):
+    """[symbol] — złożenia, które nie wchodzą w skład żadnego innego.
+
+    To jedyne pozycje, którym wolno zmienić ilość w oknie: mnożnik korzenia
+    przelicza CAŁE poddrzewo, więc proporcje wszędzie zostają zachowane.
+    Zmiana czegoś w środku rozjechałaby pozycję z jej rodzicem.
+    """
+    dzieci = set()
+    for _rodzic, lista in (kids or {}).items():
+        for c, _q in lista:
+            dzieci.add(c.strip().upper())
+    return [k for k in (kids or {}) if k.strip().upper() not in dzieci]
+
+
+def ilosci_z_drzewa(kids, ilosci_korzeni):
+    """{NUMER: ilość} policzone rekurencyjnie z drzewka.
+
+    `ilosci_korzeni` to {KORZEŃ: ILE MA BYĆ}. To ilość DOCELOWA, nie mnożnik —
+    wpisanie 3 znaczy „ma być 3 sztuki", niezależnie od tego, ile jest teraz
+    (różnicę wobec stanu na ZK dopisuje most). Zejście mnoży ilość lokalną składnika
+    przez ilość rodzica, więc zagnieżdżenia liczą się same:
+    korzeń ×2 → podzespół ×2 → jego części ×2 razy ich ilość w podzespole.
+
+    Pozycja występująca w kilku gałęziach SUMUJE się (A×n + A gdzie indziej) —
+    tak samo jak w drzewku Inventora, gdzie „Ilość całkowita" to suma wystąpień.
+
+    Cykl w drzewku (A zawiera B, B zawiera A) przerywamy na ścieżce, żeby nie
+    zapętlić rekurencji — dane z Inventora bywają uszkodzone.
+    """
+    wynik = {}
+
+    def zejdz(symbol, ile_rodzica, sciezka):
+        klucz = symbol.strip().upper()
+        if klucz in sciezka:
+            return                      # cykl — dalej nie schodzimy
+        sciezka = sciezka | {klucz}
+        for child, qty in (kids or {}).get(klucz, []):
+            try:
+                lokalna = float(qty) if qty not in (None, "") else 1.0
+            except (TypeError, ValueError):
+                lokalna = 1.0
+            ile = lokalna * ile_rodzica
+            k_child = child.strip().upper()
+            wynik[k_child] = wynik.get(k_child, 0.0) + ile
+            zejdz(child, ile, sciezka)
+
+    for korzen, ile in (ilosci_korzeni or {}).items():
+        try:
+            n = float(ile)
+        except (TypeError, ValueError):
+            n = 1.0
+        if n <= 0:
+            continue
+        k = korzen.strip().upper()
+        wynik[k] = wynik.get(k, 0.0) + n
+        zejdz(korzen, n, frozenset())
+    return wynik
+
+
+def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
+               ilosci_korzeni=None, bazowe_ilosci=None):
     """Buduje plan dla mostu + dane do wyświetlenia.
 
     Zwraca (plan, items, ostrzezenie, poza_bom, ukryte_cale_galezie), gdzie `poza_bom` to
     {rodzic: [numer, …]} — składniki obecne w DRZEWKU, ale nieobecne w BOM-ie.
     Nie trafią do Subiekta, więc okno musi je pokazać (patrz komentarz przy
     zbieraniu tej mapy).
+
+    `ilosci_korzeni` — {KORZEŃ: ILE MA BYĆ}. Gdy podane, ilości pozycji liczone
+    są OD NOWA z drzewka (patrz ilosci_z_drzewa), a nie brane z BOM-u.
+    Użytkownik wpisuje w oknie ilość docelową korzenia (np. 3 sztuki maszyny),
+    a całe poddrzewo przelicza się proporcjonalnie. Pozycje spoza drzewa
+    zostają z ilością z BOM-u — te wpisuje się ręcznie.
+
+    `bazowe_ilosci` — {SYMBOL: ilość NA ZK}, żywy odczyt z Subiekta. Gdy podane,
+    pozycja obecna na dokumencie startuje z ilością Z DOKUMENTU, nie z arkusza
+    (order_qty bywa nieaktualne między lockami). Precedencja: BOM < ZK < edycja.
     """
     # csv_path — maly projekt spoza RM_BAZA: caly BOM siedzi w jednym pliku,
     # wiec nie ma ani bazy project_*.sqlite, ani drzewka w *_OUT.xlsx.
@@ -613,6 +840,16 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None):
                 "qty": 1, "typ": typ_zl, "biblioteczne": False})
     else:
         kids, warn, nazwy_drzewka = read_tree(project_name)
+
+    # Mnożnik korzenia (np. „zamawiam 2 maszyny") — ilości liczone OD NOWA
+    # z drzewka. Skład bierzemy z SUBIEKTA, nie z pliku OUT: projekt zakładamy
+    # z OUT, ale po zasiewie właścicielem struktury jest Subiekt, więc ręczna
+    # poprawka składu kompletu ma być uwzględniona. Gdy mostu brak — schodzimy
+    # na drzewko z OUT, żeby funkcja działała też bez Subiekta.
+    z_drzewa = {}
+    if ilosci_korzeni:
+        kids_sub, _nazwy_sub = drzewo_z_subiekta(list(kids.keys()))
+        z_drzewa = ilosci_z_drzewa(kids_sub or kids, ilosci_korzeni)
 
     by_nr = {it["nr"].upper(): it for it in items}
     # Składniki z DRZEWKA, których NIE MA w BOM-ie:
@@ -661,6 +898,24 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None):
                 biblioteczne_bez_skladu[it["nr"]] = it["nazwa"] or it["nr"]
         try:
             qty = float(str(it["qty"]).replace(",", ".")) if it["qty"] not in (None, "") else 1.0
+            # Mnożnik korzenia: ilość liczona OD NOWA z drzewka, nie z BOM-u.
+            # Dotyczy tylko pozycji, które drzewo zna — reszta (znormalizowane
+            # bez numeru, dodane ręcznie, biblioteczne bez składu) zostaje
+            # z ilością z BOM-u, bo nie wiadomo, czy należy do tego zespołu.
+            # PRECEDENCJA: BOM < ZK < edycja usera.
+            # ZK jako baza: arkusz (order_qty) odświeża się z Subiekta tylko przy
+            # braniu locka, więc bywa nieaktualny — okno pokazywało „2", gdy na
+            # dokumencie było już 1, a zapis „nic nie robił" (09.09.2026).
+            # Żywy stan ZK ma pierwszeństwo przed BOM-em, ale edycja usera
+            # (przeliczone poddrzewo albo ręczna ilość) ma pierwszeństwo nad wszystkim.
+            if bazowe_ilosci:
+                na_zk = bazowe_ilosci.get(it["nr"].strip().upper())
+                if na_zk is not None:
+                    qty = na_zk
+            if z_drzewa:
+                policzona = z_drzewa.get(it["nr"].strip().upper())
+                if policzona is not None:
+                    qty = policzona
         except (TypeError, ValueError):
             qty = 1.0
         pozycje.append({
@@ -777,6 +1032,160 @@ def zapisz_mapowania(wynik):
         return subiekt_mapowania.put_many(wpisy)
     except Exception:
         return 0          # brak dostępu do bazy mapowań nie może wywalić całego zapisu
+
+
+def zapisz_zasiew(project_id, wynik):
+    """Zapisuje w BOM-ie projektu, które pozycje mają już kartotekę w Subiekcie.
+
+    Symbol kartoteki to KLUCZ dopasowania RM_BAZA ↔ Subiekt (numer rysunku,
+    a dla pozycji znormalizowanych symbol z nazwy). Jego zmiana w arkuszu
+    sprawiłaby, że przy kolejnym zasiewie kartoteka nie zostanie rozpoznana
+    i powstanie duplikat — dlatego arkusz blokuje edycję klucza pozycji
+    już zasianych (ANALIZA_ZK_DWA_ZRODLA_PRAWDY.md, 6D.4b).
+
+    Ślad musi być TRWAŁY: słownik w pamięci znika po restarcie, a wtedy nie
+    byłoby z czego odtworzyć blokady.
+
+    Zwraca liczbę oznaczonych pozycji.
+    """
+    if project_id is None:
+        return 0                      # projekt z CSV — nie ma bazy do oznaczenia
+    path = os.path.join(PROJECTS_DIR, f"project_{project_id}.sqlite")
+    if not os.path.isfile(path):
+        return 0
+
+    # „istnieje" liczy się tak samo jak „zalozona" — w obu wypadkach pozycja
+    # MA kartotekę w Subiekcie, a tylko to decyduje o blokadzie klucza.
+    symbole = {(k.get("Symbol") or "").strip()
+               for k in (wynik or {}).get("kroki", [])
+               if k.get("Rodzaj") == "kartoteka"
+               and k.get("Status") in ("zalozona", "istnieje")}
+    symbole.discard("")
+    if not symbole:
+        return 0
+
+    teraz = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ile = 0
+    try:
+        # timeout — arkusz główny trzyma tę samą bazę otwartą; bez czekania
+        # SQLite od razu rzuca "database is locked" i znacznik przepada.
+        con = sqlite3.connect(path, timeout=15)
+        try:
+            cols = {r[1] for r in con.execute("PRAGMA table_info('items')")}
+            if "subiekt_symbol" not in cols:
+                return 0              # baza sprzed migracji — pominięcie jest bezpieczne
+            # 1) Pozycje z numerem rysunku — symbol JEST numerem.
+            for symbol in symbole:
+                cur = con.execute(
+                    "UPDATE items SET subiekt_symbol = ?, subiekt_zasiew_at = ? "
+                    "WHERE COALESCE(NULLIF(TRIM(work_drawing_no), ''), "
+                    "               NULLIF(TRIM(norm_drawing_no), ''), "
+                    "               NULLIF(TRIM(src_drawing_no), '')) = ? COLLATE NOCASE",
+                    (symbol, teraz, symbol))
+                ile += cur.rowcount
+
+            # 2) Pozycje ZNORMALIZOWANE — nie mają numeru, ich symbol powstał
+            #    z NAZWY (symbol_z_nazwy). Trafienia z punktu 1 ich nie objęły,
+            #    a to właśnie dla nich kluczem jest nazwa, nie numer.
+            brak_numeru = con.execute(
+                "SELECT id, COALESCE(NULLIF(TRIM(work_name), ''), TRIM(src_name)) "
+                "FROM items WHERE subiekt_symbol IS NULL AND COALESCE("
+                "  NULLIF(TRIM(work_drawing_no), ''), NULLIF(TRIM(norm_drawing_no), ''), "
+                "  NULLIF(TRIM(src_drawing_no), '')) IS NULL").fetchall()
+            wg_symbolu = {s.upper(): s for s in symbole}
+            for item_id, nazwa in brak_numeru:
+                if not nazwa:
+                    continue
+                try:
+                    kand = symbol_z_nazwy(nazwa)
+                except Exception:
+                    continue
+                realny = wg_symbolu.get((kand or "").upper())
+                if not realny:
+                    continue          # symbol z sufiksem kolizji (-2) — nie zgadujemy
+                con.execute(
+                    "UPDATE items SET subiekt_symbol = ?, subiekt_zasiew_at = ? WHERE id = ?",
+                    (realny, teraz, item_id))
+                ile += 1
+            con.commit()
+        finally:
+            con.close()
+    except Exception as e:
+        # Pod pythonw.exe nie ma konsoli — sam print by przepadł i błąd
+        # zniknąłby bez śladu (tak stało się przy pierwszym uruchomieniu).
+        _log_techniczny(f"zapisz_zasiew({project_id}) NIEUDANY: {type(e).__name__}: {e}")
+        return 0                      # nie może wywalić udanego zapisu do Subiekta
+    _log_techniczny(f"zapisz_zasiew({project_id}): oznaczono {ile} pozycji")
+    return ile
+
+
+def pobierz_ilosci_zk(project_name, timeout=120):
+    """{symbol: ilość} z dokumentu ZK projektu. Sam odczyt.
+
+    Źródło „Ilość (zam.)" w arkuszu. Wołane przez RM_BAZA przy zwalnianiu
+    locka — stanowisko z mostem odświeża wartości, zapisuje je do pliku
+    projektu, a plik idzie na dysk sieciowy. Stanowiska BEZ dostępu do
+    Subiekta czytają już zwykły plik projektu i pracują jak dotąd.
+
+    Zwraca (ilości, numer_ZK, błąd). Brak mostu albo brak ZK to NIE błąd
+    krytyczny — po prostu nie ma czym odświeżyć i zostaje poprzedni stan.
+    """
+    numer = numer_projektu(project_name)
+    if not numer:
+        return {}, None, "brak numeru projektu"
+    if not os.path.isfile(CONFIG_PATH):
+        return {}, None, "brak konfiguracji połączenia"
+
+    # STAŁY MOST przede wszystkim — osobny proces to ~10 s samego logowania
+    # do Sfery, a ta funkcja chodzi przy ZWALNIANIU LOCKA, gdzie user czeka.
+    try:
+        import subiekt_bridge
+        dane = subiekt_bridge.call(
+            "zk-ilosci", {"projekt": numer}, timeout=timeout, write=False,
+            fallback=lambda: _zk_ilosci_cli(numer, timeout))
+    except ImportError:
+        dane = _zk_ilosci_cli(numer, timeout)
+    except Exception as e:
+        return {}, None, f"{type(e).__name__}: {e}"
+    if not isinstance(dane, dict):
+        return {}, None, "most nie zwrócił wyniku"
+
+    if dane.get("blad"):
+        return {}, dane.get("zk"), dane["blad"]
+    ilosci = {}
+    for p in dane.get("pozycje", []):
+        sym = (p.get("Symbol") or "").strip()
+        if sym:
+            try:
+                ilosci[sym.upper()] = float(p.get("Ilosc") or 0)
+            except (TypeError, ValueError):
+                pass
+    return ilosci, dane.get("zk"), None
+
+
+def _zk_ilosci_cli(numer, timeout):
+    """Zapas: osobny proces NexoRecon.exe, gdy stały most niedostępny."""
+    exe = _find_exe()
+    if not exe:
+        return {"blad": "brak NexoRecon.exe"}
+    import tempfile, subprocess, json as _json
+    out = os.path.join(tempfile.gettempdir(), f"zk_ilosci_{numer}.json")
+    try:
+        subprocess.run([exe, "zk-ilosci", f"--projekt={numer}", f"--out={out}",
+                        CONFIG_PATH],
+                       capture_output=True, timeout=timeout,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if not os.path.isfile(out):
+            return {"blad": "most nie zwrócił wyniku"}
+        with open(out, encoding="utf-8") as f:
+            return _json.load(f)
+    except Exception as e:
+        return {"blad": f"{type(e).__name__}: {e}"}
+    finally:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
 
 
 def save_log(project_id, wynik, plan=None):
@@ -952,7 +1361,7 @@ class MiksinNotatki:
             def ok():
                 nowy = pole.get("1.0", tk.END).strip()
                 if not nowy:
-                    messagebox.showwarning("Edycja", "Treść nie może być pusta.", parent=dlg)
+                    komunikat(dlg, "Edycja", "Treść nie może być pusta.", rodzaj="warn")
                     return
                 if nowy != z.get("tekst"):
                     z["tekst"] = nowy
@@ -1054,6 +1463,17 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         # Symbole (UPPER) wybrane do założenia w Subiekcie. Pozycje, które już
         # mają kartotekę, nie są tu trzymane — nie ma czego zakładać.
         self.wybrane = set()
+        #: True po kliknięciu „⊞ Rozwiń wszystko" — drzewko zostaje rozwinięte
+        #: także po każdej przebudowie („Przelicz", zmiana filtra).
+        self._rozwiniete_wszystko = False
+        #: {KORZEŃ: ile ma być} — ilość docelowa wpisana przez usera. Przelicza
+        #: całe poddrzewo, więc wpisanie 3 znaczy „trzy sztuki tego zespołu".
+        self.ilosci_korzeni = {}
+        #: {NUMER: ile} — ręczne ilości pozycji SPOZA drzewa (znormalizowane,
+        #: dodane ręcznie). Te nie wynikają z niczego, więc ustawia się je same.
+        self.ilosci_reczne = {}
+        #: drzewko projektu — potrzebne, żeby wiedzieć, co jest korzeniem
+        self.kids = {}
         self.filter_typ_modes = {}  # {typ: 'show'|'hide'} — kafelek ✚
 
         self.title("Projekt / Aktualizacja w Subiekcie — " + self.project_name
@@ -1263,6 +1683,9 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         # nagłówkiem (ta sama zasada co w arkuszu głównym RM_BAZA).
         self.tree.bind("<ButtonRelease-1>", self._zapisz_szerokosci, add="+")
         self.tree.bind("<Button-1>", self._toggle_pozycja, add="+")
+        # Dwuklik w kolumnę „Ilość" — wpisanie ilości docelowej (korzeń
+        # przelicza poddrzewo, pozycja spoza drzewa ustawia się sama).
+        self.tree.bind("<Double-Button-1>", self._edytuj_ilosc, add="+")
         # Dymki z pełną nazwą — WYŁĄCZONE na życzenie (07.09.2026). Wyskakiwały
         # przy każdym przesunięciu myszy nad drzewkiem i zasłaniały wiersze,
         # a przy przeglądaniu listy przeszkadzały bardziej, niż pomagały.
@@ -1318,10 +1741,42 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
 
     def _dry_run_worker(self):
         try:
+            # Drzewko — okno potrzebuje go, żeby wiedzieć, która pozycja jest
+            # KORZENIEM (tylko tam wolno zmienić ilość).
+            try:
+                if not self.csv_path:
+                    self.kids = read_tree(self.project_name)[0] or {}
+            except Exception:
+                self.kids = {}
+
+            # ŻYWY stan ZK jako baza ilości (BOM < ZK < edycja usera). Wołane
+            # tu, w wątku roboczym — pobierz_ilosci_zk to sam most, bez Tk
+            # i bez sqlite, więc jest wątkowo bezpieczne. Brak mostu = brak
+            # bazy = zostaje arkusz, jak dotąd.
+            bazowe = None
+            if not self.csv_path:
+                try:
+                    bazowe, _zk, _blad = pobierz_ilosci_zk(self.project_name, timeout=60)
+                    bazowe = bazowe or None
+                except Exception:
+                    bazowe = None
+
+            # Ilości docelowe: korzenie przeliczają poddrzewo, ręczne dotyczą
+            # pozycji spoza drzewa. Razem trafiają do build_plan jednym słownikiem.
+            ilosci = dict(self.ilosci_korzeni)
             plan, items, warn, poza_bom, ukryte_galezie, bib_bez_skladu = build_plan(
                 self.project_id, self.project_name,
                 self.var_podmiot.get().strip(), self.var_tytul.get().strip(),
-                csv_path=self.csv_path)
+                csv_path=self.csv_path,
+                ilosci_korzeni=ilosci or None,
+                bazowe_ilosci=bazowe)
+            # Ręczne ilości pozycji spoza drzewa — nakładamy po zbudowaniu planu,
+            # bo nie wynikają ze struktury i nic ich nie przelicza.
+            if self.ilosci_reczne:
+                for p in plan["pozycje"]:
+                    reczna = self.ilosci_reczne.get(p["symbol"].strip().upper())
+                    if reczna is not None:
+                        p["ilosc"] = reczna
             if not plan["pozycje"]:
                 self._po_watku(self._dry_done, None, None, [], "Brak pozycji z numerem rysunku.", {}, 0, {})
                 return
@@ -1372,7 +1827,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             self.status.config(text="Błąd.")
             self.summary.config(text=(warn or "")[:200])
             if warn:
-                messagebox.showerror("Subiekt", warn, parent=self)
+                komunikat(self, "Subiekt", warn, rodzaj="error")
                 self._na_wierzch()
             return
 
@@ -1428,9 +1883,23 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         self.ukryte_cale_galezie = ukryte_galezie
         ile_poza = sum(len(v) for v in self.poza_bom.values())
         rozjazd = f"   ⚠ {ile_poza} składników z drzewka NIE wejdzie do kompletów" if ile_poza else ""
+        # Rozjazd ilości BOM ↔ ZK musi być widać już po „Przelicz", nie dopiero
+        # w oknie potwierdzenia — user zgłosił (08.09.2026), że przy odświeżeniu
+        # nie dostawał o nim ŻADNEJ informacji, choć ilości były pomnożone.
+        ile_ilosci = sum(1 for k in wynik.get("kroki", [])
+                         if k.get("Rodzaj") == "zk-poz"
+                         and k.get("Status") == "roznica-ilosci")
+        ile_uzup = sum(1 for k in wynik.get("kroki", [])
+                       if k.get("Rodzaj") == "zk-poz"
+                       and k.get("Status") in ("do-uzupelnienia", "do-zmniejszenia"))
+        rozjazd_ilosci = (f"   ⚠ {ile_ilosci} pozycji ma na ZK INNĄ ILOŚĆ niż BOM"
+                          if ile_ilosci else "")
+        if ile_uzup:
+            rozjazd_ilosci += f"   ↕ {ile_uzup} poz. ze zmianą ilości na ZK"
         self.stop_kreciolek()
         self.status.config(
-            text=f"Podgląd gotowy — w Subiekcie nic nie zmieniono.{extra}{rozjazd}{note}")
+            text=f"Podgląd gotowy — w Subiekcie nic nie zmieniono."
+                 f"{extra}{rozjazd}{rozjazd_ilosci}{note}")
 
         # Rozjazd RM_BAZA ↔ drzewko też NIE wyskakuje sam (ta sama przyczyna
         # co przy oknie decyzji: modalne okno zabiera fokus i wypycha arkusz
@@ -1605,12 +2074,11 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         def zatwierdz():
             brak = [n for n, v in zmienne.items() if v.get() not in ("bez_skladu", "pomin")]
             if brak:
-                messagebox.showwarning(
+                komunikat(okno, 
                     "Decyzja wymagana",
                     f"Brakuje decyzji dla {len(brak)} pozycji:\n\n   "
                     + "\n   ".join(sorted(brak))
-                    + "\n\nZaznacz jedną z dwóch opcji przy każdej z nich.",
-                    parent=okno)
+                    + "\n\nZaznacz jedną z dwóch opcji przy każdej z nich.", rodzaj="warn")
                 return
             for n, v in zmienne.items():
                 self._bib_decyzje[n] = v.get()
@@ -1767,6 +2235,109 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             return                                  # już ma kartotekę — nie ma czego zakładać
         self.wybrane.symmetric_difference_update({sym})
         self._odswiez_znaczniki()
+
+    def _edytuj_ilosc(self, event):
+        """Dwuklik w kolumnę „Ilość" — wpisanie ilości DOCELOWEJ.
+
+        Edytować wolno tylko:
+          * KORZENIE drzewa — ich ilość przelicza CAŁE poddrzewo, więc
+            proporcje wszędzie zostają zachowane (wpisujesz 3 → 3 maszyny);
+          * pozycje SPOZA drzewa (znormalizowane, dodane ręcznie) — te nie
+            wynikają z niczego, więc ustawia się je pojedynczo.
+
+        Wnętrza drzewa nie ruszamy: ilość składnika wynika z rodzica i ręczna
+        zmiana rozjechałaby ją ze strukturą (patrz ANALIZA_ZK_DWA_ZRODLA_PRAWDY.md).
+        """
+        if self.tree.identify_region(event.x, event.y) != "cell":
+            return
+        kolumna = self._nazwa_kolumny(event.x)
+        # Kolumnę rozpoznajemy po NAZWIE, nie po numerze: przy
+        # show="tree headings" numeracja #N bywa przesunięta o kolumnę drzewa,
+        # a `tree.column(id, "id")` zwraca nazwę niezależnie od tego.
+        if kolumna != "qty":
+            return
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return
+        sym = (self.tree.set(item, "nr") or "").strip()
+        if not sym:
+            return
+        klucz = sym.upper()
+
+        kids = getattr(self, "kids", {}) or {}
+        glowne = {k.upper() for k in korzenie_drzewa(kids)}
+        zlozenia = {k.strip().upper() for k in kids}      # wszystko, co ma skład
+
+        if klucz in glowne:
+            komunikat(self, 
+                "Główne złożenie",
+                f"„{sym}” to główne złożenie projektu — jego ilość wynika\n"
+                f"z tego, ile maszyn budujecie, i nie zmienia się tutaj.\n\n"
+                f"Zmień ilość podzespołu (KT) niżej w strukturze —\n"
+                f"jego poddrzewo przeliczy się samo.", rodzaj="info")
+            self._na_wierzch()
+            return
+
+        # Detal wewnątrz złożenia (nie ma własnego składu) — jego ilość wynika
+        # wprost z rodzica, więc ręczna zmiana rozjechałaby ją ze strukturą.
+        if klucz not in zlozenia and klucz in self._symbole_w_drzewie():
+            komunikat(self, 
+                "Ilość wynika ze struktury",
+                f"„{sym}” jest składnikiem złożenia — jego ilość wynika z tego,\n"
+                f"ile sztuk zamawiasz nadrzędnego zespołu.\n\n"
+                f"Zmień ilość ZŁOŻENIA (KT), w którym siedzi,\n"
+                f"a jego zawartość przeliczy się sama.", rodzaj="info")
+            self._na_wierzch()
+            return
+
+        teraz = (self.tree.set(item, "qty") or "").strip()
+        nowa = simpledialog.askstring(
+            "Ilość", f"{sym}\n\nIle ma być (ilość docelowa):",
+            initialvalue=teraz, parent=self)
+        if nowa is None:
+            return
+        try:
+            wart = float(str(nowa).replace(",", "."))
+        except ValueError:
+            komunikat(self, "Ilość", "To nie jest liczba.", rodzaj="warn")
+            self._na_wierzch()
+            return
+        if wart <= 0:
+            komunikat(self, "Ilość", "Ilość musi być większa od zera.", rodzaj="warn")
+            self._na_wierzch()
+            return
+
+        if klucz in zlozenia:
+            # Złożenie — ilość przelicza CAŁE jego poddrzewo.
+            self.ilosci_korzeni[klucz] = wart
+        else:
+            # Pozycja spoza drzewa (znormalizowana, dodana ręcznie) — sama dla siebie.
+            self.ilosci_reczne[klucz] = wart
+        self._dry_run_async()          # przelicz plan i pokaż nowe ilości
+
+    def _nazwa_kolumny(self, x):
+        """Nazwa kolumny pod kursorem („sel", „qty", …) albo "" dla drzewa.
+
+        `identify_column` zwraca „#N", ale przy show="tree headings" to N
+        odnosi się do listy `columns` z przesunięciem, które łatwo pomylić.
+        Tk potrafi przetłumaczyć „#N" na nazwę — i to jest jedyny pewny sposób.
+        """
+        try:
+            kol = self.tree.identify_column(x)
+            if not kol or kol == "#0":
+                return ""
+            return self.tree.column(kol, "id") or ""
+        except tk.TclError:
+            return ""
+
+    def _symbole_w_drzewie(self):
+        """{NUMER} — wszystko, co wynika ze struktury (rodzice i dzieci)."""
+        w = set()
+        for rodzic, lista in (getattr(self, "kids", {}) or {}).items():
+            w.add(rodzic.strip().upper())
+            for c, _q in lista:
+                w.add(c.strip().upper())
+        return w
 
     def _odswiez_znaczniki(self):
         """Przerysowuje kolumnę ✓ i podsumowanie bez przebudowy drzewa."""
@@ -2005,7 +2576,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         def po_zapisie(d):
             sym = d["symbol"].strip()
             if any(p["symbol"].strip().upper() == sym.upper() for p in self.plan["pozycje"]):
-                messagebox.showinfo("Pozycja", f"„{sym}” już jest w planie.", parent=self)
+                komunikat(self, "Pozycja", f"„{sym}” już jest w planie.", rodzaj="info")
                 self._na_wierzch()
                 return
             self.plan["pozycje"].append({
@@ -2058,9 +2629,17 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             pass
         self._przerysuj()
 
-    def _rozwin(self, otwarte):
+    def _rozwin(self, otwarte, zapamietaj=True):
         """Rozwija/zwija całe drzewo — bez tego elementy handlowe siedzą
-        schowane w złożeniach i wygląda, jakby ich nie było."""
+        schowane w złożeniach i wygląda, jakby ich nie było.
+
+        `zapamietaj` zapisuje decyzję na stałe: drzewko przebudowuje się przy
+        każdym „Przelicz", a wcześniej wracało wtedy do stanu domyślnego
+        i rozwinięcia „żyły własnym życiem" (09.09.2026).
+        """
+        if zapamietaj:
+            self._rozwiniete_wszystko = bool(otwarte)
+
         def przejdz(node):
             for c in self.tree.get_children(node):
                 self.tree.item(c, open=otwarte)
@@ -2216,7 +2795,67 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         return (self.filter_typ_var.get() != TYP_WSZYSTKO
                 or bool(self.filter_typ_modes))
 
+    def _klucz_wezla(self, node):
+        """Identyfikator węzła w ścieżce rozwinięć.
+
+        Numer rysunku, a gdy go brak — tekst węzła. Węzły bez numeru
+        („Pozostałe pozycje", grupy) dawały pusty klucz, więc wszystkie
+        wyglądały tak samo i rozwinięcia myliły się między nimi.
+        """
+        nr = (self.tree.set(node, "nr") or "").strip().upper()
+        if nr:
+            return nr
+        try:
+            return "#" + (self.tree.item(node, "text") or "").strip().upper()
+        except tk.TclError:
+            return "#?"
+
+    def _zapamietaj_rozwiniete(self):
+        """{ŚCIEŻKA} — gałęzie rozwinięte przez usera.
+
+        Drzewko jest przy każdym „Przelicz" budowane OD NOWA, więc bez tego
+        wszystko zwijało się do pierwszego poziomu i trzeba było klikać od
+        początku (zgłoszone 09.09.2026).
+
+        Kluczem jest ŚCIEŻKA symboli od korzenia, nie sam symbol: ta sama
+        pozycja bywa w kilku złożeniach i rozwinięcie jej w jednym miejscu
+        nie znaczy, że ma się rozwinąć wszędzie.
+        """
+        rozwiniete = set()
+
+        def zejdz(node, sciezka):
+            for ch in self.tree.get_children(node):
+                s = sciezka + (self._klucz_wezla(ch),)
+                if self.tree.item(ch, "open"):
+                    rozwiniete.add(s)
+                zejdz(ch, s)
+
+        try:
+            zejdz("", ())
+        except tk.TclError:
+            pass
+        return rozwiniete
+
+    def _przywroc_rozwiniete(self, rozwiniete):
+        """Rozwija z powrotem gałęzie zapamiętane przed odbudową drzewka."""
+        if not rozwiniete:
+            return
+
+        def zejdz(node, sciezka):
+            for ch in self.tree.get_children(node):
+                s = sciezka + (self._klucz_wezla(ch),)
+                if s in rozwiniete:
+                    self.tree.item(ch, open=True)
+                zejdz(ch, s)
+
+        try:
+            zejdz("", ())
+        except tk.TclError:
+            pass
+
     def _fill_tree(self, plan, wynik):
+        # Co user miał rozwinięte — odtworzymy to po przebudowie.
+        rozwiniete = self._zapamietaj_rozwiniete()
         self.tree.delete(*self.tree.get_children())
         status = {}
         for k in wynik.get("kroki", []):
@@ -2299,6 +2938,16 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             for p in sorted(luzne, key=lambda x: x["symbol"]):
                 wstaw(grupa, p)
 
+        # Stan rozwinięcia po przebudowie:
+        #   * kliknąłeś „Rozwiń wszystko" → zostaje rozwinięte, na stałe;
+        #   * inaczej wracają gałęzie, które miałeś otwarte.
+        # Odtwarzanie po ścieżkach bywa zawodne (pozycja może zniknąć z planu
+        # albo zmienić rodzica), więc jawna decyzja usera ma pierwszeństwo.
+        if getattr(self, "_rozwiniete_wszystko", False):
+            self._rozwin(True, zapamietaj=False)
+        else:
+            self._przywroc_rozwiniete(rozwiniete)
+
     # ── zapis ──────────────────────────────────────────────────────────────
     def _plan_do_zapisu(self):
         """Plan ograniczony do wybranych pozycji.
@@ -2336,21 +2985,20 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         # do okna, w którym się ją podejmuje.
         czekaja = [n for n in self.bib_bez_skladu if n not in self._bib_decyzje]
         if czekaja:
-            messagebox.showwarning(
+            komunikat(self, 
                 "Najpierw decyzje",
                 f"{len(czekaja)} złożeń bibliotecznych czeka na decyzję:\n\n   "
                 + "\n   ".join(sorted(czekaja))
                 + "\n\nBez niej powstałby PUSTY komplet — kartoteka rodzaju Komplet\n"
                   "bez składu, z której magazynier nic nie złoży.\n\n"
-                  "Za chwilę otworzę okno decyzji.",
-                parent=self)
+                  "Za chwilę otworzę okno decyzji.", rodzaj="warn")
             self._na_wierzch()
             self._pokaz_biblioteczne()
             return
 
         podmiot = self.var_podmiot.get().strip()
         if not podmiot:
-            messagebox.showwarning("Subiekt", "Podaj podmiot na ZK.", parent=self)
+            komunikat(self, "Subiekt", "Podaj podmiot na ZK.", rodzaj="warn")
             self._na_wierzch()
             return
 
@@ -2382,12 +3030,11 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                 kompl += 1
 
         if not plan["pozycje"]:
-            messagebox.showwarning(
+            komunikat(self, 
                 "Subiekt",
                 "Nic nie zostało wybrane do zapisu.\n\n"
                 "Żadna pozycja nie ma kartoteki i nic nie jest zaznaczone —\n"
-                "ZK nie miałoby z czego powstać.",
-                parent=self)
+                "ZK nie miałoby z czego powstać.", rodzaj="warn")
             return
 
         # Co się stanie z ZK — most już to ustalił w suchym przebiegu. Bez tego
@@ -2396,6 +3043,12 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         opis_zk = (f"  • ZK „{self.var_tytul.get().strip()}” dla podmiotu „{podmiot}”\n"
                    f"    — {len(plan['pozycje'])} pozycji, "
                    f"Uwagi: „{numer_projektu(self.project_name, self.project_id)}”\n")
+        # Ile pozycji jest na ZK w innej ilości niż w BOM-ie — most zgłasza to
+        # osobnymi krokami „zk-poz". Musi wejść do opisu ZK, bo samo „dopisze
+        # 0 poz." czytało się jak „nic się nie dzieje", a dane były rozjechane.
+        ile_roznic = sum(1 for k in (self.dry or {}).get("kroki", [])
+                         if k.get("Rodzaj") == "zk-poz"
+                         and k.get("Status") == "roznica-ilosci")
         for k in (self.dry or {}).get("kroki", []):
             if k.get("Rodzaj") != "zk":
                 continue
@@ -2404,6 +3057,9 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                            f"    (nowy dokument NIE powstanie)\n")
             elif k.get("Status") == "bez-zmian":
                 opis_zk = f"  • {k['Symbol']} — bez zmian, wszystko już na dokumencie\n"
+            if ile_roznic:
+                opis_zk += (f"    ⚠ {ile_roznic} pozycji ma na dokumencie INNĄ ILOŚĆ niż BOM "
+                            f"— zapis tego NIE zmieni\n")
             break
 
         # Zapis idzie na bazę produkcyjną — potwierdzenie musi mówić wprost,
@@ -2508,14 +3164,61 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             wiersze.append(("BIBLIOTECZNE bez składu", n, self.bib_bez_skladu.get(n, ""),
                             "powstanie jako zwykła kartoteka"))
 
+        # Pozycje, które SĄ już na ZK, ale w innej ilości niż w BOM-ie.
+        # Most ich nie rusza (właściciel ilości na wystawionym dokumencie nie
+        # jest rozstrzygnięty — ANALIZA_ZK_DWA_ZRODLA_PRAWDY.md), ale user MUSI
+        # to zobaczyć: wcześniej okno pisało „BEZ ZMIAN" i „dopisze 0 poz.",
+        # choć BOM i dokument rozjechały się na ilościach (zgłoszone 08.09.2026:
+        # „cała zmiana przebiega po cichu, USER nawet nie wie co zrobił").
+        roznice_ilosci = 0
+        uzupelnienia = 0
+        zmniejszenia = 0
+        for k in (self.dry or {}).get("kroki", []):
+            if k.get("Rodzaj") != "zk-poz":
+                continue
+            st = k.get("Status")
+            if st not in ("roznica-ilosci", "do-uzupelnienia", "do-zmniejszenia"):
+                continue
+            sym = (k.get("Symbol") or "").strip()
+            if sym.upper() not in w_planie:
+                continue
+            if st == "do-uzupelnienia":
+                # Ilość, którą zapis ZWIĘKSZY na ZK. Bez tego wiersza pasek
+                # mówił „uzupełni ilość w 24 poz.", a tabela nie pokazywała
+                # ANI JEDNEJ z nich (09.09.2026).
+                uzupelnienia += 1
+                wiersze.append(("ZWIĘKSZY ILOŚĆ", sym, nazwy.get(sym.upper(), ""),
+                                k.get("Szczegoly") or ""))
+            elif st == "do-zmniejszenia":
+                # Zmniejszenie ZABIERA coś z dokumentu księgowego — osobna
+                # kategoria i czerwone tło, żeby nie przeszło niezauważone.
+                zmniejszenia += 1
+                wiersze.append(("ZMNIEJSZY ILOŚĆ", sym, nazwy.get(sym.upper(), ""),
+                                k.get("Szczegoly") or ""))
+            else:
+                roznice_ilosci += 1
+                wiersze.append(("RÓŻNICA ILOŚCI", sym, nazwy.get(sym.upper(), ""),
+                                k.get("Szczegoly") or ""))
+
         # Najpierw to, co się realnie zmienia; „bez zmian" na koniec — inaczej
         # dwie istotne zmiany giną wśród dwudziestu trzech nieistotnych wierszy.
-        waga = {"NOWA KARTOTEKA": 0, "NOWY KOMPLET": 1, "ZMIENIA SKŁAD": 2,
-                "BIBLIOTECZNE bez składu": 3, "bez zmian": 9}
+        # RÓŻNICA ILOŚCI na samej górze: to jedyna kategoria, której most NIE
+        # zapisze, więc user musi ją zobaczyć zanim uzna zapis za komplet.
+        waga = {"ZMNIEJSZY ILOŚĆ": 0, "RÓŻNICA ILOŚCI": 1, "ZWIĘKSZY ILOŚĆ": 2,
+                "NOWA KARTOTEKA": 3, "NOWY KOMPLET": 4, "ZMIENIA SKŁAD": 5,
+                "BIBLIOTECZNE bez składu": 6, "bez zmian": 9}
         wiersze.sort(key=lambda w: (waga.get(w[0], 5), w[1]))
 
+        if roznice_ilosci:
+            uwagi.append(
+                f"{roznice_ilosci} pozycji ma na ZK INNĄ ILOŚĆ niż w BOM-ie.\n"
+                "   Zapis ICH NIE ZMIENI — ilości na wystawionym dokumencie\n"
+                "   prowadzi się w Subiekcie. Sprawdź listę i popraw ręcznie,\n"
+                "   jeśli dokument ma iść za BOM-em.")
+
         ok = self._potwierdz_zapis(czesc_trwala, opis_zk, uwagi, wiersze,
-                                   nowe, kompl, kompl_akt, kompl_bez_zmian)
+                                   nowe, kompl, kompl_akt, kompl_bez_zmian,
+                                   roznice_ilosci, uzupelnienia, zmniejszenia)
         self._na_wierzch()
         if not ok:
             return
@@ -2525,8 +3228,100 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         self.status.config(text="Zapisuję do Subiekta — nie zamykaj okna…")
         threading.Thread(target=self._write_worker, daemon=True).start()
 
+    def _okno_raportu(self, zk, lines, wiersze, log, liczniki, zle):
+        """Raport PO zapisie — bliźniak okna potwierdzenia PRZED zapisem.
+
+        Te same kafelki i ta sama tabela pozycja po pozycji, tylko w czasie
+        przeszłym: co się faktycznie stało i na jaką wartość. Wąski messagebox
+        urywał listę na 12 pozycjach („… i 8 więcej") — druga połowa zasady
+        „nic po cichu" (okno PRZED + raport PO) była przez to połowiczna.
+        """
+        okno = tk.Toplevel(self)
+        okno.title("Subiekt — zapis zakończony")
+        wys = max(520, min(900, 360 + 22 * len(wiersze)))
+        okno.geometry(f"1000x{wys}")
+        okno.minsize(760, 420)
+        okno.resizable(True, True)
+        okno.transient(self)
+
+        # Nagłówek mówi od razu, czy wszystko poszło: zielony = czysto,
+        # czerwony = były błędy albo coś zostało nietknięte.
+        kolor = "#c0392b" if zle else "#1e8449"
+        tytul = ("ZAPISANO — ale sprawdź, co wymaga uwagi" if zle
+                 else "ZAPISANO W SUBIEKCIE")
+        naglowek = tk.Frame(okno, bg=kolor)
+        naglowek.pack(fill=tk.X)
+        tk.Label(naglowek, text=tytul, bg=kolor, fg="white",
+                 font=("Arial", 12, "bold"), anchor="w", padx=12, pady=8).pack(fill=tk.X)
+
+        pasek = tk.Frame(okno, bg="#ecf0f1")
+        pasek.pack(fill=tk.X)
+        for tekst, liczba, kol in liczniki:
+            if not liczba:
+                continue
+            kafel = tk.Frame(pasek, bg="#ecf0f1", padx=16, pady=8)
+            kafel.pack(side=tk.LEFT)
+            tk.Label(kafel, text=str(liczba), bg="#ecf0f1", fg=kol,
+                     font=("Arial", 20, "bold")).pack()
+            tk.Label(kafel, text=tekst, bg="#ecf0f1", fg="#2c3e50",
+                     font=("Arial", 8, "bold")).pack()
+
+        # Z `lines` bierzemy tylko nagłówkowe liczby (do pierwszej pustej
+        # linii) — listy pozycji są w tabeli, tu by się tylko dublowały.
+        naglowkowe = []
+        for ln in lines:
+            if not ln.strip():
+                break
+            naglowkowe.append(ln)
+        tk.Label(okno, text="\n".join(naglowkowe) or f"ZK: {zk or '—'}",
+                 justify="left", anchor="w", padx=12, pady=6,
+                 font=("Arial", 9)).pack(fill=tk.X)
+
+        ramka = tk.Frame(okno)
+        ramka.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 6))
+        kol = ("co", "symbol", "nazwa", "szczegoly")
+        tab = ttk.Treeview(ramka, columns=kol, show="headings", height=12)
+        for c, tekst, szer in (("co", "Co się stało", 175), ("symbol", "Symbol", 135),
+                               ("nazwa", "Nazwa", 210), ("szczegoly", "Szczegóły", 400)):
+            tab.heading(c, text=tekst)
+            tab.column(c, width=szer, anchor="w")
+        vs = ttk.Scrollbar(ramka, orient="vertical", command=tab.yview)
+        tab.configure(yscrollcommand=vs.set)
+        tab.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+
+        tab.tag_configure("blad", background="#e6b0aa", font=("Arial", 9, "bold"))
+        tab.tag_configure("zmn", background="#f5b7b1", font=("Arial", 9, "bold"))
+        tab.tag_configure("akt", background="#fdebd0")
+        tab.tag_configure("nowe", background="#d5f5e3")
+        tab.tag_configure("nic", foreground="#95a5a6")
+        tagi = {"BŁĄD": "blad", "ZMNIEJSZONO ILOŚĆ": "zmn", "ZWIĘKSZONO ILOŚĆ": "akt",
+                "NIE ZMIENIONO": "nic", "UTWORZONY KOMPLET": "nowe",
+                "ZAŁOŻONA KARTOTEKA": "nowe", "ZMIENIONY SKŁAD": "akt"}
+        for co, sym, nazwa, szcz in wiersze:
+            tab.insert("", "end", values=(co, sym, nazwa, szcz), tags=(tagi.get(co, "nic"),))
+        if not wiersze:
+            tab.insert("", "end", values=("bez zmian", "", "", "nic nie wymagało zapisu"),
+                       tags=("nic",))
+
+        if log:
+            tk.Label(okno, text=f"Log: {log}", justify="left", anchor="w",
+                     fg="#7f8c8d", font=("Arial", 8), padx=12,
+                     wraplength=960).pack(fill=tk.X)
+
+        stopka = tk.Frame(okno)
+        stopka.pack(fill=tk.X, padx=12, pady=10)
+        tk.Button(stopka, text="OK", width=12, command=okno.destroy,
+                  font=("Arial", 10, "bold")).pack(side=tk.RIGHT)
+
+        wysrodkuj(okno, self)
+        okno.grab_set()
+        okno.focus_set()
+        self.wait_window(okno)
+
     def _potwierdz_zapis(self, czesc_trwala, opis_zk, uwagi, wiersze,
-                         nowe, kompl, kompl_akt, kompl_bez_zmian=0):
+                         nowe, kompl, kompl_akt, kompl_bez_zmian=0,
+                         roznice_ilosci=0, uzupelnienia=0, zmniejszenia=0):
         """Potwierdzenie zapisu z TABELĄ — co dokładnie powstanie i co zostanie
         nadpisane, pozycja po pozycji.
 
@@ -2556,10 +3351,18 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         pasek = tk.Frame(okno, bg="#ecf0f1")
         pasek.pack(fill=tk.X)
         for tekst, liczba, kolor in (
+            # RÓŻNICA ILOŚCI pierwsza i czerwona — to jedyna kategoria, której
+            # zapis NIE załatwi. Kafelek „BEZ ZMIAN" obok niej byłby mylący,
+            # więc niżej jest wyciszany, gdy rozjazd istnieje.
+            ("RÓŻNICA ILOŚCI", roznice_ilosci, "#c0392b"),
+            # Ilości, które zapis UZUPEŁNI na ZK — pomarańczowy, bo to realna
+            # zmiana na dokumencie, ale zamierzona (w odróżnieniu od rozjazdu).
+            ("ZMNIEJSZY ILOŚĆ", zmniejszenia, "#c0392b"),
+            ("ZWIĘKSZY ILOŚĆ", uzupelnienia, "#d35400"),
             ("NOWE KARTOTEKI", nowe, "#27ae60"),
             ("NOWE KOMPLETY", kompl, "#27ae60"),
             ("ZMIENIĄ SKŁAD", kompl_akt, "#d35400"),
-            ("BEZ ZMIAN", kompl_bez_zmian, "#95a5a6"),
+            ("SKŁAD BEZ ZMIAN", kompl_bez_zmian, "#95a5a6"),
         ):
             if not liczba:
                 continue
@@ -2601,6 +3404,9 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         tab.tag_configure("nowe", background="#d5f5e3")
         tab.tag_configure("akt", background="#fdebd0")
         tab.tag_configure("bib", background="#fadbd8")
+        # Rozjazd ilości — czerwone tło i pogrubienie: to JEDYNA kategoria,
+        # której zapis nie załatwi, więc nie może wyglądać jak reszta.
+        tab.tag_configure("roznica", background="#f5b7b1", font=("Arial", 9, "bold"))
         tab.tag_configure("nic", foreground="#95a5a6")   # bez tła — to nie jest zmiana
 
         def przeladuj():
@@ -2610,6 +3416,12 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                     if var_tylko.get():
                         continue
                     tag = "nic"
+                elif "RÓŻNICA" in co:
+                    tag = "roznica"
+                elif "ZMNIEJSZY" in co:
+                    tag = "roznica"      # zabiera z dokumentu — musi rzucać się w oczy
+                elif "ZWIĘKSZY" in co:
+                    tag = "akt"          # zmiana na dokumencie, ale zamierzona
                 elif "ZMIENIA" in co:
                     tag = "akt"
                 elif "BIBLIOTECZNE" in co:
@@ -2668,8 +3480,10 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                 save_log(self.project_id or numer_projektu(self.project_name),
                          wynik, plan=self._plan_do_zapisu())
                 zapisz_mapowania(wynik)
-            except Exception:
-                pass          # log nie moze przeslonic udanego zapisu
+                zapisz_zasiew(self.project_id, wynik)
+            except Exception as e:
+                # log nie moze przeslonic udanego zapisu, ale musi zostawic slad
+                _log_techniczny(f"slad po zapisie (okno zamkniete) NIEUDANY: {e}")
             return
         self._po_watku(self._write_done, wynik, None)
 
@@ -2677,7 +3491,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         self.btn_refresh.config(state=tk.NORMAL)
         if error:
             self.status.config(text="Zapis nieudany.")
-            messagebox.showerror("Subiekt — zapis", error, parent=self)
+            komunikat(self, "Subiekt — zapis", error, rodzaj="error")
             self._na_wierzch()
             self.btn_write.config(state=tk.NORMAL)
             return
@@ -2694,6 +3508,9 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         log = save_log(self.project_id or numer_projektu(self.project_name),
                        wynik, plan=self._plan_do_zapisu())
         zmap = zapisz_mapowania(wynik)
+        # Trwały ślad w BOM-ie: te pozycje mają już kartotekę w Subiekcie,
+        # więc arkusz zablokuje edycję ich klucza (numeru / nazwy).
+        zasiane = zapisz_zasiew(self.project_id, wynik)
 
         # Co się stało z ZK — „utworzone" i „dopisano do istniejącego" to dwie
         # różne informacje, a użytkownik musi wiedzieć, którą dostał.
@@ -2709,6 +3526,38 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             zk_opis,
             f"Mapowań zapamiętanych: {zmap}",
         ]
+        if zasiane:
+            lines.append(f"Pozycji oznaczonych jako zasiane: {zasiane}")
+            lines.append("  (ich numer rysunku / nazwa jest teraz zablokowany w arkuszu —")
+            lines.append("   zmiana rozspójniłaby powiązanie z kartoteką w Subiekcie)")
+
+        # Pozycje, które zostały na ZK z inną ilością niż BOM. Most ich nie
+        # ruszył, więc raport MUSI to powiedzieć wprost i z wartościami —
+        # inaczej user wychodzi z zapisu przekonany, że dokument zgadza się
+        # z BOM-em (zgłoszone 08.09.2026).
+        # Co faktycznie uzupełniono — druga połowa zasady „nic po cichu":
+        # skoro zapowiadaliśmy uzupełnienie, raport musi powiedzieć, że zaszło.
+        uzupelnione = [k for k in kroki
+                       if k.get("Rodzaj") == "zk-poz"
+                       and k.get("Status") in ("ilosc-uzupelniona", "ilosc-zmniejszona")]
+        if uzupelnione:
+            lines += ["", f"✅ ZMIENIONO ILOŚĆ w {len(uzupelnione)} poz. na ZK:"]
+            lines += [f"  • {r['Symbol']}: {r.get('Szczegoly') or ''}"
+                      for r in uzupelnione[:12]]
+            if len(uzupelnione) > 12:
+                lines.append(f"  … i {len(uzupelnione) - 12} więcej (szczegóły w logu)")
+
+        roznice = [k for k in kroki
+                   if k.get("Rodzaj") == "zk-poz"
+                   and k.get("Status") == "roznica-ilosci-pominieta"]
+        if roznice:
+            lines += ["", f"⚠ RÓŻNICA ILOŚCI — {len(roznice)} pozycji NIE zmieniono na ZK:"]
+            lines += [f"  • {r['Symbol']}: {r.get('Szczegoly') or ''}" for r in roznice[:12]]
+            if len(roznice) > 12:
+                lines.append(f"  … i {len(roznice) - 12} więcej (szczegóły w logu)")
+            lines.append("  Ilości na wystawionym ZK prowadzi się w Subiekcie —")
+            lines.append("  popraw ręcznie, jeśli dokument ma iść za BOM-em.")
+
         if bledy:
             lines += ["", f"Błędy ({len(bledy)}):"]
             lines += [f"  • {b['Rodzaj']} {b['Symbol']}: {b.get('Szczegoly') or ''}" for b in bledy[:12]]
@@ -2717,9 +3566,65 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         if log:
             lines += ["", f"Log: {log}"]
 
-        self.status.config(text=f"Zapisano. ZK: {zk or '—'}" + (f"   ⚠ błędów: {len(bledy)}" if bledy else ""))
-        (messagebox.showwarning if bledy else messagebox.showinfo)(
-            "Subiekt — zapis zakończony", "\n".join(lines), parent=self)
+        self.status.config(text=f"Zapisano. ZK: {zk or '—'}"
+                                + (f"   ⚠ błędów: {len(bledy)}" if bledy else "")
+                                + (f"   ⚠ różnic ilości: {len(roznice)}" if roznice else ""))
+
+        # Raport w tej samej formie co potwierdzenie PRZED zapisem: kafelki
+        # z licznikami + tabela pozycja po pozycji. Wąski messagebox urywał
+        # listę na 12 pozycjach („… i 8 więcej"), więc tego, co się faktycznie
+        # zmieniło, nie dało się doczytać bez zaglądania do logu (09.09.2026).
+        nazwy_poz = {p["symbol"].strip().upper(): p.get("nazwa") or ""
+                     for p in (self.plan or {}).get("pozycje", [])}
+        w_raport = []
+        for k in kroki:
+            r, st = k.get("Rodzaj"), k.get("Status") or ""
+            sym = (k.get("Symbol") or "").strip()
+            szcz = k.get("Szczegoly") or ""
+            if st == "blad":
+                w_raport.append(("BŁĄD", sym, "", f"{r}: {szcz}"))
+            elif r == "zk-poz" and st == "ilosc-zmniejszona":
+                w_raport.append(("ZMNIEJSZONO ILOŚĆ", sym, nazwy_poz.get(sym.upper(), ""), szcz))
+            elif r == "zk-poz" and st == "ilosc-uzupelniona":
+                w_raport.append(("ZWIĘKSZONO ILOŚĆ", sym, nazwy_poz.get(sym.upper(), ""), szcz))
+            elif r == "zk-poz" and st == "roznica-ilosci-pominieta":
+                w_raport.append(("NIE ZMIENIONO", sym, nazwy_poz.get(sym.upper(), ""), szcz))
+            elif r == "kartoteka" and st == "zalozona":
+                w_raport.append(("ZAŁOŻONA KARTOTEKA", sym, nazwy_poz.get(sym.upper(), ""), szcz))
+            elif r == "komplet" and st.startswith("utworzony"):
+                w_raport.append(("UTWORZONY KOMPLET", sym, nazwy_poz.get(sym.upper(), ""), szcz))
+            elif r == "komplet" and st == "zaktualizowany":
+                w_raport.append(("ZMIENIONY SKŁAD", sym, nazwy_poz.get(sym.upper(), ""), szcz))
+
+        waga_r = {"BŁĄD": 0, "ZMNIEJSZONO ILOŚĆ": 1, "NIE ZMIENIONO": 2,
+                  "ZWIĘKSZONO ILOŚĆ": 3, "UTWORZONY KOMPLET": 4,
+                  "ZMIENIONY SKŁAD": 5, "ZAŁOŻONA KARTOTEKA": 6}
+        w_raport.sort(key=lambda w: (waga_r.get(w[0], 8), w[1]))
+
+        self._okno_raportu(
+            zk=zk, lines=lines, wiersze=w_raport, log=log,
+            liczniki=[
+                ("BŁĘDY", len(bledy), "#c0392b"),
+                ("ZMNIEJSZONO", sum(1 for w in w_raport if w[0] == "ZMNIEJSZONO ILOŚĆ"), "#c0392b"),
+                ("ZWIĘKSZONO", sum(1 for w in w_raport if w[0] == "ZWIĘKSZONO ILOŚĆ"), "#d35400"),
+                ("KARTOTEKI", zal, "#27ae60"),
+                ("KOMPLETY", kom, "#27ae60"),
+                ("NIE ZMIENIONO", len(roznice), "#7f8c8d"),
+            ],
+            zle=bool(bledy or roznice))
+        # READ-BACK do arkusza (6D.6): po zapisie „Ilość (zam.)" w arkuszu
+        # musi od razu pokazać stan Subiekta. Bez tego odświeżała się dopiero
+        # przy następnym braniu locka — a okno buduje plan z arkusza, więc
+        # po zapisie pokazywało STARE ilości i kolejny zapis „nic nie robił",
+        # choć user właśnie coś zmienił (zgłoszone 09.09.2026, transporterek).
+        app = self.master
+        try:
+            if hasattr(app, "_zapisz_ilosci_z_subiekta"):
+                app._zapisz_ilosci_z_subiekta()
+            if hasattr(app, "refresh_data"):
+                app.refresh_data()
+        except Exception as e:
+            _log_techniczny(f"read-back do arkusza po zapisie NIEUDANY: {e}")
         self._na_wierzch()         # inaczej arkusz główny przykryje to okno
         self._dry_run_async()      # odśwież — pokaże już założone kartoteki jako istniejące
 
@@ -2743,16 +3648,14 @@ def open_window_csv(parent):
     try:
         items = read_items_csv(sciezka)
     except Exception as e:
-        messagebox.showerror("Projekt z CSV",
-                             "Nie uda\u0142o si\u0119 odczyta\u0107 pliku:\n\n%s" % e,
-                             parent=parent)
+        komunikat(parent, "Projekt z CSV",
+                             "Nie uda\u0142o si\u0119 odczyta\u0107 pliku:\n\n%s" % e, rodzaj="error")
         return None
     if not items:
-        messagebox.showwarning(
+        komunikat(parent, 
             "Projekt z CSV",
             "W pliku nie ma \u017cadnych pozycji.\n\n"
-            "Sprawd\u017a, czy ma kolumny \u201eNr rysunku\u201d / \u201eNazwa\u201d / \u201eIlo\u015b\u0107\u201d.",
-            parent=parent)
+            "Sprawd\u017a, czy ma kolumny \u201eNr rysunku\u201d / \u201eNazwa\u201d / \u201eIlo\u015b\u0107\u201d.", rodzaj="warn")
         return None
 
     _kids, _nazwy, symbol, nazwa_zlozenia = tree_z_csv(sciezka, items)
@@ -2778,7 +3681,7 @@ def open_window_csv(parent):
 def open_window(parent, project_id, project_name=None):
     """Punkt wejścia dla RM_BAZA."""
     if not project_id:
-        messagebox.showwarning("Subiekt", "Najpierw wybierz projekt.", parent=parent)
+        komunikat(parent, "Subiekt", "Najpierw wybierz projekt.", rodzaj="warn")
         return None
     return SubiektProjektWindow(parent, project_id, project_name)
 
@@ -2808,13 +3711,12 @@ class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
 
         logi = znajdz_logi_projektu(project_id)
         if not logi:
-            messagebox.showinfo(
+            komunikat(self, 
                 "Subiekt — cofnij projekt",
                 "Brak zapisanego logu zakładania dla tego projektu\n"
                 f"(szukane w {LOG_DIR}).\n\n"
                 "Bez logu nie wiadomo, jakie symbole i w jakim typie (Z/ZZ/X/XX)\n"
-                "zostały założone — cofnięcie nie może zgadywać.",
-                parent=self)
+                "zostały założone — cofnięcie nie może zgadywać.", rodzaj="info")
             self.after(10, self.destroy)
             return
 
@@ -2939,7 +3841,7 @@ class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         self.btn_check.config(state=tk.NORMAL)
         if error:
             self.status.config(text="Błąd.")
-            messagebox.showerror("Subiekt", error, parent=self)
+            komunikat(self, "Subiekt", error, rodzaj="error")
             self._na_wierzch()
             return
         self.dry = wynik
@@ -2954,13 +3856,13 @@ class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
 
     def _confirm(self):
         do_usun = sum(1 for k in (self.dry or {}).get("kroki", []) if k["Status"] == "do-usuniecia")
-        ok = messagebox.askyesno(
-            "Subiekt — potwierdzenie",
+        ok = komunikat(
+            self, "Subiekt — potwierdzenie",
             f"Baza PRODUKCYJNA.\n\nUsunąć {do_usun} obiektów (ZK, komplety, kartoteki)\n"
             f"projektu {self.project_name}?\n\n"
             "Subiekt odmówi tego, co ma powiązania spoza tego planu —\n"
             "to zostanie i raport pokaże dlaczego.",
-            parent=self, icon="warning")
+            rodzaj="error", pytanie=True)
         self._na_wierzch()
         if not ok:
             return
@@ -2978,7 +3880,7 @@ class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
     def _go_done(self, wynik, error):
         if error:
             self.status.config(text="Usuwanie nieudane.")
-            messagebox.showerror("Subiekt — cofnięcie", error, parent=self)
+            komunikat(self, "Subiekt — cofnięcie", error, rodzaj="error")
             self._na_wierzch()
             self.btn_go.config(state=tk.NORMAL)
             return
@@ -3147,14 +4049,13 @@ class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         arkusz = self.master
         metoda = getattr(arkusz, "open_subiekt_zamowienia", None)
         if metoda is None:
-            messagebox.showinfo("Subiekt",
-                                "Otwórz okno „Zamówienia do dostawców” z menu SUBIEKT.",
-                                parent=self)
+            komunikat(self, "Subiekt",
+                                "Otwórz okno „Zamówienia do dostawców” z menu SUBIEKT.", rodzaj="info")
             return
         try:
             metoda()
         except Exception as e:
-            messagebox.showerror("Subiekt", str(e), parent=self)
+            komunikat(self, "Subiekt", str(e), rodzaj="error")
 
 
 def dokumenty_do_recznego_usuniecia(plan, limit=300):
@@ -3199,7 +4100,7 @@ def dokumenty_do_recznego_usuniecia(plan, limit=300):
 def open_cofnij_window(parent, project_id, project_name=None):
     """Punkt wejścia dla RM_BAZA — cofnięcie projektu założonego (kiedykolwiek) w Subiekcie."""
     if not project_id:
-        messagebox.showwarning("Subiekt", "Najpierw wybierz projekt.", parent=parent)
+        komunikat(parent, "Subiekt", "Najpierw wybierz projekt.", rodzaj="warn")
         return None
     return SubiektProjektCofnijWindow(parent, project_id, project_name)
 

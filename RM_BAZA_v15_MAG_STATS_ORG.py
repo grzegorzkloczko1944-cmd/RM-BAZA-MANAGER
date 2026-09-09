@@ -353,6 +353,11 @@ class MainWindow(tk.Tk):
         # W pamięci, nie w bazie — to widok stanu zewnętrznego systemu, który
         # może się zmienić w każdej chwili; zapisany zestarzałby się po cichu.
         self._subiekt_stany = {}
+        # Role pozycji dla kolumny „Typ / Źródło" — {NUMER: opis}, liczone
+        # z drzewka projektu raz na projekt (patrz _odswiez_role_pozycji).
+        self._role_pozycji = {}
+        self._role_pozycji_pid = None
+        self._current_project_name_for_roles = None
         self._subiekt_szczegoly = {}
         self.filter_supplier_var = tk.StringVar(value=FILTER_SUPPLIER_ALL)
         self.search_var = tk.StringVar(value="")  # Filtr tekstowy (szukaj)
@@ -1706,7 +1711,12 @@ class MainWindow(tk.Tk):
                 "Ilość BOM", "Ilość (zam.)", "Δ", "Ilość dostarczonych",
                 "Typ", "Materiał", "Grubość [mm]", "Dostawca",
                 "Cena 1szt PLN", "Zamówiono", "Termin dostawy", "ALARM",
-                "Uwagi", "DWF_BIB", "ODEBRANE", "Moduł", "WYCENA", "SUBIEKT", "Casting"
+                "Uwagi", "DWF_BIB", "ODEBRANE", "Moduł", "WYCENA", "SUBIEKT", "Casting",
+                # Rola pozycji w projekcie: KT / TW / „Składnik KT <symbol>".
+                # Nowa kolumna DOKLEJONA NA KOŃCU — indeksy 0-21 są zaszyte
+                # w kilkunastu miejscach kodu (col_map, kolorowanie, filtry),
+                # więc wstawianie w środku rozjechałoby je wszystkie.
+                "Typ / Źródło"
             ],
             column_width=100,
             height=600,
@@ -6226,12 +6236,218 @@ class MainWindow(tk.Tk):
         except Exception as e:
             messagebox.showerror("Błąd", f"Nie udało się otworzyć projektu:\n{e}")
     
+    def _odswiez_role_pozycji(self):
+        """Przelicza role tylko przy zmianie projektu — drzewko leży na V:."""
+        pid = self.current_project_id
+        if getattr(self, "_role_pozycji_pid", None) == pid:
+            return
+        nazwa = None
+        try:
+            row = self.db_manager.master_con.execute(
+                "SELECT name FROM projects WHERE project_id = ?", (pid,)).fetchone()
+            if row:
+                nazwa = row[0]
+        except Exception:
+            nazwa = None
+        self._current_project_name_for_roles = nazwa
+        try:
+            self._role_pozycji = self._przelicz_role_pozycji()
+        except Exception as e:
+            print(f"⚠️  Role pozycji niedostępne: {e}")
+            self._role_pozycji = {}
+        self._role_pozycji_pid = pid
+
+    def _przelicz_role_pozycji(self):
+        """{NUMER: opis roli} — „KT", „TW" albo „Składnik KT <symbol>".
+
+        Rola NIE jest tym samym co typ kartoteki: ten sam numer rysunku bywa
+        jednocześnie pozycją samodzielną i składnikiem złożenia (RM_BAZA sumuje
+        go do jednego wiersza BOM-u). Kolumna pokazuje wtedy obie role, bo od
+        tego zależy, gdzie zmieniać ilość
+        (ANALIZA_ZK_DWA_ZRODLA_PRAWDY.md, 6D.2b i 6D.3).
+
+        Źródłem jest DRZEWKO projektu (*_OUT.xlsx na V:), to samo, z którego
+        okno „Projekt / Aktualizacja" buduje skład kompletów — dzięki temu
+        kolumna nie wymaga odpytywania Subiekta.
+        """
+        role = {}
+        try:
+            from subiekt_projekt import read_tree, KOMPLETY
+        except Exception:
+            return role
+
+        nazwa = getattr(self, "_current_project_name_for_roles", None)
+        if not nazwa:
+            return role
+        try:
+            kids, _powod, _nazwy = read_tree(nazwa)
+        except Exception:
+            return role
+        if not kids:
+            return role                # brak drzewka — kolumna zostaje pusta
+
+        # {dziecko: [rodzice]} — jedna część potrafi wchodzić do kilku złożeń.
+        rodzice = {}
+        for rodzic, dzieci in kids.items():
+            for child_nr, _qty in dzieci:
+                rodzice.setdefault(child_nr.strip().upper(), []).append(rodzic)
+
+        komplety = {k.strip().upper() for k in kids}
+        for nr, lista in rodzice.items():
+            # Trzy pozycje wystarczą; przy większej liczbie i tak nie zmieści
+            # się w kolumnie, a liczba mówi resztę.
+            widoczne = ", ".join(sorted(set(lista))[:3])
+            if len(set(lista)) > 3:
+                widoczne += f" (+{len(set(lista)) - 3})"
+            role[nr] = f"Składnik KT {widoczne}"
+
+        # Złożenie, które samo jest korzeniem (nie wchodzi w skład niczego).
+        for nr in komplety:
+            if nr not in rodzice:
+                role[nr] = "KT"
+        return role
+
+    def _opis_roli_pozycji(self, drawing_no, typ):
+        """Tekst do kolumny „Typ / Źródło" dla jednej pozycji."""
+        nr = (drawing_no or "").strip().upper()
+        rola = self._role_pozycji.get(nr) if nr else None
+        try:
+            from subiekt_projekt import KOMPLETY
+            jest_kt = str(typ or "").strip().upper() in KOMPLETY
+        except Exception:
+            jest_kt = False
+
+        if not rola:
+            # Brak w drzewku = nic go nie zawiera → pozycja samodzielna.
+            return "KT" if jest_kt else "TW"
+        if rola == "KT":
+            return "KT"
+        # Składnik: jeśli sam jest złożeniem, mówimy o tym wprost — inaczej
+        # „Składnik KT" sugerowałoby, że to zwykły towar.
+        return (f"KT • {rola}" if jest_kt else rola)
+
+    def _zapisz_ilosci_z_subiekta(self):
+        """Odświeża „Ilość (zam.)" z ZK i zapisuje do pliku projektu.
+
+        Wołane przy ZWALNIANIU LOCKA, zanim plik pójdzie na dysk sieciowy —
+        dzięki temu stanowiska BEZ dostępu do Subiekta widzą aktualne ilości,
+        czytając zwykły plik projektu (ANALIZA_ZK_DWA_ZRODLA_PRAWDY.md, 6D.7).
+
+        Brak mostu nie jest błędem: kto go nie ma, pracuje jak dotąd,
+        a wartości zostają takie, jakie zapisał ostatni użytkownik z dostępem.
+        """
+        if not self.current_project_id or not self.db_manager.project_con:
+            return
+        try:
+            from subiekt_projekt import pobierz_ilosci_zk
+            from subiekt_stany import _find_exe, CONFIG_PATH
+        except Exception:
+            return
+
+        # Stanowisko BEZ Subiekta: nie ma po co czekać na most, który i tak
+        # nie wstanie. Bez tego zwolnienie locka wisiałoby ~19 s tylko po to,
+        # żeby dostać błąd — a takie stanowiska mają pracować jak dotąd.
+        if not _find_exe() or not os.path.isfile(CONFIG_PATH):
+            print("ℹ️  Brak mostu — ilości z ZK bez zmian (stanowisko bez Subiekta)")
+            return
+
+        # Numer projektu z Uwag na ZK bierze się z NAZWY projektu — a ta przy
+        # zwalnianiu locka bywa jeszcze niewczytana do pamięci, więc pytamy master.
+        nazwa = getattr(self, "_current_project_name_for_roles", None)
+        if not nazwa:
+            try:
+                row = self.db_manager.master_con.execute(
+                    "SELECT name FROM projects WHERE project_id = ?",
+                    (self.current_project_id,)).fetchone()
+                nazwa = row[0] if row else None
+            except Exception:
+                nazwa = None
+        nazwa = nazwa or str(self.current_project_id)
+        try:
+            # Krótki limit: to odświeżenie jest MIŁE, nie konieczne. Gdy most
+            # akurat wstaje albo Subiekt nie odpowiada, lepiej zwolnić lock
+            # z poprzednimi ilościami niż kazać czekać przy zamykaniu pracy.
+            ilosci, zk, blad = pobierz_ilosci_zk(nazwa, timeout=25)
+        except Exception as e:
+            print(f"ℹ️  Ilości z Subiekta pominięte: {e}")
+            return
+        if blad or not ilosci:
+            # Cicho: brak Subiekta na tym stanowisku to normalny stan pracy.
+            print(f"ℹ️  Ilości z ZK nieodświeżone ({blad or 'brak pozycji'})")
+            return
+
+        con = self.db_manager.project_con
+        zmienione = 0
+        try:
+            wiersze = con.execute(
+                "SELECT id, COALESCE(NULLIF(TRIM(work_drawing_no), ''), "
+                "                    NULLIF(TRIM(norm_drawing_no), ''), "
+                "                    NULLIF(TRIM(src_drawing_no), '')), "
+                "       subiekt_symbol, order_qty FROM items").fetchall()
+        except sqlite3.OperationalError:
+            return                    # baza sprzed migracji
+        teraz = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for item_id, nr, sym_zasiew, stara in wiersze:
+            # Klucz: najpierw symbol, pod którym pozycja poszła do Subiekta,
+            # a w razie jego braku numer rysunku (tak dopasowuje też most).
+            klucz = (sym_zasiew or nr or "").strip().upper()
+            if not klucz or klucz not in ilosci:
+                continue
+            nowa = ilosci[klucz]
+            try:
+                if stara is not None and abs(float(stara) - nowa) < 1e-9:
+                    continue          # bez zmian — nie ruszamy wiersza
+            except (TypeError, ValueError):
+                pass
+            con.execute(
+                "UPDATE items SET order_qty = ?, subiekt_zasiew_at = ? WHERE id = ?",
+                (nowa, teraz, item_id))
+            zmienione += 1
+        if zmienione:
+            con.commit()
+        print(f"✅ Ilości z {zk or 'ZK'}: zaktualizowano {zmienione} pozycji")
+
+    def _pobierz_zasiew_subiekt(self, item_id):
+        """(symbol, data) gdy pozycja ma już kartotekę w Subiekcie, inaczej None.
+
+        Znacznik stawia okno „Projekt / Aktualizacja" po udanym zapisie
+        (subiekt_projekt.zapisz_zasiew). Trzymany w bazie, nie w pamięci,
+        żeby blokada klucza działała także po restarcie aplikacji.
+        """
+        try:
+            row = self.db_manager.project_con.execute(
+                "SELECT subiekt_symbol, subiekt_zasiew_at FROM items WHERE id = ?",
+                (item_id,)).fetchone()
+        except sqlite3.OperationalError:
+            return None               # baza sprzed migracji — brak blokady, nie błąd
+        except Exception:
+            return None
+        if not row or not row[0]:
+            return None
+        return (str(row[0]).strip(), row[1])
+
+    def _pozycja_bez_numeru(self, item_id):
+        """True dla pozycji ZNORMALIZOWANEJ — bez numeru rysunku.
+
+        Dla niej kluczem jest nazwa (z niej powstaje symbol w Subiekcie),
+        a nie numer. Ta sama kolejność pól co przy czytaniu BOM-u.
+        """
+        try:
+            row = self.db_manager.project_con.execute(
+                "SELECT COALESCE(NULLIF(TRIM(work_drawing_no), ''), "
+                "                NULLIF(TRIM(norm_drawing_no), ''), "
+                "                NULLIF(TRIM(src_drawing_no), '')) FROM items WHERE id = ?",
+                (item_id,)).fetchone()
+        except Exception:
+            return False
+        return not (row and row[0])
+
     def _migrate_project_schema(self):
         """
         Automatyczna migracja schemy projektu (dla starych baz).
         Dodaje brakujące kolumny do tabeli items.
         Pełna struktura: 63 kolumny (zgodnie z project_1.sqlite).
-        
+
         UWAGA: Działa tylko gdy mamy lock (LOCAL READ/WRITE).
         """
         if not self.db_manager or not self.db_manager.project_con:
@@ -6318,7 +6534,17 @@ class MainWindow(tk.Tk):
                 'sync_last_at': 'TEXT',
                 'sync_status': 'TEXT',
                 'src_modul': 'TEXT',
-                'work_modul': 'TEXT'
+                'work_modul': 'TEXT',
+                # Symbol, pod jakim pozycja została ZAŁOŻONA w Subiekcie.
+                # Klucz dopasowania RM_BAZA ↔ Subiekt: numer rysunku, a dla
+                # pozycji znormalizowanych symbol wygenerowany z nazwy.
+                # Zmiana tego klucza w arkuszu rozspójniłaby integrację —
+                # przy kolejnym zasiewie kartoteka nie zostałaby rozpoznana
+                # i powstałby duplikat (ANALIZA_ZK_DWA_ZRODLA_PRAWDY.md, 6D.4b).
+                # Stąd trwały ślad w bazie: sam słownik w pamięci znika po
+                # restarcie i nie byłoby z czego odtworzyć blokady.
+                'subiekt_symbol': 'TEXT',
+                'subiekt_zasiew_at': 'TEXT'
             }
             
             # Dodaj brakujące kolumny
@@ -7045,7 +7271,11 @@ class MainWindow(tk.Tk):
                 # 20: SUBIEKT — wypełniane na żądanie, trzymane w pamięci, żeby
                 # przeżyło odświeżenie arkusza (odczyt z Subiekta trwa ~10 s).
                 self._subiekt_stany.get(item['drawing_no'] or "", ""),
-                casting_disp                                # 21: Casting
+                casting_disp,                               # 21: Casting
+                # 22: Typ / Źródło — rola pozycji (KT / TW / Składnik KT …).
+                # Mówi, GDZIE zmieniać ilość: składnika nie edytuje się wprost,
+                # tylko przez komplet, który go zawiera.
+                self._opis_roli_pozycji(item['drawing_no'], class_eff)
             ]
             
             data.append(row)
@@ -7475,7 +7705,12 @@ class MainWindow(tk.Tk):
         
         # Automatyczna migracja schemy (dla starych projektów)
         self._migrate_project_schema()
-        
+
+        # Role pozycji (kolumna „Typ / Źródło") — liczone RAZ na projekt.
+        # Drzewko leży na dysku sieciowym, więc odczyt przy każdym odświeżeniu
+        # arkusza byłby odczuwalny; unieważnia je zmiana projektu.
+        self._odswiez_role_pozycji()
+
         try:
             # Pobierz items (z filtrowaniem is_hidden)
             show_hidden = self.show_hidden_var.get()
@@ -9109,6 +9344,13 @@ class MainWindow(tk.Tk):
 
             # „Zamówiono" odłożone przez wysyłkę ZD — teraz mamy lock i kopię.
             self._naloz_zamowienia_zd()
+
+            # Aktualne „Ilość (zam.)" z ZK — NA STARCIE pracy, nie na końcu.
+            # Tu user i tak czeka na wczytanie projektu (~0,3 s przy ciepłym
+            # moście), a przy zwalnianiu locka czekałby niepotrzebnie na
+            # zakończenie pracy. Wartości trafiają do lokalnej kopii, więc
+            # na serwer idą razem z nią przy zwolnieniu.
+            self._zapisz_ilosci_z_subiekta()
             
             # Update UI
             self.status_label.config(text="🟢 WRITER", fg="#27ae60")
@@ -9205,6 +9447,10 @@ class MainWindow(tk.Tk):
 
             # „Zamówiono" odłożone przez wysyłkę ZD — teraz mamy lock i kopię.
             self._naloz_zamowienia_zd()
+
+            # Ilości z ZK — tak samo jak przy zwykłym przejęciu. Przy WYMUSZENIU
+            # tym bardziej: poprzedni właściciel mógł pracować na innym stanie.
+            self._zapisz_ilosci_z_subiekta()
             
             # Update UI
             self.status_label.config(text="🟢 WRITER", fg="#27ae60")
@@ -9500,6 +9746,11 @@ class MainWindow(tk.Tk):
             # tego kopia szła na serwer bez ptaszków, a wpisy z master były
             # kasowane niżej jako „zapisane" — zgubione 6 poz. (05.09.2026).
             self._naloz_zamowienia_zd()
+
+            # Ilości z ZK NIE są tu odczytywane — robi to _acquire_lock przy
+            # BRANIU locka. Powód: tutaj user czeka na zakończenie pracy, a tam
+            # i tak czeka na wczytanie projektu. Wartości siedzą już w lokalnej
+            # kopii, więc na serwer trafiają razem z nią (przeniesione 09.09.2026).
 
             # 1. Zamknij połączenie przed sync (wymuś zapis wszystkiego)
             if self.db_manager.project_con:
@@ -12138,6 +12389,63 @@ class MainWindow(tk.Tk):
                 self.refresh_data()
                 return
         
+        # ========================================================================
+        # BLOKADA KLUCZA POZYCJI ZASIANEJ DO SUBIEKTA
+        # ========================================================================
+        # Symbol kartoteki w Subiekcie bierze się z numeru rysunku, a dla pozycji
+        # znormalizowanych (bez numeru) z NAZWY. Zmiana tego pola po zasiewie
+        # sprawia, że przy kolejnym uruchomieniu okna Projekt/Aktualizacja
+        # RM_BAZA nie rozpozna istniejącej kartoteki i założy DUPLIKAT obok niej.
+        # Blokada wynika ze stanu w bazie (subiekt_symbol), nie z wyglądu GUI —
+        # dzięki temu działa też po restarcie (ANALIZA_ZK_DWA_ZRODLA_PRAWDY.md, 6D.4b).
+        # „Ilość (zam.)" (kolumna 4) też jest blokowana — po zasiewie
+        # właścicielem tej wartości jest SUBIEKT (6D.2a). Przed zasiewem
+        # kolumna działa normalnie: to z niej bierze się ilość, która idzie
+        # na ZK. Po zasiewie zmiany prowadzi się w Subiekcie, a RM_BAZA
+        # odświeża tę wartość przy zwalnianiu locka (_zapisz_ilosci_z_subiekta).
+        if col in (0, 1, 4):
+            zasiew = self._pobierz_zasiew_subiekt(item_id)
+            if zasiew:
+                symbol, kiedy = zasiew
+
+                if col == 4:
+                    messagebox.showwarning(
+                        "Ilość (zam.) — właścicielem jest Subiekt",
+                        f"Ta pozycja jest już na dokumencie ZK w Subiekcie:\n\n"
+                        f"    {symbol}\n"
+                        f"    (zasiew: {kiedy or '—'})\n\n"
+                        f"Po zasiewie ilość zamówioną prowadzi się w SUBIEKCIE —\n"
+                        f"RM_BAZA ją tylko pokazuje i odświeża przy zwalnianiu locka.\n"
+                        f"Zmiana tutaj rozjechałaby arkusz z dokumentem,\n"
+                        f"nie zmieniając niczego w Subiekcie.\n\n"
+                        f"Ilość konstrukcyjną zmieniasz w kolumnie „Ilość BOM”."
+                    )
+                    self.refresh_data()
+                    return
+
+                # Dla pozycji z numerem kluczem jest NUMER — nazwa to tylko opis
+                # i zostaje edytowalna. Dla znormalizowanych jest odwrotnie.
+                ma_numer = not self._pozycja_bez_numeru(item_id)
+                blokuj = (col == 0) if ma_numer else (col == 1)
+                if blokuj:
+                    czego = "Numer rysunku" if col == 0 else "Nazwa"
+                    powod = ("numer rysunku" if ma_numer
+                             else "nazwa (pozycja znormalizowana — z niej powstaje symbol)")
+                    messagebox.showwarning(
+                        f"{czego} — pozycja jest już w Subiekcie",
+                        f"Ta pozycja została założona w Subiekcie jako:\n\n"
+                        f"    {symbol}\n"
+                        f"    (zasiew: {kiedy or '—'})\n\n"
+                        f"Kluczem powiązania jest {powod}, więc jego zmiana\n"
+                        f"sprawiłaby, że przy kolejnym zasiewie RM_BAZA nie rozpozna\n"
+                        f"istniejącej kartoteki i założy DUPLIKAT.\n\n"
+                        f"Jeśli symbol naprawdę ma być inny — trzeba najpierw cofnąć\n"
+                        f"projekt w Subiekcie („↩ Cofnij projekt”), poprawić dane\n"
+                        f"i zasiać ponownie."
+                    )
+                    self.refresh_data()
+                    return
+
         # ========================================================================
         # WALIDACJA: Nr Rysunku - NIE POZWÓL NA DUPLIKATY
         # ========================================================================

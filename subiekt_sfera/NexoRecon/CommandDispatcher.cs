@@ -73,7 +73,7 @@ internal static class CommandDispatcher
         "zd-usun", "wydruk-recon", "termin", "symbole", "rw", "kartoteka-usun",
         "progi", "wydruk", "projekt", "komplet", "komplet-napraw", "kartoteka-edytuj",
         "pola-wlasne", "magazyn-zaloz", "magazyn-usun", "pw", "projekt-cofnij",
-        "kartoteki",
+        "kartoteki", "zapotrzebowanie-test", "zk-ilosci",
     };
 
     public static bool Zna(string tryb) => Tryby.Contains(tryb, StringComparer.OrdinalIgnoreCase);
@@ -132,6 +132,16 @@ internal static class CommandDispatcher
 
             case "zapotrzebowanie":
                 return Zapotrzebowanie.Uruchom(sfera, k.OutPath);
+
+            // Diagnostyka: czy zapotrzebowanie rozwija komplety na skladniki.
+            // Czysty odczyt — patrz naglowek ZapotrzebowanieTest.cs.
+            case "zapotrzebowanie-test":
+                return ZapotrzebowanieTest.Uruchom(sfera, k.OutPath);
+
+            // Ilosci pozycji z ZK projektu — zrodlo „Ilosc (zam.)" w arkuszu.
+            // Czysty odczyt; zapisem do pliku projektu zajmuje sie RM_BAZA.
+            case "zk-ilosci":
+                return ZkIlosci.Uruchom(sfera, k.Projekt, k.OutPath);
 
             case "magazyn":
                 return Magazyn.Uruchom(sfera, k.OutPath, k.TylkoNiezerowe);

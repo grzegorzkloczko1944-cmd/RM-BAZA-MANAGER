@@ -258,24 +258,45 @@ internal static class Projekt
 
             if (juzJest != null)
             {
-                var naZk = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                try
-                {
-                    foreach (var poz in juzJest.Pozycje)
-                    {
-                        var s = Bezp(() => poz.AsortymentAktualny?.Symbol)?.Trim();
-                        if (!string.IsNullOrEmpty(s)) naZk.Add(s!);
-                    }
-                }
-                catch { }
-                var nowe = pozycje.Count(p =>
+                // Symbol ORAZ ilość. Sam HashSet symboli nie odróżniał 4 od 10,
+                // więc zmiana ilości w BOM-ie przechodziła jako „bez zmian”,
+                // a zapis i tak jej nie przenosił (zgłoszone 08.09.2026).
+                var naZk = CzytajPozycjeZk(juzJest.Pozycje);
+                var nowe = 0;
+                foreach (var p in pozycje)
                 {
                     var e = Znajdz(p.Symbol);
-                    return e != null && !naZk.Contains((e.Symbol ?? "").Trim());
-                });
+                    if (e == null) continue;
+                    var sym = (e.Symbol ?? "").Trim();
+                    if (!naZk.TryGetValue(sym, out var naDok)) { nowe++; continue; }
+
+                    // Zapowiedź tego, co zrobi zapis: uzupełni ilość do stanu
+                    // z BOM-u (dopisując różnicę) albo zostawi, gdy na ZK jest
+                    // WIĘCEJ — bo tego nie zabieramy (patrz pętla zapisu).
+                    var zBomu = p.Ilosc < 0 ? 0m : p.Ilosc;
+                    if (zBomu > naDok)
+                        kroki.Add(new Krok("zk-poz", sym, "do-uzupelnienia",
+                            $"na ZK: {Ilo(naDok)} → ustawi {Ilo(zBomu)} "
+                            + $"({Roznica(zBomu, naDok)})"));
+                    else if (zBomu < naDok)
+                        // Zmniejszenie to osobna kategoria — user musi je
+                        // zobaczyć wyraźnie, bo zabiera coś z dokumentu
+                        // księgowego (0 = wyzerowanie pozycji).
+                        kroki.Add(new Krok("zk-poz", sym, "do-zmniejszenia",
+                            $"na ZK: {Ilo(naDok)} → ustawi {Ilo(zBomu)} "
+                            + $"({Roznica(zBomu, naDok)})"
+                            + (zBomu == 0 ? " — POZYCJA WYZEROWANA" : "")));
+                }
+                var doUzupelnienia = kroki.Count(k => k.Rodzaj == "zk-poz"
+                                                      && k.Status == "do-uzupelnienia");
+                var doZmniejszenia = kroki.Count(k => k.Rodzaj == "zk-poz"
+                                                      && k.Status == "do-zmniejszenia");
                 var numer = Bezp(() => juzJest.NumerWewnetrzny?.PelnaSygnatura) ?? "";
                 kroki.Add(new Krok("zk", numer, "do-dopisania",
-                    $"dopisze {nowe} poz. ({naZk.Count} już na dokumencie)"));
+                    $"dopisze {nowe} poz."
+                    + (doUzupelnienia > 0 ? $", zwiększy ilość w {doUzupelnienia} poz." : "")
+                    + (doZmniejszenia > 0 ? $", ZMNIEJSZY ilość w {doZmniejszenia} poz." : "")
+                    + $" ({naZk.Count} już na dokumencie)"));
             }
             else
             {
@@ -336,48 +357,125 @@ internal static class Projekt
                     }
 
                     // Co już jest na dokumencie — nie dublujemy pozycji.
-                    var juzNaZk = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    try
-                    {
-                        foreach (var poz in ob.Dane.Pozycje)
-                        {
-                            var s = Bezp(() => poz.AsortymentAktualny?.Symbol)?.Trim();
-                            if (!string.IsNullOrEmpty(s)) juzNaZk.Add(s!);
-                        }
-                    }
-                    catch { }
+                    // Ilość trzymana razem z symbolem, żeby rozjazd dało się
+                    // zgłosić zamiast przemilczeć (zgłoszone 08.09.2026).
+                    var juzNaZk = CzytajPozycjeZk(ob.Dane.Pozycje);
 
                     var dodane = 0;
                     var pominietoJest = 0;
+                    var roznice = 0;
+                    var zmienioneIlosci = 0;
                     foreach (var p in pozycje)
                     {
                         var enc = Znajdz(p.Symbol);
                         if (enc == null) continue;
-                        if (juzNaZk.Contains((enc.Symbol ?? "").Trim())) { pominietoJest++; continue; }
+                        var sym = (enc.Symbol ?? "").Trim();
+                        if (juzNaZk.TryGetValue(sym, out var naDok))
+                        {
+                            // Pozycja JEST na dokumencie — doprowadzamy jej ilość
+                            // do stanu z BOM-u, dopisując RÓŻNICĘ. Operacja jest
+                            // idempotentna: drugie kliknięcie „zapisz" nic już
+                            // nie zmieni (rożnica = 0). Dodawanie pełnej ilości
+                            // z BOM-u podwajałoby ją przy każdym powtórzeniu.
+                            // Ilość 0 = user chce wyzerować pozycję na ZK.
+                            // Nie podnosimy jej do 1, bo to świadoma decyzja.
+                            var zBomu = p.Ilosc < 0 ? 0m : p.Ilosc;
+                            if (zBomu == naDok) { pominietoJest++; continue; }
+
+                            try
+                            {
+                                // UstawIlosc — ustawia ilość WPROST, więc działa
+                                // i w górę, i w dół (0 zeruje pozycję). Prostsze
+                                // i uczciwsze niż dopisywanie różnicy osobnym
+                                // wierszem: na dokumencie zostaje jedna pozycja
+                                // z właściwą liczbą, a nie kilka do zsumowania.
+                                // Ten sam symbol bywa w KILKU wierszach dokumentu —
+                                // wcześniejsza wersja „dopisz różnicę" dokładała
+                                // nowe wiersze zamiast zmieniać istniejące, więc
+                                // 2627-650.11ZZ miał dwa wiersze po 1. Ustawienie
+                                // tylko pierwszego na cel NIC nie zmieniało sumy
+                                // (sprawdzone diagnostyką 09.09.2026).
+                                // KONSOLIDACJA: pierwszy wiersz = ilość docelowa,
+                                // reszta usunięta (albo wyzerowana, gdy Usun brak).
+                                var wiersze = ZnajdzWszystkiePozycje(ob.Dane.Pozycje, sym);
+                                if (wiersze.Count == 0)
+                                    throw new InvalidOperationException("nie znaleziono pozycji na dokumencie");
+                                UstawIloscPozycji(wiersze[0], zBomu);
+                                var usuniete = 0; var wyzerowane = 0;
+                                foreach (var extra in wiersze.Skip(1))
+                                {
+                                    if (UsunPozycje(ob, extra)) usuniete++;
+                                    else { UstawIloscPozycji(extra, 0m); wyzerowane++; }
+                                }
+                                zmienioneIlosci++;
+                                kroki.Add(new Krok("zk-poz", sym,
+                                    zBomu > naDok ? "ilosc-uzupelniona" : "ilosc-zmniejszona",
+                                    $"na ZK było {Ilo(naDok)} → ustawiono {Ilo(zBomu)} "
+                                    + $"({Roznica(zBomu, naDok)})"));
+                            }
+                            catch (Exception ex)
+                            {
+                                roznice++;
+                                kroki.Add(new Krok("zk-poz", sym, "blad",
+                                    $"nie udało się ustawić ilości: {ex.Message}"));
+                            }
+                            continue;
+                        }
                         // Dodaj(String symbol, Decimal ilosc) — symbol realny z Subiekta,
                         // nie pytany, bo dopasowanie mogło być luźne (spacje/wielkość liter).
                         ob.Pozycje.Dodaj(enc.Symbol, p.Ilosc <= 0 ? 1m : p.Ilosc);
                         dodane++;
                     }
 
-                    if (dodane == 0 && istniejace != null)
+                    if (dodane == 0 && zmienioneIlosci == 0 && istniejace != null)
                     {
                         zkNumer = Bezp(() => ob.Dane.NumerWewnetrzny?.PelnaSygnatura);
+                        // „Wszystko już jest” tylko wtedy, gdy naprawdę się
+                        // zgadza. Przy rozjeździe ilości to byłby fałsz.
                         kroki.Add(new Krok("zk", zkNumer ?? "", "bez-zmian",
-                            $"wszystkie {pominietoJest} pozycji już są na dokumencie"));
-                    }
-                    else if (!ob.Zapisz())
-                    {
-                        kroki.Add(new Krok("zk", plan.Projekt ?? "", "blad", Bezp(ob.PodajBledy)));
+                            roznice > 0
+                                ? $"{pominietoJest} pozycji już na dokumencie, "
+                                  + $"w tym {roznice} z INNĄ ILOŚCIĄ niż BOM — nic nie zmieniono"
+                                : $"wszystkie {pominietoJest} pozycji już są na dokumencie"));
                     }
                     else
                     {
-                        zkNumer = Bezp(() => ob.Dane.NumerWewnetrzny?.PelnaSygnatura);
-                        var co = istniejace != null
-                            ? $"dopisano {dodane} poz."
-                              + (pominietoJest > 0 ? $" ({pominietoJest} już było)" : "")
-                            : $"utworzone ({dodane} poz.)";
-                        kroki.Add(new Krok("zk", zkNumer ?? plan.Projekt ?? "", co, null));
+                        // Przelicz() PRZED Zapisz() — bez tego zmiana ilości na
+                        // istniejącej pozycji NIE utrwala się: Zapisz() zwracało
+                        // true, raport mówił „ustawiono 1", a ZK zostawało na 2
+                        // (sprawdzone na żywo 09.09.2026). Tak robi przykład SDK
+                        // (FakturowanieWydan.cs: Ilosc = …; Przelicz(); Zapisz()).
+                        var przeliczOk = true;
+                        if (zmienioneIlosci > 0)
+                        {
+                            try { ob.Przelicz(); }
+                            catch (Exception ex)
+                            {
+                                przeliczOk = false;
+                                kroki.Add(new Krok("zk", plan.Projekt ?? "", "blad",
+                                    $"Przelicz() po zmianie ilości: {ex.GetType().Name}: {ex.Message}"));
+                            }
+                        }
+
+                        if (!przeliczOk)
+                        {
+                            // nie zapisujemy dokumentu w niespójnym stanie
+                        }
+                        else if (!ob.Zapisz())
+                        {
+                            kroki.Add(new Krok("zk", plan.Projekt ?? "", "blad", Bezp(ob.PodajBledy)));
+                        }
+                        else
+                        {
+                            zkNumer = Bezp(() => ob.Dane.NumerWewnetrzny?.PelnaSygnatura);
+                            var co = istniejace != null
+                                ? $"dopisano {dodane} poz."
+                                  + (zmienioneIlosci > 0 ? $", zmieniono ilość w {zmienioneIlosci} poz." : "")
+                                  + (pominietoJest > 0 ? $" ({pominietoJest} bez zmian"
+                                      + (roznice > 0 ? $", {roznice} wymaga uwagi" : "") + ")" : "")
+                                : $"utworzone ({dodane} poz.)";
+                            kroki.Add(new Krok("zk", zkNumer ?? plan.Projekt ?? "", co, null));
+                        }
                     }
                 }
                 }
@@ -493,7 +591,7 @@ internal static class Projekt
     /// i narobi się bałagan"). Kolekcja ZK w praktyce nie jest na tyle duża, żeby
     /// pełny przelot zaszkodził (dziesiątki-setki, nie dziesiątki tysięcy).
     /// </summary>
-    static (DokumentZK? najnowsze, List<DokumentZK> duplikaty) ZnajdzZkProjektu(Uchwyt sfera, string? projekt)
+    internal static (DokumentZK? najnowsze, List<DokumentZK> duplikaty) ZnajdzZkProjektu(Uchwyt sfera, string? projekt)
     {
         if (string.IsNullOrWhiteSpace(projekt)) return (null, new List<DokumentZK>());
         var szukany = projekt.Trim();
@@ -588,6 +686,176 @@ internal static class Projekt
     static bool Rowne(string? a, string b) => string.Equals((a ?? "").Trim(), b, StringComparison.OrdinalIgnoreCase);
 
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
+
+    /// Pozycja dokumentu o danym symbolu — albo null.
+    ///
+    /// Ten sam symbol moze wystapic w kilku wierszach (dopisywane partiami);
+    /// bierzemy PIERWSZY, bo to na nim ustawiamy ilosc docelowa. Pozostale
+    /// zostawiamy — usuwanie pozycji z dokumentu ksiegowego to inna decyzja
+    /// niz zmiana liczby sztuk.
+    static object? ZnajdzPozycje(IEnumerable<PozycjaDokumentu> pozycje, string symbol)
+    {
+        try
+        {
+            foreach (var poz in pozycje)
+            {
+                var s = Bezp(() => poz.AsortymentAktualny?.Symbol)?.Trim();
+                if (!string.IsNullOrEmpty(s)
+                    && string.Equals(s, symbol, StringComparison.OrdinalIgnoreCase))
+                    return poz;
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    /// WSZYSTKIE wiersze dokumentu o danym symbolu, w kolejnosci na dokumencie.
+    static List<object> ZnajdzWszystkiePozycje(IEnumerable<PozycjaDokumentu> pozycje, string symbol)
+    {
+        var wynik = new List<object>();
+        try
+        {
+            foreach (var poz in pozycje)
+            {
+                var s = Bezp(() => poz.AsortymentAktualny?.Symbol)?.Trim();
+                if (!string.IsNullOrEmpty(s)
+                    && string.Equals(s, symbol, StringComparison.OrdinalIgnoreCase))
+                    wynik.Add(poz);
+            }
+        }
+        catch { }
+        return wynik;
+    }
+
+    /// Usuwa wiersz z dokumentu przez kolekcje biznesowa `ob.Pozycje`.
+    /// Sygnatury Usun nie znamy na pewno (dokumentacja milczy), wiec szukamy
+    /// refleksja metody "Usun" przyjmujacej pozycje albo jej Id. Zwraca false,
+    /// gdy sie nie da — wtedy wolajacy zeruje ilosc zamiast usuwac.
+    static bool UsunPozycje(object ob, object poz)
+    {
+        try
+        {
+            var kolekcja = ob.GetType().GetProperty("Pozycje")?.GetValue(ob);
+            if (kolekcja == null) return false;
+            foreach (var mi in kolekcja.GetType().GetMethods().Where(m => m.Name == "Usun"))
+            {
+                var pars = mi.GetParameters();
+                if (pars.Length != 1) continue;
+                if (pars[0].ParameterType.IsInstanceOfType(poz))
+                {
+                    var r = mi.Invoke(kolekcja, new[] { poz });
+                    return r is not bool b || b;
+                }
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    /// Ustawia ilosc pozycji dokumentu.
+    ///
+    /// `UstawIlosc` jest na klasie pozycji, ale jej dokladna sygnatura roznila
+    /// sie miedzy wersjami Sfery (bywa przeciazona o jednostke miary), dlatego
+    /// szukamy jej refleksja i probujemy wariantow po kolei. Gdy zadnego nie
+    /// ma — wolamy o tym wprost, zamiast po cichu nic nie zrobic.
+
+    static void UstawIloscPozycji(object poz, decimal ilosc)
+    {
+        var typ = poz.GetType();
+
+        // UstawIlosc to METODA ROZSZERZAJACA (PozycjaExtensions), czyli
+        // STATYCZNA metoda w osobnej klasie, przyjmujaca pozycje jako pierwszy
+        // argument. Szukanie jej na instancji znajdowalo co innego i zmiana
+        // nie zapisywala sie do Subiekta, mimo ze raport mowil, ze zaszla
+        // (09.09.2026 — "zdjelo tylko w oknie, nie w Subiekcie").
+        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            Type[] typy;
+            try { typy = asm.GetTypes(); } catch { continue; }
+            foreach (var t in typy)
+            {
+                if (!t.IsAbstract || !t.IsSealed) continue;      // tylko klasy statyczne
+                foreach (var mi in t.GetMethods().Where(m => m.Name == "UstawIlosc" && m.IsStatic))
+                {
+                    var pars = mi.GetParameters();
+                    if (pars.Length < 2) continue;
+                    if (!pars[0].ParameterType.IsInstanceOfType(poz)) continue;
+                    if (pars[1].ParameterType != typeof(decimal)) continue;
+
+                    var args = new object?[pars.Length];
+                    args[0] = poz;
+                    args[1] = ilosc;
+                    for (int i = 2; i < pars.Length; i++)
+                        args[i] = pars[i].HasDefaultValue ? pars[i].DefaultValue
+                                : (pars[i].ParameterType.IsValueType
+                                   ? Activator.CreateInstance(pars[i].ParameterType) : null);
+                    mi.Invoke(null, args);
+                    return;
+                }
+            }
+        }
+
+        // Metoda instancji — gdyby w tej wersji Sfery jednak byla.
+        foreach (var mi in typ.GetMethods().Where(m => m.Name == "UstawIlosc"))
+        {
+            var pars = mi.GetParameters();
+            if (pars.Length >= 1 && pars[0].ParameterType == typeof(decimal))
+            {
+                var args = new object?[pars.Length];
+                args[0] = ilosc;
+                for (int i = 1; i < pars.Length; i++)
+                    args[i] = pars[i].HasDefaultValue ? pars[i].DefaultValue
+                            : (pars[i].ParameterType.IsValueType
+                               ? Activator.CreateInstance(pars[i].ParameterType) : null);
+                mi.Invoke(poz, args);
+                return;
+            }
+        }
+
+        throw new InvalidOperationException(
+            "nie znaleziono UstawIlosc (ani rozszerzajacej, ani na pozycji)");
+    }
+
+    /// {symbol → ilość} z pozycji dokumentu ZK.
+    ///
+    /// Wcześniej czytany był sam HashSet symboli, przez co 4 i 10 były dla
+    /// mostu tym samym stanem: zmiana ilości w BOM-ie nie pojawiała się ani
+    /// w suchym przebiegu, ani w raporcie po zapisie (zgłoszone 08.09.2026 —
+    /// „pokazało pomnożone ilości, ale w oknie potwierdzającym zero informacji”).
+    ///
+    /// Ten sam symbol może wystąpić na dokumencie w kilku pozycjach — wtedy
+    /// ilości sumujemy, bo z punktu widzenia zapotrzebowania liczy się łączna
+    /// ilość zamówiona, nie sposób jej rozpisania na wiersze.
+    internal static Dictionary<string, decimal> CzytajPozycjeZk(IEnumerable<PozycjaDokumentu> pozycje)
+    {
+        var mapa = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var poz in pozycje)
+            {
+                var s = Bezp(() => poz.AsortymentAktualny?.Symbol)?.Trim();
+                if (string.IsNullOrEmpty(s)) continue;
+                decimal ile = 0m;
+                try { ile = poz.Ilosc; } catch { }
+                mapa[s!] = mapa.TryGetValue(s!, out var byla) ? byla + ile : ile;
+            }
+        }
+        catch { }
+        return mapa;
+    }
+
+    /// Ilość bez zbędnych zer — „4” zamiast „4,000”, ale „1,5” zostaje.
+    /// Kropka dziesiętna niezależna od ustawień regionalnych, żeby raport
+    /// czytało się tak samo na każdym stanowisku.
+    static string Ilo(decimal x) => x.ToString("0.###", CultureInfo.InvariantCulture);
+
+    /// „różnica +6” / „różnica −2” — znak wprost, żeby z jednego rzutu oka
+    /// było widać, czy BOM urósł, czy zmalał względem dokumentu.
+    static string Roznica(decimal zBomu, decimal naDok)
+    {
+        var d = zBomu - naDok;
+        return "różnica " + (d > 0 ? "+" : d < 0 ? "−" : "") + Ilo(Math.Abs(d));
+    }
 
     internal record SkladnikPlan(string Symbol, decimal Ilosc);
     internal record PozPlan(string Symbol, string? Nazwa, string? Typ, decimal Ilosc, List<SkladnikPlan>? Skladniki);
