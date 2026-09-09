@@ -230,8 +230,14 @@ def wysrodkuj(okno, rodzic, szerokosc=None, wysokosc=None):
     """
     try:
         okno.update_idletasks()
-        w = szerokosc or okno.winfo_width() or okno.winfo_reqwidth()
-        h = wysokosc or okno.winfo_height() or okno.winfo_reqheight()
+        # Toplevel jeszcze NIEZMAPOWANY zwraca winfo_width()==1, nie 0 —
+        # `or winfo_reqwidth()` nigdy nie dochodził do glosu i okno dostawalo
+        # geometry("1x1+..."): Windows rysowal ramke 17x40 px bez tresci.
+        # Przy modalnym komunikacie (grab_set + wait_window) wygladalo to jak
+        # zawieszenie calej aplikacji — user nie mial czego kliknac
+        # (09.09.2026, "Subiekt -> cofnij" bez logu zakladania).
+        w = szerokosc or (okno.winfo_width() if okno.winfo_width() > 1 else okno.winfo_reqwidth())
+        h = wysokosc or (okno.winfo_height() if okno.winfo_height() > 1 else okno.winfo_reqheight())
 
         # Rodzic zmaksymalizowany albo jeszcze nierozłożony — bierzemy ekran.
         rw, rh = rodzic.winfo_width(), rodzic.winfo_height()
@@ -249,7 +255,14 @@ def wysrodkuj(okno, rodzic, szerokosc=None, wysokosc=None):
         lewo, gora, prawo, dol = _granice_pulpitu(okno)
         x = max(lewo, min(x, prawo - w))
         y = max(gora, min(y, dol - h))
-        okno.geometry(f"{w}x{h}+{x}+{y}")
+        if w > 1 and h > 1:
+            okno.geometry(f"{w}x{h}+{x}+{y}")
+        else:
+            # Tk nie zna jeszcze rozmiaru (okno transient wzgledem rodzica,
+            # ktory sam nie jest zmapowany — np. komunikat z __init__ swiezego
+            # Toplevelu). Ustawiamy SAMA pozycje; rozmiar wezmie sie z tresci
+            # przy mapowaniu. Wpisanie "1x1" dawalo ramke 17x40 px bez tresci.
+            okno.geometry(f"+{x}+{y}")
     except Exception:
         pass          # pozycjonowanie nie może wywalić okna
 
