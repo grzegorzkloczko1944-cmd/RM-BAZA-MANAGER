@@ -30,6 +30,10 @@ internal static class Dokumenty
         // (ostatnie realne z lipca 2023), ale to punkt 2 planu integracji:
         // gdy wrócą, mają się pokazywać w przeglądzie bez zmiany kodu.
         Zbierz(wynik, "RW", limit, () => sfera.RozchodyWewnetrzne().Dane.Wszystkie());
+        // PW — przyjęcia z produkcji własnej RMPAK. Potrzebne do read-backu
+        // po wystawieniu dokumentu (RMPAK_PRODUKCJA_USTALENIA.md §13): zapis
+        // wolno uznać za udany dopiero po ODCZYTANIU tego, co powstało.
+        Zbierz(wynik, "PW", limit, () => sfera.PrzychodyWewnetrzne().Dane.Wszystkie());
         // WZ — wydania zewnętrzne, dla kompletu obrazu wydań z magazynu.
         Zbierz(wynik, "WZ", limit, () => sfera.WydaniaZewnetrzne().Dane.Wszystkie());
 

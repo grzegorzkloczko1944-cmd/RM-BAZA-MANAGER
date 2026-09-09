@@ -5,9 +5,15 @@
 // Bez --zapisz to suchy przebieg: sprawdza kartoteki i mówi, co by przyjął.
 //
 // plan.json:
-//   { "pozycje": [ {"symbol":"011-100.49", "ilosc": 3} ],
-//     "uwagi": "Stany startowe magazynu nr 2 - inwentaryzacja 28.05.2026",
+//   { "pozycje": [ {"symbol":"011-100.49", "ilosc": 3, "cena": 90.00} ],
+//     "uwagi": "RM_BAZA - PROJEKT 2641",
 //     "magazyn": "MASTER" }
+//
+// "cena" jest OPCJONALNA (cena netto za sztukę). Bez niej pozycja wchodzi po
+// 0 zł — tak działa inwentaryzacja opisana niżej. Z ceną: PW produkcji własnej
+// RMPAK, gdzie każdy detal niesie koszt wytworzenia z Kalkulatora RMPAK
+// (RMPAK_PRODUKCJA_USTALENIA.md). Gdy cena jest w planie, ale nie da się jej
+// ustawić — dokument NIE powstaje.
 //
 // Po co: uruchomienie magazynu nr 2 (SUBIEKT PODWÓJNE POZYCJE DO NAPRAWY.md,
 // MAGAZYN.md) — inwentaryzacja z Excela ma wejść jako stan startowy. Pozycje
@@ -43,7 +49,7 @@ internal static class Pw
 
         var asort = sfera.Asortymenty();
         var kroki = new List<Krok>();
-        var doPrzyjecia = new List<(string Symbol, decimal Ilosc)>();
+        var doPrzyjecia = new List<(string Symbol, decimal Ilosc, decimal? Cena)>();
 
         foreach (var p in pozycje)
         {
@@ -57,8 +63,15 @@ internal static class Pw
             dynamic? enc = null;
             try { enc = asort.Dane.WyszukajPoSymbolu(symbol); } catch { }
             if (enc == null) { kroki.Add(new Krok("pozycja", symbol, "blad", "brak kartoteki")); continue; }
-            doPrzyjecia.Add((symbol, p.Ilosc));
-            kroki.Add(new Krok("pozycja", symbol, zapisz ? "do-przyjecia" : "do-przyjecia (suchy)", $"{p.Ilosc:0.##}"));
+            if (p.Cena is < 0)
+            {
+                kroki.Add(new Krok("pozycja", symbol, "blad", $"cena {p.Cena} — nie może być ujemna"));
+                continue;
+            }
+            doPrzyjecia.Add((symbol, p.Ilosc, p.Cena));
+            var opisCeny = p.Cena is { } c ? $" × {c:0.00}" : "";
+            kroki.Add(new Krok("pozycja", symbol, zapisz ? "do-przyjecia" : "do-przyjecia (suchy)",
+                               $"{p.Ilosc:0.##}{opisCeny}"));
         }
 
         string? numer = null;
@@ -74,11 +87,40 @@ internal static class Pw
                 var konfig = KonfiguracjaPw(sfera);
                 using var pw = konfig != null ? przychody.Utworz(konfig) : przychody.Utworz();
 
-                foreach (var (symbol, ilosc) in doPrzyjecia)
+                // Droga zapisu ceny raportowana RAZ, nie przy każdej pozycji —
+                // przy 300 detalach raport byłby 300 identycznymi wierszami.
+                string? drogaCeny = null;
+                var bezCeny = new List<string>();
+                foreach (var (symbol, ilosc, cena) in doPrzyjecia)
                 {
                     var enc = asort.Dane.WyszukajPoSymbolu(symbol);
                     pw.Pozycje.Dodaj(enc.Symbol, ilosc);
+                    if (cena is not { } c) continue;
+
+                    // Dodaj() nie zwraca pozycji — bierzemy ostatnią z dokumentu.
+                    object? poz = null;
+                    try
+                    {
+                        var wszystkie = ((System.Collections.IEnumerable)pw.Dane.Pozycje)
+                            .Cast<object>().ToList();
+                        poz = wszystkie.LastOrDefault();
+                    }
+                    catch { }
+                    if (poz is null) { bezCeny.Add(symbol); continue; }
+
+                    var droga = UstawCenePozycji(poz, c);
+                    if (droga is null) bezCeny.Add(symbol);
+                    else drogaCeny ??= droga;
                 }
+                if (drogaCeny != null)
+                    kroki.Add(new Krok("pw", "", "cena-ustawiona", $"drogą: {drogaCeny}"));
+                // Cicha pozycja po 0 zł byłaby gorsza niż brak dokumentu —
+                // magazyn przyjąłby produkcję bezwartościowo i nikt by nie wiedział.
+                if (bezCeny.Count > 0)
+                    kroki.Add(new Krok("pw", "", "blad",
+                        $"NIE UDAŁO SIĘ USTAWIĆ CENY dla {bezCeny.Count} poz.: "
+                        + string.Join(", ", bezCeny.Take(10))
+                        + (bezCeny.Count > 10 ? " …" : "")));
 
                 // Ta sama pułapka co w Rw.cs / Zd.cs: bez daty wystawienia
                 // i magazynu dokument jest w bazie, ale nie widać go na listach.
@@ -105,7 +147,15 @@ internal static class Pw
                 if (!string.IsNullOrWhiteSpace(plan.Uwagi))
                     UstawUwagi(pw.Dane, plan.Uwagi.Trim(), kroki);
 
-                if (!pw.Zapisz())
+                // Nie zapisujemy PW, na którym miała być cena, a jej nie ma:
+                // dokument po 0 zł jest gorszy niż jego brak, bo wygląda na
+                // poprawny i trzeba go potem ręcznie anulować w Subiekcie.
+                if (bezCeny.Count > 0)
+                {
+                    kroki.Add(new Krok("pw", "", "blad",
+                        "PW NIE zapisane — najpierw musi działać ustawianie ceny."));
+                }
+                else if (!pw.Zapisz())
                 {
                     var magazyn = Bezp(() => (string?)pw.Dane.Magazyn?.Symbol) ?? "?";
                     kroki.Add(new Krok("pw", "", "blad",
@@ -208,7 +258,52 @@ internal static class Pw
         }
     }
 
-    internal record PozPlan(string? Symbol, decimal Ilosc);
+    /// Cena pozycji PW. Zwraca opis drogi, która zadziałała, albo null.
+    ///
+    /// PW produkcji RMPAK niesie cenę wytworzenia (kalkulacja z Kalkulatora
+    /// RMPAK) — bez niej dokument jest bezwartościowy, bo magazyn przyjąłby
+    /// detale po 0 zł.
+    ///
+    /// `PozycjaDokumentu.Cena` NIE jest liczbą, tylko obiektem
+    /// `InsERT.Moria.ModelDanych.Cena` (ustalone diagnostyką 09.09.2026 —
+    /// pierwsze podejście „Cena = decimal" leciało wyjątkiem). Obiekt ma
+    /// cztery zapisywalne pola decimal:
+    ///
+    ///   NettoPrzedRabatem, NettoPoRabacie, BruttoPrzedRabatem, BruttoPoRabacie
+    ///
+    /// Ustawiamy OBA pola netto na tę samą wartość, bo PW produkcji własnej
+    /// nie zna rabatu — cena wytworzenia jest ceną końcową. `NettoPoRabacie`
+    /// to pole, które Subiekt uznaje za cenę pozycji: tak właśnie czyta ją
+    /// Dokumenty.cs:94 przy read-backu, więc zapis i odczyt patrzą w to samo
+    /// miejsce.
+    ///
+    /// Brutto zostawiamy Subiektowi — przelicza je sam ze stawki VAT
+    /// kartoteki; wpisane ręcznie mogłoby się z tym wyliczeniem rozjechać.
+    static string? UstawCenePozycji(object poz, decimal cena)
+    {
+        object? obCena = null;
+        try { obCena = ((dynamic)poz).Cena; } catch { }
+        if (obCena is null) return null;
+
+        var ustawione = new List<string>();
+        foreach (var nazwa in new[] { "NettoPrzedRabatem", "NettoPoRabacie" })
+        {
+            var pr = obCena.GetType().GetProperty(nazwa);
+            if (pr is null || !pr.CanWrite || pr.PropertyType != typeof(decimal)) continue;
+            try
+            {
+                pr.SetValue(obCena, cena);
+                if ((decimal?)pr.GetValue(obCena) == cena) ustawione.Add(nazwa);
+            }
+            catch { }
+        }
+        // Bez NettoPoRabacie cena nie jest ceną pozycji — samo
+        // NettoPrzedRabatem zostawiłoby dokument z zerową wartością.
+        return ustawione.Contains("NettoPoRabacie")
+            ? $"Cena.{string.Join("+", ustawione)}" : null;
+    }
+
+    internal record PozPlan(string? Symbol, decimal Ilosc, decimal? Cena = null);
     internal record Plan(List<PozPlan>? Pozycje, string? Uwagi, string? Magazyn);
     internal record Krok(string Rodzaj, string Symbol, string Status, string? Szczegoly);
 }
