@@ -435,8 +435,24 @@ internal static class Projekt
                     var pominietoJest = 0;
                     var roznice = 0;
                     var zmienioneIlosci = 0;
+                    var pominietoProdukcja = 0;
                     foreach (var p in pozycje)
                     {
+                        // PRODUKCJA WŁASNA nie wchodzi na ZK: RMPAK jest
+                        // producentem i nie zamawia detali u siebie. Filtr stoi
+                        // TYLKO tutaj, przy pozycjach dokumentu — kartoteka
+                        // i skład kompletu powstały wyżej normalnie, bo detal
+                        // własny bywa składnikiem KT i komplet musi być pełny
+                        // (RMPAK_PRODUKCJA_USTALENIA.md §9).
+                        //
+                        // Te pozycje idą własnym torem: Kalkulator RMPAK → PW → RW.
+                        if (p.ProdukcjaWlasna)
+                        {
+                            pominietoProdukcja++;
+                            kroki.Add(new Krok("zk-poz", p.Symbol, "produkcja-wlasna",
+                                               "robimy u siebie — nie zamawiamy; idzie na PW"));
+                            continue;
+                        }
                         // Realny symbol z mapy, nie z Sfery: `enc` sluzyl tu
                         // WYLACZNIE do odczytania enc.Symbol, a WyszukajPoSymbolu
                         // w petli po 354 pozycjach kosztowalo ~13 s na kazdy
@@ -550,12 +566,17 @@ internal static class Projekt
                         else
                         {
                             zkNumer = Bezp(() => ob.Dane.NumerWewnetrzny?.PelnaSygnatura);
-                            var co = istniejace != null
+                            // Produkcja własna w podsumowaniu, nie tylko w wierszach:
+                            // bez tego user widzi „dopisano 22 poz." przy 30 w planie
+                            // i nie wie, gdzie się podziało 8 (zasada „nic po cichu").
+                            var prod = pominietoProdukcja > 0
+                                ? $" — {pominietoProdukcja} poz. produkcji własnej pominięto (idą na PW)" : "";
+                            var co = (istniejace != null
                                 ? $"dopisano {dodane} poz."
                                   + (zmienioneIlosci > 0 ? $", zmieniono ilość w {zmienioneIlosci} poz." : "")
                                   + (pominietoJest > 0 ? $" ({pominietoJest} bez zmian"
                                       + (roznice > 0 ? $", {roznice} wymaga uwagi" : "") + ")" : "")
-                                : $"utworzone ({dodane} poz.)";
+                                : $"utworzone ({dodane} poz.)") + prod;
                             kroki.Add(new Krok("zk", zkNumer ?? plan.Projekt ?? "", co, null));
                         }
                     }
@@ -940,7 +961,8 @@ internal static class Projekt
     }
 
     internal record SkladnikPlan(string Symbol, decimal Ilosc);
-    internal record PozPlan(string Symbol, string? Nazwa, string? Typ, decimal Ilosc, List<SkladnikPlan>? Skladniki);
+    internal record PozPlan(string Symbol, string? Nazwa, string? Typ, decimal Ilosc,
+                            List<SkladnikPlan>? Skladniki, bool ProdukcjaWlasna = false);
     internal record Plan(string? Projekt, string? Tytul, string? Podmiot, string? Uwagi, List<PozPlan>? Pozycje);
     internal record Krok(string Rodzaj, string Symbol, string Status, string? Szczegoly);
 }

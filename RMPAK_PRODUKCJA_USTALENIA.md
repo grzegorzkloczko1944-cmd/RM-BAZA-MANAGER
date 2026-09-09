@@ -245,6 +245,26 @@ cena/szt.    → z Kalkulatora RMPAK
 uwagi        → numer projektu, np. „RM_BAZA — PROJEKT 2641"
 ```
 
+### PW przyjmuje TW, nie KT
+
+RMPAK z elementów TW składa ZZ — czyli z towarów robi u siebie komplet.
+W Subiekcie odwzorowuje to kartoteka KT, której stan **wynika ze stanu
+składników**; własnego stanu komplet nie ma.
+
+Dlatego na PW idą **wyłącznie pozycje TW (STANDARD / X / XX)**. Złożenia
+Z/ZZ są pomijane: przyjęcie kompletu obok jego części znaczyłoby przyjęcie
+tego samego dwa razy.
+
+Skala na projekcie 22 (507 pozycji, 59 produkcji własnej):
+
+```text
+STANDARD (TW)  43   → na PW
+Z / ZZ (KT)    16   → pomijane, powstają ze składników
+```
+
+Komplet nadal ma pełny skład w Subiekcie — filtr ZK (§9) celowo nie rusza
+budowy kartotek ani składów.
+
 ### Cena jako snapshot
 
 Cena na PW jest stanem z chwili wystawienia. Gdy kalkulacja zmieni się
@@ -497,6 +517,7 @@ Do rozstrzygnięcia z magazynierem przed Etapem 2.
 | Raport ZK | pominięte pozycje RMPAK muszą być widoczne |
 | Cena PW | z Kalkulatora RMPAK; `Pw.cs` wymaga rozszerzenia o `Cena` |
 | Ilość PW | z projektu — `COALESCE(work_qty, src_qty)`, bez `order_qty` |
+| Co wchodzi na PW | **tylko TW** (STANDARD/X/XX); złożenia Z/ZZ pomijane — KT powstaje ze składników |
 | RW | z potwierdzonego PW |
 | Lista produkcyjna | istniejąca lista Kalkulatora RMPAK |
 | Filtry GUI | nie wpływają na zawartość PW |

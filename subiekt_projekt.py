@@ -153,7 +153,11 @@ def read_project_items(project_id):
         # Opis („wykonać z PP", „LEWY / PRAWY", „6-6mm (D14L22)") — ta sama
         # kolejność co reszta: wartość robocza przed źródłową.
         desc_cols = [c for c in ("work_desc", "src_desc") if c in cols]
-        sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols + qty_cols + cls_cols + bib_col + desc_cols
+        # Dostawca — po to, żeby detal PRODUKOWANY U SIEBIE nie wszedł na ZK
+        # (RMPAK_PRODUKCJA_USTALENIA.md §9). Kolumny może nie być w starszych
+        # bazach projektów, więc jak wszystkie pozostałe: opcjonalnie.
+        sup_col = ["supplier_id"] if "supplier_id" in cols else []
+        sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols + qty_cols + cls_cols + bib_col + desc_cols + sup_col
         # Ukryte pozycje (przycisk „Ukryj zaznaczone" w arkuszu) nie mają
         # trafiać do Subiekta — COALESCE bo starsze wiersze mogą mieć NULL
         # zamiast 0 (ten sam wzorzec co database_manager.get_project_items).
@@ -167,6 +171,16 @@ def read_project_items(project_id):
     c0 = q0 + len(qty_cols)
     c1 = c0 + len(cls_cols)     # koniec kolumn typu, przed dwf_biblioteka
     d0 = c1 + len(bib_col)      # początek kolumn opisu
+    s0 = d0 + len(desc_cols)    # supplier_id — ostatnia, jeśli w ogóle jest
+
+    # Którzy dostawcy znaczą „robimy to u siebie". Czytane RAZ na projekt,
+    # nie per wiersz: to zapytanie do master.sqlite, a ta bywa na dysku
+    # sieciowym (ten sam powód co przy mapowaniach — 37 s na przebieg).
+    try:
+        import subiekt_produkcja
+        id_produkcji = subiekt_produkcja.id_dostawcow_produkcji()
+    except Exception:
+        id_produkcji = set()    # brak modułu/bazy → nic nie jest produkcją własną
 
     def first(vals):
         for v in vals:
@@ -200,14 +214,18 @@ def read_project_items(project_id):
             symbol = rozroznij_symbol(nazwa, uzyte_symbole)
         uzyte_symbole.add(symbol)
 
+        # Produkcja własna: kartoteka i skład kompletu POWSTAJĄ jak zawsze,
+        # ale pozycja nie wejdzie na ZK — nie zamawiamy detali u siebie.
+        sup_id = r[s0] if (sup_col and s0 < len(r)) else None
         out.append({
             "nr": symbol,
             "bez_numeru": not nr,    # do rozpoznania przy zakładaniu kartotek
             "nazwa": nazwa,
-            "opis": jedna_linia(first(r[d0:])) if d0 < len(r) else "",
+            "opis": jedna_linia(first(r[d0:s0] if sup_col else r[d0:])) if d0 < len(r) else "",
             "qty": first(r[q0:c0]),
             "typ": typ,
             "biblioteczne": biblioteczne,
+            "produkcja_wlasna": sup_id is not None and sup_id in id_produkcji,
         })
     return out
 
@@ -947,6 +965,9 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
             "ilosc": qty,
             "skladniki": skladniki,
             "biblioteczne": bool(it.get("biblioteczne")),
+            # Detal robiony u siebie. Zostaje w planie (kartoteka + skład KT
+            # mają powstać), ale most nie wpisze go na ZK — patrz §9 ustaleń.
+            "produkcja_wlasna": bool(it.get("produkcja_wlasna")),
         })
 
     # W Uwagach sam numer — tak firma oznacza dokumenty i tak po nich filtruje
