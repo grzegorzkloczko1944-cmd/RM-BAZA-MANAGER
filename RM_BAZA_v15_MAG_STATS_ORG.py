@@ -931,6 +931,8 @@ class MainWindow(tk.Tk):
         subiekt_menu.add_separator()
         subiekt_menu.add_command(label="🔗 Scal kody handlowe w tym projekcie…",
                                  command=self.open_subiekt_scalanie)
+        subiekt_menu.add_command(label="⚙ Dopasuj znormalizowane do kartotek…",
+                                 command=self.open_subiekt_znorm)
         # Menu pod PRAWYM klawiszem — lewy otwiera panel z kaflami.
         #
         # ⚠️ Menu NIE jest przypisane przez btn_subiekt["menu"]: Menubutton
@@ -30380,6 +30382,47 @@ class MainWindow(tk.Tk):
             project_name = None
 
         subiekt_scalanie_gui.open_window(self, self.current_project_id, project_name)
+
+    def open_subiekt_znorm(self):
+        """Okno „Dopasuj znormalizowane do kartotek" (menu 📦 SUBIEKT).
+
+        Logika w subiekt_znorm_gui.py / subiekt_znorm_dopasowanie.py.
+
+        Pozycje ZNORMALIZOWANE nie mają numeru rysunku, więc RM_BAZA nadaje
+        im symbol obcięty z nazwy do 13 znaków („Blokada GN 822.6-4-M8-C" →
+        „BlokadaGN822."). Dopasowanie 1:1 po takim symbolu nie ma szans i
+        pozycja trafia do Subiekta jako NOWA kartoteka, choć odpowiednik już
+        tam jest. To okno pozwala wskazać właściwą — z podpowiedziami,
+        licznikiem użyć w innych projektach i stanem magazynowym.
+
+        BEZ locka, inaczej niż scalanie kodów: zapis idzie do globalnej
+        tabeli mapowań (subiekt_mapowania.sqlite), a nie do BOM-u projektu.
+        """
+        if not self.current_project_id:
+            messagebox.showwarning("Dopasowanie",
+                                   "Najpierw wybierz projekt.", parent=self)
+            return
+        try:
+            import subiekt_znorm_gui
+        except ImportError as e:
+            messagebox.showerror(
+                "Dopasowanie",
+                f"Nie znaleziono modułu subiekt_znorm_gui.py\n\n{e}",
+                parent=self)
+            return
+
+        project_name = None
+        try:
+            if self.db_manager and self.db_manager.master_con:
+                row = self.db_manager.master_con.execute(
+                    "SELECT name FROM projects WHERE project_id = ?",
+                    (self.current_project_id,)).fetchone()
+                if row:
+                    project_name = row[0]
+        except Exception:
+            project_name = None
+
+        subiekt_znorm_gui.open_window(self, self.current_project_id, project_name)
 
     def toggle_show_hidden(self):
         """Przełącz wyświetlanie ukrytych pozycji"""

@@ -36,6 +36,8 @@ hiddenimports += [
     # dotad wchodzily do .exe TYLKO posrednio (przez subiekt_projekt), wiec
     # usuniecie tamtego importu wycielo by je po cichu.
     'subiekt_edytor_gui', 'subiekt_historia',
+    # dopasowanie znormalizowanych do kartotek (okno z menu SUBIEKT)
+    'subiekt_znorm_gui', 'subiekt_znorm_dopasowanie',
     # warstwa danych Subiekta
     'subiekt_bridge', 'subiekt_konfig', 'subiekt_asortyment', 'subiekt_dostawcy',
     'subiekt_mapowania', 'subiekt_podobne', 'subiekt_scalanie',
@@ -57,6 +59,7 @@ datas += [(f'{m}.py', '.') for m in (
     'subiekt_scalanie_gui', 'subiekt_polaczenie_gui', 'subiekt_pozycja_gui',
     'subiekt_projekt', 'subiekt_wyslij_zd', 'subiekt_bridge', 'subiekt_konfig',
     'subiekt_edytor_gui', 'subiekt_historia',
+    'subiekt_znorm_gui', 'subiekt_znorm_dopasowanie',
     'subiekt_asortyment', 'subiekt_dostawcy', 'subiekt_mapowania',
     'subiekt_podobne', 'subiekt_scalanie', 'rm_kreciolek',
 )]
