@@ -97,6 +97,29 @@ internal static class Projekt
             return s.Length > 0 && luzne.ContainsKey(s);
         }
 
+        // Czy sklad w Subiekcie jest DOKLADNIE taki jak w planie (para
+        // symbol+ilosc, kolejnosc nieistotna). Uzywane i przez suchy przebieg,
+        // i przez zapis — zeby zapis nie przepisywal od nowa czegos, o czym
+        // podglad wlasnie powiedzial "bez zmian".
+        bool SkladTakiSam(List<(string, decimal)> wBazie, List<SkladnikPlan> plan)
+        {
+            var zPlanu = plan
+                .Select(x => (x.Symbol.Trim().ToUpperInvariant(), x.Ilosc <= 0 ? 1m : x.Ilosc))
+                .OrderBy(x => x.Item1).ThenBy(x => x.Item2).ToList();
+            var stare = wBazie.OrderBy(x => x.Item1).ThenBy(x => x.Item2).ToList();
+            return zPlanu.Count == stare.Count
+                   && zPlanu.Zip(stare, (a, b) => a.Item1 == b.Item1 && a.Item2 == b.Item2).All(x => x);
+        }
+
+        // Realny symbol z Subiekta (z zachowana wielkoscia liter i spacjami)
+        // albo null. Z mapy jednego przelotu — bez pytania Sfery.
+        string? RealnySymbol(string symbol)
+        {
+            var s = (symbol ?? "").Trim();
+            if (s.Length == 0) return null;
+            return luzne.TryGetValue(s, out var realny) ? realny : null;
+        }
+
         // Sklad kompletu z jednego przelotu; null = nie ma takiej kartoteki.
         // Dopasowanie luzne tak samo jak w Znajdz (TRIM + ignorowanie a/A).
         List<(string, decimal)>? SkladZMapy(string symbol)
@@ -196,13 +219,7 @@ internal static class Projekt
                             // Rozstrzyga PARA (symbol, ilosc) — sama liczba
                             // skladnikow nie wystarczy: 4 na 4 moze znaczyc
                             // podmienioną pozycje albo zmieniona ilosc.
-                            var zPlanu = skl
-                                .Select(s => (s.Symbol.Trim().ToUpperInvariant(),
-                                              s.Ilosc <= 0 ? 1m : s.Ilosc))
-                                .OrderBy(x => x.Item1).ThenBy(x => x.Item2).ToList();
-                            var stare = wBazie.OrderBy(x => x.Item1).ThenBy(x => x.Item2).ToList();
-                            takiSam = zPlanu.Count == stare.Count
-                                      && zPlanu.Zip(stare, (a, bb) => a.Item1 == bb.Item1 && a.Item2 == bb.Item2).All(x => x);
+                            takiSam = SkladTakiSam(wBazie, skl);
                         }
                         catch { }
                     }
@@ -222,6 +239,21 @@ internal static class Projekt
 
                 try
                 {
+                    // Sklad JUZ identyczny → nie ruszamy kartoteki. Czyszczenie
+                    // i wpisywanie od nowa dawalo ten sam stan koncowy, ale
+                    // kosztowalo otwarcie + zapis kartoteki przez Sfere dla
+                    // KAZDEGO kompletu: 49 zlozen projektu 3000 = ~10 s na
+                    // zapis, w ktorym nic sie nie zmienialo (09.09.2026).
+                    // Podglad juz to wykrywal i pisal "bez zmian" — zapis
+                    // przepisywal mimo to.
+                    if (SkladZMapy(p.Symbol) is List<(string, decimal)> wBazieZ
+                        && wBazieZ.Count > 0 && SkladTakiSam(wBazieZ, skl))
+                    {
+                        kroki.Add(new Krok("komplet", p.Symbol, "bez-zmian",
+                                           $"skład identyczny ({wBazieZ.Count} skł.) — pominięto"));
+                        continue;
+                    }
+
                     var enc = Znajdz(p.Symbol);
                     if (enc == null) { kroki.Add(new Krok("komplet", p.Symbol, "blad", "brak kartoteki")); continue; }
 
@@ -405,9 +437,13 @@ internal static class Projekt
                     var zmienioneIlosci = 0;
                     foreach (var p in pozycje)
                     {
-                        var enc = Znajdz(p.Symbol);
-                        if (enc == null) continue;
-                        var sym = (enc.Symbol ?? "").Trim();
+                        // Realny symbol z mapy, nie z Sfery: `enc` sluzyl tu
+                        // WYLACZNIE do odczytania enc.Symbol, a WyszukajPoSymbolu
+                        // w petli po 354 pozycjach kosztowalo ~13 s na kazdy
+                        // zapis (log mostu 09.09.2026: cmd=projekt zapis=True
+                        // 13245 ms i 14580 ms przy 459 ms na suchy przebieg).
+                        var sym = RealnySymbol(p.Symbol);
+                        if (sym == null) continue;
                         if (juzNaZk.TryGetValue(sym, out var naDok))
                         {
                             // Pozycja JEST na dokumencie — doprowadzamy jej ilość
@@ -461,7 +497,7 @@ internal static class Projekt
                         }
                         // Dodaj(String symbol, Decimal ilosc) — symbol realny z Subiekta,
                         // nie pytany, bo dopasowanie mogło być luźne (spacje/wielkość liter).
-                        ob.Pozycje.Dodaj(enc.Symbol, p.Ilosc <= 0 ? 1m : p.Ilosc);
+                        ob.Pozycje.Dodaj(sym, p.Ilosc <= 0 ? 1m : p.Ilosc);
                         dodane++;
                     }
 
