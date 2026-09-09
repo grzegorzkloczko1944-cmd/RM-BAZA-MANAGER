@@ -28,4 +28,30 @@
     <SatelliteResourceLanguages>pl;en</SatelliteResourceLanguages>
   </PropertyGroup>
   <Import Project="$(nexoSdkNarzedziaPath)Targets\SferaConsoleApp.targets" />
+
+  <!--
+    BIBLIOTEKI InsERT NIE TRAFIAJA DO WYJSCIA (Private=false).
+
+    Sfera odmawia polaczenia, gdy wersja bibliotek != wersja bazy:
+        "Wersja bazy danych to 61.1.1.9471, a wersja Sfery to 61.1.0.9431"
+    Baza aktualizuje sie SAMA przy uruchomieniu Subiekta, a kopia bibliotek
+    zostaje na starej wersji — most startuje, odpowiada na ping, ale nigdy
+    nie osiaga ready. RM_BAZA wisi wtedy na przejeciu locka (09.09.2026).
+
+    Kopiowanie ich obok .exe mialo dodatkowy skutek uboczny: .NET laduje
+    biblioteke z katalogu aplikacji ZANIM odezwie sie hook Resolving
+    z SdkLoader, wiec zadne wykrywanie nowszej wersji nie mialo szans.
+
+    Teraz referencje sluza WYLACZNIE kompilacji, a w runtime biblioteki
+    laduje hook — z instalacji Subiekta (zawsze zgodna z baza) albo z kopii
+    statycznej, gdy Subiekta na maszynie nie ma. Patrz SdkLoader.cs.
+
+    Efekt uboczny: katalog wyjsciowy chudnie z ~590 MB do kilkuset KB.
+  -->
+  <Target Name="NieKopiujBibliotekInsERT" AfterTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
+                               Condition="$([System.String]::Copy('%(Filename)').StartsWith('InsERT.'))" />
+    </ItemGroup>
+  </Target>
 </Project>
