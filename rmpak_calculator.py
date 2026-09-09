@@ -582,11 +582,16 @@ class RmpakCalculatorDialog:
                  bg="#fdebd0", fg="#7d4b12", font=("", 9), anchor="w",
                  padx=12, pady=6).pack(fill="x")
 
-        cols = ("Symbol", "Nazwa", "Ilość", "Cena/szt.", "Wartość")
+        # Ceny NIE IDĄ na dokument — kolumny mówią to wprost, żeby nikt nie
+        # brał ich za wartość, którą RW faktycznie będzie miało. Wartość
+        # rozchodu liczy Subiekt ze swojej ewidencji: ten sam detal bywa na
+        # magazynie w kilku partiach po różnych cenach i tylko magazyn wie,
+        # którą zdejmuje (FIFO / średnia ważona).
+        cols = ("Symbol", "Nazwa", "Ilość", "Cena z PW", "Wartość wg PW")
         tree = ttk.Treeview(dlg, columns=cols, show="headings", height=13)
-        for c, w in zip(cols, (150, 300, 70, 90, 100)):
+        for c, w in zip(cols, (150, 290, 70, 95, 110)):
             tree.heading(c, text=c)
-            tree.column(c, width=w, anchor="e" if c in ("Ilość", "Cena/szt.", "Wartość") else "w")
+            tree.column(c, width=w, anchor="e" if c in ("Ilość", "Cena z PW", "Wartość wg PW") else "w")
         tree.pack(fill="both", expand=True, padx=10, pady=(8, 0))
         razem = 0.0
         for p in poz:
@@ -597,8 +602,10 @@ class RmpakCalculatorDialog:
 
         stopka = tk.Frame(dlg, padx=12, pady=10)
         stopka.pack(fill="x")
-        tk.Label(stopka, text=f"RAZEM: {razem:,.2f} PLN".replace(",", " "),
+        tk.Label(stopka, text=f"WG PW: {razem:,.2f} PLN".replace(",", " "),
                  font=("", 12, "bold"), fg="darkred").pack(side="left")
+        tk.Label(stopka, text="— wartość RW policzy Subiekt ze stanu magazynu",
+                 font=("", 8), fg="gray40").pack(side="left", padx=(6, 0))
         tk.Label(stopka, text=f"Uwagi: RM_BAZA — PROJEKT {self.project_name} | PW: {numer_pw}",
                  font=("", 8), fg="gray30").pack(side="left", padx=(16, 0))
         tk.Button(stopka, text="Zamknij", command=dlg.destroy, width=12).pack(side="right")
@@ -637,7 +644,7 @@ class RmpakCalculatorDialog:
                 "Potwierdź zapis RW",
                 f"Subiekt utworzy dokument RW:\n\n"
                 f"    pozycji:  {len(pozycje)}\n"
-                f"    wartość:  {razem:,.2f} PLN\n".replace(",", " ")
+                f"    wg PW:    {razem:,.2f} PLN  (wartość RW policzy Subiekt)\n".replace(",", " ")
                 + f"    magazyn:  {plan['magazyn']}\n"
                   f"    źródło:   {numer_pw}\n\n"
                   "To ZDEJMIE towar ze stanu magazynu.\n"
@@ -664,7 +671,9 @@ class RmpakCalculatorDialog:
             messagebox.showinfo(
                 "RW zapisane i potwierdzone",
                 f"✅ {numer}\n\nProjekt: {self.project_name}\nŹródło: {numer_pw}\n"
-                f"{len(pozycje)} pozycji\n{razem:,.2f} PLN".replace(",", " ")
+                f"{len(pozycje)} pozycji\n\n"
+                "Wartość dokumentu wpisał Subiekt ze stanu magazynu — "
+                "sprawdzisz ją w Przeglądzie dokumentów."
                 + "\n\n✅ PROCES RMPAK ZAKOŃCZONY", parent=dlg)
             dlg.destroy()
         else:
