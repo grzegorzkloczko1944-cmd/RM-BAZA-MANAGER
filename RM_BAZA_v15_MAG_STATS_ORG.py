@@ -934,6 +934,24 @@ class MainWindow(tk.Tk):
             lambda e: subiekt_menu.tk_popup(e.x_root, e.y_root))
         self.btn_subiekt.pack(side=tk.LEFT, padx=(0, 5), pady=2)
 
+        # Widoczność kolumn arkusza — część jest potrzebna tylko czasem
+        # (Casting, ALARM, Cena), a zabiera szerokość tym, na które patrzy się
+        # non stop. Wybór zapisuje się do JSON, więc przeżywa restart.
+        self.btn_kolumny = tk.Menubutton(
+            search_frame, text="🧱 Kolumny ▾", bg="#34495e", fg="white",
+            font=("Arial", 9), padx=8, pady=4, relief=tk.RAISED, bd=2,
+            cursor="hand2")
+        self._menu_kolumny = tk.Menu(self.btn_kolumny, tearoff=0)
+        # Menu budujemy DOPIERO gdy arkusz istnieje — nagłówki bierzemy z niego,
+        # a self.sheet powstaje później niż ten pasek przycisków.
+        self._kol_widoczne = {}
+        self.btn_kolumny.bind(
+            "<Button-1>",
+            lambda e: self._menu_kolumny.tk_popup(
+                self.btn_kolumny.winfo_rootx(),
+                self.btn_kolumny.winfo_rooty() + self.btn_kolumny.winfo_height()))
+        self.btn_kolumny.pack(side=tk.LEFT, padx=(0, 5), pady=2)
+
         # RFQ: ilu kooperantów czeka z odpowiedzią. Liczone LOKALNIE z
         # rfq_activity/rfq_results (agent je synchronizuje), więc badge działa
         # nawet gdy portal chwilowo nie odpowiada. Kliknięcie otwiera panel
@@ -1753,6 +1771,11 @@ class MainWindow(tk.Tk):
         
         # Ukryj kolumnę DWF_BIB (indeks 16)
         self.sheet.hide_columns(columns=[16])
+
+        # Menu „🧱 Kolumny" i wybór usera z poprzedniej sesji. Dopiero tutaj,
+        # bo nagłówki bierzemy z arkusza, a ten właśnie powstał.
+        self._zbuduj_menu_kolumn()
+        self.after_idle(self._zastosuj_zapisana_widocznosc)
         
         # Zapamiętanie ręcznie rozciągniętej kolumny.
         #
@@ -3450,6 +3473,104 @@ class MainWindow(tk.Tk):
             self.after_idle(_sprawdz)
         except Exception:
             pass
+
+    #: Kolumny, których NIE wolno ukryć — bez nich arkusz przestaje być
+    #: czytelny (nie wiadomo, której pozycji dotyczy wiersz).
+    KOLUMNY_STALE = (0, 1)          # Nr rysunku, Nazwa
+    #: DWF_BIB (16) jest ukryta na stałe od dawna — techniczna, nie dla usera.
+    KOLUMNY_UKRYTE_ZAWSZE = (16,)
+    #: Gdzie pamiętamy wybór. Osobny plik, żeby nie mieszać do sync_config.json.
+    PLIK_KOLUMN = Path(DEFAULT_LOCAL_DIR) / "widocznosc_kolumn.json"
+
+    def _naglowki_arkusza(self):
+        """[(indeks, nagłówek)] — kolumny, które user może włączać/wyłączać."""
+        try:
+            naglowki = list(self.sheet.headers())
+        except Exception:
+            return []
+        return [(i, str(h)) for i, h in enumerate(naglowki)
+                if i not in self.KOLUMNY_UKRYTE_ZAWSZE]
+
+    def _wczytaj_widocznosc_kolumn(self):
+        """{indeks: bool} z JSON-a. Brak pliku = wszystko widoczne."""
+        try:
+            if self.PLIK_KOLUMN.is_file():
+                with open(self.PLIK_KOLUMN, encoding="utf-8") as f:
+                    dane = json.load(f) or {}
+                return {int(k): bool(v) for k, v in dane.items()}
+        except Exception as e:
+            print(f"⚠️  Nie wczytano widoczności kolumn: {e}")
+        return {}
+
+    def _zapisz_widocznosc_kolumn(self):
+        try:
+            self.PLIK_KOLUMN.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.PLIK_KOLUMN, "w", encoding="utf-8") as f:
+                json.dump({str(i): bool(v.get())
+                           for i, v in self._kol_widoczne.items()}, f, indent=1)
+        except Exception as e:
+            print(f"⚠️  Nie zapisano widoczności kolumn: {e}")
+
+    def _zastosuj_zapisana_widocznosc(self):
+        """Stosuje wybór z JSON-a przy starcie — bez ponownego zapisu."""
+        if not getattr(self, "_kol_widoczne", None):
+            return
+        if all(v.get() for v in self._kol_widoczne.values()):
+            return                     # wszystko widoczne — nie ma co zmieniać
+        self._zastosuj_widocznosc_kolumn(zapisz=False)
+
+    def _zbuduj_menu_kolumn(self):
+        """Menu z checkboxem przy każdej kolumnie + skróty pokaż/ukryj."""
+        zapisane = self._wczytaj_widocznosc_kolumn()
+        self._kol_widoczne = {}
+        self._menu_kolumny.delete(0, "end")
+
+        for idx, naglowek in self._naglowki_arkusza():
+            stale = idx in self.KOLUMNY_STALE
+            var = tk.BooleanVar(value=True if stale else zapisane.get(idx, True))
+            self._kol_widoczne[idx] = var
+            self._menu_kolumny.add_checkbutton(
+                label=(f"{naglowek}   (zawsze)" if stale else naglowek),
+                variable=var, state=tk.DISABLED if stale else tk.NORMAL,
+                command=self._zastosuj_widocznosc_kolumn)
+
+        self._menu_kolumny.add_separator()
+        self._menu_kolumny.add_command(label="Pokaż wszystkie",
+                                       command=lambda: self._ustaw_wszystkie_kolumny(True))
+        self._menu_kolumny.add_command(label="Ukryj opcjonalne",
+                                       command=lambda: self._ustaw_wszystkie_kolumny(False))
+
+    def _ustaw_wszystkie_kolumny(self, widoczne):
+        for idx, var in self._kol_widoczne.items():
+            if idx not in self.KOLUMNY_STALE:
+                var.set(widoczne)
+        self._zastosuj_widocznosc_kolumn()
+
+    def _zastosuj_widocznosc_kolumn(self, zapisz=True):
+        """Pokazuje wybrane kolumny w arkuszu i zapamiętuje wybór.
+
+        Używamy hide/show, NIE `display_columns` — ta ostatnia w tej wersji
+        tksheet nic nie robi (sprawdzone: po jej wywołaniu wszystkie kolumny
+        nadal widoczne, `all_columns_displayed()` dalej True).
+        """
+        try:
+            pokaz, ukryj = [], list(self.KOLUMNY_UKRYTE_ZAWSZE)
+            for i, v in sorted(self._kol_widoczne.items()):
+                (pokaz if v.get() else ukryj).append(i)
+            if not pokaz:
+                return                     # nie zostawiamy pustego arkusza
+            # Najpierw pokazujemy, potem ukrywamy — inaczej kolumna zdjęta
+            # i zaraz dodana potrafi zostać w złej kolejności.
+            self.sheet.show_columns(columns=pokaz, redraw=False)
+            if ukryj:
+                self.sheet.hide_columns(columns=ukryj, redraw=True)
+            else:
+                self.sheet.refresh()
+        except Exception as e:
+            print(f"⚠️  Nie zastosowano widoczności kolumn: {e}")
+            return
+        if zapisz:
+            self._zapisz_widocznosc_kolumn()
 
     def _save_column_widths(self, quiet=False):
         """Zapisz szerokości kolumn do lokalnego pliku JSON.
