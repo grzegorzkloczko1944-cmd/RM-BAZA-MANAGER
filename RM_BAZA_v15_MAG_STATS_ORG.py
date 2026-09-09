@@ -4984,9 +4984,6 @@ class MainWindow(tk.Tk):
                 self.sheet.highlight_cells(row=row_idx, column=col, bg=GRAY_BG)
                 self._cells_special_bg.add((row_idx, col))
 
-        if not data:
-            return
-
         # === JASNOZIELONE TŁO NUMERU: pozycja ma parę w Subiekcie ===
         # Kolorujemy PRZED biblioteką, żeby niebieska czcionka bibliotecznych
         # nadal wygrywała — tam kolor niesie ważniejszą informację.
@@ -5007,6 +5004,9 @@ class MainWindow(tk.Tk):
                     self._cells_special_bg.add((row_idx, 0))
             except Exception:
                 pass
+
+        if not data:
+            return
 
         # === NIEBIESKA CZCIONKA dla pozycji BIBLIOTEKA (kolumna NUMER) ===
         if data.get('dwf_biblioteka', 0) == 1:
