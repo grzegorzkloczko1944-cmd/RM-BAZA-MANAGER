@@ -147,18 +147,11 @@ class DopasowanieWindow(tk.Toplevel):
         self.lbl_kand = tk.Label(prawa, text="Kandydaci", anchor="w",
                                  font=("Arial", 9, "bold"))
         self.lbl_kand.pack(fill=tk.X, pady=(6, 2))
-        kol2 = ("symbol", "nazwa")
-        self.tab2 = ttk.Treeview(prawa, columns=kol2, show="headings", height=14)
-        self.tab2.heading("symbol", text="Symbol")
-        self.tab2.column("symbol", width=170, anchor="w")
-        self.tab2.heading("nazwa", text="Nazwa")
-        self.tab2.column("nazwa", width=300, anchor="w")
-        vs2 = ttk.Scrollbar(prawa, orient="vertical", command=self.tab2.yview)
-        self.tab2.configure(yscrollcommand=vs2.set)
-        self.tab2.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vs2.pack(side=tk.RIGHT, fill=tk.Y)
-        self.tab2.bind("<Double-1>", lambda _e: self._przypisz())
 
+        # PRZYCISKI PAKOWANE PRZED TABELĄ i przypięte do DOŁU. Tabela ma
+        # expand=True, więc zapakowana wcześniej zabierała całą wysokość
+        # panelu i wypychała „Przypisz wybraną" poza krawędź
+        # (zgłoszone 09.09.2026 — ta sama pułapka co w raporcie po zapisie).
         akcje = tk.Frame(prawa)
         akcje.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
         tk.Button(akcje, text="Przypisz wybraną", command=self._przypisz,
@@ -166,6 +159,22 @@ class DopasowanieWindow(tk.Toplevel):
                   font=("Arial", 9, "bold"), padx=14, pady=5).pack(side=tk.LEFT)
         tk.Button(akcje, text="⛓ Odepnij", command=self._odepnij,
                   padx=12, pady=5).pack(side=tk.LEFT, padx=6)
+
+        # Tabela + pasek w osobnej ramce: mieszanie side=LEFT/RIGHT z
+        # side=BOTTOM w jednym rodzicu daje nieprzewidywalny układ.
+        ramka2 = tk.Frame(prawa)
+        ramka2.pack(fill=tk.BOTH, expand=True)
+        kol2 = ("symbol", "nazwa")
+        self.tab2 = ttk.Treeview(ramka2, columns=kol2, show="headings", height=14)
+        self.tab2.heading("symbol", text="Symbol")
+        self.tab2.column("symbol", width=170, anchor="w")
+        self.tab2.heading("nazwa", text="Nazwa")
+        self.tab2.column("nazwa", width=300, anchor="w")
+        vs2 = ttk.Scrollbar(ramka2, orient="vertical", command=self.tab2.yview)
+        self.tab2.configure(yscrollcommand=vs2.set)
+        self.tab2.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vs2.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tab2.bind("<Double-1>", lambda _e: self._przypisz())
         panel.add(prawa, minsize=440)
 
     # ── wczytywanie ────────────────────────────────────────────────────
