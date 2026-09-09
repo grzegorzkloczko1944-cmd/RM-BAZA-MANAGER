@@ -1,5 +1,6 @@
 {
   "protokol": 1,
-  "zbudowano": "2026-09-06 21:07",
-  "sha": "cc2cfce"
+  "zbudowano": "2026-09-09 13:19",
+  "sha": "f737028",
+  "uwaga": "Z main po scaleniu: ZkIlosci, magazyn-zaloz zmiana nazwy, Ilosc(zam.) z Subiekta; RM_BAZA 13:01 (bramka wersji, retire_con)"
 }
