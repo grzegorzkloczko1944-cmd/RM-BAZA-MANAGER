@@ -1,4 +1,4 @@
-// Tryb "projekt" — ZAPIS do Subiekta: kartoteki, komplety (Z/ZZ) i ZK projektu.
+﻿// Tryb "projekt" — ZAPIS do Subiekta: kartoteki, komplety (Z/ZZ) i ZK projektu.
 //
 //   NexoRecon.exe projekt --plan=plan.json [--out=wynik.json] [--zapisz] [konfig.json]
 //
@@ -43,11 +43,37 @@ internal static class Projekt
         // Mapa symboli już istniejących — jeden przelot, jak w Stan.cs.
         // Dopasowanie luźne (TRIM + ignorowanie wielkości liter), bo w bazie
         // są symbole ze spacją na końcu i różnicą a/A (plan, sekcja 12.2).
+        // W TYM SAMYM przelocie bierzemy SKLAD kompletow. Suchy przebieg
+        // porownuje sklad z BOM-u ze stanem w Subiekcie i robil to przez
+        // asort.Znajdz(symbol) + podglad.Dane.SkladnikiKompletu OSOBNO dla
+        // kazdego kompletu: 49 zlozen = 49 zapytan przez Sfere, ~5 s na jedno
+        // przeliczenie ilosci (log mostu 09.09.2026: cmd=projekt srednia
+        // 5275 ms przy 45 ms na cmd=komplet, ktory czyta to samo JEDNYM
+        // zapytaniem LINQ — Komplet.cs). Jeden przelot kosztuje tyle, co
+        // dotychczasowa mapa symboli.
         var luzne = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var a in asort.Dane.Wszystkie().Select(a => new { a.Symbol }).ToList())
+        var skladWBazie = new Dictionary<string, List<(string, decimal)>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var a in asort.Dane.Wszystkie()
+                     .Select(a => new
+                     {
+                         a.Symbol,
+                         Sklad = a.SkladnikiKompletu.Select(s => new { s.Skladnik.Symbol, s.Ilosc }),
+                     }).ToList())
         {
             var k = (a.Symbol ?? "").Trim();
-            if (k.Length > 0) luzne[k] = a.Symbol!;
+            if (k.Length == 0) continue;
+            luzne[k] = a.Symbol!;
+            var lista = new List<(string, decimal)>();
+            try
+            {
+                foreach (var s in a.Sklad)
+                {
+                    var sym = (s.Symbol ?? "").Trim();
+                    if (sym.Length > 0) lista.Add((sym.ToUpperInvariant(), s.Ilosc));
+                }
+            }
+            catch { /* kartoteka bez skladu albo uszkodzony wpis - pusty sklad */ }
+            skladWBazie[k] = lista;
         }
 
         Asortyment? Znajdz(string symbol)
@@ -58,6 +84,15 @@ internal static class Projekt
             if (enc == null && luzne.TryGetValue(s, out var realny))
                 enc = asort.Dane.WyszukajPoSymbolu(realny);
             return enc;
+        }
+
+        // Sklad kompletu z jednego przelotu; null = nie ma takiej kartoteki.
+        // Dopasowanie luzne tak samo jak w Znajdz (TRIM + ignorowanie a/A).
+        List<(string, decimal)>? SkladZMapy(string symbol)
+        {
+            var s = (symbol ?? "").Trim();
+            if (s.Length == 0) return null;
+            return skladWBazie.TryGetValue(s, out var lista) ? lista : null;
         }
 
         var pozycje = plan.Pozycje ?? new List<PozPlan>();
@@ -135,23 +170,12 @@ internal static class Projekt
                     var juzMaSklad = 0;
                     var takiSam = false;
                     var staryOpis = new List<(string, decimal)>();
-                    var istn = Znajdz(p.Symbol);
-                    if (istn != null)
+                    // Sklad z mapy zbudowanej jednym przelotem wyzej —
+                    // zero zapytan do Sfery w petli po kompletach.
+                    if (SkladZMapy(p.Symbol) is List<(string, decimal)> wBazie)
                     {
                         try
                         {
-                            using var podglad = asort.Znajdz(istn);
-                            IEnumerable<dynamic> sklad = podglad.Dane.SkladnikiKompletu;
-                            var wBazie = new List<(string, decimal)>();
-                            foreach (var s in sklad)
-                            {
-                                string? sym = null;
-                                decimal ile = 0m;
-                                try { sym = (string?)s.Skladnik?.Symbol; } catch { }
-                                try { ile = (decimal)s.Ilosc; } catch { }
-                                if (!string.IsNullOrWhiteSpace(sym))
-                                    wBazie.Add((sym!.Trim().ToUpperInvariant(), ile));
-                            }
                             juzMaSklad = wBazie.Count;
                             staryOpis = wBazie;
 
