@@ -299,7 +299,8 @@ class PanelSubiekt(tk.Toplevel):
         for ikona, etykieta, akcja in (
                 ("🏬", "Magazyn", self._akcja("open_subiekt_magazyn")),
                 ("🛒", "Zamówienia ZD", self._akcja("open_subiekt_zamowienia")),
-                ("📚", "Dokumenty", self._akcja("open_subiekt_dokumenty"))):
+                ("📚", "Dokumenty", self._akcja("open_subiekt_dokumenty")),
+                ("🧩", "Złożenia", self._akcja("open_subiekt_zlozenia"))):
             b = tk.Button(rzad, text=f"{ikona}  {etykieta}", command=akcja,
                           bg="white", fg=TEKST, relief=tk.SOLID, bd=1,
                           font=("Arial", 9), padx=12, pady=6, cursor="hand2")
@@ -361,8 +362,12 @@ class PanelSubiekt(tk.Toplevel):
                  "odczyt", "open_subiekt_magazyn", "magazyn"),
                 ("🛒", "Zamówienia do dostawców", "ZD",
                  "zapis", "open_subiekt_zamowienia", "zapotrzebowanie"),
-                ("📚", "Przegląd dokumentów", "ZK / ZD / RW / WZ",
+                ("📚", "Przegląd dokumentów", "ZK / ZD / PW / RW / WZ",
                  "odczyt", "open_subiekt_dokumenty", "dokumenty"),
+                # Komplet nie trafia na żaden dokument (nie ma własnego stanu),
+                # więc w przeglądzie dokumentów go NIE MA — stąd osobne wejście.
+                ("🧩", "Złożenia projektu", "komplety w Subiekcie: skład, sieroty",
+                 "odczyt", "open_subiekt_zlozenia", None),
             ]),
             ("Kartoteki i mapowania", "Porządkowanie danych podstawowych", [
                 ("🗂", "Asortyment", "wszystkie kartoteki, ceny, skład kompletów",

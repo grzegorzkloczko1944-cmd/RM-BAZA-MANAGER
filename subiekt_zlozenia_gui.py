@@ -41,7 +41,7 @@ from tkinter import ttk, messagebox
 
 from rm_kreciolek import Kreciolek
 from subiekt_stany import (PROJECTS_DIR, CONFIG_PATH, _find_exe, blad_mostu,
-                           wysrodkuj, podepnij_szerokosci)
+                           podepnij_szerokosci)
 
 try:
     from tksheet import Sheet
@@ -187,6 +187,43 @@ def _pozycje_zk_projektu(numer_projektu, timeout=TIMEOUT_S):
                 poz[k] = poz.get(k, 0) + float(p.get("ilosc") or 0)
         return poz, d.get("numer")
     return {}, None
+
+
+def _rozciagnij(sheet, elastyczne):
+    """Rozciąga tabelę na całą szerokość — nadmiar idzie w kolumny `elastyczne`.
+
+    tksheet 7.5.19 nie ma opcji „wypełnij szerokość": kolumny mają stałe
+    piksele i przy szerokim oknie zostaje martwe pole po prawej. Liczymy więc
+    sami: co zostało ponad sumę kolumn, rozdzielamy PROPORCJONALNIE między
+    wskazane kolumny (nazwy, opisy), a nie po równo — inaczej wąska „Ilość"
+    urosłaby tak samo jak szeroka „Nazwa".
+
+    Kolumny NIEelastyczne (liczby, statusy) zostają jak są, bo ich treść ma
+    stałą długość i rozciąganie tylko oddalałoby je od siebie.
+
+    Zwężenia nie robimy: gdy okno jest węższe niż suma kolumn, zostaje
+    poziomy pasek przewijania — lepszy niż ucinanie treści.
+    """
+    try:
+        szer = sheet.winfo_width()
+        if szer < 50:                     # jeszcze nie wyrysowane
+            return
+        obecne = list(sheet.get_column_widths())
+        if not obecne or not elastyczne:
+            return
+        # ~2 px na obramowanie + miejsce na pionowy pasek przewijania
+        dostepne = szer - 22
+        nadmiar = dostepne - sum(obecne)
+        if nadmiar <= 0:
+            return
+        baza = sum(obecne[c] for c in elastyczne if c < len(obecne)) or 1
+        for c in elastyczne:
+            if c < len(obecne):
+                obecne[c] += int(nadmiar * obecne[c] / baza)
+        sheet.set_column_widths(obecne)
+        sheet.redraw()
+    except Exception:
+        pass                              # rozciąganie to kosmetyka, nie funkcja
 
 
 def _para(symbol, ilosc):
@@ -517,6 +554,38 @@ class ZlozeniaWindow(tk.Toplevel, Kreciolek):
                                bg="#ecf0f1", fg="#2c3e50", font=("Arial", 9))
         self.status.pack(side=tk.BOTTOM, fill=tk.X)
 
+        # Rozciąganie po zmianie rozmiaru okna — z opóźnieniem, żeby przy
+        # przeciąganiu krawędzi nie przeliczać kolumn kilkadziesiąt razy.
+        self._resize_after = None
+        self.bind("<Configure>", self._on_resize, add="+")
+
+    #: Kolumny, które biorą wolne miejsce: teksty o zmiennej długości.
+    #: Liczby i statusy zostają wąskie — mają stałą treść.
+    ELASTYCZNE = ("nazwa", "wchodzi_w", "produkcja")
+    ELASTYCZNE_SKL = ("nazwa", "symbol", "dostawca")
+
+    def _indeksy(self, kolumny, nazwy):
+        klucze = [k for k, *_ in kolumny]
+        return [klucze.index(n) for n in nazwy if n in klucze]
+
+    def _rozciagnij_tabele(self):
+        if not self.sheet:
+            return
+        _rozciagnij(self.sheet, self._indeksy(self.KOL, self.ELASTYCZNE))
+        _rozciagnij(self.sheet_skl, self._indeksy(self.KOL_SKL, self.ELASTYCZNE_SKL))
+
+    def _on_resize(self, event=None):
+        # Tylko zmiana rozmiaru SAMEGO okna: <Configure> leci też od każdego
+        # dziecka, a przeliczanie kolumn przy każdym z nich jest bez sensu.
+        if event is not None and event.widget is not self:
+            return
+        if self._resize_after:
+            try:
+                self.after_cancel(self._resize_after)
+            except Exception:
+                pass
+        self._resize_after = self.after(150, self._rozciagnij_tabele)
+
     # ── ładowanie ─────────────────────────────────────────────────────────
     def _load_async(self):
         self.btn_refresh.config(state=tk.DISABLED)
@@ -631,6 +700,8 @@ class ZlozeniaWindow(tk.Toplevel, Kreciolek):
             self.sheet.highlight_cells(row=i, column=i_status, bg=bg,
                                        fg="#1e8449" if w["status"] == STATUS_OK else "#a94442")
         self.sheet.redraw()
+
+        self._rozciagnij_tabele()
 
         wid = f"Widocznych: {len(self.widoczne)} z {len(self.wiersze)}"
         prob = sum(1 for w in self.widoczne if w["status"] in PROBLEMY)
@@ -809,6 +880,7 @@ class ZlozeniaWindow(tk.Toplevel, Kreciolek):
             for c in range(len(self.KOL_SKL)):
                 self.sheet_skl.highlight_cells(row=r, column=c, bg=KOLOR_NAGLOWKA_GRUPY, fg="#2c3e50")
         self.sheet_skl.redraw()
+        _rozciagnij(self.sheet_skl, self._indeksy(self.KOL_SKL, self.ELASTYCZNE_SKL))
         self.lbl_skl.config(
             text=f"Skład:  {w['symbol']} — {w['nazwa']}   ·   {len(skl)} poz. ({zrodlo})")
 
@@ -845,13 +917,16 @@ class ZlozeniaWindow(tk.Toplevel, Kreciolek):
 
 
 def open_window(parent, project_id, project_name=""):
-    """Punkt wejścia dla RM_BAZA."""
-    w = ZlozeniaWindow(parent, project_id, project_name)
-    try:
-        wysrodkuj(w, parent)
-    except Exception:
-        pass
-    return w
+    """Punkt wejścia dla RM_BAZA.
+
+    BEZ wysrodkuj(): okno startuje zmaksymalizowane, a `geometry()` wywołane
+    na zmaksymalizowanym oknie zapisuje w Windows rozmiar pełnoekranowy jako
+    „rozmiar okienkowy" — po zerwaniu z maksymalizacji nie ma do czego wrócić
+    i okno zostaje na pełnym ekranie (zgłoszone 10.09.2026). Pozostałe okna
+    Subiekta też go nie wołają; wyśrodkowanie ma sens dla małych dialogów,
+    nie dla okna otwieranego na cały ekran.
+    """
+    return ZlozeniaWindow(parent, project_id, project_name)
 
 
 if __name__ == "__main__":
