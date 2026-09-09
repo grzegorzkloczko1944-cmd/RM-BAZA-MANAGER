@@ -114,11 +114,16 @@ class ZnormWindow(tk.Toplevel):
         lewa = tk.Frame(srodek)
         tk.Label(lewa, text="Pozycje bez kartoteki w Subiekcie", anchor="w",
                  font=("Arial", 9, "bold")).pack(fill=tk.X)
-        kol = ("nazwa", "ilosc", "wybor")
+        kol = ("symbol", "nazwa", "ilosc", "wybor")
         self.tab = ttk.Treeview(lewa, columns=kol, show="headings", height=18)
-        for c, tekst, szer in (("nazwa", "Nazwa z arkusza", 300),
-                               ("ilosc", "Ilość", 60),
-                               ("wybor", "Wybrana kartoteka", 190)):
+        # Symbol z arkusza obok nazwy: pozycja MOŻE go już mieć (np. wpisany
+        # ręcznie albo obcięty z nazwy do 13 znaków) i trzeba widzieć, z czym
+        # się pracuje — bez tego nie wiadomo, czy symbol jest sensowny
+        # (zgłoszone 09.09.2026).
+        for c, tekst, szer in (("symbol", "Symbol w arkuszu", 150),
+                               ("nazwa", "Nazwa z arkusza", 260),
+                               ("ilosc", "Ilość", 55),
+                               ("wybor", "Wybrana kartoteka", 170)):
             self.tab.heading(c, text=tekst)
             self.tab.column(c, width=szer, anchor="w")
         self.tab.tag_configure("wybrano", background="#d5f5e3")
@@ -218,8 +223,8 @@ class ZnormWindow(tk.Toplevel):
         for b in self.braki:
             wybrany = self._wybor.get(b["kod"], "")
             self.tab.insert("", "end", iid=b["kod"],
-                            values=(b["nazwa"] or b["kod"], b.get("ilosc") or "",
-                                    wybrany),
+                            values=(b["kod"], b["nazwa"] or b["kod"],
+                                    b.get("ilosc") or "", wybrany),
                             tags=("wybrano",) if wybrany else ())
         self.btn_zapisz.config(
             state=tk.NORMAL if self._wybor else tk.DISABLED,
