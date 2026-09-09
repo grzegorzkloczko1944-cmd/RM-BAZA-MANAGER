@@ -299,37 +299,147 @@ def sprawdz_pw(wynik, plan):
     return (not uwagi), numer, uwagi
 
 
-def zapisz_numer_pw(project_con, numer, wartosc=None):
-    """Numer PW na poziomie projektu. Tabela zakładana przy pierwszym zapisie.
+#: Marker w Uwagach dokumentu — po nim RM_BAZA rozpoznaje SWOJE PW/RW.
+#: Bez niego numery trzeba by trzymać lokalnie, a baza projektu bez locka
+#: jest READ-ONLY: zapis się nie udawał i dokument istniał w Subiekcie,
+#: o którym RM_BAZA nie wiedziała (PW 2/MASTER/2026, 10.09.2026).
+#:
+#: Subiekt jest źródłem prawdy dla wystawionego dokumentu (§21 v2), więc
+#: czytamy stamtąd i nie ma czego trzymać po dwóch stronach.
+MARKER = "RM_BAZA"
 
-    Osobna tabela zamiast kolumn w `projects`: numer PW mieszka w bazie
-    PROJEKTU (tam gdzie pozycje), a nie w master — dzięki temu jedzie razem
-    z plikiem projektu i nie wymaga migracji bazy głównej.
+
+def dokumenty_produkcji(numer_projektu, timeout=600):
+    """{"PW": [...], "RW": [...]} — dokumenty produkcji tego projektu z SUBIEKTA.
+
+    Rozpoznanie po Uwagach: „RM_BAZA — PROJEKT <numer>". Nie trzymamy tych
+    numerów lokalnie — patrz MARKER.
+
+    Każdy wpis: {numer, data, uwagi, pozycje: [{symbol, nazwa, ilosc, cena}]}.
+    Rzuca wyjątkiem tylko przy błędzie połączenia; brak dokumentów to nie błąd.
     """
-    project_con.execute("""
-        CREATE TABLE IF NOT EXISTS produkcja_dokumenty (
-            rodzaj   TEXT PRIMARY KEY,      -- 'PW' albo 'RW'
-            numer    TEXT NOT NULL,
-            data     TEXT NOT NULL,
-            wartosc  REAL
-        )""")
-    from datetime import datetime as _dt
-    project_con.execute(
-        "INSERT INTO produkcja_dokumenty (rodzaj, numer, data, wartosc) VALUES ('PW', ?, ?, ?) "
-        "ON CONFLICT(rodzaj) DO UPDATE SET numer=excluded.numer, data=excluded.data, "
-        "wartosc=excluded.wartosc",
-        (numer, _dt.now().isoformat(timespec="seconds"), wartosc))
-    project_con.commit()
+    import subiekt_bridge
+    dane = subiekt_bridge.call("dokumenty", {"limit": 400}, timeout=timeout, write=False)
+    cel = str(numer_projektu or "").strip().upper()
+    out = {"PW": [], "RW": []}
+    for d in (dane or {}).get("dokumenty", []):
+        rodzaj = d.get("Rodzaj")
+        if rodzaj not in out:
+            continue
+        uwagi = str(d.get("Uwagi") or "").strip()
+        gora = uwagi.upper()
+        # MARKER odsiewa dokumenty wystawione ręcznie w Subiekcie albo przez
+        # inne narzędzie — te nie są „nasze" i nie chcemy ich brać za źródło RW.
+        if MARKER not in gora or (cel and cel not in gora):
+            continue
+        out[rodzaj].append({
+            "numer": d.get("Numer") or "",
+            "data": d.get("Data") or "",
+            "uwagi": uwagi,
+            "wartosc": float(d.get("Wartosc") or 0),
+            "pozycje": [{"symbol": (p.get("Symbol") or "").strip(),
+                         "nazwa": p.get("Nazwa") or "",
+                         "ilosc": float(p.get("Ilosc") or 0),
+                         "cena": float(p.get("Cena") or 0)}
+                        for p in (d.get("Pozycje") or []) if (p.get("Symbol") or "").strip()],
+        })
+    for k in out:
+        out[k].sort(key=lambda x: x["numer"])
+    return out
 
 
-def dokument_projektu(project_con, rodzaj="PW"):
-    """(numer, data) albo (None, None) — czy dokument już istnieje."""
+def pw_do_rw(numer_projektu, timeout=600):
+    """Pozycje potwierdzonego PW — źródło dla RW. Zwraca (pozycje, numer, blad).
+
+    RW NIE jest budowane z BOM-u ani z kalkulatora (§11 ustaleń): bierze
+    dokładnie to, co przyjęło PW. Dzięki temu przyjęcie i wydanie nie
+    rozjadą się, nawet gdy ktoś później zmieni ilości w projekcie.
+    """
     try:
-        r = project_con.execute(
-            "SELECT numer, data FROM produkcja_dokumenty WHERE rodzaj=?", (rodzaj,)).fetchone()
-        return (r[0], r[1]) if r else (None, None)
-    except sqlite3.Error:
-        return None, None               # tabeli jeszcze nie ma
+        dok = dokumenty_produkcji(numer_projektu, timeout)
+    except Exception as e:
+        return [], None, f"Nie udało się odczytać dokumentów z Subiekta: {e}"
+
+    pw = dok["PW"]
+    if not pw:
+        return [], None, ("Nie znaleziono PW tego projektu w Subiekcie. "
+                          "Najpierw wystaw PW — RW powstaje z przyjęcia, nie z BOM-u.")
+    if len(pw) > 1:
+        numery = ", ".join(d["numer"] for d in pw)
+        return [], None, (f"Dla tego projektu istnieje kilka PW ({numery}). "
+                          "RM_BAZA nie wie, z którego budować RW — zostaw jedno, "
+                          "usuwając zbędne w Subiekcie.")
+    if not pw[0]["pozycje"]:
+        return [], pw[0]["numer"], f"PW {pw[0]['numer']} nie ma pozycji."
+    return pw[0]["pozycje"], pw[0]["numer"], None
+
+
+def plan_rw(numer_projektu, pozycje, numer_pw, magazyn="MASTER"):
+    """Plan dla mostu (tryb „rw"). Ilości PROSTO Z PW, bez przeliczania.
+
+    W Uwagach numer projektu ORAZ źródłowe PW — żeby z samego dokumentu
+    w Subiekcie dało się odczytać, skąd się wziął (§16 v2).
+    """
+    return {
+        "pozycje": [{"symbol": p["symbol"], "ilosc": p["ilosc"]} for p in pozycje],
+        "uwagi": f"RM_BAZA — PROJEKT {numer_projektu} | PW: {numer_pw}",
+        "magazyn": magazyn,
+    }
+
+
+def wyslij_rw(plan, zapisz=False, timeout=600):
+    """Suchy przebieg (zapisz=False) albo REALNY zapis RW."""
+    from subiekt_stany import _find_exe, CONFIG_PATH
+    if not _find_exe():
+        raise RuntimeError(
+            "Nie znaleziono NexoRecon.exe.\n\n"
+            "Zbuduj most:\n  cd subiekt_sfera\\NexoRecon\n  dotnet build -c Release")
+    if not os.path.isfile(CONFIG_PATH):
+        raise RuntimeError(f"Brak konfiguracji połączenia:\n{CONFIG_PATH}")
+    args = {"plan": plan}
+    if zapisz:
+        args["zapisz"] = True
+    import subiekt_bridge
+    return subiekt_bridge.call("rw", args, timeout=timeout, write=zapisz)
+
+
+def sprawdz_rw(wynik, plan, numer_pw):
+    """Read-back RW: czy wydano dokładnie to, co przyjęło PW.
+
+    Zwraca (ok, numer, uwagi). Porównanie PO WIERSZACH (symbol, ilość) —
+    ten sam powód co przy PW: jeden symbol bywa na dokumencie w kilku
+    wierszach i suma zatarłaby różnicę.
+    """
+    numer = (wynik or {}).get("numer") or ""
+    if not (wynik or {}).get("zapisano") or not numer:
+        return False, numer, ["Subiekt nie potwierdził zapisu dokumentu."]
+
+    oczek = {}
+    for p in plan.get("pozycje", []):
+        k = (str(p["symbol"]).strip().upper(), round(float(p["ilosc"]), 3))
+        oczek[k] = oczek.get(k, 0) + 1
+    try:
+        import subiekt_bridge
+        dane = subiekt_bridge.call("dokumenty", {"limit": 400}, timeout=300, write=False)
+        dok = next((d for d in (dane or {}).get("dokumenty", [])
+                    if d.get("Rodzaj") == "RW" and d.get("Numer") == numer), None)
+    except Exception as e:
+        return False, numer, [f"Nie udało się odczytać RW z Subiekta: {e}"]
+    if dok is None:
+        return False, numer, [f"Zapisany dokument {numer} nie został odnaleziony przy odczycie."]
+
+    mam = {}
+    for p in dok.get("Pozycje", []):
+        k = (str(p.get("Symbol") or "").strip().upper(), round(float(p.get("Ilosc") or 0), 3))
+        mam[k] = mam.get(k, 0) + 1
+    uwagi = []
+    for k, ile in oczek.items():
+        if mam.get(k, 0) < ile:
+            uwagi.append(f"{k[0]}: z PW {k[1]:g} szt. — nie znaleziono na RW")
+    for k, ile in mam.items():
+        if oczek.get(k, 0) < ile:
+            uwagi.append(f"{k[0]}: na RW {k[1]:g} szt. — nie było na PW {numer_pw}")
+    return (not uwagi), numer, uwagi
 
 
 def ilosc_produkcyjna(order_qty, work_qty, src_qty):

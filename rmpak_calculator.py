@@ -395,6 +395,48 @@ class RmpakCalculatorDialog:
         except Exception:
             return None, None
 
+    def _odswiez_numery_dokumentow(self):
+        """PW/RW z Subiekta — W TLE, bo odczyt idzie przez most (~1 s).
+
+        Numerów nie trzymamy w bazie projektu: bez locka jest READ-ONLY, więc
+        zapis się nie udawał i dokument istniał w Subiekcie, o którym RM_BAZA
+        nie wiedziała. Ten sam wzorzec co „Ilość (zam.)": Subiekt jest
+        właścicielem, my odświeżamy.
+        """
+        import threading
+
+        def worker():
+            try:
+                import subiekt_produkcja
+                dok = subiekt_produkcja.dokumenty_produkcji(self.project_name)
+            except Exception:
+                dok = None
+            try:
+                self.win.after(0, lambda: self._pokaz_numery(dok))
+            except Exception:
+                pass                      # okno zamknięte w trakcie odczytu
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _pokaz_numery(self, dok):
+        """Wynik odczytu na etykiety. None = nie udało się połączyć."""
+        if dok is None:
+            self.pw_status_var.set("PW: (brak połączenia)")
+            self.rw_status_var.set("RW: (brak połączenia)")
+            return
+        self._dok_produkcji = dok
+        pw, rw = dok.get("PW") or [], dok.get("RW") or []
+        self.pw_status_var.set("PW: " + (", ".join(d["numer"] for d in pw) if pw else "—"))
+        self.rw_status_var.set("RW: " + (", ".join(d["numer"] for d in rw) if rw else "—"))
+        # RW dopiero po PW — i tylko raz (§6: 1 projekt = 1 PW = 1 RW).
+        try:
+            self.btn_rw.config(state="normal" if (pw and not rw) else "disabled",
+                               bg="#337ab7" if (pw and not rw) else "SystemButtonFace",
+                               fg="white" if (pw and not rw) else "gray40",
+                               command=self._podglad_rw)
+        except Exception:
+            pass
+
     def _odswiez_status_pw(self):
         """Podpis pod przyciskiem: ile pozycji i czego brakuje.
 
@@ -410,8 +452,10 @@ class RmpakCalculatorDialog:
         try:
             import subiekt_produkcja
             braki = subiekt_produkcja.braki_przed_pw(poz)
-            numer, _data = subiekt_produkcja.dokument_projektu(self.project_con, "PW")
-            self.pw_status_var.set(f"PW: {numer}" if numer else "PW: —")
+            # Numery PW/RW czytane z SUBIEKTA, nie trzymane lokalnie — ten sam
+            # wzorzec co „Ilość (zam.)" i termin dostawy: Subiekt jest
+            # właścicielem wystawionego dokumentu, RM_BAZA go tylko odświeża.
+            self._odswiez_numery_dokumentow()
         except Exception:
             braki = []
         opis = f"{len(poz)} poz. na PW"
@@ -513,6 +557,125 @@ class RmpakCalculatorDialog:
                           + ", ".join(p["symbol"] for p in pom[:12])
                           + (" …" if len(pom) > 12 else "")).pack(fill="x", pady=(0, 8))
 
+    def _podglad_rw(self):
+        """Okno „co pójdzie na RW". Źródłem jest POTWIERDZONE PW, nie BOM.
+
+        Ilości nie są tu edytowane (§16 v2): RW wydaje dokładnie to, co
+        przyjęło PW, żeby oba dokumenty nie rozjechały się po późniejszej
+        zmianie w projekcie.
+        """
+        import subiekt_produkcja
+        poz, numer_pw, blad = subiekt_produkcja.pw_do_rw(self.project_name)
+        if blad:
+            messagebox.showwarning("RW", blad, parent=self.win)
+            return
+
+        dlg = tk.Toplevel(self.win)
+        dlg.title("Podgląd RW — wydanie produkcji na projekt")
+        dlg.transient(self.win)
+        dlg.geometry("820x520")
+
+        tk.Label(dlg, text=f"ZOSTANIE UTWORZONY DOKUMENT RW — {self.project_name}",
+                 bg="#e67e22", fg="white", font=("", 10, "bold"),
+                 anchor="w", padx=12, pady=8).pack(fill="x")
+        tk.Label(dlg, text=f"Źródło: {numer_pw}   ·   ilości i pozycje prosto z PW, bez przeliczania",
+                 bg="#fdebd0", fg="#7d4b12", font=("", 9), anchor="w",
+                 padx=12, pady=6).pack(fill="x")
+
+        cols = ("Symbol", "Nazwa", "Ilość", "Cena/szt.", "Wartość")
+        tree = ttk.Treeview(dlg, columns=cols, show="headings", height=13)
+        for c, w in zip(cols, (150, 300, 70, 90, 100)):
+            tree.heading(c, text=c)
+            tree.column(c, width=w, anchor="e" if c in ("Ilość", "Cena/szt.", "Wartość") else "w")
+        tree.pack(fill="both", expand=True, padx=10, pady=(8, 0))
+        razem = 0.0
+        for p in poz:
+            wart = p["cena"] * p["ilosc"]
+            razem += wart
+            tree.insert("", "end", values=(p["symbol"], p["nazwa"], f"{p['ilosc']:g}",
+                                           f"{p['cena']:.2f}", f"{wart:.2f}"))
+
+        stopka = tk.Frame(dlg, padx=12, pady=10)
+        stopka.pack(fill="x")
+        tk.Label(stopka, text=f"RAZEM: {razem:,.2f} PLN".replace(",", " "),
+                 font=("", 12, "bold"), fg="darkred").pack(side="left")
+        tk.Label(stopka, text=f"Uwagi: RM_BAZA — PROJEKT {self.project_name} | PW: {numer_pw}",
+                 font=("", 8), fg="gray30").pack(side="left", padx=(16, 0))
+        tk.Button(stopka, text="Zamknij", command=dlg.destroy, width=12).pack(side="right")
+        btn = tk.Button(stopka, text="Wystaw RW", width=14, font=("", 9, "bold"),
+                        bg="#e67e22", fg="white")
+        btn.config(command=lambda: self._wystaw_rw(poz, numer_pw, dlg, btn))
+        btn.pack(side="right", padx=(0, 8))
+
+    def _wystaw_rw(self, pozycje, numer_pw, dlg, btn):
+        """Suchy przebieg → potwierdzenie → zapis → read-back względem PW."""
+        import subiekt_produkcja
+        plan = subiekt_produkcja.plan_rw(self.project_name, pozycje, numer_pw)
+
+        btn.config(state="disabled", text="Sprawdzam…")
+        dlg.update_idletasks()
+        try:
+            sucho = subiekt_produkcja.wyslij_rw(plan, zapisz=False)
+        except Exception as e:
+            btn.config(state="normal", text="Wystaw RW")
+            messagebox.showerror("RW", f"Nie udało się połączyć z Subiektem:\n\n{e}", parent=dlg)
+            return
+        bledy = [k for k in (sucho or {}).get("kroki", []) if k.get("Status") == "blad"]
+        if bledy:
+            btn.config(state="normal", text="Wystaw RW")
+            opis = "\n".join(f"• {k.get('Symbol') or '—'}: {k.get('Szczegoly')}" for k in bledy[:12])
+            messagebox.showerror(
+                "RW — suchy przebieg wykrył problemy",
+                f"Dokument NIE został utworzony.\n\n{opis}"
+                + ("\n…" if len(bledy) > 12 else "")
+                + "\n\nCzęsty powód: za mały stan magazynowy — RW zdejmuje "
+                  "z magazynu to, co PW na niego przyjęło.", parent=dlg)
+            return
+
+        razem = sum(p["cena"] * p["ilosc"] for p in pozycje)
+        if not messagebox.askyesno(
+                "Potwierdź zapis RW",
+                f"Subiekt utworzy dokument RW:\n\n"
+                f"    pozycji:  {len(pozycje)}\n"
+                f"    wartość:  {razem:,.2f} PLN\n".replace(",", " ")
+                + f"    magazyn:  {plan['magazyn']}\n"
+                  f"    źródło:   {numer_pw}\n\n"
+                  "To ZDEJMIE towar ze stanu magazynu.\n"
+                  "Dokumentu magazynowego nie cofa się jednym kliknięciem.\n\nZapisać?",
+                icon="question", default="no", parent=dlg):
+            btn.config(state="normal", text="Wystaw RW")
+            return
+
+        btn.config(text="Zapisuję…")
+        dlg.update_idletasks()
+        try:
+            wynik = subiekt_produkcja.wyslij_rw(plan, zapisz=True)
+        except Exception as e:
+            btn.config(state="normal", text="Wystaw RW")
+            messagebox.showerror(
+                "RW", f"Zapis nie powiódł się:\n\n{e}\n\n"
+                "NIE ponawiaj automatycznie — najpierw sprawdź w Subiekcie, "
+                "czy dokument mimo to nie powstał.", parent=dlg)
+            return
+
+        ok, numer, uwagi = subiekt_produkcja.sprawdz_rw(wynik, plan, numer_pw)
+        if ok:
+            self._odswiez_status_pw()
+            messagebox.showinfo(
+                "RW zapisane i potwierdzone",
+                f"✅ {numer}\n\nProjekt: {self.project_name}\nŹródło: {numer_pw}\n"
+                f"{len(pozycje)} pozycji\n{razem:,.2f} PLN".replace(",", " ")
+                + "\n\n✅ PROCES RMPAK ZAKOŃCZONY", parent=dlg)
+            dlg.destroy()
+        else:
+            messagebox.showwarning(
+                "NIE POTWIERDZONO ZAPISU RW",
+                (f"Dokument {numer} mógł zostać zapisany, ale odczyt z Subiekta "
+                 f"nie zgadza się z PW {numer_pw}:\n\n" if numer else "Zapis nieudany:\n\n")
+                + "\n".join(f"• {u}" for u in uwagi[:10])
+                + "\n\nNIE twórz drugiego RW — sprawdź dokument w Subiekcie.", parent=dlg)
+            btn.config(state="normal", text="Wystaw RW")
+
     def _wystaw_pw(self, pozycje, dlg, btn):
         """Suchy przebieg → potwierdzenie → zapis → read-back → numer w bazie.
 
@@ -521,7 +684,15 @@ class RmpakCalculatorDialog:
         „zapisać?" przed sprawdzeniem byłoby pytaniem w ciemno.
         """
         import subiekt_produkcja
-        numer_ist, data_ist = subiekt_produkcja.dokument_projektu(self.project_con, "PW")
+        # Czy PW już jest — pytamy SUBIEKTA, nie lokalnego zapisu. Odczyt
+        # na żywo, bo między otwarciem okna a kliknięciem ktoś mógł je wystawić.
+        try:
+            _dok = subiekt_produkcja.dokumenty_produkcji(self.project_name)
+            _pw = _dok.get("PW") or []
+        except Exception:
+            _pw = []                      # brak połączenia wyjdzie w suchym przebiegu
+        numer_ist = ", ".join(d["numer"] for d in _pw)
+        data_ist = _pw[0]["data"] if _pw else ""
         if numer_ist:
             # Blokada MIĘKKA (§15): pokazujemy istniejący, ale nie zamykamy drogi.
             if not messagebox.askyesno(
@@ -584,7 +755,8 @@ class RmpakCalculatorDialog:
 
         ok, numer, uwagi = subiekt_produkcja.sprawdz_pw(wynik, plan)
         if ok:
-            subiekt_produkcja.zapisz_numer_pw(self.project_con, numer, razem)
+            # Nic nie zapisujemy lokalnie — numer żyje w Subiekcie, w Uwagach
+            # dokumentu. Odświeżenie odczyta go z powrotem.
             self._odswiez_status_pw()
             messagebox.showinfo(
                 "PW zapisane i potwierdzone",
