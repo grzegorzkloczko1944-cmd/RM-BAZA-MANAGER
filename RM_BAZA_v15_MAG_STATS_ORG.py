@@ -919,8 +919,10 @@ class MainWindow(tk.Tk):
         subiekt_menu.add_command(label="🤝 Powiąż dostawców z kontrahentami…",
                                  command=self.open_subiekt_dostawcy)
         subiekt_menu.add_separator()
-        subiekt_menu.add_command(label="📚 Przegląd dokumentów (ZK / ZD / RW / WZ)…",
+        subiekt_menu.add_command(label="📚 Przegląd dokumentów (ZK / ZD / PW / RW / WZ)…",
                                  command=self.open_subiekt_dokumenty)
+        subiekt_menu.add_command(label="🧩 Złożenia projektu (komplety w Subiekcie)…",
+                                 command=self.open_subiekt_zlozenia)
         subiekt_menu.add_separator()
         subiekt_menu.add_command(label="➕ Nowa kartoteka w Subiekcie…",
                                  command=self.open_subiekt_nowa_kartoteka)
@@ -30319,6 +30321,39 @@ class MainWindow(tk.Tk):
                 parent=self)
             return
         subiekt_dokumenty_gui.open_window(self)
+
+    def open_subiekt_zlozenia(self):
+        """Okno „Złożenia projektu" (menu 📦 SUBIEKT). Tylko odczyt.
+
+        Komplet w Subiekcie nie ma własnego stanu i nie trafia na żaden
+        dokument — istnieje wyłącznie jako kartoteka ze składem. To jedyne
+        miejsce, gdzie widać wszystkie złożenia projektu naraz i czy ich skład
+        zgadza się z drzewkiem. Wymaga wybranego projektu, bo pyta o JEGO
+        drzewko (*_OUT.xlsx na V:\\).
+        """
+        if not self.current_project_id:
+            messagebox.showwarning("Złożenia", "Najpierw wybierz projekt.", parent=self)
+            return
+        try:
+            import subiekt_zlozenia_gui
+        except ImportError as e:
+            messagebox.showerror(
+                "Subiekt",
+                f"Nie znaleziono modułu subiekt_zlozenia_gui.py\n\n{e}",
+                parent=self)
+            return
+
+        project_name = None
+        try:
+            row = self.db_manager.master_con.execute(
+                "SELECT name FROM projects WHERE project_id = ?",
+                (self.current_project_id,)).fetchone()
+            if row:
+                project_name = row[0]
+        except Exception:
+            project_name = None
+
+        subiekt_zlozenia_gui.open_window(self, self.current_project_id, project_name)
 
     def open_subiekt_magazyn(self):
         """Okno „Stany magazynowe — cały Subiekt" (menu 📦 SUBIEKT).
