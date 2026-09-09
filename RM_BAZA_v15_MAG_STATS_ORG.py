@@ -1780,8 +1780,11 @@ class MainWindow(tk.Tk):
             "edit_cell"
         ))
         
-        # Ukryj kolumnę DWF_BIB (indeks 16)
-        self.sheet.hide_columns(columns=[16])
+        # Ukryj kolumnę DWF_BIB (indeks 16). `data_indexes=True` jak wszędzie
+        # indziej — to WŁAŚNIE ta kolumna rozjeżdżała numerację: po jej ukryciu
+        # widok miał 22 kolumny zamiast 23, więc kolejne hide_columns(19)
+        # trafiało obok i znikała WYCENA (zgłoszone 10.09.2026).
+        self.sheet.hide_columns(columns=[16], data_indexes=True)
 
         # Menu „🧱 Kolumny" i wybór usera z poprzedniej sesji. Dopiero tutaj,
         # bo nagłówki bierzemy z arkusza, a ten właśnie powstał.
@@ -3804,6 +3807,12 @@ class MainWindow(tk.Tk):
         Używamy hide/show, NIE `display_columns` — ta ostatnia w tej wersji
         tksheet nic nie robi (sprawdzone: po jej wywołaniu wszystkie kolumny
         nadal widoczne, `all_columns_displayed()` dalej True).
+
+        ⚠️ `data_indexes=True` JEST KONIECZNE. Bez tego tksheet liczy indeksy
+        w WIDOKU, nie w danych: gdy część kolumn jest już ukryta (ALARM=14,
+        Moduł=18), kolejne wywołanie z numerem 19 trafia w zupełnie inną
+        kolumnę. Objaw: znikała WYCENA, a klikanie „Typ / Źródło" dawało
+        dane z RFQ (zgłoszone 10.09.2026).
         """
         try:
             pokaz, ukryj = [], list(self.KOLUMNY_UKRYTE_ZAWSZE)
@@ -3811,11 +3820,14 @@ class MainWindow(tk.Tk):
                 (pokaz if v.get() else ukryj).append(i)
             if not pokaz:
                 return                     # nie zostawiamy pustego arkusza
-            # Najpierw pokazujemy, potem ukrywamy — inaczej kolumna zdjęta
-            # i zaraz dodana potrafi zostać w złej kolejności.
-            self.sheet.show_columns(columns=pokaz, redraw=False)
+            # Od PEŁNEGO stanu, nie od bieżącego: przy „pokaż, potem ukryj"
+            # z częściowo ukrytego arkusza indeksy i tak by się rozjechały.
+            # Jedno przejście — wszystko widoczne, potem ukrywamy raz.
+            self.sheet.show_columns(columns=list(range(len(self.sheet.headers()))),
+                                    redraw=False)
             if ukryj:
-                self.sheet.hide_columns(columns=ukryj, redraw=True)
+                self.sheet.hide_columns(columns=sorted(set(ukryj)), redraw=True,
+                                        data_indexes=True)
             else:
                 self.sheet.refresh()
         except Exception as e:
