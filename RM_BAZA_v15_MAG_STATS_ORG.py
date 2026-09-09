@@ -4837,6 +4837,10 @@ class MainWindow(tk.Tk):
     #: (zapisane mapowanie kod → kartoteka). Czysto informacyjne: nic nie
     #: zmienia w danych, tylko od razu widać, co jest już powiązane.
     _COLOR_SUBIEKT_PARA = "#E8F8E8"
+    #: Szare (nadpisanie BOM) + zielone (jest na ZK) naraz. Bez tego szare
+    #: wygrywało i informacja o ZK ginęła akurat na pozycjach ręcznie
+    #: poprawionych — czyli tych, które najczęściej się sprawdza.
+    _COLOR_SUBIEKT_PARA_NADPISANE = "#CDE0CD"
     _COLOR_GREEN_BG_BRIGHT = "#90EE90"  # Zielone Odebrane (wyraziste, nowy kolor)
     _COLOR_YELLOW_BG = "#FCF8E3"    # Żółty alarm (jasny)
     _COLOR_RED_BG = "#F2DEDE"       # Czerwony po terminie (jasny)
@@ -4985,12 +4989,19 @@ class MainWindow(tk.Tk):
         # Kolorujemy PRZED biblioteką, żeby niebieska czcionka bibliotecznych
         # nadal wygrywała — tam kolor niesie ważniejszą informację.
         pary = getattr(self, "_subiekt_pary", None)
+        item_id_pary = None            # ustawione, gdy pozycja JEST na ZK
         if pary:
             try:
                 item_id = self._sheet_row_ids[row_idx]
-                if item_id in pary and (row_idx, 0) not in self._cells_special_bg:
-                    self.sheet.highlight_cells(row=row_idx, column=0,
-                                               bg=self._COLOR_SUBIEKT_PARA)
+                if item_id in pary:
+                    item_id_pary = item_id
+                    # Numer nadpisany ręcznie (szary) I na ZK → kolor mieszany,
+                    # żeby obie informacje zostały widoczne.
+                    nadpisany = 0 in overridden
+                    self.sheet.highlight_cells(
+                        row=row_idx, column=0,
+                        bg=(self._COLOR_SUBIEKT_PARA_NADPISANE if nadpisany
+                            else self._COLOR_SUBIEKT_PARA))
                     self._cells_special_bg.add((row_idx, 0))
             except Exception:
                 pass
@@ -5000,8 +5011,17 @@ class MainWindow(tk.Tk):
             try:
                 numer_val = self.sheet.get_cell_data(row_idx, 0)
                 if numer_val and str(numer_val).strip():
+                    # Niebieska czcionka dokłada się do TŁA USTALONEGO WYŻEJ,
+                    # nie zastępuje go. Wcześniej wymuszała GRAY_BG, przez co
+                    # biblioteczna pozycja będąca na ZK traciła zielone tło —
+                    # a to właśnie na nich sprawdza się je najczęściej.
                     if (row_idx, 0) in self._cells_special_bg:
-                        self.sheet.highlight_cells(row=row_idx, column=0, bg=GRAY_BG, fg="blue")
+                        tlo = GRAY_BG
+                        if item_id_pary is not None:
+                            tlo = (self._COLOR_SUBIEKT_PARA_NADPISANE
+                                   if 0 in overridden else self._COLOR_SUBIEKT_PARA)
+                        self.sheet.highlight_cells(row=row_idx, column=0,
+                                                   bg=tlo, fg="blue")
                     else:
                         self.sheet.highlight_cells(row=row_idx, column=0, bg="white", fg="blue")
                     self._cells_special_bg.add((row_idx, 0))
