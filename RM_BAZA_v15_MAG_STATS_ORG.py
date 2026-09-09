@@ -4836,13 +4836,13 @@ class MainWindow(tk.Tk):
     #: Jasnozielone tło numeru rysunku — pozycja ma parę w Subiekcie
     #: (zapisane mapowanie kod → kartoteka). Czysto informacyjne: nic nie
     #: zmienia w danych, tylko od razu widać, co jest już powiązane.
-    _COLOR_SUBIEKT_PARA = "#C6ECC6"
+    _COLOR_SUBIEKT_PARA = "#DCF5DC"
     #: Zmienione RĘCZNIE i jednocześnie obecne na ZK — zieleń przyciemniona
     #: (25 % czerni). Bez tego szare tło nadpisania wygrywało i informacja
     #: o ZK ginęła akurat na pozycjach poprawianych ręcznie, czyli tych,
     #: które najczęściej się sprawdza. Ciemniej niż 25 % nie schodzimy:
     #: przy 50 % czarny tekst przestaje być czytelny (jasność 121).
-    _COLOR_SUBIEKT_PARA_NADPISANE = "#8FD08F"
+    _COLOR_SUBIEKT_PARA_NADPISANE = "#B4E3B4"
     _COLOR_GREEN_BG_BRIGHT = "#90EE90"  # Zielone Odebrane (wyraziste, nowy kolor)
     _COLOR_YELLOW_BG = "#FCF8E3"    # Żółty alarm (jasny)
     _COLOR_RED_BG = "#F2DEDE"       # Czerwony po terminie (jasny)
@@ -5001,7 +5001,10 @@ class MainWindow(tk.Tk):
                         row=row_idx, column=0,
                         bg=(self._COLOR_SUBIEKT_PARA_NADPISANE if nadpisany
                             else self._COLOR_SUBIEKT_PARA))
-                    self._cells_special_bg.add((row_idx, 0))
+                    # Celowo NIE do _cells_special_bg: zieleń to znacznik, nie
+                    # alarm — podświetlenie zaznaczonego wiersza ma ją przykryć
+                    # tak samo jak każdą zwykłą komórkę (zgłoszone 09.09.2026),
+                    # a po zejściu zaznaczenia wiersz i tak jest przekolorowany.
             except Exception:
                 pass
 
@@ -5017,16 +5020,16 @@ class MainWindow(tk.Tk):
                     # nie zastępuje go. Wcześniej wymuszała GRAY_BG, przez co
                     # biblioteczna pozycja będąca na ZK traciła zielone tło —
                     # a to właśnie na nich sprawdza się je najczęściej.
-                    if (row_idx, 0) in self._cells_special_bg:
-                        tlo = GRAY_BG
-                        if item_id_pary is not None:
-                            tlo = (self._COLOR_SUBIEKT_PARA_NADPISANE
-                                   if 0 in overridden else self._COLOR_SUBIEKT_PARA)
-                        self.sheet.highlight_cells(row=row_idx, column=0,
-                                                   bg=tlo, fg="blue")
+                    if item_id_pary is not None:
+                        tlo = (self._COLOR_SUBIEKT_PARA_NADPISANE
+                               if 0 in overridden else self._COLOR_SUBIEKT_PARA)
+                        self.sheet.highlight_cells(row=row_idx, column=0, bg=tlo, fg="blue")
+                    elif (row_idx, 0) in self._cells_special_bg:
+                        self.sheet.highlight_cells(row=row_idx, column=0, bg=GRAY_BG, fg="blue")
+                        self._cells_special_bg.add((row_idx, 0))
                     else:
                         self.sheet.highlight_cells(row=row_idx, column=0, bg="white", fg="blue")
-                    self._cells_special_bg.add((row_idx, 0))
+                        self._cells_special_bg.add((row_idx, 0))
             except Exception:
                 pass
 
