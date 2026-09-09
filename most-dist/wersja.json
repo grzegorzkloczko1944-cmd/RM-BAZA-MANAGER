@@ -1,6 +1,6 @@
 {
   "protokol": 1,
-  "zbudowano": "2026-09-09 17:15",
-  "sha": "7ec751f",
-  "uwaga": "Zapis 13,2s -> 3,5s: bez WyszukajPoSymbolu w petli ZK, komplety o identycznym skladzie pomijane"
+  "zbudowano": "2026-09-09 19:24",
+  "sha": "955e081",
+  "uwaga": "Biblioteki Sfery z INSTALACJI Subiekta (zgodne z baza) + kazda pozycja dopisana na ZK w raporcie"
 }
