@@ -551,8 +551,8 @@ Do rozstrzygnięcia z magazynierem przed Etapem 2.
 | Cena PW | z Kalkulatora RMPAK; `Pw.cs` wymaga rozszerzenia o `Cena` |
 | Ilość PW | z projektu — `COALESCE(work_qty, src_qty)`, bez `order_qty` |
 | Co wchodzi na PW | **tylko TW** (STANDARD/X/XX); złożenia Z/ZZ pomijane — KT powstaje ze składników |
-| RW | z potwierdzonego PW, **bez ceny** (dokument ma 0,00) |
-| Wartość produkcji | niesie **PW**; RW tylko zdejmuje ze stanu |
+| RW | z potwierdzonego PW, **bez wpisywania ceny** |
+| Wartość RW | **koszt magazynowy** — liczy go Subiekt z ceny przyjęcia (nie cena netto, ta zostaje 0) |
 | Lista produkcyjna | istniejąca lista Kalkulatora RMPAK |
 | Filtry GUI | nie wpływają na zawartość PW |
 | Brak kartoteki | zakładać z kalkulatora; krok „wrzuć na ZK" **odpada** |

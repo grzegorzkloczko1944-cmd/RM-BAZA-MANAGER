@@ -378,15 +378,16 @@ def plan_rw(numer_projektu, pozycje, numer_pw, magazyn="MASTER"):
     """Plan dla mostu (tryb „rw"). Ilości PROSTO Z PW, bez przeliczania.
 
     BEZ CENY — decyzja użytkownika z 10.09.2026: „PW z ceną, RW bez ceny".
-    Wartość na magazyn wprowadza PW; RW tylko zdejmuje towar ze stanu,
-    a rozliczeniem kosztu zajmuje się magazyn/księgowość osobno.
+    I tak ma być: RW nie jest przez to bezwartościowe.
 
-    Sprawdzone: Sfera NIE podstawia ceny sama — pozycja dodana przez
-    `Pozycje.Dodaj()` zostaje z zerem i dokument ma wartość 0,00
-    (RW 1/MASTER/2026). Ceny na starszych RW w bazie pochodzą z ręcznego
-    wystawienia w GUI Subiekta, które podstawia cenę ewidencyjną kartoteki.
-    Gdyby kiedyś cena była potrzebna, trzeba ją ustawić jawnie — tym samym
-    wzorcem co UstawCenePozycji w Pw.cs.
+    Cena netto to parametr HANDLOWY i na dokumencie magazynowym zostaje
+    zerowa. Wartość rozchodu niesie KOSZT MAGAZYNOWY, który Subiekt liczy
+    SAM z ceny przyjęcia — sprawdzone na RW 1/MASTER/2026: cena netto 0,
+    a `KosztMagazynowy` 4848 zł, dokładnie tyle co PW.
+
+    Dlatego ceny NIE wpisujemy: gdyby ten sam detal leżał na magazynie
+    w kilku partiach po różnych cenach, ręczna wartość rozjechałaby się
+    z metodą wyceny rozchodu, którą stosuje magazyn.
 
     W Uwagach numer projektu ORAZ źródłowe PW — żeby z samego dokumentu
     w Subiekcie dało się odczytać, skąd się wziął (§16 v2).

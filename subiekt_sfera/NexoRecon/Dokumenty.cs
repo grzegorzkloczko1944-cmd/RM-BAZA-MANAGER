@@ -96,6 +96,14 @@ internal static class Dokumenty
                         p.Ilosc,
                         Jm = p.JednostkaMiaryAs.JednostkaMiary.Symbol,
                         Cena = p.Cena.NettoPoRabacie,
+                        // KOSZT MAGAZYNOWY — właściwa miara dla PW/RW/WZ.
+                        // „Cena netto" jest parametrem HANDLOWYM: na dokumencie
+                        // magazynowym bywa zerowa, choć rozchód ma realną
+                        // wartość wynikającą z ceny przyjęcia (RW 1/MASTER/2026
+                        // miało cenę 0, 10.09.2026). Subiekt liczy to sam wg
+                        // metody wyceny rozchodu, więc czytamy, a nie ustawiamy.
+                        KosztJedn = p.JednostkowyKosztMagazynowy,
+                        Koszt = p.KosztMagazynowy,
                         Pozycja = p,        // do ProjektZk() przy ZD
                     }),
                 })
@@ -109,7 +117,11 @@ internal static class Dokumenty
                 {
                     var sym = (p.Symbol ?? "").Trim();
                     if (sym.Length == 0) continue;
-                    wartosc += p.Cena * p.Ilosc;
+                    // Wartość dokumentu: dla magazynowych (PW/RW/WZ) z KOSZTU,
+                    // dla handlowych (ZK/ZD) z ceny. Inaczej RW z zerową ceną
+                    // netto wygląda na bezwartościowy, choć rozchód ma realny
+                    // koszt wynikający z ceny przyjęcia.
+                    wartosc += (p.Koszt != 0 ? p.Koszt : p.Cena * p.Ilosc);
                     pozycje.Add(new PozDok(
                         sym,
                         p.Nazwa ?? "",
@@ -120,7 +132,9 @@ internal static class Dokumenty
                         // Uwagi samego ZD są puste, a jedno ZD zbiera detale
                         // z kilku projektów; bez tego okno dokumentów nie
                         // wiedziało, gdzie postawić „Zamówiono" (05.09.2026).
-                        czyZd ? Zapotrzebowanie.ProjektZk(p.Pozycja) : ""));
+                        czyZd ? Zapotrzebowanie.ProjektZk(p.Pozycja) : "",
+                        decimal.Round(p.KosztJedn, 2),
+                        decimal.Round(p.Koszt, 2)));
                 }
 
                 wynik.Add(new Dok(
@@ -173,7 +187,11 @@ internal static class Dokumenty
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
 
     internal record PozDok(string Symbol, string Nazwa, decimal Ilosc, string Jm,
-                           decimal Cena, string Projekt);
+                           decimal Cena, string Projekt,
+                           // Koszt magazynowy: dla PW/RW/WZ to ON niesie wartość,
+                           // nie „Cena". Osobne pola, żeby okno mogło pokazać
+                           // właściwą miarę zależnie od rodzaju dokumentu.
+                           decimal KosztJedn = 0, decimal Koszt = 0);
 
     /// <param name="Id">Trwały klucz dokumentu — w odróżnieniu od Numer,
     /// którego Subiekt używa ponownie po usunięciu (patrz komentarz przy

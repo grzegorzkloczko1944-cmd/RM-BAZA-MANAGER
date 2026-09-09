@@ -604,7 +604,7 @@ class RmpakCalculatorDialog:
         stopka.pack(fill="x")
         tk.Label(stopka, text=f"WG PW: {razem:,.2f} PLN".replace(",", " "),
                  font=("", 12, "bold"), fg="darkred").pack(side="left")
-        tk.Label(stopka, text="— RW wystawiamy BEZ ceny (dokument będzie miał 0,00)",
+        tk.Label(stopka, text="— wartość RW to KOSZT MAGAZYNOWY, liczy go Subiekt z ceny przyjęcia",
                  font=("", 8), fg="gray40").pack(side="left", padx=(6, 0))
         tk.Label(stopka, text=f"Uwagi: RM_BAZA — PROJEKT {self.project_name} | PW: {numer_pw}",
                  font=("", 8), fg="gray30").pack(side="left", padx=(16, 0))
@@ -644,7 +644,7 @@ class RmpakCalculatorDialog:
                 "Potwierdź zapis RW",
                 f"Subiekt utworzy dokument RW:\n\n"
                 f"    pozycji:  {len(pozycje)}\n"
-                f"    wg PW:    {razem:,.2f} PLN  (RW powstanie BEZ ceny — 0,00)\n".replace(",", " ")
+                f"    wg PW:    {razem:,.2f} PLN  (koszt magazynowy policzy Subiekt)\n".replace(",", " ")
                 + f"    magazyn:  {plan['magazyn']}\n"
                   f"    źródło:   {numer_pw}\n\n"
                   "To ZDEJMIE towar ze stanu magazynu.\n"
@@ -672,8 +672,8 @@ class RmpakCalculatorDialog:
                 "RW zapisane i potwierdzone",
                 f"✅ {numer}\n\nProjekt: {self.project_name}\nŹródło: {numer_pw}\n"
                 f"{len(pozycje)} pozycji\n\n"
-                "Dokument bez ceny (0,00) — wartość niesie PW, RW tylko "
-                "zdejmuje towar ze stanu."
+                "Wartość dokumentu to KOSZT MAGAZYNOWY, wyliczony przez Subiekta\n"
+                "z ceny przyjęcia — sprawdzisz go w Przeglądzie dokumentów."
                 + "\n\n✅ PROCES RMPAK ZAKOŃCZONY", parent=dlg)
             dlg.destroy()
         else:

@@ -125,6 +125,12 @@ def _przelicz_dokumenty(data):
             "ilosc": float(p.get("Ilosc") or 0),
             "jm": p.get("Jm") or "szt",
             "cena": float(p.get("Cena") or 0),
+            # Koszt magazynowy — dla PW/RW/WZ to ON niesie wartość. „Cena
+            # netto" jest parametrem HANDLOWYM i na dokumencie magazynowym
+            # bywa zerowa: RW 1/MASTER/2026 miało cenę 0, a koszt 4848 zł
+            # (10.09.2026). Subiekt liczy koszt sam z ceny przyjęcia.
+            "koszt_jedn": float(p.get("KosztJedn") or 0),
+            "koszt": float(p.get("Koszt") or 0),
             # Projekt pozycji z Uwag ZK, którą realizuje — „2632, 3000" gdy
             # jedno ZD zbiera detale z kilku projektów. Tylko przy ZD.
             "projekt": p.get("Projekt") or "",
@@ -176,6 +182,11 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
     KOL_POZ = [("symbol", "Nr rysunku / symbol", 200), ("nazwa", "Nazwa", 330),
                ("ilosc", "Ilość", 70), ("jm", "J.m.", 50),
                ("cena", "Cena netto", 90), ("wartosc", "Wartość", 90)]
+    #: Dokumenty MAGAZYNOWE: wartość niesie koszt magazynowy, nie cena netto
+    #: (parametr handlowy, na PW/RW/WZ zwykle zerowy). Nagłówki zmieniają się
+    #: razem z danymi, żeby kolumna nie kłamała o tym, co pokazuje.
+    RODZAJE_MAGAZYNOWE = ("PW", "RW", "WZ")
+    NAGL_KOSZT = ("Koszt jedn.", "Wartość magazynowa")
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -1034,10 +1045,18 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
             return
 
         szukaj = (self.search_var.get() or "").strip().lower()
+        # Dokument magazynowy → koszt zamiast ceny netto, także w nagłówkach.
+        mag = d["rodzaj"] in self.RODZAJE_MAGAZYNOWE
+        naglowki = [k[1] for k in self.KOL_POZ]
+        if mag:
+            naglowki[4], naglowki[5] = self.NAGL_KOSZT
+        self.sheet_poz.headers(naglowki)
         self.sheet_poz.set_sheet_data(
             [[p["symbol"], p["nazwa"], f"{p['ilosc']:g}", p["jm"],
-              f"{p['cena']:.2f}" if p["cena"] else "",
-              f"{p['cena'] * p['ilosc']:.2f}" if p["cena"] else ""]
+              (f"{p['koszt_jedn']:.2f}" if p.get("koszt_jedn") else "") if mag
+              else (f"{p['cena']:.2f}" if p["cena"] else ""),
+              (f"{p['koszt']:.2f}" if p.get("koszt") else "") if mag
+              else (f"{p['cena'] * p['ilosc']:.2f}" if p["cena"] else "")]
              for p in d["pozycje"]], reset_col_positions=False, redraw=False)
 
         # Podświetl pozycje pasujące do wyszukiwarki — po to się szukało.
@@ -1098,12 +1117,18 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
                 wiersze.append([
                     d["numer"], d["rodzaj"], p["symbol"], p["nazwa"],
                     f"{p['ilosc']:g}", p["jm"],
-                    f"{p['cena']:.2f}" if p["cena"] else "",
-                    f"{p['cena'] * p['ilosc']:.2f}" if p["cena"] else "",
+                    # Magazynowe (PW/RW/WZ) niosą KOSZT, handlowe cenę netto.
+                    # W liście płaskiej mieszają się rodzaje, więc wybór jest
+                    # per wiersz, a nagłówek mówi „/ koszt" dla obu wariantów.
+                    (f"{p['koszt_jedn']:.2f}" if p.get("koszt_jedn")
+                     else f"{p['cena']:.2f}" if p["cena"] else ""),
+                    (f"{p['koszt']:.2f}" if p.get("koszt")
+                     else f"{p['cena'] * p['ilosc']:.2f}" if p["cena"] else ""),
                     d["projekt"] or ""])
 
         self.sheet_poz.headers(["Dokument", "Rodzaj", "Nr rysunku / symbol", "Nazwa",
-                                "Ilość", "J.m.", "Cena netto", "Wartość", "Projekt"])
+                                "Ilość", "J.m.", "Cena / koszt jedn.",
+                                "Wartość", "Projekt"])
         self.sheet_poz.set_sheet_data(wiersze, reset_col_positions=False, redraw=False)
         # Szerokości USTAWIANE JAWNIE: zapamiętane w JSON-ie dotyczą 6 kolumn
         # trybu „jeden dokument", a tu jest 9 — bez tego trzy ostatnie miałyby
