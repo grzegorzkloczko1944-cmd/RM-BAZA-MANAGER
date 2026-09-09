@@ -107,13 +107,21 @@ class DopasowanieWindow(tk.Toplevel):
         panel.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 6))
 
         lewa = tk.Frame(panel)
-        kol = ("stan", "kod", "ilosc", "symbol", "nazwa", "sposob")
+        # NAZWA jest pierwsza i najszersza, bo dla pozycji bez numeru rysunku
+        # to ONA jest tożsamością — po niej człowiek lokalizuje detal.
+        # Kolumna „Nr rysunku" zostaje PUSTA, gdy numeru nie ma: wcześniej
+        # pokazywaliśmy tam symbol wyliczony z nazwy („ERTALONTRANSP"),
+        # co sugerowało, że taki kod istnieje w bazie — a nie istnieje
+        # (zgłoszone 09.09.2026: „po chuj mi on?").
+        kol = ("stan", "nazwa_rm", "nr", "ilosc", "symbol", "nazwa", "sposob")
         self.tab = ttk.Treeview(lewa, columns=kol, show="headings", height=20)
-        for c, tekst, szer in (("stan", "", 34), ("kod", "Kod RM_BAZA", 160),
+        for c, tekst, szer in (("stan", "", 34),
+                               ("nazwa_rm", "Nazwa (RM_BAZA)", 230),
+                               ("nr", "Nr rysunku", 110),
                                ("ilosc", "Ilość", 50),
-                               ("symbol", "Symbol Subiekt", 150),
-                               ("nazwa", "Nazwa Subiekt", 230),
-                               ("sposob", "Sposób", 130)):
+                               ("symbol", "Symbol Subiekt", 140),
+                               ("nazwa", "Nazwa Subiekt", 210),
+                               ("sposob", "Sposób", 120)):
             self.tab.heading(c, text=tekst)
             self.tab.column(c, width=szer, anchor="w")
         for stan, (_opis, kolor) in D.OPIS_STANU.items():
@@ -239,7 +247,7 @@ class DopasowanieWindow(tk.Toplevel):
         for p in self.pozycje:
             if p["stan"] not in stany:
                 continue
-            if fraza and fraza not in (p["kod"] + " " + p["nazwa_rm"]).upper():
+            if fraza and fraza not in (p["nazwa_rm"] + " " + p["kod"]).upper():
                 continue
             out.append(p)
         return out
@@ -255,7 +263,10 @@ class DopasowanieWindow(tk.Toplevel):
             sposob = ("Twój wybór" if decyzja
                       else D.OPIS_STANU[p["stan"]][0])
             self.tab.insert("", "end", iid=p["kod"], values=(
-                znaki.get(p["stan"], ""), p["kod"], p.get("ilosc") or "",
+                znaki.get(p["stan"], ""),
+                p["nazwa_rm"] or p["kod"],
+                "" if p.get("bez_numeru") else p["kod"],
+                p.get("ilosc") or "",
                 wyb.get("symbol") or "—",
                 (wyb.get("nazwa") or
                  (f"{len(p['kandydaci'])} kandydatów" if len(p["kandydaci"]) > 1
@@ -282,12 +293,22 @@ class DopasowanieWindow(tk.Toplevel):
         if not p:
             return
         self._biezaca = p["kod"]
+        if p.get("bez_numeru"):
+            # Nie ma numeru rysunku — mówimy wprost, że symbol jest wyliczony,
+            # żeby nikt nie szukał go w RM_BAZA.
+            opis_id = (f"Nazwa:        {p['nazwa_rm'] or '—'}\n"
+                       f"Nr rysunku:   — (pozycja bez numeru)\n"
+                       f"Symbol dla Subiekta: {p['kod']}  (wyliczony z nazwy)")
+        else:
+            opis_id = (f"Nazwa:        {p['nazwa_rm'] or '—'}\n"
+                       f"Nr rysunku:   {p['kod']}")
         self.lbl_poz.config(text=(
-            f"Kod RM_BAZA:  {p['kod']}\n"
-            f"Nazwa:        {p['nazwa_rm'] or '—'}\n"
+            f"{opis_id}\n"
             f"Ilość:        {p.get('ilosc') or '—'}\n"
             f"Stan:         {D.OPIS_STANU[p['stan']][0]}"))
-        self.var_szukaj.set(p["kod"])
+        # Szukamy po NAZWIE, gdy nie ma numeru — obcięty symbol („rolkaSITI8010")
+        # gubi końcówkę i nie znajdzie nic sensownego.
+        self.var_szukaj.set(p["nazwa_rm"] if p.get("bez_numeru") else p["kod"])
         self._wypelnij(p["kandydaci"], "Kandydaci z katalogu")
 
     def _wypelnij(self, lista, tytul):

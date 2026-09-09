@@ -107,12 +107,24 @@ class Indeks:
 
 
 def klasyfikuj(kod: str, indeks: Indeks, mapowanie: Optional[Dict] = None,
-               odrzucone: Optional[set] = None) -> Dict:
-    """Jeden kod → {stan, kandydaci, wybrany}. Bez żadnego fuzzy.
+               odrzucone: Optional[set] = None, nazwa: str = "",
+               bez_numeru: bool = False) -> Dict:
+    """Jeden element → {stan, kandydaci, wybrany}. Bez żadnego fuzzy.
 
-    Kolejność reguł (A–E z ustaleń):
+    CZYM SZUKAMY (zasada użytkownika, 09.09.2026):
+
+    * znormalizowany MA kod w bazie  → pracujemy na KODZIE,
+    * NIE MA kodu                    → pracujemy na NAZWIE.
+
+    To nie jest drobiazg. Pozycja bez numeru rysunku dostaje symbol
+    wyliczony przez `symbol_z_nazwy()` — obcięty do 13 znaków, bez spacji
+    („rolka SITI 8010235" → „rolkaSITI8010"). Takiego ciągu NIE MA nigdzie:
+    ani w RM_BAZA, ani w Subiekcie. Szukanie po nim to gwarantowane zero
+    trafień, więc dla tych pozycji kluczem jest pełna nazwa.
+
+    Kolejność reguł (A–E):
       A. jest globalne mapowanie              → zapamiętane
-      B. dokładnie 1 kartoteka po symbolu     → symbol (zielone)
+      B. dokładnie 1 kartoteka po kluczu      → symbol (zielone)
       C. dokładnie 1 po nazwie                → nazwa (żółte, do potwierdzenia)
       D. więcej niż jedna                     → niejednoznaczne (decyzja)
       E. nic                                  → brak
@@ -122,8 +134,11 @@ def klasyfikuj(kod: str, indeks: Indeks, mapowanie: Optional[Dict] = None,
     kandydatów do ręcznego wyboru, ale nie „wygrywa" sam.
     """
     odrzucone = odrzucone or set()
-    k = norm_kod(kod)
-    wynik = {"kod": kod, "stan": STAN_BRAK, "kandydaci": [], "wybrany": None}
+    # Klucz wyszukiwania: kod, gdy jest prawdziwy; inaczej nazwa.
+    klucz = (nazwa or kod) if bez_numeru else (kod or nazwa)
+    k = norm_kod(klucz)
+    wynik = {"kod": kod, "stan": STAN_BRAK, "kandydaci": [], "wybrany": None,
+             "klucz": klucz}
 
     # A. Decyzja człowieka zapisana wcześniej — najwyższy priorytet.
     if mapowanie:
@@ -141,7 +156,12 @@ def klasyfikuj(kod: str, indeks: Indeks, mapowanie: Optional[Dict] = None,
     if not k:
         return wynik
 
+    # Pozycja bez numeru: jej „symbol" w Subiekcie i tak powstaje z nazwy,
+    # więc sprawdzamy oba indeksy — kartoteka mogła zostać założona
+    # wcześniej dokładnie tą samą drogą.
     po_symbolu = list(indeks.wg_symbolu.get(k, []))
+    if bez_numeru and not po_symbolu:
+        po_symbolu = [p for p in indeks.wg_nazwy.get(k, [])]
     if len(po_symbolu) == 1 and (kod, po_symbolu[0].get("id")) not in odrzucone:
         wynik.update(stan=STAN_SYMBOL, wybrany=po_symbolu[0], kandydaci=po_symbolu)
         return wynik
@@ -190,10 +210,19 @@ def przygotuj_pozycje(items: List[Dict], indeks: Indeks,
     out = []
     for it in wybrane:
         kod = (it.get("nr") or "").strip()
-        info = klasyfikuj(kod, indeks, mapowania.get(norm_kod(kod))
-                          or mapowania.get(kod), odrzucone)
-        info["nazwa_rm"] = (it.get("nazwa") or "").strip()
+        nazwa = (it.get("nazwa") or "").strip()
+        bez_nr = bool(it.get("bez_numeru"))
+        info = klasyfikuj(kod, indeks,
+                          mapowania.get(norm_kod(kod)) or mapowania.get(kod),
+                          odrzucone, nazwa=nazwa, bez_numeru=bez_nr)
+        info["nazwa_rm"] = nazwa
         info["ilosc"] = it.get("qty")
+        # Czy `kod` to PRAWDZIWY numer rysunku z BOM-u, czy symbol wyliczony
+        # z nazwy przez symbol_z_nazwy() (obcięcie do 13 znaków, bez spacji).
+        # Dla pozycji bez numeru rysunku ten drugi jest fikcją: w bazie go
+        # NIE MA i nie da się po nim niczego zlokalizować — tożsamością jest
+        # nazwa. Interfejs musi te przypadki rozróżniać (09.09.2026).
+        info["bez_numeru"] = bez_nr
         out.append(info)
     return out
 
