@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Przegląd dokumentów Subiekta: ZK, ZD, RW, WZ — z pozycjami.
+Przegląd dokumentów Subiekta: ZK, ZD, PW, RW, WZ — z pozycjami.
 
     import subiekt_dokumenty_gui
     subiekt_dokumenty_gui.open_window(parent)
@@ -9,13 +9,19 @@ Po co: RM_BAZA potrafi już zakładać ZK i tworzyć ZD, ale nie było gdzie
 zobaczyć, co w Subiekcie realnie jest. Żeby sprawdzić stan projektu, trzeba
 było przełączać się do Subiekta i filtrować listy ręcznie.
 
-Układ dwupanelowy:
-  * góra  — lista dokumentów (rodzaj, numer, data, podmiot, projekt, pozycje),
-  * dół   — pozycje klikniętego dokumentu.
+Układ dwupanelowy, OBOK SIEBIE:
+  * lewa   — lista dokumentów (rodzaj, numer, data, podmiot, projekt, pozycje),
+  * prawa  — pozycje klikniętego dokumentu albo WSZYSTKIE płasko.
+
+Panele stoją w poziomie, nie w pionie: dokumentów bywa 31, a pozycji
+w jednym ZK ponad 180, więc dzielenie wysokości znaczyło, że w obu tabelach
+widać po kilka wierszy.
 
 Wyszukiwarka działa na OBU poziomach: wpisanie numeru rysunku pokazuje
 dokumenty, które go zawierają — po tym widać, na którym ZK/ZD siedzi dana
-część i czy została już wydana.
+część i czy została już wydana. Przełącznik „Wszystkie pozycje" spłaszcza
+dokumenty w jedną listę (z kolumnami Dokument i Rodzaj), żeby szukać detalu
+bez zgadywania, w którym dokumencie siedzi.
 
 Dane idą jednym wywołaniem mostu (~9 s): pozycje przychodzą razem
 z nagłówkami, bo most jest bezstanowy i pytanie o każdy dokument osobno
@@ -43,10 +49,13 @@ except ImportError:
 TIMEOUT_S = 300
 
 RODZ_WSZYSTKIE = "— wszystkie —"
-RODZAJE = ["ZK", "ZD", "RW", "WZ"]
+RODZAJE = ["ZK", "ZD", "PW", "RW", "WZ"]
 OPIS_RODZAJU = {
     "ZK": "ZK — lista projektu",
     "ZD": "ZD — zamówienie do dostawcy",
+    # PW stoi PRZED RW, bo taka jest kolejność w torze produkcji: najpierw
+    # przyjmujemy z warsztatu na magazyn, potem wydajemy na projekt.
+    "PW": "PW — przyjęcie z produkcji własnej",
     "RW": "RW — wydanie na produkcję",
     "WZ": "WZ — wydanie zewnętrzne",
 }
@@ -175,7 +184,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         self.biezacy = None
         self._wyslane = {}          # {Id dokumentu: (kiedy, ile razy)} — kolumna „Wysłano”
 
-        self.title("Subiekt — przegląd dokumentów (ZK / ZD / RW / WZ)")
+        self.title("Subiekt — przegląd dokumentów (ZK / ZD / PW / RW / WZ)")
         self.geometry("1250x760")
         self.minsize(900, 450)
         try:
@@ -285,6 +294,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         for kolor, opis in (("#d6eaf8", "ZK — zamówienie od klienta"),
                             ("#dfeaf7", "ZD niewysłane — dostawca nie wie"),
                             ("#b3d1ec", "ZD wysłane do dostawcy"),
+                            ("#d5f0dd", "PW — przyjęcie z produkcji własnej"),
                             ("#fdebd0", "RW — wydanie na produkcję"),
                             ("#f4ecf7", "WZ — wydanie zewnętrzne"),
                             ("#eaecee", "anulowany"),
@@ -298,14 +308,17 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
                  bg="#ecf0f1", fg="#7f8c8d", font=("Arial", 8)).pack(
             side=tk.LEFT, padx=(16, 0), pady=(0, 5))
 
-        # Dwa panele: dokumenty u góry, pozycje klikniętego na dole.
-        paned = ttk.PanedWindow(self, orient=tk.VERTICAL)
+        # Dwa panele OBOK SIEBIE: dokumenty po lewej, pozycje po prawej.
+        # W pionie obie tabele dusiły się nawzajem — dokumentów bywa 31,
+        # a pozycji w jednym ZK ponad 180, więc dzielenie wysokości znaczyło,
+        # że w obu widać po kilka wierszy.
+        paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 4))
 
-        gora = tk.Frame(paned)
-        dol = tk.Frame(paned)
+        gora = tk.Frame(paned)      # lewa: lista dokumentów
+        dol = tk.Frame(paned)       # prawa: pozycje
         paned.add(gora, weight=3)
-        paned.add(dol, weight=2)
+        paned.add(dol, weight=4)
 
         if Sheet is None:
             tk.Label(gora, text="Brak biblioteki tksheet", fg="#c0392b").pack(pady=20)
@@ -331,10 +344,21 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         self.sheet.bind("<Double-Button-1>", self._on_dwuklik, add="+")
         self.sheet.pack(fill=tk.BOTH, expand=True)
 
-        self.lbl_poz = tk.Label(dol, text="Pozycje — kliknij dokument powyżej",
+        # Pasek panelu pozycji: opis + przełącznik trybu. „Wszystkie pozycje"
+        # spłaszcza dokumenty w jedną listę — szukanie konkretnego detalu bez
+        # zgadywania, w którym z 31 dokumentów siedzi.
+        pasek_poz = tk.Frame(dol, bg="#34495e")
+        pasek_poz.pack(side=tk.TOP, fill=tk.X)
+        self.lbl_poz = tk.Label(pasek_poz, text="Pozycje — kliknij dokument",
                                 bg="#34495e", fg="white", font=("Arial", 9, "bold"),
                                 anchor="w", padx=10, pady=4)
-        self.lbl_poz.pack(side=tk.TOP, fill=tk.X)
+        self.lbl_poz.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.wszystkie_poz_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(pasek_poz, text="Wszystkie pozycje",
+                       variable=self.wszystkie_poz_var, command=self._przelacz_pozycje,
+                       bg="#34495e", fg="white", selectcolor="#2c3e50",
+                       activebackground="#34495e", activeforeground="white",
+                       font=("Arial", 8)).pack(side=tk.RIGHT, padx=(6, 10))
 
         self.sheet_poz = Sheet(dol, headers=[k[1] for k in self.KOL_POZ],
                                column_width=120, theme="light green")
@@ -470,7 +494,9 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         #   mocny  — wysłane do dostawcy.
         # Wcześniej ZD było zielone i nie odróżniało jednego od drugiego,
         # a to jedyna rzecz, którą w tym oknie trzeba widzieć o ZD.
-        kolory = {"ZK": "#d6eaf8", "RW": "#fdebd0", "WZ": "#f4ecf7"}
+        # PW zielonkawe — przychód, odróżnia się od pomarańczowego RW
+        # (rozchód). Para PW/RW to jeden tor, więc kolory sąsiadują.
+        kolory = {"ZK": "#d6eaf8", "PW": "#d5f0dd", "RW": "#fdebd0", "WZ": "#f4ecf7"}
         wyslane = getattr(self, "_wyslane", None) or {}
         for i, d in enumerate(out):
             if d["rodzaj"] == "ZD":
@@ -505,6 +531,11 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
             + f"    pozycji łącznie: {poz}"
             + (f"    🔍 znaleziono w pozycjach" if szukaj else "")
         ))
+
+        # Płaska lista żyje z tych samych filtrów co tabela dokumentów —
+        # po każdej zmianie filtra albo frazy musi się przeliczyć.
+        if getattr(self, "wszystkie_poz_var", None) and self.wszystkie_poz_var.get():
+            self._pokaz_wszystkie_pozycje()
 
     # ── usuwanie dokumentów ────────────────────────────────────────────────
     def _zaznaczony_dokument(self, tylko_zd=False, akcja="tej operacji"):
@@ -997,6 +1028,10 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
             return
         d = self.widoczne[r]
         self.biezacy = d
+        if self.wszystkie_poz_var.get():
+            # W trybie płaskim kliknięcie dokumentu nie przestawia panelu —
+            # lista ma zostać taka, jaka jest, żeby nie gubić miejsca w szukaniu.
+            return
 
         szukaj = (self.search_var.get() or "").strip().lower()
         self.sheet_poz.set_sheet_data(
@@ -1023,6 +1058,82 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
                  + (f"   ·   projekt {d['projekt']}" if d["projekt"] else "")
                  + f"   ·   {len(d['pozycje'])} poz."
                  + (f"   ·   {d['wartosc']:.2f} zł" if d["wartosc"] else ""))
+
+
+    # ── płaska lista wszystkich pozycji ────────────────────────────────────
+    def _przelacz_pozycje(self):
+        """Przełącza panel: pozycje jednego dokumentu ↔ wszystkie płasko."""
+        if self.wszystkie_poz_var.get():
+            self._pokaz_wszystkie_pozycje()
+        else:
+            # Powrót do trybu „jeden dokument": nagłówki i szerokości wracają
+            # do KOL_POZ, inaczej zostałyby te z listy płaskiej (9 kolumn).
+            self.sheet_poz.headers([k[1] for k in self.KOL_POZ])
+            for c, k in enumerate(self.KOL_POZ):
+                try:
+                    self.sheet_poz.column_width(column=c, width=k[2], redraw=False)
+                except Exception:
+                    pass
+            if self.biezacy:
+                d, self.biezacy = self.biezacy, None
+                self._pokaz_pozycje(d)
+            else:
+                self.sheet_poz.set_sheet_data([], reset_col_positions=False)
+                self.lbl_poz.config(text="Pozycje — kliknij dokument")
+
+    def _pokaz_wszystkie_pozycje(self):
+        """Pozycje ze WSZYSTKICH widocznych dokumentów w jednej liście.
+
+        Bierzemy `self.widoczne`, nie `self.dokumenty` — filtry rodzaju
+        i projektu mają działać także tutaj, inaczej lista kłamałaby o tym,
+        co użytkownik właśnie zawęził.
+        """
+        szukaj = (self.search_var.get() or "").strip().lower()
+        wiersze, trafienia = [], []
+        for d in self.widoczne:
+            for p in d["pozycje"]:
+                if szukaj and szukaj not in f"{p['symbol']} {p['nazwa']}".lower():
+                    continue
+                trafienia.append(bool(szukaj))
+                wiersze.append([
+                    d["numer"], d["rodzaj"], p["symbol"], p["nazwa"],
+                    f"{p['ilosc']:g}", p["jm"],
+                    f"{p['cena']:.2f}" if p["cena"] else "",
+                    f"{p['cena'] * p['ilosc']:.2f}" if p["cena"] else "",
+                    d["projekt"] or ""])
+
+        self.sheet_poz.headers(["Dokument", "Rodzaj", "Nr rysunku / symbol", "Nazwa",
+                                "Ilość", "J.m.", "Cena netto", "Wartość", "Projekt"])
+        self.sheet_poz.set_sheet_data(wiersze, reset_col_positions=False, redraw=False)
+        # Szerokości USTAWIANE JAWNIE: zapamiętane w JSON-ie dotyczą 6 kolumn
+        # trybu „jeden dokument", a tu jest 9 — bez tego trzy ostatnie miałyby
+        # przypadkową szerokość.
+        for c, w in enumerate((130, 60, 190, 300, 70, 50, 90, 90, 80)):
+            try:
+                self.sheet_poz.column_width(column=c, width=w, redraw=False)
+            except Exception:
+                pass
+        try:
+            self.sheet_poz.dehighlight_all()
+        except Exception:
+            pass
+        # Kolor wiersza wg rodzaju dokumentu — ta sama paleta co w tabeli
+        # dokumentów, żeby oko łączyło jedno z drugim.
+        kolory = {"ZK": "#d6eaf8", "ZD": "#dfeaf7", "PW": "#d5f0dd",
+                  "RW": "#fdebd0", "WZ": "#f4ecf7"}
+        for i, w in enumerate(wiersze):
+            bg = "#fcf3cf" if trafienia[i] else kolory.get(w[1])
+            if bg:
+                for c in range(9):
+                    self.sheet_poz.highlight_cells(row=i, column=c, bg=bg)
+        self.sheet_poz.redraw()
+
+        wart = sum(float(w[7]) for w in wiersze if w[7])
+        self.lbl_poz.config(
+            text=f"WSZYSTKIE POZYCJE   ·   {len(wiersze)} poz."
+                 + (f"   ·   🔍 „{szukaj}”" if szukaj else "")
+                 + f"   ·   z {len(self.widoczne)} dok."
+                 + (f"   ·   {wart:,.2f} zł".replace(",", " ") if wart else ""))
 
 
 def open_window(parent):
