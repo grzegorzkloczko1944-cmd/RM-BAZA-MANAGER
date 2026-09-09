@@ -187,7 +187,34 @@ projektu z bazy**, `WHERE Dostawca = RMPAK` (przejściowo `RMPAK + RMPAK+`).
 
 ## 9. Detale RMPAK a ZK
 
-Pozycje z `Dostawca = RMPAK` **nie trafiają jako pozycje dokumentu ZK**.
+Pozycje produkcji własnej **nie trafiają jako pozycje dokumentu ZK**.
+
+### Co jest produkcją własną — dwie drogi
+
+```text
+1. Dostawca = RMPAK / RMPAK + materiał   → nasze (dowolny typ, także TW)
+2. Złożenie Z/ZZ BEZ wskazanego dostawcy → nasze
+```
+
+Punkt 2 wynika z tego, jak firma pracuje: **RMPAK z elementów TW składa ZZ**,
+więc złożenie z definicji powstaje przez składanie, a składamy u siebie.
+Pustego pola przy komplecie nie czytamy jako „nie wiadomo" — znaczy ono, że
+nikt tego nie dostarcza, bo robimy to sami.
+
+**Wyjątek — zespół kupowany gotowy:** gdy przy złożeniu wpisano REALNEGO
+dostawcę (np. MAJA), zostaje na ZK. To świadoma decyzja człowieka wyrażona
+w polu, które już istnieje i już znaczy „kto to dostarcza" — nie dokładamy
+drugiego mechanizmu obok.
+
+Skala na projekcie 22 (484 pozycji w planie):
+
+```text
+produkcja własna   84   = 43 detale TW + 41 złożeń
+na ZK             400   w tym 9 złożeń kupowanych gotowych (dostawca MAJA)
+```
+
+Reguła mieszka w `subiekt_produkcja.czy_produkcja_wlasna()` — jedno miejsce,
+żeby nie rozjechała się między oknem projektu a kalkulatorem.
 
 Ale krytyczne zastrzeżenie: **nie wolno usuwać ich z pełnego planu
 projektu / BOM**, bo mogą być składnikami kompletów KT.
@@ -217,12 +244,16 @@ Gdyby jednak wyciąć detale RMPAK z `plan.Pozycje`, zniknęłyby też ze skład
 kompletów — dokładnie ten błąd, który naprawiały `4270403` i `d5174c2`.
 Stąd zastrzeżenie powyżej.
 
-### Stan faktyczny
+### Stan faktyczny — WDROŻONE
 
-`build_plan()` w `subiekt_projekt.py` **nie zna dziś pojęcia dostawcy** —
-czyta wszystkie pozycje BOM-u jednakowo. `supplier_id` jest w bazie projektu
-(obok `src_supplier_text`, `supplier_over`), ale ta ścieżka go nie czyta.
-To jest miejsce do zmiany.
+`read_project_items()` czyta `supplier_id` i ustawia flagę `produkcja_wlasna`,
+która wędruje przez plan do mostu jako `PozPlan.ProdukcjaWlasna`. `Projekt.cs`
+pomija te pozycje **wyłącznie w pętli dodającej wiersze na dokument ZK**
+(linia ~449) — budowa kartotek i składów kompletów dzieje się w osobnej pętli
+znacznie wyżej (~150–320) i filtra tam nie ma.
+
+Sprawdzone na projekcie 22: złożenia produkcji własnej zostają w planie
+z pełnym składem, więc drzewko w Subiekcie się nie rozpada.
 
 ---
 
@@ -513,6 +544,8 @@ Do rozstrzygnięcia z magazynierem przed Etapem 2.
 | Źródło ilości RMPAK | **projekt / BOM**, nie ZK |
 | RMPAK na ZK | **nie** — nie zamawiamy u siebie |
 | RMPAK w składzie KT | **tak, zostaje** — drzewko pełne |
+| Co jest produkcją własną | dostawca RMPAK **albo** złożenie Z/ZZ bez wskazanego dostawcy |
+| Złożenie kupowane gotowe | wpisz realnego dostawcę przy Z/ZZ → wraca na ZK |
 | Filtr RMPAK | tylko przy pozycjach ZK, nigdy przy budowie planu |
 | Raport ZK | pominięte pozycje RMPAK muszą być widoczne |
 | Cena PW | z Kalkulatora RMPAK; `Pw.cs` wymaga rozszerzenia o `Cena` |

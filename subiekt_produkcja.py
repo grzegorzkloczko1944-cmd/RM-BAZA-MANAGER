@@ -85,6 +85,32 @@ def na_pw(typ):
     return str(typ or "").strip().upper() not in TYPY_KOMPLETOW
 
 
+def czy_produkcja_wlasna(supplier_id, typ, id_produkcji):
+    """Czy tę pozycję robimy u siebie. Jedno miejsce na całą regułę.
+
+    Dwie drogi do „nasze":
+
+    1. DOSTAWCA to RMPAK — dotyczy każdego typu, także detali TW.
+    2. ZŁOŻENIE Z/ZZ bez wskazanego dostawcy — złożenie z definicji powstaje
+       przez SKŁADANIE, a składamy u siebie. Pustego pola nie traktujemy jak
+       „nie wiadomo": dla kompletu brak dostawcy znaczy, że nikt go nie
+       dostarcza, bo robimy go sami.
+
+    Wyjątek od 2: gdy ktoś wpisał przy złożeniu REALNEGO dostawcę (np. MAJA),
+    zespół jest kupowany gotowy i zostaje na ZK. To świadoma decyzja
+    człowieka wyrażona w polu, które już istnieje i już znaczy „kto to
+    dostarcza" — nie dokładamy drugiego mechanizmu obok.
+
+    Stan zastany na projekcie 22 (50 złożeń): 25 bez dostawcy + 13 RMPAK
+    idzie na PW, 9 od MAJA zostaje na ZK.
+    """
+    if supplier_id is not None and supplier_id in id_produkcji:
+        return True
+    if str(typ or "").strip().upper() in TYPY_KOMPLETOW:
+        return supplier_id is None
+    return False
+
+
 def ilosc_produkcyjna(order_qty, work_qty, src_qty):
     """Ile sztuk wytwarzamy — z PROJEKTU, świadomie z pominięciem order_qty.
 

@@ -179,8 +179,13 @@ def read_project_items(project_id):
     try:
         import subiekt_produkcja
         id_produkcji = subiekt_produkcja.id_dostawcow_produkcji()
+        _produkcja_wlasna = subiekt_produkcja.czy_produkcja_wlasna
     except Exception:
-        id_produkcji = set()    # brak modułu/bazy → nic nie jest produkcją własną
+        # Brak modułu → nic nie jest produkcją własną i wszystko idzie starą
+        # drogą na ZK. Bezpieczniejsza strona błędu: nadmiarowa pozycja na
+        # dokumencie rzuca się w oczy od razu, brakująca dopiero przy dostawie.
+        id_produkcji = set()
+        _produkcja_wlasna = lambda sup, typ, ids: False
 
     def first(vals):
         for v in vals:
@@ -216,6 +221,8 @@ def read_project_items(project_id):
 
         # Produkcja własna: kartoteka i skład kompletu POWSTAJĄ jak zawsze,
         # ale pozycja nie wejdzie na ZK — nie zamawiamy detali u siebie.
+        # Regułę (dostawca RMPAK ALBO złożenie bez dostawcy) trzyma
+        # subiekt_produkcja, żeby nie rozjechała się między modułami.
         sup_id = r[s0] if (sup_col and s0 < len(r)) else None
         out.append({
             "nr": symbol,
@@ -225,7 +232,7 @@ def read_project_items(project_id):
             "qty": first(r[q0:c0]),
             "typ": typ,
             "biblioteczne": biblioteczne,
-            "produkcja_wlasna": sup_id is not None and sup_id in id_produkcji,
+            "produkcja_wlasna": _produkcja_wlasna(sup_id, typ, id_produkcji),
         })
     return out
 
