@@ -4833,6 +4833,10 @@ class MainWindow(tk.Tk):
     # Kolory (jak v6) - stałe modułowe używane przez kolorowanie pełne i per-wiersz
     _COLOR_GRAY_BG = "#D3D3D3"      # Szare tło BOM
     _COLOR_GREEN_BG_LIGHT = "#D9EDF7"   # Zielone Zamówiono (jasne, stary kolor)
+    #: Jasnozielone tło numeru rysunku — pozycja ma parę w Subiekcie
+    #: (zapisane mapowanie kod → kartoteka). Czysto informacyjne: nic nie
+    #: zmienia w danych, tylko od razu widać, co jest już powiązane.
+    _COLOR_SUBIEKT_PARA = "#E8F8E8"
     _COLOR_GREEN_BG_BRIGHT = "#90EE90"  # Zielone Odebrane (wyraziste, nowy kolor)
     _COLOR_YELLOW_BG = "#FCF8E3"    # Żółty alarm (jasny)
     _COLOR_RED_BG = "#F2DEDE"       # Czerwony po terminie (jasny)
@@ -4976,6 +4980,20 @@ class MainWindow(tk.Tk):
 
         if not data:
             return
+
+        # === JASNOZIELONE TŁO NUMERU: pozycja ma parę w Subiekcie ===
+        # Kolorujemy PRZED biblioteką, żeby niebieska czcionka bibliotecznych
+        # nadal wygrywała — tam kolor niesie ważniejszą informację.
+        pary = getattr(self, "_subiekt_pary", None)
+        if pary:
+            try:
+                item_id = self._sheet_row_ids[row_idx]
+                if item_id in pary and (row_idx, 0) not in self._cells_special_bg:
+                    self.sheet.highlight_cells(row=row_idx, column=0,
+                                               bg=self._COLOR_SUBIEKT_PARA)
+                    self._cells_special_bg.add((row_idx, 0))
+            except Exception:
+                pass
 
         # === NIEBIESKA CZCIONKA dla pozycji BIBLIOTEKA (kolumna NUMER) ===
         if data.get('dwf_biblioteka', 0) == 1:
@@ -5134,6 +5152,13 @@ class MainWindow(tk.Tk):
             self._cells_special_bg = set()
         except Exception:
             pass
+        # Które pozycje mają już parę w Subiekcie — JEDNO zapytanie na całe
+        # odświeżenie. Pytanie per wiersz szłoby do tabeli na Y: (SMB) i
+        # kosztowało tyle, co dawne przepisywanie mapowań (37 s).
+        try:
+            self._subiekt_pary = self._wczytaj_pary_subiekta()
+        except Exception:
+            self._subiekt_pary = set()
         try:
             self._apply_cell_colors()
         except Exception as e:
@@ -6790,6 +6815,31 @@ class MainWindow(tk.Tk):
         if not row or not row[0]:
             return None
         return (str(row[0]).strip(), row[1])
+
+    def _wczytaj_pary_subiekta(self):
+        """{ID POZYCJI} — pozycje, które SĄ NA ZK w Subiekcie.
+
+        „Subiekt zaliczył tę pozycję" = trafiła na dokument zamówienia, a nie
+        samo „ma kartotekę" (w zasianym projekcie kartotekę ma wszystko, więc
+        kolor nic by nie mówił — sprawdzone na 3000: 361/361).
+
+        Źródłem jest `order_qty` w pliku projektu — ta sama wartość, którą
+        pokazuje kolumna „Ilość (zam.)". Jest LOKALNIE, więc kolorowanie nie
+        pyta mostu ani sieci: to samo źródło działa na stanowiskach bez
+        Subiekta, bo wypełnia je `_zapisz_ilosci_z_subiekta` przy zwalnianiu
+        locka.
+        """
+        na_zk = set()
+        if not self.db_manager or not self.db_manager.project_con:
+            return na_zk
+        try:
+            for (item_id,) in self.db_manager.project_con.execute(
+                    "SELECT id FROM items "
+                    "WHERE COALESCE(is_hidden, 0) = 0 AND order_qty IS NOT NULL"):
+                na_zk.add(int(item_id))
+        except Exception:
+            pass                       # baza sprzed migracji — bez kolorów
+        return na_zk
 
     def _pozycja_bez_numeru(self, item_id):
         """True dla pozycji ZNORMALIZOWANEJ — bez numeru rysunku.
