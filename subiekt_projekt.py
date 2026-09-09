@@ -876,6 +876,7 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
     # to jawnie i zdecydować (założyć bez składu świadomie / uzupełnić ręcznie /
     # wyłączyć z tego zapisu), zamiast to przechodziło po cichu.
     biblioteczne_bez_skladu = {}
+    z_biblioteki = set()        # ktore z powyzszych pochodza z biblioteki B:\
     ukryte = read_hidden_drawings(project_id)
     pozycje = []
     for it in items:
@@ -894,8 +895,20 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
                     else:
                         powod, nazwa_ch = "nieznana", nazwy_drzewka.get(klucz_ch, "")
                     poza_bom.setdefault(it["nr"], []).append((child_nr, powod, nazwa_ch))
-            if not skladniki and it.get("biblioteczne"):
+            if not skladniki:
+                # KAŻDE złożenie bez składników idzie do jawnej decyzji usera
+                # (załóż bez składu / pomiń), nie tylko biblioteczne. Do
+                # 09.09.2026 złożenie z projektu bez składu było twardym
+                # „błędem danych": szary zapis z napisem „Popraw drzewko" i
+                # instrukcją „popraw *_OUT.xlsx albo ukryj w arkuszu" — bez
+                # żadnej drogi z okna. User widział błąd, którego nie mógł
+                # rozstrzygnąć, i przycisk „Decyzje" znikał, bo lista
+                # bibliotecznych była pusta. Skąd pochodzi (biblioteka /
+                # projekt) zostaje w z_biblioteki — okno decyzji to pokazuje,
+                # bo lekarstwo jest inne (B:\ vs *_OUT.xlsx).
                 biblioteczne_bez_skladu[it["nr"]] = it["nazwa"] or it["nr"]
+                if it.get("biblioteczne"):
+                    z_biblioteki.add(it["nr"])
         try:
             qty = float(str(it["qty"]).replace(",", ".")) if it["qty"] not in (None, "") else 1.0
             # Mnożnik korzenia: ilość liczona OD NOWA z drzewka, nie z BOM-u.
@@ -939,6 +952,7 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
         "podmiot": podmiot,
         "uwagi": numer,
         "pozycje": pozycje,
+        "bez_skladu_z_biblioteki": sorted(z_biblioteki),
     }
     # Ile ukrytych pozycji jest składnikami złożeń, których i tak nie ma
     # w projekcie (ukryta cała gałąź). To NIE jest problem — służy tylko do
@@ -2003,7 +2017,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         zamknąć, żeby pusty komplet nie przeszedł po cichu.
         """
         okno = tk.Toplevel(self)
-        okno.title("Decyzja wymagana: złożenia biblioteczne bez składu")
+        okno.title("Decyzja wymagana: złożenia bez składu")
         # Wysokość rośnie z liczbą pozycji, ale nie przekracza ekranu.
         wys = min(560, 300 + 62 * len(self.bib_bez_skladu))
         okno.geometry(f"760x{wys}")
@@ -2022,14 +2036,17 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         naglowek = tk.Frame(okno, bg="#c0392b")
         naglowek.pack(fill=tk.X)
         tk.Label(naglowek,
-                 text=f"⛔ {len(self.bib_bez_skladu)} złożeń z BIBLIOTEKI bez ani jednego składnika",
+                 text=f"⛔ {len(self.bib_bez_skladu)} złożeń Z/ZZ bez ani jednego składnika",
                  bg="#c0392b", fg="white", font=("Arial", 11, "bold"),
                  anchor="w", padx=12, pady=8).pack(fill=tk.X)
 
         tk.Label(okno, justify="left", anchor="w", padx=12, pady=8, wraplength=730, text=(
-            "Skład tych złożeń pochodzi z biblioteki (B:\\), a drzewko projektu "
-            "(V:\\…_OUT.xlsx) go nie zna. Bez decyzji powstałby PUSTY komplet — "
-            "wyglądałby na sukces, a magazynier nie miałby z czego go złożyć.")).pack(fill=tk.X)
+            "Drzewko projektu (V:\\…_OUT.xlsx) nie podaje składu tych złożeń. "
+            "[biblioteka] — skład jest w bibliotece B:\\, drzewko go nie zna. "
+            "[projekt] — złożenie z projektu bez węzła w *_OUT.xlsx; jeśli to "
+            "pomyłka, popraw drzewko i przelicz. Bez decyzji powstałby PUSTY "
+            "komplet — wyglądałby na sukces, a magazynier nie miałby z czego go "
+            "złożyć.")).pack(fill=tk.X)
 
         # STOPKA PAKOWANA PRZED LISTĄ — inaczej przy kilku pozycjach lista
         # rozpycha okno i przycisk „Zatwierdź" wypada poza ekran (zgłoszone
@@ -2049,13 +2066,15 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         vs.pack(side=tk.RIGHT, fill=tk.Y)
 
         self._bib_decyzje = getattr(self, "_bib_decyzje", {})   # {numer: "bez_skladu"|"pomin"}
+        z_bib = set((self.plan or {}).get("bez_skladu_z_biblioteki", []))
         zmienne = {}
         for numer, nazwa in sorted(self.bib_bez_skladu.items()):
+            pochodzenie = "[biblioteka B:\\]" if numer in z_bib else "[projekt — brak w *_OUT.xlsx]"
             # Ramka z obwódką: przy kilku pozycjach od razu widać, gdzie kończy
             # się jedna decyzja, a zaczyna druga.
             wiersz = tk.Frame(wnetrze, pady=6, padx=8, relief=tk.GROOVE, bd=1)
             wiersz.pack(fill=tk.X, anchor="w", pady=(0, 6))
-            tk.Label(wiersz, text=f"{numer}   {nazwa}", anchor="w",
+            tk.Label(wiersz, text=f"{numer}   {nazwa}   {pochodzenie}", anchor="w",
                      font=("Consolas", 10, "bold")).pack(fill=tk.X)
             # Wartość początkowa "brak", nie "" — pusty string zbiega się
             # z domyślnym stanem Radiobuttona i OBA wyglądały na zaznaczone,
@@ -2102,7 +2121,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                                              if p["symbol"].strip().upper() != n.strip().upper()]
             okno.destroy()
             self._odswiez_znaczniki()
-            self.status.config(text="Decyzje o złożeniach bibliotecznych zapisane.")
+            self.status.config(text="Decyzje o złożeniach bez składu zapisane.")
 
         tk.Label(stopka, text="Bez decyzji dla wszystkich pozycji zapis pozostanie zablokowany.",
                  fg="#7f8c8d").pack(side=tk.LEFT)
@@ -2126,9 +2145,14 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         BOM-u, pominięte pozycje. Wcześniej znikało razem z oknem.
         """
         zadania = []
+        z_bib = set((self.plan or {}).get("bez_skladu_z_biblioteki", []))
         for numer, nazwa in sorted(getattr(self, "bib_bez_skladu", {}).items()):
-            zadania.append(f"Uzupełnić skład bibliotecznego złożenia {numer} ({nazwa}) "
-                           f"— biblioteka B:\\ nie podaje, z czego się składa")
+            if numer in z_bib:
+                zadania.append(f"Uzupełnić skład bibliotecznego złożenia {numer} ({nazwa}) "
+                               f"— biblioteka B:\\ nie podaje, z czego się składa")
+            else:
+                zadania.append(f"Poprawić drzewko dla {numer} ({nazwa}) "
+                               f"— złożenie bez żadnego składnika w *_OUT.xlsx")
 
         if self.plan:
             for p in self.plan["pozycje"]:
@@ -2406,7 +2430,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             + f"    komplety: {pelne} pełnych"
             + (f", {niepelne} niepełnych ⚠" if niepelne else "")
             + (f", {puste_blad} BEZ SKŁADU (błąd danych!) ⛔" if puste_blad else "")
-            + (f", {puste_biblioteczne} bibliotecznych bez składu" if puste_biblioteczne else "")
+            + (f", {puste_biblioteczne} bez składu (po decyzji)" if puste_biblioteczne else "")
             + (f" [{nieprzy} niepotwierdzone ⛔]" if nieprzy else "")
         ))
         self._odswiez_stan_zapisu()
@@ -2478,7 +2502,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         try:
             if nieprzy:
                 self.pasek_blokady.config(
-                    text=f"⛔ {len(nieprzy)} złożeń bibliotecznych czeka na decyzję "
+                    text=f"⛔ {len(nieprzy)} złożeń bez składu czeka na decyzję "
                          f"({', '.join(sorted(nieprzy)[:3])}{'…' if len(nieprzy) > 3 else ''})"
                          "  —  kliknij „⛔ Decyzje” na górnej belce",
                     bg="#c0392b")
@@ -2987,7 +3011,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         if czekaja:
             komunikat(self, 
                 "Najpierw decyzje",
-                f"{len(czekaja)} złożeń bibliotecznych czeka na decyzję:\n\n   "
+                f"{len(czekaja)} złożeń bez składu czeka na decyzję:\n\n   "
                 + "\n   ".join(sorted(czekaja))
                 + "\n\nBez niej powstałby PUSTY komplet — kartoteka rodzaju Komplet\n"
                   "bez składu, z której magazynier nic nie złoży.\n\n"
@@ -3132,7 +3156,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         # w Subiekcie powstaną jako ZWYKŁE kartoteki, nie komplety.
         bez_skladu = [n for n, d in getattr(self, "_bib_decyzje", {}).items() if d == "bez_skladu"]
         if bez_skladu:
-            uwagi.append("Złożenia biblioteczne bez składu (Twoja decyzja) —\n"
+            uwagi.append("Złożenia bez składu (Twoja decyzja) —\n"
                          "   powstaną jako zwykłe kartoteki, magazynier kompletuje ręcznie:\n   "
                          + ", ".join(sorted(bez_skladu)))
 
