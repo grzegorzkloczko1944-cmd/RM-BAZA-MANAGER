@@ -941,15 +941,12 @@ class MainWindow(tk.Tk):
             search_frame, text="🧱 Kolumny ▾", bg="#34495e", fg="white",
             font=("Arial", 9), padx=8, pady=4, relief=tk.RAISED, bd=2,
             cursor="hand2")
-        self._menu_kolumny = tk.Menu(self.btn_kolumny, tearoff=0)
-        # Menu budujemy DOPIERO gdy arkusz istnieje — nagłówki bierzemy z niego,
-        # a self.sheet powstaje później niż ten pasek przycisków.
+        # Okno z listą, nie menu: menu zamyka się po KAŻDYM kliknięciu, więc
+        # zaznaczenie kilku kolumn wymagało otwierania go od nowa za każdym
+        # razem (09.09.2026). Tu zaznaczasz ile chcesz i klikasz „Zastosuj".
         self._kol_widoczne = {}
-        self.btn_kolumny.bind(
-            "<Button-1>",
-            lambda e: self._menu_kolumny.tk_popup(
-                self.btn_kolumny.winfo_rootx(),
-                self.btn_kolumny.winfo_rooty() + self.btn_kolumny.winfo_height()))
+        self._okno_kolumn = None
+        self.btn_kolumny.bind("<Button-1>", lambda _e: self._pokaz_okno_kolumn())
         self.btn_kolumny.pack(side=tk.LEFT, padx=(0, 5), pady=2)
 
         # RFQ: ilu kooperantów czeka z odpowiedzią. Liczone LOKALNIE z
@@ -3520,31 +3517,101 @@ class MainWindow(tk.Tk):
         self._zastosuj_widocznosc_kolumn(zapisz=False)
 
     def _zbuduj_menu_kolumn(self):
-        """Menu z checkboxem przy każdej kolumnie + skróty pokaż/ukryj."""
+        """Wczytuje zapamiętany wybór kolumn do zmiennych (bez rysowania okna)."""
         zapisane = self._wczytaj_widocznosc_kolumn()
         self._kol_widoczne = {}
-        self._menu_kolumny.delete(0, "end")
+        for idx, _naglowek in self._naglowki_arkusza():
+            stale = idx in self.KOLUMNY_STALE
+            self._kol_widoczne[idx] = tk.BooleanVar(
+                value=True if stale else zapisane.get(idx, True))
+
+    def _pokaz_okno_kolumn(self):
+        """Okno wyboru kolumn — zaznaczasz ile chcesz, potem „Zastosuj”."""
+        if self._okno_kolumn is not None:
+            try:
+                self._okno_kolumn.lift()
+                self._okno_kolumn.focus_force()
+                return
+            except tk.TclError:
+                self._okno_kolumn = None
+
+        if not self._kol_widoczne:
+            self._zbuduj_menu_kolumn()
+
+        okno = tk.Toplevel(self)
+        self._okno_kolumn = okno
+        okno.title("Widoczne kolumny")
+        okno.resizable(False, True)
+        okno.transient(self)
+
+        # Stan roboczy — zmiany wchodzą dopiero po „Zastosuj”, więc „Anuluj”
+        # naprawdę anuluje, a nie zostawia połowy zaznaczeń.
+        robocze = {i: tk.BooleanVar(value=v.get())
+                   for i, v in self._kol_widoczne.items()}
+
+        tk.Label(okno, text="Zaznacz kolumny widoczne w arkuszu:",
+                 font=("Arial", 9, "bold"), anchor="w", padx=12, pady=8).pack(fill=tk.X)
+
+        ramka = tk.Frame(okno)
+        ramka.pack(fill=tk.BOTH, expand=True, padx=12)
+        canvas = tk.Canvas(ramka, highlightthickness=0, width=280, height=420)
+        pasek = ttk.Scrollbar(ramka, orient="vertical", command=canvas.yview)
+        lista = tk.Frame(canvas)
+        lista.bind("<Configure>",
+                   lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=lista, anchor="nw")
+        canvas.configure(yscrollcommand=pasek.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        pasek.pack(side=tk.RIGHT, fill=tk.Y)
 
         for idx, naglowek in self._naglowki_arkusza():
             stale = idx in self.KOLUMNY_STALE
-            var = tk.BooleanVar(value=True if stale else zapisane.get(idx, True))
-            self._kol_widoczne[idx] = var
-            self._menu_kolumny.add_checkbutton(
-                label=(f"{naglowek}   (zawsze)" if stale else naglowek),
-                variable=var, state=tk.DISABLED if stale else tk.NORMAL,
-                command=self._zastosuj_widocznosc_kolumn)
+            tk.Checkbutton(
+                lista, text=(f"{naglowek}   (zawsze widoczna)" if stale else naglowek),
+                variable=robocze[idx], anchor="w", padx=4,
+                state=tk.DISABLED if stale else tk.NORMAL,
+                font=("Arial", 9)).pack(fill=tk.X, anchor="w")
 
-        self._menu_kolumny.add_separator()
-        self._menu_kolumny.add_command(label="Pokaż wszystkie",
-                                       command=lambda: self._ustaw_wszystkie_kolumny(True))
-        self._menu_kolumny.add_command(label="Ukryj opcjonalne",
-                                       command=lambda: self._ustaw_wszystkie_kolumny(False))
+        skroty = tk.Frame(okno)
+        skroty.pack(fill=tk.X, padx=12, pady=(8, 0))
 
-    def _ustaw_wszystkie_kolumny(self, widoczne):
-        for idx, var in self._kol_widoczne.items():
-            if idx not in self.KOLUMNY_STALE:
-                var.set(widoczne)
-        self._zastosuj_widocznosc_kolumn()
+        def zaznacz_wszystkie(wartosc):
+            for i, v in robocze.items():
+                if i not in self.KOLUMNY_STALE:
+                    v.set(wartosc)
+
+        tk.Button(skroty, text="Zaznacz wszystkie", font=("Arial", 8),
+                  command=lambda: zaznacz_wszystkie(True)).pack(side=tk.LEFT)
+        tk.Button(skroty, text="Odznacz opcjonalne", font=("Arial", 8),
+                  command=lambda: zaznacz_wszystkie(False)).pack(side=tk.LEFT, padx=6)
+
+        stopka = tk.Frame(okno)
+        stopka.pack(fill=tk.X, padx=12, pady=10)
+
+        def zamknij():
+            self._okno_kolumn = None
+            okno.destroy()
+
+        def zastosuj():
+            for i, v in robocze.items():
+                self._kol_widoczne[i].set(v.get())
+            self._zastosuj_widocznosc_kolumn()
+            zamknij()
+
+        tk.Button(stopka, text="Anuluj", width=10, command=zamknij).pack(side=tk.RIGHT, padx=(6, 0))
+        tk.Button(stopka, text="Zastosuj", width=12, font=("Arial", 9, "bold"),
+                  command=zastosuj).pack(side=tk.RIGHT)
+
+        okno.bind("<Return>", lambda _e: zastosuj())
+        okno.bind("<Escape>", lambda _e: zamknij())
+        okno.protocol("WM_DELETE_WINDOW", zamknij)
+
+        try:
+            from subiekt_stany import wysrodkuj
+            wysrodkuj(okno, self)
+        except Exception:
+            pass
+        okno.focus_set()
 
     def _zastosuj_widocznosc_kolumn(self, zapisz=True):
         """Pokazuje wybrane kolumny w arkuszu i zapamiętuje wybór.
