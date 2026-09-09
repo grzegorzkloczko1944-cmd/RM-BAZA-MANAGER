@@ -43,6 +43,20 @@ ILE_PODPOWIEDZI = 5
 _ROZDZIELACZ = re.compile(r"[^0-9A-ZĄĆĘŁŃÓŚŻŹ]+")
 _MA_CYFRE = re.compile(r"\d")
 
+# Numer rysunku RMPAK: „2632-200.37", „027-100.00Z", „ZP196-000.00ZZ",
+# „013-100.04a" — grupa cyfr, myślnik, grupa cyfr, kropka, cyfry i
+# ewentualna końcówka typu (X/XX/Z/ZZ). Taka kartoteka to DETAL konkretnego
+# projektu, nigdy odpowiednik normalium: „ASKUBAL KFL 000" nie ma nic
+# wspólnego z „2621-000.00ZZ Ceramizator", choć oba mają w sobie „000"
+# (zgłoszone 09.09.2026).
+_NUMER_RYSUNKU = re.compile(
+    r"^[A-Z]{0,4}\d{2,4}-\d{2,3}\.\d{2}[A-Z]{0,2}$", re.IGNORECASE)
+
+
+def wyglada_na_numer_rysunku(symbol: str) -> bool:
+    """Czy symbol kartoteki to numer rysunku detalu (a nie kod handlowy)."""
+    return bool(_NUMER_RYSUNKU.match((symbol or "").strip()))
+
 
 def tokeny(tekst: str) -> set:
     """Tokeny alfanumeryczne (≥2 znaki) z tekstu, wielkimi literami.
@@ -80,20 +94,30 @@ def wynik(tokeny_pozycji: set, tokeny_kartoteki: set) -> float:
     # opisowe. Bez tego „Dźwignia LAC.63 p-M6x20" dostawało podpowiedź
     # „Czujnik CAB" (symbol „63"), bo samo „63" wystarczało do przekroczenia
     # progu. Rozstrzyga kod, nie rzeczownik.
-    if mocne_pozycji and not mocne_wspolne:
+    # Token SAMYCH cyfr („000", „63", „10") nie jest trafieniem w kod:
+    # „000" z „ASKUBAL KFL 000" pasuje do KAŻDEGO numeru rysunku typu
+    # 2621-000.00ZZ, a „63" z „Dźwignia LAC.63" do kartoteki o symbolu „63"
+    # (Czujnik CAB). Tożsamość niosą tokeny MIESZANE (litera+cyfra: „M8",
+    # „5M", „GN822") — te liczymy jako kodowe.
+    mieszane_wspolne = {t for t in mocne_wspolne if not t.isdigit()}
+    mieszane_pozycji = {t for t in mocne_pozycji if not t.isdigit()}
+
+    # Gdy pozycja ma tokeny mieszane, a kartoteka nie trafiła w żaden —
+    # to nie ta sama rzecz, choćby zgadzała się liczba albo rzeczownik.
+    if mieszane_pozycji and not mieszane_wspolne:
         return 0.0
 
-    # Sama liczba bez kontekstu („10", „63") to nie jest trafienie w kod —
-    # kartoteki o takich symbolach pasują do wszystkiego. Wymagamy, żeby
-    # wspólny token kodowy miał co najmniej 3 znaki ALBO literę.
-    if mocne_wspolne and not any(len(t) >= 3 or not t.isdigit()
-                                 for t in mocne_wspolne):
-        return 0.0
+    # Pozycja bez tokenów mieszanych („ASKUBAL KFL 000") — wtedy decyduje
+    # część wspólna SŁÓW, a sama zgodna liczba nie może wystarczyć.
+    if not mieszane_pozycji:
+        slowa_wspolne = {t for t in wspolne if not _MA_CYFRE.search(t)}
+        if not slowa_wspolne:
+            return 0.0
 
     baza = len(wspolne) / len(tokeny_pozycji | tokeny_kartoteki)
-    if mocne_pozycji:
+    if mieszane_pozycji:
         # Ile z „kodowych" tokenów pozycji pokryła kartoteka.
-        premia = len(mocne_wspolne) / len(mocne_pozycji)
+        premia = len(mieszane_wspolne) / len(mieszane_pozycji)
         return min(1.0, 0.6 * baza + 0.4 * premia)
     return baza
 
@@ -187,6 +211,10 @@ class Indeks:
             symbol = (poz.get("symbol") or "").strip()
             nazwa = (poz.get("nazwa") or "").strip()
             if not symbol and not nazwa:
+                continue
+            # Kartoteki o symbolu będącym numerem rysunku odpadają: szukamy
+            # odpowiednika NORMALIUM, a detal z cudzego projektu nim nie jest.
+            if wyglada_na_numer_rysunku(symbol):
                 continue
             self.pozycje.append((tokeny(f"{symbol} {nazwa}"), poz))
 
