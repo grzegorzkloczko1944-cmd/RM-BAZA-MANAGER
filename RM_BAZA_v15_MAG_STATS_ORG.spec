@@ -15,6 +15,7 @@
 # nie recznie — przy dokladaniu nowego okna trzeba ja odswiezyc.
 
 hiddenimports_lokalne = [
+    "client_version",   # bramka wersji + heartbeat sesji (import top-level, ale dla pewnosci)
     # ── integracja z Subiektem (okna otwierane z panelu SUBIEKT) ──
     "subiekt_panel",
     "subiekt_stany",

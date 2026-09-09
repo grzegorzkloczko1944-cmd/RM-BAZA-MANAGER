@@ -40,6 +40,8 @@ hiddenimports += [
     # reszta lokalnych, tez leniwa
     'material_calculator', 'rm_kreciolek', 'rm_manager', 'rm_panel_plikow',
     'rm_sync_agent', 'rmpak_calculator',
+    # bramka wersji + heartbeat sesji (import top-level; wpis dla pewnosci)
+    'client_version',
     # zewnetrzne wchodzace tylko przez powyzsze (importy dynamiczne)
     'requests', 'win32com', 'win32com.client', 'pythoncom', 'pywintypes',
 ]
@@ -100,3 +102,35 @@ try:
     _os.startfile(_os.path.join(_os.path.abspath(DISTPATH), ''))
 except Exception as _e:
     print(f"(spec) Nie udalo sie otworzyc folderu dist: {_e}")
+
+# ── PUBLIKACJA NA SERWER ─────────────────────────────────────────────────────
+# Gotowy .exe leci od razu do Y:/RMPAK_CLIENT — miejsca, z ktorego aktualizuje
+# RM_Tray_Organizer i z ktorym bramka wersji (client_version.py) porownuje
+# kazdego klienta przy starcie. UWAGA: od tej kopii kazdy user ze starym .exe
+# dostanie blokade przy nastepnym uruchomieniu — to jest zamierzone.
+#
+# copy2, nie copy: bramka porownuje rozmiar+mtime, wiec mtime musi przetrwac.
+# Poprzednia wersja z serwera laduje w "backup dd-mm-rrrr" (jak dotychczas
+# recznie). Blad publikacji NIE psuje buildu — tylko glosny komunikat.
+import shutil as _shutil
+from datetime import datetime as _dt
+_SERVER_DIR = r"Y:\RMPAK_CLIENT"
+_src = _os.path.join(_os.path.abspath(DISTPATH), "RM_BAZA_v15_MAG.exe")
+_dst = _os.path.join(_SERVER_DIR, "RM_BAZA_v15_MAG.exe")
+try:
+    if not _os.path.isdir(_SERVER_DIR):
+        raise FileNotFoundError(f"brak katalogu serwera {_SERVER_DIR} (dysk Y: niezmapowany?)")
+    if _os.path.exists(_dst):
+        _bak = _os.path.join(_SERVER_DIR, "backup " + _dt.now().strftime("%d-%m-%Y"))
+        _os.makedirs(_bak, exist_ok=True)
+        _shutil.move(_dst, _os.path.join(_bak, "RM_BAZA_v15_MAG.exe"))
+        print(f"(spec) Poprzednia wersja z serwera -> {_bak}")
+    _shutil.copy2(_src, _dst)
+    _s, _d = _os.stat(_src), _os.stat(_dst)
+    assert _s.st_size == _d.st_size and abs(_s.st_mtime - _d.st_mtime) < 2, "kopia rozni sie od zrodla"
+    print(f"(spec) OPUBLIKOWANO: {_dst}  ({_d.st_size} B, {_dt.fromtimestamp(_d.st_mtime):%Y-%m-%d %H:%M:%S})")
+except Exception as _e:
+    print("=" * 70)
+    print(f"(spec) !!! PUBLIKACJA NA SERWER NIE POWIODLA SIE: {_e}")
+    print(f"(spec) !!! Skopiuj recznie: {_src} -> {_dst}")
+    print("=" * 70)

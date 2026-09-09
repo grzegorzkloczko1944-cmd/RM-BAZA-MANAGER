@@ -35,6 +35,8 @@ class DatabaseManager:
         
         # Połączenia
         self.master_con: Optional[sqlite3.Connection] = None
+        # Serializuje reconnecty mastera (watchdog z kilku wątków naraz).
+        self._master_reconnect_lock = threading.Lock()
         self.project_con: Optional[sqlite3.Connection] = None
         
         # Stan
@@ -54,6 +56,35 @@ class DatabaseManager:
         # Utwórz folder lokalny jeśli nie istnieje
         self.local_dir.mkdir(parents=True, exist_ok=True)
     
+    def _retire_master_con(self) -> None:
+        """Odłącz self.master_con BEZ close().
+
+        master_con ma check_same_thread=False i jest dzielony przez ~20
+        wątków (GUI, heartbeat locków, backup, watchdog z timeoutem).
+        Jawne close() z jednego wątku, gdy inny jest w trakcie execute(),
+        to use-after-free w sqlite3.dll → 0xc0000005 (cztery takie dumpy
+        09.09.2026, przy masterze zablokowanym przez innych klientów:
+        _safe_ensure_master_alive porzucał wątek po 3 s, a ten po 5 s
+        busy_timeout zamykał połączenie spod nóg GUI).
+
+        Zamiast zamykać — zrzucamy referencję. CPython zwolni (i zamknie)
+        połączenie dopiero, gdy ostatni wątek przestanie go używać, we
+        własnym wątku. Uchwyt SMB żyje o ułamek sekundy dłużej — to cena
+        za brak crasha. Prawdziwe close() zostaje tylko w close_all().
+        """
+        self.master_con = None
+
+    def _retire_project_con(self) -> None:
+        """To samo co _retire_master_con, dla project_con.
+
+        Tylko dla reconnectu z watchdoga (ensure_project_alive, wołany
+        z wątku z timeoutem przez _safe_ensure_project_alive). Świadome
+        zamknięcie projektu (_close_project, checkpoint WAL w GUI) nadal
+        robi commit + close(): tam plik MUSI być zwolniony od razu — locki,
+        kopiowanie lokalnej kopii na serwer.
+        """
+        self.project_con = None
+
     def connect_master(self) -> bool:
         # Tryb zapamietany dla watchdoga (ensure_master_alive): po zerwaniu
         # ma odtworzyc TEN SAM tryb, a nie zawsze read-only.
@@ -76,9 +107,8 @@ class DatabaseManager:
                     return True
                 else:
                     # Mamy READ-WRITE, zamknij i otwórz READ-ONLY
-                    print(f"🔄 Zamykam stare połączenie READ-WRITE, otwieram READ-ONLY...")
-                    self.master_con.close()
-                    self.master_con = None
+                    print(f"🔄 Odłączam stare połączenie READ-WRITE, otwieram READ-ONLY...")
+                    self._retire_master_con()
             except:
                 # Połączenie martwe, zamknij
                 try:
@@ -273,12 +303,8 @@ class DatabaseManager:
         
         # ZAWSZE zamykaj i otwieraj ponownie aby sprawdzić uprawnienia
         if self.master_con:
-            print(f"🔄 Zamykam stare połączenie i tworzę nowe (wymuszam sprawdzenie uprawnień)...")
-            try:
-                self.master_con.close()
-            except:
-                pass
-            self.master_con = None
+            print(f"🔄 Odłączam stare połączenie i tworzę nowe (wymuszam sprawdzenie uprawnień)...")
+            self._retire_master_con()
         
         if not self.master_path.exists():
             raise FileNotFoundError(f"Brak master.sqlite: {self.master_path}")
@@ -462,12 +488,7 @@ class DatabaseManager:
             
         try:
             print(f"🔄 RECONNECT master po 'database is locked' (sleep/wake?)...")
-            try:
-                if self.master_con:
-                    self.master_con.close()
-            except:
-                pass
-            self.master_con = None
+            self._retire_master_con()
             time.sleep(0.2)  # Krótka pauza żeby SMB zdążył się odbudować
             return self.connect_master()
         finally:
@@ -517,10 +538,9 @@ class DatabaseManager:
                     # Otwórz w trybie RW (automatycznie wykona migrację)
                     self.reconnect_master_rw()
                     
-                    # Zamknij połączenie RW
-                    if self.master_con:
-                        self.master_con.close()
-                    
+                    # Odłącz tymczasowe RW (bez close — patrz _retire_master_con)
+                    self._retire_master_con()
+
                     # Przywróć połączenie READ-ONLY
                     self.master_con = old_con
                     
@@ -719,13 +739,21 @@ class DatabaseManager:
             else:
                 print(f"⚠️  Master: połączenie martwe ({e}), reconnect...")
             
-            # Zamknij martwe połączenie
+            # Reconnect tylko z jednego wątku naraz: _safe_ensure_master_alive
+            # porzuca wątek po timeoucie i przy następnym sprawdzeniu odpala
+            # kolejny — bez tej blokady stackowały się i podmieniały
+            # master_con jeden drugiemu.
+            if not self._master_reconnect_lock.acquire(blocking=False):
+                print("⏳ Master: reconnect już trwa w innym wątku — czekam na jego wynik")
+                return False
             try:
-                self.master_con.close()
-            except:
-                pass
-            self.master_con = None
-            
+                # Odłącz martwe połączenie (bez close — patrz _retire_master_con)
+                self._retire_master_con()
+                return self._reconnect_master_same_mode()
+            finally:
+                self._master_reconnect_lock.release()
+
+    def _reconnect_master_same_mode(self) -> bool:
             # Próba ponownego połączenia — W TYM SAMYM TRYBIE CO PRZEDTEM.
             #
             # ⚠️ Wczesniej zawsze connect_master(), czyli READ-ONLY
@@ -773,11 +801,9 @@ class DatabaseManager:
         except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
             print(f"⚠️  Project: połączenie martwe ({e}), reconnect...")
             
-            # Zamknij martwe połączenie
-            try:
-                self.project_con.close()
-            except:
-                pass
+            # Odłącz martwe połączenie bez close() — inny wątek może być
+            # w execute() na tym samym obiekcie (patrz _retire_master_con).
+            self._retire_project_con()
             self.project_con = None
             
             # Próba ponownego otwarcia projektu

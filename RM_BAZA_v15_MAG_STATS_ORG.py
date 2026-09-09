@@ -124,6 +124,7 @@ from project_manager import (
     PROJECT_STATUSES_NEW
 )
 from backup_manager import BackupManager
+import client_version
 
 
 # ============================================================================
@@ -195,6 +196,13 @@ def release_single_instance_lock(lock_file):
 class InitConfigRequired(Exception):
     """Initialization requires user-provided config (missing master path)."""
     pass
+
+
+class OutdatedClient(Exception):
+    """Własny .exe jest starszy niż wzorzec na serwerze — patrz client_version."""
+    def __init__(self, info: dict):
+        super().__init__(info.get("reason", "przestarzała wersja klienta"))
+        self.info = info
 
 # Domyślne ścieżki (mogą być nadpisane przez config)
 DEFAULT_MASTER_PATH = "Y:/RM_BAZA/master.sqlite"
@@ -531,6 +539,8 @@ class MainWindow(tk.Tk):
         self.toolsm.add_command(label="📜 Historia zmian pozycji…", command=self.menu_show_items_history)
         self.toolsm.add_separator()
         self.toolsm.add_command(label="📥 RM_IMPORT…", command=self.launch_rm_import)
+        self.toolsm.add_separator()
+        self.toolsm.add_command(label="👥 Sesje klientów…", command=self.menu_show_client_sessions)
         menubar.add_cascade(label="Narzędzia", menu=self.toolsm)
 
         # Menu KSEF
@@ -2406,10 +2416,7 @@ class MainWindow(tk.Tk):
             try:
                 self._safe_print(f"🔄 Wymuszam pełny reconnect do master.sqlite...")
                 if self.db_manager and self.db_manager.master_con:
-                    try:
-                        self.db_manager.master_con.close()
-                    except:
-                        pass
+                    self.db_manager._retire_master_con()  # bez close: inne wątki mogą być w execute()
                     self.db_manager.master_con = None
                 
                 # Reconnect z odpowiednią rolą (READ-WRITE dla ADMIN/USER$$)
@@ -2517,6 +2524,9 @@ class MainWindow(tk.Tk):
                 else:
                     print("⚠️  Heartbeat tick: brak lock_manager!")
                 
+                # Sesja klienta → client_sessions (własne, krótkie połączenie)
+                self._session_heartbeat()
+
                 # Sprawdź nowe wiadomości w chacie
                 self.after(0, self.check_new_chat_messages)
                 
@@ -2712,6 +2722,8 @@ class MainWindow(tk.Tk):
             
             # Uruchom timer heartbeat dla locków
             self._start_heartbeat_timer()
+            # Heartbeat sesji (client_sessions w masterze) — po autologinie
+            self.after(5000, self._session_heartbeat_async)
             return
 
         # Błąd - przywróć kursor
@@ -2737,6 +2749,10 @@ class MainWindow(tk.Tk):
             self._start_initialize_background()
             return
 
+        if isinstance(err, OutdatedClient):
+            self._handle_outdated_client(err.info)
+            return
+
         messagebox.showerror(
             "Błąd inicjalizacji",
             f"Nie udało się uruchomić aplikacji:\n\n{err}"
@@ -2744,6 +2760,135 @@ class MainWindow(tk.Tk):
         print(tb)
         self.destroy()
     
+    # ========================================================================
+    # WERSJA KLIENTA I SESJE (client_version.py)
+    # ========================================================================
+
+    def _handle_outdated_client(self, info: dict):
+        """Własny .exe starszy niż wzorzec na serwerze: zaproponuj podmianę,
+        w każdym razie nie pracuj na masterze."""
+        loc, srv = info.get("local") or {}, info.get("server") or {}
+
+        def _opis(b):
+            if not b or b.get("size") is None:
+                return "?"
+            return f"{b['mtime_str']}   ({b['size'] / 1024 / 1024:.1f} MB)"
+
+        self.config(cursor="")
+        if hasattr(self, 'info_label'):
+            self.info_label.config(text="⛔ Przestarzała wersja RM_BAZA", fg="red")
+
+        pobrac = messagebox.askyesno(
+            "Przestarzała wersja RM_BAZA",
+            "Na serwerze jest nowsza wersja RM_BAZA. Praca na starej wersji\n"
+            "blokuje bazę główną innym użytkownikom, dlatego start został wstrzymany.\n\n"
+            f"Twoja wersja:   {_opis(loc)}\n"
+            f"Na serwerze:    {_opis(srv)}\n\n"
+            "Pobrać nową wersję teraz?\n"
+            "(aplikacja zamknie się — uruchom ją ponownie po pobraniu)",
+            icon="warning",
+        )
+        if pobrac:
+            try:
+                msg = client_version.self_update(Path(srv["path"]), Path(loc["path"]))
+                messagebox.showinfo("Zaktualizowano", msg + "\n\nUruchom RM_BAZA ponownie.")
+            except Exception as e:
+                messagebox.showerror(
+                    "Nie udało się pobrać",
+                    f"{e}\n\nSkopiuj ręcznie:\n{srv.get('path')}\n→ {loc.get('path')}\n"
+                    "albo użyj 'Aktualizuj z serwera' w RM_Tray_Organizer.",
+                )
+        else:
+            messagebox.showwarning(
+                "Start wstrzymany",
+                "Zaktualizuj RM_BAZA przez RM_Tray_Organizer (Ustawienia → Aktualizuj z serwera)\n"
+                f"albo skopiuj:\n{srv.get('path')}\n→ {loc.get('path')}",
+            )
+        self.destroy()
+
+    def _session_heartbeat(self):
+        """Wpis do client_sessions. Wołane z wątku roboczego — dlatego nie
+        dotyka master_con, tylko otwiera własne połączenie (client_version)."""
+        try:
+            client_version.heartbeat(
+                MASTER_PATH,
+                getattr(self, "current_user", None),
+                getattr(self, "current_user_role", None),
+            )
+        except Exception as e:
+            print(f"⚠️  _session_heartbeat: {e}")
+
+    def _session_heartbeat_async(self):
+        threading.Thread(target=self._session_heartbeat, daemon=True).start()
+
+    def menu_show_client_sessions(self):
+        """Okno: kto jest zalogowany i na jakim buildzie (client_sessions)."""
+        from tkinter import ttk
+
+        rows = client_version.list_sessions(MASTER_PATH)
+        srv = client_version.build_info(client_version.server_exe_path(getattr(self, "_sync_config", None)))
+        srv_id = srv["build_id"] if srv else None
+
+        win = tk.Toplevel(self)
+        win.title("👥 Sesje klientów RM_BAZA")
+        win.geometry("1180x460")
+        win.transient(self)
+
+        naglowek = (f"Wzorzec na serwerze: {srv['mtime_str']}  ({srv['size'] / 1024 / 1024:.1f} MB)   —   {srv['path']}"
+                    if srv else "Wzorzec na serwerze niedostępny — nie da się ocenić aktualności")
+        tk.Label(win, text=naglowek, anchor="w", padx=10, pady=6).pack(fill=tk.X)
+
+        cols = ("host", "user", "role", "build", "pid", "last_seen", "age", "status")
+        tree = ttk.Treeview(win, columns=cols, show="headings", height=14)
+        heads = {"host": ("Komputer", 130), "user": ("Użytkownik", 120), "role": ("Rola", 80),
+                 "build": ("Build .exe (data, rozmiar)", 220), "pid": ("PID", 70),
+                 "last_seen": ("Ostatni sygnał", 150), "age": ("Wiek", 80), "status": ("Stan", 260)}
+        for c in cols:
+            tree.heading(c, text=heads[c][0])
+            tree.column(c, width=heads[c][1], anchor="w")
+        tree.tag_configure("old", background="#f2b8b8")
+        tree.tag_configure("dead", foreground="#888888")
+        tree.tag_configure("ok", background="#d9f2d9")
+
+        for r in rows:
+            if r.get("build_id") == "src":
+                build = "źródła (python)"
+            elif r.get("exe_mtime"):
+                build = f"{r['exe_mtime']}  ({(r.get('exe_size') or 0) / 1024 / 1024:.1f} MB)"
+            else:
+                build = r.get("build_id") or "?"
+            age = r.get("age_s")
+            if age is None:
+                wiek = "?"
+            elif age < 60:
+                wiek = f"{age} s"
+            elif age < 3600:
+                wiek = f"{age // 60} min"
+            else:
+                wiek = f"{age // 3600} h"
+
+            if r.get("ended_at"):
+                stan, tag = f"zamknięta {r['ended_at'][11:16]}", "dead"
+            elif not r.get("alive"):
+                stan, tag = "brak sygnału (zawieszona / ubita?)", "dead"
+            elif srv_id and r.get("build_id") not in (srv_id, "src"):
+                stan, tag = "⛔ STARA WERSJA — zaktualizować", "old"
+            else:
+                stan, tag = "✅ aktywna", "ok"
+
+            tree.insert("", tk.END, tags=(tag,), values=(
+                r.get("host"), r.get("username") or "—", r.get("role") or "—", build,
+                r.get("pid"), (r.get("last_seen") or "")[:19].replace("T", " "), wiek, stan))
+
+        vsb = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0), pady=(0, 10))
+        vsb.pack(side=tk.LEFT, fill=tk.Y, pady=(0, 10), padx=(0, 10))
+
+        if not rows:
+            tk.Label(win, text="Brak wpisów — tabela client_sessions powstaje przy pierwszym "
+                               "heartbeacie klienta w nowej wersji.", fg="gray").pack(pady=4)
+
     def initialize(self):        # Skróty klawiszowe
         self.bind("<Control-z>", self.undo_last_action)
         self.bind("<Control-Z>", self.undo_last_action)
@@ -2834,6 +2979,16 @@ class MainWindow(tk.Tk):
             ui_settings = config.get("ui", {})
             self.loaded_last_file_category = ui_settings.get("last_file_category", "DWF")
             print(f"     UI: Ostatnia kategoria pliku: {self.loaded_last_file_category}")
+            self._sync_config = config
+
+            # BRAMKA WERSJI: stara binarka nie dotyka mastera. Porównanie
+            # własnego .exe z Y:/RMPAK_CLIENT/RM_BAZA_v15_MAG.exe (rozmiar+mtime).
+            # Ze źródeł i z lokalnym nowszym buildem przechodzi — patrz
+            # client_version.check_outdated().
+            ver = client_version.check_outdated(config)
+            print(f"  → Wersja klienta: {ver['reason']}")
+            if ver["outdated"]:
+                raise OutdatedClient(ver)
             
             # Database Manager
             print("  → Tworzę DatabaseManager...")
@@ -5369,11 +5524,8 @@ class MainWindow(tk.Tk):
                                 time.sleep(0.1)
                             elif "disk i/o error" in err_msg and attempt < 2:
                                 print(f"⚠️  restore_previous_user: disk I/O error (próba {attempt+1}/3), wymuszam reconnect...")
-                                # Wymuś reconnect
-                                try:
-                                    self.db_manager.master_con.close()
-                                except:
-                                    pass
+                                # Wymuś reconnect (bez close — patrz _retire_master_con)
+                                self.db_manager._retire_master_con()
                                 self.db_manager.master_con = None
                                 if self.current_user_role in ("ADMIN", "USER$$", "USER$"):
                                     self.db_manager.reconnect_master_rw()
@@ -5486,11 +5638,8 @@ class MainWindow(tk.Tk):
                             time.sleep(0.2)
                         elif "disk i/o error" in err_msg and attempt < 2:
                             print(f"⚠️  on_user_selected: disk I/O error (próba {attempt+1}/3), wymuszam reconnect...")
-                            # Wymuś reconnect
-                            try:
-                                self.db_manager.master_con.close()
-                            except:
-                                pass
+                            # Wymuś reconnect (bez close — patrz _retire_master_con)
+                            self.db_manager._retire_master_con()
                             self.db_manager.master_con = None
                             # Użyj bieżącej roli (przed zmianą użytkownika)
                             if self.current_user_role in ("ADMIN", "USER$$", "USER$"):
@@ -22132,11 +22281,8 @@ class MainWindow(tk.Tk):
                         time.sleep(0.2)
                     elif "disk i/o error" in err_msg and attempt < 2:
                         print(f"⚠️  reload_suppliers: disk I/O error (próba {attempt+1}/3), wymuszam reconnect...")
-                        # Wymusz reconnect
-                        try:
-                            self.db_manager.master_con.close()
-                        except:
-                            pass
+                        # Wymusz reconnect (bez close — patrz _retire_master_con)
+                        self.db_manager._retire_master_con()
                         self.db_manager.master_con = None
                         if self.current_user_role in ("ADMIN", "USER$$", "USER$"):
                             self.db_manager.reconnect_master_rw()
@@ -35388,6 +35534,8 @@ if __name__ == "__main__":
         # Usuń app lock
         if app_lock:
             release_single_instance_lock(app_lock)
+        # Oznacz sesję jako zakończoną (client_sessions) — nic krytycznego
+        client_version.close_session(MASTER_PATH)
     
     def signal_handler(sig, frame):
         """Obsługa Ctrl+C i innych sygnałów"""
