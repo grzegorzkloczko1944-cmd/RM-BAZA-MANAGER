@@ -4981,17 +4981,17 @@ class MainWindow(tk.Tk):
         if not data:
             return
 
-        # === JASNOZIELONE TŁO NUMERU: pozycja ma parę w Subiekcie ===
-        # Kolorujemy PRZED biblioteką, żeby niebieska czcionka bibliotecznych
-        # nadal wygrywała — tam kolor niesie ważniejszą informację.
+        # === JASNOZIELONE TŁO "ILOŚĆ DOSTARCZONYCH": pozycja jest na ZK ===
+        # Kolumna 6, nie numer rysunku: zielone tło stoi tuż przy liczbie,
+        # której dotyczy — ile dostarczono z tego, co Subiekt zamówił.
         pary = getattr(self, "_subiekt_pary", None)
         if pary:
             try:
                 item_id = self._sheet_row_ids[row_idx]
-                if item_id in pary and (row_idx, 0) not in self._cells_special_bg:
-                    self.sheet.highlight_cells(row=row_idx, column=0,
+                if item_id in pary and (row_idx, 6) not in self._cells_special_bg:
+                    self.sheet.highlight_cells(row=row_idx, column=6,
                                                bg=self._COLOR_SUBIEKT_PARA)
-                    self._cells_special_bg.add((row_idx, 0))
+                    self._cells_special_bg.add((row_idx, 6))
             except Exception:
                 pass
 
