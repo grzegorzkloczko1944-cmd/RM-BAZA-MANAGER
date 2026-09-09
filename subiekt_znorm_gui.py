@@ -169,6 +169,8 @@ class ZnormWindow(tk.Toplevel):
             import subiekt_projekt as sp
             katalog = S.wczytaj_katalog_subiekta() or []
             items = sp.read_project_items(self.project_id)
+            ile_znorm = sum(1 for it in items
+                            if (it.get("typ") or "").upper() == "ZNORMALIZOWANE")
             braki = Z.pozycje_do_dopasowania(items, katalog, S.dopasuj_katalog)
 
             uzycia = {}
@@ -187,8 +189,8 @@ class ZnormWindow(tk.Toplevel):
 
             indeks = Z.Indeks(katalog, uzycia=uzycia, stany=stany)
         except Exception as e:
-            blad, braki, indeks = str(e), [], None
-        self.after(0, lambda: self._wczytano(braki, indeks, blad))
+            blad, braki, indeks, ile_znorm = str(e), [], None, 0
+        self.after(0, lambda: self._wczytano(braki, indeks, blad, ile_znorm))
 
     @staticmethod
     def _projects_dir():
@@ -198,7 +200,7 @@ class ZnormWindow(tk.Toplevel):
         except Exception:
             return r"Y:\RM_BAZA\projects"
 
-    def _wczytano(self, braki, indeks, blad):
+    def _wczytano(self, braki, indeks, blad, ile_znorm=0):
         if not self.winfo_exists():
             return
         if blad:
@@ -207,14 +209,22 @@ class ZnormWindow(tk.Toplevel):
             return
         self.braki, self.indeks = braki, indeks
         self.lbl_stan.config(text=f"katalog: {len(indeks)} kartotek")
+        # Ile znormalizowanych JEST w ogóle — bez tego puste okno nie mówi,
+        # czy nie ma czego dopasowywać, czy coś się nie wczytało
+        # (zgłoszone 09.09.2026: „mam puste okna").
         self.summary.config(text=(
-            f"Pozycji ZNORMALIZOWANYCH bez kartoteki: {len(braki)}"
-            + ("   —   nie ma czego dopasowywać, wszystkie mają już kartotekę"
-               if not braki else "")))
+            f"Pozycji ZNORMALIZOWANYCH w projekcie: {ile_znorm}   ·   "
+            f"bez kartoteki w Subiekcie: {len(braki)}"))
         self._odswiez_liste()
+        if not braki:
+            self._wypelnij_podpowiedzi([], "Nie ma czego dopasowywać")
 
     def _odswiez_liste(self):
         self.tab.delete(*self.tab.get_children())
+        if not self.braki:
+            self.tab.insert("", "end", values=(
+                "✅ Wszystkie znormalizowane mają już kartotekę w Subiekcie",
+                "", ""))
         for b in self.braki:
             wybrany = self._wybor.get(b["kod"], "")
             self.tab.insert("", "end", iid=b["kod"],
