@@ -4836,13 +4836,13 @@ class MainWindow(tk.Tk):
     #: Jasnozielone tło numeru rysunku — pozycja ma parę w Subiekcie
     #: (zapisane mapowanie kod → kartoteka). Czysto informacyjne: nic nie
     #: zmienia w danych, tylko od razu widać, co jest już powiązane.
-    _COLOR_SUBIEKT_PARA = "#E8F8E8"
+    _COLOR_SUBIEKT_PARA = "#C6ECC6"
     #: Zmienione RĘCZNIE i jednocześnie obecne na ZK — zieleń przyciemniona
     #: (25 % czerni). Bez tego szare tło nadpisania wygrywało i informacja
     #: o ZK ginęła akurat na pozycjach poprawianych ręcznie, czyli tych,
     #: które najczęściej się sprawdza. Ciemniej niż 25 % nie schodzimy:
     #: przy 50 % czarny tekst przestaje być czytelny (jasność 121).
-    _COLOR_SUBIEKT_PARA_NADPISANE = "#AEBAAE"
+    _COLOR_SUBIEKT_PARA_NADPISANE = "#8FD08F"
     _COLOR_GREEN_BG_BRIGHT = "#90EE90"  # Zielone Odebrane (wyraziste, nowy kolor)
     _COLOR_YELLOW_BG = "#FCF8E3"    # Żółty alarm (jasny)
     _COLOR_RED_BG = "#F2DEDE"       # Czerwony po terminie (jasny)
