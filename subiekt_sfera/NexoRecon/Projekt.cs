@@ -86,6 +86,17 @@ internal static class Projekt
             return enc;
         }
 
+        // Czy kartoteka o tym symbolu ISTNIEJE — z mapy jednego przelotu,
+        // bez pytania Sfery. WyszukajPoSymbolu to zapytanie do bazy; wolane
+        // per pozycja (354) i per skladnik dawalo grubo ponad 400 zapytan na
+        // KAZDY przebieg, choc odpowiedz siedzi juz w `luzne`
+        // (09.09.2026: zapis i podglad "trwaja w chuj").
+        bool Istnieje(string symbol)
+        {
+            var s = (symbol ?? "").Trim();
+            return s.Length > 0 && luzne.ContainsKey(s);
+        }
+
         // Sklad kompletu z jednego przelotu; null = nie ma takiej kartoteki.
         // Dopasowanie luzne tak samo jak w Znajdz (TRIM + ignorowanie a/A).
         List<(string, decimal)>? SkladZMapy(string symbol)
@@ -103,7 +114,7 @@ internal static class Projekt
         // od tego CO piszemy.
         foreach (var p in pozycje)
         {
-            var istnieje = Znajdz(p.Symbol) != null;
+            var istnieje = Istnieje(p.Symbol);
             if (istnieje) { kroki.Add(new Krok("kartoteka", p.Symbol, "istnieje", null)); continue; }
 
             if (!zapisz) { kroki.Add(new Krok("kartoteka", p.Symbol, "do-zalozenia", null)); continue; }
@@ -127,6 +138,9 @@ internal static class Projekt
                     continue;
                 }
                 luzne[p.Symbol.Trim()] = p.Symbol.Trim();
+                // Swiezo zalozona kartoteka nie ma jeszcze skladu — wpisujemy
+                // pusty, zeby dalsze kroki czytaly mape, a nie Sfere.
+                skladWBazie[p.Symbol.Trim()] = new List<(string, decimal)>();
                 kroki.Add(new Krok("kartoteka", p.Symbol, "zalozona", null));
             }
             catch (Exception ex)
@@ -154,7 +168,7 @@ internal static class Projekt
 
                 if (!zapisz)
                 {
-                    var brakujace = skl.Where(s => Znajdz(s.Symbol) == null).Select(s => s.Symbol).ToList();
+                    var brakujace = skl.Where(s => !Istnieje(s.Symbol)).Select(s => s.Symbol).ToList();
 
                     // Czy ten komplet JUZ ma sklad w Subiekcie i czy sklad
                     // z BOM-u faktycznie sie od niego ROZNI?
