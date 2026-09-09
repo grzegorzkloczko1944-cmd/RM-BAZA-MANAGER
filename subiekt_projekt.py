@@ -150,7 +150,10 @@ def read_project_items(project_id):
         qty_cols = [c for c in ("order_qty", "work_qty", "src_qty") if c in cols]
         cls_cols = [c for c in ("class_manual", "class_effective", "class_auto") if c in cols]
         bib_col = ["dwf_biblioteka"] if "dwf_biblioteka" in cols else []
-        sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols + qty_cols + cls_cols + bib_col
+        # Opis („wykonać z PP", „LEWY / PRAWY", „6-6mm (D14L22)") — ta sama
+        # kolejność co reszta: wartość robocza przed źródłową.
+        desc_cols = [c for c in ("work_desc", "src_desc") if c in cols]
+        sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols + qty_cols + cls_cols + bib_col + desc_cols
         # Ukryte pozycje (przycisk „Ukryj zaznaczone" w arkuszu) nie mają
         # trafiać do Subiekta — COALESCE bo starsze wiersze mogą mieć NULL
         # zamiast 0 (ten sam wzorzec co database_manager.get_project_items).
@@ -163,6 +166,7 @@ def read_project_items(project_id):
     q0 = n0 + len(name_cols)
     c0 = q0 + len(qty_cols)
     c1 = c0 + len(cls_cols)     # koniec kolumn typu, przed dwf_biblioteka
+    d0 = c1 + len(bib_col)      # początek kolumn opisu
 
     def first(vals):
         for v in vals:
@@ -200,6 +204,7 @@ def read_project_items(project_id):
             "nr": symbol,
             "bez_numeru": not nr,    # do rozpoznania przy zakładaniu kartotek
             "nazwa": nazwa,
+            "opis": jedna_linia(first(r[d0:])) if d0 < len(r) else "",
             "qty": first(r[q0:c0]),
             "typ": typ,
             "biblioteczne": biblioteczne,
@@ -934,6 +939,7 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
         pozycje.append({
             "symbol": it["nr"],
             "nazwa": it["nazwa"] or it["nr"],
+            "opis": it.get("opis") or "",
             "typ": it["typ"],
             # Pozycje bez numeru rysunku (znormalizowane) mają symbol = nazwa.
             # Okno pokazuje to wprost, żeby nie wyglądało na błąd danych.
@@ -1453,12 +1459,16 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
     COLS = [
         ("sel",    "✓",             30, "c"),
         ("nr",     "Nr rysunku",   150, "w"),
+        # NAZWA zaraz za numerem: dla pozycji bez numeru rysunku to ONA jest
+        # tożsamością detalu, więc czytanie „numer → nazwa" musi być pod ręką,
+        # a nie na drugim końcu wiersza (zgłoszone 09.09.2026).
+        ("nazwa",  "Nazwa",        300, "w"),
+        # Opis z BOM-u („wykonać z PP", „LEWY / PRAWY") — bywa jedyną rzeczą
+        # odróżniającą dwie pozycje o tej samej nazwie.
+        ("opis",   "Opis",         180, "w"),
         ("typ",    "Typ",           55, "c"),
         ("qty",    "Ilość",         60, "e"),
         ("co",     "Co powstanie", 175, "w"),
-        # Nazwy bywają długie („Zaślepka DN50 DIN 32676") — ta kolumna jako
-        # jedyna się rozciąga, resztę treści pokazuje dymek.
-        ("nazwa",  "Nazwa",        420, "w"),
     ]
 
     # Wartości filtra typu — DOKŁADNIE jak FILTER_CLASS_VALUES w arkuszu
@@ -2930,7 +2940,8 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         def wstaw(parent_id, p, glebokosc=0, sciezka=()):
             node = self.tree.insert(
                 parent_id, "end", text=p["symbol"],
-                values=("", p["symbol"], p["typ"], f"{p['ilosc']:g}", opis(p), p["nazwa"]),
+                values=("", p["symbol"], p["nazwa"], p.get("opis") or "",
+                        p["typ"], f"{p['ilosc']:g}", opis(p)),
                 open=(glebokosc < 1), tags=(tag(p),))
             # Drzewa bywają głębokie (realnie widziane 4 poziomy, firma mówi
             # o nawet 6), więc nie ucinamy po stałej głębokości — pilnujemy
@@ -2959,7 +2970,8 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             for p in sorted(pasujace, key=lambda x: x["symbol"]):
                 self.tree.insert(
                     "", "end", text="",
-                    values=("", p["symbol"], p["typ"], f"{p['ilosc']:g}", opis(p), p["nazwa"]),
+                    values=("", p["symbol"], p["nazwa"], p.get("opis") or "",
+                        p["typ"], f"{p['ilosc']:g}", opis(p)),
                     tags=(tag(p),))
             return
 
@@ -2972,7 +2984,8 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                  if p["symbol"].upper() not in dzieci and p not in korzenie]
         if luzne:
             grupa = self.tree.insert("", "end", text="Pozostałe pozycje",
-                                     values=("", "", "", "", f"{len(luzne)} poz. bez złożenia", ""), open=False)
+                                     values=("", "", "", "", "",
+                                             f"{len(luzne)} poz. bez złożenia"), open=False)
             for p in sorted(luzne, key=lambda x: x["symbol"]):
                 wstaw(grupa, p)
 
@@ -3215,12 +3228,18 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             if k.get("Rodzaj") != "zk-poz":
                 continue
             st = k.get("Status")
-            if st not in ("roznica-ilosci", "do-uzupelnienia", "do-zmniejszenia"):
+            if st not in ("roznica-ilosci", "do-uzupelnienia", "do-zmniejszenia",
+                          "dopisana"):
                 continue
             sym = (k.get("Symbol") or "").strip()
             if sym.upper() not in w_planie:
                 continue
-            if st == "do-uzupelnienia":
+            if st == "dopisana":
+                # Pozycja, której na dokumencie NIE BYŁO — najważniejszy
+                # wiersz raportu, a dotąd nie było go wcale.
+                wiersze.append(("DOPISANA NA ZK", sym, nazwy.get(sym.upper(), ""),
+                                k.get("Szczegoly") or ""))
+            elif st == "do-uzupelnienia":
                 # Ilość, którą zapis ZWIĘKSZY na ZK. Bez tego wiersza pasek
                 # mówił „uzupełni ilość w 24 poz.", a tabela nie pokazywała
                 # ANI JEDNEJ z nich (09.09.2026).
@@ -3243,8 +3262,8 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         # RÓŻNICA ILOŚCI na samej górze: to jedyna kategoria, której most NIE
         # zapisze, więc user musi ją zobaczyć zanim uzna zapis za komplet.
         waga = {"ZMNIEJSZY ILOŚĆ": 0, "RÓŻNICA ILOŚCI": 1, "ZWIĘKSZY ILOŚĆ": 2,
-                "NOWA KARTOTEKA": 3, "NOWY KOMPLET": 4, "ZMIENIA SKŁAD": 5,
-                "BIBLIOTECZNE bez składu": 6, "bez zmian": 9}
+                "DOPISANA NA ZK": 2, "NOWA KARTOTEKA": 3, "NOWY KOMPLET": 4,
+                "ZMIENIA SKŁAD": 5, "BIBLIOTECZNE bez składu": 6, "bez zmian": 9}
         wiersze.sort(key=lambda w: (waga.get(w[0], 5), w[1]))
 
         if roznice_ilosci:

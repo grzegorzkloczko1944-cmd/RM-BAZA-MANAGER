@@ -497,8 +497,16 @@ internal static class Projekt
                         }
                         // Dodaj(String symbol, Decimal ilosc) — symbol realny z Subiekta,
                         // nie pytany, bo dopasowanie mogło być luźne (spacje/wielkość liter).
-                        ob.Pozycje.Dodaj(sym, p.Ilosc <= 0 ? 1m : p.Ilosc);
+                        var ileDodane = p.Ilosc <= 0 ? 1m : p.Ilosc;
+                        ob.Pozycje.Dodaj(sym, ileDodane);
                         dodane++;
+                        // Kazda DOPISANA pozycja ma swoj wiersz w raporcie.
+                        // Dotad zk-poz raportowal wylacznie zmiany ilosci, wiec
+                        // po zapisie user widzial "dopisano 2 poz." i PUSTA
+                        // tabele — nie dalo sie sprawdzic, co konkretnie weszlo
+                        // na dokument (zgloszone 09.09.2026: "nic nie widze").
+                        kroki.Add(new Krok("zk-poz", sym, "dopisana",
+                            $"dodano na ZK w ilosci {ileDodane:0.###}"));
                     }
 
                     if (dodane == 0 && zmienioneIlosci == 0 && istniejace != null)
