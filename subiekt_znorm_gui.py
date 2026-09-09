@@ -76,6 +76,47 @@ class ZnormWindow(tk.Toplevel):
                                 font=("Arial", 9), fg="#2c3e50")
         self.summary.pack(fill=tk.X)
 
+        # ── PASEK STEROWANIA ──────────────────────────────────────────
+        # Czułość i filtry są tu, bo dobre dopasowanie zależy od materiału:
+        # dla normaliów z czytelnym kodem („GN 822-6") ostry próg odsiewa
+        # śmieci, a dla nazw opisowych („Docisk nakrętek") trzeba zejść
+        # niżej, żeby cokolwiek zobaczyć. Bez regulatora user musiałby
+        # wierzyć jednej wartości dobranej przeze mnie.
+        panel = tk.Frame(self, bg="#ecf0f1")
+        panel.pack(fill=tk.X, padx=12, pady=(0, 6))
+
+        tk.Label(panel, text="Czułość:", bg="#ecf0f1",
+                 font=("Arial", 9)).pack(side=tk.LEFT, padx=(8, 4), pady=6)
+        self.var_czulosc = tk.StringVar(value="zwykła")
+        cb = ttk.Combobox(panel, textvariable=self.var_czulosc, width=12,
+                          state="readonly",
+                          values=("ostra", "zwykła", "luźna", "wszystko"))
+        cb.pack(side=tk.LEFT, pady=6)
+        cb.bind("<<ComboboxSelected>>", lambda e: self._pokaz_podpowiedzi())
+
+        tk.Label(panel, text="Ile podpowiedzi:", bg="#ecf0f1",
+                 font=("Arial", 9)).pack(side=tk.LEFT, padx=(14, 4), pady=6)
+        self.var_ile = tk.StringVar(value="5")
+        cb2 = ttk.Combobox(panel, textvariable=self.var_ile, width=5,
+                           state="readonly", values=("3", "5", "10", "20"))
+        cb2.pack(side=tk.LEFT, pady=6)
+        cb2.bind("<<ComboboxSelected>>", lambda e: self._pokaz_podpowiedzi())
+
+        self.var_tylko_stan = tk.BooleanVar(value=False)
+        tk.Checkbutton(panel, text="tylko z zapasem na stanie", bg="#ecf0f1",
+                       variable=self.var_tylko_stan, font=("Arial", 9),
+                       command=self._pokaz_podpowiedzi).pack(side=tk.LEFT, padx=(16, 0))
+
+        self.var_tylko_uzywane = tk.BooleanVar(value=False)
+        tk.Checkbutton(panel, text="tylko już używane", bg="#ecf0f1",
+                       variable=self.var_tylko_uzywane, font=("Arial", 9),
+                       command=self._pokaz_podpowiedzi).pack(side=tk.LEFT, padx=(10, 0))
+
+        self.var_ukryj_wybrane = tk.BooleanVar(value=False)
+        tk.Checkbutton(panel, text="ukryj pozycje z wyborem", bg="#ecf0f1",
+                       variable=self.var_ukryj_wybrane, font=("Arial", 9),
+                       command=self._odswiez_liste).pack(side=tk.LEFT, padx=(10, 0))
+
         # STOPKA PRZED tabelami — inaczej przy długiej liście przyciski
         # wypadają poza ekran (ta sama pułapka co w raporcie po zapisie).
         stopka = tk.Frame(self)
@@ -222,16 +263,38 @@ class ZnormWindow(tk.Toplevel):
         self.tab.delete(*self.tab.get_children())
         for b in self.braki:
             wybrany = self._wybor.get(b["kod"], "")
+            if wybrany and self.var_ukryj_wybrane.get():
+                continue          # załatwione — schodzi z oczu, zostaje w wyborze
             self.tab.insert("", "end", iid=b["kod"],
                             values=(b["kod"], b["nazwa"] or b["kod"],
                                     b.get("ilosc") or "", wybrany),
                             tags=("wybrano",) if wybrany else ())
+        widoczne = len(self.tab.get_children())
+        self.summary.config(text=(
+            f"Pozycji ZNORMALIZOWANYCH bez kartoteki: {len(self.braki)}"
+            f"   ·   wyświetlanych: {widoczne}"
+            f"   ·   z wybraną kartoteką: {len(self._wybor)}"))
         self.btn_zapisz.config(
             state=tk.NORMAL if self._wybor else tk.DISABLED,
             text=(f"💾 Zapisz dopasowania ({len(self._wybor)})"
                   if self._wybor else "💾 Zapisz dopasowania"))
 
     # ── podpowiedzi ────────────────────────────────────────────────────
+    #: Próg minimalnego dopasowania dla każdego poziomu czułości.
+    #: Skalibrowane pomiarem na 56 pozycjach projektu 79 (mediana najlepszego
+    #: trafienia = 0.455): 0.40 daje podpowiedź dla 32/56 pozycji i prawie
+    #: same trafne, 0.15 dla 44/56 ale z szumem. „wszystko" = pokaż cokolwiek
+    #: dzieli choć jeden token — ostatnia deska ratunku.
+    PROGI = {"ostra": 0.40, "zwykła": 0.20, "luźna": 0.10, "wszystko": 0.0}
+
+    def _filtruj(self, lista):
+        """Odsiew wg checkboxów — na gotowej liście, bez pytania katalogu."""
+        if self.var_tylko_stan.get():
+            lista = [p for p in lista if (p.get("stan") or 0) > 0]
+        if self.var_tylko_uzywane.get():
+            lista = [p for p in lista if (p.get("uzyc") or 0) > 0]
+        return lista
+
     def _pokaz_podpowiedzi(self, _event=None):
         sel = self.tab.selection()
         if not sel or not self.indeks:
@@ -242,11 +305,25 @@ class ZnormWindow(tk.Toplevel):
         if not poz:
             return
         self.var_reczny.set(self._wybor.get(kod, ""))
-        self._wypelnij_podpowiedzi(self.indeks.podpowiedzi(poz["nazwa"] or kod),
-                                   f"Podpowiedzi dla: {poz['nazwa'] or kod}")
+        prog = self.PROGI.get(self.var_czulosc.get(), 0.15)
+        try:
+            ile = int(self.var_ile.get())
+        except ValueError:
+            ile = 5
+        # Bierzemy z zapasem, bo checkboxy dopiero potem odsieją część —
+        # inaczej „tylko z zapasem na stanie" pokazywałoby 1 wynik z 5.
+        lista = self.indeks.podpowiedzi(poz["nazwa"] or kod,
+                                        ile=ile * 4, prog=prog)
+        lista = self._filtruj(lista)[:ile]
+        self._wypelnij_podpowiedzi(lista, f"Podpowiedzi dla: {poz['nazwa'] or kod}")
 
     def _wypelnij_podpowiedzi(self, lista, tytul):
-        self.lbl_prawa.config(text=f"{tytul} — kliknij dwukrotnie, żeby wybrać")
+        # Licznik: ile faktycznie widać PO progu i checkboxach — inaczej nie
+        # wiadomo, czy pusto znaczy „nic nie pasuje", czy „filtr uciął"
+        # (zgłoszone 09.09.2026).
+        ile = len(lista or [])
+        self.lbl_prawa.config(
+            text=f"{tytul}   —   {ile} dopasowań   —   kliknij dwukrotnie, żeby wybrać")
         self.tab2.delete(*self.tab2.get_children())
         if not lista:
             self.tab2.insert("", "end", values=(
@@ -275,7 +352,7 @@ class ZnormWindow(tk.Toplevel):
         fraza = self.var_szukaj.get().strip()
         if not fraza:
             return
-        self._wypelnij_podpowiedzi(self.indeks.znajdz_tekstem(fraza),
+        self._wypelnij_podpowiedzi(self._filtruj(self.indeks.znajdz_tekstem(fraza)),
                                    f"Wyniki szukania „{fraza}”")
 
     # ── wybór ──────────────────────────────────────────────────────────
