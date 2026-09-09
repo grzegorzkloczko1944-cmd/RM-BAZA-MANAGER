@@ -3315,6 +3315,18 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                  justify="left", anchor="w", padx=12, pady=6,
                  font=("Arial", 9)).pack(fill=tk.X)
 
+        # STOPKA PAKOWANA PRZED TABELA i przypieta do DOLU. Tabela ma
+        # expand=True, wiec przy dlugiej liscie zjadala cala wysokosc i
+        # spychala „OK" pod krawedz pulpitu — okna nie dalo sie zamknac
+        # inaczej niz X-em (zgloszone 09.09.2026). Tk oddaje miejsce w
+        # kolejnosci pakowania, wiec to, co MUSI byc widoczne, idzie pierwsze.
+        stopka = tk.Frame(okno)
+        stopka.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=10)
+        if log:
+            tk.Label(okno, text=f"Log: {log}", justify="left", anchor="w",
+                     padx=12, fg="#7f8c8d", font=("Arial", 8),
+                     wraplength=960).pack(side=tk.BOTTOM, fill=tk.X)
+
         ramka = tk.Frame(okno)
         ramka.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 6))
         kol = ("co", "symbol", "nazwa", "szczegoly")
@@ -3342,13 +3354,6 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             tab.insert("", "end", values=("bez zmian", "", "", "nic nie wymagało zapisu"),
                        tags=("nic",))
 
-        if log:
-            tk.Label(okno, text=f"Log: {log}", justify="left", anchor="w",
-                     fg="#7f8c8d", font=("Arial", 8), padx=12,
-                     wraplength=960).pack(fill=tk.X)
-
-        stopka = tk.Frame(okno)
-        stopka.pack(fill=tk.X, padx=12, pady=10)
         tk.Button(stopka, text="OK", width=12, command=okno.destroy,
                   font=("Arial", 10, "bold")).pack(side=tk.RIGHT)
 
