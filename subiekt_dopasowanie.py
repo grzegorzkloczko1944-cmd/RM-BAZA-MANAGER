@@ -94,21 +94,13 @@ class Indeks:
         f = (fraza or "").strip().upper()
         if not f:
             return []
-        # Fraza z kilku czlonow ("6004 rS") szukana DOSLOWNIE nie trafia
-        # w nic, bo kartoteka nazywa sie "SS 6004 2RS" — czlony sa te same,
-        # ale w innej kolejnosci i z dodatkami. Wymagamy wiec, zeby kazdy
-        # czlon wystapil gdziekolwiek w symbolu albo nazwie (09.09.2026).
-        czlony = [c for c in f.split() if c]
         w_symbolu, w_nazwie = [], []
         for poz in self.katalog:
             symbol = (poz.get("symbol") or "").upper()
             nazwa = (poz.get("nazwa") or "").upper()
-            razem = symbol + " " + nazwa
-            if not all(c in razem for c in czlony):
-                continue
-            if f in symbol or all(c in symbol for c in czlony):
+            if f in symbol:
                 w_symbolu.append(poz)
-            else:
+            elif f in nazwa:
                 w_nazwie.append(poz)
         klucz = lambda p: len(p.get("symbol") or "")
         return (sorted(w_symbolu, key=klucz) + sorted(w_nazwie, key=klucz))[:ile]

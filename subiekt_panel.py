@@ -377,8 +377,6 @@ class PanelSubiekt(tk.Toplevel):
                  "zapis", "open_subiekt_scalanie", None),
                 ("🔎", "Dopasowanie kartotek", "znormalizowane → Subiekt",
                  "zapis", "open_subiekt_dopasowanie", None),
-                ("📥", "Wpisz dane z Subiekta", "symbol i nazwa do arkusza",
-                 "zapis", "menu_subiekt_pokaz_dopasowania", None),
             ]),
         ]
         for tytul, podtytul, kafle in uklad:
