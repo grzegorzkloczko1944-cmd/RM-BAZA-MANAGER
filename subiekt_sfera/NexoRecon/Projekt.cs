@@ -22,6 +22,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using InsERT.Moria.ModelDanych;
 using InsERT.Moria.Sfera;
 
@@ -333,8 +334,12 @@ internal static class Projekt
                 // a zapis i tak jej nie przenosił (zgłoszone 08.09.2026).
                 var naZk = CzytajPozycjeZk(juzJest.Pozycje);
                 var nowe = 0;
+                var prodPominiete = 0;
                 foreach (var p in pozycje)
                 {
+                    // Ten sam filtr co w pętli zapisu — podgląd nie może
+                    // zapowiadać dopisania pozycji, której zapis nie doda.
+                    if (p.ProdukcjaWlasna) { prodPominiete++; continue; }
                     var e = Znajdz(p.Symbol);
                     if (e == null) continue;
                     var sym = (e.Symbol ?? "").Trim();
@@ -366,13 +371,20 @@ internal static class Projekt
                     $"dopisze {nowe} poz."
                     + (doUzupelnienia > 0 ? $", zwiększy ilość w {doUzupelnienia} poz." : "")
                     + (doZmniejszenia > 0 ? $", ZMNIEJSZY ilość w {doZmniejszenia} poz." : "")
-                    + $" ({naZk.Count} już na dokumencie)"));
+                    + $" ({naZk.Count} już na dokumencie)"
+                    + (prodPominiete > 0 ? $", {prodPominiete} poz. produkcji własnej pominięto" : "")));
             }
             else
             {
-                var doZk = pozycje.Count;
+                // Produkcja własna nie wchodzi na ZK — podgląd MUSI liczyć tak
+                // samo jak zapis. Inaczej suchy przebieg mówi „211 pozycji",
+                // a dokument dostaje 180 i user dowiaduje się o różnicy po
+                // fakcie (zasada „nic po cichu").
+                var prod = pozycje.Count(p => p.ProdukcjaWlasna);
+                var doZk = pozycje.Count - prod;
                 kroki.Add(new Krok("zk", plan.Projekt ?? "", "do-utworzenia",
-                    $"{doZk} pozycji, podmiot: {plan.Podmiot}"));
+                    $"{doZk} pozycji, podmiot: {plan.Podmiot}"
+                    + (prod > 0 ? $" ({prod} poz. produkcji własnej pominięto — idą na PW)" : "")));
             }
         }
         else
@@ -962,7 +974,13 @@ internal static class Projekt
 
     internal record SkladnikPlan(string Symbol, decimal Ilosc);
     internal record PozPlan(string Symbol, string? Nazwa, string? Typ, decimal Ilosc,
-                            List<SkladnikPlan>? Skladniki, bool ProdukcjaWlasna = false);
+                            List<SkladnikPlan>? Skladniki,
+                            // JAWNA nazwa z JSON-a: PropertyNameCaseInsensitive
+                            // ignoruje wielkość liter, ale NIE podkreślenia —
+                            // bez tego atrybutu "produkcja_wlasna" nie trafiało
+                            // w ProdukcjaWlasna i filtr milczał (09.09.2026).
+                            [property: JsonPropertyName("produkcja_wlasna")]
+                            bool ProdukcjaWlasna = false);
     internal record Plan(string? Projekt, string? Tytul, string? Podmiot, string? Uwagi, List<PozPlan>? Pozycje);
     internal record Krok(string Rodzaj, string Symbol, string Status, string? Szczegoly);
 }
