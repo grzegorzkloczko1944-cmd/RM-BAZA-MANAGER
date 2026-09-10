@@ -50,7 +50,7 @@ internal static class CommandDispatcher
     {
         "kartoteka", "kartoteka-usun", "kartoteka-edytuj", "projekt", "zd", "zd-usun",
         "dostawcy", "progi", "rw", "pw", "termin", "symbole", "komplet-napraw", "magazyn-zaloz",
-        "magazyn-usun", "projekt-cofnij", "kartoteki",
+        "magazyn-usun", "projekt-cofnij", "kartoteki", "zk-poz-usun",
     };
 
     /// <summary>
@@ -73,7 +73,7 @@ internal static class CommandDispatcher
         "zd-usun", "wydruk-recon", "termin", "symbole", "rw", "kartoteka-usun",
         "progi", "wydruk", "projekt", "komplet", "komplet-napraw", "kartoteka-edytuj",
         "pola-wlasne", "magazyn-zaloz", "magazyn-usun", "pw", "projekt-cofnij",
-        "kartoteki", "zapotrzebowanie-test", "zk-ilosci",
+        "kartoteki", "zapotrzebowanie-test", "zk-ilosci", "zk-poz-usun",
     };
 
     public static bool Zna(string tryb) => Tryby.Contains(tryb, StringComparer.OrdinalIgnoreCase);
@@ -196,6 +196,10 @@ internal static class CommandDispatcher
             case "pw":
                 if (k.PlanPath is null) return Brak("pw: brak --plan=plik.json");
                 return Pw.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
+
+            case "zk-poz-usun":
+                if (k.PlanPath is null) return Brak("zk-poz-usun: brak --plan=plik.json");
+                return ZkPozUsun.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
 
             case "kartoteka-usun":
                 return KartotekaUsun.Uruchom(sfera, k.SymboleCsv, k.OutPath, k.Zapisz);

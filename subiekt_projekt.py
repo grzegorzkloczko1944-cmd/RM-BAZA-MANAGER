@@ -1496,6 +1496,11 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         ("opis",   "Opis",         180, "w"),
         ("typ",    "Typ",           55, "c"),
         ("qty",    "Ilość",         60, "e"),
+        # DOSTAWCA rozstrzyga, czy pozycja idzie na ZK (zakup), czy na PW
+        # (produkcja własna) — bez tej kolumny zmiana dostawcy z menu prawym
+        # działa „w ciemno" i nie widać, co się właściwie zmieniło
+        # (zgłoszone 10.09.2026).
+        ("dost",   "Dostawca",     130, "w"),
         ("co",     "Co powstanie", 175, "w"),
     ]
 
@@ -1702,6 +1707,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                 ("#d5f5e3", "jest w Subiekcie — nic do zrobienia"),
                 ("#d4e6f1", "złożenie (Z/ZZ), kartoteka jest — będzie komplet"),
                 ("#fdebd0", "BRAK kartoteki — zaznacz ✓, żeby założyć"),
+                ("#f5b041", "komplet BEZ SKŁADU — powstanie pusty"),
                 ("#fadbd8", "błąd — pozycja nie przejdzie")):
             tk.Label(leg, text="   ", bg=kolor, relief=tk.SOLID, bd=1).pack(
                 side=tk.LEFT, padx=(8, 3), pady=(0, 4))
@@ -1752,6 +1758,9 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         # Dwuklik w kolumnę „Ilość" — wpisanie ilości docelowej (korzeń
         # przelicza poddrzewo, pozycja spoza drzewa ustawia się sama).
         self.tree.bind("<Double-Button-1>", self._edytuj_ilosc, add="+")
+        # Menu prawym: zmiana dostawcy pozycji. Tu, a nie w oknie Złożeń —
+        # to jedyne miejsce, które zna PLAN i wie, co zmiana zrobi z ZK.
+        self.tree.bind("<Button-3>", self._menu_kontekstowe, add="+")
         # Dymki z pełną nazwą — WYŁĄCZONE na życzenie (07.09.2026). Wyskakiwały
         # przy każdym przesunięciu myszy nad drzewkiem i zasłaniały wiersze,
         # a przy przeglądaniu listy przeszkadzały bardziej, niż pomagały.
@@ -1771,6 +1780,12 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         self.tree.tag_configure("istnieje", background="#d5f5e3")  # jest w Subiekcie
         self.tree.tag_configure("nowy",    background="#fdebd0")   # do założenia
         self.tree.tag_configure("blad",    background="#fadbd8")
+        # Komplet, który NIE POWSTANIE — kartoteka jest, ale składu brak.
+        # Pomarańcz z ciemnym tekstem: mocniej niż „do założenia" (to normalny
+        # stan), słabiej niż błąd (nic się nie psuje, tylko zespół zostanie
+        # pusty i magazynier nie ma z czego go złożyć).
+        self.tree.tag_configure("komplet-pusty", background="#f5b041",
+                                foreground="#7d4b12")
 
         bottom = tk.Frame(self)
         bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(0, 8))
@@ -2311,6 +2326,292 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             return                                  # już ma kartotekę — nie ma czego zakładać
         self.wybrane.symmetric_difference_update({sym})
         self._odswiez_znaczniki()
+
+    # ── zmiana dostawcy (menu prawym) ───────────────────────────────────
+    def _dostawcy_pozycji(self):
+        """{SYMBOL: nazwa dostawcy} dla pozycji projektu. {} przy błędzie.
+
+        Czytamy z bazy PROJEKTU (supplier_id) + master (nazwy) — ten sam
+        podział co w subiekt_zamowienia. Dla projektu z CSV zwraca pusto,
+        bo taki projekt nie ma bazy w RM_BAZA.
+        """
+        if self.csv_path:
+            return {}
+        try:
+            import sqlite3
+            from subiekt_zamowienia import _nazwy_dostawcow
+            nazwy = _nazwy_dostawcow()
+            sciezka = os.path.join(PROJECTS_DIR, f"project_{self.project_id}.sqlite")
+            con = sqlite3.connect(f"file:{sciezka}?mode=ro", uri=True)
+            try:
+                out = {}
+                for nr, sid in con.execute(
+                        "SELECT COALESCE(work_drawing_no, norm_drawing_no, src_drawing_no, ''), "
+                        "supplier_id FROM items WHERE COALESCE(is_hidden, 0) = 0"):
+                    nr = (nr or "").strip().upper()
+                    if nr and sid is not None:
+                        out[nr] = nazwy.get(sid, "") or ""
+                return out
+            finally:
+                con.close()
+        except Exception:
+            return {}
+
+    def _mam_lock(self):
+        """Czy mamy lock projektu — bez niego baza jest READ-ONLY.
+
+        Zapis bez locka po cichu przepada (na tym przewrócił się numer PW,
+        10.09.2026), więc akcje zmieniające dane są wyszarzane Z GÓRY,
+        zamiast kończyć się błędem po kliknięciu.
+        """
+        if self.csv_path:
+            return False              # projekt spoza RM_BAZA — nie ma bazy
+        try:
+            return bool(getattr(self.master, "have_lock", False))
+        except Exception:
+            return False
+
+    def _menu_kontekstowe(self, event):
+        """Prawy przycisk na wierszu → zmiana dostawcy."""
+        wiersz = self.tree.identify_row(event.y)
+        if not wiersz:
+            return
+        if wiersz not in self.tree.selection():
+            self.tree.selection_set(wiersz)
+        symbole = self._symbole_zaznaczone()
+        if not symbole:
+            return
+
+        menu = tk.Menu(self, tearoff=0)
+        ile = len(symbole)
+        opis = symbole[0] if ile == 1 else f"{ile} pozycji"
+        if self._mam_lock():
+            menu.add_command(label=f"🏭 Ustaw dostawcę… ({opis})",
+                             command=lambda: self._okno_dostawcy(symbole))
+        else:
+            menu.add_command(label="🏭 Ustaw dostawcę… (weź lock projektu)",
+                             state=tk.DISABLED)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _symbole_zaznaczone(self):
+        """[SYMBOL] zaznaczonych wierszy, które są pozycjami planu.
+
+        Symbol bierzemy z KOLUMNY „Nr rysunku", nie z `text` drzewa: w trybie
+        PŁASKIM (i przy filtrze typu) wiersze wstawiane są z `text=""`, bo
+        kolumna „Struktura" jest wtedy zwinięta do zera. Czytanie `text`
+        zwracało tam pustą listę i zapis „udawał się" na zero pozycji
+        (zgłoszone 10.09.2026).
+        """
+        out = []
+        by = {p["symbol"].upper(): p for p in (self.plan or {}).get("pozycje", [])}
+        i_nr = [c[0] for c in self.COLS].index("nr")
+        for iid in self.tree.selection():
+            sym = str(self.tree.item(iid, "text") or "").strip()
+            if not sym:
+                try:
+                    sym = str(self.tree.item(iid, "values")[i_nr] or "").strip()
+                except (IndexError, TypeError):
+                    sym = ""
+            if sym and sym.upper() in by and sym not in out:
+                out.append(sym)
+        return out
+
+    def _okno_dostawcy(self, symbole):
+        """Lista dostawców + zapis. Pokazuje SKUTEK zmiany przed zapisem."""
+        try:
+            from subiekt_zamowienia import _nazwy_dostawcow
+            dostawcy = _nazwy_dostawcow()
+        except Exception as e:
+            messagebox.showerror("Dostawcy", f"Nie udało się wczytać listy dostawców:\n{e}",
+                                 parent=self)
+            return
+        if not dostawcy:
+            messagebox.showwarning("Dostawcy", "Brak dostawców w bazie RM_BAZA.", parent=self)
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Ustaw dostawcę")
+        dlg.transient(self)
+        dlg.geometry("520x520")
+        dlg.grab_set()
+
+        tk.Label(dlg, text=f"Dostawca dla {len(symbole)} poz.",
+                 bg="#34495e", fg="white", font=("Arial", 10, "bold"),
+                 anchor="w", padx=12, pady=8).pack(fill=tk.X)
+        tk.Label(dlg, text=", ".join(symbole[:8]) + (" …" if len(symbole) > 8 else ""),
+                 fg="gray30", font=("Arial", 8), anchor="w", wraplength=490,
+                 justify="left", padx=12, pady=4).pack(fill=tk.X)
+
+        # „(brak)" NA GÓRZE: dla złożenia Z/ZZ brak dostawcy znaczy „robimy
+        # u siebie" — to najczęstszy wybór w tym oknie.
+        lista = tk.Listbox(dlg, font=("Arial", 9))
+        lista.pack(fill=tk.BOTH, expand=True, padx=12, pady=(4, 8))
+        pozycje = [(None, "(brak) — produkcja własna RMPAK")]
+        pozycje += sorted(((sid, n) for sid, n in dostawcy.items() if n),
+                          key=lambda x: x[1].lower())
+        for _sid, nazwa in pozycje:
+            lista.insert(tk.END, nazwa)
+        lista.selection_set(0)
+
+        stopka = tk.Frame(dlg, padx=12, pady=10)
+        stopka.pack(fill=tk.X)
+        tk.Button(stopka, text="Anuluj", command=dlg.destroy, width=12).pack(side=tk.RIGHT)
+        tk.Button(stopka, text="Ustaw", width=12, bg="#2c3e50", fg="white",
+                  font=("Arial", 9, "bold"),
+                  command=lambda: self._zapisz_dostawce(
+                      symbole, pozycje[lista.curselection()[0]] if lista.curselection() else None,
+                      dlg)).pack(side=tk.RIGHT, padx=(0, 8))
+
+    def _zapisz_dostawce(self, symbole, wybor, dlg):
+        """Zapis dostawcy + sprzątnięcie ZK, gdy pozycja przechodzi na produkcję.
+
+        Kierunki NIE są symetryczne (RMPAK_ZMIANA_DOSTAWCY_ZLOZEN.md):
+
+        * dostawca → RMPAK — pozycja WYPADA z planu ZK, ale tryb „projekt"
+          jej NIE ZDEJMIE z dokumentu (przechodzi tylko po pozycjach planu).
+          Zostałaby SIEROTA: zamówiona u dostawcy i robiona u siebie. Dlatego
+          po zapisie wołamy „zk-poz-usun", który usuwa ją z ZK — ale TYLKO
+          gdy nie poszła dalej na ZD.
+        * RMPAK → dostawca — pozycja dojdzie na ZK przy najbliższym zapisie
+          projektu, nic nie trzeba sprzątać.
+        """
+        if wybor is None:
+            return
+        sup_id, nazwa = wybor
+        import subiekt_produkcja
+        id_prod = subiekt_produkcja.id_dostawcow_produkcji()
+        by = {p["symbol"].upper(): p for p in (self.plan or {}).get("pozycje", [])}
+
+        # Które pozycje PRZESTANĄ być zamawiane — tylko te wymagają sprzątania.
+        na_produkcje = []
+        for s in symbole:
+            p = by.get(s.upper())
+            if not p:
+                continue
+            bylo = bool(p.get("produkcja_wlasna"))
+            bedzie = subiekt_produkcja.czy_produkcja_wlasna(sup_id, p.get("typ"), id_prod)
+            if bedzie and not bylo:
+                na_produkcje.append(s)
+
+        if na_produkcje:
+            if not messagebox.askyesno(
+                    "Pozycja przechodzi na produkcję własną",
+                    f"{len(na_produkcje)} poz. przestanie być zamawiana:\n\n"
+                    + ", ".join(na_produkcje[:10])
+                    + (" …" if len(na_produkcje) > 10 else "")
+                    + "\n\nJeśli są już na ZK tego projektu, SPRÓBUJĘ je stamtąd usunąć.\n"
+                      "Sfera nie zawsze na to pozwala — wtedy powiem, które zostały\n"
+                      "i trzeba je usunąć ręcznie w Subiekcie.\n\n"
+                      "NIE zeruję ilości zamiast usunięcia: zero z ZK wraca do BOM-u\n"
+                      "i psuje ilości w projekcie.\n\n"
+                      "Pozycji, które poszły dalej na ZD, NIE RUSZAM: zamówienie\n"
+                      "do dostawcy to zobowiązanie — takie rozstrzygniesz w Subiekcie.\n\n"
+                      "Zapisać zmianę dostawcy?",
+                    icon="warning", default="no", parent=dlg):
+                return
+
+        # 1. Zapis do bazy projektu (wymaga locka — menu jest bez niego wyszarzone).
+        try:
+            ile = self._zapisz_supplier_id(symbole, sup_id)
+        except Exception as e:
+            messagebox.showerror("Zmiana dostawcy",
+                                 f"Nie udało się zapisać:\n\n{e}\n\n"
+                                 "Sprawdź, czy masz lock projektu.", parent=dlg)
+            return
+        # ZERO zmienionych wierszy to BŁĄD, nie sukces: symbol z zaznaczenia
+        # nie trafił w żadną pozycję bazy. Bez tego okno mówiło „ustawiono",
+        # a w bazie nic się nie działo (zgłoszone 10.09.2026).
+        if not ile:
+            messagebox.showerror(
+                "Zmiana dostawcy",
+                "NIC nie zostało zapisane — żadna z zaznaczonych pozycji nie "
+                "została odnaleziona w bazie projektu.\n\n"
+                "Zaznacz wiersze ponownie i spróbuj jeszcze raz.", parent=dlg)
+            return
+        dlg.destroy()
+
+        # 2. Sprzątnięcie ZK — dopiero po udanym zapisie.
+        raport = ""
+        if na_produkcje:
+            raport = self._sprzatnij_zk(na_produkcje)
+
+        messagebox.showinfo(
+            "Dostawca zmieniony",
+            f"Ustawiono „{nazwa}” dla {ile} poz." + (f"\n\n{raport}" if raport else "")
+            + "\n\nOdświeżam podgląd projektu.", parent=self)
+        # Plan trzeba przeliczyć OD NOWA: zmiana dostawcy przestawia pozycję
+        # między torami (ZK ↔ PW), więc stary podgląd pokazywałby nieprawdę.
+        self._dry_run_async()
+
+    def _zapisz_supplier_id(self, symbole, sup_id):
+        """UPDATE items.supplier_id. Zwraca liczbę zmienionych wierszy.
+
+        ⚠️ Piszemy przez POŁĄCZENIE ARKUSZA (`db_manager.project_con`), nie
+        własnym do pliku na Y:. RM_BAZA pracuje na KOPII LOKALNEJ projektu
+        i przy zwalnianiu/odświeżaniu locka kopiuje ją na dysk sieciowy
+        (`shutil.copy2(local_db, remote_db)`) — nadpisując plik w całości.
+        Zapis zrobiony osobnym połączeniem do pliku zdalnego znikał przy
+        pierwszym odświeżeniu locka: dostawca był widoczny w oknie, a potem
+        wracał do pustego (zgłoszone 10.09.2026, QUAY na 2627-650.11ZZ).
+
+        Ten sam wzorzec co ceny w kalkulatorze RMPAK — tam też idzie to
+        przez `db_manager.project_con`.
+        """
+        from datetime import datetime as _dt
+        con = None
+        try:
+            con = self.master.db_manager.project_con
+        except Exception:
+            con = None
+        if con is None:
+            raise RuntimeError(
+                "Brak połączenia z bazą projektu.\n\n"
+                "Okno musi być otwarte z arkusza RM_BAZA z aktywnym projektem.")
+
+        gorne = {s.strip().upper() for s in symbole}
+        teraz = _dt.now().isoformat(timespec="seconds")
+        ile = 0
+        for item_id, nr in con.execute(
+                "SELECT id, COALESCE(work_drawing_no, norm_drawing_no, src_drawing_no, '') "
+                "FROM items WHERE COALESCE(is_hidden, 0) = 0").fetchall():
+            if (nr or "").strip().upper() in gorne:
+                con.execute("UPDATE items SET supplier_id=?, updated_at=? WHERE id=?",
+                            (sup_id, teraz, item_id))
+                ile += 1
+        con.commit()
+        return ile
+
+    def _sprzatnij_zk(self, symbole):
+        """Usuwa z ZK pozycje, które przeszły na produkcję własną. Zwraca opis."""
+        plan = {"projekt": numer_projektu(self.project_name, self.project_id),
+                "symbole": symbole}
+        try:
+            import subiekt_bridge
+            wynik = subiekt_bridge.call("zk-poz-usun", {"plan": plan, "zapisz": True},
+                                        timeout=TIMEOUT_S, write=True)
+        except Exception as e:
+            return (f"⚠ Nie udało się posprzątać ZK: {e}\n"
+                    "Pozycje zostały na dokumencie — usuń je ręcznie w Subiekcie.")
+        kroki = (wynik or {}).get("kroki", [])
+        # „zapisane" niesie liczbę POTWIERDZONĄ ODCZYTEM — nie liczymy kroków
+        # „do-usuniecia", bo one mówią tylko, co most zamierzał zrobić.
+        zapisane = next((k for k in kroki if k.get("Status") == "zapisane"), None)
+        nieusuwalne = [k for k in kroki if k.get("Status") == "nie-do-usuniecia"]
+        realizowane = [k for k in kroki if k.get("Status") == "realizowana"]
+        czesci = []
+        if zapisane:
+            czesci.append(f"✓ {zapisane.get('Szczegoly') or 'zdjęto z ZK'}")
+        if nieusuwalne:
+            czesci.append("⚠ ZOSTAŁY NA ZK — usuń ręcznie w Subiekcie: "
+                          + ", ".join(k["Symbol"] for k in nieusuwalne[:8]))
+        if realizowane:
+            czesci.append("⚠ NIE usunięto (są już na ZD): "
+                          + ", ".join(f"{k['Symbol']} → {k.get('Szczegoly', '')}"
+                                      for k in realizowane[:5]))
+        return "\n".join(czesci) if czesci else "Nic nie było na ZK."
 
     def _edytuj_ilosc(self, event):
         """Dwuklik w kolumnę „Ilość" — wpisanie ilości DOCELOWEJ.
@@ -2938,6 +3239,9 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             status.setdefault(k["Rodzaj"], {})[k["Symbol"].upper()] = k
 
         by_symbol = {p["symbol"].upper(): p for p in plan["pozycje"]}
+        # {SYMBOL: nazwa dostawcy} — czytane RAZ na przebudowę drzewa, nie per
+        # wiersz: nazwy leżą w master.sqlite na dysku sieciowym.
+        dostawcy = self._dostawcy_pozycji()
         dzieci = set()
         for p in plan["pozycje"]:
             for s in p["skladniki"]:
@@ -2960,16 +3264,32 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             # zaznaczenia, żeby komplet w ogóle powstał (07.09.2026).
             # Kolor ma mówić „co zrobić", a dopiero potem „czym to jest";
             # rodzaj widać i tak w kolumnie Typ oraz po drzewku.
+            # KOMPLET, KTÓRY NIE POWSTANIE, ma własny kolor. Kartoteka
+            # istnieje, więc dotąd dostawał zwykły niebieski „komplet" i status
+            # „pominiety-brak-skladnikow" ginął w tekście — a to jedyny wiersz
+            # w tym oknie, po którym magazynier nie ma z czego złożyć zespołu
+            # (zgłoszone 10.09.2026).
+            kompl = status.get("komplet", {}).get(p["symbol"].upper())
+            if kompl and str(kompl.get("Status", "")).startswith("pominiety"):
+                return "komplet-pusty"
             kart = status.get("kartoteka", {}).get(p["symbol"].upper())
             if kart and kart["Status"] == "istnieje":
                 return "komplet" if p["typ"] in KOMPLETY else "istnieje"
             return "nowy"
 
+        # Nazwa dostawcy do kolumny. Pusto = produkcja własna (nikt tego
+        # nie dostarcza, bo robimy sami) — dla złożeń Z/ZZ to znaczenie ma
+        # regułę w subiekt_produkcja.czy_produkcja_wlasna().
+        def dost(p):
+            if p.get("produkcja_wlasna"):
+                return dostawcy.get(p["symbol"].upper()) or "— RMPAK —"
+            return dostawcy.get(p["symbol"].upper()) or ""
+
         def wstaw(parent_id, p, glebokosc=0, sciezka=()):
             node = self.tree.insert(
                 parent_id, "end", text=p["symbol"],
                 values=("", p["symbol"], p["nazwa"], p.get("opis") or "",
-                        p["typ"], f"{p['ilosc']:g}", opis(p)),
+                        p["typ"], f"{p['ilosc']:g}", dost(p), opis(p)),
                 open=(glebokosc < 1), tags=(tag(p),))
             # Drzewa bywają głębokie (realnie widziane 4 poziomy, firma mówi
             # o nawet 6), więc nie ucinamy po stałej głębokości — pilnujemy
@@ -2999,7 +3319,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                 self.tree.insert(
                     "", "end", text="",
                     values=("", p["symbol"], p["nazwa"], p.get("opis") or "",
-                        p["typ"], f"{p['ilosc']:g}", opis(p)),
+                        p["typ"], f"{p['ilosc']:g}", dost(p), opis(p)),
                     tags=(tag(p),))
             return
 

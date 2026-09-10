@@ -846,6 +846,11 @@ internal static class Projekt
     /// Sygnatury Usun nie znamy na pewno (dokumentacja milczy), wiec szukamy
     /// refleksja metody "Usun" przyjmujacej pozycje albo jej Id. Zwraca false,
     /// gdy sie nie da — wtedy wolajacy zeruje ilosc zamiast usuwac.
+    /// Ta sama logika dla ZkPozUsun — usuwanie pozycji z dokumentu jest
+    /// nietrywialne (refleksja po metodzie „Usun" przyjmującej pozycję albo
+    /// jej Id), więc nie powielamy go w drugim miejscu.
+    internal static bool UsunPozycjePubl(object ob, object poz) => UsunPozycje(ob, poz);
+
     static bool UsunPozycje(object ob, object poz)
     {
         try
@@ -873,6 +878,12 @@ internal static class Projekt
     /// sie miedzy wersjami Sfery (bywa przeciazona o jednostke miary), dlatego
     /// szukamy jej refleksja i probujemy wariantow po kolei. Gdy zadnego nie
     /// ma — wolamy o tym wprost, zamiast po cichu nic nie zrobic.
+
+    /// Dla ZkPozUsun — `UstawIlosc` jest METODĄ ROZSZERZAJĄCĄ, więc zwykłe
+    /// `poz.Ilosc = x` przez dynamic nic nie robi (patrz komentarz niżej).
+    /// Nie powielamy tego szukania w drugim pliku.
+    internal static void UstawIloscPozycjiPubl(object poz, decimal ilosc)
+        => UstawIloscPozycji(poz, ilosc);
 
     static void UstawIloscPozycji(object poz, decimal ilosc)
     {
