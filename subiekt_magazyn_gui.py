@@ -1116,14 +1116,45 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
                 messagebox.showwarning("RW", "Wpisz powód — bez niego za pół roku nikt nie będzie "
                                              "wiedział, dlaczego stan zszedł.", parent=dlg)
                 return
+
+            # SUCHY PRZEBIEG PRZED POTWIERDZENIEM (10.09.2026): most mówi,
+            # które pozycje pójdą z kosztem 0,00. Bez tego RW wyglądał na
+            # udany, a wartość dokumentu była zaniżona — wychodziło to dopiero
+            # w Subiekcie (RW 24/09/2026: 17 z 24 pozycji po zerze, bo
+            # migracja magazynu nr 2 przyjęła stan bez ceny).
+            #
+            # Suchy przebieg NIC nie zapisuje, więc w najgorszym razie
+            # kosztuje jedno wywołanie mostu. Gdy most nie odpowiada,
+            # pokazujemy zwykłe potwierdzenie zamiast blokować wystawienie.
+            bez_wyceny = []
+            try:
+                sucho = utworz_rw(poz, f"{UWAGI_MAGAZYN}: {powod}", zapisz=False)
+                bez_wyceny = [k for k in (sucho or {}).get("kroki", [])
+                              if k.get("Status") == "bez-wyceny"]
+            except Exception:
+                pass
+
+            ostrzezenie = ""
+            if bez_wyceny:
+                lista = NL.join(f"     • {k.get('Symbol')}" for k in bez_wyceny[:8])
+                wiecej = ("" if len(bez_wyceny) <= 8
+                          else NL + f"     … i {len(bez_wyceny) - 8} więcej")
+                ostrzezenie = (
+                    NL + NL + f"⚠ {len(bez_wyceny)} z {len(poz)} pozycji pójdzie z KOSZTEM 0,00 zł:"
+                    + NL + lista + wiecej
+                    + NL + NL + "   Te kartoteki nie mają ceny przyjęcia, więc nie podniosą"
+                    + NL + "   wartości RW — dokument pokaże mniej, niż faktycznie zeszło."
+                    + NL + "   Stan magazynu zejdzie normalnie.")
+
             if not messagebox.askyesno(
                     "RW — potwierdzenie",
-                    f"Baza PRODUKCYJNA Subiekta." + NL + NL
+                    "Baza PRODUKCYJNA Subiekta." + NL + NL
                     + f"Powstanie rozchód wewnętrzny (RW) na magazyn {MAGAZYN}:" + NL
                     + NL.join(f"  • {x['symbol']}: {x['ilosc']:g}" for x in poz[:10])
                     + ("" if len(poz) <= 10 else NL + "  …")
-                    + NL + NL + f"Uwagi: {UWAGI_MAGAZYN}: {powod}" + NL + NL
-                    + "Stan w Subiekcie ZEJDZIE o te ilości. Wykonać?",
+                    + NL + NL + f"Uwagi: {UWAGI_MAGAZYN}: {powod}"
+                    + ostrzezenie
+                    + NL + NL + "Stan w Subiekcie ZEJDZIE o te ilości. Wykonać?",
                     parent=dlg, icon="warning"):
                 return
             dlg.destroy()

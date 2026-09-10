@@ -509,6 +509,10 @@ def find_assembly_tree_rows(out_path: Path) -> list:
     out_path = Path(out_path)
     rows = []
     wb = None
+    # Kasujemy na wejsciu, nie na wyjsciu: wczesne "return []" (brak arkusza,
+    # brak wymaganych kolumn) inaczej zostawialoby blad z POPRZEDNIEGO pliku
+    # i wolacz raportowalby nieistniejaca awarie.
+    globals()["_ostatni_blad_drzewka"] = None
     try:
         wb = openpyxl.load_workbook(out_path, data_only=True)
         if "DRZEWKO TEKST" not in wb.sheetnames:
@@ -545,7 +549,20 @@ def find_assembly_tree_rows(out_path: Path) -> list:
                 "sciezka": [norm(seg) for seg in sciezka_raw.split(">")],
             })
     except Exception as e:
-        print(f"⚠️  [find_assembly_tree_rows] Błąd czytania {out_path.name}: {e}")
+        # Diagnostyka NIE MOZE wywrocic obslugi bledu: print z emoji leci
+        # UnicodeEncodeError na polskiej konsoli (cp1250), a wtedy wyjatek
+        # ucieka z tej funkcji zamiast zwrocic [] — wolacz dostawal crash
+        # zamiast lagodnego "nie da sie odczytac". 10.09.2026.
+        try:
+            print(f"[find_assembly_tree_rows] Blad czytania {out_path.name}: {e}")
+        except Exception:
+            pass
+        # Wolacz, ktory chce ZNAC przyczyne (okno "Z pliku" w edytorze
+        # kartotek), czyta ostatni blad stad. Bez tego kazda awaria
+        # — brak openpyxl, plik zajety przez Excela, uszkodzony ZIP —
+        # wygladala tak samo jak "nie ma arkusza DRZEWKO TEKST", a w .exe
+        # (console=False) print nie ma gdzie trafic. 10.09.2026.
+        globals()["_ostatni_blad_drzewka"] = f"{type(e).__name__}: {e}"
         return []
     finally:
         if wb is not None:
@@ -555,6 +572,16 @@ def find_assembly_tree_rows(out_path: Path) -> list:
                 pass
 
     return rows
+
+
+#: Przyczyna ostatniej nieudanej proby czytania "DRZEWKO TEKST" (albo None).
+#: Ustawia find_assembly_tree_rows; czyta okno "Z pliku" w edytorze kartotek.
+_ostatni_blad_drzewka = None
+
+
+def ostatni_blad_drzewka():
+    """Dlaczego find_assembly_tree_rows zwrocilo [] — albo None, gdy plik byl OK."""
+    return _ostatni_blad_drzewka
 
 
 # Indeks DWF folderu projektu: {(root, projekt) -> (czas_budowy, {PREFIKS: Path})}.

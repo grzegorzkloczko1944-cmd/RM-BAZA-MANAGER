@@ -59,7 +59,26 @@ internal static class Rw
             try { enc = asort.Dane.WyszukajPoSymbolu(symbol); } catch { }
             if (enc == null) { kroki.Add(new Krok("pozycja", symbol, "blad", "brak kartoteki")); continue; }
             doWydania.Add((symbol, p.Ilosc));
-            kroki.Add(new Krok("pozycja", symbol, zapisz ? "do-wydania" : "do-wydania (suchy)", $"{p.Ilosc:0.##}"));
+
+            // BEZ WYCENY: kartoteka lezy na stanie, ale zadna warstwa przyjecia
+            // nie ma ceny, wiec Subiekt policzy koszt rozchodu = 0,00 i wartosc
+            // RW bedzie zanizona. Zrodlo problemu: migracja magazynu nr 2
+            // (PW 2-8/09/2026) przyjela 24 373 szt. bez ceny — obsluge ceny
+            // w Pw.cs dolozono dopiero 09.09.2026. Pomiar 10.09.2026: 1183
+            // z 1376 kartotek ze stanem nie ma zadnej ceny przyjecia.
+            //
+            // Sprawdzamy KOSZT MAGAZYNOWY warstw, nie cene handlowa ani
+            // CenaEwidencyjna: to on niesie wartosc RW (patrz naglowek pliku
+            // i RMPAK_PRODUKCJA_USTALENIA.md, wiersze 554-555).
+            var kosztJedn = KosztWarstwy(enc);
+            if (kosztJedn is null or 0)
+                kroki.Add(new Krok("pozycja", symbol, "bez-wyceny",
+                    $"{p.Ilosc:0.##} szt \u00d7 0,00 z\u0142 \u2014 brak ceny przyj\u0119cia, "
+                    + "ta pozycja NIE podniesie warto\u015bci RW"));
+            else
+                kroki.Add(new Krok("pozycja", symbol,
+                    zapisz ? "do-wydania" : "do-wydania (suchy)",
+                    $"{p.Ilosc:0.##} \u00d7 {kosztJedn:0.00} = {p.Ilosc * kosztJedn:0.00} z\u0142"));
         }
 
         string? numer = null;
@@ -235,6 +254,67 @@ internal static class Rw
         {
             return null;      // diagnostyka nie moze przykryc wlasciwego bledu
         }
+    }
+
+    /// <summary>
+    /// Jednostkowy koszt magazynowy kartoteki — albo null/0, gdy nie ma
+    /// z czego go policzyc.
+    /// </summary>
+    /// <remarks>
+    /// Kolejnosc zrodel od najpewniejszego:
+    ///   1. WartoscZakupu / IloscDostepna ze stanow magazynowych — to
+    ///      dokladnie ta warstwa, z ktorej Subiekt liczy rozchod;
+    ///   2. ostatnia pozycja dokumentu PRZYCHODOWEGO z niezerowym kosztem
+    ///      (PZ, PW, FZ, MM) — dla kartotek, ktorych stan juz zszedl;
+    ///   3. CenaEwidencyjna — ostatnia deska ratunku (w tym wdrozeniu
+    ///      wypelniona w ~2 przypadkach na 1183, patrz MAGAZYN.md).
+    /// Kazde zrodlo w osobnym try: nazwy pol roznia sie miedzy wersjami SDK,
+    /// a brak jednego z nich nie moze wywrocic calego suchego przebiegu.
+    /// </remarks>
+    static decimal? KosztWarstwy(dynamic enc)
+    {
+        try
+        {
+            decimal wartosc = 0, ilosc = 0;
+            foreach (var st in enc.StanyMagazynowe)
+            {
+                try
+                {
+                    ilosc += (decimal)st.IloscDostepna;
+                    wartosc += (decimal)st.WartoscZakupu;
+                }
+                catch { }
+            }
+            if (ilosc > 0 && wartosc > 0) return decimal.Round(wartosc / ilosc, 2);
+        }
+        catch { }
+
+        try
+        {
+            IEnumerable<dynamic> poz = enc.PozycjeDokumentu;
+            var przychodowe = new[] { "PZ", "PW", "FZ", "MM" };
+            foreach (var p in poz.Reverse())
+            {
+                try
+                {
+                    var sym = (string?)p.Dokument?.Symbol ?? "";
+                    if (!przychodowe.Contains(sym, StringComparer.OrdinalIgnoreCase)) continue;
+                    var kj = (decimal)p.JednostkowyKosztMagazynowy;
+                    if (kj > 0) return decimal.Round(kj, 2);
+                }
+                catch { }
+            }
+        }
+        catch { }
+
+        try
+        {
+            var ce = (decimal)enc.CenaEwidencyjna;
+            if (ce > 0) return decimal.Round(ce, 2);
+        }
+        catch { }
+
+        return null;
     }
 
     internal record PozPlan(string? Symbol, decimal Ilosc);
