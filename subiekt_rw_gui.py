@@ -73,7 +73,7 @@ class OknoRW(OknoDokumentu):
                  bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8)).grid(
             row=1, column=2, columnspan=2, sticky="w", pady=(8, 0))
 
-        tk.Label(siatka, text="Opis:", bg=TLO_SEKCJI, fg=TEKST,
+        tk.Label(siatka, text="Uwagi:", bg=TLO_SEKCJI, fg=TEKST,
                  font=("Arial", 9), anchor="w", width=10).grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.var_uwagi = tk.StringVar(value=self.kontekst.get("uwagi", ""))
         tk.Entry(siatka, textvariable=self.var_uwagi, font=("Arial", 9)).grid(
@@ -82,13 +82,13 @@ class OknoRW(OknoDokumentu):
 
         # DWA OSOBNE POLA DOKUMENTU, nie jeden sklejony tekst (10.09.2026).
         # Cała firma filtruje dokumenty w Subiekcie po Uwagach, szukając
-        # SAMEGO numeru projektu — `numer_projektu_z_uwag()` bierze całą ich
-        # treść jako numer. Doklejenie opisu („2741 — Montaż maszyny")
-        # zepsułoby ten odczyt, więc opis idzie polem Tytuł.
+        # numeru projektu w PIERWSZYM wierszu Uwag; uwagi użytkownika idą pod
+        # spód, do drugiego wiersza. Uwagi to jedyne z tych pól, które się
+        # DRUKUJE — Tytuł niesie wyłącznie znacznik RM_BAZA i na wydruku
+        # nie występuje.
         tk.Label(rodzic,
-                 text="Projekt → pole „Uwagi” dokumentu (sam numer — po nim "
-                      "filtruje się dokumenty w Subiekcie).    "
-                      "Opis → pole „Tytuł”.",
+                 text="Projekt i uwagi → pole „Uwagi” dokumentu (numer w pierwszym "
+                      "wierszu, uwagi pod nim) — to jedyne pole, które widać na wydruku.",
                  bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8), anchor="w").pack(
             fill=tk.X, padx=12, pady=(0, 6))
 
@@ -121,17 +121,19 @@ class OknoRW(OknoDokumentu):
         return bledy
 
     def _uwagi_dokumentu(self):
-        """Pole Uwagi: WYŁĄCZNIE numer projektu (patrz komentarz w nagłówku).
+        """Pole Uwagi: numer projektu w pierwszym wierszu, uwagi użytkownika niżej.
 
-        Gdy projektu nie podano, wpada tam opis — lepiej mieć w Uwagach
-        cokolwiek niż dokument bez żadnego śladu, po co powstał.
+        To pole SIĘ DRUKUJE, więc trafia tu wszystko, co ma zobaczyć człowiek
+        trzymający kartkę. Tytuł niesie tylko znacznik RM_BAZA.
         """
-        return self.var_projekt.get().strip() or self.var_uwagi.get().strip()
+        from subiekt_zamowienia import zloz_uwagi
+        return zloz_uwagi(self.var_projekt.get().strip(),
+                          self.var_uwagi.get().strip())
 
     def _tytul_dokumentu(self):
-        """Pole Tytuł: opis. Puste, gdy opis poszedł już do Uwag."""
-        opis = self.var_uwagi.get().strip()
-        return opis if self.var_projekt.get().strip() else ""
+        """Pole Tytuł: znacznik „RM_BAZA <numer>" — po nim poznajemy swoje."""
+        from subiekt_zamowienia import tytul_dokumentu
+        return tytul_dokumentu(self.var_projekt.get().strip())
 
     def _plan(self, pozycje):
         return [{"symbol": p["symbol"], "ilosc": float(p["ilosc"])} for p in pozycje]
@@ -230,8 +232,8 @@ class OknoRW(OknoDokumentu):
             f"✅ {numer or 'Dokument utworzony'}\n\n"
             f"Pozycji: {len(self.tabela.uzyte())}\n"
             f"Magazyn: {self.var_magazyn.get()}\n"
-            f"Uwagi (projekt): {self._uwagi_dokumentu()}\n"
-            + (f"Tytuł: {self._tytul_dokumentu()}\n" if self._tytul_dokumentu() else "")
+            f"Uwagi: {self._uwagi_dokumentu()}\n"
+            + f"Tytuł: {self._tytul_dokumentu()}\n"
             + "\n"
             "Stan w Subiekcie zszedł. Wartość dokumentu to koszt magazynowy —\n"
             "sprawdzisz go w Przeglądzie dokumentów.", parent=self)

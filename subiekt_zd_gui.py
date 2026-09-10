@@ -69,7 +69,7 @@ class OknoZD(OknoDokumentu):
         tk.Entry(siatka, textvariable=self.var_data, font=("Arial", 9),
                  width=14, state="readonly").grid(row=0, column=3, sticky="w")
 
-        tk.Label(siatka, text="Opis:", bg=TLO_SEKCJI, fg=TEKST,
+        tk.Label(siatka, text="Uwagi:", bg=TLO_SEKCJI, fg=TEKST,
                  font=("Arial", 9), anchor="w", width=10).grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.var_uwagi = tk.StringVar(value=self.kontekst.get("uwagi", ""))
         tk.Entry(siatka, textvariable=self.var_uwagi, font=("Arial", 9)).grid(
@@ -77,7 +77,8 @@ class OknoZD(OknoDokumentu):
         siatka.grid_columnconfigure(3, weight=1)
 
         tk.Label(rodzic,
-                 text="Projekt → pole „Uwagi” każdego ZD (sam numer).    "
+                 text="Projekt i uwagi → pole „Uwagi” każdego ZD (numer w pierwszym "
+                      "wierszu, uwagi pod nim) — to widzi dostawca na wydruku.    "
                       "Ceny nie podajemy — ustala się ją przy przyjęciu towaru.",
                  bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8), anchor="w").pack(
             fill=tk.X, padx=12, pady=(0, 4))
@@ -222,8 +223,19 @@ class OknoZD(OknoDokumentu):
         return bledy
 
     def _uwagi_dokumentu(self):
-        """Pole Uwagi każdego ZD: WYŁĄCZNIE numer projektu."""
-        return self.var_projekt.get().strip() or self.var_uwagi.get().strip()
+        """Pole Uwagi każdego ZD: numer projektu w pierwszym wierszu, uwagi niżej.
+
+        To pole SIĘ DRUKUJE — a ZD jako jedyny z tych dokumentów wychodzi
+        na zewnątrz firmy, do dostawcy.
+        """
+        from subiekt_zamowienia import zloz_uwagi
+        return zloz_uwagi(self.var_projekt.get().strip(),
+                          self.var_uwagi.get().strip())
+
+    def _tytul_dokumentu(self):
+        """Pole Tytuł: znacznik „RM_BAZA <numer>" — po nim poznajemy swoje."""
+        from subiekt_zamowienia import tytul_dokumentu
+        return tytul_dokumentu(self.var_projekt.get().strip())
 
     def _grupy(self):
         """{dostawca: [pozycje]} — tyle powstanie dokumentów.
@@ -288,12 +300,14 @@ class OknoZD(OknoDokumentu):
     def sprawdz(self, pozycje):
         import subiekt_zamowienia
         return subiekt_zamowienia.utworz_zd(
-            self._plan(pozycje), uwagi=self._uwagi_dokumentu(), zapisz=False)
+            self._plan(pozycje), uwagi=self._uwagi_dokumentu(),
+            tytul=self._tytul_dokumentu(), zapisz=False)
 
     def wystaw(self, pozycje):
         import subiekt_zamowienia
         return subiekt_zamowienia.utworz_zd(
-            self._plan(pozycje), uwagi=self._uwagi_dokumentu(), zapisz=True)
+            self._plan(pozycje), uwagi=self._uwagi_dokumentu(),
+            tytul=self._tytul_dokumentu(), zapisz=True)
 
     # ── reakcje na wynik ────────────────────────────────────────────────
 
@@ -347,7 +361,8 @@ class OknoZD(OknoDokumentu):
             + f"Pozycji: {len(self.tabela.uzyte())}\n"
             + (f"Wartość: {sum(float(p.get('wartosc') or 0) for p in self.tabela.uzyte()):,.2f} zł netto\n".replace(",", " ")
                if any(p.get("wartosc") for p in self.tabela.uzyte()) else "")
-            + f"Uwagi (projekt): {self._uwagi_dokumentu()}\n"
+            + f"Uwagi: {self._uwagi_dokumentu()}\n"
+            + f"Tytuł: {self._tytul_dokumentu()}\n"
             + ("\n⚠ Część pozycji odpadła — sprawdź raport w Subiekcie."
                if bledy else ""), parent=self)
         odswiez = self.kontekst.get("po_zapisie")

@@ -130,12 +130,12 @@ internal static class Rw
                 }
                 catch { }
 
+                // Uwagi: numer projektu z przodu (drukuje sie), reszta dla
+                // czlowieka. Tytul: znacznik RM_BAZA — patrz Znacznik.cs.
                 if (!string.IsNullOrWhiteSpace(plan.Uwagi))
                     UstawUwagi(rw.Dane, plan.Uwagi.Trim(), kroki);
-                // Tytul to OPIS dokumentu; Uwagi zostaja czystym numerem
-                // projektu (konwencja firmowa - patrz UstawPole).
-                if (!string.IsNullOrWhiteSpace(plan.Tytul))
-                    UstawPole(rw.Dane, "Tytul", plan.Tytul.Trim(), kroki);
+                UstawPole(rw.Dane, "Tytul",
+                          Znacznik.Tytul(Znacznik.NumerProjektu(plan.Uwagi)), kroki);
 
                 if (!rw.Zapisz())
                 {
@@ -216,9 +216,8 @@ internal static class Rw
     /// Setter przy jawnej implementacji interfejsu potrafi po cichu nic nie
     /// zrobic — stad druga proba przez refleksje po interfejsach i sprawdzenie,
     /// czy wartosc naprawde siedzi. Wydzielone z UstawUwagi (10.09.2026), gdy
-    /// doszedl Tytul: numer projektu ma zostac SAM w Uwagach, bo cala firma
-    /// filtruje po nich dokumenty i numer_projektu_z_uwag() bierze cala ich
-    /// tresc jako numer. Opis idzie wiec osobnym polem, nie doklejany do numeru.
+    /// doszedl Tytul — dzis niesie on znacznik RM_BAZA, po ktorym poznajemy
+    /// wlasne dokumenty (patrz Znacznik.cs).
     /// </remarks>
     static void UstawPole(object dane, string nazwa, string chciane, List<Krok> kroki)
     {

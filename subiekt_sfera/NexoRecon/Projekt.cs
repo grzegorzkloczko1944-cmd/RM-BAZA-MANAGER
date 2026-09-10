@@ -327,6 +327,14 @@ internal static class Projekt
                     + string.Join(", ", new[] { NumerZk(juzJest) }.Concat(duplikaty.Select(NumerZk)))
                     + " — zanim cokolwiek zapiszesz, ustal ręcznie z którym dokumentem pracujesz"));
 
+            // Cudze ZK na ten numer — zapis i tak się wstrzyma, ale user ma to
+            // zobaczyć TERAZ, a nie dopiero po kliknięciu „Zapisz".
+            if (juzJest != null && !NaszeZk(juzJest))
+                kroki.Add(new Krok("zk", plan.Projekt ?? "", "UWAGA-CUDZE-ZK",
+                    $"ZK {NumerZk(juzJest)} ma w Uwagach numer tego projektu, ale nie "
+                    + "wystawiła go RM_BAZA (brak znacznika w Tytule) — zapis zostanie "
+                    + "wstrzymany, żeby nie dopisać pozycji do cudzego dokumentu"));
+
             if (juzJest != null)
             {
                 // Symbol ORAZ ilość. Sam HashSet symboli nie odróżniał 4 od 10,
@@ -414,6 +422,21 @@ internal static class Projekt
                         + "zapis wstrzymany, żeby nie pogłębić bałaganu. Scal je ręcznie "
                         + "w Subiekcie albo usuń zbędny, potem uruchom ponownie."));
                 }
+                // ZK z tym numerem istnieje, ale NIE wystawiła go RM_BAZA (brak
+                // znacznika w Tytule). Numer projektu w Uwagach wpisuje też
+                // człowiek zakładający zamówienie ręcznie — i dopisanie mu tam
+                // całego BOM-u zniszczyłoby dokument, którego nie znamy.
+                // Zatrzymujemy się i oddajemy decyzję człowiekowi.
+                else if (istniejace != null && !NaszeZk(istniejace))
+                {
+                    kroki.Add(new Krok("zk", plan.Projekt ?? "", "blad",
+                        $"ZK {NumerZk(istniejace)} ma w Uwagach numer tego projektu, ale "
+                        + "NIE wystawiła go RM_BAZA (brak znacznika w polu Tytuł) — "
+                        + "zapis wstrzymany, żeby nie dopisać pozycji do cudzego "
+                        + "dokumentu. Sprawdź go w Subiekcie: jeśli to właściwe "
+                        + "zamówienie, wpisz w Tytuł „" + Znacznik.Tytul(plan.Projekt)
+                        + "”, a jeśli nie — zmień jego Uwagi albo numer projektu."));
+                }
                 else
                 {
 
@@ -432,10 +455,15 @@ internal static class Projekt
                     if (istniejace == null)
                     {
                         ob.Dane.Podmiot = podm;
-                        if (!string.IsNullOrWhiteSpace(plan.Tytul)) ob.Dane.Tytul = plan.Tytul;
-                        // Numer projektu też w Uwagach — tak firma już oznacza dokumenty
-                        // (628 dokumentów z wypełnionym polem Uwagi, sekcja 2.1).
-                        ob.Dane.Uwagi = string.IsNullOrWhiteSpace(plan.Uwagi) ? $"Projekt {plan.Projekt}" : plan.Uwagi;
+                        // Uwagi: numer projektu z przodu, reszta dla człowieka —
+                        // to pole SIĘ DRUKUJE. Tytuł: znacznik RM_BAZA, po którym
+                        // poznajemy własne dokumenty (patrz Znacznik.cs).
+                        //
+                        // plan.Tytul (dawniej opis dokumentu) NIE trafia już do
+                        // Tytułu: Tytuł niesie teraz znacznik, a opisu i tak nikt
+                        // nie widział — wydruk tego pola nie pokazuje.
+                        ob.Dane.Uwagi = Znacznik.Uwagi(plan.Projekt, plan.Uwagi);
+                        ob.Dane.Tytul = Znacznik.Tytul(plan.Projekt);
                     }
 
                     // Co już jest na dokumencie — nie dublujemy pozycji.
@@ -696,9 +724,18 @@ internal static class Projekt
     }
 
     /// <summary>
-    /// Szuka ZK projektu po Uwagach (dopasowanie dokładne, TRIM + bez rozróżniania
-    /// wielkości liter). Zwraca NAJNOWSZE dopasowanie i listę WSZYSTKICH pozostałych
-    /// dopasowań (duplikaty) — wołający decyduje, co z nimi zrobić.
+    /// Szuka ZK projektu po Uwagach (numer = pierwszy człon, patrz Znacznik.cs).
+    /// Zwraca NAJNOWSZE dopasowanie i listę WSZYSTKICH pozostałych dopasowań
+    /// (duplikaty) — wołający decyduje, co z nimi zrobić.
+    ///
+    /// ⚠️ ZNAJDUJE TAKŻE DOKUMENTY WYSTAWIONE RĘCZNIE. Numer projektu w Uwagach
+    /// wpisuje również człowiek zakładający ZK w Subiekcie, więc samo dopasowanie
+    /// NIE dowodzi, że dokument wyszedł z RM_BAZA. I tak ma być: do OSTRZEŻENIA
+    /// („projekt ma już ZK") liczy się każdy dokument na ten numer, bo drugie ZK
+    /// rozbija zapotrzebowanie niezależnie od tego, kto wystawił pierwsze.
+    ///
+    /// Ale do ZMIANY albo USUNIĘCIA dokumentu to za mało — tam trzeba sprawdzić
+    /// <see cref="Znacznik.Nasz"/> na Tytule. Służy do tego <see cref="TylkoNasze"/>.
     ///
     /// Bez limitu Take() — poprzednia wersja brała tylko 100 ostatnich ZK i milczące
     /// wypadanie starego dokumentu poza to okno prowadziło do DRUGIEGO ZK dla tego
@@ -727,6 +764,28 @@ internal static class Projekt
             return (trafienia[0], trafienia.Skip(1).ToList());
         }
         catch { return (null, new List<DokumentZK>()); }
+    }
+
+    /// <summary>Czy to ZK wystawiła RM_BAZA — znacznik w Tytule (Znacznik.cs).</summary>
+    internal static bool NaszeZk(DokumentZK? d) =>
+        d is not null && Znacznik.Nasz(Bezp(() => d.Tytul));
+
+    /// <summary>
+    /// Z listy ZK zostawia WYŁĄCZNIE nasze; resztę oddaje osobno, żeby wołający
+    /// mógł o nich powiedzieć zamiast je przemilczeć.
+    ///
+    /// Do tego służy podział: dopisanie 200 pozycji BOM-u albo skasowanie
+    /// dokumentu, którego RM_BAZA nie wystawiła, to zniszczenie cudzej pracy —
+    /// a numer projektu w Uwagach wpisuje też człowiek ręcznie.
+    /// </summary>
+    internal static (List<DokumentZK> nasze, List<DokumentZK> obce) TylkoNasze(
+        IEnumerable<DokumentZK> dokumenty)
+    {
+        var nasze = new List<DokumentZK>();
+        var obce = new List<DokumentZK>();
+        foreach (var d in dokumenty)
+            (NaszeZk(d) ? nasze : obce).Add(d);
+        return (nasze, obce);
     }
 
     /// <summary>
@@ -776,14 +835,17 @@ internal static class Projekt
         lista.Count <= 3 ? string.Join(", ", lista)
                          : string.Join(", ", lista.Take(3)) + $" … (+{lista.Count - 3})";
 
-    internal static bool PasujeUwagi(string? uwagi, string projekt)
-    {
-        var u = (uwagi ?? "").Trim();
-        if (u.Length == 0) return false;
-        if (u.Equals(projekt, StringComparison.OrdinalIgnoreCase)) return true;
-        if (u.Equals($"Projekt {projekt}", StringComparison.OrdinalIgnoreCase)) return true;
-        return false;
-    }
+    /// <summary>
+    /// Czy Uwagi wskazuja na ten projekt — PIERWSZY czlon Uwag jest numerem,
+    /// reszta nalezy do czlowieka (patrz Znacznik.cs).
+    ///
+    /// ⚠️ Mowi tylko O JAKIM PROJEKCIE jest dokument, NIE czyj jest. Recznie
+    /// wystawione ZK z tym samym numerem w Uwagach pasuje tak samo — bo user
+    /// ten numer normalnie wpisuje. Operacje, ktore dokument ZMIENIAJA albo
+    /// KASUJA, musza dodatkowo sprawdzic Znacznik.Nasz(Tytul).
+    /// </summary>
+    internal static bool PasujeUwagi(string? uwagi, string projekt) =>
+        Znacznik.PasujeProjekt(uwagi, projekt);
 
     static string NumerZk(DokumentZK? d) =>
         d is null ? "?" : (Bezp(() => d.NumerWewnetrzny?.PelnaSygnatura) ?? "?");

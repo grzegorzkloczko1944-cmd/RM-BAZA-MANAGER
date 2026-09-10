@@ -55,21 +55,42 @@ internal static class ZkPozUsun
         try
         {
             var zamowienia = sfera.ZamowieniaOdKlientow();
-            // ZK projektu rozpoznajemy po Uwagach — tak samo jak tryb "projekt".
-            dynamic? dokument = null;
-            foreach (var d in zamowienia.Dane.Wszystkie())
-            {
-                var uwagi = (Bezp(() => (string?)d.Uwagi) ?? "").Trim();
-                if (uwagi.Equals(numerProjektu, StringComparison.OrdinalIgnoreCase))
-                {
-                    dokument = d;
-                    break;
-                }
-            }
+
+            // ZK projektu rozpoznajemy TĄ SAMĄ metodą co tryb "projekt".
+            // Wcześniej stała tu własna kopia dopasowania (Equals na całych
+            // Uwagach) — dokładnie to, przed czym ostrzega nagłówek ZkNowe.cs:
+            // przy zmianie formatu Uwag (10.09.2026: numer to pierwszy człon,
+            // reszta należy do człowieka) kopia przestałaby cokolwiek znajdować,
+            // a tryb po cichu mówiłby „nie ma czego usuwać".
+            var (dokument, duplikaty) = Projekt.ZnajdzZkProjektu(sfera, numerProjektu);
             if (dokument == null)
             {
                 kroki.Add(new Krok("zk", numerProjektu, "brak",
                     "nie znaleziono ZK tego projektu — nie ma czego usuwać"));
+                return Wypisz(kroki, null, zapisz, outPath);
+            }
+
+            // ⚠️ Nie ruszamy cudzego dokumentu. Numer projektu w Uwagach wpisuje
+            // też człowiek zakładający ZK ręcznie, a ten tryb USUWA pozycje.
+            if (!Projekt.NaszeZk(dokument))
+            {
+                kroki.Add(new Krok("zk",
+                    Bezp(() => (string?)dokument.NumerWewnetrzny?.PelnaSygnatura) ?? "",
+                    "blad",
+                    "ma w Uwagach numer tego projektu, ale nie wystawiła go RM_BAZA "
+                    + "(brak znacznika w Tytule) — NIE usuwam pozycji z cudzego "
+                    + "dokumentu. Popraw go ręcznie w Subiekcie."));
+                return Wypisz(kroki, null, zapisz, outPath);
+            }
+
+            // Dwa+ ZK na projekt: nie zgadujemy, z którego zdejmować pozycje.
+            if (duplikaty.Count > 0)
+            {
+                var numery = string.Join(", ", new[] { dokument }.Concat(duplikaty)
+                    .Select(d => Bezp(() => d.NumerWewnetrzny?.PelnaSygnatura) ?? "?"));
+                kroki.Add(new Krok("zk", numerProjektu, "blad",
+                    $"projekt ma {duplikaty.Count + 1} dokumenty ZK ({numery}) — "
+                    + "nie zgaduję, z którego zdjąć pozycje. Uporządkuj je w Subiekcie."));
                 return Wypisz(kroki, null, zapisz, outPath);
             }
 

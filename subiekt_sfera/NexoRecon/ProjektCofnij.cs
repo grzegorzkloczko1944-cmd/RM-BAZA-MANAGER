@@ -55,14 +55,29 @@ internal static class ProjektCofnij
         // Wszystkie dopasowania po Uwagach, nie tylko najnowsze — jeśli
         // ktoś już wpadł w bałagan z sekcji "duplikaty ZK" (Projekt.cs),
         // cofnięcie ma sprzątnąć WSZYSTKIE, nie tylko jedno.
-        var zk = ZnajdzWszystkieZk(sfera, plan.Projekt);
+        var znalezione = ZnajdzWszystkieZk(sfera, plan.Projekt);
+
+        // ⚠️ KASUJEMY WYŁĄCZNIE SWOJE. Numer projektu w Uwagach wpisuje także
+        // człowiek zakładający ZK ręcznie w Subiekcie, więc samo dopasowanie po
+        // Uwagach nie dowodzi, czyj jest dokument — a usunięcia zamówienia nie
+        // da się cofnąć. Rozstrzyga znacznik RM_BAZA w Tytule (Znacznik.cs).
+        var (zk, obce) = Projekt.TylkoNasze(znalezione);
+
+        // Obce dokumenty NIE znikają po cichu — user musi wiedzieć, że coś
+        // z tym numerem zostało w Subiekcie, inaczej uzna projekt za sprzątnięty.
+        foreach (var d in obce)
+            kroki.Add(new Projekt.Krok("zk", NumerZk(d), "pominiete",
+                "ma w Uwagach numer tego projektu, ale nie wystawiła go RM_BAZA "
+                + "(brak znacznika w Tytule) — NIE usuwam cudzego dokumentu, "
+                + "skasuj go ręcznie w Subiekcie, jeśli faktycznie ma zniknąć"));
+
         foreach (var d in zk)
         {
             var numer = NumerZk(d);
             if (!zapisz) { kroki.Add(new Projekt.Krok("zk", numer, "do-usuniecia", null)); continue; }
             UsunDokument(sfera.ZamowieniaOdKlientow(), d, numer, kroki);
         }
-        if (zk.Count == 0)
+        if (zk.Count == 0 && obce.Count == 0)
             kroki.Add(new Projekt.Krok("zk", plan.Projekt ?? "", "brak", "nie znaleziono ZK tego projektu"));
 
         // ── 2. KOMPLETY — od góry drzewa (odwrotnie niż zakładanie) ───────
@@ -193,9 +208,13 @@ internal static class ProjektCofnij
     }
 
     /// Wszystkie ZK dopasowane do numeru projektu (ta sama logika co
-    /// Projekt.PasujeUwagi — oba formaty Uwag, "numer" i "Projekt {numer}"),
-    /// nie tylko najnowsze, bo cofnięcie ma sprzątnąć bałagan, nie tylko
-    /// jeden dokument z niego.
+    /// Projekt.PasujeUwagi — numer to pierwszy człon Uwag), nie tylko
+    /// najnowsze, bo cofnięcie ma sprzątnąć bałagan, nie tylko jeden
+    /// dokument z niego.
+    ///
+    /// ⚠️ Zwraca TAKŻE dokumenty wystawione ręcznie — odsiewa je dopiero
+    /// Projekt.TylkoNasze u wołającego. Tak ma być: o cudzym ZK z tym
+    /// numerem trzeba powiedzieć, choć nie wolno go skasować.
     static List<DokumentZK> ZnajdzWszystkieZk(Uchwyt sfera, string? projekt)
     {
         if (string.IsNullOrWhiteSpace(projekt)) return new List<DokumentZK>();

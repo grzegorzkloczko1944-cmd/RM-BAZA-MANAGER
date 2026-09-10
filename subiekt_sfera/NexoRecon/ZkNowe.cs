@@ -5,7 +5,7 @@
 // Bez --zapisz to suchy przebieg: mówi, co powstanie, i NIC nie zapisuje.
 //
 // plan.json:
-//   { "projekt": "2741", "podmiot": "ABC Sp. z o.o.", "tytul": "Maszyna 2741",
+//   { "projekt": "2741", "podmiot": "ABC Sp. z o.o.", "uwagi": "pilne, do piatku",
 //     "termin": "2026-09-30",
 //     "pozycje": [ {"symbol":"2741-000", "ilosc":1, "cena":120000} ] }
 //
@@ -65,9 +65,22 @@ internal static class ZkNowe
             {
                 var numery = string.Join(", ", new[] { istniejace }.Concat(duplikaty)
                     .Select(d => (Bezp(() => d.NumerWewnetrzny?.PelnaSygnatura) ?? "?")));
+
+                // Blokada obowiazuje TAKZE dla dokumentu wystawionego recznie:
+                // drugie ZK rozbija zapotrzebowanie niezaleznie od tego, kto
+                // zalozyl pierwsze. Ale rada musi byc inna — przy cudzym ZK
+                // arkusz tez odmowi zapisu, wiec odsylanie tam wprowadzaloby
+                // w blad (patrz Projekt.cs, gałąź „nie wystawiła go RM_BAZA").
+                var rada = Projekt.NaszeZk(istniejace)
+                    ? "Pozycje dopisz przez arkusz RM_BAZA (zapis projektu do Subiekta)."
+                    : "UWAGA: tego ZK nie wystawiła RM_BAZA (brak znacznika w Tytule) — "
+                      + "sprawdź w Subiekcie, czy to na pewno zamówienie tego projektu. "
+                      + "Jeśli tak, wpisz w jego Tytuł „" + Znacznik.Tytul(projekt)
+                      + "”; jeśli nie — popraw jego Uwagi albo użyj innego numeru.";
+
                 kroki.Add(new Krok("zk", projekt, "blad",
                     $"projekt {projekt} ma już ZK ({numery}) — drugiego nie zakładamy. "
-                    + "Pozycje dopisz przez arkusz RM_BAZA (zapis projektu do Subiekta)."));
+                    + rada));
                 return Wynik(outPath, zapisz, null, kroki, false);
             }
         }
@@ -120,10 +133,11 @@ internal static class ZkNowe
             var zam = sfera.ZamowieniaOdKlientow();
             using var ob = zam.UtworzZamowienieOdKlienta();
             ob.Dane.Podmiot = podm;
-            if (!string.IsNullOrWhiteSpace(plan.Tytul)) ob.Dane.Tytul = plan.Tytul!.Trim();
-            // Uwagi = SAM numer projektu — po nim filtruje cała firma i po nim
-            // ZnajdzZkProjektu odnajduje dokument (konwencja z 10.09.2026).
-            if (projekt.Length > 0) ob.Dane.Uwagi = projekt;
+            // Uwagi: numer projektu z przodu, za nim swobodne uwagi z formularza
+            // — to pole się DRUKUJE. Tytuł: znacznik RM_BAZA, po którym poznajemy
+            // własne dokumenty. Patrz Znacznik.cs.
+            ob.Dane.Uwagi = Znacznik.Uwagi(projekt, plan.Uwagi);
+            ob.Dane.Tytul = Znacznik.Tytul(projekt);
 
             // Bez daty wystawienia dokument istnieje, ale WYPADA Z LIST
             // w Subiekcie — ta sama pułapka co przy ZD i RW. Pole nazywa się
@@ -235,7 +249,11 @@ internal static class ZkNowe
     }
 
     internal record PozPlan(string? Symbol, decimal Ilosc, decimal? Cena = null);
-    internal record Plan(string? Projekt, string? Podmiot, string? Tytul,
+    // Uwagi — to, co user wpisal w polu „Uwagi" formularza. Numer projektu
+    // dochodzi osobno (Projekt) i most sklada oba: numer w pierwszym wierszu,
+    // uwagi pod nim. Pole Tytul dokumentu niesie znacznik RM_BAZA i NIE
+    // pochodzi z planu — patrz Znacznik.cs.
+    internal record Plan(string? Projekt, string? Podmiot, string? Uwagi,
                          string? Termin, List<PozPlan>? Pozycje);
     internal record Krok(string Rodzaj, string Symbol, string Status, string? Szczegoly);
 }

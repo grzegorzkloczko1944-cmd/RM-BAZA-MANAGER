@@ -71,18 +71,18 @@ class OknoPW(OknoDokumentu):
                  bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8)).grid(
             row=1, column=2, columnspan=2, sticky="w", pady=(8, 0))
 
-        tk.Label(siatka, text="Opis:", bg=TLO_SEKCJI, fg=TEKST,
+        tk.Label(siatka, text="Uwagi:", bg=TLO_SEKCJI, fg=TEKST,
                  font=("Arial", 9), anchor="w", width=10).grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.var_uwagi = tk.StringVar(value=self.kontekst.get("uwagi", ""))
         tk.Entry(siatka, textvariable=self.var_uwagi, font=("Arial", 9)).grid(
             row=2, column=1, columnspan=3, sticky="we", pady=(8, 0))
         siatka.grid_columnconfigure(3, weight=1)
 
-        # Ta sama zasada co w RW: Uwagi = sam numer projektu (po nim filtruje
-        # cała firma), opis osobnym polem Tytuł.
+        # Ta sama zasada co w RW: Uwagi niosą numer projektu w pierwszym
+        # wierszu i uwagi użytkownika pod spodem. Tytuł to znacznik RM_BAZA.
         tk.Label(rodzic,
-                 text="Projekt → pole „Uwagi” dokumentu (sam numer).    "
-                      "Opis → pole „Tytuł”.    "
+                 text="Projekt i uwagi → pole „Uwagi” dokumentu (numer w pierwszym "
+                      "wierszu, uwagi pod nim).    "
                       "Cena ustala warstwę, z której Subiekt policzy koszt RW.",
                  bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8), anchor="w").pack(
             fill=tk.X, padx=12, pady=(0, 6))
@@ -140,13 +140,18 @@ class OknoPW(OknoDokumentu):
         return bledy
 
     def _uwagi_dokumentu(self):
-        """Pole Uwagi: WYŁĄCZNIE numer projektu."""
-        return self.var_projekt.get().strip() or self.var_uwagi.get().strip()
+        """Pole Uwagi: numer projektu w pierwszym wierszu, uwagi użytkownika niżej.
+
+        To pole SIĘ DRUKUJE — Tytuł niesie tylko znacznik RM_BAZA.
+        """
+        from subiekt_zamowienia import zloz_uwagi
+        return zloz_uwagi(self.var_projekt.get().strip(),
+                          self.var_uwagi.get().strip())
 
     def _tytul_dokumentu(self):
-        """Pole Tytuł: opis. Puste, gdy opis poszedł już do Uwag."""
-        opis = self.var_uwagi.get().strip()
-        return opis if self.var_projekt.get().strip() else ""
+        """Pole Tytuł: znacznik „RM_BAZA <numer>" — po nim poznajemy swoje."""
+        from subiekt_zamowienia import tytul_dokumentu
+        return tytul_dokumentu(self.var_projekt.get().strip())
 
     def _plan(self, pozycje):
         out = []
@@ -273,8 +278,8 @@ class OknoPW(OknoDokumentu):
             f"Pozycji: {len(uzyte)}\n"
             f"Wartość: {razem:,.2f} zł\n".replace(",", " ")
             + f"Magazyn: {self.var_magazyn.get()}\n"
-              f"Uwagi (projekt): {self._uwagi_dokumentu()}\n"
-            + (f"Tytuł: {self._tytul_dokumentu()}\n" if self._tytul_dokumentu() else "")
+              f"Uwagi: {self._uwagi_dokumentu()}\n"
+            + f"Tytuł: {self._tytul_dokumentu()}\n"
             + "\nStan w Subiekcie wzrósł o te ilości.", parent=self)
         odswiez = self.kontekst.get("po_zapisie")
         if odswiez:

@@ -144,12 +144,12 @@ internal static class Pw
                 }
                 catch { }
 
+                // Uwagi: numer projektu z przodu (drukuje sie), reszta dla
+                // czlowieka. Tytul: znacznik RM_BAZA — patrz Znacznik.cs.
                 if (!string.IsNullOrWhiteSpace(plan.Uwagi))
                     UstawUwagi(pw.Dane, plan.Uwagi.Trim(), kroki);
-                // Tytul to OPIS dokumentu; Uwagi zostaja czystym numerem
-                // projektu (konwencja firmowa - patrz UstawPole).
-                if (!string.IsNullOrWhiteSpace(plan.Tytul))
-                    UstawPole(pw.Dane, "Tytul", plan.Tytul.Trim(), kroki);
+                UstawPole(pw.Dane, "Tytul",
+                          Znacznik.Tytul(Znacznik.NumerProjektu(plan.Uwagi)), kroki);
 
                 // Nie zapisujemy PW, na którym miała być cena, a jej nie ma:
                 // dokument po 0 zł jest gorszy niż jego brak, bo wygląda na
@@ -224,10 +224,8 @@ internal static class Pw
     /// <remarks>
     /// Setter przy jawnej implementacji interfejsu potrafi po cichu nic nie
     /// zrobic, stad druga proba przez refleksje i sprawdzenie, czy wartosc
-    /// naprawde siedzi. Tytul doszedl 10.09.2026: numer projektu ma zostac
-    /// SAM w Uwagach, bo cala firma po nich filtruje dokumenty, a
-    /// numer_projektu_z_uwag() bierze cala ich tresc jako numer. Opis idzie
-    /// wiec osobnym polem.
+    /// naprawde siedzi. Tytul doszedl 10.09.2026 — dzis niesie znacznik
+    /// RM_BAZA, po ktorym poznajemy wlasne dokumenty (patrz Znacznik.cs).
     /// </remarks>
     static void UstawPole(object dane, string nazwa, string chciane, List<Krok> kroki)
     {

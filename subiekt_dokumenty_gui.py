@@ -103,6 +103,8 @@ def _pobierz_dokumenty_cli(limit, timeout):
 
 def _przelicz_dokumenty(data):
     """Surowa odpowiedź mostu -> format okna przeglądu dokumentów."""
+    # Jedna reguła czytania Uwag dla całego programu — patrz docstring tam.
+    from subiekt_zamowienia import numer_projektu_z_uwag, uwagi_czlowieka
     wynik = [{
         "rodzaj": d.get("Rodzaj") or "",
         "numer": d.get("Numer") or "",
@@ -112,7 +114,11 @@ def _przelicz_dokumenty(data):
         "data": d.get("Data") or "",
         "podmiot": (d.get("Podmiot") or "").strip(),
         "tytul": d.get("Tytul") or "",
-        "projekt": (d.get("Uwagi") or "").strip(),
+        # Kolumna Projekt bierze PIERWSZY CZŁON Uwag — reszta pierwszego wiersza
+        # („Projekt") i wiersze niżej to treść dla człowieka, nie numer.
+        # Całe Uwagi zostają osobno, żeby dało się je pokazać w szczegółach.
+        "projekt": numer_projektu_z_uwag(d.get("Uwagi")),
+        "uwagi": (d.get("Uwagi") or "").strip(),
         "status": d.get("Status") or "",
         # Termin dostawy — ta sama nazwa co kolumna w arkuszu głównym RM_BAZA.
         # Mają go tylko zamówienia; przy WZ/RW zostaje pusty.
@@ -149,7 +155,10 @@ def _przelicz_dokumenty(data):
         # sam znacznik, powód ląduje w Tytule — inaczej filtr projektów
         # rozmnażałby się o każdy wpisany powód.
         if d["projekt"].upper().startswith(UWAGI_MAGAZYN):
-            reszta = d["projekt"][len(UWAGI_MAGAZYN):].lstrip(" :").strip()
+            # Powód stoi za znacznikiem: w tym samym wierszu („MAGAZYN: brak
+            # miejsca") albo — po zmianie formatu Uwag — wierszem niżej.
+            reszta = (d["uwagi"].strip()[len(UWAGI_MAGAZYN):].lstrip(" :").strip()
+                      or uwagi_czlowieka(d["uwagi"]))
             d["projekt"] = UWAGI_MAGAZYN
             if reszta:
                 d["tytul"] = reszta

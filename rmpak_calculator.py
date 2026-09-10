@@ -538,7 +538,11 @@ class RmpakCalculatorDialog:
         stopka.pack(fill="x")
         tk.Label(stopka, text=f"RAZEM: {razem:,.2f} PLN".replace(",", " "),
                  font=("", 12, "bold"), fg="darkred").pack(side="left")
-        tk.Label(stopka, text=f"Uwagi: RM_BAZA — PROJEKT {self.project_name}",
+        # Format Uwag czytamy ze ŹRÓDŁA (plan_pw), nie powtarzamy go tutaj —
+        # własna kopia rozjeżdżała się z tym, co naprawdę idzie na dokument.
+        from subiekt_zamowienia import zloz_uwagi
+        tk.Label(stopka,
+                 text="Uwagi: " + zloz_uwagi(self.project_name).replace("\n", " ⏎ "),
                  font=("", 8), fg="gray30").pack(side="left", padx=(16, 0))
 
         tk.Button(stopka, text="Zamknij", command=dlg.destroy, width=12).pack(side="right")
@@ -606,7 +610,10 @@ class RmpakCalculatorDialog:
                  font=("", 12, "bold"), fg="darkred").pack(side="left")
         tk.Label(stopka, text="— wartość RW to KOSZT MAGAZYNOWY, liczy go Subiekt z ceny przyjęcia",
                  font=("", 8), fg="gray40").pack(side="left", padx=(6, 0))
-        tk.Label(stopka, text=f"Uwagi: RM_BAZA — PROJEKT {self.project_name} | PW: {numer_pw}",
+        from subiekt_zamowienia import zloz_uwagi
+        tk.Label(stopka,
+                 text="Uwagi: " + zloz_uwagi(self.project_name,
+                                             f"PW: {numer_pw}").replace("\n", " ⏎ "),
                  font=("", 8), fg="gray30").pack(side="left", padx=(16, 0))
         tk.Button(stopka, text="Zamknij", command=dlg.destroy, width=12).pack(side="right")
         btn = tk.Button(stopka, text="Wystaw RW", width=14, font=("", 9, "bold"),
@@ -646,7 +653,9 @@ class RmpakCalculatorDialog:
                 f"    pozycji:  {len(pozycje)}\n"
                 f"    wg PW:    {razem:,.2f} PLN  (koszt magazynowy policzy Subiekt)\n".replace(",", " ")
                 + f"    magazyn:  {plan['magazyn']}\n"
-                  f"    źródło:   {numer_pw}\n\n"
+                  f"    źródło:   {numer_pw}\n"
+                  f"    uwagi:    {plan['uwagi']}\n"
+                  f"    tytuł:    {plan.get('tytul', '')}\n\n"
                   "To ZDEJMIE towar ze stanu magazynu.\n"
                   "Dokumentu magazynowego nie cofa się jednym kliknięciem.\n\nZapisać?",
                 icon="question", default="no", parent=dlg):
@@ -744,7 +753,8 @@ class RmpakCalculatorDialog:
                 f"    pozycji:  {len(pozycje)}\n"
                 f"    wartość:  {razem:,.2f} PLN\n".replace(",", " ")
                 + f"    magazyn:  {plan['magazyn']}\n"
-                  f"    uwagi:    {plan['uwagi']}\n\n"
+                  f"    uwagi:    {plan['uwagi']}\n"
+                  f"    tytuł:    {plan.get('tytul', '')}\n\n"
                   "Dokumentu magazynowego nie cofa się jednym kliknięciem.\n\nZapisać?",
                 icon="question", default="no", parent=dlg):
             btn.config(state="normal", text="Wystaw PW")

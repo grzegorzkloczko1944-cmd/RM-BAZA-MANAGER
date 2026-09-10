@@ -228,6 +228,32 @@ internal static class Zd
                                     $"nie udalo sie ustawic Uwag=\"{chciane}\" (odczyt: \"{mam}\")"));
                         }
 
+                        // Tytul — znacznik RM_BAZA. Ta sama pulapka Sfery co
+                        // przy Uwagach powyzej: zapis, potem settery
+                        // z interfejsow, na koniec odczyt kontrolny.
+                        if (!string.IsNullOrWhiteSpace(plan.Tytul))
+                        {
+                            var chcianyT = plan.Tytul.Trim();
+                            object daneT = zd.Dane;
+                            try { zd.Dane.Tytul = chcianyT; } catch { }
+                            string? mamT = null;
+                            try { mamT = zd.Dane.Tytul; } catch { }
+                            if (mamT != chcianyT)
+                            {
+                                foreach (var i in daneT.GetType().GetInterfaces())
+                                {
+                                    var pr = i.GetProperty("Tytul");
+                                    if (pr == null || !pr.CanWrite) continue;
+                                    try { pr.SetValue(daneT, chcianyT); } catch { }
+                                    try { mamT = pr.GetValue(daneT) as string; } catch { }
+                                    if (mamT == chcianyT) break;
+                                }
+                            }
+                            if (mamT != chcianyT)
+                                kroki.Add(new Krok("zd", dostawca, "uwaga",
+                                    $"nie udalo sie ustawic Tytulu=\"{chcianyT}\" (odczyt: \"{mamT}\")"));
+                        }
+
                         try
                         {
                             // Domyslny magazyn ZD. 07.09.2026 przepiete z "MAG" na
@@ -318,8 +344,11 @@ internal static class Zd
                            decimal? Cena = null);
     // Uwagi na ZD — okno magazynu wpisuje tu "MAGAZYN", zeby zamowienie
     // na sklad dalo sie odroznic od projektowych (kolumna Projekt w Przegladzie
-    // dokumentow bierze sie z Uwag).
-    internal record Plan(List<PozPlan>? Pozycje, string? Uwagi);
+    // dokumentow bierze sie z Uwag). Formularz ZD wpisuje numer projektu
+    // w pierwszym wierszu i uwagi uzytkownika pod spodem (patrz Znacznik.cs).
+    //
+    // Tytul — znacznik "RM_BAZA <numer>", po ktorym poznajemy wlasne dokumenty.
+    internal record Plan(List<PozPlan>? Pozycje, string? Uwagi, string? Tytul = null);
     internal record Zam(string Numer, string Dostawca, int Pozycji, int Id = 0);
     internal record Krok(string Rodzaj, string Symbol, string Status, string? Szczegoly);
 }

@@ -4847,9 +4847,11 @@ class MainWindow(tk.Tk):
     # Kolory (jak v6) - stałe modułowe używane przez kolorowanie pełne i per-wiersz
     _COLOR_GRAY_BG = "#D3D3D3"      # Szare tło BOM
     _COLOR_GREEN_BG_LIGHT = "#D9EDF7"   # Zielone Zamówiono (jasne, stary kolor)
-    #: Jasnozielone tło numeru rysunku — pozycja ma parę w Subiekcie
-    #: (zapisane mapowanie kod → kartoteka). Czysto informacyjne: nic nie
-    #: zmienia w danych, tylko od razu widać, co jest już powiązane.
+    #: Jasnozielone tło kolumny „Ilość dostarczonych" — pozycja JEST NA ZK
+    #: w Subiekcie (ma order_qty). Nie „ma kartotekę": w zasianym projekcie
+    #: kartotekę ma prawie wszystko, więc taki kolor nic by nie mówił.
+    #: Czysto informacyjne — nazwa stałej („PARA") została z czasów, gdy kolor
+    #: pokazywał mapowanie kod → kartoteka.
     _COLOR_SUBIEKT_PARA = "#E8F8E8"
     _COLOR_GREEN_BG_BRIGHT = "#90EE90"  # Zielone Odebrane (wyraziste, nowy kolor)
     _COLOR_YELLOW_BG = "#FCF8E3"    # Żółty alarm (jasny)
@@ -6737,8 +6739,15 @@ class MainWindow(tk.Tk):
         dzięki temu stanowiska BEZ dostępu do Subiekta widzą aktualne ilości,
         czytając zwykły plik projektu (ANALIZA_ZK_DWA_ZRODLA_PRAWDY.md, 6D.7).
 
+        `order_qty` ma być STANEM ZK, nie historią: pozycje, których na
+        zamówieniu nie ma, dostają NULL. Bez tego wartość raz wpisana zostawała
+        na zawsze i „Ilość (zam.)" kłamała także po zdjęciu pozycji z ZK
+        (10.09.2026). Od tej wartości zależy jasnozielone tło kolumny
+        „Ilość dostarczonych" — patrz `_wczytaj_pary_subiekta`.
+
         Brak mostu nie jest błędem: kto go nie ma, pracuje jak dotąd,
-        a wartości zostają takie, jakie zapisał ostatni użytkownik z dostępem.
+        a wartości zostają takie, jakie zapisał ostatni użytkownik z dostępem —
+        nieudany odczyt NIC nie czyści (`return` przed pętlą zapisu).
         """
         if not self.current_project_id or not self.db_manager.project_con:
             return
@@ -6791,12 +6800,35 @@ class MainWindow(tk.Tk):
         except sqlite3.OperationalError:
             return                    # baza sprzed migracji
         teraz = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        wyczyszczone = 0
         for item_id, nr, sym_zasiew, stara in wiersze:
             # Klucz: najpierw symbol, pod którym pozycja poszła do Subiekta,
             # a w razie jego braku numer rysunku (tak dopasowuje też most).
             klucz = (sym_zasiew or nr or "").strip().upper()
+
             if not klucz or klucz not in ilosci:
+                # POZYCJI NIE MA NA ZK → order_qty musi zniknąć.
+                #
+                # Wcześniej było tu `continue` i stara wartość zostawała
+                # w bazie NA ZAWSZE: odświeżanie nadpisywało tylko to, co
+                # przyszło z Subiekta, więc pozycja zdjęta z ZK (albo wpisana
+                # ręcznie/testowo) świeciła na zielono i pokazywała nieprawdziwą
+                # „Ilość (zam.)". Widać to było na projekcie 3500: 213 z 213
+                # pozycji podświetlonych, choć ZK ma 184 — z wartościami w stylu
+                # 16666 po testach (zgłoszone 10.09.2026).
+                #
+                # order_qty ma być STANEM ZK, nie historią tego, co kiedykolwiek
+                # tam trafiło — stąd zerowanie. Bezpieczne, bo wyżej stoi
+                # `if blad or not ilosci: return`: gdy mostu nie ma albo ZK się
+                # nie odczytało, do tej pętli w ogóle nie wchodzimy i nikt nie
+                # czyści danych na podstawie nieudanego odczytu.
+                if stara is not None:
+                    con.execute(
+                        "UPDATE items SET order_qty = NULL WHERE id = ?",
+                        (item_id,))
+                    wyczyszczone += 1
                 continue
+
             nowa = ilosci[klucz]
             try:
                 if stara is not None and abs(float(stara) - nowa) < 1e-9:
@@ -6807,9 +6839,11 @@ class MainWindow(tk.Tk):
                 "UPDATE items SET order_qty = ?, subiekt_zasiew_at = ? WHERE id = ?",
                 (nowa, teraz, item_id))
             zmienione += 1
-        if zmienione:
+        if zmienione or wyczyszczone:
             con.commit()
-        print(f"✅ Ilości z {zk or 'ZK'}: zaktualizowano {zmienione} pozycji")
+        print(f"✅ Ilości z {zk or 'ZK'}: zaktualizowano {zmienione} pozycji"
+              + (f", wyczyszczono {wyczyszczone} (nie ma ich na ZK)"
+                 if wyczyszczone else ""))
 
     def _pobierz_zasiew_subiekt(self, item_id):
         """(symbol, data) gdy pozycja ma już kartotekę w Subiekcie, inaczej None.

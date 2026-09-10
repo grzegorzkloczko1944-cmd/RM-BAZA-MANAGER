@@ -30,6 +30,8 @@ internal static class ZkIlosci
         string? numerZk = null;
         string? blad = null;
         var duplikatyOpis = new List<string>();
+        // Czy ZK, z ktorej czytamy ilosci, NIE wyszla z RM_BAZA.
+        var obce = false;
 
         if (string.IsNullOrWhiteSpace(projekt))
         {
@@ -55,6 +57,13 @@ internal static class ZkIlosci
                     foreach (var d in duplikaty)
                         duplikatyOpis.Add(Bezp(() => d.NumerWewnetrzny?.PelnaSygnatura) ?? "?");
 
+                    // Dokument z numerem projektu w Uwagach, ale bez znacznika
+                    // RM_BAZA w Tytule, moze byc zalozony recznie przez kogos
+                    // innego. Tutaj tylko czytamy, wiec nie przerywamy — ale
+                    // ilosci trafiaja do arkusza jako „Ilosc (zam.)", wiec user
+                    // musi wiedziec, ze pochodza z NIE NASZEGO dokumentu.
+                    obce = !Projekt.NaszeZk(zk);
+
                     // Ta sama funkcja, ktorej uzywa zapis — sumuje powtorzony
                     // symbol, bo liczy sie laczna ilosc zamowiona.
                     foreach (var kv in Projekt.CzytajPozycjeZk(zk.Pozycje))
@@ -72,6 +81,9 @@ internal static class ZkIlosci
             projekt,
             zk = numerZk,
             duplikaty = duplikatyOpis,
+            // true = ilosci pochodza z dokumentu bez znacznika RM_BAZA
+            // (mogl go zalozyc recznie ktos inny) — patrz Znacznik.cs.
+            obce_zk = obce,
             pozycji = pozycje.Count,
             pozycje,
             blad,

@@ -80,7 +80,7 @@ class OknoZK(OknoDokumentu):
         tk.Entry(siatka, textvariable=self.var_projekt, font=("Arial", 9),
                  width=16).grid(row=1, column=1, sticky="w", pady=(8, 0))
 
-        tk.Label(siatka, text="Tytuł:", bg=TLO_SEKCJI, fg=TEKST,
+        tk.Label(siatka, text="Uwagi:", bg=TLO_SEKCJI, fg=TEKST,
                  font=("Arial", 9), anchor="w", width=10).grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.var_uwagi = tk.StringVar(value=self.kontekst.get("uwagi", ""))
         tk.Entry(siatka, textvariable=self.var_uwagi, font=("Arial", 9)).grid(
@@ -88,8 +88,8 @@ class OknoZK(OknoDokumentu):
         siatka.grid_columnconfigure(4, weight=1)
 
         tk.Label(rodzic,
-                 text="Projekt → pole „Uwagi” (sam numer — po nim Subiekt odnajduje ZK).    "
-                      "Tytuł → pole „Tytuł”.",
+                 text="Projekt i uwagi → pole „Uwagi” (numer w pierwszym wierszu — "
+                      "po nim Subiekt odnajduje ZK — uwagi pod nim).",
                  bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8), anchor="w").pack(
             fill=tk.X, padx=12, pady=(0, 4))
 
@@ -187,10 +187,13 @@ class OknoZK(OknoDokumentu):
         super()._na_zmiane_tabeli()
 
     def _plan_dokumentu(self, pozycje):
+        # "uwagi" to treść, którą user wpisał w polu Uwagi — most skleja ją
+        # z numerem projektu (numer w pierwszym wierszu, uwagi pod nim)
+        # i osobno ustawia Tytuł na znacznik RM_BAZA. Patrz Znacznik.cs.
         plan = {
             "projekt": self.var_projekt.get().strip(),
             "podmiot": self.var_klient.get().strip(),
-            "tytul": self.var_uwagi.get().strip(),
+            "uwagi": self.var_uwagi.get().strip(),
             "pozycje": [],
         }
         termin = self._termin_iso()

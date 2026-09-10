@@ -391,9 +391,76 @@ def dane_z_bom(project_id, numer_projektu=None):
     return out
 
 
+#: Znacznik w polu Tytuł dokumentu — po nim poznajemy dokumenty wystawione
+#: przez RM_BAZA. Odpowiednik stałej MARKER w Znacznik.cs po stronie mostu.
+MARKER = "RM_BAZA"
+
+
+#: Słowo dopisywane za numerem w pierwszym wierszu Uwag — żeby ktoś oglądający
+#: sam wydruk wiedział, co znaczy ta liczba. Kod go NIE czyta.
+OPIS_NUMERU = "Projekt"
+
+
 def numer_projektu_z_uwag(uwagi):
-    """Numer projektu z Uwag na ZK — tam RM_BAZA go wpisuje przy zakładaniu."""
-    return (uwagi or "").strip()
+    """Numer projektu z Uwag dokumentu — PIERWSZY CZŁON pierwszego wiersza.
+
+    Uwagi mają dwa piętra i dwóch autorów (ustalone 10.09.2026):
+
+        2741 Projekt        ← pierwszy wiersz, wpisuje RM_BAZA
+        pilne, do piątku    ← reszta: co człowiek wpisał w polu „Uwagi"
+
+    Numer stoi przed spacją, za nim słowo „Projekt" — wyłącznie dla człowieka
+    czytającego wydruk. Ta funkcja bierze tekst do pierwszej spacji, więc opis
+    nie miesza się do dopasowania.
+
+    Pole Uwagi SIĘ DRUKUJE (sekcja „Uwagi • Notes" na wzorcu), w odróżnieniu
+    od Tytułu — dlatego to tu, a nie w Tytule, ląduje treść dla człowieka.
+
+    Dwa różne podziały, każdy w swoim miejscu: numer kończy SPACJA (sam spacji
+    nie zawiera), a uwagi człowieka KONIEC WIERSZA (bywają wielowyrazowe).
+    Musi dzielić tak samo jak Znacznik.NumerProjektu w C#.
+
+    ⚠️ Bez kompatybilności wstecz: stare formaty („Projekt 2741",
+    „RM_BAZA — PROJEKT 2741") NIE są rozumiane — dokumentów było mało
+    i zostały poprawione ręcznie.
+    """
+    tekst = (uwagi or "").strip()
+    if not tekst:
+        return ""
+    return tekst.splitlines()[0].strip().split(" ")[0].strip()
+
+
+def uwagi_czlowieka(uwagi):
+    """Co człowiek wpisał w Uwagach — wszystko OD DRUGIEGO wiersza w dół."""
+    linie = (uwagi or "").strip().splitlines()
+    return "\n".join(linie[1:]).strip() if len(linie) > 1 else ""
+
+
+def zloz_uwagi(projekt, uwagi=None):
+    """Pole Uwagi dokumentu: „2741 Projekt" w pierwszym wierszu, uwagi niżej."""
+    p = str(projekt or "").strip()
+    u = str(uwagi or "").strip()
+    if not p:
+        return u
+    pierwszy = f"{p} {OPIS_NUMERU}"
+    return f"{pierwszy}\n{u}" if u else pierwszy
+
+
+def tytul_dokumentu(projekt):
+    """Pole Tytuł: znacznik RM_BAZA + numer projektu („RM_BAZA 2741").
+
+    Rozpoznanie idzie po samym MARKER — numer jest zapasowym śladem na wypadek,
+    gdyby ktoś wyczyścił Uwagi. Tytuł się NIE drukuje i człowiek wystawiający
+    dokument ręcznie go nie wypełnia, więc jego obecność jest wiarygodnym
+    dowodem, że dokument wyszedł z RM_BAZA.
+    """
+    p = str(projekt or "").strip()
+    return f"{MARKER} {p}" if p else MARKER
+
+
+def nasz_dokument(tytul):
+    """Czy ten dokument wystawiła RM_BAZA — znacznik w Tytule."""
+    return MARKER in str(tytul or "").upper()
 
 
 def _numery_zd(tekst):
@@ -706,12 +773,16 @@ def utworz_zk(plan, timeout=TIMEOUT_S, zapisz=False):
                                timeout=timeout, write=zapisz)
 
 
-def utworz_zd(pozycje, timeout=TIMEOUT_S, uwagi=None, zapisz=True):
+def utworz_zd(pozycje, timeout=TIMEOUT_S, uwagi=None, zapisz=True, tytul=None):
     """Tworzy ZD w Subiekcie. pozycje: [{symbol, ilosc, dostawca[, reczna]}].
 
     `uwagi` — tekst do pola Uwagi każdego utworzonego ZD. Okno magazynu
     wpisuje „MAGAZYN", żeby zamówienie na skład dało się odróżnić od
     projektowych; zamówienia z ZK nie podają nic i Uwagi zostają puste.
+
+    `tytul` — znacznik „RM_BAZA <numer>" do pola Tytuł, po którym poznajemy
+    własne dokumenty. Podaje go formularz ZD; ZD z zapotrzebowania ZK go nie
+    ustawia, bo tam dokument powstaje na podstawie zamówienia klienta.
 
     `zapisz=False` to SUCHY PRZEBIEG: most mówi, co by powstało (ile ZD,
     dla jakich dostawców, które pozycje odpadną), i NIC nie zapisuje.
@@ -726,6 +797,8 @@ def utworz_zd(pozycje, timeout=TIMEOUT_S, uwagi=None, zapisz=True):
     plan = {"pozycje": pozycje}
     if uwagi:
         plan["uwagi"] = uwagi
+    if tytul:
+        plan["tytul"] = tytul
 
     # ZAPIS — most nie ponawia operacji po niejednoznacznym błędzie, bo
     # powtórzone „zd" to drugi dokument w Subiekcie (plan, sekcja 14).

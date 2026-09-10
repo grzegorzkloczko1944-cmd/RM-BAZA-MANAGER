@@ -461,11 +461,20 @@ def read_tree(project_name):
     kids = {}
     nazwy = {}          # {NUMER: nazwa z drzewka}
     found = False
+    # Ile rodziców dał KAŻDY plik — folder projektu potrafi zawierać drzewka
+    # kilku projektów naraz i wszystkie są sklejane w jedno. Bywa to zamierzone
+    # (V:\3500 Dupal trzyma też „2627-650.11ZZ Transporterek_OUT.xlsx", bo
+    # Transporterek wchodzi w skład Dupala), ale bez tej informacji nie da się
+    # odróżnić celowego złożenia od pliku wrzuconego omyłkowo — a ostrzeżenia
+    # o pozycjach z obcym prefiksem wyglądają wtedy na błąd RM_BAZA
+    # (zgłoszone 10.09.2026: „ostrzeżenia wyskakują z obcego projektu").
+    zrodla = {}
     for out_path in find_out_files(folder):
         rows = find_assembly_tree_rows(out_path)
         if not rows:
             continue
         found = True
+        przed = len(kids)
         for row in rows:
             sciezka = row.get("sciezka") or []
             if len(sciezka) < 2:
@@ -486,8 +495,18 @@ def read_tree(project_name):
             if not any(c[0].upper() == child.upper() for c in kids[parent]):
                 kids[parent].append((child, qty))
 
+        zrodla[out_path.name] = len(kids) - przed
+
     if not found:
         return {}, "nie znaleziono arkusza „DRZEWKO TEKST” w plikach *_OUT.xlsx", {}
+
+    # Skąd pochodzi drzewko — tylko do konsoli, zachowanie bez zmian.
+    # Przy kilku plikach w folderze widać, który co wniósł; bez tego pozycje
+    # z obcym prefiksem wyglądają na błąd, choć bywają całkiem zamierzone.
+    if len(zrodla) > 1:
+        opis = ", ".join(f"{nazwa} ({ile})" for nazwa, ile in zrodla.items())
+        print(f"📄 Drzewko „{project_name}” z {len(zrodla)} plików: {opis}")
+
     return kids, None, nazwy
 
 
@@ -977,14 +996,16 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
             "produkcja_wlasna": bool(it.get("produkcja_wlasna")),
         })
 
-    # W Uwagach sam numer — tak firma oznacza dokumenty i tak po nich filtruje
-    # (F8 / kolumna Uwagi). Pełna nazwa idzie w Tytule, gdzie jest czytelna.
+    # Uwagi: numer projektu w pierwszym wierszu, pełna nazwa pod spodem —
+    # tak firma oznacza dokumenty i tak po nich filtruje (F8 / kolumna Uwagi).
+    # Nazwa siedziała dotąd w Tytule, ale to pole SIĘ NIE DRUKUJE i od
+    # 10.09.2026 niesie znacznik RM_BAZA (patrz Znacznik.cs po stronie mostu),
+    # więc żeby nazwa nie przepadła, schodzi do Uwag.
     numer = numer_projektu(project_name, project_id)
     plan = {
         "projekt": numer,
-        "tytul": tytul,
         "podmiot": podmiot,
-        "uwagi": numer,
+        "uwagi": tytul,
         "pozycje": pozycje,
         "bez_skladu_z_biblioteki": sorted(z_biblioteki),
     }
@@ -1690,6 +1711,27 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         tk.Button(wid, text="🗑️", command=self._wyczysc_filtry, bg="#95a5a6", fg="white",
                   font=("Arial", 11, "bold"), width=3, relief=tk.RAISED, bd=2,
                   cursor="hand2").pack(side=tk.LEFT, padx=(10, 2), pady=3)
+
+        # ── Szukaj w drzewku ────────────────────────────────────────────
+        # NIE jest filtrem: drzewko zostaje w całości, rozwijają się tylko
+        # gałęzie z trafieniami. Filtr pokazałby same trafienia i gubił to,
+        # co w tym oknie najważniejsze — w którym złożeniu pozycja siedzi.
+        tk.Label(wid, text="Szukaj:", bg="#eaf2f8",
+                 font=("Arial", 9)).pack(side=tk.LEFT, padx=(14, 3), pady=4)
+        self.var_szukaj = tk.StringVar()
+        e_szukaj = tk.Entry(wid, textvariable=self.var_szukaj, width=18,
+                            font=("Arial", 9))
+        e_szukaj.pack(side=tk.LEFT, pady=4)
+        # Szukanie NA ŻYWO — przy kilkudziesięciu pozycjach przeliczenie jest
+        # natychmiastowe, a wymaganie Entera dokładałoby kliknięcie.
+        self.var_szukaj.trace_add("write", lambda *_: self._szukaj_w_drzewku())
+        # Enter/F3 przeskakuje do kolejnego trafienia, Escape czyści.
+        e_szukaj.bind("<Return>", lambda _e: self._nastepne_trafienie())
+        e_szukaj.bind("<Escape>", lambda _e: self.var_szukaj.set(""))
+        self.bind("<F3>", lambda _e: self._nastepne_trafienie())
+        self.lbl_szukaj = tk.Label(wid, text="", bg="#eaf2f8", fg="#7f8c8d",
+                                   font=("Arial", 8), width=10, anchor="w")
+        self.lbl_szukaj.pack(side=tk.LEFT, padx=(4, 0), pady=4)
 
         self.summary = tk.Label(self, text="Wczytywanie…", bg="#ecf0f1", fg="#2c3e50",
                                 font=("Arial", 9), anchor="w", padx=12, pady=6)
@@ -3000,6 +3042,12 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         self.filter_typ_var.set(TYP_WSZYSTKO)
         self.filter_typ_modes = {}
         self.plaska_var.set(0)
+        # Szukanie to też stan widoku — zostawione zaznaczałoby wiersze
+        # po wyczyszczeniu wszystkiego innego i wyglądało na usterkę.
+        try:
+            self.var_szukaj.set("")
+        except Exception:
+            pass
         try:
             self.btn_typ_multi.config(bg="#7f8c8d")
         except Exception:
@@ -3022,6 +3070,86 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                 self.tree.item(c, open=otwarte)
                 przejdz(c)
         przejdz("")
+
+    # ── szukanie w drzewku ──────────────────────────────────────────────
+    #
+    # Rozwija gałęzie, w których siedzą trafienia, i zaznacza je. Drzewko
+    # zostaje NIETKNIĘTE — nic nie znika, bo w tym oknie połowa informacji
+    # to kontekst: w którym złożeniu pozycja siedzi i czy jej rodzic ma
+    # kartotekę. Filtrowanie by to zabrało.
+    #
+    # Podświetlenie robi ZAZNACZENIE drzewa, nie tag koloru: tagi niosą tu
+    # znaczenie (kartoteka jest / NOWA / błąd / komplet pusty) i nadpisanie
+    # ich kolorem wyszukiwania skasowałoby informację, po której user decyduje,
+    # co zaznaczyć do zapisu.
+
+    def _szukaj_w_drzewku(self):
+        """Rozwija i zaznacza pozycje pasujące do wpisanego tekstu."""
+        szukane = (self.var_szukaj.get() or "").strip().upper()
+        self._trafienia = []
+        self._trafienie_idx = -1
+
+        tree = getattr(self, "tree", None)
+        if tree is None:
+            return
+
+        if not szukane:
+            # Puste pole = koniec szukania. Zaznaczenie zdejmujemy, ale
+            # rozwinięcia zostawiamy — user właśnie je oglądał.
+            try:
+                tree.selection_remove(*tree.selection())
+            except Exception:
+                pass
+            self.lbl_szukaj.config(text="")
+            return
+
+        def obejdz(node):
+            for c in tree.get_children(node):
+                war = tree.item(c, "values") or ()
+                # Kolumna 1 = symbol, 2 = nazwa (patrz _fill_tree).
+                symbol = str(war[1] if len(war) > 1 else "").upper()
+                nazwa = str(war[2] if len(war) > 2 else "").upper()
+                if szukane in symbol or szukane in nazwa:
+                    self._trafienia.append(c)
+                obejdz(c)
+
+        obejdz("")
+
+        # Rozwijamy WSZYSTKICH rodziców trafienia — inaczej pozycja jest
+        # znaleziona, ale niewidoczna, bo siedzi w zwiniętym złożeniu.
+        for node in self._trafienia:
+            rodzic = tree.parent(node)
+            while rodzic:
+                tree.item(rodzic, open=True)
+                rodzic = tree.parent(rodzic)
+
+        try:
+            tree.selection_remove(*tree.selection())
+            if self._trafienia:
+                tree.selection_set(self._trafienia)
+                tree.see(self._trafienia[0])
+                self._trafienie_idx = 0
+        except Exception:
+            pass
+
+        ile = len(self._trafienia)
+        self.lbl_szukaj.config(
+            text=(f"{ile} trafień" if ile != 1 else "1 trafienie") if ile else "brak",
+            fg="#7f8c8d" if ile else "#c0392b")
+
+    def _nastepne_trafienie(self):
+        """Enter / F3 — przeskok do kolejnego trafienia (cyklicznie)."""
+        traf = getattr(self, "_trafienia", None)
+        if not traf:
+            return
+        self._trafienie_idx = (getattr(self, "_trafienie_idx", -1) + 1) % len(traf)
+        node = traf[self._trafienie_idx]
+        try:
+            self.tree.see(node)
+            self.tree.focus(node)
+        except Exception:
+            return
+        self.lbl_szukaj.config(text=f"{self._trafienie_idx + 1} z {len(traf)}")
 
     def _przerysuj(self):
         """Przebudowa drzewa po zmianie filtra/trybu — bez pytania Subiekta."""
@@ -3321,6 +3449,7 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                     values=("", p["symbol"], p["nazwa"], p.get("opis") or "",
                         p["typ"], f"{p['ilosc']:g}", dost(p), opis(p)),
                     tags=(tag(p),))
+            self._odswiez_szukanie()
             return
 
         self.tree.column("#0", width=230, minwidth=80, stretch=False)
@@ -3346,6 +3475,19 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             self._rozwin(True, zapamietaj=False)
         else:
             self._przywroc_rozwiniete(rozwiniete)
+
+        self._odswiez_szukanie()
+
+    def _odswiez_szukanie(self):
+        """Powtarza szukanie po przebudowie drzewa.
+
+        Węzły dostają nowe iid, więc zapamiętane trafienia wskazywałyby na
+        nieistniejące wiersze — a wpisany tekst zostaje w polu i user ma prawo
+        oczekiwać, że dalej działa.
+        """
+        if (getattr(self, "var_szukaj", None) is not None
+                and self.var_szukaj.get().strip()):
+            self._szukaj_w_drzewku()
 
     # ── zapis ──────────────────────────────────────────────────────────────
     def _plan_do_zapisu(self):
@@ -3460,6 +3602,25 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                 opis_zk += (f"    ⚠ {ile_roznic} pozycji ma na dokumencie INNĄ ILOŚĆ niż BOM "
                             f"— zapis tego NIE zmieni\n")
             break
+
+        # Cudze ZK na ten numer — most i tak wstrzyma zapis, ale user musi to
+        # zobaczyć TERAZ. Osobna pętla, bo powyższa kończy się na pierwszym
+        # kroku „zk" i to ostrzeżenie by przepadło.
+        for k in (self.dry or {}).get("kroki", []):
+            if k.get("Status") == "UWAGA-CUDZE-ZK":
+                opis_zk += (f"    ⛔ {k.get('Szczegoly') or 'ZK nie pochodzi z RM_BAZA'}\n")
+                # Konkretna poprawka zamiast samego „sprawdź w Subiekcie" —
+                # i ta sama informacja ląduje na liście „Do zrobienia", żeby
+                # nie przepadła razem z zamknięciem okna.
+                try:
+                    zad = zadania_z_zk_do_poprawy(
+                        numer_projektu(self.project_name, self.project_id))
+                    if zad:
+                        opis_zk += "".join(f"       → {z}\n" for z in zad)
+                        subiekt_historia.scal_zadania(self.project_id, zad)
+                except Exception as e:
+                    print(f"⚠️  Nie ustalono, co poprawić w ZK: {e}")
+                break
 
         # Zapis idzie na bazę produkcyjną — potwierdzenie musi mówić wprost,
         # co powstanie i czego (kartotek) nie da się łatwo cofnąć.
@@ -4304,10 +4465,19 @@ class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             reszta = dokumenty_do_recznego_usuniecia(self.plan or {})
         except Exception:
             reszta = []
-        self._pokaz(f"Usunięto: {usuniete}   Błędów: {len(bledy)}\n\n"
+        # Dokumenty z numerem tego projektu, których NIE wystawiła RM_BAZA —
+        # most ich nie skasował i nie skasuje. Bez tego licznika user zobaczy
+        # „Usunięto 1" i uzna, że po projekcie nic nie zostało.
+        pominiete = [k for k in kroki if k["Status"] == "pominiete"]
+
+        self._pokaz(f"Usunięto: {usuniete}   Błędów: {len(bledy)}"
+                    + (f"   Pominięto cudzych: {len(pominiete)}" if pominiete else "")
+                    + "\n\n"
                     + "\n".join(linie) + self._opis_pozostalosci())
         self.status.config(text=f"Usunięto {usuniete}."
                            + (f"   ⚠ {len(bledy)} błędów" if bledy else "")
+                           + (f"   ⚠ {len(pominiete)} dokumentów NIE od RM_BAZA pominięto"
+                              if pominiete else "")
                            + (f"   ⚠ zostało {len(reszta)} dokumentów do ręcznego usunięcia" if reszta else ""))
 
         # Pozostałości NA LISTĘ „Do zrobienia" projektu, a nie tylko do raportu.
@@ -4505,6 +4675,67 @@ def dokumenty_do_recznego_usuniecia(plan, limit=300):
             znalezione.append((d.get("Numer") or "?", rodzaj, nasze, len(pozycje),
                                d.get("Podmiot") or ""))
     return sorted(znalezione)
+
+
+def zk_wymagajace_poprawy(numer_projektu, limit=300):
+    """ZK z numerem tego projektu w Uwagach, których NIE wystawiła RM_BAZA.
+
+    Po co: numer projektu w Uwagach wpisuje także człowiek zakładający ZK
+    ręcznie w Subiekcie — i taki dokument blokuje potem zapis BOM-u („projekt
+    ma już ZK"), bo most nie dopisuje pozycji do cudzego zamówienia. Zamiast
+    czekać, aż ktoś zderzy się z tym przy zapisie, wykrywamy to wcześniej
+    i mówimy wprost, co poprawić.
+
+    Poprawka jest prosta: wpisać w Tytuł „RM_BAZA <numer>”. Wtedy dokument
+    staje się „nasz” i RM_BAZA może do niego dopisywać.
+
+    ⚠️ Wykrywa TYLKO dokumenty, w których numer stoi na początku Uwag — bo tak
+    czyta go `numer_projektu_z_uwag()`. ZK z Uwagami „Projekt 3500” albo
+    pustymi nie zostanie znalezione i nadal może powstać dublet; to samo
+    ograniczenie ma blokada w mostu. Wykrywanie jest więc pomocą, nie
+    gwarancją — pełne wykrycie wymagałoby porównywania POZYCJI dokumentów.
+
+    Zwraca [(numer_zk, uwagi, tytul, podmiot)].
+    """
+    cel = str(numer_projektu or "").strip().upper()
+    if not cel:
+        return []
+    try:
+        import subiekt_bridge
+        from subiekt_zamowienia import numer_projektu_z_uwag, nasz_dokument
+        dane = subiekt_bridge.call("dokumenty", {"limit": limit}, timeout=TIMEOUT_S)
+    except Exception:
+        return []
+
+    znalezione = []
+    for d in (dane or {}).get("dokumenty", []):
+        rodzaj = str(d.get("Rodzaj") or (d.get("Numer") or "").split(" ")[0]).upper()
+        if rodzaj != "ZK":
+            continue
+        uwagi = str(d.get("Uwagi") or "")
+        if numer_projektu_z_uwag(uwagi).upper() != cel:
+            continue
+        if nasz_dokument(d.get("Tytul")):
+            continue                      # nasze — nic do poprawy
+        znalezione.append((d.get("Numer") or "?", uwagi.strip(),
+                           str(d.get("Tytul") or "").strip(),
+                           d.get("Podmiot") or ""))
+    return sorted(znalezione)
+
+
+def zadania_z_zk_do_poprawy(numer_projektu, limit=300):
+    """Teksty zadań dla listy „Do zrobienia” — gotowe do scal_zadania()."""
+    from subiekt_zamowienia import tytul_dokumentu
+    zadania = []
+    for numer, _uwagi, tytul, podmiot in zk_wymagajace_poprawy(numer_projektu, limit):
+        zadania.append(
+            f"Poprawić {numer}"
+            + (f" ({podmiot})" if podmiot else "")
+            + f": ma w Uwagach numer projektu {numer_projektu}, ale Tytuł "
+            + (f"„{tytul}”" if tytul else "jest pusty")
+            + f" — wpisz „{tytul_dokumentu(numer_projektu)}”, inaczej RM_BAZA "
+              "nie dopisze do niego pozycji z arkusza")
+    return zadania
 
 
 def open_cofnij_window(parent, project_id, project_name=None):

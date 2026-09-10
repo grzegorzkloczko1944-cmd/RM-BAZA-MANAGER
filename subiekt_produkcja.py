@@ -16,6 +16,12 @@ pierwszej zmianie listy dostawców.
 import os
 import sqlite3
 
+# Reguła Uwag/Tytułu jest WSPÓLNA dla wszystkich dokumentów — jedno miejsce,
+# żeby zapis i odczyt nie rozjechały się przy zmianie formatu (patrz
+# subiekt_zamowienia.numer_projektu_z_uwag i Znacznik.cs po stronie mostu).
+from subiekt_zamowienia import (MARKER, nasz_dokument, numer_projektu_z_uwag,
+                               tytul_dokumentu, zloz_uwagi)
+
 #: Dostawcy oznaczający produkcję własną. To NAZWY z master.sqlite → suppliers,
 #: nie id — id różnią się między instalacjami (dom/firma), nazwy nie.
 #:
@@ -219,13 +225,15 @@ def plan_pw(project_id, numer_projektu, pozycje, magazyn="MASTER"):
     """Plan dla mostu (tryb „pw"). Sam słownik — bez zapisu i bez sieci.
 
     `uwagi` niosą numer projektu, bo tak firma oznacza dokumenty i tak po
-    nich filtruje (F8 / kolumna Uwagi) — ten sam wzorzec co ZK.
+    nich filtruje (F8 / kolumna Uwagi) — ten sam wzorzec co ZK. Znacznik
+    RM_BAZA idzie osobno, w Tytule (patrz MARKER).
     """
     return {
         "pozycje": [{"symbol": p["symbol"],
                      "ilosc": p["ilosc"],
                      "cena": p["cena"]} for p in pozycje],
-        "uwagi": f"RM_BAZA — PROJEKT {numer_projektu}",
+        "uwagi": zloz_uwagi(numer_projektu),
+        "tytul": tytul_dokumentu(numer_projektu),
         "magazyn": magazyn,
     }
 
@@ -299,21 +307,35 @@ def sprawdz_pw(wynik, plan):
     return (not uwagi), numer, uwagi
 
 
-#: Marker w Uwagach dokumentu — po nim RM_BAZA rozpoznaje SWOJE PW/RW.
+#: Marker w polu TYTUŁ dokumentu — po nim RM_BAZA rozpoznaje SWOJE PW/RW.
 #: Bez niego numery trzeba by trzymać lokalnie, a baza projektu bez locka
 #: jest READ-ONLY: zapis się nie udawał i dokument istniał w Subiekcie,
 #: o którym RM_BAZA nie wiedziała (PW 2/MASTER/2026, 10.09.2026).
 #:
 #: Subiekt jest źródłem prawdy dla wystawionego dokumentu (§21 v2), więc
 #: czytamy stamtąd i nie ma czego trzymać po dwóch stronach.
-MARKER = "RM_BAZA"
+#:
+#: PRZEPROWADZKA Z UWAG DO TYTUŁU (10.09.2026)
+#: Marker siedział w Uwagach jako „RM_BAZA — PROJEKT 2741". Nie może tam
+#: zostać, odkąd pierwszy wiersz Uwag jest numerem projektu: z przodu się nie
+#: mieści, a doklejony niżej byłby nie do odróżnienia od uwagi człowieka.
+#: Tytuł nadaje się lepiej — nie drukuje się i nikt nie wypełnia go ręcznie,
+#: więc jego obecność naprawdę świadczy o pochodzeniu dokumentu.
+#:
+#: Sama stała mieszka w subiekt_zamowienia (importowana na górze pliku) —
+#: dwie kopie rozjechałyby się przy pierwszej zmianie.
 
 
 def dokumenty_produkcji(numer_projektu, timeout=600):
     """{"PW": [...], "RW": [...]} — dokumenty produkcji tego projektu z SUBIEKTA.
 
-    Rozpoznanie po Uwagach: „RM_BAZA — PROJEKT <numer>". Nie trzymamy tych
-    numerów lokalnie — patrz MARKER.
+    Rozpoznanie dwuczłonowe (10.09.2026):
+      • TYTUŁ musi nieść znacznik RM_BAZA — dowód, że to nasz dokument,
+      • pierwszy człon UWAG musi być tym numerem projektu.
+
+    Sam numer nie wystarcza: użytkownik wystawiający RW ręcznie w Subiekcie
+    też wpisuje numer projektu w Uwagi, a taki dokument nie może trafić do
+    RW jako źródło. Nie trzymamy tych numerów lokalnie — patrz MARKER.
 
     Każdy wpis: {numer, data, uwagi, pozycje: [{symbol, nazwa, ilosc, cena}]}.
     Rzuca wyjątkiem tylko przy błędzie połączenia; brak dokumentów to nie błąd.
@@ -327,10 +349,12 @@ def dokumenty_produkcji(numer_projektu, timeout=600):
         if rodzaj not in out:
             continue
         uwagi = str(d.get("Uwagi") or "").strip()
-        gora = uwagi.upper()
-        # MARKER odsiewa dokumenty wystawione ręcznie w Subiekcie albo przez
-        # inne narzędzie — te nie są „nasze" i nie chcemy ich brać za źródło RW.
-        if MARKER not in gora or (cel and cel not in gora):
+        # Znacznik w Tytule odsiewa dokumenty wystawione ręcznie w Subiekcie
+        # albo przez inne narzędzie — te nie są „nasze" i nie wolno ich brać
+        # za źródło RW. Numer z Uwag zawęża do TEGO projektu.
+        if not nasz_dokument(d.get("Tytul")):
+            continue
+        if cel and numer_projektu_z_uwag(uwagi).upper() != cel:
             continue
         out[rodzaj].append({
             "numer": d.get("Numer") or "",
@@ -390,11 +414,14 @@ def plan_rw(numer_projektu, pozycje, numer_pw, magazyn="MASTER"):
     z metodą wyceny rozchodu, którą stosuje magazyn.
 
     W Uwagach numer projektu ORAZ źródłowe PW — żeby z samego dokumentu
-    w Subiekcie dało się odczytać, skąd się wziął (§16 v2).
+    w Subiekcie dało się odczytać, skąd się wziął (§16 v2). Numer PW idzie
+    do DRUGIEGO wiersza, na miejsce uwag człowieka: pierwszy wiersz należy
+    do numeru projektu, a Uwagi to jedyne z tych pól, które się drukuje.
     """
     return {
         "pozycje": [{"symbol": p["symbol"], "ilosc": p["ilosc"]} for p in pozycje],
-        "uwagi": f"RM_BAZA — PROJEKT {numer_projektu} | PW: {numer_pw}",
+        "uwagi": zloz_uwagi(numer_projektu, f"PW: {numer_pw}"),
+        "tytul": tytul_dokumentu(numer_projektu),
         "magazyn": magazyn,
     }
 
