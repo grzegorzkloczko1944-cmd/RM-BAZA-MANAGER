@@ -337,12 +337,19 @@ def dokumenty_produkcji(numer_projektu, timeout=600):
     też wpisuje numer projektu w Uwagi, a taki dokument nie może trafić do
     RW jako źródło. Nie trzymamy tych numerów lokalnie — patrz MARKER.
 
+    `numer_projektu` przyjmuje TAK SAMO numer („3500") jak pełną nazwę
+    („3500 dupal") — wołający mają jedno i drugie pod ręką (kalkulator trzyma
+    nazwę projektu) i pomyłka kończyła się cichym „PW: —", czyli zablokowanym
+    przyciskiem „Wystaw RW" mimo istniejącego PW (10.09.2026).
+
     Każdy wpis: {numer, data, uwagi, pozycje: [{symbol, nazwa, ilosc, cena}]}.
     Rzuca wyjątkiem tylko przy błędzie połączenia; brak dokumentów to nie błąd.
     """
     import subiekt_bridge
     dane = subiekt_bridge.call("dokumenty", {"limit": 400}, timeout=timeout, write=False)
-    cel = str(numer_projektu or "").strip().upper()
+    # Sam numer — z nazwy bierzemy pierwszy człon, dokładnie tak jak robi to
+    # zapis dokumentu (numer_projektu() w subiekt_projekt).
+    cel = str(numer_projektu or "").strip().split(" ")[0].upper()
     out = {"PW": [], "RW": []}
     for d in (dane or {}).get("dokumenty", []):
         rodzaj = d.get("Rodzaj")

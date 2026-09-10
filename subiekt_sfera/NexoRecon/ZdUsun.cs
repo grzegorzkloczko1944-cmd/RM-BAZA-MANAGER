@@ -17,6 +17,10 @@
 // sprząta mieszaną listę. Nazwa trybu została "zd-usun" — zmiana zepsułaby
 // istniejące wywołania z RM_BAZA (subiekt_zamowienia.usun_zd).
 //
+// 10.09.2026 doszło PW — przychody wewnętrzne z kalkulatora RMPAK. Dotąd
+// wypadały z listy rodzajów i kasowanie kończyło się „nie znaleziono dokumentu
+// o tym numerze", choć dokument istniał i był widoczny w Przeglądzie.
+//
 // ⚠️ Kasujemy tylko to, na co pozwala Subiekt (MoznaUsunac). Dokument
 // zrealizowany albo powiązany z innym zostaje i wraca jako "blad" —
 // nie próbujemy tego obchodzić.
@@ -44,7 +48,13 @@ internal static class ZdUsun
         // Typ dokumentu z prefiksu numeru — jedno wywołanie sprząta mieszaną
         // listę. Przeszukujemy tylko te rodzaje, które faktycznie padły
         // w --numery, żeby nie ciągnąć z bazy czterech list bez potrzeby.
-        var rodzaje = new[] { "ZK", "ZD", "RW", "WZ" }
+        // PW doszlo 10.09.2026: bez niego kasowanie przychodu wewnetrznego
+        // wpadalo w galaz „szukamy wszedzie" i przegladalo ZK/ZD/RW/WZ —
+        // wszedzie poza kolekcja, w ktorej PW naprawde leza. Konczylo sie
+        // komunikatem „nie znaleziono dokumentu o tym numerze", choc dokument
+        // spokojnie istnial i byl widoczny w Przegladzie dokumentow.
+        var WSZYSTKIE = new[] { "ZK", "ZD", "RW", "WZ", "PW" };
+        var rodzaje = WSZYSTKIE
             .Where(r => chciane.Any(n => n.StartsWith(r + " ", StringComparison.OrdinalIgnoreCase)
                                       || n.StartsWith(r + "/", StringComparison.OrdinalIgnoreCase)))
             .ToList();
@@ -52,7 +62,7 @@ internal static class ZdUsun
         {
             // Numer bez rozpoznanego prefiksu — szukamy wszędzie, zamiast
             // odsyłać z niczym.
-            rodzaje = new List<string> { "ZK", "ZD", "RW", "WZ" };
+            rodzaje = WSZYSTKIE.ToList();
         }
 
         foreach (var rodzaj in rodzaje)
@@ -183,6 +193,7 @@ internal static class ZdUsun
         "ZD" => sfera.ZamowieniaDoDostawcow(),
         "RW" => sfera.RozchodyWewnetrzne(),
         "WZ" => sfera.WydaniaZewnetrzne(),
+        "PW" => sfera.PrzychodyWewnetrzne(),
         _ => throw new ArgumentException($"nieznany rodzaj dokumentu: {rodzaj}")
     };
 

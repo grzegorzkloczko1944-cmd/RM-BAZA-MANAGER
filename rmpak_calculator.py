@@ -534,19 +534,29 @@ class RmpakCalculatorDialog:
                 tags=() if cena else ("brak",))
         tree.tag_configure("brak", background="#f2dede")
 
+        # STOPKA NA DOLE OKNA (side="bottom") i PRZED tabelą w kolejności
+        # pakowania — inaczej tabela z expand=True zjada wysokość i przyciski
+        # wypadają poza ekran. Dwa rzędy, bo w jednym długie Uwagi wypychały
+        # „Wystaw PW" poza prawą krawędź (zgłoszone 10.09.2026 na oknie RW).
         stopka = tk.Frame(dlg, padx=12, pady=10)
-        stopka.pack(fill="x")
-        tk.Label(stopka, text=f"RAZEM: {razem:,.2f} PLN".replace(",", " "),
+        stopka.pack(side="bottom", fill="x")
+
+        rzad_opis = tk.Frame(stopka)
+        rzad_opis.pack(fill="x")
+        tk.Label(rzad_opis, text=f"RAZEM: {razem:,.2f} PLN".replace(",", " "),
                  font=("", 12, "bold"), fg="darkred").pack(side="left")
+
         # Format Uwag czytamy ze ŹRÓDŁA (plan_pw), nie powtarzamy go tutaj —
         # własna kopia rozjeżdżała się z tym, co naprawdę idzie na dokument.
         from subiekt_zamowienia import zloz_uwagi
-        tk.Label(stopka,
+        rzad_btn = tk.Frame(stopka)
+        rzad_btn.pack(fill="x", pady=(6, 0))
+        tk.Label(rzad_btn,
                  text="Uwagi: " + zloz_uwagi(self.project_name).replace("\n", " ⏎ "),
-                 font=("", 8), fg="gray30").pack(side="left", padx=(16, 0))
+                 font=("", 8), fg="gray30", anchor="w").pack(side="left")
 
-        tk.Button(stopka, text="Zamknij", command=dlg.destroy, width=12).pack(side="right")
-        btn = tk.Button(stopka, text="Wystaw PW", width=14, font=("", 9, "bold"),
+        tk.Button(rzad_btn, text="Zamknij", command=dlg.destroy, width=12).pack(side="right")
+        btn = tk.Button(rzad_btn, text="Wystaw PW", width=14, font=("", 9, "bold"),
                         bg="#337ab7", fg="white")
         btn.config(command=lambda: self._wystaw_pw(poz, dlg, btn))
         if braki:
@@ -591,35 +601,46 @@ class RmpakCalculatorDialog:
         # rozchodu liczy Subiekt ze swojej ewidencji: ten sam detal bywa na
         # magazynie w kilku partiach po różnych cenach i tylko magazyn wie,
         # którą zdejmuje (FIFO / średnia ważona).
+        # STOPKA PAKOWANA PRZED TABELĄ — inaczej przy ciasnym oknie tabela
+        # (expand=True) zjada całą wysokość i przyciski wypadają poza ekran.
+        # Ten sam błąd co w oknie decyzji o złożeniach bez składu; tutaj
+        # objawiał się schowanym „Wystaw RW" (zgłoszone 10.09.2026).
+        stopka = tk.Frame(dlg, padx=12, pady=10)
+        stopka.pack(side="bottom", fill="x")
+
+        # Dwa rzędy: przyciski osobno od opisów. W jednym rzędzie długie
+        # etykiety (koszt magazynowy + Uwagi) wypychały „Wystaw RW" poza
+        # prawą krawędź okna.
+        rzad_opis = tk.Frame(stopka)
+        rzad_opis.pack(fill="x")
+        razem = sum(p["cena"] * p["ilosc"] for p in poz)
+        tk.Label(rzad_opis, text=f"WG PW: {razem:,.2f} PLN".replace(",", " "),
+                 font=("", 12, "bold"), fg="darkred").pack(side="left")
+        tk.Label(rzad_opis, text="— wartość RW to KOSZT MAGAZYNOWY, liczy go Subiekt z ceny przyjęcia",
+                 font=("", 8), fg="gray40").pack(side="left", padx=(6, 0))
+
+        from subiekt_zamowienia import zloz_uwagi
+        rzad_btn = tk.Frame(stopka)
+        rzad_btn.pack(fill="x", pady=(6, 0))
+        tk.Label(rzad_btn,
+                 text="Uwagi: " + zloz_uwagi(self.project_name,
+                                             f"PW: {numer_pw}").replace("\n", " ⏎ "),
+                 font=("", 8), fg="gray30", anchor="w").pack(side="left")
+        tk.Button(rzad_btn, text="Zamknij", command=dlg.destroy, width=12).pack(side="right")
+        btn = tk.Button(rzad_btn, text="Wystaw RW", width=14, font=("", 9, "bold"),
+                        bg="#e67e22", fg="white")
+        btn.config(command=lambda: self._wystaw_rw(poz, numer_pw, dlg, btn))
+        btn.pack(side="right", padx=(0, 8))
+
         cols = ("Symbol", "Nazwa", "Ilość", "Cena z PW", "Wartość wg PW")
         tree = ttk.Treeview(dlg, columns=cols, show="headings", height=13)
         for c, w in zip(cols, (150, 290, 70, 95, 110)):
             tree.heading(c, text=c)
             tree.column(c, width=w, anchor="e" if c in ("Ilość", "Cena z PW", "Wartość wg PW") else "w")
         tree.pack(fill="both", expand=True, padx=10, pady=(8, 0))
-        razem = 0.0
         for p in poz:
-            wart = p["cena"] * p["ilosc"]
-            razem += wart
             tree.insert("", "end", values=(p["symbol"], p["nazwa"], f"{p['ilosc']:g}",
-                                           f"{p['cena']:.2f}", f"{wart:.2f}"))
-
-        stopka = tk.Frame(dlg, padx=12, pady=10)
-        stopka.pack(fill="x")
-        tk.Label(stopka, text=f"WG PW: {razem:,.2f} PLN".replace(",", " "),
-                 font=("", 12, "bold"), fg="darkred").pack(side="left")
-        tk.Label(stopka, text="— wartość RW to KOSZT MAGAZYNOWY, liczy go Subiekt z ceny przyjęcia",
-                 font=("", 8), fg="gray40").pack(side="left", padx=(6, 0))
-        from subiekt_zamowienia import zloz_uwagi
-        tk.Label(stopka,
-                 text="Uwagi: " + zloz_uwagi(self.project_name,
-                                             f"PW: {numer_pw}").replace("\n", " ⏎ "),
-                 font=("", 8), fg="gray30").pack(side="left", padx=(16, 0))
-        tk.Button(stopka, text="Zamknij", command=dlg.destroy, width=12).pack(side="right")
-        btn = tk.Button(stopka, text="Wystaw RW", width=14, font=("", 9, "bold"),
-                        bg="#e67e22", fg="white")
-        btn.config(command=lambda: self._wystaw_rw(poz, numer_pw, dlg, btn))
-        btn.pack(side="right", padx=(0, 8))
+                                           f"{p['cena']:.2f}", f"{p['cena'] * p['ilosc']:.2f}"))
 
     def _wystaw_rw(self, pozycje, numer_pw, dlg, btn):
         """Suchy przebieg → potwierdzenie → zapis → read-back względem PW."""

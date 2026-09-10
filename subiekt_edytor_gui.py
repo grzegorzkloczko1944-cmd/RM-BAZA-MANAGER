@@ -288,12 +288,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                  fg="white", font=("Arial", 11, "bold")).pack(side=tk.LEFT, padx=12)
         tk.Button(pasek, text="Anuluj", command=self._anuluj,
                   font=("Arial", 9)).pack(side=tk.RIGHT, padx=8, pady=7)
-        self.btn_zapisz = tk.Button(pasek, text="Załóż / Zapisz", state=tk.DISABLED,
-                                    command=self._zapisz_calosc, bg="#2980b9", fg="white",
-                                    font=("Arial", 9, "bold"))
-        self.btn_zapisz.pack(side=tk.RIGHT, padx=4, pady=7)
-        tk.Button(pasek, text="Sprawdź całość", command=self._sprawdz_calosc,
-                  font=("Arial", 9)).pack(side=tk.RIGHT, padx=4, pady=7)
+        # „Sprawdź całość" i „Załóż / Zapisz" NIE stoją tutaj, tylko pod
+        # drzewem w sekcji 1 — działają na jego zawartości, więc leżą przy
+        # tym, czego dotyczą (zgłoszone 10.09.2026). W pasku górnym zostaje
+        # samo „Anuluj”, bo ono zamyka całe okno.
 
         # ── DOKUMENTY Z POZYCJI DRZEWA ─────────────────────────────
         # Drzewo z sekcji 1 jest roboczym koszykiem: zebrane w nim pozycje
@@ -804,6 +802,18 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                       width=8 if len(txt) > 2 else 3).pack(side=tk.LEFT, padx=2)
         tk.Button(pb, text="Z pliku…", command=self._wczytaj_z_pliku,
                   font=("Arial", 8)).pack(side=tk.RIGHT, padx=2)
+
+        # Akcje na CAŁYM drzewie — przeniesione tu z paska górnego
+        # (10.09.2026): działają na zawartości sekcji 1, więc mają stać przy
+        # niej, a nie w nagłówku okna, gdzie wyglądały na akcje całego okna.
+        pc = tk.Frame(ram, bg=TLO_SEKCJI)
+        pc.pack(fill=tk.X, padx=6, pady=(2, 8))
+        self.btn_zapisz = tk.Button(pc, text="Załóż / Zapisz", state=tk.DISABLED,
+                                    command=self._zapisz_calosc, bg="#2980b9", fg="white",
+                                    font=("Arial", 9, "bold"))
+        self.btn_zapisz.pack(side=tk.RIGHT, padx=2)
+        tk.Button(pc, text="Sprawdź całość", command=self._sprawdz_calosc,
+                  font=("Arial", 9)).pack(side=tk.RIGHT, padx=2)
         # Dokad trafi "+ Skladnik" / "+ Istniejaca" - zawsze widoczne, zeby
         # nie zgadywac. Wynika z zaznaczenia (patrz _cel_dla_skladnika).
         self.lbl_cel = tk.Label(ram, text="", bg="#eaf2f8", fg=TEKST,
@@ -924,8 +934,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
 
     # ── 5. SCALANIE POZYCJI ───────────────────────────────────
 
-    KOL_SCAL = [("cel", "●", 26), ("symbol", "Symbol", 120),
-                ("nazwa", "Nazwa", 150), ("opis", "Opis", 100),
+    #: Kolumny tabeli scalania. Szersze od 10.09.2026, odkąd panel „Po
+    #: scaleniu" zszedł pod tabelę i przestał zabierać ~340 px — to Symbol,
+    #: Nazwa i Opis identyfikują duplikaty, więc miejsce idzie do nich.
+    KOL_SCAL = [("cel", "●", 26), ("symbol", "Symbol", 180),
+                ("nazwa", "Nazwa", 300), ("opis", "Opis", 240),
                 ("ilosc", "Ilość", 52), ("rodzaj", "Rodzaj", 60)]
 
     def _panel_scalanie(self, rodzic):
@@ -948,11 +961,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                  bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8), anchor="w").pack(
             fill=tk.X, padx=8, pady=(4, 2))
 
-        srodek = tk.Frame(ram, bg=TLO_SEKCJI)
-        srodek.pack(fill=tk.X, padx=8, pady=2)
-
-        lewa = tk.Frame(srodek, bg=TLO_SEKCJI)
-        lewa.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Bez podziału na kolumny — tabela bierze CAŁĄ szerokość sekcji;
+        # opis skutków zszedł pod spód (patrz niżej).
+        lewa = tk.Frame(ram, bg=TLO_SEKCJI)
+        lewa.pack(fill=tk.X, padx=8, pady=2)
         tk.Label(lewa, text="Pozycje do scalenia (● = docelowa)", bg=TLO_SEKCJI,
                  fg=TEKST, font=("Arial", 8, "bold"), anchor="w").pack(fill=tk.X)
         wrap = tk.Frame(lewa, bg=TLO_SEKCJI)
@@ -984,18 +996,28 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         tk.Button(przyciski, text="Wyczyść", command=self._scal_wyczysc,
                   font=("Arial", 8)).pack(side=tk.LEFT, padx=4)
 
-        prawa = tk.Frame(srodek, bg=TLO_SEKCJI)
-        prawa.pack(side=tk.LEFT, fill=tk.Y, padx=(10, 0))
-        tk.Label(prawa, text="Po scaleniu:", bg=TLO_SEKCJI, fg=TEKST,
-                 font=("Arial", 8, "bold"), anchor="w").pack(fill=tk.X)
-        for t in ("✓ użycie w kompletach przepięte na docelową",
+        # „Po scaleniu" POD tabelą, nie obok (10.09.2026). Jako kolumna z boku
+        # zabierało ~340 px szerokości tabeli, przez co Symbol i Nazwa robiły
+        # się ciasne, choć to one identyfikują scalane pozycje. Skutki scalenia
+        # czyta się RAZ, przed decyzją — nie muszą stać w linii wzroku obok
+        # listy. Dwie kolumny, żeby nie wydłużać sekcji na sześć wierszy.
+        opis = tk.Frame(ram, bg=TLO_SEKCJI)
+        opis.pack(fill=tk.X, padx=8, pady=(6, 0))
+        tk.Label(opis, text="Po scaleniu:", bg=TLO_SEKCJI, fg=TEKST,
+                 font=("Arial", 8, "bold"), anchor="w").pack(anchor="w")
+        siatka = tk.Frame(opis, bg=TLO_SEKCJI)
+        siatka.pack(fill=tk.X)
+        skutki = ("✓ użycie w kompletach przepięte na docelową",
                   "✓ ilości zsumowane, gdy obie są w jednym komplecie",
                   "✓ stare symbole zapamiętane jako aliasy",
                   "✓ źródła oznaczone „SCALONO DO” (zostają w bazie)",
                   "✓ dane kartoteki docelowej bez zmian",
-                  "✗ kompletów ten tryb nie scala"):
-            tk.Label(prawa, text=t, bg=TLO_SEKCJI, fg=TEKST_SZARY,
-                     font=("Arial", 8), anchor="w").pack(fill=tk.X)
+                  "✗ kompletów ten tryb nie scala")
+        polowa = (len(skutki) + 1) // 2
+        for i, t in enumerate(skutki):
+            tk.Label(siatka, text=t, bg=TLO_SEKCJI, fg=TEKST_SZARY,
+                     font=("Arial", 8), anchor="w").grid(
+                row=i % polowa, column=i // polowa, sticky="w", padx=(0, 24))
 
         stopka = tk.Frame(ram, bg=TLO_SEKCJI)
         stopka.pack(fill=tk.X, padx=8, pady=(4, 6))

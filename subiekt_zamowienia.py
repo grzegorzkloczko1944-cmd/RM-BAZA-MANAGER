@@ -436,9 +436,28 @@ def uwagi_czlowieka(uwagi):
     return "\n".join(linie[1:]).strip() if len(linie) > 1 else ""
 
 
+def sam_numer(projekt):
+    """Numer projektu z tego, co dostaliśmy — nazwa albo już sam numer.
+
+    Wołający mają pod ręką różne rzeczy: okno projektu numer, kalkulator RMPAK
+    pełną nazwę („3500 dupal"). Wpuszczenie nazwy do Uwag dawało pierwszy człon
+    „3500", ale drugi („dupal") wyglądał jak uwaga człowieka, a Tytuł robił się
+    „RM_BAZA 3500 dupal" — dokument powstawał, tylko przestawał być odnajdywany
+    (PW 3/MASTER/2026 z 10.09.2026 miało „3500 dupal Projekt" i kalkulator go
+    nie widział, więc „Wystaw RW" zostawało wyszarzone).
+
+    Stąd jedno miejsce, które ucina do pierwszego członu — ta sama zasada,
+    którą stosuje numer_projektu() w subiekt_projekt.
+    """
+    return str(projekt or "").strip().split(" ")[0]
+
+
 def zloz_uwagi(projekt, uwagi=None):
-    """Pole Uwagi dokumentu: „2741 Projekt" w pierwszym wierszu, uwagi niżej."""
-    p = str(projekt or "").strip()
+    """Pole Uwagi dokumentu: „2741 Projekt" w pierwszym wierszu, uwagi niżej.
+
+    `projekt` może być nazwą albo numerem — patrz sam_numer().
+    """
+    p = sam_numer(projekt)
     u = str(uwagi or "").strip()
     if not p:
         return u
@@ -453,8 +472,10 @@ def tytul_dokumentu(projekt):
     gdyby ktoś wyczyścił Uwagi. Tytuł się NIE drukuje i człowiek wystawiający
     dokument ręcznie go nie wypełnia, więc jego obecność jest wiarygodnym
     dowodem, że dokument wyszedł z RM_BAZA.
+
+    `projekt` może być nazwą albo numerem — patrz sam_numer().
     """
-    p = str(projekt or "").strip()
+    p = sam_numer(projekt)
     return f"{MARKER} {p}" if p else MARKER
 
 
