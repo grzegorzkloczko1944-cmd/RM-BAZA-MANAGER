@@ -146,6 +146,10 @@ internal static class Pw
 
                 if (!string.IsNullOrWhiteSpace(plan.Uwagi))
                     UstawUwagi(pw.Dane, plan.Uwagi.Trim(), kroki);
+                // Tytul to OPIS dokumentu; Uwagi zostaja czystym numerem
+                // projektu (konwencja firmowa - patrz UstawPole).
+                if (!string.IsNullOrWhiteSpace(plan.Tytul))
+                    UstawPole(pw.Dane, "Tytul", plan.Tytul.Trim(), kroki);
 
                 // Nie zapisujemy PW, na którym miała być cena, a jej nie ma:
                 // dokument po 0 zł jest gorszy niż jego brak, bo wygląda na
@@ -211,22 +215,46 @@ internal static class Pw
         catch { return null; }
     }
 
-    static void UstawUwagi(object dane, string chciane, List<Krok> kroki)
+    static void UstawUwagi(object dane, string chciane, List<Krok> kroki) =>
+        UstawPole(dane, "Uwagi", chciane, kroki);
+
+    /// <summary>
+    /// Ustawia pole tekstowe dokumentu z ODCZYTEM KONTROLNYM. Kopia z Rw.cs.
+    /// </summary>
+    /// <remarks>
+    /// Setter przy jawnej implementacji interfejsu potrafi po cichu nic nie
+    /// zrobic, stad druga proba przez refleksje i sprawdzenie, czy wartosc
+    /// naprawde siedzi. Tytul doszedl 10.09.2026: numer projektu ma zostac
+    /// SAM w Uwagach, bo cala firma po nich filtruje dokumenty, a
+    /// numer_projektu_z_uwag() bierze cala ich tresc jako numer. Opis idzie
+    /// wiec osobnym polem.
+    /// </remarks>
+    static void UstawPole(object dane, string nazwa, string chciane, List<Krok> kroki)
     {
         string? mam = null;
-        try { ((dynamic)dane).Uwagi = chciane; mam = ((dynamic)dane).Uwagi; } catch { }
+        try
+        {
+            var pr0 = dane.GetType().GetProperty(nazwa);
+            if (pr0 != null && pr0.CanWrite)
+            {
+                pr0.SetValue(dane, chciane);
+                mam = pr0.GetValue(dane) as string;
+            }
+        }
+        catch { }
         if (mam != chciane)
         {
             foreach (var i in dane.GetType().GetInterfaces())
             {
-                var pr = i.GetProperty("Uwagi");
+                var pr = i.GetProperty(nazwa);
                 if (pr == null || !pr.CanWrite) continue;
                 try { pr.SetValue(dane, chciane); mam = pr.GetValue(dane) as string; } catch { }
                 if (mam == chciane) break;
             }
         }
         if (mam != chciane)
-            kroki.Add(new Krok("pw", "", "uwaga", $"nie udało się ustawić Uwag (odczyt: \"{mam}\")"));
+            kroki.Add(new Krok("pw", "", "uwaga",
+                $"nie udało się ustawić pola {nazwa} (odczyt: \"{mam}\")"));
     }
 
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
@@ -304,6 +332,7 @@ internal static class Pw
     }
 
     internal record PozPlan(string? Symbol, decimal Ilosc, decimal? Cena = null);
-    internal record Plan(List<PozPlan>? Pozycje, string? Uwagi, string? Magazyn);
+    internal record Plan(List<PozPlan>? Pozycje, string? Uwagi, string? Magazyn,
+                        string? Tytul = null);
     internal record Krok(string Rodzaj, string Symbol, string Status, string? Szczegoly);
 }

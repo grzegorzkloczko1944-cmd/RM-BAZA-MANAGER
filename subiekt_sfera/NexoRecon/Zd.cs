@@ -74,7 +74,7 @@ internal static class Zd
         var brakujace = new List<string>();
         // Pozycje ręczne (spoza BOM-u): (podmiot, symbol, ilość) — dokładane do
         // ZD wprost, bo w zestawieniu zapotrzebowania ich nie ma.
-        var reczne = new List<(Podmiot Podmiot, string Symbol, decimal Ilosc)>();
+        var reczne = new List<(Podmiot Podmiot, string Symbol, decimal Ilosc, decimal? Cena)>();
 
         foreach (var p in pozycje)
         {
@@ -99,7 +99,7 @@ internal static class Zd
                     // Pozycja dodana ręcznie w oknie — spoza BOM-u, więc nie ma
                     // jej w zapotrzebowaniu. Trafi do ZD wprost (patrz niżej),
                     // nie przez UtworzNaPodstawieZapotrzebowania.
-                    reczne.Add((podmiot, symbol, p.Ilosc <= 0 ? 1m : p.Ilosc));
+                    reczne.Add((podmiot, symbol, p.Ilosc <= 0 ? 1m : p.Ilosc, p.Cena));
                     kroki.Add(new Krok("pozycja", symbol,
                         zapisz ? "do-zamowienia (ręczna)" : "do-utworzenia (ręczna)", nazwaDostawcy));
                     continue;
@@ -164,8 +164,24 @@ internal static class Zd
                         foreach (var r in reczne.Where(r => r.Podmiot.Id == idPodm))
                         {
                             var enc = asort.Dane.WyszukajPoSymbolu(r.Symbol);
-                            if (enc != null) zd.Pozycje.Dodaj(enc.Symbol, r.Ilosc);
-                            else kroki.Add(new Krok("pozycja", r.Symbol, "blad", "brak kartoteki"));
+                            if (enc == null)
+                            {
+                                kroki.Add(new Krok("pozycja", r.Symbol, "blad", "brak kartoteki"));
+                                continue;
+                            }
+                            var pozDok = zd.Pozycje.Dodaj(enc.Symbol, r.Ilosc);
+                            // CENA ZAKUPU na pozycji ZD (10.09.2026): na
+                            // zamowieniu do dostawcy cena jest naturalna —
+                            // z niej bierze sie wartosc zamowienia. Wzorzec
+                            // jak w Pw.cs: PozycjaDokumentu.Cena to OBIEKT,
+                            // nie liczba, i liczy sie NettoPoRabacie.
+                            if (r.Cena is { } c && c > 0)
+                            {
+                                var droga = UstawCenePozycji(pozDok, c);
+                                if (droga == null)
+                                    kroki.Add(new Krok("pozycja", r.Symbol, "uwaga",
+                                        $"nie udalo sie ustawic ceny {c:0.00} — pozycja bez ceny"));
+                            }
                         }
 
                         // ⚠️ UtworzNaPodstawieZapotrzebowania NIE wypełnia daty
@@ -266,7 +282,40 @@ internal static class Zd
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
     static int Bezp2(Func<int> f) { try { return f(); } catch { return 0; } }
 
-    internal record PozPlan(string Symbol, decimal Ilosc, string? Dostawca, bool? Reczna);
+    /// <summary>
+    /// Cena pozycji dokumentu. Zwraca opis drogi, ktora zadzialala, albo null.
+    /// </summary>
+    /// <remarks>
+    /// Kopia sprawdzonej metody z Pw.cs (ustalone diagnostyka 09.09.2026):
+    /// `PozycjaDokumentu.Cena` NIE jest liczba, tylko obiektem
+    /// InsERT.Moria.ModelDanych.Cena — pierwsze podejscie "Cena = decimal"
+    /// lecialo wyjatkiem. Bez NettoPoRabacie cena nie jest cena pozycji:
+    /// samo NettoPrzedRabatem zostawiloby dokument z zerowa wartoscia.
+    /// </remarks>
+    static string? UstawCenePozycji(object poz, decimal cena)
+    {
+        object? obCena = null;
+        try { obCena = ((dynamic)poz).Cena; } catch { }
+        if (obCena is null) return null;
+
+        var ustawione = new List<string>();
+        foreach (var nazwa in new[] { "NettoPrzedRabatem", "NettoPoRabacie" })
+        {
+            var pr = obCena.GetType().GetProperty(nazwa);
+            if (pr is null || !pr.CanWrite || pr.PropertyType != typeof(decimal)) continue;
+            try
+            {
+                pr.SetValue(obCena, cena);
+                if ((decimal?)pr.GetValue(obCena) == cena) ustawione.Add(nazwa);
+            }
+            catch { }
+        }
+        return ustawione.Contains("NettoPoRabacie")
+            ? $"Cena.{string.Join("+", ustawione)}" : null;
+    }
+
+    internal record PozPlan(string Symbol, decimal Ilosc, string? Dostawca, bool? Reczna,
+                           decimal? Cena = null);
     // Uwagi na ZD — okno magazynu wpisuje tu "MAGAZYN", zeby zamowienie
     // na sklad dalo sie odroznic od projektowych (kolumna Projekt w Przegladzie
     // dokumentow bierze sie z Uwag).

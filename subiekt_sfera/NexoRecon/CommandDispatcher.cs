@@ -50,7 +50,7 @@ internal static class CommandDispatcher
     {
         "kartoteka", "kartoteka-usun", "kartoteka-edytuj", "projekt", "zd", "zd-usun",
         "dostawcy", "progi", "rw", "pw", "termin", "symbole", "komplet-napraw", "magazyn-zaloz",
-        "magazyn-usun", "projekt-cofnij", "kartoteki", "zk-poz-usun", "scal",
+        "magazyn-usun", "projekt-cofnij", "kartoteki", "zk-poz-usun", "scal", "zk-nowe",
     };
 
     /// <summary>
@@ -73,7 +73,7 @@ internal static class CommandDispatcher
         "zd-usun", "wydruk-recon", "termin", "symbole", "rw", "kartoteka-usun",
         "progi", "wydruk", "projekt", "komplet", "komplet-napraw", "kartoteka-edytuj",
         "pola-wlasne", "magazyn-zaloz", "magazyn-usun", "pw", "projekt-cofnij",
-        "kartoteki", "zapotrzebowanie-test", "zk-ilosci", "zk-poz-usun", "scal",
+        "kartoteki", "zapotrzebowanie-test", "zk-ilosci", "zk-poz-usun", "scal", "zk-nowe",
     };
 
     public static bool Zna(string tryb) => Tryby.Contains(tryb, StringComparer.OrdinalIgnoreCase);
@@ -142,6 +142,12 @@ internal static class CommandDispatcher
             // Czysty odczyt; zapisem do pliku projektu zajmuje sie RM_BAZA.
             case "zk-ilosci":
                 return ZkIlosci.Uruchom(sfera, k.Projekt, k.OutPath);
+
+            // NOWE ZK z pozycji zebranych recznie w Edytorze kartotek.
+            // Dopisywanie do istniejacego ZK robi tryb "projekt" (arkusz).
+            case "zk-nowe":
+                if (k.PlanPath is null) return Brak("zk-nowe: brak --plan=plik.json");
+                return ZkNowe.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
 
             case "magazyn":
                 return Magazyn.Uruchom(sfera, k.OutPath, k.TylkoNiezerowe);

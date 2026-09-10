@@ -306,9 +306,9 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         tk.Label(pasek, text="Dokument:", bg="#34495e", fg="#bdc3c7",
                  font=("Arial", 8)).pack(side=tk.LEFT, padx=(0, 4))
         for etykieta, akcja in (("RW", self._dokument_rw),
-                                ("PW", self._wkrotce("PW")),
-                                ("ZD", self._wkrotce("ZD")),
-                                ("ZK", self._wkrotce("ZK")),
+                                ("PW", self._dokument_pw),
+                                ("ZD", self._dokument_zd),
+                                ("ZK", self._dokument_zk),
                                 ("Więcej ▾", self._wkrotce("MM / PZ / WZ"))):
             tk.Button(pasek, text=etykieta, command=akcja, font=("Arial", 9),
                       padx=8).pack(side=tk.LEFT, padx=2, pady=7)
@@ -383,10 +383,29 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         from subiekt_dokument_form import pozycje_z_drzewa
         poz = pozycje_z_drzewa(self.pozycje, self.relacje, self.korzenie, tryb,
                                tylko_symbole=self._wezly_zrodlowe())
-        # Stan magazynowy dokladamy z tego, co juz wczytalismy razem
-        # z katalogiem — bez dodatkowego pytania do Subiekta.
+        # Stan magazynowy i cene ewidencyjna dokladamy z tego, co juz
+        # wczytalismy razem z katalogiem — bez dodatkowego pytania do Subiekta.
+        #
+        # Cena jest PODPOWIEDZIA dla PW (formularz i tak pozwala ja zmienic
+        # albo ustawic hurtem). Bez niej kolumna "Cena" startowala pusta
+        # i wygladalo to na blad, a nie na "podaj cene" (10.09.2026).
+        # W tym wdrozeniu CenaEwidencyjna jest zwykle zerowa, wiec czesto
+        # i tak trzeba ja wpisac — ale gdy kartoteka ja ma, nie ma powodu
+        # kazac userowi przepisywac.
+        cennik = {}
+        for k in (self.katalog or []):
+            sym = str(k.get("Symbol") or "").strip().upper()
+            if sym:
+                try:
+                    cennik[sym] = float(k.get("CenaEwidencyjna") or 0)
+                except (TypeError, ValueError):
+                    pass
         for p in poz:
-            p["stan"] = self._stany.get(p["symbol"].upper())
+            klucz = p["symbol"].upper()
+            p["stan"] = self._stany.get(klucz)
+            cena = cennik.get(klucz)
+            if cena:
+                p["cena"] = cena
         return poz
 
     def _dokument_rw(self):
@@ -428,6 +447,159 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             "przelicz": self._pozycje_na_dokument,
             "po_zapisie": self._wczytaj_katalog,   # stany sie zmienily
         })
+
+    def _dokument_pw(self):
+        """PW z pozycji zaznaczonych w drzewie (sekcja 1)."""
+        from subiekt_dokument_form import BEZPOSREDNIO
+        poz = self._pozycje_na_dokument(BEZPOSREDNIO)
+        if not poz:
+            messagebox.showinfo(
+                "PW", "Drzewo jest puste — nie ma czego przyjąć.\n\n"
+                "Wciągnij pozycje z listy 4 (dwuklik) albo dodaj nowe.",
+                parent=self)
+            return
+        # Inaczej niż RW: PW przyjmuje NA STAN, więc kartoteka musi już
+        # istnieć w Subiekcie — most nie zakłada jej przy okazji.
+        brak = [p["symbol"] for p in poz
+                if p["symbol"] in self.pozycje and not self.pozycje[p["symbol"]].w_subiekcie]
+        if brak:
+            messagebox.showwarning(
+                "PW",
+                "Te pozycje nie są jeszcze w Subiekcie i nie mogą wejść na stan:\n\n"
+                + "\n".join(f"  • {b}" for b in brak[:10])
+                + ("" if len(brak) <= 10 else f"\n  … i {len(brak) - 10} więcej")
+                + "\n\nNajpierw je załóż („Załóż / Zapisz”).", parent=self)
+            poz = [p for p in poz if p["symbol"] not in brak]
+            if not poz:
+                return
+        ile_zazn = len(self.tree.selection())
+        self.status.config(
+            text=(f"PW: {len(poz)} pozycji z {ile_zazn} zaznaczonych węzłów"
+                  if ile_zazn else f"PW: {len(poz)} pozycji z całego drzewa "
+                                   "(nic nie zaznaczono)"),
+            fg=TEKST_SZARY)
+        import subiekt_pw_gui
+        subiekt_pw_gui.otworz(self, poz, {
+            "magazyny": self._magazyny(),
+            "przelicz": self._pozycje_na_dokument,
+            "po_zapisie": self._wczytaj_katalog,   # stany sie zmienily
+        })
+
+    def _dokument_zd(self):
+        """ZD z pozycji zaznaczonych w drzewie — jedno zamówienie na dostawcę."""
+        from subiekt_dokument_form import BEZPOSREDNIO
+        poz = self._pozycje_na_dokument(BEZPOSREDNIO)
+        if not poz:
+            messagebox.showinfo(
+                "ZD", "Drzewo jest puste — nie ma czego zamawiać.\n\n"
+                "Wciągnij pozycje z listy 4 (dwuklik) albo dodaj nowe.",
+                parent=self)
+            return
+        # Kartoteka MUSI istniec: most dopisuje pozycje ZD po symbolu.
+        brak = [p["symbol"] for p in poz
+                if p["symbol"] in self.pozycje and not self.pozycje[p["symbol"]].w_subiekcie]
+        if brak:
+            messagebox.showwarning(
+                "ZD",
+                "Te pozycje nie są jeszcze w Subiekcie i nie mogą trafić na zamówienie:\n\n"
+                + "\n".join(f"  • {b}" for b in brak[:10])
+                + ("" if len(brak) <= 10 else f"\n  … i {len(brak) - 10} więcej")
+                + "\n\nNajpierw je załóż („Załóż / Zapisz”).", parent=self)
+            poz = [p for p in poz if p["symbol"] not in brak]
+            if not poz:
+                return
+        ile_zazn = len(self.tree.selection())
+        self.status.config(
+            text=(f"ZD: {len(poz)} pozycji z {ile_zazn} zaznaczonych węzłów"
+                  if ile_zazn else f"ZD: {len(poz)} pozycji z całego drzewa "
+                                   "(nic nie zaznaczono)"),
+            fg=TEKST_SZARY)
+        import subiekt_zd_gui
+        subiekt_zd_gui.otworz(self, poz, {
+            "dostawcy": self._dostawcy(),
+            "przelicz": self._pozycje_na_dokument,
+        })
+
+    def _dokument_zk(self):
+        """NOWE ZK z pozycji zaznaczonych w drzewie.
+
+        Dopisywanie do istniejacego ZK idzie przez arkusz RM_BAZA (tryb
+        mostu "projekt") — tutaj tworzymy wylacznie nowe zamowienie.
+        """
+        from subiekt_dokument_form import BEZPOSREDNIO
+        poz = self._pozycje_na_dokument(BEZPOSREDNIO)
+        if not poz:
+            messagebox.showinfo(
+                "ZK", "Drzewo jest puste — nie ma czego zamówić.\n\n"
+                "Wciągnij pozycje z listy 4 (dwuklik) albo dodaj nowe.",
+                parent=self)
+            return
+        brak = [p["symbol"] for p in poz
+                if p["symbol"] in self.pozycje and not self.pozycje[p["symbol"]].w_subiekcie]
+        if brak:
+            messagebox.showwarning(
+                "ZK",
+                "Te pozycje nie są jeszcze w Subiekcie i nie mogą trafić na zamówienie:\n\n"
+                + "\n".join(f"  • {b}" for b in brak[:10])
+                + ("" if len(brak) <= 10 else f"\n  … i {len(brak) - 10} więcej")
+                + "\n\nNajpierw je załóż („Załóż / Zapisz”).", parent=self)
+            poz = [p for p in poz if p["symbol"] not in brak]
+            if not poz:
+                return
+        ile_zazn = len(self.tree.selection())
+        self.status.config(
+            text=(f"ZK: {len(poz)} pozycji z {ile_zazn} zaznaczonych węzłów"
+                  if ile_zazn else f"ZK: {len(poz)} pozycji z całego drzewa "
+                                   "(nic nie zaznaczono)"),
+            fg=TEKST_SZARY)
+        import subiekt_zk_gui
+        klienci = self._klienci()
+        subiekt_zk_gui.otworz(self, poz, {
+            "klienci": klienci,
+            "nipy": getattr(self, "_nipy_klientow", {}),
+            "przelicz": self._pozycje_na_dokument,
+        })
+
+    def _klienci(self):
+        """Nazwy kontrahentów do podpowiedzi w formularzu ZK.
+
+        Z Subiekta (tryb "kontrahenci") — to podmioty, na które realnie da
+        się wystawić dokument. Lista dostawców z master.sqlite by tu nie
+        pasowała: klient i dostawca to w Subiekcie ta sama kartoteka, ale
+        w RM_BAZA dostawcy to osobna tabela bez klientów.
+        """
+        try:
+            from subiekt_asortyment_gui import _uruchom
+            import os, tempfile
+            out = os.path.join(tempfile.mkdtemp(prefix="subiekt_kontr_"), "k.json")
+            dane = _uruchom("kontrahenci", [], out, 120) or {}
+            nazwy = {(k.get("NazwaSkrocona") or "").strip()
+                     for k in (dane.get("kontrahenci") or [])}
+            # NIP-y osobno: formularz ZK rozstrzyga po nich, ktora firma jest
+            # "nasza" — pod prefiksem RMPAK sa dwa rozne podmioty.
+            self._nipy_klientow = {
+                (k.get("NazwaSkrocona") or "").strip(): (k.get("NIP") or "").strip()
+                for k in (dane.get("kontrahenci") or [])
+                if (k.get("NazwaSkrocona") or "").strip()}
+            return sorted(n for n in nazwy if n)
+        except Exception:
+            self._nipy_klientow = {}
+            return []
+
+    def _dostawcy(self):
+        """Nazwy dostawców do podpowiedzi w formularzu ZD.
+
+        Z master.sqlite (tabela suppliers) — to ta sama lista, którą RM_BAZA
+        wiąże z kontrahentami Subiekta po NIP. Brak listy nie blokuje
+        formularza: pole dostawcy zostaje zwykłym tekstem.
+        """
+        try:
+            import subiekt_dostawcy
+            nazwy = {(d.get("name") or "").strip()
+                     for d in subiekt_dostawcy.pobierz_dostawcow()}
+            return sorted(n for n in nazwy if n)
+        except Exception:
+            return []
 
     def _magazyny(self):
         """Symbole magazynów do wyboru w formularzu — z wczytanych stanów."""

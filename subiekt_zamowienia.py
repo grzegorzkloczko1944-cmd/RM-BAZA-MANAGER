@@ -690,12 +690,34 @@ def zbuduj_wiersze(zapotrzebowanie, bom, podmioty=(), tylko_projekt=None, zamowi
 
 
 # ── Zapis ZD ────────────────────────────────────────────────────────────────
-def utworz_zd(pozycje, timeout=TIMEOUT_S, uwagi=None):
+def utworz_zk(plan, timeout=TIMEOUT_S, zapisz=False):
+    """Nowe ZK z pozycji zebranych w Edytorze kartotek (tryb mostu „zk-nowe").
+
+    plan: {projekt, podmiot, tytul, termin, pozycje:[{symbol, ilosc[, cena]}]}
+
+    JEDEN PROJEKT = JEDNO ZK: gdy dla numeru projektu zamówienie już istnieje,
+    most ODMAWIA (ok=False z powodem) — dopisywanie pozycji robi się w arkuszu
+    RM_BAZA, trybem „projekt". Patrz nagłówek ZkNowe.cs.
+
+    zapisz=False to suchy przebieg — nic nie powstaje.
+    """
+    import subiekt_bridge
+    return subiekt_bridge.call("zk-nowe", {"plan": plan, "zapisz": zapisz},
+                               timeout=timeout, write=zapisz)
+
+
+def utworz_zd(pozycje, timeout=TIMEOUT_S, uwagi=None, zapisz=True):
     """Tworzy ZD w Subiekcie. pozycje: [{symbol, ilosc, dostawca[, reczna]}].
 
     `uwagi` — tekst do pola Uwagi każdego utworzonego ZD. Okno magazynu
     wpisuje „MAGAZYN", żeby zamówienie na skład dało się odróżnić od
     projektowych; zamówienia z ZK nie podają nic i Uwagi zostają puste.
+
+    `zapisz=False` to SUCHY PRZEBIEG: most mówi, co by powstało (ile ZD,
+    dla jakich dostawców, które pozycje odpadną), i NIC nie zapisuje.
+    Dołożone 10.09.2026 pod formularz ZD z Edytora — reszta formularzy
+    dokumentów wymaga „Sprawdź" przed zapisem, a ZD tworzy kilka dokumentów
+    naraz, więc tym bardziej nie powinno być pierwszą niespodzianką.
     """
     exe = _find_exe()
     if not exe:
@@ -712,13 +734,13 @@ def utworz_zd(pozycje, timeout=TIMEOUT_S, uwagi=None):
     try:
         import subiekt_bridge
         return subiekt_bridge.call(
-            "zd", {"plan": plan, "zapisz": True}, timeout=timeout, write=True,
-            fallback=lambda: _utworz_zd_cli(plan, timeout))
+            "zd", {"plan": plan, "zapisz": zapisz}, timeout=timeout, write=zapisz,
+            fallback=lambda: _utworz_zd_cli(plan, timeout, zapisz))
     except ImportError:
-        return _utworz_zd_cli(plan, timeout)
+        return _utworz_zd_cli(plan, timeout, zapisz)
 
 
-def _utworz_zd_cli(plan, timeout):
+def _utworz_zd_cli(plan, timeout, zapisz=True):
     """Stara ścieżka: osobny proces NexoRecon.exe."""
     exe = _find_exe()
     if not exe:
@@ -733,7 +755,11 @@ def _utworz_zd_cli(plan, timeout):
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     try:
         proc = subprocess.run(
-            [exe, "zd", f"--plan={plan_path}", f"--out={out}", "--zapisz"],
+            # --zapisz TYLKO przy realnym zapisie: bez tego przelacznika most
+            # robi suchy przebieg. Wczesniej flaga byla na sztywno, wiec
+            # sciezka CLI zapisywalaby dokumenty takze przy "Sprawdz".
+            [exe, "zd", f"--plan={plan_path}", f"--out={out}"]
+            + (["--zapisz"] if zapisz else []),
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout, creationflags=flags)
     except subprocess.TimeoutExpired:

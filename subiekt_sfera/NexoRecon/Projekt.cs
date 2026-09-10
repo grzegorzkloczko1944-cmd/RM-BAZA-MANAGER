@@ -788,6 +788,14 @@ internal static class Projekt
     static string NumerZk(DokumentZK? d) =>
         d is null ? "?" : (Bezp(() => d.NumerWewnetrzny?.PelnaSygnatura) ?? "?");
 
+    /// <summary>Klient po nazwie skroconej albo NIP — dla trybu "zk-nowe".</summary>
+    /// <remarks>
+    /// Wystawione zamiast kopiowania: dopasowanie podmiotu ma dzialac tak samo
+    /// w zapisie BOM-u i w recznym ZK, inaczej ten sam wpis raz trafi, raz nie.
+    /// </remarks>
+    internal static Podmiot? ZnajdzPodmiotPubl(Uchwyt sfera, string? szukany) =>
+        ZnajdzPodmiot(sfera, szukany);
+
     static Podmiot? ZnajdzPodmiot(Uchwyt sfera, string? szukany)
     {
         if (string.IsNullOrWhiteSpace(szukany)) return null;

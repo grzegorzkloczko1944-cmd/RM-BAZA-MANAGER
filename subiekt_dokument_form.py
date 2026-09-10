@@ -131,9 +131,16 @@ class TabelaPozycji(tk.Frame):
     """
 
     #: Kolumny zawsze obecne, w tej kolejności.
-    STALE_PRZED = [("uzyj", "✓", 34), ("symbol", "Symbol", 150),
-                   ("nazwa", "Nazwa", 240)]
+    STALE_PRZED = [("uzyj", "✓", 34), ("symbol", "Symbol", 140),
+                   ("nazwa", "Nazwa", 190), ("opis", "Opis", 150)]
     STALE_PO = [("ilosc", "Ilość", 70), ("jm", "JM", 45)]
+
+    #: Kolumny traktowane jak LICZBY: wyrównanie do prawej i formatowanie
+    #: `%g` zamiast surowego str(). Jedna lista, bo trzymanie tego w dwóch
+    #: miejscach skończyło się tym, że „wartosc" miała wyrównanie, ale nie
+    #: formatowanie — i kolumna zostawała pusta mimo policzonej liczby
+    #: (10.09.2026).
+    LICZBOWE = ("ilosc", "stan", "cena", "wartosc")
 
     def __init__(self, rodzic, pozycje, kolumny_dodatkowe=(), edytowalne=("ilosc",),
                  na_zmiane=None):
@@ -144,6 +151,9 @@ class TabelaPozycji(tk.Frame):
             p.setdefault("uzyj", True)
             p.setdefault("jm", "kpl" if p.get("rodzaj") == "komplet" else "szt")
         self._na_zmiane = na_zmiane
+        #: Hak liczący kolumny wyliczane tuż przed rysowaniem wierszy.
+        #: Ustawia go klasa formularza (patrz OknoPW._przelicz_wartosci).
+        self._przed_rysowaniem = None
         self._edytowalne = set(edytowalne) | {
             k for k, _n, _s, edy in kolumny_dodatkowe if edy}
 
@@ -159,14 +169,24 @@ class TabelaPozycji(tk.Frame):
         for klucz, naglowek, szer in kolumny:
             self.tab.heading(klucz, text=naglowek)
             self.tab.column(klucz, width=szer, minwidth=40,
-                            stretch=(klucz == "nazwa"),
+                            # Nazwa rosnie z oknem, ale ma GORNY limit przez
+                            # maxwidth ustawiony nizej — inaczej zabierala cala
+                            # wolna szerokosc i kolumny liczbowe uciekaly na
+                            # skraj, poza pole widzenia (10.09.2026).
+                            stretch=(klucz in self.ROZCIAGLIWE),
                             anchor=("center" if klucz == "uzyj"
-                                    else "e" if klucz in ("ilosc", "stan", "cena")
+                                    else "e" if klucz in self.LICZBOWE
                                     else "w"))
         sc = ttk.Scrollbar(wrap, orient="vertical", command=self.tab.yview)
         self.tab.configure(yscrollcommand=sc.set)
         self.tab.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sc.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Nazwa rosnie tylko do rozsadnej szerokosci; reszte wolnego miejsca
+        # zostawiamy pustej kolumnie-wypelniaczowi, dzieki czemu Cena, Wartosc
+        # i Ilosc trzymaja sie razem po prawej stronie tresci, a nie na
+        # krawedzi okna.
+        self.tab.bind("<Configure>", self._dopasuj_szerokosci)
 
         self.tab.tag_configure("odznaczona", foreground=TEKST_SZARY)
         self.tab.tag_configure("uwaga", background=UWAGA_TLO, foreground=UWAGA_ZOLTY)
@@ -178,9 +198,46 @@ class TabelaPozycji(tk.Frame):
 
         self.odswiez()
 
+    #: Kolumny tekstowe dzielace miedzy siebie wolna szerokosc. Reszta
+    #: (symbol, liczby, JM) ma staly rozmiar.
+    ROZCIAGLIWE = ("nazwa", "opis")
+
+    def _dopasuj_szerokosci(self, _e=None):
+        """Rozdziela wolna szerokosc miedzy Nazwe i Opis.
+
+        Gorne limity sa po to, zeby dlugi opis nie wypchnal kolumn liczbowych
+        poza krawedz okna — a to wlasnie liczby sa tu najwazniejsze.
+        """
+        szer = self.tab.winfo_width()
+        if szer <= 1:
+            return
+        rozciagliwe = [k for k in self._klucze if k in self.ROZCIAGLIWE]
+        if not rozciagliwe:
+            return
+        stale = sum(self.tab.column(k, "width")
+                    for k in self._klucze if k not in self.ROZCIAGLIWE)
+        wolne = max(0, szer - stale - 4)
+        # Nazwa dostaje wiecej niz Opis: to ona identyfikuje pozycje.
+        limity = {"nazwa": (120, 300), "opis": (90, 220)}
+        udzial = {"nazwa": 0.58, "opis": 0.42}
+        for k in rozciagliwe:
+            lo, hi = limity.get(k, (90, 260))
+            czesc = wolne * udzial.get(k, 1.0 / len(rozciagliwe))
+            self.tab.column(k, width=max(lo, min(hi, int(czesc))))
+
     # ── dane ────────────────────────────────────────────────────────────
 
     def odswiez(self):
+        # Kolumny WYLICZANE (np. Wartość = ilość × cena w PW) muszą powstać
+        # PRZED zbudowaniem wierszy. Wcześniej liczył je dopiero callback
+        # `_na_zmiane`, wołany na końcu tej metody — więc pierwsze rysowanie
+        # pokazywało pustą kolumnę, a liczba pojawiała się dopiero przy
+        # następnym odświeżeniu (10.09.2026).
+        if self._przed_rysowaniem:
+            try:
+                self._przed_rysowaniem()
+            except Exception:
+                pass
         wybrane = set(self.tab.selection())
         for w in self.tab.get_children():
             self.tab.delete(w)
@@ -203,7 +260,7 @@ class TabelaPozycji(tk.Frame):
         for k in self._klucze:
             if k == "uzyj":
                 out.append("☑" if p["uzyj"] else "☐")
-            elif k in ("ilosc", "stan", "cena"):
+            elif k in self.LICZBOWE:
                 v = p.get(k)
                 out.append("" if v in (None, "") else f"{float(v):g}")
             else:
@@ -211,8 +268,25 @@ class TabelaPozycji(tk.Frame):
         return out
 
     def uzyte(self):
-        """Pozycje zaznaczone ✓ — to one idą na dokument."""
+        """Pozycje z ptaszkiem ✓ — to one idą na dokument."""
         return [p for p in self.pozycje if p["uzyj"]]
+
+    def podswietlone(self):
+        """Wiersze ZAZNACZONE w tabeli (podświetlone), a nie te z ✓.
+
+        Dwie różne rzeczy, mylone przy operacjach hurtowych: ✓ mówi „ta
+        pozycja wejdzie na dokument", a podświetlenie — „na tej właśnie
+        pracuję". „Ustaw cenę / dostawcę zaznaczonym" ma dotyczyć drugiego
+        (10.09.2026: ustawiało wszystkim z listy).
+
+        Gdy nic nie jest podświetlone, zwracamy pozycje z ✓ — wtedy „ustaw
+        wszystkim" jest sensownym domyślnym zachowaniem, a nie ciszą.
+        """
+        wyb = self.tab.selection()
+        if not wyb:
+            return self.uzyte()
+        return [self.pozycje[int(i)] for i in wyb
+                if str(i).isdigit() and int(i) < len(self.pozycje)]
 
     def ustaw_uwage(self, symbol, tekst):
         """Dopisuje ostrzeżenie do pozycji (żółte tło wiersza)."""
@@ -329,7 +403,12 @@ class OknoDokumentu(tk.Toplevel):
     TYTUL = "Dokument"
     PRZYCISK = "WYSTAW"
     KOLOR_PRZYCISKU = "#2980b9"
-    ROZMIAR = "1180x700"
+    #: 790x700, nie 1180: kolumny tabeli sumuja sie do ~700-730 px (RW 699,
+    #: PW 729), wiec reszta byla pustym miejscem, ktore tylko odsuwalo liczby
+    #: od tresci. Zwezone o ~33% na prosbe uzytkownika (10.09.2026).
+    #: Wysokosc zostaje - to lista pozycji, a nie szerokosc, decyduje ile
+    #: widac naraz.
+    ROZMIAR = "940x700"
 
     def __init__(self, parent, pozycje, kontekst=None):
         super().__init__(parent)
@@ -353,7 +432,9 @@ class OknoDokumentu(tk.Toplevel):
 
         # ── nagłówek dokumentu ──────────────────────────────────────────
         self.ram_naglowek = tk.LabelFrame(
-            self, text=f" 1. Dane dokumentu {self.TYTUL.split()[0]} ",
+            # TYTUL to "DOKUMENT PW" / "DOKUMENT RW" — bierzemy OSTATNI czlon,
+            # nie pierwszy: split()[0] dawal naglowek "Dane dokumentu DOKUMENT".
+            self, text=f" 1. Dane dokumentu {self.TYTUL.split()[-1]} ",
             bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9, "bold"))
         self.ram_naglowek.pack(fill=tk.X, padx=12, pady=6)
         self.buduj_naglowek(self.ram_naglowek)
