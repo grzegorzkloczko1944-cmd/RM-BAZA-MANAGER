@@ -9130,6 +9130,24 @@ class MainWindow(tk.Tk):
             import traceback
             traceback.print_exc()
     
+    def _kolumna_danych(self, col_widoku):
+        """Indeks kolumny W DANYCH z indeksu W WIDOKU.
+
+        tksheet numeruje kliknięcia po kolumnach WIDOCZNYCH, a stałe typu
+        WYCENA_COL/SUBIEKT_COL to pozycje w danych. Dopóki ukryta była tylko
+        DWF_BIB (16), wystarczało sztywne `col += 1` — ale menu „Kolumny"
+        pozwala ukryć dowolne, więc przesunięcie bywa większe niż 1 i klik
+        trafiał w sąsiednią kolumnę (WYCENA nie otwierała RFQ, 10.09.2026).
+
+        `data_c()` liczy to sam na podstawie realnie wyświetlanych kolumn.
+        """
+        try:
+            return self.sheet.data_c(col_widoku)
+        except Exception:
+            # Starsze tksheet albo brak metody — stara heurystyka lepsza
+            # niż wysypanie się obsługi kliknięcia.
+            return col_widoku + 1 if col_widoku >= 16 else col_widoku
+
     def on_sheet_click(self, event=None):
         """Obsługa kliknięcia - Zamówiono (lewy) + Dostawca (prawy)"""
         # Sprawdź czy to kliknięcie myszy
@@ -9154,9 +9172,7 @@ class MainWindow(tk.Tk):
                     col = self.sheet.identify_column(event, exclude_header=True)
 
                     if row is not None and col is not None and row >= 0 and col >= 0:
-                        # KONWERSJA INDEKSU: Kolumna 16 (DWF_BIB) jest ukryta, więc visual != physical
-                        if col >= 16:
-                            col += 1
+                        col = self._kolumna_danych(col)
                         # Kolumna 10 = Dostawca
                         if col == 10:
                             self._show_supplier_context_menu(row, col, event)
@@ -9180,9 +9196,7 @@ class MainWindow(tk.Tk):
                 if row is None or col is None or row < 0 or col < 0:
                     return
 
-                # KONWERSJA INDEKSU: Kolumna 16 (DWF_BIB) jest ukryta, więc visual != physical
-                if col >= 16:
-                    col += 1
+                col = self._kolumna_danych(col)
 
                 # Kolumna 10 = Dostawca - pokaż menu wyboru (jak prawy klik)
                 if col == 10:
