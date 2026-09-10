@@ -114,34 +114,40 @@ try:
 except Exception as _e:
     print(f"(spec) Nie udalo sie otworzyc folderu dist: {_e}")
 
-# ── PUBLIKACJA NA SERWER ─────────────────────────────────────────────────────
-# Gotowy .exe leci od razu do Y:/RMPAK_CLIENT — miejsca, z ktorego aktualizuje
-# RM_Tray_Organizer i z ktorym bramka wersji (client_version.py) porownuje
-# kazdego klienta przy starcie. UWAGA: od tej kopii kazdy user ze starym .exe
-# dostanie blokade przy nastepnym uruchomieniu — to jest zamierzone.
+# ── PUBLIKACJA: KATALOG TESTOWY ──────────────────────────────────────────────
+# Gotowy .exe leci do Y:\RMPAK_CLIENT\TESTY RM_BAZA, a NIE do Y:\RMPAK_CLIENT.
 #
-# copy2, nie copy: bramka porownuje rozmiar+mtime, wiec mtime musi przetrwac.
-# Poprzednia wersja z serwera laduje w "backup dd-mm-rrrr" (jak dotychczas
-# recznie). Blad publikacji NIE psuje buildu — tylko glosny komunikat.
+# DLACZEGO NIE NA PRODUKCJE (09-10.09.2026):
+# Bramka wersji (client_version.py) porownuje .exe kazdego klienta z plikiem
+# lezacym WPROST w Y:\RMPAK_CLIENT. Publikowanie tam po kazdym buildzie
+# oznaczaloby, ze wszyscy userzy dostaja monit o aktualizacji po kazdej
+# najdrobniejszej zmianie — i 127 MB do pobrania. Katalog testowy jest poza
+# zasiegiem bramki, wiec buildy w toku nikogo nie ruszaja.
+#
+# WYDANIE NA PRODUKCJE JEST SWIADOMYM, RECZNYM KROKIEM:
+#     copy /y "Y:\RMPAK_CLIENT\TESTY RM_BAZA\RM_BAZA_v15_MAG.exe" ^
+#             "Y:\RMPAK_CLIENT\RM_BAZA_v15_MAG.exe"
+# (kopiowac tak, zeby mtime przetrwal — bramka porownuje rozmiar+mtime;
+#  Explorer i copy /y to robia, `type >` NIE).
+#
+# copy2, nie copy: mtime musi przetrwac takze tutaj, inaczej nie da sie
+# poznac, ktory build lezy w TESTACH. Poprzedni plik nadpisujemy bez backupu
+# — od backupow jest katalog produkcyjny. Blad publikacji NIE psuje buildu.
 import shutil as _shutil
 from datetime import datetime as _dt
-_SERVER_DIR = r"Y:\RMPAK_CLIENT"
+_SERVER_DIR = r"Y:\RMPAK_CLIENT\TESTY RM_BAZA"
 _src = _os.path.join(_os.path.abspath(DISTPATH), "RM_BAZA_v15_MAG.exe")
 _dst = _os.path.join(_SERVER_DIR, "RM_BAZA_v15_MAG.exe")
 try:
-    if not _os.path.isdir(_SERVER_DIR):
-        raise FileNotFoundError(f"brak katalogu serwera {_SERVER_DIR} (dysk Y: niezmapowany?)")
-    if _os.path.exists(_dst):
-        _bak = _os.path.join(_SERVER_DIR, "backup " + _dt.now().strftime("%d-%m-%Y"))
-        _os.makedirs(_bak, exist_ok=True)
-        _shutil.move(_dst, _os.path.join(_bak, "RM_BAZA_v15_MAG.exe"))
-        print(f"(spec) Poprzednia wersja z serwera -> {_bak}")
+    _os.makedirs(_SERVER_DIR, exist_ok=True)
     _shutil.copy2(_src, _dst)
     _s, _d = _os.stat(_src), _os.stat(_dst)
     assert _s.st_size == _d.st_size and abs(_s.st_mtime - _d.st_mtime) < 2, "kopia rozni sie od zrodla"
-    print(f"(spec) OPUBLIKOWANO: {_dst}  ({_d.st_size} B, {_dt.fromtimestamp(_d.st_mtime):%Y-%m-%d %H:%M:%S})")
+    print(f"(spec) DO TESTOW: {_dst}  ({_d.st_size} B, {_dt.fromtimestamp(_d.st_mtime):%Y-%m-%d %H:%M:%S})")
+    print("(spec) Produkcja NIETKNIETA — userzy nie dostana monitu o aktualizacji.")
+    print(r'(spec) Wydanie: copy /y "%s" "Y:\RMPAK_CLIENT\RM_BAZA_v15_MAG.exe"' % _dst)
 except Exception as _e:
     print("=" * 70)
-    print(f"(spec) !!! PUBLIKACJA NA SERWER NIE POWIODLA SIE: {_e}")
+    print(f"(spec) !!! KOPIA DO TESTOW NIE POWIODLA SIE: {_e}")
     print(f"(spec) !!! Skopiuj recznie: {_src} -> {_dst}")
     print("=" * 70)
