@@ -70,15 +70,21 @@ internal static class Rw
             // Sprawdzamy KOSZT MAGAZYNOWY warstw, nie cene handlowa ani
             // CenaEwidencyjna: to on niesie wartosc RW (patrz naglowek pliku
             // i RMPAK_PRODUKCJA_USTALENIA.md, wiersze 554-555).
-            var kosztJedn = KosztWarstwy(enc);
+            // decimal?, NIE var: KosztWarstwy przyjmuje `dynamic enc`, wiec
+            // `var` robi z wyniku dynamic i `.Value` rozstrzyga sie dopiero
+            // w runtime — leci "decimal does not contain a definition for
+            // 'Value'". Jawny typ przywraca statyczne wiazanie (10.09.2026).
+            decimal? kosztJedn = KosztWarstwy(enc);
             if (kosztJedn is null or 0)
                 kroki.Add(new Krok("pozycja", symbol, "bez-wyceny",
-                    $"{p.Ilosc:0.##} szt \u00d7 0,00 z\u0142 \u2014 brak ceny przyj\u0119cia, "
-                    + "ta pozycja NIE podniesie warto\u015bci RW"));
+                    $"{p.Ilosc:0.##} szt × 0,00 zł — brak ceny przyjęcia, "
+                    + "ta pozycja NIE podniesie wartości RW", 0m, 0m));
             else
                 kroki.Add(new Krok("pozycja", symbol,
                     zapisz ? "do-wydania" : "do-wydania (suchy)",
-                    $"{p.Ilosc:0.##} \u00d7 {kosztJedn:0.00} = {p.Ilosc * kosztJedn:0.00} z\u0142"));
+                    $"{p.Ilosc:0.##} × {kosztJedn:0.00} = {p.Ilosc * kosztJedn:0.00} zł",
+                    decimal.Round(kosztJedn.Value, 2),
+                    decimal.Round(p.Ilosc * kosztJedn.Value, 2)));
         }
 
         string? numer = null;
@@ -126,6 +132,10 @@ internal static class Rw
 
                 if (!string.IsNullOrWhiteSpace(plan.Uwagi))
                     UstawUwagi(rw.Dane, plan.Uwagi.Trim(), kroki);
+                // Tytul to OPIS dokumentu; Uwagi zostaja czystym numerem
+                // projektu (konwencja firmowa - patrz UstawPole).
+                if (!string.IsNullOrWhiteSpace(plan.Tytul))
+                    UstawPole(rw.Dane, "Tytul", plan.Tytul.Trim(), kroki);
 
                 if (!rw.Zapisz())
                 {
@@ -196,22 +206,46 @@ internal static class Rw
         catch { return null; }
     }
 
-    static void UstawUwagi(object dane, string chciane, List<Krok> kroki)
+    static void UstawUwagi(object dane, string chciane, List<Krok> kroki) =>
+        UstawPole(dane, "Uwagi", chciane, kroki);
+
+    /// <summary>
+    /// Ustawia pole tekstowe dokumentu z ODCZYTEM KONTROLNYM.
+    /// </summary>
+    /// <remarks>
+    /// Setter przy jawnej implementacji interfejsu potrafi po cichu nic nie
+    /// zrobic — stad druga proba przez refleksje po interfejsach i sprawdzenie,
+    /// czy wartosc naprawde siedzi. Wydzielone z UstawUwagi (10.09.2026), gdy
+    /// doszedl Tytul: numer projektu ma zostac SAM w Uwagach, bo cala firma
+    /// filtruje po nich dokumenty i numer_projektu_z_uwag() bierze cala ich
+    /// tresc jako numer. Opis idzie wiec osobnym polem, nie doklejany do numeru.
+    /// </remarks>
+    static void UstawPole(object dane, string nazwa, string chciane, List<Krok> kroki)
     {
         string? mam = null;
-        try { ((dynamic)dane).Uwagi = chciane; mam = ((dynamic)dane).Uwagi; } catch { }
+        try
+        {
+            var pr0 = dane.GetType().GetProperty(nazwa);
+            if (pr0 != null && pr0.CanWrite)
+            {
+                pr0.SetValue(dane, chciane);
+                mam = pr0.GetValue(dane) as string;
+            }
+        }
+        catch { }
         if (mam != chciane)
         {
             foreach (var i in dane.GetType().GetInterfaces())
             {
-                var pr = i.GetProperty("Uwagi");
+                var pr = i.GetProperty(nazwa);
                 if (pr == null || !pr.CanWrite) continue;
                 try { pr.SetValue(dane, chciane); mam = pr.GetValue(dane) as string; } catch { }
                 if (mam == chciane) break;
             }
         }
         if (mam != chciane)
-            kroki.Add(new Krok("rw", "", "uwaga", $"nie udało się ustawić Uwag (odczyt: \"{mam}\")"));
+            kroki.Add(new Krok("rw", "", "uwaga",
+                $"nie udało się ustawić pola {nazwa} (odczyt: \"{mam}\")"));
     }
 
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
@@ -318,6 +352,12 @@ internal static class Rw
     }
 
     internal record PozPlan(string? Symbol, decimal Ilosc);
-    internal record Plan(List<PozPlan>? Pozycje, string? Uwagi, string? Magazyn);
-    internal record Krok(string Rodzaj, string Symbol, string Status, string? Szczegoly);
+    internal record Plan(List<PozPlan>? Pozycje, string? Uwagi, string? Magazyn,
+                        string? Tytul = null);
+    /// KosztJedn/Koszt sa OPCJONALNE i sluza GUI: formularz RW pokazuje
+    /// kolumne "Koszt" po suchym przebiegu, zeby user widzial wartosc
+    /// dokumentu PRZED wystawieniem. Wyciaganie ich z tekstu Szczegoly
+    /// byloby parsowaniem napisu (10.09.2026).
+    internal record Krok(string Rodzaj, string Symbol, string Status, string? Szczegoly,
+                         decimal? KosztJedn = null, decimal? Koszt = null);
 }

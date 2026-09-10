@@ -295,6 +295,24 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         tk.Button(pasek, text="Sprawdź całość", command=self._sprawdz_calosc,
                   font=("Arial", 9)).pack(side=tk.RIGHT, padx=4, pady=7)
 
+        # ── DOKUMENTY Z POZYCJI DRZEWA ─────────────────────────────
+        # Drzewo z sekcji 1 jest roboczym koszykiem: zebrane w nim pozycje
+        # ida na JEDEN dokument zbiorczy, nie na osobny per kartoteka
+        # (SUBIEKT_FORMULARZE_DOKUMENTOW.md §2). Kolejnosc wdrazania:
+        # RW → PW → ZK → ZD → MM/PZ/WZ; niegotowe mowia wprost, ze ich nie ma,
+        # zamiast udawac dzialajacy przycisk.
+        tk.Frame(pasek, bg="#4a6278", width=1).pack(side=tk.LEFT, fill=tk.Y,
+                                                    padx=10, pady=9)
+        tk.Label(pasek, text="Dokument:", bg="#34495e", fg="#bdc3c7",
+                 font=("Arial", 8)).pack(side=tk.LEFT, padx=(0, 4))
+        for etykieta, akcja in (("RW", self._dokument_rw),
+                                ("PW", self._wkrotce("PW")),
+                                ("ZD", self._wkrotce("ZD")),
+                                ("ZK", self._wkrotce("ZK")),
+                                ("Więcej ▾", self._wkrotce("MM / PZ / WZ"))):
+            tk.Button(pasek, text=etykieta, command=akcja, font=("Arial", 9),
+                      padx=8).pack(side=tk.LEFT, padx=2, pady=7)
+
         self.status = tk.Label(self, text="", bg=TLO, fg=TEKST_SZARY,
                                font=("Arial", 9), anchor="w")
         self.status.pack(fill=tk.X, padx=10, pady=(6, 0))
@@ -305,6 +323,126 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self._panel_drzewo(srodek)
         self._panel_szczegoly(srodek)
         self._panel_sklad_i_lista(srodek)
+
+    # ── DOKUMENTY ─────────────────────────────────────────
+
+    def _wkrotce(self, nazwa):
+        """Zaslepka dla dokumentow jeszcze niezrobionych.
+
+        Lepsze niz ukrywanie przyciskow: user widzi, co jest planowane,
+        i nie szuka funkcji, ktorej nie ma.
+        """
+        def pokaz():
+            messagebox.showinfo(
+                nazwa,
+                f"Formularz {nazwa} jeszcze nie jest gotowy.\n\n"
+                "Kolejność wdrażania: RW → PW → ZK → ZD → MM/PZ/WZ\n"
+                "(SUBIEKT_FORMULARZE_DOKUMENTOW.md)", parent=self)
+        return pokaz
+
+    def _wezly_zrodlowe(self):
+        """Symbole, od których liczymy pozycje dokumentu.
+
+        ZAZNACZONE w drzewie, a gdy nic nie zaznaczono — wszystkie korzenie
+        (czyli całe drzewo). Zaznaczyć można DOWOLNY węzeł, nie tylko korzeń;
+        zaznaczony komplet wchodzi Z CAŁYM PODDRZEWEM — w dół schodzi
+        `pozycje_z_drzewa` według wybranego trybu rozwijania, my podajemy
+        tylko punkty startowe (ustalenie z 10.09.2026).
+
+        Węzły ZAGNIEŻDŻONE w innych zaznaczonych są ODSIEWANE: zaznaczenie
+        kompletu RAZEM z jego składnikiem policzyłoby ten składnik dwa razy
+        — raz z rozwinięcia kompletu, raz wprost.
+        """
+        zazn = []
+        for it in self.tree.selection():
+            sym = self._symbol_wezla(it)
+            if sym and sym in self.pozycje:
+                zazn.append((it, sym))
+        if not zazn:
+            return list(self.korzenie)
+
+        # Pracujemy na ID WĘZŁÓW, nie na symbolach: ta sama kartoteka może
+        # wystąpić w kilku miejscach drzewa (model grafowy), a zaznaczone
+        # bywa tylko jedno z nich.
+        zazn_id = {it for it, _s in zazn}
+        wynik = []
+        for it, sym in zazn:
+            rodzic = self.tree.parent(it)
+            pod_innym = False
+            while rodzic:
+                if rodzic in zazn_id:
+                    pod_innym = True
+                    break
+                rodzic = self.tree.parent(rodzic)
+            if not pod_innym and sym not in wynik:
+                wynik.append(sym)
+        return wynik
+
+    def _pozycje_na_dokument(self, tryb):
+        """Pozycje z drzewa dla formularza dokumentu, wg trybu rozwijania."""
+        from subiekt_dokument_form import pozycje_z_drzewa
+        poz = pozycje_z_drzewa(self.pozycje, self.relacje, self.korzenie, tryb,
+                               tylko_symbole=self._wezly_zrodlowe())
+        # Stan magazynowy dokladamy z tego, co juz wczytalismy razem
+        # z katalogiem — bez dodatkowego pytania do Subiekta.
+        for p in poz:
+            p["stan"] = self._stany.get(p["symbol"].upper())
+        return poz
+
+    def _dokument_rw(self):
+        """RW z pozycji zebranych w drzewie (sekcja 1)."""
+        from subiekt_dokument_form import BEZPOSREDNIO
+        poz = self._pozycje_na_dokument(BEZPOSREDNIO)
+        if not poz:
+            messagebox.showinfo(
+                "RW", "Drzewo jest puste — nie ma czego wydać.\n\n"
+                "Wciągnij pozycje z listy 4 (dwuklik) albo dodaj nowe.",
+                parent=self)
+            return
+        # Mowimy wprost, co weszlo do dokumentu — przy zaznaczonym komplecie
+        # pozycji bywa wiecej niz zaznaczonych wezlow i bez tego wygladaloby
+        # to na przypadek.
+        ile_zazn = len(self.tree.selection())
+        self.status.config(
+            text=(f"RW: {len(poz)} pozycji z {ile_zazn} zaznaczonych węzłów"
+                  if ile_zazn else f"RW: {len(poz)} pozycji z całego drzewa "
+                                   "(nic nie zaznaczono)"),
+            fg=TEKST_SZARY)
+        # Pozycje bez kartoteki w Subiekcie odpadaja od razu — most i tak
+        # by je odrzucil, a tu mozna powiedziec o tym po ludzku.
+        brak = [p["symbol"] for p in poz
+                if p["symbol"] in self.pozycje and not self.pozycje[p["symbol"]].w_subiekcie]
+        if brak:
+            messagebox.showwarning(
+                "RW",
+                "Te pozycje nie są jeszcze w Subiekcie i nie mogą zejść ze stanu:\n\n"
+                + "\n".join(f"  • {b}" for b in brak[:10])
+                + ("" if len(brak) <= 10 else f"\n  … i {len(brak) - 10} więcej")
+                + "\n\nNajpierw je załóż („Załóż / Zapisz”).", parent=self)
+            poz = [p for p in poz if p["symbol"] not in brak]
+            if not poz:
+                return
+        import subiekt_rw_gui
+        subiekt_rw_gui.otworz(self, poz, {
+            "magazyny": self._magazyny(),
+            "przelicz": self._pozycje_na_dokument,
+            "po_zapisie": self._wczytaj_katalog,   # stany sie zmienily
+        })
+
+    def _magazyny(self):
+        """Symbole magazynów do wyboru w formularzu — z wczytanych stanów."""
+        from subiekt_rw_gui import MAGAZYN_DOMYSLNY
+        symbole = set()
+        try:
+            for p in self.katalog or []:
+                for m in (p.get("Magazyny") or []):
+                    sym = str(m.get("Magazyn") or "").strip()
+                    if sym:
+                        symbole.add(sym)
+        except Exception:
+            pass
+        symbole.add(MAGAZYN_DOMYSLNY)
+        return sorted(symbole)
 
     # ── KLAWIATURA ────────────────────────────────────────
 
@@ -2617,6 +2755,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         okno.configure(bg=TLO)
         okno.geometry("640x520")
         okno.transient(self)
+        self.after_idle(lambda: wysrodkuj(okno, self))
 
         tk.Label(okno, text=("Zostanie ZAŁOŻONA nowa kartoteka"
                              if nowa else "Zostanie ZMIENIONA istniejąca kartoteka"),
@@ -2794,6 +2933,9 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         okno.configure(bg=TLO)
         okno.geometry("820x620")
         okno.transient(self)
+        # Na srodku okna matki, nie ekranu — na trzech monitorach Tk stawialby
+        # je na monitorze glownym, czyli nie tam, gdzie stoi Edytor.
+        self.after_idle(lambda: wysrodkuj(okno, self))
 
         # Liczniki z tego, co OSADZONE w drzewie — musza zgadzac sie
         # z lista ponizej i z tym, co naprawde pojdzie do Subiekta.
@@ -2938,6 +3080,8 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         okno.title("Sprawdzenie całości" if not zapisz else "Wynik zapisu")
         okno.configure(bg=TLO)
         okno.geometry("1040x560")
+        okno.transient(self)
+        self.after_idle(lambda: wysrodkuj(okno, self))
 
         # Waga kazdego statusu — decyduje o kolorze tla wiersza.
         wagi = [WAGA_STATUSU.get(str(k.get("Status") or ""), "info") for k in kroki]

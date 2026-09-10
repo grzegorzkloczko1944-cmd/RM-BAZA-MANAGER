@@ -141,13 +141,23 @@ def pobierz_katalog(timeout=TIMEOUT_S):
     return _uruchom("katalog", [], out, timeout).get("pozycje", [])
 
 
-def utworz_rw(pozycje, uwagi, magazyn=MAGAZYN, zapisz=True, timeout=TIMEOUT_S):
+def utworz_rw(pozycje, uwagi, magazyn=MAGAZYN, zapisz=True, timeout=TIMEOUT_S,
+              tytul=None):
     """Rozchód wewnętrzny — zdejmuje towar ze stanu. pozycje: [{symbol, ilosc}].
+
+    `uwagi` idą do pola Uwagi dokumentu, `tytul` (opcjonalny) do pola Tytuł.
+    Rozdzielone świadomie: cała firma filtruje dokumenty po Uwagach szukając
+    SAMEGO numeru projektu, a `numer_projektu_z_uwag()` bierze całą ich treść
+    jako numer — doklejenie opisu zepsułoby ten odczyt (10.09.2026).
+
     Zwraca {zapisano, numer, kroki}. zapisz=False = suchy przebieg."""
     tmp = tempfile.mkdtemp(prefix="subiekt_rw_")
     plan_path = os.path.join(tmp, "plan.json")
+    plan = {"pozycje": pozycje, "uwagi": uwagi, "magazyn": magazyn}
+    if tytul:
+        plan["tytul"] = tytul
     with open(plan_path, "w", encoding="utf-8") as f:
-        json.dump({"pozycje": pozycje, "uwagi": uwagi, "magazyn": magazyn}, f, ensure_ascii=False)
+        json.dump(plan, f, ensure_ascii=False)
     argv = [f"--plan={plan_path}"] + (["--zapisz"] if zapisz else [])
     wynik = _uruchom("rw", argv, os.path.join(tmp, "wynik.json"), timeout)
     # Ślad do WSPÓLNEJ historii — RW zdejmuje stan i dotąd nie zostawiał
