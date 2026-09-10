@@ -75,7 +75,7 @@ internal static class CommandDispatcher
         "progi", "wydruk", "projekt", "komplet", "komplet-napraw", "kartoteka-edytuj",
         "pola-wlasne", "magazyn-zaloz", "magazyn-usun", "pw", "projekt-cofnij",
         "kartoteki", "zapotrzebowanie-test", "zk-ilosci", "zk-poz-usun", "scal", "zk-nowe",
-        "migracja-uwagi",
+        "migracja-uwagi", "wydanie-stan",
     };
 
     public static bool Zna(string tryb) => Tryby.Contains(tryb, StringComparer.OrdinalIgnoreCase);
@@ -142,6 +142,12 @@ internal static class CommandDispatcher
 
             // Ilosci pozycji z ZK projektu — zrodlo „Ilosc (zam.)" w arkuszu.
             // Czysty odczyt; zapisem do pliku projektu zajmuje sie RM_BAZA.
+            // Stan wydawania materialu na projekt dla okna magazyniera:
+            // potrzeba (ZK+PW), wydano (RW). WYLACZNIE ODCZYT — patrz
+            // WydanieStan.cs, dlatego nie ma go w liscie Zapisujace.
+            case "wydanie-stan":
+                return WydanieStan.Uruchom(sfera, k.Projekt, k.Magazyn, k.OutPath);
+
             case "zk-ilosci":
                 return ZkIlosci.Uruchom(sfera, k.Projekt, k.OutPath);
 

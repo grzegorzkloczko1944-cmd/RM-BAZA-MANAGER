@@ -1658,7 +1658,26 @@ class MainWindow(tk.Tk):
             state=tk.DISABLED  # Aktywne tylko przy wybranym projekcie
         )
         self.btn_print.pack(side=tk.LEFT, padx=5, pady=10)
-        
+
+        # Przycisk WYDAJ — okno magazyniera „Wydanie z magazynu" (skan → RW).
+        # NIE zastępuje starego skanera „Uzupełnianie DOSTARCZONO": tamten
+        # obsługuje projekty prowadzone starą ścieżką i zostaje bez zmian
+        # (RM_BAZA_OKNO_WYDANIA_RW_PLAN.md §6).
+        self.btn_wydaj = tk.Button(
+            bt_r2,
+            text="📤 Wydaj",
+            command=self.open_wydanie_window,
+            bg="#e67e22",
+            fg="white",
+            font=("Arial", 10),
+            padx=15,
+            pady=5,
+            relief=tk.RAISED,
+            bd=2,
+            state=tk.DISABLED  # Aktywne tylko przy wybranym projekcie
+        )
+        self.btn_wydaj.pack(side=tk.LEFT, padx=5, pady=10)
+
         # Przycisk CHAT (skrajnie po prawej)
         tk.Button(
             bt_r2,
@@ -5754,15 +5773,15 @@ class MainWindow(tk.Tk):
             return
         
         allowed_roles = ["USER", "USER$", "USER$$", "ADMIN"]
-        if self.current_user_role in allowed_roles:
-            self.export_btn.config(state=tk.NORMAL)
-            # Aktywuj też przycisk DRUKUJ jeśli istnieje
-            if hasattr(self, 'btn_print'):
-                self.btn_print.config(state=tk.NORMAL)
-        else:
-            self.export_btn.config(state=tk.DISABLED)
-            if hasattr(self, 'btn_print'):
-                self.btn_print.config(state=tk.DISABLED)
+        wolno = self.current_user_role in allowed_roles
+        self.export_btn.config(state=tk.NORMAL if wolno else tk.DISABLED)
+        # DRUKUJ i WYDAJ chodzą po tej samej roli co EXPORT. WYDAJ nie
+        # wymaga locka projektu — okno nic nie zapisuje do bazy projektu,
+        # tylko wystawia RW w Subiekcie (patrz open_wydanie_window).
+        for nazwa in ('btn_print', 'btn_wydaj'):
+            btn = getattr(self, nazwa, None)
+            if btn is not None:
+                btn.config(state=tk.NORMAL if wolno else tk.DISABLED)
     
     def _update_lock_buttons_state(self):
         """Aktualizuje stan przycisków lock w zależności od roli użytkownika"""
@@ -30414,6 +30433,48 @@ class MainWindow(tk.Tk):
             project_name = None
 
         subiekt_zlozenia_gui.open_window(self, self.current_project_id, project_name)
+
+    def open_wydanie_window(self):
+        """Okno magazyniera „Wydanie z magazynu" — przycisk 📤 Wydaj.
+
+        Skan kodu → sesja pozycji → JEDNO RW ze wszystkimi pozycjami.
+        Potrzeba idzie z ZK (zakupy) i PW (produkcja własna), wydania z RW —
+        wszystko z Subiekta, bo to on jest właścicielem faktu magazynowego
+        (RM_BAZA_OKNO_WYDANIA_RW_PLAN.md §1).
+
+        NIE wymaga locka projektu: okno nic nie zapisuje do bazy projektu,
+        więc dwóch magazynierów może wydawać równocześnie. Kolizję wykrywa
+        ponowny odczyt przed wystawieniem dokumentu.
+
+        To NIE jest zamiennik starego skanera „Uzupełnianie DOSTARCZONO" —
+        tamten obsługuje projekty prowadzone starą ścieżką i zostaje.
+        """
+        if not self.current_project_id:
+            messagebox.showwarning("Wydanie z magazynu",
+                                   "Najpierw wybierz projekt.", parent=self)
+            return
+        try:
+            import subiekt_wydanie_gui
+        except ImportError as e:
+            messagebox.showerror(
+                "Wydanie z magazynu",
+                f"Nie znaleziono modułu subiekt_wydanie_gui.py\n\n{e}",
+                parent=self)
+            return
+
+        # Nazwa projektu niesie numer, po którym rozpoznaje się dokumenty
+        # w Subiekcie (pierwszy człon — patrz subiekt_zamowienia.sam_numer).
+        project_name = None
+        try:
+            row = self.db_manager.master_con.execute(
+                "SELECT name FROM projects WHERE project_id = ?",
+                (self.current_project_id,)).fetchone()
+            if row:
+                project_name = row[0]
+        except Exception:
+            project_name = None
+
+        subiekt_wydanie_gui.open_window(self, self.current_project_id, project_name)
 
     def open_subiekt_magazyn(self):
         """Okno „Stany magazynowe — cały Subiekt" (menu 📦 SUBIEKT).
