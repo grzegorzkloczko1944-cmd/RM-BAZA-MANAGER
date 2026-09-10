@@ -56,6 +56,7 @@ SPOSOB_AUTO = "auto"        # trafienie 1:1 po symbolu = numer rysunku
 SPOSOB_LUZNY = "luzny"      # TRIM + wielkość liter (spacje/a-A w bazie Subiekta)
 SPOSOB_RECZNY = "reczny"    # użytkownik wskazał kartotekę (fuzzy match)
 SPOSOB_ZALOZONA = "zalozona"  # kartoteka założona przez RM_BAZA
+SPOSOB_SCALONA = "scalona"    # stary symbol → kartoteka docelowa po scaleniu (alias)
 
 _lock = threading.Lock()
 
@@ -289,6 +290,110 @@ def stats(path=None):
 # Powiązania „to jest ta firma" nie wymagają tabeli — zapisują się jako NIP
 # w suppliers i następne dopasowanie idzie po NIP-ie. Ale „to nie firma" nie
 # ma gdzie żyć w RM_BAZA, a bez utrwalenia wracało po każdym odświeżeniu.
+
+# ── SCALANIE KARTOTEK: aliasy starych symboli ────────────────────────────────
+
+def ensure_schema_aliasy(path=None):
+    """Tabela aliasów po scaleniu kartotek (edytor, panel 5 — 10.09.2026).
+
+    Osobna od `mapowania`, bo tamta jest kluczowana numerem z BOM-u, a tu
+    kluczem jest STARY SYMBOL SUBIEKTA. Trzymamy ją, żeby po pół roku dało
+    się odpowiedzieć „skąd wzięło się to mapowanie" i cofnąć decyzję.
+    """
+    with _lock:
+        con = _connect(path)
+        try:
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS aliasy_scalen (
+                    stary_symbol  TEXT PRIMARY KEY,   -- symbol wycofanej kartoteki (jak w Subiekcie)
+                    stary_id      INTEGER,
+                    nowy_symbol   TEXT NOT NULL,      -- kartoteka docelowa
+                    nowy_id       INTEGER,
+                    kto           TEXT,
+                    kiedy         TEXT NOT NULL
+                )
+            """)
+            con.execute("CREATE INDEX IF NOT EXISTS idx_alias_nowy ON aliasy_scalen(nowy_symbol)")
+            con.commit()
+        finally:
+            con.close()
+
+
+def zapisz_scalenie(cel, cel_id, zrodla, path=None):
+    """Po udanym scaleniu w Subiekcie: aliasy + przepięcie mapowań.
+
+    `zrodla` = {stary_symbol: stary_id}. Trzy rzeczy, w jednej transakcji:
+      1. alias stary → nowy (tabela aliasy_scalen),
+      2. każde mapowanie BOM-u, które wskazywało stary symbol, wskazuje
+         teraz cel — inaczej arkusz dalej „widziałby" wycofaną kartotekę,
+      3. mapowanie numer=stary_symbol → cel (sposob=scalona): gdy stary BOM
+         przyniesie dosłownie stary symbol, etap 3 rozpozna go od razu jako
+         zapamiętany i wskaże kartotekę docelową — bez zmian w dopasowaniu.
+    Zwraca liczbę przepiętych mapowań.
+    """
+    cel = (cel or "").strip()
+    if not cel or not zrodla:
+        return 0
+    ensure_schema(path)
+    ensure_schema_aliasy(path)
+    kto = os.environ.get("USERNAME") or "?"
+    kiedy = datetime.now().isoformat(timespec="seconds")
+    przepiete = 0
+    with _lock:
+        con = _connect(path)
+        try:
+            for stary, stary_id in zrodla.items():
+                stary = (stary or "").strip()
+                if not stary:
+                    continue
+                con.execute("""
+                    INSERT INTO aliasy_scalen (stary_symbol, stary_id, nowy_symbol, nowy_id, kto, kiedy)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(stary_symbol) DO UPDATE SET
+                        nowy_symbol = excluded.nowy_symbol, nowy_id = excluded.nowy_id,
+                        kto = excluded.kto, kiedy = excluded.kiedy
+                """, (stary, stary_id, cel, cel_id, kto, kiedy))
+                cur = con.execute("""
+                    UPDATE mapowania SET symbol_subiekt = ?, id_subiekt = ?,
+                        uwagi = COALESCE(uwagi || ' | ', '') || 'scalono z ' || ?
+                    WHERE symbol_subiekt = ? COLLATE NOCASE
+                """, (cel, cel_id, stary, stary))
+                przepiete += cur.rowcount
+                con.execute("""
+                    INSERT INTO mapowania
+                        (numer_rysunku, symbol_subiekt, id_subiekt, nazwa_subiekt, sposob, kto, kiedy, uwagi)
+                    VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+                    ON CONFLICT(numer_rysunku) DO UPDATE SET
+                        symbol_subiekt = excluded.symbol_subiekt,
+                        id_subiekt = excluded.id_subiekt,
+                        sposob = excluded.sposob, kto = excluded.kto,
+                        kiedy = excluded.kiedy, uwagi = excluded.uwagi
+                """, (_key(stary), cel, cel_id, SPOSOB_SCALONA, kto, kiedy,
+                      f"alias po scaleniu kartotek: {stary} → {cel}"))
+            con.commit()
+        finally:
+            con.close()
+    return przepiete
+
+
+def alias_dla(symbol, path=None):
+    """Kartoteka docelowa dla wycofanego symbolu albo None."""
+    s = (symbol or "").strip()
+    if not s:
+        return None
+    try:
+        con = _connect(path, readonly=True)
+    except Exception:
+        return None
+    try:
+        r = con.execute("SELECT nowy_symbol, nowy_id FROM aliasy_scalen "
+                        "WHERE stary_symbol = ? COLLATE NOCASE", (s,)).fetchone()
+        return {"symbol": r["nowy_symbol"], "id": r["nowy_id"]} if r else None
+    except Exception:
+        return None
+    finally:
+        con.close()
+
 
 def ensure_schema_dostawcy(path=None):
     with _lock:

@@ -91,6 +91,11 @@ internal static class Katalog
                 a.Id,
                 a.Symbol,
                 a.Nazwa,
+                // Opis dochodzi pod kolumne "Opis" w edytorze kartotek
+                // (10.09.2026): sam symbol i nazwa nie wystarczaly, zeby
+                // odroznic warianty tej samej czesci. To pole tekstowe
+                // W TEJ SAMEJ projekcji — bez drugiego przelotu po bazie.
+                a.Opis,
                 a.CenaEwidencyjna,
                 Rodzaj = a.Rodzaj.Nazwa,
                 WKompletach = a.SkladnikiWKompletach.Count(),
@@ -107,6 +112,7 @@ internal static class Katalog
                 a.Id,
                 (a.Symbol ?? "").Trim(),
                 (a.Nazwa ?? "").Trim(),
+                (a.Opis ?? "").Trim(),
                 decimal.Round(a.CenaEwidencyjna, 2),
                 (a.Rodzaj ?? "").Trim(),
                 a.WKompletach,
@@ -129,6 +135,7 @@ internal static class Katalog
     // Id kartoteki — RM_BAZA pokazuje je obok symbolu, żeby dało się
     // jednoznacznie wskazać pozycję w Subiekcie (symbole bywają zapisane
     // różnie, Id nie).
-    internal record Kart(int Id, string Symbol, string Nazwa, decimal CenaEwidencyjna,
+    internal record Kart(int Id, string Symbol, string Nazwa, string Opis,
+                         decimal CenaEwidencyjna,
                          string Rodzaj, int WKompletach, int Skladnikow);
 }

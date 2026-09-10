@@ -109,7 +109,14 @@ internal static class Kartoteki
                         zmiany.Add($"nazwa: „{ob.Dane.Nazwa}” → „{nazwa}”");
                         if (zapisz) ob.Dane.Nazwa = nazwa;
                     }
-                    if (p.Cena is { } cena)
+                    // CENA ZERO NIGDY NIE NADPISUJE (10.09.2026): przy zakladaniu
+                    // kartoteki (nizej) zero bylo pomijane od poczatku, ale TU,
+                    // przy edycji, kazda wartosc szla do bazy — wiec zapis
+                    // kartoteki z nietknietym polem "Cena ewid." (startuje z 0,00)
+                    // zerowal cene ustawiona w Subiekcie. Warunek trzymamy takze
+                    // po stronie mostu, bo starsze binarki klienta nadal wysylaja
+                    // zero. Zero wpisuje sie w Subiekcie, nie przez ten kanal.
+                    if (p.Cena is > 0 and { } cena)
                     {
                         var stara = decimal.Round((decimal)ob.Dane.CenaEwidencyjna, 2);
                         var nowa = decimal.Round(cena, 2);
