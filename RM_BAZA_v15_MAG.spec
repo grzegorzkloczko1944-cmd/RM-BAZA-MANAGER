@@ -38,6 +38,8 @@ hiddenimports += [
     'subiekt_edytor_gui', 'subiekt_historia',
     # dopasowanie znormalizowanych do kartotek (okno z menu SUBIEKT)
     'subiekt_dopasowanie_gui', 'subiekt_dopasowanie',
+    # produkcja wlasna RMPAK (PW/RW) + okno zlozen projektu
+    'subiekt_produkcja', 'subiekt_zlozenia_gui',
     # warstwa danych Subiekta
     'subiekt_bridge', 'subiekt_konfig', 'subiekt_asortyment', 'subiekt_dostawcy',
     'subiekt_mapowania', 'subiekt_podobne', 'subiekt_scalanie',
@@ -60,6 +62,7 @@ datas += [(f'{m}.py', '.') for m in (
     'subiekt_projekt', 'subiekt_wyslij_zd', 'subiekt_bridge', 'subiekt_konfig',
     'subiekt_edytor_gui', 'subiekt_historia',
     'subiekt_dopasowanie_gui', 'subiekt_dopasowanie',
+    'subiekt_produkcja', 'subiekt_zlozenia_gui',
     'subiekt_asortyment', 'subiekt_dostawcy', 'subiekt_mapowania',
     'subiekt_podobne', 'subiekt_scalanie', 'rm_kreciolek',
 )]
