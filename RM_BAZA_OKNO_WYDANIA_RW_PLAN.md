@@ -8,11 +8,76 @@ Podstawa: specyfikacja i makieta GUI od użytkownika (10–11.09.2026).
 ## 1. Zasada nadrzędna: skąd co się bierze
 
 ```text
-POTRZEBA          → RM_BAZA / BOM projektu
+POTRZEBA          → Subiekt:
+                      ZK  dla pozycji kupowanych
+                      PW  dla produkcji własnej
 STAN MAGAZYNU     → Subiekt
 LOKACJA           → Subiekt (Polozenie na kartotece)
 WYDANO WCZEŚNIEJ  → dokumenty RW w Subiekcie
 ```
+
+**Całe okno operuje na faktach zapisanych w Subiekcie**, nie na założeniach
+konstrukcyjnych:
+
+```text
+ZK → co trzeba wydać z zakupów
+PW → co przyjęto z własnej produkcji i trzeba wydać
+RW → co już faktycznie wydano
+```
+
+BOM zostaje źródłem **konstrukcyjnym**, ale nie licznikiem magazynowym.
+
+### Dlaczego dwa dokumenty, nie BOM
+
+Tory są rozdzielone od dawna (`RMPAK_PRODUKCJA_USTALENIA.md` §2):
+
+```text
+Dostawca ≠ RMPAK  → tor zakupowy    → ZK
+Dostawca = RMPAK  → tor produkcji   → PW → RW
+```
+
+Detale produkcji własnej **świadomie nie trafiają na ZK** — RMPAK jest
+producentem, nie zamawia u siebie. Gdyby potrzeba szła z BOM-u, okno
+pokazywałoby pozycje, których nikt jeszcze nie kupił ani nie wyprodukował.
+
+Kod już na tym stoi: `pw_do_rw()` bierze pozycje **dokładnie z PW**, nie
+z BOM-u ani kalkulatora (§11 ustaleń) — żeby przyjęcie i wydanie nie
+rozjechały się, gdy ktoś później zmieni ilości w projekcie.
+
+### Przykład
+
+```text
+ZK 48/2026:              PW 31/MASTER/2026:
+  UCFL 201        4        2741-100.01     6
+  Czujnik SICK    2        2741-200.02     2
+```
+
+daje jedną listę potrzeb:
+
+```text
+UCFL 201        potrzeba 4   źródło ZK
+Czujnik SICK    potrzeba 2   źródło ZK
+2741-100.01     potrzeba 6   źródło PW
+2741-200.02     potrzeba 2   źródło PW
+```
+
+a potem `POZOSTAŁO = POTRZEBA (ZK/PW) − SUMA RW`.
+
+Kolumna **źródło** zostaje widoczna w oknie — magazynier ma wiedzieć, czy
+pozycja przyszła z zakupu, czy z własnej produkcji.
+
+### ⚠️ Nie sumować ZK + PW dla tego samego symbolu
+
+Te drogi są rozłączne z założenia. Jeśli symbol pojawi się w obu (stare
+dane, błędnie ustawiony dostawca), **nie dodajemy ilości** — pokazujemy
+konflikt do sprawdzenia:
+
+```text
+⚠ 2741-100.01 występuje i na ZK 48/2026 (4 szt.), i na PW 31/MASTER/2026 (6 szt.)
+  Sprawdź dostawcę tej pozycji — potrzeba niepoliczona.
+```
+
+Ciche `4 + 6 = 10` byłoby liczbą, której nikt nie zamierzał.
 
 **Dokument RW jest faktem magazynowym i to on odpowiada na pytanie, ile
 naprawdę wyszło z magazynu.** Nie liczymy tego z własnej bazy.
@@ -90,33 +155,44 @@ a nie w domysłach.
 Dziś jedyna droga do RW to tryb `dokumenty`, który ciągnie **ZK + ZD + RW +
 PW + WZ z pozycjami** — stąd ~9 s. Dla skanera to za dużo.
 
-### Nowy tryb mostu: `rw-wydania`
+### Nowy tryb mostu: `wydanie-stan`
+
+Jedno wywołanie daje wszystko, czego okno potrzebuje na starcie —
+potrzebę (ZK + PW) i wydania (RW) tego projektu:
 
 ```text
-NexoRecon.exe rw-wydania --projekt=2741 [--magazyn=MASTER] [--out=w.json]
+NexoRecon.exe wydanie-stan --projekt=2741 [--magazyn=MASTER] [--out=w.json]
 ```
-
-Zwraca wyłącznie sumy per symbol:
 
 ```json
 {
   "projekt": "2741",
   "magazyn": "MASTER",
-  "dokumentow": 3,
-  "bez_projektu": 3,
   "pozycje": [
-    {"symbol": "UCFL 201", "ilosc": 6},
-    {"symbol": "DFM-20-100", "ilosc": 2},
-    {"symbol": "DIN912 M6x20", "ilosc": 20}
+    {"symbol": "UCFL 201",    "potrzeba": 4, "zrodlo": "ZK", "wydano": 6},
+    {"symbol": "2741-100.01", "potrzeba": 6, "zrodlo": "PW", "wydano": 0},
+    {"symbol": "DIN 933 M8x30","potrzeba": null, "zrodlo": null, "wydano": 4}
+  ],
+  "konflikty": [
+    {"symbol": "2741-200.02", "zk": 4, "pw": 6}
+  ],
+  "rw_bez_projektu": [
+    {"numer": "RW 141/MASTER/2026", "data": "2026-09-10", "pozycji": 6}
   ]
 }
 ```
 
-Jedna kolekcja (`RozchodyWewnetrzne`), filtr po numerze projektu z Uwag,
-suma ilości. Bez nagłówków, bez cen, bez pozostałych czterech rodzajów
-dokumentów.
+Trzy kolekcje (`ZamowieniaOdKlientow`, `PrzychodyWewnetrzne`,
+`RozchodyWewnetrzne`), filtr po numerze projektu z Uwag, sumy per symbol.
+Bez cen, bez pozostałych rodzajów dokumentów, bez nagłówków poza tym, co
+potrzebne do listy pominiętych RW.
 
-`bez_projektu` niesie liczbę do komunikatu z §2.
+Pola specjalne:
+
+- `potrzeba: null` + `zrodlo: null` → pozycja **spoza BOM-u**, wydana wcześniej
+  na ten projekt, ale nieplanowana (§8)
+- `konflikty` → symbol i na ZK, i na PW — potrzeba **niepoliczona** (§1)
+- `rw_bez_projektu` → gotowa lista do klikalnej stopki (§8)
 
 ### Cache — wyłącznie przyspieszenie
 
@@ -142,7 +218,7 @@ otwarcie okna
      ↓
 natychmiast: pokaż cache (jeśli jest) + etykieta „odświeżam…"
      ↓
-w tle: rw-wydania z Subiekta
+w tle: wydanie-stan z Subiekta
      ↓
 0,5–3 s: podmień liczby, zapisz cache, zdejmij etykietę
 ```
@@ -161,7 +237,7 @@ dokumentu:
 ```text
 [ZAKOŃCZ WYDANIE → RW]
      ↓
-świeży rw-wydania + stany magazynu
+świeży wydanie-stan + stany magazynu
      ↓
 czy coś się zmieniło od otwarcia okna?
      ├─ NIE  → podgląd sesji → potwierdzenie → RW
@@ -225,7 +301,7 @@ tego, co powstało.
 | Plik | Co się dzieje |
 |---|---|
 | `subiekt_wydanie_gui.py` | **nowy** — całe okno |
-| `subiekt_sfera/NexoRecon/RwWydania.cs` | **nowy** — tryb `rw-wydania` |
+| `subiekt_sfera/NexoRecon/WydanieStan.cs` | **nowy** — tryb `wydanie-stan` |
 | `subiekt_sfera/NexoRecon/CommandDispatcher.cs` | +1 tryb (odczyt, nie zapis) |
 | `subiekt_magazyn_gui.py` | bez zmian — `utworz_rw()` używane jak jest |
 | `RM_BAZA_v15_MAG_STATS_ORG.py` | +1 pozycja w menu, otwarcie okna |
@@ -242,7 +318,7 @@ Nowe okno powstaje **obok**, nie zamiast. Kopiujemy z niego wzorce
 
 ## 7. Kolejność prac
 
-1. **Tryb `rw-wydania`** w moście + test na demo (sam odczyt, bezpieczny).
+1. **Tryb `wydanie-stan`** w moście + test na demo (sam odczyt, bezpieczny).
 2. **Szkielet okna** — układ wg makiety, dane z punktu 1, bez wystawiania RW.
    Do obejrzenia, czy układ pasuje magazynierowi.
 3. **Sesja wydania** — dodawanie, usuwanie, poprawianie ilości, historia skanów.
