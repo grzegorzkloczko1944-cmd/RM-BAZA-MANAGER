@@ -95,6 +95,10 @@ def _poz(n):
 class WydanieWindow(tk.Toplevel, Kreciolek):
     """Okno wydania materiału na projekt."""
 
+    #: Rozmiar miniatury rysunku w PIKSELACH. Magazynier ma po niej poznać
+    #: detal, którego nie zna z numeru — znaczek 100×60 tego nie da.
+    MINI_W, MINI_H = 260, 200
+
     #: Kolumny listy kompletacyjnej: (klucz, nagłówek, szerokość)
     #:
     #: To NIE jest lista „co zeskanowałem" — to PLAN WYDANIA: co zostało do
@@ -202,10 +206,20 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                      state="readonly", font=("Arial", 10),
                      values=[MAGAZYN]).pack(anchor="w", pady=(2, 0))
 
+        # DWIE OSOBY: kto wydaje z magazynu i kto odbiera. RW zdejmuje towar
+        # ze stanu, więc przy sporze „gdzie się podział ten detal" potrzebne
+        # są obie strony, nie jedna.
+        s = sekcja("🔑", "Wydał:")
+        self.var_wydal = tk.StringVar()
+        self.combo_wydal = ttk.Combobox(s, textvariable=self.var_wydal,
+                                        width=20, state="readonly",
+                                        font=("Arial", 10))
+        self.combo_wydal.pack(anchor="w", pady=(2, 0))
+
         s = sekcja("👤", "Pobiera:")
         self.var_pobiera = tk.StringVar()
         self.combo_pobiera = ttk.Combobox(s, textvariable=self.var_pobiera,
-                                          width=22, state="readonly",
+                                          width=20, state="readonly",
                                           font=("Arial", 10))
         self.combo_pobiera.pack(anchor="w", pady=(2, 0))
         self._wczytaj_osoby()
@@ -226,9 +240,30 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         tk.Button(pasek, text="Odśwież", command=self._odswiez,
                   font=("Arial", 8)).pack(side=tk.RIGHT, padx=14)
 
+        # Diplodok. Żart dla magazyniera — jedyne jego zadanie to stać
+        # na belce i patrzeć. Brak pliku niczego nie psuje.
+        self._dino = None
+        try:
+            import os
+            from PIL import Image, ImageTk
+            plik = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "diplodok.png")
+            if os.path.isfile(plik):
+                im = Image.open(plik).convert("RGBA")
+                im.thumbnail((150, 66), Image.LANCZOS)
+                # Tło paska pod przezroczystość — inaczej PNG z alfą wychodzi
+                # na czarno w tk.Label.
+                plansza = Image.new("RGBA", im.size, TLO_SEKCJI)
+                plansza.alpha_composite(im)
+                self._dino = ImageTk.PhotoImage(plansza.convert("RGB"))
+                tk.Label(pasek, image=self._dino, bg=TLO_SEKCJI).pack(
+                    side=tk.RIGHT, padx=(0, 10))
+        except Exception:
+            pass          # dinozaur wymarł, praca idzie dalej
+
     def _panel_skanera(self, rodzic):
         ram = tk.LabelFrame(rodzic, text=" Skaner ", bg=TLO_SEKCJI, fg=TEKST,
-                            font=("Arial", 9, "bold"), width=560)
+                            font=("Arial", 9, "bold"), width=640)
         ram.pack(fill=tk.BOTH, expand=True)
         ram.pack_propagate(False)
 
@@ -267,16 +302,22 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
 
         # Miniatura rysunku — magazynier wydaje detal, którego nie zna
         # z numeru. Obrazek pochodzi z DWF projektu (ten sam cache co arkusz).
-        mini = tk.Frame(dane, bg=TLO_SEKCJI)
+        # Rozmiar w PIKSELACH, nie w znakach: tk.Label liczy width/height
+        # w jednostkach czcionki, więc „width=14" dawało pasek na ~14 znaków,
+        # a nie 14 px — miniatura wychodziła wielkości znaczka. Pusta ramka
+        # wymusza rozmiar przez frame + pack_propagate.
+        #
+        # Bez obwódki i bez przycisku „Podgląd": sam rysunek jest przyciskiem
+        # (klik = powiększenie). Ramka i przycisk dokładały dwa elementy,
+        # które nic nie wnosiły poza zajęciem miejsca.
+        mini = tk.Frame(dane, bg=TLO_SEKCJI, width=self.MINI_W,
+                        height=self.MINI_H)
         mini.pack(side=tk.LEFT, padx=(10, 0))
-        self.lbl_rysunek = tk.Label(mini, bg="#f4f6f7", width=14, height=6,
-                                    bd=1, relief=tk.SOLID, text="—",
+        mini.pack_propagate(False)
+        self.lbl_rysunek = tk.Label(mini, bg=TLO_SEKCJI, text="—",
                                     fg=TEKST_SZARY, font=("Arial", 8))
-        self.lbl_rysunek.pack()
-        self.btn_podglad = tk.Button(mini, text="🔍 Podgląd", font=("Arial", 8),
-                                     command=self._podglad_rysunku,
-                                     state=tk.DISABLED)
-        self.btn_podglad.pack(fill=tk.X, pady=(4, 0))
+        self.lbl_rysunek.pack(fill=tk.BOTH, expand=True)
+        self.lbl_rysunek.bind("<Button-1>", lambda _e: self._podglad_rysunku())
         #: Referencja na PhotoImage — bez niej obrazek znika po GC.
         self._foto = None
         self._sciezka_rysunku = None
@@ -518,8 +559,20 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         except Exception as e:
             print("⚠️  Nie wczytano listy osób: %s" % e)
         self.combo_pobiera["values"] = osoby
-        if osoby:
-            self.var_pobiera.set(osoby[0])
+        self.combo_wydal["values"] = osoby
+
+        # „Wydał" to ten, kto stoi przy komputerze — podstawiamy zalogowanego,
+        # żeby magazynier nie klikał tego przy każdym wydaniu. „Pobiera"
+        # zostaje PUSTE: to świadomy wybór, kto odbiera towar.
+        import os
+        ja = (os.environ.get("USERNAME") or "").strip().upper()
+        for o in osoby:
+            if o.strip().upper() == ja:
+                self.var_wydal.set(o)
+                break
+        else:
+            if osoby:
+                self.var_wydal.set(osoby[0])
 
     def _odswiez(self):
         """Stan z Subiekta w tle — okno zostaje responsywne."""
@@ -790,8 +843,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         """Miniatura DWF — ten sam cache co arkusz główny RM_BAZA."""
         self._foto = None
         self._sciezka_rysunku = None
-        self.lbl_rysunek.config(image="", text="—")
-        self.btn_podglad.config(state=tk.DISABLED)
+        self.lbl_rysunek.config(image="", text="—", cursor="")
         try:
             from pathlib import Path
             from import_bom import find_dwf_for_drawing, find_dwf_in_library
@@ -804,11 +856,20 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                 return
             thumb = dwf_thumb.get_cached_thumb_path(str(sciezka))
             im = Image.open(thumb).convert("RGB")
-            im.thumbnail((150, 110), Image.LANCZOS)
+            # Cache trzyma rysunek wpasowany w kwadrat, więc pionowy detal ma
+            # po bokach puste tło — przycinamy je, żeby cała ramka szła na
+            # sam rysunek (ten sam zabieg co w arkuszu głównym RM_BAZA).
+            from PIL import ImageChops
+            tlo = im.getpixel((0, 0))
+            bbox = ImageChops.difference(
+                im, Image.new("RGB", im.size, tlo)).getbbox()
+            if bbox:
+                im = im.crop(bbox)
+            im.thumbnail((self.MINI_W - 6, self.MINI_H - 6), Image.LANCZOS)
             self._foto = ImageTk.PhotoImage(im)
             self._sciezka_rysunku = thumb
-            self.lbl_rysunek.config(image=self._foto, text="")
-            self.btn_podglad.config(state=tk.NORMAL)
+            # Kursor „rączka" mówi, że w rysunek da się kliknąć.
+            self.lbl_rysunek.config(image=self._foto, text="", cursor="hand2")
         except Exception:
             # Brak rysunku nie może przeszkodzić w wydaniu — to tylko pomoc.
             self.lbl_rysunek.config(text="brak\nrysunku")
@@ -839,9 +900,9 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
             z.set("—")
         self.var_ilosc.set("")
         self.var_meta.set("Typ: —   |   Grubość: —   |   Materiał: —   |   Plan: —")
-        self.lbl_rysunek.config(image="", text="—")
+        self.lbl_rysunek.config(image="", text="—", cursor="")
         self._foto = None
-        self.btn_podglad.config(state=tk.DISABLED)
+        self._sciezka_rysunku = None
         if not zostaw_uwage:
             self._uwaga("")
         self.btn_dodaj.config(state=tk.DISABLED)
@@ -1140,8 +1201,37 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
             lokacja or "—"))
 
     def _podglad_rysunku(self):
-        """Powiększenie miniatury — dochodzi razem ze skanowaniem (punkt 3)."""
-        pass
+        """Rysunek na pełnym ekranie — gdy miniatura nie wystarcza."""
+        if not self._sciezka_rysunku:
+            return
+        try:
+            from PIL import Image, ImageTk
+            im = Image.open(self._sciezka_rysunku).convert("RGB")
+        except Exception as e:
+            messagebox.showerror("Podgląd", "Nie udało się otworzyć rysunku:\n\n%s"
+                                 % e, parent=self)
+            return
+
+        okno = tk.Toplevel(self)
+        okno.title("Rysunek — %s" % self.var_symbol.get())
+        okno.transient(self)
+        okno.configure(bg="#2c3e50")
+        # Do 85% ekranu: rysunek ma być duży, ale okno musi się zmieścić.
+        maks_w = int(self.winfo_screenwidth() * 0.85)
+        maks_h = int(self.winfo_screenheight() * 0.85)
+        im.thumbnail((maks_w, maks_h), Image.LANCZOS)
+        foto = ImageTk.PhotoImage(im)
+        lbl = tk.Label(okno, image=foto, bg="#2c3e50", cursor="hand2")
+        lbl.image = foto          # referencja — bez niej obrazek znika po GC
+        lbl.pack(padx=6, pady=6)
+        tk.Label(okno, text="%s   %s   —   kliknij albo Esc, aby zamknąć"
+                 % (self.var_symbol.get(), self.var_nazwa.get()),
+                 bg="#2c3e50", fg="white", font=("Arial", 9)).pack(pady=(0, 6))
+        for zdarzenie in ("<Button-1>", "<Escape>"):
+            okno.bind(zdarzenie, lambda _e: okno.destroy())
+        lbl.bind("<Button-1>", lambda _e: okno.destroy())
+        wysrodkuj(okno, self)
+        okno.focus_set()
 
     def _podglad_rw(self):
         """Co pójdzie na dokument. NIC nie zapisuje."""
@@ -1178,16 +1268,29 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         wysrodkuj(okno, self)
 
     def _uwagi_rw(self):
-        """Uwagi dokumentu: numer projektu w 1. wierszu, kto pobrał niżej.
+        """Uwagi dokumentu: numer projektu w 1. wierszu, ludzie niżej.
+
+            2627
+            WYDAŁ: Grzegorz Kloczko   POBRAŁ: Jan Kowalski
 
         Pierwszy wiersz należy do numeru projektu — po nim liczą się wydania
-        (patrz WydanieStan.cs). „POBRAŁ" idzie do drugiego; Uwagi SIĘ DRUKUJĄ,
-        więc nazwisko będzie widoczne na dokumencie.
+        (patrz WydanieStan.cs). Ludzie idą do drugiego; Uwagi SIĘ DRUKUJĄ,
+        więc oba nazwiska są widoczne na dokumencie.
+
+        DWIE OSOBY, NIE JEDNA: RW zdejmuje towar ze stanu, więc przy sporze
+        „gdzie się podział ten detal" trzeba wiedzieć i kto go wydał z
+        magazynu, i komu. Sam „POBRAŁ" zostawiał połowę odpowiedzi.
         """
         from subiekt_zamowienia import zloz_uwagi
-        kto = (self.var_pobiera.get() or "").strip()
+        czesci = []
+        wydal = (self.var_wydal.get() or "").strip()
+        pobral = (self.var_pobiera.get() or "").strip()
+        if wydal:
+            czesci.append("WYDAŁ: %s" % wydal)
+        if pobral:
+            czesci.append("POBRAŁ: %s" % pobral)
         return zloz_uwagi(self.project_name,
-                          "POBRAŁ: %s" % kto if kto else None)
+                          "   ".join(czesci) if czesci else None)
 
     # ── wystawienie RW ──────────────────────────────────────────────────
 
@@ -1200,10 +1303,17 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         """
         if not self.sesja:
             return
-        if not (self.var_pobiera.get() or "").strip():
-            messagebox.showwarning("Wydanie",
-                                   "Wybierz osobę w polu „Pobiera”.",
-                                   parent=self)
+        # Obie osoby są wymagane: RW zdejmuje towar ze stanu i dokument musi
+        # powiedzieć, kto go wydał i komu.
+        brak = [n for n, v in (("Wydał", self.var_wydal),
+                               ("Pobiera", self.var_pobiera))
+                if not (v.get() or "").strip()]
+        if brak:
+            messagebox.showwarning(
+                "Wydanie",
+                "Uzupełnij pole „%s”." % "” i „".join(brak), parent=self)
+            (self.combo_wydal if "Wydał" in brak
+             else self.combo_pobiera).focus_set()
             return
 
         self.btn_zakoncz.config(state=tk.DISABLED, text="Sprawdzam…")
@@ -1305,12 +1415,12 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                 "Potwierdź wydanie",
                 "Subiekt utworzy dokument RW:\n\n"
                 "    pozycji:  %d\n    sztuk:    %s\n    magazyn:  %s\n"
-                "    pobiera:  %s\n    uwagi:    %s\n\n"
+                "    wydał:    %s\n    pobiera:  %s\n    uwagi:    %s\n\n"
                 "To ZDEJMIE towar ze stanu magazynu.\n"
                 "Dokumentu magazynowego nie cofa się jednym kliknięciem.\n\n"
                 "Zapisać?"
                 % (len(poz_sesji), _ilo(sztuk), self.var_magazyn.get(),
-                   self.var_pobiera.get(),
+                   self.var_wydal.get(), self.var_pobiera.get(),
                    self._uwagi_rw().replace("\n", " ⏎ ")),
                 icon="question", default="no", parent=self):
             return
@@ -1414,9 +1524,10 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         messagebox.showinfo(
             "Wydanie zapisane",
             "✓ Wystawiono %s\n✓ %d pozycji, %s szt.\n"
-            "✓ zapisano wydanie dla projektu %s\n\nPobrał: %s"
+            "✓ zapisano wydanie dla projektu %s\n\n"
+            "Wydał: %s\nPobrał: %s"
             % (numer, len(poz_sesji), _ilo(sztuk), self.project_name,
-               self.var_pobiera.get()), parent=self)
+               self.var_wydal.get(), self.var_pobiera.get()), parent=self)
 
         # Sesja zamknięta — kolejne wydanie zaczyna się od zera, a liczby
         # „wydano wcześniej" muszą już uwzględniać ten dokument.
