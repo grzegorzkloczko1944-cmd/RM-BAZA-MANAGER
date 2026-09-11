@@ -24139,60 +24139,12 @@ class RMManagerGUI:
             """Załaduj listę projektów do combobox"""
             try:
                 # Pobierz projekty z master DB
-                print(f"🔍 load_projects_list: master_db_path = {self.master_db_path}")
-                from pathlib import Path
-                master_path = Path(self.master_db_path)
-                print(f"   Plik istnieje: {master_path.exists()}")
-                if master_path.exists():
-                    print(f"   Rozmiar: {master_path.stat().st_size / 1024:.1f} KB")
-                
-                con = sqlite3.connect(self.master_db_path, timeout=10.0)
-                con.row_factory = sqlite3.Row
-                
-                # Sprawdź czy tabela projects istnieje
-                cursor = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='projects'")
-                if not cursor.fetchone():
-                    print(f"   ⚠️  Tabela 'projects' NIE ISTNIEJE w {self.master_db_path}")
-                    con.close()
-                    return
-                
-                # Wykryj nazwy kolumn dynamicznie
-                cursor = con.execute("PRAGMA table_info(projects)")
-                cols_info = cursor.fetchall()
-                col_names = [col[1] for col in cols_info]
-                
-                print(f"   Kolumny w tabeli projects: {col_names}")
-                
-                # Znajdź kolumnę ID
-                id_col = 'id'
-                if 'project_id' in col_names:
-                    id_col = 'project_id'
-                
-                # Znajdź kolumnę name
-                name_col = 'name'
-                if 'project_name' in col_names:
-                    name_col = 'project_name'
-                
-                # Znajdź kolumnę active
-                active_col = None
-                for candidate in ['is_active', 'active', 'enabled']:
-                    if candidate in col_names:
-                        active_col = candidate
-                        break
-                
-                # Buduj SQL - tylko aktywne projekty MACHINE
-                where_clause = []
-                if active_col:
-                    where_clause.append(f"COALESCE({active_col}, 1) = 1")
-                if 'project_type' in col_names:
-                    where_clause.append("COALESCE(project_type, 'MACHINE') = 'MACHINE'")
-                
-                where_sql = f"WHERE {' AND '.join(where_clause)}" if where_clause else ""
-                
-                sql = f"SELECT {id_col} as pid, {name_col} as name FROM projects {where_sql}"
-                cursor = con.execute(sql)
-                projects = cursor.fetchall()
-                con.close()
+                # Master RM_BAZA przez serwer — bez otwierania pliku i zgadywania kolumn.
+                # Filtr jak w SELECT: aktywne (NULL = aktywny) i typu MACHINE (NULL = MACHINE).
+                projects = [{"pid": p["project_id"], "name": p["name"]}
+                            for p in rmm._master().master_read("projects-list")
+                            if (p.get("active") is None or p.get("active"))
+                            and (p.get("project_type") or "MACHINE") == "MACHINE"]
                 
                 print(f"   Znaleziono {len(projects)} projektów")
                 
