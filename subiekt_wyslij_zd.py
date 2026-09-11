@@ -130,6 +130,13 @@ def _master():
     return _sciezka_master()
 
 
+def _serwer():
+    """RM_SERWER — jedyna droga do mastera. Konfigurację (adres, sekret)
+    ustawia RM_BAZA przy starcie; ten moduł działa wewnątrz niej."""
+    import rm_klient
+    return rm_klient
+
+
 def _katalog_pdf_domyslny():
     """
     Katalog wydruków ZD: Y:\\RM_BAZA\\zd_pdf\\ — obok archiwum faktur KSeF.
@@ -156,55 +163,17 @@ def _katalog_pdf_domyslny():
 
 def zapisz_wyslanie(numer_zd, adresat, nadawca, zalacznikow, termin=None, tryb="",
                     dokument_id=None):
-    """
-    Odnotowuje, że zamówienie poszło mailem — w RM_BAZA, nie w Subiekcie.
-
-    Status dokumentu w Subiekcie („Do realizacji") mówi o stanie MAGAZYNOWYM,
-    nie o wysyłce: nie zmienia się po wysłaniu maila i nie odróżnia zamówienia
-    wysłanego od czekającego. Stąd własny ślad.
-
-    Zapisujemy moment OTWARCIA wiadomości w programie pocztowym — bo tylko to
-    wiemy na pewno. Czy użytkownik faktycznie kliknął „Wyślij", wie już tylko
-    Outlook; dlatego kolumna nazywa się „Wysłano", ale znaczy „przygotowano
-    i otwarto do wysłania".
-
-    ⚠️ KLUCZEM JEST `dokument_id`, nie numer. Subiekt używa numeru PONOWNIE
-    po usunięciu dokumentu (07.09.2026: po skasowaniu ZD 4/5/6 kolejne dostały
-    te same numery), więc dziennik kluczowany numerem pokazywał nowemu ZD
-    wysyłkę starego — z datą i podświetleniem „wysłane". `numer_zd` zostaje,
-    ale tylko do pokazania człowiekowi.
-    """
-    import sqlite3
+    """Ślad wysyłki ZD w dzienniku na serwerze. Nie rzuca — brak śladu nie
+    unieważnia wysłanego maila."""
     try:
-        con = sqlite3.connect(_master(), timeout=10)
-        try:
-            con.execute("""
-                CREATE TABLE IF NOT EXISTS zd_wyslane (
-                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                    numer_zd     TEXT NOT NULL,
-                    dokument_id  INTEGER,
-                    adresat      TEXT,
-                    nadawca      TEXT,
-                    zalacznikow  INTEGER,
-                    termin       TEXT,
-                    tryb         TEXT,
-                    kiedy        TEXT NOT NULL
-                )""")
-            con.execute("CREATE INDEX IF NOT EXISTS idx_zd_wyslane_nr "
-                        "ON zd_wyslane(numer_zd)")
-            _zapewnij_kolumne_id(con)
-            con.execute(
-                "INSERT INTO zd_wyslane (numer_zd, dokument_id, adresat, nadawca,"
-                " zalacznikow, termin, tryb, kiedy) VALUES (?,?,?,?,?,?,?,?)",
-                (numer_zd, int(dokument_id) if dokument_id else None,
-                 adresat, nadawca, int(zalacznikow or 0),
-                 str(termin) if termin else None, tryb,
-                 datetime.now().isoformat(timespec="seconds")))
-            con.commit()
-        finally:
-            con.close()
+        _serwer().master_exec("zd-wyslane-dodaj", {
+            "numer_zd": numer_zd,
+            "dokument_id": int(dokument_id) if dokument_id else None,
+            "adresat": adresat, "nadawca": nadawca,
+            "zalacznikow": int(zalacznikow or 0),
+            "termin": str(termin) if termin else None, "tryb": tryb,
+            "kiedy": datetime.now().isoformat(timespec="seconds")})
     except Exception as e:
-        # Brak śladu nie może przerwać wysyłki — mail jest ważniejszy niż log.
         print(f"⚠️  Nie zapisano śladu wysyłki {numer_zd}: {e}")
 
 
@@ -264,38 +233,20 @@ def supplier_id_dostawcy(nazwa_subiekt, nip=None):
 
 
 def dostawca_rm_baza(nazwa_subiekt, nip=None):
-    """(supplier_id, nazwa) z listy dostawców RM_BAZA dla dostawcy z ZD.
-    (None, "") gdy nie da się ustalić.
-
-    Nazwa jest ta z RM_BAZA („QUAY"), nie z Subiekta („„QUAY" BIURO
-    HANDLOWO-USŁUGOWE SPÓŁKA…") — to ją widać w arkuszu i to ją pokazujemy
-    użytkownikowi, żeby wiedział, co dokładnie wejdzie do kolumny Dostawca.
-
-    Najpierw NIP (z kartoteki kontrahentów Subiekta) — jedyny pewny klucz;
-    nazwy w Subiekcie są pełne („… SPÓŁKA Z OGRANICZONĄ…"), w RM_BAZA
-    skrócone („QUAY"). Awaryjnie nazwa tą samą regułą co adres e-mail
-    (_uprosc_nazwe: dokładnie, potem zawieranie). Gdy nic nie pasuje —
-    dostawcy w arkuszu NIE ruszamy: lepiej zostawić starego niż wpisać złego.
-    """
-    import sqlite3
+    """(supplier_id, name) dostawcy RM_BAZA dla kartoteki Subiekta: najpierw
+    po NIP-ie, potem po uproszczonej nazwie. Kilku kandydatów = nie zgadujemy."""
     try:
         from subiekt_zamowienia import _uprosc_nazwe
-        con = sqlite3.connect(f"file:{_master()}?mode=ro", uri=True, timeout=10)
-        try:
-            if nip:
-                r = con.execute(
-                    "SELECT supplier_id, name FROM suppliers WHERE is_active=1"
-                    " AND REPLACE(REPLACE(COALESCE(nip,''),'-',''),' ','')=?",
-                    (str(nip).replace("-", "").replace(" ", ""),)).fetchone()
-                if r:
-                    return r[0], r[1] or ""
-            cel = _uprosc_nazwe(nazwa_subiekt or "")
-            if not cel:
-                return None, ""
-            wiersze = con.execute(
-                "SELECT supplier_id, name FROM suppliers WHERE is_active=1").fetchall()
-        finally:
-            con.close()
+        aktywni = [w for w in _serwer().master_read("suppliers-list") if w.get("is_active")]
+        if nip:
+            cyfry = str(nip).replace("-", "").replace(" ", "")
+            for w in aktywni:
+                if str(w.get("nip") or "").replace("-", "").replace(" ", "") == cyfry:
+                    return w["supplier_id"], w.get("name") or ""
+        cel = _uprosc_nazwe(nazwa_subiekt or "")
+        if not cel:
+            return None, ""
+        wiersze = [(w["supplier_id"], w.get("name")) for w in aktywni]
     except Exception as e:
         print(f"⚠️  Nie ustalono dostawcy RM_BAZA dla „{nazwa_subiekt}”: {e}")
         return None, ""
@@ -308,225 +259,78 @@ def dostawca_rm_baza(nazwa_subiekt, nip=None):
 
 
 def odloz_zamowienia(bom_refy, termin, numer_zd, supplier_id=None):
-    """Zapisuje do master, które pozycje BOM-u poszły w ZD i z jakim terminem.
-
-    `bom_refy`: [(project_id, item_id)]. Klucz (project_id, item_id) —
-    ponowna wysyłka tego samego ZD nie mnoży wpisów, obowiązuje ostatni termin.
-    `supplier_id`: dostawca z ZD (RM_BAZA) — trafia do kolumny Dostawca
-    w arkuszu, bo to ZD mówi, u kogo naprawdę zamówiono; BOM mógł mieć
-    innego (zgłoszone 05.09.2026). None = nie ruszać.
-    Zwraca liczbę odłożonych.
-    """
-    import sqlite3
+    """Odłóż „Zamówiono" dla pozycji BOM na serwerze — nałoży się na projekt
+    przy najbliższym przejęciu locka. Jednym batchem: wpisy + zdjęcie
+    ewentualnych cofnięć + wygaszenie starych."""
     refy = [tuple(r) for r in (bom_refy or ()) if r and r[0] and r[1]]
     if not refy:
         return 0
     try:
-        con = sqlite3.connect(_master(), timeout=10)
-        try:
-            con.execute("""
-                CREATE TABLE IF NOT EXISTS zd_zamowione_pozycje (
-                    project_id  INTEGER NOT NULL,
-                    item_id     INTEGER NOT NULL,
-                    termin      TEXT,
-                    numer_zd    TEXT,
-                    kiedy       TEXT NOT NULL,
-                    PRIMARY KEY (project_id, item_id)
-                )""")
-            # Kolumna doszła później (05.09.2026) — tabela mogła już istnieć.
-            if "supplier_id" not in {r[1] for r in con.execute(
-                    "PRAGMA table_info(zd_zamowione_pozycje)")}:
-                con.execute("ALTER TABLE zd_zamowione_pozycje ADD COLUMN supplier_id INTEGER")
-            teraz = datetime.now().isoformat(timespec="seconds")
-            con.executemany(
-                "INSERT OR REPLACE INTO zd_zamowione_pozycje"
-                " (project_id, item_id, termin, numer_zd, kiedy, supplier_id)"
-                " VALUES (?,?,?,?,?,?)",
-                [(pid, iid, str(termin) if termin else None, numer_zd, teraz, supplier_id)
-                 for pid, iid in refy])
-            # Nowa wysyłka unieważnia odłożone COFNIĘCIE tej samej pozycji:
-            # usunięto stare ZD, wystawiono nowe i wysłano — pozycja jest
-            # znów zamówiona, a stare cofnięcie nie ma już czego cofać.
-            _zapewnij_tabele_cofniec(con)
-            con.executemany(
-                "DELETE FROM zd_cofniete_pozycje WHERE project_id=? AND item_id=?",
-                refy)
-            # Sprzątanie przy okazji — to jedyne miejsce, które i tak otwiera
-            # master do zapisu; osobny cykl sprzątający byłby przerostem formy.
-            granica = (datetime.now() - timedelta(days=DNI_WAZNOSCI_ZAMOWIEN)
-                       ).isoformat(timespec="seconds")
-            stare = con.execute("DELETE FROM zd_zamowione_pozycje WHERE kiedy < ?",
-                                (granica,)).rowcount
-            if stare:
-                print(f"🧹 Wygasło {stare} wpisów „Zamówiono” starszych niż "
-                      f"{DNI_WAZNOSCI_ZAMOWIEN} dni (projekt nigdy nie przejęty)")
-            con.commit()
-        finally:
-            con.close()
+        teraz = datetime.now().isoformat(timespec="seconds")
+        granica = (datetime.now() - timedelta(days=DNI_WAZNOSCI_ZAMOWIEN)
+                   ).isoformat(timespec="seconds")
+        operacje = [{"operation": "zd-zamowione-dodaj", "params": {
+            "project_id": pid, "item_id": iid,
+            "termin": str(termin) if termin else None, "numer_zd": numer_zd,
+            "kiedy": teraz, "supplier_id": supplier_id}} for pid, iid in refy]
+        operacje += [{"operation": "zd-cofniete-usun-pozycja",
+                      "params": {"project_id": pid, "item_id": iid}} for pid, iid in refy]
+        operacje.append({"operation": "zd-zamowione-wygas", "params": {"granica": granica}})
+        wyniki = _serwer().master_batch(operacje)
+        stare = ((wyniki or [{}])[-1] or {}).get("rowcount") or 0
+        if stare:
+            print(f"🧹 Wygasło {stare} wpisów „Zamówiono” starszych niż "
+                  f"{DNI_WAZNOSCI_ZAMOWIEN} dni (projekt nigdy nie przejęty)")
         return len(refy)
     except Exception as e:
         print(f"⚠️  Nie odłożono {len(refy)} poz. „Zamówiono” do master: {e}")
         return 0
 
 
-def _zapewnij_kolumne_id(con):
-    """Kolumna `dokument_id` w dzienniku wysyłek — TRWAŁY klucz dokumentu.
-
-    ⚠️ SUBIEKT UŻYWA NUMERÓW PONOWNIE. Po usunięciu ZD 4, 5 i 6 nowe
-    dokumenty dostały znów „ZD 4/CENTRALA/2026" i „ZD 5/CENTRALA/2026"
-    (07.09.2026) — a dziennik, kluczowany numerem, pamiętał wysyłki starych.
-    Świeżo wystawione ZD pokazywało się jako WYSŁANE, z cudzą datą.
-
-    Pierwszym lekarstwem była kolumna `dokument_usuniety`: wpis dokumentu
-    usuniętego przez RM_BAZA dostawał znacznik i przestawał się liczyć. Działało,
-    ale nie łapało usunięcia zrobionego wprost w Subiekcie — numer wracał
-    „czysty" tylko wtedy, gdy kasowaliśmy go my.
-
-    Teraz kluczem jest Id dokumentu z mostu (`Dokumenty.cs`, `Zd.cs`,
-    `ZdUsun.cs`). Id nadaje Subiekt i nie używa go ponownie, więc problem
-    znika u źródła — niezależnie od tego, kto i gdzie usunął dokument.
-
-    ⚠️ Id jest LOKALNE DLA BAZY: to samo ZD ma inny Id na M-OLD i na produkcji.
-    Dziennika nie wolno przenosić między środowiskami.
-
-    Wiersze bez `dokument_id` (sprzed tej zmiany) są ignorowane przy odczycie —
-    patrz `historia_wyslania`. W firmie ich nie ma, bo wysyłka nie była tam
-    jeszcze używana (ustalone 08.09.2026).
-    """
-    kolumny = {r[1] for r in con.execute("PRAGMA table_info(zd_wyslane)")}
-    if "dokument_id" not in kolumny:
-        con.execute("ALTER TABLE zd_wyslane ADD COLUMN dokument_id INTEGER")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_zd_wyslane_docid "
-                    "ON zd_wyslane(dokument_id)")
+def _zapewnij_kolumne_id(con=None):
+    """NIC NIE ROBI — kolumnę `dokument_id` pilnują migracje RM_SERWER."""
+    return
 
 
 def uniewaznij_wyslania(dokument_idy):
-    """Usuwa wpisy dziennika dla usuniętych dokumentów. Zwraca ile.
-
-    `dokument_idy` — Id z Subiekta (z odpowiedzi trybu `zd-usun`), NIE numery.
-
-    Wołane PO cofnij_zamowienia: ono jeszcze czyta z dziennika termin wysyłki,
-    żeby zdjąć go z arkusza; po skasowaniu wpisu już by go nie znalazło.
-
-    Wpis KASUJEMY, a nie znaczamy jak wcześniej. Przy kluczu Id nie ma czego
-    chronić przed pomyleniem: Id usuniętego dokumentu nigdy nie wróci, więc
-    wpis nie ma już do czego się odnosić. Wcześniejszy `dokument_usuniety`
-    istniał tylko dlatego, że numer wracał do obiegu.
-    """
-    import sqlite3
+    """Usuń z dziennika wpisy dokumentów skasowanych w Subiekcie."""
+    import json
     idy = {int(i) for i in (dokument_idy or ()) if i}
     if not idy:
         return 0
     try:
-        con = sqlite3.connect(_master(), timeout=10)
-        try:
-            if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
-                               " AND name='zd_wyslane'").fetchone():
-                return 0
-            _zapewnij_kolumne_id(con)
-            pyt = ",".join("?" * len(idy))
-            kur = con.execute(f"DELETE FROM zd_wyslane WHERE dokument_id IN ({pyt})",
-                              tuple(idy))
-            con.commit()
-            return kur.rowcount or 0
-        finally:
-            con.close()
+        w = _serwer().master_exec("zd-wyslane-usun-po-dokumentach",
+                                  {"idy_json": json.dumps(sorted(idy))})
+        return (w or {}).get("rowcount") or 0
     except Exception as e:
         print(f"⚠️  Nie posprzątano dziennika wysyłek: {e}")
         return 0
 
 
-def _zapewnij_tabele_cofniec(con):
-    """Tabela odłożonych cofnięć „Zamówiono" — lustro zd_zamowione_pozycje.
-
-    `termin` to termin, z którym usuwane ZD było WYSŁANE (z dziennika
-    zd_wyslane). Przy zdejmowaniu kasujemy termin dostawy w arkuszu tylko
-    wtedy, gdy nadal równa się temu — bo wtedy wiadomo, że przyszedł z tej
-    wysyłki i pokazuje dostawę, której nie będzie. Termin zmieniony ręcznie
-    po wysyłce zostaje (zgłoszone 07.09.2026: po usunięciu ZD flagi zeszły,
-    a terminy z tych ZD stały dalej w arkuszu).
-    """
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS zd_cofniete_pozycje (
-            project_id  INTEGER NOT NULL,
-            item_id     INTEGER NOT NULL,
-            numer_zd    TEXT,
-            termin      TEXT,
-            kiedy       TEXT NOT NULL,
-            PRIMARY KEY (project_id, item_id)
-        )""")
-    # Kolumna doszła tego samego dnia, ale tabela mogła już powstać bez niej.
-    if "termin" not in {r[1] for r in con.execute("PRAGMA table_info(zd_cofniete_pozycje)")}:
-        con.execute("ALTER TABLE zd_cofniete_pozycje ADD COLUMN termin TEXT")
+def _zapewnij_tabele_cofniec(con=None):
+    """NIC NIE ROBI — tabelę `zd_cofniete_pozycje` tworzą migracje RM_SERWER."""
+    return
 
 
-def _terminy_wysylek(con, numery):
-    """{numer ZD: termin z OSTATNIEJ wysyłki} — z dziennika zd_wyslane.
-
-    ZD bywa wysyłane ponownie z innym terminem; w arkuszu siedzi ten
-    z ostatniej wysyłki, więc ten porównujemy.
-    """
+def _terminy_wysylek(con=None, numery=()):
+    """{numer_zd: termin[:10]} z dziennika wysyłek — ostatni wpis wygrywa.
+    `con` ignorowane (zostało w sygnaturze)."""
     out = {}
-    if not numery or not con.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='zd_wyslane'").fetchone():
+    if not numery:
         return out
-    # Porównanie po ZNORMALIZOWANYM numerze (spacje, wielkość liter), nie
-    # przez IN (...): numer z mostu i numer zapisany przy wysyłce nie muszą
-    # być bajt w bajt równe, a wtedy termin wychodził None i zostawał
-    # w arkuszu (złapane na teście 07.09.2026). Dziennik jest mały — skan
-    # całości jest tańszy niż jedna pomyłka.
     norm = lambda s: " ".join(str(s or "").split()).upper()
     szukane = {norm(n): n for n in numery}
-    _zapewnij_kolumne_id(con)
-    # Wpisy usuniętych dokumentów są z dziennika KASOWANE (uniewaznij_wyslania),
-    # więc to, co tu zostało, należy do dokumentów żywych.
-    for nr, termin in con.execute(
-            "SELECT numer_zd, termin FROM zd_wyslane ORDER BY id"):
-        k = norm(nr)
+    for w in _serwer().master_read("zd-wyslane-terminy"):
+        k = norm(w["numer_zd"])
         if k in szukane:
-            out[szukane[k]] = (termin or "").strip()[:10] or None        # ostatni wygrywa
+            out[szukane[k]] = (w["termin"] or "").strip()[:10] or None        # ostatni wygrywa
     return out
 
 
 def cofnij_zamowienia(numery_zd, bom_refy=(), project_con=None, project_id=None, log=None):
-    """Cofa „Zamówiono" dla pozycji z USUNIĘTYCH ZD — tą samą drogą, którą
-    szło nakładanie.
-
-    Nakładanie ma trzy etapy: odłożenie w master (odloz_zamowienia) →
-    nałożenie na kopię lokalną przy locku (naloz_zamowienia) → sprzątnięcie
-    master po wgraniu na serwer (usun_zamowienia). Cofnięcie MUSI iść tak
-    samo, bo flaga już siedzi w pliku projektu, a bez locka nie wolno go
-    dotykać.
-
-    Pierwsza wersja (07.09.2026, wcześniej tego dnia) tylko kasowała wpisy
-    z master i zakładała, że „najbliższy lock nic nie nałoży". Nie zadziałała
-    z dwóch powodów — oba wyszły na żywo:
-      * flaga była JUŻ zapisana w projekcie, więc skasowanie wpisu w master
-        niczego nie cofało,
-      * dla ZD, które przeszło cykl lock→wgranie, wpisów w master już nie
-        było (sprzątnięte), więc nie było nawet czego kasować.
-
-    Dlatego pozycje bierzemy z SAMEGO usuwanego dokumentu (`bom_refy`
-    z wierszy okna ZD), nie z master, i zapisujemy ODŁOŻONE COFNIĘCIE do
-    `zd_cofniete_pozycje`. Zdejmuje je zdejmij_zamowienia() przy locku,
-    sprząta usun_zamowienia() po wgraniu — „Anuluj" ich nie gubi, tak jak
-    nie gubi odłożonych „Zamówiono".
-
-    Czego NIE rusza:
-      * `supplier_id` — dostawcę ustawiono świadomie i po usunięciu ZD nadal
-        jest najlepszą wiedzą o tym, u kogo się zamawia,
-      * `deadline_date` — termin mógł być wpisany w arkuszu przed wysyłką;
-        skasowanie zgasiłoby alarm pilnujący dostawy,
-      * `zd_wyslane` — to dziennik zdarzeń („wysłano wtedy i wtedy"), a nie
-        stan; historii się nie przepisuje.
-
-    `bom_refy`: [(project_id, item_id, numer_zd)] — trzeci element mówi,
-    z KTÓREGO usuwanego ZD pozycja pochodzi; po nim bierzemy termin wysyłki.
-    Dwuelementowe krotki też przechodzą (bez terminu).
-
-    Zwraca (ile_odlozonych_cofniec, ile_poprawionych_w_otwartym_projekcie).
-    """
-    import sqlite3
+    """Cofnij „Zamówiono": zdejmij odłożone wpisy dla numerów ZD i odłóż
+    cofnięcia (jednym batchem); przy otwartym projekcie popraw też kopię."""
+    import json
     numery = [str(n).strip() for n in (numery_zd or ()) if str(n).strip()]
     refy = {}
     for r in (bom_refy or ()):
@@ -534,49 +338,30 @@ def cofnij_zamowienia(numery_zd, bom_refy=(), project_con=None, project_id=None,
             refy[(int(r[0]), int(r[1]))] = (str(r[2]).strip() if len(r) > 2 and r[2] else None)
     if not numery and not refy:
         return 0, 0
-
     odlozone = 0
-    wpisy = []                          # (pid, iid, termin) — do kopii lokalnej
+    wpisy = []                          # (pid, iid, termin, nr) — do kopii lokalnej
     try:
-        con = sqlite3.connect(_master(), timeout=10)
-        try:
-            _zapewnij_tabele_cofniec(con)
-            # Odłożone „Zamówiono" z tych ZD nie mogą już wejść — dokumentu
-            # nie ma. Kasujemy po NUMERZE, nie po pozycji: ta sama pozycja
-            # może siedzieć w innym, żywym ZD i tamto odłożenie ma zostać.
-            if numery and con.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table'"
-                    " AND name='zd_zamowione_pozycje'").fetchone():
-                pyt = ",".join("?" * len(numery))
-                con.execute(f"DELETE FROM zd_zamowione_pozycje WHERE numer_zd IN ({pyt})",
-                            numery)
-            terminy = _terminy_wysylek(con, numery)
-            # Ref bez numeru dostaje termin tylko wtedy, gdy usuwane jest
-            # JEDNO ZD — inaczej nie wiadomo, który.
-            jedyny = terminy.get(numery[0]) if len(numery) == 1 else None
-            teraz = datetime.now().isoformat(timespec="seconds")
-            for (pid, iid), nr in sorted(refy.items()):
-                wpisy.append((pid, iid, terminy.get(nr) if nr else jedyny, nr or ", ".join(numery)))
-            con.executemany(
-                "INSERT OR REPLACE INTO zd_cofniete_pozycje"
-                " (project_id, item_id, numer_zd, termin, kiedy) VALUES (?,?,?,?,?)",
-                [(pid, iid, nr, termin, teraz) for pid, iid, termin, nr in wpisy])
-            odlozone = len(wpisy)
-            con.commit()
-        finally:
-            con.close()
-        # Zero pozycji przy podanym numerze to NIE jest sukces — to brak
-        # adresów z okna. Bez tej linii ginęło bez śladu (07.09.2026, ZD 6).
+        terminy = _terminy_wysylek(None, numery)
+        jedyny = terminy.get(numery[0]) if len(numery) == 1 else None
+        teraz = datetime.now().isoformat(timespec="seconds")
+        for (pid, iid), nr in sorted(refy.items()):
+            wpisy.append((pid, iid, terminy.get(nr) if nr else jedyny, nr or ", ".join(numery)))
+        operacje = []
+        if numery:
+            operacje.append({"operation": "zd-zamowione-usun-po-numerach",
+                             "params": {"numery_json": json.dumps(numery)}})
+        operacje += [{"operation": "zd-cofniete-dodaj", "params": {
+            "project_id": pid, "item_id": iid, "numer_zd": nr, "termin": termin,
+            "kiedy": teraz}} for pid, iid, termin, nr in wpisy]
+        if operacje:
+            _serwer().master_batch(operacje)
+        odlozone = len(wpisy)
         if numery and not odlozone:
             print(f"⚠️  Cofnięcie „Zamówiono” dla {', '.join(numery)}: brak pozycji "
                   "do odłożenia — flagi w arkuszu ZOSTAJĄ.")
     except Exception as e:
         print(f"⚠️  Nie odłożono cofnięcia „Zamówiono” ({', '.join(numery)}): {e}")
         return 0, 0
-
-    # Otwarty pod lockiem projekt poprawiamy OD RAZU — inaczej użytkownik
-    # usuwa ZD z własnego projektu i nic nie widzi. Wpis w master zostaje
-    # do wgrania na serwer, jak przy nakładaniu.
     poprawione = 0
     if project_con is not None and project_id:
         poprawione = _zdejmij_z_kopii(
@@ -645,36 +430,12 @@ def _zdejmij_z_kopii(project_con, wpisy, log=None):
 
 
 def zdejmij_zamowienia(project_con, project_id, log=None):
-    """Zdejmuje odłożone cofnięcia „Zamówiono" z OTWARTEJ POD LOCKIEM kopii.
-
-    Lustro naloz_zamowienia(): tamto nakłada flagi z zd_zamowione_pozycje,
-    to zdejmuje je wg zd_cofniete_pozycje. MUSI być wołane PRZED
-    naloz_zamowienia — gdy ta sama pozycja ma odłożone cofnięcie (ze starego,
-    usuniętego ZD) i odłożone nałożenie (z nowego ZD), wygrywa nowsze
-    nałożenie, a nie kolejność przypadkowa.
-
-    NIE kasuje wpisów z master — to robi usun_zamowienia() po udanym wgraniu.
-    Zwraca liczbę odznaczonych pozycji.
-    """
-    import sqlite3
+    """Nałóż odłożone cofnięcia na kopię projektu (przy przejęciu locka)."""
     if project_con is None or not project_id:
         return 0
     try:
-        # Krótki limit: gdy posiadacz RESERVED próbuje commitu (PENDING), nawet
-        # ODCZYT dostaje „locked" i czekałby tu 10 s przy każdym locku (11.09.2026).
-        # Brak odczytu = wpisy nałożą się przy następnym przejęciu projektu.
-        m = sqlite3.connect(f"file:{_master()}?mode=ro", uri=True, timeout=1)
-        try:
-            if not m.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
-                             " AND name='zd_cofniete_pozycje'").fetchone():
-                return 0
-            ma_termin = "termin" in {r[1] for r in m.execute(
-                "PRAGMA table_info(zd_cofniete_pozycje)")}
-            wpisy = [(r[0], (str(r[1] or "").strip()[:10] or None)) for r in m.execute(
-                "SELECT item_id, " + ("termin" if ma_termin else "NULL")
-                + " FROM zd_cofniete_pozycje WHERE project_id=?", (project_id,))]
-        finally:
-            m.close()
+        wpisy = [(r["item_id"], (str(r["termin"] or "").strip()[:10] or None))
+                 for r in _serwer().master_read("zd-cofniete-list", {"project_id": project_id})]
     except Exception as e:
         print(f"⚠️  Nie odczytano odłożonych cofnięć dla projektu {project_id}: {e}")
         return 0
@@ -700,25 +461,11 @@ def naloz_zamowienia(project_con, project_id, log=None):
     if project_con is None or not project_id:
         return 0
     try:
-        # Krótki limit: gdy posiadacz RESERVED próbuje commitu (PENDING), nawet
-        # ODCZYT dostaje „locked" i czekałby tu 10 s przy każdym locku (11.09.2026).
-        # Brak odczytu = wpisy nałożą się przy następnym przejęciu projektu.
-        m = sqlite3.connect(f"file:{_master()}?mode=ro", uri=True, timeout=1)
-        try:
-            if not m.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
-                             " AND name='zd_zamowione_pozycje'").fetchone():
-                return 0
-            ma_dostawce = "supplier_id" in {r[1] for r in m.execute(
-                "PRAGMA table_info(zd_zamowione_pozycje)")}
-            wiersze = m.execute(
-                "SELECT item_id, termin, kiedy, "
-                + ("supplier_id" if ma_dostawce else "NULL")
-                + " FROM zd_zamowione_pozycje WHERE project_id=?",
-                (project_id,)).fetchall()
-            # Nazwy do audytu — historia pozycji pokazuje nazwy, nie id.
-            nazwy_dost = dict(m.execute("SELECT supplier_id, name FROM suppliers"))
-        finally:
-            m.close()
+        wiersze = [(r['item_id'], r['termin'], r['kiedy'], r.get('supplier_id'))
+                   for r in _serwer().master_read('zd-zamowione-list',
+                                                  {'project_id': project_id})]
+        nazwy_dost = {r['supplier_id']: r['name']
+                      for r in _serwer().master_read('suppliers-list')}
     except Exception as e:
         print(f"⚠️  Nie odczytano odłożonych „Zamówiono” dla projektu {project_id}: {e}")
         return 0
@@ -780,58 +527,22 @@ def naloz_zamowienia(project_con, project_id, log=None):
 
 
 def usun_zamowienia(project_id, do_kiedy=None):
-    """Kasuje odłożone wpisy projektu — po UDANYM wgraniu kopii na serwer.
-
-    `do_kiedy` — znacznik czasu z chwili NAŁOŻENIA (naloz_zamowienia /
-    zdejmij_zamowienia). Kasujemy tylko wpisy nie nowsze niż on.
-
-    ⚠️ PO CO TA GRANICA. Master jest wspólny dla wszystkich stanowisk. Między
-    nałożeniem a wgraniem kopii na serwer mija kilka–kilkanaście sekund, a w
-    tym czasie KTOŚ INNY może wysłać ZD na ten sam projekt i dołożyć swój
-    wpis. Kasowanie „wszystkiego dla project_id" zabierało go razem ze
-    starymi — jego pozycja nie dostawała „Zamówiono", choć ZD poszło,
-    i nikt się o tym nie dowiadywał.
-
-    Bez `do_kiedy` zachowuje się jak dawniej (kasuje wszystko) — dla
-    wywołań, które nie znają momentu nałożenia.
-    """
-    import sqlite3
+    """Po nałożeniu na projekt: usuń z serwera wpisy „Zamówiono" i cofnięcia
+    (jednym batchem). `do_kiedy` chroni wpisy dodane w trakcie przez inne
+    stanowisko — te nałożą się przy następnym przejęciu."""
     try:
-        # KRÓTKI limit, nie 10 s. To sprzątanie jest best-effort: wpisy, których
-        # nie skasujemy, nałożą się ponownie przy następnym locku (idempotentne).
-        # Gdy master trzyma INNE stanowisko (wisząca transakcja po nieudanym
-        # commit — patrz DatabaseManager.master_commit), pełne 10 s czekania
-        # objawiało się jako „zwalnianie locka się wiesza" (11.09.2026).
-        con = sqlite3.connect(_master(), timeout=0.5)
-        try:
-            if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
-                               " AND name='zd_zamowione_pozycje'").fetchone():
-                return 0
-            if do_kiedy:
-                warunek = " WHERE project_id=? AND kiedy<=?"
-                args = (project_id, do_kiedy)
-            else:
-                warunek = " WHERE project_id=?"
-                args = (project_id,)
-            n = con.execute("DELETE FROM zd_zamowione_pozycje" + warunek, args).rowcount
-            # Odłożone cofnięcia sprzątamy w tym samym momencie i z tego
-            # samego powodu: dopiero teraz są na serwerze.
-            _zapewnij_tabele_cofniec(con)
-            c = con.execute("DELETE FROM zd_cofniete_pozycje" + warunek, args).rowcount
-            # Co zostało — czyjeś świeże wpisy, które nałożą się przy
-            # następnym locku. Mówimy o tym wprost, żeby nie wyglądało
-            # na zgubione.
-            zostalo = 0
-            if do_kiedy:
-                zostalo = (con.execute(
-                    "SELECT COUNT(*) FROM zd_zamowione_pozycje WHERE project_id=?",
-                    (project_id,)).fetchone()[0]
-                    + con.execute(
-                    "SELECT COUNT(*) FROM zd_cofniete_pozycje WHERE project_id=?",
-                    (project_id,)).fetchone()[0])
-            con.commit()
-        finally:
-            con.close()
+        wyniki = _serwer().master_batch([
+            {"operation": "zd-zamowione-usun",
+             "params": {"project_id": project_id, "do_kiedy": do_kiedy}},
+            {"operation": "zd-cofniete-usun",
+             "params": {"project_id": project_id, "do_kiedy": do_kiedy}},
+        ])
+        n = ((wyniki or [{}, {}])[0] or {}).get("rowcount") or 0
+        c = ((wyniki or [{}, {}])[1] or {}).get("rowcount") or 0
+        zostalo = 0
+        if do_kiedy:
+            zostalo = (_serwer().master_read("zd-zamowione-ile", {"project_id": project_id})[0]["n"]
+                       + _serwer().master_read("zd-cofniete-ile", {"project_id": project_id})[0]["n"])
         if n or c:
             print(f"🧹 Projekt {project_id}: {n} wpisów „Zamówiono” i {c} cofnięć "
                   "zapisanych na serwer, usunięte z master")
@@ -840,45 +551,19 @@ def usun_zamowienia(project_id, do_kiedy=None):
                   "(inny użytkownik) — nałożą się przy następnym przejęciu projektu")
         return n + c
     except Exception as e:
-        # Zostają — nałożą się ponownie przy następnym locku (idempotentne).
-        dopisek = (" — master trzyma inne stanowisko, wpisy nałożą się przy następnym locku"
-                   if "locked" in str(e).lower() else "")
-        print(f"⚠️  Nie usunięto wpisów „Zamówiono” projektu {project_id}: {e}{dopisek}")
+        print(f"⚠️  Nie usunięto wpisów „Zamówiono” projektu {project_id}: {e}")
         return 0
 
 
 def historia_wyslania(numery=None):
-    """
-    {Id dokumentu: (data ostatniej wysyłki, ile razy)} — do kolumny „Wysłano".
-
-    ⚠️ KLUCZEM JEST Id Z SUBIEKTA, nie numer — bo numer wraca do obiegu po
-    usunięciu dokumentu i nowe ZD dziedziczyło cudzą wysyłkę (07.09.2026).
-    Wołający dopasowuje po `Id` z trybu `dokumenty` mostu.
-
-    Wiersze bez `dokument_id` (zapisane przed przejściem na Id) są POMIJANE:
-    nie da się ich pewnie przypisać do dokumentu, a zgadywanie po numerze to
-    dokładnie ten błąd, który tu naprawiamy. W firmie takich nie ma.
-
-    Pusty słownik, gdy tabeli jeszcze nie ma (nikt nic nie wysyłał).
-    """
-    import sqlite3
+    """{dokument_id: (ostatnia wysyłka, ile razy)} z dziennika na serwerze."""
     try:
-        con = sqlite3.connect(f"file:{_master()}?mode=ro", uri=True)
-        try:
-            # Połączenie jest read-only, więc kolumnę tylko sprawdzamy;
-            # dokłada ją pierwszy zapis (_zapewnij_kolumne_id).
-            kolumny = {r[1] for r in con.execute("PRAGMA table_info(zd_wyslane)")}
-            if "dokument_id" not in kolumny:
-                return {}
-            wiersze = con.execute(
-                "SELECT dokument_id, MAX(kiedy), COUNT(*) FROM zd_wyslane"
-                " WHERE dokument_id IS NOT NULL GROUP BY dokument_id").fetchall()
-        finally:
-            con.close()
+        wiersze = _serwer().master_read("zd-wyslane-historia")
     except Exception:
         return {}
     chciane = {int(n) for n in numery if n} if numery else None
-    return {i: (k, c) for i, k, c in wiersze if not chciane or i in chciane}
+    return {w["dokument_id"]: (w["kiedy"], w["ile"]) for w in wiersze
+            if not chciane or w["dokument_id"] in chciane}
 
 
 #: Tryby wysyłki rysunków — treść pola „Rysunki" w stopce okna.

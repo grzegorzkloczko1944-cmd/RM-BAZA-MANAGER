@@ -750,6 +750,29 @@ ODCZYT = {
     ),
 
     # Stan zamówień ZD odkładany przez wysyłkę — nakładany przy przejęciu locka.
+    # ══ WYSYŁKA ZD — dziennik i odłożone zamówienia (subiekt_wyslij_zd) ═══
+    "zd-wyslane-terminy": (
+        "SELECT numer_zd, termin FROM zd_wyslane ORDER BY id",
+        [],
+    ),
+    "zd-wyslane-historia": (
+        "SELECT dokument_id, MAX(kiedy) AS kiedy, COUNT(*) AS ile FROM zd_wyslane"
+        " WHERE dokument_id IS NOT NULL GROUP BY dokument_id",
+        [],
+    ),
+    "zd-wyslane-mapa": (
+        "SELECT numer_zd, MAX(kiedy) AS kiedy FROM zd_wyslane"
+        " WHERE dokument_id IS NOT NULL GROUP BY numer_zd",
+        [],
+    ),
+    "zd-zamowione-ile": (
+        "SELECT COUNT(*) AS n FROM zd_zamowione_pozycje WHERE project_id = ?",
+        ["project_id"],
+    ),
+    "zd-cofniete-ile": (
+        "SELECT COUNT(*) AS n FROM zd_cofniete_pozycje WHERE project_id = ?",
+        ["project_id"],
+    ),
     "zd-zamowione-list": (
         "SELECT item_id, termin, kiedy, supplier_id FROM zd_zamowione_pozycje"
         " WHERE project_id = ?",
@@ -1612,6 +1635,49 @@ ZAPIS = {
     ),
 
     # ── „Zamówiono" odłożone przez wysyłkę ZD ─────────────────────────
+    "zd-wyslane-dodaj": (
+        "INSERT INTO zd_wyslane (numer_zd, dokument_id, adresat, nadawca,"
+        " zalacznikow, termin, tryb, kiedy) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ["numer_zd", "dokument_id", "adresat", "nadawca", "zalacznikow",
+         "termin", "tryb", "kiedy"],
+    ),
+    # Lista id jako tablica JSON (json_each) — zero sklejania `IN (?,?,…)`.
+    "zd-wyslane-usun-po-dokumentach": (
+        "DELETE FROM zd_wyslane"
+        " WHERE dokument_id IN (SELECT value FROM json_each(?))",
+        ["idy_json"],
+    ),
+    "zd-zamowione-dodaj": (
+        "INSERT OR REPLACE INTO zd_zamowione_pozycje"
+        " (project_id, item_id, termin, numer_zd, kiedy, supplier_id)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        ["project_id", "item_id", "termin", "numer_zd", "kiedy", "supplier_id"],
+    ),
+    "zd-zamowione-usun-po-numerach": (
+        "DELETE FROM zd_zamowione_pozycje"
+        " WHERE numer_zd IN (SELECT value FROM json_each(?))",
+        ["numery_json"],
+    ),
+    # Wygaszanie wpisów starszych niż DNI_WAZNOSCI_ZAMOWIEN (projekt nigdy
+    # nie przejęty) — granicę liczy klient.
+    "zd-zamowione-wygas": (
+        "DELETE FROM zd_zamowione_pozycje WHERE kiedy < ?",
+        ["granica"],
+    ),
+    "zd-cofniete-dodaj": (
+        "INSERT OR REPLACE INTO zd_cofniete_pozycje"
+        " (project_id, item_id, numer_zd, termin, kiedy) VALUES (?, ?, ?, ?, ?)",
+        ["project_id", "item_id", "numer_zd", "termin", "kiedy"],
+    ),
+    "zd-cofniete-usun-pozycja": (
+        "DELETE FROM zd_cofniete_pozycje WHERE project_id = ? AND item_id = ?",
+        ["project_id", "item_id"],
+    ),
+    # NIP dostawcy — dopisywany z Subiekta przy scalaniu kartotek.
+    "supplier-nip-set": (
+        "UPDATE suppliers SET nip = ? WHERE supplier_id = ?",
+        ["nip", "supplier_id"],
+    ),
     "zd-zamowione-usun": (
         "DELETE FROM zd_zamowione_pozycje WHERE project_id = ?"
         " AND (? IS NULL OR kiedy <= ?)",
@@ -1662,6 +1728,46 @@ MIGRACJE = [
             timestamp    TEXT NOT NULL,
             details      TEXT
         )""", None),
+    # ── Wysyłka ZD do Subiekta: dziennik + odłożone „Zamówiono"/cofnięcia ──
+    # Wcześniej tworzył je klient (`subiekt_wyslij_zd._zapewnij_*`) przy
+    # każdym zapisie. Schemat zgodny z produkcją.
+    ("""CREATE TABLE IF NOT EXISTS zd_wyslane (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            numer_zd          TEXT NOT NULL,
+            adresat           TEXT,
+            nadawca           TEXT,
+            zalacznikow       INTEGER,
+            termin            TEXT,
+            tryb              TEXT,
+            kiedy             TEXT NOT NULL,
+            dokument_usuniety TEXT,
+            dokument_id       INTEGER
+        )""", None),
+    ("ALTER TABLE zd_wyslane ADD COLUMN dokument_id INTEGER", ("zd_wyslane", "dokument_id")),
+    ("ALTER TABLE zd_wyslane ADD COLUMN dokument_usuniety TEXT", ("zd_wyslane", "dokument_usuniety")),
+    ("CREATE INDEX IF NOT EXISTS idx_zd_wyslane_nr ON zd_wyslane(numer_zd)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_zd_wyslane_docid ON zd_wyslane(dokument_id)", None),
+    ("""CREATE TABLE IF NOT EXISTS zd_zamowione_pozycje (
+            project_id  INTEGER NOT NULL,
+            item_id     INTEGER NOT NULL,
+            termin      TEXT,
+            numer_zd    TEXT,
+            kiedy       TEXT NOT NULL,
+            supplier_id INTEGER,
+            PRIMARY KEY (project_id, item_id)
+        )""", None),
+    ("ALTER TABLE zd_zamowione_pozycje ADD COLUMN supplier_id INTEGER",
+     ("zd_zamowione_pozycje", "supplier_id")),
+    ("""CREATE TABLE IF NOT EXISTS zd_cofniete_pozycje (
+            project_id INTEGER NOT NULL,
+            item_id    INTEGER NOT NULL,
+            numer_zd   TEXT,
+            termin     TEXT,
+            kiedy      TEXT NOT NULL,
+            PRIMARY KEY (project_id, item_id)
+        )""", None),
+    ("ALTER TABLE zd_cofniete_pozycje ADD COLUMN termin TEXT", ("zd_cofniete_pozycje", "termin")),
+
     # Dziennik idempotencji — patrz §3. W MASTERZE, nie w osobnym pliku:
     # jedna baza, jeden journal, jedna transakcja z operacją.
     ("""CREATE TABLE IF NOT EXISTS _server_request_log (
