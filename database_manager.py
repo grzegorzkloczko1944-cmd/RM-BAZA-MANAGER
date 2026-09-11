@@ -1200,10 +1200,12 @@ class DatabaseManager:
         
         # Sprawdź czy baza ma kolumny src_modul i work_modul (backward compatibility)
         has_modul_cols = False
+        has_symbol_col = False
         try:
             cursor_check = self.project_con.execute("PRAGMA table_info(items)")
             columns = [row[1] for row in cursor_check.fetchall()]
             has_modul_cols = 'src_modul' in columns and 'work_modul' in columns
+            has_symbol_col = 'subiekt_symbol' in columns
             print(f"   Kolumny Moduł w bazie: {has_modul_cols}")
         except Exception as e:
             print(f"   ⚠️  Nie udało się sprawdzić kolumn: {e}")
@@ -1218,6 +1220,10 @@ class DatabaseManager:
                 COALESCE(i.work_modul, i.src_modul) AS modul_disp,
                 """
         
+        # Symbol, pod którym pozycja poszła do Subiekta — arkusz pokazuje go
+        # w „Nr rysunku", gdy numeru brak (znormalia). Bazy sprzed migracji
+        # kolumny nie mają, stąd warunkowo.
+        symbol_select = "                i.subiekt_symbol,\n" if has_symbol_col else ""
         # Zbuduj pełne SQL query
         query = f"""
             SELECT 
@@ -1263,6 +1269,7 @@ class DatabaseManager:
                 i.thickness_mm,
                 i.thickness_src,
                 
+                {symbol_select}
                 {modul_select}
                 i.supplier_id,
                 i.price_pln,

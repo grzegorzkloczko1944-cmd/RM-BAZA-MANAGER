@@ -361,6 +361,9 @@ class MainWindow(tk.Tk):
         # W pamięci, nie w bazie — to widok stanu zewnętrznego systemu, który
         # może się zmienić w każdej chwili; zapisany zestarzałby się po cichu.
         self._subiekt_stany = {}
+        # {item_id: symbol} — pozycje, którym w kolumnie „Nr rysunku" pokazujemy
+        # SYMBOL z Subiekta, bo numeru rysunku nie mają (znormalia).
+        self._nr_zastepczy = {}
         # Role pozycji dla kolumny „Typ / Źródło" — {NUMER: opis}, liczone
         # z drzewka projektu raz na projekt (patrz _odswiez_role_pozycji).
         self._role_pozycji = {}
@@ -4978,8 +4981,9 @@ class MainWindow(tk.Tk):
         try:
             fresh = getattr(self, "_rfq_freshness", None) or {}
             if fresh:
-                dn = str(self.sheet.get_cell_data(row_idx, 0) or "").strip() \
-                     or str(self.sheet.get_cell_data(row_idx, 1) or "").strip()
+                dn = str(self.sheet.get_cell_data(row_idx, 0) or "").strip()
+                if not dn or self._symbol_zastepczy_wiersza(row_idx):
+                    dn = str(self.sheet.get_cell_data(row_idx, 1) or "").strip()
                 st = (fresh.get(dn) or {}).get("status") if dn else None
                 if st in ("changed", "missing"):
                     _bg, _fg = (("#fff3cd", "#7a5c00") if st == "changed"
@@ -5146,6 +5150,15 @@ class MainWindow(tk.Tk):
             for row_idx, item_id in enumerate(self._sheet_row_ids):
                 data = data_map.get(item_id) if item_id else None
                 self._color_single_row(row_idx, data, today)
+            # Symbol z Subiekta w kolumnie 0 (pozycje bez numeru) — na szaro,
+            # żeby nie wyglądał jak numer rysunku.
+            for row_idx, item_id in enumerate(self._sheet_row_ids):
+                if item_id in self._nr_zastepczy:
+                    try:
+                        self.sheet.highlight_cells(row=row_idx, column=0,
+                                                   fg="#7f8c8d", overwrite=False)
+                    except Exception:
+                        pass
 
         except Exception as e:
             print(f"⚠️  Błąd kolorowania: {e}")
@@ -6828,15 +6841,28 @@ class MainWindow(tk.Tk):
                 "SELECT id, COALESCE(NULLIF(TRIM(work_drawing_no), ''), "
                 "                    NULLIF(TRIM(norm_drawing_no), ''), "
                 "                    NULLIF(TRIM(src_drawing_no), '')), "
-                "       subiekt_symbol, order_qty FROM items").fetchall()
+                "       subiekt_symbol, order_qty, "
+                "       COALESCE(NULLIF(TRIM(work_name), ''), TRIM(src_name)) FROM items").fetchall()
         except sqlite3.OperationalError:
             return                    # baza sprzed migracji
         teraz = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         wyczyszczone = 0
-        for item_id, nr, sym_zasiew, stara in wiersze:
+        for item_id, nr, sym_zasiew, stara, nazwa in wiersze:
             # Klucz: najpierw symbol, pod którym pozycja poszła do Subiekta,
             # a w razie jego braku numer rysunku (tak dopasowuje też most).
             klucz = (sym_zasiew or nr or "").strip().upper()
+            # Pozycja BEZ numeru i BEZ zapisanego symbolu — znormalia z ZK
+            # założonego, zanim zasiew zapisywał symbole (ZP196). Klucz z NAZWY,
+            # tym samym generatorem, którym zasiew nadał symbol w Subiekcie;
+            # przy trafieniu symbol zostaje utrwalony (kolumna „Nr rysunku").
+            symbol_z_nazwy_poz = None
+            if not klucz and nazwa:
+                try:
+                    from subiekt_projekt import symbol_z_nazwy
+                    symbol_z_nazwy_poz = symbol_z_nazwy(nazwa)
+                    klucz = (symbol_z_nazwy_poz or "").strip().upper()
+                except Exception:
+                    klucz = ""
 
             if not klucz or klucz not in ilosci:
                 # POZYCJI NIE MA NA ZK → order_qty musi zniknąć.
@@ -6863,13 +6889,19 @@ class MainWindow(tk.Tk):
 
             nowa = ilosci[klucz]
             try:
-                if stara is not None and abs(float(stara) - nowa) < 1e-9:
+                if (stara is not None and abs(float(stara) - nowa) < 1e-9
+                        and not (symbol_z_nazwy_poz and not sym_zasiew)):
                     continue          # bez zmian — nie ruszamy wiersza
             except (TypeError, ValueError):
                 pass
-            con.execute(
-                "UPDATE items SET order_qty = ?, subiekt_zasiew_at = ? WHERE id = ?",
-                (nowa, teraz, item_id))
+            if symbol_z_nazwy_poz and not sym_zasiew:
+                con.execute(
+                    "UPDATE items SET order_qty = ?, subiekt_zasiew_at = ?, subiekt_symbol = ?"
+                    " WHERE id = ?", (nowa, teraz, symbol_z_nazwy_poz, item_id))
+            else:
+                con.execute(
+                    "UPDATE items SET order_qty = ?, subiekt_zasiew_at = ? WHERE id = ?",
+                    (nowa, teraz, item_id))
             zmienione += 1
         if zmienione or wyczyszczone:
             con.commit()
@@ -7253,6 +7285,7 @@ class MainWindow(tk.Tk):
         # Wypełnij danymi
         data = []
         self._sheet_row_ids = []
+        self._nr_zastepczy = {}
         self._sheet_src_values = []
         self._sheet_overridden = []
         # termin odpowiedzi RFQ per wiersz — do kolorowania komórki WYCENA
@@ -7742,8 +7775,15 @@ class MainWindow(tk.Tk):
             self._rfq_deadline_by_row.append(_dl)
 
             # Wiersz danych (20 kolumn)
+            # Pozycja BEZ numeru rysunku, ale Z symbolem w Subiekcie (znormalia):
+            # pokazujemy symbol — inaczej komórka jest pusta, choć kartoteka
+            # istnieje i pozycja siedzi w ZK (zgłoszone 11.09.2026). Na szaro,
+            # a zatwierdzenie komórki nie utrwala go jako numeru (on_cell_edited).
+            symbol_zastepczy = ""
+            if not str(item['drawing_no'] or "").strip():
+                symbol_zastepczy = str(item.get('subiekt_symbol') or "").strip()
             row = [
-                item['drawing_no'] or "",                   # 0: Nr rysunku (bez emoji)
+                item['drawing_no'] or symbol_zastepczy or "",   # 0: Nr rysunku (bez emoji) — albo symbol z Subiekta
                 item['name'] or "",                          # 1: Nazwa
                 item['descr'] or "",                         # 2: Opis
                 qty_bom_display,                            # 3: Ilość BOM (● gdy >1 moduł)
@@ -7766,7 +7806,8 @@ class MainWindow(tk.Tk):
                 # 20: SUBIEKT — wypełniane na żądanie, trzymane w pamięci, żeby
                 # przeżyło odświeżenie arkusza (odczyt z Subiekta trwa ~10 s).
                 self._subiekt_stany.get(
-                    self._klucz_subiekt(item['drawing_no'], item.get('name')), ""),
+                    self._klucz_subiekt(item['drawing_no'] or item.get('subiekt_symbol'),
+                                        item.get('name')), ""),
                 casting_disp,                               # 21: Casting
                 # 22: Typ / Źródło — rola pozycji (KT / TW / Składnik KT …).
                 # Mówi, GDZIE zmieniać ilość: składnika nie edytuje się wprost,
@@ -7776,6 +7817,8 @@ class MainWindow(tk.Tk):
             
             data.append(row)
             self._sheet_row_ids.append(item['id'])
+            if symbol_zastepczy:
+                self._nr_zastepczy[item['id']] = symbol_zastepczy
         
         self.sheet.set_sheet_data(data)
         
@@ -8294,6 +8337,8 @@ class MainWindow(tk.Tk):
                 if not wycena_val:
                     continue   # nie w RFQ — nie ma czego sprawdzać
                 drawing_no = str(self.sheet.get_cell_data(row_idx, 0) or "").strip()
+                if self._symbol_zastepczy_wiersza(row_idx):
+                    drawing_no = ""       # symbol z Subiekta to nie numer — RFQ kluczuje po nazwie
                 if not drawing_no:
                     drawing_no = str(self.sheet.get_cell_data(row_idx, 1) or "").strip()
                 if not drawing_no:
@@ -12889,6 +12934,13 @@ class MainWindow(tk.Tk):
         
         field, field_type = col_map[col]
         new_value = self.sheet.get_cell_data(row, col)
+        # Kolumna 0 potrafi pokazywać SYMBOL z Subiekta zamiast numeru (pozycja
+        # bez numeru rysunku). Zatwierdzenie komórki bez zmiany nie może
+        # zapisać go jako work_drawing_no — to nie jest numer rysunku.
+        if col == 0:
+            zast = self._symbol_zastepczy_wiersza(row)
+            if zast and str(new_value or "").strip().upper() == zast.upper():
+                new_value = ""
         
         # ========================================================================
         # BLOKADA EDYCJI ILOŚCI BOM gdy jest symbol (więcej niż jeden moduł)
@@ -30373,6 +30425,13 @@ class MainWindow(tk.Tk):
                 parent=self)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _symbol_zastepczy_wiersza(self, row_idx):
+        """Symbol z Subiekta pokazany w kolumnie 0 zamiast numeru albo ""."""
+        try:
+            return self._nr_zastepczy.get(self._sheet_row_ids[row_idx]) or ""
+        except Exception:
+            return ""
 
     def _klucz_subiekt(self, numer, nazwa):
         """Klucz pozycji w Subiekcie: numer rysunku, a gdy go brak — symbol z nazwy.
