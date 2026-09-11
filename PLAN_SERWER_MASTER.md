@@ -1,10 +1,16 @@
 # Serwer master.sqlite — plan wdrożenia
 
-Dokument wykonawczy. Wersja 6 (11.09.2026) — **gotowa do kodowania**.
+Dokument wykonawczy. Wersja 7 (11.09.2026) — **gotowa do kodowania**.
 
 | Zakres | Robota | Co naprawia |
 |---|---|---|
 | **Master przez serwer** | 3–4 dni | awarię z 11.09.2026 — u źródła |
+
+> **Zmiany wobec wersji 6**: rollback i tryb legacy **oddają plik na `Y:`** —
+> sama flaga w JSON nie wystarcza, bo stary klient szuka mastera pod starą
+> ścieżką, a aktualny leży na `D:` (§5, §8); opis HMAC nie przecenia już ochrony
+> przed replayem — podpis chroni integralność, powtórzenia blokuje
+> `_server_request_log`, a replay odczytu jest nieszkodliwy (§7).
 
 > **Zmiany wobec wersji 5**: **read-only to nie zwolnienie** — narzędzia
 > raportowe też nie mogą otwierać żywego mastera, bo czytelnik trzyma SHARED
@@ -419,6 +425,20 @@ Gdyby serwer padł na dłużej (awaria maszyny), administrator przełącza
 Klienci czytają to przy starcie i **wszyscy naraz** wracają na SMB. To jest
 świadoma decyzja człowieka, nie skutek uboczny timeoutu.
 
+⚠️ **Sama flaga nie wystarczy — trzeba oddać plik.** Klienci w trybie legacy
+szukają mastera na `Y:`, a aktualny leży na `D:` maszyny `nic`. Pełna procedura
+to ta sama, co przy wycofaniu programu (§8): zatrzymać serwer, skopiować
+`D:\RM_BAZA\master.sqlite` → `Y:\RM_BAZA\master.sqlite`, sprawdzić
+`integrity_check`, dopiero potem przełączyć flagę.
+
+Jeśli maszyna `nic` **nie żyje** i lokalny plik jest nieosiągalny, do `Y:` idzie
+najnowszy backup z rotacji — z jawną informacją dla ludzi, ile pracy przepadło
+(różnica między czasem backupu a awarią). Lepiej powiedzieć wprost „tracimy
+dwie godziny" niż pozwolić komuś odkryć to samodzielnie po tygodniu.
+
+**Powrót z legacy na serwer** to zwykły cutover (§8) w drugą stronę: cisza,
+kopia `Y:` → `D:`, start serwera, nowy `.exe`, weryfikacja `handle.exe`.
+
 ---
 
 ## 6. Pliki
@@ -466,9 +486,20 @@ Trzy rzeczy muszą być ustalone po obu stronach: **kolejność kluczy** (`sort_
 w danych są polskie znaki i nazwy dostawców). Separator `|` między członami —
 żeby `request_id` „ab" + `cmd` „c" nie dawało tego samego co „a" + „bc".
 
-`request_id` idzie w **każdym** żądaniu, także w odczytach — nie dla
-idempotencji (odczyty jej nie potrzebują), lecz dlatego, że wchodzi do podpisu
-i chroni przed powtórzeniem przechwyconego żądania.
+`request_id` idzie w **każdym** żądaniu, także w odczytach — dla jednoznacznego
+podpisania i śledzenia żądania w logu.
+
+⚠️ **Sam podpis nie chroni przed replayem.** HMAC gwarantuje, że treść nie
+została podmieniona — ale przechwycony pakiet, odsłany bez zmian, ma poprawny
+podpis. Realnie:
+
+| | Ochrona przed powtórzeniem |
+|---|---|
+| operacje zmieniające | **`_server_request_log`** — drugie wykonanie zwraca zapamiętany wynik, nic się nie dzieje |
+| odczyty | brak — i **nie jest potrzebna**: powtórzony odczyt jest nieszkodliwy |
+
+Nie dokładamy tu nic więcej (nonce, znacznik czasu, numery sekwencyjne). W LAN,
+za zaporą, przy nieszkodliwym replayu odczytów — byłaby to złożoność bez zysku.
 
 To nie kryptografia wojskowa — to bariera przeciw przypadkowi i ciekawskiemu
 skryptowi.
@@ -570,15 +601,29 @@ zrobionej o 7:30, ginie pięć godzin pracy całej firmy.
 
 **Wycofanie programu** — gdy nowa wersja się źle zachowuje:
 
+⚠️ **Baza musi wrócić tam, gdzie stary klient jej szuka.** Podczas cutoveru
+master przeprowadza się z `Y:` na `D:` maszyny `nic`; stary `.exe` nie zna
+ścieżki lokalnej i sam jej nie znajdzie. Bez kroku 4 poniżej rollback wygląda
+na wykonany, a klienci startują na **starym, nieaktualnym** pliku z `Y:`
+— i cicho rozjadą dane.
+
 ```
-1. Zatrzymaj RM_SERWER
-2. Zrób AWARYJNĄ kopię AKTUALNEGO mastera   ← bezcenne przy diagnozie
-3. Wróć do starego .exe (RM_BAZA_v15_MAG.exe.przed_*)
-4. Pracuj dalej na AKTUALNYM masterze
+1. Wszyscy zamykają RM_BAZA
+2. Zatrzymaj RM_SERWER
+3. Backup D:\RM_BAZA\master.sqlite            ← bezcenne przy diagnozie
+4. Skopiuj AKTUALNY master z powrotem na udział:
+       D:\RM_BAZA\master.sqlite  →  Y:\RM_BAZA\master.sqlite
+5. PRAGMA integrity_check na kopii docelowej
+6. Przełącz sync_config.json na tryb legacy
+7. Przywróć stary .exe (RM_BAZA_v15_MAG.exe.przed_*)
+8. Uruchomienie klientów
 ```
 
 Schemat bazy się nie zmienia, więc stary klient czyta i pisze te dane bez
 problemu — wraca tylko do robienia tego wprost po SMB.
+
+Kroki 1 i 2 są w tej kolejności nieprzypadkowo: kopiowanie żywego pliku SQLite,
+do którego ktoś pisze, daje uszkodzoną kopię. Najpierw cisza, potem kopia.
 
 **Odtworzenie bazy z kopii sprzed cutoveru** — osobna, świadoma decyzja, wyłącznie
 gdy master jest **faktycznie uszkodzony** (`PRAGMA integrity_check` zgłasza błędy,
@@ -686,5 +731,5 @@ sprawdzeniem, czy kogoś nie pominęliśmy.
 
 ---
 
-*Wersja 6, 11.09.2026 — gotowa do kodowania. Poprzednie wersje w historii gita
-(`c6130ff`, `d3e2f6e`, `2cfec13`, `5c1a465`, `cbc721d`).*
+*Wersja 7, 11.09.2026 — gotowa do kodowania. Poprzednie wersje w historii gita
+(`c6130ff`, `d3e2f6e`, `2cfec13`, `5c1a465`, `cbc721d`, `5572370`).*
