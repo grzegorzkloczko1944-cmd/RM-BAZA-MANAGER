@@ -22258,8 +22258,7 @@ class MainWindow(tk.Tk):
                 return
             
             # Dynamiczne wykrywanie kolumn (jak v6)
-            cursor = self.db_manager.master_con.execute("SELECT * FROM suppliers LIMIT 0")
-            cols = [desc[0] for desc in cursor.description]
+            cols = [w["name"] for w in self.db_manager.master_read("suppliers-kolumny")]
             
             # Znajdź kolumnę ID
             id_col = None
@@ -22559,8 +22558,7 @@ class MainWindow(tk.Tk):
             
             try:
                 # Dynamiczne wykrywanie kolumn
-                cursor = self.db_manager.master_con.execute("SELECT * FROM suppliers LIMIT 0")
-                cols_db = [desc[0] for desc in cursor.description]
+                cols_db = [w["name"] for w in self.db_manager.master_read("suppliers-kolumny")]
                 
                 # Znajdź kolumny
                 id_col = next((c for c in ["id", "supplier_id", "sup_id"] if c in cols_db), cols_db[0] if cols_db else "id")
@@ -22593,11 +22591,8 @@ class MainWindow(tk.Tk):
                 # Tagi wszystkich firm jednym zapytaniem: supplier_id -> "Laser, CNC"
                 tags_by_sup = {}
                 try:
-                    for r in self.db_manager.master_con.execute(
-                        "SELECT st.supplier_id, t.label FROM rfq_supplier_tags st "
-                        "JOIN rfq_tags t ON t.id = st.tag_id "
-                        "ORDER BY t.sort_order, t.label"):
-                        tags_by_sup.setdefault(r[0], []).append(r[1])
+                    for w in self.db_manager.master_read("rfq-tagi-wszystkich"):
+                        tags_by_sup.setdefault(w["supplier_id"], []).append(w["label"])
                 except Exception:
                     pass  # brak tabel tagów (starsza baza) — kolumna zostaje pusta
 
@@ -22690,8 +22685,7 @@ class MainWindow(tk.Tk):
                 
                 try:
                     # Wykryj nazwy kolumn dynamicznie
-                    cursor = self.db_manager.master_con.execute("SELECT * FROM suppliers LIMIT 0")
-                    cols_db = [desc[0] for desc in cursor.description]
+                    cols_db = [w["name"] for w in self.db_manager.master_read("suppliers-kolumny")]
                     
                     # Znajdź kolumny
                     id_col = next((c for c in ["id", "supplier_id", "sup_id"] if c in cols_db), "id")

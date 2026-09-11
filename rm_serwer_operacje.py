@@ -138,6 +138,21 @@ ODCZYT = {
         ["name_normalized"],
     ),
 
+    # Kolumny tabeli suppliers — klient używa ich do zbudowania widoku
+    # (nazwy kolumn różnią się między instalacjami, patrz ALIASY_DOSTAWCY).
+    # Zwraca po jednym wierszu na kolumnę, jak PRAGMA table_info.
+    "suppliers-kolumny": (
+        "SELECT name FROM pragma_table_info('suppliers')",
+        [],
+    ),
+    # Tagi wszystkich kooperantów naraz — do listy dostawców z etykietami.
+    "rfq-tagi-wszystkich": (
+        "SELECT st.supplier_id, t.label FROM rfq_supplier_tags st"
+        "  JOIN rfq_tags t ON t.id = st.tag_id"
+        " ORDER BY t.sort_order, t.label",
+        [],
+    ),
+
     # ── wyniki zapytań ofertowych (portal RM_RFQ; tabele w masterze) ──
     # Kolumny wypisane jawnie, nie SELECT * — przy zmianie schematu portalu
     # chcemy błędu tutaj, a nie cicho innego kształtu wiersza u wołającego.
