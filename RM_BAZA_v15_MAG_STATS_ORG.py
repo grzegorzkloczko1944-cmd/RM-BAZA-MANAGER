@@ -5203,6 +5203,14 @@ class MainWindow(tk.Tk):
         if hasattr(self, 'lock_manager') and self.lock_manager:
             self.lock_manager.update_user_name(username)
 
+        # Log serwera ma pokazywać użytkownika RM_BAZA, nie konto Windows —
+        # inaczej „kto skasował dostawcę" wskazuje zawsze na login systemowy.
+        try:
+            import rm_klient
+            rm_klient.ustaw_uzytkownika(username)
+        except Exception:
+            pass
+
         if error:
             messagebox.showwarning(
                 "Ostrzeżenie",

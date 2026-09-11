@@ -3083,6 +3083,13 @@ class RMManagerGUI:
         # Odblokuj przyciski lock (były zablokowane do czasu logowania)
         self._update_lock_buttons_state()
         print(f"✅ Zalogowano: {username} (ID={uid}, Rola={role})")
+        # Log serwera ma pokazywać użytkownika APLIKACJI, nie konto Windows —
+        # inaczej „kto zmienił status projektu" wskazuje zawsze na `mongo`.
+        try:
+            import rm_klient
+            rm_klient.ustaw_uzytkownika(username)
+        except Exception:
+            pass
         if hasattr(self, 'status_bar'):
             self.status_bar.config(
                 text=f"👤 {username} [{role}]",
