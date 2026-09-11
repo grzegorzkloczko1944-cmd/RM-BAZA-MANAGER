@@ -12995,11 +12995,20 @@ class MainWindow(tk.Tk):
                 # Dla pozycji z numerem kluczem jest NUMER — nazwa to tylko opis
                 # i zostaje edytowalna. Dla znormalizowanych jest odwrotnie.
                 ma_numer = not self._pozycja_bez_numeru(item_id)
-                blokuj = (col == 0) if ma_numer else (col == 1)
+                # Znormalizowana: kluczem jest NAZWA, a w kolumnie 0 stoi SYMBOL
+                # z Subiekta (od 11.09.2026) — to nie numer rysunku i też nie
+                # podlega edycji: nadanie numeru zmieniłoby klucz tak samo jak
+                # zmiana nazwy. Dopóki komórka była pusta, nie było czego pilnować.
+                blokuj = (col == 0) if ma_numer else (col in (0, 1))
                 if blokuj:
-                    czego = "Numer rysunku" if col == 0 else "Nazwa"
-                    powod = ("numer rysunku" if ma_numer
-                             else "nazwa (pozycja znormalizowana — z niej powstaje symbol)")
+                    if ma_numer:
+                        czego, powod = "Numer rysunku", "numer rysunku"
+                    elif col == 1:
+                        czego, powod = "Nazwa", "nazwa (pozycja znormalizowana — z niej powstaje symbol)"
+                    else:
+                        czego = "Symbol z Subiekta"
+                        powod = ("nazwa — a to, co stoi w tej komórce, to SYMBOL kartoteki\n"
+                                 "z Subiekta, nie numer rysunku (pozycja go nie ma)")
                     messagebox.showwarning(
                         f"{czego} — pozycja jest już w Subiekcie",
                         f"Ta pozycja została założona w Subiekcie jako:\n\n"
