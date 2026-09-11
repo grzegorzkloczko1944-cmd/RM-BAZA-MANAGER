@@ -29,3 +29,9 @@ sdk/
 subiekt_sfera/**/bin/
 subiekt_sfera/**/obj/
 .nexo_sfera.json
+
+# RM_SERWER: logi, dane i backupy zostaja lokalnie / na serwerze
+logi/
+dane/
+backup/
+rm_serwer_config.json
