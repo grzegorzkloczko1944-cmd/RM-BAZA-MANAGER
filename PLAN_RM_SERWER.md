@@ -1,63 +1,54 @@
-# Serwer master.sqlite — plan wdrożenia
+# RM_SERWER — plan wdrożenia w trzech etapach
 
-Dokument wykonawczy. Wersja 7 (11.09.2026) — **gotowa do kodowania**.
+Dokument wykonawczy. Wersja 8 (11.09.2026).
 
-| Zakres | Robota | Co naprawia |
-|---|---|---|
-| **Master przez serwer** | 3–4 dni | awarię z 11.09.2026 — u źródła |
+| Etap | Co przechodzi przez serwer | Robota | Co daje |
+|---|---|---|---|
+| **1** | `master.sqlite` | 3–4 dni | koniec awarii typu 11.09.2026 — u źródła |
+| **2** | pliki projektów (checkout/checkin) + locki | 3–4 dni | serwer plików świadomy locków; koniec kopiowania po SMB |
+| **3** | rysunki i pozostałe pliki | do wyceny | **RM_BAZA nie potrzebuje `Y:`** |
 
-> **Zmiany wobec wersji 6**: rollback i tryb legacy **oddają plik na `Y:`** —
-> sama flaga w JSON nie wystarcza, bo stary klient szuka mastera pod starą
-> ścieżką, a aktualny leży na `D:` (§5, §8); opis HMAC nie przecenia już ochrony
-> przed replayem — podpis chroni integralność, powtórzenia blokuje
-> `_server_request_log`, a replay odczytu jest nieszkodliwy (§7).
+**Kolejność: 1 → 2 → 3.** Każdy etap ma własny cutover i jest użyteczny sam
+w sobie. Etap 1 jest opisany w pełni (Część I) — to on idzie do kodowania
+teraz. Etapy 2 i 3 są zakresem i decyzjami (Części II i III); szczegóły
+protokołu doprecyzujemy przed ich kodowaniem, gdy etap 1 będzie chodził.
 
-> **Zmiany wobec wersji 5**: **read-only to nie zwolnienie** — narzędzia
-> raportowe też nie mogą otwierać żywego mastera, bo czytelnik trzyma SHARED
-> (§10, ze snapshotem jako rozwiązaniem); weryfikacja cutoveru przez
-> **`handle.exe` na maszynie `nic`**, nie przez „Otwarte pliki" — po przenosinach
-> na dysk lokalny tamta lista jest pusta zawsze (§8, §9); usunięte resztki po
-> wyciętym serwerze locków w sekcji bezpieczeństwa.
+> **Zmiana wobec wersji 7 — decyzja: cel docelowy to RM_BAZA bez dysków
+> sieciowych.** Wersje 5–7 świadomie zostawiały projekty i locki na `Y:`,
+> bo „locki działają, nie ma bólu". To nadal prawda — i dlatego **etap 2 nie
+> przebudowuje warstwy danych ani reguł locków**. Zmienia się wyłącznie
+> transport: zamiast `shutil.copy2` po SMB i plików `.lock` na udziale —
+> `checkout`/`checkin` przez serwer i te same reguły locków wykonywane po jego
+> stronie. Kopia lokalna zostaje, 244 wywołania SQL na `project_con` zostają,
+> `acquire_project_lock()` i pozostałe metody zostają. Zysk, którego etap 1
+> nie daje: stanowisko potrzebuje tylko adresu serwera i lokalnego cache —
+> bez mapowania dysków, poświadczeń SMB i „nie widzi udziału".
 
-> **Zmiana wobec wersji 4: LOCKI ZOSTAJĄ TAKIE, JAKIE SĄ.**
->
-> Wersje 1–4 miały drugi etap — locki projektów przez serwer, z lease'ami,
-> TTL, heartbeatem i `server_epoch`. **Wypadł z zakresu**, i słusznie: sam
-> dokument przyznawał, że „naprawia problem, którego 11.09 nie było".
->
-> Locki plikowe działają. `lock_manager_v2.py` ruszany cztery razy w całej
-> historii repozytorium, bez śladu incydentu — nikt nie zgłosił zgubionej
-> pracy ani dwóch osób w jednym projekcie. Bramka przed nadpisaniem cudzej
-> pracy **już istnieje** i już sprawdza `lock_id` (RM_BAZA, `release_lock`;
-> RM_MANAGER, `rm_manager.py:313` — „ostatnia bramka przed nadpisaniem
-> cudzych danych"). Projektowałem od nowa coś, co jest.
->
-> Refaktor działającego elementu bez bólu to koszt bez zysku. Zostaje jeden
-> cel, dający się zmieścić w jednym zdaniu:
->
-> ```
-> dziś:        10 komputerów ──SMB──► master.sqlite
-> po zmianie:  10 komputerów ──TCP──► serwer ──► master.sqlite
-> ```
->
-> Projekty i locki zostają całkowicie poza tym.
->
-> Co odpadło: `rm_serwer_locki.py`, TTL, heartbeat, `server_epoch`,
-> `lock-acquire/release/owner`, `lock-commit-start`, migracja 13 metod
-> `lock_manager_v2`, bramka lease przed zapisem projektu i cała obsługa
-> utraty lease.
+```
+DZIŚ                                   DOCELOWO
+RM_BAZA ──SMB──► Y:\RM_BAZA\master     RM_BAZA ──TCP──► RM_SERWER ──► D:\RM_BAZA\master.sqlite
+RM_BAZA ──SMB──► Y:\RM_BAZA\projects                        │        ├── projects\
+RM_BAZA ──SMB──► Y:\RM_BAZA\locks                           │        ├── locks (w pamięci + dysk)
+RM_BAZA ──SMB──► Y:\SERVER_PROJEKTY, B:, V:                  │        └── backups\
+                                                          └── pliki: get_file → lokalny cache
+```
 
-> **Zmiany wobec wersji 3** (poprawki wykonawcze): `_server_request_log`
-> **w masterze**, bez `ATTACH` — jedna baza, jeden journal, jedna transakcja
-> (§3); **wycofanie programu ≠ odtworzenie bazy** — rollback nie kasuje pracy
-> z całego dnia (§8); master na **lokalnym dysku** maszyny `nic`, SMB znika
-> ze ścieżki do bazy (§1); kanoniczny JSON w HMAC (§7).
->
-> **Zmiany wobec wersji 2**: klienci **nie otwierają** master.sqlite — także
-> do odczytu (§4); **nie ma** automatycznego fallbacku per-klient (§5);
-> `request_id` przeciw duplikatom po zerwanym TCP (§3); `master-exec`
-> przyjmuje **nazwane operacje**, nigdy SQL (§3, §7); backup mastera
-> przechodzi na serwer (§4); token HMAC w każdym żądaniu (§7).
+> **Zmiany wobec wersji 6** (w Części I): rollback i tryb legacy **oddają plik
+> na `Y:`** (§5, §8); HMAC nie przecenia ochrony przed replayem (§7).
+> **Wobec wersji 5**: read-only to nie zwolnienie — snapshot dla narzędzi
+> raportowych (§10); weryfikacja przez `handle.exe` (§8, §9).
+> **Wobec 1–4**: klienci nie otwierają mastera wcale; brak fallbacku
+> per-klient; `request_id` + `_server_request_log` w masterze; nazwane
+> operacje; backup na serwerze; HMAC z kanonicznym JSON; cutover zamiast
+> pilota.
+
+---
+
+# CZĘŚĆ I — ETAP 1: master.sqlite przez serwer
+
+*Ta część jest kompletna i idzie do kodowania jako pierwsza.* Wszędzie, gdzie
+mowa „locki i projekty zostają na `Y:`", rozumieć: **w etapie 1**. Etap 2
+(Część II) przenosi je na serwer — bez zmiany reguł.
 
 ---
 
@@ -128,7 +119,8 @@ Wzorzec mostu Subiekta — sprawdzony, wszyscy go znają.
          |
          |  jedno połączenie SQLite, jeden wątek zapisu
          v
-    master.sqlite  +  backups/     (locks/ ZOSTAJĄ na Y: — poza zakresem)
+    master.sqlite  +  backups/     (locks/ i projects/ zostają na Y: w ETAPIE 1;
+                                    przechodzą na serwer w ETAPIE 2 — Część II)
 ```
 
 ### Decyzje i powody
@@ -384,7 +376,7 @@ Zamiast tego:
 |---|---|
 | Odczyty z mastera | z **lokalnego cache** (ostatni znany stan, oznaczony jako nieświeży) |
 | Zapisy do mastera | **zablokowane** — komunikat „serwer niedostępny, spróbuj za chwilę" |
-| Locki projektów | **działają normalnie** — pliki `.lock` na `Y:`, serwer ich nie dotyka |
+| Locki projektów | **działają normalnie** — w etapie 1 to pliki `.lock` na `Y:`, serwer ich nie dotyka (etap 2: patrz Część II, §13) |
 | Praca na projekcie | trwa — kopia jest lokalna |
 | Zwolnienie locka | **działa normalnie** — plik projektu idzie na `Y:` jak dziś |
 
@@ -393,13 +385,15 @@ spowodowała 40-minutowe zakleszczenie.**
 
 ### Co z pracy na projektach przetrwa awarię serwera
 
-**Wszystko.** Locki i pliki projektów są poza zakresem tej zmiany — klient bierze
+**Wszystko.** Locki i pliki projektów są poza zakresem **etapu 1** — klient bierze
 lock z `Y:\RM_BAZA\locks`, pracuje na kopii lokalnej i oddaje plik na `Y:`
 dokładnie tak jak dziś. Brak serwera oznacza wyłącznie: **nie zapiszesz danych
 z mastera** (dostawcy, użytkownicy, ustawienia, statusy).
 
 To jest mocna strona węższego zakresu: awaria serwera nie może zabrać nikomu
-pracy nad projektem, bo serwer o projektach nic nie wie.
+pracy nad projektem, bo w etapie 1 serwer o projektach nic nie wie.
+(W etapie 2 ta własność jest zachowana inaczej — praca na kopii lokalnej
+trwa, tylko `checkin` czeka na serwer; Część II, §13.)
 
 ⚠️ Jeden przypadek do zapamiętania: **„Zamówiono" z wysyłki ZD** siedzi w masterze
 (`zd_zamowione_pozycje`) i jest nakładane na kopię przy przejęciu locka. Przy
@@ -453,8 +447,9 @@ backup_manager.py       ZMIANA: backup_master() znika z klienta
 RM_BAZA_v15_MAG_STATS_ORG.py   ZMIANA: 17 DML + 8 SELECT
 ```
 
-**`lock_manager_v2.py` — BEZ ZMIAN.** Locki plikowe zostają dokładnie takie,
-jakie są.
+**`lock_manager_v2.py` — BEZ ZMIAN w etapie 1.** Locki plikowe zostają dokładnie
+takie, jakie są. Etap 2 podmienia **wnętrza** jego metod na wywołania serwera,
+z tymi samymi regułami (Część II, §12).
 
 Serwer w repo, wystawiany na `\\nic` — zasada z `feedback_most_w_gicie`.
 
@@ -716,7 +711,210 @@ sprawdzeniem, czy kogoś nie pominęliśmy.
 
 ---
 
-## 11. Kontekst
+# CZĘŚĆ II — ETAP 2: projekty i locki przez serwer
+
+## 11. Co się zmienia, a co świadomie nie
+
+Dziś projekt przechodzi przez SMB trzy razy:
+
+```
+Y:\RM_BAZA\locks\project_2627.lock     ← utwórz / odśwież / usuń
+Y:\RM_BAZA\projects\project_2627.sqlite ─copy→ C:\RMPAK_CLIENT\project_2627.sqlite
+                                              ↓ praca na kopii (244 zapytania SQL)
+Y:\RM_BAZA\projects\project_2627.sqlite ←copy─ C:\RMPAK_CLIENT\project_2627.sqlite
+```
+
+Po etapie 2 te same trzy kroki, ale przez serwer:
+
+```
+RM_BAZA  ──►  project-checkout(2627)   serwer: sprawdza i zakłada lock, odsyła plik
+RM_BAZA       zapisuje lokalnie, otwiera przez OBECNY project_con
+RM_BAZA       praca — 244 zapytania SQL DOKŁADNIE JAK DZIŚ
+RM_BAZA  ──►  project-checkin(2627, plik)   serwer: czy lock nadal tego klienta?
+                                            zapisuje, weryfikuje, backup, zwalnia lock
+```
+
+| | Zostaje bez zmian | Zmienia się |
+|---|---|---|
+| **Warstwa danych** | model kopii lokalnej; `project_con`; **244 wywołania SQL** | — |
+| **Reguły locków** | jeden lock na użytkownika; stale po **300 s**; heartbeat co **30 s**; `force`; `bulk` dla linii produkcyjnej (RM_MANAGER) | wykonywane **na serwerze**, nie na plikach |
+| **API locków w GUI** | 13 metod `lock_manager_v2`, 92 wywołania — sygnatury te same | tylko **wnętrza** metod |
+| **Transport** | — | `shutil.copy2` po SMB → `checkout`/`checkin` przez TCP |
+| **Backup projektu** | — | z klienta (przy zwalnianiu) na serwer (przy `checkin`) |
+| **Weryfikacja po zapisie** | — | `integrity_check` + `checkpoint` robi serwer, nie klient |
+
+To jest **serwer plików projektowych świadomy locków**, nie centralizacja bazy
+projektów. Różnica w skali roboty: dni, nie tygodnie.
+
+## 12. Locki — te same reguły, inne miejsce wykonania
+
+Nie projektujemy nowego systemu lease/heartbeat (wersje 2–4 tego planu
+próbowały — i słusznie z tego zrezygnowaliśmy). Przenosimy **dokładnie
+obecną logikę** z `lock_manager_v2.py`:
+
+| Reguła dziś | Skąd | Na serwerze |
+|---|---|---|
+| jeden lock na użytkownika | `_release_my_other_locks()` | serwer trzyma mapę `użytkownik@komputer → lock` |
+| lock osierocony po 300 s bez heartbeatu | `stale_lock_seconds = 300` | ta sama wartość, liczona zegarem serwera |
+| heartbeat co 30 s | `_heartbeat_interval_ms` | klient woła `lock-heartbeat`, jak dziś woła `refresh_heartbeat()` |
+| `force` przejmuje cudzy lock | `acquire_project_lock(force=True)` | ta sama semantyka + wpis w logu serwera |
+| `bulk` — wszystkie projekty linii naraz | `acquire_project_locks_bulk()` (RM_MANAGER) | `lock-acquire-bulk`, atomowo: wszystkie albo żaden |
+| kto trzyma? | odczyt pliku `.lock` | `lock-owner` — ta sama struktura odpowiedzi |
+
+Metody `lock_manager_v2` zostają, zmienia się wnętrze:
+
+```python
+# dziś
+def get_project_lock_owner(self, project_id):
+    lock_file = self.locks_folder / f"project_{project_id}.lock"
+    ...
+
+# etap 2
+def get_project_lock_owner(self, project_id):
+    return rm_klient.zapytaj("lock-owner", {"project_id": project_id}).get("owner")
+```
+
+Co znika z klienta: `cleanup_stale_locks()`, `cleanup_my_computer_locks()`,
+obsługa „plik `.lock` zniknął w trakcie czytania". Serwer wie to sam.
+
+**Bramka przed nadpisaniem cudzej pracy** — ta, która już istnieje
+(`release_lock` sprawdza `lock_id`; `rm_manager.py:313`) — przenosi się do
+`project-checkin`: serwer odmawia zapisu, gdy lock nie należy do proszącego.
+Klient wtedy **nie traci pracy**: plik zostaje lokalnie jako kopia awaryjna
+(`C:\RMPAK_CLIENT\awaria\`). To domyka dziurę odnotowaną w wersji 3:
+`_force_cancel_lock_on_lost` dziś zamyka kopię i nic z nią nie robi.
+
+⚠️ **RM_MANAGER dzieli te same locki.** Używa `lock_manager_v2` (plus stub
+„no-lock" do symulacji) i `bulk` dla linii produkcyjnej. Etap 2 obejmuje go
+tak samo jak RM_BAZA — inaczej dwa programy miałyby dwa różne źródła prawdy
+o tym, kto trzyma projekt.
+
+## 13. Komendy etapu 2
+
+| Komenda | Argumenty | Zwraca | Uwagi |
+|---|---|---|---|
+| `project-checkout` | `project_id`, `typ` (MACHINE/WAREHOUSE), `force` | `lock_id`, plik (bajty), `wersja` | zakłada lock **i** oddaje plik w jednej operacji |
+| `project-checkin` | `project_id`, `lock_id`, plik, `request_id` | `ok`, `wersja` | serwer: lock nadal tego klienta? → zapis → `integrity_check` → backup → zwolnij |
+| `project-download` | `project_id` | plik (bajty), `wersja` | **snapshot do odczytu** bez locka — zastępuje dzisiejsze `mode=ro&immutable=1` po SMB |
+| `project-list` | — | lista `{id, nazwa, typ, wersja, lock}` | jedna odpowiedź zamiast listowania katalogu |
+| `lock-acquire` / `-release` / `-owner` / `-heartbeat` / `-force` | jak dziś w `lock_manager_v2` | jak dziś | dla przypadków, gdy lock jest brany bez pobierania pliku |
+| `lock-acquire-bulk` | `project_ids`, `force` | mapa `id → (ok, lock_id)` | atomowo — dla RM_MANAGER |
+| `backup-list` / `backup-get` | `project_id` | lista kopii / plik | okno „Przywróć backup (ADMIN)" musi mieć skąd brać |
+
+Rozmiary są bez znaczenia dla transportu: **94 pliki, średnio 109 KB, największy
+476 KB, razem 10,5 MB**. `checkout` to ułamek sekundy w LAN.
+
+`project-download` zamiast czytania `immutable=1` po SMB: dziś przeglądanie
+projektu bez locka otwiera plik na udziale w trybie „nic się nie zmienia".
+Po etapie 2 klient pobiera kopię i otwiera ją lokalnie tak samo. Jedyna
+różnica widoczna dla użytkownika: żadna.
+
+`request_id` przy `checkin` chroni przed podwójnym zapisem po zerwanym TCP —
+tak samo jak przy operacjach na masterze (`_server_request_log`).
+
+## 14. Awaria serwera w etapie 2
+
+Tu zasada „brak fallbacku per-klient" ma większe konsekwencje niż w etapie 1
+i trzeba je nazwać wprost:
+
+| Sytuacja | Zachowanie |
+|---|---|
+| Serwer pada, klient **ma** projekt pobrany (checkout) | praca na kopii lokalnej **trwa** — nic się nie dzieje |
+| Klient chce oddać projekt (checkin), serwer nie odpowiada | `checkin` czeka; komunikat „serwer niedostępny — projekt zostaje u Ciebie, spróbuj za chwilę". **Nie ma** zapisu na `Y:` |
+| Klient chce pobrać nowy projekt | odmowa: „serwer niedostępny" |
+| Klient chce tylko **przejrzeć** projekt | z lokalnego cache ostatnio pobranych snapshotów, oznaczone jako nieświeże |
+| Heartbeat nie dochodzi > 300 s | lock po stronie serwera wygasa; klient dowiaduje się przy `checkin` → odmowa + kopia awaryjna |
+
+Ta ostatnia linia to jedyny przypadek, w którym praca **może** wymagać ręcznego
+scalenia — dokładnie ten sam, co dziś przy `force` albo padnięciu sieci
+w trakcie pracy. Etap 2 go nie tworzy; czyni go jawnym i zostawia plik.
+
+**Tryb legacy** (§5) w etapie 2 oznacza dodatkowo: serwer musi oddać na `Y:`
+katalogi `projects\` i `projects_MAG\` — nie tylko master. Ta sama zasada
+„najpierw cisza, potem kopia".
+
+## 15. Cutover etapu 2
+
+Ten sam schemat co w etapie 1 (§8), z jedną różnicą w kroku 4: na `D:` maszyny
+`nic` przenoszą się także `projects\`, `projects_MAG\`, `locks\` i `backups\`.
+Krok 3 („Otwarte pliki = pusto") obejmuje wtedy **wszystkie** pliki `.sqlite`
+w `RM_BAZA\`, nie tylko master.
+
+Przed cutoverem — inwentaryzacja, kto jeszcze czyta pliki projektów z `Y:`
+bezpośrednio (nie przez RM_BAZA): `Parser_RM_BAZA` (wszystkie bazy projektowe
+→ snapshot), `subiekt_stany.py` (`Y:/RM_BAZA/projects` → `project-download`),
+RM_MANAGER (własne `rm_manager_project_*.sqlite` w `Y:/RM_MANAGER` — **inna
+baza, poza zakresem**, ale locki projektów RM_BAZA bierze przez ten sam
+`lock_manager_v2` → etap 2).
+
+## 16. Do rozstrzygnięcia przed kodowaniem etapu 2
+
+Nie teraz — gdy etap 1 będzie chodził. Zapisane, żeby nie zginęły:
+
+1. **`subiekt_mapowania.sqlite` na `Y:`** — drugi współdzielony SQLite z wieloma
+   pisarzami po SMB (RW, `journal=DELETE`, 15 miejsc DML, 8 commitów, 0 rollbacków).
+   Ta sama klasa problemu co master; mniejsze ryzyko, bo połączenia są krótkie
+   (nie ma trwałego `master_con`, więc nieudany commit kończy się `close()`,
+   które zwalnia RESERVED). Do decyzji: nazwane operacje na serwerze w etapie 1
+   (najczyściej) albo osobny mały krok między 1 a 2.
+2. **Chat** (`Y:/RM_BAZA/chat`, pliki JSON, odpytywanie co 30 s) — trywialne
+   `chat-post`/`chat-poll`, ale to etap 3 albo przy okazji 2.
+3. **Wersjonowanie pliku projektu** — `wersja` z `checkout`/`checkin` pozwala
+   serwerowi odrzucić `checkin` starszej kopii, gdyby lock został przejęty
+   przez `force` i oddany. Dziś tej ochrony nie ma; tania, warto.
+4. **Lokalny cache snapshotów** — ile trzymać, kiedy sprzątać (propozycja:
+   ostatnie 20 projektów, sprzątanie przy starcie).
+
+---
+
+# CZĘŚĆ III — ETAP 3: pliki przez serwer — `Y:` znika z RM_BAZA
+
+## 17. Co jeszcze RM_BAZA bierze z dysków sieciowych
+
+Inwentaryzacja z kodu (po etapach 1 i 2 zostaje to):
+
+| Ścieżka | Do czego | Kto | Propozycja |
+|---|---|---|---|
+| `Y:\SERVER_PROJEKTY` | rysunki DWF/PDF/DXF/STP/STL projektów; miniatury | arkusz, panel plików, wysyłka ZD, RFQ | `get_file(projekt, nazwa)` + lokalny cache |
+| `B:\` | biblioteka RM — komponenty wspólne (`dwf_biblioteka=1`) | miniatury, „Szukaj w bibliotece" | `get_file` + **indeks po stronie serwera** |
+| `V:\` | drzewa złożeń Inventora (`_OUT.xlsx`), „Szukaj na serwerze" | import BOM, skany | jak wyżej |
+| `Y:\RM_BAZA\chat` | wiadomości JSON | chat | `chat-post` / `chat-poll` |
+| `Y:\RM_BAZA\backups` | backupy projektów | okno „Przywróć backup" | już w etapie 2 (`backup-list/-get`) |
+| `Y:\RMPAK_CLIENT\*.exe` | bramka wersji, samoaktualizacja | `client_version` | `client-version` + `client-download` |
+| `Y:\RMPAK_CLIENT\iLogic\Subiekt\MOST` | dystrybucja mostu Subiekta | `subiekt_bridge` | `most-version` + `most-download` |
+| `Y:\RM_BAZA\subiekt_mapowania.sqlite` | mapowania Subiekta | `subiekt_mapowania` | patrz §16 pkt 1 |
+| `Y:\RM_MANAGER\` | bazy RM_MANAGER | RM_MANAGER, RM_STATS | **poza zakresem** — osobny program |
+
+## 18. Dwie rzeczy do nazwania uczciwie
+
+**„RM_BAZA bez `Y:`" to nie „stanowisko bez `Y:`".** Konstruktorzy pracują
+w Inventorze i AutoCAD-zie na tych samych udziałach — one zostają. Zysk etapu 3
+jest realny (RM_BAZA nie zależy od mapowania, poświadczeń i liter dysków), ale
+dotyczy programu, nie infrastruktury.
+
+**Skany plików to największa pozycja.** „Szukaj w bibliotece" i „Szukaj na
+serwerze" to dziś `os.walk` po `B:` i `V:` z klienta (w wątkach, z „Anuluj" —
+naprawionym 11.09). Przez serwer to albo **indeks** (serwer skanuje raz, klient
+pyta), albo endpoint wyszukiwania. Indeks jest lepszy — skan wolnego dysku
+sieciowego, który dziś każdy klient robi osobno, robi się raz. Ale to osobna
+decyzja projektowa, nie „get_file".
+
+## 19. Docelowe stanowisko
+
+```
+potrzebuje:                 nie potrzebuje:
+  adres RM_SERWER             Y:  V:  B:  X:  Z:
+  token klienta (HMAC)        \\nic\...
+  C:\RMPAK_CLIENT\cache\      mapowania dysków przy logowaniu
+                              poświadczeń SMB
+                              „nie widzi udziału" / „inna litera dysku"
+```
+
+Etap 3 jest **do wyceny po etapie 2** — zależy od decyzji o indeksie plików.
+
+---
+
+## 20. Kontekst
 
 | Dokument / pamięć | Co zawiera |
 |---|---|
@@ -728,8 +926,11 @@ sprawdzeniem, czy kogoś nie pominęliśmy.
 | `project_master_journal_delete` | dlaczego `journal=delete`, nie WAL po SMB |
 | `project_master_con_retire_crash` | dlaczego `master_con` nie wolno `close()` |
 | `feedback_most_w_gicie` | źródła w gicie, binarka osobno |
+| `project_rfq_zamowienia_subiekt` | WinRM na W2019S — jak wystawiono poprzedni serwer |
+| `lock_manager_v2.py` | reguły locków przenoszone 1:1 w etapie 2 |
 
 ---
 
-*Wersja 7, 11.09.2026 — gotowa do kodowania. Poprzednie wersje w historii gita
-(`c6130ff`, `d3e2f6e`, `2cfec13`, `5c1a465`, `cbc721d`, `5572370`).*
+*Wersja 8, 11.09.2026 — trzy etapy; etap 1 gotowy do kodowania. Poprzednie
+wersje w historii gita (`c6130ff`, `d3e2f6e`, `2cfec13`, `5c1a465`, `cbc721d`,
+`5572370`, `9e70fae`). Plik zmienił nazwę z `PLAN_SERWER_MASTER.md`.*
