@@ -130,6 +130,22 @@ ODCZYT = {
         ["name_normalized"],
     ),
 
+    # ── wyniki zapytań ofertowych (portal RM_RFQ; tabele w masterze) ──
+    # Kolumny wypisane jawnie, nie SELECT * — przy zmianie schematu portalu
+    # chcemy błędu tutaj, a nie cicho innego kształtu wiersza u wołającego.
+    "rfq-wyniki": (
+        "SELECT drawing_number, invitations_sent, suppliers_count,"
+        "       offers_count, min_price, supplier_name, price,"
+        "       rfq_status, response_deadline, declined_count,"
+        "       files_updated_at, docs_notified_at"
+        "  FROM rfq_results ORDER BY COALESCE(rfq_id, 0) ASC",
+        [],
+    ),
+    "rfq-id-po-rysunku": (
+        "SELECT rfq_id FROM rfq_results WHERE drawing_number = ?",
+        ["drawing_number"],
+    ),
+
     # ── tagi kooperantów (portal RM_RFQ; tabele leżą w masterze) ──────
     "rfq-tagi": (
         "SELECT id, name, label FROM rfq_tags ORDER BY sort_order, label",

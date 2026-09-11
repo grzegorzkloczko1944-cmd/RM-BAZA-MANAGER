@@ -7052,8 +7052,8 @@ class MainWindow(tk.Tk):
         self._rfq_multi = {}          # {numer: ile_dodatkowych_RFQ}
         self._rfq_data_stale = False
         try:
-            master_con = self.db_manager.master_con if self.db_manager else None
-            if master_con:
+            # Odczyt idzie przez master_read — liczy się db_manager, nie połączenie.
+            if self.db_manager:
                 # ⚠️ Ten sam detal MOŻE być w kilku RFQ naraz (np. pytamy drugą
                 # grupę kooperantów). Wcześniej `rfq_by_drawing[nr] = r` nadpisywał
                 # po cichu — jeden wiersz wygrywał w kolejności z bazy, o drugim
@@ -7061,14 +7061,12 @@ class MainWindow(tk.Tk):
                 # ostatni zapis to NAJNOWSZE zapytanie, a liczbę pozostałych
                 # trzymamy w _rfq_multi (znacznik w komórce, patrz
                 # _format_wycena_cell). Ostrzeżenie o dublu pada już przy wysyłce.
-                for r in master_con.execute(
-                    """SELECT drawing_number, invitations_sent, suppliers_count,
-                              offers_count, min_price, supplier_name, price,
-                              rfq_status, response_deadline, declined_count,
-                              files_updated_at, docs_notified_at
-                       FROM rfq_results
-                      ORDER BY COALESCE(rfq_id, 0) ASC"""
-                ):
+                for _w in self.db_manager.master_read("rfq-wyniki"):
+                    r = (_w["drawing_number"], _w["invitations_sent"],
+                         _w["suppliers_count"], _w["offers_count"], _w["min_price"],
+                         _w["supplier_name"], _w["price"], _w["rfq_status"],
+                         _w["response_deadline"], _w["declined_count"],
+                         _w["files_updated_at"], _w["docs_notified_at"])
                     if r[0] in rfq_by_drawing:
                         self._rfq_multi[r[0]] = self._rfq_multi.get(r[0], 0) + 1
                     rfq_by_drawing[r[0]] = r
@@ -8178,8 +8176,8 @@ class MainWindow(tk.Tk):
         # (drawing_number, rfq_id, row_idx) dla wierszy, które SĄ w jakimś RFQ
         pending = []
         try:
-            master_con = self.db_manager.master_con if self.db_manager else None
-            if not master_con:
+            # Odczyt idzie przez master_read — liczy się db_manager, nie połączenie.
+            if not self.db_manager:
                 return
             # liczba wierszy jak w reszcie kodu (get_total_rows nie ma w tej
             # wersji tksheet) — _sheet_row_ids odzwierciedla widoczne wiersze
@@ -8201,10 +8199,9 @@ class MainWindow(tk.Tk):
                     drawing_no = str(self.sheet.get_cell_data(row_idx, 1) or "").strip()
                 if not drawing_no:
                     continue
-                row = master_con.execute(
-                    "SELECT rfq_id FROM rfq_results WHERE drawing_number=?",
-                    (drawing_no,)
-                ).fetchone()
+                _w = self.db_manager.master_read("rfq-id-po-rysunku",
+                                                 {"drawing_number": drawing_no})
+                row = (_w[0]["rfq_id"],) if _w else None
                 if row and row[0] is not None:
                     pending.append((drawing_no, int(row[0]), row_idx))
             except Exception:
@@ -24430,15 +24427,14 @@ class MainWindow(tk.Tk):
         w rm_sync_agent._portal_url_for_machine(), żeby GUI i agent nigdy nie
         pokazywały innego adresu."""
         try:
-            master_con = self.db_manager.master_con if self.db_manager else None
-            if not master_con:
+            # Odczyt idzie przez master_read — liczy się db_manager, nie połączenie.
+            if not self.db_manager:
                 return ""
             klucz = ('rfq_portal_url_server' if self._is_server_machine()
                      else 'rfq_portal_url_local')
             for k in (klucz, 'rfq_portal_url'):
-                row = master_con.execute(
-                    "SELECT value FROM settings WHERE key=?", (k,)
-                ).fetchone()
+                _w = self.db_manager.master_read("settings-get", {"key": k})
+                row = (_w[0]["value"],) if _w else None
                 if row and (row[0] or "").strip():
                     return row[0].rstrip("/")
             return ""
