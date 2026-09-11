@@ -376,7 +376,7 @@ Zamiast tego:
 |---|---|
 | Odczyty z mastera | z **lokalnego cache** (ostatni znany stan, oznaczony jako nieświeży) |
 | Zapisy do mastera | **zablokowane** — komunikat „serwer niedostępny, spróbuj za chwilę" |
-| Locki projektów | **działają normalnie** — w etapie 1 to pliki `.lock` na `Y:`, serwer ich nie dotyka (etap 2: patrz Część II, §13) |
+| Locki projektów | **działają normalnie** — w etapie 1 to pliki `.lock` na `Y:`, serwer ich nie dotyka (etap 2: patrz Część II, §14) |
 | Praca na projekcie | trwa — kopia jest lokalna |
 | Zwolnienie locka | **działa normalnie** — plik projektu idzie na `Y:` jak dziś |
 
@@ -393,7 +393,7 @@ z mastera** (dostawcy, użytkownicy, ustawienia, statusy).
 To jest mocna strona węższego zakresu: awaria serwera nie może zabrać nikomu
 pracy nad projektem, bo w etapie 1 serwer o projektach nic nie wie.
 (W etapie 2 ta własność jest zachowana inaczej — praca na kopii lokalnej
-trwa, tylko `checkin` czeka na serwer; Część II, §13.)
+trwa, tylko `checkin` czeka na serwer; Część II, §14.)
 
 ⚠️ Jeden przypadek do zapamiętania: **„Zamówiono" z wysyłki ZD** siedzi w masterze
 (`zd_zamowione_pozycje`) i jest nakładane na kopię przy przejęciu locka. Przy
