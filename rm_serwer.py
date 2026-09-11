@@ -218,6 +218,7 @@ class Serwer:
         self.odczytow = 0
         self.stop = threading.Event()
         self._ostatnie_sprzatanie = 0.0
+        self._ostatni_backup = None
 
     # ── baza ──────────────────────────────────────────────────────────
     def polacz(self):
@@ -349,6 +350,39 @@ class Serwer:
             finally:
                 zad.gotowe.set()
 
+    def _backup(self):
+        """Spójna kopia mastera + rotacja. Robi to WŁAŚCICIEL pliku (§4 planu).
+
+        `sqlite3.Connection.backup` (Online Backup API) kopiuje bazę **bez
+        blokowania zapisów** i bez ryzyka złapania pliku w połowie transakcji —
+        inaczej niż `shutil.copy2`, którym robił to klient. Dlatego backup
+        przeniósł się tutaj: klient, który nie otwiera już mastera, nie ma jak
+        zrobić spójnej kopii.
+        """
+        katalog = self.config["backup_katalog"]
+        os.makedirs(katalog, exist_ok=True)
+        nazwa = "master_%s.sqlite" % datetime.now().strftime("%Y%m%d_%H%M%S")
+        cel = os.path.join(katalog, nazwa)
+        docelowe = sqlite3.connect(cel)
+        try:
+            self.con.backup(docelowe)
+        finally:
+            docelowe.close()
+
+        # Rotacja: zostaje N najnowszych. Po nazwie, nie po mtime — nazwa
+        # niesie czas utworzenia i nie zmienia się przy kopiowaniu katalogu.
+        kopie = sorted(f for f in os.listdir(katalog)
+                       if f.startswith("master_") and f.endswith(".sqlite"))
+        ile = max(1, int(self.config.get("backup_ile", 20)))
+        for stara in kopie[:-ile]:
+            try:
+                os.remove(os.path.join(katalog, stara))
+            except OSError:
+                pass
+        log("Backup: %s (%.1f KB), kopii w katalogu: %d"
+            % (nazwa, os.path.getsize(cel) / 1024, min(len(kopie), ile)))
+        return cel
+
     def _sprzatanie(self):
         """Raz na dobę: czyszczenie dziennika. Robione w wątku roboczym,
         żeby nie dotykać połączenia z innego miejsca."""
@@ -362,6 +396,16 @@ class Serwer:
                     % (ile, RETENCJA_DZIENNIKA_H))
         except Exception as e:
             log("⚠️  Sprzątanie dziennika: %s" % e)
+
+        # Backup raz na dobę — i tylko gdy coś się zapisało. Kopia bazy,
+        # w której nic się nie zmieniło, to zajęte miejsce bez wartości.
+        try:
+            dzis = datetime.now().strftime("%Y%m%d")
+            if self._ostatni_backup != dzis and self.zapisow > 0:
+                self._backup()
+                self._ostatni_backup = dzis
+        except Exception as e:
+            log("⚠️  Backup nieudany: %s" % e)
 
     def zleć(self, zadanie, timeout=120):
         z = Zadanie(zadanie)
