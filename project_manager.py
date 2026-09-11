@@ -2,7 +2,13 @@
 ============================================================================
 PROJECT MANAGER - Zarządzanie projektami dla RM_BAZA v10 DISTRIBUTED
 ============================================================================
-Funkcje do zarządzania projektami w master.sqlite:
+Funkcje do zarządzania projektami w masterze — WYŁĄCZNIE przez RM_SERWER.
+
+⚠️ Parametr `con` został w sygnaturach (wołają je dziesiątki miejsc), ale
+jest IGNOROWANY: master leży na dysku serwera i klient nie ma połączenia
+do pliku. Nowy kod może go po prostu pomijać.
+
+Funkcje:
 - Tworzenie nowych projektów
 - Edycja projektów (nazwa, ścieżka)
 - Aktywacja/dezaktywacja projektów
@@ -10,10 +16,20 @@ Funkcje do zarządzania projektami w master.sqlite:
 ============================================================================
 """
 
-import sqlite3
 from pathlib import Path
 from typing import Optional, Tuple, List
 import re
+
+
+def _klient():
+    """RM_SERWER — jedyna droga do mastera.
+
+    Import w środku funkcji, bo `project_manager` bywa importowany przez
+    narzędzia, które serwera nie potrzebują (np. `get_project_db_path`
+    liczy samą ścieżkę).
+    """
+    import rm_klient
+    return rm_klient
 
 
 def norm(s) -> str:
@@ -23,28 +39,29 @@ def norm(s) -> str:
     return re.sub(r"\s+", " ", str(s).replace("\u00A0", " ")).strip()
 
 
-def colnames(con: sqlite3.Connection, table: str) -> set:
-    """Zwraca zbiór nazw kolumn w tabeli (lowercase).
 
-    Krotki retry na "database is locked" (dysk sieciowy, chwilowa kolizja),
-    potem — jak dawniej — pusty zbior. Wolajacy, ktorym pusty zbior szkodzi
-    (lista maszyn), sprawdzaja obowiazkowe kolumny sami i mowia wprost,
-    ze baza jest zajeta. Rzucanie stad wyjatku dotykaloby 24 miejsc naraz
-    (07.09.2026).
+
+def colnames(con=None, table: str = "projects") -> set:
+    """Nazwy kolumn tabeli w masterze.
+
+    `con` ignorowane (patrz nagłówek modułu). Schemat czytamy z pierwszego
+    wiersza zwróconego przez serwer — to wystarcza, bo wołający pytają
+    wyłącznie „czy jest kolumna X".
+
+    Obsługiwane są tabele, dla których serwer ma operację `SELECT *`.
+    Dla nieznanej tabeli zwracamy pusty zbiór — wołający i tak sprawdzają
+    obecność kolumn, więc zachowają się jak przy starszym schemacie.
     """
-    import time as _time
-    for proba in range(3):
-        try:
-            cur = con.execute(f"PRAGMA table_info({table})")
-            return {str(r[1]).lower() for r in cur.fetchall()}
-        except sqlite3.OperationalError as e:
-            if "locked" in str(e).lower() and proba < 2:
-                _time.sleep(0.1)
-                continue
-            return set()
-        except Exception:
-            return set()
-    return set()
+    OPERACJE = {"projects": "projects-list", "suppliers": "suppliers-list",
+                "users": "users-list"}
+    operacja = OPERACJE.get(table)
+    if not operacja:
+        return set()
+    try:
+        wiersze = _klient().master_read(operacja)
+    except Exception:
+        return set()
+    return set(wiersze[0].keys()) if wiersze else set()
 
 
 def pick_col(cols: set, candidates: list) -> Optional[str]:
@@ -59,588 +76,173 @@ def pick_col(cols: set, candidates: list) -> Optional[str]:
 # PROJEKTY - Podstawowe operacje
 # ============================================================================
 
-def ensure_projects_active_column(con: sqlite3.Connection) -> None:
-    """Zapewnia, że tabela projects ma kolumnę is_active (backward compatible)."""
-    cols = colnames(con, "projects")
-    active_col = pick_col(cols, ["is_active", "active", "enabled"])
-    
-    if active_col:
-        # Normalizuj NULLy -> 1
-        try:
-            con.execute(f"UPDATE projects SET {active_col}=1 WHERE {active_col} IS NULL;")
-        except Exception:
-            pass
-        return
-    
-    # Dodaj kolumnę
-    try:
-        con.execute("ALTER TABLE projects ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1;")
-    except Exception:
-        return
-    
-    try:
-        con.execute("UPDATE projects SET is_active=1 WHERE is_active IS NULL;")
-    except Exception:
-        pass
 
 
-def ensure_project_type_column(con: sqlite3.Connection) -> None:
-    """Zapewnia, że tabela projects ma kolumnę project_type (backward compatible)."""
-    cols = colnames(con, "projects")
-    type_col = pick_col(cols, ["project_type", "type"])
-    
-    if type_col:
-        # Normalizuj NULLy -> 'MACHINE'
-        try:
-            con.execute(f"UPDATE projects SET {type_col}='MACHINE' WHERE {type_col} IS NULL OR {type_col}='';")
-        except Exception:
-            pass
-        return
-    
-    # Dodaj kolumnę
-    try:
-        con.execute("ALTER TABLE projects ADD COLUMN project_type TEXT NOT NULL DEFAULT 'MACHINE';")
-    except Exception:
-        return
-    
-    try:
-        con.execute("UPDATE projects SET project_type='MACHINE' WHERE project_type IS NULL OR project_type='';")
-    except Exception:
-        pass
 
 
-def ensure_projects_stats_columns(con: sqlite3.Connection) -> None:
-    """Zapewnia, że tabela projects ma kolumny dla statystyk (backward compatible).
-    
-    Dodaje kolumny:
-    - started_at TEXT - data rozpoczęcia prac nad projektem
-    - expected_delivery TEXT - planowany termin odbioru
-    - completed_at TEXT - data faktycznego zakończenia projektu
-    - designer TEXT - konstruktor/osoba przypisana do projektu
-    - status TEXT - szczegółowy stan projektu (NOWY, W_REALIZACJI, etc.)
-    
-    UWAGA: Kolumna 'active' pozostaje bez zmian dla kompatybilności wstecznej!
-    """
-    cols = colnames(con, "projects")
-    
-    # started_at - kiedy rozpoczęto pracę
-    if "started_at" not in cols:
-        try:
-            con.execute("ALTER TABLE projects ADD COLUMN started_at TEXT;")
-            print("✅ Dodano kolumnę: started_at")
-        except Exception as e:
-            print(f"⚠️  Błąd dodawania started_at: {e}")
-    
-    # expected_delivery - planowany termin odbioru
-    if "expected_delivery" not in cols:
-        try:
-            con.execute("ALTER TABLE projects ADD COLUMN expected_delivery TEXT;")
-            print("✅ Dodano kolumnę: expected_delivery")
-        except Exception as e:
-            print(f"⚠️  Błąd dodawania expected_delivery: {e}")
-    
-    # completed_at - data faktycznego zakończenia
-    if "completed_at" not in cols:
-        try:
-            con.execute("ALTER TABLE projects ADD COLUMN completed_at TEXT;")
-            print("✅ Dodano kolumnę: completed_at")
-        except Exception as e:
-            print(f"⚠️  Błąd dodawania completed_at: {e}")
-    
-    # montaz - Data montażu (dawniej 'sat' - Site Acceptance Test)
-    # Dla kompatybilności wstecznej sprawdź obie nazwy
-    if "montaz" not in cols and "sat" not in cols:
-        try:
-            con.execute("ALTER TABLE projects ADD COLUMN montaz TEXT;")
-            print("✅ Dodano kolumnę: montaz")
-        except sqlite3.OperationalError as e:
-            print(f"⚠️  Błąd dodawania montaz: {e}")
-    
-    # fat - Factory Acceptance Test
-    if "fat" not in cols:
-        try:
-            con.execute("ALTER TABLE projects ADD COLUMN fat TEXT;")
-            print("✅ Dodano kolumnę: fat")
-        except Exception as e:
-            print(f"⚠️  Błąd dodawania fat: {e}")
-    
-    # designer - konstruktor przypisany
-    if "designer" not in cols:
-        try:
-            con.execute("ALTER TABLE projects ADD COLUMN designer TEXT;")
-            print("✅ Dodano kolumnę: designer")
-        except Exception as e:
-            print(f"⚠️  Błąd dodawania designer: {e}")
-    
-    # status - szczegółowy stan projektu
-    if "status" not in cols:
-        try:
-            con.execute("ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'PROJEKT';")
-            print("✅ Dodano kolumnę: status (default='PROJEKT')")
-        except Exception as e:
-            print(f"⚠️  Błąd dodawania status: {e}")
-    
-    # received_percent - procent odebranych elementów (dla RM_MANAGER)
-    if "received_percent" not in cols:
-        try:
-            con.execute("ALTER TABLE projects ADD COLUMN received_percent TEXT;")
-            print("✅ Dodano kolumnę: received_percent")
-        except Exception as e:
-            print(f"⚠️  Błąd dodawania received_percent: {e}")
-    
-    # Normalizuj wartości NULL dla status
-    try:
-        con.execute("UPDATE projects SET status='PROJEKT' WHERE status IS NULL OR status='';")
-    except Exception as e:
-        print(f"⚠️  Błąd normalizacji status: {e}")
-
-    # priority — używane przez optymalizator (1=Turbo, 2=Pilny, 3=Normalny)
-    ensure_project_priority_column(con)
 
 
-def ensure_project_priority_column(con: sqlite3.Connection) -> None:
-    """Zapewnia, że tabela projects ma kolumnę priority (1=Turbo, 2=Pilny, 3=Normalny).
-
-    Używana przez optymalizator do ważenia funkcji celu — projekty z niższym
-    numerem (wyższym priorytetem) są pchane wcześniej w czasie."""
-    cols = colnames(con, "projects")
-    if "priority" in cols:
-        try:
-            con.execute("UPDATE projects SET priority=3 WHERE priority IS NULL OR priority NOT IN (1,2,3);")
-        except Exception:
-            pass
-        return
-    try:
-        con.execute("ALTER TABLE projects ADD COLUMN priority INTEGER NOT NULL DEFAULT 3;")
-        print("✅ Dodano kolumnę: priority (default=3=Normalny)")
-    except Exception as e:
-        print(f"⚠️  Błąd dodawania priority: {e}")
-        return
-    try:
-        con.execute("UPDATE projects SET priority=3 WHERE priority IS NULL;")
-    except Exception:
-        pass
 
 
 def fetch_projects(
-    con: sqlite3.Connection, 
-    only_active: bool = False, 
+    con=None,
+    only_active: bool = False,
     include_active: bool = False,
     project_type: Optional[str] = None
 ) -> List[Tuple]:
+    """Lista projektów z mastera (przez RM_SERWER).
+
+    `con` jest ignorowane — zostaje w sygnaturze, bo wołają tę funkcję
+    dziesiątki miejsc. Master leży na serwerze i klient nie ma połączenia
+    do pliku.
+
+    Zwraca krotki: (id, nazwa, ścieżka, typ) albo — przy `include_active` —
+    (id, nazwa, ścieżka, aktywny, typ). Kolejność pól zachowana, bo
+    wołający rozpakowują je pozycyjnie.
     """
-    Pobiera listę projektów z master DB.
-    
-    Args:
-        con: Połączenie do master.sqlite
-        only_active: Jeśli True, zwraca tylko aktywne projekty
-        include_active: Jeśli True, dodaje flagę is_active do wyniku
-        project_type: Filtr typu projektu ('MACHINE', 'WAREHOUSE', lub None dla wszystkich)
-    
-    Returns:
-        Lista tupli: (id, name, root_path) lub (id, name, root_path, is_active) lub (id, name, root_path, is_active, project_type)
-    """
-    # Zapewnij tabelę historii statusów (automatyczne tworzenie przy pierwszym użyciu)
-    ensure_project_status_history_table(con)
-    
-    cols = colnames(con, "projects")
-    pk = pick_col(cols, ["id", "project_id"])
-    if pk is None:
-        raise RuntimeError(f"Nieznany klucz w projects. Kolumny: {sorted(cols)}")
-    
-    name_col = pick_col(cols, ["name", "project_name"])
-    if name_col is None:
-        raise RuntimeError(f"Nieznana kolumna nazwy projektu. Kolumny: {sorted(cols)}")
-    
-    path_col = pick_col(cols, ["root_path", "path"])
-    active_col = pick_col(cols, ["is_active", "active", "enabled"])
-    type_col = pick_col(cols, ["project_type", "type"])
-    
-    # Zapewnij kolumnę project_type
-    if not type_col:
-        ensure_project_type_column(con)
-        cols = colnames(con, "projects")
-        type_col = pick_col(cols, ["project_type", "type"])
-    
-    # Zapewnij kolumny dla statystyk
-    ensure_projects_stats_columns(con)
-    
-    # Buduj SELECT
-    select_cols = [pk, name_col]
-    if path_col:
-        select_cols.append(path_col)
-    
-    if include_active:
-        if not active_col:
-            ensure_projects_active_column(con)
-            cols = colnames(con, "projects")
-            active_col = pick_col(cols, ["is_active", "active", "enabled"])
-        if active_col:
-            select_cols.append(active_col)
-    
-    # Zawsze dodaj type_col do SELECT
-    if type_col:
-        select_cols.append(type_col)
-    
-    # WHERE clause
-    where_clauses = []
-    if only_active:
-        if not active_col:
-            ensure_projects_active_column(con)
-            cols = colnames(con, "projects")
-            active_col = pick_col(cols, ["is_active", "active", "enabled"])
-        if active_col:
-            where_clauses.append(f"COALESCE({active_col},1)=1")
-    
-    if project_type and type_col:
-        where_clauses.append(f"{type_col}='{project_type}'")
-    
-    where = ""
-    if where_clauses:
-        where = f" WHERE {' AND '.join(where_clauses)} "
-    
-    sql = f"SELECT {', '.join(select_cols)} FROM projects{where} ORDER BY {name_col} COLLATE NOCASE, {pk}"
-    rows = con.execute(sql).fetchall()
-    
-    # Parsuj wyniki
+    wiersze = _klient().master_read("projects-list")
+
     out = []
-    for r in rows:
-        pid = int(r[0])
-        pname = str(r[1]) if r[1] is not None else ""
-        idx = 2
-        
-        ppath = ""
-        if path_col:
-            if len(r) > idx and r[idx] is not None:
-                ppath = str(r[idx])
-            idx += 1
-        
-        is_act = 1
-        if include_active:
-            if active_col and len(r) > idx and r[idx] is not None:
-                try:
-                    is_act = 1 if int(r[idx]) else 0
-                except Exception:
-                    is_act = 1
-            idx += 1
-        
-        ptype = "MACHINE"
-        if type_col and len(r) > idx and r[idx] is not None:
-            ptype = str(r[idx])
-        
-        if include_active:
-            out.append((pid, pname, ppath, is_act, ptype))
-        else:
-            out.append((pid, pname, ppath, ptype))
-    
+    for w in wiersze:
+        akt = 1 if (w.get("active") is None or w.get("active")) else 0
+        if only_active and not akt:
+            continue
+        typ = w.get("project_type") or "MACHINE"
+        if project_type and typ != project_type:
+            continue
+
+        pid = int(w.get("project_id"))
+        nazwa = str(w.get("name") or "")
+        sciezka = str(w.get("path") or "")
+        out.append((pid, nazwa, sciezka, akt, typ) if include_active
+                   else (pid, nazwa, sciezka, typ))
+
+    # Sortowanie po stronie klienta: SQLite sortowałby po COLLATE NOCASE,
+    # ale polskie znaki i tak wymagają `lower()` w Pythonie.
+    out.sort(key=lambda r: ((r[1] or "").lower(), r[0]))
     return out
 
 
 def create_project(
-    con: sqlite3.Connection, 
-    name: str, 
-    root_path: Optional[str] = None, 
+    con=None,
+    name: str = "",
+    root_path: str = "",
     project_type: str = "MACHINE",
-    designer: Optional[str] = None,
+    designer: str = "",
     status: str = "PROJEKT"
 ) -> int:
+    """Zakłada projekt w masterze. Zwraca nadany `project_id`.
+
+    Wpis początkowy w historii statusów leci TYM SAMYM batchem — projekt
+    bez historii wyglądałby jak utworzony poza systemem.
     """
-    Tworzy nowy projekt w master DB.
-    
-    Args:
-        con: Połączenie do master.sqlite
-        name: Nazwa projektu
-        root_path: Opcjonalna ścieżka do katalogu projektu
-        project_type: Typ projektu ('MACHINE' lub 'WAREHOUSE')
-        designer: Konstruktor przypisany do projektu
-        status: Status projektu (PROJEKT, W_REALIZACJI, WSTRZYMANY, ZAKOŃCZONY)
-    
-    Returns:
-        ID nowo utworzonego projektu
-    
-    Note:
-        Data utworzenia (created_at) jest automatycznie ustawiana przez bazę danych
-    """
-    name = norm(name)
-    if not name:
-        raise ValueError("Pusta nazwa projektu")
-    
-    # Zapewnij kolumnę project_type
-    ensure_project_type_column(con)
-    
-    # Zapewnij kolumny dla statystyk
-    ensure_projects_stats_columns(con)
-    
-    cols = colnames(con, "projects")
-    pk = pick_col(cols, ["id", "project_id"])
-    name_col = pick_col(cols, ["name", "project_name"])
-    path_col = pick_col(cols, ["root_path", "path"])
-    type_col = pick_col(cols, ["project_type", "type"])
-    
-    if pk is None or name_col is None:
-        raise RuntimeError(f"Nieznany schemat projects. Kolumny: {sorted(cols)}")
-    
-    # Buduj INSERT
-    fields = [name_col]
-    params = [name]
-    
-    if path_col:
-        fields.append(path_col)
-        params.append(norm(root_path) if root_path else None)
-    
-    # Dodaj is_active=1
-    active_col = pick_col(cols, ["is_active", "active", "enabled"])
-    if active_col:
-        fields.append(active_col)
-        params.append(1)
-    
-    # Dodaj project_type
-    if type_col:
-        fields.append(type_col)
-        params.append(project_type if project_type in ("MACHINE", "WAREHOUSE") else "MACHINE")
-    
-    # Dodaj designer (jeśli kolumna istnieje)
-    if 'designer' in cols and designer:
-        fields.append('designer')
-        params.append(norm(designer))
-    
-    # Dodaj status (jeśli kolumna istnieje)
-    if 'status' in cols:
-        fields.append('status')
-        params.append(status if status else 'PROJEKT')
-    
-    sql = f"INSERT INTO projects({', '.join(fields)}) VALUES ({', '.join(['?']*len(fields))})"
-    cur = con.execute(sql, params)
-    project_id = int(cur.lastrowid)
-    
-    # Zapewnij tabelę historii statusów i dodaj wpis początkowy
-    ensure_project_status_history_table(con)
+    nazwa = norm(name)
+    if not nazwa:
+        raise ValueError("Nazwa projektu jest wymagana")
+
+    wynik = _klient().master_exec("project-add", {
+        "project_id": None,                 # NULL → SQLite nada kolejny numer
+        "name": nazwa,
+        "path": norm(root_path) if root_path else None,
+        "project_type": (project_type
+                         if project_type in ("MACHINE", "WAREHOUSE") else "MACHINE"),
+        "designer": norm(designer) if designer else None,
+        "status": status or "PROJEKT",
+    })
+    project_id = int((wynik or {}).get("lastrowid") or 0)
+    if not project_id:
+        raise RuntimeError("Serwer nie zwrócił identyfikatora nowego projektu")
+
+    from datetime import datetime
     try:
-        from datetime import datetime
-        now = datetime.now().isoformat()
-        con.execute("""
-            INSERT INTO project_status_history 
-            (project_id, old_status, new_status, changed_at, notes)
-            VALUES (?, NULL, ?, ?, 'Utworzenie projektu')
-        """, (project_id, status if status else 'PROJEKT', now))
-        con.commit()
+        _klient().master_exec("status-historia-zapisz", {
+            "project_id": project_id,
+            "old_status": None,
+            "new_status": status or "PROJEKT",
+            "changed_at": datetime.now().isoformat(),
+            "changed_by": None,
+            "notes": "Utworzenie projektu",
+        })
     except Exception:
-        # Jeśli nie można dodać do historii, nie blokuj tworzenia projektu
-        pass
-    
+        pass        # historia jest dziennikiem — jej brak nie unieważnia projektu
+
     return project_id
 
 
 def update_project(
-    con: sqlite3.Connection, 
-    project_id: int, 
-    name: Optional[str] = None, 
+    con=None,
+    project_id: int = 0,
+    name: Optional[str] = None,
     root_path: Optional[str] = None,
     designer: Optional[str] = None,
     montaz: Optional[str] = None,
     fat: Optional[str] = None,
     completed_at: Optional[str] = None,
+    expected_delivery: Optional[str] = None,
+    received_percent: Optional[str] = None,
     status: Optional[str] = None
 ) -> None:
+    """Edycja projektu. `None` = pole bez zmian (operacja używa COALESCE).
+
+    Status idzie OSOBNO, przez `change_project_status` — ta funkcja
+    dopisuje wpis do historii, czego zwykły UPDATE by nie zrobił.
     """
-    Aktualizuje dane projektu.
-    
-    Args:
-        con: Połączenie do master.sqlite
-        project_id: ID projektu do aktualizacji
-        name: Nowa nazwa (opcjonalnie)
-        root_path: Nowa ścieżka (opcjonalnie)
-        designer: Konstruktor (opcjonalnie)
-        montaz: Data montażu ISO (opcjonalnie)
-        fat: Data FAT ISO (opcjonalnie)
-        completed_at: Data zakończenia ISO (opcjonalnie)
-        status: Status projektu (opcjonalnie) - automatycznie zapisuje historię zmian
-    
-    Note:
-        Data utworzenia (created_at) jest ustawiana automatycznie tylko przy tworzeniu projektu
-        Zmiana statusu automatycznie zapisuje się w project_status_history
-    """
-    cols = colnames(con, "projects")
-    pk = pick_col(cols, ["id", "project_id"])
-    if pk is None:
-        raise RuntimeError(f"Nieznany klucz w projects. Kolumny: {sorted(cols)}")
-    
-    name_col = pick_col(cols, ["name", "project_name"])
-    if name_col is None:
-        raise RuntimeError(f"Nieznana kolumna nazwy projektu. Kolumny: {sorted(cols)}")
-    
-    path_col = pick_col(cols, ["root_path", "path"])
-    
-    sets = []
-    params = []
-    
-    if name is not None:
-        nm = norm(name)
-        if not nm:
-            raise RuntimeError("Nazwa projektu nie może być pusta.")
-        sets.append(f"{name_col}=?")
-        params.append(nm)
-    
-    if root_path is not None and path_col is not None:
-        rp = norm(root_path)
-        sets.append(f"{path_col}=?")
-        params.append(rp if rp else None)
-    
-    # Nowe pola dla statystyk
-    if designer is not None and 'designer' in cols:
-        sets.append("designer=?")
-        params.append(norm(designer) if designer else None)
-    
-    # Sprawdź obie nazwy kolumny dla kompatybilności wstecznej
-    if montaz is not None:
-        if 'montaz' in cols:
-            sets.append("montaz=?")
-            params.append(montaz)
-        elif 'sat' in cols:
-            sets.append("sat=?")
-            params.append(montaz)
-    
-    if fat is not None and 'fat' in cols:
-        sets.append("fat=?")
-        params.append(fat)
-    
-    if completed_at is not None and 'completed_at' in cols:
-        sets.append("completed_at=?")
-        params.append(completed_at)
-    
-    # SPECJALNA OBSŁUGA STATUSU: zapisz w historii jeśli się zmienił
-    if status is not None and 'status' in cols:
-        # Pobierz aktualny status
-        cur = con.execute(f"SELECT status FROM projects WHERE {pk}=?", (int(project_id),))
-        row = cur.fetchone()
-        old_status = row[0] if row else None
-        
-        # Jeśli status się zmienił, zapisz w historii
-        if old_status != status:
-            # Użyj funkcji change_project_status która obsłuży historię
-            change_project_status(con, int(project_id), status, notes="Zmiana przez GUI")
-            # Funkcja change_project_status już zapisze status, więc nie dodajemy do sets
-        else:
-            # Status się nie zmienił, ale może chcemy go ustawić przy tworzeniu
-            sets.append("status=?")
-            params.append(status)
-    
-    if not sets:
-        return
-    
-    params.append(int(project_id))
-    sql = f"UPDATE projects SET {', '.join(sets)} WHERE {pk}=?"
-    con.execute(sql, params)
+    _klient().master_exec("project-edit", {
+        "project_id": int(project_id),
+        "name": norm(name) if name is not None else None,
+        "path": (norm(root_path) or None) if root_path is not None else None,
+        "designer": (norm(designer) or None) if designer is not None else None,
+        # `montaz` i `sat` to w tej bazie to samo pole pod dwiema nazwami —
+        # zapisujemy obie, żeby okna czytające którąkolwiek widziały zmianę.
+        "montaz": montaz,
+        "sat": montaz,
+        "fat": fat,
+        "completed_at": completed_at,
+        "expected_delivery": expected_delivery,
+        "received_percent": received_percent,
+    })
+
+    if status is not None:
+        wiersze = _klient().master_read("project-get", {"project_id": int(project_id)})
+        stary = (wiersze[0].get("status") if wiersze else None)
+        if stary != status:
+            change_project_status(None, int(project_id), status,
+                                  notes="Zmiana przez GUI")
 
 
-def set_project_active(con: sqlite3.Connection, project_id: int, is_active: int) -> None:
-    """
-    Ustawia status aktywności projektu.
-    
-    Args:
-        con: Połączenie do master.sqlite
-        project_id: ID projektu
-        is_active: 1 = aktywny, 0 = nieaktywny
-    """
-    cols = colnames(con, "projects")
-    pk = pick_col(cols, ["id", "project_id"])
-    if pk is None:
-        raise RuntimeError(f"Nieznany klucz w projects. Kolumny: {sorted(cols)}")
-    
-    active_col = pick_col(cols, ["is_active", "active", "enabled"])
-    if not active_col:
-        ensure_projects_active_column(con)
-        cols = colnames(con, "projects")
-        active_col = pick_col(cols, ["is_active", "active", "enabled"])
-    
-    # Zapewnij kolumny dla statystyk
-    ensure_projects_stats_columns(con)
-    
-    if not active_col:
-        raise RuntimeError("Nie można znaleźć/dodać kolumny aktywności projektu.")
-    
-    docelowy = 1 if int(is_active) else 0
-    cur = con.execute(
-        f"UPDATE projects SET {active_col}=? WHERE {pk}=?",
-        (docelowy, int(project_id))
-    )
-    # UPDATE, ktory nic nie zmienil, NIE jest bledem dla SQLite. Bez tej
-    # kontroli "aktywuj projekt" konczylo sie bez komunikatu, a projekt
-    # zostawal nieaktywny (07.09.2026). rowcount == 0 = nie ma wiersza o tym
-    # id, np. lista pokazuje dane z innej bazy niz ta, do ktorej piszemy.
-    if cur.rowcount == 0:
-        raise RuntimeError(
-            f"Nie zmieniono zadnego wiersza: w tabeli projects nie ma "
-            f"{pk}={project_id}.")
+def set_project_active(con=None, project_id: int = 0, is_active: int = 1) -> None:
+    """Włącza/wyłącza projekt. Wyłączony znika z list, ale zostaje w bazie."""
+    _klient().master_exec("project-set-active", {
+        "project_id": int(project_id),
+        "active": 1 if is_active else 0,
+    })
 
 
-def delete_project(con: sqlite3.Connection, project_id: int) -> None:
+def delete_project(con=None, project_id: int = 0) -> None:
+    """Usuwa projekt z mastera.
+
+    Statusy, historia i dziennik zmian znikają same — mają
+    `ON DELETE CASCADE` na `projects(project_id)`.
     """
-    Usuwa projekt z master DB.
-    
-    UWAGA: W architekturze distributed to usuwa tylko rekord w master.sqlite.
-    Plik project_X.sqlite NIE jest automatycznie usuwany - wymaga osobnej obsługi.
-    
-    Args:
-        con: Połączenie do master.sqlite
-        project_id: ID projektu do usunięcia
-    """
-    cols = colnames(con, "projects")
-    pk = pick_col(cols, ["id", "project_id"])
-    if pk is None:
-        raise RuntimeError(f"Nieznany klucz w projects. Kolumny: {sorted(cols)}")
-    
-    con.execute(f"DELETE FROM projects WHERE {pk}=?", (int(project_id),))
+    _klient().master_exec("project-delete", {"project_id": int(project_id)})
 
 
 # ============================================================================
 # UTILITY - Dodatkowe pomocnicze funkcje
 # ============================================================================
 
-def get_project_info(con: sqlite3.Connection, project_id: int) -> Optional[Tuple[int, str, str, str]]:
-    """
-    Pobiera informacje o pojedynczym projekcie.
-    
-    Returns:
-        (id, name, root_path, project_type) lub None jeśli projekt nie istnieje
-    """
-    # Zapewnij kolumnę project_type
-    ensure_project_type_column(con)
-    
-    cols = colnames(con, "projects")
-    pk = pick_col(cols, ["id", "project_id"])
-    name_col = pick_col(cols, ["name", "project_name"])
-    path_col = pick_col(cols, ["root_path", "path"])
-    type_col = pick_col(cols, ["project_type", "type"])
-    
-    if pk is None or name_col is None:
-        raise RuntimeError(f"Nieznany schemat projects. Kolumny: {sorted(cols)}")
-    
-    select_cols = [pk, name_col]
-    if path_col:
-        select_cols.append(path_col)
-    if type_col:
-        select_cols.append(type_col)
-    
-    sql = f"SELECT {', '.join(select_cols)} FROM projects WHERE {pk}=?"
-    row = con.execute(sql, (int(project_id),)).fetchone()
-    
-    if not row:
+def get_project_info(con=None, project_id: int = 0) -> Optional[Tuple[int, str, str, str]]:
+    """(id, nazwa, ścieżka, typ) albo None, gdy projektu nie ma."""
+    wiersze = _klient().master_read("project-get", {"project_id": int(project_id)})
+    if not wiersze:
         return None
-    
-    pid = int(row[0])
-    pname = str(row[1]) if row[1] is not None else ""
-    idx = 2
-    ppath = str(row[idx]) if len(row) > idx and row[idx] is not None else ""
-    idx += 1
-    ptype = str(row[idx]) if len(row) > idx and row[idx] is not None else "MACHINE"
-    
-    return (pid, pname, ppath, ptype)
+    w = wiersze[0]
+    return (int(w.get("project_id")), str(w.get("name") or ""),
+            str(w.get("path") or ""), str(w.get("project_type") or "MACHINE"))
 
 
-def project_exists(con: sqlite3.Connection, project_id: int) -> bool:
-    """Sprawdza czy projekt o danym ID istnieje."""
-    return get_project_info(con, project_id) is not None
+def project_exists(con=None, project_id: int = 0) -> bool:
+    return get_project_info(None, project_id) is not None
 
 
 def get_project_db_path(projects_dir: Path, project_id: int, project_type: str = "MACHINE") -> Path:
@@ -700,401 +302,115 @@ PROJECT_STATUSES = [
 ]
 
 
-def ensure_project_statuses_table(con: sqlite3.Connection) -> None:
-    """
-    Zapewnia, że tabela project_statuses istnieje (NOWY SYSTEM MULTI-STATUS).
-    
-    Tworzy tabelę many-to-many do przechowywania wielu statusów dla jednego projektu.
-    Tabela pozwala na przypisanie wielu statusów równocześnie.
-    """
-    try:
-        cur = con.cursor()
-        
-        # Sprawdź czy tabela już istnieje
-        cur.execute("""
-            SELECT name FROM sqlite_master 
-            WHERE type='table' AND name='project_statuses'
-        """)
-        
-        if cur.fetchone():
-            # Tabela już istnieje
-            return
-        
-        # Utwórz tabelę project_statuses (many-to-many)
-        cur.execute("""
-            CREATE TABLE project_statuses (
-                project_id     INTEGER NOT NULL,
-                status         TEXT NOT NULL,
-                set_at         TEXT NOT NULL DEFAULT (datetime('now')),
-                set_by         TEXT,
-                PRIMARY KEY (project_id, status),
-                FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
-            )
-        """)
-        
-        # Indeks dla szybkiego wyszukiwania
-        cur.execute("""
-            CREATE INDEX idx_project_statuses_project 
-            ON project_statuses(project_id)
-        """)
-        
-        # Indeks dla wyszukiwania po statusie
-        cur.execute("""
-            CREATE INDEX idx_project_statuses_status 
-            ON project_statuses(status)
-        """)
-        
-        con.commit()
-        print("✅ Utworzono tabelę project_statuses (multi-status)")
-        
-    except Exception as e:
-        print(f"⚠️  Błąd tworzenia tabeli project_statuses: {e}")
 
 
-def ensure_project_status_changes_table(con: sqlite3.Connection) -> None:
-    """
-    Zapewnia, że tabela project_status_changes istnieje (SZCZEGÓŁOWA HISTORIA).
-    
-    Tworzy tabelę do śledzenia każdej zmiany statusu osobno - każde dodanie lub
-    usunięcie statusu zapisywane jest jako osobny wpis.
-    
-    Struktura:
-    - id: Unikalny identyfikator zmiany
-    - project_id: ID projektu
-    - status: Nazwa statusu (np. 'MONTAZ', 'ODBIORY')
-    - action: 'ADDED' (dodano) lub 'REMOVED' (usunięto)
-    - changed_at: Timestamp zmiany
-    - changed_by: Kto wykonał zmianę
-    - notes: Opcjonalne notatki
-    """
-    try:
-        cur = con.cursor()
-        
-        # Sprawdź czy tabela już istnieje
-        cur.execute("""
-            SELECT name FROM sqlite_master 
-            WHERE type='table' AND name='project_status_changes'
-        """)
-        
-        if cur.fetchone():
-            # Tabela już istnieje
-            return
-        
-        # Utwórz tabelę szczegółowej historii statusów
-        cur.execute("""
-            CREATE TABLE project_status_changes (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_id     INTEGER NOT NULL,
-                status         TEXT NOT NULL,
-                action         TEXT NOT NULL CHECK(action IN ('ADDED', 'REMOVED')),
-                changed_at     TEXT NOT NULL DEFAULT (datetime('now')),
-                changed_by     TEXT,
-                notes          TEXT,
-                FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
-            )
-        """)
-        
-        # Indeks dla szybkiego wyszukiwania po projekcie
-        cur.execute("""
-            CREATE INDEX idx_status_changes_project 
-            ON project_status_changes(project_id, changed_at DESC)
-        """)
-        
-        # Indeks dla wyszukiwania po statusie
-        cur.execute("""
-            CREATE INDEX idx_status_changes_status 
-            ON project_status_changes(status, changed_at DESC)
-        """)
-        
-        # Indeks dla wyszukiwania kombinacji projekt+status
-        cur.execute("""
-            CREATE INDEX idx_status_changes_project_status 
-            ON project_status_changes(project_id, status, changed_at DESC)
-        """)
-        
-        con.commit()
-        print("✅ Utworzono tabelę project_status_changes (szczegółowa historia)")
-        
-    except Exception as e:
-        print(f"⚠️  Błąd tworzenia tabeli project_status_changes: {e}")
 
 
-def ensure_project_status_history_table(con: sqlite3.Connection) -> None:
-    """
-    Zapewnia, że tabela project_status_history istnieje wraz z potrzebnymi kolumnami.
-    Tworzy automatycznie przy pierwszym użyciu - gotowe do instalacji w działającym systemie.
-    
-    Tworzy:
-    - Tabelę project_status_history do śledzenia zmian statusów
-    - Indeks dla szybkiego wyszukiwania
-    - Kolumnę status_changed_at w tabeli projects
-    - Inicjalizuje historię dla istniejących projektów
-    """
-    from datetime import datetime
-    
-    try:
-        cur = con.cursor()
-        
-        # Sprawdź czy tabela już istnieje
-        cur.execute("""
-            SELECT name FROM sqlite_master 
-            WHERE type='table' AND name='project_status_history'
-        """)
-        
-        if cur.fetchone():
-            # Tabela już istnieje, nie rób nic
-            return
-        
-        # Utwórz tabelę historii statusów
-        cur.execute("""
-            CREATE TABLE project_status_history (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_id     INTEGER NOT NULL,
-                old_status     TEXT,
-                new_status     TEXT NOT NULL,
-                changed_at     TEXT NOT NULL DEFAULT (datetime('now')),
-                changed_by     TEXT,
-                notes          TEXT,
-                FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
-            )
-        """)
-        
-        # Indeks dla szybkiego wyszukiwania
-        cur.execute("""
-            CREATE INDEX idx_status_history_project 
-            ON project_status_history(project_id, changed_at DESC)
-        """)
-        
-        # Dodaj kolumnę status_changed_at do projects (jeśli nie istnieje)
-        cols = colnames(con, "projects")
-        if "status_changed_at" not in cols:
-            try:
-                cur.execute("""
-                    ALTER TABLE projects 
-                    ADD COLUMN status_changed_at TEXT
-                """)
-            except sqlite3.OperationalError:
-                pass  # Kolumna już istnieje
-        
-        # Inicjalizuj historię dla istniejących projektów
-        cur.execute("""
-            SELECT project_id, status, created_at
-            FROM projects
-        """)
-        projects = cur.fetchall()
-        
-        for proj_id, status, created_at in projects:
-            # Dodaj wpis historii
-            cur.execute("""
-                INSERT INTO project_status_history 
-                (project_id, old_status, new_status, changed_at, notes)
-                VALUES (?, NULL, ?, ?, 'Automatyczna inicjalizacja historii')
-            """, (proj_id, status or 'PROJEKT', created_at or datetime.now().isoformat()))
-            
-            # Ustaw status_changed_at
-            cur.execute("""
-                UPDATE projects 
-                SET status_changed_at = ?
-                WHERE project_id = ?
-            """, (created_at or datetime.now().isoformat(), proj_id))
-        
-        con.commit()
-        
-    except Exception as e:
-        # Błąd nie jest krytyczny, system może działać bez historii
-        print(f"⚠️  Błąd tworzenia tabeli historii: {e}")
 
 
 def change_project_status(
-    con: sqlite3.Connection,
-    project_id: int,
-    new_status: str,
+    con=None,
+    project_id: int = 0,
+    new_status: str = "",
     changed_by: Optional[str] = None,
     notes: Optional[str] = None
 ) -> bool:
-    """
-    Zmienia status projektu i zapisuje w historii.
-    
-    Args:
-        con: Połączenie z master.sqlite
-        project_id: ID projektu
-        new_status: Nowy status (musi być z PROJECT_STATUSES)
-        changed_by: Kto zmienił status (opcjonalne)
-        notes: Notatki do zmiany (opcjonalne)
-    
-    Returns:
-        True jeśli zmiana się powiodła
+    """Zmienia status projektu i zapisuje wpis w historii.
+
+    Wszystko jednym batchem (jedna transakcja): historia, samo pole
+    `status` i ewentualna data zakończenia. Rozjazd między tymi trzema
+    zapisami dałby projekt w stanie, którego historia nie tłumaczy.
     """
     from datetime import datetime
-    
-    # Zapewnij tabelę historii statusów (automatyczne tworzenie przy pierwszym użyciu)
-    ensure_project_status_history_table(con)
-    
-    # Walidacja statusu
+
     if new_status not in PROJECT_STATUSES:
-        print(f"❌ Nieprawidłowy status: {new_status}")
+        print(f"❌ Nieznany status: {new_status}")
         print(f"   Dozwolone: {', '.join(PROJECT_STATUSES)}")
         return False
-    
-    # Wykryj nazwę kolumny klucza głównego (może być 'id' lub 'project_id')
-    cols = colnames(con, "projects")
-    pk = pick_col(cols, ["id", "project_id"])
-    if pk is None:
-        print(f"❌ Nie znaleziono klucza głównego w tabeli projects")
-        return False
-    
+
     try:
-        # Pobierz aktualny status (używając wykrytej nazwy kolumny)
-        cur = con.execute(
-            f"SELECT status FROM projects WHERE {pk}=?",
-            (project_id,)
-        )
-        row = cur.fetchone()
-        if not row:
-            print(f"❌ Nie znaleziono projektu {project_id}")
+        wiersze = _klient().master_read("project-get", {"project_id": int(project_id)})
+        if not wiersze:
+            print(f"❌ Projekt {project_id} nie istnieje")
             return False
-        
-        old_status = row[0]
-        
-        # Jeśli status się nie zmienił, nie rób nic
-        if old_status == new_status:
-            return True
-        
-        now = datetime.now().isoformat()
-        
-        # Zapisz w historii
-        con.execute("""
-            INSERT INTO project_status_history 
-            (project_id, old_status, new_status, changed_at, changed_by, notes)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (project_id, old_status, new_status, now, changed_by, notes))
-        
-        # Zaktualizuj status w projects (używając wykrytej nazwy kolumny)
-        con.execute(f"""
-            UPDATE projects 
-            SET status = ?, status_changed_at = ?
-            WHERE {pk} = ?
-        """, (new_status, now, project_id))
-        
-        # Jeśli status to ZAKOŃCZONY, ustaw completed_at (jeśli nie jest już ustawiony)
+        stary = wiersze[0].get("status")
+        if stary == new_status:
+            return True          # nic się nie zmienia — bez pustego wpisu
+
+        teraz = datetime.now().isoformat()
+        operacje = [
+            {"operation": "status-historia-zapisz",
+             "params": {"project_id": int(project_id), "old_status": stary,
+                        "new_status": new_status, "changed_at": teraz,
+                        "changed_by": changed_by, "notes": notes}},
+            {"operation": "project-status-zmien",
+             "params": {"project_id": int(project_id), "status": new_status,
+                        "status_changed_at": teraz}},
+        ]
         if new_status == "ZAKOŃCZONY":
-            con.execute(f"""
-                UPDATE projects 
-                SET completed_at = COALESCE(completed_at, ?)
-                WHERE {pk} = ?
-            """, (now, project_id))
-        
-        con.commit()
+            operacje.append({"operation": "project-zakonczony",
+                             "params": {"project_id": int(project_id),
+                                        "completed_at": teraz}})
+        _klient().master_batch(operacje)
         return True
-        
+
     except Exception as e:
         print(f"❌ Błąd zmiany statusu: {e}")
-        import traceback
-        traceback.print_exc()
         return False
 
 
-def get_project_status_history(
-    con: sqlite3.Connection,
-    project_id: int
-) -> list:
-    """
-    Pobiera historię zmian statusów projektu.
-    
-    Returns:
-        Lista tuple: (id, old_status, new_status, changed_at, changed_by, notes)
-    """
-    # Zapewnij tabelę historii statusów (automatyczne tworzenie przy pierwszym użyciu)
-    ensure_project_status_history_table(con)
-    
-    try:
-        cur = con.execute("""
-            SELECT id, old_status, new_status, changed_at, changed_by, notes
-            FROM project_status_history
-            WHERE project_id = ?
-            ORDER BY changed_at DESC
-        """, (project_id,))
-        return cur.fetchall()
-    except Exception as e:
-        print(f"❌ Błąd pobierania historii: {e}")
-        return []
+def get_project_status_history(con=None, project_id: int = 0) -> List[Tuple]:
+    """Historia zmian statusu: (id, stary, nowy, kiedy, kto, uwagi)."""
+    return [(w["id"], w["old_status"], w["new_status"], w["changed_at"],
+             w["changed_by"], w["notes"])
+            for w in _klient().master_read("status-historia",
+                                           {"project_id": int(project_id)})]
 
 
 def get_project_time_in_status(
-    con: sqlite3.Connection,
-    project_id: int,
-    status: str
+    con=None,
+    project_id: int = 0,
+    status: str = ""
 ) -> float:
-    """
-    Oblicza łączny czas (w dniach) spędzony w danym statusie.
-    
-    Args:
-        con: Połączenie z master.sqlite
-        project_id: ID projektu
-        status: Status do sprawdzenia
-    
-    Returns:
-        Liczba dni w tym statusie
+    """Łączny czas (w dniach) spędzony w danym statusie.
+
+    Liczony z historii przejść: od wpisu, który ten status nadał, do
+    następnej zmiany. Ostatni odcinek trwa do teraz.
     """
     from datetime import datetime
-    
-    # Zapewnij tabelę historii statusów (automatyczne tworzenie przy pierwszym użyciu)
-    ensure_project_status_history_table(con)
-    
+
     try:
-        # Pobierz wszystkie zmiany statusu
-        cur = con.execute("""
-            SELECT old_status, new_status, changed_at
-            FROM project_status_history
-            WHERE project_id = ?
-            ORDER BY changed_at ASC
-        """, (project_id,))
-        
-        history = cur.fetchall()
-        if not history:
+        wiersze = _klient().master_read("status-historia-rosnaco",
+                                        {"project_id": int(project_id)})
+        if not wiersze:
             return 0.0
-        
-        total_days = 0.0
-        current_status = None
-        status_start = None
-        
-        for old_stat, new_stat, changed_at in history:
-            # Parsuj datę
-            try:
-                change_time = datetime.fromisoformat(changed_at)
-            except:
+
+        razem = 0.0
+        for i, w in enumerate(wiersze):
+            if w.get("new_status") != status:
                 continue
-            
-            # Jeśli wchodzimy w interesujący nas status
-            if new_stat == status:
-                status_start = change_time
-                current_status = status
-            
-            # Jeśli wychodzimy z interesującego nas statusu
-            elif current_status == status and status_start:
-                delta = (change_time - status_start).total_seconds()
-                total_days += delta / 86400.0  # sekund na dzień
-                status_start = None
-                current_status = new_stat
+            try:
+                od = datetime.fromisoformat(w["changed_at"])
+            except Exception:
+                continue
+            if i + 1 < len(wiersze):
+                try:
+                    do = datetime.fromisoformat(wiersze[i + 1]["changed_at"])
+                except Exception:
+                    continue
             else:
-                current_status = new_stat
-        
-        # Jeśli nadal jesteśmy w tym statusie
-        if current_status == status and status_start:
-            now = datetime.now()
-            delta = (now - status_start).total_seconds()
-            total_days += delta / 86400.0
-        
-        return total_days
-        
+                do = datetime.now()      # wciąż w tym statusie
+            razem += (do - od).total_seconds() / 86400.0
+
+        return razem
     except Exception as e:
-        print(f"❌ Błąd obliczania czasu: {e}")
+        print(f"⚠️  get_project_time_in_status: {e}")
         return 0.0
 
 
 def get_all_project_times(
-    con: sqlite3.Connection,
-    project_id: int
+    con=None,
+    project_id: int = 0
 ) -> dict:
     """
     Oblicza czas spędzony w każdym statusie.
@@ -1112,156 +428,94 @@ def get_all_project_times(
 # MULTI-STATUS SYSTEM - Funkcje zarządzania wieloma statusami
 # ============================================================================
 
-def get_project_statuses(con: sqlite3.Connection, project_id: int) -> list:
-    """
-    Pobiera listę aktywnych statusów dla projektu (NOWY SYSTEM).
-    
-    Args:
-        con: Połączenie z master.sqlite
-        project_id: ID projektu
-    
-    Returns:
-        Lista statusów: ['PROJEKT', 'MONTAZ', ...]
-    """
-    # Zapewnij tabelę
-    ensure_project_statuses_table(con)
-    
+def get_project_statuses(con=None, project_id: int = 0) -> list:
+    """Wszystkie statusy projektu (może mieć kilka naraz), od najstarszego."""
     try:
-        cur = con.execute("""
-            SELECT status
-            FROM project_statuses
-            WHERE project_id = ?
-            ORDER BY set_at ASC
-        """, (project_id,))
-        return [row[0] for row in cur.fetchall()]
+        return [w["status"] for w in
+                _klient().master_read("statusy-projektu",
+                                      {"project_id": int(project_id)})]
     except Exception as e:
-        print(f"❌ Błąd pobierania statusów: {e}")
+        print(f"⚠️  get_project_statuses: {e}")
         return []
 
 
 def set_project_statuses(
-    con: sqlite3.Connection,
-    project_id: int,
-    statuses: list,
+    con=None,
+    project_id: int = 0,
+    statuses: list = None,
     set_by: Optional[str] = None
 ) -> bool:
-    """
-    Ustawia statusy projektu (NOWY SYSTEM - multi-select).
-    
-    Zastępuje wszystkie poprzednie statusy nowymi.
-    
-    Args:
-        con: Połączenie z master.sqlite
-        project_id: ID projektu
-        statuses: Lista statusów do ustawienia ['PROJEKT', 'MONTAZ', ...]
-        set_by: Kto ustawił (login użytkownika)
-    
-    Returns:
-        True jeśli sukces
+    """Ustawia KOMPLET statusów projektu (podmiana, nie dokładanie).
+
+    Wszystko leci jednym batchem — dziennik zmian, podmiana zbioru,
+    wpis w historii i znaczniki w `projects`. Rozjazd między nimi dałby
+    projekt, którego dzienniki nie tłumaczą.
     """
     from datetime import datetime
-    
-    # Zapewnij tabelę
-    ensure_project_statuses_table(con)
-    
-    # Walidacja statusów
+
+    statuses = statuses or []
     for status in statuses:
         if status not in PROJECT_STATUSES_NEW:
-            print(f"❌ Nieprawidłowy status: {status}")
+            print(f"❌ Nieznany status: {status}")
             print(f"   Dozwolone: {', '.join(PROJECT_STATUSES_NEW)}")
             return False
-    
+
     try:
-        now = datetime.now().isoformat()
-        
-        # Pobierz stare statusy
-        old_statuses = get_project_statuses(con, project_id)
-        old_statuses_set = set(old_statuses)
-        new_statuses_set = set(statuses)
-        
-        # Oblicz różnice
-        added_statuses = new_statuses_set - old_statuses_set
-        removed_statuses = old_statuses_set - new_statuses_set
-        
-        # Zapewnij tabelę szczegółowej historii
-        ensure_project_status_changes_table(con)
-        
-        # Zapisz szczegółową historię - każdy dodany status
-        for status in added_statuses:
-            con.execute("""
-                INSERT INTO project_status_changes 
-                (project_id, status, action, changed_at, changed_by, notes)
-                VALUES (?, ?, 'ADDED', ?, ?, ?)
-            """, (project_id, status, now, set_by, f"Status {status} dodany"))
-        
-        # Zapisz szczegółową historię - każdy usunięty status
-        for status in removed_statuses:
-            con.execute("""
-                INSERT INTO project_status_changes 
-                (project_id, status, action, changed_at, changed_by, notes)
-                VALUES (?, ?, 'REMOVED', ?, ?, ?)
-            """, (project_id, status, now, set_by, f"Status {status} usunięty"))
-        
-        # Usuń wszystkie obecne statusy
-        con.execute("""
-            DELETE FROM project_statuses
-            WHERE project_id = ?
-        """, (project_id,))
-        
-        # Dodaj nowe statusy
+        teraz = datetime.now().isoformat()
+        stare = set(get_project_statuses(None, project_id))
+        nowe = set(statuses)
+        dodane, zdjete = nowe - stare, stare - nowe
+
+        operacje = []
+        for status in sorted(dodane):
+            operacje.append({"operation": "status-zmiana-zapisz",
+                             "params": {"project_id": project_id, "status": status,
+                                        "action": "ADDED", "changed_at": teraz,
+                                        "changed_by": set_by, "notes": None}})
+        for status in sorted(zdjete):
+            operacje.append({"operation": "status-zmiana-zapisz",
+                             "params": {"project_id": project_id, "status": status,
+                                        "action": "REMOVED", "changed_at": teraz,
+                                        "changed_by": set_by, "notes": None}})
+
+        # Podmiana zbioru: czyścimy i wstawiamy od nowa.
+        operacje.append({"operation": "statusy-wyczysc",
+                         "params": {"project_id": project_id}})
         for status in statuses:
-            con.execute("""
-                INSERT INTO project_statuses (project_id, status, set_at, set_by)
-                VALUES (?, ?, ?, ?)
-            """, (project_id, status, now, set_by))
-        
-        # Zapisz zmianę w historii (stary system - dla kompatybilności)
-        old_status_str = ", ".join(sorted(old_statuses)) if old_statuses else None
-        new_status_str = ", ".join(sorted(statuses)) if statuses else None
-        
-        if old_status_str != new_status_str:
-            ensure_project_status_history_table(con)
-            con.execute("""
-                INSERT INTO project_status_history 
-                (project_id, old_status, new_status, changed_at, changed_by, notes)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (project_id, old_status_str, new_status_str, now, set_by, "Multi-status update"))
-        
-        # Zaktualizuj status_changed_at w projects
-        cols = colnames(con, "projects")
-        pk = pick_col(cols, ["id", "project_id"])
-        if "status_changed_at" in cols and pk:
-            con.execute(f"""
-                UPDATE projects 
-                SET status_changed_at = ?
-                WHERE {pk} = ?
-            """, (now, project_id))
-        
-        # Jeśli ZAKONCZONY jest w statusach, ustaw completed_at
+            operacje.append({"operation": "status-dodaj",
+                             "params": {"project_id": project_id, "status": status,
+                                        "set_at": teraz, "set_by": set_by}})
+
+        stary_opis = ", ".join(sorted(stare)) if stare else None
+        nowy_opis = ", ".join(sorted(nowe)) if nowe else None
+        if stary_opis != nowy_opis:
+            operacje.append({"operation": "status-historia-zapisz",
+                             "params": {"project_id": project_id,
+                                        "old_status": stary_opis,
+                                        "new_status": nowy_opis,
+                                        "changed_at": teraz, "changed_by": set_by,
+                                        "notes": "Multi-status update"}})
+
+        operacje.append({"operation": "project-status-znacznik",
+                         "params": {"project_id": project_id,
+                                    "status_changed_at": teraz}})
         if "ZAKONCZONY" in statuses:
-            cols = colnames(con, "projects")
-            pk = pick_col(cols, ["id", "project_id"])
-            if "completed_at" in cols and pk:
-                con.execute(f"""
-                    UPDATE projects 
-                    SET completed_at = COALESCE(completed_at, ?)
-                    WHERE {pk} = ?
-                """, (now, project_id))
-        
-        con.commit()
+            operacje.append({"operation": "project-zakonczony",
+                             "params": {"project_id": project_id,
+                                        "completed_at": teraz}})
+
+        _klient().master_batch(operacje)
         return True
-        
+
     except Exception as e:
-        print(f"❌ Błąd ustawiania statusów: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ Błąd zapisu statusów: {e}")
         return False
 
 
 def add_project_status(
-    con: sqlite3.Connection,
-    project_id: int,
-    status: str,
+    con=None,
+    project_id: int = 0,
+    status: str = "",
     set_by: Optional[str] = None
 ) -> bool:
     """
@@ -1284,9 +538,9 @@ def add_project_status(
 
 
 def remove_project_status(
-    con: sqlite3.Connection,
-    project_id: int,
-    status: str,
+    con=None,
+    project_id: int = 0,
+    status: str = "",
     set_by: Optional[str] = None
 ) -> bool:
     """
@@ -1329,50 +583,30 @@ def get_project_statuses_display(con: sqlite3.Connection, project_id: int) -> st
 # SZCZEGÓŁOWA HISTORIA STATUSÓW - Tracking każdej zmiany osobno
 # ============================================================================
 
-def get_status_detailed_history(
-    con: sqlite3.Connection,
-    project_id: int,
-    status: Optional[str] = None
-) -> list:
+def get_status_detailed_history(con=None, project_id: int = 0,
+                                status: Optional[str] = None) -> List[Tuple]:
+    """Dziennik ADDED/REMOVED: (id, status, akcja, kiedy, kto, uwagi).
+
+    Bez `status` — całość dla projektu; z `status` — tylko ten jeden.
     """
-    Pobiera szczegółową historię zmian statusów dla projektu.
-    
-    Args:
-        con: Połączenie z master.sqlite
-        project_id: ID projektu
-        status: Opcjonalnie - filtruj po konkretnym statusie
-    
-    Returns:
-        Lista tuple: (id, status, action, changed_at, changed_by, notes)
-        Posortowana od najnowszych
-    """
-    ensure_project_status_changes_table(con)
-    
     try:
         if status:
-            cur = con.execute("""
-                SELECT id, status, action, changed_at, changed_by, notes
-                FROM project_status_changes
-                WHERE project_id = ? AND status = ?
-                ORDER BY changed_at DESC
-            """, (project_id, status))
+            wiersze = _klient().master_read(
+                "status-zmiany-jednego",
+                {"project_id": int(project_id), "status": status})
         else:
-            cur = con.execute("""
-                SELECT id, status, action, changed_at, changed_by, notes
-                FROM project_status_changes
-                WHERE project_id = ?
-                ORDER BY changed_at DESC
-            """, (project_id,))
-        
-        return cur.fetchall()
+            wiersze = _klient().master_read(
+                "status-zmiany", {"project_id": int(project_id)})
+        return [(w["id"], w["status"], w["action"], w["changed_at"],
+                 w["changed_by"], w["notes"]) for w in wiersze]
     except Exception as e:
-        print(f"❌ Błąd pobierania szczegółowej historii: {e}")
+        print(f"⚠️  get_status_detailed_history: {e}")
         return []
 
 
 def get_status_timeline(
-    con: sqlite3.Connection,
-    project_id: int
+    con=None,
+    project_id: int = 0
 ) -> dict:
     """
     Pobiera pełną linię czasu statusów dla projektu.
@@ -1413,9 +647,9 @@ def get_status_timeline(
 
 
 def get_status_duration(
-    con: sqlite3.Connection,
-    project_id: int,
-    status: str
+    con=None,
+    project_id: int = 0,
+    status: str = ""
 ) -> float:
     """
     Oblicza łączny czas (w dniach) spędzony w danym statusie.
@@ -1465,44 +699,21 @@ def get_status_duration(
     return total_seconds / 86400.0  # Konwertuj na dni
 
 
-def get_all_statuses_duration(
-    con: sqlite3.Connection,
-    project_id: int
-) -> dict:
-    """
-    Oblicza czas spędzony w każdym statusie.
-    
-    Returns:
-        Dict: {status_name: days}
-    """
-    durations = {}
-    
-    # Pobierz wszystkie unikalne statusy dla tego projektu
-    ensure_project_status_changes_table(con)
-    
+def get_all_statuses_duration(con=None, project_id: int = 0) -> dict:
+    """Czas spędzony w każdym statusie: {status: liczba_dni}."""
     try:
-        cur = con.execute("""
-            SELECT DISTINCT status
-            FROM project_status_changes
-            WHERE project_id = ?
-        """, (project_id,))
-        
-        statuses = [row[0] for row in cur.fetchall()]
-        
-        for status in statuses:
-            durations[status] = get_status_duration(con, project_id, status)
-        
-        return durations
-    
+        uzyte = [w["status"] for w in _klient().master_read(
+            "status-lista-uzytych", {"project_id": int(project_id)})]
+        return {s: get_status_duration(None, project_id, s) for s in uzyte}
     except Exception as e:
-        print(f"❌ Błąd obliczania czasów: {e}")
+        print(f"⚠️  get_all_statuses_duration: {e}")
         return {}
 
 
 def is_status_currently_active(
-    con: sqlite3.Connection,
-    project_id: int,
-    status: str
+    con=None,
+    project_id: int = 0,
+    status: str = ""
 ) -> bool:
     """
     Sprawdza czy dany status jest obecnie aktywny dla projektu.

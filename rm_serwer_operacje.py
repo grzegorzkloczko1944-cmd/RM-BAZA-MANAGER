@@ -47,8 +47,12 @@ ODCZYT = {
         "SELECT supplier_id, name FROM suppliers WHERE name = ? COLLATE NOCASE",
         ["name"],
     ),
+    # `is_active` jest potrzebne oknu zarządzania użytkownikami (kolumna
+    # „Aktywny"). Dokładanie kolumny do SELECT-a jest bezpieczne: wołający
+    # czytają wiersz po nazwach.
     "users-list": (
-        "SELECT id, username, display_name, role FROM users ORDER BY username COLLATE NOCASE",
+        "SELECT id, username, display_name, role, is_active FROM users"
+        " ORDER BY username COLLATE NOCASE",
         [],
     ),
     "settings-get": (
@@ -95,6 +99,11 @@ ODCZYT = {
         [],
     ),
     # ── użytkownicy ───────────────────────────────────────────────────
+    # Jeden użytkownik po id — uprawnienia sprawdzane przy każdej akcji.
+    "user-po-id": (
+        "SELECT id, username, display_name, role FROM users WHERE id = ?",
+        ["id"],
+    ),
     "users-aktywni": (
         "SELECT id, username, display_name, role FROM users"
         " WHERE is_active = 1 ORDER BY username",
@@ -168,8 +177,17 @@ ODCZYT = {
         "SELECT name FROM suppliers WHERE supplier_id = ?",
         ["supplier_id"],
     ),
+    # Dostawca po nazwie z BOM-u. ⚠️ Poprzednio pytało o `id` i
+    # `name_normalized` — tabela nie ma ANI JEDNEJ z tych kolumn (jest
+    # `supplier_id` i `name`), więc każde wywołanie rzucało wyjątkiem,
+    # cicho zjadanym przez `except: pass` u wołającego. Efekt: importowana
+    # pozycja NIGDY nie dostawała dostawcy.
+    #
+    # `norm()` po stronie klienta zwija białe znaki; tutaj dokładamy TRIM
+    # i NOCASE, bo nazwy w BOM-ie różnią się wielkością liter.
     "supplier-po-normalizacji": (
-        "SELECT id FROM suppliers WHERE name_normalized = ?",
+        "SELECT supplier_id AS id FROM suppliers"
+        " WHERE TRIM(name) = TRIM(?) COLLATE NOCASE",
         ["name_normalized"],
     ),
 
@@ -240,13 +258,118 @@ ODCZYT = {
     ),
 
     # ── tagi kooperantów (portal RM_RFQ; tabele leżą w masterze) ──────
-    "rfq-tagi": (
-        "SELECT id, name, label FROM rfq_tags ORDER BY sort_order, label",
-        [],
-    ),
     "rfq-tagi-dostawcy": (
         "SELECT tag_id FROM rfq_supplier_tags WHERE supplier_id = ?",
         ["supplier_id"],
+    ),
+
+    # ══ KALKULATORY ═════════════════════════════════════════════════
+    "materialy-cennik": (
+        "SELECT material, density, price_per_kg FROM material_prices"
+        " ORDER BY material",
+        [],
+    ),
+    # Dostawcy „RMPAK" — kalkulator liczy im robociznę zamiast ceny z oferty.
+    "suppliers-po-nazwie-like": (
+        "SELECT supplier_id FROM suppliers WHERE name LIKE ?",
+        ["wzorzec"],
+    ),
+
+    # ══ STATUSY PROJEKTÓW ═══════════════════════════════════════════
+    # Projekt ma KILKA statusów naraz — `project_statuses` to zbiór, nie
+    # jedno pole. Kolejność po `set_at`, bo pierwszy nadany jest głównym.
+    "statusy-projektu": (
+        "SELECT status FROM project_statuses WHERE project_id = ?"
+        " ORDER BY set_at ASC",
+        ["project_id"],
+    ),
+    "status-historia": (
+        "SELECT id, old_status, new_status, changed_at, changed_by, notes"
+        " FROM project_status_history WHERE project_id = ?"
+        " ORDER BY changed_at DESC",
+        ["project_id"],
+    ),
+    # Rosnąco — liczenie czasu spędzonego w statusie wymaga kolejności od
+    # najstarszego.
+    "status-historia-rosnaco": (
+        "SELECT old_status, new_status, changed_at"
+        " FROM project_status_history WHERE project_id = ?"
+        " ORDER BY changed_at ASC",
+        ["project_id"],
+    ),
+    "status-zmiany": (
+        "SELECT id, status, action, changed_at, changed_by, notes"
+        " FROM project_status_changes WHERE project_id = ?"
+        " ORDER BY changed_at DESC",
+        ["project_id"],
+    ),
+    "status-zmiany-jednego": (
+        "SELECT id, status, action, changed_at, changed_by, notes"
+        " FROM project_status_changes"
+        " WHERE project_id = ? AND status = ? ORDER BY changed_at DESC",
+        ["project_id", "status"],
+    ),
+    "status-lista-uzytych": (
+        "SELECT DISTINCT status FROM project_status_changes"
+        " WHERE project_id = ?",
+        ["project_id"],
+    ),
+
+    # ══ PORTAL RFQ — synchronizator (rm_sync_agent) ═════════════════
+    # Agent chodzi w sieci firmowej: czyta mastera (przez serwer) i pliki
+    # z V:\, wysyła ich treść do portalu po HTTPS. Pliki to etap 3 —
+    # tutaj idą WYŁĄCZNIE metadane.
+    "rfq-ustawienie": (
+        "SELECT value FROM settings WHERE key = ?",
+        ["key"],
+    ),
+    "rfq-tagi": (
+        "SELECT id, name, label, sort_order FROM rfq_tags"
+        " ORDER BY sort_order, label",
+        [],
+    ),
+    "rfq-tag-nastepny-numer": (
+        "SELECT COALESCE(MAX(sort_order), 0) + 1 AS nastepny FROM rfq_tags",
+        [],
+    ),
+    "rfq-tagi-dostawcow": (
+        "SELECT supplier_id, tag_id FROM rfq_supplier_tags",
+        [],
+    ),
+    # DISTINCT rfq_id — po tym iteruje all_stale_drawings() licząc badge
+    # „do podmiany".
+    "rfq-pushed-rfq-id": (
+        "SELECT DISTINCT rfq_id FROM rfq_pushed_files",
+        [],
+    ),
+    "rfq-pushed-nazwy": (
+        "SELECT filename FROM rfq_pushed_files"
+        " WHERE rfq_id = ? AND drawing_number = ?",
+        ["rfq_id", "drawing_number"],
+    ),
+    "rfq-pushed-sciezki": (
+        "SELECT path FROM rfq_pushed_files"
+        " WHERE rfq_id = ? AND drawing_number = ?",
+        ["rfq_id", "drawing_number"],
+    ),
+    "rfq-pushed-odciski": (
+        "SELECT path, filename, drawing_number, size, mtime_ns, sha1"
+        " FROM rfq_pushed_files WHERE rfq_id = ?",
+        ["rfq_id"],
+    ),
+    # Pozycje z ZALEGŁYM powiadomieniem: dokumentację podmieniono, ale
+    # kooperanci nie wiedzą o tej wersji. Do tabelki „Do powiadomienia".
+    "rfq-do-powiadomienia": (
+        "SELECT rfq_id, drawing_number, item_name, rfq_code, files_updated_at"
+        " FROM rfq_results"
+        " WHERE files_updated_at IS NOT NULL"
+        "   AND (docs_notified_at IS NULL OR docs_notified_at < files_updated_at)"
+        " ORDER BY rfq_code, drawing_number",
+        [],
+    ),
+    "rfq-wynikow-ile": (
+        "SELECT COUNT(*) AS n FROM rfq_results",
+        [],
     ),
 
     # ══ MAPOWANIA SUBIEKTA ══════════════════════════════════════════
@@ -373,6 +496,28 @@ ZAPIS = {
         " WHERE project_id = ?",
         ["status", "designer", "montaz", "fat", "completed_at", "project_id"],
     ),
+    # ⚠️ `status` i `project_status` to DWIE RÓŻNE kolumny w `projects`:
+    # `status` to faza projektu (PROJEKT/MONTAZ/…), `project_status` to
+    # osobne pole używane przez RM_MANAGER. Nie mylić — operacja poniżej
+    # (`project-status-set`) pisze do tego drugiego.
+    "project-status-zmien": (
+        "UPDATE projects SET status = ?, status_changed_at = ?"
+        " WHERE project_id = ?",
+        ["status", "status_changed_at", "project_id"],
+    ),
+    # Sam znacznik czasu, bez ruszania `status` — używa go tryb
+    # wielostatusowy, gdzie stan trzyma `project_statuses`, a w `projects`
+    # aktualizujemy tylko „kiedy ostatnio coś się zmieniło".
+    "project-status-znacznik": (
+        "UPDATE projects SET status_changed_at = ? WHERE project_id = ?",
+        ["status_changed_at", "project_id"],
+    ),
+    # Data zakończenia tylko gdy jeszcze pusta — COALESCE chroni pierwotną.
+    "project-zakonczony": (
+        "UPDATE projects SET completed_at = COALESCE(completed_at, ?)"
+        " WHERE project_id = ?",
+        ["completed_at", "project_id"],
+    ),
     "project-status-set": (
         "UPDATE projects SET project_status = ? WHERE project_id = ?",
         ["project_status", "project_id"],
@@ -380,6 +525,42 @@ ZAPIS = {
     "project-priorytet-set": (
         "UPDATE projects SET priority = ? WHERE project_id = ?",
         ["priority", "project_id"],
+    ),
+    # ── Projekty: dodanie / edycja / usunięcie ────────────────────────
+    # Schemat `projects` jest ustalony (migracje serwera), więc operacje są
+    # statyczne — inaczej niż przy dostawcach, gdzie nazwy kolumn różnią się
+    # między instalacjami.
+    # `project_id` przekazywany jawnie albo NULL. NULL = SQLite nadaje
+    # kolejny numer sam (kolumna jest INTEGER PRIMARY KEY), a wołający
+    # odczytuje go z `lastrowid` w odpowiedzi.
+    "project-add": (
+        "INSERT INTO projects"
+        " (project_id, name, path, project_type, active, designer, status,"
+        "  created_at)"
+        " VALUES (?, ?, ?, COALESCE(?, 'MACHINE'), 1, ?,"
+        "         COALESCE(?, 'PROJEKT'), datetime('now','localtime'))",
+        ["project_id", "name", "path", "project_type", "designer", "status"],
+    ),
+    # ⚠️ COALESCE(?, kolumna): NULL znaczy „nie ruszaj tego pola".
+    # Bez tego edycja samej nazwy wyczyściłaby projektantowi resztę danych.
+    "project-edit": (
+        "UPDATE projects SET"
+        "   name              = COALESCE(?, name),"
+        "   path              = COALESCE(?, path),"
+        "   designer          = COALESCE(?, designer),"
+        "   montaz            = COALESCE(?, montaz),"
+        "   sat               = COALESCE(?, sat),"
+        "   fat               = COALESCE(?, fat),"
+        "   completed_at      = COALESCE(?, completed_at),"
+        "   expected_delivery = COALESCE(?, expected_delivery),"
+        "   received_percent  = COALESCE(?, received_percent)"
+        " WHERE project_id = ?",
+        ["name", "path", "designer", "montaz", "sat", "fat", "completed_at",
+         "expected_delivery", "received_percent", "project_id"],
+    ),
+    "project-delete": (
+        "DELETE FROM projects WHERE project_id = ?",
+        ["project_id"],
     ),
     "project-set-active": (
         "UPDATE projects SET active = ? WHERE project_id = ?",
@@ -412,6 +593,165 @@ ZAPIS = {
         "UPDATE client_sessions SET ended_at = ?, last_seen = ?"
         " WHERE host = ? AND pid = ?",
         ["ended_at", "last_seen", "host", "pid"],
+    ),
+
+    # ══ PORTAL RFQ — synchronizator (rm_sync_agent) ═════════════════
+    # ══ KALKULATORY ═════════════════════════════════════════════════
+    "material-zapisz": (
+        "INSERT INTO material_prices (material, density, price_per_kg, updated_at)"
+        " VALUES (?, ?, ?, ?)"
+        " ON CONFLICT(material) DO UPDATE SET"
+        "   density      = excluded.density,"
+        "   price_per_kg = excluded.price_per_kg,"
+        "   updated_at   = excluded.updated_at",
+        ["material", "density", "price_per_kg", "updated_at"],
+    ),
+
+    # ══ STATUSY PROJEKTÓW ═══════════════════════════════════════════
+    # Zestaw statusów podmienia się w całości: DELETE + INSERT-y jednym
+    # batchem (jedna transakcja), inaczej zerwane połączenie zostawiłoby
+    # projekt bez żadnego statusu.
+    "statusy-wyczysc": (
+        "DELETE FROM project_statuses WHERE project_id = ?",
+        ["project_id"],
+    ),
+    "status-dodaj": (
+        "INSERT INTO project_statuses (project_id, status, set_at, set_by)"
+        " VALUES (?, ?, ?, ?)",
+        ["project_id", "status", "set_at", "set_by"],
+    ),
+    # Dziennik pojedynczych zdarzeń: ADDED / REMOVED.
+    "status-zmiana-zapisz": (
+        "INSERT INTO project_status_changes"
+        " (project_id, status, action, changed_at, changed_by, notes)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        ["project_id", "status", "action", "changed_at", "changed_by", "notes"],
+    ),
+    # Dziennik przejść stary→nowy. `old_status` bywa NULL (pierwszy wpis).
+    "status-historia-zapisz": (
+        "INSERT INTO project_status_history"
+        " (project_id, old_status, new_status, changed_at, changed_by, notes)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        ["project_id", "old_status", "new_status", "changed_at",
+         "changed_by", "notes"],
+    ),
+
+    "rfq-ustawienie-zapisz": (
+        "INSERT INTO settings (key, value, updated_at)"
+        " VALUES (?, ?, datetime('now','localtime'))"
+        " ON CONFLICT(key) DO UPDATE SET"
+        "   value = excluded.value, updated_at = excluded.updated_at",
+        ["key", "value"],
+    ),
+
+    # ── Tagi kooperantów (RM_BAZA jest właścicielem) ──────────────────
+    # Nadpisanie przypisań firmy: DELETE + INSERT-y lecą jednym batchem,
+    # czyli w jednej transakcji — inaczej zerwanie połączenia między nimi
+    # zostawiłoby kooperanta bez żadnego tagu.
+    "rfq-tagi-dostawcy-czysc": (
+        "DELETE FROM rfq_supplier_tags WHERE supplier_id = ?",
+        ["supplier_id"],
+    ),
+    "rfq-tag-przypisz": (
+        "INSERT OR IGNORE INTO rfq_supplier_tags (supplier_id, tag_id)"
+        " VALUES (?, ?)",
+        ["supplier_id", "tag_id"],
+    ),
+    "rfq-tag-usun": (
+        "DELETE FROM rfq_tags WHERE id = ?",
+        ["tag_id"],
+    ),
+    "rfq-tag-usun-przypisania": (
+        "DELETE FROM rfq_supplier_tags WHERE tag_id = ?",
+        ["tag_id"],
+    ),
+    "rfq-tag-dodaj": (
+        "INSERT OR IGNORE INTO rfq_tags (name, label, sort_order)"
+        " VALUES (?, ?, ?)",
+        ["name", "label", "sort_order"],
+    ),
+
+    # ── Odciski wysłanych plików ──────────────────────────────────────
+    # Para DELETE+INSERT leci jednym batchem (jedna transakcja): przy
+    # ponownej wysyłce z innym zestawem plików stare, odpięte pliki nie
+    # mają wisieć jako „zmienione".
+    "rfq-pushed-czysc-pozycje": (
+        "DELETE FROM rfq_pushed_files"
+        " WHERE rfq_id = ? AND drawing_number = ?",
+        ["rfq_id", "drawing_number"],
+    ),
+    "rfq-pushed-dodaj": (
+        "INSERT OR REPLACE INTO rfq_pushed_files"
+        " (rfq_id, drawing_number, path, filename, size, mtime_ns, sha1)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ["rfq_id", "drawing_number", "path", "filename", "size",
+         "mtime_ns", "sha1"],
+    ),
+    "rfq-pushed-odswiez-odcisk": (
+        "UPDATE rfq_pushed_files SET size = ?, mtime_ns = ? WHERE path = ?",
+        ["size", "mtime_ns", "path"],
+    ),
+
+    # Stan pozycji RFQ z portalu. Jedna pozycja = jeden wiersz; zawiera
+    # też nierozstrzygnięte (liczniki zaproszeń/ofert), bo kolumna WYCENA
+    # pokazuje stany pośrednie: „WYSŁANO · 4" → „1/4 OFERT · 96 zł".
+    "rfq-wynik-zapisz": (
+        "INSERT INTO rfq_results"
+        " (rfq_item_id, drawing_number, item_name, revision, quantity, material, project_number, rfq_id, rfq_code, rfq_title, rfq_status, suppliers_count, offers_count, declined_count, min_price, invitations_sent, viewers_count, seen_item_count, last_viewed_at, response_deadline, files_updated_at, docs_notified_at, supplier_id, supplier_name, price, currency, lead_time_days, offer_notes, decided_at, synced_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))"
+        " ON CONFLICT(rfq_item_id) DO UPDATE SET"
+        " drawing_number = excluded.drawing_number, item_name = excluded.item_name, revision = excluded.revision, quantity = excluded.quantity, material = excluded.material, project_number = excluded.project_number, rfq_id = excluded.rfq_id, rfq_code = excluded.rfq_code, rfq_title = excluded.rfq_title, rfq_status = excluded.rfq_status, suppliers_count = excluded.suppliers_count, offers_count = excluded.offers_count, declined_count = excluded.declined_count, min_price = excluded.min_price, invitations_sent = excluded.invitations_sent, viewers_count = excluded.viewers_count, seen_item_count = excluded.seen_item_count, last_viewed_at = excluded.last_viewed_at, response_deadline = excluded.response_deadline, files_updated_at = excluded.files_updated_at, docs_notified_at = excluded.docs_notified_at, supplier_id = excluded.supplier_id, supplier_name = excluded.supplier_name, price = excluded.price, currency = excluded.currency, lead_time_days = excluded.lead_time_days, offer_notes = excluded.offer_notes, decided_at = excluded.decided_at,"
+        " synced_at = excluded.synced_at",
+        ['rfq_item_id', 'drawing_number', 'item_name', 'revision', 'quantity', 'material', 'project_number', 'rfq_id', 'rfq_code', 'rfq_title', 'rfq_status', 'suppliers_count', 'offers_count', 'declined_count', 'min_price', 'invitations_sent', 'viewers_count', 'seen_item_count', 'last_viewed_at', 'response_deadline', 'files_updated_at', 'docs_notified_at', 'supplier_id', 'supplier_name', 'price', 'currency', 'lead_time_days', 'offer_notes', 'decided_at'],
+    ),
+
+    # Aktywność kooperanta na pozycji. Klucz złożony: jedna para
+    # (pozycja, kooperant) = jeden wiersz.
+    "rfq-aktywnosc-zapisz": (
+        "INSERT INTO rfq_activity"
+        " (rfq_item_id, supplier_name, drawing_number, item_name, email_sent_at, first_viewed_at, last_viewed_at, view_count, seen_this_item, has_offer, is_winner, win_price, offer_price, offer_currency, offer_lead_time, has_declined, decline_reason, decline_label, decline_notes, declined_at, offer_notes, offer_submitted_at, synced_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))"
+        " ON CONFLICT(rfq_item_id, supplier_name) DO UPDATE SET"
+        " drawing_number = excluded.drawing_number, item_name = excluded.item_name, email_sent_at = excluded.email_sent_at, first_viewed_at = excluded.first_viewed_at, last_viewed_at = excluded.last_viewed_at, view_count = excluded.view_count, seen_this_item = excluded.seen_this_item, has_offer = excluded.has_offer, is_winner = excluded.is_winner, win_price = excluded.win_price, offer_price = excluded.offer_price, offer_currency = excluded.offer_currency, offer_lead_time = excluded.offer_lead_time, has_declined = excluded.has_declined, decline_reason = excluded.decline_reason, decline_label = excluded.decline_label, decline_notes = excluded.decline_notes, declined_at = excluded.declined_at, offer_notes = excluded.offer_notes, offer_submitted_at = excluded.offer_submitted_at,"
+        " synced_at = excluded.synced_at",
+        ['rfq_item_id', 'supplier_name', 'drawing_number', 'item_name', 'email_sent_at', 'first_viewed_at', 'last_viewed_at', 'view_count', 'seen_this_item', 'has_offer', 'is_winner', 'win_price', 'offer_price', 'offer_currency', 'offer_lead_time', 'has_declined', 'decline_reason', 'decline_label', 'decline_notes', 'declined_at', 'offer_notes', 'offer_submitted_at'],
+    ),
+
+    # ── Wyniki ofert i aktywność ──────────────────────────────────────
+    "rfq-wynik-usun": (
+        "DELETE FROM rfq_results WHERE rfq_item_id = ?",
+        ["rfq_item_id"],
+    ),
+    "rfq-wyniki-wyczysc": (
+        "DELETE FROM rfq_results",
+        [],
+    ),
+    "rfq-aktywnosc-wyczysc": (
+        "DELETE FROM rfq_activity",
+        [],
+    ),
+
+    # ── Reconcile: skasuj to, czego nie ma już w portalu ──────────────
+    # ⚠️ Lista żywych identyfikatorów jedzie jako JEDEN parametr —
+    # tablica JSON rozpakowana przez json_each. Bez tego trzeba by skleić
+    # `NOT IN (?,?,?…)` po stronie klienta, czyli wpuścić SQL z sieci.
+    # Pusta lista = nic nie kasujemy (wołający sam pilnuje, by nie
+    # wyczyścić tabeli po nieudanym pobraniu z portalu).
+    "rfq-wyniki-reconcile": (
+        "DELETE FROM rfq_results"
+        " WHERE rfq_item_id NOT IN (SELECT value FROM json_each(?))",
+        ["zywe_json"],
+    ),
+    "rfq-aktywnosc-reconcile": (
+        "DELETE FROM rfq_activity"
+        " WHERE rfq_item_id NOT IN (SELECT value FROM json_each(?))",
+        ["zywe_json"],
+    ),
+    # Odciski są kluczowane po rfq_id (nie rfq_item_id) — stąd osobno.
+    "rfq-pushed-reconcile": (
+        "DELETE FROM rfq_pushed_files"
+        " WHERE rfq_id NOT IN (SELECT value FROM json_each(?))",
+        ["zywe_json"],
     ),
 
     # ══ MAPOWANIA SUBIEKTA (osobny plik — patrz odczyty) ════════════
@@ -601,12 +941,432 @@ def zbuduj_operacje_dostawcow(con):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# SCHEMAT RM_MANAGER  (rm_manager.sqlite)
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Wygenerowane z PRODUKCYJNEJ bazy (sqlite_master), nie przepisane
+# ręcznie — przy 30 tabelach i 31 indeksach pomyłka w jednej kolumnie
+# byłaby nie do wychwycenia okiem.
+#
+# ⚠️ To OSOBNY PLIK, nie master RM_BAZA. Serwer trzyma do niego trzecie
+# połączenie; operacje mają prefiks `rmm-`.
+
+MIGRACJE_RM_MANAGER = [
+    ("CREATE TABLE IF NOT EXISTS absence_exclusion_groups ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " name TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+     " created_by TEXT )", None),
+    ("CREATE TABLE IF NOT EXISTS absence_exclusion_members ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " group_id INTEGER NOT NULL, employee_id INTEGER NOT NULL,"
+     " FOREIGN KEY (group_id) REFERENCES absence_exclusion_groups(id) ON DELETE CASCADE,"
+     " FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,"
+     " UNIQUE (group_id, employee_id) )", None),
+    ("CREATE TABLE IF NOT EXISTS active_sessions ( session_id TEXT PRIMARY KEY,"
+     " user_id INTEGER NOT NULL, username TEXT NOT NULL,"
+     " hostname TEXT NOT NULL, pid INTEGER NOT NULL,"
+     " app_name TEXT NOT NULL DEFAULT 'rm_manager',"
+     " login_at DATETIME NOT NULL, last_heartbeat DATETIME NOT NULL,"
+     " client_info TEXT,"
+     " FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE )", None),
+    ("CREATE TABLE IF NOT EXISTS audit_log ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " employee_id INTEGER, entity_type TEXT NOT NULL, entity_id INTEGER,"
+     " action TEXT NOT NULL, field TEXT, old_value TEXT, new_value TEXT,"
+     " note TEXT, changed_by TEXT,"
+     " changed_at DATETIME DEFAULT CURRENT_TIMESTAMP )", None),
+    ("CREATE TABLE IF NOT EXISTS company_calendar ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " date DATE NOT NULL UNIQUE,"
+     " day_type TEXT NOT NULL CHECK (day_type IN ( 'HOLIDAY',"
+     " 'COMPANY_DAY_OFF', 'SATURDAY_WORK' )), description TEXT,"
+     " created_at DATETIME DEFAULT CURRENT_TIMESTAMP, created_by TEXT )", None),
+    ("CREATE TABLE IF NOT EXISTS employee_availability ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " employee_id INTEGER NOT NULL, date_from DATE NOT NULL,"
+     " date_to DATE NOT NULL, reason TEXT NOT NULL, notes TEXT,"
+     " created_at DATETIME DEFAULT CURRENT_TIMESTAMP, created_by TEXT,"
+     " time_from TEXT, time_to TEXT, days_override REAL,"
+     " status TEXT NOT NULL DEFAULT 'OCZEKUJE', decided_by TEXT,"
+     " decided_at DATETIME, decision_note TEXT,"
+     " FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,"
+     " CHECK (date_to >= date_from) )", None),
+    ("CREATE TABLE IF NOT EXISTS employee_carryover_override ( employee_id INTEGER NOT NULL,"
+     " year INTEGER NOT NULL, days REAL NOT NULL,"
+     " updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_by TEXT,"
+     " PRIMARY KEY (employee_id, year),"
+     " FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE )", None),
+    ("CREATE TABLE IF NOT EXISTS employee_vacation_base ( employee_id INTEGER PRIMARY KEY,"
+     " days REAL NOT NULL DEFAULT 26,"
+     " updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_by TEXT,"
+     " FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE )", None),
+    ("CREATE TABLE IF NOT EXISTS employee_vacation_quota ( employee_id INTEGER NOT NULL,"
+     " year INTEGER NOT NULL, days REAL NOT NULL DEFAULT 26,"
+     " updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_by TEXT,"
+     " carryover_override REAL, PRIMARY KEY (employee_id, year),"
+     " FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE )", None),
+    ("CREATE TABLE IF NOT EXISTS employees ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " name TEXT NOT NULL, category TEXT NOT NULL, description TEXT,"
+     " contact_info TEXT, is_active INTEGER NOT NULL DEFAULT 1,"
+     " created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+     " updated_at DATETIME DEFAULT CURRENT_TIMESTAMP , phone TEXT, email TEXT,"
+     " master_max_parallel INTEGER NOT NULL DEFAULT 1, podmiot TEXT,"
+     " user_login TEXT)", None),
+    ("CREATE TABLE IF NOT EXISTS in_app_notifications ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " project_id INTEGER NOT NULL, project_name TEXT,"
+     " notification_type TEXT NOT NULL, message TEXT NOT NULL,"
+     " created_at DATETIME DEFAULT CURRENT_TIMESTAMP, created_by TEXT,"
+     " is_read INTEGER NOT NULL DEFAULT 0, read_at DATETIME, read_by TEXT )", None),
+    ("CREATE TABLE IF NOT EXISTS line_projects ( line_id INTEGER NOT NULL,"
+     " project_id INTEGER NOT NULL UNIQUE, PRIMARY KEY (line_id, project_id),"
+     " FOREIGN KEY (line_id) REFERENCES production_lines(id) ON DELETE CASCADE )", None),
+    ("CREATE TABLE IF NOT EXISTS optimization_runs ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " run_mode TEXT NOT NULL CHECK (run_mode IN ('fit_projects',"
+     " 'optimize_all')), project_ids_json TEXT NOT NULL,"
+     " date_range_start DATE, date_range_end DATE, constraints_snapshot TEXT,"
+     " result_json TEXT, score_before REAL, score_after REAL,"
+     " solver_status TEXT, solver_time_ms INTEGER,"
+     " applied INTEGER NOT NULL DEFAULT 0, applied_at DATETIME,"
+     " applied_by TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+     " created_by TEXT )", None),
+    ("CREATE TABLE IF NOT EXISTS payment_history ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " project_id INTEGER NOT NULL, percentage INTEGER NOT NULL,"
+     " payment_date DATE, action TEXT NOT NULL CHECK (action IN ('ADDED',"
+     " 'MODIFIED', 'DELETED')), changed_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+     " changed_by TEXT NOT NULL, old_date DATE )", None),
+    ("CREATE TABLE IF NOT EXISTS \"payment_milestones\" ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " project_id INTEGER NOT NULL,"
+     " percentage INTEGER NOT NULL CHECK (percentage > 0 AND percentage <= 100),"
+     " payment_date DATE, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+     " created_by TEXT, modified_at DATETIME, modified_by TEXT,"
+     " payment_type TEXT NOT NULL DEFAULT 'PŁATNOŚĆ' )", None),
+    ("CREATE TABLE IF NOT EXISTS payment_notification_config ( id INTEGER PRIMARY KEY CHECK (id = 1),"
+     " trigger_percentage INTEGER NOT NULL DEFAULT 100,"
+     " email_recipients TEXT NOT NULL, smtp_server TEXT,"
+     " smtp_port INTEGER DEFAULT 587, smtp_user TEXT, smtp_password TEXT,"
+     " enabled INTEGER NOT NULL DEFAULT 1,"
+     " created_at DATETIME DEFAULT CURRENT_TIMESTAMP, modified_at DATETIME )", None),
+    ("CREATE TABLE IF NOT EXISTS payment_notifications_sent ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " project_id INTEGER NOT NULL, project_name TEXT,"
+     " percentage INTEGER NOT NULL, payment_date DATE,"
+     " recipients TEXT NOT NULL, sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+     " sent_by TEXT, email_status TEXT CHECK (email_status IN ('SUCCESS',"
+     " 'FAILED', 'PENDING')), error_message TEXT )", None),
+    ("CREATE TABLE IF NOT EXISTS plc_authorized_senders ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " username TEXT NOT NULL UNIQUE, added_by TEXT,"
+     " added_at DATETIME DEFAULT CURRENT_TIMESTAMP, notes TEXT )", None),
+    ("CREATE TABLE IF NOT EXISTS plc_global_recipients ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " setting_key TEXT NOT NULL UNIQUE, recipients_json TEXT NOT NULL,"
+     " updated_by TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP )", None),
+    ("CREATE TABLE IF NOT EXISTS plc_unlock_codes ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " project_id INTEGER NOT NULL,"
+     " code_type TEXT NOT NULL CHECK (code_type IN ('TEMPORARY', 'EXTENDED',"
+     " 'PERMANENT')), unlock_code TEXT NOT NULL, description TEXT,"
+     " created_at DATETIME DEFAULT CURRENT_TIMESTAMP, created_by TEXT,"
+     " modified_at DATETIME, modified_by TEXT,"
+     " is_used INTEGER NOT NULL DEFAULT 0, used_at DATETIME, used_by TEXT,"
+     " notes TEXT , default_recipients TEXT, sent_at DATETIME, sent_by TEXT,"
+     " sent_via TEXT, expiry_date DATETIME)", None),
+    ("CREATE TABLE IF NOT EXISTS priority_weights ( level INTEGER PRIMARY KEY,"
+     " label TEXT NOT NULL, weight INTEGER NOT NULL DEFAULT 1 )", None),
+    ("CREATE TABLE IF NOT EXISTS production_lines ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " name TEXT NOT NULL UNIQUE, description TEXT,"
+     " parallel_stages_csv TEXT NOT NULL DEFAULT '',"
+     " created_at DATETIME DEFAULT CURRENT_TIMESTAMP, created_by TEXT,"
+     " updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_by TEXT )", None),
+    ("CREATE TABLE IF NOT EXISTS project_file_tracking ( project_id INTEGER PRIMARY KEY,"
+     " project_name TEXT, file_path TEXT NOT NULL,"
+     " file_birth_time REAL NOT NULL,"
+     " last_verified_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+     " verification_status TEXT DEFAULT 'OK',"
+     " CHECK (verification_status IN ('OK', 'MISSING', 'BIRTH_MISMATCH')) )", None),
+    ("CREATE TABLE IF NOT EXISTS resource_constraints ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " constraint_type TEXT NOT NULL CHECK (constraint_type IN ( 'exclusive_person',"
+     " 'max_concurrent_category', 'max_concurrent_stage' )), category TEXT,"
+     " stage_code TEXT, max_parallel INTEGER NOT NULL DEFAULT 1,"
+     " is_active INTEGER NOT NULL DEFAULT 1, description TEXT,"
+     " created_at DATETIME DEFAULT CURRENT_TIMESTAMP, created_by TEXT,"
+     " modified_at DATETIME, modified_by TEXT )", None),
+    ("CREATE TABLE IF NOT EXISTS rm_feature_user_permissions ( feature TEXT NOT NULL,"
+     " username TEXT NOT NULL, granted_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+     " PRIMARY KEY (feature, username) )", None),
+    ("CREATE TABLE IF NOT EXISTS rm_user_permissions ( role TEXT PRIMARY KEY,"
+     " can_start_stage INTEGER NOT NULL DEFAULT 0,"
+     " can_end_stage INTEGER NOT NULL DEFAULT 0,"
+     " can_edit_dates INTEGER NOT NULL DEFAULT 0,"
+     " can_sync_master INTEGER NOT NULL DEFAULT 0,"
+     " can_critical_path INTEGER NOT NULL DEFAULT 0,"
+     " can_manage_permissions INTEGER NOT NULL DEFAULT 0,"
+     " updated_at DATETIME DEFAULT CURRENT_TIMESTAMP )", None),
+    ("CREATE TABLE IF NOT EXISTS service_trips ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " employee_id INTEGER NOT NULL, project_id INTEGER, client_or_place TEXT,"
+     " trip_type TEXT NOT NULL DEFAULT 'INNE', date_from DATE NOT NULL,"
+     " date_to DATE NOT NULL,"
+     " status TEXT NOT NULL DEFAULT 'PLANOWANY' CHECK (status IN ( 'PLANOWANY',"
+     " 'POTWIERDZONY', 'ZREALIZOWANY' )), note TEXT,"
+     " created_at DATETIME DEFAULT CURRENT_TIMESTAMP, created_by TEXT,"
+     " working_days REAL,"
+     " FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,"
+     " CHECK (date_to >= date_from) )", None),
+    ("CREATE TABLE IF NOT EXISTS stage_definitions ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " code TEXT UNIQUE NOT NULL, display_name TEXT, color TEXT,"
+     " is_milestone INTEGER DEFAULT 0 )", None),
+    ("CREATE TABLE IF NOT EXISTS sync_log ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " sync_date TEXT NOT NULL, sync_timestamp TEXT NOT NULL,"
+     " projects_synced INTEGER DEFAULT 0, user TEXT, notes TEXT )", None),
+    ("CREATE TABLE IF NOT EXISTS transports ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " name TEXT NOT NULL, description TEXT, contact_info TEXT,"
+     " is_active INTEGER NOT NULL DEFAULT 1,"
+     " created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+     " updated_at DATETIME DEFAULT CURRENT_TIMESTAMP )", None),
+
+    # ── indeksy ──────────────────────────────────────────────────────
+    ("CREATE INDEX IF NOT EXISTS idx_abs_excl_members_emp ON absence_exclusion_members(employee_id)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_abs_excl_members_group ON absence_exclusion_members(group_id)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_active_sessions_heartbeat ON active_sessions(last_heartbeat)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_active_sessions_user ON active_sessions(user_id)", None),
+    ("CREATE UNIQUE INDEX IF NOT EXISTS idx_active_sessions_user_host_app ON active_sessions(user_id,"
+     " hostname, app_name)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_audit_changed_at ON audit_log(changed_at)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_audit_employee ON audit_log(employee_id)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_company_calendar_date ON company_calendar(date)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_emp_avail_dates ON employee_availability(date_from,"
+     " date_to)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_emp_avail_employee ON employee_availability(employee_id)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_emp_avail_status ON employee_availability(status)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_employees_active ON employees(is_active)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_employees_category ON employees(category)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_file_tracking_status ON project_file_tracking(verification_status)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_in_app_notifications_project ON in_app_notifications(project_id)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_in_app_notifications_read ON in_app_notifications(is_read)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_line_projects_line ON line_projects(line_id)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_notifications_project ON payment_notifications_sent(project_id)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_notifications_status ON payment_notifications_sent(email_status)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_opt_runs_mode ON optimization_runs(run_mode)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_payment_history_project ON payment_history(project_id)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_payment_project ON payment_milestones(project_id)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_plc_codes_project ON plc_unlock_codes(project_id)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_plc_codes_type ON plc_unlock_codes(code_type)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_plc_senders_username ON plc_authorized_senders(username)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_res_constraints_active ON resource_constraints(is_active)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_res_constraints_type ON resource_constraints(constraint_type)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_service_trips_dates ON service_trips(date_from,"
+     " date_to)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_service_trips_employee ON service_trips(employee_id)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_sync_log_date ON sync_log(sync_date)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_transports_active ON transports(is_active)", None),
+]
+
+# ═══════════════════════════════════════════════════════════════════════
 # MIGRACJE DRUGIEJ BAZY — subiekt_mapowania.sqlite
 # ═══════════════════════════════════════════════════════════════════════
 #
 # Osobny plik obok mastera. Schemat ten sam co w `subiekt_mapowania.py` —
 # gdy tam coś dojdzie, dopisać i tutaj, bo to właściciel pliku zakłada
 # tabele, nie klient.
+
+# ═══════════════════════════════════════════════════════════════════════
+# SCHEMAT PORTALU RFQ
+# ═══════════════════════════════════════════════════════════════════════
+#
+# W agencie (`rm_sync_agent`) były to `PRAGMA table_info` + `ALTER TABLE`
+# rozsiane po `_ensure_*_table()`, wołane przy KAŻDYM połączeniu. Schemat
+# jest sprawą serwera, więc migracje idą tutaj — agent tylko woła operacje.
+#
+# Produkcyjna baza te tabele już ma; to jest dla świeżej bazy i dla kolumn
+# dokładanych później.
+
+MIGRACJE_RFQ = [
+    # Cennik materiałów kalkulatora (gęstość + cena za kg). Wcześniej
+    # tabelę tworzył `material_calculator._ensure_material_table`.
+    ("""CREATE TABLE IF NOT EXISTS material_prices (
+            material     TEXT PRIMARY KEY,
+            density      REAL NOT NULL,
+            price_per_kg REAL NOT NULL DEFAULT 0,
+            updated_at   TEXT
+        )""", None),
+
+    # ── Statusy projektów ─────────────────────────────────────────────
+    # Projekt może mieć KILKA statusów naraz (`project_statuses`), stąd
+    # klucz złożony. Obok dwa dzienniki: `project_status_changes` notuje
+    # dodanie/zdjęcie pojedynczego statusu, `project_status_history` —
+    # przejścia stary→nowy. Schemat zgodny z produkcją.
+    #
+    # Wcześniej tworzył je klient (`project_manager.ensure_*_table`) na
+    # bazie leżącej na dysku sieciowym.
+    ("""CREATE TABLE IF NOT EXISTS project_statuses (
+            project_id INTEGER NOT NULL,
+            status     TEXT NOT NULL,
+            set_at     TEXT NOT NULL DEFAULT (datetime('now')),
+            set_by     TEXT,
+            PRIMARY KEY (project_id, status),
+            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+        )""", None),
+    ("CREATE INDEX IF NOT EXISTS idx_project_statuses_project"
+     " ON project_statuses(project_id)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_project_statuses_status"
+     " ON project_statuses(status)", None),
+
+    ("""CREATE TABLE IF NOT EXISTS project_status_changes (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            status     TEXT NOT NULL,
+            action     TEXT NOT NULL CHECK(action IN ('ADDED', 'REMOVED')),
+            changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+            changed_by TEXT,
+            notes      TEXT,
+            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+        )""", None),
+    ("CREATE INDEX IF NOT EXISTS idx_status_changes_project"
+     " ON project_status_changes(project_id, changed_at DESC)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_status_changes_status"
+     " ON project_status_changes(status, changed_at DESC)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_status_changes_project_status"
+     " ON project_status_changes(project_id, status, changed_at DESC)", None),
+
+    ("""CREATE TABLE IF NOT EXISTS project_status_history (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            old_status TEXT,
+            new_status TEXT NOT NULL,
+            changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+            changed_by TEXT,
+            notes      TEXT,
+            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+        )""", None),
+    ("CREATE INDEX IF NOT EXISTS idx_status_history_project"
+     " ON project_status_history(project_id, changed_at DESC)", None),
+
+    # Tagi kooperantów dla portalu RM_RFQ: słownik + przypisania.
+    # RM_BAZA jest właścicielem, RM_SYNC_AGENT wypycha je do portalu.
+    # Wcześniej tworzył je klient własnym połączeniem do pliku.
+    ("""CREATE TABLE IF NOT EXISTS rfq_tags (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL UNIQUE,
+            label      TEXT NOT NULL,
+            sort_order INTEGER DEFAULT 0
+        )""", None),
+    ("""CREATE TABLE IF NOT EXISTS rfq_supplier_tags (
+            supplier_id INTEGER NOT NULL,
+            tag_id      INTEGER NOT NULL,
+            PRIMARY KEY (supplier_id, tag_id)
+        )""", None),
+    ("CREATE INDEX IF NOT EXISTS idx_rfq_supplier_tags_sup"
+     " ON rfq_supplier_tags(supplier_id)", None),
+
+    # Sesje klientów: kto jest zalogowany i na jakim buildzie .exe.
+    # Wcześniej tę tabelę tworzył `client_version._SESSIONS_DDL` po stronie
+    # klienta — teraz schemat jest wyłącznie sprawą serwera.
+    ("""CREATE TABLE IF NOT EXISTS client_sessions (
+            host        TEXT PRIMARY KEY,
+            username    TEXT,
+            role        TEXT,
+            exe_path    TEXT,
+            exe_size    INTEGER,
+            exe_mtime   TEXT,
+            build_id    TEXT,
+            pid         INTEGER,
+            started_at  TEXT NOT NULL,
+            last_seen   TEXT NOT NULL,
+            ended_at    TEXT
+        )""", None),
+
+    ("""CREATE TABLE IF NOT EXISTS rfq_pushed_files (
+            rfq_id          INTEGER NOT NULL,
+            drawing_number  TEXT    NOT NULL,
+            path            TEXT    NOT NULL,   -- ścieżka źródłowa na V:\\
+            filename        TEXT    NOT NULL,
+            size            INTEGER,
+            mtime_ns        INTEGER,            -- st_mtime_ns w chwili wysyłki
+            sha1            TEXT,               -- sha1 treści wysłanej do portalu
+            pushed_at       TEXT DEFAULT (datetime('now','localtime')),
+            PRIMARY KEY (rfq_id, path)
+        )""", None),
+    # Stare bazy miały `mtime` zamiast `mtime_ns`. Wartości NIE konwertujemy:
+    # NULL wymusi przeliczenie sha1 przy pierwszym sprawdzeniu (bezpiecznie),
+    # a udana wysyłka zapisze bieżącą wartość.
+    ("ALTER TABLE rfq_pushed_files ADD COLUMN mtime_ns INTEGER",
+     ("rfq_pushed_files", "mtime_ns")),
+    ("CREATE INDEX IF NOT EXISTS idx_rfq_pushed_drawing"
+     " ON rfq_pushed_files(rfq_id, drawing_number)", None),
+
+    ("""CREATE TABLE IF NOT EXISTS rfq_results (
+            rfq_item_id      INTEGER PRIMARY KEY,
+            drawing_number   TEXT NOT NULL,
+            item_name        TEXT,
+            revision         INTEGER,
+            quantity         INTEGER,
+            material         TEXT,
+            project_number   TEXT,
+            rfq_id           INTEGER,
+            rfq_code         TEXT,
+            rfq_title        TEXT,
+            rfq_status       TEXT,
+            suppliers_count  INTEGER,
+            offers_count     INTEGER,
+            declined_count   INTEGER,
+            min_price        REAL,
+            invitations_sent INTEGER,
+            response_deadline TEXT,
+            files_updated_at TEXT,
+            docs_notified_at TEXT,
+            viewers_count    INTEGER,
+            seen_item_count  INTEGER,
+            last_viewed_at   TEXT,
+            supplier_id      INTEGER,   -- poniżej: dane zwycięzcy (NULL gdy brak)
+            supplier_name    TEXT,
+            price            REAL,
+            currency         TEXT,
+            lead_time_days   INTEGER,
+            offer_notes      TEXT,
+            decided_at       TEXT,
+            synced_at        TEXT DEFAULT (datetime('now','localtime'))
+        )""", None),
+    ("CREATE INDEX IF NOT EXISTS idx_rfq_results_drawing"
+     " ON rfq_results(drawing_number)", None),
+    ("ALTER TABLE rfq_results ADD COLUMN rfq_id INTEGER", ("rfq_results", "rfq_id")),
+    ("ALTER TABLE rfq_results ADD COLUMN rfq_status TEXT", ("rfq_results", "rfq_status")),
+    ("ALTER TABLE rfq_results ADD COLUMN suppliers_count INTEGER", ("rfq_results", "suppliers_count")),
+    ("ALTER TABLE rfq_results ADD COLUMN offers_count INTEGER", ("rfq_results", "offers_count")),
+    ("ALTER TABLE rfq_results ADD COLUMN min_price REAL", ("rfq_results", "min_price")),
+    ("ALTER TABLE rfq_results ADD COLUMN invitations_sent INTEGER", ("rfq_results", "invitations_sent")),
+    ("ALTER TABLE rfq_results ADD COLUMN viewers_count INTEGER", ("rfq_results", "viewers_count")),
+    ("ALTER TABLE rfq_results ADD COLUMN seen_item_count INTEGER", ("rfq_results", "seen_item_count")),
+    ("ALTER TABLE rfq_results ADD COLUMN last_viewed_at TEXT", ("rfq_results", "last_viewed_at")),
+    ("ALTER TABLE rfq_results ADD COLUMN response_deadline TEXT", ("rfq_results", "response_deadline")),
+    ("ALTER TABLE rfq_results ADD COLUMN declined_count INTEGER", ("rfq_results", "declined_count")),
+    ("ALTER TABLE rfq_results ADD COLUMN files_updated_at TEXT", ("rfq_results", "files_updated_at")),
+    ("ALTER TABLE rfq_results ADD COLUMN docs_notified_at TEXT", ("rfq_results", "docs_notified_at")),
+
+    ("""CREATE TABLE IF NOT EXISTS rfq_activity (
+            rfq_item_id     INTEGER NOT NULL,
+            supplier_name   TEXT    NOT NULL,
+            drawing_number  TEXT,
+            item_name       TEXT,
+            email_sent_at   TEXT,      -- NULL = zaproszenia nie wysłano
+            first_viewed_at TEXT,
+            last_viewed_at  TEXT,
+            view_count      INTEGER,   -- 0 = nie zajrzał
+            seen_this_item  INTEGER,   -- 1 = wszedł po dodaniu tej pozycji
+            has_offer       INTEGER,
+            is_winner       INTEGER,
+            win_price       REAL,
+            offer_price     REAL,      -- cena złożonej oferty (przed wyborem)
+            offer_currency  TEXT,
+            offer_lead_time INTEGER,
+            -- Zastrzeżenia zmieniające sens ceny („bez obróbki cieplnej").
+            -- Bez nich user widział samą kwotę.
+            offer_notes     TEXT,
+            offer_submitted_at TEXT,
+            -- ODMOWA: bez tego „brak oferty" i „odmowa" wyglądały w RM_BAZA
+            -- identycznie („—"), a to różnica między „czekamy" a „szukaj dalej".
+            has_declined    INTEGER,
+            decline_reason  TEXT,      -- kod z listy zamkniętej (brak_mocy…)
+            decline_label   TEXT,      -- gotowa etykieta PL z portalu
+            decline_notes   TEXT,
+            declined_at     TEXT,
+            synced_at       TEXT DEFAULT (datetime('now','localtime')),
+            PRIMARY KEY (rfq_item_id, supplier_name)
+        )""", None),
+    ("CREATE INDEX IF NOT EXISTS idx_rfq_activity_drawing"
+     " ON rfq_activity(drawing_number)", None),
+]
+
 
 MIGRACJE_MAPOWANIA = [
     """CREATE TABLE IF NOT EXISTS mapowania (
@@ -717,7 +1477,7 @@ def zastosuj_migracje(con):
     sprawdzeniem kolumny. Zwraca listę tego, co faktycznie dołożono.
     """
     zrobione = []
-    for sql, warunek in MIGRACJE:
+    for sql, warunek in MIGRACJE + MIGRACJE_RFQ:
         if warunek is not None:
             tabela, kolumna = warunek
             try:

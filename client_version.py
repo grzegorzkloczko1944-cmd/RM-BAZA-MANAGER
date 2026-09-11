@@ -22,20 +22,17 @@ Dwa mechanizmy, wspólny cel: żeby nikt nie pracował na starej binarce.
    dla przestarzałych.
 
 Zasady:
-- Heartbeat NIGDY nie używa master_con aplikacji: tick leci w wątku
-  roboczym, a połączenia sqlite3 nie są współdzielone między wątkami.
-  Otwiera własne, krótkie połączenie z busy_timeout 2 s i po zapisie zamyka.
-- Master jest w journal_mode=delete (celowo, WAL po SMB się rozpada), więc
-  każdy zapis blokuje plik dla wszystkich — heartbeat jest jednym małym
-  UPSERT-em i przy "database is locked" po prostu odpuszcza do następnego
-  ticku. Nigdy nie rzuca do GUI.
+- Sesje idą przez RM_SERWER (`session-heartbeat`, `session-close`,
+  `sessions-list`) — klient nie otwiera master.sqlite jako pliku. Tabelę
+  `client_sessions` tworzą migracje serwera.
+- Heartbeat NIGDY nie rzuca do GUI: tick leci w wątku roboczym i przy
+  niedostępnym serwerze po prostu odpuszcza do następnego ticku.
 - Praca ze źródeł (nie-frozen) omija bramkę: nie ma własnego .exe do
   porównania. Heartbeat wtedy raportuje build "src".
 """
 
 import os
 import socket
-import sqlite3
 import sys
 import threading
 import time
@@ -49,22 +46,6 @@ DEFAULT_SERVER_EXE = "Y:/RMPAK_CLIENT/RM_BAZA_v15_MAG.exe"
 # dziedzictwo w timestampach), a mtime identycznego pliku nie może różnić
 # się bardziej.
 _MTIME_TOL_S = 2.0
-
-_SESSIONS_DDL = """
-CREATE TABLE IF NOT EXISTS client_sessions (
-    host        TEXT PRIMARY KEY,
-    username    TEXT,
-    role        TEXT,
-    exe_path    TEXT,
-    exe_size    INTEGER,
-    exe_mtime   TEXT,
-    build_id    TEXT,
-    pid         INTEGER,
-    started_at  TEXT NOT NULL,
-    last_seen   TEXT NOT NULL,
-    ended_at    TEXT
-)
-"""
 
 _PROCESS_STARTED_AT = datetime.now().isoformat(timespec="seconds")
 _hb_error_reported = False   # loguj pierwszą awarię heartbeatu, nie każdą
@@ -234,12 +215,6 @@ def self_update(server: Path, local: Path) -> str:
 # Heartbeat sesji
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _open_master_rw(master_path, timeout_s: float = 2.0) -> sqlite3.Connection:
-    con = sqlite3.connect(str(master_path), timeout=timeout_s)
-    con.execute(f"PRAGMA busy_timeout={int(timeout_s * 1000)}")
-    return con
-
-
 def heartbeat(master_path, username: Optional[str], role: Optional[str],
               build: Optional[dict] = None) -> bool:
     """Jeden UPSERT do client_sessions. True gdy zapisano.
@@ -248,42 +223,16 @@ def heartbeat(master_path, username: Optional[str], role: Optional[str],
     w journal=delete to zdarzenie zwykłe, nie warte spamu w konsoli).
     """
     global _hb_error_reported
-    if not master_path:
-        return False
     build = build or own_build_info()
     now = datetime.now().isoformat(timespec="seconds")
     try:
-        con = _open_master_rw(master_path)
-        try:
-            con.execute(_SESSIONS_DDL)
-            con.execute(
-                """
-                INSERT INTO client_sessions
-                    (host, username, role, exe_path, exe_size, exe_mtime,
-                     build_id, pid, started_at, last_seen, ended_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-                ON CONFLICT(host) DO UPDATE SET
-                    username  = excluded.username,
-                    role      = excluded.role,
-                    exe_path  = excluded.exe_path,
-                    exe_size  = excluded.exe_size,
-                    exe_mtime = excluded.exe_mtime,
-                    build_id  = excluded.build_id,
-                    pid       = excluded.pid,
-                    started_at = CASE WHEN client_sessions.pid = excluded.pid
-                                      THEN client_sessions.started_at
-                                      ELSE excluded.started_at END,
-                    last_seen = excluded.last_seen,
-                    ended_at  = NULL
-                """,
-                (hostname(), username, role, build.get("path"),
-                 build.get("size"), build.get("mtime_str"),
-                 build.get("build_id"), os.getpid(),
-                 _PROCESS_STARTED_AT, now),
-            )
-            con.commit()
-        finally:
-            con.close()
+        import rm_klient
+        rm_klient.master_exec("session-heartbeat", {
+            "host": hostname(), "username": username, "role": role,
+            "exe_path": build.get("path"), "exe_size": build.get("size"),
+            "exe_mtime": build.get("mtime_str"), "build_id": build.get("build_id"),
+            "pid": os.getpid(), "started_at": _PROCESS_STARTED_AT, "last_seen": now,
+        })
         _hb_error_reported = False
         return True
     except Exception as e:
@@ -295,23 +244,15 @@ def heartbeat(master_path, username: Optional[str], role: Optional[str],
 
 def close_session(master_path) -> None:
     """Oznacz własną sesję jako zakończoną (wołane przy zamykaniu)."""
-    if not master_path:
-        return
+    teraz = datetime.now().isoformat(timespec="seconds")
     try:
-        con = _open_master_rw(master_path, timeout_s=1.0)
-        try:
-            con.execute(
-                "UPDATE client_sessions SET ended_at=?, last_seen=? "
-                "WHERE host=? AND pid=?",
-                (datetime.now().isoformat(timespec="seconds"),
-                 datetime.now().isoformat(timespec="seconds"),
-                 hostname(), os.getpid()),
-            )
-            con.commit()
-        finally:
-            con.close()
+        import rm_klient
+        rm_klient.master_exec("session-close", {
+            "ended_at": teraz, "last_seen": teraz,
+            "host": hostname(), "pid": os.getpid(),
+        })
     except Exception:
-        pass
+        pass        # zamykamy aplikację — nie ma komu pokazać błędu
 
 
 def list_sessions(master_path, stale_after_s: int = 300) -> list:
@@ -319,29 +260,18 @@ def list_sessions(master_path, stale_after_s: int = 300) -> list:
     bez ended_at) i `age_s`. Tylko odczyt."""
     rows = []
     try:
-        con = sqlite3.connect(f"file:{master_path}?mode=ro", uri=True, timeout=2.0)
-        con.row_factory = sqlite3.Row
-        try:
-            cur = con.execute(
-                "SELECT * FROM client_sessions ORDER BY ended_at IS NOT NULL, last_seen DESC"
-            )
-            now = time.time()
-            for r in cur.fetchall():
-                d = dict(r)
-                try:
-                    seen = datetime.fromisoformat(d["last_seen"]).timestamp()
-                    d["age_s"] = int(now - seen)
-                except Exception:
-                    d["age_s"] = None
-                d["alive"] = (d.get("ended_at") is None
-                              and d["age_s"] is not None
-                              and d["age_s"] <= stale_after_s)
-                rows.append(d)
-        finally:
-            con.close()
-    except sqlite3.OperationalError as e:
-        if "no such table" not in str(e).lower():
-            print(f"⚠️  list_sessions: {e}")
+        import rm_klient
+        now = time.time()
+        for d in rm_klient.master_read("sessions-list"):
+            try:
+                seen = datetime.fromisoformat(d["last_seen"]).timestamp()
+                d["age_s"] = int(now - seen)
+            except Exception:
+                d["age_s"] = None
+            d["alive"] = (d.get("ended_at") is None
+                          and d["age_s"] is not None
+                          and d["age_s"] <= stale_after_s)
+            rows.append(d)
     except Exception as e:
         print(f"⚠️  list_sessions: {e}")
     return rows

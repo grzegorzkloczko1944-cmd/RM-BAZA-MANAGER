@@ -260,9 +260,257 @@ CONFIG_FILE = Path(DEFAULT_LOCAL_DIR) / "sync_config.json"
 
 # Filtry
 CLASS_VALUES = ["(AUTO)", "X", "XX", "Z", "ZZ", "STANDARD", "ZNORMALIZOWANE"]
+
 FILTER_CLASS_VALUES = ["(WSZYSTKO)"] + CLASS_VALUES[1:] + ["LASER", "LASER EXPORT"]
+
 SUPPLIER_EMPTY = "(brak)"
+
 FILTER_SUPPLIER_ALL = "(WSZYSCY)"
+
+# ── RM_SERWER: adres domyślny ──────────────────────────────────────────
+#
+# ⚠️ To NIE jest wygoda, tylko zabezpieczenie przed zakleszczeniem: master
+# leży na serwerze, więc bez adresu program nie wystartuje — a okno, w którym
+# można by ten adres wpisać, samo potrzebuje bazy. Świeża stacja z samym .exe
+# nie miałaby jak się z tego wydostać.
+#
+# Kolejność ustalania adresu (pierwszy, który da wynik):
+#   1. `rm_serwer` w lokalnym sync_config.json,
+#   2. `rm_serwer` w sync_config.json na Y: — admin zmienia RAZ, dla wszystkich,
+#   3. te stałe.
+DEFAULT_RM_SERWER_HOST = "192.168.100.84"
+DEFAULT_RM_SERWER_PORT = 5060
+# Wspólny plik, z którego stacje biorą adres i sekret serwera. Ścieżkę
+# można zmienić w configu (`wspolny_config`) albo w oknie połączenia —
+# nie każdy ma dysk pod tą samą literą.
+DEFAULT_WSPOLNY_CONFIG = "Y:/RM_BAZA/sync_config.json"
+
+
+def sciezka_wspolnego(config: dict = None) -> Path:
+    return Path((config or {}).get("wspolny_config") or DEFAULT_WSPOLNY_CONFIG)
+
+
+def sprawdz_serwer(host, port, sekret):
+    """Czy pod tym adresem odpowiada RM_SERWER i czy sekret pasuje?
+
+    Zwraca (True, opis) albo (False, powód). Testujemy prawdziwym odczytem,
+    nie samym pingiem — ping przechodzi także przy złym sekrecie, a wtedy
+    user dowiedziałby się o problemie dopiero przy pierwszym oknie z danymi.
+    """
+    import rm_klient
+    try:
+        rm_klient.ustaw_serwer(host, port=port, sekret=sekret or None)
+        rm_klient.master_read("users-list")
+        return True, f"{host}:{port} — połączenie OK"
+    except Exception as e:
+        tekst = str(e)
+        if "podpis" in tekst.lower():
+            return False, ("Serwer odpowiada, ale ODRZUCIŁ podpis.\n"
+                           "Sekret jest inny niż na serwerze.")
+        return False, tekst
+
+
+def okno_konfiguracji_serwera(config: dict, parent=None) -> dict:
+    """Pyta o adres RM_SERWER. Zwraca {'host','port','sekret'} albo None.
+
+    Pokazywane, gdy zapisana konfiguracja nie działa — zamiast zgadywania
+    w tle, po którym i tak zostaje niezrozumiały komunikat. Zapisuje tylko
+    ustawienia, które przeszły test.
+    """
+    import tkinter as tk
+    from tkinter import ttk, messagebox
+
+    biezace = dict((config or {}).get("rm_serwer") or {})
+
+    # Pola wypełniamy tym, co znamy — łącznie z sekretem z Y:. Nie po to,
+    # żeby zgadywać (to właśnie zawiodło), tylko żeby user nie musiał
+    # przepisywać 64 znaków z innego komputera. Widzi wartości, może je
+    # poprawić, a „Sprawdź połączenie" mówi wprost, czy działają.
+    if not biezace.get("sekret") or not biezace.get("host"):
+        try:
+            import json as _json
+            with open(sciezka_wspolnego(config), encoding="utf-8-sig") as _f:
+                wspolny = (_json.load(_f).get("rm_serwer") or {})
+            for _k in ("host", "port", "sekret"):
+                if not biezace.get(_k) and wspolny.get(_k):
+                    biezace[_k] = wspolny[_k]
+        except Exception:
+            pass        # brak Y: — user wpisze ręcznie
+
+    # ⚠️ WŁASNY root, nie `Toplevel` ukrytego rodzica.
+    #
+    # Główne okno jest w tym momencie ukryte (`self.withdraw()` na czas
+    # budowania UI), a `Toplevel` dziedziczy stan rodzica — w .exe
+    # kończyło się to procesem BEZ ŻADNEGO OKNA: user widział, że „nic
+    # się nie dzieje", i nie miał czego kliknąć. Ze źródeł działało
+    # przypadkiem, więc błąd wyszedł dopiero na skompilowanej binarce.
+    rodzic_ukryty = True
+    try:
+        rodzic_ukryty = (parent is None or parent.state() == "withdrawn")
+    except Exception:
+        pass
+
+    if parent is not None and not rodzic_ukryty:
+        okno = tk.Toplevel(parent)
+    else:
+        # Bez rodzica albo przy ukrytym rodzicu — samodzielne okno.
+        okno = tk.Toplevel() if tk._default_root else tk.Tk()
+
+    okno.title("RM_BAZA — połączenie z serwerem")
+    okno.deiconify()
+    okno.lift()
+    okno.attributes("-topmost", True)
+    okno.after(300, lambda: okno.attributes("-topmost", False))
+    okno.resizable(False, False)
+    okno.configure(bg="#f0f0f0")
+
+    ramka = tk.Frame(okno, bg="#f0f0f0", padx=18, pady=14)
+    ramka.pack(fill=tk.BOTH, expand=True)
+
+    tk.Label(ramka, text="Połączenie z RM_SERWER", font=("Arial", 13, "bold"),
+             bg="#f0f0f0").grid(row=0, column=0, columnspan=3, sticky="w")
+    tk.Label(ramka, bg="#f0f0f0", fg="#555", justify="left", wraplength=430,
+             text=("Baza RM_BAZA leży na serwerze. Podaj jego adres i klucz "
+                   "(sekret) — ten sam, który wpisano w konfiguracji serwera.")
+             ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 12))
+
+    wynik = {"dane": None}
+    pola = {}
+    for wiersz, (klucz, etykieta, domyslnie) in enumerate((
+            ("host", "Adres serwera:", biezace.get("host") or "192.168.100.84"),
+            ("port", "Port:", str(biezace.get("port") or 5060)),
+            ("sekret", "Sekret (klucz):", biezace.get("sekret") or ""),
+            ("wspolny", "Wspólny plik (opcj.):",
+             str((config or {}).get("wspolny_config") or DEFAULT_WSPOLNY_CONFIG))),
+            start=2):
+        tk.Label(ramka, text=etykieta, bg="#f0f0f0", font=("Arial", 10, "bold")
+                 ).grid(row=wiersz, column=0, sticky="w", pady=5)
+        e = tk.Entry(ramka, width=44, font=("Arial", 10))
+        e.insert(0, domyslnie)
+        e.grid(row=wiersz, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=5)
+        pola[klucz] = e
+
+    stan = tk.Label(ramka, text="", bg="#f0f0f0", justify="left", wraplength=430)
+    stan.grid(row=5, column=0, columnspan=3, sticky="w", pady=(10, 4))
+
+    def zebrane():
+        try:
+            port = int(pola["port"].get().strip() or 5060)
+        except ValueError:
+            port = 5060
+        return (pola["host"].get().strip(), port, pola["sekret"].get().strip())
+
+    def wczytaj_z_pliku():
+        """Pobiera adres i sekret ze wskazanego wspólnego pliku.
+
+        Osobny przycisk, nie automat: user widzi, SKĄD wzięły się wartości
+        i może je poprawić przed zapisem.
+        """
+        sciezka = pola["wspolny"].get().strip() or DEFAULT_WSPOLNY_CONFIG
+        try:
+            import json as _json
+            with open(sciezka, encoding="utf-8-sig") as f:
+                wspolny = (_json.load(f).get("rm_serwer") or {})
+            if not wspolny:
+                stan.config(text=f"W pliku {sciezka} nie ma sekcji rm_serwer.",
+                            fg="#c0392b")
+                return
+            for klucz, wartosc in (("host", wspolny.get("host")),
+                                   ("port", wspolny.get("port")),
+                                   ("sekret", wspolny.get("sekret"))):
+                if wartosc:
+                    pola[klucz].delete(0, tk.END)
+                    pola[klucz].insert(0, str(wartosc))
+            stan.config(text=f"Wczytano z {sciezka}. Sprawdź połączenie.",
+                        fg="#1e8449")
+        except Exception as e:
+            stan.config(text=f"Nie udało się odczytać {sciezka}:\n{e}",
+                        fg="#c0392b")
+
+    def testuj(cicho=False):
+        host, port, sekret = zebrane()
+        if not host:
+            stan.config(text="Podaj adres serwera.", fg="#c0392b")
+            return False
+        stan.config(text="Sprawdzam…", fg="#7f8c8d")
+        okno.update_idletasks()
+        ok, opis = sprawdz_serwer(host, port, sekret)
+        stan.config(text=("✅ " if ok else "❌ ") + opis,
+                    fg="#1e8449" if ok else "#c0392b")
+        return ok
+
+    def zapisz():
+        # Zapisujemy WYŁĄCZNIE ustawienia, które przeszły test — inaczej
+        # zapisalibyśmy kolejną niedziałającą konfigurację i user wróciłby
+        # tu przy następnym starcie, niczego nie wiedząc więcej.
+        if not testuj():
+            return
+        host, port, sekret = zebrane()
+        wynik["dane"] = {"host": host, "port": port, "sekret": sekret or None,
+                         "wspolny_config": pola["wspolny"].get().strip() or None}
+        okno.destroy()
+
+    przyciski = tk.Frame(ramka, bg="#f0f0f0")
+    przyciski.grid(row=6, column=0, columnspan=3, sticky="e", pady=(8, 0))
+    tk.Button(przyciski, text="Wczytaj z pliku", command=wczytaj_z_pliku,
+              bg="#8e44ad", fg="white", font=("Arial", 10), padx=10
+              ).pack(side=tk.LEFT, padx=4)
+    tk.Button(przyciski, text="Sprawdź połączenie", command=testuj,
+              bg="#3498db", fg="white", font=("Arial", 10), padx=10
+              ).pack(side=tk.LEFT, padx=4)
+    tk.Button(przyciski, text="Zapisz i uruchom", command=zapisz,
+              bg="#27ae60", fg="white", font=("Arial", 10, "bold"), padx=10
+              ).pack(side=tk.LEFT, padx=4)
+    tk.Button(przyciski, text="Zamknij program", command=okno.destroy,
+              bg="#95a5a6", fg="white", font=("Arial", 10), padx=10
+              ).pack(side=tk.LEFT, padx=4)
+
+    okno.protocol("WM_DELETE_WINDOW", okno.destroy)
+    okno.update_idletasks()
+    szer, wys = okno.winfo_width(), okno.winfo_height()
+    okno.geometry("+%d+%d" % ((okno.winfo_screenwidth() - szer) // 2,
+                              (okno.winfo_screenheight() - wys) // 3))
+    okno.grab_set()
+    okno.focus_force()
+    okno.wait_window()
+    return wynik["dane"]
+
+
+def ustal_rm_serwer(config: dict, parent=None) -> dict:
+    """Konfiguracja RM_SERWER: zapisana albo wpisana ręcznie.
+
+    Najpierw próbujemy tego, co w configu. Gdy nie działa — pokazujemy okno.
+    Żadnego zgadywania w tle: nietrafiony sekret kończył się komunikatem
+    „nieprawidłowy podpis żądania", z którego nic nie wynikało.
+    """
+    cfg = dict((config or {}).get("rm_serwer") or {})
+    if cfg.get("host"):
+        ok, opis = sprawdz_serwer(cfg.get("host"), cfg.get("port") or 5060,
+                                  cfg.get("sekret"))
+        if ok:
+            return cfg
+        print(f"  ⚠️  Zapisana konfiguracja RM_SERWER nie działa: {opis}")
+
+    nowe = okno_konfiguracji_serwera(config, parent)
+    if not nowe:
+        return cfg          # user zamknął okno — wołający zdecyduje, co dalej
+
+    # Zapis do configu, żeby pytać tylko raz.
+    try:
+        import json as _json
+        sciezka = CONFIG_FILE
+        dane = {}
+        if os.path.isfile(sciezka):
+            with open(sciezka, encoding="utf-8-sig") as f:
+                dane = _json.load(f)
+        dane["rm_serwer"] = nowe
+        with open(sciezka, "w", encoding="utf-8") as f:
+            _json.dump(dane, f, ensure_ascii=False, indent=2)
+        print(f"  ✅ Zapisano konfigurację RM_SERWER do {sciezka}")
+    except Exception as e:
+        print(f"  ⚠️  Nie zapisano konfiguracji: {e}")
+
+    return nowe
 
 
 def tylko_najnowsze(pliki):
@@ -3043,23 +3291,29 @@ class MainWindow(tk.Tk):
             print("  ✅ DatabaseManager OK")
 
             # ── Dostęp do mastera: WYŁĄCZNIE przez RM_SERWER ─────────────
-            # Nie ma trybu lokalnego (decyzja 11.09.2026). Adres serwera
-            # w sync_config.json na Y: — ten sam plik dla wszystkich stanowisk.
-            try:
-                cfg_srv = (config or {}).get("rm_serwer") or {}
-                opis = self.db_manager.ustaw_klienta_mastera(
-                    cfg_srv.get("host"),
-                    port=cfg_srv.get("port"),
-                    sekret=cfg_srv.get("sekret"),
-                )
-                print(f"  → {opis}")
-            except Exception as e:
-                # Brak adresu zatrzyma program przy pierwszym odczycie mastera
-                # — mówimy o tym TERAZ, przy starcie, a nie za dziesięć minut
-                # w losowym oknie.
-                print(f"  ⛔ RM_SERWER nieskonfigurowany: {e}")
-                print(f"     Dopisz do sync_config.json:")
-                print(f'       "rm_serwer": {{"host": "192.168.100.84", "port": 5060}}')
+            #
+            # Nie ma trybu lokalnego (decyzja 11.09.2026): baza leży na
+            # serwerze. `ustal_rm_serwer` sprawdza zapisaną konfigurację,
+            # a gdy ta nie działa — pyta OKNEM. Wcześniej program próbował
+            # dobrać adres sam i kończył komunikatem „nieprawidłowy podpis
+            # żądania": trafiał w adres, nie w sekret, a user nie miał ani
+            # jak tego zobaczyć, ani gdzie poprawić.
+            cfg_srv = ustal_rm_serwer(config, parent=self)
+            if not cfg_srv.get("host"):
+                from tkinter import messagebox as _mb
+                _mb.showinfo(
+                    "RM_BAZA",
+                    "Bez połączenia z serwerem nie ma dostępu do bazy.\n\n"
+                    "Uruchom program ponownie i podaj adres serwera.")
+                raise InitConfigRequired("Anulowano konfigurację RM_SERWER")
+
+            opis = self.db_manager.ustaw_klienta_mastera(
+                cfg_srv.get("host"),
+                port=cfg_srv.get("port"),
+                sekret=cfg_srv.get("sekret"),
+            )
+            print(f"  → {opis}")
+
             
             # Callback dla aktualizacji statusu (z wątku tła)
             def update_status(msg):
@@ -3090,21 +3344,12 @@ class MainWindow(tk.Tk):
             # Wcześniej każde z 10 stanowisk próbowało dokładać kolumny przy
             # każdym uruchomieniu; stąd w logach „attempt to write a readonly
             # database" — klient bez prawa zapisu migrował cudzą bazę.
-            print("  → Sprawdzam schemat mastera...")
-            try:
-                import rm_serwer_operacje as _ops
-                if self.db_manager.master_con is not None:
-                    zrobione = _ops.zastosuj_migracje(self.db_manager.master_con)
-                    _ops.zbuduj_operacje_dostawcow(self.db_manager.master_con)
-                    if zrobione:
-                        for z in zrobione:
-                            print(f"  ✅ Migracja: {z}")
-                    else:
-                        print("  ✅ Schemat aktualny")
-            except Exception as e:
-                # Brak prawa zapisu to NORMALNY stan w trybie serwer i przy
-                # masterze otwartym read-only — nie powód do przerywania startu.
-                print(f"  ℹ️  Migracje pominięte: {e}")
+            # Schematu mastera NIE dotykamy: migracje wykonuje RM_SERWER
+            # u siebie, przy starcie (widać je w jego logu). Klient nie ma
+            # pliku, który mógłby migrować — a wcześniej próbował migrować
+            # CUDZĄ bazę na dysku sieciowym, przy każdym uruchomieniu
+            # każdego z 10 stanowisk.
+            print("  → Schemat mastera: pilnuje RM_SERWER")
 
             # Tabele tagów kooperantów (dla portalu RM_RFQ) — słownik + przypisania.
             # RM_BAZA jest WŁAŚCICIELEM tagów; RM_SYNC_AGENT wypycha je do RM_RFQ
@@ -3371,13 +3616,10 @@ class MainWindow(tk.Tk):
         # Kolumnę `nip` dokłada wspólna migracja (rm_serwer_operacje.MIGRACJE),
         # wykonywana przez właściciela pliku. Metoda zostaje jako punkt
         # wywołania po przełączeniu mastera na READ-WRITE.
-        try:
-            import rm_serwer_operacje as _ops
-            if self.db_manager.master_con is not None:
-                for z in _ops.zastosuj_migracje(self.db_manager.master_con):
-                    print(f"✅ Migracja: {z}")
-        except Exception as e:
-            print(f"ℹ️  Migracje pominięte: {e}")
+        # Nic do zrobienia: kolumnę `nip` (i resztę schematu) dokłada
+        # RM_SERWER przy swoim starcie. Metoda zostaje, bo wołają ją
+        # miejsca po zalogowaniu — ma teraz nic nie robić.
+        return
 
     def _init_items_audit_log(self):
         """Inicjalizuj tabelę logowania zmian pozycji projektu"""
@@ -3965,6 +4207,13 @@ class MainWindow(tk.Tk):
             },
             "locks": {
                 "folder": str(Path(DEFAULT_LOCKS_DIR))
+            },
+            # Adres serwera trafia do configu OD RAZU — bez niego świeża
+            # stacja nie miałaby jak dojść do bazy (patrz `ustal_rm_serwer`).
+            # `sekret` zostaje pusty: dopisuje go admin przy wdrożeniu.
+            "rm_serwer": {
+                "host": DEFAULT_RM_SERWER_HOST,
+                "port": DEFAULT_RM_SERWER_PORT
             },
             "ui": {
                 "last_file_category": "DWF"
@@ -5162,9 +5411,9 @@ class MainWindow(tk.Tk):
     def _silent_login_worker(self, user_id):
         """Wątek roboczy: pobierz usera i przełącz tryb DB bez dotykania GUI."""
         try:
-            sql = "SELECT id, username, display_name, role FROM users WHERE id = ?"
-            cursor = self.db_manager.master_con.execute(sql, (user_id,))
-            row = cursor.fetchone()
+            _w = self.db_manager.master_read("user-po-id", {"id": user_id})
+            row = ((_w[0]["id"], _w[0]["username"], _w[0]["display_name"],
+                    _w[0]["role"]) if _w else None)
             if not row:
                 self.after(0, lambda: self._finish_silent_login(False, None, None, None, None, "Brak użytkownika"))
                 return
@@ -5233,9 +5482,9 @@ class MainWindow(tk.Tk):
     def _silent_login_last_user(self, user_id):
         """Ciche zalogowanie ostatniego użytkownika (bez promptu hasła)"""
         try:
-            sql = "SELECT id, username, display_name, role FROM users WHERE id = ?"
-            cursor = self.db_manager.master_con.execute(sql, (user_id,))
-            row = cursor.fetchone()
+            _w = self.db_manager.master_read("user-po-id", {"id": user_id})
+            row = ((_w[0]["id"], _w[0]["username"], _w[0]["display_name"],
+                    _w[0]["role"]) if _w else None)
             
             if row:
                 uid, username, display_name, role = row
@@ -5284,8 +5533,8 @@ class MainWindow(tk.Tk):
                 #  Warunek nigdy nie był spełniony, więc blok nic nie robił.)
 
                 # Pobierz aktywnych użytkowników
-                sql = "SELECT id, username, display_name, role FROM users WHERE is_active = 1 ORDER BY username"
-                users_rows = self.db_manager.master_con.execute(sql).fetchall()
+                users_rows = [(u["id"], u["username"], u["display_name"], u["role"])
+                              for u in self.db_manager.master_read("users-aktywni")]
 
             print(f"📋 Lista użytkowników z bazy:")
             for row in users_rows:
@@ -5442,34 +5691,15 @@ class MainWindow(tk.Tk):
             try:
                 if self.current_user_id:
                     # Pobierz aktualnego użytkownika z bazy aby odtworzyć pełny format
-                    sql = "SELECT id, username, display_name, role FROM users WHERE id = ?"
-                    
-                    # RETRY LOOP - 3 próby z opóźnieniem i reconnect przy I/O error
-                    row = None
-                    for attempt in range(3):
-                        try:
-                            self.db_manager.master_commit()  # Zwolnij locki
-                            cursor = self.db_manager.master_con.execute(sql, (self.current_user_id,))
-                            row = cursor.fetchone()
-                            break
-                        except sqlite3.OperationalError as e:
-                            err_msg = str(e).lower()
-                            if "locked" in err_msg and attempt < 2:
-                                print(f"⚠️  restore_previous_user: database locked (próba {attempt+1}/3), czekam 100ms...")
-                                time.sleep(0.1)
-                            elif "disk i/o error" in err_msg and attempt < 2:
-                                print(f"⚠️  restore_previous_user: disk I/O error (próba {attempt+1}/3), wymuszam reconnect...")
-                                # Wymuś reconnect (bez close — patrz _retire_master_con)
-                                self.db_manager._retire_master_con()
-                                self.db_manager.master_con = None
-                                if self.current_user_role in ("ADMIN", "USER$$", "USER$"):
-                                    self.db_manager.reconnect_master_rw()
-                                else:
-                                    self.db_manager.connect_master()
-                                time.sleep(0.1)
-                            else:
-                                raise
-                    
+                    # Bez pętli retry: „locked" i „disk I/O error" dotyczyły
+                    # pliku otwieranego po SMB. Odczyt idzie teraz do serwera,
+                    # a jego niedostępność zgłasza `BladSerwera` — nie ma
+                    # czego ponawiać w tym miejscu.
+                    _w = self.db_manager.master_read("user-po-id",
+                                                     {"id": self.current_user_id})
+                    row = ((_w[0]["id"], _w[0]["username"], _w[0]["display_name"],
+                            _w[0]["role"]) if _w else None)
+
                     if row:
                         uid, username, display_name, role = row
                         label = f"{uid} | {username}"
@@ -20474,16 +20704,9 @@ class MainWindow(tk.Tk):
             try:
                 # Debugowanie - sprawdź czy połączenie jest READ-WRITE
                 print(f"\n➕ Tworzenie projektu ({project_type}): {name}")
-                try:
-                    cur = self.db_manager.master_con.execute("PRAGMA query_only")
-                    is_readonly = cur.fetchone()[0]
-                    print(f"   PRAGMA query_only = {is_readonly} ({'READ-ONLY' if is_readonly else 'READ-WRITE'})")
-                    if is_readonly:
-                        print("   🔄 Master jest READ-ONLY, przełączam na READ-WRITE...")
-                        self.db_manager.reconnect_master_rw()
-                except Exception as pragma_err:
-                    print(f"   ⚠️  Błąd sprawdzania PRAGMA: {pragma_err}")
-                    self.db_manager.reconnect_master_rw()
+                # Bez sprawdzania trybu połączenia: zapisy idą do RM_SERWER,
+                # który jest jedynym właścicielem pliku. Rozróżnienie
+                # READ-ONLY/READ-WRITE dotyczyło uchwytu do pliku na `Y:`.
                 
                 # Utwórz projekt w master.sqlite
                 pid_new = create_project(
@@ -20644,10 +20867,6 @@ class MainWindow(tk.Tk):
                     traceback.print_exc()
             
             except Exception as e:
-                try:
-                    self.db_manager.master_con.rollback()
-                except:
-                    pass
                 messagebox.showerror("Błąd", f"Nie udało się utworzyć projektu:\n{e}", parent=win)
         
         tk.Button(
@@ -20834,12 +21053,16 @@ class MainWindow(tk.Tk):
                     else:
                         where_clause = f"WHERE {type_col} = '{project_type}'"
                 
-                sql = f"""
-                    SELECT {', '.join(select_cols)}
-                    FROM projects
-                    {where_clause}
-                """
-                rows = self.db_manager.master_con.execute(sql).fetchall()
+                # `projects-list` zwraca SELECT * — kolumny wybieramy tutaj,
+                # w tej samej kolejności co `select_cols`, bo dalszy kod
+                # czyta wiersz POZYCYJNIE (row[1] = nazwa itd.).
+                _wszystkie = self.db_manager.master_read("projects-list")
+                if project_type and type_col:
+                    _wszystkie = [w for w in _wszystkie
+                                  if w.get(type_col) == project_type]
+                if active_col:
+                    _wszystkie = [w for w in _wszystkie if w.get(active_col)]
+                rows = [tuple(w.get(c) for c in select_cols) for w in _wszystkie]
                 
                 # Sortuj w Pythonie - cyfry malejąco, potem litery A-Z (z numerami malejąco)
                 def sort_key_projects(row):
@@ -21046,13 +21269,10 @@ class MainWindow(tk.Tk):
                     select_cols.append(received_percent_col)
                 
                 if select_cols:
-                    sql = f"""
-                        SELECT {', '.join(select_cols)}
-                        FROM projects
-                        WHERE {pk}=?
-                    """
-                    cur = self.db_manager.master_con.execute(sql, (proj['id'],))
-                    row = cur.fetchone()
+                    _w = self.db_manager.master_read("project-get",
+                                                     {"project_id": proj['id']})
+                    row = (tuple(_w[0].get(c) for c in select_cols)
+                           if _w else None)
                     if row:
                         idx = 0
                         if designer_col:
@@ -21328,16 +21548,7 @@ class MainWindow(tk.Tk):
                 try:
                     # Debugowanie - sprawdź czy połączenie jest READ-WRITE
                     print(f"\n✏️  Edycja projektu {proj['id']}: {name}")
-                    try:
-                        cur = self.db_manager.master_con.execute("PRAGMA query_only")
-                        is_readonly = cur.fetchone()[0]
-                        print(f"   PRAGMA query_only = {is_readonly} ({'READ-ONLY' if is_readonly else 'READ-WRITE'})")
-                        if is_readonly:
-                            print("   🔄 Master jest READ-ONLY, przełączam na READ-WRITE...")
-                            self.db_manager.reconnect_master_rw()
-                    except Exception as pragma_err:
-                        print(f"   ⚠️  Błąd sprawdzania PRAGMA: {pragma_err}")
-                        self.db_manager.reconnect_master_rw()
+                    # Tryb połączenia nieistotny — patrz `create_project`.
                     
                     # Aktualizuj dane projektu (włącznie ze statusem)
                     update_project(
@@ -21361,10 +21572,6 @@ class MainWindow(tk.Tk):
                     self.load_projects()  # Odśwież dropdown
                 
                 except Exception as e:
-                    try:
-                        self.db_manager.master_con.rollback()
-                    except:
-                        pass
                     messagebox.showerror("Błąd", f"Nie udało się zapisać:\n{e}", parent=dlg)
             
             tk.Button(
@@ -21415,11 +21622,6 @@ class MainWindow(tk.Tk):
             ostatni_blad = None
             for proba in range(3):
                 try:
-                    try:
-                        if self.db_manager.master_con.in_transaction:
-                            self.db_manager.master_con.rollback()
-                    except Exception:
-                        pass
                     set_project_active(self.db_manager.master_con, proj["id"], new_state)
                     self.db_manager.master_commit()
                     # POTWIERDZENIE ODCZYTEM. Commit na polaczeniu, ktore cicho
@@ -21439,10 +21641,6 @@ class MainWindow(tk.Tk):
                     break
                 except Exception as e:
                     ostatni_blad = e
-                    try:
-                        self.db_manager.master_con.rollback()
-                    except Exception:
-                        pass
                     tresc = str(e).lower()
                     # ⚠️ POLACZENIE READ-ONLY UDAJE BLOKADE. master_con bywa
                     # otwarte jako "mode=ro&immutable=1" (connect_master) —
@@ -21516,16 +21714,9 @@ class MainWindow(tk.Tk):
             try:
                 # Debugowanie - sprawdź czy połączenie jest READ-WRITE
                 print(f"\n🗑️  Usuwanie projektu {proj['id']}: {proj['name']}")
-                try:
-                    cur = self.db_manager.master_con.execute("PRAGMA query_only")
-                    is_readonly = cur.fetchone()[0]
-                    print(f"   PRAGMA query_only = {is_readonly} ({'READ-ONLY' if is_readonly else 'READ-WRITE'})")
-                    if is_readonly:
-                        print("   🔄 Master jest READ-ONLY, przełączam na READ-WRITE...")
-                        self.db_manager.reconnect_master_rw()
-                except Exception as pragma_err:
-                    print(f"   ⚠️  Błąd sprawdzania PRAGMA: {pragma_err}")
-                    self.db_manager.reconnect_master_rw()
+                # Bez sprawdzania trybu połączenia: zapisy idą do RM_SERWER,
+                # który jest jedynym właścicielem pliku. Rozróżnienie
+                # READ-ONLY/READ-WRITE dotyczyło uchwytu do pliku na `Y:`.
                 
                 # Usuń projekt
                 delete_project(self.db_manager.master_con, proj["id"])
@@ -21537,10 +21728,6 @@ class MainWindow(tk.Tk):
             
             except Exception as e:
                 print(f"   ❌ Błąd usuwania: {e}")
-                try:
-                    self.db_manager.master_con.rollback()
-                except:
-                    pass
                 messagebox.showerror("Błąd", f"Nie udało się usunąć projektu:\n{e}", parent=win)
         
         def hard_kill_selected():
@@ -21609,11 +21796,7 @@ class MainWindow(tk.Tk):
             # 2) Reconnect master jako READ-WRITE z dłuższym busy_timeout
             try:
                 self.db_manager.reconnect_master_rw()
-                try:
-                    self.db_manager.master_con.execute("PRAGMA busy_timeout=15000")
-                except Exception:
-                    pass
-                msg = "   🔄 master reconnect RW OK (busy_timeout=15s)"
+                msg = "   🔄 master reconnect RW OK"
                 print(msg); log_lines.append(msg)
             except Exception as e:
                 msg = f"   ⚠️  reconnect_master_rw błąd: {e}"
@@ -21635,17 +21818,9 @@ class MainWindow(tk.Tk):
                     err_low = str(e).lower()
                     msg = f"   ⚠️  DELETE próba {attempt}: {e}"
                     print(msg); log_lines.append(msg)
-                    try:
-                        self.db_manager.master_con.rollback()
-                    except Exception:
-                        pass
                     if "locked" in err_low or "busy" in err_low:
                         try:
                             self.db_manager._reconnect_master_after_locked()
-                            try:
-                                self.db_manager.master_con.execute("PRAGMA busy_timeout=15000")
-                            except Exception:
-                                pass
                         except Exception as re:
                             log_lines.append(f"   ⚠️  reconnect po lock: {re}")
                     else:
@@ -22276,50 +22451,18 @@ class MainWindow(tk.Tk):
                     break
             
             # Pobierz dostawców
+            # Bez pętli retry i bez sklejanego SQL: „database is locked"
+            # należało do świata, w którym każdy klient sam otwierał plik po
+            # SMB. Teraz plik ma jeden proces (RM_SERWER), który szereguje
+            # dostęp u siebie — nie ma z kim ścigać się o lock.
+            _dost = self.db_manager.master_read("suppliers-list")
             if active_col:
-                sql = f"SELECT {id_col}, {name_col} FROM suppliers WHERE {active_col} = 1 ORDER BY {name_col} COLLATE NOCASE"
-            else:
-                sql = f"SELECT {id_col}, {name_col} FROM suppliers ORDER BY {name_col} COLLATE NOCASE"
-            
-            # RETRY LOOP - 3 próby z opóźnieniem (sieć + WAL + I/O errors)
-            cursor = None
-            for attempt in range(3):
-                try:
-                    # NIE commit'ujemy przed SELECT — to czysty read, a commit na SMB
-                    # zajmuje writer-lock i blokuje innych klientów. Jeśli była otwarta
-                    # transakcja write, rollback ją zamyka bez I/O.
-                    try:
-                        if self.db_manager.master_con.in_transaction:
-                            self.db_manager.master_con.rollback()
-                    except Exception:
-                        pass
-                    cursor = self.db_manager.master_con.execute(sql)
-                    break
-                except sqlite3.OperationalError as e:
-                    err_msg = str(e).lower()
-                    if "locked" in err_msg and attempt < 2:
-                        print(f"⚠️  reload_suppliers: database locked (próba {attempt+1}/3), czekam 200ms...")
-                        time.sleep(0.2)
-                    elif "disk i/o error" in err_msg and attempt < 2:
-                        print(f"⚠️  reload_suppliers: disk I/O error (próba {attempt+1}/3), wymuszam reconnect...")
-                        # Wymusz reconnect (bez close — patrz _retire_master_con)
-                        self.db_manager._retire_master_con()
-                        self.db_manager.master_con = None
-                        if self.current_user_role in ("ADMIN", "USER$$", "USER$"):
-                            self.db_manager.reconnect_master_rw()
-                        else:
-                            self.db_manager.connect_master()
-                        time.sleep(0.2)
-                    else:
-                        raise
-            
-            if cursor is None:
-                raise sqlite3.OperationalError("reload_suppliers: nie udało się wykonać SELECT po 3 próbach")
-            
+                _dost = [w for w in _dost if w.get(active_col)]
+            _dost.sort(key=lambda w: (w.get(name_col) or "").lower())
+
             self.suppliers_map = {}
-            for row in cursor.fetchall():
-                sid, name = row
-                self.suppliers_map[sid] = name
+            for w in _dost:
+                self.suppliers_map[w.get(id_col)] = w.get(name_col)
             
             # Zaktualizuj wartości w filtrze dostawców
             # 🔍 Filtruj dostawców - pokaż tylko tych, którzy występują w aktualnym projekcie
@@ -22555,23 +22698,23 @@ class MainWindow(tk.Tk):
                 desc_col = next((c for c in ["description", "desc", "opis", "note", "notes"] if c in cols_db), None)
                 active_col = next((c for c in ["is_active", "active", "enabled"] if c in cols_db), None)
 
-                # Buduj SELECT
-                select_cols = [id_col, name_col]
-                if nip_col: select_cols.append(nip_col)
-                else: select_cols.append("NULL")
-                if contact_col: select_cols.append(contact_col)
-                else: select_cols.append("NULL")
-                if phone_col: select_cols.append(phone_col)
-                else: select_cols.append("NULL")
-                if email_col: select_cols.append(email_col)
-                else: select_cols.append("NULL")
-                if desc_col: select_cols.append(desc_col)
-                else: select_cols.append("NULL")
-                if active_col: select_cols.append(active_col)
-                else: select_cols.append("1")
-
-                sql = f"SELECT {', '.join(select_cols)} FROM suppliers ORDER BY {name_col} COLLATE NOCASE"
-                cursor = self.db_manager.master_con.execute(sql)
+                # Kolumny bierzemy po nazwie ze zwróconego wiersza.
+                #
+                # ⚠️ Nie budujemy już listy z literałami "NULL"/"1" jak
+                # w sklejanym SELECT: tam SQL sam je zamieniał na wartości,
+                # tutaj `w.get("1")` dałoby None — i KAŻDY dostawca
+                # wyglądałby na nieaktywnego. Brak kolumny = jawny default.
+                _wsz = sorted(self.db_manager.master_read("suppliers-list"),
+                              key=lambda w: (w.get(name_col) or "").lower())
+                cursor = [(
+                    w.get(id_col), w.get(name_col),
+                    w.get(nip_col) if nip_col else None,
+                    w.get(contact_col) if contact_col else None,
+                    w.get(phone_col) if phone_col else None,
+                    w.get(email_col) if email_col else None,
+                    w.get(desc_col) if desc_col else None,
+                    w.get(active_col) if active_col else 1,
+                ) for w in _wsz]
 
                 # Tagi wszystkich firm jednym zapytaniem: supplier_id -> "Laser, CNC"
                 tags_by_sup = {}
@@ -22581,7 +22724,7 @@ class MainWindow(tk.Tk):
                 except Exception:
                     pass  # brak tabel tagów (starsza baza) — kolumna zostaje pusta
 
-                for row in cursor.fetchall():
+                for row in cursor:
                     sid, name, nip, contact, phone, email, description, active = row
                     active_str = "TAK" if active else "NIE"
                     tags_str = ", ".join(tags_by_sup.get(sid, []))
@@ -22669,53 +22812,26 @@ class MainWindow(tk.Tk):
                 new_active = 1 if var_active.get() else 0
                 
                 try:
-                    # Wykryj nazwy kolumn dynamicznie
-                    cols_db = [w["name"] for w in self.db_manager.master_read("suppliers-kolumny")]
-                    
-                    # Znajdź kolumny
-                    id_col = next((c for c in ["id", "supplier_id", "sup_id"] if c in cols_db), "id")
-                    name_col = next((c for c in ["name", "nazwa", "supplier_name"] if c in cols_db), "name")
-                    nip_col = next((c for c in ["nip"] if c in cols_db), None)
-                    contact_col = next((c for c in ["contact", "contact_info"] if c in cols_db), None)
-                    phone_col = next((c for c in ["phone", "phone_default"] if c in cols_db), None)
-                    email_col = next((c for c in ["email", "email_default"] if c in cols_db), None)
-                    desc_col = next((c for c in ["description", "desc", "opis", "note", "notes"] if c in cols_db), None)
-                    active_col = next((c for c in ["is_active", "active", "enabled"] if c in cols_db), None)
+                    # Zapis przez RM_SERWER. Nazwy kolumn różnią się między
+                    # instalacjami, ale rozpoznaje je SERWER przy starcie
+                    # (`zbuduj_operacje_dostawcow` — widać w jego logu), więc
+                    # klient podaje nazwy LOGICZNE, nie nazwy kolumn.
+                    self.db_manager.master_exec("supplier-edit", {
+                        "supplier_id": sid,
+                        "name": new_name,
+                        "nip": new_nip,
+                        "contact": new_contact,
+                        "phone": new_phone,
+                        "email": new_email,
+                        "description": new_desc,
+                    })
 
-                    # Buduj UPDATE dynamicznie
-                    set_parts = [f"{name_col} = ?"]
-                    params = [new_name]
-
-                    if nip_col:
-                        set_parts.append(f"{nip_col} = ?")
-                        params.append(new_nip)
-
-                    if contact_col:
-                        set_parts.append(f"{contact_col} = ?")
-                        params.append(new_contact)
-                    
-                    if phone_col:
-                        set_parts.append(f"{phone_col} = ?")
-                        params.append(new_phone)
-                    
-                    if email_col:
-                        set_parts.append(f"{email_col} = ?")
-                        params.append(new_email)
-                    
-                    if desc_col:
-                        set_parts.append(f"{desc_col} = ?")
-                        params.append(new_desc)
-                    
-                    if active_col:
-                        set_parts.append(f"{active_col} = ?")
-                        params.append(new_active)
-                    
-                    params.append(sid)  # WHERE id = ?
-                    
-                    sql = f"UPDATE suppliers SET {', '.join(set_parts)} WHERE {id_col} = ?"
-                    
-                    self.db_manager.master_con.execute(sql, params)
-                    self.db_manager.master_commit()
+                    # Flaga „aktywny" ma własną operację: `supplier-edit` jej
+                    # nie rusza, żeby poprawka telefonu nie mogła przy okazji
+                    # wyłączyć dostawcy.
+                    self.db_manager.master_exec("supplier-set-active",
+                                                {"supplier_id": sid,
+                                                 "is_active": new_active})
 
                     # Zapis tagów kooperanta (przypisania z checkboxów)
                     try:
@@ -23388,14 +23504,9 @@ class MainWindow(tk.Tk):
         def zapisz():
             lista = ','.join(u for u, v in vars_by_user.items() if v.get())
             try:
-                # własne połączenie RW — master_con bywa read-only bez locka
-                rw = sqlite3.connect(str(self.db_manager.master_path), timeout=10)
-                rw.execute(
-                    "INSERT INTO settings (key, value, updated_at) VALUES ('rfq_watchers', ?, ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                    (lista, datetime.now().isoformat()))
-                rw.commit()
-                rw.close()
+                self.db_manager.master_exec("settings-set", {
+                    "key": "rfq_watchers", "value": lista,
+                    "updated_at": datetime.now().isoformat()})
             except Exception as e:
                 messagebox.showerror("Powiadomienia RFQ", f"Nie udało się zapisać:\n{e}", parent=dlg)
                 return
@@ -23483,47 +23594,42 @@ class MainWindow(tk.Tk):
 
         Własne połączenie RW — master_con jest read-only dopóki nie ma locka
         projektu, a to ustawienie ma działać zawsze (wzorzec z rfq_watchers)."""
-        rw = sqlite3.connect(str(self.db_manager.master_path), timeout=10)
-        try:
-            rw.execute("CREATE TABLE IF NOT EXISTS settings ("
-                       "key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
-            teraz = datetime.now().isoformat()
+        teraz = datetime.now().isoformat()
 
-            # Doczytujemy CAŁOŚĆ i podmieniamy tylko swoją sekcję.
-            wszystko = {}
-            row = rw.execute("SELECT value FROM settings WHERE key='app_urls'").fetchone()
-            if row and str(row[0]).strip():
-                try:
-                    stare = json.loads(row[0])
-                    if isinstance(stare, dict):
-                        wszystko = (stare if ('local' in stare or 'server' in stare)
-                                    else {'local': stare, 'server': stare})
-                except Exception:
-                    pass
-            wszystko[('server' if self._is_server_machine() else 'local')] = mapa
+        # Doczytujemy CAŁOŚĆ i podmieniamy tylko swoją sekcję.
+        wszystko = {}
+        _w = self.db_manager.master_read("settings-get", {"key": "app_urls"})
+        if _w and str(_w[0]["value"] or "").strip():
+            try:
+                stare = json.loads(_w[0]["value"])
+                if isinstance(stare, dict):
+                    wszystko = (stare if ('local' in stare or 'server' in stare)
+                                else {'local': stare, 'server': stare})
+            except Exception:
+                pass
+        wszystko[('server' if self._is_server_machine() else 'local')] = mapa
 
-            rw.execute(
-                "INSERT INTO settings (key, value, updated_at) VALUES ('app_urls', ?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                (json.dumps(wszystko, ensure_ascii=False), teraz)
-            )
-            # Adres RM_RFQ czyta też RM_SYNC_AGENT — zapisujemy go dodatkowo
-            # pod kluczem per-maszyna (rfq_portal_url_local/_server), inaczej
-            # user zmieniłby adres w menu, a synchronizacja dalej gadałaby ze
-            # starym portalem. Wspólnego 'rfq_portal_url' NIE ruszamy: to
-            # fallback dla maszyn, które nie mają własnego wpisu.
-            rfq = (mapa.get('rm_rfq') or '').rstrip('/')
-            if rfq:
-                klucz = ('rfq_portal_url_server' if self._is_server_machine()
-                         else 'rfq_portal_url_local')
-                rw.execute(
-                    f"INSERT INTO settings (key, value, updated_at) VALUES ('{klucz}', ?, ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                    (rfq, teraz)
-                )
-            rw.commit()
-        finally:
-            rw.close()
+        operacje = [{"operation": "settings-set",
+                     "params": {"key": "app_urls",
+                                "value": json.dumps(wszystko, ensure_ascii=False),
+                                "updated_at": teraz}}]
+
+        # Adres RM_RFQ czyta też RM_SYNC_AGENT — zapisujemy go dodatkowo
+        # pod kluczem per-maszyna (rfq_portal_url_local/_server), inaczej
+        # user zmieniłby adres w menu, a synchronizacja dalej gadałaby ze
+        # starym portalem. Wspólnego 'rfq_portal_url' NIE ruszamy: to
+        # fallback dla maszyn, które nie mają własnego wpisu.
+        #
+        # Oba zapisy jednym batchem: rozjechany adres w menu i u agenta to
+        # dokładnie ta cicha awaria, której ten kod ma zapobiegać.
+        rfq = (mapa.get('rm_rfq') or '').rstrip('/')
+        if rfq:
+            operacje.append({"operation": "settings-set",
+                             "params": {"key": ('rfq_portal_url_server'
+                                                if self._is_server_machine()
+                                                else 'rfq_portal_url_local'),
+                                        "value": rfq, "updated_at": teraz}})
+        self.db_manager.master_batch(operacje)
 
     def _sprawdz_portal_rfq(self, url: str):
         """Czy pod tym adresem faktycznie odpowiada portal RM_RFQ?
@@ -23891,15 +23997,9 @@ class MainWindow(tk.Tk):
 
             # zapis znacznika — osobne połączenie RW (patrz _init_rfq_tags_tables)
             try:
-                rw = sqlite3.connect(str(self.db_manager.master_path), timeout=10)
-                rw.execute(
-                    "INSERT INTO settings (key, value, updated_at) VALUES "
-                    "('rfq_watchlist_shown', ?, ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
-                    "updated_at=excluded.updated_at",
-                    (dzis, datetime.now().isoformat()))
-                rw.commit()
-                rw.close()
+                self.db_manager.master_exec("settings-set", {
+                    "key": "rfq_watchlist_shown", "value": dzis,
+                    "updated_at": datetime.now().isoformat()})
             except Exception:
                 pass        # nie udało się zapisać — najwyżej pokaże się jutro ponownie
         except Exception as e:
@@ -26416,56 +26516,23 @@ class MainWindow(tk.Tk):
     ]
 
     def _init_rfq_tags_tables(self):
-        """Tworzy w master.sqlite tabele tagów kooperantów dla portalu RM_RFQ:
-        rfq_tags (słownik) + rfq_supplier_tags (firma↔tag). RM_BAZA jest
-        właścicielem; RM_SYNC_AGENT wypycha je do RM_RFQ. Seed tylko gdy słownik
-        pusty (nie nadpisuje ręcznych zmian). Bezpieczne przy każdym starcie.
+        """Seed słownika tagów kooperantów, gdy jest pusty.
 
-        WŁASNE połączenie read-write, nie self.db_manager.master_con: to ostatnie
-        jest otwierane w trybie ?mode=ro dopóki użytkownik nie weźmie locka na
-        projekcie, więc CREATE TABLE kończyło się błędem "attempt to write a
-        readonly database" przy każdym starcie. Tworzenie pustych tabel
-        słownikowych to nie edycja danych projektu, więc nie wymaga locka —
-        połączenie otwieramy na chwilę i od razu zamykamy."""
-        con = None
+        Tabele (`rfq_tags`, `rfq_supplier_tags`) tworzy RM_SERWER migracjami —
+        wcześniej robił to klient WŁASNYM połączeniem sqlite3 do pliku na
+        dysku sieciowym. Zostaje tylko wstawienie wartości domyślnych, bo to
+        dane, nie schemat; `INSERT OR IGNORE` nie nadpisze ręcznych zmian.
+        """
         try:
-            con = sqlite3.connect(str(self.db_manager.master_path), timeout=10)
-            con.execute("""
-                CREATE TABLE IF NOT EXISTS rfq_tags (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
-                    label TEXT NOT NULL,
-                    sort_order INTEGER DEFAULT 0
-                )
-            """)
-            con.execute("""
-                CREATE TABLE IF NOT EXISTS rfq_supplier_tags (
-                    supplier_id INTEGER NOT NULL,
-                    tag_id INTEGER NOT NULL,
-                    PRIMARY KEY (supplier_id, tag_id)
-                )
-            """)
-            con.execute("CREATE INDEX IF NOT EXISTS idx_rfq_supplier_tags_sup "
-                        "ON rfq_supplier_tags(supplier_id)")
-            # Seed tylko do pustego słownika
-            n = con.execute("SELECT COUNT(*) FROM rfq_tags").fetchone()[0]
-            if not n:
-                for i, (name, label) in enumerate(self.RFQ_TAGS_SEED):
-                    con.execute("INSERT OR IGNORE INTO rfq_tags (name, label, sort_order) "
-                                "VALUES (?, ?, ?)", (name, label, i))
-            con.commit()
-            return True
+            if self.db_manager.master_read("rfq-tagi"):
+                return          # słownik już wypełniony
+            self.db_manager.master_batch([
+                {"operation": "rfq-tag-dodaj",
+                 "params": {"name": n, "label": e, "sort_order": i}}
+                for i, (n, e) in enumerate(self.RFQ_TAGS_SEED)
+            ])
         except Exception as e:
-            print(f"⚠️  Błąd tworzenia tabel tagów RFQ: {e}")
-            return False
-        finally:
-            if con is not None:
-                try:
-                    con.close()
-                except Exception:
-                    pass
-
-    # --- Dane tagów (używane przez GUI edytora podwykonawców i przez sync) ---
+            print(f"ℹ️  Tagi RFQ — seed pominięty: {e}")
 
     def _rfq_all_tags(self):
         """Słownik tagów: lista (id, name, label) posortowana. [] gdy brak tabeli."""
@@ -26484,13 +26551,17 @@ class MainWindow(tk.Tk):
             return set()
 
     def _rfq_set_supplier_tags(self, supplier_id, tag_ids):
-        """Nadpisuje przypisania tagów firmy (DELETE wszystkich + INSERT wybranych)."""
-        con = self.db_manager.master_con
-        con.execute("DELETE FROM rfq_supplier_tags WHERE supplier_id=?", (supplier_id,))
-        for tid in tag_ids:
-            con.execute("INSERT OR IGNORE INTO rfq_supplier_tags (supplier_id, tag_id) "
-                        "VALUES (?, ?)", (supplier_id, tid))
-        self.db_manager.master_commit()
+        """Nadpisuje przypisania tagów firmy (DELETE wszystkich + INSERT wybranych).
+
+        Jednym batchem = jedna transakcja: inaczej zerwane połączenie między
+        DELETE a INSERT-ami zostawiłoby kooperanta bez żadnego tagu.
+        """
+        operacje = [{"operation": "rfq-tagi-dostawcy-czysc",
+                     "params": {"supplier_id": supplier_id}}]
+        operacje += [{"operation": "rfq-tag-przypisz",
+                      "params": {"supplier_id": supplier_id, "tag_id": tid}}
+                     for tid in tag_ids]
+        self.db_manager.master_batch(operacje)
 
     def _rfq_add_tag(self, label):
         """Dodaje nowy tag do słownika. Zwraca (id, name, label) albo None gdy
@@ -26499,13 +26570,17 @@ class MainWindow(tk.Tk):
         if not label:
             return None
         name = re.sub(r'[^a-z0-9]+', '_', label.lower()).strip('_') or 'tag'
-        con = self.db_manager.master_con
         try:
-            nxt = con.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM rfq_tags").fetchone()[0]
-            cur = con.execute("INSERT INTO rfq_tags (name, label, sort_order) VALUES (?,?,?)",
-                              (name, label, nxt))
-            self.db_manager.master_commit()
-            return (cur.lastrowid, name, label)
+            _w = self.db_manager.master_read("rfq-tag-nastepny-numer")
+            nxt = _w[0]["nastepny"] if _w else 1
+            wynik = self.db_manager.master_exec(
+                "rfq-tag-dodaj",
+                {"name": name, "label": label, "sort_order": nxt})
+            # INSERT OR IGNORE przy duplikacie nazwy nie wstawia nic —
+            # rowcount 0 znaczy „taki tag już jest".
+            if not (wynik or {}).get("rowcount"):
+                return None
+            return ((wynik or {}).get("lastrowid"), name, label)
         except Exception:
             return None  # duplikat (UNIQUE) lub inny błąd
 
@@ -26513,11 +26588,11 @@ class MainWindow(tk.Tk):
         """Usuwa tag ze słownika ORAZ jego przypisania u wszystkich firm.
         Zwraca True gdy usunięto. Przy najbliższym sync zniknie też w RM_RFQ
         (agent wysyła pełny słownik, portal kasuje tagi spoza listy)."""
-        con = self.db_manager.master_con
         try:
-            con.execute("DELETE FROM rfq_supplier_tags WHERE tag_id=?", (tag_id,))
-            con.execute("DELETE FROM rfq_tags WHERE id=?", (tag_id,))
-            self.db_manager.master_commit()
+            self.db_manager.master_batch([
+                {"operation": "rfq-tag-usun-przypisania", "params": {"tag_id": tag_id}},
+                {"operation": "rfq-tag-usun", "params": {"tag_id": tag_id}},
+            ])
             return True
         except Exception as e:
             print(f"⚠️  Błąd usuwania tagu: {e}")
@@ -27167,10 +27242,13 @@ class MainWindow(tk.Tk):
                 return
             
             try:
-                sql = "SELECT id, username, display_name, role, is_active FROM users ORDER BY username COLLATE NOCASE"
-                cursor = self.db_manager.master_con.execute(sql)
-                
-                for row in cursor.fetchall():
+                # Kolejność ustala serwer (`users-list`), żeby COLLATE NOCASE
+                # było wykonane tam, gdzie leży baza.
+                cursor = [(u["id"], u["username"], u["display_name"],
+                           u["role"], u["is_active"])
+                          for u in self.db_manager.master_read("users-list")]
+
+                for row in cursor:
                     uid, username, display_name, role, active = row
                     active_str = "TAK" if active else "NIE"
                     tree.insert("", tk.END, values=(uid, username or "", display_name or "", role or "", active_str))
@@ -31927,12 +32005,21 @@ class MainWindow(tk.Tk):
         result_var = tk.BooleanVar(value=False)
         
         # Master DB
+        # Master DB — informacyjnie: baza leży na serwerze (patrz okno
+        # „Konfiguracja ścieżek"), adres w sync_config.json.
         tk.Label(fields_frame, text="📁 Baza Master:", font=("Arial", 11, "bold"), bg="#ecf0f1").grid(row=0, column=0, sticky="w", pady=10)
-        e_master = tk.Entry(fields_frame, width=55, font=("Arial", 10))
-        e_master.insert(0, DEFAULT_MASTER_PATH)
+        try:
+            import rm_klient
+            _opis_serwera = rm_klient.opis()
+        except Exception:
+            _opis_serwera = "RM_SERWER (adres w sync_config.json)"
+        e_master = tk.Entry(fields_frame, width=55, font=("Arial", 10),
+                            disabledbackground="#dfe4e6", disabledforeground="#4a4a4a")
+        e_master.insert(0, _opis_serwera)
+        e_master.configure(state="disabled")
         e_master.grid(row=0, column=1, sticky="ew", padx=5, pady=10)
-        tk.Button(fields_frame, text="🔍", width=3, 
-                  command=lambda: browse_file(e_master, "Wybierz master.sqlite")).grid(row=0, column=2, pady=10)
+        tk.Label(fields_frame, text="baza na serwerze", font=("Arial", 8),
+                 fg="#7f8c8d", bg="#ecf0f1").grid(row=0, column=2, sticky="w", padx=5)
         
         # Projekty
         tk.Label(fields_frame, text="📁 Folder projektów:", font=("Arial", 11, "bold"), bg="#ecf0f1").grid(row=1, column=0, sticky="w", pady=10)
@@ -31987,7 +32074,10 @@ class MainWindow(tk.Tk):
         
         def save_and_close():
             """Zapisz konfigurację i zamknij dialog"""
-            master_path = e_master.get().strip()
+            # Master nie pochodzi z pola (wyłączone) — zapisujemy domyślną
+            # wartość dla zgodności klucza w config.json. Realnym adresem
+            # bazy jest `rm_serwer` w sync_config.json.
+            master_path = DEFAULT_MASTER_PATH
             projects_dir = e_projects.get().strip()
             local_dir = e_local.get().strip()
             locks_dir = e_locks.get().strip()
@@ -32199,12 +32289,28 @@ class MainWindow(tk.Tk):
 
         dlg.protocol("WM_DELETE_WINDOW", _close_dlg)
 
-        # Master DB
+        # Master DB — POLE WYŁĄCZONE.
+        #
+        # Master leży na dysku RM_SERWER i uchwyt do pliku ma wyłącznie ten
+        # proces; aplikacja rozmawia z nim po TCP. Adres serwera bierze się
+        # z `C:\RMPAK_CLIENT\sync_config.json` (klucz `rm_serwer`) — nie stąd.
+        #
+        # Pole zostaje widoczne, ale nieedytowalne: edytowalne pole, które
+        # niczego nie zmienia, jest gorsze niż jego brak — ktoś poprawiłby
+        # ścieżkę, kliknął Zapisz i był pewien, że przełączył bazę.
         tk.Label(fields_frame, text="Baza Master:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=0, column=0, sticky="w", pady=8)
-        e_master = tk.Entry(fields_frame, width=50, font=("Arial", 9))
-        e_master.insert(0, current_master)
+        try:
+            import rm_klient
+            _opis_serwera = rm_klient.opis()
+        except Exception:
+            _opis_serwera = "RM_SERWER (adres w sync_config.json)"
+        e_master = tk.Entry(fields_frame, width=50, font=("Arial", 9),
+                            disabledbackground="#e4e7e9", disabledforeground="#4a4a4a")
+        e_master.insert(0, _opis_serwera)
+        e_master.configure(state="disabled")
         e_master.grid(row=0, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_file(e_master, "Master DB")).grid(row=0, column=2, pady=8)
+        tk.Label(fields_frame, text="baza na serwerze", font=("Arial", 8),
+                 fg="#7f8c8d", bg="#f0f0f0").grid(row=0, column=2, sticky="w", padx=5)
         
         # Projekty
         tk.Label(fields_frame, text="Folder projektów:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=1, column=0, sticky="w", pady=8)
@@ -32367,7 +32473,10 @@ class MainWindow(tk.Tk):
         
         def save_settings():
             """Zapisz ustawienia"""
-            new_master = e_master.get().strip()
+            # Master NIE pochodzi z pola (jest wyłączone i pokazuje adres
+            # serwera). Zachowujemy wartość z configu, żeby zapis ustawień
+            # nie wpisał tam „RM_SERWER 192.168.100.84:5060".
+            new_master = current_master
             new_projects = e_projects.get().strip()
             new_projects_mag = e_projects_mag.get().strip()
             new_server = e_server.get().strip()

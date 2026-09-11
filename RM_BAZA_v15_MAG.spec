@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('rm_baza_icon.ico', '.'), ('diplodok.png', '.'), ('database_manager.py', '.'), ('lock_manager_v2.py', '.'), ('import_bom.py', '.'), ('project_manager.py', '.'), ('backup_manager.py', '.'), ('dwf_thumb.py', '.')]
+datas = [('rm_baza_icon.ico', '.'), ('diplodok.png', '.'), ('database_manager.py', '.'), ('lock_manager_v2.py', '.'), ('import_bom.py', '.'), ('project_manager.py', '.'), ('rm_klient.py', '.'), ('rm_serwer_operacje.py', '.'), ('backup_manager.py', '.'), ('dwf_thumb.py', '.')]
 binaries = []
 hiddenimports = ['tksheet', 'openpyxl', 'openpyxl.cell', 'openpyxl.cell.cell', 'openpyxl.styles', 'openpyxl.workbook', 'openpyxl.worksheet', 'openpyxl.utils', 'reportlab', 'reportlab.lib', 'reportlab.lib.pagesizes', 'reportlab.lib.colors', 'reportlab.lib.units', 'reportlab.lib.styles', 'reportlab.lib.enums', 'reportlab.platypus', 'reportlab.pdfbase', 'reportlab.pdfbase.pdfmetrics', 'reportlab.pdfbase.ttfonts', 'pystray', 'PIL', 'PIL.Image', 'PIL.ImageDraw']
 tmp_ret = collect_all('reportlab')
@@ -27,6 +27,13 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 # przez RM_BAZA + wszystko, co one same importuja. Przy dokladaniu nowego okna
 # TRZEBA ja odswiezyc, inaczej zniknie z .exe po cichu.
 hiddenimports += [
+    # ⚠️ WARSTWA RM_SERWER — importowana LENIWIE (wewnatrz funkcji), wiec
+    # analiza statyczna jej nie widzi. Bez tych wpisow .exe zbuduje sie bez
+    # bledu i padnie U USERA przy pierwszym odczycie z bazy: master lezy na
+    # serwerze i KAZDY odczyt idzie przez rm_klient.
+    'rm_klient', 'rm_serwer_operacje', 'project_manager',
+    'rmpak_calculator', 'material_calculator',
+
     # integracja z Subiektem — okna z panelu SUBIEKT
     'subiekt_panel', 'subiekt_stany', 'subiekt_zamowienia', 'subiekt_magazyn_gui',
     'subiekt_dokumenty_gui', 'subiekt_dostawcy_gui', 'subiekt_asortyment_gui',

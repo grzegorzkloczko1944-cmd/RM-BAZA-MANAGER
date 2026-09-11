@@ -14,12 +14,18 @@ Dlatego cały ruch przechodzi przez tego agenta:
   - portal nie zna ani nie potrzebuje żadnej ścieżki do zasobów firmowych.
 
     SIEĆ FIRMOWA                                  SERWER PORTALU (internet)
-    ┌──────────────────────────┐                  ┌────────────────────┐
-    │ master.sqlite   V:\ Y:\  │                  │  RM_RFQ (Flask)    │
-    │        ▲          ▲      │                  │  rm_rfq.db         │
-    │        └────┬─────┘      │   HTTPS (out)    │        ▲           │
-    │      RM_SYNC_AGENT ──────┼─────────────────►│  API + X-API-Key   │
-    └──────────────────────────┘                  └────────────────────┘
+    ┌────────────────────────────────┐            ┌────────────────────┐
+    │ RM_SERWER ──► master.sqlite    │            │  RM_RFQ (Flask)    │
+    │     ▲              (na dysku   │            │  rm_rfq.db         │
+    │     │ TCP 5060      serwera)   │            │        ▲           │
+    │  RM_SYNC_AGENT ────► V:\ (pliki)┼───────────►│  API + X-API-Key   │
+    └────────────────────────────────┘  HTTPS out └────────────────────┘
+
+    ⚠️ Dwa różne dostępy, nie mylić:
+      • METADANE (settings, wyniki, odciski) — przez RM_SERWER, nazwanymi
+        operacjami. Agent NIE otwiera master.sqlite jako pliku.
+      • PLIKI rysunków — czytane wprost z V:\ i wysyłane treścią do portalu.
+        To zostaje bez zmian do etapu 3 planu (patrz PLAN_RM_SERWER.md).
 
 TRZY KANAŁY
 -----------
@@ -35,10 +41,16 @@ Kanał 2 wywoływany z GUI RM_BAZA po zaznaczeniu rysunków:
 
 KONFIGURACJA
 ------------
-Wszystko w master.sqlite → tabela settings (klucz/wartość):
+Wszystko w master.sqlite → tabela settings (klucz/wartość), czytane
+przez RM_SERWER:
     rfq_portal_url   — np. https://oferty.rmpak.pl
     rfq_api_key      — ten sam klucz co RM_RFQ/config.json → rm_baza_api_key
     rfq_last_sync_id — kursor kanału 3, agent aktualizuje go sam
+
+Adres samego RM_SERWER bierze się z `sync_config.json` (klucz `rm_serwer`) —
+jak w RM_BAZA. Gdy serwer nie odpowiada, agent kończy błędem i Task Scheduler
+spróbuje w następnym cyklu; NIE ma trybu awaryjnego na plik, bo dwa procesy
+piszące do jednego SQLite to dokładnie ten problem, który serwer usuwa.
 """
 
 from __future__ import annotations
@@ -48,14 +60,14 @@ import datetime as dt
 import hashlib
 import json
 import os
-import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
 
 import requests
 
-MASTER_DB_DEFAULT = r'Y:\RM_BAZA\master.sqlite'
+import rm_klient
+
 HTTP_TIMEOUT = 30
 
 # Nazwy kolumn w RM_BAZA.suppliers bywają różne między instalacjami (schemat
@@ -78,9 +90,37 @@ def _pick_column(available: set, aliases: list) -> str | None:
     return None
 
 
+def _skonfiguruj_serwer() -> None:
+    """Adres RM_SERWER z `sync_config.json` — ten sam plik co RM_BAZA.
+
+    Wołane raz; `rm_klient` trzyma konfigurację globalnie, więc powtórne
+    wywołanie jest nieszkodliwe (agent bywa importowany przez GUI RM_BAZA,
+    które skonfigurowało klienta wcześniej).
+    """
+    if rm_klient.skonfigurowany():
+        return
+    # Ta sama ścieżka i ten sam klucz co w RM_BAZA (`database_manager`)
+    # i RM_MANAGER — jedna konfiguracja dla wszystkich klientów serwera.
+    # utf-8-sig, bo plik bywa zapisywany z BOM-em.
+    cfg = {}
+    try:
+        cfg = json.loads(Path(r'C:\RMPAK_CLIENT\sync_config.json')
+                         .read_text(encoding='utf-8-sig'))
+    except Exception:
+        pass
+    serwer = (cfg.get('rm_serwer') or {}) if isinstance(cfg, dict) else {}
+    host = serwer.get('host')
+    if not host:
+        raise RuntimeError(
+            'Brak adresu RM_SERWER w sync_config.json (klucz "rm_serwer" → "host"). '
+            'Agent nie ma innej drogi do master.sqlite.')
+    rm_klient.ustaw_serwer(host, serwer.get('port'), serwer.get('sekret'))
+    rm_klient.ustaw_uzytkownika('RM_SYNC_AGENT')
+
+
 class RMSyncAgent:
-    def __init__(self, master_path: str = MASTER_DB_DEFAULT):
-        self.master_path = master_path
+    def __init__(self):
+        _skonfiguruj_serwer()
         self.portal_url = self._portal_url_for_machine()
         self.api_key = self._setting('rfq_api_key', '')
         if not self.portal_url or not self.api_key:
@@ -89,25 +129,21 @@ class RMSyncAgent:
                 'ustaw rfq_portal_url i rfq_api_key'
             )
 
-    # --- dostęp do master.sqlite -------------------------------------------
+    # --- dostęp do mastera: WYŁĄCZNIE przez RM_SERWER -----------------------
+    #
+    # Nie ma tu `_open_master()`. Master leży na dysku serwera i uchwyt do
+    # pliku ma jeden proces — RM_SERWER. Każda operacja jest nazwana
+    # (`rm_serwer_operacje.ODCZYT` / `.ZAPIS`); agent nie wysyła SQL, bo
+    # serwer słucha na LAN, a furtka na dowolny SQL to `DROP TABLE`
+    # z dowolnej maszyny w sieci.
 
-    def _open_master(self, readonly: bool = True) -> sqlite3.Connection:
-        uri = Path(self.master_path).as_posix()
-        if readonly:
-            # Ścieżki UNC (\\nic\... -> //nic/...) w SQLite URI: "file://nic/..."
-            # traktuje "nic" jako authority hosta i odrzuca. Poprawny zapis to
-            # pusta authority: file:////nic/... (4 ukośniki). Ten sam fix co
-            # auth.py/db.py — pozwala agentowi czytać przez UNC na serwerze
-            # (Task Scheduler mapuje \\nic bez litery dysku).
-            if uri.startswith('//'):
-                file_uri = 'file:////' + uri.lstrip('/')
-            else:
-                file_uri = f'file:{uri}'
-            con = sqlite3.connect(f'{file_uri}?mode=ro', uri=True, timeout=10)
-        else:
-            con = sqlite3.connect(self.master_path, timeout=10)
-        con.row_factory = sqlite3.Row
-        return con
+    @staticmethod
+    def _czytaj(operacja: str, params: dict = None) -> list[dict]:
+        return rm_klient.master_read(operacja, params)
+
+    @staticmethod
+    def _zapisz(operacja: str, params: dict = None) -> dict:
+        return rm_klient.master_exec(operacja, params)
 
     # Nazwy maszyn serwerowych — te same co SERVER_HOSTNAMES w RM_BAZA
     # i server_hostnames w config.json aplikacji webowych.
@@ -135,24 +171,12 @@ class RMSyncAgent:
         return (specyficzny or self._setting('rfq_portal_url', '')).rstrip('/')
 
     def _setting(self, key: str, default: str = '') -> str:
-        con = self._open_master()
-        try:
-            row = con.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
-            return row['value'] if row and row['value'] is not None else default
-        finally:
-            con.close()
+        wiersze = self._czytaj('rfq-ustawienie', {'key': key})
+        wartosc = wiersze[0]['value'] if wiersze else None
+        return wartosc if wartosc is not None else default
 
     def _set_setting(self, key: str, value: str) -> None:
-        con = self._open_master(readonly=False)
-        try:
-            con.execute(
-                "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now','localtime')) "
-                'ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at',
-                (key, value)
-            )
-            con.commit()
-        finally:
-            con.close()
+        self._zapisz('rfq-ustawienie-zapisz', {'key': key, 'value': value})
 
     # --- HTTP ---------------------------------------------------------------
 
@@ -164,33 +188,30 @@ class RMSyncAgent:
     def push_suppliers(self) -> int:
         """Czyta suppliers z master.sqlite i wypycha pełną listę do portalu.
         Portal robi upsert po supplier_id, więc nie musimy śledzić zmian."""
-        con = self._open_master()
+        # `suppliers-list` to `SELECT *` — aliasowanie kolumn robimy tutaj,
+        # po nazwach w zwróconym wierszu. Wcześniej szło to przez
+        # `PRAGMA table_info` i sklejany SELECT; schemat rozpoznajemy dalej
+        # dynamicznie (kolumny różnią się między instalacjami), tylko bez
+        # budowania SQL po stronie klienta.
+        rows = self._czytaj('suppliers-list')
+        cols = set(rows[0].keys()) if rows else set()
+        if not cols:
+            raise RuntimeError('Tabela suppliers jest pusta albo nie istnieje')
+        col_map = {k: _pick_column(cols, aliases)
+                   for k, aliases in SUPPLIER_COLUMN_ALIASES.items()}
+        if not col_map['name']:
+            raise RuntimeError('Nie znaleziono kolumny z nazwą firmy w suppliers')
+
+        # Tagi kooperantów: słownik + przypisania (RM_BAZA jest właścicielem,
+        # portal RM_RFQ tylko czyta kopię). Puste, gdy tabel jeszcze nie ma
+        # (starsza baza) — sync dostawców ma działać niezależnie od tagów.
+        tags_dict, tag_ids_by_supplier = [], {}
         try:
-            cols = {r[1] for r in con.execute('PRAGMA table_info(suppliers)')}
-            if not cols:
-                raise RuntimeError('Tabela suppliers nie istnieje w master.sqlite')
-            col_map = {k: _pick_column(cols, aliases) for k, aliases in SUPPLIER_COLUMN_ALIASES.items()}
-            if not col_map['name']:
-                raise RuntimeError('Nie znaleziono kolumny z nazwą firmy w suppliers')
-
-            select_cols = ['supplier_id'] + [c for c in col_map.values() if c]
-            rows = con.execute(f'SELECT {", ".join(select_cols)} FROM suppliers').fetchall()
-
-            # Tagi kooperantów: słownik + przypisania (RM_BAZA jest właścicielem;
-            # portal RM_RFQ tylko czyta kopię). Puste, gdy tabele jeszcze nie
-            # istnieją (starsza baza) — sync suppliers ma działać niezależnie.
-            tags_dict, tag_ids_by_supplier = [], {}
-            try:
-                tag_rows = con.execute(
-                    'SELECT id, name, label, sort_order FROM rfq_tags ORDER BY sort_order, label'
-                ).fetchall()
-                tags_dict = [dict(r) for r in tag_rows]
-                for r in con.execute('SELECT supplier_id, tag_id FROM rfq_supplier_tags'):
-                    tag_ids_by_supplier.setdefault(r['supplier_id'], []).append(r['tag_id'])
-            except Exception:
-                pass
-        finally:
-            con.close()
+            tags_dict = [dict(r) for r in self._czytaj('rfq-tagi')]
+            for r in self._czytaj('rfq-tagi-dostawcow'):
+                tag_ids_by_supplier.setdefault(r['supplier_id'], []).append(r['tag_id'])
+        except Exception:
+            pass
 
         suppliers = []
         for row in rows:
@@ -468,54 +489,26 @@ class RMSyncAgent:
                       file=sys.stderr)
         return result
 
-    @staticmethod
-    def _ensure_pushed_files_table(con: sqlite3.Connection) -> None:
-        """Odciski plików wysłanych do RFQ — do wykrywania, że źródło na V:\\
-        zmieniło się po wysłaniu. Jedna para (rfq_id, path) = jeden wiersz;
-        ponowna wysyłka tego samego pliku NADPISUJE odcisk (INSERT OR REPLACE)."""
-        con.execute('''
-            CREATE TABLE IF NOT EXISTS rfq_pushed_files (
-                rfq_id          INTEGER NOT NULL,
-                drawing_number  TEXT    NOT NULL,
-                path            TEXT    NOT NULL,   -- ścieżka źródłowa na V:\\/bibliotece
-                filename        TEXT    NOT NULL,
-                size            INTEGER,
-                mtime_ns        INTEGER,            -- st_mtime_ns źródła w chwili wysyłki
-                sha1            TEXT,               -- sha1 zawartości wysłanej do portalu
-                pushed_at       TEXT DEFAULT (datetime('now','localtime')),
-                PRIMARY KEY (rfq_id, path)
-            )
-        ''')
-        # migracja starych baz (kolumna mtime INTEGER → mtime_ns): dodaj kolumnę
-        # jeśli brak. Starych wartości nie konwertujemy — przy pierwszym
-        # sprawdzeniu mtime_ns=NULL wymusi hash (bezpiecznie), a udane 'ok'
-        # zaktualizuje mtime_ns do bieżącej wartości.
-        cols = {r[1] for r in con.execute('PRAGMA table_info(rfq_pushed_files)')}
-        if 'mtime_ns' not in cols:
-            con.execute('ALTER TABLE rfq_pushed_files ADD COLUMN mtime_ns INTEGER')
-        con.execute('CREATE INDEX IF NOT EXISTS idx_rfq_pushed_drawing '
-                    'ON rfq_pushed_files(rfq_id, drawing_number)')
 
     def _store_pushed_fingerprints(self, rfq_id: int, drawing_number: str,
                                    file_paths: list[str], fingerprints: list) -> None:
-        con = self._open_master(readonly=False)
-        try:
-            self._ensure_pushed_files_table(con)
-            # Odciski dla tej pozycji zastępujemy w całości: jeśli user wyśle ją
-            # ponownie z innym zestawem plików, stare (odpięte) pliki nie mają
-            # już wisieć jako "zmienione".
-            con.execute('DELETE FROM rfq_pushed_files WHERE rfq_id=? AND drawing_number=?',
-                        (rfq_id, drawing_number))
-            con.executemany(
-                'INSERT OR REPLACE INTO rfq_pushed_files '
-                '(rfq_id, drawing_number, path, filename, size, mtime_ns, sha1) '
-                'VALUES (?,?,?,?,?,?,?)',
-                [(rfq_id, drawing_number, str(path), fn, size, mtime_ns, sha1)
-                 for path, (fn, size, mtime_ns, sha1) in zip(file_paths, fingerprints)]
-            )
-            con.commit()
-        finally:
-            con.close()
+        # Odciski dla tej pozycji zastępujemy w całości: jeśli user wyśle ją
+        # ponownie z innym zestawem plików, stare (odpięte) pliki nie mają
+        # już wisieć jako „zmienione".
+        #
+        # DELETE i INSERT-y lecą JEDNYM batchem, czyli jedną transakcją —
+        # inaczej zerwane połączenie między nimi zostawiłoby pozycję bez
+        # odcisków i każdy jej plik wyglądałby na „brakujący".
+        operacje = [{'operation': 'rfq-pushed-czysc-pozycje',
+                     'params': {'rfq_id': rfq_id, 'drawing_number': drawing_number}}]
+        operacje += [
+            {'operation': 'rfq-pushed-dodaj',
+             'params': {'rfq_id': rfq_id, 'drawing_number': drawing_number,
+                        'path': str(path), 'filename': fn, 'size': size,
+                        'mtime_ns': mtime_ns, 'sha1': sha1}}
+            for path, (fn, size, mtime_ns, sha1) in zip(file_paths, fingerprints)
+        ]
+        rm_klient.master_batch(operacje)
 
     def notify_doc_update(self, rfq_id: int, drawing_numbers: list[str]) -> dict:
         """Prosi portal o wysyłkę maili „zaktualizowano dokumentację" do
@@ -537,13 +530,7 @@ class RMSyncAgent:
         Zwraca listę {rfq_id, drawing_number, status, changed_files,
         missing_files} tylko dla status in ('changed','missing'). Robi lokalne
         I/O (per plik stat, ewent. hash) — wołać w wątku, nie blokować GUI."""
-        con = self._open_master(readonly=False)
-        try:
-            self._ensure_pushed_files_table(con)
-            rfq_ids = [r['rfq_id'] for r in con.execute(
-                'SELECT DISTINCT rfq_id FROM rfq_pushed_files').fetchall()]
-        finally:
-            con.close()
+        rfq_ids = [r['rfq_id'] for r in self._czytaj('rfq-pushed-rfq-id')]
 
         out = []
         for rfq_id in rfq_ids:
@@ -570,43 +557,27 @@ class RMSyncAgent:
         Czyta z rfq_results w master.sqlite (dane z portalu, bez SMB I/O — szybko).
         Zwraca [{rfq_id, drawing_number, item_name, rfq_code, files_updated_at}].
         Do tabelki „Do powiadomienia" w RM_BAZA."""
-        con = self._open_master(readonly=True)
-        try:
-            cols = {r[1] for r in con.execute('PRAGMA table_info(rfq_results)')}
-            if 'files_updated_at' not in cols or 'docs_notified_at' not in cols:
-                return []          # stara baza sprzed migracji — nic do pokazania
-            rows = con.execute('''
-                SELECT rfq_id, drawing_number, item_name, rfq_code, files_updated_at
-                  FROM rfq_results
-                 WHERE files_updated_at IS NOT NULL
-                   AND (docs_notified_at IS NULL OR docs_notified_at < files_updated_at)
-                 ORDER BY rfq_code, drawing_number
-            ''').fetchall()
-            out = [dict(r) for r in rows]
+        # Kolumn `files_updated_at`/`docs_notified_at` pilnują migracje
+        # serwera, więc nie ma już sprawdzania PRAGMA „czy stara baza".
+        out = [dict(r) for r in self._czytaj('rfq-do-powiadomienia')]
 
-            # Nazwa detalu: portal często NIE ma jej w rfq_items.name (jest tylko
-            # sklejana z nazwy pliku), więc item_name z bazy bywa NULL. Wyciągamy
-            # ją z nazwy WYSŁANEGO pliku (rfq_pushed_files) — te dane są lokalnie,
-            # zero dodatkowego I/O. Format pliku: "<numer rysunku> <nazwa>.<ext>".
-            self._ensure_pushed_files_table(con)
-            for d in out:
-                if d.get('item_name'):
-                    continue
-                d['item_name'] = self._name_from_pushed_files(
-                    con, d['rfq_id'], d['drawing_number']) or None
-            return out
-        finally:
-            con.close()
+        # Nazwa detalu: portal często NIE ma jej w rfq_items.name (jest tylko
+        # sklejana z nazwy pliku), więc item_name z bazy bywa NULL. Wyciągamy
+        # ją z nazwy WYSŁANEGO pliku (rfq_pushed_files) — te dane są lokalnie,
+        # zero dodatkowego I/O. Format pliku: "<numer rysunku> <nazwa>.<ext>".
+        for d in out:
+            if d.get('item_name'):
+                continue
+            d['item_name'] = self._name_from_pushed_files(
+                d['rfq_id'], d['drawing_number']) or None
+        return out
 
-    @staticmethod
-    def _name_from_pushed_files(con, rfq_id, drawing_number) -> str:
+    def _name_from_pushed_files(self, rfq_id, drawing_number) -> str:
         """Wydłubuje nazwę detalu z nazwy wysłanego pliku (rfq_pushed_files).
         Preferuje PDF/DWF (czysta nazwa bez dopisków typu ", 304 gr8mm" na DXF).
         Zwraca '' gdy nie da się wyznaczyć."""
-        rows = con.execute(
-            'SELECT filename FROM rfq_pushed_files WHERE rfq_id=? AND drawing_number=?',
-            (rfq_id, drawing_number)
-        ).fetchall()
+        rows = self._czytaj('rfq-pushed-nazwy',
+                            {'rfq_id': rfq_id, 'drawing_number': drawing_number})
         if not rows:
             return ''
         names = [r['filename'] for r in rows if r['filename']]
@@ -625,17 +596,9 @@ class RMSyncAgent:
         ścieżki niezależnie od tego, czy plik nadal istnieje — filtruje
         dopiero wywołujący (istniejące → wysyłamy, brakujące → portal skasuje
         przez replace_snapshot)."""
-        # RW, bo _ensure_pushed_files_table może zrobić ALTER (read-only by padło).
-        con = self._open_master(readonly=False)
-        try:
-            self._ensure_pushed_files_table(con)
-            rows = con.execute(
-                'SELECT path FROM rfq_pushed_files WHERE rfq_id=? AND drawing_number=? '
-                'ORDER BY filename', (rfq_id, drawing_number)
-            ).fetchall()
-            return [r['path'] for r in rows]
-        finally:
-            con.close()
+        rows = self._czytaj('rfq-pushed-sciezki',
+                            {'rfq_id': rfq_id, 'drawing_number': drawing_number})
+        return [r['path'] for r in rows]
 
     def check_drawing_freshness(self, rfq_id: int) -> dict:
         """Sprawdza, czy pliki źródłowe na V:\\ zmieniły się od wysłania do RFQ.
@@ -662,96 +625,95 @@ class RMSyncAgent:
 
         Status per pozycja: 'changed' > 'missing' > 'ok'. Wyłącznie lokalne I/O
         (dysk), bez sieci/portalu. Wołana z GUI w wątku z opóźnieniem."""
-        con = self._open_master(readonly=False)
-        try:
-            self._ensure_pushed_files_table(con)
-            rows = con.execute(
-                'SELECT path, filename, drawing_number, size, mtime_ns, sha1 '
-                'FROM rfq_pushed_files WHERE rfq_id=?', (rfq_id,)
-            ).fetchall()
-            if not rows:
-                return {}
+        rows = self._czytaj('rfq-pushed-odciski', {'rfq_id': rfq_id})
+        if not rows:
+            return {}
 
-            # per drawing_number: zbieramy flagi i listy zmienionych/brakujących
-            agg: dict = {}   # dn -> {'changed': bool, 'missing': bool, 'ok': bool,
-                             #        'changed_files': [], 'missing_files': []}
-            fixes = []       # (size, mtime_ns, path) — cicha aktualizacja odcisku
-            any_readable = False
+        # per drawing_number: zbieramy flagi i listy zmienionych/brakujących
+        agg: dict = {}   # dn -> {'changed': bool, 'missing': bool, 'ok': bool,
+                         #        'changed_files': [], 'missing_files': []}
+        fixes = []       # (size, mtime_ns, path) — cicha aktualizacja odcisku
+        any_readable = False
 
-            def _slot(dn):
-                return agg.setdefault(dn, {'changed': False, 'missing': False,
-                                          'ok': False, 'changed_files': [],
-                                          'missing_files': []})
+        def _slot(dn):
+            return agg.setdefault(dn, {'changed': False, 'missing': False,
+                                      'ok': False, 'changed_files': [],
+                                      'missing_files': []})
 
-            for r in rows:
-                path, fn, dn = r['path'], r['filename'], r['drawing_number']
-                slot = _slot(dn)
-                try:
-                    st1 = os.stat(path)
-                except OSError:
-                    slot['missing'] = True          # kandydat — rozstrzygniemy po pętli
-                    if fn not in slot['missing_files']:
-                        slot['missing_files'].append(fn)
-                    continue
+        for r in rows:
+            path, fn, dn = r['path'], r['filename'], r['drawing_number']
+            slot = _slot(dn)
+            try:
+                st1 = os.stat(path)
+            except OSError:
+                slot['missing'] = True          # kandydat — rozstrzygniemy po pętli
+                if fn not in slot['missing_files']:
+                    slot['missing_files'].append(fn)
+                continue
 
-                any_readable = True
-                # tania ścieżka: metadane zgadzają się → plik nietknięty
-                if st1.st_size == r['size'] and r['mtime_ns'] is not None \
-                        and st1.st_mtime_ns == r['mtime_ns']:
-                    slot['ok'] = True
-                    continue
+            any_readable = True
+            # tania ścieżka: metadane zgadzają się → plik nietknięty
+            if st1.st_size == r['size'] and r['mtime_ns'] is not None \
+                    and st1.st_mtime_ns == r['mtime_ns']:
+                slot['ok'] = True
+                continue
 
-                # różnica metadanych — potwierdzamy hashem, ale STABILNIE
-                try:
-                    raw = Path(path).read_bytes()
-                    st2 = os.stat(path)
-                except OSError:
-                    slot['missing'] = True
-                    if fn not in slot['missing_files']:
-                        slot['missing_files'].append(fn)
-                    continue
+            # różnica metadanych — potwierdzamy hashem, ale STABILNIE
+            try:
+                raw = Path(path).read_bytes()
+                st2 = os.stat(path)
+            except OSError:
+                slot['missing'] = True
+                if fn not in slot['missing_files']:
+                    slot['missing_files'].append(fn)
+                continue
 
-                if st1.st_size != st2.st_size or st1.st_mtime_ns != st2.st_mtime_ns:
-                    # plik zmieniał się PODCZAS odczytu (zapis w toku) — nie
-                    # oceniaj teraz, żeby nie policzyć hasha częściowego pliku
-                    slot['ok'] = True   # neutralnie; następny Odśwież rozstrzygnie
-                    continue
+            if st1.st_size != st2.st_size or st1.st_mtime_ns != st2.st_mtime_ns:
+                # plik zmieniał się PODCZAS odczytu (zapis w toku) — nie
+                # oceniaj teraz, żeby nie policzyć hasha częściowego pliku
+                slot['ok'] = True   # neutralnie; następny Odśwież rozstrzygnie
+                continue
 
-                if hashlib.sha1(raw).hexdigest() == r['sha1']:
-                    # ta sama treść, tylko metadane inne (kopia) — nie alarmuj,
-                    # podmień odcisk, by następnym razem trafić w tanią ścieżkę
-                    fixes.append((st2.st_size, st2.st_mtime_ns, path))
-                    slot['ok'] = True
-                else:
-                    slot['changed'] = True
-                    if fn not in slot['changed_files']:
-                        slot['changed_files'].append(fn)
+            if hashlib.sha1(raw).hexdigest() == r['sha1']:
+                # ta sama treść, tylko metadane inne (kopia) — nie alarmuj,
+                # podmień odcisk, by następnym razem trafić w tanią ścieżkę
+                fixes.append((st2.st_size, st2.st_mtime_ns, path))
+                slot['ok'] = True
+            else:
+                slot['changed'] = True
+                if fn not in slot['changed_files']:
+                    slot['changed_files'].append(fn)
 
-            # cały zasób niedostępny (nic się nie odczytało) → brak alarmu
-            if not any_readable:
-                return {}
+        # cały zasób niedostępny (nic się nie odczytało) → brak alarmu
+        if not any_readable:
+            return {}
 
-            if fixes:
-                con.executemany(
-                    'UPDATE rfq_pushed_files SET size=?, mtime_ns=? WHERE path=?',
-                    fixes)
-                con.commit()
+        if fixes:
+            # Cicha aktualizacja odcisków (ta sama treść, inne metadane).
+            # Nieudany zapis NIE jest błędem tej metody: to optymalizacja,
+            # żeby następnym razem wystarczył sam os.stat. Bez niej wynik
+            # jest ten sam, tylko liczony drożej.
+            try:
+                rm_klient.master_batch([
+                    {'operation': 'rfq-pushed-odswiez-odcisk',
+                     'params': {'size': size, 'mtime_ns': mtime_ns, 'path': path}}
+                    for size, mtime_ns, path in fixes])
+            except rm_klient.BladSerwera:
+                pass
 
-            # spłaszcz do statusu wg priorytetu changed > missing > ok
-            result = {}
-            for dn, s in agg.items():
-                if s['changed']:
-                    status = 'changed'
-                elif s['missing']:
-                    status = 'missing'
-                else:
-                    status = 'ok'
-                result[dn] = {'status': status,
-                              'changed_files': s['changed_files'],
-                              'missing_files': s['missing_files']}
-            return result
-        finally:
-            con.close()
+        # spłaszcz do statusu wg priorytetu changed > missing > ok
+        result = {}
+        for dn, s in agg.items():
+            if s['changed']:
+                status = 'changed'
+            elif s['missing']:
+                status = 'missing'
+            else:
+                status = 'ok'
+            result[dn] = {'status': status,
+                          'changed_files': s['changed_files'],
+                          'missing_files': s['missing_files']}
+        return result
 
     # --- Kanał 3: wyniki portal → RM_BAZA ----------------------------------
 
@@ -767,14 +729,11 @@ class RMSyncAgent:
         resp.raise_for_status()
         rows = resp.json()
 
-        con = self._open_master(readonly=False)
-        try:
-            self._ensure_results_table(con)
-            for row in rows:
-                self._upsert_result(con, row)
-            con.commit()
-        finally:
-            con.close()
+        # Jeden batch = jedna transakcja: albo wchodzi cały stan z portalu,
+        # albo nic. Połowicznie zapisany stan dałby w RM_BAZA mieszankę
+        # nowych i starych wycen, nie do odróżnienia na oko.
+        if rows:
+            rm_klient.master_batch([self._operacja_wyniku(r) for r in rows])
         self._set_setting('rfq_last_contact', dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         return len(rows)
 
@@ -796,27 +755,19 @@ class RMSyncAgent:
         rows = resp.json()
         live_item_ids = [r.get('rfq_item_id') for r in rows if r.get('rfq_item_id') is not None]
 
-        con = self._open_master(readonly=False)
         removed = 0
-        try:
-            self._ensure_results_table(con)
-            # 1) upsert wszystkiego, co jest w portalu
-            for row in rows:
-                self._upsert_result(con, row)
-            # 2) skasuj osierocone (są w master.sqlite, nie ma ich w portalu)
-            if live_item_ids:
-                placeholders = ','.join('?' * len(live_item_ids))
-                cur = con.execute(
-                    f'DELETE FROM rfq_results WHERE rfq_item_id NOT IN ({placeholders})',
-                    live_item_ids)
-                removed = cur.rowcount
-                # rfq_activity też czyścimy dla spójności (tabelka aktywności)
-                try:
-                    con.execute(
-                        f'DELETE FROM rfq_activity WHERE rfq_item_id NOT IN ({placeholders})',
-                        live_item_ids)
-                except Exception:
-                    pass  # rfq_activity może nie istnieć w starszej bazie
+        if live_item_ids:
+            # Wszystko jednym batchem = jedna transakcja: upsert stanu
+            # i skasowanie osieroconych albo wchodzi razem, albo wcale.
+            #
+            # ⚠️ Listy żywych identyfikatorów NIE sklejamy w `NOT IN (?,?,?…)` —
+            # jadą jako jeden parametr (tablica JSON, rozpakowana po stronie
+            # serwera przez json_each). Klient nie wysyła SQL.
+            operacje = [self._operacja_wyniku(r) for r in rows]
+            operacje.append({'operation': 'rfq-wyniki-reconcile',
+                             'params': {'zywe_json': json.dumps(live_item_ids)}})
+            operacje.append({'operation': 'rfq-aktywnosc-reconcile',
+                             'params': {'zywe_json': json.dumps(live_item_ids)}})
 
                 # 3) ODCISKI PLIKÓW po RFQ, których nie ma już w portalu.
                 #
@@ -828,57 +779,55 @@ class RMSyncAgent:
                 # Efekt: licznik pokazywał pozycje, których nie ma już w panelu,
                 # a każde sprawdzenie świeżości czytało te pliki z dysku
                 # sieciowego (najwolniejsza operacja w tym mechanizmie).
-                live_rfq_ids = {r.get('rfq_id') for r in rows
-                                if r.get('rfq_id') is not None}
-                if live_rfq_ids:
-                    try:
-                        ph_rfq = ','.join('?' * len(live_rfq_ids))
-                        cur2 = con.execute(
-                            f'DELETE FROM rfq_pushed_files WHERE rfq_id NOT IN ({ph_rfq})',
-                            list(live_rfq_ids))
-                        if cur2.rowcount:
-                            print(f'reconcile: usunieto {cur2.rowcount} odciskow plikow '
-                                  f'po skasowanych RFQ')
-                    except Exception:
-                        pass  # tabela może nie istnieć (agent nigdy nic nie wysłał)
+            live_rfq_ids = {r.get('rfq_id') for r in rows
+                            if r.get('rfq_id') is not None}
+            if live_rfq_ids:
+                operacje.append({
+                    'operation': 'rfq-pushed-reconcile',
+                    'params': {'zywe_json': json.dumps(sorted(live_rfq_ids))}})
+
+            wyniki = rm_klient.master_batch(operacje)
+            # Ile skasowano: rowcount operacji `rfq-wyniki-reconcile`. Leży
+            # bezpośrednio po upsertach, stąd indeks liczony od ich liczby.
+            try:
+                removed = wyniki[len(rows)].get('rowcount') or 0
+            except (IndexError, AttributeError, TypeError):
+                removed = 0
+        else:
+            # PORTAL ZWRÓCIŁ PUSTO. Dwie możliwości, nie do odróżnienia
+            # z samej odpowiedzi:
+            #   a) faktycznie skasowano wszystkie RFQ — wtedy czyszczenie OK,
+            #   b) portal wystartował na PUSTEJ/INNEJ bazie (nieudany deploy,
+            #      config.json wskazujący nie ten plik, świeża instalacja).
+            #
+            # Przy (b) hurtowe DELETE kasuje CAŁĄ kolumnę WYCENA — i robi to
+            # automat chodzący co 10 minut, więc user nawet tego nie kliknął.
+            # Odtworzenie wymaga ponownej wysyłki wszystkiego do portalu.
+            #
+            # Dlatego: kasujemy tylko wtedy, gdy lokalnie też jest pusto
+            # (nic do stracenia). Gdy mamy dane, a portal nie — to podejrzane,
+            # zostawiamy nietknięte i zapisujemy ślad. Kosztem jest ewentualne
+            # przetrzymanie śmieci do czasu, aż ktoś to sprawdzi; korzyścią —
+            # brak cichej utraty danych.
+            wiersze = self._czytaj('rfq-wynikow-ile')
+            ile_lokalnie = wiersze[0]['n'] if wiersze else 0
+            if ile_lokalnie:
+                print(f'reconcile: portal zwrocil 0 pozycji, a lokalnie jest '
+                      f'{ile_lokalnie} — NIE kasuje (podejrzenie pustej bazy '
+                      f'portalu). Sprawdz portal i config.json.', file=sys.stderr)
+                self._set_setting(
+                    'rfq_last_error',
+                    f'reconcile wstrzymany: portal zwrocil 0 pozycji, '
+                    f'lokalnie {ile_lokalnie} — mozliwa pusta baza portalu')
+                self._set_setting('rfq_last_error_at',
+                                  dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                removed = 0
             else:
-                # PORTAL ZWRÓCIŁ PUSTO. Dwie możliwości, nie do odróżnienia
-                # z samej odpowiedzi:
-                #   a) faktycznie skasowano wszystkie RFQ — wtedy czyszczenie OK,
-                #   b) portal wystartował na PUSTEJ/INNEJ bazie (nieudany deploy,
-                #      config.json wskazujący nie ten plik, świeża instalacja).
-                #
-                # Przy (b) hurtowe DELETE kasuje CAŁĄ kolumnę WYCENA — i robi to
-                # automat chodzący co 10 minut, więc user nawet tego nie kliknął.
-                # Odtworzenie wymaga ponownej wysyłki wszystkiego do portalu.
-                #
-                # Dlatego: kasujemy tylko wtedy, gdy lokalnie też jest pusto
-                # (nic do stracenia). Gdy mamy dane, a portal nie — to podejrzane,
-                # zostawiamy nietknięte i zapisujemy ślad. Kosztem jest ewentualne
-                # przetrzymanie śmieci do czasu, aż ktoś to sprawdzi; korzyścią —
-                # brak cichej utraty danych.
-                ile_lokalnie = con.execute(
-                    'SELECT COUNT(*) FROM rfq_results').fetchone()[0]
-                if ile_lokalnie:
-                    print(f'reconcile: portal zwrocil 0 pozycji, a lokalnie jest '
-                          f'{ile_lokalnie} — NIE kasuje (podejrzenie pustej bazy '
-                          f'portalu). Sprawdz portal i config.json.', file=sys.stderr)
-                    self._set_setting(
-                        'rfq_last_error',
-                        f'reconcile wstrzymany: portal zwrocil 0 pozycji, '
-                        f'lokalnie {ile_lokalnie} — mozliwa pusta baza portalu')
-                    self._set_setting('rfq_last_error_at',
-                                      dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-                    removed = 0
-                else:
-                    removed = con.execute('DELETE FROM rfq_results').rowcount
-                    try:
-                        con.execute('DELETE FROM rfq_activity')
-                    except Exception:
-                        pass
-            con.commit()
-        finally:
-            con.close()
+                wyniki = rm_klient.master_batch([
+                    {'operation': 'rfq-wyniki-wyczysc', 'params': {}},
+                    {'operation': 'rfq-aktywnosc-wyczysc', 'params': {}},
+                ])
+                removed = (wyniki[0].get('rowcount') or 0) if wyniki else 0
         self._set_setting('rfq_last_contact', dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         return removed
 
@@ -904,27 +853,27 @@ class RMSyncAgent:
         if not changes:
             return 0
 
-        con = self._open_master(readonly=False)
-        try:
-            self._ensure_results_table(con)
-            applied = 0
-            for change in changes:
-                # 'rfq_item' = pełny snapshot stanu pozycji (zaproszenia, oferty,
-                # rozstrzygnięcie). 'award' = format sprzed 29.08.2026, obsługiwany
-                # dla wpisów, które mogły zostać w sync_log ze starej wersji.
-                if change.get('entity_type') not in ('rfq_item', 'award'):
-                    continue
-                payload = json.loads(change['payload']) if change.get('payload') else {}
-                if not payload.get('drawing_number'):
-                    # pozycja skasowana w portalu — usuń też u nas
-                    con.execute('DELETE FROM rfq_results WHERE rfq_item_id=?',
-                                (payload.get('rfq_item_id'),))
-                else:
-                    self._upsert_result(con, payload)
-                applied += 1
-            con.commit()
-        finally:
-            con.close()
+        operacje = []
+        for change in changes:
+            # 'rfq_item' = pełny snapshot stanu pozycji (zaproszenia, oferty,
+            # rozstrzygnięcie). 'award' = format sprzed 29.08.2026, obsługiwany
+            # dla wpisów, które mogły zostać w sync_log ze starej wersji.
+            if change.get('entity_type') not in ('rfq_item', 'award'):
+                continue
+            payload = json.loads(change['payload']) if change.get('payload') else {}
+            if not payload.get('drawing_number'):
+                # pozycja skasowana w portalu — usuń też u nas
+                operacje.append({'operation': 'rfq-wynik-usun',
+                                 'params': {'rfq_item_id': payload.get('rfq_item_id')}})
+            else:
+                operacje.append(self._operacja_wyniku(payload))
+        applied = len(operacje)
+        # Kursor (`rfq_last_sync_id`) przesuwamy DOPIERO po udanym batchu —
+        # gdyby zapis padł, następny przebieg pobierze te same zmiany jeszcze
+        # raz. Powtórka jest nieszkodliwa (upsert po kluczu), a zgubiona
+        # zmiana nie wróciłaby już nigdy.
+        if operacje:
+            rm_klient.master_batch(operacje)
 
         self._set_setting('rfq_last_sync_id', str(changes[-1]['id']))
         return applied
@@ -962,191 +911,61 @@ class RMSyncAgent:
         resp.raise_for_status()
         rows = resp.json()
 
-        con = self._open_master(readonly=False)
-        try:
-            con.execute('''
-                CREATE TABLE IF NOT EXISTS rfq_activity (
-                    rfq_item_id     INTEGER NOT NULL,
-                    supplier_name   TEXT    NOT NULL,
-                    drawing_number  TEXT,
-                    item_name       TEXT,
-                    email_sent_at   TEXT,      -- kiedy poszło zaproszenie (NULL = nie wysłano)
-                    first_viewed_at TEXT,      -- pierwsze otwarcie zapytania
-                    last_viewed_at  TEXT,      -- ostatnie otwarcie
-                    view_count      INTEGER,   -- ile razy otwierał (0 = nie zajrzał)
-                    seen_this_item  INTEGER,   -- 1 = wszedł już po dodaniu tej pozycji
-                    has_offer       INTEGER,   -- 1 = złożył ofertę na tę pozycję
-                    is_winner       INTEGER,   -- 1 = jego oferta wybrana (zwycięzca)
-                    win_price       REAL,      -- cena zwycięskiej oferty
-                    offer_price     REAL,      -- cena ZŁOŻONEJ oferty (widoczna przed wyborem zwycięzcy)
-                    offer_currency  TEXT,      -- waluta złożonej oferty (np. PLN)
-                    offer_lead_time INTEGER,   -- termin realizacji w dniach ze złożonej oferty
-                    -- Uwagi kooperanta do oferty: zastrzeżenia zmieniające sens
-                    -- ceny („bez obróbki cieplnej", „termin po potwierdzeniu
-                    -- materiału"). Bez nich user widział samą kwotę.
-                    offer_notes     TEXT,
-                    offer_submitted_at TEXT,   -- kiedy wpłynęła (vs files_updated_at)
-                    -- ODMOWA wyceny: 1 = kooperant świadomie odmówił. Bez tego
-                    -- "brak oferty" i "odmowa" wyglądały w RM_BAZA identycznie
-                    -- ("—"), a to różnica między "czekamy" a "szukaj kogoś innego".
-                    has_declined    INTEGER,
-                    decline_reason  TEXT,      -- kod z listy zamkniętej (brak_mocy, termin, …)
-                    decline_label   TEXT,      -- gotowa etykieta PL z portalu (nie tłumaczymy u siebie)
-                    decline_notes   TEXT,      -- własne wyjaśnienie kooperanta (zwykle przy „inne")
-                    declined_at     TEXT,      -- kiedy odmówił
-                    synced_at       TEXT DEFAULT (datetime('now','localtime')),
-                    PRIMARY KEY (rfq_item_id, supplier_name)
-                )
-            ''')
-            # migracja istniejącej tabeli (sprzed oznaczania zwycięzcy)
-            akt_cols = {r[1] for r in con.execute('PRAGMA table_info(rfq_activity)')}
-            for col, decl in (('is_winner', 'INTEGER'), ('win_price', 'REAL'),
-                              ('offer_price', 'REAL'), ('offer_currency', 'TEXT'),
-                              ('offer_lead_time', 'INTEGER'),
-                              ('has_declined', 'INTEGER'), ('decline_reason', 'TEXT'),
-                              ('decline_label', 'TEXT'), ('decline_notes', 'TEXT'),
-                              ('declined_at', 'TEXT'),
-                              ('offer_notes', 'TEXT'), ('offer_submitted_at', 'TEXT')):
-                if col not in akt_cols:
-                    con.execute(f'ALTER TABLE rfq_activity ADD COLUMN {col} {decl}')
-            con.execute('CREATE INDEX IF NOT EXISTS idx_rfq_activity_drawing '
-                        'ON rfq_activity(drawing_number)')
-            # pełna podmiana — patrz docstring
-            con.execute('DELETE FROM rfq_activity')
-            con.executemany('''
-                INSERT OR REPLACE INTO rfq_activity (
-                    rfq_item_id, supplier_name, drawing_number, item_name,
-                    email_sent_at, first_viewed_at, last_viewed_at,
-                    view_count, seen_this_item, has_offer, is_winner, win_price,
-                    offer_price, offer_currency, offer_lead_time,
-                    has_declined, decline_reason, decline_label, decline_notes,
-                    declined_at, offer_notes, offer_submitted_at, synced_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
-            ''', [
-                (r.get('rfq_item_id'), r.get('supplier_name'), r.get('drawing_number'),
-                 r.get('item_name'), r.get('email_sent_at'), r.get('first_viewed_at'),
-                 r.get('last_viewed_at'), r.get('view_count'),
-                 r.get('seen_this_item'), r.get('has_offer'),
-                 r.get('is_winner'), r.get('win_price'),
-                 r.get('offer_price'), r.get('offer_currency'), r.get('offer_lead_time'),
-                 r.get('has_declined'), r.get('decline_reason'),
-                 r.get('decline_reason_label'), r.get('decline_notes'),
-                 r.get('declined_at'),
-                 r.get('offer_notes'), r.get('offer_submitted_at'))
-                for r in rows
-            ])
-            con.commit()
-        finally:
-            con.close()
+        # Pełna podmiana (patrz docstring): kasujemy wszystko i wstawiamy
+        # świeży stan — JEDNYM batchem, czyli jedną transakcją. Gdyby DELETE
+        # wszedł, a INSERT-y nie, RM_BAZA pokazałaby pustą tabelkę aktywności
+        # przy żywych zapytaniach.
+        #
+        # Schematu nie dotykamy: tabelę i jej kolumny tworzą migracje serwera.
+        operacje = [{'operation': 'rfq-aktywnosc-wyczysc', 'params': {}}]
+        for r in rows:
+            p = {k: r.get(k) for k in (
+                'rfq_item_id', 'supplier_name', 'drawing_number', 'item_name',
+                'email_sent_at', 'first_viewed_at', 'last_viewed_at',
+                'view_count', 'seen_this_item', 'has_offer', 'is_winner',
+                'win_price', 'offer_price', 'offer_currency', 'offer_lead_time',
+                'has_declined', 'decline_reason', 'decline_notes', 'declined_at',
+                'offer_notes', 'offer_submitted_at')}
+            # ⚠️ Portal nazywa to `decline_reason_label`, kolumna u nas to
+            # `decline_label`. Nie zmieniać na pętlę po wspólnych nazwach —
+            # ta jedna się nie zgadza i etykieta odmowy zniknęłaby z GUI.
+            p['decline_label'] = r.get('decline_reason_label')
+            operacje.append({'operation': 'rfq-aktywnosc-zapisz', 'params': p})
+        rm_klient.master_batch(operacje)
         return len(rows)
 
-    @staticmethod
-    def _ensure_results_table(con: sqlite3.Connection) -> None:
-        """Stan ofertowania w master.sqlite — jedna pozycja RFQ = jeden wiersz.
-        Zawiera też pozycje jeszcze nierozstrzygnięte (liczniki zaproszeń/ofert),
-        bo kolumna WYCENA w tksheet pokazuje stany pośrednie:
-        "WYSŁANO · 4" → "1/4 OFERT · 96 zł" → "✓ ABC CNC · 85 zł"."""
-        con.execute('''
-            CREATE TABLE IF NOT EXISTS rfq_results (
-                rfq_item_id      INTEGER PRIMARY KEY,
-                drawing_number   TEXT NOT NULL,
-                item_name        TEXT,
-                revision         INTEGER,
-                quantity         INTEGER,
-                material         TEXT,
-                project_number   TEXT,
-                rfq_id           INTEGER,   -- do linku 'Przejdź do RFQ' w RM_BAZA
-                rfq_code         TEXT,
-                rfq_title        TEXT,
-                rfq_status       TEXT,
-                suppliers_count  INTEGER,   -- ilu kooperantów widzi tę pozycję
-                offers_count     INTEGER,   -- ile ofert wpłynęło
-                declined_count   INTEGER,   -- ilu kooperantów odmówiło wyceny
-                min_price        REAL,      -- najtańsza oferta (do stanu pośredniego)
-                invitations_sent INTEGER,   -- do ilu wysłano zaproszenia
-                response_deadline TEXT,     -- termin odpowiedzi (kolor komórki WYCENA)
-                files_updated_at TEXT,      -- kiedy podmieniono dokumentację (replace_snapshot)
-                docs_notified_at TEXT,      -- kiedy powiadomiono kooperantów o tej wersji
-                viewers_count    INTEGER,   -- ilu z nich otworzyło zapytanie w portalu
-                seen_item_count  INTEGER,   -- ilu widziało TĘ pozycję (weszło po jej dodaniu)
-                last_viewed_at   TEXT,      -- ostatnie wejście któregokolwiek z przypisanych
-                supplier_id      INTEGER,   -- poniżej: dane zwycięzcy (NULL gdy brak)
-                supplier_name    TEXT,
-                price            REAL,
-                currency         TEXT,
-                lead_time_days   INTEGER,
-                offer_notes      TEXT,
-                decided_at       TEXT,
-                synced_at        TEXT DEFAULT (datetime('now','localtime'))
-            )
-        ''')
-        con.execute(
-            'CREATE INDEX IF NOT EXISTS idx_rfq_results_drawing ON rfq_results(drawing_number)'
-        )
-        # migracja starszej wersji tabeli (sprzed kolumny WYCENA ze stanami pośrednimi)
-        existing = {r[1] for r in con.execute('PRAGMA table_info(rfq_results)')}
-        for col, decl in (
-            ('rfq_id', 'INTEGER'), ('rfq_status', 'TEXT'), ('suppliers_count', 'INTEGER'),
-            ('offers_count', 'INTEGER'), ('min_price', 'REAL'),
-            ('invitations_sent', 'INTEGER'),
-            ('viewers_count', 'INTEGER'), ('seen_item_count', 'INTEGER'),
-            ('last_viewed_at', 'TEXT'), ('response_deadline', 'TEXT'),
-            ('declined_count', 'INTEGER'),
-            ('files_updated_at', 'TEXT'), ('docs_notified_at', 'TEXT'),
-        ):
-            if col not in existing:
-                con.execute(f'ALTER TABLE rfq_results ADD COLUMN {col} {decl}')
 
     @staticmethod
-    def _upsert_result(con: sqlite3.Connection, p: dict[str, Any]) -> None:
-        con.execute('''
-            INSERT INTO rfq_results (
-                rfq_item_id, drawing_number, item_name, revision, quantity, material,
-                project_number, rfq_id, rfq_code, rfq_title, rfq_status,
-                suppliers_count, offers_count, declined_count, min_price, invitations_sent,
-                viewers_count, seen_item_count, last_viewed_at, response_deadline,
-                files_updated_at, docs_notified_at,
-                supplier_id, supplier_name, price, currency, lead_time_days,
-                offer_notes, decided_at, synced_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now','localtime'))
-            ON CONFLICT(rfq_item_id) DO UPDATE SET
-                drawing_number=excluded.drawing_number, item_name=excluded.item_name,
-                revision=excluded.revision, quantity=excluded.quantity,
-                material=excluded.material, project_number=excluded.project_number,
-                rfq_id=excluded.rfq_id,
-                rfq_code=excluded.rfq_code, rfq_title=excluded.rfq_title,
-                rfq_status=excluded.rfq_status, suppliers_count=excluded.suppliers_count,
-                offers_count=excluded.offers_count, declined_count=excluded.declined_count,
-                min_price=excluded.min_price,
-                invitations_sent=excluded.invitations_sent,
-                viewers_count=excluded.viewers_count,
-                seen_item_count=excluded.seen_item_count,
-                last_viewed_at=excluded.last_viewed_at,
-                response_deadline=excluded.response_deadline,
-                files_updated_at=excluded.files_updated_at,
-                docs_notified_at=excluded.docs_notified_at,
-                supplier_id=excluded.supplier_id, supplier_name=excluded.supplier_name,
-                price=excluded.price, currency=excluded.currency,
-                lead_time_days=excluded.lead_time_days, offer_notes=excluded.offer_notes,
-                decided_at=excluded.decided_at, synced_at=excluded.synced_at
-        ''', (
-            p.get('rfq_item_id'), p.get('drawing_number'), p.get('item_name'),
-            p.get('revision'), p.get('quantity'), p.get('material'),
-            p.get('project_number'), p.get('rfq_id'), p.get('rfq_code'), p.get('rfq_title'),
-            p.get('rfq_status'), p.get('suppliers_count'), p.get('offers_count'),
-            p.get('declined_count'), p.get('min_price'), p.get('invitations_sent'),
-            p.get('viewers_count'), p.get('seen_item_count'), p.get('last_viewed_at'),
-            p.get('response_deadline'),
-            p.get('files_updated_at'), p.get('docs_notified_at'),
-            p.get('supplier_id'), p.get('supplier_name'), p.get('price'),
-            p.get('currency'), p.get('lead_time_days'), p.get('offer_notes'),
-            p.get('decided_at'),
-        ))
+    def _operacja_wyniku(p: dict[str, Any]) -> dict:
+        """Opis operacji zapisu jednej pozycji — do batcha.
+
+        Zwraca `{'operation': ..., 'params': ...}`, a nie wykonuje zapisu:
+        wołający zbiera je w listę i wysyła JEDNYM batchem, żeby cały stan
+        z portalu wszedł w jednej transakcji.
+        """
+        return {
+            'operation': 'rfq-wynik-zapisz',
+            'params': {k: p.get(k) for k in (
+                'rfq_item_id', 'drawing_number', 'item_name', 'revision',
+                'quantity', 'material', 'project_number', 'rfq_id', 'rfq_code',
+                'rfq_title', 'rfq_status', 'suppliers_count', 'offers_count',
+                'declined_count', 'min_price', 'invitations_sent',
+                'viewers_count', 'seen_item_count', 'last_viewed_at',
+                'response_deadline', 'files_updated_at', 'docs_notified_at',
+                'supplier_id', 'supplier_name', 'price', 'currency',
+                'lead_time_days', 'offer_notes', 'decided_at')},
+        }
+
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description='RM_SYNC_AGENT — synchronizacja RM_BAZA ↔ RM_RFQ')
-    parser.add_argument('--master', default=MASTER_DB_DEFAULT, help='ścieżka do master.sqlite')
+    # Master leży na dysku serwera; ścieżki do pliku nie ma już jak podać.
+    # `--serwer HOST[:PORT]` nadpisuje adres z sync_config.json — do testów
+    # i do wskazania zapasowego serwera bez ruszania konfiguracji.
+    parser.add_argument('--serwer', default=None,
+                        help='adres RM_SERWER, np. 192.168.100.84:5060 '
+                             '(domyślnie z sync_config.json)')
     parser.add_argument('--once', action='store_true', help='jeden przebieg (kanały 1 i 3) i wyjście')
     parser.add_argument('--suppliers-only', action='store_true', help='tylko wypchnij kooperantów')
     parser.add_argument('--results-only', action='store_true', help='tylko pobierz wyniki')
@@ -1156,8 +975,13 @@ def main() -> int:
                         help='pełna synchronizacja + usunięcie osieroconych rekordów (czyszczenie śmieci)')
     args = parser.parse_args()
 
+    if args.serwer:
+        host, _, port = args.serwer.partition(':')
+        rm_klient.ustaw_serwer(host, int(port) if port else None)
+        rm_klient.ustaw_uzytkownika('RM_SYNC_AGENT')
+
     try:
-        agent = RMSyncAgent(args.master)
+        agent = RMSyncAgent()
     except Exception as e:
         print(f'BLAD konfiguracji: {e}', file=sys.stderr)
         return 2

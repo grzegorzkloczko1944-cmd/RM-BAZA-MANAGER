@@ -77,6 +77,10 @@ DOMYSLNA_BAZA = os.path.join(KATALOG, "dane", "master.sqlite")
 #: Mapowania numer rysunku → kartoteka Subiekta. OSOBNY plik, obok mastera
 #: (decyzja 11.09.2026: wszystkie bazy w jednym katalogu na serwerze).
 DOMYSLNA_BAZA_MAPOWANIA = os.path.join(KATALOG, "dane", "subiekt_mapowania.sqlite")
+
+# Trzecia baza: RM_MANAGER. Leży obok pozostałych w `dane\` — wszystkie bazy
+# systemu w jednym miejscu, na lokalnym dysku serwera.
+DOMYSLNA_BAZA_RM_MANAGER = os.path.join(KATALOG, "dane", "rm_manager.sqlite")
 DOMYSLNY_PORT = 5060
 
 #: Ile trzymamy odpowiedzi w `_server_request_log` (§3 planu).
@@ -101,6 +105,7 @@ def wczytaj_config(sciezka=None):
     return {
         "baza": dane.get("baza", DOMYSLNA_BAZA),
         "baza_mapowania": dane.get("baza_mapowania", DOMYSLNA_BAZA_MAPOWANIA),
+        "baza_rm_manager": dane.get("baza_rm_manager", DOMYSLNA_BAZA_RM_MANAGER),
         "port": int(dane.get("port", DOMYSLNY_PORT)),
         "nasluch": dane.get("nasluch", "0.0.0.0"),
         "sekret": dane.get("sekret"),          # None = HMAC wyłączony
@@ -229,6 +234,7 @@ class Serwer:
         self.kolejka = queue.Queue()
         self.con = None
         self.con_map = None            # subiekt_mapowania.sqlite — osobny plik
+        self.con_rmm = None            # rm_manager.sqlite — osobny plik
         self.start_czas = time.time()
         self.zapisow = 0
         self.odczytow = 0
@@ -275,18 +281,45 @@ class Serwer:
             self.con_map.commit()
             log("Mapowania: %s" % sciezka_map)
 
+        # Trzecia baza: RM_MANAGER. Znów osobny plik i osobne połączenie,
+        # ale ten sam wątek roboczy — nadal JEDEN pisarz na cały serwer.
+        sciezka_rmm = self.config.get("baza_rm_manager")
+        if sciezka_rmm:
+            os.makedirs(os.path.dirname(sciezka_rmm), exist_ok=True)
+            self.con_rmm = sqlite3.connect(sciezka_rmm, timeout=30,
+                                           check_same_thread=False)
+            self.con_rmm.execute("PRAGMA journal_mode=DELETE")
+            self.con_rmm.execute("PRAGMA synchronous=FULL")
+            self.con_rmm.execute("PRAGMA busy_timeout=5000")
+            # ⚠️ Klucze obce są w tym schemacie używane (ON DELETE CASCADE),
+            # a SQLite ma je DOMYŚLNIE WYŁĄCZONE — bez tego kasowanie
+            # pracownika zostawiłoby osierocone wpisy w kilku tabelach.
+            self.con_rmm.execute("PRAGMA foreign_keys=ON")
+            for sql, _warunek in ops.MIGRACJE_RM_MANAGER:
+                self.con_rmm.execute(sql)
+            self.con_rmm.commit()
+            log("RM_MANAGER: %s" % sciezka_rmm)
+
     # ── wykonanie pojedynczego żądania (w wątku roboczym) ─────────────
     def _polaczenie(self, operacja):
         """Które połączenie obsługuje tę operację.
 
-        Prefiks `map-` → subiekt_mapowania.sqlite, reszta → master.
+        Prefiks `map-` → subiekt_mapowania.sqlite,
+        prefiks `rmm-` → rm_manager.sqlite,
+        reszta → master RM_BAZA.
+
         Routing po nazwie, nie po tabeli: wołający nie musi wiedzieć,
         w którym pliku co leży.
         """
-        if (operacja or "").startswith("map-"):
+        nazwa = operacja or ""
+        if nazwa.startswith("map-"):
             if self.con_map is None:
                 raise ops.BladOperacji("baza mapowań nie jest skonfigurowana")
             return self.con_map
+        if nazwa.startswith("rmm-"):
+            if self.con_rmm is None:
+                raise ops.BladOperacji("baza RM_MANAGER nie jest skonfigurowana")
+            return self.con_rmm
         return self.con
 
     def _wykonaj(self, z):

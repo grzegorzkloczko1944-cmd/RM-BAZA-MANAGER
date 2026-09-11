@@ -132,7 +132,6 @@ except ImportError:
 from project_manager import (
     colnames, pick_col, create_project, update_project, delete_project,
     set_project_active, get_project_statuses, set_project_statuses,
-    ensure_project_type_column, ensure_projects_stats_columns,
     get_project_db_path as pm_get_project_db_path,
     PROJECT_STATUSES_NEW,
 )

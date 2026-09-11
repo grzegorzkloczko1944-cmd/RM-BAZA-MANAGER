@@ -7,33 +7,33 @@ from datetime import datetime
 RMPAK_SUPPLIER_NAME = "RMPAK"
 
 
-def _get_rmpak_supplier_ids(master_con):
-    rows = master_con.execute(
-        "SELECT supplier_id FROM suppliers WHERE name LIKE ?",
-        (f"%{RMPAK_SUPPLIER_NAME}%",)
-    ).fetchall()
-    return [r[0] for r in rows]
+def _klient():
+    """RM_SERWER — master leży na serwerze, klient nie otwiera pliku."""
+    import rm_klient
+    return rm_klient
 
 
-def _get_hourly_rate(master_con):
-    row = master_con.execute(
-        "SELECT value FROM settings WHERE key = 'rmpak_hourly_rate'"
-    ).fetchone()
-    if row:
+def _get_rmpak_supplier_ids(master_con=None):
+    """Id dostawców „RMPAK*" — tym kalkulator liczy robociznę, nie cenę."""
+    return [w["supplier_id"] for w in _klient().master_read(
+        "suppliers-po-nazwie-like", {"wzorzec": f"%{RMPAK_SUPPLIER_NAME}%"})]
+
+
+def _get_hourly_rate(master_con=None):
+    wiersze = _klient().master_read("settings-get",
+                                    {"key": "rmpak_hourly_rate"})
+    if wiersze:
         try:
-            return float(row[0])
+            return float(wiersze[0]["value"])
         except (ValueError, TypeError):
             return 0.0
     return 0.0
 
 
-def _save_hourly_rate(master_con, rate):
-    master_con.execute(
-        """INSERT INTO settings (key, value, updated_at) VALUES ('rmpak_hourly_rate', ?, ?)
-           ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
-        (str(rate), datetime.now().isoformat())
-    )
-    master_con.commit()
+def _save_hourly_rate(master_con=None, rate=0.0):
+    _klient().master_exec("settings-set", {
+        "key": "rmpak_hourly_rate", "value": str(rate),
+        "updated_at": datetime.now().isoformat()})
 
 
 def _ensure_calc_columns(project_con):
@@ -48,11 +48,11 @@ def _ensure_calc_columns(project_con):
     project_con.commit()
 
 
-def _get_supplier_id_by_exact_name(master_con, name):
-    row = master_con.execute(
-        "SELECT supplier_id FROM suppliers WHERE name = ?", (name,)
-    ).fetchone()
-    return row[0] if row else None
+def _get_supplier_id_by_exact_name(master_con=None, name=""):
+    """Dokładne dopasowanie nazwy — „RMPAK" to nie to samo co „RMPAK+"."""
+    wiersze = _klient().master_read("supplier-po-normalizacji",
+                                    {"name_normalized": name})
+    return wiersze[0]["id"] if wiersze else None
 
 
 def _load_rmpak_items(project_con, supplier_ids):
@@ -101,7 +101,8 @@ class RmpakCalculatorDialog:
         self.rmpak_cut_id = _get_supplier_id_by_exact_name(master_con, "RMPAK")
         self.rmpak_semi_id = _get_supplier_id_by_exact_name(master_con, "RMPAK+")
         self.suppliers_map = {
-            row[0]: row[1] for row in master_con.execute("SELECT supplier_id, name FROM suppliers")
+            w["supplier_id"]: w["name"]
+            for w in _klient().master_read("suppliers-list")
         }
         self.on_price_saved = on_price_saved
         self.on_save_item = on_save_item  # fn(item_id, price_pln, hours, material, extra, rate)

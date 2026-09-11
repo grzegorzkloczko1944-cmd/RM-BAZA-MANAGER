@@ -527,13 +527,11 @@ class DatabaseManager:
             
             print(f"✅ Master: {self.master_path} (READ-WRITE, {current_mode.upper()})")
             
-            # Wykonaj migrację kolumn dla statystyk (jeśli jeszcze nie istnieją)
+            # Schematu nie migrujemy: kolumny `projects` dokłada RM_SERWER
+            # przy swoim starcie. Klient migrujący cudzą bazę po SMB był
+            # źródłem błędów „attempt to write a readonly database".
             try:
-                from project_manager import ensure_projects_stats_columns
-                print(f"🔄 Sprawdzam/dodaję kolumny statystyk do tabeli projects...")
-                ensure_projects_stats_columns(self.master_con)
-                self.master_con.commit()
-                print(f"✅ Migracja kolumn statystyk zakończona")
+                pass
             except Exception as migration_err:
                 print(f"⚠️  Błąd migracji kolumn statystyk: {migration_err}")
                 # Nie przerywaj - aplikacja może działać bez nowych kolumn
@@ -648,11 +646,7 @@ class DatabaseManager:
                         print(f"❌ Migracja nie powiodła się - kolumny wciąż nie istnieją")
                         return False
                 else:
-                    # Już w trybie READ-WRITE - wykonaj migrację bezpośrednio
-                    from project_manager import ensure_projects_stats_columns
-                    ensure_projects_stats_columns(self.master_con)
-                    self.master_con.commit()
-                    print(f"✅ Migracja zakończona pomyślnie")
+                    # Migracje należą do serwera — tutaj nie ma nic do zrobienia.
                     return True
                     
             except Exception as e:

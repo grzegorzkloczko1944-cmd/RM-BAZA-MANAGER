@@ -192,14 +192,18 @@ class BackupManager:
                 print(f"⚠️  Błąd usuwania {backup_file.name}: {e}")
     
     def backup_master(self) -> Path:
-        """Backup bazy głównej"""
-        backup_path = self.create_backup(
-            self.master_path,
-            self.master_backup_dir,
-            "master"
-        )
-        self.cleanup_old_backups(self.master_backup_dir, "master")
-        return backup_path
+        """NIEAKTUALNE — backup mastera robi RM_SERWER.
+
+        Master leży na dysku serwera i uchwyt do pliku ma wyłącznie proces
+        RM_SERWER; ten kopiuje go przez Online Backup API (spójna kopia bez
+        blokowania) z własną rotacją. Klient nie ma czego kopiować:
+        `self.master_path` wskazuje STARY plik na `Y:`, do którego nikt już
+        nie pisze — kopiowanie go dawałoby backupy nieaktualnych danych,
+        wyglądające na dobre.
+        """
+        raise NotImplementedError(
+            "Backup mastera należy do RM_SERWER (katalog backup na serwerze). "
+            "Klient nie kopiuje master.sqlite.")
     
     def backup_project(self, project_id: int, skip_checkpoint: bool = False) -> Path:
         """
@@ -326,10 +330,11 @@ class BackupManager:
         print(f"{'='*60}\n")
         
         try:
-            # Master
-            print("📦 Backup bazy głównej...")
-            self.backup_master()
-            
+            # Master pomijamy: kopiuje go RM_SERWER u siebie (patrz
+            # `backup_master`). Tutaj zostają projekty, które nadal są
+            # plikami na dysku sieciowym — etap 2 planu.
+            print("📦 Backup bazy głównej: pomijam (robi RM_SERWER)")
+
             # Projekty
             print("\n📦 Backup projektów...")
             backups = self.backup_all_projects(skip_existing_today=skip_existing_projects)

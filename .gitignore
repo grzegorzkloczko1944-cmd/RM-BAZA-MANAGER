@@ -35,3 +35,6 @@ logi/
 dane/
 backup/
 rm_serwer_config.json
+
+# Konfiguracja z sekretem HMAC — NIGDY do repozytorium.
+sync_config.json

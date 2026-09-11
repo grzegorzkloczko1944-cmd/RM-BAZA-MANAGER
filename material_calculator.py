@@ -18,40 +18,46 @@ DEFAULT_MATERIALS = [
 PROFILES = ("Pręt", "Rura", "Płaskownik", "Profil prostokąt", "Sześciokąt", "Kątownik")
 
 
-def _ensure_material_table(master_con):
-    master_con.execute("""
-        CREATE TABLE IF NOT EXISTS material_prices (
-            material TEXT PRIMARY KEY,
-            density REAL NOT NULL,
-            price_per_kg REAL NOT NULL DEFAULT 0,
-            updated_at TEXT
-        )
-    """)
-    existing = {row[0] for row in master_con.execute("SELECT material FROM material_prices")}
-    for name, density, price in DEFAULT_MATERIALS:
-        if name not in existing:
-            master_con.execute(
-                "INSERT INTO material_prices (material, density, price_per_kg, updated_at) VALUES (?, ?, ?, ?)",
-                (name, density, price, datetime.now().isoformat())
-            )
-    master_con.commit()
+def _klient():
+    """RM_SERWER — master leży na serwerze, klient nie otwiera pliku."""
+    import rm_klient
+    return rm_klient
 
 
-def _load_materials(master_con):
-    rows = master_con.execute(
-        "SELECT material, density, price_per_kg FROM material_prices ORDER BY material"
-    ).fetchall()
-    return {name: (density, price) for name, density, price in rows}
+def _ensure_material_table(master_con=None):
+    """Uzupełnia cennik o brakujące materiały domyślne.
+
+    Samą TABELĘ tworzą migracje serwera — tutaj zostaje tylko seed, bo to
+    dane, nie schemat. Istniejących wpisów nie ruszamy: ktoś mógł już
+    poprawić cenę.
+    """
+    try:
+        maja = {w["material"] for w in _klient().master_read("materialy-cennik")}
+    except Exception as e:
+        print(f"⚠️  Cennik materiałów niedostępny: {e}")
+        return
+
+    brakujace = [(n, d, c) for n, d, c in DEFAULT_MATERIALS if n not in maja]
+    if not brakujace:
+        return
+    teraz = datetime.now().isoformat()
+    _klient().master_batch([
+        {"operation": "material-zapisz",
+         "params": {"material": n, "density": d, "price_per_kg": c,
+                    "updated_at": teraz}}
+        for n, d, c in brakujace
+    ])
 
 
-def _save_material_price(master_con, material, density, price):
-    master_con.execute(
-        """INSERT INTO material_prices (material, density, price_per_kg, updated_at) VALUES (?, ?, ?, ?)
-           ON CONFLICT(material) DO UPDATE SET density=excluded.density, price_per_kg=excluded.price_per_kg,
-               updated_at=excluded.updated_at""",
-        (material, density, price, datetime.now().isoformat())
-    )
-    master_con.commit()
+def _load_materials(master_con=None):
+    return {w["material"]: (w["density"], w["price_per_kg"])
+            for w in _klient().master_read("materialy-cennik")}
+
+
+def _save_material_price(master_con=None, material="", density=0.0, price=0.0):
+    _klient().master_exec("material-zapisz", {
+        "material": material, "density": density, "price_per_kg": price,
+        "updated_at": datetime.now().isoformat()})
 
 
 def _cross_section_mm2(profile, dims):
@@ -252,7 +258,10 @@ class MaterialCalculatorDialog:
             mass_kg, price = calculate_material_price(
                 self.profile_var.get(), dims, length_mm, density, price_per_kg
             )
-        except (ValueError, ZeroDivisionError):
+        # KeyError: pole wymiaru jeszcze nieuzupełnione (np. „d" dla pręta).
+        # Przy otwarciu okna przeliczenie leci, zanim user cokolwiek wpisze —
+        # to normalny stan, nie błąd.
+        except (ValueError, ZeroDivisionError, KeyError):
             self.mass_var.set("—")
             self.result_price_var.set("— PLN")
             self._last_price = None
