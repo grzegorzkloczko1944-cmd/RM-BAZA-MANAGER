@@ -50,6 +50,16 @@ from datetime import datetime
 
 import rm_serwer_operacje as ops
 
+# ⚠️ Konsola Windows to domyślnie cp1250 — `print` z emoji rzuca wtedy
+# UnicodeEncodeError i WYWALA PROCES. Pod NSSM i przez WinRM dzieje się to
+# zawsze, więc bez tego serwer padał na własnym komunikacie diagnostycznym.
+# Ten sam problem co przy starcie RM_BAZA (project_cp1250_emoji_print).
+for _strumien in (sys.stdout, sys.stderr):
+    try:
+        _strumien.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # ═══════════════════════════════════════════════════════════════════════
 # Konfiguracja
 # ═══════════════════════════════════════════════════════════════════════
