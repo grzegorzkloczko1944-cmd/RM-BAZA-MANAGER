@@ -26,7 +26,7 @@ protokołu doprecyzujemy przed ich kodowaniem, gdy etap 1 będzie chodził.
 
 ```
 DZIŚ                                   DOCELOWO
-RM_BAZA ──SMB──► Y:\RM_BAZA\master     RM_BAZA ──TCP──► RM_SERWER ──► D:\RM_BAZA\master.sqlite
+RM_BAZA ──SMB──► Y:\RM_BAZA\master     RM_BAZA ──TCP──► RM_SERWER ──► C:\Apps\RM_SERWER\dane\master.sqlite
 RM_BAZA ──SMB──► Y:\RM_BAZA\projects                        │        ├── projects\
 RM_BAZA ──SMB──► Y:\RM_BAZA\locks                           │        ├── locks (w pamięci + dysk)
 RM_BAZA ──SMB──► Y:\SERVER_PROJEKTY, B:, V:                  │        └── backups\
@@ -123,6 +123,42 @@ Wzorzec mostu Subiekta — sprawdzony, wszyscy go znają.
                                     przechodzą na serwer w ETAPIE 2 — Część II)
 ```
 
+### Maszyna docelowa — ustalone 11.09.2026
+
+| | |
+|---|---|
+| **Host** | `W2019S`, `192.168.100.84` (LAN), Windows Server 2019 Essentials |
+| **Konto** | `w2019s\mongo` (lokalne, WORKGROUP — bez domeny) |
+| **Katalog aplikacji** | `C:\Apps\RM_SERWER\` |
+| **Dane** | `C:\Apps\RM_SERWER\dane\master.sqlite` — **dysk lokalny, 121 GB wolne** |
+| **Python** | 3.12.8 (zainstalowany) |
+| **Usługa** | NSSM (`C:\Tools\nssm\nssm.exe`), ObjectName `.\mongo` |
+| **Port** | 5060 (wolne; zajęte: 5050 RM_STATS, 5055 RM_PRINT, 5057 RM_DWF, 5058 RM_SERWIS) |
+| **Dostęp administracyjny** | WinRM/PSSession, poświadczenia w `%TEMP%\rmdwf_srvcred.xml` (DPAPI) |
+
+Wzorzec wdrożenia i obsługi usług — jak pozostałe aplikacje firmowe:
+`NOW/DOKUMENTACJA/DOSTEP_SERWER.md`.
+
+⚠️ **SERWER NIE DOTYKA DYSKÓW SIECIOWYCH** — decyzja z 11.09.2026. Żadnego
+`Y:`, żadnego `\\nic` w jego konfiguracji. Master i (w etapie 2) pliki
+projektów leżą na dysku lokalnym serwera.
+
+Trzy powody, każdy wystarczający:
+1. **To jest sedno tego planu** — jeden proces, jeden lokalny plik, koniec
+   SQLite po SMB (§0).
+2. **Sesja WinRM nie widzi dysków sieciowych.** Sprawdzone: `Test-Path Y:` →
+   „Access is denied", `\\nic\rysunki` tak samo. Mapowanie żyje tylko
+   w sesji usługi (przez `net use` z osobnym hasłem `nic\mongo`
+   w launcherze). Gdyby serwer czytał bazę z `Y:`, każda diagnoza przez
+   WinRM byłaby ślepa.
+3. **SQLite i tak nie działa przez UNC** — stąd w pozostałych aplikacjach
+   firmowych litera `Y:`. Dysk lokalny usuwa ten problem u źródła, zamiast
+   go obchodzić.
+
+Konsekwencja dla cutoveru (§8): master **przeprowadza się** z `Y:` na dysk
+lokalny serwera. To nie jest szczegół konfiguracji, tylko jeden z kroków
+wdrożenia — i powód, dla którego rollback wymaga kopii w drugą stronę.
+
 ### Decyzje i powody
 
 **TCP + ramka z długością, nie HTTP.** Most Subiekta używa dokładnie tego
@@ -141,7 +177,7 @@ z SQLite, który Python obsługuje natywnie — żadnej zewnętrznej zależnośc
 autoryzacja — §7.
 
 **Serwer i master na LOKALNYM dysku maszyny `nic`.** To domyka całą rzecz: serwer
-otwiera `D:\RM_BAZA\master.sqlite`, a nie `\\nic\rysunki\RM_BAZA\master.sqlite`.
+otwiera `C:\Apps\RM_SERWER\dane\master.sqlite`, a nie `\\nic\rysunki\RM_BAZA\master.sqlite`.
 **SMB znika ze ścieżki do bazy całkowicie** — razem z sieciowymi blokadami
 plikowymi, które były źródłem awarii. Udział sieciowy zostaje dla plików
 projektów i rysunków; baza przestaje przez niego przechodzić.
@@ -501,9 +537,9 @@ Klienci czytają to przy starcie i **wszyscy naraz** wracają na SMB. To jest
 świadoma decyzja człowieka, nie skutek uboczny timeoutu.
 
 ⚠️ **Sama flaga nie wystarczy — trzeba oddać plik.** Klienci w trybie legacy
-szukają mastera na `Y:`, a aktualny leży na `D:` maszyny `nic`. Pełna procedura
+szukają mastera na `Y:`, a aktualny leży na dysku lokalnym maszyny `nic`. Pełna procedura
 to ta sama, co przy wycofaniu programu (§8): zatrzymać serwer, skopiować
-`D:\RM_BAZA\master.sqlite` → `Y:\RM_BAZA\master.sqlite`, sprawdzić
+`C:\Apps\RM_SERWER\dane\master.sqlite` → `Y:\RM_BAZA\master.sqlite`, sprawdzić
 `integrity_check`, dopiero potem przełączyć flagę.
 
 Jeśli maszyna `nic` **nie żyje** i lokalny plik jest nieosiągalny, do `Y:` idzie
@@ -512,7 +548,7 @@ najnowszy backup z rotacji — z jawną informacją dla ludzi, ile pracy przepad
 dwie godziny" niż pozwolić komuś odkryć to samodzielnie po tygodniu.
 
 **Powrót z legacy na serwer** to zwykły cutover (§8) w drugą stronę: cisza,
-kopia `Y:` → `D:`, start serwera, nowy `.exe`, weryfikacja `handle.exe`.
+kopia `Y:` → dysk lokalny serwera, start serwera, nowy `.exe`, weryfikacja `handle.exe`.
 
 ---
 
@@ -644,7 +680,7 @@ Poza godzinami pracy albo w umówionym oknie:
 6.  Publikacja `.exe` na produkcję
 7.  Uruchomienie klientów - bramka wersji wymusi nowy `.exe`
 8.  Weryfikacja NA MASZYNIE nic (handle.exe / Process Explorer):
-    uchwyt do D:\RM_BAZA\master.sqlite ma WYLACZNIE proces RM_SERWER
+    uchwyt do C:\Apps\RM_SERWER\dane\master.sqlite ma WYLACZNIE proces RM_SERWER
 ```
 
 Krok 3 jest istotny: dopóki któryś klient trzyma plik, serwer nie jest jedynym
@@ -656,7 +692,7 @@ baza przeprowadza się z udziału sieciowego na dysk lokalny:
 | | Gdzie leży master | Czym sprawdzić |
 |---|---|---|
 | **krok 3** (przed) | `Y:` — udział sieciowy | `\nic` → Zarządzanie komputerem → **Otwarte pliki** |
-| **krok 8** (po) | `D:` na `nic` — lokalnie | na maszynie `nic`: `handle.exe master.sqlite` albo Process Explorer |
+| **krok 8** (po) | `C:\Apps\RM_SERWER\dane` na `nic` — lokalnie | na maszynie `nic`: `handle.exe master.sqlite` albo Process Explorer |
 
 „Otwarte pliki" pokazują **wyłącznie uchwyty przez SMB**. Po przenosinach serwer
 otwiera plik lokalnie, więc ta lista będzie pusta **zawsze** — także wtedy, gdy
@@ -678,7 +714,7 @@ zrobionej o 7:30, ginie pięć godzin pracy całej firmy.
 **Wycofanie programu** — gdy nowa wersja się źle zachowuje:
 
 ⚠️ **Baza musi wrócić tam, gdzie stary klient jej szuka.** Podczas cutoveru
-master przeprowadza się z `Y:` na `D:` maszyny `nic`; stary `.exe` nie zna
+master przeprowadza się z `Y:` na dysku lokalnym maszyny `nic`; stary `.exe` nie zna
 ścieżki lokalnej i sam jej nie znajdzie. Bez kroku 4 poniżej rollback wygląda
 na wykonany, a klienci startują na **starym, nieaktualnym** pliku z `Y:`
 — i cicho rozjadą dane.
@@ -686,9 +722,9 @@ na wykonany, a klienci startują na **starym, nieaktualnym** pliku z `Y:`
 ```
 1. Wszyscy zamykają RM_BAZA
 2. Zatrzymaj RM_SERWER
-3. Backup D:\RM_BAZA\master.sqlite            ← bezcenne przy diagnozie
+3. Backup C:\Apps\RM_SERWER\dane\master.sqlite            ← bezcenne przy diagnozie
 4. Skopiuj AKTUALNY master z powrotem na udział:
-       D:\RM_BAZA\master.sqlite  →  Y:\RM_BAZA\master.sqlite
+       C:\Apps\RM_SERWER\dane\master.sqlite  →  Y:\RM_BAZA\master.sqlite
 5. PRAGMA integrity_check na kopii docelowej
 6. Przełącz sync_config.json na tryb legacy
 7. Przywróć stary .exe (RM_BAZA_v15_MAG.exe.przed_*)
@@ -720,7 +756,7 @@ zawsze.
 - żądanie z nieznaną `operation` → odrzucone
 - **po tygodniu: uchwyt do mastera ma wyłącznie RM_SERWER** — sprawdzone
   `handle.exe master.sqlite` NA MASZYNIE `nic` (nie przez „Otwarte pliki":
-  te pokazują tylko dostęp przez SMB, a baza leży już lokalnie). To jest dowód,
+  te pokazują tylko dostęp przez SMB, a baza leży już lokalnie na serwerze). To jest dowód,
   że przyczyna zniknęła — i jedyny test, który wyłapie zapomniany skrypt
   czytający żywy plik
 
@@ -760,7 +796,7 @@ albo
     → czyta wyłącznie KOPIĘ / snapshot, nigdy żywego pliku
 ```
 
-Po przeniesieniu bazy na `D:` maszyny `nic` te narzędzia i tak przestaną ją
+Po przeniesieniu bazy na dysku lokalnym maszyny `nic` te narzędzia i tak przestaną ją
 widzieć pod dotychczasową ścieżką — więc decyzja zapada tak czy inaczej.
 Lepiej podjąć ją świadomie przed cutoverem niż przez awarię po nim.
 
@@ -916,7 +952,7 @@ katalogi `projects\` i `projects_MAG\` — nie tylko master. Ta sama zasada
 
 ## 15. Cutover etapu 2
 
-Ten sam schemat co w etapie 1 (§8), z jedną różnicą w kroku 4: na `D:` maszyny
+Ten sam schemat co w etapie 1 (§8), z jedną różnicą w kroku 4: na dysku lokalnym maszyny
 `nic` przenoszą się także `projects\`, `projects_MAG\`, `locks\` i `backups\`.
 Krok 3 („Otwarte pliki = pusto") obejmuje wtedy **wszystkie** pliki `.sqlite`
 w `RM_BAZA\`, nie tylko master.
