@@ -3088,125 +3088,29 @@ class MainWindow(tk.Tk):
             print("  ✅ Master połączony")
             update_status("✅ Połączono z bazą główną")
             
-            # MIGRACJA: Dodaj kolumnę project_type jeśli nie istnieje
-            print("  → Sprawdzam kolumnę project_type...")
+            # ── Migracje schematu mastera ────────────────────────────────
+            # Wykonuje je WŁAŚCICIEL PLIKU, nie każdy klient z osobna:
+            # w trybie serwer robi to RM_SERWER przy starcie (raz), w trybie
+            # legacy — ten sam kod lokalnie (rm_serwer_operacje.MIGRACJE).
+            #
+            # Wcześniej każde z 10 stanowisk próbowało dokładać kolumny przy
+            # każdym uruchomieniu; stąd w logach „attempt to write a readonly
+            # database" — klient bez prawa zapisu migrował cudzą bazę.
+            print("  → Sprawdzam schemat mastera...")
             try:
-                # Sprawdź czy kolumna istnieje
-                cursor_check = self.db_manager.master_con.execute("PRAGMA table_info(projects)")
-                columns = [row[1] for row in cursor_check.fetchall()]
-                
-                if 'project_type' not in columns:
-                    print("  ⚠️  Kolumna project_type nie istnieje - próbuję dodać...")
-                    try:
-                        # Próba dodania kolumny (wymaga READ-WRITE!)
-                        self.db_manager.master_con.execute(
-                            "ALTER TABLE projects ADD COLUMN project_type TEXT NOT NULL DEFAULT 'MACHINE'"
-                        )
-                        self.db_manager.master_commit()
-                        print("  ✅ Kolumna project_type dodana pomyślnie")
-                    except sqlite3.OperationalError as alter_err:
-                        if "read-only" in str(alter_err).lower() or "readonly" in str(alter_err).lower():
-                            print("  ⚠️  Master DB jest READ-ONLY - kolumna project_type nie została dodana")
-                            print("     Wszystkie projekty będą traktowane jako typ MACHINE")
-                        else:
-                            print(f"  ⚠️  Nie udało się dodać kolumny project_type: {alter_err}")
-                else:
-                    print("  ✅ Kolumna project_type istnieje")
-            except Exception as pt_err:
-                print(f"  ⚠️  Błąd sprawdzania kolumny project_type: {pt_err}")
-            
-            # MIGRACJA KOLUMN DLA STATYSTYK PRODUKCJI
-            print("  → Sprawdzam kolumny dla statystyk produkcji...")
-            try:
-                cursor_check = self.db_manager.master_con.execute("PRAGMA table_info(projects)")
-                columns = [row[1] for row in cursor_check.fetchall()]
-
-                # ⚡ Skrócony busy_timeout TYLKO dla migracji — żeby nie wisieć
-                # po 5s gdy inny klient w sieci trzyma writer-lock na master.sqlite.
-                # Po migracji przywracamy domyślne 5000ms (w finally).
-                _migration_needed = any(c not in columns for c in
-                                        ('designer', 'completed_at', 'status', 'received_percent'))
-                if _migration_needed:
-                    try:
-                        self.db_manager.master_con.execute("PRAGMA busy_timeout=800")
-                    except Exception:
-                        pass
-                # designer - konstruktor przypisany do projektu
-                if 'designer' not in columns:
-                    print("  → Dodaję kolumnę designer...")
-                    try:
-                        self.db_manager.master_con.execute(
-                            "ALTER TABLE projects ADD COLUMN designer TEXT"
-                        )
-                        self.db_manager.master_commit()
-                        print("  ✅ Kolumna designer dodana")
-                    except Exception as e:
-                        print(f"  ⚠️  Błąd dodawania designer: {e}")
-                
-                # completed_at - data zakończenia projektu
-                if 'completed_at' not in columns:
-                    print("  → Dodaję kolumnę completed_at...")
-                    try:
-                        self.db_manager.master_con.execute(
-                            "ALTER TABLE projects ADD COLUMN completed_at TEXT"
-                        )
-                        self.db_manager.master_commit()
-                        print("  ✅ Kolumna completed_at dodana")
-                    except Exception as e:
-                        print(f"  ⚠️  Błąd dodawania completed_at: {e}")
-                
-                # status - status projektu (W_REALIZACJI, ZAKOŃCZONY, WSTRZYMANY)
-                if 'status' not in columns:
-                    print("  → Dodaję kolumnę status...")
-                    try:
-                        self.db_manager.master_con.execute(
-                            "ALTER TABLE projects ADD COLUMN status TEXT DEFAULT 'W_REALIZACJI'"
-                        )
-                        self.db_manager.master_commit()
-                        print("  ✅ Kolumna status dodana")
-                    except Exception as e:
-                        print(f"  ⚠️  Błąd dodawania status: {e}")
-                
-                # received_percent - procent odebranych elementów (dla RM_MANAGER)
-                if 'received_percent' not in columns:
-                    print("  → Dodaję kolumnę received_percent...")
-                    try:
-                        self.db_manager.master_con.execute(
-                            "ALTER TABLE projects ADD COLUMN received_percent TEXT"
-                        )
-                        self.db_manager.master_commit()
-                        print("  ✅ Kolumna received_percent dodana")
-                    except Exception as e:
-                        print(f"  ⚠️  Błąd dodawania received_percent: {e}")
-                
-                print("  ✅ Kolumny statystyk produkcji OK")
+                import rm_serwer_operacje as _ops
+                if self.db_manager.master_con is not None:
+                    zrobione = _ops.zastosuj_migracje(self.db_manager.master_con)
+                    _ops.zbuduj_operacje_dostawcow(self.db_manager.master_con)
+                    if zrobione:
+                        for z in zrobione:
+                            print(f"  ✅ Migracja: {z}")
+                    else:
+                        print("  ✅ Schemat aktualny")
             except Exception as e:
-                print(f"  ⚠️  Błąd sprawdzania kolumn statystyk: {e}")
-            finally:
-                # przywróć domyślny busy_timeout
-                try:
-                    self.db_manager.master_con.execute("PRAGMA busy_timeout=5000")
-                except Exception:
-                    pass
-            
-            # MIGRACJA TABELI SUPPLIERS (jeśli nie istnieje)
-            print("  → Sprawdzam tabelę suppliers...")
-            try:
-                self.db_manager.master_con.execute("""
-                    CREATE TABLE IF NOT EXISTS suppliers (
-                        supplier_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        name TEXT NOT NULL,
-                        contact TEXT,
-                        phone TEXT,
-                        email TEXT,
-                        description TEXT,
-                        is_active INTEGER DEFAULT 1
-                    )
-                """)
-                self.db_manager.master_commit()
-                print("  ✅ Tabela suppliers OK")
-            except Exception as e:
-                print(f"  ⚠️  Błąd migracji suppliers: {e}")
+                # Brak prawa zapisu to NORMALNY stan w trybie serwer i przy
+                # masterze otwartym read-only — nie powód do przerywania startu.
+                print(f"  ℹ️  Migracje pominięte: {e}")
 
             # Tabele tagów kooperantów (dla portalu RM_RFQ) — słownik + przypisania.
             # RM_BAZA jest WŁAŚCICIELEM tagów; RM_SYNC_AGENT wypycha je do RM_RFQ
