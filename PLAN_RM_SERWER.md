@@ -6,9 +6,10 @@ Dokument wykonawczy. Wersja 8 (11.09.2026).
 |---|---|---|---|
 | **1** | `master.sqlite` | 3–4 dni | koniec awarii typu 11.09.2026 — u źródła |
 | **2** | pliki projektów (checkout/checkin) + locki | 3–4 dni | serwer plików świadomy locków; koniec kopiowania po SMB |
+| **2.5** | bazy RM_MANAGER (`rm_manager.sqlite` + 81 projektowych) | do wyceny | ten sam problem co master, tylko jeszcze nie wybuchł |
 | **3** | rysunki i pozostałe pliki | do wyceny | **RM_BAZA nie potrzebuje `Y:`** |
 
-**Kolejność: 1 → 2 → 3.** Każdy etap ma własny cutover i jest użyteczny sam
+**Kolejność: 1 → 2 → (2.5) → 3.** Każdy etap ma własny cutover i jest użyteczny sam
 w sobie. Etap 1 jest opisany w pełni (Część I) — to on idzie do kodowania
 teraz. Etapy 2 i 3 są zakresem i decyzjami (Części II i III); szczegóły
 protokołu doprecyzujemy przed ich kodowaniem, gdy etap 1 będzie chodził.
@@ -984,17 +985,88 @@ Nie teraz — gdy etap 1 będzie chodził. Zapisane, żeby nie zginęły:
 
 ---
 
+# CZĘŚĆ II.5 — ETAP 2.5: bazy RM_MANAGER przez serwer
+
+## 17. Dlaczego osobny etap, a nie część etapu 1
+
+RM_MANAGER ma **własne bazy** na tym samym dysku sieciowym:
+
+```
+Y:\RM_MANAGER\rm_manager.sqlite                     424 KB — procesy, pracownicy, płatności
+Y:\RM_MANAGER\RM_MANAGER_projects\rm_manager_project_<id>.sqlite   81 plików — zdarzenia per projekt
+```
+
+**To ta sama klasa problemu co master**: wielu użytkowników, jeden plik SQLite
+po SMB. Różnica jest wyłącznie w tym, że dotąd nie wywołało to awarii —
+RM_MANAGER ma mniej użytkowników niż RM_BAZA i krótsze sesje zapisu.
+
+⚠️ **Nie mylić z przeniesieniem programu.** RM_MANAGER to aplikacja okienkowa
+(Tkinter, 38 tys. linii GUI). Program okienkowy na serwerze nie ma komu
+wyświetlić okna — ludzie pracują na swoich stanowiskach. Przeniesienie
+*programu* oznaczałoby przepisanie na web, jak RM_STATS czy RM_RFQ. To miesiące
+i osobna decyzja, nie ten plan. **Ten etap przenosi wyłącznie DANE.**
+
+## 18. Zakres
+
+| | Liczba | Uwaga |
+|---|---|---|
+| Wywołania SQL w `rm_manager.py` | **568** | warstwa danych |
+| Wywołania SQL w `rm_manager_gui.py` | **187** | GUI woła bezpośrednio |
+| Programy czytające te bazy | **10** | RM_BAZA, RM_STATS (`db.py`), optymalizator, RM_KOD, backup… |
+
+755 wywołań to **więcej niż cały etap 1** (133 na masterze). Dlatego osobny
+etap, a nie dopisek — i dlatego kolejność ma znaczenie: wchodzimy tu dopiero,
+gdy mechanizm jest sprawdzony na masterze i na plikach projektów.
+
+## 19. Dwa punkty styku, które wchodzą WCZEŚNIEJ
+
+RM_MANAGER dotyka rzeczy z etapów 1 i 2 **niezależnie od tego etapu** — i tam
+musi być obsłużony, inaczej zostaje współwłaścicielem plików:
+
+| Co | Gdzie | Etap |
+|---|---|---|
+| `sync_to_master` — `UPDATE projects` w **masterze RM_BAZA** | `rm_manager.py` | **1** (§10) |
+| Locki projektów, w tym `acquire_project_locks_bulk` dla linii produkcyjnej | `lock_manager_v2` | **2** (§12) |
+
+To jest ważne rozróżnienie: **RM_MANAGER wchodzi do planu przez te dwa punkty
+już teraz**, a jego własne bazy dopiero w tym etapie.
+
+## 20. Jak to zrobić, gdy przyjdzie czas
+
+Ten sam wzorzec co etap 1 — architektura już stoi, dochodzi tylko treść:
+
+1. **Inwentaryzacja** 755 wywołań: ile to realnych, różnych operacji (przy
+   masterze 133 wywołania okazały się 17 zapisami i 8 odczytami — reszta to
+   PRAGMA, migracje i obsługa połączenia).
+2. **Operacje** do `rm_serwer_operacje` (osobna mapa albo prefiks `rmm-`).
+3. **`rm_manager_gui` i `rm_manager`** przepięte na `rm_klient`.
+4. **Pozostałe 9 programów** czytających te bazy: przez serwer albo snapshot —
+   ta sama zasada co §16 („read-only to nie zwolnienie").
+5. Cutover jak w §8.
+
+Bazy projektowe RM_MANAGER (81 plików) są kandydatem na model `checkout`/
+`checkin` z etapu 2 — ale tylko jeśli okaże się, że ktoś je edytuje pod lockiem.
+Jeśli są zapisywane wprost, idą przez operacje jak `rm_manager.sqlite`.
+
+## 21. Kiedy
+
+**Po etapie 2**, przed etapem 3 albo równolegle z nim. Nie wcześniej: 755
+wywołań to duża powierzchnia, a etapy 1 i 2 dają nam pewność, że wzorzec
+działa, zanim zastosujemy go na czymś większym.
+
+---
+
 # CZĘŚĆ III — ETAP 3: pliki przez serwer — `Y:` znika z RM_BAZA
 
-## 17. Co jeszcze RM_BAZA bierze z dysków sieciowych
+## 22. Co jeszcze RM_BAZA bierze z dysków sieciowych
 
 Inwentaryzacja z kodu (po etapach 1 i 2 zostaje to):
 
 | Ścieżka | Do czego | Kto | Propozycja |
 |---|---|---|---|
 | `Y:\SERVER_PROJEKTY` | rysunki DWF/PDF/DXF/STP/STL projektów; miniatury | arkusz, panel plików, wysyłka ZD, RFQ | `get_file(projekt, nazwa)` + lokalny cache |
-| `B:\` | biblioteka RM — komponenty wspólne (`dwf_biblioteka=1`) | miniatury, „Szukaj w bibliotece" | **indeks** (§18) + `get_file` |
-| `V:\` | drzewa złożeń Inventora (`_OUT.xlsx`), „Szukaj na serwerze" | import BOM, skany | **indeks** (§18) + `get_file` |
+| `B:\` | biblioteka RM — komponenty wspólne (`dwf_biblioteka=1`) | miniatury, „Szukaj w bibliotece" | **indeks** (§23) + `get_file` |
+| `V:\` | drzewa złożeń Inventora (`_OUT.xlsx`), „Szukaj na serwerze" | import BOM, skany | **indeks** (§23) + `get_file` |
 | `Y:\RM_BAZA\chat` | wiadomości JSON | chat | `chat-post` / `chat-poll` |
 | `Y:\RM_BAZA\backups` | backupy projektów | okno „Przywróć backup" | już w etapie 2 (`backup-list/-get`) |
 | `Y:\RMPAK_CLIENT\*.exe` | bramka wersji, samoaktualizacja | `client_version` | `client-version` + `client-download` |
@@ -1002,7 +1074,7 @@ Inwentaryzacja z kodu (po etapach 1 i 2 zostaje to):
 | `Y:\RM_BAZA\subiekt_mapowania.sqlite` | mapowania Subiekta | `subiekt_mapowania` | patrz §16 pkt 1 |
 | `Y:\RM_MANAGER\` | bazy RM_MANAGER | RM_MANAGER, RM_STATS | **poza zakresem** — osobny program |
 
-## 18. Dwie rzeczy do nazwania uczciwie
+## 23. Dwie rzeczy do nazwania uczciwie
 
 **„RM_BAZA bez `Y:`" to nie „stanowisko bez `Y:`".** Konstruktorzy pracują
 w Inventorze i AutoCAD-zie na tych samych udziałach — one zostają. Zysk etapu 3
@@ -1029,7 +1101,7 @@ Konsekwencje dla implementacji etapu 3:
 - „Anuluj" ze skanu klienckiego (naprawione 11.09) znika wraz z samym skanem —
   odpytanie indeksu jest natychmiastowe, nie ma czego anulować.
 
-## 19. Docelowe stanowisko
+## 24. Docelowe stanowisko
 
 ```
 potrzebuje:                 nie potrzebuje:
@@ -1040,12 +1112,12 @@ potrzebuje:                 nie potrzebuje:
                               „nie widzi udziału" / „inna litera dysku"
 ```
 
-Etap 3 jest **do wyceny po etapie 2** — z ustaloną decyzją o indeksie (§18),
+Etap 3 jest **do wyceny po etapie 2** — z ustaloną decyzją o indeksie (§23),
 zostaje wycena samego mechanizmu odświeżania i objętości `B:`/`V:`.
 
 ---
 
-## 20. Kontekst
+## 25. Kontekst
 
 | Dokument / pamięć | Co zawiera |
 |---|---|
