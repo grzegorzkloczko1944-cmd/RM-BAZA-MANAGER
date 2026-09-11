@@ -125,6 +125,74 @@ class DatabaseManager:
             print(f"⚠️  master_con: nie udalo sie cofnac wiszacej transakcji: {e}")
         return False
 
+    # ═══════════════════════════════════════════════════════════════════
+    # DOSTĘP DO MASTERA PRZEZ RM_SERWER (PLAN_RM_SERWER.md, etap 1)
+    # ═══════════════════════════════════════════════════════════════════
+    #
+    # Te trzy metody zastępują `master_con.execute(...)` w całym RM_BAZA.
+    # Zależnie od trybu (§2a) idą przez RM_SERWER albo wykonują ten sam SQL
+    # lokalnie — wołający nie musi wiedzieć który.
+    #
+    # Docelowo (po 2–4 tygodniach stabilnej pracy na trybie serwer) tryb
+    # legacy i samo `master_con` znikają — wtedy zostaje tylko ścieżka
+    # sieciowa, a §2 planu obowiązuje bez zastrzeżeń.
+
+    def ustaw_klienta_mastera(self, tryb, host=None, port=None, sekret=None):
+        """Konfiguruje dostęp do mastera. Wołane raz, przy starcie RM_BAZA.
+
+        Tryb przychodzi z `sync_config.json` na `Y:` — jest GLOBALNY dla
+        całej firmy, ustawia go ADMIN. Zwraca opis trybu do logu.
+        """
+        import rm_klient
+        rm_klient.ustaw_tryb(tryb, host=host, port=port, sekret=sekret,
+                             polaczenie=self.master_con)
+        self._tryb_mastera = tryb
+        return rm_klient.opis_trybu()
+
+    def master_read(self, operation, params=None):
+        """Odczyt z mastera przez nazwaną operację. Zwraca listę słowników.
+
+        Zastępuje `master_con.execute("SELECT …").fetchall()`. Nazwa operacji
+        musi istnieć w `rm_serwer_operacje.ODCZYT` — SQL żyje tylko tam.
+        """
+        import rm_klient
+        self._dopilnuj_polaczenia_legacy()
+        return rm_klient.master_read(operation, params)
+
+    def master_exec(self, operation, params=None, request_id=None):
+        """Pojedynczy zapis. Zwraca {'rowcount', 'lastrowid'}.
+
+        Zastępuje `master_con.execute(...)` + `master_commit()`. Commit
+        i rollback robi warstwa niżej — tutaj nie ma czego domykać.
+        """
+        import rm_klient
+        self._dopilnuj_polaczenia_legacy()
+        return rm_klient.master_exec(operation, params, request_id=request_id)
+
+    def master_batch(self, operacje, request_id=None):
+        """Kilka zapisów jako JEDNA transakcja — wszystko albo nic.
+
+        Do rzeczy, które dziś są dwoma `execute` i jednym `commit`:
+        „dodaj dostawcę + wpis do audytu".
+        """
+        import rm_klient
+        self._dopilnuj_polaczenia_legacy()
+        return rm_klient.master_batch(operacje, request_id=request_id)
+
+    def _dopilnuj_polaczenia_legacy(self):
+        """W trybie legacy klient pisze przez `master_con` — musi być żywe.
+
+        Watchdog potrafi je wymienić (`_retire_master_con` + reconnect),
+        a klient trzyma referencję z chwili `ustaw_klienta_mastera`. Bez tego
+        po reconnekcie pisalibyśmy do porzuconego połączenia.
+        """
+        import rm_klient
+        if rm_klient.czy_serwer():
+            return
+        if self.master_con is None:
+            self.ensure_master_alive()
+        rm_klient.ustaw_tryb("legacy", polaczenie=self.master_con)
+
     def _retire_project_con(self) -> None:
         """To samo co _retire_master_con, dla project_con.
 
