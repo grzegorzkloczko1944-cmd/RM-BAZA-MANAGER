@@ -40,6 +40,13 @@ hiddenimports += [
     'subiekt_dopasowanie_gui', 'subiekt_dopasowanie',
     # produkcja wlasna RMPAK (PW/RW) + okno zlozen projektu
     'subiekt_produkcja', 'subiekt_zlozenia_gui',
+    # formularze dokumentow z Edytora kartotek (10-11.09.2026) — importowane
+    # leniwie w subiekt_edytor_gui (przyciski RW/PW/ZD/ZK), wiec statyczna
+    # analiza ich NIE WIDZI. subiekt_dokument_form to ich wspolny szkielet.
+    'subiekt_dokument_form', 'subiekt_rw_gui', 'subiekt_pw_gui',
+    'subiekt_zd_gui', 'subiekt_zk_gui',
+    # okno wydania RW ze stanu + raport duplikatow kartotek
+    'subiekt_wydanie_gui', 'subiekt_raport_duplikatow',
     # warstwa danych Subiekta
     'subiekt_bridge', 'subiekt_konfig', 'subiekt_asortyment', 'subiekt_dostawcy',
     'subiekt_mapowania', 'subiekt_podobne', 'subiekt_scalanie',
@@ -63,6 +70,9 @@ datas += [(f'{m}.py', '.') for m in (
     'subiekt_edytor_gui', 'subiekt_historia',
     'subiekt_dopasowanie_gui', 'subiekt_dopasowanie',
     'subiekt_produkcja', 'subiekt_zlozenia_gui',
+    'subiekt_dokument_form', 'subiekt_rw_gui', 'subiekt_pw_gui',
+    'subiekt_zd_gui', 'subiekt_zk_gui',
+    'subiekt_wydanie_gui', 'subiekt_raport_duplikatow',
     'subiekt_asortyment', 'subiekt_dostawcy', 'subiekt_mapowania',
     'subiekt_podobne', 'subiekt_scalanie', 'rm_kreciolek',
 )]
