@@ -75,6 +75,64 @@ for _stream_name in ("stdout", "stderr"):
 _JOURNAL_MODE_VERIFIED: set = set()
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# DOSTĘP DO MASTERA RM_BAZA — przez RM_SERWER albo lokalnie
+# ═══════════════════════════════════════════════════════════════════════
+#
+# RM_MANAGER czyta i pisze do master.sqlite RM_BAZA (statusy projektów,
+# priorytety, logowanie użytkownikami RM_BAZA, sync_to_master). To ten sam
+# plik, który przenosimy na serwer — więc RM_MANAGER musi iść tą samą drogą,
+# inaczej zostaje współwłaścicielem i cutover jest pozorny
+# (PLAN_RM_SERWER.md §10).
+#
+# ⚠️ NIE MYLIĆ DWÓCH BAZ: `master_db_path` to master RM_BAZA (ta idzie
+# przez serwer), a `rm_master_db_path` to własna baza RM_MANAGER — ta zostaje
+# lokalna do etapu 2.5. Nazwy są mylące, a część tabel (`employees`,
+# `production_lines`, `transports`) istnieje w OBU plikach.
+
+_master_tryb_ustawiony = False
+
+
+def _master(master_db_path: str):
+    """Klient mastera RM_BAZA — konfiguruje tryb przy pierwszym użyciu.
+
+    Tryb czytamy z sync_config.json na Y: (ten sam plik i klucz co RM_BAZA),
+    bo przełącznik jest GLOBALNY dla całej firmy. Brak wpisu = „legacy",
+    czyli dotychczasowe zachowanie.
+    """
+    global _master_tryb_ustawiony
+    import rm_klient
+
+    if not _master_tryb_ustawiony:
+        cfg = {}
+        try:
+            import json
+            with io.open(r"C:\RMPAK_CLIENT\sync_config.json",
+                         encoding="utf-8-sig") as f:
+                cfg = (json.load(f).get("rm_serwer") or {})
+        except Exception:
+            pass
+        tryb = cfg.get("tryb", "legacy")
+        try:
+            if tryb == "serwer":
+                rm_klient.ustaw_tryb("serwer", host=cfg.get("host"),
+                                     port=cfg.get("port"), sekret=cfg.get("sekret"))
+            else:
+                rm_klient.ustaw_tryb(
+                    "legacy", polaczenie=_open_rm_connection(master_db_path))
+        except Exception as e:
+            print(f"⚠️  RM_SERWER niedostępny ({e}) — master lokalnie")
+            rm_klient.ustaw_tryb(
+                "legacy", polaczenie=_open_rm_connection(master_db_path))
+        _master_tryb_ustawiony = True
+    elif not rm_klient.czy_serwer():
+        # Tryb legacy: połączenie bywa zamykane przez wołających, więc
+        # odświeżamy je przy każdym użyciu.
+        rm_klient.ustaw_tryb("legacy",
+                             polaczenie=_open_rm_connection(master_db_path))
+    return rm_klient
+
+
 def _open_rm_connection(db_path: str, row_factory: bool = True,
                         uri: bool = False) -> sqlite3.Connection:
     """Otwórz SMB-safe połączenie do dowolnej bazy RM_MANAGER na NAS.
@@ -3927,119 +3985,68 @@ def cleanup_orphaned_wstrzymany(rm_db_path: str, project_id: int) -> int:
 # ============================================================================
 
 def get_project_status(master_db_path: str, project_id: int) -> str:
-    """Pobierz aktualny status projektu z master.sqlite
+    """Status procesu projektu (NEW, ACCEPTED, IN_PROGRESS, PAUSED, DONE).
 
-    Returns:
-        Status projektu (NEW, ACCEPTED, IN_PROGRESS, PAUSED, DONE)
-        Jeśli brak kolumny project_status w master, zwraca None
+    Brak wiersza albo pusta wartość = NEW. Kolumny `project_status` nie ma
+    w bardzo starych bazach — wtedy migracja ją dokłada, a do tego czasu
+    zwracamy NEW zamiast wywracać okno.
     """
-    con = _open_rm_connection(master_db_path)
-
     try:
-        cursor = con.execute("""
-            SELECT project_status FROM projects WHERE project_id = ?
-        """, (project_id,))
-        row = cursor.fetchone()
-        con.close()
-
-        if row and row['project_status']:
-            return row['project_status']
-        else:
-            # Domyślny status jeśli nie ustawiony
-            return ProjectStatus.NEW
-
-    except sqlite3.OperationalError:
-        # Kolumna project_status nie istnieje (stary schemat)
-        con.close()
-        return None
+        w = _master(master_db_path).master_read("project-status",
+                                                {"project_id": project_id})
+        if w and w[0]["project_status"]:
+            return w[0]["project_status"]
+    except Exception as e:
+        print(f"⚠️  get_project_status: {e}")
+    return ProjectStatus.NEW
 
 
 def get_all_project_statuses(master_db_path: str) -> Dict[int, str]:
-    """Pobierz statusy WSZYSTKICH projektów z master.sqlite jednym zapytaniem.
+    """{project_id: project_status} dla wszystkich projektów naraz.
 
-    Odpowiednik get_project_status() wołanego w pętli po projektach - zamiast
-    N osobnych połączeń SQLite do tego samego pliku, jedno zapytanie zbiorcze.
-
-    Returns:
-        Dict {project_id: status}. Brak wpisu / brak kolumny project_status
-        traktowany jak ProjectStatus.NEW.
+    Jedno zapytanie zamiast N — przy liście projektów w combo szło inaczej
+    tyle połączeń, ile projektów.
     """
-    con = _open_rm_connection(master_db_path)
-    result = {}
     try:
-        cursor = con.execute("SELECT project_id, project_status FROM projects")
-        for row in cursor.fetchall():
-            result[row['project_id']] = row['project_status'] or ProjectStatus.NEW
-    except sqlite3.OperationalError:
-        pass
-    finally:
-        con.close()
-    return result
+        return {w["project_id"]: (w["project_status"] or ProjectStatus.NEW)
+                for w in _master(master_db_path).master_read("projects-statusy")}
+    except Exception as e:
+        print(f"⚠️  get_all_project_statuses: {e}")
+        return {}
 
 
 def set_project_status(master_db_path: str, project_id: int, new_status: str):
-    """Ustaw status projektu w master.sqlite
-    
-    Args:
-        master_db_path: Ścieżka do master.sqlite
-        project_id: ID projektu
-        new_status: Nowy status (NEW, ACCEPTED, IN_PROGRESS, PAUSED, DONE)
+    """Ustaw status procesu projektu w masterze RM_BAZA.
+
+    Kolumnę `project_status` zakłada migracja (rm_serwer_operacje.MIGRACJE),
+    nie ta funkcja — schemat zmienia właściciel pliku.
+
+    🔁 RETRY został: w trybie legacy master nadal bywa chwilowo zablokowany
+    po SMB, a zgubiony zapis statusu jest kosztowny (milestone PRZYJĘTY
+    zapisany, `project_status` zostaje NEW → projekt nie startuje).
+    W trybie serwer pierwsza próba przechodzi — jest jeden pisarz.
     """
-    # Walidacja: czy nowy status jest poprawny
-    valid_statuses = [ProjectStatus.NEW, ProjectStatus.ACCEPTED, ProjectStatus.IN_PROGRESS, 
-                     ProjectStatus.PAUSED, ProjectStatus.DONE]
+    valid_statuses = [ProjectStatus.NEW, ProjectStatus.ACCEPTED,
+                      ProjectStatus.IN_PROGRESS, ProjectStatus.PAUSED,
+                      ProjectStatus.DONE]
     if new_status not in valid_statuses:
         raise ValueError(f"Nieprawidłowy status: {new_status}")
 
-    # 🔁 RETRY: master.sqlite jest współdzielony po SMB i bywa chwilowo zablokowany
-    #    przez sync/innego użytkownika. Bez retry zapis statusu ginie (np. milestone
-    #    PRZYJETY zapisany, ale project_status zostaje NEW → projekt nie startuje).
     import time as _time
     last_err = None
     for attempt in range(5):
-        con = _open_rm_connection(master_db_path)
         try:
-            # Dodaj kolumnę project_status jeśli nie istnieje
-            try:
-                con.execute("ALTER TABLE projects ADD COLUMN project_status TEXT DEFAULT 'NEW'")
-            except sqlite3.OperationalError:
-                pass  # Kolumna już istnieje
-
-            # Update status
-            con.execute("""
-                UPDATE projects
-                SET project_status = ?
-                WHERE project_id = ?
-            """, (new_status, project_id))
-
-            con.commit()
+            _master(master_db_path).master_exec(
+                "project-status-set",
+                {"project_status": new_status, "project_id": project_id})
             print(f"✅ Status projektu {project_id}: {new_status}")
             return
-
-        except sqlite3.OperationalError as e:
+        except Exception as e:
             last_err = e
-            if "locked" in str(e).lower() or "busy" in str(e).lower():
-                wait = 0.3 * (attempt + 1)
-                try:
-                    print(f"master zablokowany (proba {attempt + 1}/5), ponawiam za {wait:.1f}s: {e}")
-                except Exception:
-                    pass  # stdout cp1250/None w trybie windowed - nie przerywaj retry
-                con.close()
-                _time.sleep(wait)
-                continue
-            con.close()
-            raise
-        finally:
-            try:
-                con.close()
-            except Exception:
-                pass
-
-    # Wszystkie próby nieudane — nie połykaj cicho, zgłoś dalej
-    raise RuntimeError(
-        f"Nie udało się zapisać statusu projektu {project_id}='{new_status}' "
-        f"do master po 5 próbach (master zablokowany): {last_err}"
-    )
+            if attempt < 4:
+                _time.sleep(0.4 * (attempt + 1))
+    print(f"❌ Nie zapisano statusu projektu {project_id}: {last_err}")
+    raise last_err
 
 
 def can_transition_to(current_status: str, new_status: str) -> tuple:
@@ -5546,26 +5553,17 @@ def sync_to_master(rm_db_path: str, master_db_path: str, project_id: int):
     
     con_peek.close()
     
-    # Połączenie z master.sqlite
-    con = _open_rm_connection(str(master_path))
-    
+    # Master przez RM_SERWER albo lokalnie — patrz `_master`.
+    klient = _master(str(master_path))
     try:
-        # Sprawdź obecne wartości (dla WRITE ONCE logic)
-        # Najpierw sprawdź które kolumny istnieją
-        cursor = con.execute("PRAGMA table_info(projects)")
-        columns = {col[1] for col in cursor.fetchall()}
-        
-        existing_montaz = None
-        if 'montaz' in columns:
-            cursor = con.execute("SELECT montaz FROM projects WHERE project_id = ?", (project_id,))
-            row = cursor.fetchone()
-            if row:
-                existing_montaz = row['montaz']
-        elif 'sat' in columns:
-            cursor = con.execute("SELECT sat FROM projects WHERE project_id = ?", (project_id,))
-            row = cursor.fetchone()
-            if row:
-                existing_montaz = row['sat']
+        # Obecne wartości — dla logiki WRITE ONCE (montaż wpisujemy raz).
+        # Jedno zapytanie zamiast PRAGMA + SELECT na kolumnę; kolumny
+        # `montaz` i `sat` istnieją w obu wariantach schematu, więc bierzemy
+        # pierwszą niepustą.
+        _d = klient.master_read("project-daty", {"project_id": project_id})
+        _biezace = _d[0] if _d else {}
+        columns = set(_biezace.keys())
+        existing_montaz = _biezace.get("montaz") or _biezace.get("sat")
         
         # BUILD UPDATE dynamically (tylko kolumny które istnieją)
         updates = []
@@ -5601,12 +5599,22 @@ def sync_to_master(rm_db_path: str, master_db_path: str, project_id: int):
             updates.append("completed_at = ?")
             params.append(completed_date)
         
-        # Wykonaj UPDATE jeśli są zmiany
+        # Zapis: jedna nazwana operacja zamiast dynamicznie sklejanego UPDATE.
+        # `_pole()` zwraca wartość albo None — NULL po stronie SQL znaczy
+        # „zostaw jak było" (COALESCE), więc semantyka „aktualizuj tylko to,
+        # co się zmieniło" jest zachowana.
+        def _pole(nazwa, wartosc):
+            return wartosc if (nazwa in columns and wartosc) else None
+
         if updates:
-            params.append(project_id)
-            sql = f"UPDATE projects SET {', '.join(updates)} WHERE project_id = ?"
-            con.execute(sql, params)
-            con.commit()  # commit PRZED logowaniem - błąd w print() nie może cofnąć zapisu
+            klient.master_exec("project-status-sync", {
+                "status": _pole("status", status_text),
+                "designer": _pole("designer", designer_name),
+                "montaz": _pole("montaz", montaz_date) or _pole("sat", montaz_date),
+                "fat": _pole("fat", fat_date),
+                "completed_at": _pole("completed_at", completed_date),
+                "project_id": project_id,
+            })
 
             try:
                 print(f"✅ SYNC → master.sqlite (projekt {project_id}):")
@@ -5624,15 +5632,16 @@ def sync_to_master(rm_db_path: str, master_db_path: str, project_id: int):
                 pass
 
     except Exception as e:
-        con.rollback()
+        # Rollback i zamknięcie należą do warstwy klienta (rm_klient robi
+        # BEGIN IMMEDIATE + rollback w razie błędu). Tutaj zostaje wyłącznie
+        # zgłoszenie problemu — sync statusu jest „miły, nie konieczny"
+        # i nie może wywrócić zwalniania locka.
         try:
             print(f"❌ Błąd sync_to_master (projekt {project_id}): {e}")
             import traceback
             traceback.print_exc()
         except Exception:
             pass
-    finally:
-        con.close()
 
 
 def get_last_sync_date(rm_master_db_path: str) -> str:
@@ -6055,19 +6064,12 @@ def get_stage_events(rm_db_path: str, project_id: int, stage_code: str = None) -
 # ===========================================================================
 
 def get_users_from_baza(master_baza_path: str) -> List[Dict]:
-    """Pobierz aktywnych użytkowników z master.sqlite RM_BAZA (read-only).
+    """Aktywni użytkownicy z master.sqlite RM_BAZA — do logowania w RM_MANAGER.
+
     Zwraca listę słowników: id, username, display_name, role, password_hash.
     """
-    if not Path(master_baza_path).exists():
-        return []
     try:
-        con = _open_rm_connection(f"file:{master_baza_path}?mode=ro", uri=True)
-        rows = con.execute(
-            "SELECT id, username, display_name, role, password_hash "
-            "FROM users WHERE is_active = 1 ORDER BY username"
-        ).fetchall()
-        con.close()
-        return [dict(r) for r in rows]
+        return _master(master_baza_path).master_read("users-do-logowania")
     except Exception as e:
         print(f"⚠️  get_users_from_baza: {e}")
         return []
@@ -6628,70 +6630,42 @@ def set_priority_weight(rm_master_db_path: str, level: int, weight: int):
         con.close()
 
 
-def get_project_priority(master_db_path: str, project_id: int) -> int:
-    """Zwróć priorytet projektu (1=Turbo / 2=Pilny / 3=Normalny). Default=3."""
+def get_project_priority(master_db_path: str, project_id: int) -> Optional[int]:
+    """Priorytet projektu albo None, gdy nieustawiony."""
     try:
-        con = _open_rm_connection(master_db_path)
-        try:
-            row = con.execute(
-                "SELECT priority FROM projects WHERE project_id = ?", (int(project_id),)
-            ).fetchone()
-            if row and row[0] in (1, 2, 3):
-                return int(row[0])
-        finally:
-            con.close()
-    except Exception:
-        pass
-    return 3
+        w = _master(master_db_path).master_read("project-priorytet",
+                                                {"project_id": int(project_id)})
+        return w[0]["priority"] if w else None
+    except Exception as e:
+        print(f"⚠️  get_project_priority: {e}")
+        return None
 
 
-def set_project_priority(master_db_path: str, project_id: int, level: int):
-    """Ustaw priorytet projektu (1/2/3) w master.sqlite."""
-    if level not in (1, 2, 3):
-        raise ValueError(f"Nieprawidłowy poziom priorytetu: {level}")
-    con = _open_rm_connection(master_db_path)
+def set_project_priority(master_db_path: str, project_id: int, priority) -> bool:
+    """Ustaw priorytet projektu. Kolumnę zakłada migracja, nie ta funkcja."""
     try:
-        # Idempotentnie zapewnij kolumnę
-        try:
-            con.execute("ALTER TABLE projects ADD COLUMN priority INTEGER NOT NULL DEFAULT 3")
-        except sqlite3.OperationalError:
-            pass
-        con.execute(
-            "UPDATE projects SET priority = ? WHERE project_id = ?",
-            (int(level), int(project_id))
-        )
-        con.commit()
-    finally:
-        con.close()
+        _master(master_db_path).master_exec(
+            "project-priorytet-set",
+            {"priority": priority, "project_id": int(project_id)})
+        return True
+    except Exception as e:
+        print(f"⚠️  set_project_priority: {e}")
+        return False
 
 
 def get_all_project_priorities(master_db_path: str) -> Dict[int, int]:
-    """Zwróć {project_id: priority} dla wszystkich projektów.
+    """{project_id: priority} — jedno zapytanie zamiast N.
 
-    Brak kolumny / brak rekordu → 3 (Normalny).
+    Projekty bez priorytetu mają None i nie trafiają do wyniku; wołający
+    traktuje brak klucza jak „nieustawiony".
     """
-    out: Dict[int, int] = {}
     try:
-        con = _open_rm_connection(master_db_path)
-        try:
-            # Sprawdź czy kolumna istnieje
-            try:
-                rows = con.execute("SELECT project_id, priority FROM projects").fetchall()
-            except sqlite3.OperationalError:
-                # brak kolumny — wszyscy Normalni
-                rows = con.execute("SELECT project_id FROM projects").fetchall()
-                for r in rows:
-                    out[int(r[0])] = 3
-                return out
-            for r in rows:
-                pid = int(r[0])
-                p = r[1]
-                out[pid] = int(p) if p in (1, 2, 3) else 3
-        finally:
-            con.close()
+        return {w["project_id"]: w["priority"]
+                for w in _master(master_db_path).master_read("projects-priorytety")
+                if w["priority"] is not None}
     except Exception as e:
-        print(f"⚠️ get_all_project_priorities: {e}")
-    return out
+        print(f"⚠️  get_all_project_priorities: {e}")
+        return {}
 
 
 def get_transports(rm_master_db_path: str, active_only: bool = False) -> List[Dict]:

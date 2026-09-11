@@ -113,6 +113,41 @@ ODCZYT = {
         ["id"],
     ),
 
+    # ── projekty: status i priorytet (używa RM_MANAGER) ───────────────
+    # ⚠️ `project_status` to CO INNEGO niż `status`: pierwsze to stan procesu
+    # w RM_MANAGER (NEW/ACCEPTED/IN_PROGRESS/PAUSED/DONE), drugie to nazwa
+    # etapu wpisywana przez `project-status-sync`. Obie kolumny są w tej
+    # samej tabeli i łatwo je pomylić.
+    "project-status": (
+        "SELECT project_status FROM projects WHERE project_id = ?",
+        ["project_id"],
+    ),
+    "projects-statusy": (
+        "SELECT project_id, project_status FROM projects",
+        [],
+    ),
+    # Do logiki „write once" w sync_to_master: montaz/sat wpisujemy RAZ,
+    # kolejne synchronizacje go nie nadpisują.
+    "project-daty": (
+        "SELECT montaz, sat, fat, completed_at, designer, status"
+        "  FROM projects WHERE project_id = ?",
+        ["project_id"],
+    ),
+    "project-priorytet": (
+        "SELECT priority FROM projects WHERE project_id = ?",
+        ["project_id"],
+    ),
+    "projects-priorytety": (
+        "SELECT project_id, priority FROM projects",
+        [],
+    ),
+    # Logowanie do RM_MANAGER kontem z RM_BAZA — stąd password_hash.
+    "users-do-logowania": (
+        "SELECT id, username, display_name, role, password_hash FROM users"
+        " WHERE is_active = 1 ORDER BY username",
+        [],
+    ),
+
     # ── projekty ──────────────────────────────────────────────────────
     "projects-id-nazwa": (
         "SELECT project_id, name FROM projects",
@@ -286,10 +321,27 @@ ZAPIS = {
     # ── projekty (nagłówek w masterze; zawartość siedzi w plikach) ─────
     # Używa tego RM_MANAGER.sync_to_master — jeden z dwóch zewnętrznych
     # pisarzy do mastera (§10 planu).
+    # RM_MANAGER.sync_to_master. COALESCE(?, kolumna): NULL w parametrze
+    # znaczy „nie ruszaj tego pola" — dzięki temu jedna operacja zastępuje
+    # dynamicznie budowany UPDATE z listą zmienionych kolumn, a logika
+    # WRITE ONCE dla montażu zostaje po stronie wołającego.
     "project-status-sync": (
-        "UPDATE projects SET status = ?, designer = ?, montaz = ?, fat = ?,"
-        " completed_at = ? WHERE project_id = ?",
+        "UPDATE projects SET"
+        "   status       = COALESCE(?, status),"
+        "   designer     = COALESCE(?, designer),"
+        "   montaz       = COALESCE(?, montaz),"
+        "   fat          = COALESCE(?, fat),"
+        "   completed_at = COALESCE(?, completed_at)"
+        " WHERE project_id = ?",
         ["status", "designer", "montaz", "fat", "completed_at", "project_id"],
+    ),
+    "project-status-set": (
+        "UPDATE projects SET project_status = ? WHERE project_id = ?",
+        ["project_status", "project_id"],
+    ),
+    "project-priorytet-set": (
+        "UPDATE projects SET priority = ? WHERE project_id = ?",
+        ["priority", "project_id"],
     ),
     "project-set-active": (
         "UPDATE projects SET active = ? WHERE project_id = ?",
@@ -399,6 +451,12 @@ MIGRACJE = [
     ("ALTER TABLE projects ADD COLUMN montaz TEXT", ("projects", "montaz")),
     ("ALTER TABLE projects ADD COLUMN fat TEXT", ("projects", "fat")),
     ("ALTER TABLE suppliers ADD COLUMN nip TEXT", ("suppliers", "nip")),
+    # Kolumny, które dokładał sobie sam RM_MANAGER przy pierwszym zapisie
+    # (ALTER w set_project_status / set_project_priority). Teraz robi to
+    # migracja — klient nie zmienia schematu.
+    ("ALTER TABLE projects ADD COLUMN project_status TEXT DEFAULT 'NEW'",
+     ("projects", "project_status")),
+    ("ALTER TABLE projects ADD COLUMN priority INTEGER", ("projects", "priority")),
 ]
 
 
