@@ -16236,9 +16236,8 @@ class MainWindow(tk.Tk):
         matched_supplier_name = None
         if invoice_nip:
             try:
-                cur_sup = self.db_manager.master_con.execute(
-                    "SELECT supplier_id, name, nip FROM suppliers WHERE nip IS NOT NULL AND nip != ''"
-                ).fetchall()
+                cur_sup = [(w["supplier_id"], w["name"], w["nip"])
+                           for w in self.db_manager.master_read("suppliers-z-nip")]
                 for sup_id, sup_name, sup_nip in cur_sup:
                     if _nip_key(sup_nip) == invoice_nip:
                         matched_supplier_id = sup_id
@@ -16908,11 +16907,8 @@ class MainWindow(tk.Tk):
             return re.sub(r"[\s-]", "", str(s).strip())
 
         try:
-            known_nips = {
-                _nip_key(row[0]) for row in self.db_manager.master_con.execute(
-                    "SELECT nip FROM suppliers WHERE nip IS NOT NULL AND nip != ''"
-                ).fetchall()
-            }
+            known_nips = {_nip_key(w["nip"])
+                          for w in self.db_manager.master_read("suppliers-z-nip")}
         except Exception as e:
             messagebox.showerror("Błąd", f"Nie udało się odczytać listy dostawców:\n{e}")
             return
@@ -18924,10 +18920,9 @@ class MainWindow(tk.Tk):
                 sup_norm = norm(src_sup) if src_sup else None
                 if sup_norm:
                     try:
-                        row = self.db_manager.master_con.execute(
-                            "SELECT id FROM suppliers WHERE name_normalized = ?",
-                            (sup_norm,)
-                        ).fetchone()
+                        _w = self.db_manager.master_read(
+                            "supplier-po-normalizacji", {"name_normalized": sup_norm})
+                        row = (_w[0]["id"],) if _w else None
                         if row:
                             supplier_id_val = row[0]
                     except:
@@ -26515,20 +26510,16 @@ class MainWindow(tk.Tk):
     def _rfq_all_tags(self):
         """Słownik tagów: lista (id, name, label) posortowana. [] gdy brak tabeli."""
         try:
-            rows = self.db_manager.master_con.execute(
-                "SELECT id, name, label FROM rfq_tags ORDER BY sort_order, label"
-            ).fetchall()
-            return [(r[0], r[1], r[2]) for r in rows]
+            return [(w["id"], w["name"], w["label"])
+                    for w in self.db_manager.master_read("rfq-tagi")]
         except Exception:
             return []
 
     def _rfq_supplier_tag_ids(self, supplier_id):
         """Zbiór tag_id przypisanych danej firmie."""
         try:
-            rows = self.db_manager.master_con.execute(
-                "SELECT tag_id FROM rfq_supplier_tags WHERE supplier_id=?", (supplier_id,)
-            ).fetchall()
-            return {r[0] for r in rows}
+            return {w["tag_id"] for w in self.db_manager.master_read(
+                "rfq-tagi-dostawcy", {"supplier_id": supplier_id})}
         except Exception:
             return set()
 
@@ -27650,11 +27641,9 @@ class MainWindow(tk.Tk):
         """Dialog pokazujący historię zmian pozycji w bieżącym projekcie"""
         # Pobierz nazwę projektu z bazy master
         try:
-            cursor = self.db_manager.master_con.execute(
-                "SELECT name FROM projects WHERE project_id = ?",
-                (self.current_project_id,)
-            )
-            row = cursor.fetchone()
+            _w = self.db_manager.master_read("project-name",
+                                             {"project_id": self.current_project_id})
+            row = (_w[0]["name"],) if _w else None
             project_name = row[0] if row else f"Projekt {self.current_project_id}"
         except Exception as e:
             project_name = f"Projekt {self.current_project_id}"
@@ -32832,11 +32821,9 @@ class MainWindow(tk.Tk):
                 os.makedirs(save_dir, exist_ok=True)
                 
                 # Pobierz nazwę projektu wcześniej aby użyć w nazwie pliku
-                cursor = self.db_manager.master_con.execute(
-                    "SELECT name FROM projects WHERE project_id = ?",
-                    (self.current_project_id,)
-                )
-                row = cursor.fetchone()
+                _w = self.db_manager.master_read("project-name",
+                                                 {"project_id": self.current_project_id})
+                row = (_w[0]["name"],) if _w else None
                 project_name_raw = row[0] if row else f"Projekt_{self.current_project_id}"
                 
                 # Nazwa pliku: NazwaProjektu_YYYYMMDD_HHMMSS.pdf
@@ -32850,11 +32837,9 @@ class MainWindow(tk.Tk):
                     pdf_path = tmp.name
             
             # Pobierz nazwę projektu
-            cursor = self.db_manager.master_con.execute(
-                "SELECT name FROM projects WHERE project_id = ?",
-                (self.current_project_id,)
-            )
-            row = cursor.fetchone()
+            _w = self.db_manager.master_read("project-name",
+                                             {"project_id": self.current_project_id})
+            row = (_w[0]["name"],) if _w else None
             project_name = row[0] if row else f"Projekt {self.current_project_id}"
             
             # Buduj informację o filtrach (jak w export_to_xlsx)
@@ -33320,11 +33305,9 @@ class MainWindow(tk.Tk):
         
         try:
             # Pobierz nazwę projektu
-            cursor = self.db_manager.master_con.execute(
-                "SELECT name FROM projects WHERE project_id = ?",
-                (self.current_project_id,)
-            )
-            row = cursor.fetchone()
+            _w = self.db_manager.master_read("project-name",
+                                             {"project_id": self.current_project_id})
+            row = (_w[0]["name"],) if _w else None
             project_name = row[0] if row else f"PROJEKT_{self.current_project_id}"
             
             # Buduj nazwę pliku z filtrami
