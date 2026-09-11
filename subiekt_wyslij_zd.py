@@ -660,7 +660,10 @@ def zdejmij_zamowienia(project_con, project_id, log=None):
     if project_con is None or not project_id:
         return 0
     try:
-        m = sqlite3.connect(f"file:{_master()}?mode=ro", uri=True, timeout=10)
+        # Krótki limit: gdy posiadacz RESERVED próbuje commitu (PENDING), nawet
+        # ODCZYT dostaje „locked" i czekałby tu 10 s przy każdym locku (11.09.2026).
+        # Brak odczytu = wpisy nałożą się przy następnym przejęciu projektu.
+        m = sqlite3.connect(f"file:{_master()}?mode=ro", uri=True, timeout=1)
         try:
             if not m.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
                              " AND name='zd_cofniete_pozycje'").fetchone():
@@ -697,7 +700,10 @@ def naloz_zamowienia(project_con, project_id, log=None):
     if project_con is None or not project_id:
         return 0
     try:
-        m = sqlite3.connect(f"file:{_master()}?mode=ro", uri=True, timeout=10)
+        # Krótki limit: gdy posiadacz RESERVED próbuje commitu (PENDING), nawet
+        # ODCZYT dostaje „locked" i czekałby tu 10 s przy każdym locku (11.09.2026).
+        # Brak odczytu = wpisy nałożą się przy następnym przejęciu projektu.
+        m = sqlite3.connect(f"file:{_master()}?mode=ro", uri=True, timeout=1)
         try:
             if not m.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
                              " AND name='zd_zamowione_pozycje'").fetchone():
