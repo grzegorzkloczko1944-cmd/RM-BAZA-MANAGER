@@ -5386,12 +5386,8 @@ class RMManagerGUI:
         
         # Sprawdź czy projekt jest zarejestrowany w systemie śledzenia
         try:
-            con = rmm._open_rm_connection(self.rm_master_db_path, row_factory=False)
-            cursor = con.execute("""
-                SELECT COUNT(*) FROM project_file_tracking WHERE project_id = ?
-            """, (self.selected_project_id,))
-            count = cursor.fetchone()[0]
-            con.close()
+            count = len(rmm.rmm_read("rmm-project-file-tracking-po-project-id",
+                                      {"project_id": self.selected_project_id}))
 
             if count == 0:
                 # Pierwszy dostęp - zarejestruj plik
@@ -5554,10 +5550,7 @@ class RMManagerGUI:
                 except ValueError:
                     pass
 
-            con = rmm._open_rm_connection(self.rm_master_db_path, row_factory=False)
-            con.execute("DELETE FROM project_file_tracking")
-            con.commit()
-            con.close()
+            rmm.rmm_exec("rmm-project-file-tracking-usun", {})
 
             # Użyj również ID z listy projektów GUI
             all_pids = set(project_ids_from_files) | set(self.projects)
@@ -5773,209 +5766,30 @@ class RMManagerGUI:
             messagebox.showerror("❌ Błąd", f"Nie można migrować milestones:\n{e}")
     
     def migrate_plc_codes_ui(self):
-        """Migruj bazę kodów PLC - dodaj nowe kolumny i tabelę uprawnień.
-        
-        Menu: Narzędzia → 🔧 Migruj bazę kodów PLC (dodaj kolumny)
+        """Menu: Narzędzia → 🔧 Migracja bazy kodów PLC.
+
+        NIC NIE MIGRUJE — baza RM_MANAGER leży na serwerze, a jej schemat
+        (kolumny, tabele) tworzą migracje RM_SERWER przy jego starcie.
+        Klient nie ma pliku, do którego mógłby dokładać kolumny.
         """
-        result = messagebox.askyesno(
+        messagebox.showinfo(
             "🔧 Migracja bazy kodów PLC",
-            "Operacja:\n\n"
-            "1️⃣ Doda nowe kolumny do tabeli plc_unlock_codes:\n"
-            "   • sent_at (data wysłania)\n"
-            "   • sent_by (kto wysłał)\n"
-            "   • sent_via (EMAIL/SMS)\n"
-            "   • expiry_date (data wygaśnięcia)\n\n"
-            "2️⃣ Utworzy tabelę plc_authorized_senders:\n"
-            "   • lista użytkowników uprawnionych do wysyłki\n\n"
-            "WYMAGANE DO:\n"
-            "  ✅ Automatycznej wysyłki kodów (przycisk UŻYJ)\n"
-            "  ✅ Wyświetlania kolumny 'Ważny do'\n"
-            "  ✅ Zarządzania uprawnieniami\n\n"
-            "BEZPIECZEŃSTWO:\n"
-            "  • Jeśli kolumny/tabele już istnieją, zostaną pominięte\n"
-            "  • Istniejące dane NIE zostaną usunięte\n"
-            "  • Operacja jest bezpieczna do powtórzenia\n\n"
-            "Kontynuować?"
+            "Ta migracja nie jest już potrzebna.\n\n"
+            "Kolumny sent_at / sent_by / sent_via / expiry_date i tabela\nplc_authorized_senders są częścią schematu pilnowanego przez RM_SERWER\n— baza na serwerze ma je od razu."
         )
-        if not result:
-            return
-        
-        try:
-            self.status_bar.config(text="⏳ Migracja bazy kodów PLC...", fg="#f39c12")
-            self.root.update()
-            
-            # Wykonaj migrację
-            con = sqlite3.connect(self.rm_master_db_path, timeout=30.0)
-            con.row_factory = sqlite3.Row
-            
-            stats = {
-                'columns_added': 0,
-                'tables_created': 0,
-                'errors': []
-            }
-            
-            try:
-                # Sprawdź czy tabela plc_unlock_codes istnieje
-                cursor = con.execute("""
-                    SELECT name FROM sqlite_master 
-                    WHERE type='table' AND name='plc_unlock_codes'
-                """)
-                
-                if not cursor.fetchone():
-                    stats['errors'].append("Tabela plc_unlock_codes nie istnieje")
-                    raise ValueError("Tabela plc_unlock_codes nie istnieje w bazie danych")
-                
-                # Sprawdź jakie kolumny już istnieją
-                cursor = con.execute("PRAGMA table_info(plc_unlock_codes)")
-                existing_columns = {row['name'] for row in cursor.fetchall()}
-                
-                # Dodaj nowe kolumny jeśli nie istnieją
-                new_columns = [
-                    ('sent_at', 'DATETIME'),
-                    ('sent_by', 'TEXT'),
-                    ('sent_via', 'TEXT'),
-                    ('expiry_date', 'DATETIME')
-                ]
-                
-                for col_name, col_type in new_columns:
-                    if col_name not in existing_columns:
-                        con.execute(f"ALTER TABLE plc_unlock_codes ADD COLUMN {col_name} {col_type}")
-                        stats['columns_added'] += 1
-                
-                # Utwórz tabelę plc_authorized_senders jeśli nie istnieje
-                cursor = con.execute("""
-                    SELECT name FROM sqlite_master 
-                    WHERE type='table' AND name='plc_authorized_senders'
-                """)
-                
-                if not cursor.fetchone():
-                    con.execute("""
-                        CREATE TABLE plc_authorized_senders (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            username TEXT NOT NULL UNIQUE,
-                            added_by TEXT,
-                            added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                            notes TEXT
-                        )
-                    """)
-                    con.execute("CREATE INDEX IF NOT EXISTS idx_plc_senders_username ON plc_authorized_senders(username)")
-                    stats['tables_created'] += 1
-                
-                con.commit()
-                
-                self.status_bar.config(
-                    text=f"✅ Migracja zakończona: {stats['columns_added']} kolumn, {stats['tables_created']} tabel",
-                    fg="#27ae60"
-                )
-                
-                messagebox.showinfo(
-                    "✅ Migracja zakończona!",
-                    f"Migracja bazy kodów PLC:\n\n"
-                    f"• Dodano kolumn: {stats['columns_added']}\n"
-                    f"• Utworzono tabel: {stats['tables_created']}\n\n"
-                    f"✅ Baza gotowa do wysyłki kodów przez email/SMS!\n\n"
-                    f"Następne kroki:\n"
-                    f"1️⃣ Dodaj użytkowników: Narzędzia → Zarządzaj uprawnieniami\n"
-                    f"2️⃣ Skonfiguruj SMTP: Narzędzia → Konfiguracja powiadomień\n"
-                    f"3️⃣ Skonfiguruj SMS: Narzędzia → Konfiguracja SMS\n\n"
-                    f"📚 Zobacz PLC_CODES_README.md dla szczegółów."
-                )
-                
-                # Odśwież dane jeśli projekt jest wybrany
-                if self.selected_project_id:
-                    self.load_plc_codes()
-                    
-            except Exception as e:
-                stats['errors'].append(f"Błąd główny: {e}")
-                con.rollback()
-                raise
-            
-            finally:
-                con.close()
-                
-        except Exception as e:
-            self.status_bar.config(text="❌ Błąd migracji", fg="#e74c3c")
-            messagebox.showerror("❌ Błąd", f"Nie można migrować bazy kodów PLC:\n{e}")
 
     def migrate_plc_recipients_ui(self):
-        """Migruj bazę kodów PLC - dodaj kolumnę default_recipients.
-        
-        Menu: Narzędzia → 🔧 Migruj odbiorców kodów PLC
+        """Menu: Narzędzia → 🔧 Migracja odbiorców kodów PLC.
+
+        NIC NIE MIGRUJE — baza RM_MANAGER leży na serwerze, a jej schemat
+        (kolumny, tabele) tworzą migracje RM_SERWER przy jego starcie.
+        Klient nie ma pliku, do którego mógłby dokładać kolumny.
         """
-        result = messagebox.askyesno(
-            "🔧 Migracja odbiorców kodów PLC (PRZESTARZAŁE)",
-            "⚠️ UWAGA: Ta funkcja jest PRZESTARZAŁA!\n\n"
-            "Od tej wersji odbiorcy kodów PLC są GLOBALNI dla wszystkich projektów\n"
-            "i zarządzane przez tabelę plc_global_recipients.\n\n"
-            "Stara kolumna default_recipients jest zachowana dla kompatybilności,\n"
-            "ale nie jest już aktywnie używana.\n\n"
-            "OBECNE DZIAŁANIE:\n"
-            "  ✅ Jedna lista odbiorców dla WSZYSTKICH projektów\n"
-            "  ✅ Zapisywane w tabeli plc_global_recipients\n"
-            "  ✅ Automatyczne tworzenie przy inicjalizacji bazy\n\n"
-            "Kontynuować migrację starych kolumn?"
+        messagebox.showinfo(
+            "🔧 Migracja odbiorców kodów PLC",
+            "Ta migracja nie jest już potrzebna.\n\n"
+            "Odbiorcy kodów PLC są globalni (tabela plc_global_recipients),\na schemat pilnuje RM_SERWER — nie ma czego migrować."
         )
-        if not result:
-            return
-        
-        try:
-            self.status_bar.config(text="⏳ Migracja odbiorców kodów PLC...", fg="#f39c12")
-            self.root.update()
-            
-            # Wykonaj migrację
-            con = sqlite3.connect(self.rm_master_db_path, timeout=30.0)
-            con.row_factory = sqlite3.Row
-            
-            try:
-                # Sprawdź czy tabela plc_unlock_codes istnieje
-                cursor = con.execute("""
-                    SELECT name FROM sqlite_master 
-                    WHERE type='table' AND name='plc_unlock_codes'
-                """)
-                
-                if not cursor.fetchone():
-                    raise ValueError("Tabela plc_unlock_codes nie istnieje w bazie danych")
-                
-                # Sprawdź czy kolumna już istnieje
-                cursor = con.execute("PRAGMA table_info(plc_unlock_codes)")
-                existing_columns = {row['name'] for row in cursor.fetchall()}
-                
-                if 'default_recipients' in existing_columns:
-                    messagebox.showinfo(
-                        "ℹ️ Kolumna już istnieje",
-                        "Kolumna 'default_recipients' już istnieje w tabeli plc_unlock_codes.\n\n"
-                        "Migracja nie jest wymagana."
-                    )
-                    self.status_bar.config(text="✅ Kolumna już istnieje", fg="#27ae60")
-                    return
-                
-                # Dodaj kolumnę
-                con.execute("ALTER TABLE plc_unlock_codes ADD COLUMN default_recipients TEXT")
-                con.commit()
-                
-                messagebox.showinfo(
-                    "✅ Migracja zakończona",
-                    "Kolumna 'default_recipients' została dodana pomyślnie!\n\n"
-                    "Teraz lista odbiorców będzie zapisywana automatycznie\n"
-                    "przy każdej wysyłce kodu PLC."
-                )
-                
-                self.status_bar.config(text="✅ Migracja odbiorców zakończona", fg="#27ae60")
-                
-                # Odśwież dane jeśli projekt jest wybrany
-                if self.selected_project_id:
-                    self.load_plc_codes()
-                    
-            except Exception as e:
-                con.rollback()
-                raise
-            
-            finally:
-                con.close()
-                
-        except Exception as e:
-            self.status_bar.config(text="❌ Błąd migracji", fg="#e74c3c")
-            messagebox.showerror("❌ Błąd", f"Nie można migrować odbiorców kodów PLC:\n{e}")
 
     def migrate_central_to_per_project_ui(self):
         """Migracja danych z centralnej rm_manager.sqlite do per-projekt baz.
@@ -17042,15 +16856,8 @@ class RMManagerGUI:
                     pass
             if all_emp_ids:
                 try:
-                    rmm.ensure_list_tables(self.rm_master_db_path)
-                    con_master = rmm._open_rm_connection(self.rm_master_db_path)
-                    placeholders = ','.join('?' * len(all_emp_ids))
-                    rows = con_master.execute(f"""
-                        SELECT id, name, category FROM employees
-                        WHERE id IN ({placeholders})
-                        ORDER BY category, name
-                    """, list(all_emp_ids)).fetchall()
-                    con_master.close()
+                    rows = rmm.rmm_read("rmm-employees-po-idach",
+                                        {"idy_json": rmm.json.dumps(sorted(all_emp_ids))})
                     for r in rows:
                         all_employees[r['id']] = {'name': r['name'], 'category': r['category'] or ''}
                 except Exception:
@@ -18629,15 +18436,8 @@ class RMManagerGUI:
             all_emp_ids |= ids
         if all_emp_ids:
             try:
-                rmm.ensure_list_tables(self.rm_master_db_path)
-                con_master = rmm._open_rm_connection(self.rm_master_db_path)
-                placeholders = ','.join('?' * len(all_emp_ids))
-                rows = con_master.execute(f"""
-                    SELECT id, name, category FROM employees
-                    WHERE id IN ({placeholders})
-                    ORDER BY category, name
-                """, list(all_emp_ids)).fetchall()
-                con_master.close()
+                rows = rmm.rmm_read("rmm-employees-po-idach",
+                                    {"idy_json": rmm.json.dumps(sorted(all_emp_ids))})
                 for r in rows:
                     all_employees[r['id']] = {'name': r['name'], 'category': r['category'] or ''}
             except Exception:
@@ -20433,16 +20233,12 @@ class RMManagerGUI:
         
         max_par = 1
         try:
-            con_m = rmm._open_rm_connection(self.rm_master_db_path)
-            mr = con_m.execute(
-                "SELECT master_max_parallel FROM employees WHERE id=?",
-                (master_eid,)).fetchone()
+            mr = (rmm.rmm_read("rmm-employees-po-id-4", {"id": master_eid}) or [None])[0]
             if mr:
                 try:
                     max_par = int(mr['master_max_parallel'] or 1)
                 except (TypeError, ValueError):
                     max_par = 1
-            con_m.close()
         except Exception:
             pass
         
@@ -24759,14 +24555,7 @@ class RMManagerGUI:
         
         # Załaduj powiadomienia (wszystkie, nie tylko nieprzeczytane)
         try:
-            con = rmm._open_rm_connection(self.rm_master_db_path)
-            rows = con.execute("""
-                SELECT id, project_name, message, created_at, created_by, is_read
-                FROM in_app_notifications
-                ORDER BY created_at DESC
-                LIMIT 100
-            """).fetchall()
-            con.close()
+            rows = rmm.rmm_read("rmm-in-app-notifications")
             
             notification_ids = []
             for row in rows:
@@ -24784,15 +24573,9 @@ class RMManagerGUI:
             
             # Oznacz wszystkie jako przeczytane
             if notification_ids:
-                con = rmm._open_rm_connection(self.rm_master_db_path)
-                for nid in notification_ids:
-                    con.execute("""
-                        UPDATE in_app_notifications
-                        SET is_read = 1, read_at = CURRENT_TIMESTAMP, read_by = ?
-                        WHERE id = ?
-                    """, (self.current_user, nid))
-                con.commit()
-                con.close()
+                rmm.rmm_batch([{"operation": "rmm-in-app-notifications-zmien-po-id",
+                                "params": {"read_by": self.current_user, "id": nid}}
+                               for nid in notification_ids])
                 
                 # Odśwież banner
                 self.check_unread_notifications()
@@ -30332,11 +30115,7 @@ Kod: {unlock_code}
             """Zwraca {employee_id: [project_name, ...]} — projekty gdzie pracownik jest masterem."""
             emp_projects: dict = {}
             try:
-                con_m = rmm._open_rm_connection(self.rm_master_db_path)
-                prows = con_m.execute(
-                    "SELECT project_id, project_name FROM project_file_tracking ORDER BY project_id"
-                ).fetchall()
-                con_m.close()
+                prows = rmm.rmm_read("rmm-project-file-tracking")
             except Exception:
                 return emp_projects
             for prow in prows:
@@ -36563,12 +36342,7 @@ Kod: {unlock_code}
         # Zbierz kody etapów ze stage_definitions (z RM master DB — nie z master.sqlite!)
         all_stage_codes = []
         try:
-            con = rmm._open_rm_connection(self.rm_master_db_path)
-            rows = con.execute(
-                "SELECT code, display_name FROM stage_definitions "
-                "ORDER BY id"
-            ).fetchall()
-            con.close()
+            rows = rmm.rmm_read("rmm-stage-definitions-lista")
             all_stage_codes = [(r['code'], r['display_name']) for r in rows]
         except Exception as e:
             print(f"⚠️ Nie wczytano stage_definitions: {e}")
@@ -36856,10 +36630,8 @@ Kod: {unlock_code}
         # ── Wczytaj nazwy pracowników z master DB ──────────────────────
         emp_names = {}
         try:
-            con = rmm._open_rm_connection(self.rm_master_db_path)
-            for r in con.execute("SELECT id, name FROM employees").fetchall():
+            for r in rmm.rmm_read("rmm-employees"):
                 emp_names[r['id']] = r['name']
-            con.close()
         except Exception:
             pass
 
@@ -36867,13 +36639,9 @@ Kod: {unlock_code}
         stage_order = []
         stage_display = {}
         try:
-            con = rmm._open_rm_connection(self.rm_master_db_path)
-            for r in con.execute(
-                "SELECT code, display_name FROM stage_definitions ORDER BY id"
-            ).fetchall():
+            for r in rmm.rmm_read("rmm-stage-definitions-lista"):
                 stage_order.append(r['code'])
                 stage_display[r['code']] = r['display_name'] or r['code']
-            con.close()
         except Exception:
             pass
 
