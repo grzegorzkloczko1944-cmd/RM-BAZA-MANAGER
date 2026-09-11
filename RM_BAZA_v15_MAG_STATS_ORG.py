@@ -22467,68 +22467,19 @@ class MainWindow(tk.Tk):
             desc = e_desc.get().strip() or None
             
             try:
-                # Dynamiczne wykrywanie kolumn
-                cursor = self.db_manager.master_con.execute("SELECT * FROM suppliers LIMIT 0")
-                cols_db = [desc[0] for desc in cursor.description]
-                
-                name_col = next((c for c in ["name", "nazwa", "supplier_name"] if c in cols_db), "name")
-                nip_col = next((c for c in ["nip"] if c in cols_db), None)
-                contact_col = next((c for c in ["contact", "contact_info"] if c in cols_db), None)
-                phone_col = next((c for c in ["phone", "phone_default"] if c in cols_db), None)
-                email_col = next((c for c in ["email", "email_default"] if c in cols_db), None)
-                desc_col = next((c for c in ["description", "desc", "opis", "note", "notes"] if c in cols_db), None)
-                active_col = next((c for c in ["is_active", "active", "enabled"] if c in cols_db), None)
-
-                # Sprawdź czy istnieje
-                cursor = self.db_manager.master_con.execute(
-                    f"SELECT {cols_db[0]} FROM suppliers WHERE {name_col} = ?", (name,))
-                if cursor.fetchone():
+                # Wykrywanie kolumn robi RAZ serwer przy starcie
+                # (rm_serwer_operacje.zbuduj_operacje_dostawcow) — tabela
+                # `suppliers` ma różne schematy zależnie od instalacji:
+                # na produkcji contact_info/notes, gdzie indziej contact/description.
+                if self.db_manager.master_read("supplier-po-nazwie", {"name": name}):
                     messagebox.showwarning("Błąd", f"Dostawca '{name}' już istnieje!")
                     return
 
-                # Buduj INSERT
-                insert_cols = [name_col]
-                insert_vals = [name]
-
-                if nip_col and nip:
-                    insert_cols.append(nip_col)
-                    insert_vals.append(nip)
-
-                if contact_col and contact:
-                    insert_cols.append(contact_col)
-                    insert_vals.append(contact)
-                
-                if phone_col and phone:
-                    insert_cols.append(phone_col)
-                    insert_vals.append(phone)
-                
-                if email_col and email:
-                    insert_cols.append(email_col)
-                    insert_vals.append(email)
-                
-                if desc_col and desc:
-                    insert_cols.append(desc_col)
-                    insert_vals.append(desc)
-                
-                if active_col:
-                    insert_cols.append(active_col)
-                    insert_vals.append(1)
-                
-                placeholders = ", ".join(["?"] * len(insert_vals))
-                sql = f"INSERT INTO suppliers ({', '.join(insert_cols)}) VALUES ({placeholders})"
-                
-                # Upewnij się że master jest w trybie READ-WRITE
-                try:
-                    cur = self.db_manager.master_con.execute("PRAGMA query_only")
-                    if cur.fetchone()[0] == 1:
-                        print("🔄 Master jest READ-ONLY, przełączam na READ-WRITE...")
-                        self.db_manager.reconnect_master_rw()
-                except Exception:
-                    self.db_manager.reconnect_master_rw()
-                
-                ins_cur = self.db_manager.master_con.execute(sql, tuple(insert_vals))
-                new_sid = ins_cur.lastrowid
-                self.db_manager.master_commit()
+                wynik = self.db_manager.master_exec("supplier-add", {
+                    "name": name, "contact": contact, "phone": phone,
+                    "email": email, "description": desc, "nip": nip,
+                })
+                new_sid = wynik.get("lastrowid")
 
                 # Zapis tagów nowej firmy (na świeżo utworzonym supplier_id)
                 try:

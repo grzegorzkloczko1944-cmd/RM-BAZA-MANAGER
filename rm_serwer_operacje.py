@@ -41,6 +41,12 @@ ODCZYT = {
         "SELECT * FROM suppliers WHERE supplier_id = ?",
         ["supplier_id"],
     ),
+    # Sprawdzenie duplikatu przed dodaniem — po nazwie, bo to ona jest
+    # dla użytkownika identyfikatorem firmy.
+    "supplier-po-nazwie": (
+        "SELECT supplier_id, name FROM suppliers WHERE name = ? COLLATE NOCASE",
+        ["name"],
+    ),
     "users-list": (
         "SELECT id, username, display_name, role FROM users ORDER BY username COLLATE NOCASE",
         [],
