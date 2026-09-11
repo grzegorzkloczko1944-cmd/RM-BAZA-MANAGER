@@ -163,15 +163,11 @@ def projekty_z_pozycja(nr):
         return []
     nazwy = {}
     try:
-        con = sqlite3.connect(
-            f"file:{os.path.join(os.path.dirname(PROJECTS_DIR), 'master.sqlite')}?mode=ro",
-            uri=True, timeout=5)
-        try:
-            nazwy = {pid: (n or "") for pid, n in con.execute("SELECT project_id, name FROM projects")}
-        finally:
-            con.close()
-    except sqlite3.Error:
-        pass
+        import rm_klient
+        nazwy = {r["project_id"]: (r.get("name") or "")
+                 for r in rm_klient.master_read("projects-id-nazwa")}
+    except Exception:
+        pass                            # bez nazw pokazemy "projekt <id>"
     wynik = []
     for sciezka in glob.glob(os.path.join(PROJECTS_DIR, "project_*.sqlite")):
         try:
