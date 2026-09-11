@@ -3303,40 +3303,22 @@ class MainWindow(tk.Tk):
     def _init_settings_table(self):
         """Inicjalizuj tabelę settings w master DB"""
         try:
-            # Utwórz tabelę settings jeśli nie istnieje
-            self.db_manager.master_con.execute("""
-                CREATE TABLE IF NOT EXISTS settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT,
-                    updated_at TEXT
-                )
-            """)
-            self.db_manager.master_commit()
-            
-            # Ustaw domyślną wartość backup_on_release jeśli nie istnieje
-            cursor = self.db_manager.master_con.execute("""
-                SELECT value FROM settings WHERE key = 'backup_on_release'
-            """)
-            row = cursor.fetchone()
-            
-            if not row:
-                # Domyślnie włączone
-                self.db_manager.master_con.execute("""
-                    INSERT INTO settings (key, value, updated_at)
-                    VALUES ('backup_on_release', '1', ?)
-                """, (datetime.now().isoformat(),))
-                self.db_manager.master_commit()
+            # Tabelę zakłada migracja (serwer przy starcie / rm_serwer_operacje).
+            wiersze = self.db_manager.master_read(
+                "settings-get", {"key": "backup_on_release"})
+
+            if not wiersze:
+                self.db_manager.master_exec("settings-set", {
+                    "key": "backup_on_release", "value": "1",
+                    "updated_at": datetime.now().isoformat(),
+                })
+                wartosc = "1"
                 print("    ℹ️  Ustawienie backup_on_release = 1 (domyślnie)")
             else:
-                print(f"    ℹ️  Ustawienie backup_on_release = {row[0]}")
-            
-            # Wczytaj wartość do zmiennej
-            cursor = self.db_manager.master_con.execute("""
-                SELECT value FROM settings WHERE key = 'backup_on_release'
-            """)
-            row = cursor.fetchone()
-            if row:
-                self.backup_on_release_var.set(bool(int(row[0])))
+                wartosc = wiersze[0]["value"]
+                print(f"    ℹ️  Ustawienie backup_on_release = {wartosc}")
+
+            self.backup_on_release_var.set(bool(int(wartosc)))
                 
         except Exception as e:
             print(f"⚠️  Błąd inicjalizacji settings: {e}")
@@ -20037,37 +20019,14 @@ class MainWindow(tk.Tk):
         status = "WŁĄCZONY" if enabled else "WYŁĄCZONY"
         
         try:
-            # Upewnij się że tabela istnieje
-            self.db_manager.master_con.execute("""
-                CREATE TABLE IF NOT EXISTS settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT,
-                    updated_at TEXT
-                )
-            """)
-            self.db_manager.master_commit()
-            
-            # Sprawdź czy rekord istnieje
-            cursor = self.db_manager.master_con.execute("""
-                SELECT value FROM settings WHERE key = 'backup_on_release'
-            """)
-            row = cursor.fetchone()
-            
-            if row:
-                # Aktualizuj istniejący rekord
-                self.db_manager.master_con.execute("""
-                    UPDATE settings 
-                    SET value = ?, updated_at = ?
-                    WHERE key = 'backup_on_release'
-                """, (str(int(enabled)), datetime.now().isoformat()))
-            else:
-                # Wstaw nowy rekord
-                self.db_manager.master_con.execute("""
-                    INSERT INTO settings (key, value, updated_at)
-                    VALUES ('backup_on_release', ?, ?)
-                """, (str(int(enabled)), datetime.now().isoformat()))
-            
-            self.db_manager.master_commit()
+            # Jedna operacja zamiast CREATE + SELECT + UPDATE-albo-INSERT
+            # i dwóch commitów. Tabelę zakłada migracja przy starcie serwera,
+            # a `settings-set` to UPSERT — patrz rm_serwer_operacje.
+            self.db_manager.master_exec("settings-set", {
+                "key": "backup_on_release",
+                "value": str(int(enabled)),
+                "updated_at": datetime.now().isoformat(),
+            })
             
             print(f"✅ Zapisano ustawienie backup_on_release = {int(enabled)}")
             
@@ -23138,8 +23097,7 @@ class MainWindow(tk.Tk):
                 return
             
             try:
-                self.db_manager.master_con.execute("DELETE FROM suppliers WHERE supplier_id = ?", (sid,))
-                self.db_manager.master_commit()
+                self.db_manager.master_exec("supplier-delete", {"supplier_id": sid})
                 
                 # Odśwież mapę
                 self.reload_suppliers()
