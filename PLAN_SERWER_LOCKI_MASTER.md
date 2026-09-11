@@ -1,6 +1,6 @@
 # Serwer locków i mastera — plan wdrożenia
 
-Dokument wykonawczy. Wersja 3 (11.09.2026) — po drugiej recenzji.
+Dokument wykonawczy. Wersja 4 (11.09.2026) — **gotowa do kodowania**.
 
 | Etap | Robota | Co naprawia |
 |---|---|---|
@@ -10,6 +10,15 @@ Dokument wykonawczy. Wersja 3 (11.09.2026) — po drugiej recenzji.
 **Kolejność: B, potem A.** B leczy realny ból; A jest tańszy, ale naprawia problem,
 którego 11.09 nie było.
 
+> **Zmiany wobec wersji 3** (trzecia recenzja — poprawki wykonawcze):
+> `_server_request_log` **w masterze**, bez `ATTACH` — jedna baza, jeden journal,
+> jedna transakcja (§3); `request_id` dla locków żyje **tylko w bieżącym
+> `server_epoch`** — inaczej po restarcie wskrzeszałby unieważniony lease (§3);
+> `lock-commit-start` domyka wyścig między sprawdzeniem lease'u a kopiowaniem
+> pliku (§6); **wycofanie programu ≠ odtworzenie bazy** — rollback nie kasuje
+> pracy z całego dnia (§9); master na **lokalnym dysku** maszyny `nic`, SMB znika
+> ze ścieżki do bazy (§1); kanoniczny JSON w HMAC (§8).
+>
 > **Zmiany wobec wersji 2** (druga recenzja): **nie ma pilota** na produkcyjnym
 > masterze — testy na kopii, wdrożenie cutoverem (§9); `request_log` **trwały**,
 > w jednej transakcji z operacją — cache w pamięci ginął przy restarcie (§3);
@@ -114,6 +123,16 @@ który Python obsługuje natywnie — a logika locków już istnieje w `lock_man
 **Nasłuch na LAN.** Jedyna różnica wobec mostu (tamten: `127.0.0.1`). Stąd
 autoryzacja — §8.
 
+**Serwer i master na LOKALNYM dysku maszyny `nic`.** To domyka całą rzecz: serwer
+otwiera `D:\RM_BAZA\master.sqlite`, a nie `\\nic\rysunki\RM_BAZA\master.sqlite`.
+**SMB znika ze ścieżki do bazy całkowicie** — razem z sieciowymi blokadami
+plikowymi, które były źródłem awarii. Udział sieciowy zostaje dla plików
+projektów i rysunków; baza przestaje przez niego przechodzić.
+
+Przy przenosinach pliku pamiętać o `sync_config.json` — klienci nie będą już
+potrzebować ścieżki do mastera (nie otwierają go), ale narzędzia read-only
+wymienione w §11 — owszem.
+
 ---
 
 ## 2. Kontrakt: kto dotyka pliku
@@ -173,11 +192,10 @@ INSERT + COMMIT ✓  →  serwer pada przed odpowiedzią  →  restart
                    →  cache pusty  →  klient ponawia  →  DRUGI INSERT
 ```
 
-Dlatego dziennik idzie na dysk, do **osobnej bazy** `rm_serwer.sqlite` (nie do
-mastera — to stan serwera, nie dane firmy):
+Dziennik idzie **do samego mastera**, jako tabela techniczna:
 
 ```sql
-CREATE TABLE request_log (
+CREATE TABLE _server_request_log (
     request_id  TEXT PRIMARY KEY,
     operation   TEXT NOT NULL,
     kto         TEXT,
@@ -186,16 +204,51 @@ CREATE TABLE request_log (
 );
 ```
 
-Zapis do `request_log` i sama operacja idą **w jednej transakcji** na tym samym
-połączeniu — inaczej wraca ta sama dziura, tylko węższa. Ponieważ master
-i `rm_serwer.sqlite` to dwa pliki, w praktyce znaczy to: `ATTACH` bazy serwera
-do połączenia z masterem i jeden `COMMIT` na obie.
+```
+BEGIN
+    właściwa operacja
+    INSERT _server_request_log
+COMMIT
+```
+
+**Jedna baza, jeden journal, jedna transakcja.** Rozważałem osobną
+`rm_serwer.sqlite` z `ATTACH`, ale to komplikuje najważniejszą gwarancję systemu
+w zamian za czystość estetyczną — łatwiej udowodnić brak dziury, gdy wszystko
+siedzi w jednym pliku, którego i tak jesteśmy jedynym właścicielem.
+
+Podkreślenie `_` w nazwie mówi wprost: to stan serwera, nie dane firmy. Backup
+obejmuje ją razem z resztą — i dobrze, bo po odtworzeniu kopii ochrona przed
+duplikatami działa dalej.
 
 Czyszczenie: rekordy starsze niż **24 h** (raz dziennie, przy okazji backupu).
 Klient generuje `request_id` **raz na operację**, nie raz na próbę.
 
-Dotyczy: wszystkich `*-add/-edit/-delete`, `lock-acquire`, `lock-release`.
-Odczyty są idempotentne, więc ich nie obejmuje.
+### Dwa różne czasy życia: master kontra locki
+
+`request_id` działa inaczej dla zapisów do mastera i dla locków — inaczej wraca
+sprzeczność z zasadą „restart unieważnia wszystkie lease'y" (§5):
+
+```
+lock-acquire  →  sukces
+odpowiedź     →  ginie
+serwer        →  restart (nowy epoch, stare lease'y nieważne)
+klient        →  ponawia z tym samym request_id
+serwer        →  zwraca zapamiętany lock_id + STARY epoch  ❌
+```
+
+Klient dostałby lock, który według własnej zasady serwera już nie istnieje.
+
+| Operacje | Czas życia `request_id` |
+|---|---|
+| **master** (`*-add/-edit/-delete`, `master-batch`) | trwały, 24 h — przetrwa restart |
+| **locki** (`lock-acquire`, `lock-release`) | **tylko w pamięci, w ramach bieżącego `server_epoch`** |
+
+Po restarcie cache locków znika **razem z lease'ami** — logicznie spójne. Klient
+ponawiający `lock-acquire` po restarcie dostaje nowy lock (albo odmowę), nigdy
+wskrzeszonego trupa.
+
+Odczyty są idempotentne, więc ochrona ich nie obejmuje — ale `request_id`
+wysyłamy **przy każdym żądaniu**, bo wchodzi do podpisu HMAC (§8).
 
 ### Nazwane operacje, nigdy SQL
 
@@ -478,7 +531,42 @@ ZAPIS PROJEKTU NA Y: wymaga
     ✓ ten sam server_epoch
 ```
 
-Gdy którykolwiek nie jest spełniony:
+### Sprawdzenie i zapis muszą być jednym procesem
+
+Samo sprawdzenie przed kopiowaniem **nie wystarcza** — zostaje okno:
+
+```
+16:00:00.000  lease sprawdzony ✓
+16:00:00.050  lease wygasa / ktoś robi force
+16:00:00.100  drugi klient dostaje projekt
+16:00:00.200  pierwszy NADAL kopiuje plik na Y:
+```
+
+Kopia trwa 2 ms, więc szansa jest mała — ale skoro budujemy porządny system
+locków, zamykamy to do końca. Stąd dodatkowa komenda:
+
+```
+lock-commit-start(project_id, lock_id)
+    → serwer sprawdza lease
+    → oznacza lock jako COMMITTING
+    → przedłuża o 30 s
+    → w tym czasie NIE WOLNO go oddać nikomu, także przez force
+```
+
+Pełna sekwencja zwolnienia locka:
+
+```
+lock-commit-start  →  kopiowanie pliku na Y:  →  lock-release
+```
+
+Gdy klient zginie między `commit-start` a `release`, stan COMMITTING wygasa po
+30 s i lock wraca do obiegu normalnie — bez ręcznej interwencji.
+
+`force` na locku w stanie COMMITTING jest **odrzucany** z komunikatem „projekt
+jest w trakcie zapisu, spróbuj za chwilę". To jedyny moment, w którym `force`
+nie działa — i słusznie, bo przerwałby zapis w połowie.
+
+Gdy którykolwiek warunek nie jest spełniony (albo `lock-commit-start` odmówi):
 
 ```
 ⛔ Nie można nadpisać projektu — lock wygasł albo należy do kogoś innego.
@@ -543,9 +631,25 @@ nikogo — dowolny klient w LAN napisze, że jest ADMIN, i wywoła `lock-force-d
 
 ```
 sekret:   plik na Y: czytelny tylko dla grupy RM_BAZA
-hmac:     HMAC-SHA256(sekret, request_id + cmd + json(args))
+hmac:     HMAC-SHA256(sekret, request_id + "|" + cmd + "|" + kanoniczny_json(args))
 serwer:   odrzuca żądanie bez poprawnego HMAC
 ```
+
+**Kanoniczny JSON** — inaczej podpis raz na jakiś czas nie zgodzi się bez powodu,
+bo Python ułożył klucze inaczej:
+
+```python
+json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+```
+
+Trzy rzeczy muszą być ustalone po obu stronach: **kolejność kluczy** (`sort_keys`),
+**brak spacji** (`separators`) i **kodowanie znaków** (`ensure_ascii=False`, bo
+w danych są polskie znaki i nazwy dostawców). Separator `|` między członami —
+żeby `request_id` „ab" + `cmd` „c" nie dawało tego samego co „a" + „bc".
+
+`request_id` idzie w **każdym** żądaniu, także w odczytach — nie dla
+idempotencji (odczyty jej nie potrzebują), lecz dlatego, że wchodzi do podpisu
+i chroni przed powtórzeniem przechwyconego żądania.
 
 To nie kryptografia wojskowa — to bariera przeciw przypadkowi i ciekawskiemu
 skryptowi.
@@ -620,10 +724,31 @@ Poza godzinami pracy albo w umówionym oknie:
 Krok 3 jest istotny: dopóki któryś klient trzyma plik, serwer nie jest jedynym
 właścicielem i cutover jest pozorny.
 
-**Wycofanie** (gdyby coś poszło nie tak): zatrzymać serwer, przywrócić poprzedni
-`.exe` z `RM_BAZA_v15_MAG.exe.przed_*`, odtworzyć master z kopii z kroku 4.
-Decyzja o wycofaniu do końca pierwszego dnia — potem w masterze są już dane
-zapisane przez serwer.
+### Wycofanie — dwie różne rzeczy
+
+⚠️ **Wycofanie programu to NIE jest odtworzenie bazy.** Mylenie tych dwóch
+kasuje pracę: jeśli serwer działał pięć godzin, a ktoś odtworzy master z kopii
+zrobionej o 7:30, ginie pięć godzin pracy całej firmy.
+
+**Wycofanie programu** — gdy nowa wersja się źle zachowuje:
+
+```
+1. Zatrzymaj RM_SERWER
+2. Zrób AWARYJNĄ kopię AKTUALNEGO mastera   ← bezcenne przy diagnozie
+3. Wróć do starego .exe (RM_BAZA_v15_MAG.exe.przed_*)
+4. Pracuj dalej na AKTUALNYM masterze
+```
+
+Schemat bazy się nie zmienia, więc stary klient czyta i pisze te dane bez
+problemu — wraca tylko do robienia tego wprost po SMB.
+
+**Odtworzenie bazy z kopii sprzed cutoveru** — osobna, świadoma decyzja, wyłącznie
+gdy master jest **faktycznie uszkodzony** (`PRAGMA integrity_check` zgłasza błędy,
+brakuje tabel, dane są wewnętrznie sprzeczne). Wtedy i tak najpierw kopia
+awaryjna z kroku 2 — bo może się okazać, że da się z niej coś odzyskać.
+
+Nie ma terminu „do końca pierwszego dnia" — wycofanie programu jest bezpieczne
+zawsze.
 
 ### Etap A
 
@@ -696,5 +821,5 @@ Pozostałe narzędzia dotykające mastera są **bezpieczne** i zostają bez zmia
 
 ---
 
-*Wersja 3, 11.09.2026 — po drugiej recenzji. Poprzednie wersje w historii gita
-(`c6130ff`, `d3e2f6e`).*
+*Wersja 4, 11.09.2026 — gotowa do kodowania. Poprzednie wersje w historii gita
+(`c6130ff`, `d3e2f6e`, `2cfec13`).*
