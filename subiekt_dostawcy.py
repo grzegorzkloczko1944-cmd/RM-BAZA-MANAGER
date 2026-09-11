@@ -36,6 +36,12 @@ def _master_path():
     return os.path.join(os.path.dirname(PROJECTS_DIR.rstrip("\\/")), "master.sqlite")
 
 
+def _serwer():
+    """RM_SERWER — jedyna droga do mastera RM_BAZA (konfiguruje go RM_BAZA)."""
+    import rm_klient
+    return rm_klient
+
+
 # ── Kontrahenci z Subiekta ──────────────────────────────────────────────────
 def pobierz_kontrahentow(timeout=TIMEOUT_S):
     """[{id, nazwa, nip}] — firmy z Subiekta. Przez stały most, z fallbackiem."""
@@ -76,19 +82,11 @@ def _pobierz_kontrahentow_cli(timeout):
 
 # ── Dostawcy RM_BAZA ────────────────────────────────────────────────────────
 def pobierz_dostawcow():
-    """[{supplier_id, name, nip}] z master.sqlite."""
-    p = _master_path()
-    if not os.path.isfile(p):
-        raise RuntimeError(f"Brak bazy głównej: {p}")
-    con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
-    try:
-        return [{"supplier_id": r[0], "name": (r[1] or "").strip(),
-                 "nip": (r[2] or "").strip() if r[2] else ""}
-                for r in con.execute(
-                    "SELECT supplier_id, name, nip FROM suppliers "
-                    "WHERE COALESCE(name,'') <> ''")]
-    finally:
-        con.close()
+    """Dostawcy RM_BAZA (id, nazwa, NIP) — przez serwer; tylko z nazwą."""
+    return [{"supplier_id": w["supplier_id"], "name": (w.get("name") or "").strip(),
+             "nip": (w.get("nip") or "").strip()}
+            for w in _serwer().master_read("suppliers-list")
+            if (w.get("name") or "").strip()]
 
 
 def _uprosc(s):
@@ -164,60 +162,44 @@ def dopasuj(dostawcy, kontrahenci):
 
 
 def dopisz_nipy(pary, zapisz=False):
-    """Uzupełnia puste NIP-y w RM_BAZA. Zwraca listę (nazwa, nip, status)."""
+    """Porównaj NIP-y RM_BAZA z Subiektem; przy zapisz=True dopisz brakujące
+    (jednym batchem)."""
     zmiany = []
     for d, k, powod in pary:
         if not k or not k["nip"]:
             continue
         if d["nip"]:
-            # Nie nadpisujemy — jeśli NIP już jest, to ktoś go wpisał świadomie.
             status = "ma-nip" if d["nip"] == k["nip"] else "ROZBIEŻNY"
             zmiany.append((d["name"], d["nip"], status))
             continue
         zmiany.append((d["name"], k["nip"], "do-dopisania"))
-
     if not zapisz:
         return zmiany
-
-    p = _master_path()
-    con = sqlite3.connect(p, timeout=15.0)
-    try:
-        con.execute("PRAGMA journal_mode=DELETE")   # WAL nie działa przez SMB
-        con.execute("PRAGMA busy_timeout=5000")
-        for d, k, powod in pary:
-            if k and k["nip"] and not d["nip"]:
-                con.execute("UPDATE suppliers SET nip = ? WHERE supplier_id = ?",
-                            (k["nip"], d["supplier_id"]))
-        con.commit()
-    finally:
-        con.close()
+    operacje = [{"operation": "supplier-nip-set",
+                 "params": {"nip": k["nip"], "supplier_id": d["supplier_id"]}}
+                for d, k, powod in pary if k and k["nip"] and not d["nip"]]
+    if operacje:
+        _serwer().master_batch(operacje)
     return [(n, nip, "zapisany" if s == "do-dopisania" else s) for n, nip, s in zmiany]
 
 
 def dane_kontaktowe(nazwy):
-    """{nazwa: {email, telefon}} — z suppliers, do założenia kontrahenta."""
-    p = _master_path()
-    if not os.path.isfile(p) or not nazwy:
+    """{nazwa: {email, telefon}} dla dostawców o podanych nazwach.
+    Pierwszeństwo mają kolumny *_default (jak w oryginalnym SELECT)."""
+    if not nazwy:
         return {}
-    con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    chciane = set(nazwy)
+    out = {}
     try:
-        cols = {r[1] for r in con.execute("PRAGMA table_info('suppliers')")}
-        mail = [c for c in ("email_default", "email") if c in cols]
-        tel = [c for c in ("phone_default", "phone") if c in cols]
-        sel = ["name"] + mail + tel
-        q = (f"SELECT {', '.join(sel)} FROM suppliers "
-             f"WHERE name IN ({','.join('?' * len(nazwy))})")
-        out = {}
-        for r in con.execute(q, list(nazwy)):
-            wart = list(r[1:])
-            e = next((v for v in wart[:len(mail)] if v and str(v).strip()), "")
-            t = next((v for v in wart[len(mail):] if v and str(v).strip()), "")
-            out[r[0]] = {"email": str(e).strip(), "telefon": str(t).strip()}
-        return out
-    except sqlite3.Error:
+        for w in _serwer().master_read("suppliers-list"):
+            if w.get("name") not in chciane:
+                continue
+            e = next((v for v in (w.get("email_default"), w.get("email")) if v and str(v).strip()), "")
+            t = next((v for v in (w.get("phone_default"), w.get("phone")) if v and str(v).strip()), "")
+            out[w["name"]] = {"email": str(e).strip(), "telefon": str(t).strip()}
+    except Exception:
         return {}
-    finally:
-        con.close()
+    return out
 
 
 def zaloz_w_subiekcie(dostawcy_do_zalozenia, zapisz=False, timeout=TIMEOUT_S):

@@ -47,26 +47,13 @@ def _sciezka_master():
 
 
 def id_dostawcow_produkcji(master_path=None):
-    """{supplier_id} dla dostawców produkcji własnej.
-
-    Pusty zbiór, gdy bazy nie ma albo nie ma tabeli — wtedy NIC nie jest
-    produkcją własną i wszystko idzie starą drogą na ZK. To bezpieczniejsza
-    strona błędu niż odwrotna: pominięcie pozycji na ZK jest widoczne dopiero
-    przy dostawie, a nadmiarowa pozycja rzuca się w oczy od razu.
-    """
-    path = master_path or _sciezka_master()
-    if not os.path.isfile(path):
-        return set()
+    """Id dostawców „produkcyjnych" (RMPAK itp.) — przez serwer.
+    `master_path` ignorowany, zostaje dla wołających."""
     try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        try:
-            return {r[0] for r in con.execute(
-                "SELECT supplier_id FROM suppliers WHERE name IN "
-                f"({','.join('?' * len(DOSTAWCY_PRODUKCJA))})",
-                DOSTAWCY_PRODUKCJA)}
-        finally:
-            con.close()
-    except sqlite3.Error:
+        import rm_klient
+        return {w["supplier_id"] for w in rm_klient.master_read("suppliers-list")
+                if w.get("name") in DOSTAWCY_PRODUKCJA}
+    except Exception:
         return set()
 
 

@@ -752,20 +752,15 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         return pozycje
 
     def _email_dostawcy(self, dok):
-        """Adres dostawcy z RM_BAZA — po nazwie z dokumentu."""
+        """E-mail dostawcy RM_BAZA dla podmiotu dokumentu (dokładnie, potem luźno)."""
         try:
             import subiekt_zamowienia as sz
             nazwa = (dok.get("podmiot") or "").strip()
             if not nazwa:
                 return ""
-            con = sqlite3.connect(f"file:{sz._sciezka_master()}?mode=ro", uri=True)
-            try:
-                wiersze = con.execute(
-                    "SELECT name, COALESCE(NULLIF(TRIM(email),''),"
-                    "                      NULLIF(TRIM(email_default),'')) "
-                    "FROM suppliers WHERE is_active=1").fetchall()
-            finally:
-                con.close()
+            wiersze = [(w.get("name"),
+                        (w.get("email") or "").strip() or (w.get("email_default") or "").strip() or None)
+                       for w in sz._serwer().master_read("suppliers-list") if w.get("is_active")]
             cel = sz._uprosc_nazwe(nazwa)
             for n, mail in wiersze:
                 if mail and sz._uprosc_nazwe(n or "") == cel:

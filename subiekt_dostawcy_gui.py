@@ -472,16 +472,10 @@ class DostawcyWindow(tk.Toplevel, Kreciolek):
         raport = []
         try:
             if nipy:
-                con = sqlite3.connect(sd._master_path(), timeout=15.0)
-                try:
-                    con.execute("PRAGMA journal_mode=DELETE")     # WAL nie działa przez SMB
-                    con.execute("PRAGMA busy_timeout=5000")
-                    for w in nipy:
-                        con.execute("UPDATE suppliers SET nip = ? WHERE supplier_id = ?",
-                                    (w["nip_sub"], w["supplier_id"]))
-                    con.commit()
-                finally:
-                    con.close()
+                sd._serwer().master_batch([
+                    {"operation": "supplier-nip-set",
+                     "params": {"nip": w["nip_sub"], "supplier_id": w["supplier_id"]}}
+                    for w in nipy])
                 raport.append(f"✅ NIP dopisany w RM_BAZA: {len(nipy)}")
             if zaloz:
                 wynik = sd.zaloz_w_subiekcie(

@@ -319,25 +319,12 @@ def blad_mostu(exe, tryb, proc, out_path):
 
 # ── Odczyt numerów rysunków z bazy projektu ─────────────────────────────────
 def nazwa_projektu(project_id):
-    """Nazwa projektu z master.sqlite ("3000 Testowy") albo "".
-
-    Potrzebna do struktury zlozen: read_tree() szuka folderu projektu po
-    NAZWIE, nie po id. Okno stanow dostaje z RM_BAZA samo project_id, wiec
-    dociagamy ja tutaj, zamiast zmieniac sygnature open_window i wszystkie
-    wywolania.
-    """
-    sciezka = os.path.join(os.path.dirname(PROJECTS_DIR), "master.sqlite")
-    if not os.path.isfile(sciezka):
-        return ""
+    """Nazwa projektu z mastera RM_BAZA (przez serwer); "" gdy brak."""
     try:
-        con = sqlite3.connect(f"file:{sciezka}?mode=ro", uri=True, timeout=5)
-        try:
-            r = con.execute("SELECT name FROM projects WHERE project_id=?",
-                            (project_id,)).fetchone()
-        finally:
-            con.close()
-        return (r[0] or "").strip() if r else ""
-    except sqlite3.Error:
+        import rm_klient
+        r = rm_klient.master_read("project-name", {"project_id": project_id})
+        return (r[0].get("name") or "").strip() if r else ""
+    except Exception:
         return ""
 
 

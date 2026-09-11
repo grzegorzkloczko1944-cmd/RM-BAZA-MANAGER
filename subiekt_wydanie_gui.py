@@ -542,28 +542,17 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
     # ── dane ────────────────────────────────────────────────────────────
 
     def _wczytaj_osoby(self):
-        """Lista do pola „Pobiera" — z tabeli users w master.sqlite."""
+        """Lista osób (aktywni użytkownicy RM_BAZA) do pól „pobiera"/„wydał"."""
         osoby = []
         try:
-            import sqlite3
-            from subiekt_stany import PROJECTS_DIR
-            import os
-            master = os.path.join(os.path.dirname(PROJECTS_DIR.rstrip("\\/")),
-                                  "master.sqlite")
-            con = sqlite3.connect("file:%s?mode=ro" % master, uri=True)
-            osoby = [r[0] for r in con.execute(
-                "SELECT COALESCE(NULLIF(TRIM(display_name), ''), username) "
-                "FROM users WHERE COALESCE(is_active, 1) = 1 "
-                "ORDER BY 1") if r[0]]
-            con.close()
+            import rm_klient
+            osoby = sorted({((r.get("display_name") or "").strip() or r.get("username") or "")
+                            for r in rm_klient.master_read("users-list")
+                            if r.get("is_active") is None or r.get("is_active")} - {""})
         except Exception as e:
             print("⚠️  Nie wczytano listy osób: %s" % e)
         self.combo_pobiera["values"] = osoby
         self.combo_wydal["values"] = osoby
-
-        # „Wydał" to ten, kto stoi przy komputerze — podstawiamy zalogowanego,
-        # żeby magazynier nie klikał tego przy każdym wydaniu. „Pobiera"
-        # zostaje PUSTE: to świadomy wybór, kto odbiera towar.
         import os
         ja = (os.environ.get("USERNAME") or "").strip().upper()
         for o in osoby:
