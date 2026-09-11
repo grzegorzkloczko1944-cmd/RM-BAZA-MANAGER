@@ -1,38 +1,57 @@
-# Serwer locków i mastera — plan wdrożenia
+# Serwer master.sqlite — plan wdrożenia
 
-Dokument wykonawczy. Wersja 4 (11.09.2026) — **gotowa do kodowania**.
+Dokument wykonawczy. Wersja 6 (11.09.2026) — **gotowa do kodowania**.
 
-| Etap | Robota | Co naprawia |
+| Zakres | Robota | Co naprawia |
 |---|---|---|
-| **B. Master przez serwer** | 3–4 dni | awarię z 11.09.2026 — u źródła |
-| **A. Locki przez serwer** | 1–2 dni | wyścigi o pliki `.lock`, stale locks |
+| **Master przez serwer** | 3–4 dni | awarię z 11.09.2026 — u źródła |
 
-**Kolejność: B, potem A.** B leczy realny ból; A jest tańszy, ale naprawia problem,
-którego 11.09 nie było.
+> **Zmiany wobec wersji 5**: **read-only to nie zwolnienie** — narzędzia
+> raportowe też nie mogą otwierać żywego mastera, bo czytelnik trzyma SHARED
+> (§10, ze snapshotem jako rozwiązaniem); weryfikacja cutoveru przez
+> **`handle.exe` na maszynie `nic`**, nie przez „Otwarte pliki" — po przenosinach
+> na dysk lokalny tamta lista jest pusta zawsze (§8, §9); usunięte resztki po
+> wyciętym serwerze locków w sekcji bezpieczeństwa.
 
-> **Zmiany wobec wersji 3** (trzecia recenzja — poprawki wykonawcze):
-> `_server_request_log` **w masterze**, bez `ATTACH` — jedna baza, jeden journal,
-> jedna transakcja (§3); `request_id` dla locków żyje **tylko w bieżącym
-> `server_epoch`** — inaczej po restarcie wskrzeszałby unieważniony lease (§3);
-> `lock-commit-start` domyka wyścig między sprawdzeniem lease'u a kopiowaniem
-> pliku (§6); **wycofanie programu ≠ odtworzenie bazy** — rollback nie kasuje
-> pracy z całego dnia (§9); master na **lokalnym dysku** maszyny `nic`, SMB znika
-> ze ścieżki do bazy (§1); kanoniczny JSON w HMAC (§8).
+> **Zmiana wobec wersji 4: LOCKI ZOSTAJĄ TAKIE, JAKIE SĄ.**
 >
-> **Zmiany wobec wersji 2** (druga recenzja): **nie ma pilota** na produkcyjnym
-> masterze — testy na kopii, wdrożenie cutoverem (§9); `request_log` **trwały**,
-> w jednej transakcji z operacją — cache w pamięci ginął przy restarcie (§3);
-> restart serwera **unieważnia wszystkie lease'y**, bez odtwarzania — usunięta
-> sprzeczność z zapisem locków na dysk (§5); zapis projektu na `Y:` wymaga
-> **potwierdzonego lease'u**, inaczej kopia awaryjna (§6); HMAC uwierzytelnia
-> klienta, **nie użytkownika** — docelowo sesja (§8).
+> Wersje 1–4 miały drugi etap — locki projektów przez serwer, z lease'ami,
+> TTL, heartbeatem i `server_epoch`. **Wypadł z zakresu**, i słusznie: sam
+> dokument przyznawał, że „naprawia problem, którego 11.09 nie było".
 >
-> **Zmiany wobec wersji 1** (pierwsza recenzja): klienci **nie otwierają**
-> master.sqlite — także do odczytu (§4); **nie ma** automatycznego fallbacku
-> per-klient (§6); `request_id` przeciw duplikatom po zerwanym TCP (§3);
-> lease z TTL i `server_epoch` zamiast gołego heartbeatu (§5); `master-exec`
-> przyjmuje **nazwane operacje**, nigdy SQL (§3, §8); backup mastera przechodzi
-> na serwer w etapie B (§4); token HMAC w każdym żądaniu (§8).
+> Locki plikowe działają. `lock_manager_v2.py` ruszany cztery razy w całej
+> historii repozytorium, bez śladu incydentu — nikt nie zgłosił zgubionej
+> pracy ani dwóch osób w jednym projekcie. Bramka przed nadpisaniem cudzej
+> pracy **już istnieje** i już sprawdza `lock_id` (RM_BAZA, `release_lock`;
+> RM_MANAGER, `rm_manager.py:313` — „ostatnia bramka przed nadpisaniem
+> cudzych danych"). Projektowałem od nowa coś, co jest.
+>
+> Refaktor działającego elementu bez bólu to koszt bez zysku. Zostaje jeden
+> cel, dający się zmieścić w jednym zdaniu:
+>
+> ```
+> dziś:        10 komputerów ──SMB──► master.sqlite
+> po zmianie:  10 komputerów ──TCP──► serwer ──► master.sqlite
+> ```
+>
+> Projekty i locki zostają całkowicie poza tym.
+>
+> Co odpadło: `rm_serwer_locki.py`, TTL, heartbeat, `server_epoch`,
+> `lock-acquire/release/owner`, `lock-commit-start`, migracja 13 metod
+> `lock_manager_v2`, bramka lease przed zapisem projektu i cała obsługa
+> utraty lease.
+
+> **Zmiany wobec wersji 3** (poprawki wykonawcze): `_server_request_log`
+> **w masterze**, bez `ATTACH` — jedna baza, jeden journal, jedna transakcja
+> (§3); **wycofanie programu ≠ odtworzenie bazy** — rollback nie kasuje pracy
+> z całego dnia (§8); master na **lokalnym dysku** maszyny `nic`, SMB znika
+> ze ścieżki do bazy (§1); kanoniczny JSON w HMAC (§7).
+>
+> **Zmiany wobec wersji 2**: klienci **nie otwierają** master.sqlite — także
+> do odczytu (§4); **nie ma** automatycznego fallbacku per-klient (§5);
+> `request_id` przeciw duplikatom po zerwanym TCP (§3); `master-exec`
+> przyjmuje **nazwane operacje**, nigdy SQL (§3, §7); backup mastera
+> przechodzi na serwer (§4); token HMAC w każdym żądaniu (§7).
 
 ---
 
@@ -103,7 +122,7 @@ Wzorzec mostu Subiekta — sprawdzony, wszyscy go znają.
          |
          |  jedno połączenie SQLite, jeden wątek zapisu
          v
-    master.sqlite  +  locks/  +  backups/
+    master.sqlite  +  backups/     (locks/ ZOSTAJĄ na Y: — poza zakresem)
 ```
 
 ### Decyzje i powody
@@ -117,11 +136,11 @@ nie przez plik" — i to dostajemy.
 kolejki — jak `SferaWorker` w moście. Współbieżność **znika z problemu**, zamiast
 być obsługiwana.
 
-**Serwer w Pythonie.** Most jest w C#, bo woła SDK Sfery. Tu rozmawiamy z SQLite,
-który Python obsługuje natywnie — a logika locków już istnieje w `lock_manager_v2.py`.
+**Serwer w Pythonie.** Most jest w C#, bo woła SDK Sfery. Tu rozmawiamy wyłącznie
+z SQLite, który Python obsługuje natywnie — żadnej zewnętrznej zależności.
 
 **Nasłuch na LAN.** Jedyna różnica wobec mostu (tamten: `127.0.0.1`). Stąd
-autoryzacja — §8.
+autoryzacja — §7.
 
 **Serwer i master na LOKALNYM dysku maszyny `nic`.** To domyka całą rzecz: serwer
 otwiera `D:\RM_BAZA\master.sqlite`, a nie `\\nic\rysunki\RM_BAZA\master.sqlite`.
@@ -131,7 +150,7 @@ projektów i rysunków; baza przestaje przez niego przechodzić.
 
 Przy przenosinach pliku pamiętać o `sync_config.json` — klienci nie będą już
 potrzebować ścieżki do mastera (nie otwierają go), ale narzędzia read-only
-wymienione w §11 — owszem.
+wymienione w §10 — owszem.
 
 ---
 
@@ -223,32 +242,9 @@ duplikatami działa dalej.
 Czyszczenie: rekordy starsze niż **24 h** (raz dziennie, przy okazji backupu).
 Klient generuje `request_id` **raz na operację**, nie raz na próbę.
 
-### Dwa różne czasy życia: master kontra locki
-
-`request_id` działa inaczej dla zapisów do mastera i dla locków — inaczej wraca
-sprzeczność z zasadą „restart unieważnia wszystkie lease'y" (§5):
-
-```
-lock-acquire  →  sukces
-odpowiedź     →  ginie
-serwer        →  restart (nowy epoch, stare lease'y nieważne)
-klient        →  ponawia z tym samym request_id
-serwer        →  zwraca zapamiętany lock_id + STARY epoch  ❌
-```
-
-Klient dostałby lock, który według własnej zasady serwera już nie istnieje.
-
-| Operacje | Czas życia `request_id` |
-|---|---|
-| **master** (`*-add/-edit/-delete`, `master-batch`) | trwały, 24 h — przetrwa restart |
-| **locki** (`lock-acquire`, `lock-release`) | **tylko w pamięci, w ramach bieżącego `server_epoch`** |
-
-Po restarcie cache locków znika **razem z lease'ami** — logicznie spójne. Klient
-ponawiający `lock-acquire` po restarcie dostaje nowy lock (albo odmowę), nigdy
-wskrzeszonego trupa.
-
-Odczyty są idempotentne, więc ochrona ich nie obejmuje — ale `request_id`
-wysyłamy **przy każdym żądaniu**, bo wchodzi do podpisu HMAC (§8).
+Dotyczy **wszystkich operacji zmieniających** (`*-add/-edit/-delete`,
+`master-batch`). Odczyty są idempotentne, więc ochrona ich nie obejmuje — ale
+`request_id` wysyłamy przy każdym żądaniu, bo wchodzi do podpisu HMAC (§7).
 
 ### Nazwane operacje, nigdy SQL
 
@@ -265,14 +261,14 @@ master_exec(operation="supplier-delete", params={"supplier_id": 123})
 
 Dotyczy też `master-batch`: lista **nazwanych** operacji, nie tablica SQL-i.
 
-### Komendy — etap B (master)
+### Komendy
 
 | Komenda | Argumenty | Zwraca |
 |---|---|---|
 | `master-read` | `operation`, `params` | wiersze |
 | `master-exec` | `operation`, `params`, `request_id` | `rowcount`, `lastrowid` |
 | `master-batch` | `operacje: [{operation, params}]`, `request_id` | **wszystko albo nic** |
-| `ping` | — | `protokol`, `server_epoch`, `uptime` |
+| `ping` | — | `protokol`, `uptime`, `zapisow_od_startu` |
 
 `master-batch` jest konieczny: „dodaj dostawcę + wpis do audytu" to jedna
 transakcja. Dziś dwa `execute` i jeden `commit`.
@@ -285,17 +281,6 @@ transakcja. Dziś dwa `execute` i jeden `commit`.
   `user-add`, `user-edit`, `user-delete`, `user-audit-add`, `settings-set`,
   `session-heartbeat`, `session-close`, `project-status-sync`, `zd-zamowione-*`
 
-### Komendy — etap A (locki)
-
-| Komenda | Argumenty | Zwraca |
-|---|---|---|
-| `lock-acquire` | `project_id`, `force`, `request_id` | `lock_id`, `expires_at`, `server_epoch` |
-| `lock-release` | `project_id`, `lock_id`, `request_id` | `zwolniony` |
-| `lock-heartbeat` | `project_id`, `lock_id` | `expires_at`, `server_epoch` |
-| `lock-owner` | `project_id` | `owner` albo `null` |
-| `lock-list` | — | wszystkie locki |
-| `lock-force-delete` | `project_id`, `request_id` | `usuniety` |
-
 ### Wersja protokołu
 
 `ping` zwraca `protokol`. Klient zna minimalną zgodną wersję i przy niezgodności
@@ -303,7 +288,7 @@ mówi wprost, co zaktualizować — mechanizm z `subiekt_bridge._sprawdz_protoko
 
 ---
 
-## 4. Etap B — master
+## 4. Zmiany w kodzie
 
 ### Stan obecny
 
@@ -373,116 +358,11 @@ Nie „z definicji" — konkretnie: **żaden klient nie ma otwartego połączeni
 plikiem**, więc nie ma kto trzymać SHARED ani zostawić wiszącej transakcji. Serwer
 ma jedno połączenie, jeden wątek i `try/finally` wokół każdej transakcji.
 
-Zostaje jedno ryzyko: **awaria samego serwera** — §6.
+Zostaje jedno ryzyko: **awaria samego serwera** — §5.
 
 ---
 
-## 5. Etap A — locki jako lease
-
-### Stan obecny
-
-`lock_manager_v2.py` (481 linii) czyta i pisze `Y:\RM_BAZA\locks\project_N.lock`.
-Reszta programu woła **13 metod**, 92 wywołania. Trzy metody to 65 z nich:
-`get_project_lock_owner` (32), `release_project_lock` (21), `acquire_project_lock` (12).
-
-### Co się zmienia
-
-**Tylko wnętrza metod.** Sygnatury zostają → **92 wywołania w GUI nietknięte.**
-
-```python
-# przed
-def get_project_lock_owner(self, project_id):
-    lock_file = self.locks_folder / f"project_{project_id}.lock"
-    if not lock_file.exists():
-        return None
-    with open(lock_file, 'r', encoding='utf-8') as f:
-        return json.load(f)
-
-# po
-def get_project_lock_owner(self, project_id):
-    return rm_klient.zapytaj("lock-owner", {"project_id": project_id}).get("owner")
-```
-
-### Lease, nie „lock z heartbeatem"
-
-```
-TTL locka:   90 s
-heartbeat:   co 20 s   (4 szanse na dojście)
-brak heartbeatu przez 90 s → lock wygasa, serwer oddaje go następnemu
-```
-
-Struktura locka po stronie serwera:
-
-```jsonc
-{
-  "project_id": 90,
-  "lock_id": "380d3f78-…",     // UUID, wymagany przy release i heartbeat
-  "owner": {"user": "ADMIN", "host": "MONGO", "pid": 1234},
-  "acquired_at": "2026-09-11T15:47:07",
-  "expires_at":  "2026-09-11T15:48:37",
-  "server_epoch": "a1b2c3d4"
-}
-```
-
-**`release` i `heartbeat` wymagają właściwego `lock_id`.** Bez tego spóźniony
-klient zwalnia lock, który należy już do kogoś innego — i dwie osoby piszą do
-jednego projektu.
-
-### server_epoch — restart serwera
-
-Krytyczne przy naszym modelu: klient bierze lock, **kopiuje projekt lokalnie**,
-pracuje na kopii i nadpisuje plik przy zwolnieniu. Gdyby serwer zapomniał locki po
-restarcie, drugi użytkownik dostałby ten sam projekt — i jedna praca przepadłaby
-bez śladu.
-
-Serwer generuje `server_epoch` przy każdym starcie. Klient zapamiętuje go przy
-przejęciu locka i porównuje przy każdym heartbeacie:
-
-```
-klient:  epoch = ABC, lock_id = 123
-serwer:  epoch = XYZ            ← serwer wstał na nowo
-
-→ ⛔ UTRACONO LOCK PROJEKTU
-→ zapis na serwer ZABRONIONY
-→ oferta: zapisz kopię awaryjną do C:\RMPAK_CLIENT\awaria\
-```
-
-Ta sama reakcja, gdy `lock-heartbeat` zwróci `ok: false` (lock wygasł albo ktoś
-użył `force`). Kod na to już częściowo istnieje — `release_lock` sprawdza, czy
-lock nadal nasz, i wywołuje `_force_cancel_lock_on_lost`.
-
-### Restart serwera unieważnia WSZYSTKIE lease'y
-
-Bez wyjątków i bez odtwarzania. Rozważałem zapisywanie locków na dysk, żeby
-przetrwały restart — **to nie ma sensu**: skoro każdy restart zmienia `epoch`,
-a klient po zmianie `epoch` i tak uznaje swój lock za utracony, odtworzony lock
-nikomu nie pomaga. Dwie zasady naraz przeczyłyby sobie.
-
-Zasada jest więc jedna i brutalna:
-
-```
-restart RM_SERWER  =  wszystkie stare lease'y nieważne
-```
-
-Co się dzieje po restarcie:
-
-- klient z lockiem dowiaduje się przy najbliższym heartbeacie (≤20 s)
-- **nie może nadpisać pliku projektu** — §6
-- dostaje ofertę zapisu kopii awaryjnej
-- nowy lock bierze świadomie, po obejrzeniu, co się stało
-
-Łatwiejsze do udowodnienia jako bezpieczne niż jakiekolwiek odtwarzanie stanu.
-Restart serwera to rzadkie zdarzenie; utrata cudzej pracy przez „prawie dobrze
-odtworzony" lock byłaby znacznie droższa.
-
-### Co znika z klienta
-
-`cleanup_stale_locks()`, `_release_my_other_locks()`, `_lock_age_seconds()`
-i obsługa „plik zniknął w trakcie czytania". Wszystko to wie teraz serwer.
-
----
-
-## 6. Awaria serwera — bez cichego powrotu do SMB
+## 5. Awaria serwera — bez cichego powrotu do SMB
 
 **Nie ma automatycznego fallbacku per-klient.** To była najgroźniejsza wada wersji 1:
 
@@ -498,91 +378,28 @@ Zamiast tego:
 |---|---|
 | Odczyty z mastera | z **lokalnego cache** (ostatni znany stan, oznaczony jako nieświeży) |
 | Zapisy do mastera | **zablokowane** — komunikat „serwer niedostępny, spróbuj za chwilę" |
-| Locki | **nie można przejąć**; już przejęty działa do wygaśnięcia TTL |
+| Locki projektów | **działają normalnie** — pliki `.lock` na `Y:`, serwer ich nie dotyka |
 | Praca na projekcie | trwa — kopia jest lokalna |
-| Zwolnienie locka | **wymaga potwierdzenia lease'u** — patrz niżej |
+| Zwolnienie locka | **działa normalnie** — plik projektu idzie na `Y:` jak dziś |
 
 **Minuta bez możliwości edycji jest lepsza niż cichy powrót do architektury, która
 spowodowała 40-minutowe zakleszczenie.**
 
-### Zapis projektu na Y: — bramka
+### Co z pracy na projektach przetrwa awarię serwera
 
-Nadpisanie pliku projektu **nie jest** operacją lokalną, choć tak wygląda. Bez
-bramki zdarza się to:
+**Wszystko.** Locki i pliki projektów są poza zakresem tej zmiany — klient bierze
+lock z `Y:\RM_BAZA\locks`, pracuje na kopii lokalnej i oddaje plik na `Y:`
+dokładnie tak jak dziś. Brak serwera oznacza wyłącznie: **nie zapiszesz danych
+z mastera** (dostawcy, użytkownicy, ustawienia, statusy).
 
-```
-15:00  serwer pada
-15:00  klient ma jeszcze ważny lock, pracuje dalej
-15:02  TTL 90 s wygasa
-15:05  serwer wraca
-15:06  KTOŚ INNY dostaje ten projekt i zaczyna pracę
-15:20  pierwszy klient kończy i „normalnie" wrzuca swoją kopię na Y:
-       → praca drugiego znika bez śladu
-```
+To jest mocna strona węższego zakresu: awaria serwera nie może zabrać nikomu
+pracy nad projektem, bo serwer o projektach nic nie wie.
 
-Dlatego **każde** nadpisanie pliku projektu na `Y:` wymaga czterech warunków
-naraz — sprawdzanych **bezpośrednio przed kopiowaniem**, nie przy przejęciu locka:
-
-```
-ZAPIS PROJEKTU NA Y: wymaga
-    ✓ serwer dostępny
-    ✓ ten sam lock_id
-    ✓ lease nadal ważny (expires_at > teraz)
-    ✓ ten sam server_epoch
-```
-
-### Sprawdzenie i zapis muszą być jednym procesem
-
-Samo sprawdzenie przed kopiowaniem **nie wystarcza** — zostaje okno:
-
-```
-16:00:00.000  lease sprawdzony ✓
-16:00:00.050  lease wygasa / ktoś robi force
-16:00:00.100  drugi klient dostaje projekt
-16:00:00.200  pierwszy NADAL kopiuje plik na Y:
-```
-
-Kopia trwa 2 ms, więc szansa jest mała — ale skoro budujemy porządny system
-locków, zamykamy to do końca. Stąd dodatkowa komenda:
-
-```
-lock-commit-start(project_id, lock_id)
-    → serwer sprawdza lease
-    → oznacza lock jako COMMITTING
-    → przedłuża o 30 s
-    → w tym czasie NIE WOLNO go oddać nikomu, także przez force
-```
-
-Pełna sekwencja zwolnienia locka:
-
-```
-lock-commit-start  →  kopiowanie pliku na Y:  →  lock-release
-```
-
-Gdy klient zginie między `commit-start` a `release`, stan COMMITTING wygasa po
-30 s i lock wraca do obiegu normalnie — bez ręcznej interwencji.
-
-`force` na locku w stanie COMMITTING jest **odrzucany** z komunikatem „projekt
-jest w trakcie zapisu, spróbuj za chwilę". To jedyny moment, w którym `force`
-nie działa — i słusznie, bo przerwałby zapis w połowie.
-
-Gdy którykolwiek warunek nie jest spełniony (albo `lock-commit-start` odmówi):
-
-```
-⛔ Nie można nadpisać projektu — lock wygasł albo należy do kogoś innego.
-
-Twoja praca NIE przepadła. Zapisano kopię awaryjną:
-C:\RMPAK_CLIENT\awaria\project_90_2026-09-11_1520.sqlite
-
-Co dalej: przejmij projekt ponownie i przenieś zmiany,
-albo poproś o pomoc przy scaleniu.
-```
-
-⚠️ **Kopia awaryjna to nowa rzecz, nie istnieje dziś.** `_force_cancel_lock_on_lost`
-zamyka lokalną kopię i nic z nią nie robi — przy utracie locka praca **przepada**.
-Trzeba to naprawić razem z bramką: ta sama ścieżka obsługuje oba przypadki.
-
-Retencja kopii awaryjnych: 30 dni, sprzątane przy starcie klienta.
+⚠️ Jeden przypadek do zapamiętania: **„Zamówiono" z wysyłki ZD** siedzi w masterze
+(`zd_zamowione_pozycje`) i jest nakładane na kopię przy przejęciu locka. Przy
+niedostępnym serwerze wpisy **nie znikną** — zostaną nałożone przy następnym
+przejęciu projektu (mechanizm jest idempotentny, patrz `usun_zamowienia`).
+Nic nie ginie, tylko później dochodzi.
 
 ### Żeby ta minuta była minutą
 
@@ -604,30 +421,32 @@ Klienci czytają to przy starcie i **wszyscy naraz** wracają na SMB. To jest
 
 ---
 
-## 7. Pliki
+## 6. Pliki
 
 ```
 rm_serwer.py            TCP, kolejka, jeden wątek, HMAC, request_id     ~300 linii
 rm_serwer_master.py     nazwane operacje + migracje + backup            ~250 linii
-rm_serwer_locki.py      lease, TTL, server_epoch                        ~180 linii
 rm_klient.py            klient (wzorzec subiekt_bridge)                 ~180 linii
 
-lock_manager_v2.py      ZMIANA: wnętrza 13 metod → rm_klient
 database_manager.py     ZMIANA: master_con → master_read/exec/batch
 backup_manager.py       ZMIANA: backup_master() znika z klienta
 RM_BAZA_v15_MAG_STATS_ORG.py   ZMIANA: 17 DML + 8 SELECT
 ```
 
+**`lock_manager_v2.py` — BEZ ZMIAN.** Locki plikowe zostają dokładnie takie,
+jakie są.
+
 Serwer w repo, wystawiany na `\\nic` — zasada z `feedback_most_w_gicie`.
 
 ---
 
-## 8. Bezpieczeństwo
+## 7. Bezpieczeństwo
 
 Most Subiekta słucha na `127.0.0.1`. Ten musi na LAN, więc:
 
 **Token HMAC w każdym żądaniu.** Samo `"kto": {"user": "ADMIN"}` nie uwierzytelnia
-nikogo — dowolny klient w LAN napisze, że jest ADMIN, i wywoła `lock-force-delete`.
+nikogo — dowolny klient w LAN napisze, że jest ADMIN, i wywoła `user-delete`
+albo `supplier-delete`.
 
 ```
 sekret:   plik na Y: czytelny tylko dla grupy RM_BAZA
@@ -668,21 +487,20 @@ kolejne żądania      →  token zamiast gołego "kto"
 ```
 
 Serwer ma już po temu materiał: tabela `users` w masterze i `client_sessions`
-z heartbeatem. To osobna zmiana — **nie blokuje etapu B ani A**, ale powinna
-wejść, zanim przez serwer pójdą operacje groźniejsze niż dziś (np. zarządzanie
-użytkownikami czy kasowanie dokumentów).
+z heartbeatem. To osobna zmiana — **nie blokuje tego wdrożenia**, ale powinna
+wejść, zanim przez serwer pójdą operacje groźniejsze niż dziś.
 
 **Pozostałe:**
 - nasłuch na konkretnym interfejsie LAN, nie `0.0.0.0`
 - reguła zapory: tylko podsieć firmowa
 - **żadnego SQL od klienta** — wyłącznie nazwane operacje (§3)
 - log każdego zapisu: kto, co, kiedy → `C:\RMPAK_CLIENT\rm_serwer_logi\`
-- `lock-force-delete` i operacje na users: dodatkowo rola ADMIN sprawdzana
-  **po stronie serwera**, nie w GUI
+- operacje wrażliwe (`user-add/-edit/-delete`, `settings-set`,
+  `supplier-delete`): rola ADMIN sprawdzana **po stronie serwera**, nie w GUI
 
 ---
 
-## 9. Kolejność wdrożenia
+## 8. Kolejność wdrożenia
 
 ### ⚠️ Nie ma pilota na produkcyjnym masterze
 
@@ -693,20 +511,20 @@ który usuwamy — tylko z dodatkowym pisarzem.
 
 Testujemy na **kopii mastera**, wdrażamy **jednorazowym cutoverem**.
 
-### Etap B — budowa i testy (na kopii)
+### Budowa i testy (na kopii)
 
 1. `rm_serwer.py` + `rm_serwer_master.py` — nazwane operacje, `request_log`,
    migracje, backup
 2. `rm_klient.py` + `master_read/exec/batch` w `DatabaseManager`
 3. Przepisanie 17 DML + 8 SELECT + migracje; **usunięcie `master_con`**
 4. `backup_manager`: backup mastera znika z klienta
-5. RM_MANAGER: `sync_to_master` → operacja `project-status-sync` (§11)
+5. RM_MANAGER: `sync_to_master` → operacja `project-status-sync` (§10)
 6. **Środowisko testowe**: serwer + **kopia** `master.sqlite` + 1–2 klienty ze
    źródeł. Produkcyjny master **nietknięty**.
-7. Testy z §10 — wszystkie, w tym awaria serwera i restart
+7. Testy z §9 — wszystkie, w tym awaria serwera i restart
 8. Build `.exe` → `TESTY RM_BAZA`
 
-### Etap B — cutover (jedno okno, ~30 min)
+### Cutover (jedno okno, ~30 min)
 
 Poza godzinami pracy albo w umówionym oknie:
 
@@ -718,11 +536,31 @@ Poza godzinami pracy albo w umówionym oknie:
 5.  Start RM_SERWER jako usługa + weryfikacja `ping`
 6.  Publikacja `.exe` na produkcję
 7.  Uruchomienie klientów - bramka wersji wymusi nowy `.exe`
-8.  Weryfikacja: Otwarte pliki -> master.sqlite otwarty TYLKO przez serwer
+8.  Weryfikacja NA MASZYNIE nic (handle.exe / Process Explorer):
+    uchwyt do D:\RM_BAZA\master.sqlite ma WYLACZNIE proces RM_SERWER
 ```
 
 Krok 3 jest istotny: dopóki któryś klient trzyma plik, serwer nie jest jedynym
 właścicielem i cutover jest pozorny.
+
+⚠️ **Kroki 3 i 8 sprawdzają co innego i innym narzędziem** — bo w międzyczasie
+baza przeprowadza się z udziału sieciowego na dysk lokalny:
+
+| | Gdzie leży master | Czym sprawdzić |
+|---|---|---|
+| **krok 3** (przed) | `Y:` — udział sieciowy | `\nic` → Zarządzanie komputerem → **Otwarte pliki** |
+| **krok 8** (po) | `D:` na `nic` — lokalnie | na maszynie `nic`: `handle.exe master.sqlite` albo Process Explorer |
+
+„Otwarte pliki" pokazują **wyłącznie uchwyty przez SMB**. Po przenosinach serwer
+otwiera plik lokalnie, więc ta lista będzie pusta **zawsze** — także wtedy, gdy
+coś będzie nie tak. Test, który zawsze przechodzi, nie jest testem.
+
+```
+# na maszynie nic, po cutoverze:
+handle.exe master.sqlite
+
+# oczekiwane: dokładnie jeden proces — RM_SERWER (python.exe / rm_serwer.exe)
+```
 
 ### Wycofanie — dwie różne rzeczy
 
@@ -750,39 +588,29 @@ awaryjna z kroku 2 — bo może się okazać, że da się z niej coś odzyskać.
 Nie ma terminu „do końca pierwszego dnia" — wycofanie programu jest bezpieczne
 zawsze.
 
-### Etap A
+## 9. Testy akceptacyjne
 
-Ten sam schemat: testy na kopii, cutover. **Serwer musi działać, zanim pójdzie
-`.exe`** — klienci bez fallbacku nie przejmą locków w ogóle.
-
-Etap A może iść razem z B w jednym cutoverze, jeśli obie części będą gotowe —
-jedno okno przestoju zamiast dwóch.
-
-
----
-
-## 10. Testy akceptacyjne
-
-**Etap B:**
+**Master przez serwer:**
 - 10 równoczesnych zapisów z różnych maszyn → wszystkie przechodzą
 - `master-batch` przerwany w połowie → **nic** nie zostaje zapisane
 - zerwane TCP po commicie → ponowienie z tym samym `request_id` **nie duplikuje**
 - serwer ubity w trakcie zapisu → klient dostaje błąd, nie cichą stratę
 - żądanie bez poprawnego HMAC → odrzucone
 - żądanie z nieznaną `operation` → odrzucone
-- **po tygodniu: żadne stanowisko nie ma otwartego master.sqlite** (sprawdzić
-  w „Otwarte pliki" na `\\nic` — to jest dowód, że przyczyna zniknęła)
+- **po tygodniu: uchwyt do mastera ma wyłącznie RM_SERWER** — sprawdzone
+  `handle.exe master.sqlite` NA MASZYNIE `nic` (nie przez „Otwarte pliki":
+  te pokazują tylko dostęp przez SMB, a baza leży już lokalnie). To jest dowód,
+  że przyczyna zniknęła — i jedyny test, który wyłapie zapomniany skrypt
+  czytający żywy plik
 
-**Etap A:**
-- dwa stanowiska proszą o ten sam lock w tej samej sekundzie → jedno dostaje
-- klient ubity → lock wygasa po 90 s, nie wisi
-- `release` z cudzym `lock_id` → odrzucony
-- restart serwera → klient z lockiem dostaje „utracono lock", **nie nadpisuje** pliku
-- `force` odbiera lock → poprzedni właściciel dowiaduje się przy heartbeacie (≤20 s)
+**Locki — regresja (muszą działać jak dotąd):**
+- przejęcie i zwolnienie locka projektu — bez zmian
+- `release_lock` przy utraconym locku — nadal wykrywa i nie nadpisuje cudzej pracy
+- praca przy niedostępnym serwerze — lock się bierze, projekt zapisuje na `Y:`
 
 ---
 
-## 11. Czego plan nie rozwiązuje
+## 10. Czego plan nie rozwiązuje
 
 - **`project_con`** — pliki projektów zostają, świadomie (§0)
 - **`rm_manager.sqlite`** — RM_MANAGER ma własną bazę, osobny temat.
@@ -796,17 +624,54 @@ praca idzie na marne:
 | **RM_MANAGER** (`rm_manager.sync_to_master`) | `UPDATE projects SET status, designer, montaz, fat, completed_at` przy zwalnianiu locka | operacja `project-status-sync` przez `rm_klient` |
 | **backup_manager** (`backup_master`) | otwiera master i robi kopię | znika z klienta — backup robi serwer (§4) |
 
-Pozostałe narzędzia dotykające mastera są **bezpieczne** i zostają bez zmian:
-`project_manager.py` (biblioteka — dostaje połączenie z zewnątrz, nie otwiera pliku),
-`Parser_RM_BAZA`, `RM_KOD`, `db.py`, `rm_ai_optimizer` (read-only albo własne ścieżki),
-`ksef_archiwum` (pisze do własnej bazy obok mastera).
+### ⚠️ Read-only to NIE jest zwolnienie
+
+Kuszące jest zostawić narzędzia, które tylko czytają. **Nie wolno** — przeczyłoby
+to mechanizmowi opisanemu w §0: **czytelnik trzyma SHARED i potrafi zablokować
+commit pisarza**. To była druga połowa awarii z 11.09, nie przypis do niej.
+
+Zasada jest jedna, bez wyjątku dla trybu odczytu:
+
+```
+KAŻDY program otwierający ŻYWY master.sqlite
+    → przechodzi przez RM_SERWER
+albo
+    → czyta wyłącznie KOPIĘ / snapshot, nigdy żywego pliku
+```
+
+Po przeniesieniu bazy na `D:` maszyny `nic` te narzędzia i tak przestaną ją
+widzieć pod dotychczasową ścieżką — więc decyzja zapada tak czy inaczej.
+Lepiej podjąć ją świadomie przed cutoverem niż przez awarię po nim.
+
+| Narzędzie | Jak dziś dotyka mastera | Co zrobić |
+|---|---|---|
+| `Parser_RM_BAZA` | `DatabaseManager(master_path=...)` — **otwiera żywy plik** | snapshot: serwer wystawia dzienną kopię do odczytu |
+| `Parser_RM_BAZA_gui` | j.w., ścieżka z okna | j.w. |
+| `RM_KOD` | `master_db_path` z konfiguracji | snapshot albo `master-read` |
+| `db.py` (RM_STATS) | `master_db_path` | snapshot — statystyki nie potrzebują danych sprzed sekundy |
+| `rm_ai_optimizer` | przez `db.py` | jak wyżej |
+| `RM_MANAGER` | **pisze** (`sync_to_master`) | operacja `project-status-sync` (wyżej) |
+| `backup_manager` | otwiera master do kopii | znika z klienta — backup robi serwer (§4) |
+| `project_manager.py` | **biblioteka** — dostaje połączenie z zewnątrz | bez zmian; wołający decyduje |
+| `ksef_archiwum` | pisze do **własnej** bazy obok mastera | bez zmian |
+
+**Snapshot dla czytelników** — najtańsze rozwiązanie dla narzędzi raportowych:
+serwer przy okazji backupu wystawia `master_snapshot.sqlite` na udziale
+sieciowym. Read-only, nikogo nie blokuje, wiek ≤ 24 h. Dla Parsera i statystyk
+to w zupełności wystarcza; gdy któreś będzie potrzebowało świeżych danych,
+dostanie `master-read`.
+
+⚠️ **Inwentaryzacja przed cutoverem jest obowiązkowa** — powyższa lista powstała
+z przeszukania repozytorium, ale skrypty i narzędzia mogą żyć poza nim (harmonogram
+zadań, cudze kopie, makra). Test z §9 (uchwyty do pliku) jest ostatecznym
+sprawdzeniem, czy kogoś nie pominęliśmy.
 - **Bramka wersji** — działa tylko przy starcie; kto ma otwarte, nie zobaczy monitu.
   Przy wdrożeniu trzeba powiedzieć ludziom „zrestartujcie".
 - **Backupy projektów** — zostają po stronie klienta (inne pliki, inny problem)
 
 ---
 
-## 12. Kontekst
+## 11. Kontekst
 
 | Dokument / pamięć | Co zawiera |
 |---|---|
@@ -821,5 +686,5 @@ Pozostałe narzędzia dotykające mastera są **bezpieczne** i zostają bez zmia
 
 ---
 
-*Wersja 4, 11.09.2026 — gotowa do kodowania. Poprzednie wersje w historii gita
-(`c6130ff`, `d3e2f6e`, `2cfec13`).*
+*Wersja 6, 11.09.2026 — gotowa do kodowania. Poprzednie wersje w historii gita
+(`c6130ff`, `d3e2f6e`, `2cfec13`, `5c1a465`, `cbc721d`).*
