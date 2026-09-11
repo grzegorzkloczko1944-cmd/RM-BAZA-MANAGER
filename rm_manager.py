@@ -105,17 +105,56 @@ def _master(master_db_path: str = None):
 
     if not _serwer_ustawiony:
         cfg = {}
-        try:
-            # utf-8-sig: konfiguracja bywa zapisywana z BOM-em
-            with open(r"C:\RMPAK_CLIENT\sync_config.json",
-                      encoding="utf-8-sig") as f:
-                cfg = (json.load(f).get("rm_serwer") or {})
-        except Exception as e:
-            print(f"⚠️  Nie wczytano konfiguracji RM_SERWER: {e}")
+        # utf-8-sig: konfiguracja bywa zapisywana z BOM-em.
+        for sciezka in (r"C:\RMPAK_CLIENT\sync_config.json",
+                        r"Y:\RM_BAZA\sync_config.json"):
+            try:
+                with open(sciezka, encoding="utf-8-sig") as f:
+                    wczytane = (json.load(f).get("rm_serwer") or {})
+            except Exception:
+                continue
+            # Dobieramy BRAKUJĄCE pola, nie cały wpis: lokalny config bywa
+            # ma host i port, ale nie zna sekretu — bez tego stacja
+            # dostawałaby „nieprawidłowy podpis żądania".
+            for klucz in ("host", "port", "sekret"):
+                if not cfg.get(klucz) and wczytane.get(klucz):
+                    cfg[klucz] = wczytane[klucz]
+            if cfg.get("host") and cfg.get("sekret"):
+                break
+        if not cfg.get("host"):
+            print("⚠️  Brak adresu RM_SERWER w sync_config.json")
         rm_klient.ustaw_serwer(cfg.get("host"), port=cfg.get("port"),
                                sekret=cfg.get("sekret"))
         _serwer_ustawiony = True
     return rm_klient
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# WŁASNA BAZA RM_MANAGER — przez serwer (prefiks `rmm-`)
+# ═══════════════════════════════════════════════════════════════════════
+
+def rmm_read(operacja: str, params: dict = None) -> list:
+    """Odczyt z rm_manager.sqlite. Zwraca listę słowników.
+
+    Nazwa musi istnieć w `rm_serwer_operacje.ODCZYT` — SQL żyje tam,
+    nie tutaj. Prefiks `rmm-` kieruje żądanie do właściwej z trzech baz.
+    """
+    return _master().master_read(operacja, params)
+
+
+def rmm_exec(operacja: str, params: dict = None, request_id: str = None) -> dict:
+    """Pojedynczy zapis. Zwraca {'rowcount', 'lastrowid'}."""
+    return _master().master_exec(operacja, params, request_id=request_id)
+
+
+def rmm_batch(operacje: list, request_id: str = None) -> list:
+    """Kilka zapisów jako JEDNA transakcja — wszystko albo nic.
+
+    Tym zastępujemy wzorzec `_open_rm_connection` + kilka `execute`
+    + `_rm_safe_commit`: tam rozjazd między zapisami był możliwy, tutaj
+    nie — serwer wykonuje je w jednej transakcji.
+    """
+    return _master().master_batch(operacje, request_id=request_id)
 
 
 def _open_rm_connection(db_path: str, row_factory: bool = True,
