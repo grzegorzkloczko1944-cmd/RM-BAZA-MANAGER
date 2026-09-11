@@ -540,6 +540,61 @@ ODCZYT = {
         [],
     ),
 
+    # ══ RM_MANAGER — zapytania wcześniej sklejane dynamicznie ═══════
+    #
+    # Klient budował te SQL-e z f-stringów (`WHERE id IN ({placeholders})`,
+    # `SELECT * FROM t {where}`). Tutaj listy jadą jako JEDEN parametr —
+    # tablica JSON rozpakowana przez `json_each` — a filtrowanie, którego
+    # nie da się tak wyrazić, robi wołający na zwróconych wierszach.
+    # Tabele mają od 3 do 151 wierszy, więc pełny odczyt jest tani.
+    "rmm-employees-po-idach": (
+        "SELECT id, name, category FROM employees"
+        " WHERE id IN (SELECT value FROM json_each(?))"
+        " ORDER BY category, name",
+        ["idy_json"],
+    ),
+    "rmm-employees-po-idach-konstrukcja": (
+        "SELECT id, name, category FROM employees"
+        " WHERE id IN (SELECT value FROM json_each(?))"
+        "   AND category = 'Konstrukcja' ORDER BY name",
+        ["idy_json"],
+    ),
+    "rmm-employees-wszystkie": (
+        "SELECT * FROM employees ORDER BY category, name",
+        [],
+    ),
+    "rmm-transports-wszystkie": (
+        "SELECT * FROM transports ORDER BY name",
+        [],
+    ),
+    "rmm-resource-constraints-wszystkie": (
+        "SELECT * FROM resource_constraints"
+        " ORDER BY constraint_type, category, stage_code",
+        [],
+    ),
+    "rmm-company-calendar-wszystkie": (
+        "SELECT * FROM company_calendar ORDER BY date",
+        [],
+    ),
+    # Nieobecności z nazwiskiem pracownika — złączenie po stronie serwera,
+    # żeby klient nie musiał łączyć dwóch list w pamięci.
+    "rmm-nieobecnosci-z-nazwiskami": (
+        "SELECT ea.*, e.name AS employee_name,"
+        "       e.category AS employee_category"
+        " FROM employee_availability ea"
+        " JOIN employees e ON e.id = ea.employee_id"
+        " ORDER BY ea.date_from DESC",
+        [],
+    ),
+    "rmm-wyjazdy-z-nazwiskami": (
+        "SELECT st.*, e.name AS employee_name,"
+        "       e.category AS employee_category"
+        " FROM service_trips st"
+        " LEFT JOIN employees e ON e.id = st.employee_id"
+        " ORDER BY st.date_from DESC",
+        [],
+    ),
+
     # ══ STATUSY PROJEKTÓW ═══════════════════════════════════════════
     # Projekt ma KILKA statusów naraz — `project_statuses` to zbiór, nie
     # jedno pole. Kolejność po `set_at`, bo pierwszy nadany jest głównym.
@@ -1273,6 +1328,55 @@ ZAPIS = {
     "rmm-project-file-tracking-usun": (
         "DELETE FROM project_file_tracking",
         [],
+    ),
+
+    # ══ RM_MANAGER — zapisy wcześniej sklejane dynamicznie ══════════
+    #
+    # ⚠️ COALESCE(?, kolumna): NULL znaczy „nie ruszaj tego pola".
+    # Klient budował `SET` tylko ze zmienionych kolumn; tutaj przekazuje
+    # komplet, a NULL-e zostawiają wartości nietknięte. Bez tego edycja
+    # samego telefonu wyczyściłaby pracownikowi resztę danych.
+    "rmm-employee-zmien": (
+        "UPDATE employees SET"
+        "   name                = COALESCE(?, name),"
+        "   category            = COALESCE(?, category),"
+        "   description         = COALESCE(?, description),"
+        "   contact_info        = COALESCE(?, contact_info),"
+        "   is_active           = COALESCE(?, is_active),"
+        "   phone               = COALESCE(?, phone),"
+        "   email               = COALESCE(?, email),"
+        "   master_max_parallel = COALESCE(?, master_max_parallel),"
+        "   podmiot             = COALESCE(?, podmiot),"
+        "   user_login          = COALESCE(?, user_login),"
+        "   updated_at          = datetime('now','localtime')"
+        " WHERE id = ?",
+        ["name", "category", "description", "contact_info", "is_active",
+         "phone", "email", "master_max_parallel", "podmiot", "user_login",
+         "id"],
+    ),
+    "rmm-service-trip-zmien": (
+        "UPDATE service_trips SET"
+        "   employee_id     = COALESCE(?, employee_id),"
+        "   project_id      = COALESCE(?, project_id),"
+        "   client_or_place = COALESCE(?, client_or_place),"
+        "   trip_type       = COALESCE(?, trip_type),"
+        "   date_from       = COALESCE(?, date_from),"
+        "   date_to         = COALESCE(?, date_to),"
+        "   status          = COALESCE(?, status),"
+        "   note            = COALESCE(?, note),"
+        "   working_days    = COALESCE(?, working_days)"
+        " WHERE id = ?",
+        ["employee_id", "project_id", "client_or_place", "trip_type",
+         "date_from", "date_to", "status", "note", "working_days", "id"],
+    ),
+    # Decyzja o wniosku urlopowym. `decided_by` bywa świadomie czyszczone
+    # (cofnięcie decyzji), więc NIE przez COALESCE — pusta wartość ma
+    # tu znaczyć „wyczyść", nie „zostaw".
+    "rmm-nieobecnosc-decyzja": (
+        "UPDATE employee_availability SET"
+        "   status = ?, decided_by = ?, decided_at = ?, decision_note = ?"
+        " WHERE id = ?",
+        ["status", "decided_by", "decided_at", "decision_note", "id"],
     ),
 
     # ══ STATUSY PROJEKTÓW ═══════════════════════════════════════════
