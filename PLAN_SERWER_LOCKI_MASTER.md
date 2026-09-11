@@ -1,6 +1,6 @@
 # Serwer locków i mastera — plan wdrożenia
 
-Dokument wykonawczy. Wersja 2 (11.09.2026) — po recenzji wersji 1.
+Dokument wykonawczy. Wersja 3 (11.09.2026) — po drugiej recenzji.
 
 | Etap | Robota | Co naprawia |
 |---|---|---|
@@ -10,7 +10,15 @@ Dokument wykonawczy. Wersja 2 (11.09.2026) — po recenzji wersji 1.
 **Kolejność: B, potem A.** B leczy realny ból; A jest tańszy, ale naprawia problem,
 którego 11.09 nie było.
 
-> **Zmiany wobec wersji 1** (wszystkie z recenzji): klienci **nie otwierają**
+> **Zmiany wobec wersji 2** (druga recenzja): **nie ma pilota** na produkcyjnym
+> masterze — testy na kopii, wdrożenie cutoverem (§9); `request_log` **trwały**,
+> w jednej transakcji z operacją — cache w pamięci ginął przy restarcie (§3);
+> restart serwera **unieważnia wszystkie lease'y**, bez odtwarzania — usunięta
+> sprzeczność z zapisem locków na dysk (§5); zapis projektu na `Y:` wymaga
+> **potwierdzonego lease'u**, inaczej kopia awaryjna (§6); HMAC uwierzytelnia
+> klienta, **nie użytkownika** — docelowo sesja (§8).
+>
+> **Zmiany wobec wersji 1** (pierwsza recenzja): klienci **nie otwierają**
 > master.sqlite — także do odczytu (§4); **nie ma** automatycznego fallbacku
 > per-klient (§6); `request_id` przeciw duplikatom po zerwanym TCP (§3);
 > lease z TTL i `server_epoch` zamiast gołego heartbeatu (§5); `master-exec`
@@ -157,8 +165,33 @@ serwer  → odpowiedź ──X──  zerwane TCP
 klient  → ponawia → DRUGI DOSTAWCA
 ```
 
-Serwer trzyma `{request_id: odpowiedź}` przez 10 minut. Powtórzone żądanie
-**nie wykonuje operacji** — zwraca zapamiętany wynik z `powtorzone: true`.
+**Dziennik musi przeżyć restart serwera.** Cache w pamięci nie wystarcza —
+najgorszy przypadek to właśnie ten, w którym serwer pada tuż po commicie:
+
+```
+INSERT + COMMIT ✓  →  serwer pada przed odpowiedzią  →  restart
+                   →  cache pusty  →  klient ponawia  →  DRUGI INSERT
+```
+
+Dlatego dziennik idzie na dysk, do **osobnej bazy** `rm_serwer.sqlite` (nie do
+mastera — to stan serwera, nie dane firmy):
+
+```sql
+CREATE TABLE request_log (
+    request_id  TEXT PRIMARY KEY,
+    operation   TEXT NOT NULL,
+    kto         TEXT,
+    result_json TEXT,
+    created_at  TEXT NOT NULL
+);
+```
+
+Zapis do `request_log` i sama operacja idą **w jednej transakcji** na tym samym
+połączeniu — inaczej wraca ta sama dziura, tylko węższa. Ponieważ master
+i `rm_serwer.sqlite` to dwa pliki, w praktyce znaczy to: `ATTACH` bazy serwera
+do połączenia z masterem i jeden `COMMIT` na obie.
+
+Czyszczenie: rekordy starsze niż **24 h** (raz dziennie, przy okazji backupu).
 Klient generuje `request_id` **raz na operację**, nie raz na próbę.
 
 Dotyczy: wszystkich `*-add/-edit/-delete`, `lock-acquire`, `lock-release`.
@@ -365,9 +398,29 @@ Ta sama reakcja, gdy `lock-heartbeat` zwróci `ok: false` (lock wygasł albo kto
 użył `force`). Kod na to już częściowo istnieje — `release_lock` sprawdza, czy
 lock nadal nasz, i wywołuje `_force_cancel_lock_on_lost`.
 
-Serwer zapisuje stan locków na dysk przy każdej zmianie, więc **restart nie musi**
-ich gubić. `server_epoch` to zabezpieczenie na wypadek, gdy jednak zgubi
-(uszkodzony plik, ręczne czyszczenie).
+### Restart serwera unieważnia WSZYSTKIE lease'y
+
+Bez wyjątków i bez odtwarzania. Rozważałem zapisywanie locków na dysk, żeby
+przetrwały restart — **to nie ma sensu**: skoro każdy restart zmienia `epoch`,
+a klient po zmianie `epoch` i tak uznaje swój lock za utracony, odtworzony lock
+nikomu nie pomaga. Dwie zasady naraz przeczyłyby sobie.
+
+Zasada jest więc jedna i brutalna:
+
+```
+restart RM_SERWER  =  wszystkie stare lease'y nieważne
+```
+
+Co się dzieje po restarcie:
+
+- klient z lockiem dowiaduje się przy najbliższym heartbeacie (≤20 s)
+- **nie może nadpisać pliku projektu** — §6
+- dostaje ofertę zapisu kopii awaryjnej
+- nowy lock bierze świadomie, po obejrzeniu, co się stało
+
+Łatwiejsze do udowodnienia jako bezpieczne niż jakiekolwiek odtwarzanie stanu.
+Restart serwera to rzadkie zdarzenie; utrata cudzej pracy przez „prawie dobrze
+odtworzony" lock byłaby znacznie droższa.
 
 ### Co znika z klienta
 
@@ -394,10 +447,54 @@ Zamiast tego:
 | Zapisy do mastera | **zablokowane** — komunikat „serwer niedostępny, spróbuj za chwilę" |
 | Locki | **nie można przejąć**; już przejęty działa do wygaśnięcia TTL |
 | Praca na projekcie | trwa — kopia jest lokalna |
-| Zwolnienie locka | plik projektu idzie na `Y:` normalnie (to nie master) |
+| Zwolnienie locka | **wymaga potwierdzenia lease'u** — patrz niżej |
 
 **Minuta bez możliwości edycji jest lepsza niż cichy powrót do architektury, która
 spowodowała 40-minutowe zakleszczenie.**
+
+### Zapis projektu na Y: — bramka
+
+Nadpisanie pliku projektu **nie jest** operacją lokalną, choć tak wygląda. Bez
+bramki zdarza się to:
+
+```
+15:00  serwer pada
+15:00  klient ma jeszcze ważny lock, pracuje dalej
+15:02  TTL 90 s wygasa
+15:05  serwer wraca
+15:06  KTOŚ INNY dostaje ten projekt i zaczyna pracę
+15:20  pierwszy klient kończy i „normalnie" wrzuca swoją kopię na Y:
+       → praca drugiego znika bez śladu
+```
+
+Dlatego **każde** nadpisanie pliku projektu na `Y:` wymaga czterech warunków
+naraz — sprawdzanych **bezpośrednio przed kopiowaniem**, nie przy przejęciu locka:
+
+```
+ZAPIS PROJEKTU NA Y: wymaga
+    ✓ serwer dostępny
+    ✓ ten sam lock_id
+    ✓ lease nadal ważny (expires_at > teraz)
+    ✓ ten sam server_epoch
+```
+
+Gdy którykolwiek nie jest spełniony:
+
+```
+⛔ Nie można nadpisać projektu — lock wygasł albo należy do kogoś innego.
+
+Twoja praca NIE przepadła. Zapisano kopię awaryjną:
+C:\RMPAK_CLIENT\awaria\project_90_2026-09-11_1520.sqlite
+
+Co dalej: przejmij projekt ponownie i przenieś zmiany,
+albo poproś o pomoc przy scaleniu.
+```
+
+⚠️ **Kopia awaryjna to nowa rzecz, nie istnieje dziś.** `_force_cancel_lock_on_lost`
+zamyka lokalną kopię i nic z nią nie robi — przy utracie locka praca **przepada**.
+Trzeba to naprawić razem z bramką: ta sama ścieżka obsługuje oba przypadki.
+
+Retencja kopii awaryjnych: 30 dni, sprzątane przy starcie klienta.
 
 ### Żeby ta minuta była minutą
 
@@ -451,7 +548,25 @@ serwer:   odrzuca żądanie bez poprawnego HMAC
 ```
 
 To nie kryptografia wojskowa — to bariera przeciw przypadkowi i ciekawskiemu
-skryptowi. Wystarczy.
+skryptowi.
+
+⚠️ **HMAC uwierzytelnia KLIENTA, nie użytkownika.** Sekret jest wspólny, więc
+każdy, kto go ma, może wysłać `"kto": {"user": "ADMIN"}` — a serwer sprawdza
+rolę właśnie po tym polu. Sprawdzanie roli po stronie serwera jest lepsze niż
+w GUI, ale **tylko dopóki polu `kto.user` można ufać**.
+
+W LAN, przy grupie pracowników firmy, to akceptowalne na start. Docelowo
+`kto.user` musi wynikać z **sesji**, nie z JSON-a:
+
+```
+logowanie w RM_BAZA  →  serwer wydaje token sesji (user + rola + ważność)
+kolejne żądania      →  token zamiast gołego "kto"
+```
+
+Serwer ma już po temu materiał: tabela `users` w masterze i `client_sessions`
+z heartbeatem. To osobna zmiana — **nie blokuje etapu B ani A**, ale powinna
+wejść, zanim przez serwer pójdą operacje groźniejsze niż dziś (np. zarządzanie
+użytkownikami czy kasowanie dokumentów).
 
 **Pozostałe:**
 - nasłuch na konkretnym interfejsie LAN, nie `0.0.0.0`
@@ -465,24 +580,59 @@ skryptowi. Wystarczy.
 
 ## 9. Kolejność wdrożenia
 
-### Etap B
+### ⚠️ Nie ma pilota na produkcyjnym masterze
 
-1. `rm_serwer.py` + `rm_serwer_master.py` — lista operacji, migracje, backup
-2. Usługa Windows na `\\nic` + auto-restart + watchdog
-3. `rm_klient.py` + `master_read/exec/batch` w `DatabaseManager`
-4. Przepisanie 17 DML + 8 SELECT + migracje; **usunięcie `master_con`**
-5. `backup_manager`: backup mastera znika z klienta
-6. **Test u siebie** — RM_BAZA ze źródeł
-7. **Test awarii** — ubić serwer: odczyty z cache, zapisy zablokowane, praca trwa
-8. **Test restartu** — serwer wraca, `server_epoch` się zmienia, klienci reagują
-9. Build `.exe` → `TESTY RM_BAZA`
-10. Jedno stanowisko na próbę (dzień pracy)
-11. Produkcja + prośba o restart RM_BAZA
+Wersja 1 planu przewidywała „jedno stanowisko na próbę — dzień pracy". **To
+przeczy zasadzie z §0**: przez ten dzień jeden klient chodziłby przez serwer,
+a dziewięciu nadal otwierało `master.sqlite` wprost. Czyli dokładnie ten stan,
+który usuwamy — tylko z dodatkowym pisarzem.
+
+Testujemy na **kopii mastera**, wdrażamy **jednorazowym cutoverem**.
+
+### Etap B — budowa i testy (na kopii)
+
+1. `rm_serwer.py` + `rm_serwer_master.py` — nazwane operacje, `request_log`,
+   migracje, backup
+2. `rm_klient.py` + `master_read/exec/batch` w `DatabaseManager`
+3. Przepisanie 17 DML + 8 SELECT + migracje; **usunięcie `master_con`**
+4. `backup_manager`: backup mastera znika z klienta
+5. RM_MANAGER: `sync_to_master` → operacja `project-status-sync` (§11)
+6. **Środowisko testowe**: serwer + **kopia** `master.sqlite` + 1–2 klienty ze
+   źródeł. Produkcyjny master **nietknięty**.
+7. Testy z §10 — wszystkie, w tym awaria serwera i restart
+8. Build `.exe` → `TESTY RM_BAZA`
+
+### Etap B — cutover (jedno okno, ~30 min)
+
+Poza godzinami pracy albo w umówionym oknie:
+
+```
+1.  Ostrzeżenie dzień wcześniej: "jutro 7:30-8:00 RM_BAZA niedostępna"
+2.  Wszyscy zamykają RM_BAZA
+3.  Sprawdzenie: \\nic -> Otwarte pliki -> master.sqlite = PUSTO
+4.  Kopia zapasowa master.sqlite (poza rotacją)
+5.  Start RM_SERWER jako usługa + weryfikacja `ping`
+6.  Publikacja `.exe` na produkcję
+7.  Uruchomienie klientów - bramka wersji wymusi nowy `.exe`
+8.  Weryfikacja: Otwarte pliki -> master.sqlite otwarty TYLKO przez serwer
+```
+
+Krok 3 jest istotny: dopóki któryś klient trzyma plik, serwer nie jest jedynym
+właścicielem i cutover jest pozorny.
+
+**Wycofanie** (gdyby coś poszło nie tak): zatrzymać serwer, przywrócić poprzedni
+`.exe` z `RM_BAZA_v15_MAG.exe.przed_*`, odtworzyć master z kopii z kroku 4.
+Decyzja o wycofaniu do końca pierwszego dnia — potem w masterze są już dane
+zapisane przez serwer.
 
 ### Etap A
 
-Jak wyżej. **Serwer musi działać na produkcji, zanim pójdzie `.exe`** — inaczej
-klienci nie przejmą locków w ogóle (bo fallbacku nie ma).
+Ten sam schemat: testy na kopii, cutover. **Serwer musi działać, zanim pójdzie
+`.exe`** — klienci bez fallbacku nie przejmą locków w ogóle.
+
+Etap A może iść razem z B w jednym cutoverze, jeśli obie części będą gotowe —
+jedno okno przestoju zamiast dwóch.
+
 
 ---
 
@@ -546,4 +696,5 @@ Pozostałe narzędzia dotykające mastera są **bezpieczne** i zostają bez zmia
 
 ---
 
-*Wersja 2, 11.09.2026 — po recenzji. Wersja 1 w historii gita (`c6130ff`).*
+*Wersja 3, 11.09.2026 — po drugiej recenzji. Poprzednie wersje w historii gita
+(`c6130ff`, `d3e2f6e`).*
