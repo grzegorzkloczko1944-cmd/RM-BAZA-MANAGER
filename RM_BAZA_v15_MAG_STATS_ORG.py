@@ -25519,6 +25519,44 @@ class MainWindow(tk.Tk):
         # najnowszą kopię każdej nazwy, inaczej do maila idą duplikaty.
         return tylko_najnowsze(found)
 
+    def _sciezka_zyje(self, root, parent=None, limit_s=5):
+        """Czy katalog istnieje — BEZ ZAMRAŻANIA GUI na martwym dysku.
+
+        `Path.exists()` na ODŁĄCZONYM zasobie sieciowym potrafi wisieć
+        kilkadziesiąt sekund — Windows czeka na timeout SMB. Wołane wprost
+        w wątku Tk zamrażało program ZANIM powstało okno z „Anuluj", więc
+        user nie miał czego kliknąć i zostawało ubicie procesu (zgłoszone
+        11.09.2026: „miałem niezmapowany dysk i nie dało się przerwać").
+
+        Sprawdzamy w osobnym wątku z krótkim limitem. Wątek jest demonem:
+        gdy SMB w końcu odpowie, nie ma już kogo obchodzić.
+        """
+        import threading
+        wynik = [None]
+
+        def sprawdz():
+            try:
+                wynik[0] = root.exists()
+            except Exception:
+                wynik[0] = False
+
+        w = threading.Thread(target=sprawdz, daemon=True)
+        w.start()
+        w.join(timeout=limit_s)
+
+        if wynik[0] is None:
+            messagebox.showerror(
+                "Skanowanie",
+                f"Dysk nie odpowiada:\n{root}\n\n"
+                "Sprawdź, czy zasób sieciowy jest zamapowany i dostępny.",
+                parent=parent or self)
+            return False
+        if not wynik[0]:
+            messagebox.showerror("Skanowanie", f"Ścieżka nie istnieje:\n{root}",
+                                 parent=parent or self)
+            return False
+        return True
+
     def _rfq_deep_scan(self, root: Path, drawing_no: str, title: str, parent=None) -> list:
         """Głębokie szukanie plików rysunku w całym drzewie (serwer B:\\ albo V:\\).
 
@@ -25538,10 +25576,7 @@ class MainWindow(tk.Tk):
             ".git", ".svn", "node_modules"
         }
 
-        if not root.exists():
-            messagebox.showerror("Skanowanie",
-                                 f"Ścieżka nie istnieje:\n{root}",
-                                 parent=parent or self)
+        if not self._sciezka_zyje(root, parent):
             return []
 
         dlg = tk.Toplevel(parent or self)
@@ -25591,15 +25626,19 @@ class MainWindow(tk.Tk):
             total = len(jobs)
             self.after(0, lambda: progress_bar.winfo_exists() and progress_bar.config(maximum=total))
 
-            with ThreadPoolExecutor(max_workers=6) as executor:
+            # BEZ `with`: context manager na wyjściu czeka (join) na wątki,
+            # więc przy anulowaniu i tak stalibyśmy do końca skanu. Zamykamy
+            # ręcznie z wait=False — wątki widzą `cancelled` i same wracają.
+            executor = ThreadPoolExecutor(max_workers=6)
+            try:
                 futures = {
-                    executor.submit(self._scan_directory_for_file, d, drawing_no, ext, excluded_dirs): d
+                    executor.submit(self._scan_directory_for_file, d, drawing_no,
+                                    ext, excluded_dirs, cancelled): d
                     for d, ext in jobs
                 }
                 done = 0
                 for future in as_completed(futures):
                     if cancelled[0]:
-                        executor.shutdown(wait=False, cancel_futures=True)
                         break
                     d = futures[future]
                     done += 1
@@ -25616,6 +25655,8 @@ class MainWindow(tk.Tk):
                                    status_label.config(text=f"Przeskanowano {c}/{t} — znaleziono {n}"))
                         self.after(0, lambda nm=d.name:
                                    detail_label.winfo_exists() and detail_label.config(text=f"Ostatnio: {nm}"))
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
         thread = threading.Thread(target=scan_worker, daemon=True)
         thread.start()
@@ -25624,10 +25665,12 @@ class MainWindow(tk.Tk):
         def check_done():
             if not dlg.winfo_exists():
                 return
-            if thread.is_alive():
-                dlg.after(100, check_done)
-            else:
+            # Po anulowaniu zamykamy okno OD RAZU, nie czekając aż wątki dojdą
+            # do końca swojego katalogu — są demonami i mają `cancelled`.
+            if cancelled[0] or not thread.is_alive():
                 dlg.destroy()
+            else:
+                dlg.after(100, check_done)
 
         dlg.after(100, check_done)
         self.wait_window(dlg)
@@ -25660,9 +25703,7 @@ class MainWindow(tk.Tk):
         numery = [str(n).strip() for n in (numery or []) if str(n).strip()]
         if not numery:
             return {}
-        if not root.exists():
-            messagebox.showerror("Skanowanie", f"Ścieżka nie istnieje:\n{root}",
-                                 parent=parent or self)
+        if not self._sciezka_zyje(root, parent):
             return {}
 
         anchor = parent or self
@@ -25704,6 +25745,10 @@ class MainWindow(tk.Tk):
             rozszerzenia = {f".{e.lower()}" for e in self.RFQ_FILE_EXTENSIONS}
             stos = [katalog]
             while stos:
+                # Anulowanie widoczne przy KAŻDYM katalogu — inaczej wątek
+                # przemiela poddrzewo do końca mimo klikniętego „Anuluj".
+                if cancelled[0]:
+                    return trafienia
                 biezacy = stos.pop()
                 try:
                     for item in biezacy.iterdir():
@@ -25736,12 +25781,13 @@ class MainWindow(tk.Tk):
             self.after(0, lambda: progress_bar.winfo_exists() and
                        progress_bar.config(maximum=total))
 
-            with ThreadPoolExecutor(max_workers=6) as executor:
+            # BEZ `with` — patrz komentarz w _rfq_deep_scan.
+            executor = ThreadPoolExecutor(max_workers=6)
+            try:
                 futures = {executor.submit(przeszukaj, d): d for d in dirs_to_scan}
                 done = 0
                 for future in as_completed(futures):
                     if cancelled[0]:
-                        executor.shutdown(wait=False, cancel_futures=True)
                         break
                     d = futures[future]
                     done += 1
@@ -25762,6 +25808,8 @@ class MainWindow(tk.Tk):
                                             f"znaleziono {n} z {len(numery)} pozycji"))
                         self.after(0, lambda nm=d.name: detail_label.winfo_exists() and
                                    detail_label.config(text=f"Ostatnio: {nm}"))
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
         thread = threading.Thread(target=scan_worker, daemon=True)
         thread.start()
@@ -25769,10 +25817,11 @@ class MainWindow(tk.Tk):
         def check_done():
             if not dlg.winfo_exists():
                 return
-            if thread.is_alive():
-                dlg.after(100, check_done)
-            else:
+            # Po anulowaniu zamykamy okno OD RAZU — patrz _rfq_deep_scan.
+            if cancelled[0] or not thread.is_alive():
                 dlg.destroy()
+            else:
+                dlg.after(100, check_done)
 
         dlg.after(100, check_done)
         self.wait_window(dlg)
@@ -33754,7 +33803,7 @@ class MainWindow(tk.Tk):
     # WYSZUKIWANIE PLIKÓW (DWF, PDF, DXF, STP, STL)
     # ========================================================================
     
-    def _scan_directory_for_file(self, directory: Path, drawing_no: str, extension: str, excluded_dirs: set) -> list:
+    def _scan_directory_for_file(self, directory: Path, drawing_no: str, extension: str, excluded_dirs: set, cancelled=None) -> list:
         """Rekurencyjnie skanuj katalog w poszukiwaniu pliku z numerem rysunku i rozszerzeniem.
         
         Args:
@@ -33767,6 +33816,13 @@ class MainWindow(tk.Tk):
             Lista znalezionych plików (Path objects)
         """
         found_files = []
+
+        # `cancelled` to [bool] z okna skanu. Sprawdzane przy KAŻDYM
+        # katalogu: bez tego raz wystartowana rekurencja przemielała całe
+        # poddrzewo mimo „Anuluj”, bo anulowanie wstrzymywało jedynie
+        # ODBIERANIE wyników.
+        if cancelled is not None and cancelled[0]:
+            return found_files
         
         try:
             if not directory.exists() or not directory.is_dir():
@@ -33774,12 +33830,15 @@ class MainWindow(tk.Tk):
             
             # Przeglądaj pliki i podkatalogi
             for item in directory.iterdir():
+                if cancelled is not None and cancelled[0]:
+                    return found_files
                 # Pomiń wykluczone katalogi
                 if item.is_dir():
                     if item.name in excluded_dirs:
                         continue
                     # Rekurencyjnie przeszukaj podkatalog
-                    found_files.extend(self._scan_directory_for_file(item, drawing_no, extension, excluded_dirs))
+                    found_files.extend(self._scan_directory_for_file(
+                        item, drawing_no, extension, excluded_dirs, cancelled))
                 
                 # Sprawdź plik
                 elif item.is_file():
@@ -34674,7 +34733,12 @@ class MainWindow(tk.Tk):
                 self.after(0, lambda: progress_bar.winfo_exists() and progress_bar.config(maximum=total_dirs))
                 
                 # Wielowątkowe skanowanie (4-8 wątków równolegle)
-                with ThreadPoolExecutor(max_workers=6) as executor:
+                # BEZ `with`: context manager na wyjściu czeka (join) na wątki,
+                # więc przy anulowaniu i tak stalibyśmy do końca skanu.
+                # `cancelled` idzie DO ŚRODKA — bez tego raz wystartowana
+                # rekurencja mieli poddrzewo mimo klikniętego „Anuluj".
+                executor = ThreadPoolExecutor(max_workers=6)
+                try:
                     # Zakolejkuj wszystkie zadania
                     futures = {
                         executor.submit(
@@ -34682,7 +34746,8 @@ class MainWindow(tk.Tk):
                             dir_path,
                             drawing_no,
                             category,
-                            excluded_dirs
+                            excluded_dirs,
+                            cancelled
                         ): dir_path
                         for dir_path in dirs_to_scan
                     }
@@ -34715,6 +34780,8 @@ class MainWindow(tk.Tk):
                         
                         except Exception as e:
                             print(f"   ⚠️ Błąd w {dir_path.name}: {e}")
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
                 
             except Exception as e:
                 scan_error[0] = f"Błąd podczas skanowania:\n{e}"
@@ -34731,6 +34798,11 @@ class MainWindow(tk.Tk):
                 # Okno zamknięte krzyżykiem - czekaj na wątek
                 if not scan_thread.is_alive() and not cancelled[0]:
                     cancelled[0] = True
+                return
+            # Po anulowaniu zamykamy okno OD RAZU, nie czekając aż wątki
+            # dojdą do końca katalogu - są demonami i widzą `cancelled`.
+            if cancelled[0]:
+                progress_dialog.destroy()
                 return
             if scan_thread.is_alive():
                 # Wątek nadal pracuje - sprawdź ponownie za 100ms
@@ -34961,7 +35033,12 @@ class MainWindow(tk.Tk):
                 self.after(0, lambda: progress_bar.winfo_exists() and progress_bar.config(maximum=total_dirs))
                 
                 # Wielowątkowe skanowanie (4-8 wątków równolegle)
-                with ThreadPoolExecutor(max_workers=6) as executor:
+                # BEZ `with`: context manager na wyjściu czeka (join) na wątki,
+                # więc przy anulowaniu i tak stalibyśmy do końca skanu.
+                # `cancelled` idzie DO ŚRODKA — bez tego raz wystartowana
+                # rekurencja mieli poddrzewo mimo klikniętego „Anuluj".
+                executor = ThreadPoolExecutor(max_workers=6)
+                try:
                     # Zakolejkuj wszystkie zadania
                     futures = {
                         executor.submit(
@@ -34969,7 +35046,8 @@ class MainWindow(tk.Tk):
                             dir_path,
                             drawing_no,
                             category,
-                            excluded_dirs
+                            excluded_dirs,
+                            cancelled
                         ): dir_path
                         for dir_path in dirs_to_scan
                     }
@@ -35002,6 +35080,8 @@ class MainWindow(tk.Tk):
                         
                         except Exception as e:
                             print(f"   ⚠️ Błąd w {dir_path.name}: {e}")
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
                 
             except Exception as e:
                 scan_error[0] = f"Błąd podczas skanowania:\n{e}"
@@ -35018,6 +35098,11 @@ class MainWindow(tk.Tk):
                 # Okno zamknięte krzyżykiem - czekaj na wątek
                 if not scan_thread.is_alive() and not cancelled[0]:
                     cancelled[0] = True
+                return
+            # Po anulowaniu zamykamy okno OD RAZU, nie czekając aż wątki
+            # dojdą do końca katalogu - są demonami i widzą `cancelled`.
+            if cancelled[0]:
+                progress_dialog.destroy()
                 return
             if scan_thread.is_alive():
                 # Wątek nadal pracuje - sprawdź ponownie za 100ms
