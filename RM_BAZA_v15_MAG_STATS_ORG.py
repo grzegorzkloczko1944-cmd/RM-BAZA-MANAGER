@@ -24451,17 +24451,10 @@ class MainWindow(tk.Tk):
             # Detal MOŻE być w kilku RFQ naraz. Pokazujemy NAJNOWSZE (najwyższe
             # rfq_id) — bez ORDER BY wybór był arbitralny, zależny od kolejności
             # z bazy. Pozostałe zbieramy do sekcji „Ten detal w innych zapytaniach".
-            _wszystkie = master_con.execute(
-                """SELECT drawing_number, item_name, project_number, rfq_code, rfq_title,
-                          rfq_status, invitations_sent, suppliers_count, offers_count,
-                          min_price, supplier_name, price, currency, lead_time_days,
-                          offer_notes, decided_at, synced_at, rfq_id,
-                          viewers_count, seen_item_count, last_viewed_at,
-                          rfq_item_id, files_updated_at, docs_notified_at
-                   FROM rfq_results WHERE drawing_number = ?
-                  ORDER BY COALESCE(rfq_id, 0) DESC""",
-                (drawing_no,)
-            ).fetchall()
+            _kol = ['drawing_number', 'item_name', 'project_number', 'rfq_code', 'rfq_title', 'rfq_status', 'invitations_sent', 'suppliers_count', 'offers_count', 'min_price', 'supplier_name', 'price', 'currency', 'lead_time_days', 'offer_notes', 'decided_at', 'synced_at', 'rfq_id', 'viewers_count', 'seen_item_count', 'last_viewed_at', 'rfq_item_id', 'files_updated_at', 'docs_notified_at']
+            _wszystkie = [tuple(w[k] for k in _kol)
+                           for w in self.db_manager.master_read(
+                               "rfq-wycena-detalu", {"drawing_number": drawing_no})]
             data = _wszystkie[0] if _wszystkie else None
             inne_rfq = _wszystkie[1:] if len(_wszystkie) > 1 else []
         except Exception as e:
@@ -24713,17 +24706,10 @@ class MainWindow(tk.Tk):
         # czy cisza to brak zainteresowania, czy mail w spamie.
         activity, activity_available = [], True
         try:
-            activity = master_con.execute(
-                """SELECT supplier_name, email_sent_at, last_viewed_at, view_count,
-                          seen_this_item, has_offer,
-                          COALESCE(is_winner, 0), win_price,
-                          offer_price, offer_currency, offer_lead_time,
-                          COALESCE(has_declined, 0), decline_label, decline_notes,
-                          offer_notes
-                     FROM rfq_activity WHERE drawing_number = ?
-                    ORDER BY COALESCE(is_winner, 0) DESC, supplier_name""",
-                (drawing_no,)
-            ).fetchall()
+            _kol2 = ['supplier_name', 'email_sent_at', 'last_viewed_at', 'view_count', 'seen_this_item', 'has_offer', 'is_winner', 'win_price', 'offer_price', 'offer_currency', 'offer_lead_time', 'has_declined', 'decline_label', 'decline_notes', 'offer_notes']
+            activity = [tuple(w[k] for k in _kol2)
+                        for w in self.db_manager.master_read(
+                            "rfq-aktywnosc-detalu", {"drawing_number": drawing_no})]
         except Exception:
             # Kolumny odmowy dochodzą dopiero przy pierwszym cyklu agenta po
             # aktualizacji. Zanim to nastąpi, pytamy bez nich — inaczej cała
@@ -24731,15 +24717,10 @@ class MainWindow(tk.Tk):
             # choć reszta jest w bazie od dawna.
             try:
                 # +4 puste: has_declined, decline_label, decline_notes, offer_notes
-                activity = [tuple(r) + (0, None, None, None) for r in master_con.execute(
-                    """SELECT supplier_name, email_sent_at, last_viewed_at, view_count,
-                              seen_this_item, has_offer,
-                              COALESCE(is_winner, 0), win_price,
-                              offer_price, offer_currency, offer_lead_time
-                         FROM rfq_activity WHERE drawing_number = ?
-                        ORDER BY COALESCE(is_winner, 0) DESC, supplier_name""",
-                    (drawing_no,)
-                ).fetchall()]
+                _kol3 = ['supplier_name', 'email_sent_at', 'last_viewed_at', 'view_count', 'seen_this_item', 'has_offer', 'is_winner', 'win_price', 'offer_price', 'offer_currency', 'offer_lead_time']
+                activity = [tuple(w[k] for k in _kol3) + (0, None, None, None)
+                            for w in self.db_manager.master_read(
+                                "rfq-aktywnosc-detalu-stara", {"drawing_number": drawing_no})]
             except Exception:
                 activity_available = False   # stara baza bez tabeli rfq_activity
 

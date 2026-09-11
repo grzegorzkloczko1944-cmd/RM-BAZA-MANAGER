@@ -164,6 +164,41 @@ ODCZYT = {
         "  FROM rfq_results ORDER BY COALESCE(rfq_id, 0) ASC",
         [],
     ),
+    # Pełny wiersz wyceny detalu — ten sam detal bywa w kilku zapytaniach
+    # naraz, stąd ORDER BY rfq_id DESC: pierwszy wiersz to najnowsze RFQ,
+    # reszta idzie do sekcji „Ten detal w innych zapytaniach".
+    "rfq-wycena-detalu": (
+        "SELECT drawing_number, item_name, project_number, rfq_code, rfq_title,"
+        "       rfq_status, invitations_sent, suppliers_count, offers_count,"
+        "       min_price, supplier_name, price, currency, lead_time_days,"
+        "       offer_notes, decided_at, synced_at, rfq_id,"
+        "       viewers_count, seen_item_count, last_viewed_at,"
+        "       rfq_item_id, files_updated_at, docs_notified_at"
+        "  FROM rfq_results WHERE drawing_number = ?"
+        " ORDER BY COALESCE(rfq_id, 0) DESC",
+        ["drawing_number"],
+    ),
+    # Aktywność kooperantów przy detalu. Kolumny odmowy (has_declined,
+    # decline_*) dochodzą dopiero przy pierwszym cyklu agenta po aktualizacji
+    # portalu — stąd wariant „stary" poniżej, wołany gdy ten rzuci błędem.
+    "rfq-aktywnosc-detalu": (
+        "SELECT supplier_name, email_sent_at, last_viewed_at, view_count,"
+        "       seen_this_item, has_offer, COALESCE(is_winner, 0) AS is_winner,"
+        "       win_price, offer_price, offer_currency, offer_lead_time,"
+        "       COALESCE(has_declined, 0) AS has_declined, decline_label,"
+        "       decline_notes, offer_notes"
+        "  FROM rfq_activity WHERE drawing_number = ?"
+        " ORDER BY COALESCE(is_winner, 0) DESC, supplier_name",
+        ["drawing_number"],
+    ),
+    "rfq-aktywnosc-detalu-stara": (
+        "SELECT supplier_name, email_sent_at, last_viewed_at, view_count,"
+        "       seen_this_item, has_offer, COALESCE(is_winner, 0) AS is_winner,"
+        "       win_price, offer_price, offer_currency, offer_lead_time"
+        "  FROM rfq_activity WHERE drawing_number = ?"
+        " ORDER BY COALESCE(is_winner, 0) DESC, supplier_name",
+        ["drawing_number"],
+    ),
     "rfq-id-po-rysunku": (
         "SELECT rfq_id FROM rfq_results WHERE drawing_number = ?",
         ["drawing_number"],
