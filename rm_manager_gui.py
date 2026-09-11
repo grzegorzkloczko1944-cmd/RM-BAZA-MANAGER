@@ -1762,8 +1762,6 @@ class RMManagerGUI:
             if "[SYM]" in project_name:
                 print(f"⊘ Skip sync: {project_name} (projekt symulacyjny)")
                 return
-            if not os.path.exists(self.master_db_path):
-                return
             rmm.sync_to_master(
                 self.get_project_db_path(project_id),
                 self.master_db_path,
@@ -4339,13 +4337,9 @@ class RMManagerGUI:
         if not username:
             return "Nieznany"
         try:
-            con = rmm._open_rm_connection(self.master_db_path, row_factory=False)
-            row = con.execute(
-                "SELECT display_name FROM users WHERE username = ?", (username,)
-            ).fetchone()
-            con.close()
-            if row and row[0]:
-                return row[0]
+            row = rmm._master().master_read("user-nazwa-po-loginie", {"username": username})
+            if row and row[0].get("display_name"):
+                return row[0]["display_name"]
         except Exception:
             pass
         return username
@@ -4498,37 +4492,13 @@ class RMManagerGUI:
     def load_projects(self):
         """Załaduj listę projektów z RM_BAZA master.sqlite"""
         try:
-            if not os.path.exists(self.master_db_path):
-                # Zapytaj użytkownika czy chce skonfigurować ścieżkę
-                result = messagebox.askyesno(
-                    "⚠️ Brak master.sqlite",
-                    f"Nie znaleziono bazy RM_BAZA:\n{self.master_db_path}\n\nCzy chcesz skonfigurować ścieżkę?"
-                )
-                if result:
-                    self.edit_config()
-                    if not os.path.exists(self.master_db_path):
-                        self.status_bar.config(text="⚠️ Nieprawidłowa ścieżka", fg="#f39c12")
-                        return
-                else:
-                    self.status_bar.config(text="⚠️ Brak master.sqlite", fg="#f39c12")
-                    return
-            
-            con = rmm._open_rm_connection(self.master_db_path)
-            
-            # Bezpośrednie SQL - bez project_manager
-            cursor = con.execute("""
-                SELECT 
-                    project_id as pid,
-                    name,
-                    COALESCE(active, 1) as active
-                FROM projects
-                WHERE COALESCE(active, 1) = 1
-                  AND COALESCE(project_type, 'MACHINE') = 'MACHINE'
-                ORDER BY name COLLATE NOCASE
-            """)
-            
-            rows = cursor.fetchall()
-            con.close()
+            rows = sorted(
+                ({"pid": p["project_id"], "name": p.get("name"),
+                  "active": 1 if p.get("active") is None else p["active"]}
+                 for p in rmm._master().master_read("projects-list")
+                 if (1 if p.get("active") is None else p["active"]) == 1
+                 and (p.get("project_type") or "MACHINE") == "MACHINE"),
+                key=lambda r: (r["name"] or "").lower())
             
             # Format projektów
             self.projects = []
@@ -4642,9 +4612,8 @@ class RMManagerGUI:
             )
             
         except Exception as e:
-            print(f"🔴 Błąd ładowania projektów z {self.master_db_path}:")
+            print("🔴 Błąd ładowania projektów z RM_SERWER:")
             print(f"   Błąd: {e}")
-            print(f"   Plik istnieje: {os.path.exists(self.master_db_path)}")
             import traceback
             traceback.print_exc()
             messagebox.showerror("❌ Błąd", f"Nie można załadować projektów z master.sqlite:\n{e}")
@@ -4704,13 +4673,7 @@ class RMManagerGUI:
         
         # Odczytaj % ODEBRANO z master.sqlite (kolumna received_percent)
         try:
-            con = rmm._open_rm_connection(self.master_db_path)
-            cursor = con.execute(
-                "SELECT received_percent FROM projects WHERE project_id = ?",
-                (new_project_id,)
-            )
-            row = cursor.fetchone()
-            con.close()
+            row = (rmm._master().master_read("project-get", {"project_id": new_project_id}) or [None])[0]
             if row and row['received_percent']:
                 self.received_percent = row['received_percent']
             else:
@@ -5355,16 +5318,8 @@ class RMManagerGUI:
     def get_project_dates_from_master(self) -> dict:
         """Pobierz daty projektu z master.sqlite"""
         try:
-            con = rmm._open_rm_connection(self.master_db_path)
-            
-            cursor = con.execute("""
-                SELECT started_at, expected_delivery, completed_at
-                FROM projects
-                WHERE project_id = ?
-            """, (self.selected_project_id,))
-            
-            row = cursor.fetchone()
-            con.close()
+            row = (rmm._master().master_read("project-get",
+                    {"project_id": self.selected_project_id}) or [None])[0]
             
             if row:
                 return {
@@ -6074,46 +6029,39 @@ class RMManagerGUI:
                         report_lines.append(f"     • {basename} (nieprawidłowy format nazwy)")
             
             # 2. Sprawdź projekty z master.sqlite
-            report_lines.append(f"\n📄 Master DB: {self.master_db_path}")
-            report_lines.append(f"   Istnieje: {'✅' if os.path.exists(self.master_db_path) else '❌'}")
+            report_lines.append("\n📄 Master DB: RM_SERWER (master.sqlite na serwerze)")
             
-            if os.path.exists(self.master_db_path):
-                try:
-                    con = rmm._open_rm_connection(self.master_db_path)
-                    cursor = con.execute("""
-                        SELECT project_id, name, active 
-                        FROM projects 
-                        WHERE COALESCE(active, 1) = 1
-                        ORDER BY project_id
-                    """)
-                    master_projects = cursor.fetchall()
-                    con.close()
+            try:
+                master_projects = sorted(
+                    (p for p in rmm._master().master_read("projects-list")
+                     if (1 if p.get("active") is None else p["active"]) == 1),
+                    key=lambda p: p["project_id"])
                     
-                    report_lines.append(f"   Aktywnych projektów: {len(master_projects)}")
+                report_lines.append(f"   Aktywnych projektów: {len(master_projects)}")
                     
-                    for row in master_projects:
-                        pid = row['project_id']
-                        pname = row['name']
-                        rm_file = os.path.join(self.rm_projects_dir, f"rm_manager_project_{pid}.sqlite")
-                        has_rm_file = os.path.exists(rm_file)
+                for row in master_projects:
+                    pid = row['project_id']
+                    pname = row['name']
+                    rm_file = os.path.join(self.rm_projects_dir, f"rm_manager_project_{pid}.sqlite")
+                    has_rm_file = os.path.exists(rm_file)
                         
-                        report_lines.append(f"     • ID {pid}: {pname}")
-                        report_lines.append(f"       RM_MANAGER baza: {'✅ istnieje' if has_rm_file else '❌ brak'}")
+                    report_lines.append(f"     • ID {pid}: {pname}")
+                    report_lines.append(f"       RM_MANAGER baza: {'✅ istnieje' if has_rm_file else '❌ brak'}")
                         
-                        if has_rm_file:
-                            try:
-                                con2 = rmm._open_rm_connection(rm_file, row_factory=False)
-                                cursor2 = con2.execute("""
-                                    SELECT COUNT(*) FROM project_stages WHERE project_id = ?
-                                """, (pid,))
-                                stages = cursor2.fetchone()[0]
-                                con2.close()
-                                report_lines.append(f"       Etapów w RM: {stages}")
-                            except Exception as e:
-                                report_lines.append(f"       ❌ Błąd odczytu: {e}")
+                    if has_rm_file:
+                        try:
+                            con2 = rmm._open_rm_connection(rm_file, row_factory=False)
+                            cursor2 = con2.execute("""
+                                SELECT COUNT(*) FROM project_stages WHERE project_id = ?
+                            """, (pid,))
+                            stages = cursor2.fetchone()[0]
+                            con2.close()
+                            report_lines.append(f"       Etapów w RM: {stages}")
+                        except Exception as e:
+                            report_lines.append(f"       ❌ Błąd odczytu: {e}")
                         
-                except sqlite3.Error as db_err:
-                    report_lines.append(f"   ❌ Błąd master.sqlite: {db_err}")
+            except Exception as db_err:
+                report_lines.append(f"   ❌ Błąd master.sqlite: {db_err}")
             
             # 3. Sprawdź aktualny projekt
             if self.selected_project_id:
@@ -6294,49 +6242,40 @@ class RMManagerGUI:
                     
                     # 6. Sprawdź project status w master.sqlite
                     report_lines.append(f"\n📊 Status projektu w master.sqlite:")
-                    if os.path.exists(self.master_db_path):
-                        master_con = rmm._open_rm_connection(self.master_db_path)
-                        
-                        try:
-                            cursor_master = master_con.execute("""
-                                SELECT status FROM projects WHERE project_id = ?
-                            """, (self.selected_project_id,))
-                            status_row = cursor_master.fetchone()
+                    try:
+                        status_row = (rmm._master().master_read("project-get",
+                                      {"project_id": self.selected_project_id}) or [None])[0]
                             
-                            if status_row:
-                                status = status_row['status'] or 'NULL'
-                                report_lines.append(f"   Status: {status}")
+                        if status_row:
+                            status = status_row['status'] or 'NULL'
+                            report_lines.append(f"   Status: {status}")
                                 
-                                # Weryfikacja logiki
-                                przyjety = rmm.is_milestone_set(project_db, self.selected_project_id, 'PRZYJETY')
-                                zakonczony = rmm.is_milestone_set(project_db, self.selected_project_id, 'ZAKONCZONY')
+                            # Weryfikacja logiki
+                            przyjety = rmm.is_milestone_set(project_db, self.selected_project_id, 'PRZYJETY')
+                            zakonczony = rmm.is_milestone_set(project_db, self.selected_project_id, 'ZAKONCZONY')
                                 
-                                report_lines.append(f"   PRZYJETY ustawiony: {'✅' if przyjety else '❌'}")
-                                report_lines.append(f"   ZAKONCZONY ustawiony: {'✅' if zakonczony else '❌'}")
+                            report_lines.append(f"   PRZYJETY ustawiony: {'✅' if przyjety else '❌'}")
+                            report_lines.append(f"   ZAKONCZONY ustawiony: {'✅' if zakonczony else '❌'}")
                                 
-                                # Sprawdź zgodność status <-> milestone
-                                consistent = True
-                                if przyjety and status == 'NEW':
-                                    report_lines.append(f"   ⚠️  NIEZGODNOŚĆ: PRZYJĘTY ustawiony ale status=NEW")
-                                    consistent = False
-                                if zakonczony and status != 'DONE':
-                                    report_lines.append(f"   ⚠️  NIEZGODNOŚĆ: ZAKOŃCZONY ustawiony ale status≠DONE")
-                                    consistent = False
-                                if status == 'DONE' and not zakonczony:
-                                    report_lines.append(f"   ⚠️  NIEZGODNOŚĆ: status=DONE ale ZAKOŃCZONY nie ustawiony")
-                                    consistent = False
+                            # Sprawdź zgodność status <-> milestone
+                            consistent = True
+                            if przyjety and status == 'NEW':
+                                report_lines.append(f"   ⚠️  NIEZGODNOŚĆ: PRZYJĘTY ustawiony ale status=NEW")
+                                consistent = False
+                            if zakonczony and status != 'DONE':
+                                report_lines.append(f"   ⚠️  NIEZGODNOŚĆ: ZAKOŃCZONY ustawiony ale status≠DONE")
+                                consistent = False
+                            if status == 'DONE' and not zakonczony:
+                                report_lines.append(f"   ⚠️  NIEZGODNOŚĆ: status=DONE ale ZAKOŃCZONY nie ustawiony")
+                                consistent = False
                                 
-                                if consistent:
-                                    report_lines.append(f"   ✅ Status i milestone'y zgodne")
-                            else:
-                                report_lines.append(f"   ❌ Projekt nie znaleziony w master.sqlite")
+                            if consistent:
+                                report_lines.append(f"   ✅ Status i milestone'y zgodne")
+                        else:
+                            report_lines.append(f"   ❌ Projekt nie znaleziony w master.sqlite")
                             
-                            master_con.close()
-                        except sqlite3.Error as e:
-                            report_lines.append(f"   ❌ Błąd master.sqlite: {e}")
-                            master_con.close()
-                    else:
-                        report_lines.append(f"   ❌ master.sqlite nie istnieje")
+                    except Exception as e:
+                        report_lines.append(f"   ❌ Błąd master.sqlite: {e}")
                     
                     con.close()
                     
@@ -10084,8 +10023,6 @@ class RMManagerGUI:
             print(f"⊘ Skip sync: {project_name} (projekt symulacyjny)")
             return
         
-        if not os.path.exists(self.master_db_path):
-            return
         
         try:
             rmm.sync_to_master(self.get_project_db_path(self.selected_project_id), self.master_db_path, self.selected_project_id)
@@ -10258,10 +10195,23 @@ class RMManagerGUI:
     # ========================================================================
 
     def _reconnect_master_rw(self):
-        """Upewnij się, że połączenie do master jest READ-WRITE.
-        Zwraca sqlite3.Connection (nowe lub istniejące)."""
-        con = rmm._open_rm_connection(self.master_db_path)
-        return con
+        """Dawniej: połączenie READ-WRITE do master.sqlite. Master RM_BAZA leży
+        na serwerze, a funkcje z project_manager ignorują parametr con i wołają
+        RM_SERWER same — zwracamy atrapę, żeby commit()/close() w oknach
+        projektów mogły zostać. Bezpośredni SQL celowo wybucha."""
+        class _MasterNaSerwerze:
+            def commit(self):
+                pass
+
+            def rollback(self):
+                pass
+
+            def close(self):
+                pass
+
+            def execute(self, *a, **k):
+                raise RuntimeError("SQL do mastera RM_BAZA tylko przez RM_SERWER")
+        return _MasterNaSerwerze()
 
     def add_project_dialog(self, on_created=None):
         """Dialog dodawania nowego projektu (kopiowany z RM_BAZA)"""
@@ -10581,7 +10531,7 @@ class RMManagerGUI:
                 tree.delete(iid)
 
             try:
-                con = rmm._open_rm_connection(self.master_db_path)
+                con = None    # master RM_BAZA na serwerze; colnames()/get_project_statuses() ignorują con
 
                 mcols = colnames(con, "projects")
                 pk = pick_col(mcols, ["id", "project_id"])
@@ -10603,12 +10553,12 @@ class RMManagerGUI:
                 if fat_col: select_cols.append(fat_col)
                 if completed_col: select_cols.append(completed_col)
 
-                where = "WHERE COALESCE(project_type, 'MACHINE') = 'MACHINE'"
-                if not var_show_inactive.get() and active_col:
-                    where += f" AND COALESCE({active_col}, 1) = 1"
-
-                sql = f"SELECT {', '.join(c for c in select_cols if c)} FROM projects {where}"
-                rows = con.execute(sql).fetchall()
+                pokaz_nieaktywne = var_show_inactive.get()
+                rows = [tuple(p.get(c) for c in select_cols if c)
+                        for p in rmm._master().master_read("projects-list")
+                        if (p.get("project_type") or "MACHINE") == "MACHINE"
+                        and (pokaz_nieaktywne or not active_col
+                             or (1 if p.get(active_col) is None else p[active_col]) == 1)]
 
                 rows_sorted = sorted(rows, key=_sort_key_projects)
 
@@ -10650,13 +10600,7 @@ class RMManagerGUI:
                                     # Persist do master.sqlite
                                     if designer_col:
                                         try:
-                                            con_rw = self._reconnect_master_rw()
-                                            con_rw.execute(
-                                                f"UPDATE projects SET {designer_col} = ? WHERE {pk} = ?",
-                                                (new_designer, pid)
-                                            )
-                                            con_rw.commit()
-                                            con_rw.close()
+                                            update_project(None, pid, designer=new_designer)
                                         except Exception as _e_upd:
                                             print(f"⚠️ Nie udało się zapisać Konstruktora dla {pid}: {_e_upd}")
                     except Exception:
@@ -10668,10 +10612,8 @@ class RMManagerGUI:
                     # 🔄 FALLBACK: Jeśli brak statusów w nowej tabeli, sprawdź starą kolumnę 'status'
                     if not status_list:
                         try:
-                            old_status_row = con.execute(
-                                "SELECT status FROM projects WHERE project_id = ?", 
-                                (pid,)
-                            ).fetchone()
+                            _p = rmm._master().master_read("project-get", {"project_id": pid})
+                            old_status_row = (_p[0].get("status"),) if _p else None
                             if old_status_row and old_status_row[0]:
                                 status_list = [old_status_row[0]]
                         except Exception:
@@ -10756,7 +10698,6 @@ class RMManagerGUI:
                                         completed, locked_by, pth),
                                 tags=tuple(tags))
 
-                con.close()
             except Exception as e:
                 import traceback; traceback.print_exc()
                 messagebox.showerror("Błąd", f"Nie udało się pobrać projektów:\n{e}", parent=win)
@@ -10902,11 +10843,7 @@ class RMManagerGUI:
             
             try:
                 # Zmień nazwę w bazie
-                con = self._reconnect_master_rw()
-                con.execute("UPDATE projects SET name = ? WHERE project_id = ?",
-                           (new_name, proj['id']))
-                con.commit()
-                con.close()
+                update_project(None, proj['id'], name=new_name)
                 print(f"✅ Projekt {proj['id']}: {proj['name']} → {new_name}")
                 
                 # Odśwież listę
@@ -10916,19 +10853,14 @@ class RMManagerGUI:
                 # Synchronizuj jeśli wybrano TAK
                 if result is True:
                     try:
-                        if not os.path.exists(self.master_db_path):
-                            messagebox.showwarning("Brak master.sqlite",
-                                f"Nie można zsynchronizować - brak pliku:\n{self.master_db_path}",
-                                parent=win)
-                        else:
-                            rmm.sync_to_master(
-                                self.get_project_db_path(proj['id']),
-                                self.master_db_path,
-                                proj['id']
-                            )
-                            messagebox.showinfo("✅ Sukces",
-                                f"Projekt przekształcony i zsynchronizowany z RM_BAZA:\n\n"
-                                f"{new_name}", parent=win)
+                        rmm.sync_to_master(
+                            self.get_project_db_path(proj['id']),
+                            self.master_db_path,
+                            proj['id']
+                        )
+                        messagebox.showinfo("✅ Sukces",
+                            f"Projekt przekształcony i zsynchronizowany z RM_BAZA:\n\n"
+                            f"{new_name}", parent=win)
                     except Exception as sync_err:
                         messagebox.showerror("Błąd synchronizacji",
                             f"Projekt przekształcony, ale synchronizacja nie powiodła się:\n{sync_err}",
@@ -10983,7 +10915,7 @@ class RMManagerGUI:
 
         # Odczytaj aktualne dane z bazy
         try:
-            con = rmm._open_rm_connection(self.master_db_path)
+            con = None    # master RM_BAZA na serwerze; colnames() ignoruje con
             mcols = colnames(con, "projects")
             pk = pick_col(mcols, ["id", "project_id"])
             designer_col = pick_col(mcols, ["designer", "designers"])
@@ -10998,16 +10930,14 @@ class RMManagerGUI:
             if completed_col: sel.append(completed_col)
 
             if sel:
-                row = con.execute(
-                    f"SELECT {', '.join(sel)} FROM projects WHERE {pk}=?", (proj['id'],)
-                ).fetchone()
+                _p = rmm._master().master_read("project-get", {"project_id": proj['id']})
+                row = tuple(_p[0].get(c) for c in sel) if _p else None
                 if row:
                     i = 0
                     if designer_col: proj['designer'] = row[i] or ""; i += 1
                     if montaz_col: proj['montaz'] = row[i] or ""; i += 1
                     if fat_col: proj['fat'] = row[i] or ""; i += 1
                     if completed_col: proj['completed_at'] = row[i] or ""; i += 1
-            con.close()
         except Exception as e:
             print(f"⚠️  Błąd pobierania danych projektu: {e}")
 
@@ -11081,22 +11011,18 @@ class RMManagerGUI:
             row=row_idx, column=0, sticky="ne", pady=(5, 12), padx=(0, 10))
 
         try:
-            rcon = rmm._open_rm_connection(self.master_db_path)
-            current_statuses = get_project_statuses(rcon, proj['id'])
+            current_statuses = get_project_statuses(None, proj['id'])
             
             # 🔄 FALLBACK: Jeśli brak statusów w nowej tabeli, sprawdź starą kolumnę 'status'
             if not current_statuses:
                 try:
-                    old_status_row = rcon.execute(
-                        "SELECT status FROM projects WHERE project_id = ?", 
-                        (proj['id'],)
-                    ).fetchone()
+                    _p = rmm._master().master_read("project-get", {"project_id": proj['id']})
+                    old_status_row = (_p[0].get("status"),) if _p else None
                     if old_status_row and old_status_row[0]:
                         current_statuses = [old_status_row[0]]
                 except Exception:
                     pass
             
-            rcon.close()
         except Exception:
             current_statuses = []
 
@@ -11977,10 +11903,6 @@ class RMManagerGUI:
             self.status_bar.config(text="⊘ Projekt symulacyjny - sync pominięty", fg="#95a5a6")
             return
         
-        if not os.path.exists(self.master_db_path):
-            messagebox.showwarning("⚠️ Uwaga", f"Nie znaleziono master.sqlite:\n{self.master_db_path}")
-            self.status_bar.config(text="⚠️ Brak master.sqlite", fg="#f39c12")
-            return
         
         try:
             self.status_bar.config(text="⏳ Synchronizacja...", fg="#f39c12")
@@ -12002,10 +11924,6 @@ class RMManagerGUI:
             )
             return
         
-        if not os.path.exists(self.master_db_path):
-            messagebox.showwarning("⚠️ Uwaga", f"Nie znaleziono master.sqlite:\n{self.master_db_path}")
-            self.status_bar.config(text="⚠️ Brak master.sqlite", fg="#f39c12")
-            return
         
         # Policz ile projektów będzie synchronizowanych (bez [SYM])
         total_projects = len(self.projects)
@@ -27262,14 +27180,8 @@ class RMManagerGUI:
         project_name = "???"
         project_number = "???"
         try:
-            con = rmm._open_rm_connection(self.master_db_path)
-            # Tabela projects w RM_BAZA - sprawdź czy kolumna to 'id' czy 'project_id'
-            cursor = con.execute("PRAGMA table_info(projects)")
-            columns = [row[1] for row in cursor.fetchall()]
-            
-            id_column = 'project_id' if 'project_id' in columns else 'id'
-            
-            row = con.execute(f"SELECT * FROM projects WHERE {id_column} = ?", (self.selected_project_id,)).fetchone()
+            row = (rmm._master().master_read("project-get",
+                    {"project_id": self.selected_project_id}) or [None])[0]
             if row:
                 # Tabela projects w RM_BAZA: name, project_id (sqlite3.Row używa [key] nie .get())
                 project_name = row['name'] if 'name' in row.keys() else "???"
@@ -27277,7 +27189,6 @@ class RMManagerGUI:
                 print(f"✅ Pobrano projekt: {project_number} - {project_name}")
             else:
                 print(f"⚠️ Nie znaleziono projektu {self.selected_project_id} w bazie")
-            con.close()
         except Exception as e:
             print(f"⚠️ Nie można pobrać nazwy projektu {self.selected_project_id}: {e}")
             import traceback

@@ -1111,65 +1111,31 @@ def cleanup_hostname_sessions(master_db_path: str, hostname: str) -> int:
         return deleted
 
 
-def update_stage_definitions(master_db_path: str):
-    """Aktualizuje definicje etapów w rm_manager.sqlite - dodaje brakujące.
-    
-    Przydatne po dodaniu nowych etapów do STAGE_DEFINITIONS w kodzie.
-    Używa INSERT OR IGNORE - bezpieczne dla istniejących danych.
-    
-    Returns:
-        int: Liczba dodanych etapów
+def update_stage_definitions(master_db_path: str = None):
+    """Uzupełnia definicje etapów (stage_definitions w rm_manager.sqlite NA
+    SERWERZE) o wpisy ze STAGE_DEFINITIONS w kodzie: brakujące dodaje,
+    istniejące odświeża (display_name, color, is_milestone). Jeden batch.
+
+    `master_db_path` ignorowany — patrz _master(). Zwraca liczbę dodanych.
     """
-    con = _open_rm_connection(master_db_path)
-    
-    # Upewnij się, że tabela istnieje
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS stage_definitions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            code TEXT UNIQUE NOT NULL,
-            display_name TEXT,
-            color TEXT,
-            is_milestone INTEGER DEFAULT 0
-        )
-    """)
-    
-    # Dodaj kolumnę is_milestone jeśli nie istnieje (dla starych baz)
-    try:
-        con.execute("ALTER TABLE stage_definitions ADD COLUMN is_milestone INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass  # Kolumna już istnieje
-    
-    # Sprawdź które etapy już istnieją
-    existing = {row['code'] for row in con.execute("SELECT code FROM stage_definitions")}
-    
-    added = 0
-    updated = 0
+    existing = {r["code"] for r in rmm_read("rmm-stage-definitions-lista")}
+    operacje, added, updated = [], 0, 0
     for code, display_name, color, is_milestone in STAGE_DEFINITIONS:
+        params = {"code": code, "display_name": display_name,
+                  "color": color, "is_milestone": is_milestone}
         if code not in existing:
-            con.execute("""
-                INSERT INTO stage_definitions (code, display_name, color, is_milestone)
-                VALUES (?, ?, ?, ?)
-            """, (code, display_name, color, is_milestone))
+            operacje.append({"operation": "rmm-stage-definition-dodaj", "params": params})
             added += 1
             print(f"  ➕ Dodano etap: {code} ({display_name})")
         else:
-            # Aktualizuj display_name, color i is_milestone dla istniejących etapów
-            con.execute("""
-                UPDATE stage_definitions
-                SET display_name = ?, color = ?, is_milestone = ?
-                WHERE code = ?
-            """, (display_name, color, is_milestone, code))
+            operacje.append({"operation": "rmm-stage-definition-zmien", "params": params})
             updated += 1
-            print(f"  🔄 Zaktualizowano etap: {code} ({display_name})")
-    
-    con.commit()
-    con.close()
-    
-    if added > 0 or updated > 0:
-        print(f"✅ Zaktualizowano definicje etapów: +{added} nowych, ~{updated} zaktualizowanych")
+    if operacje:
+        rmm_batch(operacje)
+    if added > 0:
+        print(f"✅ Zaktualizowano definicje etapów: +{added} nowych, ~{updated} odświeżonych")
     else:
         print("✅ Definicje etapów aktualne - brak zmian")
-    
     return added
 
 

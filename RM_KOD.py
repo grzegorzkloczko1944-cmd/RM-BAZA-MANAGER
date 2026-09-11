@@ -739,21 +739,13 @@ class RMKOD:
     def _load_projects(self):
         """Load projects from master database"""
         try:
-            con = rmm._open_rm_connection(self.master_db_path)
-
-            cursor = con.execute("""
-                SELECT
-                    project_id as pid,
-                    name
-                FROM projects
-                WHERE COALESCE(active, 1) = 1
-                  AND COALESCE(project_type, 'MACHINE') = 'MACHINE'
-                  AND LOWER(name) NOT LIKE '%[sym]%'
-                ORDER BY name COLLATE NOCASE
-            """)
-
-            rows = cursor.fetchall()
-            con.close()
+            rows = sorted(
+                ({"pid": p["project_id"], "name": p.get("name")}
+                 for p in rmm._master().master_read("projects-list")
+                 if (1 if p.get("active") is None else p["active"]) == 1
+                 and (p.get("project_type") or "MACHINE") == "MACHINE"
+                 and "[sym]" not in (p.get("name") or "").lower()),
+                key=lambda r: (r["name"] or "").lower())
 
             # Build project list
             self.projects = []

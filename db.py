@@ -9,6 +9,8 @@ migrację poprawek: kopiujesz stats_*.py między RM_STATS a RM_MANAGER bez zmian
 
 Read-only: połączenia otwierane w trybie mode=ro, nigdy nie zapisujemy do
 żywych baz.
+Master RM_BAZA (projects) i główna baza RM_MANAGER (płatności) idą przez
+RM_SERWER — patrz _rmm(); pliki otwieramy tylko dla baz projektowych.
 
 Zawiera tylko metody używane przez oba widoki (Podsumowanie, Status projektów):
 list_projects, project_stage_status, project_forecast_inputs, payment_milestones.
@@ -28,6 +30,14 @@ def open_ro(path: str) -> sqlite3.Connection:
     con = sqlite3.connect(f'file:{uri}?mode=ro', uri=True)
     con.row_factory = sqlite3.Row
     return con
+
+
+def _rmm():
+    """rm_manager = dostęp do RM_SERWER: master RM_BAZA i główna baza RM_MANAGER
+    leżą na serwerze, nie w plikach. Import leniwy — db.py bywa importowany
+    zanim rm_manager skonfiguruje klienta."""
+    import rm_manager
+    return rm_manager
 
 
 class RMStatsDB:
@@ -121,29 +131,30 @@ class RMStatsDB:
     # ------------------------------------------------------------------
 
     def list_projects(self, only_active: bool = True) -> List[Dict]:
-        con = open_ro(self.master_db_path)
-        try:
-            cols = {r[1] for r in con.execute('PRAGMA table_info(projects)')}
-            wanted = ['project_id', 'name', 'active', 'project_status', 'status',
-                      'project_type', 'priority', 'designer', 'expected_delivery',
-                      'received_percent']
-            sel = [c for c in wanted if c in cols]
-            rows = con.execute(
-                f'SELECT {", ".join(sel)} FROM projects ORDER BY '
-                + ('priority, name' if 'priority' in cols else 'name')
-            ).fetchall()
-            result = [dict(r) for r in rows]
-            if only_active and 'active' in cols:
-                result = [r for r in result if r.get('active')]
-            if 'project_type' in cols:
-                result = [r for r in result if r.get('project_type') != 'WAREHOUSE']
-            return result
-        finally:
-            con.close()
+        """Projekty z mastera RM_BAZA — przez RM_SERWER (operacja projects-list).
+        Kolejność jak dawniej w SQL: priority (NULL pierwsze), potem name."""
+        wanted = ['project_id', 'name', 'active', 'project_status', 'status',
+                  'project_type', 'priority', 'designer', 'expected_delivery',
+                  'received_percent']
+        rows = _rmm()._master().master_read('projects-list')
+        cols = set(rows[0].keys()) if rows else set(wanted)
+        sel = [c for c in wanted if c in cols]
+        result = [{c: r.get(c) for c in sel} for r in rows]
 
-    # ------------------------------------------------------------------
-    # Etapy / opóźnienia (per-projekt)
-    # ------------------------------------------------------------------
+        def _pri(v):
+            if v is None:
+                return (0, 0.0, '')
+            try:
+                return (1, float(v), '')
+            except (TypeError, ValueError):
+                return (2, 0.0, str(v))
+        result.sort(key=lambda r: (_pri(r.get('priority')) if 'priority' in cols else (0, 0.0, ''),
+                                   r.get('name') or ''))
+        if only_active and 'active' in cols:
+            result = [r for r in result if r.get('active')]
+        if 'project_type' in cols:
+            result = [r for r in result if r.get('project_type') != 'WAREHOUSE']
+        return result
 
     def project_stage_status(self, project_id: int) -> Dict:
         """Lista etapów z planem (stage_schedule) i realizacją (stage_actual_periods)."""
@@ -264,13 +275,12 @@ class RMStatsDB:
     # ------------------------------------------------------------------
 
     def payment_milestones(self, project_id: Optional[int] = None) -> List[Dict]:
-        con = open_ro(self.rm_master_db_path)
-        try:
-            sql = 'SELECT project_id, percentage, payment_date, payment_type FROM payment_milestones'
-            params = ()
-            if project_id is not None:
-                sql += ' WHERE project_id = ?'
-                params = (project_id,)
-            return [dict(r) for r in con.execute(sql, params).fetchall()]
-        finally:
-            con.close()
+        """Transze płatności z głównej bazy RM_MANAGER — przez RM_SERWER."""
+        m = _rmm()._master()
+        if project_id is not None:
+            rows = m.master_read('rmm-payment-milestones-po-project-id',
+                                 {'project_id': project_id})
+        else:
+            rows = m.master_read('rmm-payment-milestones-wszystkie')
+        return [{k: r.get(k) for k in ('project_id', 'percentage', 'payment_date', 'payment_type')}
+                for r in rows]

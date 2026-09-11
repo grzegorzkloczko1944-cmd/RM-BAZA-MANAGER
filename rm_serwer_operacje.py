@@ -293,6 +293,11 @@ ODCZYT = {
         "SELECT code, display_name FROM stage_definitions ORDER BY id",
         [],
     ),
+    "rmm-payment-milestones-wszystkie": (
+        "SELECT project_id, percentage, payment_date, payment_type"
+        "  FROM payment_milestones ORDER BY project_id, percentage",
+        [],
+    ),
     # Dla asystenta AI (rm_ai_optimizer): przeglądy „wszystkich" bez filtra.
     "rmm-plc-unlock-codes-wszystkie": (
         "SELECT id, project_id, code_type, description, is_used, used_at,"
@@ -1383,6 +1388,17 @@ ZAPIS = {
         [],
     ),
 
+    # ── definicje etapów: uzupełnianie ze STAGE_DEFINITIONS w kodzie ──────
+    "rmm-stage-definition-dodaj": (
+        "INSERT OR IGNORE INTO stage_definitions"
+        " (code, display_name, color, is_milestone) VALUES (?, ?, ?, ?)",
+        ["code", "display_name", "color", "is_milestone"],
+    ),
+    "rmm-stage-definition-zmien": (
+        "UPDATE stage_definitions SET display_name = ?, color = ?, is_milestone = ?"
+        " WHERE code = ?",
+        ["display_name", "color", "is_milestone", "code"],
+    ),
     # ══ RM_MANAGER — zapisy wcześniej sklejane dynamicznie ══════════
     #
     # ⚠️ COALESCE(?, kolumna): NULL znaczy „nie ruszaj tego pola".
