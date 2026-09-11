@@ -8109,356 +8109,102 @@ def get_payment_notifications_log(rm_db_path: str = None, project_id: int = None
 # PLC UNLOCK CODES - Kody odblokowujące (2026-04-14)
 # ============================================================================
 
-def add_plc_code(rm_db_path: str, project_id: int, code_type: str, unlock_code: str,
-                 description: str = None, user: str = None) -> int:
-    """Dodaj kod odblokowujący PLC dla projektu.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        project_id: ID projektu
-        code_type: Typ kodu: TEMPORARY, EXTENDED, PERMANENT
-        unlock_code: Kod odblokowujący
-        description: Opis kodu (opcjonalnie)
-        user: Kto dodał
-    
-    Returns:
-        ID dodanego kodu
-        
-    Raises:
-        ValueError: Jeśli code_type nieprawidłowy
-        
-    Note:
-        Dla TEMPORARY: expiry_date = created_at + 14 dni (automatycznie obliczane)
-        Dla EXTENDED/PERMANENT: expiry_date = NULL
-    """
+def add_plc_code(rm_db_path: str = None, project_id: int = 0, code_type: str = "",
+                 unlock_code: str = "", description: str = None, user: str = None) -> int:
+    """Dodaj kod odblokowujący PLC. TEMPORARY wygasa po 14 dniach. Zwraca id."""
     from datetime import datetime, timedelta
-    
     valid_types = ['TEMPORARY', 'EXTENDED', 'PERMANENT']
     if code_type not in valid_types:
         raise ValueError(f"Nieprawidłowy typ kodu: {code_type}. Dozwolone: {valid_types}")
-    
-    con = _open_rm_connection(rm_db_path)
-    try:
-        # Oblicz expiry_date dla TEMPORARY (created_at + 14 dni)
-        expiry_date = None
-        if code_type == 'TEMPORARY':
-            now = datetime.now()
-            expiry_dt = now + timedelta(days=14)
-            expiry_date = expiry_dt.strftime('%Y-%m-%d %H:%M:%S')
-        
-        cursor = con.execute("""
-            INSERT INTO plc_unlock_codes 
-                (project_id, code_type, unlock_code, description, created_by, created_at, is_used, expiry_date)
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 0, ?)
-        """, (project_id, code_type, unlock_code, description, user, expiry_date))
-        
-        code_id = cursor.lastrowid
-        _rm_safe_commit(con)
-        return code_id
-        
-    finally:
-        con.close()
+    expiry_date = None
+    if code_type == 'TEMPORARY':
+        expiry_date = (datetime.now() + timedelta(days=14)).strftime('%Y-%m-%d %H:%M:%S')
+    wynik = rmm_exec("rmm-plc-unlock-codes-dodaj", {
+        "project_id": project_id, "code_type": code_type, "unlock_code": unlock_code,
+        "description": description, "created_by": user, "expiry_date": expiry_date})
+    return int((wynik or {}).get("lastrowid") or 0)
 
 
-def update_plc_code(rm_db_path: str, code_id: int, unlock_code: str = None,
+def update_plc_code(rm_db_path: str = None, code_id: int = 0, unlock_code: str = None,
                     description: str = None, user: str = None):
-    """Zaktualizuj kod PLC.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        code_id: ID kodu do zmiany
-        unlock_code: Nowy kod (opcjonalnie)
-        description: Nowy opis (opcjonalnie)
-        user: Kto zmienił
+    """Zmień kod i/lub opis. None = bez zmiany (operacja używa COALESCE)."""
+    if unlock_code is None and description is None:
+        return  # Nic do zmiany
+    rmm_exec("rmm-plc-code-zmien", {"unlock_code": unlock_code, "description": description,
+                                    "modified_by": user, "id": code_id})
+
+
+def delete_plc_code(rm_db_path: str = None, code_id: int = 0):
+    """Usuń kod PLC."""
+    rmm_exec("rmm-plc-unlock-codes-usun-po-id", {"id": code_id})
+
+
+def get_plc_codes(rm_db_path: str = None, project_id: int = 0) -> List[Dict]:
+    """Kody PLC projektu: TEMPORARY → EXTENDED → PERMANENT, w kolejności dodania."""
+    return [dict(r) for r in rmm_read("rmm-plc-unlock-codes-po-project-id",
+                                      {"project_id": project_id})]
+
+
+def save_plc_code_recipients(rm_db_path: str = None, code_id: int = 0,
+                             recipient_ids: List[int] = None):
+    """Zapisz globalną listę domyślnych odbiorców kodów PLC (klucz `default_recipients`).
+
+    `code_id` jest ignorowany — lista jest wspólna dla wszystkich kodów;
+    parametr zostaje dla wołających. Tabelę tworzą migracje serwera.
     """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        updates = []
-        params = []
-        
-        if unlock_code is not None:
-            updates.append("unlock_code = ?")
-            params.append(unlock_code)
-        
-        if description is not None:
-            updates.append("description = ?")
-            params.append(description)
-        
-        if not updates:
-            return  # Nic do zmiany
-        
-        updates.append("modified_by = ?")
-        params.append(user)
-        updates.append("modified_at = CURRENT_TIMESTAMP")
-        
-        params.append(code_id)
-        query = f"UPDATE plc_unlock_codes SET {', '.join(updates)} WHERE id = ?"
-        
-        con.execute(query, params)
-        _rm_safe_commit(con)
-        
-    finally:
-        con.close()
-
-
-def delete_plc_code(rm_db_path: str, code_id: int):
-    """Usuń kod PLC.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        code_id: ID kodu do usunięcia
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        con.execute("DELETE FROM plc_unlock_codes WHERE id = ?", (code_id,))
-        _rm_safe_commit(con)
-    finally:
-        con.close()
-
-
-def get_plc_codes(rm_db_path: str, project_id: int) -> List[Dict]:
-    """Pobierz wszystkie kody PLC dla projektu.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        project_id: ID projektu
-    
-    Returns:
-        Lista słowników: id, code_type, unlock_code, description, created_by, 
-                        created_at, modified_by, modified_at, is_used, used_at, used_by, notes,
-                        sent_at, sent_by, sent_via, expiry_date
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        rows = con.execute("""
-            SELECT id, project_id, code_type, unlock_code, description,
-                   created_by, created_at, modified_by, modified_at,
-                   is_used, used_at, used_by, notes,
-                   sent_at, sent_by, sent_via, expiry_date
-            FROM plc_unlock_codes
-            WHERE project_id = ?
-            ORDER BY 
-                CASE code_type
-                    WHEN 'TEMPORARY' THEN 1
-                    WHEN 'EXTENDED' THEN 2
-                    WHEN 'PERMANENT' THEN 3
-                END,
-                created_at
-        """, (project_id,)).fetchall()
-        
-        return [dict(row) for row in rows]
-        
-    finally:
-        con.close()
-
-
-def save_plc_code_recipients(rm_db_path: str, code_id: int, recipient_ids: List[int]):
-    """Zapisz listę odbiorców - GLOBALNA dla wszystkich projektów w RM_MANAGER."""
     import json
-    
-    print(f"\n💾 SAVE GLOBAL RECIPIENTS: db={rm_db_path}")
-    print(f"   recipient_ids={recipient_ids}")
-    
-    con = _open_rm_connection(rm_db_path)
-    try:
-        # Upewnij się że tabela istnieje
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS plc_global_recipients (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                setting_key TEXT NOT NULL UNIQUE,
-                recipients_json TEXT NOT NULL,
-                updated_by TEXT,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        recipients_json = json.dumps(recipient_ids) if recipient_ids else '[]'
-        print(f"   recipients_json={recipients_json}")
-        
-        # UPSERT - INSERT jeśli nie ma, UPDATE jeśli jest
-        con.execute("""
-            INSERT INTO plc_global_recipients (setting_key, recipients_json, updated_at)
-            VALUES ('default_recipients', ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(setting_key) DO UPDATE SET
-                recipients_json = excluded.recipients_json,
-                updated_at = CURRENT_TIMESTAMP
-        """, (recipients_json,))
-        con.commit()
-        
-        # Weryfikacja zapisu
-        verify = con.execute("SELECT recipients_json FROM plc_global_recipients WHERE setting_key='default_recipients'").fetchone()
-        print(f"   ✅ WERYFIKACJA po zapisie: {verify['recipients_json'] if verify else 'BRAK REKORDU!'}")
-    except Exception as e:
-        print(f"   ❌ BŁĄD SAVE: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        con.close()
+    recipients_json = json.dumps(recipient_ids) if recipient_ids else '[]'
+    rmm_exec("rmm-plc-global-recipients-dodaj-2", {"recipients_json": recipients_json})
+    print(f"💾 Odbiorcy kodów PLC zapisani: {recipients_json}")
 
 
-def get_plc_code_recipients(rm_db_path: str, code_id: int) -> List[int]:
-    """Pobierz listę odbiorców - GLOBALNA dla wszystkich projektów w RM_MANAGER."""
+def get_plc_code_recipients(rm_db_path: str = None, code_id: int = 0) -> List[int]:
+    """Globalna lista domyślnych odbiorców kodów PLC ([] gdy brak)."""
     import json
-    
-    print(f"\n📚 GET GLOBAL RECIPIENTS: db={rm_db_path}")
-    
-    con = _open_rm_connection(rm_db_path)
     try:
-        # Sprawdź czy tabela istnieje
-        table_exists = con.execute("""
-            SELECT name FROM sqlite_master 
-            WHERE type='table' AND name='plc_global_recipients'
-        """).fetchone()
-        
-        print(f"   tabela plc_global_recipients istnieje: {bool(table_exists)}")
-        
-        if not table_exists:
-            # Tabela nie istnieje - utwórz ją
-            print(f"   ⚠️ Tworzę tabelę plc_global_recipients...")
-            con.execute("""
-                CREATE TABLE IF NOT EXISTS plc_global_recipients (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    setting_key TEXT NOT NULL UNIQUE,
-                    recipients_json TEXT NOT NULL,
-                    updated_by TEXT,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            con.execute("""
-                INSERT OR IGNORE INTO plc_global_recipients (setting_key, recipients_json)
-                VALUES ('default_recipients', '[]')
-            """)
-            con.commit()
-            print(f"   ✅ Tabela utworzona, zwracam []")
-            return []
-        
-        # Pobierz z globalnej tabeli
-        row = con.execute("""
-            SELECT recipients_json
-            FROM plc_global_recipients
-            WHERE setting_key = 'default_recipients'
-        """).fetchone()
-        
-        print(f"   row={dict(row) if row else None}")
-        
-        if row and row['recipients_json']:
-            try:
-                result = json.loads(row['recipients_json'])
-                print(f"   ✅ Zwracam {len(result)} odbiorców: {result}")
-                return result if result else []
-            except (json.JSONDecodeError, TypeError) as e:
-                print(f"   ❌ Błąd JSON: {e}")
-                return []
-        
-        print(f"   ⚠️ Brak rekordu lub pusty recipients_json")
+        rows = rmm_read("rmm-plc-global-recipients-po-setting-key-2")
+        if rows and rows[0]['recipients_json']:
+            return json.loads(rows[0]['recipients_json']) or []
         return []
-        
     except Exception as e:
-        print(f"   ❌ BŁĄD GET: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ Odbiorcy kodów PLC — błąd odczytu: {e}")
         return []
-    finally:
-        con.close()
 
 
-def save_payment_status_recipients(rm_db_path: str, recipient_ids: List[int]):
-    """Zapisz globalną listę odbiorców statusu płatności."""
+def save_payment_status_recipients(rm_db_path: str = None, recipient_ids: List[int] = None):
+    """Zapisz odbiorców powiadomień o statusie płatności."""
     import json
-    con = _open_rm_connection(rm_db_path)
-    try:
-        con.execute("""
-            INSERT INTO plc_global_recipients (setting_key, recipients_json, updated_at)
-            VALUES ('payment_status_recipients', ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(setting_key) DO UPDATE SET
-                recipients_json = excluded.recipients_json,
-                updated_at = CURRENT_TIMESTAMP
-        """, (json.dumps(recipient_ids),))
-        _rm_safe_commit(con)
-    finally:
-        con.close()
+    rmm_exec("rmm-plc-global-recipients-dodaj-3",
+             {"recipients_json": json.dumps(recipient_ids or [])})
 
 
-def get_payment_status_recipients(rm_db_path: str) -> List[int]:
-    """Pobierz globalną listę odbiorców statusu płatności."""
+def get_payment_status_recipients(rm_db_path: str = None) -> List[int]:
+    """Odbiorcy powiadomień o statusie płatności ([] gdy brak)."""
     import json
-    con = _open_rm_connection(rm_db_path)
     try:
-        row = con.execute(
-            "SELECT recipients_json FROM plc_global_recipients WHERE setting_key = 'payment_status_recipients'"
-        ).fetchone()
-        if row and row['recipients_json']:
-            return json.loads(row['recipients_json']) or []
+        rows = rmm_read("rmm-plc-global-recipients-po-setting-key-3")
+        if rows and rows[0]['recipients_json']:
+            return json.loads(rows[0]['recipients_json']) or []
         return []
     except Exception:
         return []
-    finally:
-        con.close()
 
 
-def mark_plc_code_as_used(rm_db_path: str, code_id: int, user: str = None, notes: str = None):
-    """Oznacz kod PLC jako użyty (przekazany klientowi).
-
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        code_id: ID kodu
-        user: Kto użył
-        notes: Notatki (opcjonalnie)
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        con.execute("""
-            UPDATE plc_unlock_codes
-            SET is_used = 1, used_at = CURRENT_TIMESTAMP, used_by = ?, notes = ?
-            WHERE id = ?
-        """, (user, notes, code_id))
-        
-        _rm_safe_commit(con)
-        
-    finally:
-        con.close()
+def mark_plc_code_as_used(rm_db_path: str = None, code_id: int = 0, user: str = None,
+                          notes: str = None):
+    """Oznacz kod jako użyty."""
+    rmm_exec("rmm-plc-unlock-codes-zmien-po-id", {"used_by": user, "notes": notes, "id": code_id})
 
 
-def get_plc_codes_summary(rm_db_path: str, project_id: int) -> Dict:
-    """Pobierz podsumowanie kodów PLC dla projektu.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        project_id: ID projektu
-    
-    Returns:
-        Dict z liczbą kodów per typ i statusem użycia
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        rows = con.execute("""
-            SELECT code_type, is_used, COUNT(*) as count
-            FROM plc_unlock_codes
-            WHERE project_id = ?
-            GROUP BY code_type, is_used
-        """, (project_id,)).fetchall()
-        
-        summary = {
-            'TEMPORARY': {'total': 0, 'used': 0, 'unused': 0},
-            'EXTENDED': {'total': 0, 'used': 0, 'unused': 0},
-            'PERMANENT': {'total': 0, 'used': 0, 'unused': 0}
-        }
-        
-        for row in rows:
-            code_type = row['code_type']
-            is_used = row['is_used']
-            count = row['count']
-            
-            summary[code_type]['total'] += count
-            if is_used:
-                summary[code_type]['used'] += count
-            else:
-                summary[code_type]['unused'] += count
-        
-        return summary
-        
-    finally:
-        con.close()
+def get_plc_codes_summary(rm_db_path: str = None, project_id: int = 0) -> Dict:
+    """Liczba kodów per typ: total / used / unused."""
+    summary = {t: {'total': 0, 'used': 0, 'unused': 0}
+               for t in ('TEMPORARY', 'EXTENDED', 'PERMANENT')}
+    for row in rmm_read("rmm-plc-unlock-codes-po-project-id-2", {"project_id": project_id}):
+        s = summary.setdefault(row['code_type'], {'total': 0, 'used': 0, 'unused': 0})
+        s['total'] += row['count']
+        s['used' if row['is_used'] else 'unused'] += row['count']
+    return summary
 
 
 def calculate_code_expiry_date(created_at: str, code_type: str) -> str:
@@ -8496,204 +8242,88 @@ def get_payment_total_percentage(rm_db_path: str = None, project_id: int = 0) ->
     return rows[0]['total'] if rows else 0.0
 
 
-def is_user_authorized_for_plc_sending(rm_db_path: str, username: str) -> bool:
-    """Sprawdź czy użytkownik ma uprawnienia do wysyłki kodów PLC.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        username: Nazwa użytkownika
-    
-    Returns:
-        True jeśli uprawniony
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        row = con.execute("""
-            SELECT COUNT(*) as cnt
-            FROM plc_authorized_senders
-            WHERE TRIM(LOWER(username)) = TRIM(LOWER(?))
-        """, (username,)).fetchone()
-
-        return row['cnt'] > 0 if row else False
-
-    finally:
-        con.close()
+def is_user_authorized_for_plc_sending(rm_db_path: str = None, username: str = "") -> bool:
+    """Czy login jest na liście uprawnionych do wysyłki kodów (bez wielkości liter)."""
+    rows = rmm_read("rmm-plc-authorized-senders", {"p1": username})
+    return bool(rows) and rows[0]['cnt'] > 0
 
 
-def add_plc_authorized_sender(rm_db_path: str, username: str, added_by: str = None, notes: str = None):
-    """Dodaj użytkownika do listy uprawnionych do wysyłki kodów.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        username: Nazwa użytkownika
-        added_by: Kto dodał
-        notes: Notatki (opcjonalnie)
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        con.execute("""
-            INSERT OR IGNORE INTO plc_authorized_senders (username, added_by, notes)
-            VALUES (?, ?, ?)
-        """, (username.strip(), added_by, notes))
-        
-        _rm_safe_commit(con)
-        
-    finally:
-        con.close()
+def add_plc_authorized_sender(rm_db_path: str = None, username: str = "", added_by: str = None,
+                              notes: str = None):
+    """Dodaj login do uprawnionych (duplikat ignorowany)."""
+    rmm_exec("rmm-plc-authorized-senders-dodaj",
+             {"username": username.strip(), "added_by": added_by, "notes": notes})
 
 
-def remove_plc_authorized_sender(rm_db_path: str, username: str):
-    """Usuń użytkownika z listy uprawnionych.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        username: Nazwa użytkownika
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        con.execute("DELETE FROM plc_authorized_senders WHERE username = ?", (username,))
-        _rm_safe_commit(con)
-        
-    finally:
-        con.close()
+def remove_plc_authorized_sender(rm_db_path: str = None, username: str = ""):
+    """Usuń login z uprawnionych."""
+    rmm_exec("rmm-plc-authorized-senders-usun-po-username", {"username": username})
 
 
-def get_plc_authorized_senders(rm_db_path: str) -> List[Dict]:
-    """Pobierz listę użytkowników uprawnionych do wysyłki kodów.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-    
-    Returns:
-        Lista słowników: username, added_by, added_at, notes
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        rows = con.execute("""
-            SELECT username, added_by, added_at, notes
-            FROM plc_authorized_senders
-            ORDER BY added_at DESC
-        """).fetchall()
-        
-        return [dict(row) for row in rows]
-        
-    finally:
-        con.close()
+def get_plc_authorized_senders(rm_db_path: str = None) -> List[Dict]:
+    """Lista uprawnionych nadawców (najnowsi pierwsi)."""
+    return [dict(r) for r in rmm_read("rmm-plc-authorized-senders-2")]
 
 
-def send_plc_code_email(rm_db_path: str, code_id: int, recipient_emails: List[str], 
-                        subject: str, message: str, user: str = None, role: str = None) -> bool:
-    """Wyślij kod PLC przez email.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        code_id: ID kodu do wysłania
-        recipient_emails: Lista adresów email odbiorców
-        subject: Temat wiadomości email
-        message: Treść wiadomości
-        user: Kto wysyła
-        role: Rola użytkownika (ADMIN ma automatyczne uprawnienia)
-    
-    Returns:
-        True jeśli wysłano pomyślnie
-    
-    Raises:
-        ValueError: Jeśli użytkownik nie ma uprawnień lub brak konfiguracji email
+def send_plc_code_email(rm_db_path: str = None, code_id: int = 0, recipient_emails: List[str] = None,
+                        subject: str = "", message: str = "", user: str = None, role: str = None) -> bool:
+    """Wyślij kod PLC e-mailem i oznacz go jako wysłany/użyty.
+
+    Logika SMTP bez zmian; do serwera idzie tylko znacznik wysyłki.
     """
     import smtplib
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
-    from datetime import datetime
-    
-    # Sprawdź uprawnienia (ADMIN ma zawsze dostęp)
-    if user and role != 'ADMIN' and not is_user_authorized_for_plc_sending(rm_db_path, user):
+    recipient_emails = recipient_emails or []
+    if user and role != 'ADMIN' and not is_user_authorized_for_plc_sending(None, user):
         raise ValueError(f"Użytkownik {user} nie ma uprawnień do wysyłki kodów PLC")
-    
-    # Pobierz konfigurację email
-    email_config = get_payment_notification_config(rm_db_path)
+    email_config = get_payment_notification_config(None)
     if not email_config or not email_config.get('enabled'):
         raise ValueError("Wysyłka email nie jest skonfigurowana lub wyłączona")
-    
-    # Wyślij email
     try:
         msg = MIMEMultipart()
         msg['From'] = email_config.get('smtp_user', 'RM_MANAGER')
         msg['To'] = ', '.join(recipient_emails)
         msg['Subject'] = subject
         msg.attach(MIMEText(message, 'plain', 'utf-8'))
-        
         if email_config.get('smtp_server') and email_config.get('smtp_user') and email_config.get('smtp_password'):
             smtp_port = email_config.get('smtp_port', 587)
             print(f"📧 Łączenie z SMTP: {email_config['smtp_server']}:{smtp_port}")
-            
             if smtp_port == 465:
-                # Port 465 = SSL (SMTP_SSL)
                 server = smtplib.SMTP_SSL(email_config['smtp_server'], smtp_port, timeout=30)
             else:
-                # Port 587 = STARTTLS
                 server = smtplib.SMTP(email_config['smtp_server'], smtp_port, timeout=30)
                 print("📧 SMTP połączony, starttls...")
                 server.starttls()
-            
             print("📧 TLS OK, logowanie...")
             server.login(email_config['smtp_user'], email_config['smtp_password'])
             print("📧 Zalogowano, wysyłanie...")
             server.send_message(msg)
             print("📧 Wysłano, zamykanie...")
             server.quit()
-            
             print(f"✅ Email wysłany do: {', '.join(recipient_emails)}")
         else:
             raise ValueError('Brak konfiguracji SMTP (server/user/password)')
-        
-        # Zaktualizuj informację o wysłaniu i oznacz jako użyty
-        con = _open_rm_connection(rm_db_path)
-        try:
-            con.execute("""
-                UPDATE plc_unlock_codes
-                SET sent_at = CURRENT_TIMESTAMP, sent_by = ?, sent_via = 'EMAIL',
-                    is_used = 1, used_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-            """, (user, code_id))
-            _rm_safe_commit(con)
-        finally:
-            con.close()
-        
+        rmm_exec("rmm-plc-unlock-codes-zmien-po-id-2", {"sent_by": user, "id": code_id})
         return True
-        
     except Exception as e:
         print(f"❌ Błąd wysyłki email: {e}")
         raise
 
 
-def send_plc_code_sms(rm_db_path: str, code_id: int, phone_numbers: List[str], 
-                      message: str, user: str = None, role: str = None,
+def send_plc_code_sms(rm_db_path: str = None, code_id: int = 0, phone_numbers: List[str] = None,
+                      message: str = "", user: str = None, role: str = None,
                       sms_config: dict = None) -> bool:
-    """Wyślij kod PLC przez SMS.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        code_id: ID kodu do wysłania
-        phone_numbers: Lista numerów telefonów odbiorców (format: 48123456789)
-        message: Treść SMS
-        user: Kto wysyła
-        role: Rola użytkownika (ADMIN ma automatyczne uprawnienia)
-        sms_config: Konfiguracja SMS (dict z sms_enabled, sms_api_token)
-    
-    Returns:
-        True jeśli wysłano pomyślnie
-    
-    Raises:
-        ValueError: Jeśli użytkownik nie ma uprawnień lub brak konfiguracji SMS
+    """Wyślij kod PLC SMS-em (SMSAPI) i oznacz go jako wysłany/użyty.
+
+    Konfiguracja SMS z `manager_sync_config.json` obok programu — bez zmian;
+    do serwera idzie tylko znacznik wysyłki.
     """
     import json
     import os
-    
-    # Sprawdź uprawnienia (ADMIN ma zawsze dostęp)
-    if user and role != 'ADMIN' and not is_user_authorized_for_plc_sending(rm_db_path, user):
+    phone_numbers = phone_numbers or []
+    if user and role != 'ADMIN' and not is_user_authorized_for_plc_sending(None, user):
         raise ValueError(f"Użytkownik {user} nie ma uprawnień do wysyłki kodów PLC")
-    
-    # Pobierz konfigurację SMS
     config = sms_config or {}
     if not config:
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -8701,17 +8331,12 @@ def send_plc_code_sms(rm_db_path: str, code_id: int, phone_numbers: List[str],
         if os.path.exists(config_file):
             with open(config_file, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-    
     sms_enabled = config.get('sms_enabled', False)
     sms_token = config.get('sms_api_token', '')
-    
     if not sms_enabled:
         raise ValueError("Wysyłka SMS jest wyłączona w konfiguracji")
-    
     if not sms_token:
         raise ValueError("Brak tokenu API dla SMS (sms_api_token w manager_sync_config.json)")
-    
-    # Wyślij SMS do wszystkich odbiorców
     success_count = 0
     last_error = None
     for phone in phone_numbers:
@@ -8721,23 +8346,9 @@ def send_plc_code_sms(rm_db_path: str, code_id: int, phone_numbers: List[str],
         except Exception as e:
             last_error = e
             print(f"❌ Błąd wysyłki SMS do {phone}: {e}")
-    
     if success_count == 0:
         raise ValueError(f"Nie wysłano żadnego SMS: {last_error}")
-    
-    # Zaktualizuj informację o wysłaniu i oznacz jako użyty
-    con = _open_rm_connection(rm_db_path)
-    try:
-        con.execute("""
-            UPDATE plc_unlock_codes
-            SET sent_at = CURRENT_TIMESTAMP, sent_by = ?, sent_via = 'SMS',
-                is_used = 1, used_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-        """, (user, code_id))
-        _rm_safe_commit(con)
-    finally:
-        con.close()
-    
+    rmm_exec("rmm-plc-unlock-codes-zmien-po-id-3", {"sent_by": user, "id": code_id})
     print(f"✅ Wysłano SMS do {success_count}/{len(phone_numbers)} odbiorców")
     return True
 

@@ -1374,6 +1374,16 @@ ZAPIS = {
     # Decyzja o wniosku urlopowym. `decided_by` bywa świadomie czyszczone
     # (cofnięcie decyzji), więc NIE przez COALESCE — pusta wartość ma
     # tu znaczyć „wyczyść", nie „zostaw".
+    # Edycja kodu PLC: klient przekazuje tylko zmienione pola (żadne nie
+    # jest czyszczone do NULL), więc COALESCE jest tu właściwe.
+    "rmm-plc-code-zmien": (
+        "UPDATE plc_unlock_codes SET"
+        "   unlock_code = COALESCE(?, unlock_code),"
+        "   description = COALESCE(?, description),"
+        "   modified_by = ?, modified_at = CURRENT_TIMESTAMP"
+        " WHERE id = ?",
+        ["unlock_code", "description", "modified_by", "id"],
+    ),
     # Konfiguracja powiadomień o płatnościach — zmiana wybranych pól.
     # COALESCE jest tu właściwe: żadnego z tych pól nie czyści się do NULL
     # (klient przekazuje tylko to, co user zmienił w oknie ustawień).
