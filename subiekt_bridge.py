@@ -312,6 +312,12 @@ def zapewnij_most():
             _most_niedostepny = True
             raise BridgeUnavailable(_powod_niewstania())
 
+        # W trakcie podmiany binarki NIE wskrzeszamy mostu — inaczej
+        # wstałby ze starego pliku i zablokował kopiowanie.
+        if _pauza_startu:
+            raise BridgeUnavailable(
+                "Trwa podmiana mostu — poczekaj, aż się skończy.")
+
         # Most może już wstawać (inne okno go uruchomiło) — wtedy tylko czekamy.
         if dane is None and not _uruchom_most():
             _most_niedostepny = True
@@ -331,6 +337,11 @@ def zapewnij_most():
 #: to sytuacja jednorazowa po „git pull", a nie powód do nękania przy każdym
 #: kliknięciu.
 _ostrzezono_o_buildzie = False
+
+#: Wstrzymuje AUTO-START mostu na czas podmiany binarki (`pobierz_most`).
+#: Bez tego inne okno tej samej aplikacji wskrzesza most ze STAREGO pliku
+#: dokładnie wtedy, gdy próbujemy go nadpisać (11.09.2026).
+_pauza_startu = False
 
 
 def _powod_niewstania(domyslny=None):
@@ -609,12 +620,27 @@ def dostepna_nowsza(timeout_s=3, wymuszone=False):
     return True, f"Na serwerze jest nowszy most (z {tam}, masz z {tu})."
 
 
-def pobierz_most():
-    """Kopiuje gotowy most z folderu sieciowego. Zwraca (ok, komunikat).
+def pobierz_most(uruchom_po=True):
+    """Podmienia most na wersję z serwera. Zwraca (ok, komunikat).
 
-    Używane na stanowiskach, gdzie RM_BAZA chodzi z .exe. Sprawdza wersję
-    protokołu PRZED kopiowaniem: binarka niezgodna z tym klientem zrobiłaby
-    więcej szkody niż stara, bo Python wołałby tryby, których ona nie zna.
+    CAŁA SEKWENCJA POD JEDNYM PRZYCISKIEM (11.09.2026):
+    zatrzymaj → skopiuj → uruchom nowy. User klika raz i ma działający,
+    aktualny most — bez ubijania czegokolwiek ręcznie w Menedżerze zadań.
+
+    ⚠️ DLACZEGO TO NIE JEST SAMO `shutil.copy2`
+
+    Kopiowanie potrafiło paść na „plik jest używany przez inny proces" MIMO
+    wcześniejszego `zatrzymaj_most()`. Powód: most WSTAJE SAM. Każde inne okno
+    RM_BAZA (i drugie uruchomienie programu), które akurat wołało Subiekta,
+    dostawało `ping()=None` i natychmiast startowało most z NADAL STAREJ
+    binarki — w środku naszych dwóch sekund oczekiwania. Wyścig: ubijamy,
+    a aplikacja sama sobie wstaje, zanim zdążymy podmienić plik.
+
+    Ubicie Subiekta nexo „pomagało" tylko dlatego, że wtedy start mostu padał
+    na braku Sfery i nikt nie trzymał pliku.
+
+    Stąd `_pauza_startu` (auto-start wyłączony na czas podmiany) i ponawianie
+    kopiowania — Windows zwalnia uchwyt z opóźnieniem.
     """
     import shutil
 
@@ -634,29 +660,60 @@ def pobierz_most():
                        f"a ta wersja RM_BAZA rozumie {PROTOKOL_MIN}.\n\n"
                        "Zaktualizuj RM_BAZA albo wystaw pasujący most.")
 
-    zatrzymaj_most()
-    time.sleep(2)               # Windows zwalnia uchwyt do pliku z opóźnieniem
-    try:
-        os.makedirs(DOCELOWY_KATALOG_MOSTU, exist_ok=True)
-        skopiowane = 0
-        for nazwa in os.listdir(zrodlo):
-            if nazwa == "wersja.json":
-                continue
-            zrodlowy = os.path.join(zrodlo, nazwa)
-            if os.path.isfile(zrodlowy):
-                shutil.copy2(zrodlowy, os.path.join(DOCELOWY_KATALOG_MOSTU, nazwa))
-                skopiowane += 1
-    except OSError as e:
-        return False, (f"Nie udało się skopiować mostu:\n{e}\n\n"
-                       "Sprawdź, czy RM_BAZA nie jest otwarta w drugim oknie.")
+    global _pauza_startu, _most_niedostepny, _ostrzezono_o_buildzie
 
-    global _most_niedostepny, _ostrzezono_o_buildzie
-    _most_niedostepny = False
-    _ostrzezono_o_buildzie = False
+    # Kopiujemy RAZEM Z wersja.json. Pomijanie go zostawiało lokalny most bez
+    # oznaczenia wersji, więc panel przy każdym otwarciu powtarzał „Twój jest
+    # bez oznaczenia wersji (starszy)" — mimo świeżo pobranego mostu
+    # (widoczne na zrzucie z 11.09.2026).
+    pliki = [n for n in os.listdir(zrodlo)
+             if os.path.isfile(os.path.join(zrodlo, n))]
+
+    _pauza_startu = True
+    try:
+        skopiowane = 0
+        ostatni_blad = None
+        for proba in range(4):
+            zatrzymaj_most()
+            time.sleep(2 if proba == 0 else 3)
+            try:
+                os.makedirs(DOCELOWY_KATALOG_MOSTU, exist_ok=True)
+                skopiowane = 0
+                for nazwa in pliki:
+                    shutil.copy2(os.path.join(zrodlo, nazwa),
+                                 os.path.join(DOCELOWY_KATALOG_MOSTU, nazwa))
+                    skopiowane += 1
+                ostatni_blad = None
+                break
+            except OSError as e:
+                ostatni_blad = e
+        if ostatni_blad is not None:
+            return False, (
+                f"Nie udało się podmienić mostu:\n{ostatni_blad}\n\n"
+                "NexoRecon.exe jest czymś trzymany. Zamknij pozostałe okna\n"
+                "RM_BAZA i spróbuj ponownie.")
+
+        _most_niedostepny = False
+        _ostrzezono_o_buildzie = False
+    finally:
+        _pauza_startu = False
+
     kiedy = (wersja or {}).get("zbudowano")
-    return True, (f"Most pobrany ({skopiowane} plików"
-                  + (f", wersja z {kiedy}" if kiedy else "") + ").\n\n"
-                  "Kolejne operacje Subiekta powinny już działać szybko.")
+    opis = (f"Most podmieniony ({skopiowane} plików"
+            + (f", wersja z {kiedy}" if kiedy else "") + ").")
+
+    if not uruchom_po:
+        return True, opis
+
+    # Nowy most od razu na nogi. Inaczej pierwsza operacja Subiekta po
+    # aktualizacji czeka ~15 s na sesję Sfery i wygląda jak zawieszenie.
+    if not _uruchom_most():
+        return True, (opis + "\n\nNie udało się od razu uruchomić mostu —\n"
+                             "wstanie sam przy pierwszej operacji Subiekta.")
+    if not _czekaj_na_gotowosc(START_TIMEOUT_S):
+        return True, (opis + "\n\nMost wstaje — sesja Sfery jeszcze się\n"
+                             "zestawia. Chwilę to potrwa.")
+    return True, opis + "\n\nMost działa i jest gotowy."
 
 
 def czy_z_binarki():
@@ -972,17 +1029,37 @@ def pozwol_na_ponowna_probe():
 
 
 def zatrzymaj_most():
-    """Kończy proces mostu. Do diagnostyki — normalnie most żyje cały dzień."""
+    """Kończy proces mostu. Zwraca True, gdy cokolwiek ubito.
+
+    ⚠️ NIE POLEGA WYŁĄCZNIE NA `ping()`. Zdrowy most poda PID i ginie grzecznie,
+    ale most ZAWIESZONY albo stojący w środku długiej operacji Sfery nie zdąży
+    odpowiedzieć w 2 s — a wtedy `ping()` zwraca None i dawna wersja tej funkcji
+    kończyła się `return False`, NIKOGO NIE UBIJAJĄC. Plik zostawał zablokowany
+    i podmiana mostu padała. Dlatego po PID-zie dobijamy jeszcze po NAZWIE
+    OBRAZU — to łapie też procesy osierocone po poprzednich sesjach.
+    """
+    ubito = False
     dane = ping()
-    if not dane:
-        return False
-    pid = dane.get("pid")
-    if not pid:
-        return False
-    try:
-        subprocess.run(["taskkill", "/F", "/PID", str(pid)],
-                       capture_output=True,
-                       creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-        return True
-    except OSError:
-        return False
+    pid = (dane or {}).get("pid")
+    if pid:
+        try:
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                           capture_output=True,
+                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+            ubito = True
+        except OSError:
+            pass
+
+    # Dobicie po nazwie: nasz most to jedyny NexoRecon.exe na stanowisku.
+    # Subiekt nexo chodzi pod innymi nazwami (Subiekt.exe, InsERT.Moria.*),
+    # więc go to NIE dotyczy. Brak procesu zwraca kod 128 — to nie błąd.
+    if os.name == "nt":
+        try:
+            p = subprocess.run(["taskkill", "/F", "/T", "/IM", "NexoRecon.exe"],
+                               capture_output=True,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            if p.returncode == 0:
+                ubito = True
+        except OSError:
+            pass
+    return ubito
