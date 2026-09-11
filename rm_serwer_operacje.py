@@ -86,6 +86,60 @@ ODCZYT = {
         "SELECT * FROM client_sessions ORDER BY ended_at IS NOT NULL, last_seen DESC",
         [],
     ),
+    # ── użytkownicy ───────────────────────────────────────────────────
+    "users-aktywni": (
+        "SELECT id, username, display_name, role FROM users"
+        " WHERE is_active = 1 ORDER BY username",
+        [],
+    ),
+    "user-nazwa-po-loginie": (
+        "SELECT display_name FROM users WHERE username = ?",
+        ["username"],
+    ),
+    "user-nazwa-po-id": (
+        "SELECT display_name FROM users WHERE id = ?",
+        ["id"],
+    ),
+    "user-hash": (
+        "SELECT password_hash FROM users WHERE id = ?",
+        ["id"],
+    ),
+
+    # ── projekty ──────────────────────────────────────────────────────
+    "projects-id-nazwa": (
+        "SELECT project_id, name FROM projects",
+        [],
+    ),
+    "project-aktywny": (
+        "SELECT active FROM projects WHERE project_id = ?",
+        ["project_id"],
+    ),
+
+    # ── dostawcy ──────────────────────────────────────────────────────
+    "suppliers-z-nip": (
+        "SELECT supplier_id, name, nip FROM suppliers"
+        " WHERE nip IS NOT NULL AND nip != ''",
+        [],
+    ),
+    "supplier-nazwa": (
+        "SELECT name FROM suppliers WHERE supplier_id = ?",
+        ["supplier_id"],
+    ),
+    "supplier-po-normalizacji": (
+        "SELECT id FROM suppliers WHERE name_normalized = ?",
+        ["name_normalized"],
+    ),
+
+    # ── tagi kooperantów (portal RM_RFQ; tabele leżą w masterze) ──────
+    "rfq-tagi": (
+        "SELECT id, name, label FROM rfq_tags ORDER BY sort_order, label",
+        [],
+    ),
+    "rfq-tagi-dostawcy": (
+        "SELECT tag_id FROM rfq_supplier_tags WHERE supplier_id = ?",
+        ["supplier_id"],
+    ),
+
     # Stan zamówień ZD odkładany przez wysyłkę — nakładany przy przejęciu locka.
     "zd-zamowione-list": (
         "SELECT item_id, termin, kiedy, supplier_id FROM zd_zamowione_pozycje"

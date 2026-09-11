@@ -3174,9 +3174,8 @@ class MainWindow(tk.Tk):
             print("  ✅ Dostawcy pobrani")
 
             print("  → Pobieram użytkowników...")
-            users = self.db_manager.master_con.execute(
-                "SELECT id, username, display_name, role FROM users WHERE is_active = 1 ORDER BY username"
-            ).fetchall()
+            users = [(u["id"], u["username"], u["display_name"], u["role"])
+                     for u in self.db_manager.master_read("users-aktywni")]
             print("  ✅ Użytkownicy pobrani")
             
             # BackupManager (przekaż db_manager dla projektów magazynowych)
@@ -4670,11 +4669,9 @@ class MainWindow(tk.Tk):
             return "Nieznany"
         
         try:
-            cursor = self.db_manager.master_con.execute(
-                "SELECT display_name FROM users WHERE username = ?",
-                (username,)
-            )
-            row = cursor.fetchone()
+            _w = self.db_manager.master_read("user-nazwa-po-loginie",
+                                             {"username": username})
+            row = (_w[0]["display_name"],) if _w else None
             if row and row[0]:
                 return row[0]  # display_name
         except Exception as e:
@@ -5578,11 +5575,8 @@ class MainWindow(tk.Tk):
                 stored_hash = None
                 for attempt in range(3):
                     try:
-                        self.db_manager.master_commit()  # Zwolnij locki przed SELECT
-                        cursor = self.db_manager.master_con.execute(
-                            "SELECT password_hash FROM users WHERE id = ?", (new_user_id,)
-                        )
-                        stored_hash = cursor.fetchone()
+                        _w = self.db_manager.master_read("user-hash", {"id": new_user_id})
+                        stored_hash = (_w[0]["password_hash"],) if _w else None
                         break
                     except sqlite3.OperationalError as e:
                         err_msg = str(e).lower()
@@ -20118,10 +20112,8 @@ class MainWindow(tk.Tk):
                     # nie mówi, dopiero różnica pokazuje co ten backup wnosi
                     try:
                         cur = {}
-                        for row in self.db_manager.master_con.execute(
-                            "SELECT project_id, name FROM projects"
-                        ):
-                            cur[row[0]] = row[1]
+                        for row in self.db_manager.master_read("projects-id-nazwa"):
+                            cur[row["project_id"]] = row["name"]
 
                         bak = {p['id']: p['name'] for p in projects_list}
 
@@ -21456,9 +21448,9 @@ class MainWindow(tk.Tk):
                     # POTWIERDZENIE ODCZYTEM. Commit na polaczeniu, ktore cicho
                     # stracilo tryb zapisu, nie zglasza bledu - a projekt zostaje
                     # nieaktywny (07.09.2026).
-                    sprawdz = self.db_manager.master_con.execute(
-                        "SELECT active FROM projects WHERE project_id=?",
-                        (proj["id"],)).fetchone()
+                    _w = self.db_manager.master_read("project-aktywny",
+                                                     {"project_id": proj["id"]})
+                    sprawdz = (_w[0]["active"],) if _w else None
                     if sprawdz is not None and int(sprawdz[0] or 0) != new_state:
                         raise RuntimeError(
                             "Zapis nie zostal utrwalony - po zapisie baza nadal "
@@ -33016,9 +33008,9 @@ class MainWindow(tk.Tk):
                     elif col_idx == 10:  # Dostawca
                         sup_id = item_dict.get("supplier_id")
                         if sup_id:
-                            sup_row = self.db_manager.master_con.execute(
-                                "SELECT name FROM suppliers WHERE supplier_id = ?", (sup_id,)
-                            ).fetchone()
+                            _w = self.db_manager.master_read("supplier-nazwa",
+                                                             {"supplier_id": sup_id})
+                            sup_row = (_w[0]["name"],) if _w else None
                             val = sup_row[0] if sup_row else ""
                         else:
                             val = ""
@@ -35514,10 +35506,9 @@ class ChatWindow(tk.Toplevel):
             display_name = self.username
             try:
                 if self.db_manager and self.db_manager.master_con:
-                    cursor = self.db_manager.master_con.execute(
-                        "SELECT display_name FROM users WHERE id = ?", (self.user_id,)
-                    )
-                    row = cursor.fetchone()
+                    _w = self.db_manager.master_read("user-nazwa-po-id",
+                                                     {"id": self.user_id})
+                    row = (_w[0]["display_name"],) if _w else None
                     if row and row[0]:
                         display_name = row[0]
             except:
