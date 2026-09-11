@@ -285,6 +285,18 @@ ODCZYT = {
         " AND percentage = ?",
         ['project_id', 'percentage'],
     ),
+    # ⚠️ Generator uciął dwa zapytania poniżej do samego SELECT-a (WHERE był
+    # w drugim literale stringa) — zwracały CAŁĄ tabelę. Tu wersje pełne.
+    "rmm-nieobecnosc-po-id": (
+        "SELECT id, employee_id, status, reason, date_from, date_to"
+        " FROM employee_availability WHERE id = ?",
+        ["id"],
+    ),
+    "rmm-carryover-po-employee-year": (
+        "SELECT days FROM employee_carryover_override"
+        " WHERE employee_id = ? AND year = ?",
+        ["employee_id", "year"],
+    ),
     "rmm-employee-vacation-base-po-employee-id": (
         "SELECT days FROM employee_vacation_base WHERE employee_id = ?",
         ['employee_id'],
@@ -488,11 +500,6 @@ ODCZYT = {
         " 'ODRZUCONY' ORDER BY date_from",
         ['employee_id', 'p1', 'p2'],
     ),
-    "rmm-employee-availability": (
-        "SELECT employee_id, reason, date_from, date_to FROM"
-        " employee_availability",
-        [],
-    ),
     "rmm-service-trips-po-id": (
         "SELECT date_from, date_to, status FROM service_trips WHERE id = ?",
         ['id'],
@@ -503,10 +510,6 @@ ODCZYT = {
         " UPPER(COALESCE(status,'ZATWIERDZONY')) = 'ZATWIERDZONY' AND"
         " date_from <= ? AND date_to >= ? ORDER BY date_from LIMIT 1",
         ['employee_id', 'p1', 'p2', 'p3'],
-    ),
-    "rmm-employee-carryover-override": (
-        "SELECT days FROM employee_carryover_override",
-        [],
     ),
     "rmm-company-calendar-po-date-date": (
         "SELECT date, day_type FROM company_calendar WHERE date >= ? AND"

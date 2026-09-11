@@ -9415,35 +9415,26 @@ def delete_resource_constraint(rm_master_db_path: str, constraint_id: int):
 # OPTYMALIZATOR — dostępność pracowników
 # ============================================================================
 
-def get_employee_availability(rm_master_db_path: str, employee_id: int = None,
+def get_employee_availability(rm_master_db_path: str = None, employee_id: int = None,
                               date_from: str = None, date_to: str = None) -> List[Dict]:
     """Pobierz okresy niedostępności pracowników.
-    
-    Filtruje po employee_id i/lub po zakresie dat (overlap).
+
+    Filtruje po employee_id i/lub po zakresie dat (overlap). Filtr robimy
+    tutaj: tabela ma kilkadziesiąt wierszy, a złączenie z nazwiskiem robi
+    serwer w `rmm-nieobecnosci-z-nazwiskami`.
     """
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        clauses, params = [], []
-        if employee_id is not None:
-            clauses.append("ea.employee_id = ?")
-            params.append(employee_id)
-        if date_from:
-            clauses.append("ea.date_to >= ?")
-            params.append(date_from)
-        if date_to:
-            clauses.append("ea.date_from <= ?")
-            params.append(date_to)
-        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-        rows = con.execute(f"""
-            SELECT ea.*, e.name AS employee_name, e.category AS employee_category
-            FROM employee_availability ea
-            JOIN employees e ON ea.employee_id = e.id
-            {where}
-            ORDER BY ea.date_from
-        """, params).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        con.close()
+    out = []
+    for w in rmm_read("rmm-nieobecnosci-z-nazwiskami"):
+        if employee_id is not None and w.get("employee_id") != employee_id:
+            continue
+        # te same porównania tekstowe co SQL: ea.date_to >= ? AND ea.date_from <= ?
+        if date_from and (w.get("date_to") or "") < date_from:
+            continue
+        if date_to and (w.get("date_from") or "") > date_to:
+            continue
+        out.append(dict(w))
+    out.sort(key=lambda w: (w.get("date_from") or "", w.get("id") or 0))
+    return out
 
 
 # ============================================================================
@@ -9451,124 +9442,91 @@ def get_employee_availability(rm_master_db_path: str, employee_id: int = None,
 # na urlopie/nieobecni jednocześnie (np. jedyni dwaj znający dany proces).
 # ============================================================================
 
-def get_absence_exclusion_groups(rm_master_db_path: str) -> List[Dict]:
-    """Lista grup wykluczających się z listą członków (employee_id + name)."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        groups = con.execute(
-            "SELECT * FROM absence_exclusion_groups ORDER BY name").fetchall()
-        result = []
-        for g in groups:
-            members = con.execute("""
-                SELECT m.employee_id, e.name AS employee_name
-                FROM absence_exclusion_members m
-                JOIN employees e ON e.id = m.employee_id
-                WHERE m.group_id = ?
-                ORDER BY e.name
-            """, (g['id'],)).fetchall()
-            result.append({
-                'id': g['id'], 'name': g['name'],
-                'members': [dict(m) for m in members],
-            })
-        return result
-    finally:
-        con.close()
+def get_absence_exclusion_groups(rm_master_db_path: str = None) -> List[Dict]:
+    """Grupy wykluczeń (osoby, które nie mogą mieć urlopu naraz) z członkami."""
+    result = []
+    for g in rmm_read("rmm-absence-exclusion-groups"):
+        members = rmm_read("rmm-absence-exclusion-members", {"group_id": g['id']})
+        result.append({'id': g['id'], 'name': g['name'],
+                       'members': [dict(m) for m in members]})
+    return result
 
 
-def save_absence_exclusion_group(rm_master_db_path: str, name: str,
-                                 employee_ids: List[int], group_id: int = None,
+def save_absence_exclusion_group(rm_master_db_path: str = None, name: str = "",
+                                 employee_ids: List[int] = None, group_id: int = None,
                                  user: str = None) -> int:
-    """Utwórz lub zaktualizuj grupę wykluczającą (nazwa + lista pracowników)."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        if group_id:
-            con.execute("UPDATE absence_exclusion_groups SET name = ? WHERE id = ?",
-                       (name, group_id))
-            con.execute("DELETE FROM absence_exclusion_members WHERE group_id = ?", (group_id,))
-        else:
-            cur = con.execute(
-                "INSERT INTO absence_exclusion_groups (name, created_by) VALUES (?, ?)",
-                (name, user))
-            group_id = cur.lastrowid
-        for eid in set(employee_ids):
-            con.execute("""
-                INSERT OR IGNORE INTO absence_exclusion_members (group_id, employee_id)
-                VALUES (?, ?)
-            """, (group_id, eid))
-        _rm_safe_commit(con)
-        return group_id
-    finally:
-        con.close()
+    """Dodaj/zmień grupę wykluczeń; skład podmieniany w całości.
 
-
-def delete_absence_exclusion_group(rm_master_db_path: str, group_id: int):
-    """Usuń grupę wykluczającą (kaskadowo usuwa jej członków)."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        con.execute("DELETE FROM absence_exclusion_groups WHERE id = ?", (group_id,))
-        _rm_safe_commit(con)
-    finally:
-        con.close()
-
-
-def check_absence_exclusion_conflicts(rm_master_db_path: str, employee_id: int,
-                                      date_from: str, date_to: str,
-                                      exclude_availability_id: int = None) -> List[Dict]:
-    """Sprawdź, czy w danym terminie inny członek tej samej grupy wykluczającej
-    ma już zatwierdzoną/oczekującą nieobecność (nakładający się zakres dat).
-
-    Zwraca listę konfliktów: [{group_name, employee_name, date_from, date_to,
-    reason, status}, ...].
+    Edycja: nazwa + czyszczenie + nowy skład jednym batchem — inaczej zerwane
+    połączenie zostawiłoby grupę bez członków.
     """
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        groups = con.execute("""
-            SELECT DISTINCT g.id, g.name
-            FROM absence_exclusion_groups g
-            JOIN absence_exclusion_members m ON m.group_id = g.id
-            WHERE m.employee_id = ?
-        """, (employee_id,)).fetchall()
-        if not groups:
-            return []
+    ids = sorted(set(employee_ids or []))
+    czlonkowie = lambda gid: [{"operation": "rmm-absence-exclusion-members-dodaj",
+                               "params": {"group_id": gid, "employee_id": eid}}
+                              for eid in ids]
+    if group_id:
+        rmm_batch([{"operation": "rmm-absence-exclusion-groups-zmien-po-id",
+                    "params": {"name": name, "id": group_id}},
+                   {"operation": "rmm-absence-exclusion-members-usun",
+                    "params": {"group_id": group_id}}] + czlonkowie(group_id))
+        return group_id
+    wynik = rmm_exec("rmm-absence-exclusion-groups-dodaj",
+                     {"name": name, "created_by": user})
+    group_id = int((wynik or {}).get("lastrowid") or 0)
+    if ids:
+        rmm_batch(czlonkowie(group_id))
+    return group_id
 
-        conflicts = []
-        for g in groups:
-            peers = con.execute("""
-                SELECT m.employee_id FROM absence_exclusion_members m
-                WHERE m.group_id = ? AND m.employee_id != ?
-            """, (g['id'], employee_id)).fetchall()
-            peer_ids = [p['employee_id'] for p in peers]
-            if not peer_ids:
+
+def delete_absence_exclusion_group(rm_master_db_path: str = None, group_id: int = 0):
+    """Usuń grupę wykluczeń. Członkowie znikają przez ON DELETE CASCADE —
+    serwer ma `PRAGMA foreign_keys=ON` (klient, z wyłączonymi kluczami
+    obcymi, zostawiał osierocone wpisy)."""
+    rmm_exec("rmm-absence-exclusion-groups-usun-po-id", {"id": group_id})
+
+
+def check_absence_exclusion_conflicts(rm_master_db_path: str = None, employee_id: int = 0,
+                                      date_from: str = "", date_to: str = "",
+                                      exclude_availability_id: int = None) -> List[Dict]:
+    """Nieobecności osób z tych samych grup wykluczeń, nachodzące na zakres.
+
+    Lista nieobecności czytana raz (kilkadziesiąt wierszy) i filtrowana tutaj
+    — wcześniej per grupa leciał SELECT ze sklejonym `IN (?,?,…)`.
+    """
+    groups = rmm_read("rmm-absence-exclusion-groups-po-employee-id",
+                      {"employee_id": employee_id})
+    if not groups:
+        return []
+    wszystkie = None
+    conflicts = []
+    for g in groups:
+        peers = rmm_read("rmm-absence-exclusion-members-2",
+                         {"group_id": g['id'], "p1": employee_id})
+        peer_ids = {p['employee_id'] for p in peers}
+        if not peer_ids:
+            continue
+        if wszystkie is None:
+            wszystkie = rmm_read("rmm-nieobecnosci-z-nazwiskami")
+        for r in wszystkie:
+            if r['employee_id'] not in peer_ids:
                 continue
-            placeholders = ",".join("?" * len(peer_ids))
-            params = peer_ids + [date_to, date_from]
-            clause = ""
-            if exclude_availability_id:
-                clause = " AND ea.id != ?"
-                params.append(exclude_availability_id)
-            rows = con.execute(f"""
-                SELECT ea.*, e.name AS employee_name
-                FROM employee_availability ea
-                JOIN employees e ON e.id = ea.employee_id
-                WHERE ea.employee_id IN ({placeholders})
-                  AND ea.status != 'ODRZUCONY'
-                  AND ea.date_from <= ? AND ea.date_to >= ?
-                  {clause}
-            """, params).fetchall()
-            for r in rows:
-                conflicts.append({
-                    'group_name': g['name'],
-                    'employee_name': r['employee_name'],
-                    'date_from': r['date_from'], 'date_to': r['date_to'],
-                    'reason': r['reason'], 'status': r['status'],
-                })
-        return conflicts
-    finally:
-        con.close()
+            # jak w SQL `ea.status != 'ODRZUCONY'`: NULL też odpada
+            if r.get('status') is None or r['status'] == 'ODRZUCONY':
+                continue
+            if not ((r['date_from'] or '') <= date_to and (r['date_to'] or '') >= date_from):
+                continue
+            if exclude_availability_id and r['id'] == exclude_availability_id:
+                continue
+            conflicts.append({
+                'group_name': g['name'], 'employee_name': r['employee_name'],
+                'date_from': r['date_from'], 'date_to': r['date_to'],
+                'reason': r['reason'], 'status': r['status'],
+            })
+    return conflicts
 
 
-def find_overlapping_absences(rm_master_db_path: str, employee_id: int,
-                              date_from: str, date_to: str,
+def find_overlapping_absences(rm_master_db_path: str = None, employee_id: int = 0,
+                              date_from: str = "", date_to: str = "",
                               exclude_id: int = None) -> List[Dict]:
     """Zwróć nie-odrzucone nieobecności tego pracownika nachodzące na [date_from,
     date_to]. exclude_id: pomiń ten wpis (przy edycji). Do walidacji kolizji.
@@ -9577,23 +9535,13 @@ def find_overlapping_absences(rm_master_db_path: str, employee_id: int,
                        AND istniejący.date_to   >= nowy.date_from.
     """
     df, dt = date_from[:10], date_to[:10]
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        rows = con.execute("""
-            SELECT id, date_from, date_to, reason, status
-            FROM employee_availability
-            WHERE employee_id = ?
-              AND date_from <= ? AND date_to >= ?
-              AND UPPER(COALESCE(status,'ZATWIERDZONY')) != 'ODRZUCONY'
-            ORDER BY date_from
-        """, (employee_id, dt, df)).fetchall()
-        out = [dict(r) for r in rows if exclude_id is None or r['id'] != exclude_id]
-        return out
-    finally:
-        con.close()
+    rows = rmm_read("rmm-employee-availability-po-employee-id-date-from",
+                    {"employee_id": employee_id, "p1": dt, "p2": df})
+    return [dict(r) for r in rows if exclude_id is None or r["id"] != exclude_id]
 
 
-def save_employee_availability(rm_master_db_path: str, data: Dict, user: str = None) -> int:
+def save_employee_availability(rm_master_db_path: str = None, data: Dict = None,
+                               user: str = None) -> int:
     """Dodaj lub zaktualizuj okres niedostępności.
 
     data keys: id (opt), employee_id, date_from, date_to, reason, notes,
@@ -9601,65 +9549,55 @@ def save_employee_availability(rm_master_db_path: str, data: Dict, user: str = N
                status (opt).
     Nowy wpis bez podanego status → OCZEKUJE (workflow wniosku). Edycja nie
     rusza statusu/decyzji, chyba że 'status' podano jawnie (wtedy tylko status).
+
+    Edycja: zmiana + ewentualny status + audyt jednym batchem. Dodanie: INSERT
+    osobno (audyt potrzebuje nadanego id), potem wpis audytu.
     """
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        if data.get('id'):
-            con.execute("""
-                UPDATE employee_availability
-                SET employee_id = ?, date_from = ?, date_to = ?, reason = ?, notes = ?,
-                    time_from = ?, time_to = ?, days_override = ?
-                WHERE id = ?
-            """, (data['employee_id'], data['date_from'], data['date_to'],
-                  data['reason'], data.get('notes'),
-                  data.get('time_from'), data.get('time_to'),
-                  data.get('days_override'), data['id']))
-            if data.get('status'):
-                con.execute("UPDATE employee_availability SET status = ? WHERE id = ?",
-                            (str(data['status']).upper(), data['id']))
-            _rm_safe_commit(con)
-            _saved_id = data['id']
-            _action = 'EDIT'
-        else:
-            status = str(data.get('status') or 'OCZEKUJE').upper()
-            cursor = con.execute("""
-                INSERT INTO employee_availability
-                    (employee_id, date_from, date_to, reason, notes, created_by,
-                     time_from, time_to, days_override, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (data['employee_id'], data['date_from'], data['date_to'],
-                  data['reason'], data.get('notes'), user,
-                  data.get('time_from'), data.get('time_to'),
-                  data.get('days_override'), status))
-            _rm_safe_commit(con)
-            _saved_id = cursor.lastrowid
-            _action = 'ADD'
-    finally:
-        con.close()
-    # Audyt wpisu nieobecności.
-    log_audit(rm_master_db_path, 'availability', _action,
-              employee_id=data['employee_id'], entity_id=_saved_id,
-              field=(data.get('reason') or ''),
-              new_value=f"{data['date_from']}→{data['date_to']}", user=user)
-    return _saved_id
+    data = data or {}
+    zakres = f"{data['date_from']}→{data['date_to']}"
+    if data.get('id'):
+        operacje = [{"operation": "rmm-employee-availability-zmien-po-id", "params": {
+            "employee_id": data['employee_id'], "date_from": data['date_from'],
+            "date_to": data['date_to'], "reason": data['reason'],
+            "notes": data.get('notes'), "time_from": data.get('time_from'),
+            "time_to": data.get('time_to'), "days_override": data.get('days_override'),
+            "id": data['id']}}]
+        if data.get('status'):
+            operacje.append({"operation": "rmm-employee-availability-zmien-po-id-2",
+                             "params": {"status": str(data['status']).upper(),
+                                        "id": data['id']}})
+        operacje.append({"operation": "rmm-audit-log-dodaj", "params": _wpis_audytu(
+            'availability', 'EDIT', data['employee_id'], data['id'],
+            (data.get('reason') or ''), None, zakres, None, user)})
+        rmm_batch(operacje)
+        return data['id']
+
+    status = str(data.get('status') or 'OCZEKUJE').upper()
+    wynik = rmm_exec("rmm-employee-availability-dodaj", {
+        "employee_id": data['employee_id'], "date_from": data['date_from'],
+        "date_to": data['date_to'], "reason": data['reason'],
+        "notes": data.get('notes'), "created_by": user,
+        "time_from": data.get('time_from'), "time_to": data.get('time_to'),
+        "days_override": data.get('days_override'), "status": status})
+    saved_id = int((wynik or {}).get("lastrowid") or 0)
+    log_audit(None, 'availability', 'ADD', employee_id=data['employee_id'],
+              entity_id=saved_id, field=(data.get('reason') or ''),
+              new_value=zakres, user=user)
+    return saved_id
 
 
-def delete_employee_availability(rm_master_db_path: str, avail_id: int, user: str = None):
-    """Usuń okres niedostępności."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        prev = con.execute(
-            "SELECT employee_id, reason, date_from, date_to FROM employee_availability "
-            "WHERE id = ?", (avail_id,)).fetchone()
-        con.execute("DELETE FROM employee_availability WHERE id = ?", (avail_id,))
-        _rm_safe_commit(con)
-    finally:
-        con.close()
+def delete_employee_availability(rm_master_db_path: str = None, avail_id: int = 0,
+                                 user: str = None):
+    """Usuń okres niedostępności (+ wpis audytu, jednym batchem)."""
+    prev = rmm_read("rmm-nieobecnosc-po-id", {"id": avail_id})
+    operacje = [{"operation": "rmm-employee-availability-usun-po-id",
+                 "params": {"id": avail_id}}]
     if prev:
-        log_audit(rm_master_db_path, 'availability', 'DELETE',
-                  employee_id=prev['employee_id'], entity_id=avail_id,
-                  field=(prev['reason'] or ''),
-                  old_value=f"{prev['date_from']}→{prev['date_to']}", user=user)
+        p = prev[0]
+        operacje.append({"operation": "rmm-audit-log-dodaj", "params": _wpis_audytu(
+            'availability', 'DELETE', p['employee_id'], avail_id,
+            (p['reason'] or ''), f"{p['date_from']}→{p['date_to']}", None, None, user)})
+    rmm_batch(operacje)
 
 
 # ============================================================================
@@ -9873,8 +9811,8 @@ def find_absences_conflicting_with_trip(rm_master_db_path: str, employee_id: int
                                      date_from[:10], date_to[:10])
 
 
-def set_absence_status(rm_master_db_path: str, avail_id: int, status: str,
-                       note: str = None, user: str = None):
+def set_absence_status(rm_master_db_path: str = None, avail_id: int = 0,
+                       status: str = "", note: str = None, user: str = None):
     """Zmień status wpisu nieobecności (workflow wniosku).
 
     status: OCZEKUJE / ZATWIERDZONY / ODRZUCONY. Zapisuje decyzję (kto/kiedy/uwaga)
@@ -9883,47 +9821,43 @@ def set_absence_status(rm_master_db_path: str, avail_id: int, status: str,
     status = (status or '').upper()
     if status not in ABSENCE_STATUSES:
         raise ValueError(f"Nieznany status: {status}")
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        prev = con.execute(
-            "SELECT employee_id, status, date_from, date_to "
-            "FROM employee_availability WHERE id = ?", (avail_id,)).fetchone()
-        # Blokada przy ZATWIERDZANIU: nie może kolidować z innym ZATWIERDZONYM
-        # wpisem tego pracownika w tych samych dniach.
-        if status == 'ZATWIERDZONY' and prev:
-            clash = con.execute("""
-                SELECT date_from, date_to, reason FROM employee_availability
-                WHERE employee_id = ? AND id != ?
-                  AND UPPER(COALESCE(status,'ZATWIERDZONY')) = 'ZATWIERDZONY'
-                  AND date_from <= ? AND date_to >= ?
-                ORDER BY date_from LIMIT 1
-            """, (prev['employee_id'], avail_id,
-                  prev['date_to'][:10], prev['date_from'][:10])).fetchone()
-            if clash:
-                con.close()
-                raise ValueError(
-                    "Nie można zatwierdzić — koliduje z już zatwierdzoną "
-                    f"nieobecnością {clash['date_from'][:10]}…{clash['date_to'][:10]} "
-                    f"({clash['reason']}).")
-        if status == 'OCZEKUJE':
-            con.execute(
-                "UPDATE employee_availability SET status = ?, decided_by = NULL, "
-                "decided_at = NULL, decision_note = NULL WHERE id = ?",
-                (status, avail_id))
-        else:
-            con.execute(
-                "UPDATE employee_availability SET status = ?, decided_by = ?, "
-                "decided_at = CURRENT_TIMESTAMP, decision_note = ? WHERE id = ?",
-                (status, user, note, avail_id))
-        _rm_safe_commit(con)
-    finally:
-        con.close()
-    # Audyt decyzji o wniosku.
+    prev_l = rmm_read("rmm-nieobecnosc-po-id", {"id": avail_id})
+    prev = prev_l[0] if prev_l else None
+    # Blokada przy ZATWIERDZANIU: nie może kolidować z innym ZATWIERDZONYM
+    # wpisem tego pracownika w tych samych dniach.
+    if status == 'ZATWIERDZONY' and prev:
+        clash = rmm_read("rmm-employee-availability-po-employee-id-date-from-2",
+                         {"employee_id": prev['employee_id'], "p1": avail_id,
+                          "p2": prev['date_to'][:10], "p3": prev['date_from'][:10]})
+        if clash:
+            c = clash[0]
+            raise ValueError(
+                "Nie można zatwierdzić — koliduje z już zatwierdzoną "
+                f"nieobecnością {c['date_from'][:10]}…{c['date_to'][:10]} "
+                f"({c['reason']}).")
+    if status == 'OCZEKUJE':
+        params = {"status": status, "decided_by": None, "decided_at": None,
+                  "decision_note": None, "id": avail_id}
+    else:
+        params = {"status": status, "decided_by": user, "decided_at": _teraz_utc(),
+                  "decision_note": note, "id": avail_id}
+    operacje = [{"operation": "rmm-nieobecnosc-decyzja", "params": params}]
     if prev:
-        log_audit(rm_master_db_path, 'availability', 'STATUS',
-                  employee_id=prev['employee_id'], entity_id=avail_id,
-                  field='Status wniosku', old_value=prev['status'],
-                  new_value=status, note=note, user=user)
+        operacje.append({"operation": "rmm-audit-log-dodaj", "params": _wpis_audytu(
+            'availability', 'STATUS', prev['employee_id'], avail_id,
+            'Status wniosku', prev['status'], status, note, user)})
+    rmm_batch(operacje)
+
+
+def _teraz_utc() -> str:
+    """Znacznik czasu w formacie CURRENT_TIMESTAMP SQLite (UTC).
+
+    Kolumny `*_at` w tej bazie mają DEFAULT CURRENT_TIMESTAMP, czyli UTC —
+    wartość nadawana po stronie klienta musi być w tym samym formacie
+    i strefie, inaczej daty decyzji rozjechałyby się z datami utworzenia.
+    """
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def count_absence_type_days_in_year(rm_master_db_path: str, employee_id: int,
@@ -9954,157 +9888,87 @@ def count_absence_type_days_in_year(rm_master_db_path: str, employee_id: int,
     return total
 
 
-def get_vacation_base(rm_master_db_path: str, employee_id: int) -> float:
-    """Zwróć pulę bazową (permanentną) pracownika. Domyślnie 26."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        row = con.execute(
-            "SELECT days FROM employee_vacation_base WHERE employee_id = ?",
-            (employee_id,),
-        ).fetchone()
-        return float(row['days']) if row else float(DEFAULT_VACATION_DAYS)
-    finally:
-        con.close()
+def get_vacation_base(rm_master_db_path: str = None, employee_id: int = 0) -> float:
+    """Stała pula urlopowa pracownika (dni). Brak wpisu → DEFAULT_VACATION_DAYS."""
+    w = rmm_read("rmm-employee-vacation-base-po-employee-id", {"employee_id": employee_id})
+    return float(w[0]['days']) if w else float(DEFAULT_VACATION_DAYS)
 
 
-def set_vacation_base(rm_master_db_path: str, employee_id: int, days: float,
-                      user: str = None):
-    """Ustaw (upsert) pulę bazową (permanentną) pracownika."""
-    old = get_vacation_base(rm_master_db_path, employee_id)
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        con.execute("""
-            INSERT INTO employee_vacation_base (employee_id, days, updated_by)
-            VALUES (?, ?, ?)
-            ON CONFLICT(employee_id) DO UPDATE SET
-                days = excluded.days,
-                updated_at = CURRENT_TIMESTAMP,
-                updated_by = excluded.updated_by
-        """, (employee_id, days, user))
-        _rm_safe_commit(con)
-    finally:
-        con.close()
-    log_audit(rm_master_db_path, 'quota', 'UPDATE', employee_id=employee_id,
-              field='Pula bazowa (stała)', old_value=f"{old:g}", new_value=f"{days:g}",
-              user=user)
+def set_vacation_base(rm_master_db_path: str = None, employee_id: int = 0,
+                      days: float = 0.0, user: str = None):
+    """Ustaw stałą pulę urlopową (+ audyt, jednym batchem)."""
+    old = get_vacation_base(None, employee_id)
+    rmm_batch([
+        {"operation": "rmm-employee-vacation-base-dodaj",
+         "params": {"employee_id": employee_id, "days": days, "updated_by": user}},
+        {"operation": "rmm-audit-log-dodaj", "params": _wpis_audytu(
+            'quota', 'UPDATE', employee_id, None, 'Pula bazowa (stała)',
+            f"{old:g}", f"{days:g}", None, user)},
+    ])
 
 
-def has_vacation_quota_for_year(rm_master_db_path: str, employee_id: int, year: int) -> bool:
-    """Czy pracownik ma osobną (roczną) korektę puli na dany rok?"""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        row = con.execute(
-            "SELECT days FROM employee_vacation_quota WHERE employee_id = ? AND year = ?",
-            (employee_id, year),
-        ).fetchone()
-        return row is not None and row['days'] is not None
-    finally:
-        con.close()
+def has_vacation_quota_for_year(rm_master_db_path: str = None, employee_id: int = 0,
+                                year: int = 0) -> bool:
+    """Czy na dany rok jest jawna korekta puli."""
+    w = rmm_read("rmm-employee-vacation-quota-po-employee-id-year",
+                 {"employee_id": employee_id, "year": year})
+    return bool(w) and w[0]['days'] is not None
 
 
-def get_vacation_quota(rm_master_db_path: str, employee_id: int, year: int) -> float:
-    """Zwróć efektywną pulę urlopu pracownika na dany rok.
-
-    Priorytet: korekta roczna (employee_vacation_quota) → pula bazowa
-    (employee_vacation_base, permanentna) → domyślne 26.
-    """
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        row = con.execute(
-            "SELECT days FROM employee_vacation_quota WHERE employee_id = ? AND year = ?",
-            (employee_id, year),
-        ).fetchone()
-        if row and row['days'] is not None:
-            return float(row['days'])
-        base = con.execute(
-            "SELECT days FROM employee_vacation_base WHERE employee_id = ?",
-            (employee_id,),
-        ).fetchone()
-        return float(base['days']) if base else float(DEFAULT_VACATION_DAYS)
-    finally:
-        con.close()
+def get_vacation_quota(rm_master_db_path: str = None, employee_id: int = 0,
+                       year: int = 0) -> float:
+    """Pula na rok: korekta roczna, a gdy jej brak — pula bazowa."""
+    w = rmm_read("rmm-employee-vacation-quota-po-employee-id-year",
+                 {"employee_id": employee_id, "year": year})
+    if w and w[0]['days'] is not None:
+        return float(w[0]['days'])
+    return get_vacation_base(None, employee_id)
 
 
-def set_vacation_quota(rm_master_db_path: str, employee_id: int, year: int,
-                       days: float, user: str = None):
-    """Ustaw (upsert) roczną korektę puli urlopu (nadpisuje bazową na ten rok)."""
-    old = get_vacation_quota(rm_master_db_path, employee_id, year)
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        con.execute("""
-            INSERT INTO employee_vacation_quota (employee_id, year, days, updated_by)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(employee_id, year) DO UPDATE SET
-                days = excluded.days,
-                updated_at = CURRENT_TIMESTAMP,
-                updated_by = excluded.updated_by
-        """, (employee_id, year, days, user))
-        _rm_safe_commit(con)
-    finally:
-        con.close()
-    log_audit(rm_master_db_path, 'quota', 'UPDATE', employee_id=employee_id,
-              field=f'Pula na rok {year}', old_value=f"{old:g}", new_value=f"{days:g}",
-              user=user)
+def set_vacation_quota(rm_master_db_path: str = None, employee_id: int = 0,
+                       year: int = 0, days: float = 0.0, user: str = None):
+    """Ustaw korektę puli na rok (+ audyt, jednym batchem)."""
+    old = get_vacation_quota(None, employee_id, year)
+    rmm_batch([
+        {"operation": "rmm-employee-vacation-quota-dodaj",
+         "params": {"employee_id": employee_id, "year": year, "days": days,
+                    "updated_by": user}},
+        {"operation": "rmm-audit-log-dodaj", "params": _wpis_audytu(
+            'quota', 'UPDATE', employee_id, None, f'Pula na rok {year}',
+            f"{old:g}", f"{days:g}", None, user)},
+    ])
 
 
-def clear_vacation_quota(rm_master_db_path: str, employee_id: int, year: int):
-    """Usuń roczną korektę puli (powrót do puli bazowej).
-
-    Zachowuje carryover_override jeśli był ustawiony (to osobna dana w tym wierszu):
-    gdy override istnieje — usuwa tylko korektę days przez skasowanie i odtworzenie
-    wiersza z samym override; w przeciwnym razie usuwa cały wiersz.
-    """
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        # Roczna korekta i override to osobne tabele — po prostu usuń korektę.
-        con.execute(
-            "DELETE FROM employee_vacation_quota WHERE employee_id = ? AND year = ?",
-            (employee_id, year))
-        _rm_safe_commit(con)
-    finally:
-        con.close()
+def clear_vacation_quota(rm_master_db_path: str = None, employee_id: int = 0,
+                         year: int = 0):
+    """Usuń korektę roczną — wraca pula bazowa. Override zaległego zostaje."""
+    rmm_exec("rmm-employee-vacation-quota-usun-po-employee-id-year",
+             {"employee_id": employee_id, "year": year})
 
 
-def get_carryover_override(rm_master_db_path: str, employee_id: int, year: int):
-    """Zwróć ręcznie ustawiony zaległy urlop (float) lub None jeśli brak (= wylicz auto)."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        row = con.execute(
-            "SELECT days FROM employee_carryover_override "
-            "WHERE employee_id = ? AND year = ?",
-            (employee_id, year),
-        ).fetchone()
-        return float(row['days']) if row else None
-    finally:
-        con.close()
+def get_carryover_override(rm_master_db_path: str = None, employee_id: int = 0,
+                           year: int = 0):
+    """Ręcznie ustawiony zaległy urlop z ub. roku albo None (= liczony auto)."""
+    w = rmm_read("rmm-carryover-po-employee-year",
+                 {"employee_id": employee_id, "year": year})
+    return float(w[0]['days']) if w else None
 
 
-def set_carryover_override(rm_master_db_path: str, employee_id: int, year: int,
-                           value, user: str = None):
-    """Ustaw ręczny zaległy urlop. value=None czyści override (powrót do auto)."""
-    old = get_carryover_override(rm_master_db_path, employee_id, year)
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        if value is None:
-            con.execute(
-                "DELETE FROM employee_carryover_override WHERE employee_id = ? AND year = ?",
-                (employee_id, year))
-        else:
-            con.execute("""
-                INSERT INTO employee_carryover_override (employee_id, year, days, updated_by)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(employee_id, year) DO UPDATE SET
-                    days = excluded.days,
-                    updated_at = CURRENT_TIMESTAMP,
-                    updated_by = excluded.updated_by
-            """, (employee_id, year, value, user))
-        _rm_safe_commit(con)
-    finally:
-        con.close()
-    log_audit(rm_master_db_path, 'carryover', 'UPDATE', employee_id=employee_id,
-              field=f'Zaległy z ub. roku ({year})',
-              old_value=('auto' if old is None else f"{old:g}"),
-              new_value=('auto' if value is None else f"{value:g}"), user=user)
+def set_carryover_override(rm_master_db_path: str = None, employee_id: int = 0,
+                           year: int = 0, value=None, user: str = None):
+    """Ustaw (albo skasuj przy None) ręczny zaległy urlop (+ audyt, batchem)."""
+    old = get_carryover_override(None, employee_id, year)
+    if value is None:
+        zapis = {"operation": "rmm-employee-carryover-override-usun-po-employee-id-year",
+                 "params": {"employee_id": employee_id, "year": year}}
+    else:
+        zapis = {"operation": "rmm-employee-carryover-override-dodaj",
+                 "params": {"employee_id": employee_id, "year": year,
+                            "days": value, "updated_by": user}}
+    rmm_batch([zapis, {"operation": "rmm-audit-log-dodaj", "params": _wpis_audytu(
+        'carryover', 'UPDATE', employee_id, None, f'Zaległy z ub. roku ({year})',
+        ('auto' if old is None else f"{old:g}"),
+        ('auto' if value is None else f"{value:g}"), None, user)}])
 
 
 _WEEKDAY_PL = ['pon', 'wt', 'śr', 'czw', 'pt', 'sob', 'ndz']
@@ -10479,50 +10343,27 @@ def export_vacations_xlsx(rm_master_db_path: str, path: str, year: int = None,
 # OPTYMALIZATOR — kalendarz firmowy
 # ============================================================================
 
-def get_company_calendar(rm_master_db_path: str, date_from: str = None,
+def get_company_calendar(rm_master_db_path: str = None, date_from: str = None,
                          date_to: str = None) -> List[Dict]:
-    """Pobierz dni firmowe (wolne, święta, soboty pracujące)."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        clauses, params = [], []
-        if date_from:
-            clauses.append("date >= ?")
-            params.append(date_from)
-        if date_to:
-            clauses.append("date <= ?")
-            params.append(date_to)
-        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-        rows = con.execute(f"""
-            SELECT * FROM company_calendar {where} ORDER BY date
-        """, params).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        con.close()
+    """Wpisy kalendarza firmowego (święta, dni wolne, pracujące soboty)."""
+    return [dict(w) for w in rmm_read("rmm-company-calendar-wszystkie")
+            if (not date_from or w['date'] >= date_from)
+            and (not date_to or w['date'] <= date_to)]
 
 
-def save_company_calendar_day(rm_master_db_path: str, date: str, day_type: str,
-                              description: str = None, user: str = None) -> int:
-    """Dodaj lub nadpisz dzień w kalendarzu firmowym."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        cursor = con.execute("""
-            INSERT OR REPLACE INTO company_calendar (date, day_type, description, created_by)
-            VALUES (?, ?, ?, ?)
-        """, (date, day_type, description, user))
-        _rm_safe_commit(con)
-        return cursor.lastrowid
-    finally:
-        con.close()
+def save_company_calendar_day(rm_master_db_path: str = None, date: str = "",
+                              day_type: str = "", description: str = None,
+                              user: str = None) -> int:
+    """Dodaj/nadpisz dzień w kalendarzu firmowym. Zwraca id wiersza."""
+    wynik = rmm_exec("rmm-company-calendar-dodaj", {
+        "date": date, "day_type": day_type, "description": description,
+        "created_by": user})
+    return int((wynik or {}).get("lastrowid") or 0)
 
 
-def delete_company_calendar_day(rm_master_db_path: str, date: str):
+def delete_company_calendar_day(rm_master_db_path: str = None, date: str = ""):
     """Usuń dzień z kalendarza firmowego."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        con.execute("DELETE FROM company_calendar WHERE date = ?", (date,))
-        _rm_safe_commit(con)
-    finally:
-        con.close()
+    rmm_exec("rmm-company-calendar-usun-po-date", {"date": date})
 
 
 def _easter_sunday(year: int) -> "date":
@@ -10592,46 +10433,31 @@ def seed_polish_holidays(rm_master_db_path: str, year: int,
     return added
 
 
-def get_working_days(rm_master_db_path: str, date_from: str, date_to: str) -> List[str]:
-    """Zwróć listę dni roboczych w podanym przedziale.
+def get_working_days(rm_master_db_path: str = None, date_from="", date_to="") -> List[str]:
+    """Dni robocze w zakresie (ISO). Pon–pt bez wpisu; wpis kalendarza rozstrzyga:
+    SATURDAY_WORK → roboczy, HOLIDAY / COMPANY_DAY_OFF → wolny.
 
-    Uwzględnia:
-    - Weekendy (sob/ndz = wolne, chyba że SATURDAY_WORK)
-    - Święta i dni wolne z company_calendar
+    Przyjmuje str ISO albo obiekt date — do serwera jedzie zawsze tekst
+    (obiekt date nie przeszedłby przez JSON).
     """
-    cal_entries = {}
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        rows = con.execute("""
-            SELECT date, day_type FROM company_calendar
-            WHERE date >= ? AND date <= ?
-        """, (date_from, date_to)).fetchall()
-        for r in rows:
-            cal_entries[r['date']] = r['day_type']
-    finally:
-        con.close()
-
     start = datetime.fromisoformat(date_from).date() if isinstance(date_from, str) else date_from
     end = datetime.fromisoformat(date_to).date() if isinstance(date_to, str) else date_to
+    cal_entries = {r['date']: r['day_type'] for r in rmm_read(
+        "rmm-company-calendar-po-date-date",
+        {"p1": start.isoformat(), "p2": end.isoformat()})}
 
     working = []
     current = start
     while current <= end:
         iso = current.isoformat()
         wd = current.weekday()  # 0=Mon .. 6=Sun
-
         if iso in cal_entries:
-            ct = cal_entries[iso]
-            if ct == 'SATURDAY_WORK':
+            if cal_entries[iso] == 'SATURDAY_WORK':
                 working.append(iso)
             # HOLIDAY / COMPANY_DAY_OFF → wolne
         elif wd < 5:
-            # Pon-Pt → roboczy
             working.append(iso)
-        # Sob/Ndz bez wpisu → wolne
-
         current += timedelta(days=1)
-
     return working
 
 
