@@ -77,6 +77,14 @@ ODCZYT = {
     ),
     # Cały dziennik od początku — po nim odtwarza się stan użytkowników
     # (SNAPSHOT/ADD dodaje, DELETE usuwa), więc kolejność MUSI być rosnąca.
+    # Pełny dziennik do okna „Historia zmian użytkowników" — wszystkie
+    # kolumny, od najnowszych.
+    "user-audit-pelny": (
+        "SELECT change_id, action, user_id, username, display_name, role,"
+        "       changed_by, timestamp, details"
+        "  FROM user_changes_log ORDER BY change_id DESC",
+        [],
+    ),
     "user-audit-historia": (
         "SELECT action, user_id, username, display_name, role"
         " FROM user_changes_log ORDER BY change_id ASC",

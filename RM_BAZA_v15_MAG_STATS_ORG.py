@@ -7075,9 +7075,9 @@ class MainWindow(tk.Tk):
                 # to wiarygodny sygnał. Nie używać rfq_results.synced_at —
                 # ten zmienia się tylko przy realnych zmianach, więc spokojne
                 # RFQ wyglądałoby jak awaria.
-                last_contact = master_con.execute(
-                    "SELECT value FROM settings WHERE key='rfq_last_contact'"
-                ).fetchone()
+                _w = self.db_manager.master_read("settings-get",
+                                                 {"key": "rfq_last_contact"})
+                last_contact = (_w[0]["value"],) if _w else None
                 self._rfq_last_contact = str(last_contact[0]) if (last_contact and last_contact[0]) else None
                 if self._rfq_last_contact:
                     try:
@@ -7100,12 +7100,12 @@ class MainWindow(tk.Tk):
                 # bez okna konsoli i stderr przepada). Dzięki temu user widzi
                 # POWÓD awarii, a nie samo „brak danych".
                 try:
-                    _err = master_con.execute(
-                        "SELECT value FROM settings WHERE key='rfq_last_error'"
-                    ).fetchone()
-                    _err_at = master_con.execute(
-                        "SELECT value FROM settings WHERE key='rfq_last_error_at'"
-                    ).fetchone()
+                    _we = self.db_manager.master_read("settings-get",
+                                                      {"key": "rfq_last_error"})
+                    _err = (_we[0]["value"],) if _we else None
+                    _wa = self.db_manager.master_read("settings-get",
+                                                      {"key": "rfq_last_error_at"})
+                    _err_at = (_wa[0]["value"],) if _wa else None
                     self._rfq_last_error = (_err[0] or '') if _err else ''
                     self._rfq_last_error_at = (_err_at[0] or '') if _err_at else ''
                 except Exception:
@@ -27570,15 +27570,12 @@ class MainWindow(tk.Tk):
             
             try:
                 # Pobierz logi (od najnowszych)
-                cursor = self.db_manager.master_con.execute("""
-                    SELECT change_id, action, user_id, username, display_name, role, 
-                           changed_by, timestamp, details
-                    FROM user_changes_log
-                    ORDER BY change_id DESC
-                """)
-                
-                for row in cursor.fetchall():
-                    change_id, action, user_id, username, display_name, role, changed_by, timestamp, details = row
+                for _w in self.db_manager.master_read("user-audit-pelny"):
+                    (change_id, action, user_id, username, display_name, role,
+                     changed_by, timestamp, details) = (
+                        _w["change_id"], _w["action"], _w["user_id"], _w["username"],
+                        _w["display_name"], _w["role"], _w["changed_by"],
+                        _w["timestamp"], _w["details"])
                     
                     # Koloruj różne akcje
                     tree.insert("", tk.END, values=(

@@ -813,6 +813,29 @@ Lepiej podjąć ją świadomie przed cutoverem niż przez awarię po nim.
 | `project_manager.py` | **biblioteka** — dostaje połączenie z zewnątrz | bez zmian; wołający decyduje |
 | `ksef_archiwum` | pisze do **własnej** bazy obok mastera | bez zmian |
 
+### ⚠️ Portal RM_RFQ — sprawdzić przed cutoverem
+
+Portal **nie czyta mastera z własnej inicjatywy** i to jest świadoma zasada
+bezpieczeństwa (`NOW/RM_RFQ/app.py`): stoi w internecie, dostępny dla
+kooperantów spoza firmy, więc dziura w nim nie może oznaczać dostępu do bazy.
+Dane wędrują jednokierunkowo:
+
+```
+RM_BAZA → master.sqlite → RM_SYNC_AGENT → (HTTPS + X-API-Key) → portal RFQ
+                          w sieci firmowej                       w internecie
+```
+
+**Ale jeden wyjątek istnieje:** `config.json` portalu ma `master_db_path`
+i używa go w `verify_login` — logowanie kooperantów weryfikuje hasło
+z tabeli `users` w masterze.
+
+Do sprawdzenia przed cutoverem: czy portal **realnie** otwiera ten plik
+(na serwerze `Y:` bywa niewidoczny — wtedy logowanie i tak działa inaczej
+albo jest wyłączone), czy tylko ma wpis w konfiguracji. Jeśli otwiera —
+po przeniesieniu mastera na dysk lokalny ścieżka przestanie być aktualna
+i logowanie kooperantów przestanie działać. Wtedy: operacja `user-login`
+przez serwer albo odczyt przez RM_SYNC_AGENT.
+
 **Snapshot dla czytelników** — najtańsze rozwiązanie dla narzędzi raportowych:
 serwer przy okazji backupu wystawia `master_snapshot.sqlite` na udziale
 sieciowym. Read-only, nikogo nie blokuje, wiek ≤ 24 h. Dla Parsera i statystyk
