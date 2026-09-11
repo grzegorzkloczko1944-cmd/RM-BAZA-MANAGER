@@ -7752,7 +7752,8 @@ class MainWindow(tk.Tk):
                 wycena_disp,                                # 19: WYCENA (z portalu RM_RFQ)
                 # 20: SUBIEKT — wypełniane na żądanie, trzymane w pamięci, żeby
                 # przeżyło odświeżenie arkusza (odczyt z Subiekta trwa ~10 s).
-                self._subiekt_stany.get(item['drawing_no'] or "", ""),
+                self._subiekt_stany.get(
+                    self._klucz_subiekt(item['drawing_no'], item.get('name')), ""),
                 casting_disp,                               # 21: Casting
                 # 22: Typ / Źródło — rola pozycji (KT / TW / Składnik KT …).
                 # Mówi, GDZIE zmieniać ilość: składnika nie edytuje się wprost,
@@ -30283,14 +30284,17 @@ class MainWindow(tk.Tk):
                                  parent=self)
             return
 
+        # Kolumna 1 arkusza to Nazwa — potrzebna, gdy numeru rysunku nie ma.
         numery = []
         for r in range(self.sheet.get_total_rows()):
             try:
                 nr = str(self.sheet.get_cell_data(r, 0) or "").strip()
+                nazwa = str(self.sheet.get_cell_data(r, 1) or "").strip()
             except Exception:
                 continue
-            if nr:
-                numery.append(nr)
+            klucz = self._klucz_subiekt(nr, nazwa)
+            if klucz:
+                numery.append(klucz)
         if not numery:
             messagebox.showinfo("Subiekt", "Arkusz jest pusty.", parent=self)
             return
@@ -30339,6 +30343,30 @@ class MainWindow(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _klucz_subiekt(self, numer, nazwa):
+        """Klucz pozycji w Subiekcie: numer rysunku, a gdy go brak — symbol z nazwy.
+
+        Znormalia (łożyska, paski, uszczelki) NIE MAJĄ numeru rysunku —
+        w Subiekcie identyfikuje je symbol zrobiony z nazwy. Kolumna SUBIEKT
+        szukała wyłącznie po numerze, więc dla nich zostawała pusta, mimo że
+        mają kartoteki i siedzą w ZK projektu (zgłoszone 11.09.2026).
+
+        Używamy TEGO SAMEGO generatora co zasiew do Subiekta
+        (`subiekt_projekt.symbol_z_nazwy`), żeby klucz był identyczny po obu
+        stronach — inaczej zapis i odczyt patrzyłyby na dwa różne stringi.
+        """
+        nr = (numer or "").strip()
+        if nr:
+            return nr
+        nazwa = (nazwa or "").strip()
+        if not nazwa:
+            return ""
+        try:
+            from subiekt_projekt import symbol_z_nazwy
+            return symbol_z_nazwy(nazwa)
+        except Exception:
+            return ""
+
     def _open_subiekt_dialog(self, row):
         """Szczegóły stanu pozycji w Subiekcie (klik w kolumnę SUBIEKT)."""
         try:
@@ -30381,9 +30409,10 @@ class MainWindow(tk.Tk):
         for r in range(self.sheet.get_total_rows()):
             try:
                 nr = str(self.sheet.get_cell_data(r, 0) or "").strip()
+                nazwa = str(self.sheet.get_cell_data(r, 1) or "").strip()
             except Exception:
                 continue
-            txt = self._subiekt_stany.get(nr, "")
+            txt = self._subiekt_stany.get(self._klucz_subiekt(nr, nazwa), "")
             try:
                 self.sheet.set_cell_data(r, self.SUBIEKT_COL, txt)
                 if txt:

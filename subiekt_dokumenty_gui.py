@@ -113,7 +113,7 @@ def _przelicz_dokumenty(data):
         "Id": d.get("Id") or 0,
         "data": d.get("Data") or "",
         "podmiot": (d.get("Podmiot") or "").strip(),
-        "tytul": d.get("Tytul") or "",
+        "tytul": _tytul_czytelny(d.get("Tytul")),
         # Kolumna Projekt bierze PIERWSZY CZŁON Uwag — reszta pierwszego wiersza
         # („Projekt") i wiersze niżej to treść dla człowieka, nie numer.
         # Całe Uwagi zostają osobno, żeby dało się je pokazać w szczegółach.
@@ -180,11 +180,31 @@ def _przelicz_dokumenty(data):
 #: Ta sama wartosc co subiekt_magazyn_gui.UWAGI_MAGAZYN.
 UWAGI_MAGAZYN = "MAGAZYN"
 
+#: Domyślne nazwy typów, które Subiekt sam wstawia w pole Tytuł.
+#:
+#: Kolumna „Rodzaj" mówi już ZK / ZD / PW / RW / WZ, więc powtarzanie tego
+#: słowami zjadało pół szerokości tabeli na zero informacji (zgłoszone
+#: 11.09.2026: „przegląd dokumentów jest nieczytelny"). W kolumnie zostaje
+#: tylko treść, którą ktoś wpisał świadomie — nasz znacznik „RM_BAZA <nr>"
+#: albo opis wpisany ręcznie w Subiekcie.
+TYTULY_DOMYSLNE = {
+    "zamówienie od klienta", "zamówienie do dostawcy",
+    "przychód wewnętrzny", "rozchód wewnętrzny",
+    "wydanie zewnętrzne", "przyjęcie zewnętrzne",
+    "faktura sprzedaży", "faktura zakupu",
+}
+
+
+def _tytul_czytelny(tytul):
+    """Tytuł bez domyślnej nazwy typu — pusty, gdy nic ponadto nie niesie."""
+    t = (tytul or "").strip()
+    return "" if t.lower() in TYTULY_DOMYSLNE else t
+
 
 class DokumentyWindow(tk.Toplevel, Kreciolek):
     KOL_DOK = [("rodzaj", "Rodzaj", 70), ("numer", "Numer", 130),
                ("data", "Data", 90), ("projekt", "Projekt", 80),
-               ("podmiot", "Podmiot / dostawca", 250), ("tytul", "Tytuł", 220),
+               ("podmiot", "Podmiot / dostawca", 250), ("tytul", "Tytuł", 130),
                ("pozycji", "Pozycji", 65), ("wartosc", "Wartość", 90),
                ("termin", "Termin dostawy", 100), ("wyslano", "Wysłano", 105),
                ("pdf", "PDF", 40), ("status", "Status", 140)]
@@ -337,8 +357,11 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
 
         gora = tk.Frame(paned)      # lewa: lista dokumentów
         dol = tk.Frame(paned)       # prawa: pozycje
-        paned.add(gora, weight=3)
-        paned.add(dol, weight=4)
+        # Lista dokumentów dostaje WIĘCEJ miejsca niż panel pozycji: to po nią
+        # otwiera się to okno, a pozycje są podglądem klikniętego wiersza.
+        # Przy 3:4 panel pozycji zasłaniał listę (zgłoszone 11.09.2026).
+        paned.add(gora, weight=5)
+        paned.add(dol, weight=3)
 
         if Sheet is None:
             tk.Label(gora, text="Brak biblioteki tksheet", fg="#c0392b").pack(pady=20)
