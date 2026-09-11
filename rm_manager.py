@@ -675,779 +675,23 @@ def _rebuild_availability_without_reason_check(con: sqlite3.Connection):
     print("✅ Master: employee_availability przebudowana bez CHECK(reason) — nowe typy kadrowe dozwolone")
 
 
-def ensure_rm_master_tables(master_db_path: str):
-    """Tworzy tabele w rm_manager.sqlite (MASTER RM_MANAGER):
-    - stage_definitions       (słownik etapów)
-    - project_file_tracking   (integralność plików RM_BAZA)
-    - rm_user_permissions     (uprawnienia per kategoria użytkownika)
+def ensure_rm_master_tables(master_db_path: str = None):
+    """NIC NIE ROBI — schemat rm_manager.sqlite pilnuje RM_SERWER.
+
+    Wcześniej ta funkcja (650 linii CREATE/ALTER/INSERT) migrowała bazę
+    leżącą na dysku sieciowym przy starcie KAŻDEJ stacji. Teraz baza leży
+    na serwerze, migracje są w `rm_serwer_operacje.MIGRACJE_RM_MANAGER`,
+    a seedy (definicje etapów, uprawnienia, wagi priorytetów) już w niej
+    są — poleciała tam kopia produkcji.
+
+    Zostaje jako pusta, bo woła ją 5 miejsc w GUI przy starcie.
     """
-    Path(master_db_path).parent.mkdir(parents=True, exist_ok=True)
-    con = _open_rm_connection(master_db_path)
-
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS stage_definitions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            code TEXT UNIQUE NOT NULL,
-            display_name TEXT,
-            color TEXT,
-            is_milestone INTEGER DEFAULT 0
-        )
-    """)
-    # Dodaj kolumnę is_milestone jeśli brak (upgrade starej bazy)
-    try:
-        con.execute("ALTER TABLE stage_definitions ADD COLUMN is_milestone INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass  # kolumna już istnieje
-    count = con.execute("SELECT COUNT(*) FROM stage_definitions").fetchone()[0]
-    if count == 0:
-        con.executemany("""
-            INSERT INTO stage_definitions (code, display_name, color, is_milestone) VALUES (?, ?, ?, ?)
-        """, STAGE_DEFINITIONS)
-        print(f"✅ Master: wstawiono {len(STAGE_DEFINITIONS)} definicji etapów")
-
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS project_file_tracking (
-            project_id INTEGER PRIMARY KEY,
-            project_name TEXT,
-            file_path TEXT NOT NULL,
-            file_birth_time REAL NOT NULL,
-            last_verified_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            verification_status TEXT DEFAULT 'OK',
-            CHECK (verification_status IN ('OK', 'MISSING', 'BIRTH_MISMATCH'))
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_file_tracking_status ON project_file_tracking(verification_status)")
-
-    # Tabela uprawnień per rola (kategoria użytkownika)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS rm_user_permissions (
-            role                TEXT PRIMARY KEY,
-            can_start_stage     INTEGER NOT NULL DEFAULT 0,
-            can_end_stage       INTEGER NOT NULL DEFAULT 0,
-            can_edit_dates      INTEGER NOT NULL DEFAULT 0,
-            can_sync_master     INTEGER NOT NULL DEFAULT 0,
-            can_critical_path   INTEGER NOT NULL DEFAULT 0,
-            can_manage_permissions INTEGER NOT NULL DEFAULT 0,
-            updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    # Wstaw domyślne uprawnienia jeśli tabela pusta
-    existing = con.execute("SELECT COUNT(*) FROM rm_user_permissions").fetchone()[0]
-    if existing == 0:
-        con.executemany("""
-            INSERT INTO rm_user_permissions
-                (role, can_start_stage, can_end_stage, can_edit_dates,
-                 can_sync_master, can_critical_path, can_manage_permissions)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, DEFAULT_ROLE_PERMISSIONS)
-        print(f"✅ Master: wstawiono domyślne uprawnienia dla {len(DEFAULT_ROLE_PERMISSIONS)} ról")
-
-    # SAFETY: ADMIN musi ZAWSZE mieć can_manage_permissions = 1
-    # (naprawa po bugfix z pustymi uprawnieniami)
-    con.execute("""
-        UPDATE rm_user_permissions
-        SET can_manage_permissions = 1, updated_at = CURRENT_TIMESTAMP
-        WHERE role = 'ADMIN' AND can_manage_permissions = 0
-    """)
-    if con.total_changes:
-        print("🔧 Naprawiono uprawnienia ADMIN (can_manage_permissions)")
-
-    # Tabela uprawnień per-feature per-user (np. transze płatności, kody PLC)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS rm_feature_user_permissions (
-            feature     TEXT NOT NULL,
-            username    TEXT NOT NULL,
-            granted_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (feature, username)
-        )
-    """)
-
-    # Tabela synchronizacji z RM_BAZA (tracking)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS sync_log (
-            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-            sync_date           TEXT NOT NULL,
-            sync_timestamp      TEXT NOT NULL,
-            projects_synced     INTEGER DEFAULT 0,
-            user                TEXT,
-            notes               TEXT
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_date ON sync_log(sync_date)")
-
-    # ============================================================================
-    # SYSTEM PŁATNOŚCI (2026-04-13)
-    # ============================================================================
-    # Transze płatności (np. 30%, 70%, 100%) z datami
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS payment_milestones (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_id INTEGER NOT NULL,
-            percentage INTEGER NOT NULL CHECK (percentage > 0 AND percentage <= 100),
-            payment_date DATE,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            created_by TEXT,
-            modified_at DATETIME,
-            modified_by TEXT,
-            UNIQUE(project_id, percentage)
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_payment_project ON payment_milestones(project_id)")
-    # Migracja: dodaj kolumnę payment_type jeśli nie istnieje (upgrade starej bazy)
-    try:
-        con.execute("ALTER TABLE payment_milestones ADD COLUMN payment_type TEXT NOT NULL DEFAULT 'PŁATNOŚĆ'")
-    except sqlite3.OperationalError:
-        pass  # kolumna już istnieje
-
-    # Migracja: usuń UNIQUE(project_id, percentage) — pozwala na wiele transz o tym samym %
-    _schema = con.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='payment_milestones'"
-    ).fetchone()
-    if _schema and 'UNIQUE(project_id, percentage)' in (_schema['sql'] or ''):
-        con.execute("""
-            CREATE TABLE payment_milestones_new (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_id INTEGER NOT NULL,
-                percentage INTEGER NOT NULL CHECK (percentage > 0 AND percentage <= 100),
-                payment_date DATE,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                created_by TEXT,
-                modified_at DATETIME,
-                modified_by TEXT,
-                payment_type TEXT NOT NULL DEFAULT 'PŁATNOŚĆ'
-            )
-        """)
-        con.execute("""
-            INSERT INTO payment_milestones_new
-                (id, project_id, percentage, payment_date, created_at, created_by,
-                 modified_at, modified_by, payment_type)
-            SELECT id, project_id, percentage, payment_date, created_at, created_by,
-                   modified_at, modified_by, payment_type
-            FROM payment_milestones
-        """)
-        con.execute("DROP TABLE payment_milestones")
-        con.execute("ALTER TABLE payment_milestones_new RENAME TO payment_milestones")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_payment_project ON payment_milestones(project_id)")
-        _rm_safe_commit(con)
-        print("    ↳ Migracja: usunięto UNIQUE(project_id, percentage) z payment_milestones")
-
-    # Historia zmian płatności (audit log)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS payment_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_id INTEGER NOT NULL,
-            percentage INTEGER NOT NULL,
-            payment_date DATE,
-            action TEXT NOT NULL CHECK (action IN ('ADDED', 'MODIFIED', 'DELETED')),
-            changed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            changed_by TEXT NOT NULL,
-            old_date DATE
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_payment_history_project ON payment_history(project_id)")
-
-    # Konfiguracja powiadomień email (lista odbiorców, trigger percentage)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS payment_notification_config (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            trigger_percentage INTEGER NOT NULL DEFAULT 100,
-            email_recipients TEXT NOT NULL,
-            smtp_server TEXT,
-            smtp_port INTEGER DEFAULT 587,
-            smtp_user TEXT,
-            smtp_password TEXT,
-            enabled INTEGER NOT NULL DEFAULT 1,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            modified_at DATETIME
-        )
-    """)
-    # Wstaw domyślną konfigurację (pusta lista odbiorców)
-    con.execute("""
-        INSERT OR IGNORE INTO payment_notification_config
-            (id, trigger_percentage, email_recipients, enabled)
-        VALUES (1, 100, '[]', 1)
-    """)
-
-    # Log wysłanych powiadomień email
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS payment_notifications_sent (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_id INTEGER NOT NULL,
-            project_name TEXT,
-            percentage INTEGER NOT NULL,
-            payment_date DATE,
-            recipients TEXT NOT NULL,
-            sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            sent_by TEXT,
-            email_status TEXT CHECK (email_status IN ('SUCCESS', 'FAILED', 'PENDING')),
-            error_message TEXT
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_notifications_project ON payment_notifications_sent(project_id)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_notifications_status ON payment_notifications_sent(email_status)")
-
-    # In-app notifications (powiadomienia w aplikacji)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS in_app_notifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_id INTEGER NOT NULL,
-            project_name TEXT,
-            notification_type TEXT NOT NULL,
-            message TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            created_by TEXT,
-            is_read INTEGER NOT NULL DEFAULT 0,
-            read_at DATETIME,
-            read_by TEXT
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_in_app_notifications_read ON in_app_notifications(is_read)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_in_app_notifications_project ON in_app_notifications(project_id)")
-
-    # ============================================================================
-    # KODY PLC - Kody odblokowujące maszyny (2026-04-14)
-    # ============================================================================
-    # 3 rodzaje kodów: chwilowy, dłuższy, permanentny
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS plc_unlock_codes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_id INTEGER NOT NULL,
-            code_type TEXT NOT NULL CHECK (code_type IN ('TEMPORARY', 'EXTENDED', 'PERMANENT')),
-            unlock_code TEXT NOT NULL,
-            description TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            created_by TEXT,
-            modified_at DATETIME,
-            modified_by TEXT,
-            is_used INTEGER NOT NULL DEFAULT 0,
-            used_at DATETIME,
-            used_by TEXT,
-            notes TEXT,
-            sent_at DATETIME,
-            sent_by TEXT,
-            sent_via TEXT,
-            expiry_date DATETIME
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_plc_codes_project ON plc_unlock_codes(project_id)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_plc_codes_type ON plc_unlock_codes(code_type)")
-    
-    # Dodaj kolumnę default_recipients jeśli nie istnieje (lista ID pracowników jako JSON)
-    try:
-        con.execute("ALTER TABLE plc_unlock_codes ADD COLUMN default_recipients TEXT")
-    except sqlite3.OperationalError:
-        pass  # kolumna już istnieje
-    
-    # Tabela uprawnień do wysyłki kodów PLC
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS plc_authorized_senders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL UNIQUE,
-            added_by TEXT,
-            added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            notes TEXT
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_plc_senders_username ON plc_authorized_senders(username)")
-
-    # Globalna tabela odbiorców kodów PLC (wspólna dla wszystkich projektów)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS plc_global_recipients (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            setting_key TEXT NOT NULL UNIQUE,
-            recipients_json TEXT NOT NULL,
-            updated_by TEXT,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    # Domyślny rekord dla globalnych odbiorców
-    con.execute("""
-        INSERT OR IGNORE INTO plc_global_recipients (setting_key, recipients_json)
-        VALUES ('default_recipients', '[]')
-    """)
-
-    # ============================================================================
-    # OPTYMALIZATOR PRODUKCJI (2026-04-19)
-    # ============================================================================
-    # Ograniczenia zasobów — reguły biznesowe typu "konstruktor pracuje nad 1 projektem"
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS resource_constraints (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            constraint_type TEXT NOT NULL CHECK (constraint_type IN (
-                'exclusive_person',
-                'max_concurrent_category',
-                'max_concurrent_stage'
-            )),
-            category TEXT,
-            stage_code TEXT,
-            max_parallel INTEGER NOT NULL DEFAULT 1,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            description TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            created_by TEXT,
-            modified_at DATETIME,
-            modified_by TEXT
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_res_constraints_type ON resource_constraints(constraint_type)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_res_constraints_active ON resource_constraints(is_active)")
-
-    # Dostępność pracowników — urlopy, L4, delegacje
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS employee_availability (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_id INTEGER NOT NULL,
-            date_from DATE NOT NULL,
-            date_to DATE NOT NULL,
-            reason TEXT NOT NULL CHECK (reason IN (
-                'URLOP', 'L4', 'DELEGACJA', 'SZKOLENIE', 'INNE'
-            )),
-            notes TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            created_by TEXT,
-            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
-            CHECK (date_to >= date_from)
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_emp_avail_employee ON employee_availability(employee_id)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_emp_avail_dates ON employee_availability(date_from, date_to)")
-
-    # Wyjazdy serwisowe — ręcznie planowane wyjazdy serwisantów (linia B grafiku
-    # Serwis). Uzupełnienie linii A, która jest wyliczana z etapów projektów.
-    # project_id opcjonalne (wyjazd nie musi być powiązany z projektem RM_MANAGER).
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS service_trips (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_id INTEGER NOT NULL,
-            project_id INTEGER,
-            client_or_place TEXT,
-            trip_type TEXT NOT NULL DEFAULT 'INNE',
-            date_from DATE NOT NULL,
-            date_to DATE NOT NULL,
-            status TEXT NOT NULL DEFAULT 'PLANOWANY' CHECK (status IN (
-                'PLANOWANY', 'POTWIERDZONY', 'ZREALIZOWANY'
-            )),
-            note TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            created_by TEXT,
-            working_days REAL,
-            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
-            CHECK (date_to >= date_from)
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_service_trips_employee ON service_trips(employee_id)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_service_trips_dates ON service_trips(date_from, date_to)")
-    # Migracja: working_days dla bazy utworzonej przed dodaniem tej kolumny.
-    _cols = {r[1] for r in con.execute("PRAGMA table_info(service_trips)").fetchall()}
-    if 'working_days' not in _cols:
-        con.execute("ALTER TABLE service_trips ADD COLUMN working_days REAL")
-
-    # Grupy pracowników, którzy nie mogą być na urlopie równocześnie (np. jedyni
-    # dwaj ludzie znający dany proces). Egzekwowane jako ostrzeżenie (nie twarda
-    # blokada) przy składaniu/zatwierdzaniu wniosku urlopowego.
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS absence_exclusion_groups (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            created_by TEXT
-        )
-    """)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS absence_exclusion_members (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            group_id INTEGER NOT NULL,
-            employee_id INTEGER NOT NULL,
-            FOREIGN KEY (group_id) REFERENCES absence_exclusion_groups(id) ON DELETE CASCADE,
-            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
-            UNIQUE (group_id, employee_id)
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_abs_excl_members_group ON absence_exclusion_members(group_id)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_abs_excl_members_emp ON absence_exclusion_members(employee_id)")
-
-    # Dni wolne / kalendarz firmy
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS company_calendar (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date DATE NOT NULL UNIQUE,
-            day_type TEXT NOT NULL CHECK (day_type IN (
-                'HOLIDAY', 'COMPANY_DAY_OFF', 'SATURDAY_WORK'
-            )),
-            description TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            created_by TEXT
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_company_calendar_date ON company_calendar(date)")
-
-    # Wyniki optymalizacji — historia uruchomień
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS optimization_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_mode TEXT NOT NULL CHECK (run_mode IN ('fit_projects', 'optimize_all')),
-            project_ids_json TEXT NOT NULL,
-            date_range_start DATE,
-            date_range_end DATE,
-            constraints_snapshot TEXT,
-            result_json TEXT,
-            score_before REAL,
-            score_after REAL,
-            solver_status TEXT,
-            solver_time_ms INTEGER,
-            applied INTEGER NOT NULL DEFAULT 0,
-            applied_at DATETIME,
-            applied_by TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            created_by TEXT
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_opt_runs_mode ON optimization_runs(run_mode)")
-
-    # Domyślne ograniczenia zasobów (jeśli tabela pusta)
-    existing_constraints = con.execute("SELECT COUNT(*) FROM resource_constraints").fetchone()[0]
-    if existing_constraints == 0:
-        _default_constraints = [
-            ('exclusive_person', 'Konstrukcja', None, 1,
-             'Konstruktor pracuje nad jednym projektem jednocześnie'),
-            ('exclusive_person', 'Serwis', 'URUCHOMIENIE', 1,
-             'Serwisant nie może uruchamiać dwóch maszyn jednocześnie'),
-            ('exclusive_person', 'Serwis', 'ODBIORY', 1,
-             'Serwisant nie może prowadzić dwóch odbiorów jednocześnie'),
-            ('exclusive_person', 'Montaż', None, 1,
-             'Monter nie może montować dwóch maszyn jednocześnie'),
-            ('exclusive_person', 'Elektromontaż', None, 1,
-             'Elektromonter nie może montować dwóch maszyn jednocześnie'),
-        ]
-        con.executemany("""
-            INSERT INTO resource_constraints
-                (constraint_type, category, stage_code, max_parallel, description)
-            VALUES (?, ?, ?, ?, ?)
-        """, _default_constraints)
-        print(f"✅ Master: wstawiono {len(_default_constraints)} domyślnych ograniczeń zasobów")
-
-    # ============================================================================
-    # SESJE UŻYTKOWNIKÓW - tracking aktywnych logowań (2026-04-24)
-    # ============================================================================
-    # Tabela aktywnych sesji - sprawdzanie czy użytkownik jest już zalogowany
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS active_sessions (
-            session_id TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            username TEXT NOT NULL,
-            hostname TEXT NOT NULL,
-            pid INTEGER NOT NULL,
-            app_name TEXT NOT NULL DEFAULT 'rm_manager',
-            login_at DATETIME NOT NULL,
-            last_heartbeat DATETIME NOT NULL,
-            client_info TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_active_sessions_user ON active_sessions(user_id)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_active_sessions_heartbeat ON active_sessions(last_heartbeat)")
-    # UNIQUE constraint - DEFENSE IN DEPTH: drugi mechanizm chroniący przed
-    # 2 sesjami tego samego usera na 1 komputerze (oprócz transakcji w register_user_session).
-    # NOTE: nie blokuje 2 komputerów dla 1 usera - to obsługuje logika "force/cancel".
-    con.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_active_sessions_user_host_app
-        ON active_sessions(user_id, hostname, app_name)
-    """)
-
-    # ============================================================================
-    # URLOPY — godziny w wpisie niedostępności + roczna pula urlopu (2026-07-15)
-    # ============================================================================
-    # Opcjonalne godziny nieobecności (puste = cały dzień). Solver dalej pracuje
-    # na dniach; godziny służą tylko do rozliczenia.
-    for _col in ("time_from", "time_to"):
-        try:
-            con.execute(f"ALTER TABLE employee_availability ADD COLUMN {_col} TEXT")
-        except sqlite3.OperationalError:
-            pass  # kolumna już istnieje
-
-    # days_override: ręcznie zmniejszona liczba dni nieobecności (2026-07-20).
-    # NULL = użyj automatycznie policzonych dni roboczych (kalendarz firmowy).
-    # User może wpisać tylko MNIEJ niż wyliczono (np. wrócił wcześniej z urlopu).
-    try:
-        con.execute("ALTER TABLE employee_availability ADD COLUMN days_override REAL")
-    except sqlite3.OperationalError:
-        pass  # kolumna już istnieje
-
-    # ========================================================================
-    # KADRY — workflow wniosków (status/decyzja) na wpisie nieobecności (2026-07-20)
-    # ========================================================================
-    # status: OCZEKUJE (nowy wpis) / ZATWIERDZONY / ODRZUCONY.
-    # decided_by/at/note: kto, kiedy i z jaką uwagą zatwierdził/odrzucił.
-    _avail_new_cols = [
-        ("status", "TEXT NOT NULL DEFAULT 'OCZEKUJE'"),
-        ("decided_by", "TEXT"),
-        ("decided_at", "DATETIME"),
-        ("decision_note", "TEXT"),
-    ]
-    _avail_added_status = False
-    for _col, _decl in _avail_new_cols:
-        try:
-            con.execute(f"ALTER TABLE employee_availability ADD COLUMN {_col} {_decl}")
-            if _col == "status":
-                _avail_added_status = True
-        except sqlite3.OperationalError:
-            pass  # kolumna już istnieje
-    con.execute("CREATE INDEX IF NOT EXISTS idx_emp_avail_status ON employee_availability(status)")
-    # Istniejące wpisy (sprzed workflow) traktujemy jako już zatwierdzone —
-    # inaczej cała dotychczasowa historia wyglądałaby na 'oczekującą'.
-    if _avail_added_status:
-        con.execute("UPDATE employee_availability SET status = 'ZATWIERDZONY' WHERE status = 'OCZEKUJE'")
-
-    # Rozszerzona lista typów nieobecności — stary CHECK(reason IN (...)) blokował
-    # nowe typy kadrowe (na żądanie, okolicznościowy, opieka art.188, bezpłatny,
-    # macierzyński). SQLite nie potrafi ALTER-ować CHECK — jeśli tabela ma stary
-    # constraint, przebudowujemy ją bez CHECK (walidacja przeniesiona do kodu).
-    try:
-        _tbl_sql = con.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='employee_availability'"
-        ).fetchone()
-        if _tbl_sql and _tbl_sql[0] and "CHECK (reason IN" in _tbl_sql[0].replace("\n", " "):
-            _rebuild_availability_without_reason_check(con)
-    except sqlite3.OperationalError:
-        pass
-
-    # Roczna pula dni urlopu — edytowalna per pracownik i rok.
-    # carryover_override: ręcznie urealniony zaległy urlop z ub. roku (NULL = wylicz automatycznie).
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS employee_vacation_quota (
-            employee_id INTEGER NOT NULL,
-            year INTEGER NOT NULL,
-            days REAL NOT NULL DEFAULT 26,
-            carryover_override REAL,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_by TEXT,
-            PRIMARY KEY (employee_id, year),
-            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
-        )
-    """)
-    try:
-        con.execute("ALTER TABLE employee_vacation_quota ADD COLUMN carryover_override REAL")
-    except sqlite3.OperationalError:
-        pass  # kolumna już istnieje
-
-    # Pula bazowa (permanentna) — stały roczny wymiar urlopu per pracownik,
-    # niezależny od roku. Pula roczna (quota) nadpisuje ją tylko dla danego roku.
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS employee_vacation_base (
-            employee_id INTEGER PRIMARY KEY,
-            days REAL NOT NULL DEFAULT 26,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_by TEXT,
-            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
-        )
-    """)
-
-    # Ręczny zaległy urlop (override) — osobna tabela, niezależna od korekty rocznej.
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS employee_carryover_override (
-            employee_id INTEGER NOT NULL,
-            year INTEGER NOT NULL,
-            days REAL NOT NULL,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_by TEXT,
-            PRIMARY KEY (employee_id, year),
-            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
-        )
-    """)
-
-    # KADRY — dziennik zmian (audyt). Rejestruje ręczne modyfikacje danych
-    # pracownika i wpisów kadrowych: kto, kiedy, co, stara→nowa wartość.
-    # entity_type: 'employee' / 'availability' / 'quota' / 'carryover' / ...
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS audit_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_id INTEGER,
-            entity_type TEXT NOT NULL,
-            entity_id INTEGER,
-            action TEXT NOT NULL,
-            field TEXT,
-            old_value TEXT,
-            new_value TEXT,
-            note TEXT,
-            changed_by TEXT,
-            changed_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_audit_employee ON audit_log(employee_id)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_audit_changed_at ON audit_log(changed_at)")
-
-    con.commit()
-    con.close()
-    print(f"✅ RM_MANAGER master baza zainicjalizowana: {master_db_path}")
-    ensure_list_tables(master_db_path)
-
-    # Auto-zasiew polskich świąt do kalendarza firmowego (bieżący i przyszły
-    # rok). Idempotentne — nie nadpisuje istniejących wpisów (ręcznych korekt,
-    # sobót pracujących). Dzięki temu liczenie dni roboczych od razu pomija
-    # święta bez ręcznej konfiguracji.
-    try:
-        this_year = datetime.now().year
-        for _y in (this_year, this_year + 1):
-            seed_polish_holidays(master_db_path, _y)
-    except Exception as _e:
-        print(f"⚠️  Auto-zasiew świąt pominięty: {_e}")
+    return
 
 
-# Kategorie pracowników (stała lista)
-EMPLOYEE_CATEGORIES = [
-    'Elektromontaż',
-    'Konstrukcja',
-    'Elektroprojekt',
-    'Logistyka',
-    'Magazyn',
-    'Montaż',
-    'Programowanie',
-    'Serwis',
-    'Sprzedaż',
-]
-
-# Podmioty (firmy) do których może być przypisany pracownik (stała lista)
-EMPLOYEE_PODMIOTY = [
-    'RM PAK',
-    'RM PRODUKCJA',
-]
-BRAK_PODMIOTU_LABEL = 'Bez przypisania'
-
-# Mapowanie etap → preferowana kategoria pracownika
-STAGE_TO_PREFERRED_CATEGORY = {
-    'PROJEKT':        ['Konstrukcja'],
-    'ELEKTROPROJEKT': ['Elektroprojekt'],
-    'KOMPLETACJA':    ['Logistyka', 'Magazyn'],
-    'MONTAZ':         ['Montaż'],
-    'ELEKTROMONTAZ':  ['Elektromontaż'],
-    'URUCHOMIENIE':   ['Serwis'],
-    'ODBIORY':        ['Serwis'],
-    'POPRAWKI':       ['Serwis'],
-    # PRZYJETY, ZAKONCZONY = milestones, zazwyczaj nie przypisujemy pracowników
-}
-
-
-def ensure_list_tables(master_db_path: str):
-    """Tworzy tabele list zasobów w rm_manager.sqlite:
-    - employees   (pracownicy z kategorią)
-    - transports  (transport)
-    Wywoływana ze ensure_rm_master_tables i osobno przy aktualizacji bazy.
-    """
-    con = _open_rm_connection(master_db_path)
-
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS employees (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            name         TEXT NOT NULL,
-            category     TEXT NOT NULL,
-            description  TEXT,
-            contact_info TEXT,
-            is_active    INTEGER NOT NULL DEFAULT 1,
-            created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_employees_category ON employees(category)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_employees_active   ON employees(is_active)")
-
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS transports (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            name         TEXT NOT NULL,
-            description  TEXT,
-            contact_info TEXT,
-            is_active    INTEGER NOT NULL DEFAULT 1,
-            created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_transports_active ON transports(is_active)")
-
-    # Dodaj kolumnę phone jeśli nie istnieje (dla funkcji SMS)
-    try:
-        con.execute("ALTER TABLE employees ADD COLUMN phone TEXT")
-    except sqlite3.OperationalError:
-        pass  # kolumna już istnieje
-    
-    # Dodaj kolumnę email jeśli nie istnieje (osobne pole dla maila)
-    try:
-        con.execute("ALTER TABLE employees ADD COLUMN email TEXT")
-    except sqlite3.OperationalError:
-        pass  # kolumna już istnieje
-
-    # Dodaj kolumnę master_max_parallel (2026-04-28) — limit liczby etapów,
-    # które pracownik może prowadzić jako MASTER (1. na liście assigned_staff)
-    # jednocześnie. Dla 2. i kolejnych pozycji ograniczenie nie obowiązuje.
-    try:
-        con.execute("ALTER TABLE employees ADD COLUMN master_max_parallel INTEGER NOT NULL DEFAULT 1")
-    except sqlite3.OperationalError:
-        pass  # kolumna już istnieje
-
-    # Dodaj kolumnę podmiot (2026-07-27) — rozdzielenie pracowników na spółki
-    # RM PAK / RM PRODUKCJA dla celów księgowych. Opcjonalna, może być pusta.
-    try:
-        con.execute("ALTER TABLE employees ADD COLUMN podmiot TEXT")
-    except sqlite3.OperationalError:
-        pass  # kolumna już istnieje
-
-    # Dodaj kolumnę user_login (2026-08-07) — powiązanie pracownika z kontem
-    # użytkownika RM_BAZA (users.username). Opcjonalna: pracownik nie musi mieć
-    # konta, a konto techniczne (ADMIN/GUEST/wspoldzielone) nie musi mieć pracownika.
-    # Trzymane po stronie employees (baza RM_MANAGER), bo users nalezy do RM_BAZA
-    # i nie chcemy zmieniac schematu tamtej bazy.
-    try:
-        con.execute("ALTER TABLE employees ADD COLUMN user_login TEXT")
-    except sqlite3.OperationalError:
-        pass  # kolumna już istnieje
-
-    # priority_weights — wagi priorytetów projektów dla optymalizatora
-    # (1=Turbo, 2=Pilny, 3=Normalny). Wagi konfigurowalne przez użytkownika.
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS priority_weights (
-            level   INTEGER PRIMARY KEY,
-            label   TEXT    NOT NULL,
-            weight  INTEGER NOT NULL DEFAULT 1
-        )
-    """)
-    # Wstaw domyślne wagi tylko jeśli tabela jest pusta
-    cnt = con.execute("SELECT COUNT(*) FROM priority_weights").fetchone()[0]
-    if cnt == 0:
-        con.executemany(
-            "INSERT INTO priority_weights (level, label, weight) VALUES (?, ?, ?)",
-            [(1, 'Turbo', 100), (2, 'Pilny', 10), (3, 'Normalny', 1)]
-        )
-
-    # production_lines — linie produkcyjne (zestaw projektów-maszyn budowanych
-    # razem dla jednego klienta). Etapy z `parallel_stages_csv` mogą być
-    # prowadzone JEDNOCZEŚNIE przez tego samego mastera dla wszystkich
-    # projektów w linii (np. URUCHOMIENIE / ODBIORY / POPRAWKI dla całej linii).
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS production_lines (
-            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-            name                 TEXT    NOT NULL UNIQUE,
-            description          TEXT,
-            parallel_stages_csv  TEXT    NOT NULL DEFAULT '',
-            created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
-            created_by           TEXT,
-            updated_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_by           TEXT
-        )
-    """)
-    # Mapowanie projekt → linia. UNIQUE na project_id = projekt może być
-    # w max 1 linii. Brak FK do projects (master.sqlite jest osobno).
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS line_projects (
-            line_id     INTEGER NOT NULL,
-            project_id  INTEGER NOT NULL UNIQUE,
-            PRIMARY KEY (line_id, project_id),
-            FOREIGN KEY (line_id) REFERENCES production_lines(id) ON DELETE CASCADE
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_line_projects_line ON line_projects(line_id)")
-
-    con.commit()
-    con.close()
-    print(f"✅ Tabele list (employees, transports) gotowe: {master_db_path}")
+def ensure_list_tables(master_db_path: str = None):
+    """NIC NIE ROBI — patrz `ensure_rm_master_tables`."""
+    return
 
 
 # ============================================================================
@@ -6260,88 +5504,108 @@ def has_feature_permission(rm_master_db_path: str, feature: str, username: str,
 
 EMPLOYEE_PODMIOT_BRAK = '__BRAK__'  # sentinel: filtruj pracowników bez przypisanego podmiotu
 
-def get_employees(rm_master_db_path: str, category: str = None, active_only: bool = False,
-                   podmiot: str = None) -> List[Dict]:
-    """Pobierz pracowników z rm_manager.sqlite.
+def get_employees(rm_master_db_path: str = None, category: str = None,
+                  active_only: bool = False, podmiot: str = None) -> List[Dict]:
+    """Pracownicy z rm_manager.sqlite (przez serwer).
+
     category=None → wszystkie kategorie.
     active_only=True → tylko is_active=1.
     podmiot=None → wszystkie podmioty (RM PAK / RM PRODUKCJA).
     podmiot=EMPLOYEE_PODMIOT_BRAK → tylko pracownicy bez przypisanego podmiotu.
+
+    Filtr robimy tutaj, nie w SQL: wcześniej szedł przez sklejany `WHERE`,
+    a tabela ma kilkadziesiąt wierszy — pełny odczyt jest tańszy niż
+    osobna operacja na każdą kombinację filtrów.
     """
-    ensure_list_tables(rm_master_db_path)
-    con = _open_rm_connection(rm_master_db_path)
-    clauses, params = [], []
-    if category:
-        clauses.append("category = ?")
-        params.append(category)
-    if podmiot == EMPLOYEE_PODMIOT_BRAK:
-        clauses.append("(podmiot IS NULL OR podmiot = '')")
-    elif podmiot:
-        clauses.append("podmiot = ?")
-        params.append(podmiot)
-    if active_only:
-        clauses.append("is_active = 1")
-    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-    rows = con.execute(
-        f"SELECT * FROM employees {where} ORDER BY category, name", params
-    ).fetchall()
-    con.close()
-    return [dict(r) for r in rows]
+    wiersze = rmm_read("rmm-employees-wszystkie")
+    out = []
+    for w in wiersze:
+        if category and w.get("category") != category:
+            continue
+        if podmiot == EMPLOYEE_PODMIOT_BRAK:
+            if w.get("podmiot"):
+                continue
+        elif podmiot and w.get("podmiot") != podmiot:
+            continue
+        if active_only and not w.get("is_active"):
+            continue
+        out.append(dict(w))
+    return out
 
 
 # ===========================================================================
 # KADRY — audyt (dziennik zmian) + edycja danych pracownika z historią
 # ===========================================================================
 
-def log_audit(rm_master_db_path: str, entity_type: str, action: str,
+def log_audit(rm_master_db_path: str = None, entity_type: str = "", action: str = "",
               employee_id: int = None, entity_id: int = None, field: str = None,
               old_value=None, new_value=None, note: str = None, user: str = None):
     """Zapisz wpis do dziennika zmian (audit_log)."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        con.execute("""
-            INSERT INTO audit_log
-                (employee_id, entity_type, entity_id, action, field,
-                 old_value, new_value, note, changed_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (employee_id, entity_type, entity_id, action, field,
-              None if old_value is None else str(old_value),
-              None if new_value is None else str(new_value),
-              note, user))
-        _rm_safe_commit(con)
-    finally:
-        con.close()
+    rmm_exec("rmm-audit-log-dodaj", _wpis_audytu(
+        entity_type, action, employee_id, entity_id, field,
+        old_value, new_value, note, user))
 
 
-def get_audit_log(rm_master_db_path: str, employee_id: int = None,
+def _wpis_audytu(entity_type, action, employee_id, entity_id, field,
+                 old_value, new_value, note, user) -> dict:
+    """Parametry jednego wpisu audytu — wspólne dla `log_audit` i batchy."""
+    return {
+        "employee_id": employee_id, "entity_type": entity_type,
+        "entity_id": entity_id, "action": action, "field": field,
+        "old_value": None if old_value is None else str(old_value),
+        "new_value": None if new_value is None else str(new_value),
+        "note": note, "changed_by": user,
+    }
+
+
+def get_audit_log(rm_master_db_path: str = None, employee_id: int = None,
                   limit: int = 500) -> List[Dict]:
     """Pobierz dziennik zmian (najnowsze pierwsze). Filtruje po pracowniku."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        if employee_id is not None:
-            rows = con.execute("""
-                SELECT * FROM audit_log WHERE employee_id = ?
-                ORDER BY changed_at DESC, id DESC LIMIT ?
-            """, (employee_id, limit)).fetchall()
-        else:
-            rows = con.execute("""
-                SELECT * FROM audit_log ORDER BY changed_at DESC, id DESC LIMIT ?
-            """, (limit,)).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        con.close()
+    if employee_id is not None:
+        return [dict(w) for w in rmm_read("rmm-audit-log-po-employee-id",
+                                          {"employee_id": employee_id, "p1": limit})]
+    return [dict(w) for w in rmm_read("rmm-audit-log", {"p1": limit})]
 
 
-def get_employee_by_id(rm_master_db_path: str, employee_id: int) -> Dict:
+def get_employee_by_id(rm_master_db_path: str = None, employee_id: int = 0) -> Dict:
     """Zwróć pełny rekord pracownika (lub {} gdy brak)."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        row = con.execute("SELECT * FROM employees WHERE id = ?",
-                          (employee_id,)).fetchone()
-        return dict(row) if row else {}
-    finally:
-        con.close()
+    wiersze = rmm_read("rmm-employees-po-id", {"id": employee_id})
+    return dict(wiersze[0]) if wiersze else {}
 
+
+# Podmioty (firmy) do których może być przypisany pracownik (stała lista)
+EMPLOYEE_PODMIOTY = [
+    'RM PAK',
+    'RM PRODUKCJA',
+]
+
+# Mapowanie etap → preferowana kategoria pracownika
+STAGE_TO_PREFERRED_CATEGORY = {
+    'PROJEKT':        ['Konstrukcja'],
+    'ELEKTROPROJEKT': ['Elektroprojekt'],
+    'KOMPLETACJA':    ['Logistyka', 'Magazyn'],
+    'MONTAZ':         ['Montaż'],
+    'ELEKTROMONTAZ':  ['Elektromontaż'],
+    'URUCHOMIENIE':   ['Serwis'],
+    'ODBIORY':        ['Serwis'],
+    'POPRAWKI':       ['Serwis'],
+    # PRZYJETY, ZAKONCZONY = milestones, zazwyczaj nie przypisujemy pracowników
+}
+
+# Kategorie pracowników (stała lista)
+EMPLOYEE_CATEGORIES = [
+    'Elektromontaż',
+    'Konstrukcja',
+    'Elektroprojekt',
+    'Logistyka',
+    'Magazyn',
+    'Montaż',
+    'Programowanie',
+    'Serwis',
+    'Sprzedaż',
+]
+
+BRAK_PODMIOTU_LABEL = 'Bez przypisania'
 
 # Pola pracownika edytowalne z karty (klucz → etykieta do audytu).
 EMPLOYEE_EDITABLE_FIELDS = {
@@ -6352,24 +5616,17 @@ EMPLOYEE_EDITABLE_FIELDS = {
 }
 
 
-def get_employee_by_user_login(rm_master_db_path: str, user_login: str) -> Optional[Dict]:
+def get_employee_by_user_login(rm_master_db_path: str = None,
+                               user_login: str = None) -> Optional[Dict]:
     """Znajdź pracownika powiązanego z danym loginem RM_BAZA.
 
     Zwraca None, gdy login nie jest z nikim powiązany (konto techniczne,
-    wspoldzielone albo pracownik jeszcze nieprzypisany).
+    współdzielone albo pracownik jeszcze nieprzypisany).
     """
     if not user_login:
         return None
-    ensure_list_tables(rm_master_db_path)
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        row = con.execute(
-            "SELECT * FROM employees WHERE user_login = ? COLLATE NOCASE LIMIT 1",
-            (user_login,)
-        ).fetchone()
-        return dict(row) if row else None
-    finally:
-        con.close()
+    wiersze = rmm_read("rmm-employees-po-user-login", {"user_login": user_login})
+    return dict(wiersze[0]) if wiersze else None
 
 
 def _normalize_name_for_match(text: str) -> str:
@@ -6477,19 +5734,23 @@ def get_user_login_owner(rm_master_db_path: str, user_login: str,
     return owner
 
 
-def update_employee_fields(rm_master_db_path: str, employee_id: int,
-                           changes: Dict, user: str = None) -> int:
+def update_employee_fields(rm_master_db_path: str = None, employee_id: int = 0,
+                           changes: Dict = None, user: str = None) -> int:
     """Zaktualizuj wybrane pola pracownika i zapisz KAŻDĄ zmianę do audytu.
 
     changes: {pole: nowa_wartość} — tylko pola z EMPLOYEE_EDITABLE_FIELDS.
     Zwraca liczbę realnie zmienionych pól (audyt tylko dla różnic).
+
+    UPDATE i wpisy audytu lecą JEDNYM batchem — wcześniej były osobnymi
+    zapisami, więc zerwane połączenie mogło zostawić zmianę bez śladu
+    w dzienniku. Operacja `rmm-employee-zmien` używa COALESCE: pola,
+    których nie zmieniamy, jadą jako None i zostają nietknięte.
     """
-    current = get_employee_by_id(rm_master_db_path, employee_id)
+    current = get_employee_by_id(None, employee_id)
     if not current:
         raise ValueError(f"Pracownik id={employee_id} nie istnieje")
-    to_set = {}
-    audits = []
-    for field, new_val in changes.items():
+    to_set, audits = {}, []
+    for field, new_val in (changes or {}).items():
         if field not in EMPLOYEE_EDITABLE_FIELDS:
             continue
         old_val = current.get(field)
@@ -6503,102 +5764,68 @@ def update_employee_fields(rm_master_db_path: str, employee_id: int,
         audits.append((field, old_val, new_val))
     if not to_set:
         return 0
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        set_sql = ", ".join(f"{f} = ?" for f in to_set) + ", updated_at = CURRENT_TIMESTAMP"
-        con.execute(f"UPDATE employees SET {set_sql} WHERE id = ?",
-                    (*to_set.values(), employee_id))
-        _rm_safe_commit(con)
-    finally:
-        con.close()
+
+    params = {k: None for k in ("name", "category", "description", "contact_info",
+                                "is_active", "phone", "email", "master_max_parallel",
+                                "podmiot", "user_login")}
+    params.update(to_set)
+    params["id"] = employee_id
+    operacje = [{"operation": "rmm-employee-zmien", "params": params}]
     for field, old_val, new_val in audits:
-        log_audit(rm_master_db_path, 'employee', 'UPDATE', employee_id=employee_id,
-                  entity_id=employee_id, field=EMPLOYEE_EDITABLE_FIELDS[field],
-                  old_value=old_val, new_value=new_val, user=user)
+        operacje.append({"operation": "rmm-audit-log-dodaj",
+                         "params": _wpis_audytu(
+                             'employee', 'UPDATE', employee_id, employee_id,
+                             EMPLOYEE_EDITABLE_FIELDS[field], old_val, new_val,
+                             None, user)})
+    rmm_batch(operacje)
     return len(to_set)
 
 
-def save_employee(rm_master_db_path: str, data: Dict) -> int:
+def save_employee(rm_master_db_path: str = None, data: Dict = None) -> int:
     """Dodaj lub aktualizuj pracownika.
     data musi zawierać: name, category.
     Opcjonalne: description, contact_info, phone, email, podmiot, user_login,
     is_active, id (gdy update).
     Zwraca id rekordu.
     """
-    ensure_list_tables(rm_master_db_path)
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        if data.get('id'):
-            con.execute("""
-                UPDATE employees SET
-                    name         = ?,
-                    category     = ?,
-                    description  = ?,
-                    contact_info = ?,
-                    phone        = ?,
-                    email        = ?,
-                    podmiot      = ?,
-                    user_login   = ?,
-                    is_active    = ?,
-                    updated_at   = CURRENT_TIMESTAMP
-                WHERE id = ?
-            """, (
-                data['name'], data['category'],
-                data.get('description', ''), data.get('contact_info', ''),
-                data.get('phone', ''), data.get('email', ''),
-                data.get('podmiot') or None,
-                data.get('user_login') or None,
-                int(bool(data.get('is_active', True))),
-                data['id']
-            ))
-            row_id = data['id']
-        else:
-            cur = con.execute("""
-                INSERT INTO employees (name, category, description, contact_info, phone, email, podmiot, user_login, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                data['name'], data['category'],
-                data.get('description', ''), data.get('contact_info', ''),
-                data.get('phone', ''), data.get('email', ''),
-                data.get('podmiot') or None,
-                data.get('user_login') or None,
-                int(bool(data.get('is_active', True))),
-            ))
-            row_id = cur.lastrowid
-        # Commit z retry na "database is locked" — master bywa wspoldzielony po SMB
-        _rm_safe_commit(con)
-        return row_id
-    finally:
-        con.close()
+    data = data or {}
+    params = {
+        "name": data['name'], "category": data['category'],
+        "description": data.get('description', ''),
+        "contact_info": data.get('contact_info', ''),
+        "phone": data.get('phone', ''), "email": data.get('email', ''),
+        "podmiot": data.get('podmiot') or None,
+        "user_login": data.get('user_login') or None,
+        "is_active": int(bool(data.get('is_active', True))),
+    }
+    if data.get('id'):
+        # Pełne nadpisanie (bez COALESCE): formularz przysyła komplet pól,
+        # a puste `podmiot`/`user_login` mają WYCZYŚCIĆ kolumnę.
+        params["id"] = data['id']
+        rmm_exec("rmm-employees-zmien-po-id", params)
+        return data['id']
+    wynik = rmm_exec("rmm-employees-dodaj", params)
+    return int((wynik or {}).get("lastrowid") or 0)
 
 
-def delete_employee(rm_master_db_path: str, employee_id: int):
-    """Usuń pracownika z bazy (fizycznie)."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        con.execute("DELETE FROM employees WHERE id = ?", (employee_id,))
-        con.commit()
-    finally:
-        con.close()
+def delete_employee(rm_master_db_path: str = None, employee_id: int = 0):
+    """Usuń pracownika z bazy (fizycznie).
+
+    Powiązane wpisy (nieobecności, wykluczenia, urlopy) znikają same —
+    serwer ma `PRAGMA foreign_keys=ON`, a schemat `ON DELETE CASCADE`.
+    """
+    rmm_exec("rmm-employees-usun-po-id", {"id": employee_id})
 
 
-def set_employee_master_max_parallel(rm_master_db_path: str, employee_id: int, value: int):
+def set_employee_master_max_parallel(rm_master_db_path: str = None,
+                                     employee_id: int = 0, value: int = 1):
     """Aktualizuj tylko kolumnę master_max_parallel dla danego pracownika.
 
     Używane w zakładce Pracownicy w oknie Optymalizatora produkcji.
     Wartość minimalna = 1.
     """
-    ensure_list_tables(rm_master_db_path)
-    v = max(1, int(value))
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        con.execute(
-            "UPDATE employees SET master_max_parallel = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (v, int(employee_id)),
-        )
-        con.commit()
-    finally:
-        con.close()
+    rmm_exec("rmm-employees-zmien-po-id-2",
+             {"master_max_parallel": max(1, int(value)), "id": int(employee_id)})
 
 
 # ============================================================================
