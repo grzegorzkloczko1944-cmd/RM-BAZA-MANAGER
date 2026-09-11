@@ -162,8 +162,89 @@ wymienione w §10 — owszem.
 | Backup mastera | klient przy zwalnianiu locka | **serwer** |
 | Pliki projektów | klient (kopia lokalna) | klient — bez zmian |
 
-Po etapie B `DatabaseManager.master_con` **przestaje istnieć**. To jest test
-kompletności: dopóki pole istnieje, ktoś może go użyć.
+Po etapie B `DatabaseManager.master_con` **przestaje być używane w trybie
+domyślnym**. Test kompletności w trybie serwer: dopóki `master_con` jest
+otwierane, ktoś może go użyć.
+
+---
+
+## 2a. Przełącznik serwer / legacy — narzędzie wdrożenia, nie architektura docelowa
+
+**Po co istnieje:** żeby cutover (§8) i ewentualne wycofanie były decyzją
+jednego kliknięcia ADMIN-a, a nie podmianą `.exe` na dziesięciu komputerach
+pod presją czasu. Przełącznik żyje **przez okres wdrożenia** — od pierwszego
+cutoveru do momentu, gdy tryb serwer jest sprawdzony w boju (propozycja:
+2–4 tygodnie stabilnej pracy).
+
+| Tryb | Jak dotyka mastera | Rola |
+|---|---|---|
+| **serwer** | przez `rm_serwer` (§0–§10) | docelowy |
+| **legacy** | dokładnie dzisiejszy kod — `master_con` bezpośrednio po SMB | **siatka bezpieczeństwa na czas wdrożenia** |
+
+**Tryb jest globalny, ustawiany przez ADMIN-a, czytany przez WSZYSTKIE
+stanowiska naraz** — dokładnie ten sam mechanizm co przełącznik legacy
+w §5/§8 (`sync_config.json` na `Y:`, klient czyta przy starcie). To nie jest
+wybór per-komputer.
+
+```json
+{"rm_serwer": {"tryb": "serwer"}}    // domyślny
+{"rm_serwer": {"tryb": "legacy"}}    // ADMIN wyłączył serwer
+```
+
+To **ten sam klucz i ten sam mechanizm** co tryb legacy w §5 — nie dwa
+osobne przełączniki. §5 opisuje go od strony awarii („serwer padł na
+dłużej"), tutaj od strony wdrożenia („ADMIN cofa cutover"). Jedna flaga,
+dwa powody użycia.
+
+⚠️ **Dlaczego nie per-stanowisko.** Rozważane i odrzucone: gdyby każdy
+komputer wybierał tryb niezależnie, PC1 mógłby pisać przez serwer, a PC2
+w tym samym momencie bezpośrednio po SMB do tego samego pliku. To jest
+dosłownie mechanizm awarii z 11.09 (§0) — czytelnik/pisarz po SMB trzyma
+blokadę, która blokuje commit serwera, i odwrotnie. Serwer nie chroni przed
+niczym, jeśli obok niego ktoś inny otwiera ten sam plik wprost. Globalny
+przełącznik gwarantuje, że w danej chwili **tylko jeden model dostępu** jest
+aktywny dla wszystkich.
+
+### Co to oznacza dla kodu
+
+`DatabaseManager` dostaje jedną warstwę pośrednią (`master_read` /
+`master_exec` / `master_batch` z §3), którą i tak już wprowadza ten plan —
+przełącznik **nie jest nową architekturą**, tylko drugą implementacją tej
+samej warstwy:
+
+```python
+def master_exec(self, operation, params, request_id=None):
+    if self.tryb_mastera == "serwer":
+        return rm_klient.zapytaj("master-exec", {...})
+    else:  # "legacy" — dzisiejszy kod, zachowany na czas wdrożenia
+        return self._master_exec_local(operation, params)
+```
+
+Stary kod (`master_con.execute(sql)` na 133 miejscach) **nie znika** —
+przenosi się pod `_master_exec_local` i mapowanie `operation → SQL`, którego
+i tak wymaga tryb serwer (nazwane operacje, §3). Innymi słowy: implementując
+tryb serwer zgodnie z resztą tego planu, tryb legacy dostajemy niemal za
+darmo — to ten sam SQL, tylko wołany bezpośrednio zamiast przez sieć.
+
+### Kiedy tryb legacy znika
+
+Dwie ścieżki kosztują: każda nowa operacja na masterze musi działać po obu
+stronach przełącznika, inaczej powrót na „legacy" po miesiącach cicho łamie
+funkcję, której nikt w tym trybie nie sprawdził.
+
+Dlatego tryb legacy ma **termin ważności**:
+
+```
+cutover  →  2–4 tygodnie obu trybów  →  usunięcie trybu legacy
+                                         (master_con znika naprawdę)
+```
+
+Warunek usunięcia: tryb serwer przepracował ten okres bez sytuacji, w której
+ADMIN musiał wrócić na „legacy". Wtedy `_master_exec_local` i `master_con`
+wypadają z kodu, a §2 („kto dotyka pliku") obowiązuje bez zastrzeżeń.
+
+Dopóki przełącznik istnieje, **nowe funkcje piszemy w obu trybach** — to jest
+cena za możliwość wycofania jednym kliknięciem.
 
 ---
 
