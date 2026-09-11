@@ -2551,6 +2551,19 @@ class MainWindow(tk.Tk):
                     print("⚠️  Heartbeat tick: brak lock_manager!")
                 
                 # Sesja klienta → client_sessions (własne, krótkie połączenie)
+                # Transakcja wiszaca na master_con przez DWA ticki (>=30 s)
+                # nie jest niczyja praca — to pozostalosc po nieudanym
+                # commit() i blokada zapisu dla calej firmy. Dwa ticki, bo
+                # jeden moglby trafic w cudza transakcje w toku z watku GUI.
+                try:
+                    con = self.db_manager.master_con
+                    wisi = bool(con is not None and con.in_transaction)
+                    if wisi and getattr(self, "_master_txn_wisiala", False):
+                        self.db_manager.master_rollback_stuck("heartbeat, >=30 s")
+                        wisi = False
+                    self._master_txn_wisiala = wisi
+                except Exception:
+                    pass
                 self._session_heartbeat()
 
                 # Sprawdź nowe wiadomości w chacie
@@ -3061,7 +3074,7 @@ class MainWindow(tk.Tk):
                         self.db_manager.master_con.execute(
                             "ALTER TABLE projects ADD COLUMN project_type TEXT NOT NULL DEFAULT 'MACHINE'"
                         )
-                        self.db_manager.master_con.commit()
+                        self.db_manager.master_commit()
                         print("  ✅ Kolumna project_type dodana pomyślnie")
                     except sqlite3.OperationalError as alter_err:
                         if "read-only" in str(alter_err).lower() or "readonly" in str(alter_err).lower():
@@ -3097,7 +3110,7 @@ class MainWindow(tk.Tk):
                         self.db_manager.master_con.execute(
                             "ALTER TABLE projects ADD COLUMN designer TEXT"
                         )
-                        self.db_manager.master_con.commit()
+                        self.db_manager.master_commit()
                         print("  ✅ Kolumna designer dodana")
                     except Exception as e:
                         print(f"  ⚠️  Błąd dodawania designer: {e}")
@@ -3109,7 +3122,7 @@ class MainWindow(tk.Tk):
                         self.db_manager.master_con.execute(
                             "ALTER TABLE projects ADD COLUMN completed_at TEXT"
                         )
-                        self.db_manager.master_con.commit()
+                        self.db_manager.master_commit()
                         print("  ✅ Kolumna completed_at dodana")
                     except Exception as e:
                         print(f"  ⚠️  Błąd dodawania completed_at: {e}")
@@ -3121,7 +3134,7 @@ class MainWindow(tk.Tk):
                         self.db_manager.master_con.execute(
                             "ALTER TABLE projects ADD COLUMN status TEXT DEFAULT 'W_REALIZACJI'"
                         )
-                        self.db_manager.master_con.commit()
+                        self.db_manager.master_commit()
                         print("  ✅ Kolumna status dodana")
                     except Exception as e:
                         print(f"  ⚠️  Błąd dodawania status: {e}")
@@ -3133,7 +3146,7 @@ class MainWindow(tk.Tk):
                         self.db_manager.master_con.execute(
                             "ALTER TABLE projects ADD COLUMN received_percent TEXT"
                         )
-                        self.db_manager.master_con.commit()
+                        self.db_manager.master_commit()
                         print("  ✅ Kolumna received_percent dodana")
                     except Exception as e:
                         print(f"  ⚠️  Błąd dodawania received_percent: {e}")
@@ -3162,7 +3175,7 @@ class MainWindow(tk.Tk):
                         is_active INTEGER DEFAULT 1
                     )
                 """)
-                self.db_manager.master_con.commit()
+                self.db_manager.master_commit()
                 print("  ✅ Tabela suppliers OK")
             except Exception as e:
                 print(f"  ⚠️  Błąd migracji suppliers: {e}")
@@ -3270,7 +3283,7 @@ class MainWindow(tk.Tk):
                     updated_at TEXT
                 )
             """)
-            self.db_manager.master_con.commit()
+            self.db_manager.master_commit()
             
             # Ustaw domyślną wartość backup_on_release jeśli nie istnieje
             cursor = self.db_manager.master_con.execute("""
@@ -3284,7 +3297,7 @@ class MainWindow(tk.Tk):
                     INSERT INTO settings (key, value, updated_at)
                     VALUES ('backup_on_release', '1', ?)
                 """, (datetime.now().isoformat(),))
-                self.db_manager.master_con.commit()
+                self.db_manager.master_commit()
                 print("    ℹ️  Ustawienie backup_on_release = 1 (domyślnie)")
             else:
                 print(f"    ℹ️  Ustawienie backup_on_release = {row[0]}")
@@ -3328,7 +3341,7 @@ class MainWindow(tk.Tk):
                     details TEXT
                 )
             """)
-            self.db_manager.master_con.commit()
+            self.db_manager.master_commit()
             
             # Snapshot aktualnego stanu użytkowników (jeśli tabela jest pusta)
             cursor = self.db_manager.master_con.execute(
@@ -3352,7 +3365,7 @@ class MainWindow(tk.Tk):
                         datetime.now().isoformat(),
                         'Initial snapshot at app start'
                     ))
-                self.db_manager.master_con.commit()
+                self.db_manager.master_commit()
                 print(f"    ℹ️  Zapisano snapshot {len(users)} użytkowników")
             else:
                 print(f"    ℹ️  Audit log już istnieje - sprawdzam zmiany...")
@@ -3433,7 +3446,7 @@ class MainWindow(tk.Tk):
                         datetime.now().isoformat(),
                         details
                     ))
-                    self.db_manager.master_con.commit()
+                    self.db_manager.master_commit()
                     print(f"    📝 Zalogowano anomalię do user_changes_log\n")
                 except sqlite3.OperationalError as e:
                     if "readonly" in str(e).lower():
@@ -3503,7 +3516,7 @@ class MainWindow(tk.Tk):
             cols_sup = [r[1] for r in self.db_manager.master_con.execute("PRAGMA table_info(suppliers)").fetchall()]
             if "nip" not in cols_sup:
                 self.db_manager.master_con.execute("ALTER TABLE suppliers ADD COLUMN nip TEXT")
-                self.db_manager.master_con.commit()
+                self.db_manager.master_commit()
                 print("✅ Kolumna nip dodana do suppliers")
         except Exception as e:
             print(f"⚠️  Błąd dodawania kolumny nip do suppliers: {e}")
@@ -4133,7 +4146,7 @@ class MainWindow(tk.Tk):
                 "UPDATE projects SET received_percent = ? WHERE project_id = ?",
                 (db_str, pid),
             )
-            con.commit()
+            self.db_manager.master_commit()
             cache[pid] = db_str
         except sqlite3.OperationalError as db_err:
             # database is locked / readonly — pomiń, spróbujemy następnym razem
@@ -5575,7 +5588,7 @@ class MainWindow(tk.Tk):
                     row = None
                     for attempt in range(3):
                         try:
-                            self.db_manager.master_con.commit()  # Zwolnij locki
+                            self.db_manager.master_commit()  # Zwolnij locki
                             cursor = self.db_manager.master_con.execute(sql, (self.current_user_id,))
                             row = cursor.fetchone()
                             break
@@ -5687,7 +5700,7 @@ class MainWindow(tk.Tk):
                 stored_hash = None
                 for attempt in range(3):
                     try:
-                        self.db_manager.master_con.commit()  # Zwolnij locki przed SELECT
+                        self.db_manager.master_commit()  # Zwolnij locki przed SELECT
                         cursor = self.db_manager.master_con.execute(
                             "SELECT password_hash FROM users WHERE id = ?", (new_user_id,)
                         )
@@ -9798,6 +9811,10 @@ class MainWindow(tk.Tk):
         
         # Zapisz szerokości kolumn PRZED przejęciem locka
         # (żeby refresh_data() po acquire nie nadpisał aktualnych szerokości)
+        # Wiszaca transakcja na master blokowalaby wszystko ponizej
+        # (i wszystkim innym) — patrz DatabaseManager.master_commit.
+        self.db_manager.master_rollback_stuck("przejecie locka")
+
         self._save_column_widths()
         
         try:
@@ -10185,6 +10202,9 @@ class MainWindow(tk.Tk):
         
         # Odblokuj GUI przed operacją
         self.update_idletasks()
+
+        # Jak w acquire_lock: usun_zamowienia() nizej pisze do master.
+        self.db_manager.master_rollback_stuck("zwolnienie locka")
         
         # ⚠️ SPRAWDŹ CZY NADAL MAMY LOCK PRZED ZAPISEM!
         if self.current_lock_id:
@@ -19939,7 +19959,7 @@ class MainWindow(tk.Tk):
                     updated_at TEXT
                 )
             """)
-            self.db_manager.master_con.commit()
+            self.db_manager.master_commit()
             
             # Sprawdź czy rekord istnieje
             cursor = self.db_manager.master_con.execute("""
@@ -19961,7 +19981,7 @@ class MainWindow(tk.Tk):
                     VALUES ('backup_on_release', ?, ?)
                 """, (str(int(enabled)), datetime.now().isoformat()))
             
-            self.db_manager.master_con.commit()
+            self.db_manager.master_commit()
             
             print(f"✅ Zapisano ustawienie backup_on_release = {int(enabled)}")
             
@@ -20615,7 +20635,7 @@ class MainWindow(tk.Tk):
                     set_by=self.current_user
                 )
                 
-                self.db_manager.master_con.commit()
+                self.db_manager.master_commit()
                 print(f"   ✅ Projekt {pid_new} ({project_type}) utworzony i zatwierdzony")
                 print(f"      Status: PRZYJETY (domyślny)")
                 if designer:
@@ -21464,7 +21484,7 @@ class MainWindow(tk.Tk):
                         completed_at=completed_iso or None
                     )
                     
-                    self.db_manager.master_con.commit()
+                    self.db_manager.master_commit()
                     print(f"   ✅ Projekt {proj['id']} zaktualizowany i zatwierdzony")
                     print(f"      Status: {status or '(pusty)'}")
                     
@@ -21533,7 +21553,7 @@ class MainWindow(tk.Tk):
                     except Exception:
                         pass
                     set_project_active(self.db_manager.master_con, proj["id"], new_state)
-                    self.db_manager.master_con.commit()
+                    self.db_manager.master_commit()
                     # POTWIERDZENIE ODCZYTEM. Commit na polaczeniu, ktore cicho
                     # stracilo tryb zapisu, nie zglasza bledu - a projekt zostaje
                     # nieaktywny (07.09.2026).
@@ -21641,7 +21661,7 @@ class MainWindow(tk.Tk):
                 
                 # Usuń projekt
                 delete_project(self.db_manager.master_con, proj["id"])
-                self.db_manager.master_con.commit()
+                self.db_manager.master_commit()
                 print(f"   ✅ Projekt {proj['id']} usunięty i zatwierdz ony")
                 
                 reload()
@@ -21737,7 +21757,7 @@ class MainWindow(tk.Tk):
             for attempt in range(1, 6):
                 try:
                     delete_project(self.db_manager.master_con, pid)
-                    self.db_manager.master_con.commit()
+                    self.db_manager.master_commit()
                     db_row_deleted = True
                     msg = f"   ✅ DELETE rekordu (próba {attempt}) OK"
                     print(msg); log_lines.append(msg)
@@ -22607,7 +22627,7 @@ class MainWindow(tk.Tk):
                 
                 ins_cur = self.db_manager.master_con.execute(sql, tuple(insert_vals))
                 new_sid = ins_cur.lastrowid
-                self.db_manager.master_con.commit()
+                self.db_manager.master_commit()
 
                 # Zapis tagów nowej firmy (na świeżo utworzonym supplier_id)
                 try:
@@ -22882,7 +22902,7 @@ class MainWindow(tk.Tk):
                     sql = f"UPDATE suppliers SET {', '.join(set_parts)} WHERE {id_col} = ?"
                     
                     self.db_manager.master_con.execute(sql, params)
-                    self.db_manager.master_con.commit()
+                    self.db_manager.master_commit()
 
                     # Zapis tagów kooperanta (przypisania z checkboxów)
                     try:
@@ -23033,7 +23053,7 @@ class MainWindow(tk.Tk):
             
             try:
                 self.db_manager.master_con.execute("DELETE FROM suppliers WHERE supplier_id = ?", (sid,))
-                self.db_manager.master_con.commit()
+                self.db_manager.master_commit()
                 
                 # Odśwież mapę
                 self.reload_suppliers()
@@ -26682,7 +26702,7 @@ class MainWindow(tk.Tk):
         for tid in tag_ids:
             con.execute("INSERT OR IGNORE INTO rfq_supplier_tags (supplier_id, tag_id) "
                         "VALUES (?, ?)", (supplier_id, tid))
-        con.commit()
+        self.db_manager.master_commit()
 
     def _rfq_add_tag(self, label):
         """Dodaje nowy tag do słownika. Zwraca (id, name, label) albo None gdy
@@ -26696,7 +26716,7 @@ class MainWindow(tk.Tk):
             nxt = con.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM rfq_tags").fetchone()[0]
             cur = con.execute("INSERT INTO rfq_tags (name, label, sort_order) VALUES (?,?,?)",
                               (name, label, nxt))
-            con.commit()
+            self.db_manager.master_commit()
             return (cur.lastrowid, name, label)
         except Exception:
             return None  # duplikat (UNIQUE) lub inny błąd
@@ -26709,7 +26729,7 @@ class MainWindow(tk.Tk):
         try:
             con.execute("DELETE FROM rfq_supplier_tags WHERE tag_id=?", (tag_id,))
             con.execute("DELETE FROM rfq_tags WHERE id=?", (tag_id,))
-            con.commit()
+            self.db_manager.master_commit()
             return True
         except Exception as e:
             print(f"⚠️  Błąd usuwania tagu: {e}")
@@ -27245,7 +27265,7 @@ class MainWindow(tk.Tk):
                     VALUES (?, ?, ?, ?, 1, datetime('now'))
                 """
                 con.execute(sql, (username, display_name, password_hash, role))
-                con.commit()
+                self.db_manager.master_commit()
                 
                 # LOG: Dodano użytkownika
                 try:
@@ -27608,7 +27628,7 @@ class MainWindow(tk.Tk):
                 ).fetchone()
                 
                 con.execute("DELETE FROM users WHERE id = ?", (uid,))
-                con.commit()
+                self.db_manager.master_commit()
                 
                 # LOG: Usunięcie użytkownika
                 if user_data:
@@ -27683,7 +27703,7 @@ class MainWindow(tk.Tk):
                     details TEXT
                 )
             """)
-            self.db_manager.master_con.commit()
+            self.db_manager.master_commit()
         except Exception as e:
             messagebox.showerror("Błąd", f"Nie można utworzyć tabeli user_changes_log:\n{e}")
             return

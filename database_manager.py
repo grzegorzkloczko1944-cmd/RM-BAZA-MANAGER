@@ -74,6 +74,57 @@ class DatabaseManager:
         """
         self.master_con = None
 
+    def master_commit(self) -> None:
+        """commit() na master_con, ktory NIE ZOSTAWIA otwartej transakcji.
+
+        ⚠️ DLACZEGO NIE GOLE master_con.commit()
+        master_con ma isolation_level='DEFERRED': pierwszy INSERT/UPDATE
+        otwiera transakcje i bierze RESERVED na master.sqlite. Gdy commit()
+        padnie na „database is locked" (ktos akurat czytal plik — w
+        journal=delete po SMB to codziennosc), Python NIE cofa transakcji:
+        polaczenie zostaje w in_transaction=True i trzyma RESERVED az do
+        zamkniecia procesu. Od tej chwili ZADNE stanowisko nie zapisze do
+        master — heartbeaty, locki, ustawienia — kazdy czeka busy_timeout
+        i pada. 11.09.2026 master byl tak zablokowany 100% czasu przez
+        ponad 20 minut, a przejecie/zwolnienie locka trwalo kilkanascie
+        sekund na kazdej maszynie.
+
+        Wyjatek leci dalej — wolajacy obsluguja go tak jak dotad. Roznica
+        jest jedna: przed wyjsciem RESERVED jest ZWOLNIONY.
+        """
+        con = self.master_con
+        if con is None:
+            return
+        try:
+            con.commit()
+        except Exception:
+            try:
+                con.rollback()
+            except Exception:
+                pass
+            raise
+
+    def master_rollback_stuck(self, powod: str = "") -> bool:
+        """Cofa transakcje WISZACA na master_con. True gdy cos cofnieto.
+
+        Wolane z miejsc, w ktorych otwarta transakcja na master nie ma
+        prawa istniec: start przejecia/zwolnienia locka i tick heartbeatu.
+        Zapisy do master sa male i natychmiast commitowane, wiec kazda
+        transakcja zastana tutaj to pozostalosc po nieudanym commit()
+        (patrz master_commit), nie czyjas praca w toku.
+        """
+        con = self.master_con
+        try:
+            if con is not None and con.in_transaction:
+                con.rollback()
+                print(f"🧹 master_con: cofnieto wiszaca transakcje"
+                      + (f" ({powod})" if powod else "")
+                      + " — zwolniono blokade zapisu master.sqlite")
+                return True
+        except Exception as e:
+            print(f"⚠️  master_con: nie udalo sie cofnac wiszacej transakcji: {e}")
+        return False
+
     def _retire_project_con(self) -> None:
         """To samo co _retire_master_con, dla project_con.
 

@@ -791,7 +791,12 @@ def usun_zamowienia(project_id, do_kiedy=None):
     """
     import sqlite3
     try:
-        con = sqlite3.connect(_master(), timeout=10)
+        # KRÓTKI limit, nie 10 s. To sprzątanie jest best-effort: wpisy, których
+        # nie skasujemy, nałożą się ponownie przy następnym locku (idempotentne).
+        # Gdy master trzyma INNE stanowisko (wisząca transakcja po nieudanym
+        # commit — patrz DatabaseManager.master_commit), pełne 10 s czekania
+        # objawiało się jako „zwalnianie locka się wiesza" (11.09.2026).
+        con = sqlite3.connect(_master(), timeout=0.5)
         try:
             if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
                                " AND name='zd_zamowione_pozycje'").fetchone():
@@ -830,7 +835,9 @@ def usun_zamowienia(project_id, do_kiedy=None):
         return n + c
     except Exception as e:
         # Zostają — nałożą się ponownie przy następnym locku (idempotentne).
-        print(f"⚠️  Nie usunięto wpisów „Zamówiono” projektu {project_id}: {e}")
+        dopisek = (" — master trzyma inne stanowisko, wpisy nałożą się przy następnym locku"
+                   if "locked" in str(e).lower() else "")
+        print(f"⚠️  Nie usunięto wpisów „Zamówiono” projektu {project_id}: {e}{dopisek}")
         return 0
 
 
