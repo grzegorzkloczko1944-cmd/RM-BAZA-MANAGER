@@ -26,7 +26,15 @@ from typing import Dict, List, Optional
 
 
 def open_ro(path: str) -> sqlite3.Connection:
+    """Baza tylko do odczytu.
+
+    Sciezka sieciowa do serwera wymaga w trybie URI czterech ukosnikow
+    (file:////serwer/udzial/plik.sqlite) — przy dwoch SQLite bierze nazwe
+    serwera za „authority" i odmawia otwarcia.
+    """
     uri = Path(path).as_posix()
+    if uri.startswith('//'):
+        uri = '//' + uri
     con = sqlite3.connect(f'file:{uri}?mode=ro', uri=True)
     con.row_factory = sqlite3.Row
     return con
