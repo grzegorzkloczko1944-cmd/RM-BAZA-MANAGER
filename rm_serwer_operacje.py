@@ -69,6 +69,13 @@ ODCZYT = {
         "SELECT * FROM user_changes_log ORDER BY change_id DESC LIMIT ?",
         ["limit"],
     ),
+    # Cały dziennik od początku — po nim odtwarza się stan użytkowników
+    # (SNAPSHOT/ADD dodaje, DELETE usuwa), więc kolejność MUSI być rosnąca.
+    "user-audit-historia": (
+        "SELECT action, user_id, username, display_name, role"
+        " FROM user_changes_log ORDER BY change_id ASC",
+        [],
+    ),
     "sessions-list": (
         "SELECT * FROM client_sessions ORDER BY ended_at IS NOT NULL, last_seen DESC",
         [],

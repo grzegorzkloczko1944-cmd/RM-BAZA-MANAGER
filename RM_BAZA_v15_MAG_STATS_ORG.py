@@ -3232,54 +3232,26 @@ class MainWindow(tk.Tk):
     def _init_user_audit_log(self):
         """Inicjalizuj tabelę logowania zmian użytkowników"""
         try:
-            # Jeśli master jest READ-ONLY, pomiń inicjalizację logów
-            try:
-                cur = self.db_manager.master_con.execute("PRAGMA query_only")
-                if cur.fetchone()[0] == 1:
-                    print("  ℹ️  Master READ-ONLY - pomijam init user_changes_log")
-                    return
-            except Exception:
-                pass
+            # Tabelę zakłada migracja (rm_serwer_operacje.MIGRACJE).
+            wpisy = self.db_manager.master_read("user-audit-list", {"limit": 1})
 
-            # Utwórz tabelę audit log jeśli nie istnieje
-            self.db_manager.master_con.execute("""
-                CREATE TABLE IF NOT EXISTS user_changes_log (
-                    change_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    action TEXT NOT NULL,
-                    user_id INTEGER,
-                    username TEXT,
-                    display_name TEXT,
-                    role TEXT,
-                    changed_by TEXT,
-                    timestamp TEXT NOT NULL,
-                    details TEXT
-                )
-            """)
-            self.db_manager.master_commit()
-            
-            # Snapshot aktualnego stanu użytkowników (jeśli tabela jest pusta)
-            cursor = self.db_manager.master_con.execute(
-                "SELECT COUNT(*) FROM user_changes_log"
-            )
-            if cursor.fetchone()[0] == 0:
-                # Zapisz snapshot
-                users = self.db_manager.master_con.execute(
-                    "SELECT id, username, display_name, role FROM users"
-                ).fetchall()
-                
-                for u in users:
-                    self.db_manager.master_con.execute("""
-                        INSERT INTO user_changes_log 
-                        (action, user_id, username, display_name, role, changed_by, timestamp, details)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        'SNAPSHOT',
-                        u[0], u[1], u[2], u[3],
-                        'SYSTEM',
-                        datetime.now().isoformat(),
-                        'Initial snapshot at app start'
-                    ))
-                self.db_manager.master_commit()
+            if not wpisy:
+                # Pierwszy start na tej bazie — snapshot stanu użytkowników.
+                # JEDNA transakcja zamiast pętli execute + commit na końcu:
+                # przerwana w połowie zostawiałaby połowiczny snapshot, po
+                # którym `_check_user_changes_on_startup` zgłaszałby fałszywe
+                # „zniknęli użytkownicy".
+                users = self.db_manager.master_read("users-list")
+                teraz = datetime.now().isoformat()
+                if users:
+                    self.db_manager.master_batch([
+                        {"operation": "user-audit-add", "params": {
+                            "action": "SNAPSHOT", "user_id": u["id"],
+                            "username": u["username"], "display_name": u["display_name"],
+                            "role": u["role"], "changed_by": "SYSTEM",
+                            "timestamp": teraz,
+                            "details": "Initial snapshot at app start"}}
+                        for u in users])
                 print(f"    ℹ️  Zapisano snapshot {len(users)} użytkowników")
             else:
                 print(f"    ℹ️  Audit log już istnieje - sprawdzam zmiany...")
@@ -3297,33 +3269,20 @@ class MainWindow(tk.Tk):
     def _check_user_changes_on_startup(self):
         """Sprawdź czy użytkownicy w bazie zgadzają się z ostatnim logiem"""
         try:
-            # Sprawdź czy master jest READ-ONLY
-            try:
-                cur = self.db_manager.master_con.execute("PRAGMA query_only")
-                if cur.fetchone()[0] == 1:
-                    print("  ℹ️  Master READ-ONLY - pomijam check user changes")
-                    return
-            except Exception:
-                pass
-            
             # Pobierz aktualnych użytkowników
-            current_users = {}
-            for row in self.db_manager.master_con.execute(
-                "SELECT id, username, display_name, role FROM users"
-            ).fetchall():
-                current_users[row[0]] = {'username': row[1], 'display_name': row[2], 'role': row[3]}
-            
-            # Pobierz ostatni snapshot/stan z logów
-            # Budujemy stan na podstawie logów: SNAPSHOT/ADD dodają, DELETE usuwa
+            current_users = {
+                u["id"]: {'username': u["username"],
+                          'display_name': u["display_name"], 'role': u["role"]}
+                for u in self.db_manager.master_read("users-list")}
+
+            # Stan odtworzony z dziennika: SNAPSHOT/ADD dodaje, DELETE usuwa.
             last_known_users = {}
-            for row in self.db_manager.master_con.execute("""
-                SELECT action, user_id, username, display_name, role 
-                FROM user_changes_log 
-                ORDER BY change_id ASC
-            """).fetchall():
-                action, uid, username, display_name, role = row
+            for w in self.db_manager.master_read("user-audit-historia"):
+                action, uid = w["action"], w["user_id"]
                 if action in ('SNAPSHOT', 'ADD'):
-                    last_known_users[uid] = {'username': username, 'display_name': display_name, 'role': role}
+                    last_known_users[uid] = {'username': w["username"],
+                                             'display_name': w["display_name"],
+                                             'role': w["role"]}
                 elif action == 'DELETE':
                     last_known_users.pop(uid, None)
             
@@ -3346,24 +3305,17 @@ class MainWindow(tk.Tk):
                 if new_users:
                     print(f"    🟢 POJAWILI SIĘ użytkownicy: {', '.join(new_users)}")
                 
-                # Zaloguj anomalię (tylko jeśli baza nie jest READ-ONLY)
+                # Zaloguj anomalię (master bywa READ-ONLY — wtedy pomijamy)
                 try:
-                    details = f"Missing: {missing_users}, New: {new_users}"
-                    self.db_manager.master_con.execute("""
-                        INSERT INTO user_changes_log 
-                        (action, user_id, username, display_name, role, changed_by, timestamp, details)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        'ANOMALY',
-                        None, None, None, None,
-                        'SYSTEM',
-                        datetime.now().isoformat(),
-                        details
-                    ))
-                    self.db_manager.master_commit()
+                    self.db_manager.master_exec("user-audit-add", {
+                        "action": "ANOMALY", "user_id": None, "username": None,
+                        "display_name": None, "role": None, "changed_by": "SYSTEM",
+                        "timestamp": datetime.now().isoformat(),
+                        "details": f"Missing: {missing_users}, New: {new_users}",
+                    })
                     print(f"    📝 Zalogowano anomalię do user_changes_log\n")
-                except sqlite3.OperationalError as e:
-                    if "readonly" in str(e).lower():
+                except Exception as e:
+                    if "readonly" in str(e).lower() or "read-only" in str(e).lower():
                         print(f"    ℹ️  Baza READ-ONLY - pominięto zapis anomalii\n")
                     else:
                         raise
