@@ -2243,146 +2243,65 @@ def get_file_birth_time(filepath: str) -> float:
         return getattr(stat_info, 'st_birthtime', stat_info.st_mtime)
 
 
-def register_project_file(rm_db_path: str, project_id: int, project_name: str, master_db_path: str, projects_path: str = None):
-    """Rejestruje plik projektu przy pierwszym dostępie (lazy init)
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite
-        project_id: ID projektu
-        project_name: Nazwa projektu
-        master_db_path: Ścieżka do master.sqlite (RM_BAZA)
-        projects_path: Folder projektów (jeśli None - używa katalogu master.sqlite)
+def register_project_file(rm_db_path: str = None, project_id: int = 0, project_name: str = "",
+                          master_db_path: str = "", projects_path: str = None):
+    """Zarejestruj plik projektu RM_BAZA (ścieżka + czas utworzenia) do śledzenia.
+
+    Sam plik projektu zostaje na dysku sieciowym (etap 2 planu) — tutaj
+    idzie tylko jego metryka. `master_db_path` służy wyłącznie do wyznaczenia
+    katalogu projektów, gdy nie podano `projects_path`.
     """
     import os
-    
-    # Konstruuj ścieżkę: {projects_path}/project_{id}.sqlite
-    base_dir = projects_path if projects_path else os.path.dirname(master_db_path)
+    base_dir = projects_path if projects_path else os.path.dirname(master_db_path or "")
     file_path = os.path.join(base_dir, f"project_{project_id}.sqlite")
-    
     birth_time = get_file_birth_time(file_path)
-    
     if birth_time == 0.0:
         print(f"⚠️ OSTRZEŻENIE: Plik projektu nie istnieje: {file_path}")
         status = 'MISSING'
     else:
         status = 'OK'
         print(f"✅ Zarejestrowano plik projektu {project_id}: {file_path} (birth: {birth_time})")
-    
-    con = _open_rm_connection(rm_db_path)
-    con.execute("""
-        INSERT OR REPLACE INTO project_file_tracking 
-        (project_id, project_name, file_path, file_birth_time, last_verified_at, verification_status)
-        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
-    """, (project_id, project_name, file_path, birth_time, status))
-    con.commit()
-    con.close()
+    rmm_exec("rmm-project-file-tracking-dodaj", {
+        "project_id": project_id, "project_name": project_name, "file_path": file_path,
+        "file_birth_time": birth_time, "verification_status": status})
 
 
-def verify_project_file(rm_db_path: str, project_id: int, projects_path: str = None) -> tuple:
-    """Weryfikuje integralność pliku projektu
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite
-        project_id: ID projektu
-        projects_path: Folder projektów (lokalny config). Jeśli podany - konstruuje ścieżkę w locie
-    
-    Returns:
-        tuple: (is_valid: bool, status: str, message: str)
-            - (True, 'OK', 'Plik prawidłowy')
-            - (False, 'MISSING', 'Plik projektu nie istnieje')
-            - (False, 'BIRTH_MISMATCH', 'Plik został zmieniony (inny czas utworzenia)')
-            - (False, 'NOT_REGISTERED', 'Projekt nie jest jeszcze zarejestrowany')
+def verify_project_file(rm_db_path: str = None, project_id: int = 0, projects_path: str = None) -> tuple:
+    """Sprawdź, czy plik projektu jest tym, który zarejestrowano (po czasie utworzenia).
+
+    Zwraca (ok, kod, opis): OK / MISSING / BIRTH_MISMATCH / NOT_REGISTERED.
+    Status zapisywany na serwerze przy każdym sprawdzeniu.
     """
-    con = _open_rm_connection(rm_db_path)
-    
-    # Pobierz zarejestrowane dane
-    row = con.execute("""
-        SELECT project_name, file_path, file_birth_time, verification_status
-        FROM project_file_tracking
-        WHERE project_id = ?
-    """, (project_id,)).fetchone()
-    
-    if not row:
-        con.close()
-        return (False, 'NOT_REGISTERED', 'Projekt nie jest jeszcze zarejestrowany w systemie śledzenia')
-    
-    # Konstruuj ścieżkę z lokalnego config (nie z bazy - litera dysku może być inna!)
     import os
+    rows = rmm_read("rmm-project-file-tracking-po-project-id", {"project_id": project_id})
+    if not rows:
+        return (False, 'NOT_REGISTERED', 'Projekt nie jest jeszcze zarejestrowany w systemie śledzenia')
+    row = rows[0]
     if projects_path:
         file_path = os.path.join(projects_path, f"project_{project_id}.sqlite")
     else:
         file_path = row['file_path']
     registered_birth = row['file_birth_time']
-    
-    # Sprawdź czy plik istnieje
     current_birth = get_file_birth_time(file_path)
-    
     if current_birth == 0.0:
-        # Plik nie istnieje
-        con.execute("""
-            UPDATE project_file_tracking
-            SET verification_status = 'MISSING', last_verified_at = CURRENT_TIMESTAMP
-            WHERE project_id = ?
-        """, (project_id,))
-        con.commit()
-        con.close()
+        rmm_exec("rmm-project-file-tracking-zmien-po-project-id", {"project_id": project_id})
         return (False, 'MISSING', f'Plik projektu nie istnieje: {file_path}')
-    
-    # Sprawdź czy czas utworzenia się zgadza (tolerancja ±1 sekunda)
     if abs(current_birth - registered_birth) > 1.0:
-        con.execute("""
-            UPDATE project_file_tracking
-            SET verification_status = 'BIRTH_MISMATCH', last_verified_at = CURRENT_TIMESTAMP
-            WHERE project_id = ?
-        """, (project_id,))
-        con.commit()
-        con.close()
-        return (False, 'BIRTH_MISMATCH', 
+        rmm_exec("rmm-project-file-tracking-zmien-po-project-id-2", {"project_id": project_id})
+        return (False, 'BIRTH_MISMATCH',
                 f'Plik projektu został zmieniony (inny czas utworzenia).\n'
                 f'Zarejestrowany: {registered_birth}, Obecny: {current_birth}')
-    
-    # Wszystko OK
-    con.execute("""
-        UPDATE project_file_tracking
-        SET verification_status = 'OK', last_verified_at = CURRENT_TIMESTAMP
-        WHERE project_id = ?
-    """, (project_id,))
-    con.commit()
-    con.close()
-    
+    rmm_exec("rmm-project-file-tracking-zmien-po-project-id-3", {"project_id": project_id})
     return (True, 'OK', 'Plik projektu prawidłowy')
 
 
-def reset_project_tracking(rm_db_path: str, project_id: int, master_db_path: str, projects_path: str = None):
-    """Resetuje śledzenie pliku projektu (ponowna rejestracja)
-    
-    Używane gdy użytkownik przywróci plik lub chce zarejestrować nowy plik.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite
-        project_id: ID projektu
-        master_db_path: Ścieżka do master.sqlite
-        projects_path: Folder projektów
-    """
-    import os
-    
-    con = _open_rm_connection(rm_db_path)
-    
-    # Pobierz nazwę projektu
-    row = con.execute("""
-        SELECT project_name FROM project_file_tracking WHERE project_id = ?
-    """, (project_id,)).fetchone()
-    
-    project_name = row['project_name'] if row else f"Projekt_{project_id}"
-    con.close()
-    
-    # Usuń stary wpis i zarejestruj ponownie
-    con = _open_rm_connection(rm_db_path)
-    con.execute("DELETE FROM project_file_tracking WHERE project_id = ?", (project_id,))
-    con.commit()
-    con.close()
-    
-    register_project_file(rm_db_path, project_id, project_name, master_db_path, projects_path=projects_path)
+def reset_project_tracking(rm_db_path: str = None, project_id: int = 0, master_db_path: str = "",
+                           projects_path: str = None):
+    """Usuń wpis śledzenia i zarejestruj plik od nowa (np. po odtworzeniu z backupu)."""
+    rows = rmm_read("rmm-project-file-tracking-po-project-id-2", {"project_id": project_id})
+    project_name = rows[0]['project_name'] if rows else f"Projekt_{project_id}"
+    rmm_exec("rmm-project-file-tracking-usun-po-project-id", {"project_id": project_id})
+    register_project_file(None, project_id, project_name, master_db_path, projects_path=projects_path)
     print(f"✅ Zresetowano śledzenie dla projektu {project_id}")
 
 
@@ -4899,89 +4818,49 @@ def record_sync(rm_master_db_path: str = None, projects_synced: int = 0,
     print(f"📝 Zapisano sync_log: {sync_date} {sync_timestamp}, projektów: {projects_synced}")
 
 
-def sync_all_projects(rm_master_db_path: str, rm_projects_dir: str, master_db_path: str, user: str = None, lock_manager=None):
-    """Synchronizuj wszystkie projekty z RM_MANAGER → master.sqlite
-    
-    ⚠️  UWAGA WSPÓŁBIEŻNOŚĆ: Synchronizuje tylko projekty które NIE są zlockowane przez innych.
-    Projekty z lockiem są pomijane aby uniknąć nadpisania danych edytowanych przez innych użytkowników.
-    
-    Args:
-        rm_master_db_path: Ścieżka do rm_manager.sqlite (MASTER)
-        rm_projects_dir: Ścieżka do katalogu z bazami projektów (RM_MANAGER_projects)
-        master_db_path: Ścieżka do master.sqlite (współdzielony z RM_BAZA)
-        user: Użytkownik który uruchomił sync (opcjonalnie)
-        lock_manager: Opcjonalny LockManager do sprawdzania locków (aby uniknąć race conditions)
-        
-    Returns:
-        int: Liczba zsynchronizowanych projektów
+def sync_all_projects(rm_master_db_path: str = None, rm_projects_dir: str = "", master_db_path: str = "",
+                      user: str = None, lock_manager=None):
+    """Zsynchronizuj do mastera RM_BAZA wszystkie projekty ze zweryfikowanym plikiem.
+
+    Lista projektów i nazwy idą przez serwer (śledzenie z RM_MANAGER, nazwy
+    z mastera RM_BAZA). Bazy projektowe RM_MANAGER nadal są plikami —
+    `sync_to_master` czyta je z `rm_projects_dir`.
     """
-    # Pobierz wszystkie projekty z RM_MANAGER
-    con = _open_rm_connection(rm_master_db_path)
-    
-    # Pobierz listę projektów z project_file_tracking (tylko poprawne)
-    cursor = con.execute("""
-        SELECT project_id
-        FROM project_file_tracking
-        WHERE verification_status = 'OK'
-    """)
-    project_ids = [row['project_id'] for row in cursor.fetchall()]
-    con.close()
-    
+    project_ids = [r['project_id'] for r in rmm_read("rmm-project-file-tracking-po-verification-status")]
     if not project_ids:
         print("⚠️  Brak projektów do synchronizacji (project_file_tracking puste lub wszystkie niezweryfikowane)")
         return 0
-    
-    # Synchronizuj każdy projekt
     synced_count = 0
     skipped_locked = 0
     skipped_simulation = 0
-    
-    # Pobierz nazwy projektów do sprawdzenia [SYM]
-    # ⚠️  Tabela `projects` jest w master.sqlite (RM_BAZA), NIE w rm_manager.sqlite!
-    con = _open_rm_connection(master_db_path)
-    cursor = con.execute("SELECT project_id, name FROM projects WHERE project_id IN ({})".format(
-        ','.join('?' * len(project_ids))
-    ), project_ids)
-    project_names = {row['project_id']: row['name'] for row in cursor.fetchall()}
-    con.close()
-    
+    chciane = set(project_ids)
+    project_names = {r['project_id']: r['name'] for r in _master().master_read("projects-list")
+                     if r['project_id'] in chciane}
     for project_id in project_ids:
         try:
-            # 🚫 Projekty symulacyjne [SYM] nie synchronizują się do RM_BAZA
             project_name = project_names.get(project_id, "")
             if "[SYM]" in project_name:
                 print(f"⊘ Pominięto projekt {project_id} ({project_name}): projekt symulacyjny")
                 skipped_simulation += 1
                 continue
-            
-            # Sprawdź czy projekt jest zlockowany przez innego użytkownika
             if lock_manager:
                 lock_info = lock_manager.get_project_lock_owner(project_id)
                 if lock_info and lock_info.get('user') != user:
-                    # Projekt edytowany przez innego użytkownika - pomiń
                     print(f"⏭️  Pominięto projekt {project_id}: zlockowany przez {lock_info.get('user')}")
                     skipped_locked += 1
                     continue
-            
-            # Ścieżka do per-project database (używamy rm_projects_dir z GUI)
             rm_project_db = str(Path(rm_projects_dir) / f"rm_manager_project_{project_id}.sqlite")
-            
             if not Path(rm_project_db).exists():
                 print(f"⚠️  Pominięto projekt {project_id}: baza nie istnieje ({rm_project_db})")
                 continue
-            
             sync_to_master(rm_project_db, master_db_path, project_id)
             synced_count += 1
-            
         except Exception as e:
             print(f"⚠️  Błąd sync projektu {project_id}: {e}")
             import traceback
             traceback.print_exc()
-    
-    # Zapisz wpis do sync_log
     notes = f"Sync: {synced_count} OK, {skipped_locked} zlockowanych, {skipped_simulation} symulacyjnych [SYM]"
-    record_sync(rm_master_db_path, synced_count, user, notes=notes)
-    
+    record_sync(None, synced_count, user, notes=notes)
     print(f"✅ SYNC ALL: {synced_count}/{len(project_ids)} projektów zaktualizowanych, "
           f"{skipped_locked} pominiętych (lock), {skipped_simulation} symulacyjnych [SYM]")
     return synced_count
