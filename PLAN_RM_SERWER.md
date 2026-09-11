@@ -876,8 +876,8 @@ Inwentaryzacja z kodu (po etapach 1 i 2 zostaje to):
 | Ścieżka | Do czego | Kto | Propozycja |
 |---|---|---|---|
 | `Y:\SERVER_PROJEKTY` | rysunki DWF/PDF/DXF/STP/STL projektów; miniatury | arkusz, panel plików, wysyłka ZD, RFQ | `get_file(projekt, nazwa)` + lokalny cache |
-| `B:\` | biblioteka RM — komponenty wspólne (`dwf_biblioteka=1`) | miniatury, „Szukaj w bibliotece" | `get_file` + **indeks po stronie serwera** |
-| `V:\` | drzewa złożeń Inventora (`_OUT.xlsx`), „Szukaj na serwerze" | import BOM, skany | jak wyżej |
+| `B:\` | biblioteka RM — komponenty wspólne (`dwf_biblioteka=1`) | miniatury, „Szukaj w bibliotece" | **indeks** (§18) + `get_file` |
+| `V:\` | drzewa złożeń Inventora (`_OUT.xlsx`), „Szukaj na serwerze" | import BOM, skany | **indeks** (§18) + `get_file` |
 | `Y:\RM_BAZA\chat` | wiadomości JSON | chat | `chat-post` / `chat-poll` |
 | `Y:\RM_BAZA\backups` | backupy projektów | okno „Przywróć backup" | już w etapie 2 (`backup-list/-get`) |
 | `Y:\RMPAK_CLIENT\*.exe` | bramka wersji, samoaktualizacja | `client_version` | `client-version` + `client-download` |
@@ -894,10 +894,23 @@ dotyczy programu, nie infrastruktury.
 
 **Skany plików to największa pozycja.** „Szukaj w bibliotece" i „Szukaj na
 serwerze" to dziś `os.walk` po `B:` i `V:` z klienta (w wątkach, z „Anuluj" —
-naprawionym 11.09). Przez serwer to albo **indeks** (serwer skanuje raz, klient
-pyta), albo endpoint wyszukiwania. Indeks jest lepszy — skan wolnego dysku
-sieciowego, który dziś każdy klient robi osobno, robi się raz. Ale to osobna
-decyzja projektowa, nie „get_file".
+naprawionym 11.09).
+
+**Decyzja: indeks, nie endpoint wyszukiwania.** Serwer skanuje `B:` i `V:` raz
+(w tle, okresowo albo na sygnał zmiany), trzyma gotową listę plików w pamięci
+lub małej bazie, klient tylko pyta „gdzie jest plik X" i dostaje odpowiedź
+natychmiast — bez dotykania dysku sieciowego przy każdym wyszukaniu. Dziś ten
+sam skan wolnego `B:`/`V:` robi osobno każdy z 10 klientów; indeks robi go raz
+i wszyscy z niego korzystają.
+
+Konsekwencje dla implementacji etapu 3:
+- serwer potrzebuje własnego wątku odświeżającego indeks (interwał albo
+  `watchdog`/zmiana mtime katalogu — do ustalenia przy kodowaniu);
+- komenda `file-search(query)` zwraca trafienia z indeksu, nie z dysku;
+- `get_file(projekt, nazwa)` zostaje osobno — services pobranie konkretnego
+  pliku po znalezieniu go w indeksie;
+- „Anuluj" ze skanu klienckiego (naprawione 11.09) znika wraz z samym skanem —
+  odpytanie indeksu jest natychmiastowe, nie ma czego anulować.
 
 ## 19. Docelowe stanowisko
 
@@ -910,7 +923,8 @@ potrzebuje:                 nie potrzebuje:
                               „nie widzi udziału" / „inna litera dysku"
 ```
 
-Etap 3 jest **do wyceny po etapie 2** — zależy od decyzji o indeksie plików.
+Etap 3 jest **do wyceny po etapie 2** — z ustaloną decyzją o indeksie (§18),
+zostaje wycena samego mechanizmu odświeżania i objętości `B:`/`V:`.
 
 ---
 
