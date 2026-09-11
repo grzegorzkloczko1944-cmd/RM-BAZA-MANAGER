@@ -249,6 +249,44 @@ ODCZYT = {
         ["supplier_id"],
     ),
 
+    # ══ MAPOWANIA SUBIEKTA ══════════════════════════════════════════
+    # ⚠️ Te operacje dotyczą OSOBNEGO PLIKU `subiekt_mapowania.sqlite`,
+    # nie mastera. Serwer trzyma do niego drugie połączenie — patrz
+    # `rm_serwer.Serwer.polacz`. Prefiks `map-` mówi, której bazy dotyczą.
+    #
+    # Numer rysunku jest kluczem głównym i jest znormalizowany (TRIM +
+    # wielkie litery) PO STRONIE WOŁAJĄCEGO — `subiekt_mapowania._key()`.
+    # Serwer nie normalizuje, żeby nie było dwóch różnych reguł.
+    "map-get": (
+        "SELECT * FROM mapowania WHERE numer_rysunku = ?",
+        ["numer_rysunku"],
+    ),
+    "map-sposob": (
+        "SELECT sposob FROM mapowania WHERE numer_rysunku = ?",
+        ["numer_rysunku"],
+    ),
+    "map-po-sposobie": (
+        "SELECT numer_rysunku FROM mapowania WHERE sposob = ?",
+        ["sposob"],
+    ),
+    "map-statystyki": (
+        "SELECT sposob, COUNT(*) AS n FROM mapowania GROUP BY sposob",
+        [],
+    ),
+    "map-wszystkie": (
+        "SELECT * FROM mapowania",
+        [],
+    ),
+    "map-alias": (
+        "SELECT nowy_symbol, nowy_id FROM aliasy_scalen"
+        " WHERE stary_symbol = ? COLLATE NOCASE ORDER BY kiedy DESC LIMIT 1",
+        ["stary_symbol"],
+    ),
+    "map-dostawcy-nie-firmy": (
+        "SELECT supplier_id FROM dostawcy_decyzje WHERE decyzja = 'nie_firma'",
+        [],
+    ),
+
     # Stan zamówień ZD odkładany przez wysyłkę — nakładany przy przejęciu locka.
     "zd-zamowione-list": (
         "SELECT item_id, termin, kiedy, supplier_id FROM zd_zamowione_pozycje"
@@ -374,6 +412,46 @@ ZAPIS = {
         "UPDATE client_sessions SET ended_at = ?, last_seen = ?"
         " WHERE host = ? AND pid = ?",
         ["ended_at", "last_seen", "host", "pid"],
+    ),
+
+    # ══ MAPOWANIA SUBIEKTA (osobny plik — patrz odczyty) ════════════
+    # UPSERT po numerze rysunku. COALESCE przy id/nazwie: dopasowanie
+    # „luźne" nie zna Id kartoteki, więc nie może skasować tego, co wpisało
+    # wcześniejsze dopasowanie dokładne.
+    "map-put": (
+        "INSERT INTO mapowania"
+        " (numer_rysunku, symbol_subiekt, id_subiekt, nazwa_subiekt, sposob,"
+        "  kto, kiedy, uwagi)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(numer_rysunku) DO UPDATE SET"
+        "   symbol_subiekt = excluded.symbol_subiekt,"
+        "   id_subiekt     = COALESCE(excluded.id_subiekt, mapowania.id_subiekt),"
+        "   nazwa_subiekt  = COALESCE(excluded.nazwa_subiekt, mapowania.nazwa_subiekt),"
+        "   sposob         = excluded.sposob,"
+        "   kto            = excluded.kto,"
+        "   kiedy          = excluded.kiedy,"
+        "   uwagi          = COALESCE(excluded.uwagi, mapowania.uwagi)",
+        ["numer_rysunku", "symbol_subiekt", "id_subiekt", "nazwa_subiekt",
+         "sposob", "kto", "kiedy", "uwagi"],
+    ),
+    "map-delete": (
+        "DELETE FROM mapowania WHERE numer_rysunku = ?",
+        ["numer_rysunku"],
+    ),
+    "map-alias-dodaj": (
+        "INSERT INTO aliasy_scalen"
+        " (stary_symbol, stary_id, nowy_symbol, nowy_id, kto, kiedy)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        ["stary_symbol", "stary_id", "nowy_symbol", "nowy_id", "kto", "kiedy"],
+    ),
+    "map-dostawca-decyzja": (
+        "INSERT INTO dostawcy_decyzje (supplier_id, nazwa, decyzja, kto, kiedy)"
+        " VALUES (?, ?, ?, ?, ?)",
+        ["supplier_id", "nazwa", "decyzja", "kto", "kiedy"],
+    ),
+    "map-dostawca-decyzja-usun": (
+        "DELETE FROM dostawcy_decyzje WHERE supplier_id = ?",
+        ["supplier_id"],
     ),
 
     # ── „Zamówiono" odłożone przez wysyłkę ZD ─────────────────────────
@@ -520,6 +598,66 @@ def zbuduj_operacje_dostawcow(con):
         pola + ["supplier_id"],
     )
     return mapa
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# MIGRACJE DRUGIEJ BAZY — subiekt_mapowania.sqlite
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Osobny plik obok mastera. Schemat ten sam co w `subiekt_mapowania.py` —
+# gdy tam coś dojdzie, dopisać i tutaj, bo to właściciel pliku zakłada
+# tabele, nie klient.
+
+MIGRACJE_MAPOWANIA = [
+    """CREATE TABLE IF NOT EXISTS mapowania (
+           numer_rysunku   TEXT PRIMARY KEY,
+           symbol_subiekt  TEXT NOT NULL,
+           id_subiekt      INTEGER,
+           nazwa_subiekt   TEXT,
+           sposob          TEXT NOT NULL,
+           kto             TEXT,
+           kiedy           TEXT NOT NULL,
+           uwagi           TEXT
+       )""",
+    "CREATE INDEX IF NOT EXISTS idx_map_sposob ON mapowania(sposob)",
+    "CREATE INDEX IF NOT EXISTS idx_map_symbol ON mapowania(symbol_subiekt)",
+    """CREATE TABLE IF NOT EXISTS aliasy_scalen (
+           id            INTEGER PRIMARY KEY AUTOINCREMENT,
+           stary_symbol  TEXT NOT NULL,
+           stary_id      INTEGER,
+           nowy_symbol   TEXT NOT NULL,
+           nowy_id       INTEGER,
+           kto           TEXT,
+           kiedy         TEXT NOT NULL
+       )""",
+    "CREATE INDEX IF NOT EXISTS idx_alias_nowy ON aliasy_scalen(nowy_symbol)",
+    """CREATE TABLE IF NOT EXISTS dostawcy_decyzje (
+           supplier_id INTEGER PRIMARY KEY,
+           nazwa       TEXT,
+           decyzja     TEXT NOT NULL,
+           kto         TEXT,
+           kiedy       TEXT NOT NULL
+       )""",
+    # Dziennik idempotencji — MUSI być w tej samej bazie co operacja, bo
+    # zapis i wpis do dziennika idą JEDNĄ transakcją (§3). Transakcja SQLite
+    # nie rozciąga się na dwa pliki.
+    """CREATE TABLE IF NOT EXISTS _server_request_log (
+           request_id  TEXT PRIMARY KEY,
+           operation   TEXT NOT NULL,
+           kto         TEXT,
+           result_json TEXT,
+           created_at  TEXT NOT NULL
+       )""",
+    "CREATE INDEX IF NOT EXISTS idx_server_request_log_czas"
+    " ON _server_request_log(created_at)",
+    """CREATE TABLE IF NOT EXISTS odrzucone_dopasowania (
+           numer_rysunku  TEXT NOT NULL,
+           symbol_subiekt TEXT NOT NULL,
+           kto            TEXT,
+           kiedy          TEXT NOT NULL,
+           PRIMARY KEY (numer_rysunku, symbol_subiekt)
+       )""",
+]
 
 
 class BladOperacji(Exception):

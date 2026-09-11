@@ -3042,30 +3042,24 @@ class MainWindow(tk.Tk):
             )
             print("  ✅ DatabaseManager OK")
 
-            # ── Dostęp do mastera: serwer czy legacy (PLAN_RM_SERWER.md §2a) ──
-            # Tryb jest GLOBALNY — ta sama wartość dla wszystkich stanowisk,
-            # ustawiana przez ADMIN-a w sync_config.json na Y:. Nie per-komputer:
-            # PC1 przez serwer + PC2 wprost po SMB to mechanizm awarii z 11.09.
-            #
-            # Domyślnie „legacy", czyli dzisiejsze zachowanie — brak wpisu
-            # w konfiguracji NIE zmienia niczego. Serwer włącza się świadomie.
+            # ── Dostęp do mastera: WYŁĄCZNIE przez RM_SERWER ─────────────
+            # Nie ma trybu lokalnego (decyzja 11.09.2026). Adres serwera
+            # w sync_config.json na Y: — ten sam plik dla wszystkich stanowisk.
             try:
                 cfg_srv = (config or {}).get("rm_serwer") or {}
                 opis = self.db_manager.ustaw_klienta_mastera(
-                    cfg_srv.get("tryb", "legacy"),
-                    host=cfg_srv.get("host"),
+                    cfg_srv.get("host"),
                     port=cfg_srv.get("port"),
                     sekret=cfg_srv.get("sekret"),
                 )
-                print(f"  → Master: {opis}")
+                print(f"  → {opis}")
             except Exception as e:
-                # Zła konfiguracja nie może zablokować startu programu —
-                # zostajemy na legacy i mówimy o tym wprost.
-                print(f"  ⚠️  Konfiguracja RM_SERWER nieczytelna ({e}) — tryb legacy")
-                try:
-                    self.db_manager.ustaw_klienta_mastera("legacy")
-                except Exception:
-                    pass
+                # Brak adresu zatrzyma program przy pierwszym odczycie mastera
+                # — mówimy o tym TERAZ, przy starcie, a nie za dziesięć minut
+                # w losowym oknie.
+                print(f"  ⛔ RM_SERWER nieskonfigurowany: {e}")
+                print(f"     Dopisz do sync_config.json:")
+                print(f'       "rm_serwer": {{"host": "192.168.100.84", "port": 5060}}')
             
             # Callback dla aktualizacji statusu (z wątku tła)
             def update_status(msg):

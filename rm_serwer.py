@@ -73,6 +73,10 @@ PROTOKOL = 1
 
 KATALOG = os.path.dirname(os.path.abspath(__file__))
 DOMYSLNA_BAZA = os.path.join(KATALOG, "dane", "master.sqlite")
+
+#: Mapowania numer rysunku → kartoteka Subiekta. OSOBNY plik, obok mastera
+#: (decyzja 11.09.2026: wszystkie bazy w jednym katalogu na serwerze).
+DOMYSLNA_BAZA_MAPOWANIA = os.path.join(KATALOG, "dane", "subiekt_mapowania.sqlite")
 DOMYSLNY_PORT = 5060
 
 #: Ile trzymamy odpowiedzi w `_server_request_log` (§3 planu).
@@ -96,6 +100,7 @@ def wczytaj_config(sciezka=None):
             print("⚠️  Nie wczytano %s: %s — biorę domyślne" % (sciezka, e))
     return {
         "baza": dane.get("baza", DOMYSLNA_BAZA),
+        "baza_mapowania": dane.get("baza_mapowania", DOMYSLNA_BAZA_MAPOWANIA),
         "port": int(dane.get("port", DOMYSLNY_PORT)),
         "nasluch": dane.get("nasluch", "0.0.0.0"),
         "sekret": dane.get("sekret"),          # None = HMAC wyłączony
@@ -223,6 +228,7 @@ class Serwer:
         self.baza = config["baza"]
         self.kolejka = queue.Queue()
         self.con = None
+        self.con_map = None            # subiekt_mapowania.sqlite — osobny plik
         self.start_czas = time.time()
         self.zapisow = 0
         self.odczytow = 0
@@ -254,7 +260,35 @@ class Serwer:
         if mapa:
             log("Schemat suppliers: %s" % mapa)
 
+        # Druga baza: mapowania Subiekta. Osobny plik, więc osobne
+        # połączenie — ale ten sam wątek roboczy, więc nadal jeden pisarz.
+        sciezka_map = self.config.get("baza_mapowania")
+        if sciezka_map:
+            os.makedirs(os.path.dirname(sciezka_map), exist_ok=True)
+            self.con_map = sqlite3.connect(sciezka_map, timeout=30,
+                                           check_same_thread=False)
+            self.con_map.execute("PRAGMA journal_mode=DELETE")
+            self.con_map.execute("PRAGMA synchronous=FULL")
+            self.con_map.execute("PRAGMA busy_timeout=5000")
+            for sql in ops.MIGRACJE_MAPOWANIA:
+                self.con_map.execute(sql)
+            self.con_map.commit()
+            log("Mapowania: %s" % sciezka_map)
+
     # ── wykonanie pojedynczego żądania (w wątku roboczym) ─────────────
+    def _polaczenie(self, operacja):
+        """Które połączenie obsługuje tę operację.
+
+        Prefiks `map-` → subiekt_mapowania.sqlite, reszta → master.
+        Routing po nazwie, nie po tabeli: wołający nie musi wiedzieć,
+        w którym pliku co leży.
+        """
+        if (operacja or "").startswith("map-"):
+            if self.con_map is None:
+                raise ops.BladOperacji("baza mapowań nie jest skonfigurowana")
+            return self.con_map
+        return self.con
+
     def _wykonaj(self, z):
         cmd = z.get("cmd")
         args = z.get("args") or {}
@@ -272,7 +306,8 @@ class Serwer:
 
         if cmd == "master-read":
             operacja = args.get("operation")
-            wiersze = ops.wykonaj_odczyt(self.con, operacja, args.get("params"))
+            wiersze = ops.wykonaj_odczyt(self._polaczenie(operacja), operacja,
+                                         args.get("params"))
             self.odczytow += 1
             return {"ok": True, "data": {"rows": wiersze}}
 
@@ -287,17 +322,6 @@ class Serwer:
             raise ops.BladOperacji("operacja zmieniająca wymaga request_id")
 
         # Idempotencja: to samo request_id = ta sama odpowiedź, bez wykonania.
-        # Dziennik jest w masterze, więc przeżywa restart serwera — cache
-        # w pamięci nie chroniłby przed „padł tuż po commicie".
-        wiersz = self.con.execute(
-            "SELECT result_json FROM _server_request_log WHERE request_id = ?",
-            (rid,)).fetchone()
-        if wiersz is not None:
-            log("↩ powtórzone %s rid=%s — zwracam zapamiętany wynik" % (cmd, rid[:8]))
-            dane = json.loads(wiersz[0]) if wiersz[0] else {}
-            dane["powtorzone"] = True
-            return {"ok": True, "data": dane}
-
         if cmd == "master-exec":
             operacje = [{"operation": args.get("operation"),
                          "params": args.get("params")}]
@@ -306,27 +330,48 @@ class Serwer:
             if not operacje:
                 raise ops.BladOperacji("master-batch bez operacji")
 
+        # Wszystkie operacje żądania muszą trafić do JEDNEJ bazy — transakcja
+        # SQLite nie rozciąga się na dwa pliki. Mieszany batch odrzucamy,
+        # zamiast po cichu zapisać połowę.
+        con = self._polaczenie(operacje[0].get("operation"))
+        for o in operacje[1:]:
+            if self._polaczenie(o.get("operation")) is not con:
+                raise ops.BladOperacji(
+                    "batch miesza operacje z dwóch baz — rozdziel je")
+
+        # Dziennik leży w TEJ SAMEJ bazie co operacja, bo zapis i jego ślad
+        # idą jedną transakcją (§3). Na dysku, nie w pamięci — inaczej nie
+        # chroniłby przed „serwer padł tuż po commicie".
+        wiersz = con.execute(
+            "SELECT result_json FROM _server_request_log WHERE request_id = ?",
+            (rid,)).fetchone()
+        if wiersz is not None:
+            log("↩ powtórzone %s rid=%s — zwracam zapamiętany wynik" % (cmd, rid[:8]))
+            dane = json.loads(wiersz[0]) if wiersz[0] else {}
+            dane["powtorzone"] = True
+            return {"ok": True, "data": dane}
+
         opis = ",".join(o.get("operation") or "?" for o in operacje)
         wyniki = []
         try:
-            self.con.execute("BEGIN IMMEDIATE")
+            con.execute("BEGIN IMMEDIATE")
             for o in operacje:
-                wyniki.append(ops.wykonaj_zapis(self.con, o.get("operation"),
+                wyniki.append(ops.wykonaj_zapis(con, o.get("operation"),
                                                 o.get("params")))
             dane = {"wyniki": wyniki} if cmd == "master-batch" else wyniki[0]
-            self.con.execute(
+            con.execute(
                 "INSERT INTO _server_request_log"
                 " (request_id, operation, kto, result_json, created_at)"
                 " VALUES (?, ?, ?, ?, ?)",
                 (rid, opis, json.dumps(kto, ensure_ascii=False),
                  json.dumps(dane, ensure_ascii=False),
                  datetime.now().isoformat(timespec="seconds")))
-            self.con.commit()
+            con.commit()
         except Exception:
             # Rollback ZAWSZE — to jest dokładnie ta rzecz, której brak
             # wywołał awarię 11.09 (nieudany commit zostawiał transakcję).
             try:
-                self.con.rollback()
+                con.rollback()
             except Exception:
                 pass
             raise

@@ -90,46 +90,31 @@ _JOURNAL_MODE_VERIFIED: set = set()
 # lokalna do etapu 2.5. Nazwy są mylące, a część tabel (`employees`,
 # `production_lines`, `transports`) istnieje w OBU plikach.
 
-_master_tryb_ustawiony = False
+_serwer_ustawiony = False
 
 
-def _master(master_db_path: str):
-    """Klient mastera RM_BAZA — konfiguruje tryb przy pierwszym użyciu.
+def _master(master_db_path: str = None):
+    """Klient RM_SERWER — konfiguruje adres przy pierwszym użyciu.
 
-    Tryb czytamy z sync_config.json na Y: (ten sam plik i klucz co RM_BAZA),
-    bo przełącznik jest GLOBALNY dla całej firmy. Brak wpisu = „legacy",
-    czyli dotychczasowe zachowanie.
+    `master_db_path` jest ignorowany: master leży na serwerze, nie na ścieżce
+    znanej klientowi. Parametr zostaje w sygnaturach funkcji wołających, żeby
+    nie przepisywać ich wszystkich naraz — patrz komentarz wyżej.
     """
-    global _master_tryb_ustawiony
+    global _serwer_ustawiony
     import rm_klient
 
-    if not _master_tryb_ustawiony:
+    if not _serwer_ustawiony:
         cfg = {}
         try:
-            import json
-            with io.open(r"C:\RMPAK_CLIENT\sync_config.json",
-                         encoding="utf-8-sig") as f:
+            # utf-8-sig: konfiguracja bywa zapisywana z BOM-em
+            with open(r"C:\RMPAK_CLIENT\sync_config.json",
+                      encoding="utf-8-sig") as f:
                 cfg = (json.load(f).get("rm_serwer") or {})
-        except Exception:
-            pass
-        tryb = cfg.get("tryb", "legacy")
-        try:
-            if tryb == "serwer":
-                rm_klient.ustaw_tryb("serwer", host=cfg.get("host"),
-                                     port=cfg.get("port"), sekret=cfg.get("sekret"))
-            else:
-                rm_klient.ustaw_tryb(
-                    "legacy", polaczenie=_open_rm_connection(master_db_path))
         except Exception as e:
-            print(f"⚠️  RM_SERWER niedostępny ({e}) — master lokalnie")
-            rm_klient.ustaw_tryb(
-                "legacy", polaczenie=_open_rm_connection(master_db_path))
-        _master_tryb_ustawiony = True
-    elif not rm_klient.czy_serwer():
-        # Tryb legacy: połączenie bywa zamykane przez wołających, więc
-        # odświeżamy je przy każdym użyciu.
-        rm_klient.ustaw_tryb("legacy",
-                             polaczenie=_open_rm_connection(master_db_path))
+            print(f"⚠️  Nie wczytano konfiguracji RM_SERWER: {e}")
+        rm_klient.ustaw_serwer(cfg.get("host"), port=cfg.get("port"),
+                               sekret=cfg.get("sekret"))
+        _serwer_ustawiony = True
     return rm_klient
 
 

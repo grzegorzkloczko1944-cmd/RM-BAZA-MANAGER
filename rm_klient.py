@@ -1,35 +1,33 @@
 # -*- coding: utf-8 -*-
-"""Klient RM_SERWER — dostęp do master.sqlite z RM_BAZA.
+"""Klient RM_SERWER — jedyna droga do master.sqlite i subiekt_mapowania.sqlite.
 
-Dwa tryby, jedna warstwa wywołań (PLAN_RM_SERWER.md §2a):
+    RM_BAZA / RM_MANAGER  ──TCP──►  RM_SERWER  ──►  C:\\Apps\\RM_SERWER\\dane\\
 
-    tryb „serwer"  →  TCP do RM_SERWER na maszynie `nic`
-    tryb „legacy"  →  ten sam SQL, wykonany lokalnie na własnym połączeniu
+⚠️ NIE MA TRYBU LOKALNEGO. Świadoma decyzja (11.09.2026): jedna ścieżka
+zamiast dwóch. Dwie ścieżki oznaczałyby, że każda nowa operacja musi działać
+w obu trybach — a ta rzadziej używana cicho gnije, aż ktoś na nią trafi
+w najgorszym momencie.
 
-Ta sama mapa operacja → SQL (`rm_serwer_operacje`) po obu stronach, więc tryb
-legacy nie jest osobną implementacją do utrzymywania — to ten sam kod wołany
-z innego miejsca.
-
-⚠️ TRYB JEST GLOBALNY, USTAWIA GO ADMIN. Nie per-stanowisko. Gdyby każdy
-komputer wybierał niezależnie, PC1 pisałby przez serwer, a PC2 bezpośrednio po
-SMB do tego samego pliku — dokładnie mechanizm awarii z 11.09.2026 (§0).
-Flaga siedzi w `sync_config.json` na `Y:`, czytana przy starcie.
-
-TRYB LEGACY MA TERMIN WAŻNOŚCI (§2a) — 2–4 tygodnie stabilnej pracy po
-cutoverze, potem znika razem z `master_con`. Dopóki istnieje, każda nowa
-operacja musi działać w OBU trybach.
+Konsekwencja, którą trzeba znać: **gdy serwer nie odpowiada, zapisy i odczyty
+mastera nie działają.** Praca na projekcie trwa (pliki projektów są poza tym
+etapem), ale dostawcy, użytkownicy i ustawienia są niedostępne. Dlatego
+serwer chodzi jako usługa z auto-restartem, a wycofanie zmiany to podmiana
+`.exe` — nie przełącznik.
 
 UŻYCIE
 
     import rm_klient
-    rm_klient.ustaw_tryb("serwer", host="192.168.100.84", port=5060, sekret="…")
+    rm_klient.ustaw_serwer(host="192.168.100.84", port=5060, sekret="…")
 
     dostawcy = rm_klient.master_read("suppliers-list")
     rm_klient.master_exec("supplier-delete", {"supplier_id": 7})
     rm_klient.master_batch([
-        {"operation": "supplier-add",    "params": {...}},
-        {"operation": "user-audit-add",  "params": {...}},
+        {"operation": "supplier-add",   "params": {...}},
+        {"operation": "user-audit-add", "params": {...}},
     ])
+
+Operacje z prefiksem `map-` trafiają do `subiekt_mapowania.sqlite`, reszta do
+mastera — routingiem zajmuje się serwer, wołający nie musi o tym wiedzieć.
 """
 
 from __future__ import annotations
@@ -39,35 +37,23 @@ import hmac
 import json
 import socket
 import struct
-import threading
 import uuid
-
-import rm_serwer_operacje as ops
 
 PROTOKOL_MIN = 1
 DOMYSLNY_PORT = 5060
 TIMEOUT_S = 30
 
-#: Stan modułu. Ustawiany raz przy starcie RM_BAZA przez `ustaw_tryb()`.
-_tryb = "legacy"
 _host = None
 _port = DOMYSLNY_PORT
 _sekret = None
-_polaczenie_lokalne = None      # tylko w trybie legacy
-_lock = threading.Lock()        # legacy: master_con bywa dzielony między wątkami
 
 
 class BladSerwera(Exception):
     """Operacja się nie udała — JEDYNY wyjątek, jaki widzi wołający.
 
     `dostepny=False` znaczy „nie dojechaliśmy do serwera" — wtedy GUI mówi
-    „serwer niedostępny, spróbuj za chwilę". `dostepny=True` to normalna
-    odmowa (nieznana operacja, brak parametru) i jest błędem wołającego.
-
-    ⚠️ Ten sam typ leci w OBU trybach. W trybie legacy `rm_serwer_operacje`
-    rzuca `BladOperacji`, który opakowujemy tutaj — inaczej kod wołający
-    musiałby łapać dwa różne wyjątki zależnie od trybu, co przeczy idei
-    „jedna warstwa, dwa transporty". Wykrył to test równoważności trybów.
+    „serwer niedostępny, spróbuj za chwilę". `dostepny=True` to zwykła odmowa
+    (nieznana operacja, brak parametru) i jest błędem wołającego.
     """
 
     def __init__(self, komunikat, dostepny=True):
@@ -76,46 +62,33 @@ class BladSerwera(Exception):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Konfiguracja trybu
+# Konfiguracja
 # ═══════════════════════════════════════════════════════════════════════
 
-def ustaw_tryb(tryb, host=None, port=None, sekret=None, polaczenie=None):
-    """Ustawia tryb pracy. Woła to RM_BAZA raz, przy starcie.
-
-    `polaczenie` — istniejące `sqlite3.Connection` do mastera; wymagane
-    w trybie legacy, ignorowane w trybie serwer.
-    """
-    global _tryb, _host, _port, _sekret, _polaczenie_lokalne
-    if tryb not in ("serwer", "legacy"):
-        raise ValueError("tryb musi być 'serwer' albo 'legacy', nie %r" % (tryb,))
-    _tryb = tryb
-    _host = host or _host
-    _port = int(port or _port)
-    _sekret = sekret if sekret is not None else _sekret
-    if polaczenie is not None:
-        _polaczenie_lokalne = polaczenie
-    if tryb == "serwer" and not _host:
-        raise ValueError("tryb 'serwer' wymaga adresu hosta")
+def ustaw_serwer(host, port=None, sekret=None):
+    """Adres serwera. Wołane raz, przy starcie aplikacji."""
+    global _host, _port, _sekret
+    if not host:
+        raise ValueError("adres RM_SERWER jest wymagany")
+    _host = host
+    _port = int(port or DOMYSLNY_PORT)
+    _sekret = sekret
 
 
-def tryb():
-    return _tryb
+def skonfigurowany():
+    return bool(_host)
 
 
-def czy_serwer():
-    return _tryb == "serwer"
-
-
-def opis_trybu():
+def opis():
     """Jedna linia do logu i okna diagnostycznego."""
-    if _tryb == "serwer":
-        return "serwer %s:%d%s" % (_host, _port,
-                                   "" if _sekret else "  (HMAC WYŁĄCZONY)")
-    return "legacy — master.sqlite bezpośrednio po SMB"
+    if not _host:
+        return "RM_SERWER NIESKONFIGUROWANY"
+    return "RM_SERWER %s:%d%s" % (_host, _port,
+                                  "" if _sekret else "  (HMAC WYŁĄCZONY)")
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Transport — jak w subiekt_bridge: 4 bajty długości LE + UTF-8 JSON
+# Transport — 4 bajty długości LE + UTF-8 JSON (jak subiekt_bridge)
 # ═══════════════════════════════════════════════════════════════════════
 
 def _czytaj_dokladnie(sock, ile):
@@ -129,8 +102,11 @@ def _czytaj_dokladnie(sock, ile):
 
 
 def _kanoniczny_json(obiekt):
-    """Musi dać identyczny ciąg co `rm_serwer.kanoniczny_json` — inaczej
-    podpis raz na jakiś czas nie zgodzi się bez powodu (§7)."""
+    """Postać, na której liczymy podpis — MUSI być identyczna co w serwerze.
+
+    Kolejność kluczy, brak spacji i `ensure_ascii=False` (w danych są polskie
+    znaki). Bez tego podpis raz na jakiś czas nie zgodzi się bez powodu.
+    """
     return json.dumps(obiekt or {}, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=False)
 
@@ -143,14 +119,43 @@ def _hmac(request_id, cmd, args):
                     hashlib.sha256).hexdigest()
 
 
+_kto_cache = None
+
+
+def _kto():
+    """Kto pyta — do logu serwera i wpisu w dzienniku."""
+    global _kto_cache
+    if _kto_cache is None:
+        import getpass
+        import os
+        try:
+            host = socket.gethostname()
+        except Exception:
+            host = "?"
+        _kto_cache = {"user": getpass.getuser(), "host": host, "pid": os.getpid()}
+    return _kto_cache
+
+
+def ustaw_uzytkownika(user):
+    """Podmienia nazwę użytkownika na zalogowanego w RM_BAZA.
+
+    Domyślnie idzie login Windows; aplikacja ma własnych użytkowników
+    (ADMIN, GKI…) i to oni mają być widoczni w logu serwera.
+    """
+    _kto()
+    if user:
+        _kto_cache["user"] = str(user)
+
+
 def zapytaj(cmd, args=None, request_id=None, timeout=TIMEOUT_S, kto=None):
     """Jedno żądanie na własnym połączeniu. Zwraca `data` z odpowiedzi."""
-    zadanie = {
-        "cmd": cmd,
-        "args": args or {},
-        "request_id": request_id,
-        "kto": kto or _kto(),
-    }
+    if not _host:
+        raise BladSerwera(
+            "RM_SERWER nieskonfigurowany — brak adresu w sync_config.json",
+            dostepny=False)
+
+    zadanie = {"cmd": cmd, "args": args or {}, "request_id": request_id,
+               "kto": kto or _kto()}
     podpis = _hmac(request_id, cmd, args)
     if podpis:
         zadanie["hmac"] = podpis
@@ -172,144 +177,50 @@ def zapytaj(cmd, args=None, request_id=None, timeout=TIMEOUT_S, kto=None):
     return odp.get("data") or {}
 
 
-_kto_cache = None
-
-
-def _kto():
-    """Kto pyta — do logu serwera i wpisu w dzienniku."""
-    global _kto_cache
-    if _kto_cache is None:
-        import getpass
-        import os
-        try:
-            host = socket.gethostname()
-        except Exception:
-            host = "?"
-        _kto_cache = {"user": getpass.getuser(), "host": host, "pid": os.getpid()}
-    return _kto_cache
-
-
-def ustaw_uzytkownika(user):
-    """Podmienia nazwę użytkownika w `kto` na zalogowanego w RM_BAZA.
-
-    Domyślnie idzie login Windows; RM_BAZA ma własnych użytkowników
-    (ADMIN, GKI…) i to oni mają być widoczni w logu serwera.
-    """
-    _kto()
-    if user:
-        _kto_cache["user"] = str(user)
-
-
 # ═══════════════════════════════════════════════════════════════════════
-# API — te trzy funkcje zastępują master_con w całym RM_BAZA
+# API
 # ═══════════════════════════════════════════════════════════════════════
 
 def master_read(operation, params=None, timeout=TIMEOUT_S):
-    """Odczyt z mastera. Zwraca listę słowników.
+    """Odczyt. Zwraca listę słowników.
 
-    Idempotentny, więc bez `request_id` po stronie ochrony — ale i tak
-    generujemy go do podpisu i śledzenia żądania w logu.
+    `request_id` generujemy mimo idempotencji odczytu — wchodzi do podpisu
+    HMAC i pozwala odnaleźć żądanie w logu serwera.
     """
-    if _tryb == "serwer":
-        dane = zapytaj("master-read",
-                       {"operation": operation, "params": params},
-                       request_id=str(uuid.uuid4()), timeout=timeout)
-        return dane.get("rows") or []
-    with _lock:
-        try:
-            return ops.wykonaj_odczyt(_con(), operation, params)
-        except ops.BladOperacji as e:
-            raise BladSerwera(str(e)) from e
+    dane = zapytaj("master-read", {"operation": operation, "params": params},
+                   request_id=str(uuid.uuid4()), timeout=timeout)
+    return dane.get("rows") or []
 
 
 def master_exec(operation, params=None, request_id=None, timeout=TIMEOUT_S):
     """Pojedynczy zapis. Zwraca {'rowcount', 'lastrowid'}.
 
-    `request_id` generujemy tutaj, gdy wołający go nie podał. Wołający podaje
-    go TYLKO wtedy, gdy chce ponowić tę samą operację po zerwanym połączeniu —
-    wtedy musi użyć tego samego identyfikatora, inaczej ochrona przed
-    duplikatem nie zadziała (§3).
+    `request_id` podaje się JAWNIE tylko wtedy, gdy ponawiamy tę samą
+    operację po zerwanym połączeniu — wtedy musi być ten sam identyfikator,
+    inaczej ochrona przed duplikatem nie zadziała.
     """
-    request_id = request_id or str(uuid.uuid4())
-    if _tryb == "serwer":
-        return zapytaj("master-exec",
-                       {"operation": operation, "params": params},
-                       request_id=request_id, timeout=timeout)
-    with _lock:
-        con = _con()
-        try:
-            con.execute("BEGIN IMMEDIATE")
-            wynik = ops.wykonaj_zapis(con, operation, params)
-            con.commit()
-            return wynik
-        except ops.BladOperacji as e:
-            try:
-                con.rollback()
-            except Exception:
-                pass
-            raise BladSerwera(str(e)) from e
-        except Exception:
-            # Rollback ZAWSZE — brak tego wywołał awarię 11.09: nieudany
-            # commit zostawiał transakcję i blokował plik całej firmie.
-            try:
-                con.rollback()
-            except Exception:
-                pass
-            raise
+    return zapytaj("master-exec", {"operation": operation, "params": params},
+                   request_id=request_id or str(uuid.uuid4()), timeout=timeout)
 
 
 def master_batch(operacje, request_id=None, timeout=TIMEOUT_S):
     """Kilka zapisów jako JEDNA transakcja — wszystko albo nic.
 
-    Do tego, co dziś jest dwoma `execute` i jednym `commit`: „dodaj dostawcę
-    + wpis do audytu". Bez batcha drugi zapis mógłby nie dojść i zostawić
-    dane bez śladu w dzienniku.
+    Wszystkie operacje muszą dotyczyć tej samej bazy (serwer odrzuca batch
+    mieszający master z mapowaniami — transakcja nie obejmuje dwóch plików).
     """
-    request_id = request_id or str(uuid.uuid4())
-    if _tryb == "serwer":
-        dane = zapytaj("master-batch", {"operacje": operacje},
-                       request_id=request_id, timeout=timeout)
-        return dane.get("wyniki") or []
-    with _lock:
-        con = _con()
-        try:
-            con.execute("BEGIN IMMEDIATE")
-            wyniki = [ops.wykonaj_zapis(con, o.get("operation"), o.get("params"))
-                      for o in operacje]
-            con.commit()
-            return wyniki
-        except ops.BladOperacji as e:
-            try:
-                con.rollback()
-            except Exception:
-                pass
-            raise BladSerwera(str(e)) from e
-        except Exception:
-            try:
-                con.rollback()
-            except Exception:
-                pass
-            raise
+    dane = zapytaj("master-batch", {"operacje": operacje},
+                   request_id=request_id or str(uuid.uuid4()), timeout=timeout)
+    return dane.get("wyniki") or []
 
 
 def ping(timeout=5):
-    """Stan serwera albo None, gdy nieosiągalny. Nie rzuca — służy do
-    sprawdzania „czy jest", więc brak odpowiedzi to informacja, nie awaria."""
-    if _tryb != "serwer":
-        return {"tryb": "legacy"}
+    """Stan serwera albo None, gdy nieosiągalny.
+
+    Nie rzuca — służy do sprawdzania „czy jest", więc brak odpowiedzi to
+    informacja, nie awaria.
+    """
     try:
         return zapytaj("ping", request_id=str(uuid.uuid4()), timeout=timeout)
     except BladSerwera:
         return None
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Tryb legacy
-# ═══════════════════════════════════════════════════════════════════════
-
-def _con():
-    if _polaczenie_lokalne is None:
-        raise BladSerwera(
-            "tryb legacy bez połączenia z masterem — wywołaj ustaw_tryb(..., polaczenie=con)",
-            dostepny=False)
-    return _polaczenie_lokalne
