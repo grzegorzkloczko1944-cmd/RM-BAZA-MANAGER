@@ -8015,15 +8015,16 @@ def _create_in_app_notification(rm_db_path: str = None, project_id: int = 0, pro
     print(f"✅ Utworzono powiadomienie in-app: {message}")
 
 
-def _send_payment_email(rm_db_path: str, project_id: int, project_name: str, 
-                        percentage: int, payment_date: str, recipients: List[str], 
-                        config: Dict, user: str = None):
+def _send_payment_email(rm_db_path: str = None, project_id: int = 0, project_name: str = "",
+                        percentage: int = 0, payment_date: str = "", recipients: List[str] = None,
+                        config: Dict = None, user: str = None):
     """Wyślij powiadomienie email o płatności."""
     import json
     import smtplib
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
     
+    recipients, config = recipients or [], config or {}
     # Treść email
     subject = f"[RM_MANAGER] Płatność {percentage}% - {project_name}"
     body = f"""
@@ -8043,49 +8044,40 @@ Wiadomość automatyczna z systemu RM_MANAGER
     email_status = 'PENDING'
     error_message = None
     
-    con = _open_rm_connection(rm_db_path)
+    # Wyślij email
+    msg = MIMEMultipart()
+    msg['From'] = config.get('smtp_user', 'RM_MANAGER')
+    msg['To'] = ', '.join(recipients)
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain', 'utf-8'))
     
-    try:
-        # Wyślij email
-        msg = MIMEMultipart()
-        msg['From'] = config.get('smtp_user', 'RM_MANAGER')
-        msg['To'] = ', '.join(recipients)
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain', 'utf-8'))
-        
-        if config.get('smtp_server') and config.get('smtp_user') and config.get('smtp_password'):
-            try:
-                server = smtplib.SMTP(config['smtp_server'], config.get('smtp_port', 587))
-                server.starttls()
-                server.login(config['smtp_user'], config['smtp_password'])
-                server.send_message(msg)
-                server.quit()
-                
-                email_status = 'SUCCESS'
-                print(f"✅ Email wysłany do: {', '.join(recipients)}")
-                
-            except Exception as e:
-                email_status = 'FAILED'
-                error_message = str(e)
-                print(f"❌ Błąd wysyłki email: {e}")
-        else:
+    if config.get('smtp_server') and config.get('smtp_user') and config.get('smtp_password'):
+        try:
+            server = smtplib.SMTP(config['smtp_server'], config.get('smtp_port', 587))
+            server.starttls()
+            server.login(config['smtp_user'], config['smtp_password'])
+            server.send_message(msg)
+            server.quit()
+            
+            email_status = 'SUCCESS'
+            print(f"✅ Email wysłany do: {', '.join(recipients)}")
+            
+        except Exception as e:
             email_status = 'FAILED'
-            error_message = 'Brak konfiguracji SMTP (server/user/password)'
-            print(f"⚠️ {error_message}")
-        
-        # Zapisz log wysyłki
-        con.execute("""
-            INSERT INTO payment_notifications_sent 
-                (project_id, project_name, percentage, payment_date, recipients, 
-                 sent_by, email_status, error_message, sent_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """, (project_id, project_name, percentage, payment_date, 
-              json.dumps(recipients), user, email_status, error_message))
-        
-        _rm_safe_commit(con)
-        
-    finally:
-        con.close()
+            error_message = str(e)
+            print(f"❌ Błąd wysyłki email: {e}")
+    else:
+        email_status = 'FAILED'
+        error_message = 'Brak konfiguracji SMTP (server/user/password)'
+        print(f"⚠️ {error_message}")
+    
+    # Zapisz log wysyłki — także przy FAILED: dziennik ma pokazywać
+    # nieudane próby, nie tylko sukcesy.
+    rmm_exec("rmm-payment-notifications-sent-dodaj", {
+        "project_id": project_id, "project_name": project_name,
+        "percentage": percentage, "payment_date": payment_date,
+        "recipients": json.dumps(recipients), "sent_by": user,
+        "email_status": email_status, "error_message": error_message})
 
 
 def get_unread_notifications(rm_db_path: str = None) -> List[Dict]:
