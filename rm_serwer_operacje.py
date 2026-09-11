@@ -275,6 +275,271 @@ ODCZYT = {
         ["wzorzec"],
     ),
 
+# ══ RM_MANAGER — odczyty ═══
+    "rmm-line-projects-po-line-id": (
+        "SELECT project_id FROM line_projects WHERE line_id = ?",
+        ['line_id'],
+    ),
+    "rmm-payment-milestones-po-project-id-percentage": (
+        "SELECT payment_date FROM payment_milestones WHERE project_id = ?"
+        " AND percentage = ?",
+        ['project_id', 'percentage'],
+    ),
+    "rmm-employee-vacation-base-po-employee-id": (
+        "SELECT days FROM employee_vacation_base WHERE employee_id = ?",
+        ['employee_id'],
+    ),
+    "rmm-employee-vacation-quota-po-employee-id-year": (
+        "SELECT days FROM employee_vacation_quota WHERE employee_id = ?"
+        " AND year = ?",
+        ['employee_id', 'year'],
+    ),
+    "rmm-rm-user-permissions": (
+        "SELECT COUNT(*) FROM rm_user_permissions",
+        [],
+    ),
+    "rmm-resource-constraints": (
+        "SELECT COUNT(*) FROM resource_constraints",
+        [],
+    ),
+    "rmm-priority-weights": (
+        "SELECT COUNT(*) FROM priority_weights",
+        [],
+    ),
+    "rmm-line-projects-po-project-id": (
+        "SELECT pl.id, pl.name, pl.description, pl.parallel_stages_csv"
+        " FROM line_projects lp JOIN production_lines pl ON pl.id ="
+        " lp.line_id WHERE lp.project_id = ?",
+        ['project_id'],
+    ),
+    "rmm-project-file-tracking-po-project-id": (
+        "SELECT project_name, file_path, file_birth_time,"
+        " verification_status FROM project_file_tracking WHERE project_id ="
+        " ?",
+        ['project_id'],
+    ),
+    "rmm-project-file-tracking-po-project-id-2": (
+        "SELECT project_name FROM project_file_tracking WHERE project_id ="
+        " ?",
+        ['project_id'],
+    ),
+    "rmm-sync-log": (
+        "SELECT sync_date FROM sync_log ORDER BY id DESC LIMIT 1",
+        [],
+    ),
+    "rmm-project-file-tracking-po-verification-status": (
+        "SELECT project_id FROM project_file_tracking WHERE"
+        " verification_status = 'OK'",
+        [],
+    ),
+    "rmm-rm-user-permissions-po-role": (
+        "SELECT * FROM rm_user_permissions WHERE role = ?",
+        ['role'],
+    ),
+    "rmm-rm-user-permissions-2": (
+        "SELECT * FROM rm_user_permissions ORDER BY role",
+        [],
+    ),
+    "rmm-rm-feature-user-permissions": (
+        "SELECT username FROM rm_feature_user_permissions",
+        [],
+    ),
+    "rmm-audit-log-po-employee-id": (
+        "SELECT * FROM audit_log WHERE employee_id = ? ORDER BY changed_at"
+        " DESC, id DESC LIMIT ?",
+        ['employee_id', 'p1'],
+    ),
+    "rmm-audit-log": (
+        "SELECT * FROM audit_log ORDER BY changed_at DESC, id DESC LIMIT ?",
+        ['p1'],
+    ),
+    "rmm-employees-po-id": (
+        "SELECT * FROM employees WHERE id = ?",
+        ['id'],
+    ),
+    "rmm-employees-po-user-login": (
+        "SELECT * FROM employees WHERE user_login = ? COLLATE NOCASE LIMIT"
+        " 1",
+        ['user_login'],
+    ),
+    "rmm-priority-weights-2": (
+        "SELECT level, weight FROM priority_weights",
+        [],
+    ),
+    "rmm-employees-po-id-2": (
+        "SELECT id FROM employees WHERE id = ?",
+        ['id'],
+    ),
+    "rmm-employees-po-id-3": (
+        "SELECT id, name FROM employees WHERE id = ?",
+        ['id'],
+    ),
+    "rmm-payment-milestones-po-project-id-payment-type": (
+        "SELECT percentage, payment_date FROM payment_milestones WHERE"
+        " project_id = ? AND payment_type = 'UMORZONY'",
+        ['project_id'],
+    ),
+    "rmm-payment-milestones-po-project-id": (
+        "SELECT id, project_id, percentage, payment_date, payment_type,"
+        " created_by, created_at, modified_by, modified_at FROM"
+        " payment_milestones WHERE project_id = ? ORDER BY id",
+        ['project_id'],
+    ),
+    "rmm-payment-history-po-project-id": (
+        "SELECT id, project_id, percentage, payment_date, action,"
+        " changed_by, changed_at, old_date FROM payment_history WHERE"
+        " project_id = ? ORDER BY changed_at DESC",
+        ['project_id'],
+    ),
+    "rmm-payment-notification-config-po-id": (
+        "SELECT id, trigger_percentage, email_recipients, smtp_server,"
+        " smtp_port, smtp_user, smtp_password, enabled FROM"
+        " payment_notification_config WHERE id = 1",
+        [],
+    ),
+    "rmm-in-app-notifications-po-is-read": (
+        "SELECT id, project_id, project_name, notification_type, message,"
+        " created_at, created_by FROM in_app_notifications WHERE is_read ="
+        " 0 ORDER BY created_at DESC",
+        [],
+    ),
+    "rmm-payment-notifications-sent-po-project-id": (
+        "SELECT id, project_id, project_name, percentage, payment_date,"
+        " recipients, sent_at, sent_by, email_status, error_message FROM"
+        " payment_notifications_sent WHERE project_id = ? ORDER BY sent_at"
+        " DESC",
+        ['project_id'],
+    ),
+    "rmm-payment-notifications-sent": (
+        "SELECT id, project_id, project_name, percentage, payment_date,"
+        " recipients, sent_at, sent_by, email_status, error_message FROM"
+        " payment_notifications_sent ORDER BY sent_at DESC LIMIT 100",
+        [],
+    ),
+    "rmm-plc-unlock-codes-po-project-id": (
+        "SELECT id, project_id, code_type, unlock_code, description,"
+        " created_by, created_at, modified_by, modified_at, is_used,"
+        " used_at, used_by, notes, sent_at, sent_by, sent_via, expiry_date"
+        " FROM plc_unlock_codes WHERE project_id = ? ORDER BY CASE"
+        " code_type WHEN 'TEMPORARY' THEN 1 WHEN 'EXTENDED' THEN 2 WHEN"
+        " 'PERMANENT' THEN 3 END, created_at",
+        ['project_id'],
+    ),
+    "rmm-plc-global-recipients-po-setting-key": (
+        "SELECT recipients_json FROM plc_global_recipients WHERE"
+        " setting_key='default_recipients'",
+        [],
+    ),
+    "rmm-plc-global-recipients-po-setting-key-2": (
+        "SELECT recipients_json FROM plc_global_recipients WHERE"
+        " setting_key = 'default_recipients'",
+        [],
+    ),
+    "rmm-plc-global-recipients-po-setting-key-3": (
+        "SELECT recipients_json FROM plc_global_recipients WHERE"
+        " setting_key = 'payment_status_recipients'",
+        [],
+    ),
+    "rmm-plc-unlock-codes-po-project-id-2": (
+        "SELECT code_type, is_used, COUNT(*) as count FROM"
+        " plc_unlock_codes WHERE project_id = ? GROUP BY code_type, is_used",
+        ['project_id'],
+    ),
+    "rmm-payment-milestones-po-project-id-2": (
+        "SELECT COALESCE(SUM(percentage), 0) as total FROM"
+        " payment_milestones WHERE project_id = ?",
+        ['project_id'],
+    ),
+    "rmm-plc-authorized-senders": (
+        "SELECT COUNT(*) as cnt FROM plc_authorized_senders WHERE"
+        " TRIM(LOWER(username)) = TRIM(LOWER(?))",
+        ['p1'],
+    ),
+    "rmm-plc-authorized-senders-2": (
+        "SELECT username, added_by, added_at, notes FROM"
+        " plc_authorized_senders ORDER BY added_at DESC",
+        [],
+    ),
+    "rmm-absence-exclusion-groups": (
+        "SELECT * FROM absence_exclusion_groups ORDER BY name",
+        [],
+    ),
+    "rmm-absence-exclusion-members": (
+        "SELECT m.employee_id, e.name AS employee_name FROM"
+        " absence_exclusion_members m JOIN employees e ON e.id ="
+        " m.employee_id WHERE m.group_id = ? ORDER BY e.name",
+        ['group_id'],
+    ),
+    "rmm-absence-exclusion-groups-po-employee-id": (
+        "SELECT DISTINCT g.id, g.name FROM absence_exclusion_groups g JOIN"
+        " absence_exclusion_members m ON m.group_id = g.id WHERE"
+        " m.employee_id = ?",
+        ['employee_id'],
+    ),
+    "rmm-absence-exclusion-members-2": (
+        "SELECT m.employee_id FROM absence_exclusion_members m WHERE"
+        " m.group_id = ? AND m.employee_id != ?",
+        ['group_id', 'p1'],
+    ),
+    "rmm-employee-availability-po-employee-id-date-from": (
+        "SELECT id, date_from, date_to, reason, status FROM"
+        " employee_availability WHERE employee_id = ? AND date_from <= ?"
+        " AND date_to >= ? AND UPPER(COALESCE(status,'ZATWIERDZONY')) !="
+        " 'ODRZUCONY' ORDER BY date_from",
+        ['employee_id', 'p1', 'p2'],
+    ),
+    "rmm-employee-availability": (
+        "SELECT employee_id, reason, date_from, date_to FROM"
+        " employee_availability",
+        [],
+    ),
+    "rmm-service-trips-po-id": (
+        "SELECT date_from, date_to, status FROM service_trips WHERE id = ?",
+        ['id'],
+    ),
+    "rmm-employee-availability-po-employee-id-date-from-2": (
+        "SELECT date_from, date_to, reason FROM employee_availability"
+        " WHERE employee_id = ? AND id != ? AND"
+        " UPPER(COALESCE(status,'ZATWIERDZONY')) = 'ZATWIERDZONY' AND"
+        " date_from <= ? AND date_to >= ? ORDER BY date_from LIMIT 1",
+        ['employee_id', 'p1', 'p2', 'p3'],
+    ),
+    "rmm-employee-carryover-override": (
+        "SELECT days FROM employee_carryover_override",
+        [],
+    ),
+    "rmm-company-calendar-po-date-date": (
+        "SELECT date, day_type FROM company_calendar WHERE date >= ? AND"
+        " date <= ?",
+        ['p1', 'p2'],
+    ),
+    "rmm-optimization-runs": (
+        "SELECT * FROM optimization_runs ORDER BY created_at DESC LIMIT ?",
+        ['p1'],
+    ),
+    "rmm-project-file-tracking-po-project-id-3": (
+        "SELECT COUNT(*) FROM project_file_tracking WHERE project_id = ?",
+        ['project_id'],
+    ),
+    "rmm-employees-po-id-4": (
+        "SELECT master_max_parallel FROM employees WHERE id=?",
+        ['id'],
+    ),
+    "rmm-in-app-notifications": (
+        "SELECT id, project_name, message, created_at, created_by, is_read"
+        " FROM in_app_notifications ORDER BY created_at DESC LIMIT 100",
+        [],
+    ),
+    "rmm-project-file-tracking": (
+        "SELECT project_id, project_name FROM project_file_tracking ORDER"
+        " BY project_id",
+        [],
+    ),
+    "rmm-employees": (
+        "SELECT id, name FROM employees",
+        [],
+    ),
+
     # ══ STATUSY PROJEKTÓW ═══════════════════════════════════════════
     # Projekt ma KILKA statusów naraz — `project_statuses` to zbiór, nie
     # jedno pole. Kolejność po `set_at`, bo pierwszy nadany jest głównym.
@@ -605,6 +870,409 @@ ZAPIS = {
         "   price_per_kg = excluded.price_per_kg,"
         "   updated_at   = excluded.updated_at",
         ["material", "density", "price_per_kg", "updated_at"],
+    ),
+
+# ══ RM_MANAGER — zapisy ═══
+    "rmm-plc-global-recipients-dodaj": (
+        "INSERT OR IGNORE INTO plc_global_recipients (setting_key,"
+        " recipients_json) VALUES ('default_recipients', '[]')",
+        [],
+    ),
+    "rmm-line-projects-usun-po-line-id": (
+        "DELETE FROM line_projects WHERE line_id = ?",
+        ['line_id'],
+    ),
+    "rmm-payment-history-dodaj": (
+        "INSERT INTO payment_history (project_id, percentage,"
+        " payment_date, action, changed_by, old_date, changed_at) VALUES"
+        " (?, ?, ?, 'MODIFIED', ?, ?, CURRENT_TIMESTAMP)",
+        ['project_id', 'percentage', 'payment_date', 'changed_by', 'old_date'],
+    ),
+    "rmm-in-app-notifications-zmien-po-id": (
+        "UPDATE in_app_notifications SET is_read = 1, read_at ="
+        " CURRENT_TIMESTAMP, read_by = ? WHERE id = ?",
+        ['read_by', 'id'],
+    ),
+    "rmm-rm-user-permissions-dodaj": (
+        "INSERT INTO rm_user_permissions (role, can_start_stage,"
+        " can_end_stage, can_edit_dates, can_sync_master,"
+        " can_critical_path, can_manage_permissions) VALUES (?, ?, ?, ?, ?,"
+        " ?, ?)",
+        ['role', 'can_start_stage', 'can_end_stage', 'can_edit_dates', 'can_sync_master', 'can_critical_path', 'can_manage_permissions'],
+    ),
+    "rmm-rm-user-permissions-zmien-po-role-ADM": (
+        "UPDATE rm_user_permissions SET can_manage_permissions = 1,"
+        " updated_at = CURRENT_TIMESTAMP WHERE role = 'ADMIN' AND"
+        " can_manage_permissions = 0",
+        [],
+    ),
+    "rmm-payment-notification-config-dodaj": (
+        "INSERT OR IGNORE INTO payment_notification_config (id,"
+        " trigger_percentage, email_recipients, enabled) VALUES (1, 100,"
+        " '[]', 1)",
+        [],
+    ),
+    "rmm-resource-constraints-dodaj": (
+        "INSERT INTO resource_constraints (constraint_type, category,"
+        " stage_code, max_parallel, description) VALUES (?, ?, ?, ?, ?)",
+        ['constraint_type', 'category', 'stage_code', 'max_parallel', 'description'],
+    ),
+    "rmm-employee-availability-zmien-po-status": (
+        "UPDATE employee_availability SET status = 'ZATWIERDZONY' WHERE"
+        " status = 'OCZEKUJE'",
+        [],
+    ),
+    "rmm-priority-weights-dodaj": (
+        "INSERT INTO priority_weights (level, label, weight) VALUES (?, ?,"
+        " ?)",
+        ['level', 'label', 'weight'],
+    ),
+    "rmm-production-lines-dodaj": (
+        "INSERT INTO production_lines (name, description,"
+        " parallel_stages_csv, created_by, updated_by) VALUES (?, ?, ?, ?,"
+        " ?)",
+        ['name', 'description', 'parallel_stages_csv', 'created_by', 'updated_by'],
+    ),
+    "rmm-production-lines-zmien-po-id": (
+        "UPDATE production_lines SET name = ?, description = ?,"
+        " parallel_stages_csv = ?, updated_at = CURRENT_TIMESTAMP,"
+        " updated_by = ? WHERE id = ?",
+        ['name', 'description', 'parallel_stages_csv', 'updated_by', 'id'],
+    ),
+    "rmm-line-projects-usun-po-project-id": (
+        "DELETE FROM line_projects WHERE project_id = ?",
+        ['project_id'],
+    ),
+    "rmm-line-projects-dodaj": (
+        "INSERT INTO line_projects (line_id, project_id) VALUES (?, ?)",
+        ['line_id', 'project_id'],
+    ),
+    "rmm-production-lines-usun-po-id": (
+        "DELETE FROM production_lines WHERE id = ?",
+        ['id'],
+    ),
+    "rmm-project-file-tracking-dodaj": (
+        "INSERT OR REPLACE INTO project_file_tracking (project_id,"
+        " project_name, file_path, file_birth_time, last_verified_at,"
+        " verification_status) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)",
+        ['project_id', 'project_name', 'file_path', 'file_birth_time', 'verification_status'],
+    ),
+    "rmm-project-file-tracking-zmien-po-project-id": (
+        "UPDATE project_file_tracking SET verification_status = 'MISSING',"
+        " last_verified_at = CURRENT_TIMESTAMP WHERE project_id = ?",
+        ['project_id'],
+    ),
+    "rmm-project-file-tracking-zmien-po-project-id-2": (
+        "UPDATE project_file_tracking SET verification_status ="
+        " 'BIRTH_MISMATCH', last_verified_at = CURRENT_TIMESTAMP WHERE"
+        " project_id = ?",
+        ['project_id'],
+    ),
+    "rmm-project-file-tracking-zmien-po-project-id-3": (
+        "UPDATE project_file_tracking SET verification_status = 'OK',"
+        " last_verified_at = CURRENT_TIMESTAMP WHERE project_id = ?",
+        ['project_id'],
+    ),
+    "rmm-project-file-tracking-usun-po-project-id": (
+        "DELETE FROM project_file_tracking WHERE project_id = ?",
+        ['project_id'],
+    ),
+    "rmm-sync-log-dodaj": (
+        "INSERT INTO sync_log (sync_date, sync_timestamp, projects_synced,"
+        " user, notes) VALUES (?, ?, ?, ?, ?)",
+        ['sync_date', 'sync_timestamp', 'projects_synced', 'user', 'notes'],
+    ),
+    "rmm-rm-user-permissions-dodaj-2": (
+        "INSERT INTO rm_user_permissions (role, can_start_stage,"
+        " can_end_stage, can_edit_dates, can_sync_master,"
+        " can_critical_path, can_manage_permissions, updated_at) VALUES (?,"
+        " ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(role) DO UPDATE"
+        " SET can_start_stage = excluded.can_start_stage, can_end_stage ="
+        " excluded.can_end_stage, can_edit_dates = excluded.can_edit_dates,"
+        " can_sync_master = excluded.can_sync_master, can_critical_path ="
+        " excluded.can_critical_path, can_manage_permissions ="
+        " excluded.can_manage_permissions, updated_at = CURRENT_TIMESTAMP",
+        ['role', 'can_start_stage', 'can_end_stage', 'can_edit_dates', 'can_sync_master', 'can_critical_path', 'can_manage_permissions'],
+    ),
+    "rmm-rm-feature-user-permissions-usun-po-feature": (
+        "DELETE FROM rm_feature_user_permissions WHERE feature = ?",
+        ['feature'],
+    ),
+    "rmm-rm-feature-user-permissions-dodaj": (
+        "INSERT INTO rm_feature_user_permissions (feature, username)"
+        " VALUES (?, ?)",
+        ['feature', 'username'],
+    ),
+    "rmm-audit-log-dodaj": (
+        "INSERT INTO audit_log (employee_id, entity_type, entity_id,"
+        " action, field, old_value, new_value, note, changed_by) VALUES (?,"
+        " ?, ?, ?, ?, ?, ?, ?, ?)",
+        ['employee_id', 'entity_type', 'entity_id', 'action', 'field', 'old_value', 'new_value', 'note', 'changed_by'],
+    ),
+    "rmm-employees-zmien-po-id": (
+        "UPDATE employees SET name = ?, category = ?, description = ?,"
+        " contact_info = ?, phone = ?, email = ?, podmiot = ?, user_login ="
+        " ?, is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        ['name', 'category', 'description', 'contact_info', 'phone', 'email', 'podmiot', 'user_login', 'is_active', 'id'],
+    ),
+    "rmm-employees-dodaj": (
+        "INSERT INTO employees (name, category, description, contact_info,"
+        " phone, email, podmiot, user_login, is_active) VALUES (?, ?, ?, ?,"
+        " ?, ?, ?, ?, ?)",
+        ['name', 'category', 'description', 'contact_info', 'phone', 'email', 'podmiot', 'user_login', 'is_active'],
+    ),
+    "rmm-employees-usun-po-id": (
+        "DELETE FROM employees WHERE id = ?",
+        ['id'],
+    ),
+    "rmm-employees-zmien-po-id-2": (
+        "UPDATE employees SET master_max_parallel = ?, updated_at ="
+        " CURRENT_TIMESTAMP WHERE id = ?",
+        ['master_max_parallel', 'id'],
+    ),
+    "rmm-priority-weights-dodaj-2": (
+        "INSERT INTO priority_weights (level, label, weight) VALUES (?, ?,"
+        " ?) ON CONFLICT(level) DO UPDATE SET weight = excluded.weight,"
+        " label = excluded.label",
+        ['level', 'label', 'weight'],
+    ),
+    "rmm-transports-zmien-po-id": (
+        "UPDATE transports SET name = ?, description = ?, contact_info ="
+        " ?, is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        ['name', 'description', 'contact_info', 'is_active', 'id'],
+    ),
+    "rmm-transports-dodaj": (
+        "INSERT INTO transports (name, description, contact_info,"
+        " is_active) VALUES (?, ?, ?, ?)",
+        ['name', 'description', 'contact_info', 'is_active'],
+    ),
+    "rmm-transports-usun-po-id": (
+        "DELETE FROM transports WHERE id = ?",
+        ['id'],
+    ),
+    "rmm-payment-milestones-dodaj": (
+        "INSERT INTO payment_milestones (project_id, percentage,"
+        " payment_date, created_by, created_at, payment_type) VALUES (?, ?,"
+        " ?, ?, CURRENT_TIMESTAMP, ?)",
+        ['project_id', 'percentage', 'payment_date', 'created_by', 'payment_type'],
+    ),
+    "rmm-payment-history-dodaj-2": (
+        "INSERT INTO payment_history (project_id, percentage,"
+        " payment_date, action, changed_by, changed_at) VALUES (?, ?, ?,"
+        " 'ADDED', ?, CURRENT_TIMESTAMP)",
+        ['project_id', 'percentage', 'payment_date', 'changed_by'],
+    ),
+    "rmm-payment-milestones-zmien-po-project-id-percentage": (
+        "UPDATE payment_milestones SET payment_date = ?, modified_by = ?,"
+        " modified_at = CURRENT_TIMESTAMP WHERE project_id = ? AND"
+        " percentage = ?",
+        ['payment_date', 'modified_by', 'project_id', 'percentage'],
+    ),
+    "rmm-payment-milestones-zmien-po-project-id-payment-type": (
+        "UPDATE payment_milestones SET payment_type = 'PŁATNOŚĆ',"
+        " modified_by = ?, modified_at = CURRENT_TIMESTAMP WHERE project_id"
+        " = ? AND payment_type = 'UMORZONY'",
+        ['modified_by', 'project_id'],
+    ),
+    "rmm-payment-milestones-usun-po-project-id-percentage": (
+        "DELETE FROM payment_milestones WHERE project_id = ? AND"
+        " percentage = ?",
+        ['project_id', 'percentage'],
+    ),
+    "rmm-payment-history-dodaj-3": (
+        "INSERT INTO payment_history (project_id, percentage,"
+        " payment_date, action, changed_by, old_date, changed_at) VALUES"
+        " (?, ?, NULL, 'DELETED', ?, ?, CURRENT_TIMESTAMP)",
+        ['project_id', 'percentage', 'changed_by', 'old_date'],
+    ),
+    "rmm-in-app-notifications-dodaj": (
+        "INSERT INTO in_app_notifications (project_id, project_name,"
+        " notification_type, message, created_by, created_at, is_read)"
+        " VALUES (?, ?, 'PAYMENT', ?, ?, CURRENT_TIMESTAMP, 0)",
+        ['project_id', 'project_name', 'message', 'created_by'],
+    ),
+    "rmm-payment-notifications-sent-dodaj": (
+        "INSERT INTO payment_notifications_sent (project_id, project_name,"
+        " percentage, payment_date, recipients, sent_by, email_status,"
+        " error_message, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
+        " CURRENT_TIMESTAMP)",
+        ['project_id', 'project_name', 'percentage', 'payment_date', 'recipients', 'sent_by', 'email_status', 'error_message'],
+    ),
+    "rmm-plc-unlock-codes-dodaj": (
+        "INSERT INTO plc_unlock_codes (project_id, code_type, unlock_code,"
+        " description, created_by, created_at, is_used, expiry_date) VALUES"
+        " (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 0, ?)",
+        ['project_id', 'code_type', 'unlock_code', 'description', 'created_by', 'expiry_date'],
+    ),
+    "rmm-plc-unlock-codes-usun-po-id": (
+        "DELETE FROM plc_unlock_codes WHERE id = ?",
+        ['id'],
+    ),
+    "rmm-plc-global-recipients-dodaj-2": (
+        "INSERT INTO plc_global_recipients (setting_key, recipients_json,"
+        " updated_at) VALUES ('default_recipients', ?, CURRENT_TIMESTAMP)"
+        " ON CONFLICT(setting_key) DO UPDATE SET recipients_json ="
+        " excluded.recipients_json, updated_at = CURRENT_TIMESTAMP",
+        ['recipients_json'],
+    ),
+    "rmm-plc-global-recipients-dodaj-3": (
+        "INSERT INTO plc_global_recipients (setting_key, recipients_json,"
+        " updated_at) VALUES ('payment_status_recipients', ?,"
+        " CURRENT_TIMESTAMP) ON CONFLICT(setting_key) DO UPDATE SET"
+        " recipients_json = excluded.recipients_json, updated_at ="
+        " CURRENT_TIMESTAMP",
+        ['recipients_json'],
+    ),
+    "rmm-plc-unlock-codes-zmien-po-id": (
+        "UPDATE plc_unlock_codes SET is_used = 1, used_at ="
+        " CURRENT_TIMESTAMP, used_by = ?, notes = ? WHERE id = ?",
+        ['used_by', 'notes', 'id'],
+    ),
+    "rmm-plc-authorized-senders-dodaj": (
+        "INSERT OR IGNORE INTO plc_authorized_senders (username, added_by,"
+        " notes) VALUES (?, ?, ?)",
+        ['username', 'added_by', 'notes'],
+    ),
+    "rmm-plc-authorized-senders-usun-po-username": (
+        "DELETE FROM plc_authorized_senders WHERE username = ?",
+        ['username'],
+    ),
+    "rmm-plc-unlock-codes-zmien-po-id-2": (
+        "UPDATE plc_unlock_codes SET sent_at = CURRENT_TIMESTAMP, sent_by"
+        " = ?, sent_via = 'EMAIL', is_used = 1, used_at = CURRENT_TIMESTAMP"
+        " WHERE id = ?",
+        ['sent_by', 'id'],
+    ),
+    "rmm-plc-unlock-codes-zmien-po-id-3": (
+        "UPDATE plc_unlock_codes SET sent_at = CURRENT_TIMESTAMP, sent_by"
+        " = ?, sent_via = 'SMS', is_used = 1, used_at = CURRENT_TIMESTAMP"
+        " WHERE id = ?",
+        ['sent_by', 'id'],
+    ),
+    "rmm-resource-constraints-zmien-po-id": (
+        "UPDATE resource_constraints SET constraint_type = ?, category ="
+        " ?, stage_code = ?, max_parallel = ?, description = ?, is_active ="
+        " ?, modified_at = CURRENT_TIMESTAMP, modified_by = ? WHERE id = ?",
+        ['constraint_type', 'category', 'stage_code', 'max_parallel', 'description', 'is_active', 'modified_by', 'id'],
+    ),
+    "rmm-resource-constraints-dodaj-2": (
+        "INSERT INTO resource_constraints (constraint_type, category,"
+        " stage_code, max_parallel, description, is_active, created_by)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ['constraint_type', 'category', 'stage_code', 'max_parallel', 'description', 'is_active', 'created_by'],
+    ),
+    "rmm-resource-constraints-usun-po-id": (
+        "DELETE FROM resource_constraints WHERE id = ?",
+        ['id'],
+    ),
+    "rmm-absence-exclusion-groups-zmien-po-id": (
+        "UPDATE absence_exclusion_groups SET name = ? WHERE id = ?",
+        ['name', 'id'],
+    ),
+    "rmm-absence-exclusion-members-usun": (
+        "DELETE FROM absence_exclusion_members WHERE group_id = ?",
+        ['group_id'],
+    ),
+    "rmm-absence-exclusion-groups-dodaj": (
+        "INSERT INTO absence_exclusion_groups (name, created_by) VALUES"
+        " (?, ?)",
+        ['name', 'created_by'],
+    ),
+    "rmm-absence-exclusion-members-dodaj": (
+        "INSERT OR IGNORE INTO absence_exclusion_members (group_id,"
+        " employee_id) VALUES (?, ?)",
+        ['group_id', 'employee_id'],
+    ),
+    "rmm-absence-exclusion-groups-usun-po-id": (
+        "DELETE FROM absence_exclusion_groups WHERE id = ?",
+        ['id'],
+    ),
+    "rmm-employee-availability-zmien-po-id": (
+        "UPDATE employee_availability SET employee_id = ?, date_from = ?,"
+        " date_to = ?, reason = ?, notes = ?, time_from = ?, time_to = ?,"
+        " days_override = ? WHERE id = ?",
+        ['employee_id', 'date_from', 'date_to', 'reason', 'notes', 'time_from', 'time_to', 'days_override', 'id'],
+    ),
+    "rmm-employee-availability-zmien-po-id-2": (
+        "UPDATE employee_availability SET status = ? WHERE id = ?",
+        ['status', 'id'],
+    ),
+    "rmm-employee-availability-dodaj": (
+        "INSERT INTO employee_availability (employee_id, date_from,"
+        " date_to, reason, notes, created_by, time_from, time_to,"
+        " days_override, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ['employee_id', 'date_from', 'date_to', 'reason', 'notes', 'created_by', 'time_from', 'time_to', 'days_override', 'status'],
+    ),
+    "rmm-employee-availability-usun-po-id": (
+        "DELETE FROM employee_availability WHERE id = ?",
+        ['id'],
+    ),
+    "rmm-service-trips-dodaj": (
+        "INSERT INTO service_trips (employee_id, project_id,"
+        " client_or_place, trip_type, date_from, date_to, status, note,"
+        " created_by, working_days) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ['employee_id', 'project_id', 'client_or_place', 'trip_type', 'date_from', 'date_to', 'status', 'note', 'created_by', 'working_days'],
+    ),
+    "rmm-service-trips-usun-po-id": (
+        "DELETE FROM service_trips WHERE id = ?",
+        ['id'],
+    ),
+    "rmm-employee-vacation-base-dodaj": (
+        "INSERT INTO employee_vacation_base (employee_id, days,"
+        " updated_by) VALUES (?, ?, ?) ON CONFLICT(employee_id) DO UPDATE"
+        " SET days = excluded.days, updated_at = CURRENT_TIMESTAMP,"
+        " updated_by = excluded.updated_by",
+        ['employee_id', 'days', 'updated_by'],
+    ),
+    "rmm-employee-vacation-quota-dodaj": (
+        "INSERT INTO employee_vacation_quota (employee_id, year, days,"
+        " updated_by) VALUES (?, ?, ?, ?) ON CONFLICT(employee_id, year) DO"
+        " UPDATE SET days = excluded.days, updated_at = CURRENT_TIMESTAMP,"
+        " updated_by = excluded.updated_by",
+        ['employee_id', 'year', 'days', 'updated_by'],
+    ),
+    "rmm-employee-vacation-quota-usun-po-employee-id-year": (
+        "DELETE FROM employee_vacation_quota WHERE employee_id = ? AND"
+        " year = ?",
+        ['employee_id', 'year'],
+    ),
+    "rmm-employee-carryover-override-usun-po-employee-id-year": (
+        "DELETE FROM employee_carryover_override WHERE employee_id = ? AND"
+        " year = ?",
+        ['employee_id', 'year'],
+    ),
+    "rmm-employee-carryover-override-dodaj": (
+        "INSERT INTO employee_carryover_override (employee_id, year, days,"
+        " updated_by) VALUES (?, ?, ?, ?) ON CONFLICT(employee_id, year) DO"
+        " UPDATE SET days = excluded.days, updated_at = CURRENT_TIMESTAMP,"
+        " updated_by = excluded.updated_by",
+        ['employee_id', 'year', 'days', 'updated_by'],
+    ),
+    "rmm-company-calendar-dodaj": (
+        "INSERT OR REPLACE INTO company_calendar (date, day_type,"
+        " description, created_by) VALUES (?, ?, ?, ?)",
+        ['date', 'day_type', 'description', 'created_by'],
+    ),
+    "rmm-company-calendar-usun-po-date": (
+        "DELETE FROM company_calendar WHERE date = ?",
+        ['date'],
+    ),
+    "rmm-optimization-runs-dodaj": (
+        "INSERT INTO optimization_runs (run_mode, project_ids_json,"
+        " date_range_start, date_range_end, constraints_snapshot,"
+        " result_json, score_before, score_after, solver_status,"
+        " solver_time_ms, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+        " ?)",
+        ['run_mode', 'project_ids_json', 'date_range_start', 'date_range_end', 'constraints_snapshot', 'result_json', 'score_before', 'score_after', 'solver_status', 'solver_time_ms', 'created_by'],
+    ),
+    "rmm-optimization-runs-zmien-po-id": (
+        "UPDATE optimization_runs SET applied = 1, applied_at ="
+        " CURRENT_TIMESTAMP, applied_by = ? WHERE id = ?",
+        ['applied_by', 'id'],
+    ),
+    "rmm-project-file-tracking-usun": (
+        "DELETE FROM project_file_tracking",
+        [],
     ),
 
     # ══ STATUSY PROJEKTÓW ═══════════════════════════════════════════
@@ -952,6 +1620,20 @@ def zbuduj_operacje_dostawcow(con):
 # połączenie; operacje mają prefiks `rmm-`.
 
 MIGRACJE_RM_MANAGER = [
+    # ⚠️ Dziennik idempotencji MUSI być w KAŻDEJ bazie, do której serwer
+    # pisze — transakcja SQLite nie obejmuje dwóch plików. Gdyby wpis
+    # dziennika szedł do mastera, a operacja tutaj, zerwane połączenie
+    # mogłoby zostawić jedno bez drugiego i ponowienie zdublowałoby zapis.
+    ("""CREATE TABLE IF NOT EXISTS _server_request_log (
+            request_id  TEXT PRIMARY KEY,
+            operation   TEXT NOT NULL,
+            kto         TEXT,
+            result_json TEXT,
+            created_at  TEXT NOT NULL
+        )""", None),
+    ("CREATE INDEX IF NOT EXISTS idx_server_request_log_czas"
+     " ON _server_request_log(created_at)", None),
+
     ("CREATE TABLE IF NOT EXISTS absence_exclusion_groups ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
      " name TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
      " created_by TEXT )", None),
