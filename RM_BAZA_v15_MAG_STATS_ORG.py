@@ -9809,12 +9809,12 @@ class MainWindow(tk.Tk):
             messagebox.showwarning("Brak projektu", "Wybierz projekt najpierw!", parent=self)
             return
         
-        # Zapisz szerokości kolumn PRZED przejęciem locka
-        # (żeby refresh_data() po acquire nie nadpisał aktualnych szerokości)
         # Wiszaca transakcja na master blokowalaby wszystko ponizej
         # (i wszystkim innym) — patrz DatabaseManager.master_commit.
         self.db_manager.master_rollback_stuck("przejecie locka")
 
+        # Zapisz szerokości kolumn PRZED przejęciem locka
+        # (żeby refresh_data() po acquire nie nadpisał aktualnych szerokości)
         self._save_column_widths()
         
         try:
@@ -30347,6 +30347,17 @@ class MainWindow(tk.Tk):
             self._subiekt_stany = {k: subiekt_zamowienia.opis_stanu(v)
                                    for k, v in dane.items()}
             self._pokaz_kolumne_subiekt()
+            # Ślad w logu: ile wierszy arkusza dostało wpis. Gdy most zwraca
+            # komplet, a wierszy jest mniej — klucz wiersza (numer rysunku /
+            # symbol z nazwy) nie zgadza się z tym, o co pytaliśmy.
+            try:
+                razem = self.sheet.get_total_rows()
+                trafione = sum(1 for r in range(razem)
+                               if str(self.sheet.get_cell_data(r, self.SUBIEKT_COL) or "").strip())
+                print(f"📦 SUBIEKT: most zwrócił {len(dane)} pozycji, "
+                      f"wypełniono {trafione}/{razem} wierszy")
+            except Exception as e:
+                print(f"📦 SUBIEKT: nie policzono wypełnienia: {e}")
             n_zd = sum(1 for v in dane.values() if v.get("zd"))
             n_zk = sum(1 for v in dane.values() if v.get("zk") and not v.get("zd"))
             n_kart = sum(1 for v in dane.values()
