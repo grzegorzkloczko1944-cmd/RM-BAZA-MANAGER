@@ -5813,9 +5813,7 @@ def add_staff_to_stage(project_db_path: str, rm_master_db_path: str,
     import json
     
     # Sprawdź czy pracownik istnieje
-    con_master = _open_rm_connection(rm_master_db_path)
-    employee = con_master.execute("SELECT id FROM employees WHERE id = ?", (employee_id,)).fetchone()
-    con_master.close()
+    employee = rmm_read("rmm-employees-po-id", {"id": employee_id})
     
     if not employee:
         raise ValueError(f"Pracownik ID={employee_id} nie istnieje w bazie employees")
@@ -5953,46 +5951,27 @@ def remove_staff_from_stage(project_db_path: str, project_id: int,
         con.close()
 
 
-def get_stage_assigned_staff(project_db_path: str, rm_master_db_path: str,
-                            project_id: int, stage_code: str) -> List[Dict]:
-    """Pobierz listę pracowników przypisanych do etapu.
-
-    Merguje oba źródła: JSON (project_stages.assigned_staff) + tabela
-    (stage_staff_assignments).  Dzięki temu wpisy istniejące tylko w tabeli
-    (np. po starym usunięciu z JSON bez sync) również zostają zwrócone i mogą
-    być usunięte z poziomu dialogu.
-
-    Returns:
-        Lista dict z kluczami:
-        - employee_id
-        - employee_name
-        - category
-        - assigned_at
-        - assigned_by
-    """
+def get_stage_assigned_staff(project_db_path: str, rm_master_db_path: str = None,
+                            project_id: int = 0, stage_code: str = "") -> List[Dict]:
+    """Pracownicy przypisani do etapu: z JSON-a w project_stages i z tabeli
+    stage_staff_assignments (baza PROJEKTOWA — plik), z nazwiskami
+    z `employees` (baza GŁÓWNA — przez serwer, lista id jako json_each)."""
     import json
-
     con = _open_rm_connection(project_db_path)
-
-    # Zbierz employee_ids z obu źródeł
     json_staff = []   # [{employee_id, assigned_at, assigned_by}, ...]
     table_eids = set()
-
     try:
         row = con.execute("""
             SELECT id, assigned_staff
             FROM project_stages
             WHERE project_id = ? AND stage_code = ?
         """, (project_id, stage_code)).fetchone()
-
         if row:
             stage_id = row['id']
             try:
                 json_staff = json.loads(row['assigned_staff'] or '[]')
             except (json.JSONDecodeError, TypeError):
                 json_staff = []
-
-            # Zbierz z tabeli stage_staff_assignments
             try:
                 ssa_rows = con.execute("""
                     SELECT employee_id, assigned_by
@@ -6004,65 +5983,38 @@ def get_stage_assigned_staff(project_db_path: str, rm_master_db_path: str,
                 pass  # stara baza bez tabeli
     finally:
         con.close()
-
-    # Zbierz unikalne employee_ids (JSON + tabela)
-    json_eid_set = set()
-    for s in json_staff:
-        if isinstance(s, dict) and 'employee_id' in s:
-            json_eid_set.add(s['employee_id'])
-
+    json_eid_set = {s['employee_id'] for s in json_staff
+                    if isinstance(s, dict) and 'employee_id' in s}
     all_eids = json_eid_set | table_eids
     if not all_eids:
         return []
-
-    # Pobierz szczegóły pracowników z master
-    con_master = _open_rm_connection(rm_master_db_path)
-
-    try:
-        placeholders = ','.join('?' * len(all_eids))
-        employees = con_master.execute(f"""
-            SELECT id, name, category
-            FROM employees
-            WHERE id IN ({placeholders})
-        """, list(all_eids)).fetchall()
-
-        employee_map = {e['id']: {'name': e['name'], 'category': e['category']}
-                        for e in employees}
-
-        # Buduj wynik — priorytet danych z JSON (ma assigned_at), dopełnienie z tabeli
-        result = []
-        seen = set()
-
-        # Najpierw wpisy z JSON (zachowaj kolejność)
-        for staff in json_staff:
-            if not isinstance(staff, dict) or 'employee_id' not in staff:
-                continue
-            emp_id = staff['employee_id']
-            if emp_id in employee_map and emp_id not in seen:
-                seen.add(emp_id)
-                result.append({
-                    'employee_id': emp_id,
-                    'employee_name': employee_map[emp_id]['name'],
-                    'category': employee_map[emp_id]['category'],
-                    'assigned_at': staff.get('assigned_at'),
-                    'assigned_by': staff.get('assigned_by')
-                })
-
-        # Dopełnij wpisami z tabeli, których nie było w JSON
-        for eid in sorted(table_eids - seen):
-            if eid in employee_map:
-                result.append({
-                    'employee_id': eid,
-                    'employee_name': employee_map[eid]['name'],
-                    'category': employee_map[eid]['category'],
-                    'assigned_at': None,
-                    'assigned_by': None
-                })
-
-        return result
-
-    finally:
-        con_master.close()
+    employee_map = {e['id']: {'name': e['name'], 'category': e['category']}
+                    for e in rmm_read("rmm-employees-po-idach",
+                                      {"idy_json": json.dumps(sorted(all_eids))})}
+    result, seen = [], set()
+    for staff in json_staff:
+        if not isinstance(staff, dict) or 'employee_id' not in staff:
+            continue
+        emp_id = staff['employee_id']
+        if emp_id in employee_map and emp_id not in seen:
+            seen.add(emp_id)
+            result.append({
+                'employee_id': emp_id,
+                'employee_name': employee_map[emp_id]['name'],
+                'category': employee_map[emp_id]['category'],
+                'assigned_at': staff.get('assigned_at'),
+                'assigned_by': staff.get('assigned_by'),
+            })
+    for eid in sorted(table_eids - seen):
+        if eid in employee_map:
+            result.append({
+                'employee_id': eid,
+                'employee_name': employee_map[eid]['name'],
+                'category': employee_map[eid]['category'],
+                'assigned_at': None,
+                'assigned_by': None,
+            })
+    return result
 
 
 # ============================================================================
@@ -6089,9 +6041,7 @@ def add_staff_assignment(project_db_path: str, rm_master_db_path: str,
     import json
 
     # Walidacja pracownika
-    con_master = _open_rm_connection(rm_master_db_path)
-    employee = con_master.execute("SELECT id, name FROM employees WHERE id = ?", (employee_id,)).fetchone()
-    con_master.close()
+    employee = rmm_read("rmm-employees-po-id", {"id": employee_id})
     if not employee:
         raise ValueError(f"Pracownik ID={employee_id} nie istnieje")
 
@@ -6217,17 +6167,11 @@ def remove_staff_assignment(project_db_path: str, project_id: int,
         con.close()
 
 
-def get_staff_assignments(project_db_path: str, rm_master_db_path: str,
-                          project_id: int, stage_code: str = None) -> List[Dict]:
-    """Pobierz przypisania pracowników z nowymi datami.
-    
-    Args:
-        stage_code: None = wszystkie etapy projektu
-    
-    Returns:
-        Lista dict: employee_id, employee_name, category, stage_code,
-                    planned_start, planned_end, actual_start, actual_end, role
-    """
+def get_staff_assignments(project_db_path: str, rm_master_db_path: str = None,
+                          project_id: int = 0, stage_code: str = None) -> List[Dict]:
+    """Przypisania z terminami (baza PROJEKTOWA — plik) + nazwiska
+    z `employees` (baza GŁÓWNA — przez serwer)."""
+    import json
     con = _open_rm_connection(project_db_path)
     try:
         if stage_code:
@@ -6248,41 +6192,23 @@ def get_staff_assignments(project_db_path: str, rm_master_db_path: str,
             """, (project_id,)).fetchall()
     finally:
         con.close()
-
     if not rows:
         return []
-
-    # Pobierz dane pracowników z master
-    emp_ids = list({r['employee_id'] for r in rows})
-    con_master = _open_rm_connection(rm_master_db_path)
-    try:
-        placeholders = ','.join('?' * len(emp_ids))
-        emps = con_master.execute(f"""
-            SELECT id, name, category FROM employees WHERE id IN ({placeholders})
-        """, emp_ids).fetchall()
-        emp_map = {e['id']: {'name': e['name'], 'category': e['category']} for e in emps}
-    finally:
-        con_master.close()
-
+    emp_ids = sorted({r['employee_id'] for r in rows})
+    emp_map = {e['id']: {'name': e['name'], 'category': e['category']}
+               for e in rmm_read("rmm-employees-po-idach", {"idy_json": json.dumps(emp_ids)})}
     result = []
     for r in rows:
         eid = r['employee_id']
         emp_info = emp_map.get(eid, {'name': f'ID={eid}', 'category': '?'})
         result.append({
-            'id': r['id'],
-            'employee_id': eid,
-            'employee_name': emp_info['name'],
-            'category': emp_info['category'],
+            'id': r['id'], 'employee_id': eid,
+            'employee_name': emp_info['name'], 'category': emp_info['category'],
             'stage_code': r['stage_code'],
-            'planned_start': r['planned_start'],
-            'planned_end': r['planned_end'],
-            'actual_start': r['actual_start'],
-            'actual_end': r['actual_end'],
-            'role': r['role'],
-            'assigned_at': r['assigned_at'],
-            'assigned_by': r['assigned_by'],
+            'planned_start': r['planned_start'], 'planned_end': r['planned_end'],
+            'actual_start': r['actual_start'], 'actual_end': r['actual_end'],
+            'role': r['role'], 'assigned_at': r['assigned_at'], 'assigned_by': r['assigned_by'],
         })
-
     return result
 
 
@@ -6419,73 +6345,34 @@ def _get_all_stage_staff_with_con(con: sqlite3.Connection, project_id: int) -> D
     return result
 
 
-def get_project_staff(project_db_path: str, rm_master_db_path: str,
-                     project_id: int) -> List[Dict]:
-    """Pobierz unikalną listę pracowników przypisanych do projektu (ze wszystkich etapów).
-    
-    Returns:
-        Lista dict z kluczami:
-        - employee_id
-        - employee_name
-        - category
-    """
+def get_project_staff(project_db_path: str, rm_master_db_path: str = None,
+                     project_id: int = 0) -> List[Dict]:
+    """Konstruktorzy przypisani do jakiegokolwiek etapu projektu
+    (JSON w project_stages — plik; nazwiska z `employees` — serwer)."""
     import json
-    
     con = _open_rm_connection(project_db_path)
-    
     try:
-        # Pobierz wszystkich pracowników ze wszystkich etapów
         rows = con.execute("""
             SELECT assigned_staff
             FROM project_stages
             WHERE project_id = ? AND assigned_staff IS NOT NULL AND assigned_staff != ''
         """, (project_id,)).fetchall()
-        
-        # Zbierz unikalne employee_id
         employee_ids = set()
         for row in rows:
             try:
-                assigned = json.loads(row['assigned_staff'])
-                for staff in assigned:
+                for staff in json.loads(row['assigned_staff']):
                     emp_id = staff.get('employee_id')
                     if emp_id:
                         employee_ids.add(emp_id)
             except (json.JSONDecodeError, TypeError):
                 continue
-        
     finally:
         con.close()
-    
     if not employee_ids:
         return []
-    
-    # Upewnij się że tabela employees istnieje
-    ensure_list_tables(rm_master_db_path)
-    
-    # Pobierz szczegóły z master DB (tylko kategoria "Konstrukcja")
-    con_master = _open_rm_connection(rm_master_db_path)
-    
-    try:
-        placeholders = ','.join('?' * len(employee_ids))
-        employees = con_master.execute(f"""
-            SELECT id, name, category
-            FROM employees
-            WHERE id IN ({placeholders})
-              AND category = 'Konstrukcja'
-            ORDER BY name
-        """, list(employee_ids)).fetchall()
-        
-        return [
-            {
-                'employee_id': e['id'],
-                'employee_name': e['name'],
-                'category': e['category']
-            }
-            for e in employees
-        ]
-        
-    finally:
-        con_master.close()
+    return [{'employee_id': e['id'], 'employee_name': e['name'], 'category': e['category']}
+            for e in rmm_read("rmm-employees-po-idach-konstrukcja",
+                              {"idy_json": json.dumps(sorted(employee_ids))})]
 
 
 # ============================================================================
