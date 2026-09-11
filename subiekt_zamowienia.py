@@ -233,6 +233,13 @@ def _sciezka_master():
     return os.path.join(os.path.dirname(PROJECTS_DIR.rstrip("\\/")), "master.sqlite")
 
 
+def _serwer():
+    """RM_SERWER — jedyna droga do mastera RM_BAZA. Konfigurację ustawia
+    RM_BAZA przy starcie; ten moduł działa wewnątrz niej."""
+    import rm_klient
+    return rm_klient
+
+
 def pracownik_rm_manager(login):
     """{name, email, phone} zalogowanego pracownika albo None.
 
@@ -256,44 +263,25 @@ def pracownik_rm_manager(login):
 
 
 def _nazwy_dostawcow():
-    """{supplier_id: nazwa} z bazy głównej RM_BAZA."""
-    master = _sciezka_master()
-    if not os.path.isfile(master):
-        return {}
+    """{supplier_id: nazwa} z mastera RM_BAZA (przez serwer); {} przy błędzie."""
     try:
-        con = sqlite3.connect(f"file:{master}?mode=ro", uri=True)
-        try:
-            return {r[0]: r[1] for r in
-                    con.execute("SELECT supplier_id, name FROM suppliers")}
-        finally:
-            con.close()
-    except sqlite3.Error:
+        return {w["supplier_id"]: w["name"] for w in _serwer().master_read("suppliers-list")}
+    except Exception:
         return {}
 
 
 def projekty_po_numerze(numery):
-    """{project_id: nazwa} dla numerów z Uwag na ZK (np. {„2619", „2607"}).
-
-    Numer projektu to pierwszy człon nazwy w RM_BAZA („2619 CERAMIZATOR…"),
-    a na ZK trafia sam numer — więc dopasowujemy po prefiksie nazwy.
-    """
+    """{project_id: nazwa} dla projektów, których nazwa zaczyna się od numeru z listy."""
     numery = {str(n).strip() for n in (numery or []) if str(n).strip()}
     if not numery:
         return {}
-    master = _sciezka_master()
-    if not os.path.isfile(master):
-        return {}
     out = {}
     try:
-        con = sqlite3.connect(f"file:{master}?mode=ro", uri=True)
-        try:
-            for pid, nazwa in con.execute("SELECT project_id, name FROM projects"):
-                pierwszy = (nazwa or "").strip().split(" ")[0]
-                if pierwszy in numery:
-                    out[pid] = nazwa
-        finally:
-            con.close()
-    except sqlite3.Error:
+        for w in _serwer().master_read("projects-list"):
+            pierwszy = (w.get("name") or "").strip().split(" ")[0]
+            if pierwszy in numery:
+                out[w["project_id"]] = w.get("name")
+    except Exception:
         return {}
     return out
 
@@ -2123,32 +2111,21 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             po_wyslaniu=self._po_wyslaniu_zd)
 
     def _email_dostawcy(self, nazwa_subiekt):
-        """
-        Adres dostawcy z bazy RM_BAZA. Dopasowanie po nazwie tą samą funkcją,
-        którą okno wiąże dostawców z podmiotami Subiekta.
-        """
+        """E-mail dostawcy RM_BAZA po uproszczonej nazwie kartoteki Subiekta.
+        Dokładne dopasowanie, potem luźne (zawieranie)."""
         if not nazwa_subiekt:
             return ""
         try:
-            master = _sciezka_master()
-            con = sqlite3.connect(f"file:{master}?mode=ro", uri=True)
-            try:
-                wiersze = con.execute(
-                    "SELECT name, COALESCE(NULLIF(TRIM(email),''),"
-                    "                      NULLIF(TRIM(email_default),'')) "
-                    "FROM suppliers WHERE is_active=1").fetchall()
-            finally:
-                con.close()
+            wiersze = [(w.get("name"),
+                        (w.get("email") or "").strip() or (w.get("email_default") or "").strip() or None)
+                       for w in _serwer().master_read("suppliers-list") if w.get("is_active")]
         except Exception as e:
             print(f"⚠️  Nie udało się odczytać maili dostawców: {e}")
             return ""
-
         cel = _uprosc_nazwe(nazwa_subiekt)
         for nazwa, mail in wiersze:
             if mail and _uprosc_nazwe(nazwa or "") == cel:
                 return mail
-        # Dopasowanie luźne — nazwy w Subiekcie bywają pełne („SPÓŁKA Z O.O.”),
-        # a w RM_BAZA skrócone.
         for nazwa, mail in wiersze:
             u = _uprosc_nazwe(nazwa or "")
             if mail and u and (u in cel or cel in u):
@@ -2156,24 +2133,18 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         return ""
 
     def _email_po_nip(self, nip):
-        """
-        Adres dostawcy po NIP-cie — klucz pewniejszy niż nazwa, bo firmy
-        w RM_BAZA i w Subiekcie macie już powiązane właśnie po NIP.
-        """
+        """E-mail dostawcy RM_BAZA po NIP-ie (porównanie po samych cyfrach)."""
         cyfry = "".join(c for c in (nip or "") if c.isdigit())
         if not cyfry:
             return ""
         try:
-            con = sqlite3.connect(f"file:{_sciezka_master()}?mode=ro", uri=True)
-            try:
-                for nazwa, mail, n in con.execute(
-                        "SELECT name, COALESCE(NULLIF(TRIM(email),''),"
-                        "                      NULLIF(TRIM(email_default),'')), nip "
-                        "FROM suppliers WHERE nip IS NOT NULL AND TRIM(nip)<>''"):
-                    if mail and "".join(c for c in (n or "") if c.isdigit()) == cyfry:
-                        return mail
-            finally:
-                con.close()
+            for w in _serwer().master_read("suppliers-list"):
+                n = w.get("nip")
+                if not n or not str(n).strip():
+                    continue
+                mail = (w.get("email") or "").strip() or (w.get("email_default") or "").strip()
+                if mail and "".join(c for c in str(n) if c.isdigit()) == cyfry:
+                    return mail
         except Exception as e:
             print(f"⚠️  Szukanie maila po NIP {cyfry}: {e}")
         return ""
@@ -2771,42 +2742,17 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         return min(daty)[:10]
 
     def _mapa_wyslanych(self):
-        """{numer ZD: data wysyłki} — czytane RAZ na odświeżenie listy.
-
-        Bez cache szłoby jedno zapytanie na wiersz (przy 200 pozycjach to
-        200 zapytań na każde przerysowanie arkusza).
-        """
+        """{numer_zd: ostatnia wysyłka} z dziennika na serwerze (cache na okno)."""
         mapa = getattr(self, "_cache_wyslane", None)
         if mapa is not None:
             return mapa
         mapa = {}
         try:
-            import sqlite3
-            from subiekt_wyslij_zd import _master
-            con = sqlite3.connect(_master(), timeout=5)
-            try:
-                # To okno zna tylko NUMERY z kolumny ZD arkusza — nie pobiera
-                # dokumentów z mostu, więc nie ma Id pod ręką. Mapujemy więc
-                # numer po dzienniku, ale jest to bezpieczne: wpisy usuniętych
-                # dokumentów są z dziennika KASOWANE (uniewaznij_wyslania po
-                # Id), więc numer, który tu został, należy do dokumentu ŻYWEGO.
-                # Wcześniej wpisy zostawały ze znacznikiem i świeżo wystawione
-                # „ZD 4" dziedziczyło wysyłkę starego „ZD 4" (07.09.2026).
-                kolumny = {r[1] for r in con.execute("PRAGMA table_info(zd_wyslane)")}
-                if "dokument_id" not in kolumny:
-                    raise RuntimeError("dziennik sprzed przejścia na Id")
-                # Najnowsza wysyłka per numer — ZD bywa wysyłane ponownie
-                # (poprawiona treść, drugi adres). Wpisy bez Id pomijamy: nie
-                # da się ich przypisać do dokumentu.
-                for numer, kiedy in con.execute(
-                        "SELECT numer_zd, MAX(kiedy) FROM zd_wyslane"
-                        " WHERE dokument_id IS NOT NULL GROUP BY numer_zd"):
-                    if numer:
-                        mapa[numer.strip()] = kiedy or ""
-            finally:
-                con.close()
+            for w in _serwer().master_read("zd-wyslane-mapa"):
+                if w.get("numer_zd"):
+                    mapa[w["numer_zd"].strip()] = w.get("kiedy") or ""
         except Exception:
-            pass            # brak tabeli = nikt jeszcze nic nie wysłał
+            pass            # brak dziennika = nikt jeszcze nic nie wysłał
         self._cache_wyslane = mapa
         return mapa
 
@@ -3242,42 +3188,21 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
 
 
 def podpis_nadawcy(uzytkownik):
-    """Podpis pod mailem do dostawcy: imię i nazwisko, e-mail, telefon.
-
-    Kontakt bierzemy z tego samego miejsca co zapytanie ofertowe (RFQ) —
-    z tabeli `employees` w rm_manager.sqlite, po loginie zalogowanego.
-    Dostawca ma wiedzieć, do kogo zadzwonić w sprawie zamówienia, tak samo
-    jak przy RFQ; wcześniej pod mailem stało samo `display_name` z
-    master.sqlite, czyli u części kont po prostu „ADMIN”
-    (zgłoszone 06.09.2026).
-
-    Gdy pracownika nie ma w RM_MANAGER albo brakuje pól, schodzimy do
-    display_name — mail ma wyjść tak czy inaczej, w przeciwieństwie do
-    RFQ, gdzie brak kontaktu blokuje wysyłkę.
-    """
+    """Podpis pod mailem: nazwa użytkownika RM_BAZA (przez serwer) + dane
+    pracownika z RM_MANAGER (imię, e-mail, telefon), gdy powiązany."""
     uzytkownik = (uzytkownik or "").strip()
     if not uzytkownik:
         return ""
-
-    # Nazwa wyświetlana z master.sqlite — podstawa podpisu i zapas,
-    # gdyby RM_MANAGER nie miał tego pracownika.
     nazwa = uzytkownik
     try:
-        con = sqlite3.connect(f"file:{_sciezka_master()}?mode=ro", uri=True)
-        try:
-            r = con.execute("SELECT display_name FROM users WHERE username=?",
-                            (uzytkownik,)).fetchone()
-        finally:
-            con.close()
-        if r and r[0]:
-            nazwa = r[0]
+        r = _serwer().master_read("user-nazwa-po-loginie", {"username": uzytkownik})
+        if r and r[0].get("display_name"):
+            nazwa = r[0]["display_name"]
     except Exception:
         pass
-
     emp = pracownik_rm_manager(uzytkownik)
     if not emp:
         return nazwa
-
     linie = [(emp.get("name") or "").strip() or nazwa]
     for pole in ("email", "phone"):
         wartosc = (emp.get(pole) or "").strip()
