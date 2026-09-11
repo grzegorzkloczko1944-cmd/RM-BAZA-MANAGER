@@ -287,6 +287,12 @@ ODCZYT = {
     ),
     # ⚠️ Generator uciął dwa zapytania poniżej do samego SELECT-a (WHERE był
     # w drugim literale stringa) — zwracały CAŁĄ tabelę. Tu wersje pełne.
+    # Definicje etapów z GŁÓWNEJ bazy RM_MANAGER (tabela o tej samej nazwie
+    # jest też w bazach projektowych — ta operacja dotyczy słownika).
+    "rmm-stage-definitions-lista": (
+        "SELECT code, display_name FROM stage_definitions ORDER BY id",
+        [],
+    ),
     "rmm-production-lines-lista": (
         "SELECT id, name, description, parallel_stages_csv"
         " FROM production_lines ORDER BY name COLLATE NOCASE",
