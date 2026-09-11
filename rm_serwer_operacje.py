@@ -287,6 +287,20 @@ ODCZYT = {
     ),
     # ⚠️ Generator uciął dwa zapytania poniżej do samego SELECT-a (WHERE był
     # w drugim literale stringa) — zwracały CAŁĄ tabelę. Tu wersje pełne.
+    "rmm-production-lines-lista": (
+        "SELECT id, name, description, parallel_stages_csv"
+        " FROM production_lines ORDER BY name COLLATE NOCASE",
+        [],
+    ),
+    "rmm-feature-users-po-feature": (
+        "SELECT username FROM rm_feature_user_permissions"
+        " WHERE feature = ? ORDER BY username",
+        ["feature"],
+    ),
+    "rmm-service-trip-po-id-pelny": (
+        "SELECT * FROM service_trips WHERE id = ?",
+        ["id"],
+    ),
     "rmm-nieobecnosc-po-id": (
         "SELECT id, employee_id, status, reason, date_from, date_to"
         " FROM employee_availability WHERE id = ?",
@@ -350,10 +364,6 @@ ODCZYT = {
     ),
     "rmm-rm-user-permissions-2": (
         "SELECT * FROM rm_user_permissions ORDER BY role",
-        [],
-    ),
-    "rmm-rm-feature-user-permissions": (
-        "SELECT username FROM rm_feature_user_permissions",
         [],
     ),
     "rmm-audit-log-po-employee-id": (
@@ -1339,6 +1349,10 @@ ZAPIS = {
     # Klient budował `SET` tylko ze zmienionych kolumn; tutaj przekazuje
     # komplet, a NULL-e zostawiają wartości nietknięte. Bez tego edycja
     # samego telefonu wyczyściłaby pracownikowi resztę danych.
+    #
+    # Wyjazdy serwisowe CELOWO nie mają wersji z COALESCE: `working_days`
+    # musi dać się ustawić na NULL (gdy wyjazd przestaje być ZREALIZOWANY),
+    # a COALESCE by to zignorował — patrz `rmm-service-trip-nadpisz`.
     "rmm-employee-zmien": (
         "UPDATE employees SET"
         "   name                = COALESCE(?, name),"
@@ -1357,24 +1371,19 @@ ZAPIS = {
          "phone", "email", "master_max_parallel", "podmiot", "user_login",
          "id"],
     ),
-    "rmm-service-trip-zmien": (
+    # Decyzja o wniosku urlopowym. `decided_by` bywa świadomie czyszczone
+    # (cofnięcie decyzji), więc NIE przez COALESCE — pusta wartość ma
+    # tu znaczyć „wyczyść", nie „zostaw".
+    # Pełne nadpisanie wyjazdu — klient scala zmienione pola z aktualnym
+    # wierszem i przysyła komplet. NULL tutaj ZNACZY NULL.
+    "rmm-service-trip-nadpisz": (
         "UPDATE service_trips SET"
-        "   employee_id     = COALESCE(?, employee_id),"
-        "   project_id      = COALESCE(?, project_id),"
-        "   client_or_place = COALESCE(?, client_or_place),"
-        "   trip_type       = COALESCE(?, trip_type),"
-        "   date_from       = COALESCE(?, date_from),"
-        "   date_to         = COALESCE(?, date_to),"
-        "   status          = COALESCE(?, status),"
-        "   note            = COALESCE(?, note),"
-        "   working_days    = COALESCE(?, working_days)"
+        "   employee_id = ?, project_id = ?, client_or_place = ?, trip_type = ?,"
+        "   date_from = ?, date_to = ?, status = ?, note = ?, working_days = ?"
         " WHERE id = ?",
         ["employee_id", "project_id", "client_or_place", "trip_type",
          "date_from", "date_to", "status", "note", "working_days", "id"],
     ),
-    # Decyzja o wniosku urlopowym. `decided_by` bywa świadomie czyszczone
-    # (cofnięcie decyzji), więc NIE przez COALESCE — pusta wartość ma
-    # tu znaczyć „wyczyść", nie „zostaw".
     "rmm-nieobecnosc-decyzja": (
         "UPDATE employee_availability SET"
         "   status = ?, decided_by = ?, decided_at = ?, decision_note = ?"

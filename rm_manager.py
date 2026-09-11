@@ -707,79 +707,49 @@ DEFAULT_LINE_PARALLEL_STAGES = [
 ]
 
 
-def list_production_lines(rm_master_db_path: str) -> List[Dict]:
-    """Zwróć wszystkie linie produkcyjne z listą projektów.
-
-    Returns: [{id, name, description, parallel_stages: [str], project_ids: [int]}, ...]
-    """
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        rows = con.execute(
-            "SELECT id, name, description, parallel_stages_csv "
-            "FROM production_lines ORDER BY name COLLATE NOCASE"
-        ).fetchall()
-        result = []
-        for r in rows:
-            pids = [int(x['project_id']) for x in con.execute(
-                "SELECT project_id FROM line_projects WHERE line_id = ? "
-                "ORDER BY project_id", (r['id'],)
-            ).fetchall()]
-            ps_csv = (r['parallel_stages_csv'] or '').strip()
-            parallel = [s.strip() for s in ps_csv.split(',') if s.strip()]
-            result.append({
-                'id': int(r['id']),
-                'name': r['name'],
-                'description': r['description'] or '',
-                'parallel_stages': parallel,
-                'project_ids': pids,
-            })
-        return result
-    finally:
-        con.close()
-
-
-def get_project_line(rm_master_db_path: str, project_id: int) -> Optional[Dict]:
-    """Zwróć linię produkcyjną do której należy projekt (lub None)."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        row = con.execute("""
-            SELECT pl.id, pl.name, pl.description, pl.parallel_stages_csv
-            FROM line_projects lp
-            JOIN production_lines pl ON pl.id = lp.line_id
-            WHERE lp.project_id = ?
-        """, (int(project_id),)).fetchone()
-        if not row:
-            return None
-        pids = [int(x['project_id']) for x in con.execute(
-            "SELECT project_id FROM line_projects WHERE line_id = ? "
-            "ORDER BY project_id", (row['id'],)
-        ).fetchall()]
-        ps_csv = (row['parallel_stages_csv'] or '').strip()
-        parallel = [s.strip() for s in ps_csv.split(',') if s.strip()]
-        return {
-            'id': int(row['id']),
-            'name': row['name'],
-            'description': row['description'] or '',
-            'parallel_stages': parallel,
+def list_production_lines(rm_master_db_path: str = None) -> List[Dict]:
+    """Linie produkcyjne z przypisanymi projektami i etapami równoległymi."""
+    result = []
+    for r in rmm_read("rmm-production-lines-lista"):
+        pids = sorted(int(x['project_id']) for x in
+                      rmm_read("rmm-line-projects-po-line-id", {"line_id": r['id']}))
+        ps_csv = (r['parallel_stages_csv'] or '').strip()
+        result.append({
+            'id': int(r['id']), 'name': r['name'],
+            'description': r['description'] or '',
+            'parallel_stages': [s.strip() for s in ps_csv.split(',') if s.strip()],
             'project_ids': pids,
-        }
-    finally:
-        con.close()
+        })
+    return result
 
 
-def save_production_line(rm_master_db_path: str, line_id: Optional[int],
-                         name: str, description: str,
-                         parallel_stages: List[str],
-                         project_ids: List[int],
+def get_project_line(rm_master_db_path: str = None, project_id: int = 0) -> Optional[Dict]:
+    """Linia, do której należy projekt (albo None)."""
+    rows = rmm_read("rmm-line-projects-po-project-id", {"project_id": int(project_id)})
+    if not rows:
+        return None
+    row = rows[0]
+    pids = sorted(int(x['project_id']) for x in
+                  rmm_read("rmm-line-projects-po-line-id", {"line_id": row['id']}))
+    ps_csv = (row['parallel_stages_csv'] or '').strip()
+    return {
+        'id': int(row['id']), 'name': row['name'],
+        'description': row['description'] or '',
+        'parallel_stages': [s.strip() for s in ps_csv.split(',') if s.strip()],
+        'project_ids': pids,
+    }
+
+
+def save_production_line(rm_master_db_path: str = None, line_id: Optional[int] = None,
+                         name: str = "", description: str = "",
+                         parallel_stages: List[str] = None,
+                         project_ids: List[int] = None,
                          user: Optional[str] = None) -> int:
-    """Utwórz lub zaktualizuj linię produkcyjną.
+    """Dodaj/zmień linię i przepnij do niej projekty.
 
-    Args:
-        line_id: None = nowa linia, int = update istniejącej
-        project_ids: lista pid; każdy może być w max 1 linii — przepisanie
-                     z innej linii odbywa się automatycznie (UNIQUE w line_projects).
-
-    Returns: id linii.
+    Przepięcie projektów (czyszczenie starych powiązań linii, zdjęcie
+    projektów z innych linii, nowe powiązania) leci jednym batchem —
+    inaczej zerwane połączenie zostawiłoby linię bez projektów.
     """
     name = (name or '').strip()
     if not name:
@@ -787,50 +757,35 @@ def save_production_line(rm_master_db_path: str, line_id: Optional[int],
     parallel_csv = ','.join(s.strip() for s in (parallel_stages or []) if s.strip())
     pids = sorted({int(p) for p in (project_ids or []) if p})
 
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        if line_id is None:
-            cur = con.execute("""
-                INSERT INTO production_lines
-                    (name, description, parallel_stages_csv, created_by, updated_by)
-                VALUES (?, ?, ?, ?, ?)
-            """, (name, description or '', parallel_csv, user, user))
-            line_id = int(cur.lastrowid)
-        else:
-            con.execute("""
-                UPDATE production_lines
-                SET name = ?, description = ?, parallel_stages_csv = ?,
-                    updated_at = CURRENT_TIMESTAMP, updated_by = ?
-                WHERE id = ?
-            """, (name, description or '', parallel_csv, user, int(line_id)))
+    operacje = []
+    if line_id is None:
+        wynik = rmm_exec("rmm-production-lines-dodaj", {
+            "name": name, "description": description or '',
+            "parallel_stages_csv": parallel_csv, "created_by": user, "updated_by": user})
+        line_id = int((wynik or {}).get("lastrowid") or 0)
+    else:
+        line_id = int(line_id)
+        operacje.append({"operation": "rmm-production-lines-zmien-po-id", "params": {
+            "name": name, "description": description or '',
+            "parallel_stages_csv": parallel_csv, "updated_by": user, "id": line_id}})
 
-        # Przepnij projekty: usuń stare powiązania tej linii i wszystkich pids
-        # (pid mógł być w innej linii — UNIQUE).
-        con.execute("DELETE FROM line_projects WHERE line_id = ?", (int(line_id),))
-        if pids:
-            con.executemany(
-                "DELETE FROM line_projects WHERE project_id = ?",
-                [(p,) for p in pids]
-            )
-            con.executemany(
-                "INSERT INTO line_projects (line_id, project_id) VALUES (?, ?)",
-                [(int(line_id), p) for p in pids]
-            )
-        con.commit()
-        return int(line_id)
-    finally:
-        con.close()
+    # Projekt może być tylko w jednej linii (UNIQUE) — zdejmujemy go z każdej.
+    operacje.append({"operation": "rmm-line-projects-usun-po-line-id",
+                     "params": {"line_id": line_id}})
+    operacje += [{"operation": "rmm-line-projects-usun-po-project-id",
+                  "params": {"project_id": p}} for p in pids]
+    operacje += [{"operation": "rmm-line-projects-dodaj",
+                  "params": {"line_id": line_id, "project_id": p}} for p in pids]
+    rmm_batch(operacje)
+    return line_id
 
 
-def delete_production_line(rm_master_db_path: str, line_id: int):
-    """Usuń linię i jej powiązania z projektami."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        con.execute("DELETE FROM line_projects WHERE line_id = ?", (int(line_id),))
-        con.execute("DELETE FROM production_lines WHERE id = ?", (int(line_id),))
-        con.commit()
-    finally:
-        con.close()
+def delete_production_line(rm_master_db_path: str = None, line_id: int = 0):
+    """Usuń linię wraz z powiązaniami projektów (jednym batchem)."""
+    rmm_batch([
+        {"operation": "rmm-line-projects-usun-po-line-id", "params": {"line_id": int(line_id)}},
+        {"operation": "rmm-production-lines-usun-po-id", "params": {"id": int(line_id)}},
+    ])
 
 
 # ============================================================================
@@ -4912,28 +4867,10 @@ def sync_to_master(rm_db_path: str, master_db_path: str, project_id: int):
             pass
 
 
-def get_last_sync_date(rm_master_db_path: str) -> str:
-    """Pobierz datę ostatniej synchronizacji
-    
-    Args:
-        rm_master_db_path: Ścieżka do rm_manager.sqlite (MASTER)
-        
-    Returns:
-        Data w formacie YYYY-MM-DD lub None jeśli nigdy nie synchronizowano
-    """
-    con = _open_rm_connection(rm_master_db_path)
-    
-    cursor = con.execute("""
-        SELECT sync_date
-        FROM sync_log
-        ORDER BY id DESC
-        LIMIT 1
-    """)
-    
-    row = cursor.fetchone()
-    con.close()
-    
-    return row['sync_date'] if row else None
+def get_last_sync_date(rm_master_db_path: str = None) -> str:
+    """Data ostatniej synchronizacji (albo None)."""
+    rows = rmm_read("rmm-sync-log")
+    return rows[0]['sync_date'] if rows else None
 
 
 def should_sync_today(rm_master_db_path: str) -> bool:
@@ -4951,29 +4888,14 @@ def should_sync_today(rm_master_db_path: str) -> bool:
     return last_sync != today
 
 
-def record_sync(rm_master_db_path: str, projects_synced: int, user: str = None, notes: str = None):
-    """Zapisz wpis o synchronizacji w sync_log
-    
-    Args:
-        rm_master_db_path: Ścieżka do rm_manager.sqlite (MASTER)
-        projects_synced: Liczba zsynchronizowanych projektów
-        user: Użytkownik który uruchomił sync (opcjonalnie)
-        notes: Notatki (opcjonalnie)
-    """
-    con = _open_rm_connection(rm_master_db_path)
-    
+def record_sync(rm_master_db_path: str = None, projects_synced: int = 0,
+                user: str = None, notes: str = None):
+    """Zapisz wpis o synchronizacji."""
     now = datetime.now()
-    sync_date = now.strftime("%Y-%m-%d")
-    sync_timestamp = now.strftime("%Y-%m-%d %H:%M")
-    
-    con.execute("""
-        INSERT INTO sync_log (sync_date, sync_timestamp, projects_synced, user, notes)
-        VALUES (?, ?, ?, ?, ?)
-    """, (sync_date, sync_timestamp, projects_synced, user, notes))
-    
-    con.commit()
-    con.close()
-    
+    sync_date, sync_timestamp = now.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d %H:%M")
+    rmm_exec("rmm-sync-log-dodaj", {
+        "sync_date": sync_date, "sync_timestamp": sync_timestamp,
+        "projects_synced": projects_synced, "user": user, "notes": notes})
     print(f"📝 Zapisano sync_log: {sync_date} {sync_timestamp}, projektów: {projects_synced}")
 
 
@@ -5343,94 +5265,48 @@ def get_users_from_baza(master_baza_path: str) -> List[Dict]:
         return []
 
 
-def get_user_permissions(rm_master_db_path: str, role: str) -> Dict:
-    """Pobierz uprawnienia dla danej roli z rm_manager.sqlite.
-    Zwraca dict: {can_start_stage: bool, can_end_stage: bool, ...}
-    Fallback: GUEST (wszystko False) gdy rola nieznana lub plik niedostępny.
-    """
+def get_user_permissions(rm_master_db_path: str = None, role: str = "") -> Dict:
+    """Uprawnienia roli. ADMIN nigdy nie traci can_manage_permissions —
+    także przy braku wiersza i przy błędzie połączenia."""
     fallback = {
-        'can_start_stage': False,
-        'can_end_stage': False,
-        'can_edit_dates': False,
-        'can_sync_master': False,
-        'can_critical_path': False,
+        'can_start_stage': False, 'can_end_stage': False, 'can_edit_dates': False,
+        'can_sync_master': False, 'can_critical_path': False,
         'can_manage_permissions': False,
     }
     try:
-        if not Path(rm_master_db_path).exists():
-            return fallback
-        con = _open_rm_connection(rm_master_db_path)
-        row = con.execute(
-            "SELECT * FROM rm_user_permissions WHERE role = ?", (role,)
-        ).fetchone()
-        con.close()
-        if row:
-            result = {k: bool(row[k]) for k in fallback}
-            # SAFETY: ADMIN zawsze ma can_manage_permissions
+        rows = rmm_read("rmm-rm-user-permissions-po-role", {"role": role})
+        if rows:
+            result = {k: bool(rows[0].get(k)) for k in fallback}
             if role == 'ADMIN':
                 result['can_manage_permissions'] = True
             return result
-        # Brak wiersza dla roli – ADMIN dostaje pełne uprawnienia
         if role == 'ADMIN':
             return {k: True for k in fallback}
         return fallback
     except Exception as e:
         print(f"⚠️  get_user_permissions: {e}")
-        # SAFETY: nawet przy błędzie ADMIN nie traci dostępu
         if role == 'ADMIN':
             return {k: True for k in fallback}
         return fallback
 
 
-def get_all_role_permissions(rm_master_db_path: str) -> List[Dict]:
-    """Pobierz uprawnienia wszystkich ról (dla dialogu edycji).
-    Zwraca listę słowników posortowaną po roli.
-    """
+def get_all_role_permissions(rm_master_db_path: str = None) -> List[Dict]:
+    """Uprawnienia wszystkich ról."""
     try:
-        if not Path(rm_master_db_path).exists():
-            return []
-        con = _open_rm_connection(rm_master_db_path)
-        rows = con.execute(
-            "SELECT * FROM rm_user_permissions ORDER BY role"
-        ).fetchall()
-        con.close()
-        return [dict(r) for r in rows]
+        return [dict(r) for r in rmm_read("rmm-rm-user-permissions-2")]
     except Exception as e:
         print(f"⚠️  get_all_role_permissions: {e}")
         return []
 
 
-def set_role_permissions(rm_master_db_path: str, role: str, permissions: Dict):
-    """Zapisz / zaktualizuj uprawnienia roli w rm_manager.sqlite.
-    permissions = {can_start_stage: bool, can_end_stage: bool, ...}
-    """
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        con.execute("""
-            INSERT INTO rm_user_permissions
-                (role, can_start_stage, can_end_stage, can_edit_dates,
-                 can_sync_master, can_critical_path, can_manage_permissions, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(role) DO UPDATE SET
-                can_start_stage     = excluded.can_start_stage,
-                can_end_stage       = excluded.can_end_stage,
-                can_edit_dates      = excluded.can_edit_dates,
-                can_sync_master     = excluded.can_sync_master,
-                can_critical_path   = excluded.can_critical_path,
-                can_manage_permissions = excluded.can_manage_permissions,
-                updated_at          = CURRENT_TIMESTAMP
-        """, (
-            role,
-            int(bool(permissions.get('can_start_stage', False))),
-            int(bool(permissions.get('can_end_stage', False))),
-            int(bool(permissions.get('can_edit_dates', False))),
-            int(bool(permissions.get('can_sync_master', False))),
-            int(bool(permissions.get('can_critical_path', False))),
-            int(bool(permissions.get('can_manage_permissions', False))),
-        ))
-        con.commit()
-    finally:
-        con.close()
+def set_role_permissions(rm_master_db_path: str = None, role: str = "",
+                         permissions: Dict = None):
+    """Zapisz uprawnienia roli (upsert)."""
+    permissions = permissions or {}
+    rmm_exec("rmm-rm-user-permissions-dodaj-2", {"role": role, **{
+        k: int(bool(permissions.get(k, False))) for k in (
+            'can_start_stage', 'can_end_stage', 'can_edit_dates',
+            'can_sync_master', 'can_critical_path', 'can_manage_permissions')}})
 
 
 # ===========================================================================
@@ -5444,44 +5320,29 @@ FEATURE_PLC_CODES = 'plc_codes'
 FEATURE_PROJECT_LIST = 'project_list'
 
 
-def get_feature_users(rm_master_db_path: str, feature: str) -> List[str]:
-    """Zwraca listę username posiadających uprawnienie do danej funkcji."""
+def get_feature_users(rm_master_db_path: str = None, feature: str = "") -> List[str]:
+    """Loginy uprawnione do danej funkcji."""
     try:
-        if not Path(rm_master_db_path).exists():
-            return []
-        con = _open_rm_connection(rm_master_db_path)
-        rows = con.execute(
-            "SELECT username FROM rm_feature_user_permissions "
-            "WHERE feature = ? ORDER BY username",
-            (feature,)
-        ).fetchall()
-        con.close()
-        return [r['username'] for r in rows]
+        return [r['username'] for r in
+                rmm_read("rmm-feature-users-po-feature", {"feature": feature})]
     except Exception as e:
         print(f"⚠️  get_feature_users({feature}): {e}")
         return []
 
 
-def set_feature_users(rm_master_db_path: str, feature: str, usernames: List[str]):
-    """Zastępuje pełną listę użytkowników uprawnionych do danej funkcji."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        con.execute("DELETE FROM rm_feature_user_permissions WHERE feature = ?", (feature,))
-        unique = []
-        seen = set()
-        for u in usernames:
-            u = (u or "").strip()
-            if u and u not in seen:
-                seen.add(u)
-                unique.append(u)
-        if unique:
-            con.executemany(
-                "INSERT INTO rm_feature_user_permissions (feature, username) VALUES (?, ?)",
-                [(feature, u) for u in unique]
-            )
-        con.commit()
-    finally:
-        con.close()
+def set_feature_users(rm_master_db_path: str = None, feature: str = "",
+                      usernames: List[str] = None):
+    """Podmień listę loginów dla funkcji (czyszczenie + wstawienie jednym batchem)."""
+    unique, seen = [], set()
+    for u in (usernames or []):
+        u = (u or "").strip()
+        if u and u not in seen:
+            seen.add(u)
+            unique.append(u)
+    rmm_batch([{"operation": "rmm-rm-feature-user-permissions-usun-po-feature",
+                "params": {"feature": feature}}]
+              + [{"operation": "rmm-rm-feature-user-permissions-dodaj",
+                  "params": {"feature": feature, "username": u}} for u in unique])
 
 
 def has_feature_permission(rm_master_db_path: str, feature: str, username: str,
@@ -5840,45 +5701,26 @@ PROJECT_PRIORITY_LABELS = {1: 'Turbo', 2: 'Pilny', 3: 'Normalny'}
 DEFAULT_PRIORITY_WEIGHTS = {1: 100, 2: 10, 3: 1}
 
 
-def get_priority_weights(rm_master_db_path: str) -> Dict[int, int]:
-    """Zwróć słownik {level: weight} dla wszystkich poziomów priorytetów.
-
-    Jeśli tabela nie istnieje lub jest niekompletna, uzupełnia z DEFAULT.
-    """
+def get_priority_weights(rm_master_db_path: str = None) -> Dict[int, int]:
+    """Wagi priorytetów {1: Turbo, 2: Pilny, 3: Normalny}; przy błędzie domyślne."""
     weights = dict(DEFAULT_PRIORITY_WEIGHTS)
     try:
-        ensure_list_tables(rm_master_db_path)
-        con = _open_rm_connection(rm_master_db_path)
-        try:
-            rows = con.execute("SELECT level, weight FROM priority_weights").fetchall()
-            for r in rows:
-                lvl = int(r['level'] if hasattr(r, 'keys') else r[0])
-                w = int(r['weight'] if hasattr(r, 'keys') else r[1])
-                if lvl in (1, 2, 3) and w > 0:
-                    weights[lvl] = w
-        finally:
-            con.close()
+        for r in rmm_read("rmm-priority-weights-2"):
+            lvl, w = int(r['level']), int(r['weight'])
+            if lvl in (1, 2, 3) and w > 0:
+                weights[lvl] = w
     except Exception as e:
         print(f"⚠️ get_priority_weights fallback do DEFAULT: {e}")
     return weights
 
 
-def set_priority_weight(rm_master_db_path: str, level: int, weight: int):
-    """Ustaw wagę dla poziomu priorytetu (1/2/3). weight musi być > 0."""
+def set_priority_weight(rm_master_db_path: str = None, level: int = 0, weight: int = 1):
+    """Ustaw wagę poziomu priorytetu (upsert)."""
     if level not in (1, 2, 3):
         raise ValueError(f"Nieprawidłowy poziom priorytetu: {level}")
-    w = max(1, int(weight))
-    ensure_list_tables(rm_master_db_path)
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        label = PROJECT_PRIORITY_LABELS.get(level, str(level))
-        con.execute("""
-            INSERT INTO priority_weights (level, label, weight) VALUES (?, ?, ?)
-            ON CONFLICT(level) DO UPDATE SET weight = excluded.weight, label = excluded.label
-        """, (level, label, w))
-        con.commit()
-    finally:
-        con.close()
+    rmm_exec("rmm-priority-weights-dodaj-2", {
+        "level": level, "label": PROJECT_PRIORITY_LABELS.get(level, str(level)),
+        "weight": max(1, int(weight))})
 
 
 def get_project_priority(master_db_path: str, project_id: int) -> Optional[int]:
@@ -5919,66 +5761,29 @@ def get_all_project_priorities(master_db_path: str) -> Dict[int, int]:
         return {}
 
 
-def get_transports(rm_master_db_path: str, active_only: bool = False) -> List[Dict]:
-    """Pobierz pozycje z listy transport."""
-    ensure_list_tables(rm_master_db_path)
-    con = _open_rm_connection(rm_master_db_path)
-    where = "WHERE is_active = 1" if active_only else ""
-    rows = con.execute(
-        f"SELECT * FROM transports {where} ORDER BY name", ()
-    ).fetchall()
-    con.close()
-    return [dict(r) for r in rows]
+def get_transports(rm_master_db_path: str = None, active_only: bool = False) -> List[Dict]:
+    """Firmy transportowe (opcjonalnie tylko aktywne)."""
+    return [dict(w) for w in rmm_read("rmm-transports-wszystkie")
+            if not active_only or w.get("is_active")]
 
 
-def save_transport(rm_master_db_path: str, data: Dict) -> int:
-    """Dodaj lub aktualizuj pozycję transportu.
-    data musi zawierać: name.
-    Opcjonalne: description, contact_info, is_active, id (gdy update).
-    """
-    ensure_list_tables(rm_master_db_path)
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        if data.get('id'):
-            con.execute("""
-                UPDATE transports SET
-                    name         = ?,
-                    description  = ?,
-                    contact_info = ?,
-                    is_active    = ?,
-                    updated_at   = CURRENT_TIMESTAMP
-                WHERE id = ?
-            """, (
-                data['name'],
-                data.get('description', ''), data.get('contact_info', ''),
-                int(bool(data.get('is_active', True))),
-                data['id']
-            ))
-            row_id = data['id']
-        else:
-            cur = con.execute("""
-                INSERT INTO transports (name, description, contact_info, is_active)
-                VALUES (?, ?, ?, ?)
-            """, (
-                data['name'],
-                data.get('description', ''), data.get('contact_info', ''),
-                int(bool(data.get('is_active', True))),
-            ))
-            row_id = cur.lastrowid
-        con.commit()
-        return row_id
-    finally:
-        con.close()
+def save_transport(rm_master_db_path: str = None, data: Dict = None) -> int:
+    """Dodaj lub zaktualizuj firmę transportową. Zwraca id."""
+    data = data or {}
+    params = {"name": data['name'], "description": data.get('description', ''),
+              "contact_info": data.get('contact_info', ''),
+              "is_active": int(bool(data.get('is_active', True)))}
+    if data.get('id'):
+        params["id"] = data['id']
+        rmm_exec("rmm-transports-zmien-po-id", params)
+        return data['id']
+    wynik = rmm_exec("rmm-transports-dodaj", params)
+    return int((wynik or {}).get("lastrowid") or 0)
 
 
-def delete_transport(rm_master_db_path: str, transport_id: int):
-    """Usuń pozycję transportu z bazy (fizycznie)."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        con.execute("DELETE FROM transports WHERE id = ?", (transport_id,))
-        con.commit()
-    finally:
-        con.close()
+def delete_transport(rm_master_db_path: str = None, transport_id: int = 0):
+    """Usuń firmę transportową."""
+    rmm_exec("rmm-transports-usun-po-id", {"id": transport_id})
 
 
 def get_stage_transport_id(project_db_path: str, project_id: int, stage_code: str) -> int:
@@ -9350,65 +9155,31 @@ def send_custom_sms(rm_db_path: str, project_id: int, message: str,
 # OPTYMALIZATOR PRODUKCJI — CRUD ograniczeń zasobów (2026-04-19)
 # ============================================================================
 
-def get_resource_constraints(rm_master_db_path: str, active_only: bool = True) -> List[Dict]:
-    """Pobierz ograniczenia zasobów."""
-    ensure_rm_master_tables(rm_master_db_path)
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        where = "WHERE is_active = 1" if active_only else ""
-        rows = con.execute(f"""
-            SELECT * FROM resource_constraints {where}
-            ORDER BY constraint_type, category, stage_code
-        """).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        con.close()
+def get_resource_constraints(rm_master_db_path: str = None, active_only: bool = True) -> List[Dict]:
+    """Ograniczenia zasobów dla optymalizatora (domyślnie tylko aktywne)."""
+    return [dict(w) for w in rmm_read("rmm-resource-constraints-wszystkie")
+            if not active_only or w.get("is_active")]
 
 
-def save_resource_constraint(rm_master_db_path: str, data: Dict, user: str = None) -> int:
-    """Dodaj lub zaktualizuj ograniczenie zasobu.
-    
-    data keys: id (opt), constraint_type, category, stage_code, max_parallel, description, is_active
-    """
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        if data.get('id'):
-            con.execute("""
-                UPDATE resource_constraints
-                SET constraint_type = ?, category = ?, stage_code = ?,
-                    max_parallel = ?, description = ?, is_active = ?,
-                    modified_at = CURRENT_TIMESTAMP, modified_by = ?
-                WHERE id = ?
-            """, (data['constraint_type'], data.get('category'),
-                  data.get('stage_code'), data.get('max_parallel', 1),
-                  data.get('description'), data.get('is_active', 1),
-                  user, data['id']))
-            _rm_safe_commit(con)
-            return data['id']
-        else:
-            cursor = con.execute("""
-                INSERT INTO resource_constraints
-                    (constraint_type, category, stage_code, max_parallel,
-                     description, is_active, created_by)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (data['constraint_type'], data.get('category'),
-                  data.get('stage_code'), data.get('max_parallel', 1),
-                  data.get('description'), data.get('is_active', 1),
-                  user))
-            _rm_safe_commit(con)
-            return cursor.lastrowid
-    finally:
-        con.close()
+def save_resource_constraint(rm_master_db_path: str = None, data: Dict = None,
+                             user: str = None) -> int:
+    """Dodaj lub zaktualizuj ograniczenie zasobów. Zwraca id."""
+    data = data or {}
+    params = {"constraint_type": data['constraint_type'], "category": data.get('category'),
+              "stage_code": data.get('stage_code'), "max_parallel": data.get('max_parallel', 1),
+              "description": data.get('description'), "is_active": data.get('is_active', 1)}
+    if data.get('id'):
+        params.update(modified_by=user, id=data['id'])
+        rmm_exec("rmm-resource-constraints-zmien-po-id", params)
+        return data['id']
+    params["created_by"] = user
+    wynik = rmm_exec("rmm-resource-constraints-dodaj-2", params)
+    return int((wynik or {}).get("lastrowid") or 0)
 
 
-def delete_resource_constraint(rm_master_db_path: str, constraint_id: int):
-    """Usuń ograniczenie zasobu."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        con.execute("DELETE FROM resource_constraints WHERE id = ?", (constraint_id,))
-        _rm_safe_commit(con)
-    finally:
-        con.close()
+def delete_resource_constraint(rm_master_db_path: str = None, constraint_id: int = 0):
+    """Usuń ograniczenie zasobów."""
+    rmm_exec("rmm-resource-constraints-usun-po-id", {"id": constraint_id})
 
 
 # ============================================================================
@@ -9650,81 +9421,57 @@ SERVICE_TRIP_STATUS_COLORS = {
 }
 
 
-def get_service_trips(rm_master_db_path: str, employee_id: int = None,
+def get_service_trips(rm_master_db_path: str = None, employee_id: int = None,
                       date_from: str = None, date_to: str = None) -> List[Dict]:
-    """Pobierz wyjazdy serwisowe (linia B). Filtry: pracownik + zakres dat.
-
-    Zakres dat = nakładanie (wyjazd, który choć częściowo mieści się w oknie).
-    Dołącza employee_name i employee_category z tabeli employees.
-    """
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        clauses, params = [], []
-        if employee_id is not None:
-            clauses.append("st.employee_id = ?")
-            params.append(employee_id)
+    """Wyjazdy serwisowe z nazwiskiem (filtr po pracowniku i nachodzeniu dat)."""
+    out = []
+    for w in rmm_read("rmm-wyjazdy-z-nazwiskami"):
+        if employee_id is not None and w.get("employee_id") != employee_id:
+            continue
         # Nakładanie zakresów: trip.from <= window.to AND trip.to >= window.from
-        if date_to:
-            clauses.append("st.date_from <= ?")
-            params.append(date_to)
-        if date_from:
-            clauses.append("st.date_to >= ?")
-            params.append(date_from)
-        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-        rows = con.execute(f"""
-            SELECT st.*, e.name AS employee_name, e.category AS employee_category
-            FROM service_trips st
-            LEFT JOIN employees e ON e.id = st.employee_id
-            {where}
-            ORDER BY st.date_from
-        """, params).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        con.close()
+        if date_to and (w.get("date_from") or "") > date_to:
+            continue
+        if date_from and (w.get("date_to") or "") < date_from:
+            continue
+        out.append(dict(w))
+    out.sort(key=lambda w: (w.get("date_from") or "", w.get("id") or 0))
+    return out
 
 
-def add_service_trip(rm_master_db_path: str, employee_id: int, date_from: str,
-                     date_to: str, trip_type: str = 'INNE',
+def add_service_trip(rm_master_db_path: str = None, employee_id: int = 0, date_from: str = "",
+                     date_to: str = "", trip_type: str = 'INNE',
                      client_or_place: str = None, project_id: int = None,
                      status: str = 'PLANOWANY', note: str = None,
                      user: str = None) -> int:
-    """Dodaj wyjazd serwisowy. Zwraca id nowego wpisu."""
+    """Dodaj wyjazd serwisowy. Zwraca id."""
     trip_type = (trip_type or 'INNE').upper()
     if trip_type not in SERVICE_TRIP_TYPE_CODES:
         trip_type = 'INNE'
     status = (status or 'PLANOWANY').upper()
     if status not in SERVICE_TRIP_STATUSES:
         raise ValueError(f"Nieznany status wyjazdu: {status}")
-    # Dni robocze wg kalendarza firmowego (bez weekendów/świąt) — liczone po
-    # cichu, nie wyświetlane w GUI; do odczytu przez zewnętrzne narzędzia.
-    # Tylko dla ZREALIZOWANY — dopóki wyjazd jest planowany/potwierdzony,
-    # dni jeszcze się nie "wydarzyły" faktycznie.
-    working_days = (compute_absence_days(rm_master_db_path, date_from, date_to)['working_days']
+    # Dni robocze wg kalendarza firmowego — tylko dla ZREALIZOWANY: dopóki
+    # wyjazd jest planowany/potwierdzony, dni jeszcze się nie "wydarzyły".
+    working_days = (compute_absence_days(None, date_from, date_to)['working_days']
                     if status == 'ZREALIZOWANY' else None)
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        cur = con.execute("""
-            INSERT INTO service_trips
-                (employee_id, project_id, client_or_place, trip_type,
-                 date_from, date_to, status, note, created_by, working_days)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (employee_id, project_id, client_or_place, trip_type,
-              date_from[:10], date_to[:10], status, note, user, working_days))
-        _rm_safe_commit(con)
-        return cur.lastrowid
-    finally:
-        con.close()
+    wynik = rmm_exec("rmm-service-trips-dodaj", {
+        "employee_id": employee_id, "project_id": project_id,
+        "client_or_place": client_or_place, "trip_type": trip_type,
+        "date_from": date_from[:10], "date_to": date_to[:10], "status": status,
+        "note": note, "created_by": user, "working_days": working_days})
+    return int((wynik or {}).get("lastrowid") or 0)
 
 
-def update_service_trip(rm_master_db_path: str, trip_id: int, **fields):
-    """Zaktualizuj wybrane pola wyjazdu serwisowego.
+def update_service_trip(rm_master_db_path: str = None, trip_id: int = 0, **fields):
+    """Zmień wybrane pola wyjazdu.
 
-    Dozwolone pola: employee_id, project_id, client_or_place, trip_type,
-    date_from, date_to, status, note.
+    Scalamy zmiany z aktualnym wierszem i wysyłamy KOMPLET (`rmm-service-trip-
+    nadpisz`, bez COALESCE): `working_days` musi dać się ustawić na NULL, gdy
+    wyjazd przestaje być ZREALIZOWANY, a pola tekstowe — wyczyścić.
     """
     allowed = {'employee_id', 'project_id', 'client_or_place', 'trip_type',
                'date_from', 'date_to', 'status', 'note'}
-    sets, params = [], []
+    zmiany = {}
     for k, v in fields.items():
         if k not in allowed:
             continue
@@ -9738,43 +9485,30 @@ def update_service_trip(rm_master_db_path: str, trip_id: int, **fields):
                 raise ValueError(f"Nieznany status wyjazdu: {v}")
         if k in ('date_from', 'date_to') and v:
             v = v[:10]
-        sets.append(f"{k} = ?")
-        params.append(v)
-    if not sets:
+        zmiany[k] = v
+    if not zmiany:
         return
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        # Przelicz working_days gdy zmienia się zakres dat lub status — scal
-        # z aktualnymi wartościami w bazie, żeby policzyć efektywny stan.
-        # Tylko dla ZREALIZOWANY (patrz add_service_trip) — inaczej NULL.
-        if 'date_from' in fields or 'date_to' in fields or 'status' in fields:
-            row = con.execute(
-                "SELECT date_from, date_to, status FROM service_trips WHERE id = ?",
-                (trip_id,)).fetchone()
-            eff_from = fields.get('date_from', row['date_from'] if row else None)
-            eff_to = fields.get('date_to', row['date_to'] if row else None)
-            eff_status = fields.get('status', row['status'] if row else None)
-            if eff_from and eff_to and eff_status == 'ZREALIZOWANY':
-                wd = compute_absence_days(rm_master_db_path, eff_from, eff_to)['working_days']
-            else:
-                wd = None
-            sets.append("working_days = ?")
-            params.append(wd)
-        params.append(trip_id)
-        con.execute(f"UPDATE service_trips SET {', '.join(sets)} WHERE id = ?", params)
-        _rm_safe_commit(con)
-    finally:
-        con.close()
+    rows = rmm_read("rmm-service-trip-po-id-pelny", {"id": trip_id})
+    if not rows:
+        return
+    stan = dict(rows[0])
+    stan.update(zmiany)
+    # Przelicz working_days, gdy zmienia się zakres dat lub status —
+    # tylko dla ZREALIZOWANY (patrz add_service_trip), inaczej NULL.
+    if {'date_from', 'date_to', 'status'} & set(zmiany):
+        if stan.get('date_from') and stan.get('date_to') and stan.get('status') == 'ZREALIZOWANY':
+            stan['working_days'] = compute_absence_days(
+                None, stan['date_from'], stan['date_to'])['working_days']
+        else:
+            stan['working_days'] = None
+    rmm_exec("rmm-service-trip-nadpisz", {k: stan.get(k) for k in (
+        'employee_id', 'project_id', 'client_or_place', 'trip_type', 'date_from',
+        'date_to', 'status', 'note', 'working_days')} | {"id": trip_id})
 
 
-def delete_service_trip(rm_master_db_path: str, trip_id: int):
+def delete_service_trip(rm_master_db_path: str = None, trip_id: int = 0):
     """Usuń wyjazd serwisowy."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        con.execute("DELETE FROM service_trips WHERE id = ?", (trip_id,))
-        _rm_safe_commit(con)
-    finally:
-        con.close()
+    rmm_exec("rmm-service-trips-usun-po-id", {"id": trip_id})
 
 
 # ============================================================================
@@ -10461,62 +10195,32 @@ def get_working_days(rm_master_db_path: str = None, date_from="", date_to="") ->
     return working
 
 
-def save_optimization_run(rm_master_db_path: str, data: Dict, user: str = None) -> int:
-    """Zapisz wynik optymalizacji."""
+def save_optimization_run(rm_master_db_path: str = None, data: Dict = None,
+                          user: str = None) -> int:
+    """Zapisz przebieg optymalizatora. Zwraca id."""
     import json
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        cursor = con.execute("""
-            INSERT INTO optimization_runs
-                (run_mode, project_ids_json, date_range_start, date_range_end,
-                 constraints_snapshot, result_json, score_before, score_after,
-                 solver_status, solver_time_ms, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            data['run_mode'],
-            json.dumps(data['project_ids']),
-            data.get('date_range_start'),
-            data.get('date_range_end'),
-            json.dumps(data.get('constraints_snapshot', {})),
-            json.dumps(data.get('result', {})),
-            data.get('score_before'),
-            data.get('score_after'),
-            data.get('solver_status'),
-            data.get('solver_time_ms'),
-            user
-        ))
-        _rm_safe_commit(con)
-        return cursor.lastrowid
-    finally:
-        con.close()
+    data = data or {}
+    wynik = rmm_exec("rmm-optimization-runs-dodaj", {
+        "run_mode": data['run_mode'], "project_ids_json": json.dumps(data['project_ids']),
+        "date_range_start": data.get('date_range_start'),
+        "date_range_end": data.get('date_range_end'),
+        "constraints_snapshot": json.dumps(data.get('constraints_snapshot', {})),
+        "result_json": json.dumps(data.get('result', {})),
+        "score_before": data.get('score_before'), "score_after": data.get('score_after'),
+        "solver_status": data.get('solver_status'),
+        "solver_time_ms": data.get('solver_time_ms'), "created_by": user})
+    return int((wynik or {}).get("lastrowid") or 0)
 
 
-def mark_optimization_applied(rm_master_db_path: str, run_id: int, user: str = None):
-    """Oznacz zapis optymalizacji jako zastosowany."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        con.execute("""
-            UPDATE optimization_runs
-            SET applied = 1, applied_at = CURRENT_TIMESTAMP, applied_by = ?
-            WHERE id = ?
-        """, (user, run_id))
-        _rm_safe_commit(con)
-    finally:
-        con.close()
+def mark_optimization_applied(rm_master_db_path: str = None, run_id: int = 0,
+                              user: str = None):
+    """Oznacz przebieg jako zastosowany."""
+    rmm_exec("rmm-optimization-runs-zmien-po-id", {"applied_by": user, "id": run_id})
 
 
-def get_optimization_runs(rm_master_db_path: str, limit: int = 20) -> List[Dict]:
-    """Pobierz historię optymalizacji."""
-    con = _open_rm_connection(rm_master_db_path)
-    try:
-        rows = con.execute("""
-            SELECT * FROM optimization_runs
-            ORDER BY created_at DESC
-            LIMIT ?
-        """, (limit,)).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        con.close()
+def get_optimization_runs(rm_master_db_path: str = None, limit: int = 20) -> List[Dict]:
+    """Ostatnie przebiegi optymalizatora (najnowsze pierwsze)."""
+    return [dict(r) for r in rmm_read("rmm-optimization-runs", {"p1": limit})]
 
 
 # ============================================================================
