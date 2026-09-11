@@ -1145,6 +1145,17 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             tk.Label(leg, text=opis, bg="#f8f9f9", fg="#7f8c8d",
                      font=("Arial", 8)).pack(side=tk.LEFT, pady=2)
 
+        # Ikona PDF znaczy „wydruk istnieje", a plik powstaje też przy zwykłym
+        # podglądzie — czytano ją jako „wysłane" (zgłoszone 11.09.2026).
+        tk.Label(leg, text="   PDF:", bg="#f8f9f9", font=("Arial", 8, "bold")
+                 ).pack(side=tk.LEFT, padx=(18, 4), pady=2)
+        for kolor, opis in (("#2e6da4", "wysłany do dostawcy"),
+                            ("#b0b8bf", "wydruk jest, ale NIE wysłany")):
+            tk.Label(leg, text="📄", bg="#f8f9f9", fg=kolor,
+                     font=("Arial", 9)).pack(side=tk.LEFT, padx=(6, 2), pady=2)
+            tk.Label(leg, text=opis, bg="#f8f9f9", fg="#7f8c8d",
+                     font=("Arial", 8)).pack(side=tk.LEFT, pady=2)
+
         self.summary = tk.Label(self, text="Wczytywanie…", bg="#ecf0f1", fg="#2c3e50",
                                 font=("Arial", 9), anchor="w", padx=12, pady=6)
         self.summary.pack(side=tk.TOP, fill=tk.X)
@@ -1773,6 +1784,15 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
                 # daltonizm). Sama wysyłka czytana jest z kolumny „Wysłano".
                 self.sheet.highlight_cells(row=i, column=self.COL_ZD,
                                            bg="#2e6da4", fg="white")
+                # Ikona PDF mówi tylko „wydruk istnieje" — a plik powstaje
+                # też przy zwykłym podglądzie. Bez rozróżnienia czytało się
+                # ją jako „wysłane" (zgłoszone 11.09.2026: „ZD 6 ma pdf
+                # mówiący o wysłaniu, ale nie ma daty wysyłania").
+                # Wysłany wydruk = czarna ikona, sam wygenerowany = szara.
+                if self._plik_pdf(w.get("zd")):
+                    self.sheet.highlight_cells(
+                        row=i, column=self.COL_PDF, bg=tlo,
+                        fg="#2e6da4" if wyslane else "#b0b8bf")
                 # Niewysłane ZD — data na pomarańczowo, bo to jest zaległość.
                 if not wyslane:
                     self.sheet.highlight_cells(row=i, column=self.COL_WYSLANO,
