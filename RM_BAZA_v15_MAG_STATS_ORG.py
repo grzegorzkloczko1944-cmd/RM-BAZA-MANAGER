@@ -3378,14 +3378,16 @@ class MainWindow(tk.Tk):
         (reconnect_master_rw) — wcześniej połączenie jest READ-ONLY i
         ALTER TABLE kończy się błędem "attempt to write a readonly database".
         """
+        # Kolumnę `nip` dokłada wspólna migracja (rm_serwer_operacje.MIGRACJE),
+        # wykonywana przez właściciela pliku. Metoda zostaje jako punkt
+        # wywołania po przełączeniu mastera na READ-WRITE.
         try:
-            cols_sup = [r[1] for r in self.db_manager.master_con.execute("PRAGMA table_info(suppliers)").fetchall()]
-            if "nip" not in cols_sup:
-                self.db_manager.master_con.execute("ALTER TABLE suppliers ADD COLUMN nip TEXT")
-                self.db_manager.master_commit()
-                print("✅ Kolumna nip dodana do suppliers")
+            import rm_serwer_operacje as _ops
+            if self.db_manager.master_con is not None:
+                for z in _ops.zastosuj_migracje(self.db_manager.master_con):
+                    print(f"✅ Migracja: {z}")
         except Exception as e:
-            print(f"⚠️  Błąd dodawania kolumny nip do suppliers: {e}")
+            print(f"ℹ️  Migracje pominięte: {e}")
 
     def _init_items_audit_log(self):
         """Inicjalizuj tabelę logowania zmian pozycji projektu"""
@@ -27539,25 +27541,7 @@ class MainWindow(tk.Tk):
     
     def show_user_audit_log(self):
         """Wyświetl historię zmian użytkowników"""
-        # Upewnij się że tabela istnieje
-        try:
-            self.db_manager.master_con.execute("""
-                CREATE TABLE IF NOT EXISTS user_changes_log (
-                    change_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    action TEXT NOT NULL,
-                    user_id INTEGER,
-                    username TEXT,
-                    display_name TEXT,
-                    role TEXT,
-                    changed_by TEXT,
-                    timestamp TEXT NOT NULL,
-                    details TEXT
-                )
-            """)
-            self.db_manager.master_commit()
-        except Exception as e:
-            messagebox.showerror("Błąd", f"Nie można utworzyć tabeli user_changes_log:\n{e}")
-            return
+        # Tabelę zakłada migracja przy starcie — okno tylko czyta.
         
         dlg = tk.Toplevel(self)
         dlg.title("📜 Historia zmian użytkowników")
