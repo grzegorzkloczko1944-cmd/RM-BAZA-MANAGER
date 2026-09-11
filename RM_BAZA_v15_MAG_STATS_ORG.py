@@ -6559,10 +6559,10 @@ class MainWindow(tk.Tk):
             return
         nazwa = None
         try:
-            row = self.db_manager.master_con.execute(
-                "SELECT name FROM projects WHERE project_id = ?", (pid,)).fetchone()
+            _w = self.db_manager.master_read("project-name", {"project_id": pid})
+            row = _w[0]["name"] if _w else None
             if row:
-                nazwa = row[0]
+                nazwa = row
         except Exception:
             nazwa = None
         self._current_project_name_for_roles = nazwa
@@ -6679,10 +6679,9 @@ class MainWindow(tk.Tk):
         nazwa = getattr(self, "_current_project_name_for_roles", None)
         if not nazwa:
             try:
-                row = self.db_manager.master_con.execute(
-                    "SELECT name FROM projects WHERE project_id = ?",
-                    (self.current_project_id,)).fetchone()
-                nazwa = row[0] if row else None
+                _w = self.db_manager.master_read("project-name", {"project_id": self.current_project_id})
+                row = _w[0]["name"] if _w else None
+                nazwa = row if row else None
             except Exception:
                 nazwa = None
         nazwa = nazwa or str(self.current_project_id)
@@ -8819,10 +8818,9 @@ class MainWindow(tk.Tk):
         """Plik .dwf dla numeru rysunku w folderze bieżącego projektu na V:\\,
         albo None (brak projektu / brak dysku / brak pasującego pliku)."""
         try:
-            project_row = self.db_manager.master_con.execute(
-                "SELECT name FROM projects WHERE project_id = ?", (self.current_project_id,)
-            ).fetchone()
-            project_name = project_row[0] if project_row else None
+            _w = self.db_manager.master_read("project-name", {"project_id": self.current_project_id})
+            project_row = _w[0]["name"] if _w else None
+            project_name = project_row if project_row else None
         except Exception:
             return None
 
@@ -11702,10 +11700,9 @@ class MainWindow(tk.Tk):
             print(f"⚠️  rmpak calc columns migration: {e}")
 
         try:
-            row = self.db_manager.master_con.execute(
-                "SELECT name FROM projects WHERE project_id = ?", (self.current_project_id,)
-            ).fetchone()
-            project_name = row[0] if row else str(self.current_project_id)
+            _w = self.db_manager.master_read("project-name", {"project_id": self.current_project_id})
+            row = _w[0]["name"] if _w else None
+            project_name = row if row else str(self.current_project_id)
         except Exception:
             project_name = str(self.current_project_id)
 
@@ -14937,10 +14934,9 @@ class MainWindow(tk.Tk):
             return
 
         try:
-            project_row = self.db_manager.master_con.execute(
-                "SELECT name FROM projects WHERE project_id = ?", (self.current_project_id,)
-            ).fetchone()
-            project_name = project_row[0] if project_row else None
+            _w = self.db_manager.master_read("project-name", {"project_id": self.current_project_id})
+            project_row = _w[0]["name"] if _w else None
+            project_name = project_row if project_row else None
         except Exception:
             project_name = None
 
@@ -30050,11 +30046,10 @@ class MainWindow(tk.Tk):
         # z których czytane jest drzewo złożeń (skład kompletów).
         project_name = None
         try:
-            row = self.db_manager.master_con.execute(
-                "SELECT name FROM projects WHERE project_id = ?",
-                (self.current_project_id,)).fetchone()
+            _w = self.db_manager.master_read("project-name", {"project_id": self.current_project_id})
+            row = _w[0]["name"] if _w else None
             if row:
-                project_name = row[0]
+                project_name = row
         except Exception:
             project_name = None
 
@@ -30082,11 +30077,10 @@ class MainWindow(tk.Tk):
 
         project_name = None
         try:
-            row = self.db_manager.master_con.execute(
-                "SELECT name FROM projects WHERE project_id = ?",
-                (self.current_project_id,)).fetchone()
+            _w = self.db_manager.master_read("project-name", {"project_id": self.current_project_id})
+            row = _w[0]["name"] if _w else None
             if row:
-                project_name = row[0]
+                project_name = row
         except Exception:
             project_name = None
 
@@ -30112,11 +30106,10 @@ class MainWindow(tk.Tk):
         project_name = None
         if self.current_project_id:
             try:
-                row = self.db_manager.master_con.execute(
-                    "SELECT name FROM projects WHERE project_id = ?",
-                    (self.current_project_id,)).fetchone()
+                _w = self.db_manager.master_read("project-name", {"project_id": self.current_project_id})
+                row = _w[0]["name"] if _w else None
                 if row:
-                    project_name = row[0]
+                    project_name = row
             except Exception:
                 project_name = None
 
@@ -30156,11 +30149,10 @@ class MainWindow(tk.Tk):
 
         projekt = None
         try:
-            row = self.db_manager.master_con.execute(
-                "SELECT name FROM projects WHERE project_id = ?",
-                (self.current_project_id,)).fetchone()
-            if row and row[0]:
-                projekt = str(row[0]).strip().split(" ")[0]
+            _w = self.db_manager.master_read("project-name", {"project_id": self.current_project_id})
+            row = _w[0]["name"] if _w else None
+            if row:
+                projekt = str(row).strip().split(" ")[0]
         except Exception:
             pass
 
@@ -30375,11 +30367,10 @@ class MainWindow(tk.Tk):
 
         project_name = None
         try:
-            row = self.db_manager.master_con.execute(
-                "SELECT name FROM projects WHERE project_id = ?",
-                (self.current_project_id,)).fetchone()
+            _w = self.db_manager.master_read("project-name", {"project_id": self.current_project_id})
+            row = _w[0]["name"] if _w else None
             if row:
-                project_name = row[0]
+                project_name = row
         except Exception:
             project_name = None
 
@@ -30417,11 +30408,10 @@ class MainWindow(tk.Tk):
         # w Subiekcie (pierwszy człon — patrz subiekt_zamowienia.sam_numer).
         project_name = None
         try:
-            row = self.db_manager.master_con.execute(
-                "SELECT name FROM projects WHERE project_id = ?",
-                (self.current_project_id,)).fetchone()
+            _w = self.db_manager.master_read("project-name", {"project_id": self.current_project_id})
+            row = _w[0]["name"] if _w else None
             if row:
-                project_name = row[0]
+                project_name = row
         except Exception:
             project_name = None
 
@@ -30530,11 +30520,10 @@ class MainWindow(tk.Tk):
 
         project_name = None
         try:
-            row = self.db_manager.master_con.execute(
-                "SELECT name FROM projects WHERE project_id = ?",
-                (self.current_project_id,)).fetchone()
+            _w = self.db_manager.master_read("project-name", {"project_id": self.current_project_id})
+            row = _w[0]["name"] if _w else None
             if row:
-                project_name = row[0]
+                project_name = row
         except Exception:
             project_name = None
 
@@ -30573,11 +30562,10 @@ class MainWindow(tk.Tk):
         project_name = None
         try:
             if self.db_manager and self.db_manager.master_con:
-                row = self.db_manager.master_con.execute(
-                    "SELECT name FROM projects WHERE project_id = ?",
-                    (self.current_project_id,)).fetchone()
+                _w = self.db_manager.master_read("project-name", {"project_id": self.current_project_id})
+                row = _w[0]["name"] if _w else None
                 if row:
-                    project_name = row[0]
+                    project_name = row
         except Exception:
             project_name = None
 
