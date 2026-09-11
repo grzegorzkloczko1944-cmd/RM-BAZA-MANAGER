@@ -3323,14 +3323,11 @@ class MainWindow(tk.Tk):
             
             # Wyświetl ostatnie 10 zmian z logów
             print(f"\n📜 Ostatnie 10 zmian w user_changes_log:")
-            cursor = self.db_manager.master_con.execute("""
-                SELECT change_id, action, username, display_name, changed_by, timestamp, details
-                FROM user_changes_log
-                ORDER BY change_id DESC
-                LIMIT 10
-            """)
-            for row in cursor.fetchall():
-                change_id, action, username, display_name, changed_by, timestamp, details = row
+            for _w in self.db_manager.master_read("user-audit-list", {"limit": 10}):
+                (change_id, action, username, display_name, changed_by, timestamp,
+                 details) = (_w["change_id"], _w["action"], _w["username"],
+                             _w["display_name"], _w["changed_by"], _w["timestamp"],
+                             _w["details"])
                 print(f"    #{change_id:3d} [{action:8s}] {username or 'N/A':15s} | przez: {changed_by:10s} | {timestamp} | {details or ''}")
             print("")
                 
@@ -5280,23 +5277,9 @@ class MainWindow(tk.Tk):
             
             users = []
             if users_rows is None:
-                # DODATKOWA WALIDACJA - sprawdź historię zmian w users (jeśli istnieje audit log)
-                try:
-                    # Sprawdź czy są dziwne zmiany w bazie
-                    audit_sql = """
-                        SELECT name FROM sqlite_master 
-                        WHERE type='table' AND name='user_audit_log'
-                    """
-                    has_audit = self.db_manager.master_con.execute(audit_sql).fetchone()
-                    if has_audit:
-                        print(f"🔍 Sprawdzam audit log użytkowników...")
-                        audit_data = self.db_manager.master_con.execute(
-                            "SELECT * FROM user_audit_log ORDER BY timestamp DESC LIMIT 10"
-                        ).fetchall()
-                        for row in audit_data:
-                            print(f"   {row}")
-                except:
-                    pass
+                # (Usunięty martwy kod: sprawdzał tabelę `user_audit_log`,
+                #  której w masterze NIE MA — jest `user_changes_log`.
+                #  Warunek nigdy nie był spełniony, więc blok nic nie robił.)
 
                 # Pobierz aktywnych użytkowników
                 sql = "SELECT id, username, display_name, role FROM users WHERE is_active = 1 ORDER BY username"
