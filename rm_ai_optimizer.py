@@ -413,6 +413,16 @@ TOOLS: List[Dict] = [
 # ---------------------------------------------------------------------------
 
 
+
+def _rmm():
+    """Klient RM_SERWER z rm_manager (konfiguruje adres przy pierwszym użyciu).
+
+    rm_manager jest tu importowany leniwie (jak w reszcie modułu), żeby
+    asystent AI nie ciągnął całego RM_MANAGER przy imporcie.
+    """
+    import rm_manager as _rm
+    return _rm._master()
+
 class AIOptimizerContext:
     """Przechowuje ścieżki do baz i eksponuje je narzędziom agenta."""
 
@@ -596,15 +606,8 @@ class AIOptimizerContext:
             # Nazwy pracowników
             employee_names: Dict[int, str] = {}
             try:
-                rm_con = self._open(self.rm_master_db_path)
-                try:
-                    emp_rows = rm_con.execute(
-                        "SELECT id, name FROM employees"
-                    ).fetchall()
-                    for e in emp_rows:
-                        employee_names[e["id"]] = e["name"]
-                finally:
-                    rm_con.close()
+                for e in _rmm().master_read("rmm-employees"):
+                    employee_names[e["id"]] = e["name"]
             except Exception:
                 pass
 
@@ -649,72 +652,50 @@ class AIOptimizerContext:
             con.close()
 
     def get_payment_status(self, project_id: Optional[int] = None) -> Dict:
-        """Transze płatności (payment_milestones w rm_manager.sqlite).
-
-        Rekord powstaje dopiero po odnotowaniu wpłaty (payment_date wymagane
-        przy dodaniu) - suma percentage to zapłacony procent, 100 - suma to
-        procent jeszcze nie zarejestrowany jako zapłacony.
-
-        Bez project_id: przechodzi po wszystkich aktywnych projektach
-        (analogicznie do get_delays) i zwraca tylko te z suma < 100%.
-
-        Wymaga uprawnienia "Transze płatności" - tego samego co okno w GUI.
-        """
+        """Transze płatności (payment_milestones w bazie RM_MANAGER, przez serwer).
+        Dla jednego projektu — jego transze; bez projektu — aktywne projekty
+        z niepełną płatnością."""
         denied = self._check_feature_permission("payment_milestones", "Transze płatności")
         if denied:
             return denied
 
-        try:
-            con = self._open(self.rm_master_db_path)
-        except Exception as e:
-            return {"error": f"Nie można otworzyć rm_manager.sqlite: {e}"}
-
         def _milestones_for(pid: int) -> List[Dict]:
             try:
-                rows = con.execute(
-                    "SELECT percentage, payment_date, payment_type, created_by"
-                    " FROM payment_milestones WHERE project_id = ? ORDER BY percentage",
-                    (pid,),
-                ).fetchall()
-            except sqlite3.OperationalError:
+                rows = _rmm().master_read("rmm-payment-milestones-po-project-id",
+                                                 {"project_id": pid})
+            except Exception:
                 return []
-            return [dict(r) for r in rows]
+            return sorted(({k: r.get(k) for k in ("percentage", "payment_date",
+                                                   "payment_type", "created_by")}
+                           for r in rows), key=lambda m: m["percentage"] or 0)
 
-        try:
-            if project_id is not None:
-                milestones = _milestones_for(project_id)
-                paid_pct = sum(m["percentage"] for m in milestones)
-                return {
-                    "project_id": project_id,
-                    "milestones": milestones,
-                    "paid_percentage": paid_pct,
-                    "remaining_percentage": max(0, 100 - paid_pct),
-                }
-
-            projects_result = self.get_projects_list(status_filter="active")
-            unpaid = []
-            for proj in projects_result["projects"]:
-                pid = proj["id"]
-                milestones = _milestones_for(pid)
-                paid_pct = sum(m["percentage"] for m in milestones)
-                if paid_pct >= 100:
-                    continue
-                unpaid.append({
-                    "project_id": pid,
-                    "project_name": proj.get("name", f"Projekt {pid}"),
-                    "project_status": proj.get("project_status"),
-                    "milestones": milestones,
-                    "paid_percentage": paid_pct,
-                    "remaining_percentage": 100 - paid_pct,
-                })
-
-            unpaid.sort(key=lambda x: x["paid_percentage"])
+        if project_id is not None:
+            milestones = _milestones_for(project_id)
+            paid_pct = sum(m["percentage"] for m in milestones)
             return {
-                "unpaid_projects": unpaid,
-                "count": len(unpaid),
+                "project_id": project_id,
+                "milestones": milestones,
+                "paid_percentage": paid_pct,
+                "remaining_percentage": max(0, 100 - paid_pct),
             }
-        finally:
-            con.close()
+        projects_result = self.get_projects_list(status_filter="active")
+        unpaid = []
+        for proj in projects_result["projects"]:
+            pid = proj["id"]
+            milestones = _milestones_for(pid)
+            paid_pct = sum(m["percentage"] for m in milestones)
+            if paid_pct >= 100:
+                continue
+            unpaid.append({
+                "project_id": pid,
+                "project_name": proj.get("name", f"Projekt {pid}"),
+                "project_status": proj.get("project_status"),
+                "milestones": milestones,
+                "paid_percentage": paid_pct,
+                "remaining_percentage": 100 - paid_pct,
+            })
+        unpaid.sort(key=lambda x: x["paid_percentage"])
+        return {"unpaid_projects": unpaid, "count": len(unpaid)}
 
     def _check_feature_permission(self, feature: str, label: str) -> Optional[Dict]:
         """Czy bieżący użytkownik ma uprawnienie do danej funkcji.
@@ -753,211 +734,119 @@ class AIOptimizerContext:
         }
 
     def _employee_names(self) -> Dict[int, str]:
-        """Mapa {employee_id: imię i nazwisko} z rm_manager.sqlite."""
-        names: Dict[int, str] = {}
+        """Mapa {employee_id: imię i nazwisko} z bazy RM_MANAGER (przez serwer)."""
         try:
-            con = self._open(self.rm_master_db_path)
-            try:
-                for r in con.execute("SELECT id, name FROM employees").fetchall():
-                    names[r["id"]] = r["name"]
-            finally:
-                con.close()
+            return {r["id"]: r["name"] for r in _rmm().master_read("rmm-employees")}
         except Exception:
-            pass
-        return names
+            return {}
 
     def get_absences(self, date_from: Optional[str] = None,
                      date_to: Optional[str] = None,
                      worker_name: Optional[str] = None) -> Dict:
-        """Nieobecności pracowników: urlopy, L4, delegacje (employee_availability).
-
-        Liczą się tylko wnioski ZATWIERDZONE - odrzucone/oczekujące nie blokują
-        dostępności. Zwraca też dni wolne firmowe (company_calendar) w zakresie.
-        """
+        """Nieobecności zatwierdzone (employee_availability) + dni wolne firmy,
+        z bazy RM_MANAGER przez serwer. Filtr dat = nakładanie zakresów."""
         names = self._employee_names()
         try:
-            con = self._open(self.rm_master_db_path)
+            rows = _rmm().master_read("rmm-nieobecnosci-z-nazwiskami")
         except Exception as e:
-            return {"error": f"Nie można otworzyć rm_manager.sqlite: {e}"}
-
+            return {"error": f"Brak danych o nieobecnościach: {e}"}
+        absences = []
+        for r in sorted(rows, key=lambda r: r.get("date_from") or ""):
+            if (r.get("status") or "ZATWIERDZONY") != "ZATWIERDZONY":
+                continue
+            if date_to and (r.get("date_from") or "") > date_to:
+                continue
+            if date_from and (r.get("date_to") or "") < date_from:
+                continue
+            name = names.get(r["employee_id"], f"ID:{r['employee_id']}")
+            if worker_name and worker_name.lower() not in name.lower():
+                continue
+            absences.append({
+                "employee_id": r["employee_id"], "worker": name,
+                "date_from": r["date_from"], "date_to": r["date_to"],
+                "reason": r.get("reason"), "notes": r.get("notes"),
+            })
+        holidays = []
         try:
-            sql = ("SELECT employee_id, date_from, date_to, reason, status, notes"
-                   " FROM employee_availability WHERE COALESCE(status,'ZATWIERDZONY') = 'ZATWIERDZONY'")
-            params: List = []
-            if date_to:
-                sql += " AND date_from <= ?"
-                params.append(date_to)
-            if date_from:
-                sql += " AND date_to >= ?"
-                params.append(date_from)
-            sql += " ORDER BY date_from"
-
-            try:
-                rows = con.execute(sql, params).fetchall()
-            except sqlite3.OperationalError as e:
-                return {"error": f"Brak danych o nieobecnościach: {e}"}
-
-            absences = []
-            for r in rows:
-                name = names.get(r["employee_id"], f"ID:{r['employee_id']}")
-                if worker_name and worker_name.lower() not in name.lower():
-                    continue
-                absences.append({
-                    "employee_id": r["employee_id"],
-                    "worker": name,
-                    "date_from": r["date_from"],
-                    "date_to": r["date_to"],
-                    "reason": r["reason"],
-                    "notes": r["notes"],
-                })
-
-            holidays = []
-            try:
-                hsql = "SELECT date, day_type, description FROM company_calendar"
-                hparams: List = []
-                if date_from and date_to:
-                    hsql += " WHERE date BETWEEN ? AND ?"
-                    hparams = [date_from, date_to]
-                hsql += " ORDER BY date"
-                holidays = [dict(r) for r in con.execute(hsql, hparams).fetchall()]
-            except sqlite3.OperationalError:
-                pass
-
-            return {
-                "absences": absences,
-                "count": len(absences),
-                "company_days_off": holidays,
-            }
-        finally:
-            con.close()
+            holidays = [{"date": h["date"], "day_type": h.get("day_type"),
+                         "description": h.get("description")}
+                        for h in _rmm().master_read("rmm-company-calendar-wszystkie")
+                        if not (date_from and date_to) or date_from <= h["date"] <= date_to]
+        except Exception:
+            pass
+        return {"absences": absences, "count": len(absences), "company_days_off": holidays}
 
     def get_service_trips(self, date_from: Optional[str] = None,
                           date_to: Optional[str] = None,
                           worker_name: Optional[str] = None) -> Dict:
-        """Wyjazdy serwisowe (service_trips) - kto jest u klienta i kiedy.
-
-        Wyjazd blokuje dostępność pracownika tak samo jak nieobecność.
-        """
+        """Wyjazdy serwisowe (service_trips) z bazy RM_MANAGER przez serwer."""
         names = self._employee_names()
         try:
-            con = self._open(self.rm_master_db_path)
+            rows = _rmm().master_read("rmm-wyjazdy-z-nazwiskami")
         except Exception as e:
-            return {"error": f"Nie można otworzyć rm_manager.sqlite: {e}"}
-
-        try:
-            sql = ("SELECT employee_id, project_id, client_or_place, trip_type,"
-                   " date_from, date_to, status, note, working_days FROM service_trips")
-            conds: List[str] = []
-            params: List = []
-            if date_to:
-                conds.append("date_from <= ?")
-                params.append(date_to)
-            if date_from:
-                conds.append("date_to >= ?")
-                params.append(date_from)
-            if conds:
-                sql += " WHERE " + " AND ".join(conds)
-            sql += " ORDER BY date_from"
-
-            try:
-                rows = con.execute(sql, params).fetchall()
-            except sqlite3.OperationalError as e:
-                return {"error": f"Brak danych o wyjazdach serwisowych: {e}"}
-
-            trips = []
-            for r in rows:
-                name = names.get(r["employee_id"], f"ID:{r['employee_id']}")
-                if worker_name and worker_name.lower() not in name.lower():
-                    continue
-                d = dict(r)
-                d["worker"] = name
-                trips.append(d)
-
-            return {"service_trips": trips, "count": len(trips)}
-        finally:
-            con.close()
+            return {"error": f"Brak danych o wyjazdach serwisowych: {e}"}
+        trips = []
+        for r in sorted(rows, key=lambda r: r.get("date_from") or ""):
+            if date_to and (r.get("date_from") or "") > date_to:
+                continue
+            if date_from and (r.get("date_to") or "") < date_from:
+                continue
+            name = names.get(r["employee_id"], f"ID:{r['employee_id']}")
+            if worker_name and worker_name.lower() not in name.lower():
+                continue
+            d = {k: r.get(k) for k in ("employee_id", "project_id", "client_or_place",
+                                       "trip_type", "date_from", "date_to", "status",
+                                       "note", "working_days")}
+            d["worker"] = name
+            trips.append(d)
+        return {"service_trips": trips, "count": len(trips)}
 
     def get_plc_codes(self, project_id: Optional[int] = None) -> Dict:
-        """Stan kodów odblokowujących PLC (plc_unlock_codes).
-
-        Zwraca STAN kodów (typ, czy wysłany/użyty, daty, ważność) - bez samych
-        wartości kodów: to faktyczne klucze do maszyn, agent ich nie potrzebuje
-        do analizy, a nie chcemy ich rozsiewać w treści czatu.
-
-        Wymaga uprawnienia "Kody odblokowujące PLC" - tego samego co okno w GUI.
-        """
+        """Kody PLC (bez samej wartości kodu) z bazy RM_MANAGER przez serwer."""
         denied = self._check_feature_permission("plc_codes", "Kody odblokowujące PLC")
         if denied:
             return denied
-
+        POLA = ("id", "project_id", "code_type", "description", "is_used", "used_at",
+                "used_by", "sent_at", "sent_by", "sent_via", "expiry_date", "created_at",
+                "created_by")
         try:
-            con = self._open(self.rm_master_db_path)
-        except Exception as e:
-            return {"error": f"Nie można otworzyć rm_manager.sqlite: {e}"}
-
-        try:
-            sql = ("SELECT id, project_id, code_type, description, is_used, used_at,"
-                   " used_by, sent_at, sent_by, sent_via, expiry_date, created_at,"
-                   " created_by FROM plc_unlock_codes")
-            params: List = []
             if project_id is not None:
-                sql += " WHERE project_id = ?"
-                params.append(project_id)
-            sql += " ORDER BY project_id, id"
-
-            try:
-                rows = con.execute(sql, params).fetchall()
-            except sqlite3.OperationalError as e:
-                return {"error": f"Brak danych o kodach PLC: {e}"}
-
-            codes = []
-            for r in rows:
-                d = dict(r)
-                d["code_present"] = True  # sama wartość kodu celowo nie jest zwracana
-                codes.append(d)
-
-            return {"plc_codes": codes, "count": len(codes)}
-        finally:
-            con.close()
+                rows = _rmm().master_read("rmm-plc-unlock-codes-po-project-id",
+                                                 {"project_id": project_id})
+                rows = sorted(rows, key=lambda r: (r.get("project_id") or 0, r.get("id") or 0))
+            else:
+                rows = _rmm().master_read("rmm-plc-unlock-codes-wszystkie")
+        except Exception as e:
+            return {"error": f"Brak danych o kodach PLC: {e}"}
+        codes = []
+        for r in rows:
+            d = {k: r.get(k) for k in POLA}
+            d["code_present"] = True  # sama wartość kodu celowo nie jest zwracana
+            codes.append(d)
+        return {"plc_codes": codes, "count": len(codes)}
 
     def get_production_lines(self) -> Dict:
         """Linie produkcyjne (production_lines) wraz z etapami równoległymi
-        i przypisanymi projektami (line_projects)."""
+        i przypisanymi projektami (line_projects) — przez serwer."""
         try:
-            con = self._open(self.rm_master_db_path)
+            rows = _rmm().master_read("rmm-production-lines-lista")
         except Exception as e:
-            return {"error": f"Nie można otworzyć rm_manager.sqlite: {e}"}
-
+            return {"error": f"Brak danych o liniach produkcyjnych: {e}"}
+        projects_by_line: Dict[int, List[int]] = {}
         try:
-            try:
-                rows = con.execute(
-                    "SELECT id, name, description, parallel_stages_csv"
-                    " FROM production_lines ORDER BY name"
-                ).fetchall()
-            except sqlite3.OperationalError as e:
-                return {"error": f"Brak danych o liniach produkcyjnych: {e}"}
-
-            projects_by_line: Dict[int, List[int]] = {}
-            try:
-                for r in con.execute("SELECT line_id, project_id FROM line_projects").fetchall():
-                    projects_by_line.setdefault(r["line_id"], []).append(r["project_id"])
-            except sqlite3.OperationalError:
-                pass
-
-            lines = []
-            for r in rows:
-                stages_csv = r["parallel_stages_csv"] or ""
-                lines.append({
-                    "line_id": r["id"],
-                    "name": r["name"],
-                    "description": r["description"],
-                    "parallel_stages": [s for s in stages_csv.split(",") if s],
-                    "project_ids": projects_by_line.get(r["id"], []),
-                })
-
-            return {"production_lines": lines, "count": len(lines)}
-        finally:
-            con.close()
+            for r in _rmm().master_read("rmm-line-projects-wszystkie"):
+                projects_by_line.setdefault(r["line_id"], []).append(r["project_id"])
+        except Exception:
+            pass
+        lines = []
+        for r in sorted(rows, key=lambda r: r.get("name") or ""):
+            stages_csv = r.get("parallel_stages_csv") or ""
+            lines.append({
+                "line_id": r["id"], "name": r["name"], "description": r.get("description"),
+                "parallel_stages": [s for s in stages_csv.split(",") if s],
+                "project_ids": projects_by_line.get(r["id"], []),
+            })
+        return {"production_lines": lines, "count": len(lines)}
 
     def get_delays(self, min_delay_days: int = 1) -> Dict:
         # Pobierz listę aktywnych projektów
@@ -1020,16 +909,9 @@ class AIOptimizerContext:
     ) -> Dict:
         # Pobierz pracowników z rm_master_db
         try:
-            rm_con = self._open(self.rm_master_db_path)
-            try:
-                emp_rows = rm_con.execute(
-                    "SELECT id, name FROM employees WHERE is_active = 1"
-                ).fetchall()
-                employees = {
-                    e["id"]: e["name"] for e in emp_rows
-                }
-            finally:
-                rm_con.close()
+            employees = {e["id"]: e["name"]
+                         for e in _rmm().master_read("rmm-employees-wszystkie")
+                         if e.get("is_active")}
         except Exception as ex:
             return {"error": f"Błąd odczytu pracowników: {ex}"}
 

@@ -293,6 +293,17 @@ ODCZYT = {
         "SELECT code, display_name FROM stage_definitions ORDER BY id",
         [],
     ),
+    # Dla asystenta AI (rm_ai_optimizer): przeglądy „wszystkich" bez filtra.
+    "rmm-plc-unlock-codes-wszystkie": (
+        "SELECT id, project_id, code_type, description, is_used, used_at,"
+        " used_by, sent_at, sent_by, sent_via, expiry_date, created_at, created_by"
+        " FROM plc_unlock_codes ORDER BY project_id, id",
+        [],
+    ),
+    "rmm-line-projects-wszystkie": (
+        "SELECT line_id, project_id FROM line_projects ORDER BY line_id, project_id",
+        [],
+    ),
     "rmm-production-lines-lista": (
         "SELECT id, name, description, parallel_stages_csv"
         " FROM production_lines ORDER BY name COLLATE NOCASE",
