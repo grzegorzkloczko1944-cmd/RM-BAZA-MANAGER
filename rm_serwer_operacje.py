@@ -293,6 +293,17 @@ ODCZYT = {
         "SELECT code, display_name FROM stage_definitions ORDER BY id",
         [],
     ),
+    # ── blokady projektów (dawniej pliki project_<id>.lock w LOCKS) ──────
+    "rmm-lock-po-projekcie": (
+        "SELECT project_id, lock_id, uzytkownik, komputer, locked_at, last_heartbeat"
+        "  FROM project_locks WHERE project_id = ?",
+        ["project_id"],
+    ),
+    "rmm-locki-wszystkie": (
+        "SELECT project_id, lock_id, uzytkownik, komputer, locked_at, last_heartbeat"
+        "  FROM project_locks ORDER BY project_id",
+        [],
+    ),
     "rmm-payment-milestones-wszystkie": (
         "SELECT project_id, percentage, payment_date, payment_type"
         "  FROM payment_milestones ORDER BY project_id, percentage",
@@ -1388,6 +1399,71 @@ ZAPIS = {
         [],
     ),
 
+    # ── blokady projektów: przejęcie, zwolnienie, bicie serca ────────────
+    # Przejęcie warunkowe: nadpisze wiersz TYLKO gdy blokada jest moja albo
+    # porzucona (bicie serca starsze niż `granica`). Warunek i zapis muszą być
+    # jednym poleceniem — przy sprawdzaniu osobno dwie stacje potrafią obie
+    # uznać, że wygrały. Klient rozpoznaje przegraną po `rowcount = 0`.
+    "rmm-lock-przejmij": (
+        "INSERT INTO project_locks"
+        " (project_id, lock_id, uzytkownik, komputer, locked_at, last_heartbeat)"
+        " VALUES (?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(project_id) DO UPDATE SET"
+        "   lock_id = excluded.lock_id, uzytkownik = excluded.uzytkownik,"
+        "   komputer = excluded.komputer, locked_at = excluded.locked_at,"
+        "   last_heartbeat = excluded.last_heartbeat"
+        " WHERE (project_locks.uzytkownik = excluded.uzytkownik"
+        "        AND project_locks.komputer = excluded.komputer)"
+        "    OR project_locks.last_heartbeat IS NULL"
+        "    OR project_locks.last_heartbeat < ?",
+        ["project_id", "lock_id", "uzytkownik", "komputer", "locked_at",
+         "last_heartbeat", "granica"],
+    ),
+    # Przejęcie na siłę: bez patrzenia na właściciela ani wiek.
+    "rmm-lock-przejmij-sila": (
+        "INSERT INTO project_locks"
+        " (project_id, lock_id, uzytkownik, komputer, locked_at, last_heartbeat)"
+        " VALUES (?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(project_id) DO UPDATE SET"
+        "   lock_id = excluded.lock_id, uzytkownik = excluded.uzytkownik,"
+        "   komputer = excluded.komputer, locked_at = excluded.locked_at,"
+        "   last_heartbeat = excluded.last_heartbeat",
+        ["project_id", "lock_id", "uzytkownik", "komputer", "locked_at", "last_heartbeat"],
+    ),
+    "rmm-lock-zwolnij": (
+        "DELETE FROM project_locks WHERE project_id = ?",
+        ["project_id"],
+    ),
+    "rmm-lock-zwolnij-moj": (
+        "DELETE FROM project_locks"
+        " WHERE project_id = ? AND uzytkownik = ? AND komputer = ?",
+        ["project_id", "uzytkownik", "komputer"],
+    ),
+    "rmm-lock-zwolnij-moje-poza": (
+        "DELETE FROM project_locks"
+        " WHERE uzytkownik = ? AND komputer = ?"
+        "   AND project_id NOT IN (SELECT value FROM json_each(?))",
+        ["uzytkownik", "komputer", "idy_json"],
+    ),
+    "rmm-lock-zwolnij-komputer": (
+        "DELETE FROM project_locks WHERE komputer = ?",
+        ["komputer"],
+    ),
+    "rmm-lock-bicie-serca": (
+        "UPDATE project_locks SET last_heartbeat = ?"
+        " WHERE project_id = ? AND uzytkownik = ? AND komputer = ?",
+        ["last_heartbeat", "project_id", "uzytkownik", "komputer"],
+    ),
+    "rmm-lock-przepisz-uzytkownika": (
+        "UPDATE project_locks SET uzytkownik = ?, last_heartbeat = ?"
+        " WHERE komputer = ? AND uzytkownik = ?",
+        ["nowy", "last_heartbeat", "komputer", "stary"],
+    ),
+    "rmm-locki-usun-przeterminowane": (
+        "DELETE FROM project_locks"
+        " WHERE last_heartbeat IS NULL OR last_heartbeat < ?",
+        ["granica"],
+    ),
     # ── definicje etapów: uzupełnianie ze STAGE_DEFINITIONS w kodzie ──────
     "rmm-stage-definition-dodaj": (
         "INSERT OR IGNORE INTO stage_definitions"
@@ -2067,6 +2143,9 @@ MIGRACJE_RM_MANAGER = [
      " working_days REAL,"
      " FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,"
      " CHECK (date_to >= date_from) )", None),
+    ("CREATE TABLE IF NOT EXISTS project_locks ( project_id INTEGER PRIMARY KEY,"
+     " lock_id TEXT NOT NULL, uzytkownik TEXT NOT NULL, komputer TEXT NOT NULL,"
+     " locked_at TEXT NOT NULL, last_heartbeat TEXT NOT NULL )", None),
     ("CREATE TABLE IF NOT EXISTS stage_definitions ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
      " code TEXT UNIQUE NOT NULL, display_name TEXT, color TEXT,"
      " is_milestone INTEGER DEFAULT 0 )", None),

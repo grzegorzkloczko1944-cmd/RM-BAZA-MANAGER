@@ -137,18 +137,22 @@ from project_manager import (
 )
 
 try:
-    from lock_manager_v2 import ProjectLockManager
+    # Blokady projektów pilnuje RM_SERWER (tabela project_locks). Dawny
+    # lock_manager_v2 trzymał je jako pliki w katalogu LOCKS na dysku
+    # sieciowym — katalog nie potrafi odmówić drugiemu komputerowi, klucz
+    # główny tabeli potrafi.
+    from lock_manager_serwer import ProjectLockManager
     _LOCK_MANAGER_AVAILABLE = True
 except ImportError:
     _LOCK_MANAGER_AVAILABLE = False
 
     class ProjectLockManager:
-        """Stub – lock_manager_v2.py niedostępny (tryb jednousytkownikowy)"""
+        """Zapas – lock_manager_serwer.py niedostępny (tryb jednoosobowy)"""
         _STUB = True  # Marker – stub bez prawdziwych locków
         def __init__(self, config):
             self.my_name = config.get('client', {}).get('name', 'Unknown')
             self.locks_folder = None
-            print("⚠️  lock_manager_v2.py niedostępny – locki wyłączone (tryb jednousytkownikowy)")
+            print("⚠️  lock_manager_serwer.py niedostępny – blokady wyłączone (tryb jednoosobowy)")
 
         def update_user_name(self, name): self.my_name = name
         def acquire_project_lock(self, project_id, force=False): return (True, "no-lock")
