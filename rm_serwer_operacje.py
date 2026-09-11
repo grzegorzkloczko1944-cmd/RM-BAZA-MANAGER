@@ -1374,6 +1374,23 @@ ZAPIS = {
     # Decyzja o wniosku urlopowym. `decided_by` bywa świadomie czyszczone
     # (cofnięcie decyzji), więc NIE przez COALESCE — pusta wartość ma
     # tu znaczyć „wyczyść", nie „zostaw".
+    # Konfiguracja powiadomień o płatnościach — zmiana wybranych pól.
+    # COALESCE jest tu właściwe: żadnego z tych pól nie czyści się do NULL
+    # (klient przekazuje tylko to, co user zmienił w oknie ustawień).
+    "rmm-payment-notification-config-zmien": (
+        "UPDATE payment_notification_config SET"
+        "   email_recipients   = COALESCE(?, email_recipients),"
+        "   smtp_server        = COALESCE(?, smtp_server),"
+        "   smtp_port          = COALESCE(?, smtp_port),"
+        "   smtp_user          = COALESCE(?, smtp_user),"
+        "   smtp_password      = COALESCE(?, smtp_password),"
+        "   enabled            = COALESCE(?, enabled),"
+        "   trigger_percentage = COALESCE(?, trigger_percentage),"
+        "   modified_at        = CURRENT_TIMESTAMP"
+        " WHERE id = 1",
+        ["email_recipients", "smtp_server", "smtp_port", "smtp_user",
+         "smtp_password", "enabled", "trigger_percentage"],
+    ),
     # Pełne nadpisanie wyjazdu — klient scala zmienione pola z aktualnym
     # wierszem i przysyła komplet. NULL tutaj ZNACZY NULL.
     "rmm-service-trip-nadpisz": (

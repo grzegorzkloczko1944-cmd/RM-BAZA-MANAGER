@@ -7847,416 +7847,172 @@ def cleanup_duplicate_dependencies(project_db_path: str, project_id: int = None)
 # PAYMENT SYSTEM - Płatności (2026-04-13)
 # ============================================================================
 
-def add_payment_milestone(rm_db_path: str, project_id: int, percentage: int, 
-                          payment_date: str, user: str = None, check_trigger: bool = True,
+def add_payment_milestone(rm_db_path: str = None, project_id: int = 0, percentage: int = 0,
+                          payment_date: str = "", user: str = None, check_trigger: bool = True,
                           master_db_path: str = None, payment_type: str = 'PŁATNOŚĆ') -> int:
-    """Dodaj transzę płatności dla projektu.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        project_id: ID projektu
-        percentage: Procent płatności (1-100)
-        payment_date: Data płatności (YYYY-MM-DD)
-        user: Kto dodał
-        check_trigger: Czy sprawdzić trigger 100% (domyślnie True)
-        master_db_path: Ścieżka do master.sqlite (opcjonalnie, do pobierania nazwy projektu)
-        payment_type: Typ transzy: 'PŁATNOŚĆ' lub 'UMORZONY'
-    
-    Returns:
-        ID dodanej transzy
-        
-    Raises:
-        sqlite3.IntegrityError: Jeśli transza już istnieje
+    """Dodaj transzę płatności (+ wpis historii ADDED jednym batchem). Zwraca id.
+
+    Transza i jej historia to jedna transakcja — wcześniej dwa osobne
+    zapisy, więc zerwane połączenie mogło zostawić transzę bez śladu.
     """
     if not (1 <= percentage <= 100):
         raise ValueError(f"Procent musi być w zakresie 1-100, otrzymano: {percentage}")
     if payment_type not in ('PŁATNOŚĆ', 'UMORZONY'):
         payment_type = 'PŁATNOŚĆ'
-    
-    con = _open_rm_connection(rm_db_path)
-    try:
-        cursor = con.execute("""
-            INSERT INTO payment_milestones (project_id, percentage, payment_date, created_by, created_at, payment_type)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
-        """, (project_id, percentage, payment_date, user, payment_type))
-        
-        milestone_id = cursor.lastrowid
-        
-        # Historia
-        con.execute("""
-            INSERT INTO payment_history (project_id, percentage, payment_date, action, changed_by, changed_at)
-            VALUES (?, ?, ?, 'ADDED', ?, CURRENT_TIMESTAMP)
-        """, (project_id, percentage, payment_date, user))
-        
-        _rm_safe_commit(con)
-        
-        # Sprawdź trigger dla 100%
-        if check_trigger and percentage == 100:
-            trigger_payment_notifications(rm_db_path, project_id, percentage, payment_date, user, master_db_path)
-        
-        return milestone_id
-        
-    finally:
-        con.close()
+    wyniki = rmm_batch([
+        {"operation": "rmm-payment-milestones-dodaj", "params": {
+            "project_id": project_id, "percentage": percentage,
+            "payment_date": payment_date, "created_by": user, "payment_type": payment_type}},
+        {"operation": "rmm-payment-history-dodaj-2", "params": {
+            "project_id": project_id, "percentage": percentage,
+            "payment_date": payment_date, "changed_by": user}},
+    ])
+    milestone_id = int(((wyniki or [{}])[0] or {}).get("lastrowid") or 0)
+    # Sprawdź trigger dla 100%
+    if check_trigger and percentage == 100:
+        trigger_payment_notifications(None, project_id, percentage, payment_date, user, master_db_path)
+    return milestone_id
 
 
-def update_payment_milestone(rm_db_path: str, project_id: int, percentage: int, 
-                              new_date: str, user: str = None, check_trigger: bool = True,
+def update_payment_milestone(rm_db_path: str = None, project_id: int = 0, percentage: int = 0,
+                              new_date: str = "", user: str = None, check_trigger: bool = True,
                               master_db_path: str = None):
-    """Zaktualizuj datę istniejącej transzy płatności.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        project_id: ID projektu
-        percentage: Procent transzy do zmiany
-        new_date: Nowa data (YYYY-MM-DD)
-        user: Kto zmienił
-        check_trigger: Czy sprawdzić trigger 100% (jeśli zmieniono datę 100%)
-        master_db_path: Ścieżka do master.sqlite (opcjonalnie)
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        # Pobierz starą datę
-        row = con.execute("""
-            SELECT payment_date FROM payment_milestones
-            WHERE project_id = ? AND percentage = ?
-        """, (project_id, percentage)).fetchone()
-        
-        if not row:
-            raise ValueError(f"Nie znaleziono transzy {percentage}% dla projektu {project_id}")
-        
-        old_date = row['payment_date']
-        
-        # Zmień datę
-        con.execute("""
-            UPDATE payment_milestones
-            SET payment_date = ?, modified_by = ?, modified_at = CURRENT_TIMESTAMP
-            WHERE project_id = ? AND percentage = ?
-        """, (new_date, user, project_id, percentage))
-        
-        # Historia
-        con.execute("""
-            INSERT INTO payment_history (project_id, percentage, payment_date, action, changed_by, old_date, changed_at)
-            VALUES (?, ?, ?, 'MODIFIED', ?, ?, CURRENT_TIMESTAMP)
-        """, (project_id, percentage, new_date, user, old_date))
-        
-        _rm_safe_commit(con)
-        
-        # Jeśli zmieniono datę 100%, może to wymagać ponownego powiadomienia
-        if check_trigger and percentage == 100:
-            trigger_payment_notifications(rm_db_path, project_id, percentage, new_date, user, master_db_path)
-        
-    finally:
-        con.close()
+    """Zmień datę transzy (+ historia MODIFIED ze starą datą, jednym batchem)."""
+    rows = rmm_read("rmm-payment-milestones-po-project-id-percentage",
+                    {"project_id": project_id, "percentage": percentage})
+    if not rows:
+        raise ValueError(f"Nie znaleziono transzy {percentage}% dla projektu {project_id}")
+    old_date = rows[0]['payment_date']
+    rmm_batch([
+        {"operation": "rmm-payment-milestones-zmien-po-project-id-percentage", "params": {
+            "payment_date": new_date, "modified_by": user,
+            "project_id": project_id, "percentage": percentage}},
+        {"operation": "rmm-payment-history-dodaj", "params": {
+            "project_id": project_id, "percentage": percentage, "payment_date": new_date,
+            "changed_by": user, "old_date": old_date}},
+    ])
+    # Jeśli zmieniono datę 100%, może to wymagać ponownego powiadomienia
+    if check_trigger and percentage == 100:
+        trigger_payment_notifications(None, project_id, percentage, new_date, user, master_db_path)
 
 
-def clear_umorzony_flags(rm_db_path: str, project_id: int, user: str = None) -> int:
-    """Konwertuje wszystkie transze typu UMORZONY w projekcie z powrotem na PŁATNOŚĆ.
-
-    Używane gdy administrator chce zdjąć stan "zapłacony" wynikający z umorzenia
-    — UMORZONY traktowany jest jak zapłacono 100%, a po konwersji staje się
-    zwykłą transzą i milestone "Zapłacony" przestaje obowiązywać (jeśli suma <100%).
-
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        project_id: ID projektu
-        user: Kto wykonał operację (do historii)
-
-    Returns:
-        Liczba zmienionych transz
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        rows = con.execute("""
-            SELECT percentage, payment_date FROM payment_milestones
-            WHERE project_id = ? AND payment_type = 'UMORZONY'
-        """, (project_id,)).fetchall()
-
-        if not rows:
-            return 0
-
-        con.execute("""
-            UPDATE payment_milestones
-            SET payment_type = 'PŁATNOŚĆ', modified_by = ?, modified_at = CURRENT_TIMESTAMP
-            WHERE project_id = ? AND payment_type = 'UMORZONY'
-        """, (user, project_id))
-
-        for r in rows:
-            con.execute("""
-                INSERT INTO payment_history (project_id, percentage, payment_date, action, changed_by, old_date, changed_at)
-                VALUES (?, ?, ?, 'MODIFIED', ?, ?, CURRENT_TIMESTAMP)
-            """, (project_id, r['percentage'], r['payment_date'], user, r['payment_date']))
-
-        _rm_safe_commit(con)
-        return len(rows)
-    finally:
-        con.close()
+def clear_umorzony_flags(rm_db_path: str = None, project_id: int = 0, user: str = None) -> int:
+    """Zdejmij flagę UMORZONY z transz projektu (+ historia per transza).
+    Zwraca liczbę zmienionych transz."""
+    rows = rmm_read("rmm-payment-milestones-po-project-id-payment-type",
+                    {"project_id": project_id})
+    if not rows:
+        return 0
+    rmm_batch([{"operation": "rmm-payment-milestones-zmien-po-project-id-payment-type",
+                "params": {"modified_by": user, "project_id": project_id}}]
+              + [{"operation": "rmm-payment-history-dodaj", "params": {
+                    "project_id": project_id, "percentage": r['percentage'],
+                    "payment_date": r['payment_date'], "changed_by": user,
+                    "old_date": r['payment_date']}} for r in rows])
+    return len(rows)
 
 
-def delete_payment_milestone(rm_db_path: str, project_id: int, percentage: int, user: str = None):
-    """Usuń transzę płatności.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        project_id: ID projektu
-        percentage: Procent transzy do usunięcia
-        user: Kto usunął
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        # Pobierz datę przed usunięciem
-        row = con.execute("""
-            SELECT payment_date FROM payment_milestones
-            WHERE project_id = ? AND percentage = ?
-        """, (project_id, percentage)).fetchone()
-        
-        if not row:
-            return  # Już usunięta
-        
-        payment_date = row['payment_date']
-        
-        # Usuń transzę
-        con.execute("""
-            DELETE FROM payment_milestones
-            WHERE project_id = ? AND percentage = ?
-        """, (project_id, percentage))
-        
-        # Historia
-        con.execute("""
-            INSERT INTO payment_history (project_id, percentage, payment_date, action, changed_by, old_date, changed_at)
-            VALUES (?, ?, NULL, 'DELETED', ?, ?, CURRENT_TIMESTAMP)
-        """, (project_id, percentage, user, payment_date))
-        
-        _rm_safe_commit(con)
-        
-    finally:
-        con.close()
+def delete_payment_milestone(rm_db_path: str = None, project_id: int = 0, percentage: int = 0,
+                             user: str = None):
+    """Usuń transzę (+ historia DELETED z datą sprzed usunięcia, jednym batchem)."""
+    rows = rmm_read("rmm-payment-milestones-po-project-id-percentage",
+                    {"project_id": project_id, "percentage": percentage})
+    if not rows:
+        return  # Już usunięta
+    rmm_batch([
+        {"operation": "rmm-payment-milestones-usun-po-project-id-percentage",
+         "params": {"project_id": project_id, "percentage": percentage}},
+        {"operation": "rmm-payment-history-dodaj-3", "params": {
+            "project_id": project_id, "percentage": percentage,
+            "changed_by": user, "old_date": rows[0]['payment_date']}},
+    ])
 
 
-def get_payment_milestones(rm_db_path: str, project_id: int) -> List[Dict]:
-    """Pobierz wszystkie transze płatności dla projektu.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        project_id: ID projektu
-    
-    Returns:
-        Lista słowników z kluczami: id, percentage, payment_date, created_by, created_at, modified_by, modified_at
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        rows = con.execute("""
-            SELECT id, project_id, percentage, payment_date, payment_type,
-                   created_by, created_at, modified_by, modified_at
-            FROM payment_milestones
-            WHERE project_id = ?
-            ORDER BY id
-        """, (project_id,)).fetchall()
-        
-        return [dict(row) for row in rows]
-        
-    finally:
-        con.close()
+def get_payment_milestones(rm_db_path: str = None, project_id: int = 0) -> List[Dict]:
+    """Transze płatności projektu (w kolejności dodawania)."""
+    return [dict(r) for r in rmm_read("rmm-payment-milestones-po-project-id",
+                                      {"project_id": project_id})]
 
 
-def get_payment_history(rm_db_path: str, project_id: int) -> List[Dict]:
-    """Pobierz historię zmian płatności dla projektu.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        project_id: ID projektu
-    
-    Returns:
-        Lista słowników: id, percentage, payment_date, action, changed_by, changed_at, old_date
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        rows = con.execute("""
-            SELECT id, project_id, percentage, payment_date, action, 
-                   changed_by, changed_at, old_date
-            FROM payment_history
-            WHERE project_id = ?
-            ORDER BY changed_at DESC
-        """, (project_id,)).fetchall()
-        
-        return [dict(row) for row in rows]
-        
-    finally:
-        con.close()
+def get_payment_history(rm_db_path: str = None, project_id: int = 0) -> List[Dict]:
+    """Historia zmian transz projektu (najnowsze pierwsze)."""
+    return [dict(r) for r in rmm_read("rmm-payment-history-po-project-id",
+                                      {"project_id": project_id})]
 
 
-def get_payment_notification_config(rm_db_path: str) -> Dict:
-    """Pobierz konfigurację powiadomień email.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-    
-    Returns:
-        Dict z kluczami: id, trigger_percentage, email_recipients (lista), 
-                         smtp_server, smtp_port, smtp_user, smtp_password, enabled
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        row = con.execute("""
-            SELECT id, trigger_percentage, email_recipients, 
-                   smtp_server, smtp_port, smtp_user, smtp_password, enabled
-            FROM payment_notification_config
-            WHERE id = 1
-        """).fetchone()
-        
-        if not row:
-            return None
-        
-        result = dict(row)
-        # Parse JSON email list
-        import json
-        result['email_recipients'] = json.loads(result['email_recipients'] or '[]')
-        return result
-        
-    finally:
-        con.close()
+def get_payment_notification_config(rm_db_path: str = None) -> Dict:
+    """Konfiguracja powiadomień o płatnościach (wiersz id=1) albo None."""
+    import json
+    rows = rmm_read("rmm-payment-notification-config-po-id")
+    if not rows:
+        return None
+    result = dict(rows[0])
+    result['email_recipients'] = json.loads(result['email_recipients'] or '[]')
+    return result
 
 
-def update_payment_notification_config(rm_db_path: str, recipients: List[str] = None, 
+def update_payment_notification_config(rm_db_path: str = None, recipients: List[str] = None,
                                         smtp_server: str = None, smtp_port: int = None,
                                         smtp_user: str = None, smtp_password: str = None,
                                         enabled: bool = None, trigger_percentage: int = None):
-    """Zaktualizuj konfigurację powiadomień email.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        recipients: Lista adresów email (opcjonalnie)
-        smtp_server: Adres serwera SMTP (opcjonalnie)
-        smtp_port: Port SMTP (opcjonalnie)
-        smtp_user: Użytkownik SMTP (opcjonalnie)
-        smtp_password: Hasło SMTP (opcjonalnie)
-        enabled: Czy powiadomienia włączone (opcjonalnie)
-        trigger_percentage: Procent triggerujący powiadomienie (opcjonalnie)
-    """
+    """Zmień wybrane pola konfiguracji. None = bez zmiany (operacja używa COALESCE)."""
     import json
-    con = _open_rm_connection(rm_db_path)
-    
-    try:
-        updates = []
-        params = []
-        
-        if recipients is not None:
-            updates.append("email_recipients = ?")
-            params.append(json.dumps(recipients))
-        
-        if smtp_server is not None:
-            updates.append("smtp_server = ?")
-            params.append(smtp_server)
-        
-        if smtp_port is not None:
-            updates.append("smtp_port = ?")
-            params.append(smtp_port)
-        
-        if smtp_user is not None:
-            updates.append("smtp_user = ?")
-            params.append(smtp_user)
-        
-        if smtp_password is not None:
-            updates.append("smtp_password = ?")
-            params.append(smtp_password)
-        
-        if enabled is not None:
-            updates.append("enabled = ?")
-            params.append(1 if enabled else 0)
-        
-        if trigger_percentage is not None:
-            updates.append("trigger_percentage = ?")
-            params.append(trigger_percentage)
-        
-        if not updates:
-            return  # Nic do zmiany
-        
-        updates.append("modified_at = CURRENT_TIMESTAMP")
-        query = f"UPDATE payment_notification_config SET {', '.join(updates)} WHERE id = 1"
-        
-        con.execute(query, params)
-        _rm_safe_commit(con)
-        
-    finally:
-        con.close()
+    params = {
+        "email_recipients": json.dumps(recipients) if recipients is not None else None,
+        "smtp_server": smtp_server, "smtp_port": smtp_port,
+        "smtp_user": smtp_user, "smtp_password": smtp_password,
+        "enabled": (1 if enabled else 0) if enabled is not None else None,
+        "trigger_percentage": trigger_percentage,
+    }
+    if all(v is None for v in params.values()):
+        return  # Nic do zmiany
+    rmm_exec("rmm-payment-notification-config-zmien", params)
 
 
-def trigger_payment_notifications(rm_db_path: str, project_id: int, percentage: int, 
-                                   payment_date: str, user: str = None, master_db_path: str = None):
-    """Wyślij powiadomienia o płatności (email + in-app).
-    
-    Wywoływane automatycznie gdy transza osiągnie trigger_percentage (domyślnie 100%).
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        project_id: ID projektu
-        percentage: Procent transzy
-        payment_date: Data płatności
-        user: Kto zmienił
-        master_db_path: Ścieżka do master.sqlite (opcjonalnie, do pobrania nazwy projektu)
+def trigger_payment_notifications(rm_db_path: str = None, project_id: int = 0, percentage: int = 0,
+                                   payment_date: str = "", user: str = None, master_db_path: str = None):
+    """Po osiągnięciu progu: powiadomienie in-app (zawsze) + e-mail (gdy są odbiorcy).
+
+    Nazwa projektu idzie z mastera RM_BAZA przez RM_SERWER (`project-name`).
+    Wcześniej ta funkcja otwierała master.sqlite jako plik z dysku sieciowego
+    i zgadywała nazwy kolumn przez PRAGMA — ostatnie takie miejsce w RM_MANAGER.
+    `master_db_path` jest ignorowany, zostaje w sygnaturze dla wołających.
     """
-    config = get_payment_notification_config(rm_db_path)
-    
+    config = get_payment_notification_config(None)
     if not config or not config['enabled']:
         print(f"⚠️ Powiadomienia wyłączone - skipuję dla projektu {project_id}")
         return
-    
     if percentage < config['trigger_percentage']:
         print(f"⚠️ Procent {percentage}% < trigger {config['trigger_percentage']}% - skipuję")
         return
-    
-    # Pobierz nazwę projektu z master.sqlite
+
     project_name = f"Projekt {project_id}"  # Fallback
-    if master_db_path:
-        try:
-            con = _open_rm_connection(master_db_path)
-            # Sprawdź czy kolumna to 'name' czy 'nazwa'
-            cursor = con.execute("PRAGMA table_info(projects)")
-            columns = [row[1] for row in cursor.fetchall()]
-            name_col = 'name' if 'name' in columns else 'nazwa'
-            id_col = 'project_id' if 'project_id' in columns else 'id'
-            
-            row = con.execute(f"SELECT {name_col} FROM projects WHERE {id_col} = ?", (project_id,)).fetchone()
-            if row and row[name_col]:
-                project_name = row[name_col]
-            con.close()
-        except Exception as e:
-            print(f"⚠️ Nie można pobrać nazwy projektu: {e}")
-    
+    try:
+        rows = _master().master_read("project-name", {"project_id": project_id})
+        if rows and rows[0].get("name"):
+            project_name = rows[0]["name"]
+    except Exception as e:
+        print(f"⚠️ Nie można pobrać nazwy projektu: {e}")
+
     recipients = config['email_recipients']
-    
     # 1. Powiadomienie in-app (zawsze)
-    _create_in_app_notification(rm_db_path, project_id, project_name, percentage, 
-                                  payment_date, user)
-    
+    _create_in_app_notification(None, project_id, project_name, percentage, payment_date, user)
     # 2. Email (jeśli są odbiorcy)
     if recipients:
-        _send_payment_email(rm_db_path, project_id, project_name, percentage, 
+        _send_payment_email(None, project_id, project_name, percentage,
                             payment_date, recipients, config, user)
     else:
         print(f"⚠️ Brak odbiorców email - skipuję wysyłkę dla projektu {project_id}")
 
 
-def _create_in_app_notification(rm_db_path: str, project_id: int, project_name: str, 
-                                  percentage: int, payment_date: str, user: str = None):
-    """Utwórz powiadomienie in-app."""
-    import json
-    con = _open_rm_connection(rm_db_path)
-    
-    try:
-        message = f"Projekt '{project_name}' osiągnął {percentage}% płatności (data: {payment_date})"
-        
-        con.execute("""
-            INSERT INTO in_app_notifications 
-                (project_id, project_name, notification_type, message, created_by, created_at, is_read)
-            VALUES (?, ?, 'PAYMENT', ?, ?, CURRENT_TIMESTAMP, 0)
-        """, (project_id, project_name, message, user))
-        
-        _rm_safe_commit(con)
-        print(f"✅ Utworzono powiadomienie in-app: {message}")
-        
-    finally:
-        con.close()
+def _create_in_app_notification(rm_db_path: str = None, project_id: int = 0, project_name: str = "",
+                                  percentage: int = 0, payment_date: str = "", user: str = None):
+    """Powiadomienie w aplikacji o osiągnięciu progu płatności."""
+    message = f"Projekt '{project_name}' osiągnął {percentage}% płatności (data: {payment_date})"
+    rmm_exec("rmm-in-app-notifications-dodaj", {
+        "project_id": project_id, "project_name": project_name,
+        "message": message, "created_by": user})
+    print(f"✅ Utworzono powiadomienie in-app: {message}")
 
 
 def _send_payment_email(rm_db_path: str, project_id: int, project_name: str, 
@@ -8332,93 +8088,29 @@ Wiadomość automatyczna z systemu RM_MANAGER
         con.close()
 
 
-def get_unread_notifications(rm_db_path: str) -> List[Dict]:
-    """Pobierz nieprzeczytane powiadomienia in-app.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-    
-    Returns:
-        Lista powiadomień: id, project_id, project_name, notification_type, message, created_at
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        rows = con.execute("""
-            SELECT id, project_id, project_name, notification_type, message, 
-                   created_at, created_by
-            FROM in_app_notifications
-            WHERE is_read = 0
-            ORDER BY created_at DESC
-        """).fetchall()
-        
-        return [dict(row) for row in rows]
-        
-    finally:
-        con.close()
+def get_unread_notifications(rm_db_path: str = None) -> List[Dict]:
+    """Nieprzeczytane powiadomienia (najnowsze pierwsze)."""
+    return [dict(r) for r in rmm_read("rmm-in-app-notifications-po-is-read")]
 
 
-def mark_notification_as_read(rm_db_path: str, notification_id: int, user: str = None):
-    """Oznacz powiadomienie jako przeczytane.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        notification_id: ID powiadomienia
-        user: Kto przeczytał
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        con.execute("""
-            UPDATE in_app_notifications
-            SET is_read = 1, read_at = CURRENT_TIMESTAMP, read_by = ?
-            WHERE id = ?
-        """, (user, notification_id))
-        
-        _rm_safe_commit(con)
-        
-    finally:
-        con.close()
+def mark_notification_as_read(rm_db_path: str = None, notification_id: int = 0, user: str = None):
+    """Oznacz powiadomienie jako przeczytane."""
+    rmm_exec("rmm-in-app-notifications-zmien-po-id", {"read_by": user, "id": notification_id})
 
 
-def get_payment_notifications_log(rm_db_path: str, project_id: int = None) -> List[Dict]:
-    """Pobierz log wysłanych powiadomień email.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        project_id: Opcjonalnie - filtruj po projekcie
-    
-    Returns:
-        Lista logów: id, project_id, project_name, percentage, payment_date, recipients, sent_at, email_status
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        if project_id:
-            rows = con.execute("""
-                SELECT id, project_id, project_name, percentage, payment_date, 
-                       recipients, sent_at, sent_by, email_status, error_message
-                FROM payment_notifications_sent
-                WHERE project_id = ?
-                ORDER BY sent_at DESC
-            """, (project_id,)).fetchall()
-        else:
-            rows = con.execute("""
-                SELECT id, project_id, project_name, percentage, payment_date, 
-                       recipients, sent_at, sent_by, email_status, error_message
-                FROM payment_notifications_sent
-                ORDER BY sent_at DESC
-                LIMIT 100
-            """).fetchall()
-        
-        import json
-        result = []
-        for row in rows:
-            d = dict(row)
-            d['recipients'] = json.loads(d['recipients'] or '[]')
-            result.append(d)
-        
-        return result
-        
-    finally:
-        con.close()
+def get_payment_notifications_log(rm_db_path: str = None, project_id: int = None) -> List[Dict]:
+    """Dziennik wysłanych powiadomień e-mail (dla projektu albo ostatnie 100)."""
+    import json
+    if project_id:
+        rows = rmm_read("rmm-payment-notifications-sent-po-project-id", {"project_id": project_id})
+    else:
+        rows = rmm_read("rmm-payment-notifications-sent")
+    result = []
+    for row in rows:
+        d = dict(row)
+        d['recipients'] = json.loads(d['recipients'] or '[]')
+        result.append(d)
+    return result
 
 
 # ============================================================================
@@ -8806,28 +8498,10 @@ def calculate_code_expiry_date(created_at: str, code_type: str) -> str:
         return None
 
 
-def get_payment_total_percentage(rm_db_path: str, project_id: int) -> float:
-    """Oblicz łączny procent płatności dla projektu.
-    
-    Args:
-        rm_db_path: Ścieżka do rm_manager.sqlite (master)
-        project_id: ID projektu
-    
-    Returns:
-        Suma procentów płatności (0-100+)
-    """
-    con = _open_rm_connection(rm_db_path)
-    try:
-        row = con.execute("""
-            SELECT COALESCE(SUM(percentage), 0) as total
-            FROM payment_milestones
-            WHERE project_id = ?
-        """, (project_id,)).fetchone()
-        
-        return row['total'] if row else 0.0
-        
-    finally:
-        con.close()
+def get_payment_total_percentage(rm_db_path: str = None, project_id: int = 0) -> float:
+    """Suma procentów transz projektu."""
+    rows = rmm_read("rmm-payment-milestones-po-project-id-2", {"project_id": project_id})
+    return rows[0]['total'] if rows else 0.0
 
 
 def is_user_authorized_for_plc_sending(rm_db_path: str, username: str) -> bool:
