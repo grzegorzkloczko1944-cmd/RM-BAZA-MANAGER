@@ -57,85 +57,21 @@ class DatabaseManager:
         self.local_dir.mkdir(parents=True, exist_ok=True)
     
     def _retire_master_con(self) -> None:
-        """Odłącz self.master_con BEZ close().
-
-        master_con ma check_same_thread=False i jest dzielony przez ~20
-        wątków (GUI, heartbeat locków, backup, watchdog z timeoutem).
-        Jawne close() z jednego wątku, gdy inny jest w trakcie execute(),
-        to use-after-free w sqlite3.dll → 0xc0000005 (cztery takie dumpy
-        09.09.2026, przy masterze zablokowanym przez innych klientów:
-        _safe_ensure_master_alive porzucał wątek po 3 s, a ten po 5 s
-        busy_timeout zamykał połączenie spod nóg GUI).
-
-        Zamiast zamykać — zrzucamy referencję. CPython zwolni (i zamknie)
-        połączenie dopiero, gdy ostatni wątek przestanie go używać, we
-        własnym wątku. Uchwyt SMB żyje o ułamek sekundy dłużej — to cena
-        za brak crasha. Prawdziwe close() zostaje tylko w close_all().
-        """
+        """NIC NIE ROBI — nie ma połączenia do odłączenia."""
         self.master_con = None
 
     def master_commit(self) -> None:
-        """commit() na master_con, ktory NIE ZOSTAWIA otwartej transakcji.
-
-        ⚠️ DLACZEGO NIE GOLE master_con.commit()
-        master_con ma isolation_level='DEFERRED': pierwszy INSERT/UPDATE
-        otwiera transakcje i bierze RESERVED na master.sqlite. Gdy commit()
-        padnie na „database is locked" (ktos akurat czytal plik — w
-        journal=delete po SMB to codziennosc), Python NIE cofa transakcji:
-        polaczenie zostaje w in_transaction=True i trzyma RESERVED az do
-        zamkniecia procesu. Od tej chwili ZADNE stanowisko nie zapisze do
-        master — heartbeaty, locki, ustawienia — kazdy czeka busy_timeout
-        i pada. 11.09.2026 master byl tak zablokowany 100% czasu przez
-        ponad 20 minut, a przejecie/zwolnienie locka trwalo kilkanascie
-        sekund na kazdej maszynie.
-
-        Wyjatek leci dalej — wolajacy obsluguja go tak jak dotad. Roznica
-        jest jedna: przed wyjsciem RESERVED jest ZWOLNIONY.
-        """
-        con = self.master_con
-        if con is None:
-            return
-        try:
-            con.commit()
-        except Exception:
-            try:
-                con.rollback()
-            except Exception:
-                pass
-            raise
+        """NIC NIE ROBI — commit należy do serwera, nie do klienta."""
+        return None
 
     def master_rollback_stuck(self, powod: str = "") -> bool:
-        """Cofa transakcje WISZACA na master_con. True gdy cos cofnieto.
+        """NIC NIE ROBI — nie ma lokalnej transakcji, która mogłaby zawisnąć.
 
-        Wolane z miejsc, w ktorych otwarta transakcja na master nie ma
-        prawa istniec: start przejecia/zwolnienia locka i tick heartbeatu.
-        Zapisy do master sa male i natychmiast commitowane, wiec kazda
-        transakcja zastana tutaj to pozostalosc po nieudanym commit()
-        (patrz master_commit), nie czyjas praca w toku.
+        Wisząca transakcja na współdzielonym `master_con` była przyczyną
+        rodziny błędów „master locked". Serwer prowadzi własną transakcję
+        na każde polecenie i sam ją zamyka.
         """
-        con = self.master_con
-        try:
-            if con is not None and con.in_transaction:
-                con.rollback()
-                print(f"🧹 master_con: cofnieto wiszaca transakcje"
-                      + (f" ({powod})" if powod else "")
-                      + " — zwolniono blokade zapisu master.sqlite")
-                return True
-        except Exception as e:
-            print(f"⚠️  master_con: nie udalo sie cofnac wiszacej transakcji: {e}")
         return False
-
-    # ═══════════════════════════════════════════════════════════════════
-    # DOSTĘP DO MASTERA PRZEZ RM_SERWER (PLAN_RM_SERWER.md, etap 1)
-    # ═══════════════════════════════════════════════════════════════════
-    #
-    # Te trzy metody zastępują `master_con.execute(...)` w całym RM_BAZA.
-    # Zależnie od trybu (§2a) idą przez RM_SERWER albo wykonują ten sam SQL
-    # lokalnie — wołający nie musi wiedzieć który.
-    #
-    # Docelowo (po 2–4 tygodniach stabilnej pracy na trybie serwer) tryb
-    # legacy i samo `master_con` znikają — wtedy zostaje tylko ścieżka
-    # sieciowa, a §2 planu obowiązuje bez zastrzeżeń.
 
     def ustaw_klienta_mastera(self, host, port=None, sekret=None):
         """Konfiguruje dostęp do serwera. Wołane raz, przy starcie aplikacji.
@@ -178,161 +114,16 @@ class DatabaseManager:
         self.project_con = None
 
     def connect_master(self) -> bool:
-        # Tryb zapamietany dla watchdoga (ensure_master_alive): po zerwaniu
-        # ma odtworzyc TEN SAM tryb, a nie zawsze read-only.
-        self.master_wants_rw = False
-        """Otwórz master.sqlite (READ ONLY)
-        
-        Returns:
-            True jeśli połączenie udane, False jeśli baza nie istnieje
+        """NIC NIE OTWIERA — master leży na RM_SERWER, nie na dysku klienta.
+
+        Zostaje jako zgoda na dalszą pracę (True), bo wołają ją 26 miejsc
+        w RM_BAZA. Wcześniej otwierała `paths.master` z konfigu; gdy plik
+        przeniósł się na serwer, start kończył się `ConnectionError`, mimo
+        że żadne zapytanie już z tego połączenia nie korzystało.
         """
-        # Sprawdź czy już mamy połączenie
-        if self.master_con:
-            try:
-                # Sprawdź czy to READ-ONLY
-                cur = self.master_con.execute("PRAGMA query_only")
-                is_readonly = cur.fetchone()[0]
-                
-                if is_readonly == 1:
-                    # Już mamy READ-ONLY, używaj istniejącego
-                    print(f"✅ Master już w trybie READ-ONLY - używam istniejącego połączenia")
-                    return True
-                else:
-                    # Mamy READ-WRITE, zamknij i otwórz READ-ONLY
-                    print(f"🔄 Odłączam stare połączenie READ-WRITE, otwieram READ-ONLY...")
-                    self._retire_master_con()
-            except:
-                # Połączenie martwe, zamknij
-                try:
-                    self.master_con.close()
-                except:
-                    pass
-                self.master_con = None
-        
-        # 🔥 PRE-TOUCH: Obudź dysk sieciowy PRZED sqlite.connect()
-        import time
-        print(f"🔍 PRE-TOUCH master.sqlite START: {time.strftime('%H:%M:%S')}")
-        pre_start = time.time()
-        
-        # Wykryj czy to prawdopodobnie zimny start (pierwsza próba połączenia)
-        cold_start = not hasattr(self, '_first_connect_done')
-        if cold_start:
-            print(f"  ❄️  ZIMNY START wykryty - użyję agresywniejszego warm-up")
-            if self.status_callback:
-                self.status_callback("❄️ Zimny start - budowanie połączenia sieciowego...")
-        
-        # Retry loop dla zimnego startu
-        max_attempts = 3 if cold_start else 1
-        last_error = None
-        
-        for attempt in range(max_attempts):
-            if attempt > 0:
-                wait_time = 2 * attempt  # Progresywne opóźnienie: 2s, 4s
-                print(f"  🔄 Próba {attempt+1}/{max_attempts} po {wait_time}s opóźnienia...")
-                if self.status_callback:
-                    self.status_callback(f"🔄 Próba połączenia {attempt+1}/{max_attempts}...")
-                time.sleep(wait_time)
-            
-            try:
-                # Szybki pre-check z timeoutem (5s cold / 3s normal)
-                # zamiast Path.exists() + stat() które mogą wisieć 30-60s na SMB
-                precheck_timeout = 5.0 if cold_start else 3.0
-                if not self.is_file_accessible(self.master_path, timeout_s=precheck_timeout):
-                    if attempt < max_attempts - 1:
-                        print(f"  ⚠️  Próba {attempt+1}/{max_attempts}: master.sqlite niedostępny (timeout {precheck_timeout}s)")
-                        continue
-                    else:
-                        print(f"  ❌ master.sqlite niedostępny po {max_attempts} próbach (timeout {precheck_timeout}s każda)")
-                        return False
-                
-                # Plik dostępny - odczytaj rozmiar (stat jest już bezpieczny)
-                try:
-                    file_stat = self.master_path.stat()
-                    print(f"  📊 File size: {file_stat.st_size / 1024:.1f} KB")
-                except Exception as e:
-                    print(f"  ⚠️  stat() failed: {e}")
-                
-                # Warm-up: odczytaj fragment pliku (więcej dla zimnego startu)
-                if self.status_callback and cold_start:
-                    self.status_callback("🔄 Budzenie dysku sieciowego...")
-                self._warm_up_remote_file(self.master_path, "master.sqlite", cold_start=cold_start)
-                
-                pre_time = time.time() - pre_start
-                print(f"🔍 PRE-TOUCH master.sqlite END: {pre_time:.3f}s")
-                
-                # Read-only connection
-                print(f"🔌 SQLITE CONNECT master.sqlite START: {time.strftime('%H:%M:%S')}")
-                if self.status_callback:
-                    self.status_callback("🔌 Nawiązywanie połączenia z bazą...")
-                connect_start = time.time()
-                
-                # Timeout: 15s dla zimnego startu, 5s normalnie
-                timeout_s = 15.0 if cold_start else 5.0
-                print(f"  ⏱️  Timeout ustawiony na: {timeout_s}s")
-                
-                self.master_con = sqlite3.connect(
-                    f"file:{self.master_path}?mode=ro&immutable=1", 
-                    uri=True,
-                    timeout=timeout_s,
-                    check_same_thread=False,
-                    isolation_level='DEFERRED'
-                )
-                self.master_con.row_factory = sqlite3.Row
-                
-                # Optymalizacje wydajności
-                self.master_con.execute("PRAGMA cache_size=-32000")  # 32MB cache
-                self.master_con.execute("PRAGMA temp_store=MEMORY")
-                
-                # Test połączenia - spróbuj odczytać dane
-                try:
-                    test_result = self.master_con.execute("SELECT 1").fetchone()
-                    if not test_result:
-                        raise sqlite3.OperationalError("Test query zwrócił NULL")
-                except Exception as test_err:
-                    if attempt < max_attempts - 1:
-                        print(f"  ⚠️  Próba {attempt+1}/{max_attempts}: Test query failed: {test_err}")
-                        try:
-                            self.master_con.close()
-                        except:
-                            pass
-                        self.master_con = None
-                        continue
-                    else:
-                        raise
-                
-                connect_time = time.time() - connect_start
-                print(f"🔌 SQLITE CONNECT master.sqlite END: {connect_time:.3f}s")
-                print(f"✅ Master: {self.master_path} (READ-ONLY) - TOTAL: {pre_time + connect_time:.3f}s")
-                
-                # Oznacz że pierwszy connect się udał
-                self._first_connect_done = True
-                
-                return True
-                
-            except Exception as e:
-                last_error = e
-                if attempt < max_attempts - 1:
-                    print(f"  ⚠️  Próba {attempt+1}/{max_attempts}: Błąd łączenia: {e}")
-                    # Zamknij połączenie jeśli istnieje
-                    try:
-                        if self.master_con:
-                            self.master_con.close()
-                            self.master_con = None
-                    except:
-                        pass
-                    continue
-                else:
-                    print(f"❌ Błąd łączenia z master.sqlite po {max_attempts} próbach: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    return False
-        
-        # Jeśli dojdzie tutaj, wszystkie próby się nie powiodły
-        print(f"❌ Nie udało się połączyć z master.sqlite po {max_attempts} próbach")
-        if last_error:
-            print(f"  Ostatni błąd: {last_error}")
-        return False
-    
+        self.master_wants_rw = False
+        return True
+
     def _warm_up_remote_file(self, db_path: Path, label: str, cold_start: bool = False) -> None:
         """Wymuś szybki odczyt pliku, żeby obudzić SMB/połączenie sieciowe.
         
@@ -389,278 +180,28 @@ class DatabaseManager:
         warm_time = time.time() - warm_start
         print(f"🧊 WARM-UP {label} END: {warm_time:.3f}s")
     
-    def reconnect_master_rw(self):
-        """Otwórz master.sqlite w trybie READ-WRITE (dla ADMIN)"""
-        self.master_wants_rw = True     # patrz ensure_master_alive
-        
-        # ZAWSZE zamykaj i otwieraj ponownie aby sprawdzić uprawnienia
-        if self.master_con:
-            print(f"🔄 Odłączam stare połączenie i tworzę nowe (wymuszam sprawdzenie uprawnień)...")
-            self._retire_master_con()
-        
-        if not self.master_path.exists():
-            raise FileNotFoundError(f"Brak master.sqlite: {self.master_path}")
-        
-        # Read-write connection
-        print(f"🔌 Tworzę nowe połączenie READ-WRITE...")
-        
-        # 🔥 PRE-TOUCH: Obudź dysk sieciowy
-        import time
-        print(f"🔍 PRE-TOUCH master.sqlite (RW) START: {time.strftime('%H:%M:%S')}")
-        pre_start = time.time()
-        
-        # Sprawdź uprawnienia pliku PRZED otwarciem
-        import os
-        import stat
-        try:
-            file_stat = os.stat(self.master_path)
-            mode = file_stat.st_mode
-            is_writable = bool(mode & stat.S_IWUSR)
-            print(f"   📂 Plik: {self.master_path}")
-            print(f"   🔐 Uprawnienia: {oct(stat.S_IMODE(mode))} - Writable: {is_writable}")
-            
-            if not is_writable:
-                print(f"   ⚠️  PLIK JEST READ-ONLY! Próbuję zmienić uprawnienia...")
-                os.chmod(self.master_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP)
-                print(f"   ✅ Zmieniono uprawnienia na 0660")
-            
-            # Sprawdź też pliki WAL i SHM
-            for suffix in ['-wal', '-shm']:
-                wal_file = Path(str(self.master_path) + suffix)
-                if wal_file.exists():
-                    wal_stat = os.stat(wal_file)
-                    wal_writable = bool(wal_stat.st_mode & stat.S_IWUSR)
-                    print(f"   📄 {wal_file.name}: {oct(stat.S_IMODE(wal_stat.st_mode))} - Writable: {wal_writable}")
-                    if not wal_writable:
-                        print(f"      ⚠️  {wal_file.name} READ-ONLY! Zmieniam uprawnienia...")
-                        os.chmod(wal_file, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP)
-                        print(f"      ✅ Zmieniono uprawnienia {wal_file.name}")
-        except Exception as perm_err:
-            print(f"   ⚠️  Błąd sprawdzania uprawnień: {perm_err}")
-        
-        pre_time = time.time() - pre_start
-        print(f"🔍 PRE-TOUCH master.sqlite (RW) END: {pre_time:.3f}s")
-        
-        print(f"🔌 SQLITE CONNECT master.sqlite (RW) START: {time.strftime('%H:%M:%S')}")
-        connect_start = time.time()
-        
-        self.master_con = sqlite3.connect(
-            str(self.master_path),
-            timeout=5.0,
-            check_same_thread=False,
-            isolation_level='DEFERRED'
-        )
-        self.master_con.row_factory = sqlite3.Row
-        
-        # Optymalizacje wydajności
-        self.master_con.execute("PRAGMA cache_size=-32000")  # 32MB cache
-        self.master_con.execute("PRAGMA temp_store=MEMORY")
-        
-        connect_time = time.time() - connect_start
-        print(f"🔌 SQLITE CONNECT master.sqlite (RW) END: {connect_time:.3f}s")
-        
-        # DELETE mode - jedyny mode działający przez sieć SMB
-        # WAL NIE DZIAŁA przez sieć!
-        try:
-            # WAŻNE: Commit/rollback przed sprawdzaniem journal_mode
-            try:
-                self.master_con.commit()
-            except:
-                pass
-            
-            # Sprawdź obecny tryb (BEZ zmiany - sprawdzenie PRZED testem zapisu)
-            cur = self.master_con.execute("PRAGMA journal_mode")
-            current_mode = cur.fetchone()[0]
-            
-            if current_mode.upper() == "WAL":
-                # Wyłącz WAL, przejdź na DELETE - KRYTYCZNE dla NAS/SMB!
-                print(f"   ⚠️  Wykryto WAL mode - próbuję zmienić na DELETE...")
-                wal_fixed = False
-                for attempt in range(5):
-                    try:
-                        self.master_con.execute("PRAGMA journal_mode=DELETE")
-                        verify = self.master_con.execute("PRAGMA journal_mode").fetchone()[0]
-                        if verify.upper() == "DELETE":
-                            print(f"   ✅ Zmieniono WAL → DELETE (próba {attempt+1})")
-                            wal_fixed = True
-                            break
-                        else:
-                            print(f"   ⚠️  Próba {attempt+1}: journal_mode nadal {verify}")
-                    except sqlite3.OperationalError as e:
-                        if "locked" in str(e).lower():
-                            print(f"   ⚠️  Próba {attempt+1}: baza locked - czekam 2s...")
-                            import time as _time
-                            _time.sleep(2)
-                        else:
-                            raise
-                
-                if not wal_fixed:
-                    print(f"   🔴 KRYTYCZNE: Nie udało się zmienić WAL → DELETE po 5 próbach!")
-                    print(f"   🔴 WAL mode NIE DZIAŁA przez SMB - ryzyko korupcji danych!")
-                    # Zamknij i rzuć wyjątek - NIE kontynuuj z WAL na sieci
-                    try:
-                        self.master_con.close()
-                    except:
-                        pass
-                    self.master_con = None
-                    raise sqlite3.OperationalError(
-                        "Nie można zmienić journal_mode z WAL na DELETE. "
-                        "Zamknij wszystkie aplikacje używające master.sqlite i spróbuj ponownie."
-                    )
-            
-            # busy_timeout dla sieci (5 sekund)
-            self.master_con.execute("PRAGMA busy_timeout=5000")
-            
-            # PRAGMA dla pracy sieciowej
-            self.master_con.execute("PRAGMA locking_mode=NORMAL")
-            self.master_con.execute("PRAGMA synchronous=NORMAL")
-            self.master_con.execute("PRAGMA temp_store=MEMORY")
-            
-            # Test zapisu - próbuj wykonać prosty UPDATE (TERAZ po ustawieniu PRAGMA)
-            try:
-                self.master_con.execute("BEGIN IMMEDIATE")
-                self.master_con.execute("ROLLBACK")
-                print(f"   ✅ Test zapisu OK")
-            except Exception as write_test_err:
-                print(f"   ❌ Test zapisu FAILED: {write_test_err}")
-                raise
-            
-            print(f"✅ Master: {self.master_path} (READ-WRITE, {current_mode.upper()})")
-            
-            # Schematu nie migrujemy: kolumny `projects` dokłada RM_SERWER
-            # przy swoim starcie. Klient migrujący cudzą bazę po SMB był
-            # źródłem błędów „attempt to write a readonly database".
-            try:
-                pass
-            except Exception as migration_err:
-                print(f"⚠️  Błąd migracji kolumn statystyk: {migration_err}")
-                # Nie przerywaj - aplikacja może działać bez nowych kolumn
-                try:
-                    self.master_con.rollback()
-                except:
-                    pass
-            
-        except Exception as e:
-            print(f"⚠️  Błąd konfiguracji master: {e}")
-            print(f"✅ Master: {self.master_path} (READ-WRITE)")
-        
-        # GWARANCJA: jeśli master_con jest None po sqlite3.connect, coś poszło bardzo źle
-        if self.master_con is None:
-            raise ConnectionError("Połączenie master READ-WRITE nie zostało utworzone!")
-    
-    def _reconnect_master_after_locked(self) -> bool:
-        """Zamknij martwe/zablokowane połączenie i połącz ponownie.
-        
-        Typowy scenariusz: po uśpieniu/obudzeniu komputera połączenie SQLite
-        przez SMB staje się martwe i rzuca 'database is locked'.
-        
-        Thread-safe: używa locka żeby uniknąć podwójnego reconnect.
-        
-        Returns:
-            True jeśli reconnect się udał
-        """
-        import time
-        
-        # Zapobiegnij podwójnemu reconnect (race condition po sleep/wake)
-        if not self._reconnect_lock.acquire(blocking=False):
-            # Inny wątek już robi reconnect — poczekaj aż skończy
-            print(f"⏳ RECONNECT: inny wątek już reconnectuje — czekam...")
-            self._reconnect_lock.acquire()  # Czekaj na zakończenie
-            self._reconnect_lock.release()
-            # Sprawdź czy połączenie działa (inny wątek już je naprawił)
-            if self.master_con:
-                try:
-                    self.master_con.execute("SELECT 1").fetchone()
-                    print(f"✅ RECONNECT: połączenie już naprawione przez inny wątek")
-                    return True
-                except:
-                    pass  # Wciąż martwe — spróbuj sam
-            
-        try:
-            print(f"🔄 RECONNECT master po 'database is locked' (sleep/wake?)...")
-            self._retire_master_con()
-            time.sleep(0.2)  # Krótka pauza żeby SMB zdążył się odbudować
-            return self.connect_master()
-        finally:
-            try:
-                self._reconnect_lock.release()
-            except RuntimeError:
-                pass  # Już zwolniony
-    
-    def ensure_stats_columns_exist(self) -> bool:
-        """Sprawdź czy kolumny statystyk istnieją, jeśli nie - wykonaj migrację
-        
-        Returns:
-            True jeśli kolumny istnieją (lub migracja się powiodła)
-            False jeśli migracja nie powiodła się
-        """
-        try:
-            from project_manager import colnames, pick_col
-            
-            if not self.master_con:
-                self.connect_master()
-            
-            # Sprawdź czy kolumny już istnieją
-            cols = colnames(self.master_con, "projects")
-            designer_col = pick_col(cols, ["designer", "designers"])
-            status_col = pick_col(cols, ["status"])
-            
-            if designer_col and status_col:
-                # Kolumny już istnieją
-                print(f"✅ Kolumny statystyk już istnieją (designer, status)")
-                return True
-            
-            # Kolumny nie istnieją - wymaga migracji
-            print(f"⚠️  Brak kolumn statystyk - wymagana migracja")
-            print(f"   Kolumny w bazie: {sorted(cols)}")
-            
-            # Sprawdź czy połączenie jest READ-ONLY
-            try:
-                cur = self.master_con.execute("PRAGMA query_only")
-                is_readonly = cur.fetchone()[0]
-                
-                if is_readonly == 1:
-                    print(f"🔄 Baza READ-ONLY - otwiera m w trybie READ-WRITE dla migracji...")
-                    # Zapisz stare połączenie
-                    old_con = self.master_con
-                    self.master_con = None
-                    
-                    # Otwórz w trybie RW (automatycznie wykona migrację)
-                    self.reconnect_master_rw()
-                    
-                    # Odłącz tymczasowe RW (bez close — patrz _retire_master_con)
-                    self._retire_master_con()
+    def reconnect_master_rw(self) -> bool:
+        """NIC NIE ROBI — zapisy idą przez `master_exec`, nie przez plik.
 
-                    # Przywróć połączenie READ-ONLY
-                    self.master_con = old_con
-                    
-                    # Sprawdź czy migracja się udała
-                    cols = colnames(self.master_con, "projects")
-                    designer_col = pick_col(cols, ["designer", "designers"])
-                    status_col = pick_col(cols, ["status"])
-                    
-                    if designer_col and status_col:
-                        print(f"✅ Migracja zakończona pomyślnie")
-                        return True
-                    else:
-                        print(f"❌ Migracja nie powiodła się - kolumny wciąż nie istnieją")
-                        return False
-                else:
-                    # Migracje należą do serwera — tutaj nie ma nic do zrobienia.
-                    return True
-                    
-            except Exception as e:
-                print(f"❌ Błąd migracji: {e}")
-                import traceback
-                traceback.print_exc()
-                return False
-                
-        except Exception as e:
-            print(f"❌ Błąd ensure_stats_columns_exist: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
+        Przełączanie połączenia na read-write miało sens, gdy dziesięć stacji
+        pisało do jednego pliku na dysku sieciowym. Serwer kolejkuje zapisy
+        u siebie i jest jedynym właścicielem bazy.
+        """
+        self.master_wants_rw = True
+        return True
+
+    def _reconnect_master_after_locked(self) -> bool:
+        """NIC NIE ROBI — „database is locked" było chorobą pliku na SMB."""
+        return True
+
+    def ensure_stats_columns_exist(self) -> bool:
+        """NIC NIE ROBI — schematu pilnuje RM_SERWER przy starcie.
+
+        Klient dokładał sobie kolumny sam (ALTER TABLE przy pierwszym
+        zapisie); teraz robią to migracje serwera, wykonywane raz.
+        """
+        return True
+
     def get_projects(self) -> List[Tuple[int, str, int, str]]:
         """
         Pobierz listę projektów z master
@@ -686,29 +227,15 @@ class DatabaseManager:
                 raise
     
     def _get_projects_inner(self) -> List[Tuple[int, str, int, str]]:
-        """Wewnętrzna implementacja get_projects (bez retry)."""
-        # Sprawdź czy kolumna project_type istnieje
-        cursor_check = self.master_con.execute("PRAGMA table_info(projects)")
-        columns = [row[1] for row in cursor_check.fetchall()]
-        has_project_type = 'project_type' in columns
-        
-        # Jeśli nie ma kolumny project_type, zwróć wszystkie projekty jako MACHINE
-        if not has_project_type:
-            print("ℹ️  Kolumna project_type nie istnieje - wszyscy projekty będą typu MACHINE")
-            cursor = self.master_con.execute("""
-                SELECT project_id, name, active, 'MACHINE' as project_type
-                FROM projects 
-                ORDER BY name
-            """)
-            return cursor.fetchall()
-        
-        # Kolumna istnieje - normalne zapytanie
-        cursor = self.master_con.execute("""
-            SELECT project_id, name, active, COALESCE(project_type, 'MACHINE') as project_type
-            FROM projects 
-            ORDER BY name
-        """)
-        return cursor.fetchall()
+        """Wewnętrzna implementacja get_projects (bez retry).
+
+        Schematu nie sprawdzamy: `project_type` pilnuje migracja serwera,
+        a `COALESCE` i tak podstawia 'MACHINE' tam, gdzie wartości brak.
+        Wcześniejsze `PRAGMA table_info` było z czasów, gdy każdy klient
+        dokładał sobie kolumny sam.
+        """
+        return [(w["project_id"], w["name"], w["active"], w["project_type"])
+                for w in self.master_read("projekty-do-selektora")]
     
     def get_project_statuses(self) -> Dict[int, str]:
         """Pobierz status (kolumna projects.status) dla wszystkich projektow.
@@ -720,15 +247,10 @@ class DatabaseManager:
 
         Returns: {project_id: status_text lub '' gdy NULL}
         """
-        if not self.master_con:
-            self.connect_master()
-        self.ensure_master_alive()
         try:
-            cursor = self.master_con.execute(
-                "SELECT project_id, COALESCE(status, '') FROM projects"
-            )
-            return {pid: status for pid, status in cursor.fetchall()}
-        except sqlite3.OperationalError as e:
+            return {w["project_id"]: w["status"]
+                    for w in self.master_read("projekty-statusy-tekstowe")}
+        except Exception as e:
             print(f"⚠️  get_project_statuses: {e}")
             return {}
 
@@ -736,31 +258,14 @@ class DatabaseManager:
         """
         Pobierz listę dostawców z master
         Returns: [(supplier_id, name), ...]
+
+        Bez pętli ponowień: „database is locked" było chorobą pliku na dysku
+        sieciowym, do którego pisało dziesięć stacji naraz. Serwer wykonuje
+        polecenia pojedynczo i kolejkuje je u siebie, więc nie ma tu czego
+        ponawiać — a błąd połączenia i tak wymaga innej reakcji niż retry.
         """
-        if not self.master_con:
-            self.connect_master()
-        
-        # Sprawdź żywotność przed operacją
-        self.ensure_master_alive()
-        
-        # Retry loop: po uśpieniu/obudzeniu połączenie może być "locked"
-        max_retries = 2
-        for attempt in range(max_retries + 1):
-            try:
-                cursor = self.master_con.execute("""
-                    SELECT supplier_id, name 
-                    FROM suppliers 
-                    WHERE is_active = 1
-                    ORDER BY name
-                """)
-                return cursor.fetchall()
-            except sqlite3.OperationalError as e:
-                if "locked" in str(e).lower() and attempt < max_retries:
-                    print(f"⚠️  get_suppliers: database locked (próba {attempt+1}/{max_retries+1}), reconnect...")
-                    if not self._reconnect_master_after_locked():
-                        raise
-                    continue
-                raise
+        return [(w["supplier_id"], w["name"])
+                for w in self.master_read("suppliers-aktywni-id-nazwa")]
     
     def is_file_accessible(self, path: Path, timeout_s: float = 2.0) -> bool:
         """Szybki test dostępności pliku (w osobnym wątku z timeoutem).
@@ -796,71 +301,22 @@ class DatabaseManager:
         return result[0]
     
     def ensure_master_alive(self) -> bool:
-        """Sprawdź czy połączenie z master jest żywe. Reconnect jeśli nie.
-        
-        Returns:
-            True jeśli połączenie OK, False jeśli nie udało się przywrócić
+        """NIC NIE SPRAWDZA — nie ma połączenia, które mogłoby obumrzeć.
+
+        Watchdog pilnował uchwytu do pliku na dysku sieciowym (zrywanego
+        przez uśpienie stacji albo chwilową utratę SMB). Dziś każde zapytanie
+        to osobne, krótkie połączenie TCP do serwera: albo się uda, albo
+        rzuci wyjątek w miejscu wywołania.
         """
-        # Jeśli nie ma połączenia, połącz
-        if not self.master_con:
-            print("🔄 Master: brak połączenia, łączę...")
-            return self.connect_master()
-        
-        # Szybki pre-check: czy plik na dysku sieciowym jest w ogóle dostępny?
-        if not self.is_file_accessible(self.master_path, timeout_s=2.0):
-            print(f"⚠️  Master: plik niedostępny (dysk sieciowy?) - nie próbuję reconnect")
-            return False
-        
-        # Test żywotności - SELECT z tabelą (dotyka pliku na dysku)
-        # SELECT 1 może przejść nawet gdy połączenie SMB jest martwe
-        try:
-            self.master_con.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
-            return True
-        except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
-            err_msg = str(e).lower()
-            
-            # "database is locked" po sleep/wake — wymuś pełny reconnect
-            if "locked" in err_msg:
-                print(f"⚠️  Master: database locked (sleep/wake?), wymuszam reconnect...")
-            else:
-                print(f"⚠️  Master: połączenie martwe ({e}), reconnect...")
-            
-            # Reconnect tylko z jednego wątku naraz: _safe_ensure_master_alive
-            # porzuca wątek po timeoucie i przy następnym sprawdzeniu odpala
-            # kolejny — bez tej blokady stackowały się i podmieniały
-            # master_con jeden drugiemu.
-            if not self._master_reconnect_lock.acquire(blocking=False):
-                print("⏳ Master: reconnect już trwa w innym wątku — czekam na jego wynik")
-                return False
-            try:
-                # Odłącz martwe połączenie (bez close — patrz _retire_master_con)
-                self._retire_master_con()
-                return self._reconnect_master_same_mode()
-            finally:
-                self._master_reconnect_lock.release()
+        return True
 
     def _reconnect_master_same_mode(self) -> bool:
-            # Próba ponownego połączenia — W TYM SAMYM TRYBIE CO PRZEDTEM.
-            #
-            # ⚠️ Wczesniej zawsze connect_master(), czyli READ-ONLY
-            # (mode=ro&immutable=1). Jedna chwilowa kolizja "database is
-            # locked" (dysk sieciowy, drugi wątek) degradowala sesje ADMIN-a
-            # do odczytu NA STALE: kazdy kolejny zapis cicho padal ("nie
-            # aktywuje projektu, bez bledu"), a immutable=1 dawal do tego
-            # nieswieze odczyty. Znalezione 07.09.2026 po pol dnia szukania
-            # blokady, ktorej nie bylo — winny byl sam watchdog.
-            try:
-                import time
-                time.sleep(0.05)  # Minimalne opóźnienie przed reconnect
-                if getattr(self, "master_wants_rw", False):
-                    print("🔄 Master reconnect w trybie READ-WRITE (tak jak przed zerwaniem)")
-                    self.reconnect_master_rw()
-                    return self.master_con is not None
-                return self.connect_master()
-            except Exception as reconnect_err:
-                print(f"❌ Master reconnect failed: {reconnect_err}")
-                return False
-    
+        """NIC NIE ROBI — nie ma połączenia z plikiem do odtworzenia.
+
+        Zostaje, bo była częścią watchdoga mastera; nikt jej dziś nie woła.
+        """
+        return True
+
     def ensure_project_alive(self) -> bool:
         """Sprawdź czy połączenie z projektem jest żywe. Reconnect jeśli nie.
         

@@ -51,6 +51,27 @@ ODCZYT = {
         "  FROM project_locks ORDER BY project_id",
         [],
     ),
+    # ── master RM_BAZA: to, co klient czytal wprost z pliku ──────────────
+    #
+    # Selektor projektow i lista dostawcow — dwa zapytania wolane przy KAZDYM
+    # starcie RM_BAZA. Dopoki szly przez `master_con`, plik `master.sqlite`
+    # musial lezec na `Y:`, a program mial dwa zrodla prawdy naraz: wlasny
+    # plik i baze serwera, ktore rozjezdzaly sie po kazdym zapisie.
+    "projekty-do-selektora": (
+        "SELECT project_id, name, active,"
+        "       COALESCE(project_type, 'MACHINE') AS project_type"
+        "  FROM projects ORDER BY name",
+        [],
+    ),
+    "projekty-statusy-tekstowe": (
+        "SELECT project_id, COALESCE(status, '') AS status FROM projects",
+        [],
+    ),
+    "suppliers-aktywni-id-nazwa": (
+        "SELECT supplier_id, name FROM suppliers"
+        " WHERE is_active = 1 ORDER BY name",
+        [],
+    ),
     "suppliers-list": (
         "SELECT * FROM suppliers ORDER BY name COLLATE NOCASE",
         [],
