@@ -97,62 +97,53 @@ class ArchiwumKsef:
     """Indeks + pliki. Bez GUI — da się użyć ze skryptu."""
 
     def __init__(self, katalog):
-        self.katalog = Path(katalog)
-        self.katalog.mkdir(parents=True, exist_ok=True)
-        self.db_path = self.katalog / "archiwum.sqlite"
-        self.con = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        # Wbudowane LOWER() w SQLite działa tylko na ASCII — „Cięte" zostałoby
-        # „cIęte". Dodatkowo ściągamy ogonki, żeby „ciete" też trafiało.
-        self.con.create_function("LOWER_PL", 1, uprosc)
-        self.con.executescript(SCHEMA)
-        # Baza sprzed wprowadzenia kolumny `xml` — CREATE TABLE IF NOT EXISTS
-        # jej nie doda. Treść wciągamy z plików przy pierwszym uruchomieniu.
-        if "xml" not in {r[1] for r in self.con.execute("PRAGMA table_info(faktury)")}:
-            self.con.execute("ALTER TABLE faktury ADD COLUMN xml TEXT")
-            self._wciagnij_xml_z_plikow()
-        self.con.commit()
+        """Archiwum leży na RM_SERWER (`FV_KSEF.sqlite`), nie w katalogu.
 
-    def _wciagnij_xml_z_plikow(self):
-        """Przenosi treść XML-i z dysku do bazy. Raz, przy migracji.
+        `katalog` zostaje w sygnaturze — wołający go podają, a przy pobieraniu
+        z KSeF nadal zapisujemy tam XML jako ślad na dysku. Ale ŹRÓDŁEM PRAWDY
+        jest baza na serwerze: treść faktury siedzi w kolumnie `xml`, więc
+        archiwum działa nawet wtedy, gdy katalogu nikt nigdy nie utworzył.
 
-        Plik zostaje na dysku — kasowanie go to osobna decyzja użytkownika,
-        a nie skutek uboczny aktualizacji programu.
+        ⚠️ Katalogu NIE zakładamy z góry. Wcześniejsze `mkdir` przy starcie
+        tworzyło pusty `faktury_ksef` obok mastera, a gdy ktoś przemianował
+        stary katalog, program budował sobie nowy, pusty — i okno pokazywało
+        zero faktur, choć dane leżały obok (12.09.2026).
         """
-        ile = 0
-        for ksef_number, sciezka in self.con.execute(
-                "SELECT ksef_number, plik FROM faktury WHERE xml IS NULL").fetchall():
-            try:
-                tresc = Path(sciezka).read_text(encoding="utf-8")
-            except Exception:
-                continue                 # brak pliku albo zły dysk — zostaje NULL
-            self.con.execute("UPDATE faktury SET xml=? WHERE ksef_number=?",
-                             (tresc, ksef_number))
-            ile += 1
-        if ile:
-            print("✅ Archiwum KSEF: wciągnięto treść %d faktur do bazy" % ile)
+        self.katalog = Path(katalog)
+        self.db_path = None              # historycznie: plik obok; dziś serwer
+        self.con = None
+
+    # ── rozmowa z serwerem ─────────────────────────────────────────────────
+    @staticmethod
+    def _czytaj(operacja, params=None):
+        import rm_klient
+        return rm_klient.master_read(operacja, params or {})
+
+    @staticmethod
+    def _pisz(operacja, params):
+        import rm_klient
+        return rm_klient.master_exec(operacja, params)
 
     def zamknij(self):
-        try:
-            self.con.close()
-        except Exception:
-            pass
+        pass                             # nie ma połączenia do zamknięcia
 
     # ── zapis ──────────────────────────────────────────────────────────────
     def zna(self, ksef_number):
-        cur = self.con.execute("SELECT 1 FROM faktury WHERE ksef_number=?", (ksef_number,))
-        return cur.fetchone() is not None
+        return bool(self._czytaj("ksef-zna", {"ksef_number": ksef_number}))
 
     def znane_numery(self):
         """Numery KSeF już w archiwum — także te z plików, których nie ma w indeksie."""
-        numery = {r[0] for r in self.con.execute("SELECT ksef_number FROM faktury")}
-        for plik in self.katalog.rglob("*.xml"):
-            # nazwa: <nip>_<numer>__<ksef_number>.xml, ale starszy flow importu
-            # cen zapisuje <ksef_number>__<sprzedawca>.xml — obsłuż oba
-            trzon = plik.stem
-            if "__" in trzon:
-                lewo, prawo = trzon.split("__", 1)
-                numery.add(prawo)
-                numery.add(lewo)
+        numery = {w["ksef_number"] for w in self._czytaj("ksef-numery")}
+        # Katalog jest już tylko śladem na dysku — może nie istnieć wcale.
+        if self.katalog.is_dir():
+            for plik in self.katalog.rglob("*.xml"):
+                # nazwa: <nip>_<numer>__<ksef_number>.xml, ale starszy flow importu
+                # cen zapisuje <ksef_number>__<sprzedawca>.xml — obsłuż oba
+                trzon = plik.stem
+                if "__" in trzon:
+                    lewo, prawo = trzon.split("__", 1)
+                    numery.add(prawo)
+                    numery.add(lewo)
         return numery
 
     def sciezka_dla(self, faktura, ksef_number):
@@ -182,26 +173,29 @@ class ArchiwumKsef:
         return docelowy, faktura
 
     def _zaindeksuj(self, faktura, ksef_number, plik):
+        """Zapisuje fakturę na serwer — z TREŚCIĄ XML, nie samą ścieżką."""
         wartosc = sum(p.wartosc_netto or 0 for p in faktura.pozycje)
         try:
             tresc = Path(plik).read_text(encoding="utf-8")
         except Exception:
             tresc = None                 # indeks powstanie i bez treści
-        self.con.execute(
-            "INSERT OR REPLACE INTO faktury"
-            " (ksef_number, numer_faktury, sprzedawca_nip, sprzedawca,"
-            "  data_wystawienia, wartosc_netto, pozycji, plik, pobrano, xml)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (ksef_number, faktura.numer_faktury, faktura.sprzedawca_nip,
-             faktura.sprzedawca_nazwa, faktura.data_wystawienia, wartosc,
-             len(faktura.pozycje), str(plik),
-             datetime.now().isoformat(timespec="seconds"), tresc))
-        self.con.execute("DELETE FROM pozycje WHERE ksef_number=?", (ksef_number,))
-        self.con.executemany(
-            "INSERT OR REPLACE INTO pozycje VALUES (?,?,?,?,?,?,?)",
-            [(ksef_number, p.nr_wiersza, p.nazwa, p.jednostka,
-              p.ilosc, p.cena_netto, p.wartosc_netto) for p in faktura.pozycje])
-        self.con.commit()
+        self._pisz("ksef-faktura-zapisz", {
+            "ksef_number": ksef_number,
+            "numer_faktury": faktura.numer_faktury,
+            "sprzedawca_nip": faktura.sprzedawca_nip,
+            "sprzedawca": faktura.sprzedawca_nazwa,
+            "data_wystawienia": faktura.data_wystawienia,
+            "wartosc_netto": wartosc,
+            "pozycji": len(faktura.pozycje),
+            "plik": str(plik),
+            "pobrano": datetime.now().isoformat(timespec="seconds"),
+            "xml": tresc})
+        self._pisz("ksef-pozycje-usun", {"ksef_number": ksef_number})
+        for p in faktura.pozycje:
+            self._pisz("ksef-pozycja-zapisz", {
+                "ksef_number": ksef_number, "nr_wiersza": p.nr_wiersza,
+                "nazwa": p.nazwa, "jednostka": p.jednostka, "ilosc": p.ilosc,
+                "cena_netto": p.cena_netto, "wartosc_netto": p.wartosc_netto})
 
     def odbuduj_indeks(self):
         """
@@ -227,45 +221,50 @@ class ArchiwumKsef:
 
     # ── odczyt ─────────────────────────────────────────────────────────────
     def faktury(self, szukaj="", nip="", od="", do=""):
-        sql = ["SELECT ksef_number, data_wystawienia, numer_faktury, sprzedawca,"
-               " sprzedawca_nip, pozycji, wartosc_netto, plik FROM faktury WHERE 1=1"]
-        par = []
-        if nip:
-            sql.append("AND sprzedawca_nip=?"); par.append(nip)
-        if od:
-            sql.append("AND data_wystawienia>=?"); par.append(od)
-        if do:
-            sql.append("AND data_wystawienia<=?"); par.append(do)
+        """Lista faktur — krotki w kolejności, której oczekuje GUI.
+
+        Filtrowanie po dacie i NIP-ie robimy PO STRONIE KLIENTA: przy archiwum
+        rzędu tysięcy faktur to nadal jedno zapytanie i milisekundy, a serwer
+        nie musi mieć osobnej operacji na każdą kombinację filtrów. Szukanie
+        tekstowe idzie do serwera, bo tam jest `LOWER_PL` i podzapytanie po
+        pozycjach.
+        """
         if szukaj:
-            # Szukamy też w pozycjach — użytkownik pamięta towar, nie numer faktury.
-            # LOWER() z SQLite nie zna polskich znaków (LIKE '%cie%' nie złapie
-            # „Cięte"), więc małe litery robimy w Pythonie po obu stronach.
-            sql.append("AND (LOWER_PL(numer_faktury) LIKE ? OR LOWER_PL(sprzedawca) LIKE ?"
-                       " OR sprzedawca_nip LIKE ?"
-                       " OR ksef_number IN (SELECT ksef_number FROM pozycje"
-                       "                    WHERE LOWER_PL(nazwa) LIKE ?))")
             wzor = f"%{uprosc(szukaj)}%"
-            par += [wzor, wzor, f"%{szukaj}%", wzor]
-        sql.append("ORDER BY data_wystawienia DESC, numer_faktury DESC")
-        return self.con.execute(" ".join(sql), par).fetchall()
+            wiersze = self._czytaj("ksef-faktury-szukaj", {
+                "wzor": wzor, "wzor2": wzor, "nip": f"%{szukaj}%", "wzor3": wzor})
+        else:
+            wiersze = self._czytaj("ksef-faktury")
+
+        out = []
+        for w in wiersze:
+            data = w.get("data_wystawienia") or ""
+            if nip and w.get("sprzedawca_nip") != nip:
+                continue
+            if od and data < od:
+                continue
+            if do and data > do:
+                continue
+            out.append((w["ksef_number"], data, w.get("numer_faktury"),
+                        w.get("sprzedawca"), w.get("sprzedawca_nip"),
+                        w.get("pozycji"), w.get("wartosc_netto"), None))
+        return out
 
     def pozycje(self, ksef_number):
-        return self.con.execute(
-            "SELECT nr_wiersza, nazwa, jednostka, ilosc, cena_netto, wartosc_netto"
-            " FROM pozycje WHERE ksef_number=? ORDER BY nr_wiersza", (ksef_number,)).fetchall()
+        return [(w["nr_wiersza"], w["nazwa"], w["jednostka"], w["ilosc"],
+                 w["cena_netto"], w["wartosc_netto"])
+                for w in self._czytaj("ksef-pozycje", {"ksef_number": ksef_number})]
 
     def dostawcy(self):
-        return self.con.execute(
-            "SELECT DISTINCT sprzedawca_nip, sprzedawca FROM faktury"
-            " WHERE sprzedawca_nip<>'' ORDER BY sprzedawca").fetchall()
+        return [(w["sprzedawca_nip"], w["sprzedawca"])
+                for w in self._czytaj("ksef-dostawcy")]
 
     def podsumowanie(self):
-        r = self.con.execute(
-            "SELECT COUNT(*), COALESCE(SUM(wartosc_netto),0), MIN(data_wystawienia),"
-            " MAX(data_wystawienia) FROM faktury").fetchone()
-        poz = self.con.execute("SELECT COUNT(*) FROM pozycje").fetchone()[0]
-        return {"faktur": r[0], "wartosc": r[1], "od": r[2] or "",
-                "do": r[3] or "", "pozycji": poz}
+        r = self._czytaj("ksef-podsumowanie")
+        w = r[0] if r else {}
+        return {"faktur": w.get("faktur") or 0, "wartosc": w.get("wartosc") or 0,
+                "od": w.get("od") or "", "do": w.get("do") or "",
+                "pozycji": w.get("pozycji") or 0}
 
 
 def pobierz_nowe(archiwum, nip, token, srodowisko="test", dni=30, postep=None):
@@ -522,17 +521,18 @@ class OknoArchiwum(tk.Toplevel, Kreciolek):
         sel = self.tv_f.selection()
         if not sel:
             return
-        r = self.arch.con.execute(
-            "SELECT xml, plik FROM faktury WHERE ksef_number=?", (sel[0],)).fetchone()
+        w = self.arch._czytaj("ksef-xml", {"ksef_number": sel[0]})
+        r = w[0] if w else None
         import os
         import tempfile
-        if r and r[0]:
-            nazwa = Path(r[1]).name if r[1] else f"{_bezpieczna_nazwa(sel[0], 60)}.xml"
+        if r and r.get("xml"):
+            nazwa = (Path(r["plik"]).name if r.get("plik")
+                     else f"{_bezpieczna_nazwa(sel[0], 60)}.xml")
             tmp = Path(tempfile.gettempdir()) / nazwa
-            tmp.write_text(r[0], encoding="utf-8")
+            tmp.write_text(r["xml"], encoding="utf-8")
             os.startfile(str(tmp))
-        elif r and r[1] and Path(r[1]).exists():
-            os.startfile(r[1])           # archiwum sprzed migracji treści do bazy
+        elif r and r.get("plik") and Path(r["plik"]).exists():
+            os.startfile(r["plik"])      # archiwum sprzed migracji treści do bazy
         else:
             messagebox.showwarning("Archiwum", "Nie znaleziono XML tej faktury.", parent=self)
 

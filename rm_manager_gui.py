@@ -10228,16 +10228,13 @@ class RMManagerGUI:
             self.locks_dir         = e_locks.get().strip() or os.path.join(self.rm_projects_dir, 'LOCKS')
             self.server_exe_path   = e_server_exe.get().strip()
             self.ai_rules_path     = e_ai_rules.get().strip() or os.path.join(self.rm_manager_dir, 'ai_rules.txt')
-            # Utwórz katalog locków jeśli nie istnieje
-            Path(self.locks_dir).mkdir(parents=True, exist_ok=True)
+            # ⚠️ Katalogu LOCKS nie tworzymy — blokady pilnuje RM_SERWER
+            # (tabela `project_locks`), a puste `LOCKS` odtwarzało się przy
+            # każdym zapisie konfiguracji, także po skasowaniu przez admina.
             # Utwórz katalog projektów jeśli nie istnieje
             Path(self.rm_projects_dir).mkdir(parents=True, exist_ok=True)
             # Utwórz katalog backupów jeśli nie istnieje
             Path(self.backup_dir).mkdir(parents=True, exist_ok=True)
-            # Zaktualizuj lock_manager na nowy folder LOCKS
-            if hasattr(self.lock_manager, 'locks_folder') and self.lock_manager.locks_folder is not None:
-                self.lock_manager.locks_folder = Path(self.locks_dir)
-                self.lock_manager.locks_folder.mkdir(parents=True, exist_ok=True)
             # Zaktualizuj backup_manager na nowy folder backupów
             if self.backup_manager:
                 self.backup_manager.backup_dir = Path(self.backup_dir)

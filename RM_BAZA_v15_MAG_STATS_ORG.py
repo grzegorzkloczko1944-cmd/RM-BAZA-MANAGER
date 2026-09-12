@@ -3413,21 +3413,17 @@ class MainWindow(tk.Tk):
                 config = json.load(f)
             print(f"  ✅ Config: {config.get('client', {}).get('name', 'unknown')}")
             
-            # SYNCHRONIZUJ ścieżkę locks z wczytanym LOCKS_DIR
+            # ⚠️ Katalogu locków NIE tworzymy — blokady pilnuje RM_SERWER
+            # (tabela `project_locks`), nie pliki `.lock` na dysku sieciowym.
+            #
+            # Wcześniejsze `mkdir` odtwarzało `Y:\RM_BAZA\locks` przy KAŻDYM
+            # starcie, więc katalog wracał zaraz po skasowaniu, a przy
+            # niedostępnym dysku program szedł do okna konfiguracji z powodu,
+            # który dziś nikogo nie dotyczy. Wartość zostaje w konfiguracji dla
+            # zgodności klucza i na wypadek powrotu do `lock_manager_v2`.
             if 'locks' not in config:
                 config['locks'] = {}
             config['locks']['folder'] = str(LOCKS_DIR)
-            print(f"  → Ścieżka locks: {LOCKS_DIR}")
-            
-            # Upewnij się że folder locks istnieje
-            try:
-                Path(LOCKS_DIR).mkdir(parents=True, exist_ok=True)
-                print(f"  ✅ Folder locks utworzony/zweryfikowany")
-            except OSError as e:
-                raise InitConfigRequired(
-                    f"Folder locków jest niedostępny: {LOCKS_DIR}\n\n"
-                    f"Sprawdź czy dysk sieciowy jest podłączony.\n\nSzczegóły: {e}"
-                ) from e
             
             print("  → Tworzę LockManager...")
             self.lock_manager = ProjectLockManager(config)
