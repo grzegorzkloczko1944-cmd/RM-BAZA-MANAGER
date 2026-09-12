@@ -34,6 +34,15 @@ hiddenimports += [
     'rm_klient', 'rm_serwer_operacje', 'project_manager',
     'rmpak_calculator', 'material_calculator',
 
+    # ⚠️ BLOKADY PROJEKTOW przez serwer (12.09.2026). RM_BAZA importuje
+    # `lock_manager_baza_serwer` na gorze pliku, ale ten dziedziczy po
+    # `lock_manager_serwer`, a wewnatrz siega po `rm_manager` — leniwie,
+    # wiec analiza statyczna tego nie lapie. Bez tych wpisow .exe nie ma
+    # czym zalozyc locka i padnie przy otwarciu pierwszego projektu.
+    # `lock_manager_v2` zostaje jako awaryjny powrot do plikow .lock.
+    'lock_manager_baza_serwer', 'lock_manager_serwer', 'lock_manager_v2',
+    'rm_manager',
+
     # integracja z Subiektem — okna z panelu SUBIEKT
     'subiekt_panel', 'subiekt_stany', 'subiekt_zamowienia', 'subiekt_magazyn_gui',
     'subiekt_dokumenty_gui', 'subiekt_dostawcy_gui', 'subiekt_asortyment_gui',
