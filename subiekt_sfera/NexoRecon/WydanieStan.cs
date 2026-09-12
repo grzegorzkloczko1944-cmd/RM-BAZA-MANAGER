@@ -55,10 +55,31 @@ namespace NexoRecon;
 
 internal static class WydanieStan
 {
-    /// Ile ostatnich dokumentow kazdego rodzaju przegladamy. Projekt zyje
-    /// tygodniami, wiec jego dokumenty sa wsrod nowszych; pelny przelot po
-    /// wszystkich RW w bazie kosztowalby przy kazdym otwarciu okna.
-    const int LIMIT = 400;
+    // ⛔ BEZ LIMITU Take() — I NIE DOKLADAJ GO Z POWROTEM.
+    //
+    // Bylo tu `Take(400)` z uzasadnieniem „projekt zyje tygodniami, wiec jego
+    // dokumenty sa wsrod nowszych". To zalozenie jest FALSZYWE dla RW: to
+    // najczestszy dokument w firmie, wystawiany codziennie na wszystkie
+    // projekty naraz. 400 ostatnich RW w bazie to moze byc kilka tygodni —
+    // starsze RW naszego projektu wypadaja poza okno.
+    //
+    // Limit dzialal PRZED sprawdzeniem numeru projektu (baza zwracala 400
+    // najnowszych dokumentow JAKICHKOLWIEK, dopiero potem petla odsiewala
+    // nasze), wiec skutek byl cichy: `wydano` wychodzilo ZA MALE, `pozostalo`
+    // ZA DUZE, a magazynier wydawal drugi raz to, co juz wydano. Zadnego
+    // ostrzezenia — liczby wygladaly wiarygodnie.
+    //
+    // TEN SAM BLAD BYL JUZ RAZ: Take(100) na ZK w Projekt.cs powodowal
+    // zakladanie DRUGIEGO ZK dla tego samego projektu (zgloszone 07.09.2026:
+    // „user zalozy projekt na projekcie i narobi sie balagan"). Tam limit tez
+    // usunieto — patrz komentarz nad Projekt.ZnajdzZkProjektu.
+    //
+    // Kolekcje sa rzedu dziesiatek-setek dokumentow, nie dziesiatek tysiecy,
+    // a projekcja ponizej i tak sciaga wszystko JEDNYM zapytaniem z JOIN-ami.
+    // Jesli kiedys realnie zacznie to boles, filtruj PO PROJEKCIE, nie po
+    // liczbie najnowszych — ale uwaga: predykatu z Znacznik.NumerProjektu nie
+    // da sie przetlumaczyc na SQL, ObjectQuery zwroci wtedy po cichu pustke
+    // (pulapka opisana w Projekt.cs:752).
 
     public static int Uruchom(Uchwyt sfera, string? projekt, string? magazyn, string? outPath)
     {
@@ -150,7 +171,6 @@ internal static class WydanieStan
         // w Dokumenty.cs kosztowala 3,6 s na 109 dokumentow.
         var dane = zrodlo()
             .OrderByDescending(d => d.DataWprowadzenia)
-            .Take(LIMIT)
             .Select(d => new
             {
                 Numer = d.NumerWewnetrzny.PelnaSygnatura,

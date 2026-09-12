@@ -82,15 +82,46 @@ pokrywające potrzebę liczoną też z innego magazynu.
 jeśli świadomie liczymy sumarycznie przez wszystkie magazyny — usunąć
 parametr z sygnatury i dopisać komentarz czemu.
 
-## Niskie/średnie: twardy limit 400 dokumentów
+## ✅ ZROBIONE 13.09.2026: limit 400 dokumentów USUNIĘTY
 
-- `subiekt_sfera/NexoRecon/WydanieStan.cs:61` (`const int LIMIT = 400`)
-- Użycie: `WydanieStan.cs:153` (`.Take(LIMIT)`)
+Użytkownik: *„limit 400 to wielki błąd"* — i miał rację, wcześniejsza ocena
+(„per rodzaj dokumentu, więc wystarczy na długo") była za łagodna.
 
-**Skutek:** możliwe zaniżenie „wydano wcześniej", jeśli projekt ma starsze
-RW poza ostatnimi 400 dokumentami danego rodzaju w bazie.
+### Dlaczego to był poważny błąd
 
-**Do zrobienia:** sprawdzić, czy limit jest per rodzaj dokumentu czy łączny,
-i czy 400 realnie wystarcza na długo żyjące projekty — albo podnieść limit,
-albo filtrować po projekcie na poziomie zapytania zamiast brać N najnowszych
-i filtrować w pamięci.
+`Take(400)` wykonywał się **PRZED** sprawdzeniem numeru projektu: baza
+zwracała 400 najnowszych dokumentów JAKICHKOLWIEK, a dopiero potem pętla
+odsiewała nasze. RW to najczęstszy dokument w firmie — wystawiany codziennie
+na wszystkie projekty naraz — więc 400 ostatnich RW to może być kilka
+tygodni. Starsze RW projektu wypadały poza okno.
+
+Skutek **cichy**: `wydano` za małe → `pozostało` za duże → magazynier wydaje
+**drugi raz** to, co już wydano. Nic nie ostrzegało, liczby wyglądały
+wiarygodnie. Gorsze niż awaria mostu: tam okno się zatrzymuje, tu spokojnie
+kłamie.
+
+### To był już drugi raz
+
+`Take(100)` na ZK w `Projekt.cs` powodował zakładanie DRUGIEGO ZK dla tego
+samego projektu — zgłoszone 07.09.2026 (*„user założy projekt na projekcie
+i narobi się bałagan"*). Tam limit też usunięto, a nad
+`Projekt.ZnajdzZkProjektu` stoi komentarz z tą historią.
+
+### Co zrobione
+
+Limit usunięty, w jego miejsce komentarz ⛔ z pełnym uzasadnieniem, żeby
+nikt go nie dołożył z powrotem.
+
+**Zmierzone przez stały most (baza demo):** 0,08 s — tyle samo co z limitem.
+Koszt nigdy nie leżał w liczbie dokumentów, tylko w logowaniu do Sfery
+(~17 s), które stały most płaci RAZ.
+
+⚠️ Baza demo jest uboga w dokumenty — na firmowej, z realną historią RW,
+warto zmierzyć ponownie.
+
+### Gdyby kiedyś realnie bolało
+
+Filtrować **po projekcie**, nie po liczbie najnowszych. Ale uwaga: predykatu
+z `Znacznik.NumerProjektu` nie da się przetłumaczyć na SQL — `ObjectQuery`
+zwróci wtedy po cichu **pustkę** zamiast błędu (pułapka opisana
+w `Projekt.cs:752`). Filtr musi iść PO `ToList()`.
