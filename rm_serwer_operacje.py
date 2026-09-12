@@ -33,6 +33,24 @@ from datetime import datetime
 # na pomyłkę kolejności: master_read("supplier-get", {"supplier_id": 7}).
 
 ODCZYT = {
+    # ── blokady projektow RM_BAZA (dawniej pliki project_<id>.lock) ──────
+    #
+    # ⚠️ Bez prefiksu `rmm-` — i to jest cala roznica. Routing serwera
+    # (`_polaczenie`) kieruje te operacje do mastera RM_BAZA, a blizniacze
+    # `rmm-lock-*` do rm_manager.sqlite. Dwa programy, dwie bazy, dwie
+    # niezalezne tabele o tej samej nazwie: user RM_BAZA nigdy nie czeka
+    # na projekt dlatego, ze ktos otworzyl projekt o tym samym numerze
+    # w RM_MANAGER (numery pokrywaja sie w 81 przypadkach).
+    "lock-po-projekcie": (
+        "SELECT project_id, lock_id, uzytkownik, komputer, locked_at, last_heartbeat"
+        "  FROM project_locks WHERE project_id = ?",
+        ["project_id"],
+    ),
+    "locki-wszystkie": (
+        "SELECT project_id, lock_id, uzytkownik, komputer, locked_at, last_heartbeat"
+        "  FROM project_locks ORDER BY project_id",
+        [],
+    ),
     "suppliers-list": (
         "SELECT * FROM suppliers ORDER BY name COLLATE NOCASE",
         [],
@@ -817,6 +835,77 @@ ODCZYT = {
 # ═══════════════════════════════════════════════════════════════════════
 
 ZAPIS = {
+    # ── blokady projektow RM_BAZA ────────────────────────────────────────
+    #
+    # Blizniaki `rmm-lock-*`, ale bez prefiksu: routing kieruje je do mastera
+    # RM_BAZA, a tamte do rm_manager.sqlite. Dwie niezalezne tabele — patrz
+    # komentarz przy `lock-po-projekcie` w ODCZYT.
+    #
+    # Warunek w `ON CONFLICT ... WHERE` jest tu calym mechanizmem wyscigu:
+    # nadpisz wiersz TYLKO gdy blokada jest moja albo porzucona (bicie serca
+    # starsze niz `granica`). Przy dwoch stacjach naraz serwer wykonuje
+    # poleceniapo kolei, wiec drugi dostaje `rowcount = 0` i wie, ze przegral.
+    # Sprawdzanie „czy wolny", a potem osobny zapis, dawalo dwoch zwyciezcow.
+    "lock-przejmij": (
+        "INSERT INTO project_locks"
+        " (project_id, lock_id, uzytkownik, komputer, locked_at, last_heartbeat)"
+        " VALUES (?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(project_id) DO UPDATE SET"
+        "   lock_id = excluded.lock_id, uzytkownik = excluded.uzytkownik,"
+        "   komputer = excluded.komputer, locked_at = excluded.locked_at,"
+        "   last_heartbeat = excluded.last_heartbeat"
+        " WHERE (project_locks.uzytkownik = excluded.uzytkownik"
+        "        AND project_locks.komputer = excluded.komputer)"
+        "    OR project_locks.last_heartbeat IS NULL"
+        "    OR project_locks.last_heartbeat < ?",
+        ["project_id", "lock_id", "uzytkownik", "komputer", "locked_at",
+         "last_heartbeat", "granica"],
+    ),
+    # Przejecie na sile: bez patrzenia na wlasciciela ani wiek.
+    "lock-przejmij-sila": (
+        "INSERT INTO project_locks"
+        " (project_id, lock_id, uzytkownik, komputer, locked_at, last_heartbeat)"
+        " VALUES (?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(project_id) DO UPDATE SET"
+        "   lock_id = excluded.lock_id, uzytkownik = excluded.uzytkownik,"
+        "   komputer = excluded.komputer, locked_at = excluded.locked_at,"
+        "   last_heartbeat = excluded.last_heartbeat",
+        ["project_id", "lock_id", "uzytkownik", "komputer", "locked_at", "last_heartbeat"],
+    ),
+    "lock-zwolnij": (
+        "DELETE FROM project_locks WHERE project_id = ?",
+        ["project_id"],
+    ),
+    "lock-zwolnij-moj": (
+        "DELETE FROM project_locks"
+        " WHERE project_id = ? AND uzytkownik = ? AND komputer = ?",
+        ["project_id", "uzytkownik", "komputer"],
+    ),
+    "lock-zwolnij-moje-poza": (
+        "DELETE FROM project_locks"
+        " WHERE uzytkownik = ? AND komputer = ?"
+        "   AND project_id NOT IN (SELECT value FROM json_each(?))",
+        ["uzytkownik", "komputer", "idy_json"],
+    ),
+    "lock-zwolnij-komputer": (
+        "DELETE FROM project_locks WHERE komputer = ?",
+        ["komputer"],
+    ),
+    "lock-bicie-serca": (
+        "UPDATE project_locks SET last_heartbeat = ?"
+        " WHERE project_id = ? AND uzytkownik = ? AND komputer = ?",
+        ["last_heartbeat", "project_id", "uzytkownik", "komputer"],
+    ),
+    "lock-przepisz-uzytkownika": (
+        "UPDATE project_locks SET uzytkownik = ?, last_heartbeat = ?"
+        " WHERE komputer = ? AND uzytkownik = ?",
+        ["nowy", "last_heartbeat", "komputer", "stary"],
+    ),
+    "locki-usun-przeterminowane": (
+        "DELETE FROM project_locks"
+        " WHERE last_heartbeat IS NULL OR last_heartbeat < ?",
+        ["granica"],
+    ),
     # ── ustawienia ────────────────────────────────────────────────────
     # UPSERT zamiast SELECT-potem-INSERT-albo-UPDATE: dziś klient robi to
     # w trzech krokach (RM_BAZA_v15…py:20026), co przy dwóch stanowiskach
@@ -1901,6 +1990,18 @@ MIGRACJE = [
     ("ALTER TABLE projects ADD COLUMN project_status TEXT DEFAULT 'NEW'",
      ("projects", "project_status")),
     ("ALTER TABLE projects ADD COLUMN priority INTEGER", ("projects", "priority")),
+    # Blokady projektow RM_BAZA — ODDZIELNE od blokad RM_MANAGER.
+    #
+    # ⚠️ Ta sama nazwa tabeli co w rm_manager.sqlite, ale to INNY PLIK i
+    # nie ma miedzy nimi zadnego zwiazku. Tak ma byc: numery projektow
+    # obu programow pokrywaja sie w 81 przypadkach (RM_BAZA 1..2611,
+    # RM_MANAGER 1..90), wiec jedna wspolna tabela kazalaby userowi
+    # RM_BAZA czekac na projekt 22 dlatego, ze ktos inny otworzyl zupelnie
+    # inny projekt 22 w RM_MANAGER. Rozdziela je routing serwera:
+    # operacje `lock-*` (bez prefiksu) ida tutaj, `rmm-lock-*` do RM_MANAGER.
+    ("CREATE TABLE IF NOT EXISTS project_locks ( project_id INTEGER PRIMARY KEY,"
+     " lock_id TEXT NOT NULL, uzytkownik TEXT NOT NULL, komputer TEXT NOT NULL,"
+     " locked_at TEXT NOT NULL, last_heartbeat TEXT NOT NULL )", None),
 ]
 
 

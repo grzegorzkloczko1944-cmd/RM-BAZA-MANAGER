@@ -110,7 +110,13 @@ except ImportError:
 
 # Nasze moduły
 from database_manager import DatabaseManager, get_supplier_name, _open_baza_connection
-from lock_manager_v2 import ProjectLockManager
+# Blokady pilnuje RM_SERWER (tabela project_locks w masterze), nie pliki
+# project_<id>.lock na dysku sieciowym — katalog nie potrafil powiedziec
+# „ten wpis juz istnieje", wiec dwie stacje potrafily uznac, ze obie maja
+# blokade. To WLASNY system RM_BAZA, niezalezny od blokad RM_MANAGER
+# (osobne bazy — patrz naglowek lock_manager_baza_serwer).
+# `lock_manager_v2` zostaje w repo jako awaryjny powrot do plikow.
+from lock_manager_baza_serwer import ProjectLockManager
 from import_bom import excel_import_material_thickness
 from project_manager import (
     fetch_projects, 
