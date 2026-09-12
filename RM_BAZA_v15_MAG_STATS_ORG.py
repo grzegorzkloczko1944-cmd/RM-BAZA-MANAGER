@@ -282,14 +282,20 @@ FILTER_SUPPLIER_ALL = "(WSZYSCY)"
 #
 # Kolejność ustalania adresu (pierwszy, który da wynik):
 #   1. `rm_serwer` w lokalnym sync_config.json,
-#   2. `rm_serwer` w sync_config.json na Y: — admin zmienia RAZ, dla wszystkich,
+#   2. `HMAC.json` na udziale serwera — admin zmienia RAZ, dla wszystkich,
 #   3. te stałe.
 DEFAULT_RM_SERWER_HOST = "192.168.100.84"
 DEFAULT_RM_SERWER_PORT = 5060
 # Wspólny plik, z którego stacje biorą adres i sekret serwera. Ścieżkę
 # można zmienić w configu (`wspolny_config`) albo w oknie połączenia —
 # nie każdy ma dysk pod tą samą literą.
-DEFAULT_WSPOLNY_CONFIG = "Y:/RM_BAZA/sync_config.json"
+#
+# Nazwa mówi, co w nim jest: adres serwera i sekret HMAC, nic więcej.
+# Wcześniej był to `sync_config.json` na `Y:` — czyjaś stara konfiguracja
+# stanowiska („M-old", szerokości kolumn, ścieżki do nieistniejących już
+# katalogów), z której czytano WYŁĄCZNIE blok `rm_serwer`. Reszta myliła:
+# wyglądała na wspólne ustawienia, a nikt jej nie czytał.
+DEFAULT_WSPOLNY_CONFIG = r"\\W2019S\RM_SERWER$\HMAC.json"
 
 
 def sciezka_wspolnego(config: dict = None) -> Path:
