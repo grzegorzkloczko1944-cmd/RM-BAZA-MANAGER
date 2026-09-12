@@ -832,80 +832,61 @@ def _is_db_readonly(con: sqlite3.Connection) -> bool:
         return False
 
 
-def _sessions_dir(master_db_path: str) -> Path:
-    """Katalog plików sesji - obok rm_manager.sqlite (wspólny dla wszystkich).
-
-    Session tracking działa na PLIKACH (jak locki projektów), nie na bazie:
-    heartbeat co 30 s u każdego klienta robił UPDATE na rm_manager.sqlite
-    przez SMB, a każdy taki zapis blokował całą bazę wszystkim pozostałym
-    ("database is locked" / kilkusekundowe zamrożenia GUI).
-    """
-    d = Path(os.path.dirname(os.path.abspath(master_db_path))) / "SESSIONS"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _session_file(master_db_path: str, session_id: str) -> Path:
-    return _sessions_dir(master_db_path) / f"session_{session_id}.json"
-
-
-def _read_session_file(path: Path) -> Optional[Dict]:
-    """Wczytaj plik sesji; None gdy nieczytelny/uszkodzony."""
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) and data.get('session_id') else None
-    except Exception:
-        return None
+# ═══════════════════════════════════════════════════════════════════════
+# SESJE UŻYTKOWNIKÓW — tabela `active_sessions` na RM_SERWER
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Pilnują czego innego niż blokady projektów: jeden użytkownik = jedno
+# zalogowanie, żeby ta sama osoba nie pracowała równocześnie z dwóch
+# komputerów (blokada projektu pilnuje, by jeden projekt miał jednego
+# edytującego — to osobna sprawa).
+#
+# Były plikami JSON w `SESSIONS\`, bo heartbeat co 30 s robił UPDATE na
+# rm_manager.sqlite przez SMB i blokował bazę wszystkim pozostałym
+# („database is locked", zamrożenia GUI). Serwer wykonuje polecenia
+# pojedynczo i kolejkuje je u siebie, więc powód zniknął — a przy okazji
+# znika wyścig, do którego stara wersja sama się przyznawała: przy
+# jednoczesnym logowaniu z dwóch maszyn powstawały dwie sesje naraz.
+# Teraz rozstrzyga indeks UNIQUE(user_id, hostname, app_name).
+#
+# `master_db_path` zostaje w sygnaturach (wołają je GUI i testy) — jest
+# IGNOROWANY, tak samo jak w pozostałych funkcjach po przejściu na serwer.
 
 
-def _write_session_file(path: Path, data: Dict):
-    """Zapis atomowy: tmp w tym samym katalogu + os.replace."""
-    tmp = path.with_suffix('.json.tmp')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+def _sesja_na_slownik(w: dict) -> Dict:
+    """Wiersz z serwera → słownik w kształcie, jaki znał plik JSON."""
+    return {
+        'session_id': w.get('session_id'),
+        'user_id': w.get('user_id'),
+        'username': w.get('username'),
+        'hostname': w.get('hostname'),
+        'pid': w.get('pid'),
+        'app_name': w.get('app_name'),
+        'login_at': w.get('login_at'),
+        'last_heartbeat': w.get('last_heartbeat'),
+        'client_info': w.get('client_info'),
+    }
 
 
-def _iter_session_files(master_db_path: str):
-    """Generator (Path, dict) po wszystkich czytelnych plikach sesji."""
-    try:
-        files = list(_sessions_dir(master_db_path).glob("session_*.json"))
-    except Exception:
-        return
-    for p in files:
-        data = _read_session_file(p)
-        if data:
-            yield p, data
-
-
-def register_user_session(master_db_path: str, user_id: int, username: str,
-                         hostname: str, pid: int, app_name: str = 'rm_manager',
+def register_user_session(master_db_path: str = None, user_id: int = 0, username: str = "",
+                         hostname: str = None, pid: int = 0, app_name: str = 'rm_manager',
                          client_info: str = None,
                          stale_minutes: int = DEFAULT_STALE_SESSION_MINUTES,
                          force: bool = False):
     """
-    Zarejestruj nową sesję użytkownika jako PLIK w SESSIONS/ (nie w bazie).
+    Zarejestruj sesję użytkownika w tabeli `active_sessions` na serwerze.
 
-    Algorytm (wzór locków projektów):
-    1. Usuń martwe pliki sesji tego usera (heartbeat > stale_minutes)
-    2. Sprawdź AKTYWNE sesje tego usera na innych komputerach
-    3a. Jeśli SĄ + force=False: zwróć (None, "active_session_exists", existing)
-    3b. Jeśli SĄ + force=True: usuń ich pliki
-    4. Usuń stare sesje tego usera na TYM komputerze (po crashu)
-    5. Zapisz plik nowej sesji (atomowo: tmp + os.replace)
-
-    Uwaga: bez transakcji bazodanowej okno wyścigu przy JEDNOCZESNYM
-    logowaniu tego samego usera z 2 maszyn istnieje (ms), ale skutek to
-    najwyżej dwie widoczne sesje - ten sam kompromis co przy lockach
-    projektów, akceptowany od miesięcy.
+    1. Usuń przeterminowane sesje (heartbeat starszy niż `stale_minutes`)
+    2. Sprawdź ŻYWE sesje tego usera na INNYCH komputerach
+    3a. Są + force=False → (None, "active_session_exists", sesja)
+    3b. Są + force=True  → usuń je
+    4. Zapisz własną (UPSERT po user_id+hostname+app_name: ponowne
+       uruchomienie na tym samym komputerze nadpisuje wiersz)
 
     Returns:
-        Tuple (session_id, status, existing_session):
-        - ("uuid...", "ok", None)                 - sesja zarejestrowana
-        - ("uuid...", "readonly", None)           - brak zapisu na udziale (GUEST)
-        - (None, "active_session_exists", dict)   - inny komputer, force=False
-        - (None, "error", error_msg_str)          - inny błąd
+        (session_id, "ok", None)                  - zarejestrowana
+        (None, "active_session_exists", dict)     - inny komputer, force=False
+        (None, "error", komunikat)                - błąd
     """
     import uuid
     import socket
@@ -917,82 +898,56 @@ def register_user_session(master_db_path: str, user_id: int, username: str,
     session_id = str(uuid.uuid4())
     now = datetime.now()
     now_iso = now.isoformat()
-    cutoff_iso = (now - timedelta(minutes=stale_minutes)).isoformat()
+    granica = (now - timedelta(minutes=stale_minutes)).isoformat()
 
     try:
-        # Kroki 1-4: przegląd istniejących plików sesji
-        for path, data in _iter_session_files(master_db_path):
-            if str(data.get('user_id')) != str(user_id):
-                continue
-            hb = data.get('last_heartbeat') or data.get('login_at') or ''
-            same_host = (data.get('hostname') == hostname)
+        rmm_exec("rmm-sesje-usun-przeterminowane", {"granica": granica})
 
-            if hb < cutoff_iso or same_host:
-                # martwa albo osierocona na tym komputerze - sprzątamy
-                try:
-                    path.unlink()
-                except Exception:
-                    pass
-                continue
+        if force:
+            # Przejmujemy: kasujemy cudze sesje tego usera, własną zostawiamy.
+            for w in rmm_read("rmm-sesje-uzytkownika", {"user_id": user_id}):
+                if w.get('hostname') == hostname:
+                    continue
+                rmm_exec("rmm-sesja-usun", {"session_id": w.get('session_id')})
+                print(f"⚡ Force-login: usunięto sesję {username}@{w.get('hostname')}")
 
-            # żywa sesja na INNYM komputerze
-            if not force:
-                print(f"⚠️  Logowanie odrzucone - {username} aktywny na {data.get('hostname')}")
-                return (None, "active_session_exists", data)
-            try:
-                path.unlink()
-                print(f"⚡ Force-login: usunięto sesję {username}@{data.get('hostname')}")
-            except Exception:
-                pass
+        # ⚠️ Jedno polecenie: serwer sam sprawdza „czy zajęte" i zapisuje.
+        # Rozdzielenie tego na odczyt i zapis przepuszczało obu proszących —
+        # między dwa polecenia jednego klienta wchodzi polecenie drugiego.
+        odp = rmm_exec("rmm-sesja-zaloz", {
+            "session_id": session_id, "user_id": user_id, "username": username,
+            "hostname": hostname, "pid": pid, "app_name": app_name,
+            "login_at": now_iso, "last_heartbeat": now_iso,
+            "client_info": client_info,
+            "user_id2": user_id, "app_name2": app_name,
+            "hostname2": hostname, "granica": granica})
 
-        # Krok 5: zapis pliku nowej sesji
-        record = {
-            'session_id': session_id,
-            'user_id': user_id,
-            'username': username,
-            'hostname': hostname,
-            'pid': pid,
-            'app_name': app_name,
-            'login_at': now_iso,
-            'last_heartbeat': now_iso,
-            'client_info': client_info,
-        }
-        _write_session_file(_session_file(master_db_path, session_id), record)
+        if not (odp or {}).get("rowcount"):
+            # Ktoś nas ubiegł albo sesja na innym komputerze wciąż żyje.
+            for w in rmm_read("rmm-sesje-uzytkownika", {"user_id": user_id}):
+                if w.get('hostname') != hostname:
+                    print(f"⚠️  Logowanie odrzucone - {username} aktywny na {w.get('hostname')}")
+                    return (None, "active_session_exists", _sesja_na_slownik(w))
+            return (None, "error", "nie udało się zarejestrować sesji")
 
         print(f"✅ Zarejestrowano sesję: {username}@{hostname} (session_id: {session_id[:8]}...)")
         return (session_id, "ok", None)
 
-    except PermissionError:
-        # Udział tylko do odczytu (tryb GUEST) - zachowujemy stary kontrakt:
-        # fake session_id, żeby GUI nie crashowało przy dalszej obsłudze
-        print(f"ℹ️  Udział read-only - sesja NIE zapisana (tryb GUEST/backup view)")
-        return (session_id, "readonly", None)
     except Exception as e:
         print(f"⚠️ Błąd rejestracji sesji: {e}")
         return (None, "error", str(e))
 
 
-def get_active_user_sessions(master_db_path: str, user_id: int, 
+def get_active_user_sessions(master_db_path: str = None, user_id: int = 0,
                             stale_minutes: int = DEFAULT_STALE_SESSION_MINUTES) -> List[Dict]:
-    """
-    Pobierz aktywne sesje użytkownika (heartbeat nie starszy niż stale_minutes).
-    
-    Czyta pliki sesji z SESSIONS/ (zero dotykania bazy).
-
-    Returns:
-        Lista słowników z danymi sesji (puste gdy brak/błąd)
-    """
+    """Żywe sesje użytkownika (heartbeat nie starszy niż `stale_minutes`)."""
     from datetime import datetime, timedelta
 
     try:
-        cutoff = (datetime.now() - timedelta(minutes=stale_minutes)).isoformat()
-        out = []
-        for _path, data in _iter_session_files(master_db_path):
-            if str(data.get('user_id')) != str(user_id):
-                continue
-            hb = data.get('last_heartbeat') or data.get('login_at') or ''
-            if hb >= cutoff:
-                out.append(data)
+        granica = (datetime.now() - timedelta(minutes=stale_minutes)).isoformat()
+        out = [_sesja_na_slownik(w)
+               for w in rmm_read("rmm-sesje-uzytkownika", {"user_id": user_id})
+               if (w.get('last_heartbeat') or w.get('login_at') or '') >= granica]
         out.sort(key=lambda d: d.get('login_at') or '', reverse=True)
         return out
     except Exception as e:
@@ -1000,116 +955,62 @@ def get_active_user_sessions(master_db_path: str, user_id: int,
         return []
 
 
-def update_session_heartbeat(master_db_path: str, session_id: str) -> bool:
-    """
-    Odśwież heartbeat sesji (wywołuj co ~30 s).
-
-    Nadpisuje WYŁĄCZNIE własny plik sesji w SESSIONS/ - zero zapisu do
-    rm_manager.sqlite. Wcześniejszy UPDATE na bazie przez SMB blokował ją
-    wszystkim pozostałym klientom przy każdym ticku.
-
-    Cicha funkcja - bez logów dla normalnych przypadków read-only.
-
-    Returns:
-        bool: True jeśli udało się zaktualizować
-    """
+def update_session_heartbeat(master_db_path: str = None, session_id: str = "") -> bool:
+    """Odśwież heartbeat sesji (wołane co ~30 s). Cicha — bez logów."""
     from datetime import datetime
 
     if not session_id:
         return False
-
     try:
-        path = _session_file(master_db_path, session_id)
-        data = _read_session_file(path)
-        if not data:
-            return False  # brak pliku = fake id (GUEST) albo sesja przejęta
-        data['last_heartbeat'] = datetime.now().isoformat()
-        _write_session_file(path, data)
-        return True
-    except PermissionError:
-        return False  # Cicho - to normalna sytuacja w trybie GUEST
+        odp = rmm_exec("rmm-sesja-bicie-serca", {
+            "last_heartbeat": datetime.now().isoformat(), "session_id": session_id})
+        return bool((odp or {}).get("rowcount"))
     except Exception as e:
         print(f"⚠️ Błąd heartbeat sesji: {e}")
         return False
 
 
-def cleanup_user_session(master_db_path: str, session_id: str):
-    """
-    Usuń sesję użytkownika (przy wylogowaniu/zamknięciu aplikacji).
-    Kasuje plik sesji z SESSIONS/ - zero dotykania bazy.
-    """
+def cleanup_user_session(master_db_path: str = None, session_id: str = ""):
+    """Usuń sesję (wylogowanie / zamknięcie aplikacji)."""
     if not session_id:
         return
-
     try:
-        path = _session_file(master_db_path, session_id)
-        if path.exists():
-            path.unlink()
-            print(f"🧹 Usunięto sesję: {session_id[:8]}...")
-    except PermissionError:
-        pass  # tryb GUEST / udział read-only
+        rmm_exec("rmm-sesja-usun", {"session_id": session_id})
+        print(f"🧹 Usunięto sesję: {session_id[:8]}...")
     except Exception as e:
         print(f"⚠️ Błąd usuwania sesji: {e}")
 
 
-def cleanup_stale_sessions(master_db_path: str,
+def cleanup_stale_sessions(master_db_path: str = None,
                           stale_minutes: int = DEFAULT_STALE_SESSION_MINUTES) -> int:
-    """
-    Usuń nieaktywne sesje (heartbeat starszy niż stale_minutes).
-    Kasuje pliki z SESSIONS/ - zero dotykania bazy.
-
-    Returns:
-        int: Liczba usuniętych sesji (0 gdy brak/error/readonly)
-    """
+    """Usuń sesje bez bicia serca ponad limit. Zwraca ile usunięto."""
     from datetime import datetime, timedelta
 
-    deleted = 0
     try:
-        cutoff = (datetime.now() - timedelta(minutes=stale_minutes)).isoformat()
-        for path, data in _iter_session_files(master_db_path):
-            hb = data.get('last_heartbeat') or data.get('login_at') or ''
-            if hb >= cutoff:
-                continue
-            try:
-                path.unlink()
-                deleted += 1
-                print(f"🧹 Usunięto nieaktywną sesję: "
-                      f"{data.get('username')}@{data.get('hostname')} "
-                      f"(ID: {str(data.get('session_id'))[:8]}...)")
-            except Exception:
-                pass
-        return deleted
+        granica = (datetime.now() - timedelta(minutes=stale_minutes)).isoformat()
+        odp = rmm_exec("rmm-sesje-usun-przeterminowane", {"granica": granica})
+        ile = int((odp or {}).get("rowcount") or 0)
+        if ile:
+            print(f"🧹 Usunięto {ile} nieaktywnych sesji")
+        return ile
     except Exception as e:
         print(f"⚠️ Błąd cleanup stale sessions: {e}")
-        return deleted
+        return 0
 
 
-def cleanup_hostname_sessions(master_db_path: str, hostname: str) -> int:
-    """
-    Usuń WSZYSTKIE sesje z danego komputera (przy starcie aplikacji po crashu).
-    Kasuje pliki z SESSIONS/ - zero dotykania bazy.
-
-    Returns:
-        int: Liczba usuniętych sesji
-    """
-    deleted = 0
+def cleanup_hostname_sessions(master_db_path: str = None, hostname: str = "") -> int:
+    """Usuń WSZYSTKIE sesje z danego komputera (start po crashu)."""
+    if not hostname:
+        return 0
     try:
-        for path, data in _iter_session_files(master_db_path):
-            if data.get('hostname') != hostname:
-                continue
-            try:
-                path.unlink()
-                deleted += 1
-                print(f"🧹 Startup cleanup: usunięto osieroconą sesję "
-                      f"{data.get('username')}@{hostname} "
-                      f"(ID: {str(data.get('session_id'))[:8]}...)")
-            except Exception:
-                pass
-        return deleted
+        odp = rmm_exec("rmm-sesje-usun-komputer", {"hostname": hostname})
+        ile = int((odp or {}).get("rowcount") or 0)
+        if ile:
+            print(f"🧹 Usunięto {ile} sesji komputera {hostname}")
+        return ile
     except Exception as e:
         print(f"⚠️ Błąd cleanup hostname sessions: {e}")
-        return deleted
-
+        return 0
 
 def update_stage_definitions(master_db_path: str = None):
     """Uzupełnia definicje etapów (stage_definitions w rm_manager.sqlite NA

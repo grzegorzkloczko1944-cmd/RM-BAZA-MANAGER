@@ -779,16 +779,16 @@ class RMManagerGUI:
                 "Kopia lokalna",
                 "⚡ Szybka praca WŁĄCZONA.\n\n"
                 "Baza edytowanego projektu jest kopiowana na dysk lokalny przy "
-                "przejęciu locka i wgrywana z powrotem na Y: przy jego zwolnieniu "
+                "przejęciu locka i wgrywana z powrotem na serwer przy jego zwolnieniu "
                 "(oraz przy zamykaniu programu).\n\n"
-                "Płatności i kody PLC działają bez zmian — bezpośrednio na Y:.\n\n"
+                "Płatności i kody PLC działają bez zmian — bezpośrednio na serwerze.\n\n"
                 "Zadziała przy następnym przejęciu locka."
             )
         else:
             messagebox.showinfo(
                 "Kopia lokalna",
                 "Szybka praca WYŁĄCZONA.\n\n"
-                "Program pracuje bezpośrednio na bazie sieciowej Y: (jak dotychczas)."
+                "Program pracuje bezpośrednio na bazie serwera (jak dotychczas)."
             )
 
     def _still_owns_lock(self, project_id: int) -> bool:
@@ -828,9 +828,9 @@ class RMManagerGUI:
             return False
         messagebox.showwarning(
             "Trwa praca na kopii lokalnej",
-            f"{operation} zapisuje bezpośrednio na dysku sieciowym Y:, "
+            f"{operation} zapisuje bezpośrednio w bazie na serwerze, "
             f"a projekt {pid} jest teraz edytowany na kopii lokalnej.\n\n"
-            f"Wynik tej operacji zostałby skasowany przy wgrywaniu kopii na Y:.\n\n"
+            f"Wynik tej operacji zostałby skasowany przy wgrywaniu kopii na serwer.\n\n"
             f"Zwolnij najpierw lock projektu {pid} (🔓 Zwolnij Lock), "
             f"a potem powtórz operację.",
             parent=self.root
@@ -838,22 +838,22 @@ class RMManagerGUI:
         return True
 
     def _warn_unsynced_local_copy(self, project_id: int):
-        """Ostrzeż o kopii lokalnej, której nie udało się wgrać na Y:."""
+        """Ostrzeż o kopii lokalnej, której nie udało się wgrać na serwer."""
         try:
             messagebox.showwarning(
                 "Niezsynchronizowane zmiany lokalne",
                 f"Na dysku została kopia projektu {project_id} z poprzedniej sesji, "
-                f"której NIE wgrano na dysk Y:.\n\n"
+                f"której NIE wgrano z powrotem na serwer.\n\n"
                 f"{rmm.get_local_copy_path(project_id)}\n\n"
                 f"Żeby nie nadpisać tych zmian, program pracuje teraz bezpośrednio "
-                f"na Y: (bez kopii lokalnej).\n\n"
+                f"na bazie serwera (bez kopii lokalnej).\n\n"
                 f"Zabezpiecz ten plik albo usuń go, gdy zmiany są już niepotrzebne."
             )
         except Exception:
             pass
 
     def _open_local_copy(self, project_id: int):
-        """Po zdobyciu locka: skopiuj bazę projektu Y: → dysk lokalny.
+        """Po zdobyciu locka: skopiuj bazę projektu z serwera na dysk lokalny.
 
         Idempotentne: ponowne wywołanie dla tego samego projektu nie nadpisuje
         kopii świeżym plikiem z Y: (skasowałoby to bieżące zmiany).
@@ -881,7 +881,7 @@ class RMManagerGUI:
             self._warn_unsynced_local_copy(project_id)
 
     def _sync_local_copy_back(self):
-        """Przed zwolnieniem locka: wgraj lokalną kopię z powrotem na Y:.
+        """Przed zwolnieniem locka: wgraj lokalną kopię z powrotem na serwer.
 
         Bezpieczne do wielokrotnego wywołania - gdy nie ma aktywnej kopii
         lokalnej, wychodzi natychmiast. Dzięki temu można je wołać na każdej
@@ -902,7 +902,7 @@ class RMManagerGUI:
             try:
                 messagebox.showerror(
                     "Błąd zapisu na dysk sieciowy",
-                    f"Nie udało się wgrać zmian projektu {pid} na dysk Y:.\n\n"
+                    f"Nie udało się wgrać zmian projektu {pid} na serwer.\n\n"
                     f"Twoje zmiany NIE zostały utracone — są w pliku:\n"
                     f"{rmm.get_local_copy_path(pid)}\n\n"
                     f"Sprawdź połączenie z dyskiem sieciowym. Nie zamykaj programu "
@@ -2603,7 +2603,7 @@ class RMManagerGUI:
         if orphan_path:
             extra = (
                 f"\n\n⚠️ Pracowałeś na kopii lokalnej. Twoje zmiany NIE zostały "
-                f"wgrane na Y:, bo projekt edytuje teraz ktoś inny "
+                f"wgrane na serwer, bo projekt edytuje teraz ktoś inny "
                 f"(nadpisanie skasowałoby jego pracę).\n\n"
                 f"Kopia z Twoimi zmianami:\n{orphan_path}"
             )
@@ -10231,7 +10231,7 @@ class RMManagerGUI:
                 entry.insert(0, path)
         
         e_server_exe = make_row(form, 7, "EXE na serwerze (update):",
-                                "Ścieżka do rm_manager.exe na serwerze dla auto-update  (np. Y:/RM_MANAGER/rm_manager.exe)",
+                                "Ścieżka do rm_manager.exe na serwerze dla auto-update (puste = bez auto-update)",
                                 self.server_exe_path, browse_exe)
 
         def browse_txt(entry):

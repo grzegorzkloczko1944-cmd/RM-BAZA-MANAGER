@@ -333,6 +333,31 @@ ODCZYT = {
         [],
     ),
     # ── blokady projektów (dawniej pliki project_<id>.lock w LOCKS) ──────
+    # ── sesje uzytkownikow (dawniej pliki JSON w SESSIONS\) ──────────────
+    #
+    # Pilnuja czego innego niz blokady projektow: jeden user = jedno
+    # zalogowanie, zeby ta sama osoba nie pracowala z dwoch komputerow naraz.
+    # Byly plikami, bo heartbeat co 30 s robil UPDATE na bazie przez SMB
+    # i blokowal ja wszystkim. Serwer kolejkuje zapisy, wiec ten powod znikl.
+    "rmm-sesje-uzytkownika": (
+        "SELECT session_id, user_id, username, hostname, pid, app_name,"
+        "       login_at, last_heartbeat, client_info"
+        "  FROM active_sessions WHERE user_id = ?"
+        " ORDER BY login_at DESC",
+        ["user_id"],
+    ),
+    "rmm-sesje-wszystkie": (
+        "SELECT session_id, user_id, username, hostname, pid, app_name,"
+        "       login_at, last_heartbeat, client_info"
+        "  FROM active_sessions ORDER BY login_at DESC",
+        [],
+    ),
+    "rmm-sesja-po-id": (
+        "SELECT session_id, user_id, username, hostname, pid, app_name,"
+        "       login_at, last_heartbeat, client_info"
+        "  FROM active_sessions WHERE session_id = ?",
+        ["session_id"],
+    ),
     "rmm-lock-po-projekcie": (
         "SELECT project_id, lock_id, uzytkownik, komputer, locked_at, last_heartbeat"
         "  FROM project_locks WHERE project_id = ?",
@@ -1514,6 +1539,65 @@ ZAPIS = {
     # porzucona (bicie serca starsze niż `granica`). Warunek i zapis muszą być
     # jednym poleceniem — przy sprawdzaniu osobno dwie stacje potrafią obie
     # uznać, że wygrały. Klient rozpoznaje przegraną po `rowcount = 0`.
+    # ── sesje uzytkownikow ───────────────────────────────────────────────
+    #
+    # Wyscig rozstrzyga indeks UNIQUE(user_id, hostname, app_name): drugie
+    # logowanie tego samego usera z TEGO SAMEGO komputera nadpisuje wiersz
+    # (to normalne — restart programu), a z INNEGO tworzy osobny, ktory
+    # klient widzi i odrzuca. Pliki JSON dawaly tu okno kilku ms, w ktorym
+    # powstawaly dwie sesje naraz.
+    # ⚠️ Warunek `WHERE NOT EXISTS` jest CALYM mechanizmem wyscigu i musi
+    # zostac w JEDNYM poleceniu.
+    #
+    # Sprawdzenie „czy user ma zywa sesje gdzie indziej", a potem osobny
+    # INSERT, przepuszczalo obu proszacych: serwer wykonuje polecenia
+    # pojedynczo, ale miedzy dwa polecenia jednego klienta wchodzi polecenie
+    # drugiego. Zmierzone — dwie maszyny logowaly sie jednoczesnie i OBIE
+    # dostawaly „ok" (12.09.2026). Tutaj serwer sam sprawdza i zapisuje bez
+    # przerwy, a przegrany dostaje `rowcount = 0`.
+    #
+    # `hostname <> ?` w podzapytaniu: wlasny komputer nie blokuje sam siebie,
+    # bo ponowne uruchomienie programu ma nadpisac wlasny wiersz (UPSERT).
+    "rmm-sesja-zaloz": (
+        "INSERT INTO active_sessions"
+        " (session_id, user_id, username, hostname, pid, app_name,"
+        "  login_at, last_heartbeat, client_info)"
+        " SELECT ?,?,?,?,?,?,?,?,?"
+        "  WHERE NOT EXISTS ("
+        "    SELECT 1 FROM active_sessions"
+        "     WHERE user_id = ? AND app_name = ? AND hostname <> ?"
+        "       AND last_heartbeat >= ?)"
+        " ON CONFLICT(user_id, hostname, app_name) DO UPDATE SET"
+        "   session_id = excluded.session_id, pid = excluded.pid,"
+        "   login_at = excluded.login_at,"
+        "   last_heartbeat = excluded.last_heartbeat,"
+        "   client_info = excluded.client_info",
+        ["session_id", "user_id", "username", "hostname", "pid", "app_name",
+         "login_at", "last_heartbeat", "client_info",
+         "user_id2", "app_name2", "hostname2", "granica"],
+    ),
+    "rmm-sesja-bicie-serca": (
+        "UPDATE active_sessions SET last_heartbeat = ? WHERE session_id = ?",
+        ["last_heartbeat", "session_id"],
+    ),
+    "rmm-sesja-usun": (
+        "DELETE FROM active_sessions WHERE session_id = ?",
+        ["session_id"],
+    ),
+    "rmm-sesje-usun-uzytkownika-poza": (
+        "DELETE FROM active_sessions"
+        " WHERE user_id = ? AND session_id <> ?",
+        ["user_id", "session_id"],
+    ),
+    "rmm-sesje-usun-komputer": (
+        "DELETE FROM active_sessions WHERE hostname = ?",
+        ["hostname"],
+    ),
+    "rmm-sesje-usun-przeterminowane": (
+        "DELETE FROM active_sessions"
+        " WHERE last_heartbeat IS NULL OR last_heartbeat < ?",
+        ["granica"],
+    ),
     "rmm-lock-przejmij": (
         "INSERT INTO project_locks"
         " (project_id, lock_id, uzytkownik, komputer, locked_at, last_heartbeat)"
@@ -2122,13 +2206,18 @@ MIGRACJE_RM_MANAGER = [
      " FOREIGN KEY (group_id) REFERENCES absence_exclusion_groups(id) ON DELETE CASCADE,"
      " FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,"
      " UNIQUE (group_id, employee_id) )", None),
+    # ⚠️ BEZ klucza obcego do `users`: ta tabela leży w MASTERZE RM_BAZA,
+    # a `active_sessions` w bazie RM_MANAGER — to dwa osobne pliki, więc
+    # SQLite nie ma jak tego sprawdzić. Przy `PRAGMA foreign_keys=ON` (serwer
+    # go włącza, bo schemat używa ON DELETE CASCADE gdzie indziej) każdy zapis
+    # kończył się „no such table: main.users". Schemat był tu od początku,
+    # ale nikt z tej tabeli nie korzystał, więc błąd nie miał okazji wyjść.
     ("CREATE TABLE IF NOT EXISTS active_sessions ( session_id TEXT PRIMARY KEY,"
      " user_id INTEGER NOT NULL, username TEXT NOT NULL,"
      " hostname TEXT NOT NULL, pid INTEGER NOT NULL,"
      " app_name TEXT NOT NULL DEFAULT 'rm_manager',"
      " login_at DATETIME NOT NULL, last_heartbeat DATETIME NOT NULL,"
-     " client_info TEXT,"
-     " FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE )", None),
+     " client_info TEXT )", None),
     ("CREATE TABLE IF NOT EXISTS audit_log ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
      " employee_id INTEGER, entity_type TEXT NOT NULL, entity_id INTEGER,"
      " action TEXT NOT NULL, field TEXT, old_value TEXT, new_value TEXT,"
