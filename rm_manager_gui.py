@@ -72,6 +72,12 @@ except ImportError:
     MATPLOTLIB_AVAILABLE = False
     plt = mdates = FigureCanvasTkAgg = NavigationToolbar2Tk = Figure = patches = None
 
+# ⚠️ PIERWSZA rzecz przed dotknięciem czegokolwiek na udziale — patrz
+# `udzial_serwera`. Bazy per-projekt są otwierane JAKO PLIKI, a część
+# pracowników ma konta bez prawa do zasobów sieciowych.
+import udzial_serwera as _udzial
+_udzial.zaloguj(cichy=False)
+
 import rm_manager as rmm
 from rm_manager import ProjectStatus
 

@@ -13,7 +13,10 @@ hiddenimports = ['plotly', 'PIL', 'PIL.Image', 'PIL.ImageTk', 'PIL.ImageDraw', '
 # i dopiero potem nie ma czym zapytać serwera. Ten sam błąd co kiedyś
 # z modułem Subiekta w RM_BAZA.
 hiddenimports += ['rm_klient', 'lock_manager_serwer', 'lock_manager_v2',
-                  'rm_serwer_operacje']
+                  'rm_serwer_operacje',
+                  # Logowanie do udzialu kontem technicznym — bez tego user
+                  # bez praw sieciowych dostaje okno o poswiadczenia.
+                  'udzial_serwera']
 tmp_ret = collect_all('anthropic')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('plotly')

@@ -109,6 +109,15 @@ except ImportError:
     openpyxl = None
 
 # Nasze moduły
+# ⚠️ PIERWSZA rzecz przed dotknięciem czegokolwiek na udziale.
+#
+# Bazy projektów są otwierane JAKO PLIKI z `\\W2019S\RM_SERWER$`, a część
+# pracowników ma konta bez prawa do zasobów sieciowych — Windows pokazuje im
+# wtedy okno „Wprowadzanie poświadczeń sieciowych" i nic się nie otwiera.
+# Logujemy się do udziału kontem technicznym, zanim cokolwiek go potrzebuje.
+import udzial_serwera as _udzial
+_udzial.zaloguj(cichy=False)
+
 from database_manager import DatabaseManager, get_supplier_name, _open_baza_connection
 # Blokady pilnuje RM_SERWER (tabela project_locks w masterze), nie pliki
 # project_<id>.lock na dysku sieciowym — katalog nie potrafil powiedziec

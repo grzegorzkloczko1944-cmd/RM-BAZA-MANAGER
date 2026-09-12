@@ -33,6 +33,9 @@ hiddenimports += [
     # serwerze i KAZDY odczyt idzie przez rm_klient.
     'rm_klient', 'rm_serwer_operacje', 'project_manager',
     'rmpak_calculator', 'material_calculator',
+    # Logowanie do udzialu kontem technicznym — bez tego user bez praw
+    # sieciowych dostaje okno „Wprowadzanie poswiadczen sieciowych".
+    'udzial_serwera',
 
     # ⚠️ BLOKADY PROJEKTOW przez serwer (12.09.2026). RM_BAZA importuje
     # `lock_manager_baza_serwer` na gorze pliku, ale ten dziedziczy po
