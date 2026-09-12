@@ -725,6 +725,8 @@ class RMManagerGUI:
 
         # Heartbeat co 30 sekund (jak RM_BAZA) + cleanup stale locków
         self._heartbeat_job = None
+        # Strażnik własnego locka — osobno, co 5 s (patrz `_start_lock_watch`)
+        self._lock_watch_job = None
         # Startup: wyczyść locki tego komputera z poprzednich crashów
         # (cleanup_stale_locks sprawdza timeout — nie pomoże przy szybkim restarcie;
         #  cleanup_my_computer_locks kasuje po nazwie komputera — zawsze skuteczny)
@@ -1486,24 +1488,8 @@ class RMManagerGUI:
                 except Exception as e:
                     print(f"⚠️ Błąd cleanup stale sessions: {e}")
 
-                # Detekcja wymuszenia: sprawdź czy lock_id się zmienił
-                # Pomijaj dla stuba (tryb jednousytkownikowy – brak prawdziwych locków)
-                if (self.have_lock and self.current_lock_id and self.selected_project_id
-                        and not getattr(self.lock_manager, '_STUB', False)):
-                    current_owner = self.lock_manager.get_project_lock_owner(self.selected_project_id)
-                    lock_lost = False
-                    reason = ""
-                    if not current_owner:
-                        lock_lost = True
-                        reason = "Lock wygasł lub został zwolniony przez innego użytkownika"
-                    elif current_owner.get('lock_id') != self.current_lock_id:
-                        new_owner = current_owner.get('user', 'Unknown')
-                        new_comp  = current_owner.get('computer', 'Unknown')
-                        lock_lost = True
-                        reason = f"Lock został wymuszony przez:\n{new_owner}@{new_comp}"
-                    if lock_lost:
-                        # _on_lock_lost musi być wywołane z GUI thread
-                        self.root.after(0, lambda r=reason: self._on_lock_lost(r))
+                # Detekcja wymuszenia przeniesiona do `_lock_watch_tick`
+                # (co 5 s zamiast co 30 s) — patrz komentarz tam.
             except Exception as e:
                 print(f"⚠️ Heartbeat error: {e}")
 
@@ -1513,12 +1499,88 @@ class RMManagerGUI:
 
         # Zaplanuj następny tick co 30 sekund (jak RM_BAZA)
         self._heartbeat_job = self.root.after(30_000, self._start_heartbeat)
+        self._start_lock_watch()
+
+    # ── szybki strażnik własnego locka ───────────────────────────────────
+    def _start_lock_watch(self):
+        """Co 5 s pytaj serwer, czy blokady nadal są nasze.
+
+        Osobno od heartbeatu (30 s), bo tamten ciągnie też sesję, sprzątanie
+        sesji i backupy — tego nie ma sensu robić co 5 s. Kontrola to jedno
+        zapytanie (~7 ms), więc dziesięć stanowisk to ~1,5% czasu serwera.
+        Chodzi o to, żeby user, któremu wymuszono przejęcie, dowiedział się
+        od razu, a nie po pół minucie pisania w cudzy już projekt.
+        """
+        if getattr(self, '_lock_watch_job', None):
+            return
+        self._lock_watch_job = self.root.after(5_000, self._lock_watch_tick)
+
+    def _stop_lock_watch(self):
+        job = getattr(self, '_lock_watch_job', None)
+        if not job:
+            return
+        try:
+            self.root.after_cancel(job)
+        except Exception:
+            pass
+        self._lock_watch_job = None
+
+    def _lock_watch_tick(self):
+        import threading
+
+        def _robotnik():
+            try:
+                if getattr(self.lock_manager, '_STUB', False):
+                    return
+                lock_lost = False
+                # 1) blokada wybranego projektu
+                if self.have_lock and self.current_lock_id and self.selected_project_id:
+                    moj_lock = self.current_lock_id
+                    pid = self.selected_project_id
+                    current_owner = self.lock_manager.get_project_lock_owner(pid)
+                    reason = ""
+                    if not current_owner:
+                        reason = "Lock wygasł lub został zwolniony przez innego użytkownika"
+                    elif current_owner.get('lock_id') != moj_lock:
+                        reason = ("Lock został wymuszony przez:\n%s@%s"
+                                  % (current_owner.get('user', 'Unknown'),
+                                     current_owner.get('computer', 'Unknown')))
+                    if reason:
+                        # Stan mógł się zmienić, póki czekaliśmy na sieć.
+                        if (self.current_lock_id == moj_lock
+                                and self.selected_project_id == pid):
+                            lock_lost = True
+                            self.root.after(0, lambda r=reason: self._on_lock_lost(r))
+
+                # 2) blokady pozostałych projektów linii produkcyjnej
+                #    (`_try_acquire_line_locks`) — bez tego ktoś mógł przejąć
+                #    równoległy projekt, a my dalej pisalibyśmy po nim etapy.
+                if not lock_lost and getattr(self, '_line_locked_pids', None):
+                    stracone = []
+                    for pid in list(self._line_locked_pids):
+                        try:
+                            wl = self.lock_manager.get_project_lock_owner(pid)
+                        except Exception:
+                            continue        # sieć mrugnęła — nie wyciągamy wniosków
+                        if not wl or not self.lock_manager._moj(wl):
+                            stracone.append((pid, wl))
+                    if stracone:
+                        opis = ", ".join(
+                            "%s (%s)" % (pid, (wl.get('user') if wl else 'zwolniony'))
+                            for pid, wl in stracone)
+                        self.root.after(0, lambda o=opis: self._on_line_locks_lost(o))
+            except Exception as e:
+                print(f"⚠️ Strażnik locka: {e}")
+
+        threading.Thread(target=_robotnik, daemon=True).start()
+        self._lock_watch_job = self.root.after(5_000, self._lock_watch_tick)
 
     def _on_closing(self):
         """Zwolnij locki i zamknij aplikację"""
         if self._heartbeat_job:
             self.root.after_cancel(self._heartbeat_job)
-        
+        self._stop_lock_watch()
+
         # Anuluj sprawdzanie alarmów
         if hasattr(self, '_alarm_check_job') and self._alarm_check_job is not None:
             self.root.after_cancel(self._alarm_check_job)
@@ -2621,6 +2683,35 @@ class RMManagerGUI:
 
         except Exception as e:
             messagebox.showerror("Błąd", f"Nie udało się zwolnić locka:\n{e}", parent=self.root)
+
+    def _on_line_locks_lost(self, opis: str):
+        """Ktoś przejął blokady projektów linii produkcyjnej (nie tego wybranego).
+
+        Sam wybrany projekt nadal jest nasz, więc nie schodzimy w READ-ONLY —
+        ale propagacja etapów na linię musi się zatrzymać, bo tamte projekty
+        edytuje już kto inny. Przestajemy je uważać za swoje i mówimy o tym.
+        """
+        stracone = getattr(self, '_line_locked_pids', None)
+        if not stracone:
+            return
+        print("🚨 UTRATA LOCKÓW LINII: %s" % opis)
+        self._line_locked_pids = []
+        self._line_parallel_stages = set()
+        self._line_snapshots = {}
+        try:
+            self._refresh_mp_lock_labels()
+            self._refresh_combo_lock_info()
+        except Exception:
+            pass
+        self.status_bar.config(
+            text="⚠️ Utracono blokady projektów linii — propagacja etapów wyłączona",
+            fg="#e67e22")
+        messagebox.showwarning(
+            "⚠️ Utrata blokad linii produkcyjnej",
+            f"Blokady pozostałych projektów linii zostały przejęte:\n{opis}\n\n"
+            f"Projekt {self.selected_project_id} nadal edytujesz Ty, ale zmiany "
+            f"etapów NIE będą już propagowane na linię.",
+            parent=self.root)
 
     def _on_lock_lost(self, reason: str):
         """Obsługa utraty locka (ktoś wymuszył przejęcie)"""

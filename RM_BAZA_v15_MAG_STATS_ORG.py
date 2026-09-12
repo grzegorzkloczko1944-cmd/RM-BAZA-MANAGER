@@ -789,6 +789,14 @@ class MainWindow(tk.Tk):
         self._heartbeat_after_id = None
         self._heartbeat_interval_ms = 30 * 1000  # 30 sekund
 
+        # Osobny, SZYBKI strażnik własnego locka (12.09.2026). Gdy ktoś wymusi
+        # przejęcie, user ma się o tym dowiedzieć od razu, a nie po pół minucie
+        # dalszego pisania w projekt, który już do niego nie należy. Osobno od
+        # heartbeatu, bo tamten ciągnie też sesję, chat i sprzątanie — tego nie
+        # ma sensu robić co 5 s. Kontrola to jedno zapytanie (~7 ms).
+        self._lock_watch_after_id = None
+        self._lock_watch_interval_ms = 5 * 1000   # 5 sekund
+
         # Banner utraty połączenia
         self._connection_lost_banner = None  # Frame z banerem
         self._connection_lost_shown = False  # Czy banner jest widoczny
@@ -2876,17 +2884,17 @@ class MainWindow(tk.Tk):
             return False
 
     def _start_heartbeat_timer(self):
-        """Uruchom timer heartbeat - odświeżanie locków co 2 minuty."""
-        print(f"💓 Uruchamiam timer heartbeat (2 min)...")
-        print(f"   interval_ms = {self._heartbeat_interval_ms}")
+        """Uruchom timer heartbeat — odświeżanie locków, sesji i chatu."""
+        sek = self._heartbeat_interval_ms // 1000
+        print(f"💓 Uruchamiam timer heartbeat ({sek} s)...")
         print(f"   lock_manager = {self.lock_manager}")
-        # Pierwsze odświeżenie po 2 minutach
         self._heartbeat_after_id = self.after(self._heartbeat_interval_ms, self._heartbeat_tick)
-        print(f"   after_id = {self._heartbeat_after_id}")
         print(f"✅ Timer heartbeat zaplanowany")
-    
+        self._start_lock_watch()
+
     def _stop_heartbeat_timer(self):
         """Zatrzymaj timer heartbeat."""
+        self._stop_lock_watch()
         if not self._heartbeat_after_id:
             return
         try:
@@ -2895,7 +2903,68 @@ class MainWindow(tk.Tk):
             pass
         self._heartbeat_after_id = None
         print("💔 Timer heartbeat zatrzymany")
-    
+
+    # ── szybki strażnik własnego locka ───────────────────────────────────
+    def _start_lock_watch(self):
+        """Co 5 s pytaj serwer, czy blokada projektu nadal jest nasza."""
+        if self._lock_watch_after_id:
+            return
+        self._lock_watch_after_id = self.after(
+            self._lock_watch_interval_ms, self._lock_watch_tick)
+
+    def _stop_lock_watch(self):
+        if not self._lock_watch_after_id:
+            return
+        try:
+            self.after_cancel(self._lock_watch_after_id)
+        except Exception:
+            pass
+        self._lock_watch_after_id = None
+
+    def _lock_watch_tick(self):
+        """Czy ktoś nie przejął nam locka (12.09.2026).
+
+        `refresh_all_my_locks()` w heartbeacie tego NIE załatwia: ono tylko
+        przestaje bić serce cudzej blokady, po cichu. Wcześniej RM_BAZA
+        zauważała przejęcie dopiero przy odświeżeniu arkusza albo przy próbie
+        zapisu — user, który niczego nie klikał, siedział z napisem „masz
+        locka" i pisał do kopii, której nikt już nie przyjmie.
+
+        Pytanie idzie z osobnego wątku (sieć, ~7 ms), a reakcja wraca do GUI.
+        """
+        import threading
+
+        def _robotnik():
+            try:
+                if not (self.have_lock and self.current_lock_id
+                        and self.current_project_id and self.lock_manager):
+                    return
+                moj_lock = self.current_lock_id
+                pid = self.current_project_id
+                wlasciciel = self.lock_manager.get_project_lock_owner(pid)
+                powod = ""
+                if not wlasciciel:
+                    powod = "Lock wygasł lub został zwolniony przez innego użytkownika"
+                elif wlasciciel.get('lock_id') != moj_lock:
+                    powod = ("Lock został wymuszony przez:\n%s@%s"
+                             % (wlasciciel.get('user', 'Unknown'),
+                                wlasciciel.get('computer', 'Unknown')))
+                if not powod:
+                    return
+                # Stan mógł się zmienić, póki czekaliśmy na sieć.
+                if (self.current_lock_id != moj_lock
+                        or self.current_project_id != pid):
+                    return
+                print("⚠️⚠️⚠️ STRAŻNIK LOCKA: %s" % powod)
+                self.after(0, lambda p=powod: self._force_cancel_lock_on_lost(p))
+            except Exception as e:
+                print("⚠️ Strażnik locka: %s" % e)
+
+        threading.Thread(target=_robotnik, daemon=True).start()
+        self._lock_watch_after_id = self.after(
+            self._lock_watch_interval_ms, self._lock_watch_tick)
+
+
     def _heartbeat_tick(self):
         """Tick timera heartbeat - odśwież locki W OSOBNYM WĄTKU (nie blokuje GUI)."""
         def _heartbeat_worker():
@@ -2926,7 +2995,7 @@ class MainWindow(tk.Tk):
 
                 # Sprawdź nowe wiadomości w chacie
                 self.after(0, self.check_new_chat_messages)
-                
+
             except Exception as e:
                 print(f"❌ Błąd w heartbeat tick: {e}")
                 import traceback
