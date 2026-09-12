@@ -19,6 +19,7 @@ Funkcje:
 from pathlib import Path
 from typing import Optional, Tuple, List
 import re
+import sqlite3
 
 
 def _klient():
