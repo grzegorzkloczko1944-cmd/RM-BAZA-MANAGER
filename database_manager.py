@@ -561,6 +561,21 @@ class DatabaseManager:
             self.project_con.commit()
             print("  ✅ Commit")
         
+        # ⚠️ ZAMYKAMY połączenie przed nadpisaniem pliku na serwerze.
+        #
+        # Sam `commit()` wyżej nie wystarcza: uchwyt do bazy ZOSTAJE OTWARTY,
+        # a Windows nie pozwala nadpisać pliku trzymanego przez proces. Na `Y:`
+        # przechodziło, na W2019S kończy się „[Errno 13] Permission denied"
+        # przy zwalnianiu locka — plik widać wtedy w `Get-SmbOpenFile` jako
+        # otwarty przez nas samych (12.09.2026). Wołający zamyka projekt zaraz
+        # potem (`close_project_and_cleanup`), więc nic nie tracimy.
+        if self.project_con:
+            try:
+                self.project_con.close()
+            except Exception:
+                pass
+            self.project_con = None
+
         # Użyj get_project_db_path dla backward compatibility - zapisz tam skąd był pobrany
         project_type = self.current_project_type  # Użyj aktualnego typu
         from project_manager import get_project_db_path
