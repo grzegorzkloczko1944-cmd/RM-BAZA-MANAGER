@@ -159,6 +159,17 @@ def _ustaw_log(katalog):
 # Ramka: 4 bajty długości (LE) + UTF-8 JSON
 # ═══════════════════════════════════════════════════════════════════════
 
+def _nasz_znacznik(ogon: str) -> bool:
+    """Czy to nasza automatyczna kopia, czyli `RRRRMMDD_GGMMSS`.
+
+    Rotacja kasuje najstarsze pliki, więc musi rozpoznawać WYŁĄCZNIE własne.
+    Obok leżą ręczne kopie z wdrożenia (`master_przed_rfq_20260911_201520`),
+    a te mają zostać — ktoś je zrobił świadomie przed groźną zmianą.
+    """
+    return (len(ogon) == 15 and ogon[8] == "_"
+            and ogon[:8].isdigit() and ogon[9:].isdigit())
+
+
 def _czytaj_dokladnie(sock, ile):
     bufor = b""
     while len(bufor) < ile:
@@ -438,8 +449,8 @@ class Serwer:
             finally:
                 zad.gotowe.set()
 
-    def _backup(self):
-        """Spójna kopia mastera + rotacja. Robi to WŁAŚCICIEL pliku (§4 planu).
+    def _backup_jednej(self, con, prefiks, katalog=None):
+        """Spójna kopia JEDNEJ bazy + rotacja jej własnych kopii.
 
         `sqlite3.Connection.backup` (Online Backup API) kopiuje bazę **bez
         blokowania zapisów** i bez ryzyka złapania pliku w połowie transakcji —
@@ -447,29 +458,78 @@ class Serwer:
         przeniósł się tutaj: klient, który nie otwiera już mastera, nie ma jak
         zrobić spójnej kopii.
         """
-        katalog = self.config["backup_katalog"]
+        katalog = katalog or self.config["backup_katalog"]
         os.makedirs(katalog, exist_ok=True)
-        nazwa = "master_%s.sqlite" % datetime.now().strftime("%Y%m%d_%H%M%S")
+        nazwa = "%s_%s.sqlite" % (prefiks, datetime.now().strftime("%Y%m%d_%H%M%S"))
         cel = os.path.join(katalog, nazwa)
         docelowe = sqlite3.connect(cel)
         try:
-            self.con.backup(docelowe)
+            con.backup(docelowe)
         finally:
             docelowe.close()
 
         # Rotacja: zostaje N najnowszych. Po nazwie, nie po mtime — nazwa
         # niesie czas utworzenia i nie zmienia się przy kopiowaniu katalogu.
+        #
+        # ⚠️ Filtrujemy po PEŁNYM prefiksie z podkreśleniem. Samo
+        # `startswith("master_")` łapałoby też `master_przed_rfq_...`
+        # (ręczne kopie z wdrożenia) i rotacja kasowałaby cudze pliki.
+        czolo = prefiks + "_"
         kopie = sorted(f for f in os.listdir(katalog)
-                       if f.startswith("master_") and f.endswith(".sqlite"))
+                       if f.startswith(czolo) and f.endswith(".sqlite")
+                       and _nasz_znacznik(f[len(czolo):-len(".sqlite")]))
         ile = max(1, int(self.config.get("backup_ile", 20)))
         for stara in kopie[:-ile]:
             try:
                 os.remove(os.path.join(katalog, stara))
             except OSError:
                 pass
-        log("Backup: %s (%.1f KB), kopii w katalogu: %d"
+        log("Backup: %s (%.1f KB), kopii tej bazy: %d"
             % (nazwa, os.path.getsize(cel) / 1024, min(len(kopie), ile)))
         return cel
+
+    def _backup(self):
+        """Kopia WSZYSTKICH baz, którymi opiekuje się serwer.
+
+        Wcześniej kopiowany był wyłącznie master RM_BAZA — `rm_manager.sqlite`
+        (81 projektów, definicje etapów, blokady) i `subiekt_mapowania.sqlite`
+        nie miały żadnego backupu, mimo że serwer jest ich jedynym właścicielem
+        i nikt inny nie ma jak ich skopiować.
+
+        Każda baza trafia do katalogu SWOJEGO programu — tam, gdzie klient
+        trzyma backupy projektów — żeby kopie jednej aplikacji leżały w jednym
+        miejscu, zamiast rozsypane po dwóch (ustalone 12.09.2026):
+
+            master.sqlite             -> backup_RM_BAZA\\master
+            rm_manager.sqlite         -> backup_RM_MANAGER\\master
+            subiekt_mapowania.sqlite  -> backup_RM_BAZA\\master (obsługuje ją RM_BAZA)
+        """
+        zrobione = []
+        for con, prefiks, katalog in (
+                (self.con, "master", self._katalog_backupu("BAZA")),
+                (self.con_rmm, "rm_manager", self._katalog_backupu("MANAGER")),
+                (self.con_map, "subiekt_mapowania", self._katalog_backupu("BAZA"))):
+            if con is None:
+                continue
+            try:
+                zrobione.append(self._backup_jednej(con, prefiks, katalog))
+            except Exception as e:
+                # Nieudany backup jednej bazy nie może zablokować pozostałych.
+                log("⚠️  Backup %s nieudany: %s" % (prefiks, e))
+        return zrobione
+
+    def _katalog_backupu(self, ktora: str) -> str:
+        """Katalog `master\\` wewnątrz backupów danego programu.
+
+        Konfiguracyjny `backup_katalog` pozostaje wartością zapasową — gdyby
+        ktoś wskazał własną ścieżkę, wygrywa ona i wszystko ląduje tam, tak
+        jak działo się to wcześniej.
+        """
+        wlasny = self.config.get("backup_katalog_%s" % ktora.lower())
+        if wlasny:
+            return wlasny
+        korzen = os.path.dirname(self.baza)          # …\dane
+        return os.path.join(korzen, "Projekty", "backup_RM_%s" % ktora, "master")
 
     def _sprzatanie(self):
         """Raz na dobę: czyszczenie dziennika. Robione w wątku roboczym,
@@ -487,13 +547,42 @@ class Serwer:
 
         # Backup raz na dobę — i tylko gdy coś się zapisało. Kopia bazy,
         # w której nic się nie zmieniło, to zajęte miejsce bez wartości.
+        #
+        # ⚠️ „Czy była już dziś kopia" czytamy z KATALOGU, nie z pola w
+        # pamięci. Pole ginęło przy każdym restarcie usługi i dawało dwa
+        # przeciwne błędy naraz: 11.09 powstały trzy kopie w ciągu doby
+        # (20:51, 23:26, 00:57 — po każdym restarcie), a po restarcie
+        # licznik zapisów też startuje od zera, więc dzień bez ruchu przez
+        # kolejne 60 minut kończył się BRAKIEM backupu. Katalog pamięta to,
+        # czego proces nie pamięta.
         try:
-            dzis = datetime.now().strftime("%Y%m%d")
-            if self._ostatni_backup != dzis and self.zapisow > 0:
+            if self._trzeba_backupu():
                 self._backup()
-                self._ostatni_backup = dzis
         except Exception as e:
             log("⚠️  Backup nieudany: %s" % e)
+
+    def _trzeba_backupu(self) -> bool:
+        """Czy dziś powstała już automatyczna kopia mastera."""
+        dzis = datetime.now().strftime("%Y%m%d")
+        if self._ostatni_backup == dzis:
+            return False
+        katalog = self._katalog_backupu("BAZA")
+        try:
+            for f in os.listdir(katalog):
+                if (f.startswith("master_") and f.endswith(".sqlite")
+                        and _nasz_znacznik(f[len("master_"):-len(".sqlite")])
+                        and f[len("master_"):len("master_") + 8] == dzis):
+                    self._ostatni_backup = dzis      # już jest — nie pytaj dysku co godzinę
+                    return False
+        except OSError:
+            pass                                     # katalog jeszcze nie istnieje
+        # Pusty licznik zapisów po restarcie nie jest dowodem, że nic się nie
+        # działo — dlatego warunek `zapisow > 0` obowiązuje tylko wtedy, gdy
+        # proces żyje od początku doby i sam widział brak ruchu.
+        if self.zapisow == 0 and self._ostatni_backup is not None:
+            return False
+        self._ostatni_backup = dzis
+        return True
 
     def zleć(self, zadanie, timeout=120):
         z = Zadanie(zadanie)

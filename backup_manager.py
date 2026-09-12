@@ -12,6 +12,29 @@ from datetime import datetime, timedelta
 import json
 
 
+def _etykieta_daty(ogon: str) -> str:
+    """Czytelna data z końcówki nazwy pliku backupu.
+
+    W jednym katalogu leżą dziś trzy pokolenia nazw:
+
+        master_2026-09-11.sqlite                   klient, do 11.09
+        master_20260912_163653.sqlite              serwer (Online Backup API)
+        master_przed_rfq_20260911_201520.sqlite    ręczna kopia przed zmianą
+
+    Bez tego lista pokazywała surową końcówkę — przy kopii ręcznej wychodziło
+    „przed_rfq_20260911_201520" w kolumnie z datą. Nieczytelne, a to właśnie
+    te kopie ogląda się w najgorszych momentach.
+    """
+    import re
+    m = re.search(r'(\d{8})_(\d{6})$', ogon)
+    if m:
+        d, g = m.group(1), m.group(2)
+        etykieta = "%s-%s-%s %s:%s" % (d[:4], d[4:6], d[6:], g[:2], g[2:4])
+        opis = ogon[:m.start()].strip('_')
+        return "%s (%s)" % (etykieta, opis.replace('_', ' ')) if opis else etykieta
+    return ogon
+
+
 class BackupManager:
     """Zarządza backupami master DB i projektów"""
     
@@ -356,7 +379,7 @@ class BackupManager:
         
         for backup_file in sorted(self.master_backup_dir.glob("master_*.sqlite"), reverse=True):
             try:
-                date_str = backup_file.stem.split('_', 1)[1]
+                date_str = _etykieta_daty(backup_file.stem.split('_', 1)[1])
                 size_mb = backup_file.stat().st_size / (1024 * 1024)
                 
                 backups.append({
