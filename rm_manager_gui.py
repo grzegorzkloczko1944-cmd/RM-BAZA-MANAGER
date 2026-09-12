@@ -441,6 +441,32 @@ DEFAULT_BACKUP_DIR = r"C:\RMPAK_CLIENT\RM_MANAGER\backups"  # Folder backupów
 DEFAULT_LOCKS_DIR = r"C:\RMPAK_CLIENT\RM_MANAGER\RM_MANAGER_projects\LOCKS"  # Folder locków
 
 
+#: Gdzie leżą pliki projektów RM_BAZA po przenosinach na serwer (12.09.2026).
+PROJEKTY_RM_BAZY_NA_SERWERZE = r"\\W2019S\RM_SERWER$\RM_BAZA_projects"
+
+
+def _na_projekty_rm_bazy(sciezka):
+    """Stara ścieżka do projektów RM_BAZA (`Y:\\RM_BAZA\\projects`) → serwer.
+
+    RM_MANAGER weryfikuje przez nią, czy plik projektu RM_BAZA istnieje i czy
+    go nie podmieniono. Konfiguracje na stanowiskach wskazują katalog, którego
+    już nie ma — a skutkiem jest czerwony pasek „PLIK PROJEKTU NIE ISTNIEJE"
+    i tryb tylko do odczytu przy KAŻDYM projekcie.
+
+    Poprawiamy w locie, tak jak `_na_ukryty_udzial`: user dostanie to razem
+    z nowym .exe, zamiast obchodzenia dziesięciu stanowisk. Ścieżkę wskazującą
+    już na serwer zostawiamy nietkniętą.
+    """
+    if not sciezka:
+        return sciezka
+    tekst = str(sciezka).replace("/", "\\").rstrip("\\")
+    if tekst.upper().endswith(r"\RM_BAZA\PROJECTS"):
+        return PROJEKTY_RM_BAZY_NA_SERWERZE
+    if tekst.upper().endswith(r"\RM_BAZA\PROJECTS_MAG"):
+        return PROJEKTY_RM_BAZY_NA_SERWERZE      # oba rodzaje w jednym katalogu
+    return sciezka
+
+
 def _na_ukryty_udzial(sciezka):
     """Podmienia udzial `RM_SERWER` na ukryty `RM_SERWER$` w sciezce UNC.
 
@@ -2622,7 +2648,14 @@ class RMManagerGUI:
                     self.config = config
                     self.master_db_path  = config.get('master_db_path',  DEFAULT_MASTER_DB_PATH)
                     self.rm_manager_dir  = config.get('rm_manager_dir',  DEFAULT_RM_MANAGER_DIR)
-                    self.projects_path   = config.get('projects_path',   DEFAULT_PROJECTS_PATH)
+                    # ⚠️ RM_MANAGER trzyma WŁASNĄ kopię ścieżki do plików projektów
+                    # RM_BAZA — służy weryfikacji, czy plik projektu nie zniknął
+                    # ani nie został podmieniony. Po przenosinach na serwer
+                    # wskazywała nieistniejące `Y:\RM_BAZA\projects`, więc każdy
+                    # projekt otwierał się z czerwonym paskiem „PLIK PROJEKTU NIE
+                    # ISTNIEJE — tryb tylko do odczytu" (12.09.2026).
+                    self.projects_path   = _na_projekty_rm_bazy(
+                        config.get('projects_path', DEFAULT_PROJECTS_PATH))
                     # Stara konfiguracja (rm_db_path) – migracja w locie
                     if 'rm_db_path' in config and 'rm_manager_dir' not in config:
                         old = config['rm_db_path']
