@@ -418,6 +418,45 @@ def numer_projektu_z_uwag(uwagi):
     return tekst.splitlines()[0].strip().split(" ")[0].strip()
 
 
+def numery_projektow_z_uwag(uwagi):
+    """Numery projektów z Uwag ZD — LISTA, gdy dokument obejmuje kilka naraz.
+
+    ZD z zapotrzebowania (`_utworz_zd` w tym module) grupuje pozycje PER
+    DOSTAWCA, nie per projekt — jeden dostawca zwykle realizuje zapotrzebowanie
+    z kilku ZK/projektów jednocześnie (ustalone 12.09.2026, po zgłoszeniu:
+    „z kilku ZK mogę zrobić jedno ZD"). Format pierwszego wiersza:
+
+        2354,ZP102,6555 Projekt   ← numery po przecinku, bez spacji między nimi
+        pilne, do piątku          ← uwagi człowieka, jak zawsze od 2. wiersza
+
+    Numery bywają alfanumeryczne (ZP102), więc dzielimy po PRZECINKU, nie
+    licząc na to, że to liczby.
+
+    ⚠️ Osobno od numer_projektu_z_uwag(): tamta funkcja karmi PW/RW/ZK, gdzie
+    dokument ZAWSZE dotyczy jednego projektu i dopasowanie idzie przez
+    `== cel`. Rozszerzenie jej na listę zepsułoby to porównanie wszędzie —
+    stąd nowa funkcja zamiast zmiany istniejącej.
+    """
+    pierwszy = numer_projektu_z_uwag(uwagi)
+    return [n.strip() for n in pierwszy.split(",") if n.strip()]
+
+
+def zloz_uwagi_wiele_projektow(projekty, uwagi=None):
+    """Pole Uwagi dla ZD obejmującego KILKA projektów naraz.
+
+        2354,ZP102,6555 Projekt
+        pilne, do piątku
+
+    `projekty` — iterowalna kolekcja numerów; kolejność i duplikaty
+    porządkujemy tu, żeby wołający (arkusz zapotrzebowania) nie musiał o tym
+    myśleć przy każdym wywołaniu.
+    """
+    lista = sorted({str(p).strip() for p in (projekty or ()) if str(p).strip()})
+    if not lista:
+        return str(uwagi or "").strip()
+    return zloz_uwagi(",".join(lista), uwagi)
+
+
 def uwagi_czlowieka(uwagi):
     """Co człowiek wpisał w Uwagach — wszystko OD DRUGIEGO wiersza w dół."""
     linie = (uwagi or "").strip().splitlines()
@@ -453,18 +492,21 @@ def zloz_uwagi(projekt, uwagi=None):
     return f"{pierwszy}\n{u}" if u else pierwszy
 
 
-def tytul_dokumentu(projekt):
-    """Pole Tytuł: znacznik RM_BAZA + numer projektu („RM_BAZA 2741").
+def tytul_dokumentu(projekt=None):
+    """Pole Tytuł: sam znacznik RM_BAZA, bez numeru projektu.
 
-    Rozpoznanie idzie po samym MARKER — numer jest zapasowym śladem na wypadek,
-    gdyby ktoś wyczyścił Uwagi. Tytuł się NIE drukuje i człowiek wystawiający
-    dokument ręcznie go nie wypełnia, więc jego obecność jest wiarygodnym
-    dowodem, że dokument wyszedł z RM_BAZA.
+    Ustalone 12.09.2026 — numer w Tytule był zbędny: rozpoznanie „czy to nasz
+    dokument" (nasz_dokument()) sprawdza wyłącznie obecność słowa MARKER,
+    nigdy nie czyta stamtąd numeru. Numer projektu ma JEDNO źródło prawdy —
+    Uwagi (numer_projektu_z_uwag() / numery_projektow_z_uwag()) — bo to one
+    się drukują. Dublowanie go w Tytule (a przy ZD z zapotrzebowania: jako
+    listy „2627,3500") nie miało odbiorcy.
 
-    `projekt` może być nazwą albo numerem — patrz sam_numer().
+    Parametr `projekt` zostaje w sygnaturze i jest IGNOROWANY — żeby nie
+    przepisywać wszystkich wołających naraz (podają numer/nazwę projektu
+    tak jak wcześniej, po prostu już nic z tym nie robimy).
     """
-    p = sam_numer(projekt)
-    return f"{MARKER} {p}" if p else MARKER
+    return MARKER
 
 
 def nasz_dokument(tytul):
@@ -787,11 +829,14 @@ def utworz_zd(pozycje, timeout=TIMEOUT_S, uwagi=None, zapisz=True, tytul=None):
 
     `uwagi` — tekst do pola Uwagi każdego utworzonego ZD. Okno magazynu
     wpisuje „MAGAZYN", żeby zamówienie na skład dało się odróżnić od
-    projektowych; zamówienia z ZK nie podają nic i Uwagi zostają puste.
+    projektowych. ZD z zapotrzebowania ZK (`_utworz_zd` w tym module) podaje
+    LISTĘ projektów przez `zloz_uwagi_wiele_projektow()` — ustalone
+    12.09.2026, po zgłoszeniu, że jeden dostawca zwykle realizuje
+    zapotrzebowanie z kilku ZK/projektów naraz, więc jednego numeru (jak
+    w PW/RW/ZK) tu nie da się wpisać.
 
     `tytul` — znacznik „RM_BAZA <numer>" do pola Tytuł, po którym poznajemy
-    własne dokumenty. Podaje go formularz ZD; ZD z zapotrzebowania ZK go nie
-    ustawia, bo tam dokument powstaje na podstawie zamówienia klienta.
+    własne dokumenty. Ta sama zasada dotyczy listy projektów w Tytule.
 
     `zapisz=False` to SUCHY PRZEBIEG: most mówi, co by powstało (ile ZD,
     dla jakich dostawców, które pozycje odpadną), i NIC nie zapisuje.
@@ -3107,6 +3152,19 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             return
 
         dostawcy = sorted({w["dostawca"] for w in zazn})
+
+        # Numer projektu w Uwagach — ustalone 12.09.2026. Osobna zasada od
+        # PW/RW/ZK: to ZD grupuje pozycje PER DOSTAWCA, a jeden dostawca
+        # zwykle realizuje zapotrzebowanie z kilku ZK/projektów naraz (stąd
+        # kolumna „Projekt" w arkuszu potrafi pokazać „2627, 3500" dla jednej
+        # pozycji). Wszystkie powstające dokumenty dostają tę samą listę
+        # WSZYSTKICH zaznaczonych projektów — decyzja świadoma, prostsza niż
+        # liczenie osobno dla każdego dostawcy, kosztem tego, że część
+        # numerów na danym dokumencie bywa „szersza" niż to, co on realizuje.
+        projekty = sorted({p for w in zazn for p in (w.get("projekty") or "").split(", ") if p})
+        uwagi = zloz_uwagi_wiele_projektow(projekty)
+        tytul = tytul_dokumentu(",".join(projekty)) if projekty else None
+
         ok = messagebox.askyesno(
             "Utworzenie ZD — potwierdzenie",
             f"Baza PRODUKCYJNA.\n\n"
@@ -3115,6 +3173,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
                         for d in dostawcy[:10])
             + ("\n  …" if len(dostawcy) > 10 else "")
             + f"\n\nŁącznie pozycji: {len(zazn)}\n\n"
+            f"Uwagi (każdy dokument): {uwagi.splitlines()[0] if uwagi else '(brak)'}\n\n"
             "ZD można w Subiekcie usunąć.\n\nUtworzyć?",
             parent=self, icon="warning")
         if not ok:
@@ -3125,11 +3184,11 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         poz = [{"symbol": w["symbol"], "ilosc": w["ilosc"], "dostawca": w["dostawca"],
                 "reczna": bool(w.get("reczna"))}
                for w in zazn]
-        threading.Thread(target=self._zd_worker, args=(poz,), daemon=True).start()
+        threading.Thread(target=self._zd_worker, args=(poz, uwagi, tytul), daemon=True).start()
 
-    def _zd_worker(self, pozycje):
+    def _zd_worker(self, pozycje, uwagi, tytul):
         try:
-            wynik = utworz_zd(pozycje)
+            wynik = utworz_zd(pozycje, uwagi=uwagi, tytul=tytul)
             self.after(0, lambda: self._zd_done(wynik, None))
         except Exception as e:
             err = str(e)

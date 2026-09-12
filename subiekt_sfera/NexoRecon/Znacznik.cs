@@ -61,11 +61,18 @@ internal static class Znacznik
     /// Tresc pola Tytul dla nowego dokumentu: "RM_BAZA 2741".
     /// Bez numeru (gdy nieznany) zostaje samo "RM_BAZA".
     /// </summary>
-    internal static string Tytul(string? projekt)
-    {
-        var p = (projekt ?? "").Trim();
-        return p.Length == 0 ? MARKER : $"{MARKER} {p}";
-    }
+    /// <summary>
+    /// Pole Tytuł: sam znacznik RM_BAZA, bez numeru projektu.
+    ///
+    /// Ustalone 12.09.2026 — numer w Tytule byl zbedny: rozpoznanie
+    /// „czy to nasz dokument" (<see cref="Nasz"/>) sprawdza wylacznie
+    /// obecnosc slowa MARKER, nigdy nie czyta stamtad numeru. Numer
+    /// projektu ma JEDNO zrodlo prawdy — Uwagi (<see cref="NumerProjektu"/>),
+    /// bo to one sie drukuja. Parametr `projekt` zostaje w sygnaturze
+    /// i jest IGNOROWANY, zeby nie przepisywac wszystkich wolajacych naraz —
+    /// odpowiednik tytul_dokumentu() po stronie subiekt_zamowienia.py.
+    /// </summary>
+    internal static string Tytul(string? projekt = null) => MARKER;
 
     /// <summary>Opis numeru w pierwszym wierszu Uwag — dla czytajacego wydruk.</summary>
     internal const string OPIS_NUMERU = "Projekt";

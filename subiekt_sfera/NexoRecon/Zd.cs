@@ -197,8 +197,12 @@ internal static class Zd
                         }
                         catch { /* pole opcjonalne w niektórych konfiguracjach */ }
 
-                        // Uwagi z planu (np. "MAGAZYN") — tylko gdy podano; ZD
-                        // z zapotrzebowania ZK zostawiamy bez zmian.
+                        // Uwagi z planu — okno magazynu wpisuje "MAGAZYN", okno
+                        // zapotrzebowania (12.09.2026) listę projektów rozdzieloną
+                        // przecinkiem ("2627,3500 Projekt"), bo ZD grupuje pozycje
+                        // per dostawca i jeden dostawca zwykle realizuje kilka
+                        // projektow naraz — patrz zloz_uwagi_wiele_projektow()
+                        // w subiekt_zamowienia.py. Tylko gdy podano.
                         if (!string.IsNullOrWhiteSpace(plan.Uwagi))
                         {
                             // ⚠️ Pulapka Sfery: setter przy JAWNEJ implementacji
