@@ -81,6 +81,9 @@ DOMYSLNA_BAZA_MAPOWANIA = os.path.join(KATALOG, "dane", "subiekt_mapowania.sqlit
 # Trzecia baza: RM_MANAGER. Leży obok pozostałych w `dane\` — wszystkie bazy
 # systemu w jednym miejscu, na lokalnym dysku serwera.
 DOMYSLNA_BAZA_RM_MANAGER = os.path.join(KATALOG, "dane", "rm_manager.sqlite")
+#: Czwarta baza: archiwum faktur KSeF. Trzyma TRESC XML w kolumnie `xml`,
+#: wiec nie ma obok niej katalogu z plikami — cale archiwum to jeden plik.
+DOMYSLNA_BAZA_KSEF = os.path.join(KATALOG, "dane", "FV_KSEF.sqlite")
 DOMYSLNY_PORT = 5060
 
 #: Ile trzymamy odpowiedzi w `_server_request_log` (§3 planu).
@@ -106,6 +109,7 @@ def wczytaj_config(sciezka=None):
         "baza": dane.get("baza", DOMYSLNA_BAZA),
         "baza_mapowania": dane.get("baza_mapowania", DOMYSLNA_BAZA_MAPOWANIA),
         "baza_rm_manager": dane.get("baza_rm_manager", DOMYSLNA_BAZA_RM_MANAGER),
+        "baza_ksef": dane.get("baza_ksef", DOMYSLNA_BAZA_KSEF),
         "port": int(dane.get("port", DOMYSLNY_PORT)),
         "nasluch": dane.get("nasluch", "0.0.0.0"),
         "sekret": dane.get("sekret"),          # None = HMAC wyłączony
@@ -158,6 +162,19 @@ def _ustaw_log(katalog):
 # ═══════════════════════════════════════════════════════════════════════
 # Ramka: 4 bajty długości (LE) + UTF-8 JSON
 # ═══════════════════════════════════════════════════════════════════════
+
+#: Ogonki → litery bez ogonków. Ta sama tablica co w `ksef_archiwum.uprosc`
+#: — obie strony muszą upraszczać tak samo, inaczej wyszukiwarka faktur
+#: dawałaby inne wyniki lokalnie niż przez serwer.
+_OGONKI_PL = str.maketrans("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ", "acelnoszzACELNOSZZ")
+
+
+def _uprosc_pl(s):
+    """Do wyszukiwania: małe litery bez ogonków. NULL zostaje NULL-em."""
+    if s is None:
+        return None
+    return str(s).translate(_OGONKI_PL).lower()
+
 
 def _nasz_znacznik(ogon: str) -> bool:
     """Czy to nasza automatyczna kopia, czyli `RRRRMMDD_GGMMSS`.
@@ -246,6 +263,7 @@ class Serwer:
         self.con = None
         self.con_map = None            # subiekt_mapowania.sqlite — osobny plik
         self.con_rmm = None            # rm_manager.sqlite — osobny plik
+        self.con_ksef = None           # FV_KSEF.sqlite — archiwum faktur
         self.start_czas = time.time()
         self.zapisow = 0
         self.odczytow = 0
@@ -311,12 +329,34 @@ class Serwer:
             self.con_rmm.commit()
             log("RM_MANAGER: %s" % sciezka_rmm)
 
+        # Czwarta baza: archiwum faktur KSeF. Treść XML siedzi w kolumnie
+        # `xml`, więc nie ma obok katalogu z plikami — całe archiwum to jeden
+        # plik, który da się zbackupować i podać przez serwer (12.09.2026).
+        sciezka_ksef = self.config.get("baza_ksef")
+        if sciezka_ksef:
+            os.makedirs(os.path.dirname(sciezka_ksef), exist_ok=True)
+            self.con_ksef = sqlite3.connect(sciezka_ksef, timeout=30,
+                                            check_same_thread=False)
+            self.con_ksef.execute("PRAGMA journal_mode=DELETE")
+            self.con_ksef.execute("PRAGMA synchronous=FULL")
+            self.con_ksef.execute("PRAGMA busy_timeout=5000")
+            # ⚠️ Wyszukiwarka faktur używa LOWER_PL: wbudowane LOWER() w SQLite
+            # działa tylko na ASCII, więc „Cięte" zostawałoby „cIęte". Funkcja
+            # była dotąd rejestrowana u klienta — przy zapytaniach przez serwer
+            # musi istnieć TUTAJ, inaczej `no such function: LOWER_PL`.
+            self.con_ksef.create_function("LOWER_PL", 1, _uprosc_pl)
+            for sql in ops.MIGRACJE_KSEF:
+                self.con_ksef.execute(sql)
+            self.con_ksef.commit()
+            log("KSEF: %s" % sciezka_ksef)
+
     # ── wykonanie pojedynczego żądania (w wątku roboczym) ─────────────
     def _polaczenie(self, operacja):
         """Które połączenie obsługuje tę operację.
 
-        Prefiks `map-` → subiekt_mapowania.sqlite,
-        prefiks `rmm-` → rm_manager.sqlite,
+        Prefiks `map-`  → subiekt_mapowania.sqlite,
+        prefiks `rmm-`  → rm_manager.sqlite,
+        prefiks `ksef-` → FV_KSEF.sqlite (archiwum faktur),
         reszta → master RM_BAZA.
 
         Routing po nazwie, nie po tabeli: wołający nie musi wiedzieć,
@@ -331,6 +371,10 @@ class Serwer:
             if self.con_rmm is None:
                 raise ops.BladOperacji("baza RM_MANAGER nie jest skonfigurowana")
             return self.con_rmm
+        if nazwa.startswith("ksef-"):
+            if self.con_ksef is None:
+                raise ops.BladOperacji("baza KSEF nie jest skonfigurowana")
+            return self.con_ksef
         return self.con
 
     def _wykonaj(self, z):
@@ -508,7 +552,8 @@ class Serwer:
         for con, prefiks, katalog in (
                 (self.con, "master", self._katalog_backupu("BAZA")),
                 (self.con_rmm, "rm_manager", self._katalog_backupu("MANAGER")),
-                (self.con_map, "subiekt_mapowania", self._katalog_backupu("BAZA"))):
+                (self.con_map, "subiekt_mapowania", self._katalog_backupu("BAZA")),
+                (self.con_ksef, "FV_KSEF", self._katalog_backupu("BAZA"))):
             if con is None:
                 continue
             try:

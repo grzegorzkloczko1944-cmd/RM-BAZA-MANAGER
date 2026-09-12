@@ -2676,3 +2676,120 @@ def wyczysc_dziennik(con, starsze_niz_h=24):
 def znane_operacje():
     """Nazwy wszystkich operacji — do diagnostyki i testów zgodności."""
     return {"odczyt": sorted(ODCZYT), "zapis": sorted(ZAPIS)}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SCHEMAT ARCHIWUM FAKTUR KSeF  (FV_KSEF.sqlite)
+# ═══════════════════════════════════════════════════════════════════════
+#
+# ⚠️ OSOBNY PLIK, czwarta baza serwera. Operacje maja prefiks `ksef-`.
+#
+# Kolumna `xml` trzyma TRESC faktury, nie tylko sciezke do pliku. Dzieki temu
+# archiwum to JEDEN plik: nie ma katalogu z XML-ami, ktory trzeba osobno
+# udostepniac, kopiowac i backupowac. Faktura wazy ~4 KB, wiec baza jest dla
+# niej naturalnym miejscem. `plik` zostaje — niesie oryginalna nazwe, pod
+# ktora XML trafil z KSeF (12.09.2026).
+
+MIGRACJE_KSEF = [
+    """CREATE TABLE IF NOT EXISTS faktury (
+           ksef_number      TEXT PRIMARY KEY,
+           numer_faktury    TEXT,
+           sprzedawca_nip   TEXT,
+           sprzedawca       TEXT,
+           data_wystawienia TEXT,
+           wartosc_netto    REAL,
+           pozycji          INTEGER,
+           plik             TEXT,
+           pobrano          TEXT,
+           xml              TEXT
+       )""",
+    """CREATE TABLE IF NOT EXISTS pozycje (
+           ksef_number   TEXT,
+           nr_wiersza    INTEGER,
+           nazwa         TEXT,
+           jednostka     TEXT,
+           ilosc         REAL,
+           cena_netto    REAL,
+           wartosc_netto REAL,
+           PRIMARY KEY (ksef_number, nr_wiersza)
+       )""",
+    "CREATE INDEX IF NOT EXISTS idx_poz_nazwa ON pozycje(nazwa)",
+    "CREATE INDEX IF NOT EXISTS idx_fakt_nip  ON faktury(sprzedawca_nip)",
+    "CREATE INDEX IF NOT EXISTS idx_fakt_data ON faktury(data_wystawienia)",
+]
+
+# ── operacje archiwum KSeF ──────────────────────────────────────────────
+#
+# LOWER_PL rejestruje serwer (`rm_serwer._uprosc_pl`) — wbudowane LOWER()
+# w SQLite dziala tylko na ASCII, wiec „Ciete" zostawaloby „cIete".
+
+ODCZYT.update({
+    "ksef-faktury": (
+        "SELECT ksef_number, numer_faktury, sprzedawca_nip, sprzedawca,"
+        "       data_wystawienia, wartosc_netto, pozycji"
+        "  FROM faktury ORDER BY data_wystawienia DESC, numer_faktury DESC",
+        [],
+    ),
+    "ksef-faktury-szukaj": (
+        "SELECT ksef_number, numer_faktury, sprzedawca_nip, sprzedawca,"
+        "       data_wystawienia, wartosc_netto, pozycji"
+        "  FROM faktury"
+        " WHERE LOWER_PL(numer_faktury) LIKE ? OR LOWER_PL(sprzedawca) LIKE ?"
+        "    OR sprzedawca_nip LIKE ?"
+        "    OR ksef_number IN (SELECT ksef_number FROM pozycje"
+        "                       WHERE LOWER_PL(nazwa) LIKE ?)"
+        " ORDER BY data_wystawienia DESC, numer_faktury DESC",
+        ["wzor", "wzor2", "nip", "wzor3"],
+    ),
+    "ksef-pozycje": (
+        "SELECT nr_wiersza, nazwa, jednostka, ilosc, cena_netto, wartosc_netto"
+        "  FROM pozycje WHERE ksef_number = ? ORDER BY nr_wiersza",
+        ["ksef_number"],
+    ),
+    "ksef-xml": (
+        "SELECT xml, plik FROM faktury WHERE ksef_number = ?",
+        ["ksef_number"],
+    ),
+    "ksef-numery": (
+        "SELECT ksef_number FROM faktury",
+        [],
+    ),
+    "ksef-zna": (
+        "SELECT 1 FROM faktury WHERE ksef_number = ?",
+        ["ksef_number"],
+    ),
+    "ksef-dostawcy": (
+        "SELECT DISTINCT sprzedawca_nip, sprzedawca FROM faktury"
+        " WHERE sprzedawca_nip <> '' ORDER BY sprzedawca",
+        [],
+    ),
+    "ksef-podsumowanie": (
+        "SELECT COUNT(*) AS faktur, COALESCE(SUM(wartosc_netto), 0) AS wartosc,"
+        "       MIN(data_wystawienia) AS od, MAX(data_wystawienia) AS do,"
+        "       (SELECT COUNT(*) FROM pozycje) AS pozycji"
+        "  FROM faktury",
+        [],
+    ),
+})
+
+ZAPIS.update({
+    "ksef-faktura-zapisz": (
+        "INSERT OR REPLACE INTO faktury"
+        " (ksef_number, numer_faktury, sprzedawca_nip, sprzedawca,"
+        "  data_wystawienia, wartosc_netto, pozycji, plik, pobrano, xml)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ["ksef_number", "numer_faktury", "sprzedawca_nip", "sprzedawca",
+         "data_wystawienia", "wartosc_netto", "pozycji", "plik", "pobrano", "xml"],
+    ),
+    "ksef-pozycje-usun": (
+        "DELETE FROM pozycje WHERE ksef_number = ?",
+        ["ksef_number"],
+    ),
+    "ksef-pozycja-zapisz": (
+        "INSERT OR REPLACE INTO pozycje"
+        " (ksef_number, nr_wiersza, nazwa, jednostka, ilosc, cena_netto, wartosc_netto)"
+        " VALUES (?,?,?,?,?,?,?)",
+        ["ksef_number", "nr_wiersza", "nazwa", "jednostka", "ilosc",
+         "cena_netto", "wartosc_netto"],
+    ),
+})

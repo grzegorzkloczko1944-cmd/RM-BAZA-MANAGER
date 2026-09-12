@@ -48,7 +48,15 @@ CREATE TABLE IF NOT EXISTS faktury (
     wartosc_netto   REAL,
     pozycji         INTEGER,
     plik            TEXT,
-    pobrano         TEXT
+    pobrano         TEXT,
+    -- Treść XML faktury trzymana W BAZIE, nie tylko jako plik obok.
+    --
+    -- Faktura to 4 KB tekstu, więc baza jest dla niej naturalnym miejscem,
+    -- a archiwum staje się JEDNYM plikiem — da się je skopiować, zbackupować
+    -- i podać przez serwer bez ciągnięcia katalogu z XML-ami. Kolumna `plik`
+    -- zostaje: niesie oryginalną nazwę i ścieżkę, pod którą plik trafił na
+    -- dysk, ale odczyt treści jej już nie potrzebuje.
+    xml             TEXT
 );
 CREATE TABLE IF NOT EXISTS pozycje (
     ksef_number     TEXT,
@@ -97,7 +105,31 @@ class ArchiwumKsef:
         # „cIęte". Dodatkowo ściągamy ogonki, żeby „ciete" też trafiało.
         self.con.create_function("LOWER_PL", 1, uprosc)
         self.con.executescript(SCHEMA)
+        # Baza sprzed wprowadzenia kolumny `xml` — CREATE TABLE IF NOT EXISTS
+        # jej nie doda. Treść wciągamy z plików przy pierwszym uruchomieniu.
+        if "xml" not in {r[1] for r in self.con.execute("PRAGMA table_info(faktury)")}:
+            self.con.execute("ALTER TABLE faktury ADD COLUMN xml TEXT")
+            self._wciagnij_xml_z_plikow()
         self.con.commit()
+
+    def _wciagnij_xml_z_plikow(self):
+        """Przenosi treść XML-i z dysku do bazy. Raz, przy migracji.
+
+        Plik zostaje na dysku — kasowanie go to osobna decyzja użytkownika,
+        a nie skutek uboczny aktualizacji programu.
+        """
+        ile = 0
+        for ksef_number, sciezka in self.con.execute(
+                "SELECT ksef_number, plik FROM faktury WHERE xml IS NULL").fetchall():
+            try:
+                tresc = Path(sciezka).read_text(encoding="utf-8")
+            except Exception:
+                continue                 # brak pliku albo zły dysk — zostaje NULL
+            self.con.execute("UPDATE faktury SET xml=? WHERE ksef_number=?",
+                             (tresc, ksef_number))
+            ile += 1
+        if ile:
+            print("✅ Archiwum KSEF: wciągnięto treść %d faktur do bazy" % ile)
 
     def zamknij(self):
         try:
@@ -151,11 +183,19 @@ class ArchiwumKsef:
 
     def _zaindeksuj(self, faktura, ksef_number, plik):
         wartosc = sum(p.wartosc_netto or 0 for p in faktura.pozycje)
+        try:
+            tresc = Path(plik).read_text(encoding="utf-8")
+        except Exception:
+            tresc = None                 # indeks powstanie i bez treści
         self.con.execute(
-            "INSERT OR REPLACE INTO faktury VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO faktury"
+            " (ksef_number, numer_faktury, sprzedawca_nip, sprzedawca,"
+            "  data_wystawienia, wartosc_netto, pozycji, plik, pobrano, xml)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
             (ksef_number, faktura.numer_faktury, faktura.sprzedawca_nip,
              faktura.sprzedawca_nazwa, faktura.data_wystawienia, wartosc,
-             len(faktura.pozycje), str(plik), datetime.now().isoformat(timespec="seconds")))
+             len(faktura.pozycje), str(plik),
+             datetime.now().isoformat(timespec="seconds"), tresc))
         self.con.execute("DELETE FROM pozycje WHERE ksef_number=?", (ksef_number,))
         self.con.executemany(
             "INSERT OR REPLACE INTO pozycje VALUES (?,?,?,?,?,?,?)",
@@ -473,15 +513,28 @@ class OknoArchiwum(tk.Toplevel, Kreciolek):
                 lp, nazwa, jm, _zl(ilosc), _zl(cena), _zl(wart)))
 
     def _otworz_xml(self):
+        """Pokazuje XML faktury — z BAZY, nie z katalogu na dysku.
+
+        Treść leży w kolumnie `xml`, więc podgląd działa także wtedy, gdy
+        pliku nikt nigdy nie skopiował na tę maszynę. Zapisujemy go do TEMP
+        i oddajemy systemowi, bo `os.startfile` potrzebuje pliku.
+        """
         sel = self.tv_f.selection()
         if not sel:
             return
-        r = self.arch.con.execute("SELECT plik FROM faktury WHERE ksef_number=?", (sel[0],)).fetchone()
-        if r and r[0] and Path(r[0]).exists():
-            import os
-            os.startfile(r[0])
+        r = self.arch.con.execute(
+            "SELECT xml, plik FROM faktury WHERE ksef_number=?", (sel[0],)).fetchone()
+        import os
+        import tempfile
+        if r and r[0]:
+            nazwa = Path(r[1]).name if r[1] else f"{_bezpieczna_nazwa(sel[0], 60)}.xml"
+            tmp = Path(tempfile.gettempdir()) / nazwa
+            tmp.write_text(r[0], encoding="utf-8")
+            os.startfile(str(tmp))
+        elif r and r[1] and Path(r[1]).exists():
+            os.startfile(r[1])           # archiwum sprzed migracji treści do bazy
         else:
-            messagebox.showwarning("Archiwum", "Nie znaleziono pliku XML tej faktury.", parent=self)
+            messagebox.showwarning("Archiwum", "Nie znaleziono XML tej faktury.", parent=self)
 
     def _otworz_katalog(self):
         import os
