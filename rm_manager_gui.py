@@ -437,14 +437,24 @@ APP_BUILD_DATE = "2026-04-24"
 # Ścieżka do pliku konfiguracyjnego (na sztywno)
 CONFIG_FILE_PATH = r"C:\RMPAK_CLIENT\manager_sync_config.json"
 
-# Domyślne wartości (jeśli brak JSON)
-DEFAULT_MASTER_DB_PATH = "master.sqlite"          # MASTER RM_BAZA (wspólny!)
-DEFAULT_RM_MANAGER_DIR = r"C:\RMPAK_CLIENT\RM_MANAGER\rm_manager"  # Folder RM_MANAGER (master + LOCKS)
-DEFAULT_RM_MANAGER_DB_PATH = r"C:\RMPAK_CLIENT\RM_MANAGER\rm_manager\rm_manager.sqlite"  # Główna baza RM_MANAGER
-DEFAULT_RM_PROJECTS_DIR = r"C:\RMPAK_CLIENT\RM_MANAGER\RM_MANAGER_projects"  # Folder per-projekt baz
-DEFAULT_PROJECTS_PATH  = r"Z:\FoldeR\projects"   # Folder projektów RM_BAZA
-DEFAULT_BACKUP_DIR = r"C:\RMPAK_CLIENT\RM_MANAGER\backups"  # Folder backupów
-DEFAULT_LOCKS_DIR = r"C:\RMPAK_CLIENT\RM_MANAGER\RM_MANAGER_projects\LOCKS"  # Folder locków
+# Domyślne wartości (jeśli brak JSON).
+#
+# ⚠️ MUSZĄ wskazywać na serwer, nie na dysk lokalny (12.09.2026). Stacja bez
+# konfiguracji — nowa, po przeinstalowaniu albo po skasowaniu JSON-a — startuje
+# WYŁĄCZNIE na tych wartościach, a `_na_serwer`/`_na_ukryty_udzial` ich nie
+# poprawią: migracja w locie tłumaczy tylko stare ścieżki sieciowe, ścieżki
+# lokalne zostawia w spokoju. Dawne `C:\RMPAK_CLIENT\...` dawały puste katalogi
+# (RM_MANAGER bez projektów), a `DEFAULT_PROJECTS_PATH = Z:\FoldeR\projects`
+# wskazywał na dysk nieistniejący nigdzie w firmie — i to ta wartość trafiła
+# do wspólnej tabeli śledzenia plików, unieruchamiając RM_MANAGER wszystkim.
+DEFAULT_MASTER_DB_PATH = "master.sqlite"          # MASTER RM_BAZA — na serwerze, nazwa umowna
+DEFAULT_RM_MANAGER_DIR = r"\\W2019S\RM_SERWER$"   # Katalog główny danych RM_MANAGER
+DEFAULT_RM_MANAGER_DB_PATH = r"\\W2019S\RM_SERWER$\rm_manager.sqlite"  # Główna baza RM_MANAGER
+DEFAULT_RM_PROJECTS_DIR = r"\\W2019S\RM_SERWER$\RM_MANAGER_projects"  # Folder per-projekt baz
+DEFAULT_PROJECTS_PATH  = r"\\W2019S\RM_SERWER$\RM_BAZA_projects"   # Folder projektów RM_BAZA
+DEFAULT_BACKUP_DIR = r"\\W2019S\RM_SERWER$\backup_RM_MANAGER"  # Folder backupów
+DEFAULT_LOCKS_DIR = r"\\W2019S\RM_SERWER$\RM_MANAGER_projects\LOCKS"  # Folder locków (blokady i tak przez serwer)
+DEFAULT_AI_RULES_PATH = r"\\W2019S\RM_SERWER$\ai_rules.txt"  # Wspólne reguły firmowe dla AI
 
 
 #: Gdzie leżą pliki projektów RM_BAZA po przenosinach na serwer (12.09.2026).
@@ -2675,6 +2685,33 @@ class RMManagerGUI:
             except:
                 return dt_str[:16]  # Fallback
 
+    def _ustaw_sciezki_na_sztywno(self):
+        """Ścieżki do danych — zaszyte w programie, konfiguracja ich nie zmienia.
+
+        Wszystko leży na serwerze, w jednym miejscu, i nie ma powodu, żeby
+        stanowisko mogło wskazać cokolwiek innego. Wcześniej ścieżki szły
+        z `manager_sync_config.json`, co dawało dwie klasy awarii (12.09.2026):
+
+        * konfiguracja sprzed przenosin wskazywała na `Y:`/`W:`/`U:` albo na
+          usunięty udział — RM_MANAGER gasł albo nie widział projektów;
+        * stacja BEZ konfiguracji dostawała wartości domyślne z dysku `C:`
+          (puste katalogi) i `Z:\\FoldeR\\projects` — dysk nieistniejący nigdzie
+          w firmie. Ta druga trafiła do wspólnej tabeli śledzenia plików i
+          unieruchomiła RM_MANAGER wszystkim naraz.
+
+        Teraz jedno i drugie jest niemożliwe: skasowany, stary czy uszkodzony
+        JSON nie ma wpływu na to, skąd program bierze dane. W konfiguracji
+        zostają wyłącznie rzeczy osobiste (geometria okien, klucze, SMS).
+        """
+        self.master_db_path    = DEFAULT_MASTER_DB_PATH
+        self.rm_manager_dir    = DEFAULT_RM_MANAGER_DIR
+        self.rm_master_db_path = DEFAULT_RM_MANAGER_DB_PATH
+        self.rm_projects_dir   = DEFAULT_RM_PROJECTS_DIR
+        self.projects_path     = DEFAULT_PROJECTS_PATH
+        self.backup_dir        = DEFAULT_BACKUP_DIR
+        self.locks_dir         = DEFAULT_LOCKS_DIR
+        self.ai_rules_path     = DEFAULT_AI_RULES_PATH
+
     def load_config(self):
         """Wczytaj konfigurację z JSON"""
         try:
@@ -2683,56 +2720,12 @@ class RMManagerGUI:
                     config = json.load(f)
                     # Przechowaj cały dict dla modułów (np. SMS)
                     self.config = config
-                    self.master_db_path  = config.get('master_db_path',  DEFAULT_MASTER_DB_PATH)
-                    self.rm_manager_dir  = config.get('rm_manager_dir',  DEFAULT_RM_MANAGER_DIR)
-                    # ⚠️ RM_MANAGER trzyma WŁASNĄ kopię ścieżki do plików projektów
-                    # RM_BAZA — służy weryfikacji, czy plik projektu nie zniknął
-                    # ani nie został podmieniony. Po przenosinach na serwer
-                    # wskazywała nieistniejące `Y:\RM_BAZA\projects`, więc każdy
-                    # projekt otwierał się z czerwonym paskiem „PLIK PROJEKTU NIE
-                    # ISTNIEJE — tryb tylko do odczytu" (12.09.2026).
-                    self.projects_path   = _na_serwer(_na_projekty_rm_bazy(
-                        config.get('projects_path', DEFAULT_PROJECTS_PATH)))
-                    # Stara konfiguracja (rm_db_path) – migracja w locie
-                    if 'rm_db_path' in config and 'rm_manager_dir' not in config:
-                        old = config['rm_db_path']
-                        self.rm_manager_dir = os.path.dirname(old) or DEFAULT_RM_MANAGER_DIR
-                    # rm_master_db_path: jawna ścieżka lub pochodna z katalogu
-                    self.rm_master_db_path = config.get(
-                        'rm_master_db_path',
-                        os.path.join(self.rm_manager_dir, 'rm_manager.sqlite')
-                    )
-                    # rm_projects_dir: osobny katalog na per-projekt bazy
-                    self.rm_projects_dir = config.get(
-                        'rm_projects_dir',
-                        os.path.join(os.path.dirname(self.rm_manager_dir), 'RM_MANAGER_projects')
-                    )
-                    # Udzial z bazami projektow zostal UKRYTY: RM_SERWER -> RM_SERWER$
-                    # (12.09.2026, zeby userzy nie widzieli go w otoczeniu sieciowym).
-                    # Stary udzial USUNIETY, wiec konfig sprzed zmiany wskazuje donikad
-                    # i RM_MANAGER gasnie bez komunikatu. Poprawiamy w locie zamiast
-                    # obchodzic 10 stanowisk — patrz `_na_ukryty_udzial`.
-                    self.rm_projects_dir = _na_serwer(_na_ukryty_udzial(self.rm_projects_dir))
-                    # backup_dir: katalog backupów
-                    self.backup_dir = _na_serwer(_na_ukryty_udzial(config.get(
-                        'backup_dir',
-                        os.path.join(os.path.dirname(self.rm_manager_dir), 'backups')
-                    )))
-                    # locks_dir: katalog locków
-                    self.locks_dir = _na_serwer(_na_ukryty_udzial(config.get(
-                        'locks_dir',
-                        os.path.join(self.rm_projects_dir, 'LOCKS')
-                    )))
+                    # ŚCIEŻKI DANYCH IDĄ NA SZTYWNO — config ich nie dotyka.
+                    self._ustaw_sciezki_na_sztywno()
                     # server_exe_path: ścieżka do EXE na serwerze (dla auto-update)
                     self.server_exe_path = config.get('server_exe_path', '')
                     # Szybka praca na kopii lokalnej (menu Narzędzia)
                     rmm.USE_LOCAL_COPY = bool(config.get('use_local_copy', rmm.USE_LOCAL_COPY))
-                    # ai_rules_path: wspólny plik reguł firmowych dla AI (jeden dla wszystkich userów)
-                    # Lezy w tym samym, ukrytym juz udziale co bazy projektow — stad ta sama poprawka.
-                    self.ai_rules_path = _na_serwer(_na_ukryty_udzial(config.get(
-                        'ai_rules_path',
-                        os.path.join(self.rm_manager_dir, 'ai_rules.txt')
-                    )))
                     # Geometria okien i szerokości kolumn
                     self.window_geometry = config.get('window_geometry', {})
                     self.column_widths = config.get('column_widths', {})
@@ -2745,33 +2738,19 @@ class RMManagerGUI:
                     print(f"   locks_dir:        {self.locks_dir}")
                     print(f"   projects_path:    {self.projects_path}")
             else:
-                # Brak pliku - użyj domyślnych
+                # Brak pliku — ścieżki i tak są na sztywno, więc nie ma czego
+                # „domyślać się". Zapisujemy świeży konfig na rzeczy osobiste.
                 self.config = {}
-                self.master_db_path    = DEFAULT_MASTER_DB_PATH
-                self.rm_manager_dir    = DEFAULT_RM_MANAGER_DIR
-                self.projects_path     = DEFAULT_PROJECTS_PATH
-                self.rm_master_db_path = DEFAULT_RM_MANAGER_DB_PATH
-                self.rm_projects_dir   = DEFAULT_RM_PROJECTS_DIR
-                self.backup_dir        = DEFAULT_BACKUP_DIR
-                self.locks_dir         = DEFAULT_LOCKS_DIR
+                self._ustaw_sciezki_na_sztywno()
                 self.server_exe_path   = ''  # Brak domyślnej ścieżki do serwera
-                self.ai_rules_path     = os.path.join(self.rm_manager_dir, 'ai_rules.txt')
-                print(f"⚠️ Brak pliku konfiguracyjnego: {self.config_file}")
-                print(f"   Użyto domyślnych ścieżek")
-                # Utwórz domyślny plik
+                print(f"ℹ️ Brak pliku konfiguracyjnego: {self.config_file}")
+                print(f"   Ścieżki danych i tak są zaszyte w programie — startuję.")
                 self.save_config()
         except Exception as e:
             print(f"⚠️ Błąd wczytywania konfiguracji: {e}")
             self.config = {}
-            self.master_db_path    = DEFAULT_MASTER_DB_PATH
-            self.rm_manager_dir    = DEFAULT_RM_MANAGER_DIR
-            self.projects_path     = DEFAULT_PROJECTS_PATH
-            self.rm_master_db_path = DEFAULT_RM_MANAGER_DB_PATH
-            self.rm_projects_dir   = DEFAULT_RM_PROJECTS_DIR
-            self.backup_dir        = DEFAULT_BACKUP_DIR
-            self.locks_dir         = DEFAULT_LOCKS_DIR
+            self._ustaw_sciezki_na_sztywno()
             self.server_exe_path   = ''  # Brak domyślnej ścieżki do serwera
-            self.ai_rules_path     = os.path.join(self.rm_manager_dir, 'ai_rules.txt')
 
     def save_config(self):
         """Zapisz konfigurację do JSON"""
@@ -2781,19 +2760,16 @@ class RMManagerGUI:
             if config_dir and not os.path.exists(config_dir):
                 os.makedirs(config_dir, exist_ok=True)
             
+            # ŚCIEŻEK DANYCH TU NIE MA — są zaszyte w programie
+            # (`_ustaw_sciezki_na_sztywno`). Zapisywanie ich z powrotem tylko
+            # odtwarzałoby problem: plik przeżywa aktualizację .exe, więc raz
+            # zapisana zła ścieżka wracałaby przy każdym starcie.
             config = {
-                'master_db_path': self.master_db_path,
-                'rm_manager_dir': self.rm_manager_dir,
-                'rm_master_db_path': self.rm_master_db_path,
-                'rm_projects_dir': self.rm_projects_dir,
-                'backup_dir': self.backup_dir,
-                'locks_dir': self.locks_dir,
-                'projects_path': self.projects_path,
                 'server_exe_path': self.server_exe_path,
-                'ai_rules_path': self.ai_rules_path,
                 'window_geometry': self.window_geometry,
                 'column_widths': self.column_widths,
-                '_comment': 'RM_MANAGER configuration file – edit paths as needed'
+                '_comment': 'RM_MANAGER — ustawienia osobiste. Sciezki do danych sa '
+                            'zaszyte w programie i NIE sa konfigurowalne.'
             }
             
             # Zachowaj last_user_id (auto-login)
@@ -10245,25 +10221,6 @@ class RMManagerGUI:
                 row=row * 2 + 1, column=1, sticky="w", padx=5)
             return entry
 
-        def browse_file(entry):
-            path = filedialog.askopenfilename(
-                title="Wybierz plik .sqlite",
-                filetypes=[("SQLite Database", "*.sqlite"), ("Wszystkie pliki", "*.*")],
-                initialdir=os.path.dirname(entry.get()) if os.path.dirname(entry.get()) else "."
-            )
-            if path:
-                entry.delete(0, tk.END)
-                entry.insert(0, path)
-
-        def browse_folder(entry):
-            path = filedialog.askdirectory(
-                title="Wybierz folder",
-                initialdir=entry.get() if os.path.isdir(entry.get()) else "."
-            )
-            if path:
-                entry.delete(0, tk.END)
-                entry.insert(0, path)
-
         form.columnconfigure(1, weight=1)
         # ⚠️ Pola oznaczone „NIEUŻYWANE" zostawiamy WIDOCZNE, ale opisane wprost.
         # Master RM_BAZA, rm_manager.sqlite i locki chodzą przez RM_SERWER
@@ -10283,27 +10240,35 @@ class RMManagerGUI:
             _adres_serwera = rm_klient.opis()
         except Exception:
             _adres_serwera = "RM_SERWER (adres w sync_config.json)"
-        e_master   = make_row(form, 0, "Baza Master (RM_BAZA):",
-                              "NIEUŻYWANE jako ścieżka — master chodzi przez RM_SERWER. Adres serwera: sync_config.json (klucz rm_serwer).",
-                              _adres_serwera, browse_file)
-        e_projects = make_row(form, 1, "Folder projektów RM_BAZA:",
-                              "Tylko do komunikatów — bazy projektów RM_BAZA otwiera sama RM_BAZA, nie RM_MANAGER.",
-                              self.projects_path, browse_folder)
-        e_rm_dir   = make_row(form, 2, "Folder RM_MANAGER:",
-                              "NIEUŻYWANE — baza i locki chodzą przez RM_SERWER. Pole bez wpływu na działanie.",
-                              self.rm_manager_dir, browse_folder)
-        e_rm_db    = make_row(form, 3, "rm_manager.sqlite:",
-                              "NIEUŻYWANE — baza leży na serwerze, czytana przez RM_SERWER. Pole bez wpływu na działanie.",
-                              self.rm_master_db_path, browse_file)
-        e_rm_proj  = make_row(form, 4, "Folder projektów RM_MANAGER:",
-                              "⬅ TO POLE DZIAŁA. Per-projekt bazy (rm_manager_project_1.sqlite itd.)  (\\\\W2019S\\RM_SERWER$\\RM_MANAGER_projects)",
-                              self.rm_projects_dir, browse_folder, dziala=True)
-        e_backup   = make_row(form, 5, "Folder backupów:",
-                              "⬅ TO POLE DZIAŁA. Codzienne backupy projektów  (\\\\W2019S\\RM_SERWER$\\backup_RM_MANAGER)",
-                              self.backup_dir, browse_folder, dziala=True)
-        e_locks    = make_row(form, 6, "Folder locków:",
-                              "NIEUŻYWANE — blokady projektów pilnuje RM_SERWER, nie pliki .lock. Pole bez wpływu na działanie.",
-                              self.locks_dir, browse_folder)
+        # Wszystkie ścieżki są zaszyte w programie (12.09.2026) — pola zostają
+        # jako PODGLĄD, żeby było widać, gdzie idą dane, ale nic nie przyjmują.
+        # Wcześniej dało się tu wpisać byle co i odciąć stanowisko od serwera;
+        # przy jednym wspólnym katalogu na serwerze nie ma czego konfigurować.
+        def make_ro(wiersz, etykieta, opis, wartosc):
+            return make_row(form, wiersz, etykieta, opis, wartosc, None,
+                            tylko_do_odczytu=True)
+
+        e_master   = make_ro(0, "Baza Master (RM_BAZA):",
+                             "Zaszyte w programie — master chodzi przez RM_SERWER.",
+                             _adres_serwera)
+        e_projects = make_ro(1, "Folder projektów RM_BAZA:",
+                             "Zaszyte w programie. Bazy projektów RM_BAZA otwiera sama RM_BAZA.",
+                             self.projects_path)
+        e_rm_dir   = make_ro(2, "Folder RM_MANAGER:",
+                             "Zaszyte w programie — baza i locki chodzą przez RM_SERWER.",
+                             self.rm_manager_dir)
+        e_rm_db    = make_ro(3, "rm_manager.sqlite:",
+                             "Zaszyte w programie — baza leży na serwerze.",
+                             self.rm_master_db_path)
+        e_rm_proj  = make_ro(4, "Folder projektów RM_MANAGER:",
+                             "Zaszyte w programie. Per-projekt bazy (rm_manager_project_1.sqlite itd.)",
+                             self.rm_projects_dir)
+        e_backup   = make_ro(5, "Folder backupów:",
+                             "Zaszyte w programie. Codzienne backupy projektów.",
+                             self.backup_dir)
+        e_locks    = make_ro(6, "Folder locków:",
+                             "Zaszyte w programie — blokady pilnuje RM_SERWER, nie pliki .lock.",
+                             self.locks_dir)
         
         def browse_exe(entry):
             path = filedialog.askopenfilename(
@@ -10319,33 +10284,16 @@ class RMManagerGUI:
                                 "Ścieżka do rm_manager.exe na serwerze dla auto-update (puste = bez auto-update)",
                                 self.server_exe_path, browse_exe)
 
-        def browse_txt(entry):
-            path = filedialog.askopenfilename(
-                title="Wybierz plik .txt",
-                filetypes=[("Plik tekstowy", "*.txt"), ("Wszystkie pliki", "*.*")],
-                initialdir=os.path.dirname(entry.get()) if os.path.dirname(entry.get()) else "."
-            )
-            if path:
-                entry.delete(0, tk.END)
-                entry.insert(0, path)
-
-        e_ai_rules = make_row(form, 8, "Plik kontekstu AI:",
-                              "⬅ TO POLE DZIAŁA. Wspólne reguły firmowe dla Agenta AI, jeden plik dla wszystkich  (\\\\W2019S\\RM_SERWER$\\ai_rules.txt)",
-                              self.ai_rules_path, browse_txt, dziala=True)
+        e_ai_rules = make_ro(8, "Plik kontekstu AI:",
+                             "Zaszyte w programie. Wspólne reguły firmowe dla Agenta AI — jeden plik dla wszystkich.",
+                             self.ai_rules_path)
 
         def save_and_close():
-            # Pole „Baza Master" pokazuje ADRES SERWERA, nie ścieżkę — więc
-            # go nie czytamy. Inaczej Zapisz wstawiłby do konfigu napis typu
-            # „RM_SERWER 192.168.100.84:5060" w miejsce ścieżki do pliku.
-            # Wartość zostaje nietknięta, dla zgodności klucza w JSON-ie.
-            self.projects_path     = e_projects.get().strip()
-            self.rm_manager_dir    = e_rm_dir.get().strip()
-            self.rm_master_db_path = e_rm_db.get().strip() or os.path.join(self.rm_manager_dir, 'rm_manager.sqlite')
-            self.rm_projects_dir   = e_rm_proj.get().strip() or os.path.join(os.path.dirname(self.rm_manager_dir), 'RM_MANAGER_projects')
-            self.backup_dir        = e_backup.get().strip() or os.path.join(os.path.dirname(self.rm_manager_dir), 'backups')
-            self.locks_dir         = e_locks.get().strip() or os.path.join(self.rm_projects_dir, 'LOCKS')
+            # ŚCIEŻKI SĄ ZASZYTE W PROGRAMIE — pola wyżej są tylko podglądem
+            # (patrz `_ustaw_sciezki_na_sztywno`). Z okna zapisujemy wyłącznie
+            # ścieżkę do .exe dla auto-update; reszta zostaje taka, jaka jest
+            # w kodzie, więc żadne kliknięcie nie odetnie stanowiska od danych.
             self.server_exe_path   = e_server_exe.get().strip()
-            self.ai_rules_path     = e_ai_rules.get().strip() or os.path.join(self.rm_manager_dir, 'ai_rules.txt')
             # ⚠️ Katalogu LOCKS nie tworzymy — blokady pilnuje RM_SERWER
             # (tabela `project_locks`), a puste `LOCKS` odtwarzało się przy
             # każdym zapisie konfiguracji, także po skasowaniu przez admina.
