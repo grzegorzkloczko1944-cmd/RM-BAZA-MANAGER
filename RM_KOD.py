@@ -13,7 +13,11 @@ from pathlib import Path
 import socket
 
 import rm_manager as rmm
-from lock_manager_v2 import ProjectLockManager
+# ⚠️ Blokady przez RM_SERWER, tak jak w RM_MANAGER — RM_KOD blokuje TE SAME
+# projekty, więc musi patrzeć w to samo miejsce. Na `lock_manager_v2` (pliki
+# .lock na dysku sieciowym) nie widziałby blokad zakładanych przez RM_MANAGER
+# i dwie osoby mogłyby edytować jeden projekt naraz (12.09.2026).
+from lock_manager_serwer import ProjectLockManager
 import hashlib
 from tkinter import filedialog
 
@@ -256,14 +260,19 @@ class RMKOD:
 
         form.columnconfigure(1, weight=1)
 
+        # Wszystkie trzy pola są dziś MARTWE: bazy i blokady chodzą przez
+        # RM_SERWER (adres w sync_config.json), a nie po ścieżkach z konfigu.
+        # Zostają widoczne, ale opisane wprost — edytowalne pole, które niczego
+        # nie zmienia, jest gorsze niż jego brak (to samo zrobiono w oknach
+        # RM_BAZA i RM_MANAGER, 12.09.2026).
         e_master = make_row(form, 0, "master.sqlite (RM_BAZA):",
-                           "Wspólna baza projektów RM_BAZA",
+                           "NIEUŻYWANE — baza chodzi przez RM_SERWER",
                            self.master_db_path, browse_file)
         e_rm_db = make_row(form, 1, "rm_manager.sqlite:",
-                          "Główna baza RM_MANAGER z kodami PLC",
+                          "NIEUŻYWANE — baza chodzi przez RM_SERWER",
                           self.rm_master_db_path, browse_file)
         e_locks = make_row(form, 2, "Folder locków:",
-                          "Katalog locków projektów",
+                          "NIEUŻYWANE — blokady pilnuje RM_SERWER, nie pliki .lock",
                           self.locks_dir, browse_folder)
 
         def save_and_close():
@@ -271,8 +280,8 @@ class RMKOD:
             self.rm_master_db_path = e_rm_db.get().strip()
             self.locks_dir = e_locks.get().strip()
 
-            # Create directories if needed
-            Path(self.locks_dir).mkdir(parents=True, exist_ok=True)
+            # ⚠️ Katalogu locków NIE tworzymy — blokady pilnuje RM_SERWER,
+            # nie pliki .lock. Wartość zostaje w konfiguracji dla zgodności.
 
             # Reinitialize lock manager
             try:

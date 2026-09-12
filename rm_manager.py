@@ -106,7 +106,12 @@ def _master(master_db_path: str = None):
     if not _serwer_ustawiony:
         cfg = {}
         # utf-8-sig: konfiguracja bywa zapisywana z BOM-em.
+        # Kolejność: własny konfig stacji, potem wspólny HMAC.json na udziale
+        # serwera (stacja bez sekretu — nowa albo po przeinstalowaniu).
+        # `Y:\RM_BAZA\sync_config.json` został na końcu jako zapas dla stacji,
+        # które nie dostały jeszcze nowego .exe — zniknie razem z Y:.
         for sciezka in (r"C:\RMPAK_CLIENT\sync_config.json",
+                        r"\\W2019S\RM_SERWER$\HMAC.json",
                         r"Y:\RM_BAZA\sync_config.json"):
             try:
                 with open(sciezka, encoding="utf-8-sig") as f:
