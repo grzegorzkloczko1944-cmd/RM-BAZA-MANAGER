@@ -2921,6 +2921,45 @@ class MainWindow(tk.Tk):
             pass
         self._lock_watch_after_id = None
 
+    def _odswiez_zamki_w_combo(self, wlasciciele):
+        """Same kłódki w pasku projektów — wołane cyklicznie ze strażnika.
+
+        Nie przebudowujemy całej listy (`load_projects` czyta statusy i sortuje),
+        tylko podmieniamy sufiks `🔒 [kto]`. Prefiksy ✅ / ⏸ zostają nietknięte.
+
+        Po co: pasek odświeżał się WYŁĄCZNIE po własnych akcjach, więc kto nic
+        nie klikał, widział cudzą kłódkę na projekcie dawno zwolnionym — i
+        odwrotnie, nie widział, że ktoś projekt zajął (12.09.2026).
+        """
+        if not getattr(self, 'projects_list', None):
+            return
+        nowe = {pid: (wlasciciele.get(pid) or {}).get('user')
+                for pid, _ in self.projects_list}
+        if nowe == getattr(self, '_combo_zamki', None):
+            return                      # bez zmian — nie ruszamy GUI
+
+        wartosci = list(self.project_combo['values'])
+        if len(wartosci) != len(self.projects_list):
+            return                      # lista w trakcie przebudowy — pomijamy tick
+
+        biezaca = self.project_var.get()
+        for i, (pid, _) in enumerate(self.projects_list):
+            baza = wartosci[i].split(" 🔒 [")[0]
+            user = nowe.get(pid)
+            wartosci[i] = (f"{baza} 🔒 [{self._get_user_display_name(user)}]"
+                           if user else baza)
+        self.project_combo['values'] = wartosci
+        # Wyświetlana wartość też musi nadążyć — inaczej w polu zostaje stara
+        # etykieta, a poprawna jest tylko na rozwiniętej liście.
+        if biezaca:
+            stara_baza = biezaca.split(" 🔒 [")[0]
+            for nowa in wartosci:
+                if nowa.split(" 🔒 [")[0] == stara_baza:
+                    if nowa != biezaca:
+                        self.project_var.set(nowa)
+                    break
+        self._combo_zamki = nowe
+
     def _lock_watch_tick(self):
         """Czy ktoś nie przejął nam locka (12.09.2026).
 
@@ -2936,27 +2975,34 @@ class MainWindow(tk.Tk):
 
         def _robotnik():
             try:
-                if not (self.have_lock and self.current_lock_id
-                        and self.current_project_id and self.lock_manager):
+                if not self.lock_manager:
                     return
-                moj_lock = self.current_lock_id
-                pid = self.current_project_id
-                wlasciciel = self.lock_manager.get_project_lock_owner(pid)
-                powod = ""
-                if not wlasciciel:
-                    powod = "Lock wygasł lub został zwolniony przez innego użytkownika"
-                elif wlasciciel.get('lock_id') != moj_lock:
-                    powod = ("Lock został wymuszony przez:\n%s@%s"
-                             % (wlasciciel.get('user', 'Unknown'),
-                                wlasciciel.get('computer', 'Unknown')))
-                if not powod:
-                    return
-                # Stan mógł się zmienić, póki czekaliśmy na sieć.
-                if (self.current_lock_id != moj_lock
-                        or self.current_project_id != pid):
-                    return
-                print("⚠️⚠️⚠️ STRAŻNIK LOCKA: %s" % powod)
-                self.after(0, lambda p=powod: self._force_cancel_lock_on_lost(p))
+                # JEDNO zapytanie obsługuje oba zadania: kontrolę własnej
+                # blokady i kłódki przy wszystkich projektach.
+                wszystkie = self.lock_manager.get_all_lock_owners()
+
+                # 1) czy nasz lock nadal nasz
+                if self.have_lock and self.current_lock_id and self.current_project_id:
+                    moj_lock = self.current_lock_id
+                    pid = self.current_project_id
+                    wlasciciel = wszystkie.get(pid)
+                    powod = ""
+                    if not wlasciciel:
+                        powod = "Lock wygasł lub został zwolniony przez innego użytkownika"
+                    elif wlasciciel.get('lock_id') != moj_lock:
+                        powod = ("Lock został wymuszony przez:\n%s@%s"
+                                 % (wlasciciel.get('user', 'Unknown'),
+                                    wlasciciel.get('computer', 'Unknown')))
+                    # Stan mógł się zmienić, póki czekaliśmy na sieć.
+                    if powod and (self.current_lock_id == moj_lock
+                                  and self.current_project_id == pid):
+                        print("⚠️⚠️⚠️ STRAŻNIK LOCKA: %s" % powod)
+                        self.after(0, lambda p=powod:
+                                   self._force_cancel_lock_on_lost(p))
+                        return          # GUI się przebuduje — kłódki przy okazji
+
+                # 2) cudze blokady w pasku projektów
+                self.after(0, lambda w=wszystkie: self._odswiez_zamki_w_combo(w))
             except Exception as e:
                 print("⚠️ Strażnik locka: %s" % e)
 
@@ -5051,10 +5097,18 @@ class MainWindow(tk.Tk):
         # UWAGA: prefiks ✅ i sufiks 🔒 [User] muszą być symetrycznie usuwane
         # przy odczycie project_var.get() - patrz on_project_selected() (~5217)
         # i inicjalizacja modulu magazynowego (~8003).
+        # Blokady WSZYSTKICH projektów jednym zapytaniem. Pytanie po jednym
+        # to przy 87 projektach 883 ms i tyleż pakietów (zmierzone 12.09.2026).
+        try:
+            wlasciciele = self.lock_manager.get_all_lock_owners()
+        except Exception as e:
+            print(f"⚠️  load_projects: blokady: {e}")
+            wlasciciele = {}
+
         values = []
         for pid, name in active_projects:
             # Sprawdź czy projekt jest zlockowany
-            lock_info = self.lock_manager.get_project_lock_owner(pid)
+            lock_info = wlasciciele.get(pid)
             if lock_info:
                 username = lock_info.get('user', '')  # LOGIN
                 locked_by = self._get_user_display_name(username)  # NAZWA
@@ -5073,8 +5127,11 @@ class MainWindow(tk.Tk):
         
         # Zapisz dla innych metod (ID, Nazwa)
         self.projects_list = active_projects
-        
+
         self.project_combo['values'] = values
+        # Stan kłódek, z którym porówna się `_odswiez_zamki_w_combo`.
+        self._combo_zamki = {pid: (wlasciciele.get(pid) or {}).get('user')
+                             for pid, _ in active_projects}
 
         # Odśwież także WYŚWIETLANĄ wartość, nie tylko listę do rozwinięcia.
         # Bez tego etykieta locka aktualizowała się dopiero po rozwinięciu

@@ -168,6 +168,7 @@ except ImportError:
         def get_project_lock_owner(self, project_id):
             # Zwróć dane własne (nie None!) żeby nie triggerować lock-lost
             return {"user": self.my_name, "computer": "local", "lock_id": "no-lock"}
+        def get_all_lock_owners(self): return {}
         def refresh_heartbeat(self, project_id): return True
         def refresh_all_my_locks(self): pass
         def cleanup_all_my_locks(self): pass
@@ -1532,12 +1533,15 @@ class RMManagerGUI:
             try:
                 if getattr(self.lock_manager, '_STUB', False):
                     return
+                # JEDNO zapytanie obsługuje wszystkie trzy zadania niżej.
+                wszystkie = self.lock_manager.get_all_lock_owners()
+
                 lock_lost = False
                 # 1) blokada wybranego projektu
                 if self.have_lock and self.current_lock_id and self.selected_project_id:
                     moj_lock = self.current_lock_id
                     pid = self.selected_project_id
-                    current_owner = self.lock_manager.get_project_lock_owner(pid)
+                    current_owner = wszystkie.get(pid)
                     reason = ""
                     if not current_owner:
                         reason = "Lock wygasł lub został zwolniony przez innego użytkownika"
@@ -1556,19 +1560,20 @@ class RMManagerGUI:
                 #    (`_try_acquire_line_locks`) — bez tego ktoś mógł przejąć
                 #    równoległy projekt, a my dalej pisalibyśmy po nim etapy.
                 if not lock_lost and getattr(self, '_line_locked_pids', None):
-                    stracone = []
-                    for pid in list(self._line_locked_pids):
-                        try:
-                            wl = self.lock_manager.get_project_lock_owner(pid)
-                        except Exception:
-                            continue        # sieć mrugnęła — nie wyciągamy wniosków
-                        if not wl or not self.lock_manager._moj(wl):
-                            stracone.append((pid, wl))
+                    stracone = [(pid, wszystkie.get(pid))
+                                for pid in list(self._line_locked_pids)
+                                if not self.lock_manager._moj(wszystkie.get(pid))]
                     if stracone:
                         opis = ", ".join(
                             "%s (%s)" % (pid, (wl.get('user') if wl else 'zwolniony'))
                             for pid, wl in stracone)
                         self.root.after(0, lambda o=opis: self._on_line_locks_lost(o))
+
+                # 3) kłódki w pasku projektów — cudze blokady też się zmieniają,
+                #    a pasek odświeżał się dotąd tylko po WŁASNYCH akcjach.
+                if self.projects:
+                    self.root.after(0, lambda w=wszystkie:
+                                    self._odswiez_zamki_w_combo(w))
             except Exception as e:
                 print(f"⚠️ Strażnik locka: {e}")
 
@@ -4634,6 +4639,15 @@ class RMManagerGUI:
         except Exception:
             all_statuses = {}
 
+        # Blokady WSZYSTKICH projektów jednym zapytaniem — pytanie po jednym
+        # to przy 87 projektach 883 ms i tyleż pakietów (zmierzone 12.09.2026).
+        wlasciciele = {}
+        if not is_stub:
+            try:
+                wlasciciele = self.lock_manager.get_all_lock_owners()
+            except Exception:
+                pass
+
         combo_values = []
         for pid in self.projects:
             name = self.project_names.get(pid, f"Projekt {pid}")
@@ -4654,17 +4668,53 @@ class RMManagerGUI:
                 pass
 
             if not is_stub:
-                try:
-                    lock_info = self.lock_manager.get_project_lock_owner(pid)
-                    if lock_info and lock_info.get('user'):
-                        locked_by = self._get_user_display_name(lock_info['user'])
-                        name = f"{name} 🔒 [{locked_by}]"
-                except Exception:
-                    pass
+                lock_info = wlasciciele.get(pid)
+                if lock_info and lock_info.get('user'):
+                    locked_by = self._get_user_display_name(lock_info['user'])
+                    name = f"{name} 🔒 [{locked_by}]"
             combo_values.append(f"{status_prefix}     {name}")
         self.project_combo['values'] = combo_values
         if current_idx >= 0:
             self.project_combo.current(current_idx)
+        # Zapamiętaj, co pokazuje pasek — `_odswiez_zamki_w_combo` porówna
+        # z tym nowy stan i przerysuje tylko wtedy, gdy coś się zmieniło.
+        self._combo_zamki = {pid: (wlasciciele.get(pid) or {}).get('user')
+                             for pid in self.projects}
+
+    def _odswiez_zamki_w_combo(self, wlasciciele):
+        """Same kłódki w pasku projektów — wołane cyklicznie ze strażnika.
+
+        Osobno od `_refresh_combo_lock_info`, bo tamta przy okazji liczy
+        prefiksy [A]/[W]/[Z], a to otwiera plik bazy KAŻDEGO projektu
+        (`is_project_paused`) — czegoś takiego nie wolno robić co 5 s.
+        Tutaj tylko podmieniamy napis, bez dotykania dysku; gotowy stan
+        blokad dostajemy z wątku strażnika (jedno zapytanie, ~16 ms).
+
+        Po co w ogóle: dotąd pasek odświeżał się WYŁĄCZNIE po własnych
+        akcjach. Kto nic nie klikał, widział stan sprzed godziny — cudzą
+        kłódkę na projekcie dawno zwolnionym (12.09.2026).
+        """
+        if getattr(self.lock_manager, '_STUB', False) or not self.projects:
+            return
+
+        nowe = {pid: (wlasciciele.get(pid) or {}).get('user') for pid in self.projects}
+        if nowe == getattr(self, '_combo_zamki', None):
+            return                      # nic się nie zmieniło — nie ruszamy GUI
+
+        wartosci = list(self.project_combo['values'])
+        if len(wartosci) != len(self.projects):
+            return                      # pasek w trakcie przebudowy — pomijamy tick
+
+        biezacy = self.project_combo.current()
+        for i, pid in enumerate(self.projects):
+            baza = wartosci[i].split(" 🔒 [")[0]
+            user = nowe.get(pid)
+            wartosci[i] = (f"{baza} 🔒 [{self._get_user_display_name(user)}]"
+                           if user else baza)
+        self.project_combo['values'] = wartosci
+        if biezacy >= 0:
+            self.project_combo.current(biezacy)
+        self._combo_zamki = nowe
 
     def load_projects(self):
         """Załaduj listę projektów z RM_BAZA master.sqlite"""
