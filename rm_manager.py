@@ -353,7 +353,7 @@ def copy_project_to_local(rm_manager_dir: str, project_id: int) -> str | None:
 
 def sync_project_to_network(rm_manager_dir: str, project_id: int,
                             still_owns_lock=None) -> bool:
-    """Wgraj lokalną kopię z powrotem na Y:. Zwraca True przy sukcesie.
+    """Wgraj lokalną kopię z powrotem na serwer. Zwraca True przy sukcesie.
 
     Wywoływane przy zwalnianiu locka / zamykaniu programu. Wymaga, żeby
     wszystkie połączenia do lokalnej kopii były już zamknięte (commit).
@@ -367,7 +367,7 @@ def sync_project_to_network(rm_manager_dir: str, project_id: int,
     - PRAGMA integrity_check przed wypchnięciem (nie wysyłamy uszkodzonego pliku),
     - weryfikacja locka tuż przed nadpisaniem (nie kasujemy cudzej pracy),
     - zapis ATOMOWY: kopia do pliku tymczasowego obok celu + os.replace().
-      shutil.copy2() prosto na cel zeruje plik na Y: i dopiero streamuje
+      shutil.copy2() prosto na cel zeruje plik docelowy i dopiero streamuje
       zawartość - zerwanie SMB w trakcie zostawiało uszkodzoną bazę dla
       wszystkich. os.replace() jest atomowe w obrębie jednego wolumenu.
     """
@@ -435,11 +435,11 @@ def sync_project_to_network(rm_manager_dir: str, project_id: int,
             except OSError:
                 pass
 
-        _lc_log(f"projekt {project_id}: lokal -> Y: ({_time.time() - t0:.3f}s)")
+        _lc_log(f"projekt {project_id}: lokal -> serwer ({_time.time() - t0:.3f}s)")
         return True
     except Exception as e:
         # Nie kasuj lokalnej kopii - zawiera zmiany użytkownika
-        _lc_log(f"SYNC NA Y: NIEUDANY ({e}). Zmiany zachowane lokalnie: {local}")
+        _lc_log(f"SYNC NA SERWER NIEUDANY ({e}). Zmiany zachowane lokalnie: {local}")
         return False
 
 
@@ -4150,11 +4150,11 @@ def sync_to_master(rm_db_path: str, master_db_path: str, project_id: int):
         master_db_path: Ścieżka do master.sqlite (współdzielony z RM_BAZA)
         project_id: ID projektu
     """
-    master_path = Path(master_db_path)
-    if not master_path.exists():
-        print(f"⚠️  master.sqlite nie istnieje: {master_path}")
-        return
-    
+    # ⚠️ Obecności pliku NIE sprawdzamy — master leży na RM_SERWER i na dysku
+    # klienta go nie ma. Ten warunek przerywał synchronizację statusu do RM_BAZA
+    # przy KAŻDYM zwolnieniu locka („master.sqlite nie istnieje: Y:\\..."),
+    # mimo że wszystkie odczyty i zapisy niżej idą przez serwer (12.09.2026).
+
     # 1. Określ status - priorytet:
     #    1. ZAKOŃCZONY (milestone "Zapłacony" LUB project_status=DONE) -> "Zakończony"
     #    2. WSTRZYMANY (pauza) -> "Wstrzymany"
