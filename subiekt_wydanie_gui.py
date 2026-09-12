@@ -104,12 +104,34 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
     #: To NIE jest lista „co zeskanowałem" — to PLAN WYDANIA: co zostało do
     #: zebrania, ile już wyszło i ile magazynier przygotował w tej sesji.
     #: Dzięki temu nie zaczyna od pustego ekranu i nie potrzeba drugiej tabeli.
-    KOL_PLAN = [("lp", "Lp.", 38), ("lokacja", "Lokacja", 80),
-                ("symbol", "Symbol", 130), ("nazwa", "Nazwa", 210),
-                ("zrodlo", "Źródło", 60), ("potrzeba", "Potrzeba", 70),
-                ("wydano", "Wydano", 65), ("pozostalo", "Pozostało", 75),
-                ("stan", "Stan", 60), ("teraz", "Teraz", 60),
-                ("status", "Status", 140)]
+    #: Szerokości dobrane tak, żeby CAŁA tabela mieściła się bez przewijania
+    #: w bok. Wcześniej suma wynosiła 988 px i przy węższym oknie „Teraz"
+    #: było ucięte, a „Status" w ogóle nie wchodził — a to on niesie
+    #: najważniejszą informację po skanie.
+    #:
+    #: Kolumny liczbowe są wąskie CELOWO: mieszczą 5 cyfr, a wpisy dłuższe
+    #: (jak 16666) i tak są wyrównane do prawej, więc widać koniec liczby.
+    #: Rozciąga się tylko „Nazwa" — reszta ma stałą szerokość, bo to po nich
+    #: magazynier wodzi wzrokiem i skakanie kolumn utrudniałoby czytanie.
+    #: ⚠️ SUMA SZEROKOŚCI MUSI SIĘ MIEŚCIĆ W PANELU.
+    #:
+    #: Okno ma 1500 px, lewy panel skanera 640, marginesy i pasek przewijania
+    #: ~40 — na tabelę zostaje około 820 px. Suma poniżej to 806, więc
+    #: „Status" dochodzi do prawej krawędzi bez pchania go ręcznie.
+    #:
+    #: Historia dwóch nieudanych prób (13.09.2026), żeby nie powtarzać:
+    #:   • suma 988 px  → „Teraz" ucięte, „Status" niewidoczny
+    #:   • suma 866 px + stretch na „Nazwa" i „Status" → jeszcze gorzej:
+    #:     dwie rozciągane kolumny DZIELĄ nadmiar między siebie, więc
+    #:     „Status" nadal nie sięgał krawędzi
+    #: Rozciąga się WYŁĄCZNIE „Nazwa" — jedna kolumna zbiera cały nadmiar,
+    #: reszta stoi w miejscu, co przy czytaniu listy regałami jest zaletą.
+    KOL_PLAN = [("lp", "Lp.", 34), ("lokacja", "Lokacja", 70),
+                ("symbol", "Symbol", 118), ("nazwa", "Nazwa", 170),
+                ("zrodlo", "Źr.", 38), ("potrzeba", "Potrzeba", 56),
+                ("wydano", "Wydano", 52), ("pozostalo", "Pozost.", 54),
+                ("stan", "Stan", 46), ("teraz", "Teraz", 46),
+                ("status", "Status", 122)]
 
     def __init__(self, parent, project_id, project_name=None):
         super().__init__(parent)
@@ -478,7 +500,13 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                                                     "zrodlo", "status")
                             else "e")
         sc = ttk.Scrollbar(wrap, orient="vertical", command=self.tab.yview)
-        self.tab.configure(yscrollcommand=sc.set)
+        # Poziomy pasek — zabezpieczenie, nie codzienny sposób pracy: przy
+        # domyślnym oknie kolumny mieszczą się w całości (806 z 808 px), ale
+        # po zwężeniu okna magazynier ma jak dojechać do „Statusu" zamiast
+        # patrzeć na ucięty tekst.
+        sc_x = ttk.Scrollbar(wrap, orient="horizontal", command=self.tab.xview)
+        self.tab.configure(yscrollcommand=sc.set, xscrollcommand=sc_x.set)
+        sc_x.pack(side=tk.BOTTOM, fill=tk.X)
         self.tab.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sc.pack(side=tk.RIGHT, fill=tk.Y)
         # Status kolorem wiersza — bez popupu przy każdym skanie, bo
