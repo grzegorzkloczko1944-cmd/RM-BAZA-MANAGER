@@ -388,21 +388,15 @@ def copy_project_to_local(rm_manager_dir: str, project_id: int) -> str | None:
         _lc_log(f"brak zdalnej bazy {remote} - pracuje bezposrednio na Y:")
         return None
 
-    # Kopia z poprzedniej sesji. Gdy RÓŻNI SIĘ od bazy na serwerze, siedzi w niej
-    # czyjaś praca — nie ruszamy jej, praca idzie wprost na serwer, a decyzję
-    # o odzyskaniu danych podejmuje user (GUI o tym mówi). Gdy jest IDENTYCZNA,
-    # to śmieć po nieudanym `os.remove` albo po sesji bez zmian: kasujemy go
-    # i kopiujemy normalnie, zamiast bez powodu schodzić na wolniejszy tryb
-    # i straszyć komunikatem o utraconej pracy (12.09.2026).
+    # Kopia z poprzedniej sesji to śmieć — bierzemy właśnie lock, więc nikt
+    # inny tego projektu teraz nie edytuje, a to, co leży, pochodzi z sesji
+    # zakończonej ubiciem procesu albo odebraniem locka. Kasujemy i kopiujemy
+    # od nowa (12.09.2026). Dawniej taki plik blokował tryb lokalny: program
+    # schodził na wolniejszą pracę wprost na serwerze i zostawiał go na zawsze.
     if os.path.exists(local):
-        if local_copy_differs(project_id, rm_manager_dir):
-            _lc_log(f"projekt {project_id}: istnieje ROZBIEZNA kopia {local} "
-                    f"- NIE nadpisuje jej, pracuje bezposrednio na serwerze")
-            return None
-        _lc_log(f"projekt {project_id}: kopia zgodna z serwerem - kasuje smiec")
+        _lc_log(f"projekt {project_id}: kasuje kopie z poprzedniej sesji")
         if not cleanup_local_copy(project_id):
-            # Nie da się skasować (plik otwarty) — nie nadpisujemy, bo to
-            # znaczy, że ktoś go trzyma; praca idzie wprost na serwer.
+            # Nie da się skasować — plik trzyma druga kopia programu.
             _lc_log(f"projekt {project_id}: kopii nie da sie skasowac "
                     f"- pracuje bezposrednio na serwerze")
             return None
@@ -545,31 +539,36 @@ def cleanup_local_copy(project_id: int) -> bool:
 
 
 def sprzatnij_zsynchronizowane_kopie(rm_manager_dir: str = None) -> int:
-    """Skasuj kopie lokalne, które NIE różnią się od baz na serwerze.
+    """Wyczyść katalog kopii lokalnych przy starcie programu.
 
-    Wołane przy starcie programu. Takie pliki to śmieci po nieudanym
-    `os.remove` (baza była jeszcze otwarta) albo po sesji, w której user
-    niczego nie zmienił. Zostawione, straszyły komunikatem o utraconej
-    pracy. Kopii ZE zmianami ta funkcja nie tyka.
+    Kopia ma sens wyłącznie w trakcie sesji, w której trzymamy lock. Po
+    starcie programu żadna z nich nie jest już do niczego potrzebna:
+    * zgodna z serwerem — śmieć po nieudanym `os.remove` (Windows nie kasuje
+      pliku trzymanego otwartym) albo po sesji bez żadnych zmian,
+    * rozbieżna — praca z sesji, w której lock przejął ktoś inny; jego wersja
+      jest obowiązująca, więc tej i tak nikt nie wgra na serwer.
+
+    Dawniej rozbieżne zostawały „na wszelki wypadek". Efekt był taki, że
+    leżały w %TEMP% bez końca, a program przy każdym wzięciu locka widział je
+    jako niezsynchronizowane zmiany: schodził na wolniejszą pracę wprost na
+    serwerze i robił obok kolejną kopię (12.09.2026).
     """
     if not os.path.isdir(LOCAL_COPY_DIR):
         return 0
     skasowane = 0
-    wzor = os.path.join(LOCAL_COPY_DIR, "rm_manager_project_*.sqlite")
-    for sciezka in glob.glob(wzor):
-        nazwa = os.path.basename(sciezka)
-        try:
-            pid = int(nazwa.replace("rm_manager_project_", "").replace(".sqlite", ""))
-        except ValueError:
-            continue
-        try:
-            if local_copy_differs(pid, rm_manager_dir):
-                continue                    # są zmiany — nie ruszamy
-        except Exception:
-            continue
-        if cleanup_local_copy(pid):
-            skasowane += 1
-            _lc_log(f"sprzatnieto zbedna kopie projektu {pid} (zgodna z serwerem)")
+    wzorce = ("rm_manager_project_*.sqlite", "rm_manager_project_*.sqlite-journal",
+              "rm_manager_project_*.sqlite-wal", "rm_manager_project_*.sqlite-shm")
+    for wzor in wzorce:
+        for sciezka in glob.glob(os.path.join(LOCAL_COPY_DIR, wzor)):
+            try:
+                os.remove(sciezka)
+                skasowane += 1
+            except OSError as e:
+                # Plik trzymany otwartym przez drugą kopię programu — zostaje,
+                # poleci przy następnym starcie.
+                _lc_log(f"nie udalo sie skasowac {sciezka}: {e}")
+    if skasowane:
+        _lc_log(f"wyczyszczono katalog kopii lokalnych: {skasowane} plikow")
     return skasowane
 
 

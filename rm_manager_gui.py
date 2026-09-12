@@ -898,20 +898,9 @@ class RMManagerGUI:
         )
         return True
 
-    def _warn_unsynced_local_copy(self, project_id: int):
-        """Ostrzeż o kopii lokalnej, której nie udało się wgrać na serwer."""
-        try:
-            messagebox.showwarning(
-                "Niezsynchronizowane zmiany lokalne",
-                f"Na dysku została kopia projektu {project_id} z poprzedniej sesji, "
-                f"której NIE wgrano z powrotem na serwer.\n\n"
-                f"{rmm.get_local_copy_path(project_id)}\n\n"
-                f"Żeby nie nadpisać tych zmian, program pracuje teraz bezpośrednio "
-                f"na bazie serwera (bez kopii lokalnej).\n\n"
-                f"Zabezpiecz ten plik albo usuń go, gdy zmiany są już niepotrzebne."
-            )
-        except Exception:
-            pass
+    # `_warn_unsynced_local_copy` usunięte (12.09.2026). Katalog kopii lokalnych
+    # jest czyszczony przy starcie programu, więc nie ma już sytuacji, w której
+    # leży tam cokolwiek wartego pokazywania użytkownikowi.
 
     def _open_local_copy(self, project_id: int):
         """Po zdobyciu locka: skopiuj bazę projektu z serwera na dysk lokalny.
@@ -930,18 +919,12 @@ class RMManagerGUI:
         if self._local_copy_project_id is not None:
             self._sync_local_copy_back()
 
-        # Kopia RÓŻNIĄCA SIĘ od bazy na serwerze = niezapisane zmiany użytkownika.
-        # copy_project_to_local jej nie nadpisze; uprzedzamy o pracy na serwerze.
-        # Kopia identyczna z serwerem to śmieć — nie ma o czym mówić, poleci
-        # przy najbliższym sprzątaniu.
-        had_orphan = rmm.local_copy_differs(project_id, self.rm_projects_dir)
-
+        # Bez ostrzeżeń o „niezsynchronizowanych zmianach" (12.09.2026):
+        # katalog kopii jest czyszczony przy starcie programu, więc cokolwiek
+        # tu leży, jest śmieciem z ubitej sesji — nie ma o czym informować.
         local = rmm.copy_project_to_local(self.rm_projects_dir, project_id)
-        # None => kopiowanie nieudane, pracujemy dalej bezpośrednio na Y:
+        # None => kopiowanie nieudane, pracujemy dalej bezpośrednio na serwerze
         self._local_copy_project_id = project_id if local else None
-
-        if had_orphan and not local:
-            self._warn_unsynced_local_copy(project_id)
 
     def _sync_local_copy_back(self):
         """Przed zwolnieniem locka: wgraj lokalną kopię z powrotem na serwer.
@@ -1751,6 +1734,14 @@ class RMManagerGUI:
             self._sync_local_copy_back()
         except Exception as e:
             print(f"⚠️ Sync kopii lokalnej przy zamykaniu: {e}")
+
+        # Katalog kopii ma zostać pusty — cokolwiek przetrwało do tego miejsca,
+        # jest śmieciem, a zostawione blokowałoby tryb lokalny przy następnym
+        # starcie i rosłoby w %TEMP% bez końca (12.09.2026).
+        try:
+            rmm.sprzatnij_zsynchronizowane_kopie(self.rm_projects_dir)
+        except Exception as e:
+            print(f"⚠️ Czyszczenie kopii lokalnych przy zamykaniu: {e}")
 
         # Cleanup wszystkich locków przed zamknięciem
         self.lock_manager.cleanup_all_my_locks()
@@ -2756,11 +2747,18 @@ class RMManagerGUI:
     def _on_lock_lost(self, reason: str):
         """Obsługa utraty locka (ktoś wymuszył przejęcie)"""
         print(f"🚨 UTRATA LOCKA: {reason}")
-        # Lock przejął ktoś inny - NIE wolno wgrywać naszej kopii na Y:,
-        # bo nadpisalibyśmy jego zmiany. Kopię zachowujemy na dysku i mówimy o tym.
+        # Lock przejął ktoś inny — jego wersja jest teraz obowiązująca, więc
+        # NIE wolno wgrywać naszej kopii na serwer. Kopia ląduje w koszu razem
+        # z niezapisaną pracą (decyzja 12.09.2026): zostawiana, leżała w %TEMP%
+        # na zawsze. Przy następnym wzięciu locka program widział ją jako
+        # „niezsynchronizowane zmiany", schodził na wolniejszą pracę wprost na
+        # serwerze, robił obok kolejną kopię — a ta pierwsza zostawała śmieciem.
         orphan_pid = self._local_copy_project_id
-        orphan_path = rmm.get_local_copy_path(orphan_pid) if orphan_pid is not None else None
         self._local_copy_project_id = None
+        if orphan_pid is not None:
+            skasowano = rmm.cleanup_local_copy(orphan_pid)
+            print(f"🗑 Kopia projektu {orphan_pid}: "
+                  f"{'skasowana' if skasowano else 'zostanie sprzątnięta przy starcie'}")
 
         self._locked_project_id = None
         self.have_lock = False
@@ -2777,19 +2775,11 @@ class RMManagerGUI:
             text=f"⚠️ Utracono lock projektu {self.selected_project_id} - tryb READ-ONLY",
             fg="#e74c3c"
         )
-        extra = ""
-        if orphan_path:
-            extra = (
-                f"\n\n⚠️ Pracowałeś na kopii lokalnej. Twoje zmiany NIE zostały "
-                f"wgrane na serwer, bo projekt edytuje teraz ktoś inny "
-                f"(nadpisanie skasowałoby jego pracę).\n\n"
-                f"Kopia z Twoimi zmianami:\n{orphan_path}"
-            )
         messagebox.showwarning(
             "⚠️ Utrata locka",
             f"Twój lock projektu {self.selected_project_id} został przejęty!\n\n"
             f"Powód:\n{reason}\n\n"
-            f"Tryb: READ-ONLY{extra}",
+            f"Tryb: READ-ONLY",
             parent=self.root
         )
 
