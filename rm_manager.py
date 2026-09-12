@@ -4254,8 +4254,12 @@ def sync_to_master(rm_db_path: str, master_db_path: str, project_id: int):
     
     con_peek.close()
     
-    # Master przez RM_SERWER albo lokalnie — patrz `_master`.
-    klient = _master(str(master_path))
+    # Master przez RM_SERWER — `_master` i tak ignoruje ścieżkę (baza leży
+    # na serwerze). Wcześniej szło tu `str(master_path)` — zmiennej, która
+    # zniknęła razem ze sprawdzaniem obecności pliku; u usera kończyło się
+    # to komunikatem „name 'master_path' is not defined" przy synchronizacji
+    # statusu do RM_BAZA (12.09.2026).
+    klient = _master(master_db_path)
     try:
         # Obecne wartości — dla logiki WRITE ONCE (montaż wpisujemy raz).
         # Jedno zapytanie zamiast PRAGMA + SELECT na kolumnę; kolumny
