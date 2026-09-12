@@ -10142,6 +10142,9 @@ class RMManagerGUI:
         # a wyglądała na działającą: user widział `Y:/...` i wnioskował, że stamtąd
         # czytamy. Skasowanie pól to osobna sprzątaczka (zapisuje je `save_config`),
         # więc na razie mówimy prawdę w opisie.
+        #
+        # Folder backupów NIE jest martwy — `BackupManager` pisze dokładnie tam,
+        # gdzie wskazuje. Codzienne kopie projektów robi klient, nie serwer.
         e_master   = make_row(form, 0, "master.sqlite (RM_BAZA):",
                               "NIEUŻYWANE — master RM_BAZA chodzi przez RM_SERWER. Pole bez wpływu na działanie.",
                               self.master_db_path, browse_file)
@@ -10158,7 +10161,7 @@ class RMManagerGUI:
                               "⬅ TO POLE DZIAŁA. Per-projekt bazy (rm_manager_project_1.sqlite itd.)  (\\\\W2019S\\RM_SERWER$\\RM_MANAGER_projects)",
                               self.rm_projects_dir, browse_folder)
         e_backup   = make_row(form, 5, "Folder backupów:",
-                              "NIEUŻYWANE — backupy robi RM_SERWER u siebie. Pole bez wpływu na działanie.",
+                              "⬅ TO POLE DZIAŁA. Codzienne backupy projektów  (\\\\W2019S\\RM_SERWER$\\backup_RM_MANAGER)",
                               self.backup_dir, browse_folder)
         e_locks    = make_row(form, 6, "Folder locków:",
                               "NIEUŻYWANE — blokady projektów pilnuje RM_SERWER, nie pliki .lock. Pole bez wpływu na działanie.",
