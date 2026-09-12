@@ -146,6 +146,42 @@ import client_version
 # SINGLE INSTANCE LOCK
 # ============================================================================
 
+def _czy_to_nasza_instancja(pid) -> bool:
+    """Czy pod tym PID-em siedzi DRUGA KOPIA RM_BAZA (a nie cudzy proces).
+
+    Windows recykluje numery PID, więc sam fakt, że proces o danym numerze
+    żyje, niczego nie dowodzi — po awarii ten numer może nosić Notatnik.
+    Sprawdzamy więc też nazwę procesu; przy braku `psutil` albo odmowie
+    dostępu wracamy do samego sprawdzenia istnienia (ostrożniej zablokować
+    drugą kopię niż wpuścić dwie naraz).
+    """
+    if not pid:
+        return False
+    try:
+        import psutil
+    except ImportError:
+        psutil = None
+    if psutil is not None:
+        if not psutil.pid_exists(pid):
+            return False
+        try:
+            proc = psutil.Process(pid)
+            nazwa = (proc.name() or "").lower()
+            try:
+                linia = " ".join(proc.cmdline() or []).lower()
+            except Exception:
+                linia = ""
+            return any(m in nazwa or m in linia
+                       for m in ("rm_baza", "rm_baza_v15"))
+        except Exception:
+            return True             # nie umiemy sprawdzić — zakładamy, że to my
+    try:
+        os.kill(pid, 0)             # bez psutil: tylko „czy żyje"
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
 def acquire_single_instance_lock():
     """Sprawdź czy to jedyna instancja aplikacji.
     
@@ -162,16 +198,18 @@ def acquire_single_instance_lock():
                 data = json.load(f)
                 old_pid = data.get('pid')
                 
-                # Sprawdź czy proces o tym PID nadal działa
-                try:
-                    # Na Windows i Linux działa kill(pid, 0)
-                    os.kill(old_pid, 0)
-                    # Proces istnieje - nie możemy uruchomić drugiej instancji
-                    return None
-                except (OSError, ProcessLookupError):
-                    # Proces nie istnieje - usuwamy stary lock
-                    print(f"🧹 Stary lock z PID {old_pid} (proces martwy) - usuwam")
-                    lock_file.unlink()
+                # ⚠️ Sprawdzamy nie tylko CZY proces żyje, ale CZY TO MY.
+                #
+                # Windows RECYKLUJE numery PID: gdy RM_BAZA padnie, a jej numer
+                # dostanie Notatnik albo Chrome, samo `os.kill(pid, 0)` mówi
+                # „proces żyje" i program NIE WSTANIE w ogóle — bez wyjścia poza
+                # ręcznym kasowaniem `app.lock`. RM_MANAGER sprawdza to od dawna
+                # (`_is_our_app_running`), RM_BAZA nie — wyrównane 12.09.2026.
+                if _czy_to_nasza_instancja(old_pid):
+                    return None                 # druga kopia NAPRAWDĘ działa
+                print(f"🧹 Stary lock z PID {old_pid} "
+                      f"(proces martwy albo to inny program) - usuwam")
+                lock_file.unlink()
         except:
             # Błąd odczytu - usuwamy lock i próbujemy ponownie
             try:
