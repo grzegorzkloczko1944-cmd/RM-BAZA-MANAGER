@@ -3407,7 +3407,12 @@ class RMManagerGUI:
         tools_menu.add_command(label="🔧 Migruj bazę kodów PLC (dodaj kolumny)", command=self.migrate_plc_codes_ui)
         tools_menu.add_command(label="🔧 Migruj odbiorców kodów PLC", command=self.migrate_plc_recipients_ui)
         tools_menu.add_separator()
-        tools_menu.add_command(label="⚠️ Resetuj śledzenie wszystkich projektów (tylko admin, groźne)", command=self.reset_all_file_tracking_ui)
+        # „Resetuj śledzenie wszystkich projektów" celowo NIE MA w menu (12.09.2026).
+        # Katalog projektów jest jeden i na stałe (\\W2019S\RM_SERWER$\RM_BAZA_projects),
+        # więc masowe przepisywanie ścieżek nie ma już zastosowania — a jeden klik
+        # zapisywał WSZYSTKIM ścieżkę z konfiguracji klikającego i unieruchamiał firmę.
+        # Metoda `reset_all_file_tracking_ui` zostaje do wywołania z konsoli, gdyby
+        # kiedyś przyszła kolejna przeprowadzka danych.
         tools_menu.add_command(label="🛠 Napraw schemat baz projektów (brakujące tabele)", command=self.repair_project_schemas_ui)
         tools_menu.add_separator()
         tools_menu.add_command(label="🔍 Diagnostyka projektów", command=self.diagnose_projects)
@@ -3815,19 +3820,12 @@ class RMManagerGUI:
         )
         reset_single_btn.pack(side=tk.RIGHT, padx=5)
         
-        # Przycisk resetowania wszystkich projektów (po skopiowaniu bazy)
-        reset_all_btn = tk.Button(
-            self.warning_frame,
-            text="🔄 Wszystkie projekty",
-            command=self.reset_all_file_tracking_ui,
-            bg="#c0392b",
-            fg="white",
-            font=self.FONT_BOLD,
-            padx=10,
-            pady=3,
-            relief=tk.RAISED
-        )
-        reset_all_btn.pack(side=tk.RIGHT, padx=5)
+        # Przycisku „🔄 Wszystkie projekty" tu NIE MA (12.09.2026) — i to on był
+        # najgroźniejszy: wyświetlał się na pasku ostrzeżenia, czyli podsuwał się
+        # dokładnie tej osobie, która widziała czerwony pasek. Jedno kliknięcie
+        # przepisywało ścieżki WSZYSTKIM userom na katalog klikającego. Katalog
+        # projektów jest dziś jeden i na stałe, więc nie ma czego resetować
+        # masowo — zostaje przycisk obok, dla pojedynczego projektu.
         # Warning frame is packed dynamically in show_file_warning()
         
         # Notifications banner (for payment notifications)
