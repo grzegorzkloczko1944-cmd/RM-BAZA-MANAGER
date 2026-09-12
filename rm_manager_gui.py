@@ -440,6 +440,37 @@ DEFAULT_PROJECTS_PATH  = r"Z:\FoldeR\projects"   # Folder projektów RM_BAZA
 DEFAULT_BACKUP_DIR = r"C:\RMPAK_CLIENT\RM_MANAGER\backups"  # Folder backupów
 DEFAULT_LOCKS_DIR = r"C:\RMPAK_CLIENT\RM_MANAGER\RM_MANAGER_projects\LOCKS"  # Folder locków
 
+
+def _na_ukryty_udzial(sciezka):
+    """Podmienia udzial `RM_SERWER` na ukryty `RM_SERWER$` w sciezce UNC.
+
+    12.09.2026 udzial z bazami projektow zostal ukryty (userzy nie maja go
+    widziec w otoczeniu sieciowym), a STARY, widoczny — usuniety. Konfiguracje
+    lezace na dziesieciu stanowiskach wskazuja wiec na udzial, ktorego juz nie
+    ma: RM_MANAGER gasnie wtedy bez zadnego komunikatu.
+
+    Poprawiamy w locie przy wczytywaniu konfigu, zamiast obchodzic stanowiska
+    — kazdy user dostanie to razem z nowym .exe. Podmiana jest waska celowo:
+    dotyka WYLACZNIE segmentu udzialu w sciezce sieciowej (`\\\\serwer\\RM_SERWER\\...`)
+    i nie rusza ani nazw katalogow, ani sciezek lokalnych. Gdy ktos ma juz
+    `RM_SERWER$`, zwracamy sciezke bez zmian.
+
+    Zostaje na stale: konfigi na stacjach zapisuja sie same przy zamknieciu
+    programu, wiec poprawiona wartosc i tak tam wsiaknie — a funkcja chroni
+    kazda kopie konfigu przywrocona ze starego backupu.
+    """
+    if not sciezka:
+        return sciezka
+    znak = "\\" if sciezka.startswith("\\\\") else ("/" if sciezka.startswith("//") else None)
+    if not znak:
+        return sciezka                      # sciezka lokalna — nie nasza sprawa
+    czesci = sciezka.split(znak)
+    # ['', '', serwer, udzial, ...] — udzial jest czwartym elementem
+    if len(czesci) > 3 and czesci[3].upper() == "RM_SERWER":
+        czesci[3] += "$"
+        return znak.join(czesci)
+    return sciezka
+
 # Użytkownik (możesz pobrać z systemu)
 CURRENT_USER = os.environ.get('USERNAME', os.environ.get('USER', 'System'))
 
@@ -2606,25 +2637,32 @@ class RMManagerGUI:
                         'rm_projects_dir',
                         os.path.join(os.path.dirname(self.rm_manager_dir), 'RM_MANAGER_projects')
                     )
+                    # Udzial z bazami projektow zostal UKRYTY: RM_SERWER -> RM_SERWER$
+                    # (12.09.2026, zeby userzy nie widzieli go w otoczeniu sieciowym).
+                    # Stary udzial USUNIETY, wiec konfig sprzed zmiany wskazuje donikad
+                    # i RM_MANAGER gasnie bez komunikatu. Poprawiamy w locie zamiast
+                    # obchodzic 10 stanowisk — patrz `_na_ukryty_udzial`.
+                    self.rm_projects_dir = _na_ukryty_udzial(self.rm_projects_dir)
                     # backup_dir: katalog backupów
-                    self.backup_dir = config.get(
+                    self.backup_dir = _na_ukryty_udzial(config.get(
                         'backup_dir',
                         os.path.join(os.path.dirname(self.rm_manager_dir), 'backups')
-                    )
+                    ))
                     # locks_dir: katalog locków
-                    self.locks_dir = config.get(
+                    self.locks_dir = _na_ukryty_udzial(config.get(
                         'locks_dir',
                         os.path.join(self.rm_projects_dir, 'LOCKS')
-                    )
+                    ))
                     # server_exe_path: ścieżka do EXE na serwerze (dla auto-update)
                     self.server_exe_path = config.get('server_exe_path', '')
                     # Szybka praca na kopii lokalnej (menu Narzędzia)
                     rmm.USE_LOCAL_COPY = bool(config.get('use_local_copy', rmm.USE_LOCAL_COPY))
                     # ai_rules_path: wspólny plik reguł firmowych dla AI (jeden dla wszystkich userów)
-                    self.ai_rules_path = config.get(
+                    # Lezy w tym samym, ukrytym juz udziale co bazy projektow — stad ta sama poprawka.
+                    self.ai_rules_path = _na_ukryty_udzial(config.get(
                         'ai_rules_path',
                         os.path.join(self.rm_manager_dir, 'ai_rules.txt')
-                    )
+                    ))
                     # Geometria okien i szerokości kolumn
                     self.window_geometry = config.get('window_geometry', {})
                     self.column_widths = config.get('column_widths', {})
@@ -10097,26 +10135,33 @@ class RMManagerGUI:
                 entry.insert(0, path)
 
         form.columnconfigure(1, weight=1)
+        # ⚠️ Pola oznaczone „NIEUŻYWANE" zostawiamy WIDOCZNE, ale opisane wprost.
+        # Master RM_BAZA, rm_manager.sqlite i locki chodzą przez RM_SERWER
+        # (`_master()` / `rmm_read()` / `lock_manager_serwer`) — ścieżka z konfigu
+        # jest tam przyjmowana i IGNOROWANA. Wpisana wartość niczego nie zmienia,
+        # a wyglądała na działającą: user widział `Y:/...` i wnioskował, że stamtąd
+        # czytamy. Skasowanie pól to osobna sprzątaczka (zapisuje je `save_config`),
+        # więc na razie mówimy prawdę w opisie.
         e_master   = make_row(form, 0, "master.sqlite (RM_BAZA):",
-                              "Wspólna baza projektów RM_BAZA  (np. Y:/RM_BAZA/master.sqlite)",
+                              "NIEUŻYWANE — master RM_BAZA chodzi przez RM_SERWER. Pole bez wpływu na działanie.",
                               self.master_db_path, browse_file)
         e_projects = make_row(form, 1, "Folder projektów RM_BAZA:",
-                              "Folder z plikami project_6.sqlite, project_7.sqlite itd.  (np. Y:/RM_BAZA)",
+                              "Tylko do komunikatów — bazy projektów RM_BAZA otwiera sama RM_BAZA, nie RM_MANAGER.",
                               self.projects_path, browse_folder)
         e_rm_dir   = make_row(form, 2, "Folder RM_MANAGER:",
-                              "Folder główny RM_MANAGER (master baza + LOCKS)  (np. Y:/RM_MANAGER)",
+                              "NIEUŻYWANE — baza i locki chodzą przez RM_SERWER. Pole bez wpływu na działanie.",
                               self.rm_manager_dir, browse_folder)
         e_rm_db    = make_row(form, 3, "rm_manager.sqlite:",
-                              "Główna baza RM_MANAGER z definicjami etapów  (np. Y:/RM_MANAGER/rm_manager.sqlite)",
+                              "NIEUŻYWANE — baza leży na serwerze, czytana przez RM_SERWER. Pole bez wpływu na działanie.",
                               self.rm_master_db_path, browse_file)
         e_rm_proj  = make_row(form, 4, "Folder projektów RM_MANAGER:",
-                              "Per-projekt bazy (rm_manager_project_1.sqlite itd.)  (np. Y:/RM_MANAGER_projects)",
+                              "⬅ TO POLE DZIAŁA. Per-projekt bazy (rm_manager_project_1.sqlite itd.)  (\\\\W2019S\\RM_SERWER$\\RM_MANAGER_projects)",
                               self.rm_projects_dir, browse_folder)
         e_backup   = make_row(form, 5, "Folder backupów:",
-                              "Katalog na backupy (rotacja 30 dni)  (np. Y:/RM_MANAGER/backups)",
+                              "NIEUŻYWANE — backupy robi RM_SERWER u siebie. Pole bez wpływu na działanie.",
                               self.backup_dir, browse_folder)
         e_locks    = make_row(form, 6, "Folder locków:",
-                              "Katalog locków projektów  (np. Y:/RM_MANAGER/RM_MANAGER_projects/LOCKS)",
+                              "NIEUŻYWANE — blokady projektów pilnuje RM_SERWER, nie pliki .lock. Pole bez wpływu na działanie.",
                               self.locks_dir, browse_folder)
         
         def browse_exe(entry):
@@ -10144,7 +10189,7 @@ class RMManagerGUI:
                 entry.insert(0, path)
 
         e_ai_rules = make_row(form, 8, "Plik kontekstu AI:",
-                              "Wspólne reguły firmowe dla Agenta AI (jeden plik dla wszystkich userów)  (np. Y:/RM_MANAGER/ai_rules.txt)",
+                              "⬅ TO POLE DZIAŁA. Wspólne reguły firmowe dla Agenta AI, jeden plik dla wszystkich  (\\\\W2019S\\RM_SERWER$\\ai_rules.txt)",
                               self.ai_rules_path, browse_txt)
 
         def save_and_close():
