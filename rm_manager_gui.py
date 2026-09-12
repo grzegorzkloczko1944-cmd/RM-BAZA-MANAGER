@@ -3407,7 +3407,7 @@ class RMManagerGUI:
         tools_menu.add_command(label="🔧 Migruj bazę kodów PLC (dodaj kolumny)", command=self.migrate_plc_codes_ui)
         tools_menu.add_command(label="🔧 Migruj odbiorców kodów PLC", command=self.migrate_plc_recipients_ui)
         tools_menu.add_separator()
-        tools_menu.add_command(label="🔄 Resetuj śledzenie wszystkich projektów", command=self.reset_all_file_tracking_ui)
+        tools_menu.add_command(label="⚠️ Resetuj śledzenie wszystkich projektów (tylko admin, groźne)", command=self.reset_all_file_tracking_ui)
         tools_menu.add_command(label="🛠 Napraw schemat baz projektów (brakujące tabele)", command=self.repair_project_schemas_ui)
         tools_menu.add_separator()
         tools_menu.add_command(label="🔍 Diagnostyka projektów", command=self.diagnose_projects)
@@ -5513,8 +5513,42 @@ class RMManagerGUI:
         """Ukryj ostrzeżenie o nieprawidłowym pliku"""
         self.warning_frame.pack_forget()
     
+    def _wolno_resetowac_sledzenie(self, co: str) -> bool:
+        """Czy wolno przepisać wpisy śledzenia plików projektów.
+
+        12.09.2026: reset przepisał ścieżki WSZYSTKICH 80 projektów na `Z:\\FoldeR
+        \\projects` — dysk istniejący u jednej osoby. Skutkiem był czerwony pasek
+        „PLIK PROJEKTU NIE ISTNIEJE" i tryb tylko do odczytu u wszystkich naraz,
+        bo tabela jest WSPÓLNA i trzyma ścieżkę tego, kto klikał ostatni.
+
+        Dwa warunki, bo sama rola nie chroni przed pomyłką admina:
+      * rola ADMIN — zwykły user nie ma po co tego ruszać,
+      * katalog projektów musi wskazywać na serwer — literę dysku odrzucamy.
+        """
+        if self.current_user_role != 'ADMIN':
+            messagebox.showwarning(
+                "🔒 Brak uprawnień",
+                f"{co} może wykonać wyłącznie administrator.\n\n"
+                f"Ta operacja przepisuje ścieżki plików projektów dla WSZYSTKICH\n"
+                f"użytkowników — wspólną tabelę na serwerze.\n\n"
+                f"Twoja rola: {self.current_user_role}")
+            return False
+        katalog = str(self.projects_path or "").replace("/", "\\")
+        if not katalog.startswith("\\\\"):
+            messagebox.showerror(
+                "⛔ Niewłaściwy folder projektów",
+                f"{co} zostało zatrzymane.\n\n"
+                f"Folder projektów wskazuje na dysk lokalny/mapowany:\n  {katalog}\n\n"
+                f"Wpisy śledzenia są wspólne dla wszystkich stanowisk, więc muszą\n"
+                f"zawierać ścieżkę sieciową do serwera (\\\\W2019S\\RM_SERWER$\\...).\n"
+                f"Zapis z literą dysku unieruchomiłby program wszystkim userom.")
+            return False
+        return True
+
     def reset_file_tracking_ui(self):
         """Reset śledzenia pliku (wywołanie z GUI)"""
+        if not self._wolno_resetowac_sledzenie("Reset śledzenia pliku"):
+            return
         if not self.selected_project_id:
             messagebox.showwarning("⚠️ Ostrzeżenie", "Nie wybrano projektu")
             return
@@ -5594,12 +5628,28 @@ class RMManagerGUI:
         """Reset śledzenia pliku dla WSZYSTKICH projektów (po zmianie ścieżki)"""
         if self._block_if_local_copy_active("Reset śledzenia wszystkich projektów"):
             return
+        if not self._wolno_resetowac_sledzenie("Reset śledzenia wszystkich projektów"):
+            return
         result = messagebox.askyesno(
-            "🔄 Resetuj śledzenie WSZYSTKICH projektów",
-            f"Czy na pewno chcesz zresetować śledzenie plików dla WSZYSTKICH projektów?\n\n"
-            f"Użyj tej opcji po zmianie folderu projektów.\n"
-            f"Folder projektów: {self.projects_path}\n\n"
-            f"Wszystkie projekty zostaną ponownie zweryfikowane."
+            "⚠️ Resetuj śledzenie WSZYSTKICH projektów",
+            f"DO CZEGO TO SŁUŻY:\n"
+            f"RM_MANAGER zapamiętuje dla każdego projektu ścieżkę jego pliku\n"
+            f".sqlite i czas jego utworzenia. Przy otwarciu projektu sprawdza,\n"
+            f"czy to nadal ten sam plik — żeby nikt niepostrzeżenie nie podmienił\n"
+            f"bazy projektu ani nie odtworzył jej ze starego backupu. Ten reset\n"
+            f"kasuje zapamiętane metryki i zapisuje je od nowa.\n\n"
+            f"KIEDY JEST POTRZEBNY: praktycznie tylko raz — gdy pliki projektów\n"
+            f"zostały przeniesione w inne miejsce (np. migracja na serwer).\n\n"
+            f"⚠️ NIE UŻYWAJ TEGO BEZ POTRZEBY.\n\n"
+            f"Ta funkcja prawie nigdy nie jest potrzebna, a potrafi popsuć\n"
+            f"wiele projektów naraz. Kasuje CAŁĄ wspólną tabelę śledzenia\n"
+            f"i zapisuje w niej ścieżkę z TWOJEJ konfiguracji — dla wszystkich\n"
+            f"użytkowników. Jeśli Twój folder jest choć trochę inny, reszta\n"
+            f"firmy zobaczy czerwony pasek „PLIK PROJEKTU NIE ISTNIEJE\"\n"
+            f"i wpadnie w tryb tylko do odczytu (tak stało się 12.09.2026).\n\n"
+            f"Pojedynczy projekt naprawisz bezpieczniej: „Resetuj śledzenie pliku\".\n\n"
+            f"Folder, który zostanie zapisany wszystkim:\n  {self.projects_path}\n\n"
+            f"Na pewno kontynuować?"
         )
         if not result:
             return
