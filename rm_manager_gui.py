@@ -743,15 +743,16 @@ class RMManagerGUI:
         except Exception as e:
             print(f"⚠️ Startup cleanup sessions error: {e}")
 
-        # Kopie lokalne zgodne z serwerem to śmieci po nieudanym `os.remove`
-        # (baza była jeszcze otwarta) albo po sesji bez żadnych zmian. Zostawione,
-        # straszyły przy starcie komunikatem o utraconej pracy, której nie było.
+        # Kopia ma sens tylko w trakcie sesji z lockiem — katalog ma być pusty.
         try:
             ile = rmm.sprzatnij_zsynchronizowane_kopie(self.rm_projects_dir)
             if ile:
-                print(f"🗑 Sprzątnięto {ile} zbędnych kopii lokalnych")
+                print(f"🗑 Wyczyszczono katalog kopii lokalnych ({ile} plików)")
         except Exception as e:
             print(f"⚠️ Sprzątanie kopii lokalnych: {e}")
+
+        # Aktualizacja .exe jednym kliknięciem, zamiast rundy po stanowiskach.
+        self.root.after(1500, self._zaproponuj_aktualizacje)
 
 
         self._start_heartbeat()
@@ -1480,6 +1481,53 @@ class RMManagerGUI:
                 self.show_notes_window(stage_code=stage_code, topic_index=topic_index, parent=notes_parent)
             else:
                 self.show_notes_window(stage_code=stage_code, parent=notes_parent)
+
+    def _zaproponuj_aktualizacje(self):
+        """Nowszy .exe na serwerze? Zaproponuj pobranie jednym kliknięciem.
+
+        RM_BAZA miała to od dawna, RM_MANAGER nie — i każda poprawka oznaczała
+        obchodzenie stanowisk (12.09.2026). W przeciwieństwie do RM_BAZY NIE
+        blokujemy startu: stary RM_MANAGER nikomu nie szkodzi (master leży na
+        serwerze), więc user sam wybiera moment. Cicho przy jakimkolwiek
+        problemie — brak dostępu do Y: nie może przeszkadzać w pracy.
+        """
+        try:
+            import client_version
+            from pathlib import Path as _P
+            ver = client_version.check_outdated(getattr(self, '_sync_config', None))
+            if not ver.get("outdated"):
+                return
+            loc, srv = ver.get("local") or {}, ver.get("server") or {}
+            if not loc.get("path") or not srv.get("path"):
+                return
+
+            def _opis(b):
+                if not b or b.get("size") is None:
+                    return "?"
+                return f"{b['mtime_str']}   ({b['size'] / 1024 / 1024:.1f} MB)"
+
+            if not messagebox.askyesno(
+                    "Nowa wersja RM_MANAGER",
+                    f"Na serwerze jest nowsza wersja programu.\n\n"
+                    f"Twoja wersja:   {_opis(loc)}\n"
+                    f"Na serwerze:    {_opis(srv)}\n\n"
+                    f"Pobrać teraz?\n"
+                    f"(program zamknie się — uruchom go ponownie)",
+                    parent=self.root):
+                return
+            try:
+                msg = client_version.self_update(_P(srv["path"]), _P(loc["path"]))
+                messagebox.showinfo("Zaktualizowano",
+                                    f"{msg}\n\nUruchom RM_MANAGER ponownie.",
+                                    parent=self.root)
+                self.root.destroy()
+            except Exception as e:
+                messagebox.showerror(
+                    "Nie udało się pobrać",
+                    f"{e}\n\nSkopiuj ręcznie:\n{srv.get('path')}\n→ {loc.get('path')}",
+                    parent=self.root)
+        except Exception as e:
+            print(f"ℹ️ Sprawdzanie wersji pominięte: {e}")
 
     def _start_heartbeat(self):
         """Uruchom cykliczne odświeżanie heartbeat (co 30 s) + cleanup stale locków.

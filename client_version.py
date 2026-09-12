@@ -127,9 +127,21 @@ def own_build_info() -> dict:
 
 def server_exe_path(config: Optional[dict] = None) -> Path:
     """Wzorcowy .exe na serwerze; nadpisywalny w sync_config.json →
-    paths.server_exe."""
+    paths.server_exe.
+
+    Gdy konfiguracja nic nie narzuca, bierzemy plik o TEJ SAMEJ nazwie, co
+    własny .exe — inaczej RM_MANAGER porównywałby się z RM_BAZĄ i albo
+    uznawał się za wiecznie przestarzały, albo za wiecznie aktualny
+    (12.09.2026). Dla uruchomienia ze źródeł zostaje dawna wartość domyślna.
+    """
     paths = (config or {}).get("paths", {}) if isinstance(config, dict) else {}
-    return Path(paths.get("server_exe") or DEFAULT_SERVER_EXE)
+    jawna = paths.get("server_exe")
+    if jawna:
+        return Path(jawna)
+    wlasny = own_exe_path()
+    if wlasny is not None:
+        return Path(DEFAULT_SERVER_EXE).parent / wlasny.name
+    return Path(DEFAULT_SERVER_EXE)
 
 
 def is_outdated(local: Optional[dict], server: Optional[dict]) -> bool:
