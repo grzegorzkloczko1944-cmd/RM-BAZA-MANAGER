@@ -217,7 +217,16 @@ DEFAULT_PROJECTS_MAG_DIR = "Y:/RM_BAZA/projects_MAG"  # Katalog z plikami projec
 DEFAULT_LOCAL_DIR = "C:/RMPAK_CLIENT"
 DEFAULT_LOCKS_DIR = "Y:/RM_BAZA/locks"
 DEFAULT_BACKUP_DIR = "Y:/RM_BAZA/backups"
-DEFAULT_CHAT_DIR = "Y:/RM_BAZA/chat"  # Katalog dla wiadomości chatu (JSON)
+#: Wiadomości chatu (jeden plik JSON na wiadomość) — na udziale serwera,
+#: obok projektów.
+#:
+#: ⚠️ TĘ SAMĄ ŚCIEŻKĘ MUSI ZNAĆ `RM_Tray_Organizer` (repozytorium NOW):
+#: oba programy piszą do wspólnego katalogu i czytają z niego nawzajem.
+#: Rozjazd nie daje błędu — po prostu połowa firmy przestaje widzieć
+#: wiadomości drugiej połowy. Tray liczy katalog jako `master.sqlite`.parent
+#: / "chat", więc po przejściu mastera na RM_SERWER trzeba go poprawić
+#: ręcznie (ustalone 12.09.2026).
+DEFAULT_CHAT_DIR = r"\\W2019S\RM_SERWER$\chat"
 DEFAULT_SERVER_DIR = "Y:/SERVER_PROJEKTY"  # Katalog serwera projektów (DWF, PDF, DXF, STP, STL)
 DEFAULT_ASSEMBLY_TREE_ROOT = "V:/"  # Awaryjny fallback - patrz get_assembly_tree_root()
 LIBRARY_ROOT = "B:/"  # Biblioteka RM - komponenty wspólne (pozycje dwf_biblioteka=1); źródło DWF dla ich miniatur.
@@ -30879,10 +30888,9 @@ class MainWindow(tk.Tk):
     def check_for_new_messages(self):
         """Sprawdź czy są nowe wiadomości (zwraca dict z informacją o wiadomości lub None)"""
         try:
-            if not self.db_manager or not self.db_manager.master_path:
-                return None
-            
-            chat_dir = Path(self.db_manager.master_path).parent / "chat"
+            # Ten sam katalog co w oknie chatu — CHAT_DIR, nie katalog mastera
+            # (master leży na serwerze, obok niego nie ma już żadnych plików).
+            chat_dir = Path(CHAT_DIR)
             if not chat_dir.exists():
                 return None
             
@@ -35148,12 +35156,13 @@ class ChatWindow(tk.Toplevel):
         # Zmienna dla "Zawsze na wierzchu"
         self.always_on_top = tk.BooleanVar(value=False)
         
-        # Utwórz folder chat
-        if db_manager and db_manager.master_path:
-            master_dir = Path(db_manager.master_path).parent
-            self.chat_dir = master_dir / "chat"
-        else:
-            self.chat_dir = Path(CHAT_DIR)
+        # Folder chatu bierzemy WPROST z CHAT_DIR, nie z katalogu mastera.
+        #
+        # Wcześniej: `Path(db_manager.master_path).parent / "chat"` — czyli
+        # obok pliku, którego już nie ma (master chodzi przez RM_SERWER).
+        # Wychodziło z tego `Y:\RM_BAZA\chat`, więc chat trzymał przy życiu
+        # całe `Y:` po tym, jak reszta programu się stamtąd wyprowadziła.
+        self.chat_dir = Path(CHAT_DIR)
         
         try:
             self.chat_dir.mkdir(parents=True, exist_ok=True)
