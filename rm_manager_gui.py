@@ -10102,16 +10102,28 @@ class RMManagerGUI:
         form.bind("<Configure>", lambda e, c=_cfg_sc: c.configure(scrollregion=c.bbox("all")))
         _cfg_sc.bind("<Configure>", lambda e, c=_cfg_sc: c.itemconfig("_cfgwin", width=e.width))
 
-        def make_row(parent, row, label, hint, default_val, browse_cmd):
+        def make_row(parent, row, label, hint, default_val, browse_cmd,
+                     tylko_do_odczytu=False, dziala=False):
+            """Wiersz okna: etykieta, pole, przycisk wyboru i podpis.
+
+            `tylko_do_odczytu` blokuje pole i chowa przycisk — dla wartości,
+            które są informacją (adres serwera), a nie ustawieniem. Edytowalne
+            pole, które niczego nie zmienia, jest gorsze niż jego brak.
+            """
             tk.Label(parent, text=label, font=self.FONT_BOLD, anchor="w", width=22).grid(
                 row=row * 2, column=0, sticky="w", pady=(8, 0))
-            entry = tk.Entry(parent, font=self.FONT_DEFAULT, width=52)
+            entry = tk.Entry(parent, font=self.FONT_DEFAULT, width=52,
+                             disabledbackground="#e4e7e9", disabledforeground="#4a4a4a")
             entry.insert(0, default_val)
             entry.grid(row=row * 2, column=1, padx=5, sticky="ew", pady=(8, 0))
-            tk.Button(parent, text="📂", command=lambda e=entry: browse_cmd(e),
-                      bg=self.COLOR_PURPLE, fg="white", font=self.FONT_BOLD, padx=6
-                      ).grid(row=row * 2, column=2, padx=5, pady=(8, 0))
-            tk.Label(parent, text=hint, font=("Arial", 8), fg="#7f8c8d", anchor="w").grid(
+            if tylko_do_odczytu:
+                entry.configure(state="disabled")
+            else:
+                tk.Button(parent, text="📂", command=lambda e=entry: browse_cmd(e),
+                          bg=self.COLOR_PURPLE, fg="white", font=self.FONT_BOLD, padx=6
+                          ).grid(row=row * 2, column=2, padx=5, pady=(8, 0))
+            tk.Label(parent, text=hint, font=("Arial", 8),
+                     fg=("#1e7e34" if dziala else "#7f8c8d"), anchor="w").grid(
                 row=row * 2 + 1, column=1, sticky="w", padx=5)
             return entry
 
@@ -10145,9 +10157,17 @@ class RMManagerGUI:
         #
         # Folder backupów NIE jest martwy — `BackupManager` pisze dokładnie tam,
         # gdzie wskazuje. Codzienne kopie projektów robi klient, nie serwer.
-        e_master   = make_row(form, 0, "master.sqlite (RM_BAZA):",
-                              "NIEUŻYWANE — master RM_BAZA chodzi przez RM_SERWER. Pole bez wpływu na działanie.",
-                              self.master_db_path, browse_file)
+        # Zamiast martwej ścieżki `Y:/...` pokazujemy ADRES SERWERA, z którym
+        # program naprawdę rozmawia — tak samo jak okno RM_BAZA. Ścieżka
+        # z konfigu nic nie znaczy, a użytkownik chce widzieć, gdzie idą dane.
+        try:
+            import rm_klient
+            _adres_serwera = rm_klient.opis()
+        except Exception:
+            _adres_serwera = "RM_SERWER (adres w sync_config.json)"
+        e_master   = make_row(form, 0, "Baza Master (RM_BAZA):",
+                              "NIEUŻYWANE jako ścieżka — master chodzi przez RM_SERWER. Adres serwera: sync_config.json (klucz rm_serwer).",
+                              _adres_serwera, browse_file)
         e_projects = make_row(form, 1, "Folder projektów RM_BAZA:",
                               "Tylko do komunikatów — bazy projektów RM_BAZA otwiera sama RM_BAZA, nie RM_MANAGER.",
                               self.projects_path, browse_folder)
@@ -10159,10 +10179,10 @@ class RMManagerGUI:
                               self.rm_master_db_path, browse_file)
         e_rm_proj  = make_row(form, 4, "Folder projektów RM_MANAGER:",
                               "⬅ TO POLE DZIAŁA. Per-projekt bazy (rm_manager_project_1.sqlite itd.)  (\\\\W2019S\\RM_SERWER$\\RM_MANAGER_projects)",
-                              self.rm_projects_dir, browse_folder)
+                              self.rm_projects_dir, browse_folder, dziala=True)
         e_backup   = make_row(form, 5, "Folder backupów:",
                               "⬅ TO POLE DZIAŁA. Codzienne backupy projektów  (\\\\W2019S\\RM_SERWER$\\backup_RM_MANAGER)",
-                              self.backup_dir, browse_folder)
+                              self.backup_dir, browse_folder, dziala=True)
         e_locks    = make_row(form, 6, "Folder locków:",
                               "NIEUŻYWANE — blokady projektów pilnuje RM_SERWER, nie pliki .lock. Pole bez wpływu na działanie.",
                               self.locks_dir, browse_folder)
@@ -10193,10 +10213,13 @@ class RMManagerGUI:
 
         e_ai_rules = make_row(form, 8, "Plik kontekstu AI:",
                               "⬅ TO POLE DZIAŁA. Wspólne reguły firmowe dla Agenta AI, jeden plik dla wszystkich  (\\\\W2019S\\RM_SERWER$\\ai_rules.txt)",
-                              self.ai_rules_path, browse_txt)
+                              self.ai_rules_path, browse_txt, dziala=True)
 
         def save_and_close():
-            self.master_db_path    = e_master.get().strip()
+            # Pole „Baza Master" pokazuje ADRES SERWERA, nie ścieżkę — więc
+            # go nie czytamy. Inaczej Zapisz wstawiłby do konfigu napis typu
+            # „RM_SERWER 192.168.100.84:5060" w miejsce ścieżki do pliku.
+            # Wartość zostaje nietknięta, dla zgodności klucza w JSON-ie.
             self.projects_path     = e_projects.get().strip()
             self.rm_manager_dir    = e_rm_dir.get().strip()
             self.rm_master_db_path = e_rm_db.get().strip() or os.path.join(self.rm_manager_dir, 'rm_manager.sqlite')

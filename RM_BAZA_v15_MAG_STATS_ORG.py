@@ -3210,10 +3210,28 @@ class MainWindow(tk.Tk):
             paths = config.get("paths", {})
             test_master_path = Path(paths.get("master", DEFAULT_MASTER_PATH))
 
+            # ⚠️ Gdy master chodzi przez RM_SERWER, pliku po prostu NIE MA na
+            # dysku klienta — leży na serwerze i nikt go stamtąd nie udostępnia.
+            # Sprawdzanie ścieżki z konfigu wysyłało wtedy usera do okna
+            # konfiguracji przy każdym starcie, każąc mu „naprawić" ścieżkę,
+            # która niczego nie dotyczy. Pytamy więc serwer, a do pliku
+            # schodzimy tylko w trybie starym (bez wpisu `rm_serwer`).
+            _s = config.get("rm_serwer") or {}
+            if _s.get("wspolny_config"):
+                try:                        # adres bywa trzymany wspólnie dla wszystkich stacji
+                    with open(sciezka_wspolnego(_s), encoding="utf-8-sig") as f:
+                        _s = {**_s, **(json.load(f).get("rm_serwer") or {})}
+                except Exception:
+                    pass
+            if _s.get("host"):
+                ok, powod = sprawdz_serwer(_s["host"], _s.get("port", 5060), _s.get("sekret"))
+                if not ok:
+                    print("  ⚠️  RM_SERWER: %s" % powod)
+                    raise InitConfigRequired("RM_SERWER nie odpowiada")
             # Użyj is_file_accessible z timeoutem 5s zamiast Path.exists()
             # (Path.exists() na zamapowanym ale niedostępnym dysku sieciowym
             #  może wisieć 30-60s czekając na timeout SMB)
-            if not self._file_accessible_with_timeout(test_master_path, timeout_s=5.0):
+            elif not self._file_accessible_with_timeout(test_master_path, timeout_s=5.0):
                 print("  ⚠️  Brak master.sqlite (lub dysk niedostępny) - wymagana konfiguracja")
                 raise InitConfigRequired("Brak master.sqlite")
             
@@ -32295,6 +32313,20 @@ class MainWindow(tk.Tk):
 
         dlg.protocol("WM_DELETE_WINDOW", _close_dlg)
 
+        def _opis(wiersz, tekst, dziala=False):
+            """Podpis pod polem: co ono realnie robi.
+
+            Po przejściu na RM_SERWER część pól została w oknie, choć nikt
+            już z nich nie czyta — a wyglądały na działające: user widział
+            `Y:/...`, poprawiał ścieżkę, klikał Zapisz i był pewien, że coś
+            przestawił. Mówimy więc wprost, które pole ma wpływ na działanie
+            (to samo zrobiono w oknie RM_MANAGER).
+            """
+            tk.Label(fields_frame, text=tekst, font=("Arial", 8),
+                     fg=("#1e7e34" if dziala else "#95a5a6"), bg="#f0f0f0",
+                     anchor="w", justify="left").grid(
+                row=wiersz, column=1, sticky="w", padx=5, pady=(0, 6))
+
         # Master DB — POLE WYŁĄCZONE.
         #
         # Master leży na dysku RM_SERWER i uchwyt do pliku ma wyłącznie ten
@@ -32317,85 +32349,92 @@ class MainWindow(tk.Tk):
         e_master.grid(row=0, column=1, sticky="ew", padx=5, pady=8)
         tk.Label(fields_frame, text="baza na serwerze", font=("Arial", 8),
                  fg="#7f8c8d", bg="#f0f0f0").grid(row=0, column=2, sticky="w", padx=5)
-        
+        _opis(1, "Adres serwera bierze się z sync_config.json (klucz rm_serwer) — nie stąd.")
+
         # Projekty
-        tk.Label(fields_frame, text="Folder projektów:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=1, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="Folder projektów:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=2, column=0, sticky="w", pady=8)
         e_projects = tk.Entry(fields_frame, width=50, font=("Arial", 9))
         e_projects.insert(0, current_projects)
-        e_projects.grid(row=1, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_projects, "Folder projektów")).grid(row=1, column=2, pady=8)
-        
+        e_projects.grid(row=2, column=1, sticky="ew", padx=5, pady=8)
+        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_projects, "Folder projektów")).grid(row=2, column=2, pady=8)
+        _opis(3, "⬅ TO POLE DZIAŁA. Bazy project_6.sqlite itd.  (\\\\W2019S\\RM_SERWER$\\RM_BAZA_projects)", True)
+
         # Projekty magazynowe
-        tk.Label(fields_frame, text="Folder proj. magazynowych:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=2, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="Folder proj. magazynowych:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=4, column=0, sticky="w", pady=8)
         e_projects_mag = tk.Entry(fields_frame, width=50, font=("Arial", 9))
         e_projects_mag.insert(0, current_projects_mag)
-        e_projects_mag.grid(row=2, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_projects_mag, "Folder projektów magazynowych")).grid(row=2, column=2, pady=8)
-        
+        e_projects_mag.grid(row=4, column=1, sticky="ew", padx=5, pady=8)
+        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_projects_mag, "Folder projektów magazynowych")).grid(row=4, column=2, pady=8)
+        _opis(5, "⬅ TO POLE DZIAŁA. Bazy project_MAG_10.sqlite itd. — leżą w tym samym katalogu co zwykłe.", True)
+
         # Serwer projekty
         current_server = paths.get("server_dir", DEFAULT_SERVER_DIR)
-        tk.Label(fields_frame, text="Serwer projekty:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=3, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="Serwer projekty:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=6, column=0, sticky="w", pady=8)
         e_server = tk.Entry(fields_frame, width=50, font=("Arial", 9))
         e_server.insert(0, current_server)
-        e_server.grid(row=3, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_server, "Serwer projekty")).grid(row=3, column=2, pady=8)
-        
+        e_server.grid(row=6, column=1, sticky="ew", padx=5, pady=8)
+        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_server, "Serwer projekty")).grid(row=6, column=2, pady=8)
+        _opis(7, "⬅ TO POLE DZIAŁA. Katalog CAD: drzewka złożeń *_OUT.xlsx i rysunki .dwf (u każdego inna litera dysku).", True)
+
         # Lokalny
-        tk.Label(fields_frame, text="Folder lokalny:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=4, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="Folder lokalny:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=8, column=0, sticky="w", pady=8)
         e_local = tk.Entry(fields_frame, width=50, font=("Arial", 9))
         e_local.insert(0, current_local)
-        e_local.grid(row=4, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_local, "Folder lokalny")).grid(row=4, column=2, pady=8)
-        
+        e_local.grid(row=8, column=1, sticky="ew", padx=5, pady=8)
+        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_local, "Folder lokalny")).grid(row=8, column=2, pady=8)
+        _opis(9, "⬅ TO POLE DZIAŁA. Tu leży sync_config.json i kopie robocze projektów.", True)
+
         # Locki
-        tk.Label(fields_frame, text="Folder locków:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=5, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="Folder locków:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=10, column=0, sticky="w", pady=8)
         e_locks = tk.Entry(fields_frame, width=50, font=("Arial", 9))
         e_locks.insert(0, current_locks)
-        e_locks.grid(row=5, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_locks, "Folder locków")).grid(row=5, column=2, pady=8)
-        
+        e_locks.grid(row=10, column=1, sticky="ew", padx=5, pady=8)
+        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_locks, "Folder locków")).grid(row=10, column=2, pady=8)
+        _opis(11, "NIEUŻYWANE — blokady projektów pilnuje RM_SERWER, nie pliki .lock. Pole bez wpływu na działanie.")
+
         # Backupy
-        tk.Label(fields_frame, text="Folder backupów:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=6, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="Folder backupów:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=12, column=0, sticky="w", pady=8)
         e_backup = tk.Entry(fields_frame, width=50, font=("Arial", 9))
         e_backup.insert(0, current_backup)
-        e_backup.grid(row=6, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_backup, "Folder backupów")).grid(row=6, column=2, pady=8)
-        
+        e_backup.grid(row=12, column=1, sticky="ew", padx=5, pady=8)
+        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_backup, "Folder backupów")).grid(row=12, column=2, pady=8)
+        _opis(13, "⬅ TO POLE DZIAŁA. Codzienne backupy projektów  (\\\\W2019S\\RM_SERWER$\\backup_RM_BAZA)", True)
+
         # Separator
-        tk.Frame(fields_frame, height=2, bg="#bdc3c7").grid(row=7, column=0, columnspan=3, sticky="ew", pady=10)
+        tk.Frame(fields_frame, height=2, bg="#bdc3c7").grid(row=14, column=0, columnspan=3, sticky="ew", pady=10)
         
         # Alarmy EXE
-        tk.Label(fields_frame, text="RM_ALARM.EXE:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=8, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="RM_ALARM.EXE:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=15, column=0, sticky="w", pady=8)
         e_alarms_exe = tk.Entry(fields_frame, width=50, font=("Arial", 9))
         e_alarms_exe.insert(0, current_alarms_exe)
-        e_alarms_exe.grid(row=8, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_file(e_alarms_exe, "RM_ALARM.EXE", [("Pliki EXE", "*.exe"), ("Wszystkie pliki", "*.*")])).grid(row=8, column=2, pady=8)
+        e_alarms_exe.grid(row=15, column=1, sticky="ew", padx=5, pady=8)
+        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_file(e_alarms_exe, "RM_ALARM.EXE", [("Pliki EXE", "*.exe"), ("Wszystkie pliki", "*.*")])).grid(row=15, column=2, pady=8)
         
         # Copy Files EXE
-        tk.Label(fields_frame, text="RM_COPY.EXE:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=9, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="RM_COPY.EXE:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=16, column=0, sticky="w", pady=8)
         e_copy_files_exe = tk.Entry(fields_frame, width=50, font=("Arial", 9))
         e_copy_files_exe.insert(0, current_copy_files_exe)
-        e_copy_files_exe.grid(row=9, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_file(e_copy_files_exe, "RM_COPY.EXE", [("Pliki EXE", "*.exe"), ("Wszystkie pliki", "*.*")])).grid(row=9, column=2, pady=8)
+        e_copy_files_exe.grid(row=16, column=1, sticky="ew", padx=5, pady=8)
+        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_file(e_copy_files_exe, "RM_COPY.EXE", [("Pliki EXE", "*.exe"), ("Wszystkie pliki", "*.*")])).grid(row=16, column=2, pady=8)
         
         # Import EXE
-        tk.Label(fields_frame, text="RM_IMPORT.EXE:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=10, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="RM_IMPORT.EXE:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=17, column=0, sticky="w", pady=8)
         e_import_exe = tk.Entry(fields_frame, width=50, font=("Arial", 9))
         e_import_exe.insert(0, current_import_exe)
-        e_import_exe.grid(row=10, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_file(e_import_exe, "RM_IMPORT.EXE", [("Pliki EXE", "*.exe"), ("Wszystkie pliki", "*.*")])).grid(row=10, column=2, pady=8)
+        e_import_exe.grid(row=17, column=1, sticky="ew", padx=5, pady=8)
+        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_file(e_import_exe, "RM_IMPORT.EXE", [("Pliki EXE", "*.exe"), ("Wszystkie pliki", "*.*")])).grid(row=17, column=2, pady=8)
         
         # Monitor EXE
-        tk.Label(fields_frame, text="MONITOR.EXE:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=11, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="MONITOR.EXE:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=18, column=0, sticky="w", pady=8)
         e_monitor_exe = tk.Entry(fields_frame, width=50, font=("Arial", 9))
         e_monitor_exe.insert(0, current_monitor_exe)
-        e_monitor_exe.grid(row=11, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_file(e_monitor_exe, "MONITOR.EXE", [("Pliki EXE", "*.exe"), ("Wszystkie pliki", "*.*")])).grid(row=11, column=2, pady=8)
+        e_monitor_exe.grid(row=18, column=1, sticky="ew", padx=5, pady=8)
+        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_file(e_monitor_exe, "MONITOR.EXE", [("Pliki EXE", "*.exe"), ("Wszystkie pliki", "*.*")])).grid(row=18, column=2, pady=8)
 
         # Separator
-        tk.Frame(fields_frame, height=2, bg="#bdc3c7").grid(row=12, column=0, columnspan=3, sticky="ew", pady=10)
+        tk.Frame(fields_frame, height=2, bg="#bdc3c7").grid(row=19, column=0, columnspan=3, sticky="ew", pady=10)
 
-        tk.Label(fields_frame, text="SUBIEKT", font=("Arial", 11, "bold"), bg="#f0f0f0", fg="#2c3e50").grid(row=12, column=0, sticky="w", pady=(10, 4))
+        tk.Label(fields_frame, text="SUBIEKT", font=("Arial", 11, "bold"), bg="#f0f0f0", fg="#2c3e50").grid(row=20, column=0, sticky="w", pady=(10, 4))
 
         # Folder z gotowym mostem (NexoRecon.exe) na dysku sieciowym.
         # Na stanowiskach RM_BAZA chodzi jako .exe — nie ma tam źródeł .cs
@@ -32404,57 +32443,57 @@ class MainWindow(tk.Tk):
         # Subiekta. Pole jest, bo ten sam zasób bywa zamapowany pod różnymi
         # literami (u większości Y:, u części Z:) — bez tego trzeba by
         # edytować sync_config.json ręcznie (zgłoszone 06.09.2026).
-        tk.Label(fields_frame, text="Folder mostu Subiekta:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=13, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="Folder mostu Subiekta:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=21, column=0, sticky="w", pady=8)
         e_bridge_dir = tk.Entry(fields_frame, width=50, font=("Arial", 9))
         e_bridge_dir.insert(0, current_bridge_dir)
-        e_bridge_dir.grid(row=13, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_bridge_dir, "Folder z NexoRecon.exe")).grid(row=13, column=2, pady=8)
+        e_bridge_dir.grid(row=21, column=1, sticky="ew", padx=5, pady=8)
+        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_bridge_dir, "Folder z NexoRecon.exe")).grid(row=21, column=2, pady=8)
         tk.Label(fields_frame, text="np. Y:\\RMPAK_CLIENT\\Subiekt — puste = szukaj automatycznie (Y:, Z:, X:, V:)",
-                 font=("Arial", 8), bg="#f0f0f0", fg="#7f8c8d").grid(row=14, column=1, sticky="w", padx=5)
+                 font=("Arial", 8), bg="#f0f0f0", fg="#7f8c8d").grid(row=22, column=1, sticky="w", padx=5)
 
         # Separator
-        tk.Frame(fields_frame, height=2, bg="#bdc3c7").grid(row=15, column=0, columnspan=3, sticky="ew", pady=10)
+        tk.Frame(fields_frame, height=2, bg="#bdc3c7").grid(row=23, column=0, columnspan=3, sticky="ew", pady=10)
 
-        tk.Label(fields_frame, text="KSEF", font=("Arial", 11, "bold"), bg="#f0f0f0", fg="#2c3e50").grid(row=16, column=0, sticky="w", pady=(0, 4))
+        tk.Label(fields_frame, text="KSEF", font=("Arial", 11, "bold"), bg="#f0f0f0", fg="#2c3e50").grid(row=24, column=0, sticky="w", pady=(0, 4))
 
         # NIP firmy (do autoryzacji API KSEF)
-        tk.Label(fields_frame, text="NIP firmy (KSEF):", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=17, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="NIP firmy (KSEF):", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=25, column=0, sticky="w", pady=8)
         e_ksef_nip = tk.Entry(fields_frame, width=50, font=("Arial", 9))
         e_ksef_nip.insert(0, format_nip(current_ksef_nip) if current_ksef_nip else "")
-        e_ksef_nip.grid(row=17, column=1, sticky="ew", padx=5, pady=8)
+        e_ksef_nip.grid(row=25, column=1, sticky="ew", padx=5, pady=8)
         bind_nip_mask(e_ksef_nip)
 
         # Token API KSEF (pole hasła — nie pokazuj wprost na ekranie)
-        tk.Label(fields_frame, text="Token API KSEF:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=18, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="Token API KSEF:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=26, column=0, sticky="w", pady=8)
         e_ksef_token = tk.Entry(fields_frame, width=50, font=("Arial", 9), show="•")
         e_ksef_token.insert(0, current_ksef_token)
-        e_ksef_token.grid(row=18, column=1, sticky="ew", padx=5, pady=8)
+        e_ksef_token.grid(row=26, column=1, sticky="ew", padx=5, pady=8)
         var_show_token = tk.BooleanVar(value=False)
         tk.Checkbutton(
             fields_frame, text="pokaż", variable=var_show_token, bg="#f0f0f0",
             command=lambda: e_ksef_token.config(show="" if var_show_token.get() else "•")
-        ).grid(row=18, column=2, pady=8)
+        ).grid(row=26, column=2, pady=8)
 
         # Środowisko KSEF (test/produkcja)
-        tk.Label(fields_frame, text="Środowisko KSEF:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=19, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="Środowisko KSEF:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=27, column=0, sticky="w", pady=8)
         var_ksef_env = tk.StringVar(value=current_ksef_env)
         env_frame = tk.Frame(fields_frame, bg="#f0f0f0")
-        env_frame.grid(row=19, column=1, sticky="w", padx=5, pady=8)
+        env_frame.grid(row=27, column=1, sticky="w", padx=5, pady=8)
         tk.Radiobutton(env_frame, text="Testowe (ksef-test)", variable=var_ksef_env, value="test", bg="#f0f0f0").pack(side=tk.LEFT, padx=(0, 15))
         tk.Radiobutton(env_frame, text="Produkcyjne", variable=var_ksef_env, value="production", bg="#f0f0f0").pack(side=tk.LEFT)
 
         # Katalog na nierozpoznane faktury (dostawca bez NIP w RM_BAZA)
-        tk.Label(fields_frame, text="Katalog faktur nierozpoznanych:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=20, column=0, sticky="w", pady=8)
+        tk.Label(fields_frame, text="Katalog faktur nierozpoznanych:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=28, column=0, sticky="w", pady=8)
         e_ksef_unrecognized_dir = tk.Entry(fields_frame, width=50, font=("Arial", 9))
         e_ksef_unrecognized_dir.insert(0, current_ksef_unrecognized_dir)
-        e_ksef_unrecognized_dir.grid(row=20, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_ksef_unrecognized_dir, "Katalog faktur nierozpoznanych")).grid(row=20, column=2, pady=8)
+        e_ksef_unrecognized_dir.grid(row=28, column=1, sticky="ew", padx=5, pady=8)
+        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_ksef_unrecognized_dir, "Katalog faktur nierozpoznanych")).grid(row=28, column=2, pady=8)
 
         tk.Label(
             fields_frame,
             text="Token KSEF jest zapisywany lokalnie w pliku konfiguracyjnym poza repozytorium git.",
             font=("Arial", 8, "italic"), bg="#f0f0f0", fg="#888", wraplength=560, justify="left"
-        ).grid(row=21, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        ).grid(row=29, column=0, columnspan=3, sticky="w", pady=(0, 4))
 
         fields_frame.columnconfigure(1, weight=1)
         
