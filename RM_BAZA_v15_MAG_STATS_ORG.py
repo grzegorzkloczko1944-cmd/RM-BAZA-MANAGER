@@ -505,6 +505,32 @@ def ustal_rm_serwer(config: dict, parent=None) -> dict:
     „nieprawidłowy podpis żądania", z którego nic nie wynikało.
     """
     cfg = dict((config or {}).get("rm_serwer") or {})
+
+    # ⚠️ Świeża stacja ma DZIAŁAĆ OD RAZU, bez wpisywania czegokolwiek.
+    #
+    # Brakujące pola dobieramy: adres z `rm_klient.DOMYSLNY_HOST` (serwer stoi
+    # pod jednym adresem od wdrożenia), sekret z `HMAC.json` na udziale.
+    # Okno pokazujemy dopiero, gdy TO nie zadziała — wcześniej user bez
+    # `sync_config.json` dostawał je zawsze, choć wszystko było do ustalenia
+    # automatycznie (12.09.2026).
+    if not cfg.get("host"):
+        try:
+            import rm_klient as _rk
+            cfg["host"] = _rk.DOMYSLNY_HOST
+            cfg.setdefault("port", _rk.DOMYSLNY_PORT)
+        except Exception:
+            pass
+    if cfg.get("host") and not cfg.get("sekret"):
+        try:
+            import json as _js
+            with open(sciezka_wspolnego(config), encoding="utf-8-sig") as _f:
+                _w = (_js.load(_f).get("rm_serwer") or {})
+            for _k in ("sekret", "port"):
+                if not cfg.get(_k) and _w.get(_k):
+                    cfg[_k] = _w[_k]
+        except Exception:
+            pass            # brak udziału — zdecyduje sprawdzenie niżej
+
     if cfg.get("host"):
         ok, opis = sprawdz_serwer(cfg.get("host"), cfg.get("port") or 5060,
                                   cfg.get("sekret"))

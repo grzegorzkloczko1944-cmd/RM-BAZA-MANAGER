@@ -127,7 +127,9 @@ def _master(master_db_path: str = None):
             if cfg.get("host") and cfg.get("sekret"):
                 break
         if not cfg.get("host"):
-            print("⚠️  Brak adresu RM_SERWER w sync_config.json")
+            # Nie błąd: `rm_klient` ma adres wpisany na sztywno (DOMYSLNY_HOST),
+            # żeby świeża stacja bez konfiguracji działała od razu.
+            print("ℹ️  Brak adresu RM_SERWER w konfiguracji — biorę domyślny")
         rm_klient.ustaw_serwer(cfg.get("host"), port=cfg.get("port"),
                                sekret=cfg.get("sekret"))
         _serwer_ustawiony = True

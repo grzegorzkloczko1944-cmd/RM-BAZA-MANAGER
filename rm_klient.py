@@ -40,11 +40,24 @@ import struct
 import uuid
 
 PROTOKOL_MIN = 1
+
+#: Adres serwera na sztywno — żeby świeżo postawiona stacja DZIAŁAŁA OD RAZU.
+#:
+#: Bez tego user bez `sync_config.json` dostawał przy starcie „adres RM_SERWER
+#: jest wymagany" i musiał go wpisać ręcznie, zanim cokolwiek zobaczył.
+#: Serwer stoi pod jednym adresem od wdrożenia i jego zmiana i tak wymaga
+#: przestawienia wszystkiego naraz — nie ma po co udawać, że jest nieznany.
+#: Konfiguracja stacji NADPISUJE te wartości, więc przeniesienie serwera nie
+#: wymaga nowego .exe: wystarczy wpis `rm_serwer` w sync_config.json.
+DOMYSLNY_HOST = "192.168.100.84"
 DOMYSLNY_PORT = 5060
 TIMEOUT_S = 30
 
-_host = None
+_host = DOMYSLNY_HOST
 _port = DOMYSLNY_PORT
+#: Sekret HMAC celowo NIE jest zaszyty w kodzie — .exe trafia na dziesięć
+#: stacji i do repozytorium. Stacja bez sekretu dociąga go z `HMAC.json`
+#: na udziale serwera (patrz `rm_manager._master`).
 _sekret = None
 
 
@@ -66,11 +79,15 @@ class BladSerwera(Exception):
 # ═══════════════════════════════════════════════════════════════════════
 
 def ustaw_serwer(host, port=None, sekret=None):
-    """Adres serwera. Wołane raz, przy starcie aplikacji."""
+    """Adres serwera. Wołane raz, przy starcie aplikacji.
+
+    Pusty `host` NIE jest błędem — zostaje wtedy `DOMYSLNY_HOST`, dzięki czemu
+    świeża stacja bez `sync_config.json` działa od pierwszego uruchomienia.
+    Wcześniej leciał tu wyjątek i user widział „adres RM_SERWER jest wymagany"
+    zamiast listy projektów (12.09.2026).
+    """
     global _host, _port, _sekret
-    if not host:
-        raise ValueError("adres RM_SERWER jest wymagany")
-    _host = host
+    _host = host or DOMYSLNY_HOST
     _port = int(port or DOMYSLNY_PORT)
     _sekret = sekret
 
