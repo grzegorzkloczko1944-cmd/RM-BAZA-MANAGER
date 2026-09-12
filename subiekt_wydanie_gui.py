@@ -134,6 +134,18 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         #: Konflikty ZK/PW i pominięte RW z ostatniego odczytu.
         self.konflikty = []
         self.rw_bez_projektu = []
+        #: Czy ostatni odczyt z Subiekta się udał.
+        #:
+        #: ⛔ AWARIA MOSTU BLOKUJE OKNO, a nie tylko wyświetla napis.
+        #: Wcześniej czerwone „Wydanie niemożliwe" było samym tekstem —
+        #: skanowanie szło dalej (`_skanuj` pyta o stany INNĄ drogą niż
+        #: most, więc kody się znajdowały), magazynier kompletował całą
+        #: paletę i dowiadywał się o awarii dopiero przy „Zakończ wydanie",
+        #: gdy obowiązkowy świeży odczyt (§4 planu) padał drugi raz. Cała
+        #: praca szła w kosz. Świadomie NIE dokładamy tu ścieżki zapasowej
+        #: przez stare CLI: bez pewnego odczytu z Subiekta nie wolno wydawać,
+        #: a wolniejsza droga tylko udawałaby, że jest dobrze.
+        self.polaczony = False
         #: Zeskanowana pozycja czekająca na dodanie do sesji.
         self.poz_biezaca = None
         #: Połączenie read-only do bazy projektu (metadane z BOM-u).
@@ -155,6 +167,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
 
     def _buduj(self):
         self._pasek_gorny()
+        self._belka_awarii()
 
         # Pasek stanu i historia PRZED środkiem — inaczej panele z expand=True
         # zjadają wysokość i dolne sekcje wypadają poza okno.
@@ -174,7 +187,8 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
 
     def _pasek_gorny(self):
         """Nagłówek: projekt, magazyn, kto pobiera, data, co powstanie."""
-        pasek = tk.Frame(self, bg=TLO_SEKCJI, height=76)
+        # Zapamiętany, bo belka awarii wpina się zaraz POD nagłówkiem.
+        pasek = self.pasek_gorny = tk.Frame(self, bg=TLO_SEKCJI, height=76)
         pasek.pack(fill=tk.X)
         pasek.pack_propagate(False)
         tk.Frame(self, bg="#d5dbdb", height=1).pack(fill=tk.X)
@@ -585,7 +599,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                     kartoteki = subiekt_stany.query_stock(symbole, timeout=300) or {}
                 self.after(0, lambda: self._po_odczycie(dane, None, kartoteki))
             except Exception as e:
-                self.after(0, lambda: self._po_odczycie(None, str(e), None))
+                self.after(0, lambda b=str(e): self._po_odczycie(None, b, None))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -593,11 +607,16 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         if blad:
             # Bez świeżego odczytu NIE WOLNO wydawać (§4 planu) — magazynier
             # musi to widzieć od razu, nie dopiero przy „Zakończ wydanie".
+            self.polaczony = False
             self.var_polaczenie.set("● Brak połączenia z Subiektem")
             self.lbl_polaczenie.config(fg="#c0392b")
             self.var_status.set("⛔ Wydanie niemożliwe: %s" % blad)
+            self._ustaw_blokade_awarii(True)
+            self._alarm_awarii(blad)
             return
 
+        self.polaczony = True
+        self._ustaw_blokade_awarii(False)
         self.var_polaczenie.set("● Połączono z Subiektem NEXO")
         self.lbl_polaczenie.config(fg=OK_ZIELONY)
         self.stan = {}
@@ -616,6 +635,103 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
             text=("ℹ RW bez numeru projektu nie są liczone (%d)"
                   % len(self.rw_bez_projektu)) if self.rw_bez_projektu else "")
         self.ent_kod.focus_set()
+
+    def _belka_awarii(self):
+        """Czerwony pas pod nagłówkiem — widoczny tylko przy awarii.
+
+        Sam napis w pasku stanu (Arial 8, dolny róg) magazynier przeoczy:
+        patrzy na listę i skaner, a nie w róg ekranu.
+        """
+        self.ram_awaria = tk.Frame(self, bg="#c0392b", height=44)
+        self.var_awaria = tk.StringVar(value="")
+        self.lbl_awaria = tk.Label(
+            self.ram_awaria, textvariable=self.var_awaria, bg="#c0392b",
+            fg="white", font=("Arial", 13, "bold"))
+        self.lbl_awaria.pack(expand=True)
+        # Nie pakujemy ramki — pojawia się dopiero w _ustaw_blokade_awarii.
+
+    def _alarm_awarii(self, powod):
+        """Duże czerwone okno na wierzchu. Magazynier MUSI je zamknąć.
+
+        Okno wydania bywa na pełnym ekranie, a magazynier ma ręce zajęte
+        skanerem — bez tego zorientowałby się dopiero po tym, jak skaner
+        przestał reagować, i nie wiedziałby dlaczego.
+        """
+        if getattr(self, "_okno_alarmu", None):
+            try:
+                self._okno_alarmu.destroy()
+            except tk.TclError:
+                pass
+        o = tk.Toplevel(self)
+        self._okno_alarmu = o
+        o.title("AWARIA — wydanie wstrzymane")
+        o.configure(bg="#c0392b")
+        o.transient(self)
+        o.resizable(False, False)
+
+        tk.Label(o, text="⛔", bg="#c0392b", fg="white",
+                 font=("Arial", 52)).pack(pady=(18, 0))
+        tk.Label(o, text="BRAK POŁĄCZENIA Z SUBIEKTEM", bg="#c0392b",
+                 fg="white", font=("Arial", 20, "bold")).pack(padx=40, pady=(6, 2))
+        tk.Label(o, text="WYDANIE WSTRZYMANE", bg="#c0392b", fg="#ffe08a",
+                 font=("Arial", 15, "bold")).pack(pady=(0, 10))
+        tk.Label(o, text=powod, bg="#c0392b", fg="white", font=("Arial", 9),
+                 wraplength=520, justify="center").pack(padx=30)
+        tk.Label(o, bg="#c0392b", fg="white", font=("Arial", 11),
+                 wraplength=520, justify="center",
+                 text=("\nNie skanuj dalej — nic nie zostanie zapisane.\n"
+                       "Przygotowane pozycje NIE przepadły.\n\n"
+                       "Zawołaj kogoś od RM_BAZA, a gdy połączenie wróci —\n"
+                       "kliknij „Odśwież” w oknie wydania.")).pack(padx=30)
+        tk.Button(o, text="Rozumiem", command=o.destroy, font=("Arial", 12, "bold"),
+                  bg="white", fg="#c0392b", padx=30, pady=8,
+                  relief=tk.FLAT, cursor="hand2").pack(pady=20)
+
+        o.update_idletasks()
+        # Na środku okna wydania, nie ekranu — magazynier patrzy tutaj.
+        x = self.winfo_rootx() + (self.winfo_width() - o.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - o.winfo_height()) // 3
+        o.geometry("+%d+%d" % (max(x, 0), max(y, 0)))
+        o.attributes("-topmost", True)
+        o.grab_set()
+        o.bell()
+        o.focus_force()
+
+    def _ustaw_blokade_awarii(self, awaria):
+        """Wyszarz obsługę, gdy nie ma połączenia z Subiektem.
+
+        Przycisk „Odśwież" zostaje CZYNNY — to jedyna droga powrotu, gdy
+        most wstanie. Zeskanowana sesja też zostaje nietknięta: awaria
+        bywa chwilowa, a skasowanie pracy magazyniera byłoby karą za cudzą
+        usterkę.
+        """
+        stan = tk.DISABLED if awaria else tk.NORMAL
+        for widget in (self.ent_kod, self.btn_dodaj, self.btn_zakoncz):
+            try:
+                widget.config(state=stan)
+            except tk.TclError:
+                pass            # okno w trakcie zamykania
+
+        # Belka zostaje po zamknięciu okna alarmu — inaczej po kliknięciu
+        # „Rozumiem" jedynym śladem awarii byłby napis w dolnym rogu.
+        try:
+            if awaria:
+                self.var_awaria.set(
+                    "⛔  BRAK POŁĄCZENIA Z SUBIEKTEM — WYDANIE WSTRZYMANE"
+                    "        kliknij „Odśwież”")
+                self.ram_awaria.pack(fill=tk.X, after=self.pasek_gorny)
+                self.ram_awaria.pack_propagate(False)
+            else:
+                self.ram_awaria.pack_forget()
+                okno = getattr(self, "_okno_alarmu", None)
+                if okno:
+                    okno.destroy()
+                    self._okno_alarmu = None
+        except tk.TclError:
+            pass
+
+        if not awaria:
+            self.ent_kod.focus_set()
 
     def _zbuduj_plan(self, kartoteki):
         """Lista kompletacyjna: co zostało do wydania w tym projekcie.
@@ -676,6 +792,9 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         Czytnik kodów kończy transmisję Enterem, więc to jest cała jego
         obsługa — żadnego trybu „nasłuchu klawiatury".
         """
+        if not self.polaczony:
+            return self._uwaga("⛔ Brak połączenia z Subiektem — "
+                               "kliknij „Odśwież”.", BLAD_TLO)
         kod = (self.var_kod.get() or "").strip()
         if not kod:
             return
@@ -704,7 +823,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                         return
                 self.after(0, lambda: self._po_skanie(kod, None, None))
             except Exception as e:
-                self.after(0, lambda: self._po_skanie(kod, None, str(e)))
+                self.after(0, lambda b=str(e): self._po_skanie(kod, None, b))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -899,6 +1018,9 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
 
     def _dodaj_do_sesji(self):
         """Dokłada zeskanowaną pozycję do sesji. NIC jeszcze nie idzie do Subiekta."""
+        if not self.polaczony:
+            return self._uwaga("⛔ Brak połączenia z Subiektem — "
+                               "kliknij „Odśwież”.", BLAD_TLO)
         p = getattr(self, "poz_biezaca", None)
         if not p:
             return
@@ -1292,6 +1414,17 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         """
         if not self.sesja:
             return
+        if not self.polaczony:
+            # Sesja ZOSTAJE — awaria mostu bywa chwilowa, a skasowanie
+            # skompletowanej palety byłoby karą za cudzą usterkę.
+            messagebox.showerror(
+                "Wydanie niemożliwe",
+                "Brak połączenia z Subiektem.\n\n"
+                "Przygotowane pozycje NIE przepadły — zostają w oknie.\n"
+                "Kliknij „Odśwież”, a gdy połączenie wróci, "
+                "dokończ wydanie.",
+                parent=self)
+            return
         # Obie osoby są wymagane: RW zdejmuje towar ze stanu i dokument musi
         # powiedzieć, kto go wydał i komu.
         brak = [n for n, v in (("Wydał", self.var_wydal),
@@ -1322,7 +1455,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                     timeout=180) or {}
                 self.after(0, lambda: self._po_kontroli(swiezy, stany, None))
             except Exception as e:
-                self.after(0, lambda: self._po_kontroli(None, None, str(e)))
+                self.after(0, lambda b=str(e): self._po_kontroli(None, None, b))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1331,12 +1464,19 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                                                       "Utwórz RW w Subiekcie")
         if blad:
             # Bez świeżego odczytu NIE WOLNO wydawać — nie wiemy, co się
-            # zmieniło (§4 planu).
-            messagebox.showerror(
-                "Wydanie wstrzymane",
-                "Nie udało się odczytać stanu z Subiekta:\n\n%s\n\n"
-                "Bez świeżego odczytu nie wolno wystawić RW — ktoś mógł\n"
-                "w międzyczasie wydać ten sam towar." % blad, parent=self)
+            # zmieniło (§4 planu). Most padł DOPIERO TERAZ, więc okno musi
+            # zejść w tryb awarii: inaczej wyszarzenie i czerwony pasek
+            # pokazałyby „połączono", a skaner przyjmowałby kolejne pozycje
+            # do wydania, którego i tak nie da się zapisać.
+            self.polaczony = False
+            self.var_polaczenie.set("● Brak połączenia z Subiektem")
+            self.lbl_polaczenie.config(fg="#c0392b")
+            self._ustaw_blokade_awarii(True)
+            # Ten sam alarm co przy starcie — magazynier ma widzieć zawsze
+            # ten sam obraz awarii, niezależnie od tego, kiedy most padł.
+            self._alarm_awarii(
+                "%s\n\nBez świeżego odczytu nie wolno wystawić RW — "
+                "ktoś mógł w międzyczasie wydać ten sam towar." % blad)
             return
 
         # Podmieniamy stan na świeży: to on obowiązuje przy zapisie.
@@ -1444,7 +1584,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                 # użytkownika: zablokowałby GUI, które ma ją pokazać.
                 self.after(0, lambda: self._zapisz_po_suchym(pozycje, kroki))
             except Exception as e:
-                self.after(0, lambda: self._po_zapisie(None, [{"Szczegoly": str(e)}], True))
+                self.after(0, lambda b=str(e): self._po_zapisie(None, [{"Szczegoly": b}], True))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1482,7 +1622,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                                   tytul=tytul_dokumentu(self.project_name))
                 self.after(0, lambda: self._po_zapisie(wynik, None, False))
             except Exception as e:
-                self.after(0, lambda: self._po_zapisie(None, [{"Szczegoly": str(e)}], False))
+                self.after(0, lambda b=str(e): self._po_zapisie(None, [{"Szczegoly": b}], False))
 
         threading.Thread(target=worker, daemon=True).start()
 
