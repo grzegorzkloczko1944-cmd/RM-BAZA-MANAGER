@@ -450,6 +450,37 @@ DEFAULT_LOCKS_DIR = r"C:\RMPAK_CLIENT\RM_MANAGER\RM_MANAGER_projects\LOCKS"  # F
 #: Gdzie leżą pliki projektów RM_BAZA po przenosinach na serwer (12.09.2026).
 PROJEKTY_RM_BAZY_NA_SERWERZE = r"\\W2019S\RM_SERWER$\RM_BAZA_projects"
 
+#: To samo dla RM_MANAGER — katalogi przeniesione tego samego dnia.
+NA_SERWERZE = {
+    r"\RM_MANAGER\RM_MANAGER_PROJECTS": r"\\W2019S\RM_SERWER$\RM_MANAGER_projects",
+    r"\RM_MANAGER\BACKUPS":             r"\\W2019S\RM_SERWER$\backup_RM_MANAGER",
+    r"\RM_MANAGER\AI_RULES.TXT":        r"\\W2019S\RM_SERWER$\ai_rules.txt",
+    r"\RM_BAZA\PROJECTS":               PROJEKTY_RM_BAZY_NA_SERWERZE,
+    r"\RM_BAZA\PROJECTS_MAG":           PROJEKTY_RM_BAZY_NA_SERWERZE,
+}
+
+
+def _na_serwer(sciezka):
+    """Stara ścieżka z dysku sieciowego → odpowiednik na udziale serwera.
+
+    ⚠️ Userzy mają w `manager_sync_config.json` ścieżki sprzed przenosin
+    (`Y:\\RM_MANAGER\\RM_MANAGER_projects` itd.). Program szukał tam projektów,
+    nie znajdował pliku i pytał „Projekt N nie istnieje jeszcze w RM_MANAGER
+    — utworzyć?" — a kliknięcie TAK NADPISAŁOBY istniejący projekt pustymi
+    etapami (12.09.2026).
+
+    `_na_ukryty_udzial` łapało tylko `RM_SERWER` → `RM_SERWER$`; ścieżek
+    z literą dysku nie ruszało. Dowolna litera (`Y:`, `W:`, `U:`) i oba
+    rodzaje ukośników. Ścieżka wskazująca gdzie indziej zostaje nietknięta.
+    """
+    if not sciezka:
+        return sciezka
+    tekst = str(sciezka).replace("/", "\\").rstrip("\\").upper()
+    for ogon, cel in NA_SERWERZE.items():
+        if tekst.endswith(ogon):
+            return cel
+    return sciezka
+
 
 def _na_projekty_rm_bazy(sciezka):
     """Stara ścieżka do projektów RM_BAZA (`Y:\\RM_BAZA\\projects`) → serwer.
@@ -2660,8 +2691,8 @@ class RMManagerGUI:
                     # wskazywała nieistniejące `Y:\RM_BAZA\projects`, więc każdy
                     # projekt otwierał się z czerwonym paskiem „PLIK PROJEKTU NIE
                     # ISTNIEJE — tryb tylko do odczytu" (12.09.2026).
-                    self.projects_path   = _na_projekty_rm_bazy(
-                        config.get('projects_path', DEFAULT_PROJECTS_PATH))
+                    self.projects_path   = _na_serwer(_na_projekty_rm_bazy(
+                        config.get('projects_path', DEFAULT_PROJECTS_PATH)))
                     # Stara konfiguracja (rm_db_path) – migracja w locie
                     if 'rm_db_path' in config and 'rm_manager_dir' not in config:
                         old = config['rm_db_path']
@@ -2681,27 +2712,27 @@ class RMManagerGUI:
                     # Stary udzial USUNIETY, wiec konfig sprzed zmiany wskazuje donikad
                     # i RM_MANAGER gasnie bez komunikatu. Poprawiamy w locie zamiast
                     # obchodzic 10 stanowisk — patrz `_na_ukryty_udzial`.
-                    self.rm_projects_dir = _na_ukryty_udzial(self.rm_projects_dir)
+                    self.rm_projects_dir = _na_serwer(_na_ukryty_udzial(self.rm_projects_dir))
                     # backup_dir: katalog backupów
-                    self.backup_dir = _na_ukryty_udzial(config.get(
+                    self.backup_dir = _na_serwer(_na_ukryty_udzial(config.get(
                         'backup_dir',
                         os.path.join(os.path.dirname(self.rm_manager_dir), 'backups')
-                    ))
+                    )))
                     # locks_dir: katalog locków
-                    self.locks_dir = _na_ukryty_udzial(config.get(
+                    self.locks_dir = _na_serwer(_na_ukryty_udzial(config.get(
                         'locks_dir',
                         os.path.join(self.rm_projects_dir, 'LOCKS')
-                    ))
+                    )))
                     # server_exe_path: ścieżka do EXE na serwerze (dla auto-update)
                     self.server_exe_path = config.get('server_exe_path', '')
                     # Szybka praca na kopii lokalnej (menu Narzędzia)
                     rmm.USE_LOCAL_COPY = bool(config.get('use_local_copy', rmm.USE_LOCAL_COPY))
                     # ai_rules_path: wspólny plik reguł firmowych dla AI (jeden dla wszystkich userów)
                     # Lezy w tym samym, ukrytym juz udziale co bazy projektow — stad ta sama poprawka.
-                    self.ai_rules_path = _na_ukryty_udzial(config.get(
+                    self.ai_rules_path = _na_serwer(_na_ukryty_udzial(config.get(
                         'ai_rules_path',
                         os.path.join(self.rm_manager_dir, 'ai_rules.txt')
-                    ))
+                    )))
                     # Geometria okien i szerokości kolumn
                     self.window_geometry = config.get('window_geometry', {})
                     self.column_widths = config.get('column_widths', {})
