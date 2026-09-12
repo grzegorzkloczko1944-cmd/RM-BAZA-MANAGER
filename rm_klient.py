@@ -78,6 +78,34 @@ class BladSerwera(Exception):
 # Konfiguracja
 # ═══════════════════════════════════════════════════════════════════════
 
+#: Wspólny plik z adresem i sekretem HMAC — stąd bierze je stacja, która
+#: nie ma własnej konfiguracji. Patrz `_dociagnij_sekret`.
+WSPOLNY_HMAC = r"\\W2019S\RM_SERWER$\HMAC.json"
+
+
+def _dociagnij_sekret():
+    """Sekret HMAC z `HMAC.json` na udziale — gdy stacja nie zna własnego.
+
+    Wołane z `ustaw_serwer` i z `opis()`, bo ustawienia serwera dotyka kilka
+    ścieżek naraz (`rm_manager._master`, okno konfiguracji, logowanie)
+    i nie każda przechodzi przez tę, która czyta konfiguracje. Bez tego okno
+    „Konfiguracja ścieżek" pokazywało „HMAC WYŁĄCZONY", choć połączenie
+    działało — mylące, bo sugerowało brak podpisywania żądań (12.09.2026).
+
+    Cisza przy błędzie jest celowa: brak udziału nie ma prawa zatrzymać
+    programu, a żądanie bez podpisu i tak odbije się na serwerze.
+    """
+    global _sekret
+    if _sekret:
+        return
+    try:
+        import json
+        with open(WSPOLNY_HMAC, encoding="utf-8-sig") as f:
+            _sekret = (json.load(f).get("rm_serwer") or {}).get("sekret") or None
+    except Exception:
+        pass
+
+
 def ustaw_serwer(host, port=None, sekret=None):
     """Adres serwera. Wołane raz, przy starcie aplikacji.
 
@@ -85,11 +113,24 @@ def ustaw_serwer(host, port=None, sekret=None):
     świeża stacja bez `sync_config.json` działa od pierwszego uruchomienia.
     Wcześniej leciał tu wyjątek i user widział „adres RM_SERWER jest wymagany"
     zamiast listy projektów (12.09.2026).
+
+    Brakujący `sekret` dociągamy z udziału — tak samo jak brakujący host.
     """
     global _host, _port, _sekret
     _host = host or DOMYSLNY_HOST
     _port = int(port or DOMYSLNY_PORT)
-    _sekret = sekret
+    # ⚠️ Pusty `sekret` NIE KASUJE już ustawionego.
+    #
+    # `ustaw_serwer` woła kilka miejsc niezależnie od siebie (RM_BAZA przy
+    # starcie, `rm_manager._master` przy pierwszym `rmm-*`, okno konfiguracji).
+    # Każde czyta INNY config: RM_BAZA swój `sync_config.json`, `rm_manager`
+    # własną listę ścieżek. Gdy drugie w kolejności nie znalazło sekretu,
+    # zerowało ten dociągnięty przez pierwsze — i wszystkie żądania leciały
+    # BEZ PODPISU, a serwer odbijał je jako „zły HMAC" (12.09.2026).
+    if sekret:
+        _sekret = sekret
+    elif not _sekret:
+        _dociagnij_sekret()
 
 
 def skonfigurowany():
@@ -102,6 +143,18 @@ def opis():
         return "RM_SERWER NIESKONFIGUROWANY"
     return "RM_SERWER %s:%d%s" % (_host, _port,
                                   "" if _sekret else "  (HMAC WYŁĄCZONY)")
+
+
+# ⚠️ Sekret dociągamy PRZY IMPORCIE, nie przy pierwszym użyciu.
+#
+# Ustawienia serwera dotyka kilka ścieżek naraz (`rm_manager._master`, okno
+# „Konfiguracja ścieżek", logowanie) i nie każda przechodzi przez tę, która
+# czyta konfiguracje. Gdy okno zapytało pierwsze, pokazywało „HMAC WYŁĄCZONY",
+# choć połączenie działało — a to sugeruje, że żądania nie są podpisywane.
+# Tutaj moduł jest gotowy od pierwszej linii, niezależnie od kolejności.
+#
+# Konfiguracja stacji i tak NADPISUJE tę wartość w `ustaw_serwer`.
+_dociagnij_sekret()
 
 
 # ═══════════════════════════════════════════════════════════════════════

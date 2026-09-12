@@ -211,12 +211,37 @@ class OutdatedClient(Exception):
         self.info = info
 
 # Domyślne ścieżki (mogą być nadpisane przez config)
+#: ⚠️ Projekty i backupy leżą na udziale serwera (12.09.2026). `Y:` zostało
+#: tylko przy masterze i lockach — a tych i tak nikt już nie czyta, bo master
+#: chodzi przez RM_SERWER, a blokady siedzą w tabeli.
+PROJEKTY_NA_SERWERZE = r"\\W2019S\RM_SERWER$\RM_BAZA_projects"
 DEFAULT_MASTER_PATH = "Y:/RM_BAZA/master.sqlite"
-DEFAULT_PROJECTS_DIR = "Y:/RM_BAZA/projects"  # Katalog z plikami project_X.sqlite (MACHINE)
-DEFAULT_PROJECTS_MAG_DIR = "Y:/RM_BAZA/projects_MAG"  # Katalog z plikami project_MAG_X.sqlite (WAREHOUSE)
+DEFAULT_PROJECTS_DIR = PROJEKTY_NA_SERWERZE          # project_X.sqlite (MACHINE)
+DEFAULT_PROJECTS_MAG_DIR = PROJEKTY_NA_SERWERZE      # project_MAG_X.sqlite (WAREHOUSE) — ten sam katalog
 DEFAULT_LOCAL_DIR = "C:/RMPAK_CLIENT"
 DEFAULT_LOCKS_DIR = "Y:/RM_BAZA/locks"
-DEFAULT_BACKUP_DIR = "Y:/RM_BAZA/backups"
+DEFAULT_BACKUP_DIR = r"\\W2019S\RM_SERWER$\backup_RM_BAZA"
+
+
+def _na_serwer(sciezka, domyslna):
+    """Stara ścieżka na `Y:` → odpowiednik na udziale serwera.
+
+    ⚠️ Userzy mają w `sync_config.json` ścieżki sprzed przenosin — wskazują
+    katalogi, które na `Y:` są już nieaktywne (`$projects`, `$backups`).
+    Bez tej podmiany świeży .exe czytałby konfigurację i trafiał donikąd,
+    a user musiałby poprawiać ścieżki ręcznie na każdej z dziesięciu stacji.
+
+    Podmieniamy TYLKO znane stare lokalizacje RM_BAZA (dowolna litera dysku).
+    Ścieżka wskazująca już na serwer albo gdzie indziej zostaje nietknięta.
+    """
+    if not sciezka:
+        return domyslna
+    tekst = str(sciezka).replace("/", "\\").rstrip("\\").upper()
+    for ogon in (r"\RM_BAZA\PROJECTS", r"\RM_BAZA\PROJECTS_MAG",
+                 r"\RM_BAZA\BACKUPS"):
+        if tekst.endswith(ogon):
+            return domyslna
+    return sciezka
 #: Wiadomości chatu (jeden plik JSON na wiadomość) — na udziale serwera,
 #: obok projektów.
 #:
@@ -538,26 +563,14 @@ def ustal_rm_serwer(config: dict, parent=None) -> dict:
             return cfg
         print(f"  ⚠️  Zapisana konfiguracja RM_SERWER nie działa: {opis}")
 
-    nowe = okno_konfiguracji_serwera(config, parent)
-    if not nowe:
-        return cfg          # user zamknął okno — wołający zdecyduje, co dalej
-
-    # Zapis do configu, żeby pytać tylko raz.
-    try:
-        import json as _json
-        sciezka = CONFIG_FILE
-        dane = {}
-        if os.path.isfile(sciezka):
-            with open(sciezka, encoding="utf-8-sig") as f:
-                dane = _json.load(f)
-        dane["rm_serwer"] = nowe
-        with open(sciezka, "w", encoding="utf-8") as f:
-            _json.dump(dane, f, ensure_ascii=False, indent=2)
-        print(f"  ✅ Zapisano konfigurację RM_SERWER do {sciezka}")
-    except Exception as e:
-        print(f"  ⚠️  Nie zapisano konfiguracji: {e}")
-
-    return nowe
+    # ⚠️ Okna NIE pokazujemy przy starcie (12.09.2026).
+    #
+    # Adres i port są w kodzie, sekret na udziale — nie ma czego wpisywać.
+    # Gdy serwer nie odpowiada, to awaria sieci, a nie brak konfiguracji:
+    # okno pytało wtedy o dane, które user już ma, i po „Zapisz" wracało
+    # w to samo miejsce. Okno zostaje dostępne z menu (Ustawienia →
+    # Połączenie), gdyby adres naprawdę trzeba było zmienić.
+    return cfg
 
 
 def tylko_najnowsze(pliki):
@@ -3264,17 +3277,19 @@ class MainWindow(tk.Tk):
                         _s = {**_s, **(json.load(f).get("rm_serwer") or {})}
                 except Exception:
                     pass
+            # ⚠️ Start NIE PYTA o nic — ustawienia są stałe (12.09.2026).
+            #
+            # Adres serwera jest w kodzie (`rm_klient.DOMYSLNY_HOST`), katalogi
+            # na udziale, blokady w bazie. Nie ma czego wpisywać, więc nie ma
+            # po co pokazywać okna konfiguracji: user klikał „Zapisz" i wracał
+            # do tego samego ekranu, bo brakująca rzecz nie była w formularzu.
+            #
+            # Gdy serwer nie odpowiada, mówimy to WPROST przy pierwszym
+            # zapytaniu — to realna awaria sieci, nie sprawa do skonfigurowania.
             if _s.get("host"):
                 ok, powod = sprawdz_serwer(_s["host"], _s.get("port", 5060), _s.get("sekret"))
                 if not ok:
                     print("  ⚠️  RM_SERWER: %s" % powod)
-                    raise InitConfigRequired("RM_SERWER nie odpowiada")
-            # Użyj is_file_accessible z timeoutem 5s zamiast Path.exists()
-            # (Path.exists() na zamapowanym ale niedostępnym dysku sieciowym
-            #  może wisieć 30-60s czekając na timeout SMB)
-            elif not self._file_accessible_with_timeout(test_master_path, timeout_s=5.0):
-                print("  ⚠️  Brak master.sqlite (lub dysk niedostępny) - wymagana konfiguracja")
-                raise InitConfigRequired("Brak master.sqlite")
             
             # Wczytaj ścieżki z configu (lub użyj domyślnych)
             paths = config.get("paths", {})
@@ -3293,12 +3308,13 @@ class MainWindow(tk.Tk):
             
             # Teraz wczytaj ostateczne ścieżki
             MASTER_PATH = paths.get("master", DEFAULT_MASTER_PATH)
-            PROJECTS_DIR = paths.get("projects_dir", DEFAULT_PROJECTS_DIR)
-            PROJECTS_MAG_DIR = paths.get("projects_mag_dir", DEFAULT_PROJECTS_MAG_DIR)
+            # ⚠️ Stary config usera wskazuje `Y:` — podmieniamy na serwer.
+            PROJECTS_DIR = _na_serwer(paths.get("projects_dir"), DEFAULT_PROJECTS_DIR)
+            PROJECTS_MAG_DIR = _na_serwer(paths.get("projects_mag_dir"), DEFAULT_PROJECTS_MAG_DIR)
             SERVER_DIR = paths.get("server_dir", DEFAULT_SERVER_DIR)
             LOCAL_DIR = paths.get("local_dir", DEFAULT_LOCAL_DIR)
             LOCKS_DIR = paths.get("locks_dir", DEFAULT_LOCKS_DIR)
-            BACKUP_DIR = paths.get("backup_dir", DEFAULT_BACKUP_DIR)
+            BACKUP_DIR = _na_serwer(paths.get("backup_dir"), DEFAULT_BACKUP_DIR)
             
             # Aktualizuj CONFIG_FILE
             CONFIG_FILE = Path(LOCAL_DIR) / "sync_config.json"
@@ -3310,16 +3326,21 @@ class MainWindow(tk.Tk):
                     config = json.load(f)
                 paths = config.get("paths", {})
                 MASTER_PATH = paths.get("master", DEFAULT_MASTER_PATH)
-                PROJECTS_DIR = paths.get("projects_dir", DEFAULT_PROJECTS_DIR)
-                PROJECTS_MAG_DIR = paths.get("projects_mag_dir", DEFAULT_PROJECTS_MAG_DIR)
+                PROJECTS_DIR = _na_serwer(paths.get("projects_dir"), DEFAULT_PROJECTS_DIR)
+                PROJECTS_MAG_DIR = _na_serwer(paths.get("projects_mag_dir"), DEFAULT_PROJECTS_MAG_DIR)
                 SERVER_DIR = paths.get("server_dir", DEFAULT_SERVER_DIR)
                 LOCAL_DIR = paths.get("local_dir", DEFAULT_LOCAL_DIR)
                 LOCKS_DIR = paths.get("locks_dir", DEFAULT_LOCKS_DIR)
-                BACKUP_DIR = paths.get("backup_dir", DEFAULT_BACKUP_DIR)
+                BACKUP_DIR = _na_serwer(paths.get("backup_dir"), DEFAULT_BACKUP_DIR)
+                # ⚠️ Pliku mastera NIE sprawdzamy — nie ma go i mieć nie ma.
+                #
+                # Master chodzi przez RM_SERWER; `MASTER_PATH` to tylko wartość
+                # w configu dla zgodności klucza. To sprawdzenie wyrzucało usera
+                # do okna „Witaj w RM BAZA!" przy KAŻDYM starcie, a kliknięcie
+                # „Zapisz i kontynuuj" wracało tu ponownie — okno pojawiało się
+                # w kółko i nie dało się przejść dalej (12.09.2026).
+                # Dostępność serwera sprawdza `sprawdz_serwer` wyżej.
                 test_master_path = Path(MASTER_PATH)
-                if not self._file_accessible_with_timeout(test_master_path, timeout_s=5.0):
-                    print("  ⚠️  Brak master.sqlite (lub dysk niedostępny) - wymagana konfiguracja")
-                    raise InitConfigRequired("Brak master.sqlite")
             
             print(f"  ✅ Ścieżki wczytane z: {CONFIG_FILE}")
             print(f"     Master: {MASTER_PATH}")
@@ -3364,13 +3385,11 @@ class MainWindow(tk.Tk):
             # żądania": trafiał w adres, nie w sekret, a user nie miał ani
             # jak tego zobaczyć, ani gdzie poprawić.
             cfg_srv = ustal_rm_serwer(config, parent=self)
+            # Brak hosta nie zatrzymuje startu — `rm_klient` ma adres w kodzie.
             if not cfg_srv.get("host"):
-                from tkinter import messagebox as _mb
-                _mb.showinfo(
-                    "RM_BAZA",
-                    "Bez połączenia z serwerem nie ma dostępu do bazy.\n\n"
-                    "Uruchom program ponownie i podaj adres serwera.")
-                raise InitConfigRequired("Anulowano konfigurację RM_SERWER")
+                import rm_klient as _rk
+                cfg_srv = {"host": _rk.DOMYSLNY_HOST, "port": _rk.DOMYSLNY_PORT,
+                           "sekret": cfg_srv.get("sekret")}
 
             opis = self.db_manager.ustaw_klienta_mastera(
                 cfg_srv.get("host"),
@@ -32098,12 +32117,15 @@ class MainWindow(tk.Tk):
                   command=lambda: browse_dir(e_local, "Wybierz folder lokalny")).grid(row=2, column=2, pady=10)
         
         # Locki
+        # Blokady pilnuje RM_SERWER (tabela `project_locks`), nie pliki .lock.
+        # Pole zostaje WIDOCZNE, ale nieedytowalne — user pierwszy raz stawiający
+        # program nie ma tu nic do ustawienia, a katalog na `Y:` już nie istnieje.
         tk.Label(fields_frame, text="📁 Folder locków:", font=("Arial", 11, "bold"), bg="#ecf0f1").grid(row=3, column=0, sticky="w", pady=10)
-        e_locks = tk.Entry(fields_frame, width=55, font=("Arial", 10))
-        e_locks.insert(0, DEFAULT_LOCKS_DIR)
+        e_locks = tk.Entry(fields_frame, width=55, font=("Arial", 10),
+                           disabledbackground="#e4e7e9", disabledforeground="#4a4a4a")
+        e_locks.insert(0, "RM_SERWER — blokady w bazie, nie w plikach")
+        e_locks.configure(state="disabled")
         e_locks.grid(row=3, column=1, sticky="ew", padx=5, pady=10)
-        tk.Button(fields_frame, text="🔍", width=3,
-                  command=lambda: browse_dir(e_locks, "Wybierz folder locków")).grid(row=3, column=2, pady=10)
         
         # Backupy
         tk.Label(fields_frame, text="📁 Folder backupów:", font=("Arial", 11, "bold"), bg="#ecf0f1").grid(row=4, column=0, sticky="w", pady=10)
@@ -32140,42 +32162,50 @@ class MainWindow(tk.Tk):
             master_path = DEFAULT_MASTER_PATH
             projects_dir = e_projects.get().strip()
             local_dir = e_local.get().strip()
-            locks_dir = e_locks.get().strip()
+            # Pole locków jest tylko informacyjne (blokady pilnuje RM_SERWER) —
+            # do configu idzie wartość domyślna, nie napis z okna.
+            locks_dir = DEFAULT_LOCKS_DIR
             backup_dir = e_backup.get().strip()
             
-            # Walidacja
-            if not master_path:
-                messagebox.showerror("Błąd", "Musisz podać ścieżkę do master.sqlite!", parent=dlg)
-                return
-            
-            if not Path(master_path).exists():
-                response = messagebox.askyesno(
-                    "Plik nie istnieje",
-                    f"Plik nie istnieje:\n{master_path}\n\nCzy chcesz kontynuować?",
-                    parent=dlg
-                )
-                if not response:
-                    return
-            
+            # ⚠️ Obecności master.sqlite NIE sprawdzamy — pliku NIE MA i mieć
+            # nie ma. Master leży na RM_SERWER, a `master_path` to tylko
+            # wartość domyślna zapisywana dla zgodności klucza w JSON-ie.
+            # Pytanie „Plik nie istnieje: Y:\RM_BAZA\master.sqlite — kontynuować?"
+            # straszyło usera przy pierwszym uruchomieniu, choć wszystko było
+            # w porządku (12.09.2026).
+
             # Zapisz do configu
             try:
-                config = {
-                    "client": {
-                        "name": socket.gethostname(),
-                        "rank": 1
-                    },
-                    "paths": {
-                        "master": master_path,
-                        "projects_dir": projects_dir,
-                        "local_dir": local_dir,
-                        "locks_dir": locks_dir,
-                        "backup_dir": backup_dir
-                    },
-                    "locks": {
-                        "folder": locks_dir
-                    }
-                }
-                
+                # ⚠️ DOPISUJEMY do istniejącego configu, nie budujemy od zera.
+                #
+                # Wcześniej ten słownik był tworzony od nowa i KASOWAŁ wszystko,
+                # czego tu nie ma — w tym `rm_serwer` (adres i sekret) oraz
+                # `projects_mag_dir`. Po kliknięciu „Zapisz i kontynuuj" program
+                # nie miał już adresu serwera, więc przy następnym sprawdzeniu
+                # pokazywał TO SAMO OKNO. User klikał w kółko i nic się nie
+                # działo (12.09.2026).
+                config = {}
+                try:
+                    _p = Path(local_dir) / "sync_config.json"
+                    if _p.is_file():
+                        with open(_p, encoding="utf-8-sig") as _f:
+                            config = json.load(_f)
+                except Exception:
+                    config = {}
+                config.setdefault("client", {"name": socket.gethostname(), "rank": 1})
+                _paths = dict(config.get("paths") or {})
+                _paths.update({
+                    "master": master_path,
+                    "projects_dir": projects_dir,
+                    # Magazynowe leżą w TYM SAMYM katalogu co zwykłe (12.09.2026).
+                    "projects_mag_dir": projects_dir,
+                    "local_dir": local_dir,
+                    "locks_dir": locks_dir,
+                    "backup_dir": backup_dir,
+                })
+                config["paths"] = _paths
+                config["locks"] = {"folder": locks_dir}
+
                 # Utwórz folder lokalny
                 Path(local_dir).mkdir(parents=True, exist_ok=True)
                 

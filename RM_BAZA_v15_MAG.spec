@@ -161,7 +161,14 @@ except Exception as _e:
 # — od backupow jest katalog produkcyjny. Blad publikacji NIE psuje buildu.
 import shutil as _shutil
 from datetime import datetime as _dt
-_SERVER_DIR = r"Y:\RMPAK_CLIENT\TESTY RM_BAZA"
+#: ⚠️ WPROST NA PRODUKCJĘ (decyzja 12.09.2026).
+#:
+#: Wcześniej build lądował w `TESTY RM_BAZA`, żeby bramka wersji nie wołała
+#: wszystkich do aktualizacji po każdej drobnej zmianie. Dziś jest odwrotnie:
+#: stacje MUSZĄ dostać wersję odciętą od `Y:` — na starej program nie znajdzie
+#: ani master.sqlite, ani projektów, bo katalogi na `Y:` są już nieaktywne.
+#: Monit o aktualizacji jest tu POŻĄDANY, nie uciążliwy.
+_SERVER_DIR = r"Y:\RMPAK_CLIENT"
 _src = _os.path.join(_os.path.abspath(DISTPATH), "RM_BAZA_v15_MAG.exe")
 _dst = _os.path.join(_SERVER_DIR, "RM_BAZA_v15_MAG.exe")
 try:
@@ -169,11 +176,10 @@ try:
     _shutil.copy2(_src, _dst)
     _s, _d = _os.stat(_src), _os.stat(_dst)
     assert _s.st_size == _d.st_size and abs(_s.st_mtime - _d.st_mtime) < 2, "kopia rozni sie od zrodla"
-    print(f"(spec) DO TESTOW: {_dst}  ({_d.st_size} B, {_dt.fromtimestamp(_d.st_mtime):%Y-%m-%d %H:%M:%S})")
-    print("(spec) Produkcja NIETKNIETA — userzy nie dostana monitu o aktualizacji.")
-    print(r'(spec) Wydanie: copy /y "%s" "Y:\RMPAK_CLIENT\RM_BAZA_v15_MAG.exe"' % _dst)
+    print(f"(spec) WYSTAWIONE: {_dst}  ({_d.st_size} B, {_dt.fromtimestamp(_d.st_mtime):%Y-%m-%d %H:%M:%S})")
+    print("(spec) Stacje dostana monit o aktualizacji przy nastepnym starcie.")
 except Exception as _e:
     print("=" * 70)
-    print(f"(spec) !!! KOPIA DO TESTOW NIE POWIODLA SIE: {_e}")
+    print(f"(spec) !!! WYSTAWIENIE NIE POWIODLO SIE: {_e}")
     print(f"(spec) !!! Skopiuj recznie: {_src} -> {_dst}")
     print("=" * 70)
