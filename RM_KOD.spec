@@ -5,8 +5,23 @@ a = Analysis(
     ['RM_KOD.py'],
     pathex=[],
     binaries=[],
-    datas=[('RM_KOD.ico', '.'), ('rm_manager.py', '.'), ('lock_manager_v2.py', '.')],
-    hiddenimports=[],
+    datas=[('RM_KOD.ico', '.')],
+    # ⚠️ hiddenimports, NIE datas.
+    #
+    # `rm_manager` i `lock_manager_serwer` importują `rm_klient` i siebie
+    # nawzajem WEWNĄTRZ FUNKCJI (leniwie), a takiego importu PyInstaller nie
+    # widzi — .exe wstawał i padał dopiero przy pierwszym sięgnięciu do bazy.
+    # Ten sam błąd co przy module Subiekta w RM_BAZA.
+    #
+    # `lock_manager_v2` zostaje mimo przejścia na blokady serwerowe: jest
+    # awaryjnym powrotem do plików .lock, a waży tyle co nic.
+    hiddenimports=[
+        'rm_manager',
+        'rm_klient',
+        'lock_manager_serwer',
+        'lock_manager_v2',
+        'rm_serwer_operacje',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
