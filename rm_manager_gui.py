@@ -742,7 +742,18 @@ class RMManagerGUI:
             rmm.cleanup_hostname_sessions(self.rm_master_db_path, socket.gethostname())
         except Exception as e:
             print(f"⚠️ Startup cleanup sessions error: {e}")
-        
+
+        # Kopie lokalne zgodne z serwerem to śmieci po nieudanym `os.remove`
+        # (baza była jeszcze otwarta) albo po sesji bez żadnych zmian. Zostawione,
+        # straszyły przy starcie komunikatem o utraconej pracy, której nie było.
+        try:
+            ile = rmm.sprzatnij_zsynchronizowane_kopie(self.rm_projects_dir)
+            if ile:
+                print(f"🗑 Sprzątnięto {ile} zbędnych kopii lokalnych")
+        except Exception as e:
+            print(f"⚠️ Sprzątanie kopii lokalnych: {e}")
+
+
         self._start_heartbeat()
         
         # Alarmy - sprawdzaj co 5 minut
@@ -919,9 +930,11 @@ class RMManagerGUI:
         if self._local_copy_project_id is not None:
             self._sync_local_copy_back()
 
-        # Kopia po nieudanym syncu/ubitym procesie = niezapisane zmiany użytkownika.
-        # copy_project_to_local jej nie nadpisze; uprzedzamy o pracy na Y:.
-        had_orphan = rmm.has_unsynced_local_copy(project_id)
+        # Kopia RÓŻNIĄCA SIĘ od bazy na serwerze = niezapisane zmiany użytkownika.
+        # copy_project_to_local jej nie nadpisze; uprzedzamy o pracy na serwerze.
+        # Kopia identyczna z serwerem to śmieć — nie ma o czym mówić, poleci
+        # przy najbliższym sprzątaniu.
+        had_orphan = rmm.local_copy_differs(project_id, self.rm_projects_dir)
 
         local = rmm.copy_project_to_local(self.rm_projects_dir, project_id)
         # None => kopiowanie nieudane, pracujemy dalej bezpośrednio na Y:
@@ -947,19 +960,41 @@ class RMManagerGUI:
         if rmm.sync_project_to_network(self.rm_projects_dir, pid,
                                        still_owns_lock=lambda: self._still_owns_lock(pid)):
             rmm.cleanup_local_copy(pid)
-        else:
-            # Sync nieudany - kopia z danymi użytkownika zostaje na dysku
-            try:
-                messagebox.showerror(
-                    "Błąd zapisu na dysk sieciowy",
-                    f"Nie udało się wgrać zmian projektu {pid} na serwer.\n\n"
-                    f"Twoje zmiany NIE zostały utracone — są w pliku:\n"
-                    f"{rmm.get_local_copy_path(pid)}\n\n"
-                    f"Sprawdź połączenie z dyskiem sieciowym. Nie zamykaj programu "
-                    f"bez skopiowania tego pliku, jeśli zmiany są ważne."
-                )
-            except Exception:
-                pass
+            return
+
+        # Sync nieudany. Powód bywa jeden z dwóch i znaczą co innego:
+        #
+        #  * lock przejął ktoś inny — jego wersja jest teraz obowiązująca,
+        #    nasza kopia jest nieaktualna i MA przepaść (decyzja 12.09.2026),
+        #    bo trzymanie jej tylko rodziło komunikat przy każdym starcie;
+        #  * padła sieć, a lock nadal nasz — wtedy plik zostaje, bo to
+        #    jedyny egzemplarz czyjejś pracy.
+        nasz_lock = False
+        try:
+            nasz_lock = self._still_owns_lock(pid)
+        except Exception:
+            pass
+
+        if not nasz_lock:
+            rmm.cleanup_local_copy(pid)
+            print(f"🗑 Kopia projektu {pid} skasowana — lock przejął ktoś inny, "
+                  f"nasza wersja jest nieaktualna")
+            self.status_bar.config(
+                text=f"⚠️ Zmiany w projekcie {pid} przepadły — lock przejął ktoś inny",
+                fg="#e67e22")
+            return
+
+        try:
+            messagebox.showerror(
+                "Błąd zapisu na dysk sieciowy",
+                f"Nie udało się wgrać zmian projektu {pid} na serwer.\n\n"
+                f"Twoje zmiany NIE zostały utracone — są w pliku:\n"
+                f"{rmm.get_local_copy_path(pid)}\n\n"
+                f"Sprawdź połączenie z serwerem. Nie zamykaj programu "
+                f"bez skopiowania tego pliku, jeśli zmiany są ważne."
+            )
+        except Exception:
+            pass
 
     def _get_all_alarms(self) -> list:
         """Zbierz wszystkie alarmy ze wszystkich projektów (včetně odłożonych)"""

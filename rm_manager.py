@@ -279,6 +279,11 @@ USE_LOCAL_COPY = True
 # Katalog na lokalne kopie (dysk lokalny, nie sieciowy)
 LOCAL_COPY_DIR = os.path.join(tempfile.gettempdir(), "RM_MANAGER_local")
 
+#: Bazy projektów RM_MANAGER na serwerze — do porównania kopii lokalnej
+#: z oryginałem, gdy wołający nie poda katalogu. Ta sama ścieżka, co zaszyta
+#: w rm_manager_gui (DEFAULT_RM_PROJECTS_DIR); wszystko leży w jednym miejscu.
+_KATALOG_PROJEKTOW_SERWERA = r"\\W2019S\RM_SERWER$\RM_MANAGER_projects"
+
 
 def get_local_copy_path(project_id: int) -> str:
     """Ścieżka lokalnej kopii bazy projektu (dysk C:, katalog tymczasowy)."""
@@ -298,13 +303,70 @@ def _lc_log(msg: str):
 
 
 def has_unsynced_local_copy(project_id: int) -> bool:
-    """Czy na dysku leży lokalna kopia, której NIE wgrano jeszcze na Y:?
+    """Czy na dysku leży lokalna kopia RÓŻNIĄCA SIĘ od bazy na serwerze?
 
-    Kopia jest kasowana (cleanup_local_copy) dopiero po udanym sync, więc
-    samo jej istnienie oznacza niezsynchronizowane zmiany użytkownika -
-    albo po nieudanym sync, albo po twardym ubiciu procesu.
+    Dawniej wystarczyło samo istnienie pliku — założenie brzmiało, że kopia
+    jest kasowana po udanym sync, więc jej obecność znaczy niezapisane zmiany.
+    Założenie jest za mocne (12.09.2026): plik zostaje też wtedy, gdy sync
+    poszedł, ale `os.remove` nie (Windows nie skasuje pliku trzymanego
+    otwartym), oraz gdy user projekt tylko otworzył i zamknął, niczego nie
+    zmieniając. W obu przypadkach program straszył komunikatem o utraconej
+    pracy i przechodził na wolniejszą pracę wprost na serwerze — bez powodu.
+
+    Teraz porównujemy zawartość. Baza projektu waży ~0,2 MB, więc policzenie
+    skrótu jest tańsze niż jedno zapytanie po sieci. Gdy czegokolwiek nie da
+    się sprawdzić (brak pliku zdalnego, błąd odczytu), zostajemy przy starym,
+    ostrożnym zachowaniu: kopia liczy się jako rozbieżna — lepiej zapytać
+    niepotrzebnie niż skasować czyjąś pracę.
     """
-    return os.path.exists(get_local_copy_path(project_id))
+    return bool(local_copy_differs(project_id))
+
+
+def _skrot_pliku(sciezka: str) -> Optional[str]:
+    """SHA-256 pliku; None gdy nie da się przeczytać."""
+    import hashlib
+    try:
+        h = hashlib.sha256()
+        with open(sciezka, "rb") as f:
+            for kawalek in iter(lambda: f.read(1 << 20), b""):
+                h.update(kawalek)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def local_copy_differs(project_id: int, rm_manager_dir: str = None) -> bool:
+    """Czy kopia lokalna różni się od bazy na serwerze (czyli: są zmiany).
+
+    False również wtedy, gdy kopii w ogóle nie ma. Przy jakiejkolwiek
+    wątpliwości zwraca True — patrz `has_unsynced_local_copy`.
+    """
+    local = get_local_copy_path(project_id)
+    if not os.path.exists(local):
+        return False
+    # Sidecar z niezapisaną transakcją = zmiany, których nie widać w pliku głównym.
+    for ogon in ("-wal", "-journal"):
+        try:
+            if os.path.getsize(local + ogon) > 0:
+                return True
+        except OSError:
+            pass
+    katalog = rm_manager_dir or _KATALOG_PROJEKTOW_SERWERA
+    if not katalog:
+        return True
+    remote = get_project_db_path(katalog, project_id)
+    try:
+        if not os.path.exists(remote):
+            return True                     # nie ma z czym porównać
+        if os.path.getsize(local) != os.path.getsize(remote):
+            return True                     # inny rozmiar = na pewno inne
+    except OSError:
+        return True
+    skrot_lok = _skrot_pliku(local)
+    skrot_zdal = _skrot_pliku(remote)
+    if skrot_lok is None or skrot_zdal is None:
+        return True
+    return skrot_lok != skrot_zdal
 
 
 def copy_project_to_local(rm_manager_dir: str, project_id: int) -> str | None:
@@ -326,12 +388,24 @@ def copy_project_to_local(rm_manager_dir: str, project_id: int) -> str | None:
         _lc_log(f"brak zdalnej bazy {remote} - pracuje bezposrednio na Y:")
         return None
 
-    # Rozbieżna kopia z poprzedniej sesji - nie ruszamy jej, praca idzie na Y:.
-    # Odzyskanie danych z takiego pliku jest decyzją użytkownika (GUI o tym mówi).
+    # Kopia z poprzedniej sesji. Gdy RÓŻNI SIĘ od bazy na serwerze, siedzi w niej
+    # czyjaś praca — nie ruszamy jej, praca idzie wprost na serwer, a decyzję
+    # o odzyskaniu danych podejmuje user (GUI o tym mówi). Gdy jest IDENTYCZNA,
+    # to śmieć po nieudanym `os.remove` albo po sesji bez zmian: kasujemy go
+    # i kopiujemy normalnie, zamiast bez powodu schodzić na wolniejszy tryb
+    # i straszyć komunikatem o utraconej pracy (12.09.2026).
     if os.path.exists(local):
-        _lc_log(f"projekt {project_id}: istnieje NIEZSYNCHRONIZOWANA kopia {local} "
-                f"- NIE nadpisuje jej, pracuje bezposrednio na Y:")
-        return None
+        if local_copy_differs(project_id, rm_manager_dir):
+            _lc_log(f"projekt {project_id}: istnieje ROZBIEZNA kopia {local} "
+                    f"- NIE nadpisuje jej, pracuje bezposrednio na serwerze")
+            return None
+        _lc_log(f"projekt {project_id}: kopia zgodna z serwerem - kasuje smiec")
+        if not cleanup_local_copy(project_id):
+            # Nie da się skasować (plik otwarty) — nie nadpisujemy, bo to
+            # znaczy, że ktoś go trzyma; praca idzie wprost na serwer.
+            _lc_log(f"projekt {project_id}: kopii nie da sie skasowac "
+                    f"- pracuje bezposrednio na serwerze")
+            return None
 
     try:
         os.makedirs(LOCAL_COPY_DIR, exist_ok=True)
@@ -445,15 +519,58 @@ def sync_project_to_network(rm_manager_dir: str, project_id: int,
         return False
 
 
-def cleanup_local_copy(project_id: int):
-    """Usuń lokalną kopię po udanym sync na Y:."""
+def cleanup_local_copy(project_id: int) -> bool:
+    """Usuń lokalną kopię po udanym sync na serwer. True gdy nic nie zostało.
+
+    Windows nie skasuje pliku, który ktoś trzyma otwartym — a wynik był
+    połykany po cichu, więc plik zostawał i przy następnym starcie program
+    straszył „niezsynchronizowanymi zmianami", których dawno nie było
+    (12.09.2026). Teraz nieudane kasowanie jest widoczne w logu, a plik
+    zostaje oznaczony do sprzątnięcia przy następnej okazji.
+    """
     local = get_local_copy_path(project_id)
+    zostalo = []
     for path in (local, local + "-journal", local + "-wal", local + "-shm"):
         try:
             if os.path.exists(path):
                 os.remove(path)
-        except OSError:
-            pass
+        except OSError as e:
+            zostalo.append(os.path.basename(path))
+            _lc_log(f"nie udalo sie skasowac {path}: {e}")
+    if zostalo:
+        _lc_log(f"projekt {project_id}: zostaly pliki {zostalo} "
+                f"- sprzatniete przy nastepnym starcie")
+        return False
+    return True
+
+
+def sprzatnij_zsynchronizowane_kopie(rm_manager_dir: str = None) -> int:
+    """Skasuj kopie lokalne, które NIE różnią się od baz na serwerze.
+
+    Wołane przy starcie programu. Takie pliki to śmieci po nieudanym
+    `os.remove` (baza była jeszcze otwarta) albo po sesji, w której user
+    niczego nie zmienił. Zostawione, straszyły komunikatem o utraconej
+    pracy. Kopii ZE zmianami ta funkcja nie tyka.
+    """
+    if not os.path.isdir(LOCAL_COPY_DIR):
+        return 0
+    skasowane = 0
+    wzor = os.path.join(LOCAL_COPY_DIR, "rm_manager_project_*.sqlite")
+    for sciezka in glob.glob(wzor):
+        nazwa = os.path.basename(sciezka)
+        try:
+            pid = int(nazwa.replace("rm_manager_project_", "").replace(".sqlite", ""))
+        except ValueError:
+            continue
+        try:
+            if local_copy_differs(pid, rm_manager_dir):
+                continue                    # są zmiany — nie ruszamy
+        except Exception:
+            continue
+        if cleanup_local_copy(pid):
+            skasowane += 1
+            _lc_log(f"sprzatnieto zbedna kopie projektu {pid} (zgodna z serwerem)")
+    return skasowane
 
 
 # ============================================================================
