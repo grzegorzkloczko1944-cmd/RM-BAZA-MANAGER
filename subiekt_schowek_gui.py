@@ -133,8 +133,11 @@ class SchowekWindow(WydanieWindow):
         # „Usuń pozycję" kasuje CAŁĄ historię symbolu — to cofnięcie pomyłki
         # skanowania, nie zwrot. Zwrot robi się skanem w trybie „Zdejmij",
         # bo tylko wtedy zostaje ślad kto i kiedy oddał.
+        tk.Button(akcje, text="✏ Popraw ilość", command=self._popraw_ilosc,
+                  font=("Arial", 8, "bold")).pack(side=tk.LEFT)
         tk.Button(akcje, text="🗑 Usuń pozycję (pomyłka)",
-                  command=self._usun_z_sesji, font=("Arial", 8)).pack(side=tk.LEFT)
+                  command=self._usun_z_sesji,
+                  font=("Arial", 8)).pack(side=tk.LEFT, padx=6)
         tk.Button(akcje, text="🕘 Historia ruchów", command=self._historia,
                   font=("Arial", 8)).pack(side=tk.LEFT, padx=6)
         tk.Button(akcje, text="✖ Wyczyść schowek", command=self._wyczysc_sesje,
@@ -159,18 +162,30 @@ class SchowekWindow(WydanieWindow):
         self.tab.tag_configure("brak_stanu", background=BLAD_TLO)
         self.tab.tag_configure("poza_bom", background="#f4ecf7")
         self.tab.bind("<Delete>", lambda _e: self._usun_z_sesji())
+        self.tab.bind("<Double-1>", lambda _e: self._popraw_ilosc())
 
     def _panel_skanera(self, rodzic):
         super()._panel_skanera(rodzic)
-        # DWA kierunki zamiast jednego przycisku. Różnią się kolorem, bo
-        # pomyłka kierunku to błędny stan magazynu.
-        self.btn_dodaj.config(text="➜  DODAJ DO SCHOWKA  (Enter)",
-                              bg="#2980b9", fg="white")
+        # DWA KIERUNKI: pobranie i zwrot.
+        #
+        # ⚠️ RAMKĘ PRZYCISKÓW PRZYPINAMY DO DOŁU (`side=tk.BOTTOM`).
+        # Panel skanera ma `pack_propagate(False)` i stałą wysokość, a ramka
+        # przycisków jest w nim OSTATNIA — gdy miniatura rysunku zajmie
+        # miejsce, cała ramka wypada poza panel i znikają OBA przyciski
+        # (14.09.2026: „gdzie jest te zdejmij?" — nie było też „Dodaj").
+        # Przypięta do dołu ma pierwszeństwo i zawsze zostaje widoczna.
+        przyciski = self.btn_dodaj.master
+        przyciski.pack_forget()
+        przyciski.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(8, 12))
+
+        self.btn_dodaj.config(text="➜  DODAJ  (Enter)", bg="#2980b9",
+                              fg="white")
         self.btn_zdejmij = tk.Button(
-            self.btn_dodaj.master, text="←  ZDEJMIJ ZE SCHOWKA  (zwrot)",
-            command=self._zdejmij, font=("Arial", 9, "bold"),
-            bg="#e67e22", fg="white", state=tk.DISABLED)
-        self.btn_zdejmij.pack(fill=tk.X, pady=(4, 0))
+            przyciski, text="←  ZDEJMIJ  (zwrot)", command=self._zdejmij,
+            font=("Arial", 10, "bold"), bg="#e67e22", fg="white",
+            state=tk.DISABLED)
+        self.btn_zdejmij.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                              padx=(8, 0))
 
     # ── stan arkusza czytany NA ŚWIEŻO ───────────────────────────────────
     def _con_projektu(self):
@@ -454,6 +469,32 @@ class SchowekWindow(WydanieWindow):
         s = self._schowek_lub_zaloz()
         if not s:
             return
+        # ⛔ PONAD STAN — TWARDA BLOKADA. Subiekt i tak odrzuci RW, wiec
+        # przepuszczenie tego przesunieloby blad na koniec sesji, gdy
+        # magazynier ma juz wszystko zebrane.
+        #
+        # ⚠️ Od stanu odejmujemy CALY SCHOWEK, nie tylko biezacy projekt:
+        # ten sam detal bywa pobrany na kilka projektow naraz, a fizycznie
+        # z polki schodzi raz. Liczenie per projekt pozwoliloby wydac
+        # trzy razy to samo (14.09.2026).
+        if kierunek > 0:
+            # ⚠️ STAN BIERZEMY Z ZESKANOWANEJ POZYCJI, nie z planu projektu.
+            # `_stan_symbolu` czyta `self.plan`, który zna tylko pozycje z ZK
+            # i PW TEGO projektu — dla detalu spoza planu zwracał None
+            # i blokada w ogóle się nie wykonywała. `poz_biezaca["stan"]`
+            # pochodzi wprost z kartoteki Subiekta, więc jest zawsze
+            # (14.09.2026: 3455 szt. weszło przy stanie 0).
+            stan = p.get("stan")
+            if stan is None:
+                stan = self._stan_symbolu(p["symbol"])
+            if stan is not None:
+                w_schowku = sum(x["ilosc"] for x in self.zawartosc
+                                if x["symbol"].strip().upper()
+                                == p["symbol"].strip().upper())
+                wolne = stan - w_schowku
+                if ile > wolne:
+                    return self._ponad_stan(p, ile, wolne, w_schowku)
+
         funkcja = SCH.pobrano if kierunek > 0 else SCH.oddano
         etykieta = "POBRANO" if kierunek > 0 else "ODDANO"
         try:
@@ -595,20 +636,127 @@ class SchowekWindow(WydanieWindow):
             raise RuntimeError("Most nie potwierdził numeru dokumentu.")
         return numer
 
+    def _ponad_stan(self, poz, chciane, wolne, w_schowku):
+        """Nie ma tyle na magazynie — mowimy DLACZEGO, nie tylko ze nie.
+
+        Magazynier musi wiedziec, czy zabraklo na polce, czy sam wczesniej
+        wzial ten detal na inny projekt — to dwie rozne sytuacje i dwie
+        rozne reakcje.
+        """
+        stan = self._stan_symbolu(poz["symbol"])
+        czesci = ["Na magazynie: %s szt." % _ilo(stan or 0)]
+        if w_schowku:
+            czesci.append("W schowku juz masz: %s szt. (wszystkie projekty)"
+                          % _ilo(w_schowku))
+        czesci.append("Zostaje do pobrania: %s szt." % _ilo(max(wolne, 0)))
+        self._uwaga("⛔ %s — chcesz %s szt.\n%s"
+                    % (poz["symbol"], _ilo(chciane), "   ·   ".join(czesci)),
+                    BLAD_TLO)
+        try:
+            self.bell()
+        except tk.TclError:
+            pass
+
+    def _popraw_ilosc(self):
+        """Wpisanie NOWEJ ilości wprost — zamiast liczenia, ile zdjąć.
+
+        Magazynier pomylił się przy wpisywaniu i chce po prostu poprawić
+        liczbę (14.09.2026: „chcę móc edytować w schowku ilość W SCHOWKU").
+
+        Pod spodem powstaje RUCH KORYGUJĄCY na różnicę, nie kasowanie
+        historii — inaczej zniknąłby ślad, kto ile faktycznie wziął.
+        """
+        s = self._schowek()
+        projekt, symbol = self._zaznaczony_wiersz()
+        if not s or not symbol:
+            return self._uwaga("Zaznacz wiersz, w którym chcesz poprawić "
+                               "ilość.", None)
+        teraz = 0.0
+        for p in self.zawartosc:
+            if p["symbol"] == symbol and (p.get("projekt") or "") == (projekt or ""):
+                teraz = p["ilosc"]
+                break
+
+        okno = tk.Toplevel(self)
+        okno.title("Popraw ilość")
+        okno.configure(bg=TLO_SEKCJI)
+        okno.transient(self)
+        okno.resizable(False, False)
+        tk.Label(okno, text=symbol, bg=TLO_SEKCJI, fg=TEKST,
+                 font=("Arial", 13, "bold")).pack(padx=24, pady=(16, 2))
+        tk.Label(okno, text="projekt %s   ·   teraz w schowku: %s szt."
+                 % (projekt or "—", _ilo(teraz)), bg=TLO_SEKCJI,
+                 fg=TEKST_SZARY, font=("Arial", 9)).pack(padx=24)
+
+        var = tk.StringVar(value=_ilo(teraz))
+        pole = tk.Spinbox(okno, textvariable=var, from_=0, to=999999,
+                          width=10, font=("Arial", 16), justify="center")
+        pole.pack(pady=12)
+        pole.focus_set()
+        pole.selection_range(0, tk.END)
+
+        def zapisz():
+            ile = _liczba(var.get(), -1)
+            if ile < 0:
+                return messagebox.showwarning(
+                    "Popraw ilość", "Podaj liczbę nie mniejszą od zera.",
+                    parent=okno)
+            try:
+                nowa_ilosc = SCH.ustaw_ilosc(
+                    s["id"], symbol, ile, projekt=projekt,
+                    operator=(self.var_wydal.get() or "").strip())
+            except SCH.BladSchowka as e:
+                return messagebox.showerror("Popraw ilość", str(e), parent=okno)
+            okno.destroy()
+            self._odswiez_zawartosc()
+            self._uwaga("✏ %s (projekt %s): %s → %s szt."
+                        % (symbol, projekt or "—", _ilo(teraz),
+                           _ilo(nowa_ilosc)), UWAGA_TLO)
+
+        przyciski = tk.Frame(okno, bg=TLO_SEKCJI)
+        przyciski.pack(pady=(0, 16))
+        tk.Button(przyciski, text="Zapisz", command=zapisz, bg="#27ae60",
+                  fg="white", font=("Arial", 10, "bold"), padx=20,
+                  pady=4).pack(side=tk.LEFT, padx=4)
+        tk.Button(przyciski, text="Anuluj", command=okno.destroy,
+                  font=("Arial", 9), padx=14).pack(side=tk.LEFT, padx=4)
+        okno.bind("<Return>", lambda _e: zapisz())
+        okno.bind("<Escape>", lambda _e: okno.destroy())
+        wysrodkuj(okno, self)
+        okno.grab_set()
+
+    def _zaznaczony_wiersz(self):
+        """(projekt, symbol) zaznaczonego wiersza albo (None, None).
+
+        iid ma postac „projekt|symbol", bo ten sam detal bywa na dwoch
+        projektach naraz. Wersja z okna wydan zwracala sam symbol i nie
+        trafiala we wlasciwy wiersz (14.09.2026: „Usun pozycje nie dziala").
+        """
+        wyb = self.tab.selection()
+        if not wyb:
+            return None, None
+        iid = wyb[0]
+        if "|" in iid:
+            projekt, symbol = iid.split("|", 1)
+            return projekt or None, symbol
+        return None, iid
+
     def _usun_z_sesji(self):
         s = self._schowek()
-        symbol = self._zaznaczony()
+        projekt, symbol = self._zaznaczony_wiersz()
         if not s or not symbol:
-            return
+            return self._uwaga("Zaznacz wiersz, który chcesz usunąć.", None)
         if not messagebox.askyesno(
                 "Usuń pozycję",
-                "Usunąć „%s” ze schowka razem z całą historią ruchów?\n\n"
+                "Usunąć „%s” (projekt %s) razem z całą historią ruchów?\n\n"
                 "To jest cofnięcie POMYŁKI skanowania — nie zostanie żaden "
-                "ślad.\nJeśli monter fizycznie oddaje element, użyj "
-                "„Zdejmij ze schowka”." % symbol, parent=self):
+                "ślad.\n"
+                "Jeśli monter fizycznie oddaje element, użyj "
+                "„Zdejmij ze schowka”." % (symbol, projekt or "—"),
+                parent=self):
             return
         try:
-            SCH.usun_pozycje(s["id"], symbol)
+            SCH.usun_pozycje(s["id"], symbol, projekt=projekt)
         except SCH.BladSchowka as e:
             return self._uwaga("⛔ %s" % e, BLAD_TLO)
         self._odswiez_zawartosc()
@@ -698,6 +846,66 @@ class SchowekWindow(WydanieWindow):
             czesci.append("POBRAŁ: %s" % ", ".join(ludzie))
         return zloz_uwagi(projekt, "   ".join(czesci) if czesci else None)
 
+    def _podglad_rw(self):
+        """Co powstanie w Subiekcie — OSOBNA SEKCJA NA KAZDY PROJEKT.
+
+        Nie dziedziczymy wersji z okna wydan: tamta wola `_uwagi_rw()` bez
+        argumentow i pokazuje jeden dokument, a tu powstaje ich tyle, ile
+        projektow (14.09.2026: „Podglad RW nie dziala" — leciał TypeError).
+        """
+        if not self.zawartosc:
+            return
+        grupy = {}
+        for p in self.zawartosc:
+            grupy.setdefault(p.get("projekt") or "(brak projektu)", []).append(p)
+
+        okno = tk.Toplevel(self)
+        okno.title("Podgląd — co powstanie w Subiekcie")
+        okno.geometry("860x560")
+        okno.transient(self)
+        tk.Label(okno, text="POWSTANIE %d DOKUMENT(ÓW) RW" % len(grupy),
+                 bg="#2980b9", fg="white", font=("Arial", 11, "bold"),
+                 anchor="w", padx=12, pady=8).pack(fill=tk.X)
+
+        stopka = tk.Frame(okno, padx=12, pady=10)
+        stopka.pack(side=tk.BOTTOM, fill=tk.X)
+        tk.Button(stopka, text="Zamknij", command=okno.destroy,
+                  width=12).pack(side=tk.RIGHT)
+
+        plotno = tk.Frame(okno)
+        plotno.pack(fill=tk.BOTH, expand=True, padx=10, pady=(8, 0))
+        for projekt, poz in sorted(grupy.items()):
+            szt = sum(x["ilosc"] for x in poz)
+            tk.Label(plotno, text="RW — projekt %s   (%d poz. / %s szt.)"
+                     % (projekt, len(poz), _ilo(szt)), anchor="w",
+                     font=("Arial", 10, "bold"), bg="#eef3f7",
+                     padx=8, pady=4).pack(fill=tk.X, pady=(8, 0))
+            tk.Label(plotno,
+                     text="Uwagi: " + self._uwagi_rw(projekt, poz).replace(
+                         chr(10), "  ⏎  "),
+                     font=("Arial", 8), fg="gray30", anchor="w",
+                     padx=8).pack(fill=tk.X)
+            tab = ttk.Treeview(plotno, columns=("symbol", "nazwa", "ilosc",
+                                                "stan", "pobral"),
+                               show="headings", height=min(len(poz), 6))
+            for k, n, w in (("symbol", "Symbol", 150), ("nazwa", "Nazwa", 260),
+                            ("ilosc", "Ilość", 70), ("stan", "Stan", 60),
+                            ("pobral", "Pobrał", 130)):
+                tab.heading(k, text=n)
+                tab.column(k, width=w, anchor="e" if k == "ilosc" else "w")
+            tab.tag_configure("brak", background=BLAD_TLO)
+            for x in poz:
+                stan = self._stan_symbolu(x["symbol"])
+                # Czerwony wiersz od razu mówi, czego Subiekt nie wyda.
+                zle = stan is not None and x["ilosc"] > stan
+                tab.insert("", tk.END, tags=("brak",) if zle else (),
+                           values=(x["symbol"], x.get("nazwa", ""),
+                                   _ilo(x["ilosc"]),
+                                   _ilo(stan) if stan is not None else "—",
+                                   x.get("monterzy") or "—"))
+            tab.pack(fill=tk.X, padx=8)
+        wysrodkuj(okno, self)
+
     # ── rozliczenie: JEDNO RW NA PROJEKT ─────────────────────────────────
     def _zakoncz(self):
         """Tyle dokumentów, ile projektów w schowku.
@@ -726,6 +934,24 @@ class SchowekWindow(WydanieWindow):
                 "Usuń je albo zeskanuj ponownie z wybranym projektem — "
                 "RW musi mieć numer projektu w Uwagach.", parent=self)
 
+        # ⛔ STANY NA ŚWIEŻO, TUŻ PRZED ZAPISEM. Blokada przy skanowaniu
+        # sprawdza stan z chwili skanu — a między skanem a „Wydaj" mógł
+        # minąć kwadrans i ktoś inny mógł ten sam detal zabrać. Subiekt
+        # i tak odrzuci dokument, ale wtedy magazynier dowiaduje się na
+        # końcu, z komunikatu mostu (14.09.2026).
+        braki = self._sprawdz_stany(grupy)
+        if braki:
+            lista = "\n".join(
+                "   %-18s potrzeba %s, na stanie %s"
+                % (s, _ilo(chc), _ilo(ma)) for s, chc, ma in braki[:12])
+            if not messagebox.askyesno(
+                    "Brakuje na magazynie",
+                    "Subiekt nie wyda tych pozycji — nie ma ich na stanie:\n\n"
+                    "%s\n\nWystawić mimo to? (dokumenty z brakami zostaną "
+                    "odrzucone)" % lista,
+                    icon="warning", default="no", parent=self):
+                return
+
         opis = "\n".join(
             "   %s: %d poz. / %s szt."
             % (pr, len(poz), _ilo(sum(x["ilosc"] for x in poz)))
@@ -747,6 +973,44 @@ class SchowekWindow(WydanieWindow):
                 bledy.append((projekt, str(e)))
                 break          # nie brniemy dalej — reszta zostaje w schowku
         self._po_wystawieniu(s, udane, bledy)
+
+    def _sprawdz_stany(self, grupy):
+        """[(symbol, chciane, na_stanie)] dla pozycji bez pokrycia.
+
+        Pyta Subiekta o stany WSZYSTKICH symboli jednym zapytaniem i sumuje
+        zapotrzebowanie po projektach: ten sam detal wydawany na trzy
+        projekty schodzi z półki raz, więc porównujemy SUMĘ, nie każdy
+        projekt osobno.
+
+        Cisza przy błędzie jest celowa — brak odpowiedzi mostu nie może
+        zablokować wydania, bo suchy przebieg i tak to złapie.
+        """
+        chciane = {}
+        for pozycje in grupy.values():
+            for p in pozycje:
+                k = p["symbol"].strip().upper()
+                chciane[k] = chciane.get(k, 0.0) + float(p["ilosc"])
+        if not chciane:
+            return []
+        try:
+            import subiekt_stany
+            kartoteki = subiekt_stany.query_stock(
+                sorted({p["symbol"] for g in grupy.values() for p in g}),
+                timeout=180) or {}
+        except Exception as e:
+            print("Nie sprawdzono stanow przed RW: %s" % e)
+            return []
+
+        po_kluczu = {(k or "").strip().upper(): v for k, v in kartoteki.items()}
+        braki = []
+        for symbol, ile in sorted(chciane.items()):
+            k = po_kluczu.get(symbol)
+            if not k:
+                continue                  # kartoteki nie ma — powie suchy przebieg
+            stan = self._stan_w_magazynie(k)
+            if ile > stan:
+                braki.append((symbol, ile, stan))
+        return braki
 
     def _wystaw_rw(self, projekt, pozycje):
         """Jeden dokument dla jednego projektu. Zwraca numer albo rzuca.

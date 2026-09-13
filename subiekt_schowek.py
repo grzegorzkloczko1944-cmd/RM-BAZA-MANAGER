@@ -333,19 +333,70 @@ def usun_projekt(schowek_id, projekt, sciezka=None):
     zapisz(dane, sciezka)
 
 
-def usun_pozycje(schowek_id, symbol, sciezka=None):
+def usun_pozycje(schowek_id, symbol, projekt=None, sciezka=None):
     """Kasuje CAŁĄ historię jednego symbolu — cofnięcie pomyłki skanowania.
 
     To NIE jest zwrot od montera: zwrot zostawia ślad (`oddano`), a to
     czyści tak, jakby skanu nigdy nie było. Do użycia, gdy magazynier
-    dopisał pozycję do złego schowka.
+    dopisał pozycję do złego projektu.
+
+    `projekt` zawęża kasowanie do jednego projektu — ten sam detal bywa
+    w schowku na dwóch naraz i wtedy czyścimy tylko wskazany wiersz.
     """
     dane = wczytaj(sciezka)
     s = _znajdz(dane, schowek_id)
     _wymagaj_otwartego(s)
     k = _klucz(symbol)
-    s["ruchy"] = [r for r in s.get("ruchy", []) if _klucz(r["symbol"]) != k]
+    pr = sam_numer(projekt) if projekt else None
+    s["ruchy"] = [r for r in s.get("ruchy", [])
+                  if _klucz(r["symbol"]) != k
+                  or (pr is not None and sam_numer(r.get("projekt")) != pr)]
     zapisz(dane, sciezka)
+
+
+def ustaw_ilosc(schowek_id, symbol, ilosc, projekt=None, monter=None,
+                operator=None, sciezka=None):
+    """Poprawia ilość pozycji w schowku na dokładnie `ilosc`.
+
+    Magazynier pomylił się przy wpisywaniu i chce po prostu wpisać dobrą
+    liczbę, zamiast liczyć, ile trzeba zdjąć (14.09.2026: „chcę móc
+    edytować w schowku ilość W SCHOWKU").
+
+    ⚠️ Historii NIE KASUJEMY — dopisujemy RUCH KORYGUJĄCY na różnicę.
+    Skasowanie i wpisanie od nowa zatarłoby ślad, kto ile faktycznie wziął,
+    a to jedyna rzecz, po której da się później dojść, gdzie podział się
+    detal. W „Historii ruchów" widać wtedy pobranie i korektę osobno.
+
+    `ilosc=0` czyści pozycję bilansem, ale ślad zostaje.
+    """
+    ile = float(ilosc)
+    if ile < 0:
+        raise BladSchowka("Ilość nie może być ujemna.")
+    teraz = ile_w_schowku(schowek_id, symbol, projekt, sciezka)
+    roznica = ile - teraz
+    if abs(roznica) < 1e-9:
+        return teraz                    # nic się nie zmienia
+    dane = wczytaj(sciezka)
+    s = _znajdz(dane, schowek_id)
+    _wymagaj_otwartego(s)
+    # Nazwę i montera bierzemy z ostatniego ruchu tej pozycji, żeby wiersz
+    # w tabeli nie stracił opisu po korekcie.
+    k, pr = _klucz(symbol), sam_numer(projekt)
+    nazwa, kto = "", (monter or "")
+    for r in s.get("ruchy", []):
+        if _klucz(r["symbol"]) == k and sam_numer(r.get("projekt")) == pr:
+            nazwa = r.get("nazwa") or nazwa
+            kto = kto or (r.get("monter") or "")
+    s.setdefault("ruchy", []).append({
+        "projekt": pr, "symbol": (symbol or "").strip(), "nazwa": nazwa,
+        "ilosc": roznica,
+        "czas": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "operator": (operator or "").strip(),
+        "monter": kto,
+        "korekta": True,
+    })
+    zapisz(dane, sciezka)
+    return ile
 
 
 def wyczysc(schowek_id, sciezka=None):
