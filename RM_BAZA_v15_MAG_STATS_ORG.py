@@ -2443,7 +2443,22 @@ class MainWindow(tk.Tk):
         SCROLL_STEP_ROWS = 3
         MIN_STEP_MS = 16
 
+        #: Po ilu ms ciszy domalować arkusz. 40 ms to mniej niż przerwa
+        #: między tickami przy normalnym kręceniu, więc w trakcie przewijania
+        #: redraw się nie odpala, a po puszczeniu kółka jest natychmiastowy.
+        REDRAW_PO_MS = 40
+
         self._sheet_scroll_last_step_ts = 0.0
+        self._sheet_scroll_redraw_id = None
+
+        def domaluj():
+            """Jeden pełny redraw po zatrzymaniu kółka — kasuje ucięty pas."""
+            self._sheet_scroll_redraw_id = None
+            try:
+                mt.main_table_redraw_grid_and_text(redraw_header=True,
+                                                   redraw_row_index=True)
+            except Exception:
+                pass
 
         def stepped_mousewheel(event):
             now = time.monotonic()
@@ -2461,7 +2476,25 @@ class MainWindow(tk.Tk):
                 mt.yview_scroll(-SCROLL_STEP_ROWS, "units")
                 mt.RI.yview_scroll(-SCROLL_STEP_ROWS, "units")
                 mt.y_move_synced_scrolls("moveto", mt.yview()[0])
-            # BEZ jawnego redraw — `yview_scroll` już przerysował (patrz wyżej).
+
+            # DOMALOWANIE PO ZATRZYMANIU KÓŁKA.
+            #
+            # Samo `yview_scroll` rysuje tylko to, co uzna za potrzebne, więc
+            # przy szybkim przewijaniu zostawia niedomalowany pas u dołu
+            # (zgłoszone 13.09.2026: „zasuwa, ale obcina przy przewijaniu").
+            # Pełny redraw przy KAŻDYM ticku kosztował 213 ms i był powodem
+            # mulenia — więc robimy go RAZ, gdy kółko się zatrzyma.
+            #
+            # Kasowanie poprzedniego `after` jest tu sednem: przy ciągłym
+            # kręceniu termin przesuwa się w przód i redraw nie wykonuje się
+            # ani razu, dopiero po ostatnim ticku.
+            if self._sheet_scroll_redraw_id:
+                try:
+                    self.after_cancel(self._sheet_scroll_redraw_id)
+                except Exception:
+                    pass
+            self._sheet_scroll_redraw_id = self.after(
+                REDRAW_PO_MS, domaluj)
 
         try:
             # Tkinter .bind() zarejestrował referencję do oryginalnej metody, więc
