@@ -180,9 +180,20 @@ def naloz_z_mastera(serwer, con, project_id, log=None):
     przy ZD. Dzięki temu „Anuluj" ani padnięcie sieci nie gubi pozycji:
     następny lock nałoży ją ponownie.
 
-    Nakładanie jest IDEMPOTENTNE — `dodaj_do_bom` sprawdza duplikat, więc
-    powtórka nic nie psuje, a pozycja dodana w międzyczasie ręcznie po
-    prostu wygrywa.
+    ⚠️ ILOŚCI TEGO SAMEGO SYMBOLU SIĘ SUMUJĄ — i to jest sedno tej funkcji.
+    Projekt czekający na lock zbiera wpisy z wielu wydań: ten sam detal może
+    zostać wydany trzy razy, przez trzech magazynierów albo trzy razy przez
+    jednego. Wcześniej liczył się TYLKO PIERWSZY wpis (`dodaj_do_bom` widział
+    istniejący wiersz i wychodził), więc 2+3+5 szt. lądowało w arkuszu jako 2,
+    a Subiekt pokazywał 10 — zielone „odebrane" nigdy by nie zapaliło
+    (znalezione 14.09.2026 przy pytaniu „co się dzieje, gdy kilku userów
+    dopisze coś do tabeli tymczasowej").
+
+    Pozycja, która JUŻ JEST w BOM-ie, zostaje nietknięta: tam „Ilość (zam.)"
+    to prawdziwe zamówienie, a wydanie i tak dojdzie kolumną „dostarczone".
+
+    Nakładanie jest IDEMPOTENTNE względem powtórnego wywołania — po udanym
+    nałożeniu wpisy znikają z master, więc drugi przebieg nie ma co dodawać.
     """
     if con is None or not project_id:
         return 0
@@ -190,27 +201,39 @@ def naloz_z_mastera(serwer, con, project_id, log=None):
         wiersze = serwer.master_read("schowek-nowe-list",
                                      {"project_id": project_id})
     except Exception as e:
-        print("⚠️  Nie odczytano odłożonych pozycji schowka dla projektu "
+        print("Nie odczytano odlozonych pozycji schowka dla projektu "
               "%s: %s" % (project_id, e))
         return 0
-    ile = 0
+
+    # Scalamy PRZED zapisem: jeden wiersz w BOM-ie na symbol, ilość zsumowana.
+    scalone = {}
     for w in wiersze or ():
         symbol = (w.get("symbol") or "").strip()
         if not symbol:
             continue
-        if znajdz_w_bom(con, project_id, symbol):
-            continue                          # ktoś dodał ręcznie — nic nie robimy
+        k = symbol.upper()
+        if k not in scalone:
+            scalone[k] = {"symbol": symbol, "nazwa": w.get("nazwa") or "",
+                          "ilosc": 0.0}
+        scalone[k]["ilosc"] += float(w.get("ilosc") or 0)
+        if w.get("nazwa") and not scalone[k]["nazwa"]:
+            scalone[k]["nazwa"] = w["nazwa"]
+
+    ile = 0
+    for w in scalone.values():
+        if znajdz_w_bom(con, project_id, w["symbol"]):
+            continue                          # jest w BOM-ie — nie ruszamy
         try:
-            item_id = dodaj_do_bom(con, project_id, symbol, w.get("nazwa"),
-                                   w.get("ilosc"))
+            item_id = dodaj_do_bom(con, project_id, w["symbol"], w["nazwa"],
+                                   w["ilosc"])
         except Exception as e:
-            print("⚠️  Nie dopisano pozycji %s: %s" % (symbol, e))
+            print("Nie dopisano pozycji %s: %s" % (w["symbol"], e))
             continue
         ile += 1
         if log:
             try:
-                log(item_id, "ADD", None, None, symbol,
-                    drawing_no=symbol, item_name=w.get("nazwa") or symbol)
+                log(item_id, "ADD", None, None, w["symbol"],
+                    drawing_no=w["symbol"], item_name=w["nazwa"] or w["symbol"])
             except Exception:
                 pass                          # log nie może psuć nakładania
     return ile
