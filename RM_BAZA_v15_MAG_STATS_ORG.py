@@ -146,6 +146,70 @@ import client_version
 # SINGLE INSTANCE LOCK
 # ============================================================================
 
+def _pilnuj_okien_na_ekranie():
+    """Nie pozwala żadnemu oknu wylądować POZA obszarem widocznym.
+
+    ⛔ PO CO: okno ustawione poza ekranem jest NIEWIDOCZNE, ale nadal działa —
+    a jeśli jest modalne (`grab_set`), przechwytuje wszystkie kliknięcia
+    i cały program wygląda na zawieszony. Zdarzyło się 13.09.2026 po
+    uśpieniu komputera: dialog „RFQ — brak konfiguracji" stanął na x=3283
+    (ekran ma 2560 px), użytkownik widział tylko martwe okno główne.
+    Pętla Tk odpowiadała normalnie — to nie było zawieszenie, tylko
+    niewidoczny modal.
+
+    DLACZEGO GLOBALNIE, A NIE W KAŻDYM OKNIE: pozycję ustawia 39 miejsc
+    w kodzie. Poprawianie ich po kolei to gwarancja, że któreś się pominie —
+    a wystarczy jedno, żeby problem wrócił. Przechwytujemy więc `geometry()`
+    raz, dla wszystkich okien Tk naraz.
+
+    ⚠️ LICZY SIĘ PULPIT WIRTUALNY, NIE JEDEN EKRAN. Drugi monitor bywa po
+    LEWEJ, czyli na współrzędnych UJEMNYCH (u autora: X=-2560). Przycinanie
+    do `winfo_screenwidth()` ściągałoby okna z tego monitora na główny —
+    gorsze niż problem, który naprawiamy. Dlatego granice bierzemy
+    z `winfo_vroot*`, a gdy Tk ich nie zna, korekty NIE ROBIMY.
+    """
+    import re as _re
+
+    _oryginalna = tk.Wm.wm_geometry
+    _wzor = _re.compile(r"^(?:(\d+)x(\d+))?\+(-?\d+)\+(-?\d+)$")
+
+    def _geometry(self, newGeometry=None):
+        if not newGeometry:
+            return _oryginalna(self, newGeometry)
+        dopasowanie = _wzor.match(newGeometry)
+        if not dopasowanie:
+            return _oryginalna(self, newGeometry)      # np. samo "800x600"
+        szer_txt, wys_txt, x, y = dopasowanie.groups()
+        x, y = int(x), int(y)
+        try:
+            # Cały pulpit, ze wszystkimi monitorami. vrootx/y bywa ujemne.
+            lewo = self.winfo_vrootx()
+            gora = self.winfo_vrooty()
+            prawo = lewo + self.winfo_vrootwidth()
+            dol = gora + self.winfo_vrootheight()
+            if prawo <= lewo or dol <= gora:
+                return _oryginalna(self, newGeometry)  # Tk nie zna granic
+            szer = int(szer_txt) if szer_txt else max(self.winfo_reqwidth(), 200)
+            wys = int(wys_txt) if wys_txt else max(self.winfo_reqheight(), 100)
+            # Zostaw okno tam, gdzie jest, jeśli MIEŚCI SIĘ w pulpicie —
+            # przesuwamy dopiero to, co faktycznie z niego wypadło.
+            nx = min(max(x, lewo), max(lewo, prawo - szer))
+            ny = min(max(y, gora), max(gora, dol - wys))
+            if (nx, ny) != (x, y):
+                print(f"⚠️  Okno poza ekranem: +{x}+{y} → +{nx}+{ny}")
+                newGeometry = (f"{szer_txt}x{wys_txt}" if szer_txt else "") \
+                              + f"+{nx}+{ny}"
+        except Exception:
+            pass            # nigdy nie blokuj otwarcia okna przez tę kontrolę
+        return _oryginalna(self, newGeometry)
+
+    tk.Wm.wm_geometry = _geometry
+    tk.Wm.geometry = _geometry
+
+
+_pilnuj_okien_na_ekranie()
+
+
 def _fmt_ilo(x):
     """Ilość bez zbędnego ogona: 3 zamiast 3.0, ale 2.5 zostaje."""
     try:
