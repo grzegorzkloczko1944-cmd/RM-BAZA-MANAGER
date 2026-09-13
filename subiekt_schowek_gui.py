@@ -56,11 +56,18 @@ class SchowekWindow(WydanieWindow):
 
     def __init__(self, parent, project_id, project_name=None,
                  con_projektu=None, mamy_lock=False):
-        #: Połączenie arkusza do bazy projektu (db_manager.project_con) —
-        #: potrzebne, żeby dopisać pozycję spoza BOM-u. Bez locka jest
-        #: READ-ONLY i wtedy wiersz idzie do poczekalni w master.
-        self.con_projektu = con_projektu
-        self.mamy_lock = bool(mamy_lock)
+        #: Arkusz RM_BAZA — bierzemy z niego POŁĄCZENIE I LOCK NA ŚWIEŻO,
+        #: w chwili zapisu.
+        #:
+        #: ⚠️ NIE wolno zapamiętać `project_con` przy otwieraniu okna:
+        #: RM_BAZA zamyka i otwiera to połączenie przy każdym przełączeniu
+        #: projektu i przy przejmowaniu locka, więc zapamiętany uchwyt
+        #: wywala się jako „Cannot operate on a closed database" (13.09.2026,
+        #: pozycja 2627-200.12 w projekcie 3500). Z tego samego powodu lock
+        #: czytamy na bieżąco — mógł dojść albo zniknąć, odkąd okno stoi.
+        self._arkusz = parent
+        self._con_awaryjne = con_projektu
+        self._lock_awaryjny = bool(mamy_lock)
         #: Jeden schowek na projekt — zakładany przy pierwszym skanie.
         self.schowek_id = None
         #: Zawartość: [{symbol, nazwa, ilosc, monterzy}]
@@ -160,6 +167,33 @@ class SchowekWindow(WydanieWindow):
             command=self._zdejmij, font=("Arial", 9, "bold"),
             bg="#e67e22", fg="white", state=tk.DISABLED)
         self.btn_zdejmij.pack(fill=tk.X, pady=(4, 0))
+
+    # ── stan arkusza czytany NA ŚWIEŻO ───────────────────────────────────
+    def _con_projektu(self):
+        """Aktualne połączenie arkusza do bazy projektu albo None.
+
+        Pytamy arkusz za każdym razem, bo między otwarciem okna a zapisem
+        mógł przełączyć projekt lub przejąć lock — a wtedy stary uchwyt
+        jest już zamknięty.
+        """
+        con = None
+        db = getattr(self._arkusz, "db_manager", None)
+        if db is not None:
+            con = getattr(db, "project_con", None)
+        if con is None:
+            con = self._con_awaryjne
+        if con is None:
+            return None
+        try:
+            con.execute("SELECT 1")          # żywe? (zamknięte rzuca wyjątek)
+        except Exception:
+            return None
+        return con
+
+    def _czy_lock(self):
+        """Czy arkusz TERAZ trzyma lock tego projektu."""
+        stan = getattr(self._arkusz, "have_lock", None)
+        return bool(self._lock_awaryjny if stan is None else stan)
 
     # ── schowek projektu ─────────────────────────────────────────────────
     def _schowek(self):
@@ -472,11 +506,18 @@ class SchowekWindow(WydanieWindow):
         try:
             import rm_klient
             dopisane, odlozone = BOM.przygotuj(
-                self.con_projektu, rm_klient, self.project_id, pozycje,
-                self.mamy_lock, kto=(self.var_wydal.get() or "").strip())
-        except BOM.BladBom as e:
-            return messagebox.showerror("RW nie zostało wystawione", str(e),
-                                        parent=self)
+                self._con_projektu(), rm_klient, self.project_id, pozycje,
+                self._czy_lock(), kto=(self.var_wydal.get() or "").strip())
+        except Exception as e:
+            # ŁAPIEMY WSZYSTKO, nie tylko BladBom: wyjątek lecący z `after`
+            # nie ma kto obsłużyć, więc przycisk zostawałby na „Zapisuję…"
+            # i okno wyglądałoby na zawieszone (13.09.2026).
+            self.btn_zakoncz.config(state=tk.NORMAL,
+                                    text="Wydaj / Utwórz RW\nw Subiekcie")
+            return messagebox.showerror(
+                "RW nie zostało wystawione",
+                "%s\n\nTowar NIE zszedł ze stanu, schowek został nietknięty."
+                % e, parent=self)
         self._po_bom = (dopisane, odlozone)
         super()._zapisz_po_suchym(pozycje, kroki)
 
