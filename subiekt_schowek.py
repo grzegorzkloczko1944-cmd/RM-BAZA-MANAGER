@@ -67,13 +67,13 @@ from datetime import datetime
 #: subiekt_kolumny.json), bo to ta sama kategoria: stan tego komputera.
 SCIEZKA = r"C:\RMPAK_CLIENT\schowki_montazowe.json"
 
-#: Statusy. ROZLICZONY jest końcowy — po nim ruchy są zamrożone, bo RW
-#: istnieje już w Subiekcie i cofnięcie rozjechałoby stan magazynu.
+#: Jedyny status, jaki schowek przyjmuje.
+#:
+#: Nie ma juz ROZLICZONEGO: schowek jest JEDEN na stanowisko i nigdy sie
+#: nie zamyka. Po wystawieniu RW znikaja tylko ruchy tego projektu
+#: (`usun_projekt`), a reszta zostaje — bo moga tam czekac pozycje innych
+#: projektow. Pole `status` zostaje w pliku, bo po nim szuka `biezacy()`.
 OTWARTY = "OTWARTY"
-ROZLICZONY = "ROZLICZONY"
-
-#: Etykieta schowka bez projektu.
-OGOLNY = "OGÓLNY"
 
 
 class BladSchowka(Exception):
@@ -166,26 +166,6 @@ def utworz(sciezka=None, **_zgodnosc):
     return nowy["id"]
 
 
-def lista(tylko_otwarte=False, sciezka=None, **_zgodnosc):
-    """Schowki od najnowszego, z licznikiem pozycji i sztuk.
-
-    W praktyce OTWARTY jest zawsze jeden — `biezacy()` zwraca właśnie jego.
-    Ta funkcja przydaje się do podglądu historii i sprzątania.
-    """
-    dane = wczytaj(sciezka)
-    wynik = []
-    for s in sorted(dane["schowki"], key=lambda x: x["id"], reverse=True):
-        if tylko_otwarte and s.get("status") != OTWARTY:
-            continue
-        stan = _bilans(s)
-        w = {k: v for k, v in s.items() if k != "ruchy"}
-        w["pozycji"] = len(stan)
-        w["sztuk"] = sum(p["ilosc"] for p in stan)
-        w["projekty"] = sorted({p["projekt"] for p in stan if p["projekt"]})
-        wynik.append(w)
-    return wynik
-
-
 def biezacy(sciezka=None):
     """JEDEN otwarty schowek stanowiska — zakładany, gdy go jeszcze nie ma.
 
@@ -211,25 +191,6 @@ def pobierz(schowek_id, sciezka=None):
     return {k: v for k, v in s.items() if k != "ruchy"}
 
 
-def usun(schowek_id, sciezka=None):
-    """Kasuje schowek z pliku — sprzątanie po rozliczonych albo pomyłkach."""
-    dane = wczytaj(sciezka)
-    dane["schowki"].remove(_znajdz(dane, schowek_id))
-    zapisz(dane, sciezka)
-
-
-def opis(s):
-    """Etykieta na listę: „2627 — Kowalski" albo „OGÓLNY — Nowak".
-
-    Numer przepuszczamy przez `sam_numer` także przy WYŚWIETLANIU, żeby
-    schowki zapisane przed 13.09.2026 (z pełną nazwą „3500 dupal") wyglądały
-    tak samo jak nowe. Plik zostaje nietknięty — poprawiamy tylko widok.
-    """
-    czolo = sam_numer(s.get("projekt")) or s.get("nazwa") or OGOLNY
-    return "%s — %s" % (czolo, s.get("monter") or "?")
-
-
-# ── ruchy ───────────────────────────────────────────────────────────────────
 def _klucz(symbol):
     """Symbol do porównań: TRIM + wielkie litery.
 
@@ -272,18 +233,6 @@ def _bilans(s):
     return out
 
 
-def wg_projektow(schowek_id, sciezka=None):
-    """{numer_projektu: [pozycje]} — po jednym RW na projekt.
-
-    Pozycje BEZ projektu trafiają pod klucz "" — wołający musi zdecydować,
-    co z nimi zrobić (dziś okno na nie nie pozwala).
-    """
-    grupy = {}
-    for p in stan_schowka(schowek_id, sciezka):
-        grupy.setdefault(p["projekt"] or "", []).append(p)
-    return grupy
-
-
 def stan_schowka(schowek_id, sciezka=None):
     return _bilans(_znajdz(wczytaj(sciezka), schowek_id))
 
@@ -302,11 +251,15 @@ def historia(schowek_id, sciezka=None):
 
 
 def _wymagaj_otwartego(s):
+    """Zabezpieczenie przed wpisem z pliku po starszej wersji programu.
+
+    Dzis schowek jest zawsze otwarty — status ROZLICZONY istnial, gdy schowek
+    nalezal do projektu i zamykal sie po RW.
+    """
     if s.get("status") != OTWARTY:
         raise BladSchowka(
-            "Schowek jest już rozliczony (RW %s). Zwrot wymaga ponownego "
-            "przyjęcia na magazyn — otwórz PW zwrotu."
-            % (s.get("rw_numer") or "?"))
+            "Ten schowek pochodzi ze starszej wersji i jest zamkniety. "
+            "Zamknij i otworz okno ponownie — powstanie nowy.")
 
 
 def _ruch(schowek_id, symbol, ilosc, nazwa, operator, monter, projekt, sciezka):
@@ -421,42 +374,6 @@ def do_rozliczenia(schowek_id, sciezka=None):
 #: dało się jeszcze zajrzeć w „Historię ruchów" i sprawdzić, kto co wziął,
 #: gdy ktoś zgłosi wątpliwość nazajutrz.
 DNI_HISTORII = 3
-
-
-def posprzataj(sciezka=None):
-    """Kasuje rozliczone schowki starsze niż DNI_HISTORII. Zwraca ile usunięto.
-
-    Wołane po każdym rozliczeniu — plik nie rośnie w nieskończoność, a lista
-    pokazuje to, co faktycznie w robocie.
-    """
-    from datetime import timedelta
-    granica = (datetime.now() - timedelta(days=DNI_HISTORII)).strftime(
-        "%Y-%m-%d %H:%M:%S")
-    dane = wczytaj(sciezka)
-    przed = len(dane["schowki"])
-    dane["schowki"] = [
-        s for s in dane["schowki"]
-        if s.get("status") != ROZLICZONY
-        or (s.get("rozliczony") or s.get("data") or "") > granica
-    ]
-    ile = przed - len(dane["schowki"])
-    if ile:
-        zapisz(dane, sciezka)
-    return ile
-
-
-def oznacz_rozliczony(schowek_id, rw_numer, sciezka=None):
-    """Zamyka schowek po UDANYM zapisie RW (dopiero po read-backie).
-
-    Wołać wyłącznie wtedy, gdy dokument faktycznie stoi w Subiekcie —
-    inaczej ruchy zostaną zamrożone bez pokrycia w dokumencie.
-    """
-    dane = wczytaj(sciezka)
-    s = _znajdz(dane, schowek_id)
-    s["status"] = ROZLICZONY
-    s["rw_numer"] = (rw_numer or "").strip() or None
-    s["rozliczony"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    zapisz(dane, sciezka)
 
 
 def zajete_w_schowkach(tylko_otwarte=True, sciezka=None):
