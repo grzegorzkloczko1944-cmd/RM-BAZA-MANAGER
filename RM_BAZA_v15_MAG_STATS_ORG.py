@@ -2044,6 +2044,25 @@ class MainWindow(tk.Tk):
         )
         self.btn_wydaj.pack(side=tk.LEFT, padx=5, pady=10)
 
+        # Przycisk SCHOWEK — bufor montażowy, TUŻ OBOK „Wydaj" (żądanie
+        # użytkownika: „klawisz do schowka ma być po prawej stronie klawisza
+        # Wydaj"). Różnica względem „Wydaj": schowek ZAPISUJE ruchy do bazy
+        # projektu, więc wymaga locka (BUFOR_SCHOWEK_MONTAZOWY.md).
+        self.btn_schowek = tk.Button(
+            bt_r2,
+            text="🧺 Schowek",
+            command=self.open_schowek_window,
+            bg="#8e44ad",
+            fg="white",
+            font=("Arial", 10),
+            padx=15,
+            pady=5,
+            relief=tk.RAISED,
+            bd=2,
+            state=tk.DISABLED  # Aktywne tylko przy wybranym projekcie
+        )
+        self.btn_schowek.pack(side=tk.LEFT, padx=5, pady=10)
+
         # Przycisk CHAT (skrajnie po prawej)
         tk.Button(
             bt_r2,
@@ -6131,7 +6150,7 @@ class MainWindow(tk.Tk):
         # DRUKUJ i WYDAJ chodzą po tej samej roli co EXPORT. WYDAJ nie
         # wymaga locka projektu — okno nic nie zapisuje do bazy projektu,
         # tylko wystawia RW w Subiekcie (patrz open_wydanie_window).
-        for nazwa in ('btn_print', 'btn_wydaj'):
+        for nazwa in ('btn_print', 'btn_wydaj', 'btn_schowek'):
             btn = getattr(self, nazwa, None)
             if btn is not None:
                 btn.config(state=tk.NORMAL if wolno else tk.DISABLED)
