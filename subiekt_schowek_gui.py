@@ -299,8 +299,13 @@ class SchowekWindow(WydanieWindow):
         try:
             db = getattr(self._arkusz, "db_manager", None)
             if db is not None:
+                # TYLKO MACHINE. Projekty WAREHOUSE to magazyny wewnetrzne,
+                # nie maszyny — nie wydaje sie na nie detali ze schowka
+                # (14.09.2026: przez brak filtra do poczekalni trafil
+                # projekt 16 CHWYTAK, ktory nie ma nawet pliku bazy).
                 nazwy = [w["name"] for w in db.master_read("projekty-do-selektora")
-                         if w.get("active")]
+                         if w.get("active")
+                         and (w.get("project_type") or "MACHINE") == "MACHINE"]
         except Exception as e:
             print("Nie wczytano listy projektow: %s" % e)
         if self.project_name and self.project_name not in nazwy:
@@ -687,6 +692,8 @@ class SchowekWindow(WydanieWindow):
             if db is None:
                 return None
             for w in db.master_read("projekty-do-selektora"):
+                if (w.get("project_type") or "MACHINE") != "MACHINE":
+                    continue        # WAREHOUSE — nie nasz tor
                 if SCH.sam_numer(w["name"]) == SCH.sam_numer(numer):
                     return w["project_id"]
         except Exception as e:

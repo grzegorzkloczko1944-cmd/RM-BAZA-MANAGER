@@ -10396,6 +10396,48 @@ class MainWindow(tk.Tk):
         # Odświeżanie wydań wisi teraz bezpośrednio pod przejęciem locka
         # (acquire_lock / force_acquire_lock), gdzie faktycznie ma sens.
 
+    def _naloz_pozycje_ze_schowka(self):
+        """Dopisuje do BOM-u pozycje odłożone przez schowek pod cudzym lockiem.
+
+        Schowek wystawia RW nawet wtedy, gdy projekt jest zajęty — nowy wiersz
+        trafia wtedy do poczekalni w master (`schowek_nowe_pozycje`), a nakłada
+        go ten, kto ma do tego prawo: MY, w chwili przejmowania locka. Ten sam
+        wzorzec co „Zamówiono" z wysyłki ZD (SCHOWEK_RW_ALGORYTM.md §4.4).
+
+        ⚠️ MUSI iść PRZED `_odswiez_wydane_z_subiekta`: ilość wydana z Subiekta
+        nie ma się do czego przypiąć, dopóki wiersz nie istnieje. Odwrotna
+        kolejność zostawiała pozycję z zerem (zgłoszone 14.09.2026:
+        „2536-300.03XX dodało się ale bez ilości").
+
+        Wpis kasujemy dopiero po UDANYM nałożeniu — „Anuluj" ani padnięcie
+        sieci go nie gubi, następny lock nałoży go ponownie.
+        """
+        if not self.current_project_id or not self.have_lock:
+            return
+        try:
+            import rm_klient
+            import subiekt_schowek_bom as BOM
+        except ImportError:
+            return
+        try:
+            ile = BOM.naloz_z_mastera(rm_klient, self.db_manager.project_con,
+                                      self.current_project_id,
+                                      log=self._log_item_change)
+        except Exception as e:
+            print(f"Nie nalozono pozycji ze schowka: {e}")
+            return
+        if not ile:
+            return
+        try:
+            BOM.usun_z_mastera(rm_klient, self.current_project_id)
+        except Exception as e:
+            print(f"Nie wyczyszczono poczekalni schowka: {e}")
+        # NIC PO CICHU: w arkuszu pojawiły się wiersze bez udziału użytkownika.
+        messagebox.showinfo(
+            "Nowe pozycje ze schowka",
+            f"Dopisano {ile} poz. wydanych z magazynu, gdy projekt nie byl "
+            f"przejety.\n\nIlosci uzupelni odczyt z Subiekta.", parent=self)
+
     def _odswiez_wydane_z_subiekta(self, cicho=False):
         """„Ilość dostarczonych" = suma RW z Subiekta (WYDANE_Z_SUBIEKTA_DO_ARKUSZA.md).
 
@@ -10541,6 +10583,10 @@ class MainWindow(tk.Tk):
             self._naloz_zamowienia_zd()
             # Wydania z Subiekta — tylko po PRZEJĘCIU locka: mamy świeżą
             # kopię lokalną i prawo zapisu (WYDANE_Z_SUBIEKTA_DO_ARKUSZA.md).
+            # Nowe pozycje ze schowka, odłożone gdy lock trzymał ktoś inny.
+            # MUSI iść PRZED odświeżeniem wydań: ilość z Subiekta nie ma się
+            # do czego przypiąć, dopóki wiersz nie istnieje.
+            self._naloz_pozycje_ze_schowka()
             self._odswiez_wydane_z_subiekta(cicho=True)
 
             # Aktualne „Ilość (zam.)" z ZK — NA STARCIE pracy, nie na końcu.
@@ -10647,6 +10693,10 @@ class MainWindow(tk.Tk):
             self._naloz_zamowienia_zd()
             # Wydania z Subiekta — tylko po PRZEJĘCIU locka: mamy świeżą
             # kopię lokalną i prawo zapisu (WYDANE_Z_SUBIEKTA_DO_ARKUSZA.md).
+            # Nowe pozycje ze schowka, odłożone gdy lock trzymał ktoś inny.
+            # MUSI iść PRZED odświeżeniem wydań: ilość z Subiekta nie ma się
+            # do czego przypiąć, dopóki wiersz nie istnieje.
+            self._naloz_pozycje_ze_schowka()
             self._odswiez_wydane_z_subiekta(cicho=True)
 
             # Ilości z ZK — tak samo jak przy zwykłym przejęciu. Przy WYMUSZENIU
