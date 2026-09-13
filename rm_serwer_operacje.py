@@ -869,6 +869,15 @@ ODCZYT = {
         " WHERE project_id = ?",
         ["project_id"],
     ),
+    "schowek-nowe-list": (
+        "SELECT symbol, nazwa, kto, kiedy FROM schowek_nowe_pozycje"
+        " WHERE project_id = ? ORDER BY id",
+        ["project_id"],
+    ),
+    "schowek-nowe-ile": (
+        "SELECT COUNT(*) AS n FROM schowek_nowe_pozycje WHERE project_id = ?",
+        ["project_id"],
+    ),
     "zd-cofniete-list": (
         "SELECT item_id, termin FROM zd_cofniete_pozycje WHERE project_id = ?",
         ["project_id"],
@@ -1961,6 +1970,23 @@ ZAPIS = {
         "DELETE FROM zd_zamowione_pozycje WHERE kiedy < ?",
         ["granica"],
     ),
+    # Poczekalnia nowych pozycji ze schowka montażowego — wiersze, których
+    # nie dało się zapisać wprost do projektu, bo lock trzymał ktoś inny.
+    # Nakłada je arkusz przy „Przejmij Lock" (SCHOWEK_RW_ALGORYTM.md §4.4).
+    "schowek-nowe-dodaj": (
+        "INSERT INTO schowek_nowe_pozycje"
+        " (project_id, symbol, nazwa, kto, kiedy) VALUES (?, ?, ?, ?, ?)",
+        ["project_id", "symbol", "nazwa", "kto", "kiedy"],
+    ),
+    # Granica `do_kiedy` jest OBOWIĄZKOWA przy sprzątaniu: master jest
+    # wspólny, więc między nałożeniem a wgraniem kopii ktoś mógł dołożyć
+    # swój wpis. Kasowanie „wszystkiego dla project_id" zabrałoby cudzy
+    # świeży wiersz — ten sam błąd złapano przy ZD 08.09.2026.
+    "schowek-nowe-usun": (
+        "DELETE FROM schowek_nowe_pozycje WHERE project_id = ?"
+        " AND (? IS NULL OR kiedy <= ?)",
+        ["project_id", "do_kiedy", "do_kiedy"],
+    ),
     "zd-cofniete-dodaj": (
         "INSERT OR REPLACE INTO zd_cofniete_pozycje"
         " (project_id, item_id, numer_zd, termin, kiedy) VALUES (?, ?, ?, ?, ?)",
@@ -2055,6 +2081,22 @@ MIGRACJE = [
         )""", None),
     ("ALTER TABLE zd_zamowione_pozycje ADD COLUMN supplier_id INTEGER",
      ("zd_zamowione_pozycje", "supplier_id")),
+    # Poczekalnia nowych pozycji ze schowka montażowego (§4.4 algorytmu).
+    #
+    # ⚠️ Klucz to `id`, a NIE (project_id, symbol) jak przy ZD: ten sam
+    # symbol może zostać odłożony kilka razy, zanim ktokolwiek przejmie
+    # lock. Nakładanie i tak sprawdza duplikat w BOM-ie, więc powtórki są
+    # nieszkodliwe — a klucz złożony gubiłby wpisy po cichu.
+    ("""CREATE TABLE IF NOT EXISTS schowek_nowe_pozycje (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id  INTEGER NOT NULL,
+            symbol      TEXT    NOT NULL,
+            nazwa       TEXT,
+            kto         TEXT,
+            kiedy       TEXT    NOT NULL
+        )""", None),
+    ("CREATE INDEX IF NOT EXISTS idx_schowek_nowe_proj "
+     "ON schowek_nowe_pozycje(project_id)", None),
     ("""CREATE TABLE IF NOT EXISTS zd_cofniete_pozycje (
             project_id INTEGER NOT NULL,
             item_id    INTEGER NOT NULL,
