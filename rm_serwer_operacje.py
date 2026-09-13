@@ -870,7 +870,7 @@ ODCZYT = {
         ["project_id"],
     ),
     "schowek-nowe-list": (
-        "SELECT symbol, nazwa, kto, kiedy FROM schowek_nowe_pozycje"
+        "SELECT symbol, nazwa, ilosc, kto, kiedy FROM schowek_nowe_pozycje"
         " WHERE project_id = ? ORDER BY id",
         ["project_id"],
     ),
@@ -1975,8 +1975,9 @@ ZAPIS = {
     # Nakłada je arkusz przy „Przejmij Lock" (SCHOWEK_RW_ALGORYTM.md §4.4).
     "schowek-nowe-dodaj": (
         "INSERT INTO schowek_nowe_pozycje"
-        " (project_id, symbol, nazwa, kto, kiedy) VALUES (?, ?, ?, ?, ?)",
-        ["project_id", "symbol", "nazwa", "kto", "kiedy"],
+        " (project_id, symbol, nazwa, ilosc, kto, kiedy)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        ["project_id", "symbol", "nazwa", "ilosc", "kto", "kiedy"],
     ),
     # Granica `do_kiedy` jest OBOWIĄZKOWA przy sprzątaniu: master jest
     # wspólny, więc między nałożeniem a wgraniem kopii ktoś mógł dołożyć
@@ -2092,9 +2093,12 @@ MIGRACJE = [
             project_id  INTEGER NOT NULL,
             symbol      TEXT    NOT NULL,
             nazwa       TEXT,
+            ilosc       REAL,
             kto         TEXT,
             kiedy       TEXT    NOT NULL
         )""", None),
+    ("ALTER TABLE schowek_nowe_pozycje ADD COLUMN ilosc REAL",
+     ("schowek_nowe_pozycje", "ilosc")),
     ("CREATE INDEX IF NOT EXISTS idx_schowek_nowe_proj "
      "ON schowek_nowe_pozycje(project_id)", None),
     ("""CREATE TABLE IF NOT EXISTS zd_cofniete_pozycje (

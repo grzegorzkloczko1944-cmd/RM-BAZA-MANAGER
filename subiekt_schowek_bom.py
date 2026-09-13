@@ -107,71 +107,43 @@ SQL_DODAJ = """
         src_drawing_no, src_name, src_qty,
         work_drawing_no, work_name, work_qty,
         created_at, updated_at
-    ) VALUES (?, 1, 0, ?, ?, 0, ?, ?, 0, ?, ?)
+    ) VALUES (?, 1, 0, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
-def dodaj_do_bom(con, project_id, symbol, nazwa):
-    """Dopisuje wiersz i zwraca item_id. Ilość 0 — Subiekt ją wypełni.
+def dodaj_do_bom(con, project_id, symbol, nazwa, ilosc=0):
+    """Dopisuje wiersz i zwraca item_id.
 
     ⚠️ Sprawdzenie duplikatu POWTÓRZONE tuż przed zapisem: między zebraniem
     listy a tym momentem pozycję mógł dodać ktoś inny (drugi magazynier,
     import, Edytor kartotek). Bez tego powstałby drugi wiersz na ten sam
     detal.
 
-    Ilość docelowa zostaje 0, bo pozycja weszła SPOZA BOM-u — nie było na nią
-    zapotrzebowania konstrukcyjnego. „Ilość dostarczonych" i tak przyjdzie
-    z Subiekta po wystawieniu RW. Pozostałe pola (typ, materiał, dostawca)
-    zostają puste: nie mamy o tej pozycji żadnej wiedzy konstrukcyjnej,
-    a wpisanie czegokolwiek byłoby zmyślaniem.
+    ILOŚĆ = TYLE, ILE WYDANO — i tylko dla pozycji, której NIE BYŁO w BOM-ie.
+    Pozycji istniejących nie ruszamy: tam „Ilość (zam.)" to prawdziwe
+    zamówienie i nadpisanie zafałszowałoby dane.
+
+    Wpisujemy ją, bo zielone „odebrane" zapala się dopiero gdy
+    `delivered_qty >= target_qty` ORAZ `target_qty > 0`
+    (`COALESCE(order_qty, work_qty, src_qty)`). Przy zerze warunek nigdy nie
+    zachodzi i pozycja wyglądałaby na niedostarczoną, choć magazynier właśnie
+    ją wydał (14.09.2026: „niech dodaje do wartości kolumny Ilość (zam.)
+    ilość wpisaną do RW — wtedy mam Ilość dostarczonych podświetlone na
+    zielono, że jest ok").
+
+    To jest pozycja SPOZA BOM-u: nikt jej nie planował, więc jedyną sensowną
+    „potrzebą" jest to, co faktycznie poszło z magazynu.
     """
     istnieje = znajdz_w_bom(con, project_id, symbol)
     if istnieje:
         return istnieje                      # ktoś nas uprzedził — dobrze
     s = (symbol or "").strip()
-    n = (nazwa or "").strip() or s           # bez nazwy z Subiekta: sam symbol
+    n = (nazwa or "").strip() or s           # bez nazwy z Subiektu: sam symbol
+    q = float(ilosc or 0)
     teraz = datetime.now().isoformat()
-    cur = con.execute(SQL_DODAJ, (project_id, s, n, s, n, teraz, teraz))
+    cur = con.execute(SQL_DODAJ, (project_id, s, n, q, s, n, q, teraz, teraz))
     con.commit()
     return cur.lastrowid
-
-
-# ── dopisanie wydanych ilości do „Ilość dostarczonych" ──────────────────────
-def zapisz_wydane_z_subiekta(con, project_id, wydane):
-    """Przepisuje do `delivered_qty` STAN Z SUBIEKTA. Zwraca liczbę zmienionych.
-
-    `wydane` — {SYMBOL: ilość} z trybu mostu `wydanie-stan` (pole `wydano`),
-    czyli SUMA wszystkich RW tego projektu, policzona przez Subiekta.
-
-    ⚠️ NADPISUJEMY, nie dodajemy — i to jest różnica zasadnicza.
-    Decyzja użytkownika 13.09.2026: „ilości mają iść z SUBIEKTA".
-    Subiekt jest właścicielem faktu magazynowego, więc arkusz ma pokazywać
-    JEGO stan, a nie sumę tego, co RM_BAZA zdążyła zaobserwować. Dodawanie
-    („+= to, co właśnie wydałem") rozjeżdżałoby się przy każdym RW
-    wystawionym poza RM_BAZA, przy powtórzonym zapisie i po korekcie
-    dokumentu w Subiekcie.
-
-    „Wydane z magazynu" i „dostarczone od dostawcy" to dla PROJEKTU jeden
-    fakt: detal dotarł i można go montować („wydane to ma iść do odebrane").
-
-    Pomijamy symbole, których nie ma w BOM-ie — nie ma gdzie zapisać.
-    """
-    if con is None or not project_id or not wydane:
-        return 0
-    teraz = datetime.now().isoformat()
-    ile = 0
-    for symbol, ilosc in wydane.items():
-        item_id = znajdz_w_bom(con, project_id, symbol)
-        if not item_id:
-            continue
-        con.execute(
-            "UPDATE items"
-            "   SET delivered_qty = ?, delivered_updated_at = ?, updated_at = ?"
-            " WHERE id = ? AND COALESCE(delivered_qty, -1) <> ?",
-            (float(ilosc), teraz, teraz, item_id, float(ilosc)))
-        ile += con.total_changes and 1 or 0
-    con.commit()
-    return ile
 
 
 # ── poczekalnia w master (gdy lock trzyma ktoś inny) ────────────────────────
@@ -189,6 +161,7 @@ def odloz_w_master(serwer, project_id, pozycje, kto=None):
         "params": {"project_id": project_id,
                    "symbol": (p["symbol"] or "").strip(),
                    "nazwa": (p.get("nazwa") or "").strip(),
+                   "ilosc": float(p.get("ilosc") or 0),
                    "kto": (kto or "").strip(),
                    "kiedy": teraz},
     } for p in pozycje]
@@ -228,7 +201,8 @@ def naloz_z_mastera(serwer, con, project_id, log=None):
         if znajdz_w_bom(con, project_id, symbol):
             continue                          # ktoś dodał ręcznie — nic nie robimy
         try:
-            item_id = dodaj_do_bom(con, project_id, symbol, w.get("nazwa"))
+            item_id = dodaj_do_bom(con, project_id, symbol, w.get("nazwa"),
+                                   w.get("ilosc"))
         except Exception as e:
             print("⚠️  Nie dopisano pozycji %s: %s" % (symbol, e))
             continue
@@ -280,7 +254,8 @@ def przygotuj(con, serwer, project_id, pozycje, mamy_lock, kto=None):
         dopisane = 0
         for p in brak:
             try:
-                dodaj_do_bom(con, project_id, p["symbol"], p.get("nazwa"))
+                dodaj_do_bom(con, project_id, p["symbol"], p.get("nazwa"),
+                             p.get("ilosc"))
                 dopisane += 1
             except Exception as e:
                 raise BladBom(
