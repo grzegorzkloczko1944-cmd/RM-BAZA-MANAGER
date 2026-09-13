@@ -2417,11 +2417,31 @@ class MainWindow(tk.Tk):
         # redraw, nie za liczbę wierszy. Stąd trzy wiersze na krok za darmo
         # i próg zbity do 50 ms, tuż nad kosztem klatki.
         #
-        # Razem: ~60 wierszy/s zamiast 10, przy tej samej liczbie przerysowań.
-        # Gdyby na słabszej maszynie zaczęło szarpać, wracamy podnosząc
-        # MIN_STEP_MS — nie zmniejszając SCROLL_STEP_ROWS, bo to nic nie kosztuje.
+        # ⚡ 13.09.2026 — ZDJĘTY PODWÓJNY REDRAW (zgłoszenie: „przewijanie
+        # i obsługa arkusza za wolne", monitor 4K).
+        #
+        # `yview_scroll()` SAM przerysowuje tabelę. Dokładane po nim jawne
+        # `main_table_redraw_grid_and_text()` było DRUGIM, zbędnym przelotem
+        # po wszystkich widocznych komórkach. Pomiar na oknie 2560×1400,
+        # 300 wierszy × 23 kolumny:
+        #
+        #     yview_scroll + update ............  12 ms
+        #     + jawny redraw (poprzedni kod) ... 197 ms   ← 16× drożej
+        #
+        # Koszt rósł z POWIERZCHNIĄ okna (46 ms przy 1200×700, 178 ms przy
+        # 2560×1400), bo tksheet rysuje każdą widoczną komórkę jako osobny
+        # obiekt canvasa — dlatego bolało dopiero na dużym ekranie.
+        #
+        # Sprawdzone: widok faktycznie się przesuwa (yview 0.0000 → 0.0568),
+        # liczba obiektów canvasa bez zmian, a indeks wierszy zostaje
+        # zsynchronizowany z tabelą co do 1e-6.
+        #
+        # MIN_STEP_MS zeszło z 50 na 16 ms (~60 klatek/s): przy 12 ms na krok
+        # dawny próg był hamulcem, a nie zabezpieczeniem. Gdyby na słabszej
+        # maszynie zaczęło szarpać — podnosić TEN próg, nie zmniejszać
+        # SCROLL_STEP_ROWS, bo liczba wierszy w kroku nic nie kosztuje.
         SCROLL_STEP_ROWS = 3
-        MIN_STEP_MS = 50
+        MIN_STEP_MS = 16
 
         self._sheet_scroll_last_step_ts = 0.0
 
@@ -2441,7 +2461,7 @@ class MainWindow(tk.Tk):
                 mt.yview_scroll(-SCROLL_STEP_ROWS, "units")
                 mt.RI.yview_scroll(-SCROLL_STEP_ROWS, "units")
                 mt.y_move_synced_scrolls("moveto", mt.yview()[0])
-            mt.main_table_redraw_grid_and_text(redraw_header=False, redraw_row_index=True)
+            # BEZ jawnego redraw — `yview_scroll` już przerysował (patrz wyżej).
 
         try:
             # Tkinter .bind() zarejestrował referencję do oryginalnej metody, więc
