@@ -20,6 +20,20 @@ widzi jeden dokument dopiero przy rozliczeniu — i to NETTO, nie sumę prób:
 to w ogóle rozwiązuje problem magazyniera — nie wolno tego „uprościć" do
 zwykłego koszyka pozycji.
 
+JEDEN SCHOWEK, PROJEKT PRZY POZYCJI
+───────────────────────────────────
+⚠️ Schowek NIE NALEŻY do projektu. Jest JEDEN, wspólny dla stanowiska,
+a projekt siedzi przy KAŻDYM RUCHU (decyzja 14.09.2026: „schowek ma nie być
+przypisany do projektu tylko niezależny, pozycje przypisujemy do projektu").
+
+Magazynier skanuje po kolei rzeczy na różne projekty do jednego koszyka —
+przełączając pole „Projekt" w nagłówku, tak samo jak przełącza montera.
+Przy rozliczeniu powstaje TYLE RW, ILE PROJEKTÓW: każdy dokument musi mieć
+swój numer w Uwagach, bo po nim Subiekt liczy wydania per projekt.
+
+Poprzednia wersja zakładała schowek NA PROJEKT i była błędna: po pięciu
+wydaniach w pliku leżało pięć schowków, a magazynier ma widzieć jeden.
+
 GDZIE TO ŻYJE — PLIK ROBOCZY, NIE BAZA
 ──────────────────────────────────────
 Schowek NIE trafia do bazy projektu ani na serwer. Leży w zwykłym pliku JSON
@@ -118,17 +132,28 @@ def zapisz(dane, sciezka=None):
 
 
 # ── schowki ─────────────────────────────────────────────────────────────────
-def utworz(monter, projekt=None, nazwa=None, sciezka=None):
-    """Nowy otwarty schowek. `projekt=None` → schowek ogólny."""
-    monter = (monter or "").strip()
-    if not monter:
-        raise BladSchowka("Podaj montera, dla którego zakładasz schowek.")
+def sam_numer(projekt):
+    """Sam numer projektu z tego, co dostaliśmy: „3500 dupal" → „3500".
+
+    ⚠️ Schowek MUSI trzymać sam numer, nie pełną nazwę. Nazwa projektu bywa
+    zmieniana w trakcie pracy, a wtedy zapisane „3500 dupal" przestałoby
+    pasować do filtra i schowki znikałyby z listy (zapisane 13.09.2026, gdy
+    pierwsze schowki wylądowały w pliku jako „3500 dupal — Agnieszka").
+    Numer się nie zmienia — po nim rozpoznaje projekt także Subiekt.
+    """
+    return str(projekt or "").strip().split(" ")[0]
+
+
+def utworz(sciezka=None, **_zgodnosc):
+    """Nowy otwarty schowek — JEDEN, bez przypisania do projektu.
+
+    Projekt i monter siedzą przy ruchach, nie tutaj. Argumenty nazwane są
+    przyjmowane i ignorowane, żeby stary kod wołający `utworz(monter, ...)`
+    nie wybuchał.
+    """
     dane = wczytaj(sciezka)
     nowy = {
         "id": dane["nastepny_id"],
-        "projekt": (projekt or "").strip() or None,
-        "monter": monter,
-        "nazwa": (nazwa or "").strip() or None,
         "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "status": OTWARTY,
         "rw_numer": None,
@@ -141,31 +166,37 @@ def utworz(monter, projekt=None, nazwa=None, sciezka=None):
     return nowy["id"]
 
 
-def lista(tylko_otwarte=False, projekt=None, sciezka=None):
+def lista(tylko_otwarte=False, sciezka=None, **_zgodnosc):
     """Schowki od najnowszego, z licznikiem pozycji i sztuk.
 
-    `projekt` zawęża do schowków tego projektu ORAZ ogólnych — magazynier
-    pracujący na projekcie ma widzieć swoje schowki i te bez przypisania,
-    ale nie cudze projekty.
-
-    Liczniki obejmują TYLKO pozycje o dodatnim bilansie — pozycja wzięta
-    i oddana nie ma czego pokazywać, a „0 szt." sugerowałoby, że coś jest
-    do zrobienia.
+    W praktyce OTWARTY jest zawsze jeden — `biezacy()` zwraca właśnie jego.
+    Ta funkcja przydaje się do podglądu historii i sprzątania.
     """
     dane = wczytaj(sciezka)
-    cel = (projekt or "").strip() or None
     wynik = []
     for s in sorted(dane["schowki"], key=lambda x: x["id"], reverse=True):
         if tylko_otwarte and s.get("status") != OTWARTY:
-            continue
-        if cel and s.get("projekt") and s["projekt"] != cel:
             continue
         stan = _bilans(s)
         w = {k: v for k, v in s.items() if k != "ruchy"}
         w["pozycji"] = len(stan)
         w["sztuk"] = sum(p["ilosc"] for p in stan)
+        w["projekty"] = sorted({p["projekt"] for p in stan if p["projekt"]})
         wynik.append(w)
     return wynik
+
+
+def biezacy(sciezka=None):
+    """JEDEN otwarty schowek stanowiska — zakładany, gdy go jeszcze nie ma.
+
+    To jest główny punkt wejścia. Schowek nie jest przypisany do projektu,
+    więc nie ma czego wybierać: jest jeden i zawsze ten sam, aż do
+    rozliczenia.
+    """
+    for s in wczytaj(sciezka)["schowki"]:
+        if s.get("status") == OTWARTY:
+            return {k: v for k, v in s.items() if k != "ruchy"}
+    return pobierz(utworz(sciezka=sciezka), sciezka)
 
 
 def _znajdz(dane, schowek_id):
@@ -188,8 +219,13 @@ def usun(schowek_id, sciezka=None):
 
 
 def opis(s):
-    """Etykieta na listę: „2627 — Kowalski" albo „OGÓLNY — Nowak"."""
-    czolo = s.get("projekt") or s.get("nazwa") or OGOLNY
+    """Etykieta na listę: „2627 — Kowalski" albo „OGÓLNY — Nowak".
+
+    Numer przepuszczamy przez `sam_numer` także przy WYŚWIETLANIU, żeby
+    schowki zapisane przed 13.09.2026 (z pełną nazwą „3500 dupal") wyglądały
+    tak samo jak nowe. Plik zostaje nietknięty — poprawiamy tylko widok.
+    """
+    czolo = sam_numer(s.get("projekt")) or s.get("nazwa") or OGOLNY
     return "%s — %s" % (czolo, s.get("monter") or "?")
 
 
@@ -204,32 +240,60 @@ def _klucz(symbol):
 
 
 def _bilans(s):
-    """Bilans NETTO po symbolach — tylko pozycje z dodatnią ilością.
+    """Bilans NETTO po parach (PROJEKT, SYMBOL) — tylko dodatnie.
+
+    ⚠️ Kluczem jest PARA, nie sam symbol. Ten sam detal bywa wydawany na
+    dwa projekty w tej samej sesji i musi zostać dwiema pozycjami — inaczej
+    ilości zlałyby się w jedną i trafiły na niewłaściwy dokument.
 
     Jedyne miejsce, w którym powstaje „co jest w schowku". Liczymy z ruchów
     zamiast trzymać osobne pole, żeby historia i stan nie mogły się rozjechać.
     """
-    razem, nazwy, oryginal = {}, {}, {}
+    razem, nazwy, oryginal, monterzy = {}, {}, {}, {}
     for r in s.get("ruchy", []):
-        k = _klucz(r["symbol"])
+        k = (sam_numer(r.get("projekt")), _klucz(r["symbol"]))
         razem[k] = razem.get(k, 0.0) + float(r["ilosc"])
         oryginal.setdefault(k, r["symbol"])
         if r.get("nazwa"):
             nazwy[k] = r["nazwa"]
-    return [{"symbol": oryginal[k], "nazwa": nazwy.get(k, ""), "ilosc": v}
-            for k, v in sorted(razem.items()) if v > 0]
+        kto = (r.get("monter") or "").strip()
+        if kto:
+            monterzy.setdefault(k, {})
+            monterzy[k][kto] = monterzy[k].get(kto, 0.0) + float(r["ilosc"])
+    out = []
+    for (projekt, _sym), ile in sorted(razem.items()):
+        if ile <= 0:
+            continue
+        k = (projekt, _sym)
+        ludzie = [n for n, x in sorted(monterzy.get(k, {}).items()) if x > 0]
+        out.append({"projekt": projekt, "symbol": oryginal[k],
+                    "nazwa": nazwy.get(k, ""), "ilosc": ile,
+                    "monterzy": ", ".join(ludzie)})
+    return out
+
+
+def wg_projektow(schowek_id, sciezka=None):
+    """{numer_projektu: [pozycje]} — po jednym RW na projekt.
+
+    Pozycje BEZ projektu trafiają pod klucz "" — wołający musi zdecydować,
+    co z nimi zrobić (dziś okno na nie nie pozwala).
+    """
+    grupy = {}
+    for p in stan_schowka(schowek_id, sciezka):
+        grupy.setdefault(p["projekt"] or "", []).append(p)
+    return grupy
 
 
 def stan_schowka(schowek_id, sciezka=None):
     return _bilans(_znajdz(wczytaj(sciezka), schowek_id))
 
 
-def ile_w_schowku(schowek_id, symbol, sciezka=None):
-    """Bilans jednego symbolu (może być 0)."""
+def ile_w_schowku(schowek_id, symbol, projekt=None, sciezka=None):
+    """Bilans jednego symbolu W RAMACH PROJEKTU (może być 0)."""
     s = _znajdz(wczytaj(sciezka), schowek_id)
-    k = _klucz(symbol)
+    k, pr = _klucz(symbol), sam_numer(projekt)
     return sum(float(r["ilosc"]) for r in s.get("ruchy", [])
-               if _klucz(r["symbol"]) == k)
+               if _klucz(r["symbol"]) == k and sam_numer(r.get("projekt")) == pr)
 
 
 def historia(schowek_id, sciezka=None):
@@ -240,42 +304,45 @@ def historia(schowek_id, sciezka=None):
 def _wymagaj_otwartego(s):
     if s.get("status") != OTWARTY:
         raise BladSchowka(
-            "Schowek jest już rozliczony (RW %s).\n\n"
-            "Zwrot wymaga ponownego przyjęcia na magazyn — otwórz PW zwrotu."
+            "Schowek jest już rozliczony (RW %s). Zwrot wymaga ponownego "
+            "przyjęcia na magazyn — otwórz PW zwrotu."
             % (s.get("rw_numer") or "?"))
 
 
-def _ruch(schowek_id, symbol, ilosc, nazwa, operator, monter, sciezka):
+def _ruch(schowek_id, symbol, ilosc, nazwa, operator, monter, projekt, sciezka):
     dane = wczytaj(sciezka)
     s = _znajdz(dane, schowek_id)
     _wymagaj_otwartego(s)
+    pr = sam_numer(projekt)
     s.setdefault("ruchy", []).append({
-        "symbol": (symbol or "").strip(), "nazwa": nazwa or "",
+        "projekt": pr, "symbol": (symbol or "").strip(), "nazwa": nazwa or "",
         "ilosc": float(ilosc),
         "czas": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "operator": (operator or "").strip(),
-        "monter": (monter or s.get("monter") or "").strip(),
+        "monter": (monter or "").strip(),
     })
     zapisz(dane, sciezka)
     k = _klucz(symbol)
-    return sum(float(r["ilosc"]) for r in s["ruchy"] if _klucz(r["symbol"]) == k)
+    return sum(float(r["ilosc"]) for r in s["ruchy"]
+               if _klucz(r["symbol"]) == k and sam_numer(r.get("projekt")) == pr)
 
 
 def pobrano(schowek_id, symbol, ilosc, nazwa=None, operator=None,
-            monter=None, sciezka=None):
-    """Monter WZIĄŁ element — ruch dodatni."""
+            monter=None, projekt=None, sciezka=None):
+    """Monter WZIĄŁ element na dany projekt — ruch dodatni."""
     if not (symbol or "").strip():
         raise BladSchowka("Brak symbolu.")
     if ilosc <= 0:
         raise BladSchowka("Ilość musi być większa od zera.")
-    return _ruch(schowek_id, symbol, ilosc, nazwa, operator, monter, sciezka)
+    return _ruch(schowek_id, symbol, ilosc, nazwa, operator, monter,
+                 projekt, sciezka)
 
 
 def oddano(schowek_id, symbol, ilosc, nazwa=None, operator=None,
-           monter=None, sciezka=None):
-    """Monter ODDAŁ element — ruch ujemny.
+           monter=None, projekt=None, sciezka=None):
+    """Monter ODDAŁ element — ruch ujemny, w ramach TEGO SAMEGO projektu.
 
-    ⛔ Nie wolno oddać więcej, niż monter faktycznie ma w schowku: ujemny
+    ⛔ Nie wolno oddać więcej, niż jest w schowku NA TYM PROJEKCIE: ujemny
     bilans zaniżyłby RW przy rozliczeniu i rozjechał stan magazynu. Twardy
     błąd, zero zapisu („nic po cichu").
     """
@@ -283,13 +350,34 @@ def oddano(schowek_id, symbol, ilosc, nazwa=None, operator=None,
         raise BladSchowka("Brak symbolu.")
     if ilosc <= 0:
         raise BladSchowka("Ilość musi być większa od zera.")
-    ma = ile_w_schowku(schowek_id, symbol, sciezka)
+    ma = ile_w_schowku(schowek_id, symbol, projekt, sciezka)
     if ilosc > ma:
         raise BladSchowka(
-            "W schowku jest %s szt. „%s” — nie można oddać %s.\n"
+            "W schowku jest %s szt. „%s”%s — nie można oddać %s. "
             "Żaden ruch nie został zapisany."
-            % (_ilo(ma), (symbol or "").strip(), _ilo(ilosc)))
-    return _ruch(schowek_id, symbol, -ilosc, nazwa, operator, monter, sciezka)
+            % (_ilo(ma), (symbol or "").strip(),
+               (" na projekcie %s" % sam_numer(projekt)) if projekt else "",
+               _ilo(ilosc)))
+    return _ruch(schowek_id, symbol, -ilosc, nazwa, operator, monter,
+                 projekt, sciezka)
+
+
+def usun_projekt(schowek_id, projekt, sciezka=None):
+    """Kasuje ruchy JEDNEGO projektu — po wystawieniu jego RW.
+
+    Schowek zbiera pozycje z kilku projektów naraz i rozlicza je osobnymi
+    dokumentami. Po udanym RW znika TYLKO ten projekt; reszta zostaje, żeby
+    dało się dokończyć wydanie, gdy któryś dokument się nie powiódł.
+
+    Schowek NIE jest zamykany — jest jeden na stanowisko i żyje dalej.
+    """
+    dane = wczytaj(sciezka)
+    s = _znajdz(dane, schowek_id)
+    _wymagaj_otwartego(s)
+    pr = sam_numer(projekt)
+    s["ruchy"] = [r for r in s.get("ruchy", [])
+                  if sam_numer(r.get("projekt")) != pr]
+    zapisz(dane, sciezka)
 
 
 def usun_pozycje(schowek_id, symbol, sciezka=None):
@@ -320,6 +408,41 @@ def wyczysc(schowek_id, sciezka=None):
 def do_rozliczenia(schowek_id, sciezka=None):
     """Pozycje, które pójdą na RW — bilans netto. Pusty = nie ma czego wydawać."""
     return stan_schowka(schowek_id, sciezka)
+
+
+#: Ile dni trzymać rozliczone schowki, zanim znikną z pliku.
+#:
+#: Schowek po wystawieniu RW jest już tylko historią — fakt magazynowy
+#: siedzi w Subiekcie, na dokumencie. Trzymanie go bez końca zaśmiecało
+#: listę: po pięciu wydaniach było pięć wpisów, po miesiącu byłyby setki
+#: („nie ma niezliczonej ilości schowków, ma być tylko jeden", 14.09.2026).
+#:
+#: Zero = kasuj natychmiast po rozliczeniu. Kilka dni zostawiamy po to, żeby
+#: dało się jeszcze zajrzeć w „Historię ruchów" i sprawdzić, kto co wziął,
+#: gdy ktoś zgłosi wątpliwość nazajutrz.
+DNI_HISTORII = 3
+
+
+def posprzataj(sciezka=None):
+    """Kasuje rozliczone schowki starsze niż DNI_HISTORII. Zwraca ile usunięto.
+
+    Wołane po każdym rozliczeniu — plik nie rośnie w nieskończoność, a lista
+    pokazuje to, co faktycznie w robocie.
+    """
+    from datetime import timedelta
+    granica = (datetime.now() - timedelta(days=DNI_HISTORII)).strftime(
+        "%Y-%m-%d %H:%M:%S")
+    dane = wczytaj(sciezka)
+    przed = len(dane["schowki"])
+    dane["schowki"] = [
+        s for s in dane["schowki"]
+        if s.get("status") != ROZLICZONY
+        or (s.get("rozliczony") or s.get("data") or "") > granica
+    ]
+    ile = przed - len(dane["schowki"])
+    if ile:
+        zapisz(dane, sciezka)
+    return ile
 
 
 def oznacz_rozliczony(schowek_id, rw_numer, sciezka=None):

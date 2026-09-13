@@ -6,16 +6,20 @@ miniatury rysunku, alarm awarii mostu, suchy przebieg i read-back są tam
 już dopracowane i przetestowane. Dziedziczymy je i nadpisujemy wyłącznie
 to, co w schowku działa inaczej.
 
-JEDEN SCHOWEK NA PROJEKT, MONTER W KOLUMNIE
-───────────────────────────────────────────
-Nie ma listy schowków do wybierania — zeskanowana pozycja ląduje OD RAZU
-w tabeli po prawej. Kto pobrał, zapisuje się przy pozycji (kolumna
-„Pobrał"), więc jeden schowek obsługuje wszystkich monterów pracujących
-przy tym projekcie. Wcześniejszy wariant z listą schowków po lewej został
-wyrzucony jako zbędny krok między skanem a wynikiem.
+JEDEN SCHOWEK, PROJEKT PRZY POZYCJI
+───────────────────────────────────
+⚠️ Schowek NIE NALEŻY do projektu — jest JEDEN, wspólny dla stanowiska,
+a projekt siedzi przy KAŻDEJ POZYCJI (decyzja 14.09.2026: „schowek ma nie
+być przypisany do projektu tylko niezależny, pozycje przypisujemy do
+projektu").
 
-Monter bierze się z pola „Pobiera" w nagłówku — zmiana pola przed skanem
-przypisze kolejne pozycje komu innemu.
+Magazynier przełącza pole „Projekt" w nagłówku i skanuje — kolejne pozycje
+lecą na wybrany projekt. Tak samo działa pole „Pobiera" dla montera.
+Zeskanowana pozycja ląduje OD RAZU w tabeli po prawej; nie ma żadnej listy
+schowków do wybierania.
+
+Przy rozliczeniu powstaje TYLE RW, ILE PROJEKTÓW w schowku — każdy dokument
+musi mieć swój numer w Uwagach, bo po nim Subiekt liczy wydania per projekt.
 
 CZYM SIĘ RÓŻNI OD OKNA WYDAŃ
 ────────────────────────────
@@ -44,11 +48,11 @@ from subiekt_wydanie_gui import (
 #: Kolumny tabeli schowka. „Potrzeba / Wydano / Pozostało" pokazujemy, bo
 #: schowek jest zawsze przypięty do projektu — magazynier ma widzieć, ile
 #: z tego, co bierze, było w ogóle planowane.
-KOL_SCHOWEK = [("lp", "Lp.", 32), ("symbol", "Symbol", 118),
-               ("nazwa", "Nazwa", 168), ("potrzeba", "Potrzeba", 56),
-               ("wydano", "Wydano", 52), ("schowek", "W schowku", 66),
-               ("pozostalo", "Pozost.", 52), ("stan", "Stan", 46),
-               ("pobral", "Pobrał", 104)]
+KOL_SCHOWEK = [("lp", "Lp.", 30), ("projekt", "Projekt", 62),
+               ("symbol", "Symbol", 112), ("nazwa", "Nazwa", 150),
+               ("potrzeba", "Potrzeba", 54), ("wydano", "Wydano", 50),
+               ("schowek", "W schowku", 64), ("pozostalo", "Pozost.", 50),
+               ("stan", "Stan", 44), ("pobral", "Pobrał", 96)]
 
 
 class SchowekWindow(WydanieWindow):
@@ -68,7 +72,7 @@ class SchowekWindow(WydanieWindow):
         self._arkusz = parent
         self._con_awaryjne = con_projektu
         self._lock_awaryjny = bool(mamy_lock)
-        #: Jeden schowek na projekt — zakładany przy pierwszym skanie.
+        #: JEDEN schowek stanowiska — zakładany przy pierwszym skanie.
         self.schowek_id = None
         #: Zawartość: [{symbol, nazwa, ilosc, monterzy}]
         self.zawartosc = []
@@ -195,72 +199,84 @@ class SchowekWindow(WydanieWindow):
         stan = getattr(self._arkusz, "have_lock", None)
         return bool(self._lock_awaryjny if stan is None else stan)
 
-    # ── schowek projektu ─────────────────────────────────────────────────
-    def _schowek(self):
-        """Schowek TEGO projektu — zakładany przy pierwszym użyciu.
+    def _pasek_gorny(self):
+        super()._pasek_gorny()
+        # Zamiana etykiety projektu na LISTĘ WYBORU.
+        #
+        # Okno wydań pokazuje projekt jako tekst — bierze go z RM_BAZA
+        # i nie zmienia. Schowek jest niezależny od projektu, więc to
+        # magazynier decyduje, na co idzie kolejna zeskanowana pozycja.
+        try:
+            for w in self.pasek_gorny.winfo_children()[0].winfo_children():
+                if isinstance(w, tk.Label) and w.cget("text") == self.project_name:
+                    w.destroy()
+                    break
+            ramka = self.pasek_gorny.winfo_children()[0]
+            self.var_projekt = tk.StringVar(value=self.project_name)
+            self.combo_projekt = ttk.Combobox(
+                ramka, textvariable=self.var_projekt, width=18,
+                state="readonly", font=("Arial", 11, "bold"))
+            self.combo_projekt.pack(anchor="w", pady=(2, 0))
+            self._wczytaj_projekty()
+        except Exception as e:
+            print("⚠️  Nie podmieniono pola projektu: %s" % e)
+            self.var_projekt = tk.StringVar(value=self.project_name)
 
-        Jeden na projekt: pozycje różnych monterów leżą razem, rozróżnia
-        je kolumna „Pobrał". Dzięki temu magazynier nie wybiera schowka
-        przed skanowaniem.
-        """
-        if self.schowek_id is not None:
-            try:
-                return SCH.pobierz(self.schowek_id)
-            except SCH.BladSchowka:
-                self.schowek_id = None
-        for s in SCH.lista(tylko_otwarte=True, projekt=self.project_name):
-            if s.get("projekt") == self.project_name:
-                self.schowek_id = s["id"]
-                return s
-        return None
+    def _wczytaj_projekty(self):
+        """Lista projektów do wyboru — te same, co w selektorze RM_BAZA."""
+        nazwy = []
+        try:
+            db = getattr(self._arkusz, "db_manager", None)
+            if db is not None:
+                nazwy = [w["name"] for w in db.master_read("projekty-do-selektora")
+                         if w.get("active")]
+        except Exception as e:
+            print("⚠️  Nie wczytano listy projektów: %s" % e)
+        if self.project_name and self.project_name not in nazwy:
+            nazwy.insert(0, self.project_name)
+        self.combo_projekt["values"] = nazwy
+        if self.project_name:
+            self.var_projekt.set(self.project_name)
+
+    def _projekt_pozycji(self):
+        """Numer projektu dla KOLEJNEJ skanowanej pozycji."""
+        return SCH.sam_numer(getattr(self, "var_projekt", None)
+                             and self.var_projekt.get() or self.project_name)
+
+    # ── schowek stanowiska ─
+    def _schowek(self):
+        """JEDEN otwarty schowek stanowiska (bez przypisania do projektu)."""
+        try:
+            s = SCH.biezacy()
+            self.schowek_id = s["id"]
+            return s
+        except SCH.BladSchowka as e:
+            self._uwaga("⛔ %s" % e, BLAD_TLO)
+            return None
 
     def _schowek_lub_zaloz(self):
-        s = self._schowek()
-        if s:
-            return s
-        monter = (self.var_pobiera.get() or "").strip()
-        self.schowek_id = SCH.utworz(monter or "—", projekt=self.project_name)
-        return SCH.pobierz(self.schowek_id)
+        return self._schowek()
 
     def _odswiez_zawartosc(self):
         s = self._schowek()
         if not s:
             self.zawartosc = []
-            self.var_podtytul.set(
-                "Skanuj detale — wydanie powstanie na koniec, jednym RW")
             return self._przerysuj()
         try:
-            self.zawartosc = self._bilans_z_monterami(s["id"])
+            self.zawartosc = SCH.stan_schowka(s["id"])
         except SCH.BladSchowka as e:
             self.zawartosc = []
             self._uwaga("⛔ %s" % e, BLAD_TLO)
+        projekty = sorted({p["projekt"] for p in self.zawartosc if p["projekt"]})
         self.var_podtytul.set(
-            "Schowek #%s otwarty od %s   ·   projekt %s   ·   "
-            "wydanie powstanie na koniec, jednym RW"
-            % (s["id"], s["data"], self.project_name))
+            "Schowek #%s otwarty od %s   ·   %s   ·   "
+            "wydanie powstanie na koniec: %s"
+            % (s["id"], s["data"],
+               ("projekty: " + ", ".join(projekty)) if projekty
+               else "pusty — skanuj detale",
+               ("%d RW (po jednym na projekt)" % len(projekty)) if len(projekty) > 1
+               else "jedno RW"))
         self._przerysuj()
-
-    def _bilans_z_monterami(self, schowek_id):
-        """Bilans netto + KTO pobrał daną pozycję.
-
-        Monter siedzi przy każdym ruchu, a nie przy schowku, więc jedna
-        pozycja może mieć kilku — wtedy pokazujemy ich po przecinku.
-        Liczą się tylko ci, którzy mają dodatni wkład: kto wziął i oddał,
-        nie zostaje na liście, bo nic nie wynosi z magazynu.
-        """
-        wklad = {}
-        for r in SCH.historia(schowek_id):
-            k = (r["symbol"] or "").strip().upper()
-            kto = (r.get("monter") or "").strip()
-            if kto:
-                wklad.setdefault(k, {})
-                wklad[k][kto] = wklad[k].get(kto, 0.0) + float(r["ilosc"])
-        out = []
-        for p in SCH.stan_schowka(schowek_id):
-            ludzie = [n for n, ile in sorted(
-                wklad.get(p["symbol"].strip().upper(), {}).items()) if ile > 0]
-            out.append(dict(p, monterzy=", ".join(ludzie)))
-        return out
 
     def _przerysuj(self):
         self.tab.delete(*self.tab.get_children())
@@ -269,7 +285,8 @@ class SchowekWindow(WydanieWindow):
             stan_mag = self._stan_symbolu(p["symbol"])
             potrzeba = wpis.get("potrzeba")
             wart = {
-                "lp": i, "symbol": p["symbol"], "nazwa": p["nazwa"],
+                "lp": i, "projekt": p.get("projekt") or "—",
+                "symbol": p["symbol"], "nazwa": p["nazwa"],
                 "schowek": _ilo(p["ilosc"]),
                 "stan": _ilo(stan_mag) if stan_mag is not None else "—",
                 "pobral": p.get("monterzy") or "—",
@@ -286,7 +303,10 @@ class SchowekWindow(WydanieWindow):
                 tagi = ("brak_stanu",)
             elif not wpis:
                 tagi = ("poza_bom",)      # nie ma jej w ZK ani PW projektu
-            self.tab.insert("", tk.END, iid=p["symbol"],
+            # iid MUSI zawierac projekt: ten sam symbol bywa na dwoch
+            # projektach naraz i jako dwa osobne wiersze.
+            self.tab.insert("", tk.END,
+                            iid="%s|%s" % (p.get("projekt") or "", p["symbol"]),
                             values=[wart[k] for k, _, _ in KOL_SCHOWEK],
                             tags=tagi)
         szt = sum(p["ilosc"] for p in self.zawartosc)
@@ -348,29 +368,38 @@ class SchowekWindow(WydanieWindow):
             self._uwaga("⛔ Podaj ilość większą od zera.", BLAD_TLO)
             return self.spin_ilosc.focus_set()
 
+        projekt = self._projekt_pozycji()
+        if not projekt:
+            return self._uwaga("⛔ Wybierz w nagłówku PROJEKT, na który "
+                               "idzie ta pozycja.", BLAD_TLO)
         s = self._schowek_lub_zaloz()
+        if not s:
+            return
         funkcja = SCH.pobrano if kierunek > 0 else SCH.oddano
         etykieta = "POBRANO" if kierunek > 0 else "ODDANO"
         try:
             teraz = funkcja(s["id"], p["symbol"], ile, nazwa=p.get("nazwa"),
                             operator=(self.var_wydal.get() or "").strip(),
-                            monter=monter)
+                            monter=monter, projekt=projekt)
         except SCH.BladSchowka as e:
             return self._uwaga("⛔ %s" % e, BLAD_TLO)
 
         self._odswiez_zawartosc()
-        self.var_ostatni.set("%s %s szt. — %s (%s)"
-                             % (etykieta, _ilo(ile), p["symbol"], monter))
-        self._uwaga("✓ %s: %s %s szt.   ·   w schowku: %s szt.   ·   %s"
-                    % (etykieta, p["symbol"], _ilo(ile), _ilo(teraz), monter),
+        self.var_ostatni.set("%s %s szt. — %s → %s (%s)"
+                             % (etykieta, _ilo(ile), p["symbol"], projekt, monter))
+        self._uwaga("✓ %s: %s %s szt. na projekt %s   ·   w schowku: %s szt."
+                    "   ·   %s"
+                    % (etykieta, p["symbol"], _ilo(ile), projekt,
+                       _ilo(teraz), monter),
                     "#e8f8e8" if kierunek > 0 else UWAGA_TLO)
         try:
             self.bell()
         except tk.TclError:
             pass
-        if self.tab.exists(p["symbol"]):
-            self.tab.selection_set(p["symbol"])
-            self.tab.see(p["symbol"])
+        klucz = "%s|%s" % (projekt, p["symbol"])
+        if self.tab.exists(klucz):
+            self.tab.selection_set(klucz)
+            self.tab.see(klucz)
         self._wyczysc_pozycje(zostaw_uwage=True)
 
     def _dodaj_do_sesji(self):
@@ -453,12 +482,7 @@ class SchowekWindow(WydanieWindow):
 
     # ── rozliczenie ──────────────────────────────────────────────────────
     def _pozycje_sesji(self):
-        """Co pójdzie na RW — bilans netto schowka.
-
-        Nadpisuje wersję z okna wydań, żeby cała maszyneria kontroli przed
-        zapisem (świeży odczyt, porównanie ze stanem, suchy przebieg,
-        read-back) działała bez zmian — różni się tylko ŹRÓDŁO pozycji.
-        """
+        """Wszystko, co w schowku — do podglądu i liczników."""
         return [dict(p) for p in self.zawartosc]
 
     @property
@@ -472,12 +496,12 @@ class SchowekWindow(WydanieWindow):
         # plik roboczy, więc podstawienie ignorujemy.
         pass
 
-    def _uwagi_rw(self):
-        """Uwagi RW: numer projektu w 1. wierszu, ludzie niżej.
+    def _uwagi_rw(self, projekt, pozycje):
+        """Uwagi JEDNEGO dokumentu: numer projektu w 1. wierszu, ludzie niżej.
 
-        Monterów wypisujemy z POZYCJI, nie z pola w nagłówku — przy jednym
-        schowku na projekt bywa ich kilku, a Uwagi się drukują, więc na
-        dokumencie ma być widać, komu towar poszedł.
+        Monterów bierzemy z POZYCJI TEGO PROJEKTU — na dokument trafiają
+        tylko ci, którzy faktycznie coś z niego wzięli. Uwagi się drukują,
+        więc ma być widać, komu towar poszedł.
         """
         from subiekt_zamowienia import zloz_uwagi
         czesci = []
@@ -485,96 +509,156 @@ class SchowekWindow(WydanieWindow):
         if wydal:
             czesci.append("WYDAŁ: %s" % wydal)
         ludzie = []
-        for p in self.zawartosc:
+        for p in pozycje:
             for n in (p.get("monterzy") or "").split(","):
                 n = n.strip()
                 if n and n not in ludzie:
                     ludzie.append(n)
         if ludzie:
             czesci.append("POBRAŁ: %s" % ", ".join(ludzie))
-        return zloz_uwagi(self.project_name,
-                          "   ".join(czesci) if czesci else None)
+        return zloz_uwagi(projekt, "   ".join(czesci) if czesci else None)
 
-    def _zapisz_po_suchym(self, pozycje, kroki):
-        """⛔ BRAMKA: BOM najpierw, RW dopiero po potwierdzeniu.
+    # ── rozliczenie: JEDNO RW NA PROJEKT ─────────────────────────────────
+    def _zakoncz(self):
+        """Tyle dokumentów, ile projektów w schowku.
 
-        Wydanie z Subiekta nie może pojawić się wcześniej niż wiersz, do
-        którego ma się przypiąć (SCHOWEK_RW_ALGORYTM.md §4.3). Dlatego
-        pozycje spoza BOM-u dopisujemy TU, przed zapisem — a gdy się nie
-        uda, RW w ogóle nie powstaje.
+        NIE dziedziczymy `_zakoncz` z okna wydań: tamto zna jeden projekt
+        i wystawia jeden dokument. Schowek zbiera pozycje z wielu projektów
+        naraz, a każdy RW musi mieć SWÓJ numer w Uwagach — po nim Subiekt
+        liczy wydania per projekt (WydanieStan.cs). Jeden wspólny dokument
+        zepsułby to liczenie.
         """
-        try:
-            import rm_klient
-            dopisane, odlozone = BOM.przygotuj(
-                self._con_projektu(), rm_klient, self.project_id, pozycje,
-                self._czy_lock(), kto=(self.var_wydal.get() or "").strip())
-        except Exception as e:
-            # ŁAPIEMY WSZYSTKO, nie tylko BladBom: wyjątek lecący z `after`
-            # nie ma kto obsłużyć, więc przycisk zostawałby na „Zapisuję…"
-            # i okno wyglądałoby na zawieszone (13.09.2026).
-            self.btn_zakoncz.config(state=tk.NORMAL,
-                                    text="Wydaj / Utwórz RW\nw Subiekcie")
-            return messagebox.showerror(
-                "RW nie zostało wystawione",
-                "%s\n\nTowar NIE zszedł ze stanu, schowek został nietknięty."
-                % e, parent=self)
-        self._po_bom = (dopisane, odlozone)
-        super()._zapisz_po_suchym(pozycje, kroki)
-
-    def _po_zapisie(self, wynik, bledy, sucho):
-        super()._po_zapisie(wynik, bledy, sucho)
-        if bledy or sucho or not (wynik or {}).get("numer"):
-            return
-        # „Ilość dostarczonych" = ile detalu dotarło na projekt, wszystko
-        # jedno czy od dostawcy, czy z magazynu (decyzja 13.09.2026:
-        # „wydane to ma iść do odebrane"). Dopisujemy PO potwierdzonym RW,
-        # nigdy przed — inaczej arkusz pokazywałby ilość bez pokrycia
-        # w dokumencie.
-        pozycje = self._pozycje_sesji()
-        con = self._con_projektu()
-        if con is not None and self._czy_lock():
-            try:
-                BOM.dopisz_wydane(con, self.project_id, pozycje)
-            except Exception as e:
-                messagebox.showwarning(
-                    "Arkusz nie zaktualizowany",
-                    "RW %s powstało i towar zszedł ze stanu, ale nie udało "
-                    "się dopisać ilości do arkusza:\n%s\n\n"
-                    "Popraw „Ilość dostarczonych” ręcznie."
-                    % (wynik["numer"], e), parent=self)
-        else:
-            # Bez locka baza projektu jest READ-ONLY. Nie zapisujemy po cichu
-            # w próżnię — magazynier musi wiedzieć, czemu arkusz się nie zmienił.
-            messagebox.showinfo(
-                "Arkusz bez zmian — brak locka",
-                "RW %s powstało, towar zszedł ze stanu.\n\n"
-                "„Ilość dostarczonych” w arkuszu NIE została zwiększona, bo "
-                "projekt nie jest przejęty.\nPrzejmij lock i popraw ręcznie "
-                "albo wystawiaj wydania przy przejętym projekcie."
-                % wynik["numer"], parent=self)
-
+        if not self.polaczony:
+            return self._uwaga("⛔ Brak połączenia z Subiektem — "
+                               "kliknij „Odśwież”.", BLAD_TLO)
         s = self._schowek()
-        if s:
+        if not s:
+            return
+        grupy = {}
+        for poz in self.zawartosc:
+            grupy.setdefault(poz.get("projekt") or "", []).append(poz)
+        if not grupy:
+            return
+        if "" in grupy:
+            return messagebox.showerror(
+                "Pozycje bez projektu",
+                "W schowku są pozycje bez przypisanego projektu.\n\n"
+                "Usuń je albo zeskanuj ponownie z wybranym projektem — "
+                "RW musi mieć numer projektu w Uwagach.", parent=self)
+
+        opis = "\n".join(
+            "   %s: %d poz. / %s szt."
+            % (pr, len(poz), _ilo(sum(x["ilosc"] for x in poz)))
+            for pr, poz in sorted(grupy.items()))
+        if not messagebox.askyesno(
+                "Wydanie z magazynu",
+                "Powstanie %d dokument(ow) RW:\n\n%s\n\nWystawiamy?"
+                % (len(grupy), opis), parent=self):
+            return
+
+        self.btn_zakoncz.config(state=tk.DISABLED, text="Zapisuję…")
+        self.update_idletasks()
+        udane, bledy = [], []
+        for projekt, pozycje in sorted(grupy.items()):
             try:
-                SCH.oznacz_rozliczony(s["id"], wynik["numer"])
-                self.schowek_id = None      # następny skan założy nowy
-            except SCH.BladSchowka as e:
-                messagebox.showwarning(
-                    "Schowek nie zamknięty",
-                    "RW %s powstało, ale nie udało się zamknąć schowka:\n%s\n\n"
-                    "Wyczyść go ręcznie, żeby nie wydać tego drugi raz."
-                    % (wynik["numer"], e), parent=self)
-        # Pozycje odłożone w poczekalni: magazynier zajrzy do arkusza i ich
-        # nie znajdzie, więc musi wiedzieć, czemu i kiedy się pojawią.
-        _, odlozone = getattr(self, "_po_bom", (0, 0))
-        if odlozone:
+                numer = self._wystaw_rw(projekt, pozycje)
+                udane.append((projekt, numer, len(pozycje)))
+            except Exception as e:
+                bledy.append((projekt, str(e)))
+                break          # nie brniemy dalej — reszta zostaje w schowku
+        self._po_wystawieniu(s, udane, bledy)
+
+    def _wystaw_rw(self, projekt, pozycje):
+        """Jeden dokument dla jednego projektu. Zwraca numer albo rzuca.
+
+        Kolejność jak w SCHOWEK_RW_ALGORYTM.md §4.3: najpierw BOM (żeby
+        wydanie miało się do czego przypiąć), potem suchy przebieg, dopiero
+        na końcu zapis.
+        """
+        import rm_klient
+        from subiekt_magazyn_gui import utworz_rw
+        from subiekt_zamowienia import tytul_dokumentu
+
+        pid = self._id_projektu(projekt)
+        if pid:
+            BOM.przygotuj(self._con_projektu(), rm_klient, pid, pozycje,
+                          self._czy_lock(),
+                          kto=(self.var_wydal.get() or "").strip())
+
+        do_rw = [{"symbol": p["symbol"], "ilosc": p["ilosc"]} for p in pozycje]
+        uwagi = self._uwagi_rw(projekt, pozycje)
+        magazyn = self.var_magazyn.get() or MAGAZYN
+
+        sucho = utworz_rw(do_rw, uwagi, magazyn=magazyn, zapisz=False,
+                          timeout=300, tytul=tytul_dokumentu())
+        zle = [k for k in (sucho or {}).get("kroki", [])
+               if k.get("Status") == "blad"]
+        if zle:
+            raise RuntimeError("; ".join(
+                (k.get("Szczegoly") or k.get("Status")) for k in zle[:5]))
+
+        wynik = utworz_rw(do_rw, uwagi, magazyn=magazyn, zapisz=True,
+                          timeout=600, tytul=tytul_dokumentu())
+        numer = (wynik or {}).get("numer") or ""
+        if not (wynik or {}).get("zapisano") or not numer:
+            raise RuntimeError("Most nie potwierdził numeru dokumentu.")
+        if pid:
+            self._dopisz_wydane(pid, projekt)
+        return numer
+
+    def _id_projektu(self, numer):
+        """project_id dla numeru projektu — potrzebny do zapisu w BOM-ie."""
+        try:
+            db = getattr(self._arkusz, "db_manager", None)
+            if db is None:
+                return None
+            for w in db.master_read("projekty-do-selektora"):
+                if SCH.sam_numer(w["name"]) == SCH.sam_numer(numer):
+                    return w["project_id"]
+        except Exception as e:
+            print("Nie ustalono project_id dla %s: %s" % (numer, e))
+        return None
+
+    def _dopisz_wydane(self, pid, projekt):
+        """Ilość dostarczonych z Subiekta — po udanym RW tego projektu."""
+        con = self._con_projektu()
+        if con is None or not self._czy_lock():
+            return
+        try:
+            import subiekt_wydane_do_arkusza as WYD
+            WYD.odswiez(con, pid, projekt)
+        except Exception as e:
+            print("Nie dopisano wydan dla %s: %s" % (projekt, e))
+
+    def _po_wystawieniu(self, s, udane, bledy):
+        self.btn_zakoncz.config(state=tk.NORMAL,
+                                text="Wydaj / Utwórz RW\nw Subiekcie")
+        if udane:
+            # Ze schowka znikają TYLKO rozliczone projekty — reszta zostaje,
+            # żeby dało się poprawić przyczynę i dokończyć.
+            for projekt, _numer, _ile in udane:
+                try:
+                    SCH.usun_projekt(s["id"], projekt)
+                except Exception as e:
+                    print("Nie wyczyszczono %s: %s" % (projekt, e))
+        if bledy:
+            projekt, tresc = bledy[0]
+            czolo = ("Wystawiono: " + ", ".join(n for _p, n, _i in udane)
+                     if udane else "Nie wystawiono żadnego dokumentu.")
+            messagebox.showerror(
+                "Wydanie przerwane",
+                "%s\n\nProjekt %s: %s\n\nPozycje tego i kolejnych projektów "
+                "ZOSTAJĄ w schowku — popraw przyczynę i wystaw ponownie."
+                % (czolo, projekt, tresc), parent=self)
+        elif udane:
             messagebox.showinfo(
-                "Nowe pozycje czekają na lock",
-                "%d nowych pozycji pojawi się w arkuszu, gdy ktoś przejmie "
-                "projekt.\n\nTeraz lock trzyma kto inny, więc nie dało się "
-                "ich dopisać od razu.\nRW jest wystawione — towar zszedł "
-                "ze stanu." % odlozone, parent=self)
+                "Wydanie zapisane",
+                "Wystawiono %d dokument(ow):\n\n%s"
+                % (len(udane), "\n".join(
+                    "   %s — projekt %s, %d poz." % (n, p, i)
+                    for p, n, i in udane)), parent=self)
         self._odswiez_zawartosc()
+        self._odswiez()
 
 
 def open_window(parent, project_id, project_name=None,
