@@ -40,7 +40,7 @@ from tkinter import ttk, messagebox
 import subiekt_schowek as SCH
 import subiekt_schowek_bom as BOM
 from subiekt_wydanie_gui import (
-    WydanieWindow, TLO_SEKCJI, TEKST, TEKST_SZARY, OK_ZIELONY,
+    WydanieWindow, MAGAZYN, TLO_SEKCJI, TEKST, TEKST_SZARY, OK_ZIELONY,
     BLAD_TLO, UWAGA_TLO, wysrodkuj, _ilo, _liczba,
 )
 
@@ -200,27 +200,98 @@ class SchowekWindow(WydanieWindow):
         return bool(self._lock_awaryjny if stan is None else stan)
 
     def _pasek_gorny(self):
-        super()._pasek_gorny()
-        # Zamiana etykiety projektu na LISTĘ WYBORU.
-        #
-        # Okno wydań pokazuje projekt jako tekst — bierze go z RM_BAZA
-        # i nie zmienia. Schowek jest niezależny od projektu, więc to
-        # magazynier decyduje, na co idzie kolejna zeskanowana pozycja.
+        """Nagłówek schowka — jak w oknie wydań, ale PROJEKT DO WYBORU.
+
+        Budujemy własny zamiast łatać dziedziczony: wcześniejsza wersja
+        wyszukiwała etykietę projektu wśród cudzych widgetów i podmieniała
+        ją na combo. Działało w teście, ale w praktyce combo bywało
+        niewidoczne — zależało od kolejności i zagnieżdżenia ramek, na które
+        nie mamy wpływu (zgłoszone 14.09.2026: „nie widać dobrze comboxa").
+        """
+        from datetime import datetime
+
+        pasek = self.pasek_gorny = tk.Frame(self, bg=TLO_SEKCJI, height=76)
+        pasek.pack(fill=tk.X)
+        pasek.pack_propagate(False)
+        tk.Frame(self, bg="#d5dbdb", height=1).pack(fill=tk.X)
+
+        def sekcja(ikona, tytul, pierwsza=False):
+            ram = tk.Frame(pasek, bg=TLO_SEKCJI)
+            ram.pack(side=tk.LEFT, padx=(14 if pierwsza else 22, 0), pady=10)
+            gora = tk.Frame(ram, bg=TLO_SEKCJI)
+            gora.pack(anchor="w")
+            tk.Label(gora, text=ikona, bg=TLO_SEKCJI, fg=TEKST_SZARY,
+                     font=("Arial", 11)).pack(side=tk.LEFT, padx=(0, 6))
+            tk.Label(gora, text=tytul, bg=TLO_SEKCJI, fg=TEKST_SZARY,
+                     font=("Arial", 9)).pack(side=tk.LEFT)
+            return ram
+
+        # PROJEKT — WYBIERANY. Schowek jest jeden i niezależny od projektu,
+        # więc to magazynier decyduje, na co idzie kolejna zeskanowana
+        # pozycja. Szerokie pole, bo nazwy projektów bywają długie.
+        s = sekcja("⚙", "Projekt pozycji:", pierwsza=True)
+        self.var_projekt = tk.StringVar(value=self.project_name)
+        self.combo_projekt = ttk.Combobox(
+            s, textvariable=self.var_projekt, width=26, state="readonly",
+            font=("Arial", 11, "bold"))
+        self.combo_projekt.pack(anchor="w", pady=(2, 0))
+        self.var_kontekst = tk.StringVar(value="")
+        tk.Label(s, textvariable=self.var_kontekst, bg=TLO_SEKCJI,
+                 fg=TEKST_SZARY, font=("Arial", 8), anchor="w").pack(anchor="w")
+
+        s = sekcja("🏠", "Magazyn:")
+        self.var_magazyn = tk.StringVar(value=MAGAZYN)
+        ttk.Combobox(s, textvariable=self.var_magazyn, width=12,
+                     state="readonly", font=("Arial", 10),
+                     values=[MAGAZYN]).pack(anchor="w", pady=(2, 0))
+
+        s = sekcja("🔑", "Wydał:")
+        self.var_wydal = tk.StringVar()
+        self.combo_wydal = ttk.Combobox(s, textvariable=self.var_wydal,
+                                        width=18, state="readonly",
+                                        font=("Arial", 10))
+        self.combo_wydal.pack(anchor="w", pady=(2, 0))
+
+        s = sekcja("👤", "Pobiera:")
+        self.var_pobiera = tk.StringVar()
+        self.combo_pobiera = ttk.Combobox(s, textvariable=self.var_pobiera,
+                                          width=18, state="readonly",
+                                          font=("Arial", 10))
+        self.combo_pobiera.pack(anchor="w", pady=(2, 0))
+        self._wczytaj_osoby()
+        self._wczytaj_projekty()
+
+        s = sekcja("📅", "Data:")
+        tk.Label(s, text=datetime.now().strftime("%d.%m.%Y"), bg=TLO_SEKCJI,
+                 fg=TEKST, font=("Arial", 11), anchor="w").pack(
+            anchor="w", pady=(2, 0))
+
+        s = sekcja("📄", "Tworzymy:")
+        tk.Label(s, text="RW (magazynowy)", bg=TLO_SEKCJI, fg=TEKST,
+                 font=("Arial", 11, "bold"), anchor="w").pack(anchor="w")
+        tk.Label(s, text="Po jednym na projekt", bg=TLO_SEKCJI,
+                 fg=TEKST_SZARY, font=("Arial", 8), anchor="w").pack(anchor="w")
+
+        tk.Button(pasek, text="Odśwież", command=self._odswiez,
+                  font=("Arial", 8)).pack(side=tk.RIGHT, padx=14)
+
+        # Diplodok — żart dla magazyniera. Brak pliku niczego nie psuje.
+        self._dino = None
         try:
-            for w in self.pasek_gorny.winfo_children()[0].winfo_children():
-                if isinstance(w, tk.Label) and w.cget("text") == self.project_name:
-                    w.destroy()
-                    break
-            ramka = self.pasek_gorny.winfo_children()[0]
-            self.var_projekt = tk.StringVar(value=self.project_name)
-            self.combo_projekt = ttk.Combobox(
-                ramka, textvariable=self.var_projekt, width=18,
-                state="readonly", font=("Arial", 11, "bold"))
-            self.combo_projekt.pack(anchor="w", pady=(2, 0))
-            self._wczytaj_projekty()
-        except Exception as e:
-            print("⚠️  Nie podmieniono pola projektu: %s" % e)
-            self.var_projekt = tk.StringVar(value=self.project_name)
+            import os
+            from PIL import Image, ImageTk
+            plik = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "diplodok.png")
+            if os.path.isfile(plik):
+                im = Image.open(plik).convert("RGBA")
+                im.thumbnail((120, 56), Image.LANCZOS)
+                plansza = Image.new("RGBA", im.size, TLO_SEKCJI)
+                plansza.alpha_composite(im)
+                self._dino = ImageTk.PhotoImage(plansza.convert("RGB"))
+                tk.Label(pasek, image=self._dino, bg=TLO_SEKCJI).pack(
+                    side=tk.RIGHT, padx=(0, 10))
+        except Exception:
+            pass
 
     def _wczytaj_projekty(self):
         """Lista projektów do wyboru — te same, co w selektorze RM_BAZA."""
@@ -231,12 +302,15 @@ class SchowekWindow(WydanieWindow):
                 nazwy = [w["name"] for w in db.master_read("projekty-do-selektora")
                          if w.get("active")]
         except Exception as e:
-            print("⚠️  Nie wczytano listy projektów: %s" % e)
+            print("Nie wczytano listy projektow: %s" % e)
         if self.project_name and self.project_name not in nazwy:
             nazwy.insert(0, self.project_name)
-        self.combo_projekt["values"] = nazwy
-        if self.project_name:
-            self.var_projekt.set(self.project_name)
+        try:
+            self.combo_projekt["values"] = nazwy
+            if self.project_name:
+                self.var_projekt.set(self.project_name)
+        except Exception:
+            pass
 
     def _projekt_pozycji(self):
         """Numer projektu dla KOLEJNEJ skanowanej pozycji."""
