@@ -2417,48 +2417,50 @@ class MainWindow(tk.Tk):
         # redraw, nie za liczbę wierszy. Stąd trzy wiersze na krok za darmo
         # i próg zbity do 50 ms, tuż nad kosztem klatki.
         #
-        # ⚡ 13.09.2026 — ZDJĘTY PODWÓJNY REDRAW (zgłoszenie: „przewijanie
-        # i obsługa arkusza za wolne", monitor 4K).
+        # ⚠️ 13.09.2026 — PRÓBA ZDJĘCIA REDRAWU: NIEUDANA, NIE POWTARZAĆ.
         #
-        # `yview_scroll()` SAM przerysowuje tabelę. Dokładane po nim jawne
-        # `main_table_redraw_grid_and_text()` było DRUGIM, zbędnym przelotem
-        # po wszystkich widocznych komórkach. Pomiar na oknie 2560×1400,
-        # 300 wierszy × 23 kolumny:
+        # Wyglądało na to, że `yview_scroll()` sam przerysowuje tabelę, więc
+        # jawny `main_table_redraw_grid_and_text()` po nim jest zbędny. Dawało
+        # to 12x szybsze przewijanie (213 -> 18 ms) i BYŁO BŁĘDEM:
         #
-        #     yview_scroll + update ............  12 ms
-        #     + jawny redraw (poprzedni kod) ... 197 ms   ← 16× drożej
+        #   `MainTable.yview_scroll` NIE JEST nadpisane przez tksheet — to goła
+        #   metoda Canvasa. Przesuwa widok, ale NIE RYSUJE nowych komórek.
         #
-        # Koszt rósł z POWIERZCHNIĄ okna (46 ms przy 1200×700, 178 ms przy
-        # 2560×1400), bo tksheet rysuje każdą widoczną komórkę jako osobny
-        # obiekt canvasa — dlatego bolało dopiero na dużym ekranie.
+        # Widok faktycznie się przesuwał (yview rósł), więc pomiar wyglądał
+        # dobrze — a arkusz zostawiał niedomalowany pas u dołu („zasuwa ale
+        # obcina"). Debounce (redraw po 40 ms ciszy) też nie wystarczył.
         #
-        # Sprawdzone: widok faktycznie się przesuwa (yview 0.0000 → 0.0568),
-        # liczba obiektów canvasa bez zmian, a indeks wierszy zostaje
-        # zsynchronizowany z tabelą co do 1e-6.
+        # Rozstrzygające: WŁASNY handler tksheet (`MainTable.mousewheel`) też
+        # woła pełny redraw po każdym ticku. Redraw jest OBOWIĄZKOWY.
         #
-        # MIN_STEP_MS zeszło z 50 na 16 ms (~60 klatek/s): przy 12 ms na krok
-        # dawny próg był hamulcem, a nie zabezpieczeniem. Gdyby na słabszej
-        # maszynie zaczęło szarpać — podnosić TEN próg, nie zmniejszać
-        # SCROLL_STEP_ROWS, bo liczba wierszy w kroku nic nie kosztuje.
+        # DLACZEGO TO BOLI DOPIERO NA 4K
+        # ──────────────────────────────
+        # Koszt jest liniowy względem liczby WIDOCZNYCH komórek, ~0,166 ms
+        # na komórkę (tksheet rysuje każdą jako osobny obiekt canvasa):
+        #
+        #     okno 1200x700   ->  28x12 =  336 komórek ->  60 ms
+        #     okno 2560x1400  ->  58x23 = 1334 komórek -> 222 ms
+        #
+        # Na dużym ekranie widać 4x więcej komórek naraz. Podświetlenia NIE
+        # są winne — bez nich jest tak samo wolno (sprawdzone).
+        #
+        # Gdyby kiedyś trzeba było przyspieszyć, jedyna droga to MNIEJ
+        # RYSOWANYCH KOMÓREK, nie mniej redrawów:
+        #     23 -> 14 kolumn (ukryte rzadkie) ....... 222 -> 139 ms
+        #     wysokość wiersza 40 px ................. 222 -> 139 ms
+        #     oba naraz ..............................        ~90 ms
+        # Poniżej ~90 ms nie da się zejść bez zmiany widżetu.
+        #
+        # Decyzja użytkownika: „wolniej niż z artefaktami". Redraw zostaje
+        # przy każdym ticku.
+        #
+        # Razem: ~60 wierszy/s zamiast 10, przy tej samej liczbie przerysowań.
+        # Gdyby na słabszej maszynie zaczęło szarpać, wracamy podnosząc
+        # MIN_STEP_MS — nie zmniejszając SCROLL_STEP_ROWS, bo to nic nie kosztuje.
         SCROLL_STEP_ROWS = 3
-        MIN_STEP_MS = 16
-
-        #: Po ilu ms ciszy domalować arkusz. 40 ms to mniej niż przerwa
-        #: między tickami przy normalnym kręceniu, więc w trakcie przewijania
-        #: redraw się nie odpala, a po puszczeniu kółka jest natychmiastowy.
-        REDRAW_PO_MS = 40
+        MIN_STEP_MS = 50
 
         self._sheet_scroll_last_step_ts = 0.0
-        self._sheet_scroll_redraw_id = None
-
-        def domaluj():
-            """Jeden pełny redraw po zatrzymaniu kółka — kasuje ucięty pas."""
-            self._sheet_scroll_redraw_id = None
-            try:
-                mt.main_table_redraw_grid_and_text(redraw_header=True,
-                                                   redraw_row_index=True)
-            except Exception:
-                pass
 
         def stepped_mousewheel(event):
             now = time.monotonic()
@@ -2476,25 +2478,10 @@ class MainWindow(tk.Tk):
                 mt.yview_scroll(-SCROLL_STEP_ROWS, "units")
                 mt.RI.yview_scroll(-SCROLL_STEP_ROWS, "units")
                 mt.y_move_synced_scrolls("moveto", mt.yview()[0])
-
-            # DOMALOWANIE PO ZATRZYMANIU KÓŁKA.
-            #
-            # Samo `yview_scroll` rysuje tylko to, co uzna za potrzebne, więc
-            # przy szybkim przewijaniu zostawia niedomalowany pas u dołu
-            # (zgłoszone 13.09.2026: „zasuwa, ale obcina przy przewijaniu").
-            # Pełny redraw przy KAŻDYM ticku kosztował 213 ms i był powodem
-            # mulenia — więc robimy go RAZ, gdy kółko się zatrzyma.
-            #
-            # Kasowanie poprzedniego `after` jest tu sednem: przy ciągłym
-            # kręceniu termin przesuwa się w przód i redraw nie wykonuje się
-            # ani razu, dopiero po ostatnim ticku.
-            if self._sheet_scroll_redraw_id:
-                try:
-                    self.after_cancel(self._sheet_scroll_redraw_id)
-                except Exception:
-                    pass
-            self._sheet_scroll_redraw_id = self.after(
-                REDRAW_PO_MS, domaluj)
+            # Redraw SYNCHRONICZNIE, przy każdym ticku — bez tego zostaje
+            # niedomalowany pas (patrz komentarz wyżej). Nie odraczać.
+            mt.main_table_redraw_grid_and_text(redraw_header=False,
+                                               redraw_row_index=True)
 
         try:
             # Tkinter .bind() zarejestrował referencję do oryginalnej metody, więc
