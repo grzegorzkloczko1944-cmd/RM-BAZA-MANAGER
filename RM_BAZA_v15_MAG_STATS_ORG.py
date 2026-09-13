@@ -10211,9 +10211,15 @@ class MainWindow(tk.Tk):
                               "(zdjęto ZAMÓWIONO i termin dostawy z tej wysyłki).")
             messagebox.showinfo("Zamówienia z Subiekta", "\n\n".join(czesci), parent=self)
 
-        # Przy okazji locka — „Ilość dostarczonych" z Subiekta. Ten sam
-        # moment i te same warunki: mamy świeżą kopię lokalną i prawo zapisu.
-        self._odswiez_wydane_z_subiekta(cicho=True)
+        # ⚠️ ODŚWIEŻANIA WYDAŃ TU NIE MA — świadomie.
+        #
+        # Ta metoda woła się z TRZECH miejsc: acquire_lock, force_acquire_lock
+        # ORAZ release_lock. Doklejenie tu odczytu z Subiekta oznaczało pytanie
+        # mostu także przy ZWALNIANIU projektu, gdzie jest zupełnie zbędne —
+        # i arkusz zaczynał mulić (zgłoszone 13.09.2026).
+        #
+        # Odświeżanie wydań wisi teraz bezpośrednio pod przejęciem locka
+        # (acquire_lock / force_acquire_lock), gdzie faktycznie ma sens.
 
     def _odswiez_wydane_z_subiekta(self, cicho=False):
         """„Ilość dostarczonych" = suma RW z Subiekta (WYDANE_Z_SUBIEKTA_DO_ARKUSZA.md).
@@ -10290,7 +10296,13 @@ class MainWindow(tk.Tk):
             "Zaktualizowano %d pozycji wg wydań (RW) z Subiekta:\n\n%s%s\n\n"
             "Pozycje, których Subiekt nie zna, zostały nietknięte."
             % (len(zmiany), lista, wiecej), parent=self)
-        self.load_items()
+        # Przerysowanie arkusza TYLKO przy wywołaniu ręcznym. Przy przejmowaniu
+        # locka arkusz i tak ładuje się zaraz potem, a `refresh_data()` sprawdza
+        # duplikaty i odpytuje serwer o właściciela locka — drugi taki przelot
+        # w tej samej chwili był odczuwalny (zgłoszone 13.09.2026: „arkusz
+        # zaczął strasznie mulić").
+        if not cicho:
+            self.refresh_data()
 
     def acquire_lock(self):
         """Przejmij lock projektu"""
@@ -10352,6 +10364,9 @@ class MainWindow(tk.Tk):
 
             # „Zamówiono" odłożone przez wysyłkę ZD — teraz mamy lock i kopię.
             self._naloz_zamowienia_zd()
+            # Wydania z Subiekta — tylko po PRZEJĘCIU locka: mamy świeżą
+            # kopię lokalną i prawo zapisu (WYDANE_Z_SUBIEKTA_DO_ARKUSZA.md).
+            self._odswiez_wydane_z_subiekta(cicho=True)
 
             # Aktualne „Ilość (zam.)" z ZK — NA STARCIE pracy, nie na końcu.
             # Tu user i tak czeka na wczytanie projektu (~0,3 s przy ciepłym
@@ -10455,6 +10470,9 @@ class MainWindow(tk.Tk):
 
             # „Zamówiono" odłożone przez wysyłkę ZD — teraz mamy lock i kopię.
             self._naloz_zamowienia_zd()
+            # Wydania z Subiekta — tylko po PRZEJĘCIU locka: mamy świeżą
+            # kopię lokalną i prawo zapisu (WYDANE_Z_SUBIEKTA_DO_ARKUSZA.md).
+            self._odswiez_wydane_z_subiekta(cicho=True)
 
             # Ilości z ZK — tak samo jak przy zwykłym przejęciu. Przy WYMUSZENIU
             # tym bardziej: poprzedni właściciel mógł pracować na innym stanie.
