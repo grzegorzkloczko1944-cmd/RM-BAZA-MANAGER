@@ -742,6 +742,11 @@ class MainWindow(tk.Tk):
         self.title("RM_BAZA_v15_MAG_C_CHAT_STATS")
         self.geometry("1400x800")
 
+        # Pilnuje, żeby OKNO GŁÓWNE nie zostało poza pulpitem po zmianie
+        # układu monitorów. Patrz `_sprawdz_pozycje_okna` — to druga połowa
+        # zabezpieczenia z `_pilnuj_okien_na_ekranie()`.
+        self.after(3000, self._sprawdz_pozycje_okna)
+
         # Ikona okna (pasek zadań/tytuł). Onefile rozpakowuje datas do sys._MEIPASS,
         # ze zrodel ikona lezy obok pliku .py. Brak pliku nie moze wywalic startu.
         try:
@@ -2625,6 +2630,52 @@ class MainWindow(tk.Tk):
         if not self.have_lock:
             return
         self._last_activity_ts = time.time()
+
+    def _sprawdz_pozycje_okna(self):
+        """Cyklicznie: czy OKNO GŁÓWNE wciąż jest na widocznym pulpicie.
+
+        ⛔ DRUGA POŁOWA ZABEZPIECZENIA. `_pilnuj_okien_na_ekranie()` chroni
+        okna, które same wołają `geometry()` — ale `messagebox` i `filedialog`
+        idą prosto do Tcl (`tk_messageBox`), więc tamten strażnik ich NIE
+        WIDZI. Tk centruje je względem okna nadrzędnego, więc gdy główne okno
+        wyjedzie poza pulpit, dialog poleci razem z nim: niewidoczny modal,
+        a program wygląda na zawieszony (13.09.2026, „RFQ — brak konfiguracji"
+        na x=3283 przy pulpicie kończącym się na 2560).
+
+        Pilnując okna głównego, załatwiamy jednym ruchem wszystkie dialogi
+        systemowe — pojedynczo nie da się ich przechwycić.
+
+        KIEDY OKNO WYJEŻDŻA: uśpienie i wybudzenie, odłączenie monitora,
+        stacja dokująca, zmiana rozdzielczości. Windows przelicza wtedy układ
+        ekranów, a okno pamięta starą pozycję.
+        """
+        try:
+            if self.state() == "normal":        # zminimalizowane ma dziwne x/y
+                x, y = self.winfo_x(), self.winfo_y()
+                lewo, gora = self.winfo_vrootx(), self.winfo_vrooty()
+                prawo = lewo + self.winfo_vrootwidth()
+                dol = gora + self.winfo_vrootheight()
+                if prawo > lewo and dol > gora:
+                    szer, wys = self.winfo_width(), self.winfo_height()
+                    # Wystarczy, że WIDAĆ KAWAŁEK okna — nie przesuwamy go
+                    # tylko dlatego, że wystaje poza krawędź. Chodzi o to,
+                    # żeby nie zostało niewidoczne w całości.
+                    widoczne = (x < prawo - 100 and x + szer > lewo + 100
+                                and y < dol - 40 and y + wys > gora)
+                    if not widoczne:
+                        nx = min(max(x, lewo), max(lewo, prawo - szer))
+                        ny = min(max(y, gora), max(gora, dol - wys))
+                        print(f"⚠️  Okno główne poza pulpitem (+{x}+{y}) "
+                              f"— przywracam na +{nx}+{ny}")
+                        self.geometry(f"+{nx}+{ny}")
+        except Exception:
+            pass            # kontrola pozycji nie ma prawa niczego zatrzymać
+        # Co 5 s: dość rzadko, żeby nic nie kosztowało, i dość często, żeby
+        # user nie zdążył kliknąć w martwe okno po wybudzeniu.
+        try:
+            self.after(5000, self._sprawdz_pozycje_okna)
+        except Exception:
+            pass
 
     def _start_idle_watch(self):
         """Uruchom obserwację bezczynności (30 min)."""
