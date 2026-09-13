@@ -136,6 +136,42 @@ def dodaj_do_bom(con, project_id, symbol, nazwa):
     return cur.lastrowid
 
 
+# ── dopisanie wydanych ilości do „Ilość dostarczonych" ──────────────────────
+def dopisz_wydane(con, project_id, pozycje):
+    """DODAJE wydane ilości do `delivered_qty`. Zwraca liczbę zmienionych.
+
+    „Wydane z magazynu" i „dostarczone od dostawcy" to z punktu widzenia
+    PROJEKTU ten sam fakt: detal dotarł i można go montować. Dlatego obie
+    drogi sumują się w jednej kolumnie — decyzja użytkownika 13.09.2026:
+    „wydane to ma iść do odebrane".
+
+    ⚠️ DODAJEMY, nie nadpisujemy. Ta sama pozycja bywa wydawana kilka razy
+    (kolejne RW, kolejne schowki), a część mogła wcześniej przyjść od
+    dostawcy — nadpisanie skasowałoby tamto.
+
+    Aktualizujemy też `delivered_updated_at`, bo tak robi każdy inny zapis
+    tego pola (`database_manager.py:861`) i po tym znaczniku poznaje się
+    świeżość liczby.
+    """
+    if con is None or not project_id or not pozycje:
+        return 0
+    teraz = datetime.now().isoformat()
+    ile = 0
+    for p in pozycje:
+        item_id = znajdz_w_bom(con, project_id, p["symbol"])
+        if not item_id:
+            continue                          # pozycji nie ma — nie ma gdzie dopisać
+        con.execute(
+            "UPDATE items"
+            "   SET delivered_qty = COALESCE(delivered_qty, 0) + ?,"
+            "       delivered_updated_at = ?, updated_at = ?"
+            " WHERE id = ?",
+            (float(p["ilosc"]), teraz, teraz, item_id))
+        ile += 1
+    con.commit()
+    return ile
+
+
 # ── poczekalnia w master (gdy lock trzyma ktoś inny) ────────────────────────
 def odloz_w_master(serwer, project_id, pozycje, kto=None):
     """Zapisuje brakujące wiersze do poczekalni. Zwraca liczbę odłożonych.

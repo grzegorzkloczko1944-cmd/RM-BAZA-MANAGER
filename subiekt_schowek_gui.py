@@ -525,6 +525,34 @@ class SchowekWindow(WydanieWindow):
         super()._po_zapisie(wynik, bledy, sucho)
         if bledy or sucho or not (wynik or {}).get("numer"):
             return
+        # „Ilość dostarczonych" = ile detalu dotarło na projekt, wszystko
+        # jedno czy od dostawcy, czy z magazynu (decyzja 13.09.2026:
+        # „wydane to ma iść do odebrane"). Dopisujemy PO potwierdzonym RW,
+        # nigdy przed — inaczej arkusz pokazywałby ilość bez pokrycia
+        # w dokumencie.
+        pozycje = self._pozycje_sesji()
+        con = self._con_projektu()
+        if con is not None and self._czy_lock():
+            try:
+                BOM.dopisz_wydane(con, self.project_id, pozycje)
+            except Exception as e:
+                messagebox.showwarning(
+                    "Arkusz nie zaktualizowany",
+                    "RW %s powstało i towar zszedł ze stanu, ale nie udało "
+                    "się dopisać ilości do arkusza:\n%s\n\n"
+                    "Popraw „Ilość dostarczonych” ręcznie."
+                    % (wynik["numer"], e), parent=self)
+        else:
+            # Bez locka baza projektu jest READ-ONLY. Nie zapisujemy po cichu
+            # w próżnię — magazynier musi wiedzieć, czemu arkusz się nie zmienił.
+            messagebox.showinfo(
+                "Arkusz bez zmian — brak locka",
+                "RW %s powstało, towar zszedł ze stanu.\n\n"
+                "„Ilość dostarczonych” w arkuszu NIE została zwiększona, bo "
+                "projekt nie jest przejęty.\nPrzejmij lock i popraw ręcznie "
+                "albo wystawiaj wydania przy przejętym projekcie."
+                % wynik["numer"], parent=self)
+
         s = self._schowek()
         if s:
             try:

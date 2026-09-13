@@ -1,7 +1,8 @@
 # Schowek → RW: algorytm wystawiania
 
 **Data:** 2026-09-13
-**Status:** SPECYFIKACJA — ustalona z użytkownikiem, do implementacji
+**Status:** WDROŻONE 13.09.2026 — kod w `subiekt_schowek_bom.py`
+i `subiekt_schowek_gui.py`; §9 to sprostowanie po pierwszym prawdziwym wydaniu
 **Zastępuje:** wcześniejsze koncepcje z `source='warehouse'`, tabelą
 pośrednią `schowek_wydane_pozycje` w master i osobną kategorią „pozycje
 magazyniera" — **wszystkie wyrzucone jako niepotrzebne**
@@ -20,10 +21,16 @@ Ten dokument opisuje **wyłącznie moment rozliczenia**: co się dzieje
 z pozycjami w chwili wystawiania RW. Sam bufor opisuje
 [[BUFOR_SCHOWEK_MONTAZOWY.md]].
 
-Kluczowe tło: **„Ilość dostarczonych" w arkuszu RM_BAZA jest CZYTANA
-z Subiekta**, nie wpisywana przez RM_BAZA. Cały algorytm sprowadza się
-więc do zapewnienia, że w chwili odczytu istnieje wiersz, do którego ta
-ilość ma się przypiąć.
+Kluczowe tło: po wystawieniu RW schowek **DOPISUJE wydane ilości do
+„Ilość dostarczonych"** w arkuszu. Algorytm dba więc o to, żeby istniał
+wiersz, do którego da się je dopisać.
+
+> ⚠️ **Sprostowanie z 13.09.2026.** Pierwsza wersja tego dokumentu
+> zakładała, że „Ilość dostarczonych" jest CZYTANA z Subiekta i wystarczy
+> zapewnić istnienie wiersza. **To założenie było błędne** — takiego
+> odczytu w kodzie nie ma, `delivered_qty` jest zwykłym polem bazy
+> projektu. Wyszło przy pierwszym prawdziwym wydaniu: RW powstało
+> w Subiekcie, a arkusz się nie zmienił. Patrz §9.
 
 ---
 
@@ -41,9 +48,9 @@ w tej samej kolumnie „Nr rysunku".
 
 ### Dlaczego to wystarcza
 
-„Ilość dostarczonych" w arkuszu jest **czytana z Subiekta**, nie wpisywana
-przez schowek. Wystarczy więc zapewnić, że w chwili odczytu istnieje wiersz,
-do którego ta ilość ma się przypiąć. Nic więcej nie trzeba synchronizować.
+Po potwierdzonym RW schowek **dopisuje wydane ilości do „Ilość
+dostarczonych"** (§9). Wystarczy więc zapewnić, że istnieje wiersz, do
+którego da się je dopisać — nic więcej nie trzeba synchronizować.
 
 **Nie oznaczamy, że pozycję dodał magazynier.** Po operacji to jest zwykła
 pozycja projektu — następnym razem ten sam detal zostanie znaleziony po
@@ -73,7 +80,7 @@ Szukaj SYMBOLU w kolumnie „Nr rysunku" projektu RM_BAZA
    │                         w Subiekcie pod projekt
    │                                  │
    │                                  ▼
-   │                        RM_BAZA odczytuje Subiekt
+   │                    RM_BAZA dopisuje wydane ilości
    │                                  │
    │                                  ▼
    │                     „Ilość dostarczonych" się zwiększa
@@ -92,7 +99,7 @@ Szukaj SYMBOLU w kolumnie „Nr rysunku" projektu RM_BAZA
                               w Subiekcie pod projekt
                                       │
                                       ▼
-                           RM_BAZA odczytuje Subiekt
+                      RM_BAZA dopisuje wydane ilości
                                       │
                                       ▼
                          „Ilość dostarczonych" się zgadza
@@ -131,7 +138,7 @@ Pierwsze dwa **istnieją** → tylko RW, żadnych nowych wierszy:
 4012345678901    [nazwa detalu]     0
 ```
 
-potem RW +3. Po odświeżeniu z Subiekta:
+potem RW +3, a po nim dopisanie ilości:
 
 ```text
 4012345678901    [nazwa detalu]     3
@@ -322,3 +329,69 @@ a wpisanie czegokolwiek byłoby zmyślaniem.
 
 *Pytanie o lock — rozstrzygnięte, patrz §4.4: wiersz idzie do master
 i RW powstaje normalnie.*
+
+---
+
+## 9. „Ilość dostarczonych" — zapis, nie odczyt (sprostowanie 13.09.2026)
+
+### Co się okazało przy pierwszym wydaniu
+
+Test na żywo: pozycja `2627-200.12`, projekt 3500. **RW powstało
+w Subiekcie, ale arkusz się nie zmienił.**
+
+Algorytm zadziałał poprawnie — pozycja była już w BOM-ie (wiersz 476), więc
+zgodnie z §1 nie dopisywał wiersza, tylko wystawił RW. Zawiodło założenie:
+
+> „Ilość dostarczonych" jest CZYTANA z Subiekta
+
+**Takiego odczytu nie ma.** `delivered_qty` to zwykłe pole bazy projektu,
+wypełniane ręcznie albo przez stary skaner. Okno wydania ma nawet komentarz,
+że **celowo** go nie rusza (`subiekt_wydanie_gui.py:19`), bo dla niego
+oznacza „dostarczono od dostawcy".
+
+### Decyzja: wydane idzie do odebranych
+
+Użytkownik: *„A — no przecież wydane to ma iść do odebrane"*.
+
+Z punktu widzenia PROJEKTU to jeden fakt: **detal dotarł i można go
+montować**. Nieważne, czy przyjechał od dostawcy, czy wyszedł z magazynu —
+jedna kolumna, jeden sens. Rozdzielanie tego na dwa pola byłoby księgowym
+rozróżnieniem bez wartości dla osoby patrzącej na arkusz.
+
+### Jak to działa
+
+Po **potwierdzonym** RW (nigdy przed) `BOM.dopisz_wydane()`:
+
+```sql
+UPDATE items
+   SET delivered_qty = COALESCE(delivered_qty, 0) + ?,
+       delivered_updated_at = ?, updated_at = ?
+ WHERE id = ?
+```
+
+* **DODAJE, nie nadpisuje** — ta sama pozycja bywa wydawana kilka razy,
+  a część mogła wcześniej przyjść od dostawcy; nadpisanie skasowałoby tamto.
+* `delivered_updated_at` aktualizowane tak samo jak przy każdym innym
+  zapisie tego pola (`database_manager.py:861`).
+* Pozycja, której nie ma w BOM-ie, jest pomijana — nie ma gdzie dopisać.
+
+### Bez locka: mówimy o tym wprost
+
+Baza projektu bez locka jest READ-ONLY, więc dopisanie się nie uda.
+Magazynier dostaje wtedy komunikat:
+
+```text
+RW 143/MASTER/2026 powstało, towar zszedł ze stanu.
+
+„Ilość dostarczonych" w arkuszu NIE została zwiększona, bo projekt nie
+jest przejęty. Przejmij lock i popraw ręcznie albo wystawiaj wydania przy
+przejętym projekcie.
+```
+
+Świadomie NIE zapisujemy tego po cichu w próżnię — magazynier zajrzy do
+arkusza, zobaczy niezmienioną liczbę i musi wiedzieć dlaczego.
+
+⚠️ **Do rozważenia:** nowe WIERSZE mają poczekalnię w master (§4.4),
+a dopisanie ILOŚCI jej nie ma. Przy wydaniu bez locka arkusz zostaje
+z nieaktualną liczbą do ręcznej poprawki. Gdyby to zaczęło przeszkadzać,
+ten sam wzorzec poczekalni obsłużyłby i ilości.
