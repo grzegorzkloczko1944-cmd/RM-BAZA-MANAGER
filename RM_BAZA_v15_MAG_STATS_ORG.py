@@ -8801,7 +8801,7 @@ class MainWindow(tk.Tk):
         żeby badge i tak pokazał 'do podmiany' / 'do powiadomienia'."""
         try:
             from rm_sync_agent import RMSyncAgent
-            agent = RMSyncAgent(str(MASTER_PATH))
+            agent = RMSyncAgent()
         except Exception:
             return
         try:
@@ -8822,7 +8822,7 @@ class MainWindow(tk.Tk):
         Wynik przekazuje z powrotem do GUI przez self.after(0, ...)."""
         try:
             from rm_sync_agent import RMSyncAgent
-            agent = RMSyncAgent(str(MASTER_PATH))
+            agent = RMSyncAgent()
         except Exception:
             return   # integracja nieskonfigurowana — cicho, bez alarmu
 
@@ -24589,12 +24589,12 @@ class MainWindow(tk.Tk):
         def worker():
             try:
                 from rm_sync_agent import RMSyncAgent
-                agent = RMSyncAgent(str(MASTER_PATH))
+                agent = RMSyncAgent()
                 stale = agent.all_stale_drawings()
             except Exception:
                 stale = []
             try:
-                agent2 = RMSyncAgent(str(MASTER_PATH))
+                agent2 = RMSyncAgent()
                 notify = agent2.all_docs_to_notify()
             except Exception:
                 notify = []
@@ -25581,7 +25581,7 @@ class MainWindow(tk.Tk):
         def _bg_sync():
             try:
                 from rm_sync_agent import RMSyncAgent
-                agent = RMSyncAgent(str(MASTER_PATH))
+                agent = RMSyncAgent()
             except Exception:
                 return  # RFQ nieskonfigurowane / brak modułu — cicho kończymy
             changed = False
@@ -25638,7 +25638,7 @@ class MainWindow(tk.Tk):
         nie jest skonfigurowana (rfq_portal_url / rfq_api_key w settings)."""
         try:
             from rm_sync_agent import RMSyncAgent
-            return RMSyncAgent(str(MASTER_PATH))
+            return RMSyncAgent()
         except Exception as e:
             messagebox.showerror(
                 "RFQ — brak konfiguracji",

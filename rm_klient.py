@@ -55,6 +55,17 @@ TIMEOUT_S = 30
 
 _host = DOMYSLNY_HOST
 _port = DOMYSLNY_PORT
+
+#: Czy adres pochodzi z KONFIGURACJI STACJI, czy to jeszcze wartość domyślna.
+#:
+#: ⚠️ `_host` jest wypełnione od importu (żeby świeża stacja bez
+#: `sync_config.json` działała), więc samo `bool(_host)` NIE ODRÓŻNIA
+#: „skonfigurowany" od „nikt nic nie ustawił". Wołający, który sprawdzał
+#: `skonfigurowany()` przed wczytaniem pliku, dostawał `True` i pomijał
+#: konfigurację — a potem uderzał w adres firmowy zamiast w lokalny
+#: (13.09.2026: agent RFQ na stacji domowej celował w 192.168.100.84,
+#: choć w `sync_config.json` stoi 127.0.0.1).
+_ustawiony_recznie = False
 #: Sekret HMAC celowo NIE jest zaszyty w kodzie — .exe trafia na dziesięć
 #: stacji i do repozytorium. Stacja bez sekretu dociąga go z `HMAC.json`
 #: na udziale serwera (patrz `rm_manager._master`).
@@ -116,7 +127,8 @@ def ustaw_serwer(host, port=None, sekret=None):
 
     Brakujący `sekret` dociągamy z udziału — tak samo jak brakujący host.
     """
-    global _host, _port, _sekret
+    global _host, _port, _sekret, _ustawiony_recznie
+    _ustawiony_recznie = True
     _host = host or DOMYSLNY_HOST
     _port = int(port or DOMYSLNY_PORT)
     # ⚠️ Pusty `sekret` NIE KASUJE już ustawionego.
@@ -134,7 +146,13 @@ def ustaw_serwer(host, port=None, sekret=None):
 
 
 def skonfigurowany():
-    return bool(_host)
+    """Czy `ustaw_serwer()` zostało już wołane.
+
+    NIE sprawdzamy `bool(_host)` — ten jest wypełniony domyślną wartością od
+    importu, więc zwracałby True także wtedy, gdy nikt konfiguracji nie
+    wczytał (patrz `_ustawiony_recznie`).
+    """
+    return _ustawiony_recznie
 
 
 def opis():
