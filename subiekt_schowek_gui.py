@@ -461,6 +461,11 @@ class SchowekWindow(WydanieWindow):
                             operator=(self.var_wydal.get() or "").strip(),
                             monter=monter, projekt=projekt)
         except SCH.BladSchowka as e:
+            # Zwrot bez pokrycia w schowku to najczęściej zwrot PO wydaniu:
+            # towar zszedł już ze stanu dokumentem RW, więc nie ma czego
+            # odejmować od bufora — trzeba go PRZYJĄĆ z powrotem.
+            if kierunek < 0:
+                return self._zwrot_po_rw(p, ile, projekt, monter, str(e))
             return self._uwaga("⛔ %s" % e, BLAD_TLO)
 
         self._odswiez_zawartosc()
@@ -493,6 +498,102 @@ class SchowekWindow(WydanieWindow):
         się do zera i nie trafia na RW — po to jest cały schowek.
         """
         self._ruch(-1)
+
+    def _zwrot_po_rw(self, poz, ile, projekt, monter, powod):
+        """Monter oddaje coś, czego nie ma już w schowku — PW zwrotu.
+
+        Dwa różne zwroty, dwie różne drogi:
+
+          PRZED wystawieniem RW → „Zdejmij ze schowka" znosi pobranie
+            i pozycja nie trafia na dokument w ogóle (`SCH.oddano`).
+
+          PO wystawieniu RW → towar JEST JUŻ ZDJĘTY ZE STANU w Subiekcie.
+            Bufora nie ma czego korygować; trzeba przyjąć towar z powrotem
+            osobnym dokumentem PW. Tego nie da się zrobić „po cichu" —
+            to ruch magazynowy w drugą stronę.
+
+        Wcześniej taki zwrot kończył się samym komunikatem „w schowku jest
+        0 szt.", bez podpowiedzi co dalej (14.09.2026).
+        """
+        s = self._schowek()
+        w_schowku = 0
+        if s:
+            try:
+                w_schowku = SCH.ile_w_schowku(s["id"], poz["symbol"], projekt)
+            except Exception:
+                pass
+
+        if w_schowku > 0:
+            # Częściowe pokrycie: część można znieść w buforze, resztę PW.
+            tresc = ("W schowku jest tylko %s szt. „%s” na projekcie %s, "
+                     "a monter oddaje %s.\n\n"
+                     "Zdejmij najpierw tyle, ile jest w schowku, a resztę "
+                     "przyjmij dokumentem PW." % (_ilo(w_schowku), poz["symbol"],
+                                                  projekt, _ilo(ile)))
+            return messagebox.showwarning("Zwrot częściowo poza schowkiem",
+                                          tresc, parent=self)
+
+        if not messagebox.askyesno(
+                "Zwrot po wydaniu",
+                "„%s” nie ma już w schowku na projekcie %s — najpewniej "
+                "poszło na RW.\n\n"
+                "Towar jest ZDJĘTY ZE STANU w Subiekcie, więc zwrot wymaga "
+                "przyjęcia go z powrotem osobnym dokumentem.\n\n"
+                "Wystawić PW zwrotu na %s szt.?"
+                % (poz["symbol"], projekt, _ilo(ile)),
+                icon="question", parent=self):
+            return
+
+        try:
+            numer = self._wystaw_pw_zwrotu(poz, ile, projekt, monter)
+        except Exception as e:
+            return messagebox.showerror(
+                "PW zwrotu nie powstało",
+                "%s\n\nTowar NIE został przyjęty na magazyn." % e, parent=self)
+
+        messagebox.showinfo(
+            "Zwrot przyjęty",
+            "Wystawiono %s\n\n%s — %s szt., projekt %s\n\n"
+            "Towar wrócił na stan magazynu."
+            % (numer, poz["symbol"], _ilo(ile), projekt), parent=self)
+        self._odswiez()
+
+    def _wystaw_pw_zwrotu(self, poz, ile, projekt, monter):
+        """PW przyjmujące towar z powrotem. Zwraca numer albo rzuca.
+
+        BEZ CENY — most wtedy bierze cenę z kartoteki (Pw.cs: „cena jest
+        OPCJONALNA"). Zgadywanie ceny przyjęcia przy zwrocie rozjechałoby
+        wartość magazynu; kartoteka wie lepiej.
+        """
+        from subiekt_produkcja import wyslij_pw
+        from subiekt_zamowienia import zloz_uwagi, tytul_dokumentu
+
+        opis = ["ZWROT z RW"]
+        if monter:
+            opis.append("ODDAŁ: %s" % monter)
+        wydal = (self.var_wydal.get() or "").strip()
+        if wydal:
+            opis.append("PRZYJĄŁ: %s" % wydal)
+
+        plan = {
+            "pozycje": [{"symbol": poz["symbol"], "ilosc": float(ile)}],
+            "uwagi": zloz_uwagi(projekt, "   ".join(opis)),
+            "tytul": tytul_dokumentu(),
+            "magazyn": self.var_magazyn.get() or MAGAZYN,
+        }
+
+        sucho = wyslij_pw(plan, zapisz=False, timeout=300)
+        zle = [k for k in (sucho or {}).get("kroki", [])
+               if k.get("Status") == "blad"]
+        if zle:
+            raise RuntimeError("; ".join(
+                (k.get("Szczegoly") or k.get("Status")) for k in zle[:5]))
+
+        wynik = wyslij_pw(plan, zapisz=True, timeout=600)
+        numer = (wynik or {}).get("numer") or ""
+        if not (wynik or {}).get("zapisano") or not numer:
+            raise RuntimeError("Most nie potwierdził numeru dokumentu.")
+        return numer
 
     def _usun_z_sesji(self):
         s = self._schowek()
