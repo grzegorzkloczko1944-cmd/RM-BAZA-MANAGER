@@ -30701,6 +30701,45 @@ class MainWindow(tk.Tk):
 
         subiekt_wydanie_gui.open_window(self, self.current_project_id, project_name)
 
+    def open_schowek_window(self):
+        """Okno „Schowek wydań" — przycisk 🧺 Schowek, obok „Wydaj".
+
+        Bufor montażowy: monter bierze i oddaje w ciągu dnia, a do Subiekta
+        idzie JEDNO RW z bilansem netto. Wzięte i oddane tego samego dnia
+        nie zostawia śladu na dokumencie (BUFOR_SCHOWEK_MONTAZOWY.md).
+
+        Sam schowek żyje w pliku roboczym stanowiska, więc skanowanie NIE
+        wymaga locka. Lock jest potrzebny dopiero przy rozliczeniu i tylko
+        wtedy, gdy w schowku są pozycje spoza BOM-u — bez niego nowy wiersz
+        idzie do poczekalni w master i arkusz nałoży go przy „Przejmij Lock"
+        (SCHOWEK_RW_ALGORYTM.md §4.4). Dlatego okno otwieramy zawsze.
+        """
+        if not self.current_project_id:
+            messagebox.showwarning("Schowek wydań",
+                                   "Najpierw wybierz projekt.", parent=self)
+            return
+        try:
+            import subiekt_schowek_gui
+        except ImportError as e:
+            messagebox.showerror(
+                "Schowek wydań",
+                f"Nie znaleziono modułu subiekt_schowek_gui.py\n\n{e}",
+                parent=self)
+            return
+
+        project_name = None
+        try:
+            _w = self.db_manager.master_read("project-name",
+                                             {"project_id": self.current_project_id})
+            project_name = (_w[0]["name"] if _w else None) or None
+        except Exception:
+            project_name = None
+
+        subiekt_schowek_gui.open_window(
+            self, self.current_project_id, project_name,
+            con_projektu=self.db_manager.project_con,
+            mamy_lock=bool(self.have_lock))
+
     def open_subiekt_magazyn(self):
         """Okno „Stany magazynowe — cały Subiekt" (menu 📦 SUBIEKT).
 
