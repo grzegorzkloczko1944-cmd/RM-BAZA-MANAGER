@@ -5488,6 +5488,31 @@ class MainWindow(tk.Tk):
             except Exception:
                 pass
 
+        # === SZARA CZCIONKA dla symbolu z Subiekta (kolumna NUMER) ===
+        #
+        # Pozycja bez własnego numeru rysunku pokazuje w tym miejscu SYMBOL
+        # z Subiekta — na szaro, żeby nie wyglądał jak numer rysunku.
+        #
+        # ⚠️ MUSI BYĆ TUTAJ, nie tylko w `_apply_cell_colors`. Przy zmianie
+        # zaznaczenia przemalowywane są tylko DWA wiersze (stary i nowy),
+        # przez `_color_single_row` — pełny rebuild się nie wykonuje. Gdy ten
+        # kolor był nadawany wyłącznie w rebuildzie, zejście podświetlenia
+        # z wiersza przywracało domyślną czerń i symbol zostawał czarny do
+        # następnego pełnego przemalowania (zgłoszone 13.09.2026).
+        #
+        # Wpis do `_cells_special_bg` jest równie istotny: po nim
+        # `_apply_selected_row_highlight_only` POMIJA tę komórkę, więc
+        # podświetlenie wiersza w ogóle nie rusza koloru czcionki.
+        if getattr(self, "_nr_zastepczy", None):
+            try:
+                item_id = self._sheet_row_ids[row_idx]
+                if item_id in self._nr_zastepczy:
+                    self.sheet.highlight_cells(row=row_idx, column=0,
+                                               fg="#7f8c8d", overwrite=False)
+                    self._cells_special_bg.add((row_idx, 0))
+            except Exception:
+                pass
+
         # === NIEBIESKA CZCIONKA dla pozycji BIBLIOTEKA (kolumna NUMER) ===
         if data.get('dwf_biblioteka', 0) == 1:
             try:
@@ -5591,15 +5616,10 @@ class MainWindow(tk.Tk):
             for row_idx, item_id in enumerate(self._sheet_row_ids):
                 data = data_map.get(item_id) if item_id else None
                 self._color_single_row(row_idx, data, today)
-            # Symbol z Subiekta w kolumnie 0 (pozycje bez numeru) — na szaro,
-            # żeby nie wyglądał jak numer rysunku.
-            for row_idx, item_id in enumerate(self._sheet_row_ids):
-                if item_id in self._nr_zastepczy:
-                    try:
-                        self.sheet.highlight_cells(row=row_idx, column=0,
-                                                   fg="#7f8c8d", overwrite=False)
-                    except Exception:
-                        pass
+            # Szary symbol z Subiekta nakłada teraz `_color_single_row`
+            # (wołane wyżej dla każdego wiersza) — osobna pętla była tu
+            # duplikatem i, co gorsza, JEDYNYM miejscem tego koloru, przez
+            # co ginął przy zejściu podświetlenia z wiersza.
 
         except Exception as e:
             print(f"⚠️  Błąd kolorowania: {e}")
