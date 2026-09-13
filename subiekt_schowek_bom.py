@@ -137,37 +137,39 @@ def dodaj_do_bom(con, project_id, symbol, nazwa):
 
 
 # ── dopisanie wydanych ilości do „Ilość dostarczonych" ──────────────────────
-def dopisz_wydane(con, project_id, pozycje):
-    """DODAJE wydane ilości do `delivered_qty`. Zwraca liczbę zmienionych.
+def zapisz_wydane_z_subiekta(con, project_id, wydane):
+    """Przepisuje do `delivered_qty` STAN Z SUBIEKTA. Zwraca liczbę zmienionych.
 
-    „Wydane z magazynu" i „dostarczone od dostawcy" to z punktu widzenia
-    PROJEKTU ten sam fakt: detal dotarł i można go montować. Dlatego obie
-    drogi sumują się w jednej kolumnie — decyzja użytkownika 13.09.2026:
-    „wydane to ma iść do odebrane".
+    `wydane` — {SYMBOL: ilość} z trybu mostu `wydanie-stan` (pole `wydano`),
+    czyli SUMA wszystkich RW tego projektu, policzona przez Subiekta.
 
-    ⚠️ DODAJEMY, nie nadpisujemy. Ta sama pozycja bywa wydawana kilka razy
-    (kolejne RW, kolejne schowki), a część mogła wcześniej przyjść od
-    dostawcy — nadpisanie skasowałoby tamto.
+    ⚠️ NADPISUJEMY, nie dodajemy — i to jest różnica zasadnicza.
+    Decyzja użytkownika 13.09.2026: „ilości mają iść z SUBIEKTA".
+    Subiekt jest właścicielem faktu magazynowego, więc arkusz ma pokazywać
+    JEGO stan, a nie sumę tego, co RM_BAZA zdążyła zaobserwować. Dodawanie
+    („+= to, co właśnie wydałem") rozjeżdżałoby się przy każdym RW
+    wystawionym poza RM_BAZA, przy powtórzonym zapisie i po korekcie
+    dokumentu w Subiekcie.
 
-    Aktualizujemy też `delivered_updated_at`, bo tak robi każdy inny zapis
-    tego pola (`database_manager.py:861`) i po tym znaczniku poznaje się
-    świeżość liczby.
+    „Wydane z magazynu" i „dostarczone od dostawcy" to dla PROJEKTU jeden
+    fakt: detal dotarł i można go montować („wydane to ma iść do odebrane").
+
+    Pomijamy symbole, których nie ma w BOM-ie — nie ma gdzie zapisać.
     """
-    if con is None or not project_id or not pozycje:
+    if con is None or not project_id or not wydane:
         return 0
     teraz = datetime.now().isoformat()
     ile = 0
-    for p in pozycje:
-        item_id = znajdz_w_bom(con, project_id, p["symbol"])
+    for symbol, ilosc in wydane.items():
+        item_id = znajdz_w_bom(con, project_id, symbol)
         if not item_id:
-            continue                          # pozycji nie ma — nie ma gdzie dopisać
+            continue
         con.execute(
             "UPDATE items"
-            "   SET delivered_qty = COALESCE(delivered_qty, 0) + ?,"
-            "       delivered_updated_at = ?, updated_at = ?"
-            " WHERE id = ?",
-            (float(p["ilosc"]), teraz, teraz, item_id))
-        ile += 1
+            "   SET delivered_qty = ?, delivered_updated_at = ?, updated_at = ?"
+            " WHERE id = ? AND COALESCE(delivered_qty, -1) <> ?",
+            (float(ilosc), teraz, teraz, item_id, float(ilosc)))
+        ile += con.total_changes and 1 or 0
     con.commit()
     return ile
 

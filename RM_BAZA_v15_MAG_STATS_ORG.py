@@ -146,6 +146,15 @@ import client_version
 # SINGLE INSTANCE LOCK
 # ============================================================================
 
+def _fmt_ilo(x):
+    """Ilość bez zbędnego ogona: 3 zamiast 3.0, ale 2.5 zostaje."""
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return str(x)
+    return str(int(x)) if abs(x - int(x)) < 1e-9 else ("%.3f" % x).rstrip("0")
+
+
 def _czy_to_nasza_instancja(pid) -> bool:
     """Czy pod tym PID-em siedzi DRUGA KOPIA RM_BAZA (a nie cudzy proces).
 
@@ -2062,6 +2071,24 @@ class MainWindow(tk.Tk):
             state=tk.DISABLED  # Aktywne tylko przy wybranym projekcie
         )
         self.btn_schowek.pack(side=tk.LEFT, padx=5, pady=10)
+
+        # Odświeżenie „Ilość dostarczonych" z Subiekta NA ŻĄDANIE. To samo
+        # dzieje się automatycznie przy „Przejmij Lock" — ten przycisk jest
+        # dla sytuacji „ktoś właśnie wystawił RW, chcę to zobaczyć teraz".
+        self.btn_wydane = tk.Button(
+            bt_r2,
+            text="⬇ Dostarczone",
+            command=self._odswiez_wydane_z_subiekta,
+            bg="#16a085",
+            fg="white",
+            font=("Arial", 10),
+            padx=15,
+            pady=5,
+            relief=tk.RAISED,
+            bd=2,
+            state=tk.DISABLED  # Aktywne tylko przy wybranym projekcie
+        )
+        self.btn_wydane.pack(side=tk.LEFT, padx=5, pady=10)
 
         # Przycisk CHAT (skrajnie po prawej)
         tk.Button(
@@ -6150,7 +6177,7 @@ class MainWindow(tk.Tk):
         # DRUKUJ i WYDAJ chodzą po tej samej roli co EXPORT. WYDAJ nie
         # wymaga locka projektu — okno nic nie zapisuje do bazy projektu,
         # tylko wystawia RW w Subiekcie (patrz open_wydanie_window).
-        for nazwa in ('btn_print', 'btn_wydaj', 'btn_schowek'):
+        for nazwa in ('btn_print', 'btn_wydaj', 'btn_schowek', 'btn_wydane'):
             btn = getattr(self, nazwa, None)
             if btn is not None:
                 btn.config(state=tk.NORMAL if wolno else tk.DISABLED)
@@ -10183,6 +10210,87 @@ class MainWindow(tk.Tk):
                               "z Subiekta, gdy projekt nie był przejęty "
                               "(zdjęto ZAMÓWIONO i termin dostawy z tej wysyłki).")
             messagebox.showinfo("Zamówienia z Subiekta", "\n\n".join(czesci), parent=self)
+
+        # Przy okazji locka — „Ilość dostarczonych" z Subiekta. Ten sam
+        # moment i te same warunki: mamy świeżą kopię lokalną i prawo zapisu.
+        self._odswiez_wydane_z_subiekta(cicho=True)
+
+    def _odswiez_wydane_z_subiekta(self, cicho=False):
+        """„Ilość dostarczonych" = suma RW z Subiekta (WYDANE_Z_SUBIEKTA_DO_ARKUSZA.md).
+
+        ⛔ NADPISUJE TYLKO POZYCJE, KTÓRE SUBIEKT ZNA. Pozycji spoza Subiekta
+        (usługi, kooperacja, detale nieskartotekowane) NIE RUSZA — tam
+        „Ilość dostarczonych" zostaje polem ręcznym, bo nikt inny jej nie
+        wypełni. Rozpoznanie jest darmowe: tryb `wydanie-stan` zwraca tylko
+        symbole mające ślad w dokumentach projektu.
+
+        `cicho=True` — wołane automatycznie przy locku: milczy, gdy nie ma
+        czego zmieniać albo gdy most nie działa. Odświeżanie nie może
+        przeszkadzać w przejmowaniu projektu.
+        """
+        if not self.current_project_id or not self.have_lock:
+            if not cicho:
+                messagebox.showwarning(
+                    "Ilość dostarczonych",
+                    "Najpierw przejmij projekt — bez locka arkusz jest tylko "
+                    "do odczytu.", parent=self)
+            return
+        try:
+            import subiekt_wydane_do_arkusza as WYD
+        except ImportError as e:
+            if not cicho:
+                messagebox.showerror("Ilość dostarczonych",
+                                     f"Brak modułu:\n{e}", parent=self)
+            return
+
+        nazwa = None
+        try:
+            _w = self.db_manager.master_read(
+                "project-name", {"project_id": self.current_project_id})
+            nazwa = (_w[0]["name"] if _w else None) or None
+        except Exception:
+            pass
+        if not nazwa:
+            if not cicho:
+                messagebox.showwarning("Ilość dostarczonych",
+                                       "Nie ustalono numeru projektu.", parent=self)
+            return
+
+        try:
+            zmiany = WYD.odswiez(self.db_manager.project_con,
+                                 self.current_project_id, nazwa,
+                                 log=self._log_item_change)
+        except Exception as e:
+            if not cicho:
+                messagebox.showerror(
+                    "Ilość dostarczonych",
+                    f"Nie udało się odczytać wydań z Subiekta:\n{e}\n\n"
+                    "Liczby w arkuszu zostają bez zmian.", parent=self)
+            else:
+                print(f"⚠️  Nie odświeżono wydań z Subiekta: {e}")
+            return
+
+        if not zmiany:
+            if not cicho:
+                messagebox.showinfo(
+                    "Ilość dostarczonych",
+                    "Wszystko aktualne — arkusz zgadza się z Subiektem.",
+                    parent=self)
+            return
+
+        # NIC PO CICHU: dane zmieniły się bez udziału użytkownika, więc
+        # pokazujemy PRZED → PO, nawet przy odświeżaniu automatycznym.
+        lista = "\n".join(
+            "   %-18s %s → %s" % (s, "—" if a is None else _fmt_ilo(a), _fmt_ilo(b))
+            for _i, s, a, b in zmiany[:15])
+        wiecej = ("\n   … i %d dalszych" % (len(zmiany) - 15)
+                  if len(zmiany) > 15 else "")
+        messagebox.showinfo(
+            "Ilość dostarczonych z Subiekta",
+            "Zaktualizowano %d pozycji wg wydań (RW) z Subiekta:\n\n%s%s\n\n"
+            "Pozycje, których Subiekt nie zna, zostały nietknięte."
+            % (len(zmiany), lista, wiecej), parent=self)
+        self.load_items()
 
     def acquire_lock(self):
         """Przejmij lock projektu"""
