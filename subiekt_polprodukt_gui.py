@@ -47,17 +47,22 @@ class PolproduktWindow(tk.Toplevel):
     żeby ten sam detal nie miał tu innego klucza niż w pozostałych oknach.
     """
 
-    def __init__(self, parent, numer, opis=""):
+    def __init__(self, parent, numer, opis="", po_zmianie=None):
         super().__init__(parent)
         self.numer = (numer or "").strip()
+        # Wolane po KAZDEJ zmianie relacji — arkusz ma odswiezyc znacznik 🛒
+        # w kolumnie Δ. Bez tego znacznik pojawia sie dopiero po recznym
+        # odswiezeniu i user nie wie, czy powiazanie w ogole weszlo.
+        self._po_zmianie = po_zmianie
+        self._cos_zmienione = False
         self._katalog = []
         self._pobieranie = False
 
         self.title("Powiąż półprodukt — %s" % self.numer)
         self.transient(parent)
         _wysrodkuj(self, parent, 760, 620)
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
-        self.bind("<Escape>", lambda _e: self.destroy())
+        self.protocol("WM_DELETE_WINDOW", self._zamknij)
+        self.bind("<Escape>", lambda _e: self._zamknij())
 
         tk.Label(self, text="Rysunek:   %s" % self.numer,
                  font=("Arial", 10, "bold"), anchor="w").pack(
@@ -77,6 +82,15 @@ class PolproduktWindow(tk.Toplevel):
         self._wczytaj_katalog()
         self.grab_set()
         self.ent_szukaj.focus_set()
+
+    def _zamknij(self):
+        """Zamknij i daj znac arkuszowi, jesli cokolwiek sie zmienilo."""
+        if self._cos_zmienione and callable(self._po_zmianie):
+            try:
+                self._po_zmianie()
+            except Exception:
+                pass          # odswiezenie arkusza nie moze wywalic okna
+        self.destroy()
 
     # ── powiązane ────────────────────────────────────────────────────────
     def _sekcja_powiazane(self):
@@ -138,6 +152,7 @@ class PolproduktWindow(tk.Toplevel):
                                 symbol=biezaca[0], nazwa=biezaca[1])
         except Exception as e:
             return messagebox.showerror("Zmień ilość", str(e), parent=self)
+        self._cos_zmienione = True
         self._odswiez_powiazane()
         self.status.config(text="%s: %s szt. na 1 detal."
                                 % (biezaca[0], ile))
@@ -162,6 +177,7 @@ class PolproduktWindow(tk.Toplevel):
             M.usun_polprodukt(self.numer, id_sub)
         except Exception as e:
             return messagebox.showerror("Usuń powiązanie", str(e), parent=self)
+        self._cos_zmienione = True
         self._odswiez_powiazane()
         self.status.config(text="Usunięto powiązanie z %s." % symbol)
 
@@ -356,16 +372,29 @@ class PolproduktWindow(tk.Toplevel):
         except Exception as e:
             return messagebox.showerror("Powiąż półprodukt", str(e),
                                         parent=self)
+        self._cos_zmienione = True
         self._odswiez_powiazane()
-        self.status.config(text="Powiązano: %s × %d szt. na 1 detal."
-                                % (poz["symbol"], ile))
+        # Okno spelnilo swoje zadanie — potwierdzamy i zamykamy. Zostawienie
+        # go otwartego kazalo zgadywac, czy powiazanie weszlo (14.09.2026).
+        messagebox.showinfo(
+            "Powiązano półprodukt",
+            "%s\n\npowstaje z:\n\n    %s\n    %s\n\n"
+            "Ilość: %d szt. na 1 detal.\n\n"
+            "W arkuszu pozycja dostaje znacznik 🛒 w kolumnie Δ."
+            % (self.numer, poz["symbol"], poz["nazwa"] or "", ile),
+            parent=self)
+        self._zamknij()
 
 
-def otworz(parent, numer, opis=""):
-    """Okno powiązania półproduktu. `numer` = klucz relacji (numer/nazwa)."""
+def otworz(parent, numer, opis="", po_zmianie=None):
+    """Okno powiązania półproduktu. `numer` = klucz relacji (numer/nazwa).
+
+    `po_zmianie` — wołane przy zamknięciu, gdy cokolwiek się zmieniło;
+    arkusz odświeża wtedy znacznik 🛒 w kolumnie Δ.
+    """
     if not (numer or "").strip():
         messagebox.showinfo("Powiąż półprodukt",
                             "Ta pozycja nie ma numeru ani nazwy.",
                             parent=parent)
         return None
-    return PolproduktWindow(parent, numer, opis)
+    return PolproduktWindow(parent, numer, opis, po_zmianie)

@@ -325,7 +325,13 @@ wejść w istniejący mechanizm, nie obok niego.
 3. **Kalkulator** — `calc_semi_subiekt_id`, podpowiedź, cena z Subiekta,
    utrwalenie przy zapisie.
 4. **ZK** — agregacja po `id_subiekt` w budowaniu zapotrzebowania.
-5. **Znacznik w kolumnie Δ** — patrz niżej.
+5. ~~**Znacznik w kolumnie Δ**~~ **✅ ZROBIONE 14.09.2026.** `_ma_polprodukt`
+   — zbiór kluczy wczytywany JEDNYM `polprodukty_many()` przed pętlą wierszy
+   (obok `rfq_by_drawing`), znacznik 🛒 doklejany w `delta_disp` po `●`.
+   Brak serwera nie blokuje arkusza: znacznika po prostu nie ma.
+   Okno powiązania po zapisie potwierdza i zamyka się, a arkusz odświeża się
+   callbackiem `po_zmianie` — inaczej znacznik pojawiałby się dopiero przy
+   następnym odświeżeniu i user nie wiedział, czy powiązanie weszło.
 
 ## Widoczność w arkuszu: znacznik w Δ, ZERO nowych kolumn
 

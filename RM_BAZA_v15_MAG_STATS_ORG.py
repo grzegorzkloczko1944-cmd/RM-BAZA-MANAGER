@@ -7878,6 +7878,22 @@ class MainWindow(tk.Tk):
         except Exception:
             pass
 
+        # Ktore pozycje powstaja z KUPIONEGO polfabrykatu — jedno zapytanie
+        # na caly arkusz, jak `rfq_by_drawing` wyzej. Nie pytamy per wiersz:
+        # przy 400 pozycjach to 400 przelotow przez siec (POLPRODUKTY_PLAN.md).
+        # Zbior KLUCZY (numer rysunku, a dla znormalizowanej nazwa) — do
+        # znacznika wystarczy „czy jest", szczegoly pokazuje okno z PPM.
+        self._ma_polprodukt = set()
+        try:
+            import subiekt_mapowania as _MAP
+            _klucze = [(i.get('drawing_no') or '').strip()
+                       or (i.get('name') or '').strip() for i in items]
+            self._ma_polprodukt = set(_MAP.polprodukty_many(_klucze))
+        except Exception as e:
+            # Brak serwera nie moze zablokowac arkusza — znacznika po prostu
+            # nie bedzie, reszta dziala.
+            print("\u26a0\ufe0f  Polprodukty: nie odczytano powiazan: %s" % e)
+
         # Helper: parse date
         def parse_date(d):
             if not d:
@@ -8212,6 +8228,17 @@ class MainWindow(tk.Tk):
                         delta_disp = f"{delta_disp} ●"
                 else:
                     delta_disp = ""
+
+            # 🛒 = „pod tym rysunkiem jest ZAKUP polfabrykatu". Drugi
+            # znacznik w tej samej komorce, bo arkusz ma 67 kolumn i tksheet
+            # przy nich niedomaga — nowej kolumny NIE dokladamy (decyzja
+            # 14.09.2026). Kolejnosc stala: delta -> ● -> 🛒.
+            if self._ma_polprodukt:
+                _klucz_pp = ((item.get('drawing_no') or '').strip()
+                             or (item.get('name') or '').strip()).upper()
+                if _klucz_pp in self._ma_polprodukt:
+                    delta_disp = (f"{delta_disp} 🛒" if delta_disp
+                                  else "🛒")
             
             # Zamówiono: ☑ data lub ☐
             ordered_disp = "☐"
@@ -12707,8 +12734,12 @@ class MainWindow(tk.Tk):
         if not cur:
             return
         import subiekt_polprodukt_gui
+        # Po zamknieciu okna (gdy cos sie zmienilo) przeladowujemy arkusz —
+        # inaczej znacznik 🛒 w kolumnie Δ pojawilby sie dopiero przy
+        # nastepnym odswiezeniu i user nie wie, czy powiazanie weszlo.
         subiekt_polprodukt_gui.otworz(self, (cur[0] or "").strip(),
-                                      (cur[1] or "").strip())
+                                      (cur[1] or "").strip(),
+                                      po_zmianie=self.refresh_data)
 
     def jump_to_bom_item(self, project_id, item_id):
         """Pokaz wiersz BOM-u o danym id w arkuszu - z innego okna.
