@@ -305,6 +305,9 @@ class Serwer:
             self.con_map.execute("PRAGMA journal_mode=DELETE")
             self.con_map.execute("PRAGMA synchronous=FULL")
             self.con_map.execute("PRAGMA busy_timeout=5000")
+            naprawa = ops.napraw_odrzucone_dopasowania(self.con_map)
+            if naprawa:
+                log("   ! %s" % naprawa)
             for sql in ops.MIGRACJE_MAPOWANIA:
                 self.con_map.execute(sql)
             self.con_map.commit()
@@ -665,7 +668,13 @@ class Serwer:
                                      zadanie.get("cmd"), zadanie.get("args"))
             # compare_digest: czas porównania niezależny od treści.
             if not hmac.compare_digest(podany, oczekiwany):
-                log("⛔ zły HMAC: cmd=%s" % zadanie.get("cmd"))
+                # Poprawka zrobiona wprost na serwerze 12.09.2026 (bez gita),
+                # przeniesiona do repo 14.09 przed wdrożeniem, żeby jej nie cofnąć:
+                # sam „zły HMAC" nie mówił, czy to brak podpisu, inny sekret,
+                # czy inaczej skanonizowane argumenty.
+                log("⛔ zły HMAC: cmd=%s podany=%s oczekiwany=%s args=%s"
+                    % (zadanie.get("cmd"), (podany or "BRAK")[:16],
+                       oczekiwany[:16], kanoniczny_json(zadanie.get("args"))[:80]))
                 return {"ok": False, "blad": "nieprawidłowy podpis żądania"}
         return self.zleć(zadanie)
 

@@ -10,9 +10,9 @@ sekcja „Zapamiętanie skojarzenia"). Trzy rzeczy, dla których istnieje:
    Dlatego mieszka obok master.sqlite, a nie w bazie projektu.
 
 2. **Warstwa filtrująca przed siecią.** Krok „sprawdź w Subiekcie" pyta
-   najpierw tutaj (SELECT po indeksie — mikrosekundy, zero sieci) i dopiero
-   przy braku trafienia leci przez Sferę (15–30 s dla 300 pozycji). To nie
-   zamiennik zapytania do Subiekta, tylko filtr przed nim.
+   najpierw tutaj (jedno żądanie do RM_SERWER, ~20 ms) i dopiero przy braku
+   trafienia leci przez Sferę (15–30 s dla 300 pozycji). To nie zamiennik
+   zapytania do Subiekta, tylko filtr przed nim.
 
 3. **Ślad, skąd wzięło się dopasowanie.** `sposob` rozróżnia trafienie
    automatyczne po symbolu od ręcznego wyboru użytkownika (fuzzy) — plan
@@ -21,36 +21,35 @@ sekcja „Zapamiętanie skojarzenia"). Trzy rzeczy, dla których istnieje:
 
 Nazwy/opisów detali NIE zapisujemy z Subiekta — źródłem prawdy dla danych
 konstrukcyjnych zostaje RM_BAZA (plan, sekcja 1/12.1).
+
+GDZIE LEŻĄ DANE (od 14.09.2026)
+
+    RM_BAZA ──TCP──► RM_SERWER ──► C:\\Apps\\RM_SERWER\\dane\\subiekt_mapowania.sqlite
+
+Ten moduł NIE otwiera żadnego pliku. Wszystko idzie przez `rm_klient`
+operacjami `map-*` (routing po prefiksie robi serwer — `rm_serwer._polaczenie`),
+a schemat pilnują migracje serwera (`rm_serwer_operacje.MIGRACJE_MAPOWANIA`).
+
+⚠️ Dlaczego nie plik. Do 12.09.2026 moduł otwierał `subiekt_mapowania.sqlite`
+obok `master.sqlite`, po ścieżce z `sync_config.json` stacji. Po przenosinach
+mastera na serwer ta ścieżka wskazywała katalog na `Y:`, którego już nie było:
+odczyty zwracały `{}` („brak pliku = brak mapowań"), a pierwszy zapis
+założyłby świeży, pusty plik na udziale — cichy rozjazd między stacjami
+a serwerem, bez jednego komunikatu. Sprawdzone na produkcji 14.09.2026.
+
+BŁĘDY. Funkcje rzucają `rm_klient.BladSerwera` jak każdy inny odczyt i zapis
+mastera — bez cichego `{}` przy awarii. To właśnie cisza ukryła martwe
+mapowania na dwa dni.
+
+Parametr `path=` w sygnaturach został dla zgodności z wołającymi
+(`subiekt_dopasowanie.zapisz_decyzje` go przekazuje) — jest IGNOROWANY.
 """
 
 import json
 import os
-import sqlite3
-import threading
 from datetime import datetime
 
-# Obok master.sqlite — to metadana integracji dla całej firmy, nie pojedynczego
-# projektu. Ścieżka realna, jak reszta baz (patrz pamięć „Ścieżki do bazy danych").
-#
-# Zależy od maszyny (firma: Y:\RM_BAZA\, dom/M-OLD: C:/RMPAK_CLIENT/RM_BAZY/RM_BAZA/)
-# — wyprowadzana z katalogu tego samego master.sqlite z sync_config.json, którego
-# już poprawnie używa reszta RM_BAZA, zamiast twardej ścieżki Y: niezależnej od
-# configu (ta sama pułapka co w subiekt_stany.py, znaleziona 2026-09-03 na M-OLD).
-_SYNC_CONFIG_PATH = r"C:\RMPAK_CLIENT\sync_config.json"
-_DB_PATH_FALLBACK = r"Y:\RM_BAZA\subiekt_mapowania.sqlite"
-
-
-def _db_path():
-    try:
-        with open(_SYNC_CONFIG_PATH, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        master = cfg["paths"]["master"]
-        return os.path.join(os.path.dirname(master), "subiekt_mapowania.sqlite")
-    except Exception:
-        return _DB_PATH_FALLBACK
-
-
-DB_PATH = _db_path()
+import rm_klient
 
 SPOSOB_AUTO = "auto"        # trafienie 1:1 po symbolu = numer rysunku
 SPOSOB_LUZNY = "luzny"      # TRIM + wielkość liter (spacje/a-A w bazie Subiekta)
@@ -58,196 +57,114 @@ SPOSOB_RECZNY = "reczny"    # użytkownik wskazał kartotekę (fuzzy match)
 SPOSOB_ZALOZONA = "zalozona"  # kartoteka założona przez RM_BAZA
 SPOSOB_SCALONA = "scalona"    # stary symbol → kartoteka docelowa po scaleniu (alias)
 
-_lock = threading.Lock()
-
-
-def _connect(path=None, readonly=False):
-    p = path or DB_PATH
-    if readonly:
-        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=5.0, check_same_thread=False)
-    else:
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        con = sqlite3.connect(p, timeout=15.0, check_same_thread=False)
-        # WAL nie działa przez SMB — ta sama pułapka co w rm_database_manager.
-        con.execute("PRAGMA journal_mode=DELETE")
-        con.execute("PRAGMA busy_timeout=5000")
-        con.execute("PRAGMA synchronous=NORMAL")
-    con.row_factory = sqlite3.Row
-    return con
-
-
-def ensure_schema(path=None):
-    """Tworzy tabelę, jeśli jej nie ma. Bezpieczne do wołania wielokrotnie."""
-    with _lock:
-        con = _connect(path)
-        try:
-            con.execute("""
-                CREATE TABLE IF NOT EXISTS mapowania (
-                    numer_rysunku   TEXT PRIMARY KEY,   -- klucz: numer z RM_BAZA (TRIM, wielkie litery)
-                    symbol_subiekt  TEXT NOT NULL,      -- symbol dokładnie taki, jak w Subiekcie
-                    id_subiekt      INTEGER,            -- Id kartoteki, jeśli znane
-                    nazwa_subiekt   TEXT,               -- tylko do podglądu; NIE nadpisuje nazwy w RM_BAZA
-                    sposob          TEXT NOT NULL,      -- auto | luzny | reczny | zalozona
-                    kto             TEXT,
-                    kiedy           TEXT NOT NULL,
-                    uwagi           TEXT
-                )
-            """)
-            # Wyszukiwanie idzie po kluczu głównym, ale raporty „co dopasowano
-            # ręcznie" chodzą po sposobie — stąd drugi indeks.
-            con.execute("CREATE INDEX IF NOT EXISTS idx_map_sposob ON mapowania(sposob)")
-            con.execute("CREATE INDEX IF NOT EXISTS idx_map_symbol ON mapowania(symbol_subiekt)")
-            con.commit()
-        finally:
-            con.close()
+#: Ile wpisów w jednym `master-batch`. Batch to jedna transakcja i jeden wpis
+#: w dzienniku idempotencji serwera; 354 pozycje projektu to ~70 KB ramki,
+#: daleko od limitu (8 MB) — paczkujemy z zapasu, nie z konieczności.
+_PACZKA = 500
 
 
 def _key(numer):
     return (numer or "").strip().upper()
 
 
+def _kto():
+    return os.environ.get("USERNAME") or "?"
+
+
+def _teraz():
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _zapisano(wynik):
+    """Czy pojedynczy zapis coś zmienił (0 = odrzucony regułą w SQL)."""
+    return bool((wynik or {}).get("rowcount"))
+
+
+def _op_put(numer, symbol, sposob, id_subiekt=None, nazwa=None, uwagi=None,
+            kto=None, kiedy=None):
+    """Jedna operacja `map-put` do `master_exec`/`master_batch`."""
+    return {"operation": "map-put", "params": {
+        "numer_rysunku": _key(numer), "symbol_subiekt": symbol.strip(),
+        "id_subiekt": id_subiekt, "nazwa_subiekt": nazwa, "sposob": sposob,
+        "kto": kto or _kto(), "kiedy": kiedy or _teraz(), "uwagi": uwagi}}
+
+
+# ── mapowania ────────────────────────────────────────────────────────────────
+
 def get(numer, path=None):
     """Jedno mapowanie albo None."""
     k = _key(numer)
     if not k:
         return None
-    try:
-        con = _connect(path, readonly=True)
-    except sqlite3.OperationalError:
-        return None                      # brak pliku = brak mapowań, nie błąd
-    try:
-        row = con.execute("SELECT * FROM mapowania WHERE numer_rysunku = ?", (k,)).fetchone()
-        return dict(row) if row else None
-    except sqlite3.OperationalError:
-        return None                      # brak tabeli — jeszcze nic nie zapisano
-    finally:
-        con.close()
+    wiersze = rm_klient.master_read("map-get", {"numer_rysunku": k})
+    return wiersze[0] if wiersze else None
 
 
 def get_many(numery, path=None):
     """{NUMER: mapowanie} dla listy numerów — jedno zapytanie zamiast N.
 
     To jest ta „warstwa filtrująca": wołane raz na całą listę BOM zanim
-    cokolwiek poleci do Subiekta przez sieć.
+    cokolwiek poleci do Subiekta przez sieć. Lista idzie jako JSON, serwer
+    rozwija ją `json_each` — bez limitu 999 zmiennych SQLite i bez sklejania
+    `IN (?,?,?…)` po stronie klienta.
     """
-    klucze = [_key(n) for n in (numery or []) if _key(n)]
+    klucze = sorted({_key(n) for n in (numery or []) if _key(n)})
     if not klucze:
         return {}
-    try:
-        con = _connect(path, readonly=True)
-    except sqlite3.OperationalError:
-        return {}
-    try:
-        out = {}
-        # SQLite ma limit zmiennych w zapytaniu (domyślnie 999) — dzielimy na paczki.
-        for i in range(0, len(klucze), 500):
-            paczka = klucze[i:i + 500]
-            q = f"SELECT * FROM mapowania WHERE numer_rysunku IN ({','.join('?' * len(paczka))})"
-            for row in con.execute(q, paczka):
-                out[row["numer_rysunku"]] = dict(row)
-        return out
-    except sqlite3.OperationalError:
-        return {}
-    finally:
-        con.close()
+    out = {}
+    for i in range(0, len(klucze), _PACZKA):
+        paczka = klucze[i:i + _PACZKA]
+        for w in rm_klient.master_read("map-get-many",
+                                       {"numery_json": json.dumps(paczka)}):
+            out[w["numer_rysunku"]] = w
+    return out
 
 
 def put(numer, symbol_subiekt, sposob, id_subiekt=None, nazwa_subiekt=None,
         kto=None, uwagi=None, path=None):
-    """Zapisuje/aktualizuje mapowanie.
+    """Zapisuje/aktualizuje mapowanie. True, gdy zapisano.
 
     Ręczny wybór użytkownika nie jest nadpisywany automatem — decyzja
     człowieka ma pierwszeństwo, bo automat mógłby ją cofnąć przy następnym
-    przebiegu (plan: ręczne dopasowanie to świadoma decyzja, nie przypadek).
+    przebiegu. Regułę egzekwuje SQL operacji `map-put` na serwerze
+    (`… DO UPDATE … WHERE sposob != 'reczny' OR excluded.sposob = 'reczny'`),
+    więc obowiązuje tak samo dla `put`, `put_many` i scalania — i nie ma
+    wyścigu „odczytaj czy ręczne → zapisz" między stacjami. Odrzucony wpis
+    to rowcount 0, stąd False.
     """
     k = _key(numer)
     if not k or not (symbol_subiekt or "").strip():
         return False
-
-    ensure_schema(path)
-    with _lock:
-        con = _connect(path)
-        try:
-            stare = con.execute(
-                "SELECT sposob FROM mapowania WHERE numer_rysunku = ?", (k,)).fetchone()
-            if stare and stare["sposob"] == SPOSOB_RECZNY and sposob != SPOSOB_RECZNY:
-                return False
-            con.execute("""
-                INSERT INTO mapowania
-                    (numer_rysunku, symbol_subiekt, id_subiekt, nazwa_subiekt, sposob, kto, kiedy, uwagi)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(numer_rysunku) DO UPDATE SET
-                    symbol_subiekt = excluded.symbol_subiekt,
-                    id_subiekt     = COALESCE(excluded.id_subiekt, mapowania.id_subiekt),
-                    nazwa_subiekt  = COALESCE(excluded.nazwa_subiekt, mapowania.nazwa_subiekt),
-                    sposob         = excluded.sposob,
-                    kto            = excluded.kto,
-                    kiedy          = excluded.kiedy,
-                    uwagi          = excluded.uwagi
-            """, (k, symbol_subiekt.strip(), id_subiekt, nazwa_subiekt, sposob,
-                  kto or os.environ.get("USERNAME") or "?",
-                  datetime.now().isoformat(timespec="seconds"), uwagi))
-            con.commit()
-            return True
-        finally:
-            con.close()
+    op = _op_put(k, symbol_subiekt, sposob, id_subiekt, nazwa_subiekt, uwagi, kto)
+    return _zapisano(rm_klient.master_exec(op["operation"], op["params"]))
 
 
 def put_many(wpisy, path=None):
-    """[(numer, symbol, sposob, id, nazwa)] → liczba zapisanych.
+    """[(numer, symbol, sposob[, id[, nazwa]])] → liczba zapisanych.
 
     Wołane po suchym przebiegu/zapisie, żeby zapamiętać, co Subiekt potwierdził.
+    Paczka = jeden `master-batch` = JEDNA transakcja na serwerze.
 
-    JEDNO połączenie i JEDEN commit na całą paczkę. Wcześniej leciało `put()`
-    w pętli, czyli na KAŻDY wpis: makedirs + connect + 3 × PRAGMA + SELECT +
-    INSERT + commit + close — a baza leży na Y: (SMB, journal_mode=DELETE, bo
-    WAL po sieci się rozpada). Przy 354 pozycjach projektu dawało to ~37 s
-    w każdym przebiegu podglądu i zapisu, i to był NAJWIĘKSZY koszt całego
-    okna „Projekt / Aktualizacja" — most odpowiadał w tym czasie w 0,5 s
-    (profil py-spy 09.09.2026: subiekt_mapowania.py:189 = 37-41 s na wątek).
+    Historia: przez plik na Y: leciało `put()` w pętli — connect + PRAGMA +
+    SELECT + INSERT + commit na KAŻDY wpis, 37 s na 354 pozycje (profil py-spy
+    09.09.2026). Przez serwer cała paczka to jedno żądanie.
+
+    Wpisy odrzucone regułą „ręczne ma pierwszeństwo" nie są liczone.
     """
-    lista = list(wpisy or [])
-    if not lista:
-        return 0
-
-    ensure_schema(path)
+    kto, kiedy = _kto(), _teraz()
+    operacje = []
+    for w in (wpisy or []):
+        numer, symbol, sposob = w[0], w[1], w[2]
+        if not _key(numer) or not (symbol or "").strip():
+            continue
+        operacje.append(_op_put(numer, symbol, sposob,
+                                w[3] if len(w) > 3 else None,
+                                w[4] if len(w) > 4 else None,
+                                None, kto, kiedy))
     n = 0
-    with _lock:
-        con = _connect(path)
-        try:
-            # Ręczne decyzje czytamy raz, zamiast SELECT-a per wpis.
-            reczne = {r["numer_rysunku"] for r in con.execute(
-                "SELECT numer_rysunku FROM mapowania WHERE sposob = ?", (SPOSOB_RECZNY,))}
-            kto = os.environ.get("USERNAME") or "?"
-            kiedy = datetime.now().isoformat(timespec="seconds")
-            for w in lista:
-                numer, symbol, sposob = w[0], w[1], w[2]
-                k = _key(numer)
-                if not k or not (symbol or "").strip():
-                    continue
-                # Ta sama reguła co w put(): decyzja człowieka ma pierwszeństwo.
-                if k in reczne and sposob != SPOSOB_RECZNY:
-                    continue
-                con.execute("""
-                    INSERT INTO mapowania
-                        (numer_rysunku, symbol_subiekt, id_subiekt, nazwa_subiekt, sposob, kto, kiedy, uwagi)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
-                    ON CONFLICT(numer_rysunku) DO UPDATE SET
-                        symbol_subiekt = excluded.symbol_subiekt,
-                        id_subiekt     = COALESCE(excluded.id_subiekt, mapowania.id_subiekt),
-                        nazwa_subiekt  = COALESCE(excluded.nazwa_subiekt, mapowania.nazwa_subiekt),
-                        sposob         = excluded.sposob,
-                        kto            = excluded.kto,
-                        kiedy          = excluded.kiedy,
-                        uwagi          = excluded.uwagi
-                """, (k, symbol.strip(),
-                      w[3] if len(w) > 3 else None,
-                      w[4] if len(w) > 4 else None,
-                      sposob, kto, kiedy))
-                n += 1
-            con.commit()          # JEDEN commit na całą paczkę
-        finally:
-            con.close()
+    for i in range(0, len(operacje), _PACZKA):
+        for wynik in rm_klient.master_batch(operacje[i:i + _PACZKA]):
+            n += 1 if _zapisano(wynik) else 0
     return n
 
 
@@ -256,124 +173,59 @@ def delete(numer, path=None):
     k = _key(numer)
     if not k:
         return False
-    ensure_schema(path)
-    with _lock:
-        con = _connect(path)
-        try:
-            cur = con.execute("DELETE FROM mapowania WHERE numer_rysunku = ?", (k,))
-            con.commit()
-            return cur.rowcount > 0
-        finally:
-            con.close()
+    return _zapisano(rm_klient.master_exec("map-delete", {"numer_rysunku": k}))
 
 
 def stats(path=None):
     """{sposob: liczba, 'razem': n} — do podglądu i diagnostyki."""
-    try:
-        con = _connect(path, readonly=True)
-    except sqlite3.OperationalError:
-        return {"razem": 0}
-    try:
-        out = {r["sposob"]: r["n"] for r in
-               con.execute("SELECT sposob, COUNT(*) n FROM mapowania GROUP BY sposob")}
-        out["razem"] = sum(out.values())
-        return out
-    except sqlite3.OperationalError:
-        return {"razem": 0}
-    finally:
-        con.close()
+    out = {w["sposob"]: w["n"] for w in rm_klient.master_read("map-statystyki")}
+    out["razem"] = sum(out.values())
+    return out
 
-
-# ── Decyzje o dostawcach ────────────────────────────────────────────────────
-# Osobna tabela: które wpisy z kolumny Dostawca RM_BAZA NIE są firmami
-# („GIĘCIE", „spawanie", „?") i nie mają dostawać kontrahenta w Subiekcie.
-# Powiązania „to jest ta firma" nie wymagają tabeli — zapisują się jako NIP
-# w suppliers i następne dopasowanie idzie po NIP-ie. Ale „to nie firma" nie
-# ma gdzie żyć w RM_BAZA, a bez utrwalenia wracało po każdym odświeżeniu.
 
 # ── SCALANIE KARTOTEK: aliasy starych symboli ────────────────────────────────
-
-def ensure_schema_aliasy(path=None):
-    """Tabela aliasów po scaleniu kartotek (edytor, panel 5 — 10.09.2026).
-
-    Osobna od `mapowania`, bo tamta jest kluczowana numerem z BOM-u, a tu
-    kluczem jest STARY SYMBOL SUBIEKTA. Trzymamy ją, żeby po pół roku dało
-    się odpowiedzieć „skąd wzięło się to mapowanie" i cofnąć decyzję.
-    """
-    with _lock:
-        con = _connect(path)
-        try:
-            con.execute("""
-                CREATE TABLE IF NOT EXISTS aliasy_scalen (
-                    stary_symbol  TEXT PRIMARY KEY,   -- symbol wycofanej kartoteki (jak w Subiekcie)
-                    stary_id      INTEGER,
-                    nowy_symbol   TEXT NOT NULL,      -- kartoteka docelowa
-                    nowy_id       INTEGER,
-                    kto           TEXT,
-                    kiedy         TEXT NOT NULL
-                )
-            """)
-            con.execute("CREATE INDEX IF NOT EXISTS idx_alias_nowy ON aliasy_scalen(nowy_symbol)")
-            con.commit()
-        finally:
-            con.close()
-
+# Tabela `aliasy_scalen` (schemat: migracje serwera) jest kluczowana STARYM
+# SYMBOLEM SUBIEKTA, nie numerem z BOM-u — żeby po pół roku dało się
+# odpowiedzieć „skąd wzięło się to mapowanie" i cofnąć decyzję. To dziennik:
+# ten sam symbol może dostać kolejny wpis, `map-alias` czyta najnowszy.
 
 def zapisz_scalenie(cel, cel_id, zrodla, path=None):
     """Po udanym scaleniu w Subiekcie: aliasy + przepięcie mapowań.
 
-    `zrodla` = {stary_symbol: stary_id}. Trzy rzeczy, w jednej transakcji:
-      1. alias stary → nowy (tabela aliasy_scalen),
+    `zrodla` = {stary_symbol: stary_id}. Trzy rzeczy na każde źródło, a całość
+    w JEDNEJ transakcji (`master-batch` — wszystko albo nic):
+      1. alias stary → nowy (`map-alias-dodaj`),
       2. każde mapowanie BOM-u, które wskazywało stary symbol, wskazuje
-         teraz cel — inaczej arkusz dalej „widziałby" wycofaną kartotekę,
+         teraz cel (`map-przepnij-symbol`) — inaczej arkusz dalej „widziałby"
+         wycofaną kartotekę,
       3. mapowanie numer=stary_symbol → cel (sposob=scalona): gdy stary BOM
          przyniesie dosłownie stary symbol, etap 3 rozpozna go od razu jako
          zapamiętany i wskaże kartotekę docelową — bez zmian w dopasowaniu.
-    Zwraca liczbę przepiętych mapowań.
+         Ręcznego mapowania pod tym numerem nie nadpisze (reguła `map-put`).
+    Zwraca liczbę przepiętych mapowań (krok 2).
     """
     cel = (cel or "").strip()
     if not cel or not zrodla:
         return 0
-    ensure_schema(path)
-    ensure_schema_aliasy(path)
-    kto = os.environ.get("USERNAME") or "?"
-    kiedy = datetime.now().isoformat(timespec="seconds")
-    przepiete = 0
-    with _lock:
-        con = _connect(path)
-        try:
-            for stary, stary_id in zrodla.items():
-                stary = (stary or "").strip()
-                if not stary:
-                    continue
-                con.execute("""
-                    INSERT INTO aliasy_scalen (stary_symbol, stary_id, nowy_symbol, nowy_id, kto, kiedy)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(stary_symbol) DO UPDATE SET
-                        nowy_symbol = excluded.nowy_symbol, nowy_id = excluded.nowy_id,
-                        kto = excluded.kto, kiedy = excluded.kiedy
-                """, (stary, stary_id, cel, cel_id, kto, kiedy))
-                cur = con.execute("""
-                    UPDATE mapowania SET symbol_subiekt = ?, id_subiekt = ?,
-                        uwagi = COALESCE(uwagi || ' | ', '') || 'scalono z ' || ?
-                    WHERE symbol_subiekt = ? COLLATE NOCASE
-                """, (cel, cel_id, stary, stary))
-                przepiete += cur.rowcount
-                con.execute("""
-                    INSERT INTO mapowania
-                        (numer_rysunku, symbol_subiekt, id_subiekt, nazwa_subiekt, sposob, kto, kiedy, uwagi)
-                    VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
-                    ON CONFLICT(numer_rysunku) DO UPDATE SET
-                        symbol_subiekt = excluded.symbol_subiekt,
-                        id_subiekt = excluded.id_subiekt,
-                        sposob = excluded.sposob, kto = excluded.kto,
-                        kiedy = excluded.kiedy, uwagi = excluded.uwagi
-                """, (_key(stary), cel, cel_id, SPOSOB_SCALONA, kto, kiedy,
-                      f"alias po scaleniu kartotek: {stary} → {cel}"))
-            con.commit()
-        finally:
-            con.close()
-    return przepiete
+    kto, kiedy = _kto(), _teraz()
+    operacje = []
+    for stary, stary_id in zrodla.items():
+        stary = (stary or "").strip()
+        if not stary:
+            continue
+        operacje.append({"operation": "map-alias-dodaj", "params": {
+            "stary_symbol": stary, "stary_id": stary_id,
+            "nowy_symbol": cel, "nowy_id": cel_id, "kto": kto, "kiedy": kiedy}})
+        operacje.append({"operation": "map-przepnij-symbol", "params": {
+            "nowy_symbol": cel, "nowy_id": cel_id, "stary_symbol": stary}})
+        operacje.append(_op_put(stary, cel, SPOSOB_SCALONA, cel_id, None,
+                                f"alias po scaleniu kartotek: {stary} → {cel}",
+                                kto, kiedy))
+    if not operacje:
+        return 0
+    wyniki = rm_klient.master_batch(operacje)
+    # Co trzeci wynik (1, 4, 7…) to UPDATE z kroku 2.
+    return sum((w or {}).get("rowcount") or 0 for w in wyniki[1::3])
 
 
 def alias_dla(symbol, path=None):
@@ -381,76 +233,32 @@ def alias_dla(symbol, path=None):
     s = (symbol or "").strip()
     if not s:
         return None
-    try:
-        con = _connect(path, readonly=True)
-    except Exception:
-        return None
-    try:
-        r = con.execute("SELECT nowy_symbol, nowy_id FROM aliasy_scalen "
-                        "WHERE stary_symbol = ? COLLATE NOCASE", (s,)).fetchone()
-        return {"symbol": r["nowy_symbol"], "id": r["nowy_id"]} if r else None
-    except Exception:
-        return None
-    finally:
-        con.close()
+    w = rm_klient.master_read("map-alias", {"stary_symbol": s})
+    return {"symbol": w[0]["nowy_symbol"], "id": w[0]["nowy_id"]} if w else None
 
 
-def ensure_schema_dostawcy(path=None):
-    with _lock:
-        con = _connect(path)
-        try:
-            con.execute("""
-                CREATE TABLE IF NOT EXISTS dostawcy_decyzje (
-                    supplier_id INTEGER PRIMARY KEY,
-                    nazwa       TEXT,
-                    decyzja     TEXT NOT NULL,   -- 'nie-firma'
-                    kto         TEXT,
-                    kiedy       TEXT NOT NULL
-                )
-            """)
-            con.commit()
-        finally:
-            con.close()
-
+# ── Decyzje o dostawcach ─────────────────────────────────────────────────────
+# Osobna tabela: które wpisy z kolumny Dostawca RM_BAZA NIE są firmami
+# („GIĘCIE", „spawanie", „?") i nie mają dostawać kontrahenta w Subiekcie.
+# Powiązania „to jest ta firma" nie wymagają tabeli — zapisują się jako NIP
+# w suppliers i następne dopasowanie idzie po NIP-ie. Ale „to nie firma" nie
+# ma gdzie żyć w RM_BAZA, a bez utrwalenia wracało po każdym odświeżeniu.
 
 def dostawcy_nie_firmy(path=None):
     """{supplier_id} oznaczonych jako „nie firma"."""
-    try:
-        con = _connect(path, readonly=True)
-    except sqlite3.OperationalError:
-        return set()
-    try:
-        return {r[0] for r in con.execute(
-            "SELECT supplier_id FROM dostawcy_decyzje WHERE decyzja = 'nie-firma'")}
-    except sqlite3.OperationalError:
-        return set()
-    finally:
-        con.close()
+    return {w["supplier_id"] for w in rm_klient.master_read("map-dostawcy-nie-firmy")}
 
 
 def dostawca_decyzja(supplier_id, nazwa, decyzja, path=None):
     """Zapisuje decyzję; decyzja=None cofa ją."""
-    ensure_schema_dostawcy(path)
-    with _lock:
-        con = _connect(path)
-        try:
-            if decyzja is None:
-                con.execute("DELETE FROM dostawcy_decyzje WHERE supplier_id = ?", (supplier_id,))
-            else:
-                con.execute("""
-                    INSERT INTO dostawcy_decyzje (supplier_id, nazwa, decyzja, kto, kiedy)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(supplier_id) DO UPDATE SET
-                        decyzja = excluded.decyzja, kto = excluded.kto, kiedy = excluded.kiedy
-                """, (supplier_id, nazwa, decyzja,
-                      os.environ.get("USERNAME") or "?",
-                      datetime.now().isoformat(timespec="seconds")))
-            con.commit()
-        finally:
-            con.close()
+    if decyzja is None:
+        rm_klient.master_exec("map-dostawca-decyzja-usun", {"supplier_id": supplier_id})
+    else:
+        rm_klient.master_exec("map-dostawca-decyzja", {
+            "supplier_id": supplier_id, "nazwa": nazwa, "decyzja": decyzja,
+            "kto": _kto(), "kiedy": _teraz()})
 
 
 if __name__ == "__main__":
-    ensure_schema()
-    print(f"Baza mapowań: {DB_PATH}")
+    print("RM_SERWER:", rm_klient.opis())
     print("Statystyki:", stats())

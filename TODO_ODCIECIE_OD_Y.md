@@ -9,36 +9,31 @@ prawdziwej stacji, z prawdziwym configiem.
 
 Kolejność: pkt 0 (ustalenia) → 2 (bezpieczne) → 1 (główne) → 3 (porządki).
 
-**15.09.2026 — JAKO PIERWSZE w firmie: test z pkt 0 na stacji** (`m.DB_PATH` / `m.stats()`).
-Drugi, niezależny sygnał: w Edytorze kartotek (panel SUBIEKT) po scaleniu
-duplikatów raport ma wiersz `alias / blad / "aliasy w RM_BAZA nie zapisane"`
-— jeśli taki był, mapowania są martwe (`subiekt_edytor_gui.py:1284-1289`).
+**Stan 14.09.2026 (w firmie, stacja GKI/MONGO): pkt 0 ustalony, pkt 1 zakodowany
+i przetestowany lokalnie — czeka na wdrożenie serwera + build .exe. Zostały pkt 2 i 3.**
 
 ---
 
-## 0. Do ustalenia PRZED zmianami (w firmie)
+## 0. Do ustalenia PRZED zmianami — ✅ USTALONE 14.09.2026 (w firmie)
 
-- [ ] **Gdzie fizycznie leży dzisiejszy `subiekt_mapowania.sqlite`?**
-      Kandydaci: `Y:\RM_BAZA\subiekt_mapowania.sqlite` (stara lokalizacja,
-      wynika z `paths.master` w configu stacji) albo katalog RM_SERWER
-      (`rm_serwer.py:79` — `DOMYSLNA_BAZA_MAPOWANIA = <KATALOG>\dane\subiekt_mapowania.sqlite`,
-      nadpisywalne kluczem `baza_mapowania` w configu serwera).
-      ⚠️ Jeśli są DWA pliki (stacje pisały na `Y:`, serwer ma własny) —
-      trzeba je scalić przed przepięciem, inaczej znikną mapowania.
-      `subiekt_mapowania.stats()` pokaże liczby wpisów w każdym.
-- [ ] Co mają stacje w `C:\RMPAK_CLIENT\sync_config.json` → `paths.master`
-      i `paths.projects_dir`? (wystarczy zajrzeć na 2–3 stanowiska)
-- [x] Czy `Y:\RM_BAZA\` jeszcze istnieje? **NIE — usunięte** (14.09.2026).
-      Program „działa", bo `subiekt_mapowania.get/get_many` zwracają `{}`
-      przy braku pliku, a `put_many` przy zasiewie jest połykany
-      (`subiekt_projekt.py:1116`, `return 0`). Jeśli config stacji ma
-      `master` na `Y:` → mapowania są MARTWE od dnia usunięcia: ręczne
-      dopasowania i scalenia kartotek nie są zapamiętywane, nikt o tym nie wie.
-- [ ] **Test rozstrzygający, na stacji, przed czymkolwiek:**
-      `python -c "import subiekt_mapowania as m; print(m.DB_PATH); print(m.stats())"`
-      Ścieżka na `Y:` + wyjątek/pusto = mapowania martwe (wariant 1).
-      Ścieżka na udziale serwera + liczby = plik żyje, ale poza RM_SERWER
-      (wariant 2 — serwer ma własny, pusty w `dane\`; scalić do niego).
+- [x] **Gdzie leży `subiekt_mapowania.sqlite`?** Na serwerze,
+      `C:\Apps\RM_SERWER\dane\` (domyślna ścieżka, `baza_mapowania` nie
+      nadpisane). `map-statystyki` przez TCP: **859 auto, 2 reczny, 2 zalozona
+      = 863** — identycznie ze starym `Y:\RM_BAZA\$subiekt_mapowania.sqlite`
+      (ostatni wpis 10.09 14:01). Jeden plik, **nic do scalania**.
+- [x] Config stacji GKI: `paths.master = Y:/RM_BAZA/master.sqlite`,
+      `paths.projects_dir = \\W2019S\RM_SERWER$\RM_BAZA_projects`. Litera
+      udziału różni się między stacjami (W:/U: dominują), cel fizyczny ten sam.
+- [x] `Y:\RM_BAZA\` **ISTNIEJE** (poprzedni wpis pisany z M-OLD, gdzie nie
+      widać): zawartość przemianowana na `$nazwa`. Dziś rano dwa stare buildy
+      założyły tam `master.sqlite` (tylko `rfq_tags`) i `locks\` — bramka
+      wersji milczy poza `Y:` (pamięć `project_autoaktualizacja_exe`).
+- [x] Test rozstrzygający: `DB_PATH = Y:/RM_BAZA\subiekt_mapowania.sqlite`,
+      `stats() = {'razem': 0}` → **wariant 1** (pliku nie ma). Ale **bez
+      strat**: każdy zapis założyłby plik (`ensure_schema` → `connect`), a
+      pliku nie ma → od 12.09 nikt nic nie zapisał. Rozjazd był zagrożeniem
+      przy pierwszym zapisie, nie faktem. Koszt: odczyty `{}` → w dopasowaniu
+      nie działała reguła A „zapamiętane" (2 ręczne wpisy wracały do decyzji).
 
 ---
 
@@ -64,19 +59,34 @@ w **jednym** miejscu — reszta (7 wywołań) idzie po pliku.
   `dostawca_decyzja`, `ensure_schema*` (schemat ma pilnować serwer,
   jak przy `rm_manager.sqlite`).
 
-**Do zrobienia:**
-- [ ] dopisać brakujące operacje w `rm_serwer_operacje.py`
-      (`map-get-many`, `map-put`, `map-put-many` jako batch, `map-delete`,
-      `map-alias`, `map-scalenie`, `map-dostawcy-*`)
-- [ ] `subiekt_mapowania.py`: funkcje publiczne wołają `rm_klient.master_read/exec/batch`,
-      `_connect`/`DB_PATH`/`_DB_PATH_FALLBACK` do usunięcia
-- [ ] schemat (`ensure_schema`, `ensure_schema_aliasy`, `ensure_schema_dostawcy`)
-      przenieść do migracji serwera
-- [ ] wskazać serwerowi właściwy plik (`baza_mapowania` w configu serwera)
-      — ten z pkt 0, po ewentualnym scaleniu
-- [ ] restart RM_SERWER po pullu (nowe operacje + migracja)
-- [ ] test: Projekt/Aktualizacja → zasiew (pisze `put_many`), Edytor →
-      scalenie, okno dopasowania — na dwóch stacjach naraz
+**Zrobione 14.09.2026** (test na lokalnym RM_SERWER z kopią produkcyjnych
+863 wpisów: 47 asercji, 0 błędów; `put_many` 1203 wpisów w 0,08 s;
+integracja `przygotuj_pozycje` OK). Korekta do „Co już jest": klient nie
+używał `map-*` w **żadnym** miejscu — wszystkie 7+ wywołań szło po pliku.
+- [x] serwer: `map-get-many` (lista jako JSON → `json_each`, bez limitu 999
+      zmiennych), `map-przepnij-symbol`, `map-odrzuc`, `map-odrzucone-lista`;
+      `map-put` z regułą „ręczne ma pierwszeństwo" **w SQL** (`DO UPDATE … WHERE`,
+      odrzucony wpis = rowcount 0); `map-dostawca-decyzja` → UPSERT;
+      `map-dostawcy-nie-firmy` szuka `'nie-firma'` (było `'nie_firma'` — nigdy
+      nie trafiało). `put_many` = `master-batch` z `map-put` (paczki po 500),
+      scalenie = jeden batch (alias + przepięcie + wpis scalona), wszystko albo nic.
+- [x] `subiekt_mapowania.py`: tylko `rm_klient`; `_connect`/`DB_PATH`/
+      `_DB_PATH_FALLBACK`/`ensure_schema*`/`_lock` usunięte. Błędy = `BladSerwera`,
+      bez cichego `{}` — to cisza ukryła martwe mapowania. `path=` ignorowany.
+- [x] `subiekt_dopasowanie.py`: odrzucenia (`wczytaj_odrzucone`/`odrzuc`) też
+      przez serwer; `_polacz`/`_DDL_ODRZUCONE` usunięte.
+- [x] schemat w migracjach serwera; `odrzucone_dopasowania` wyrównane do
+      schematu KLIENTA `(klucz_rm, id_subiekt, symbol)` — pierwotna migracja
+      miała `(numer_rysunku, symbol_subiekt)`; produkcja ma kliencki (plik
+      z Y:), M-OLD dostał pusty zły → `napraw_odrzucone_dopasowania` (pusta →
+      drop, z danymi → `_stare`) wołana przed migracjami.
+- [x] `baza_mapowania` — serwer już wskazuje właściwy plik, nic do zmiany.
+- [ ] **wdrożenie, w tej kolejności**: (1) `rm_serwer.py` + `rm_serwer_operacje.py`
+      na W2019S (`Copy-Item -ToSession` po IP 192.168.100.84) +
+      `Restart-Service RM_SERWER` — stary klient plikowy tego nie zauważy;
+      (2) build `.exe` — nowy klient WYMAGA nowych operacji, więc nigdy przed (1).
+- [ ] test na produkcji: Projekt/Aktualizacja → zasiew (`put_many`), Edytor →
+      scalenie, okno dopasowania (Odepnij), Dostawcy (nie firma) — dwie stacje naraz
 
 ---
 

@@ -245,43 +245,19 @@ def podsumowanie(pozycje: List[Dict]) -> Dict[str, int]:
 
 # ── odrzucone dopasowania ───────────────────────────────────────────────
 #
-# Osobna tabela w tej samej bazie co mapowania. Bez niej „Odepnij" nic nie
-# daje: automat przy następnym otwarciu ponownie dopasuje po symbolu tę samą
-# kartotekę, którą człowiek właśnie odrzucił.
-
-_DDL_ODRZUCONE = """
-CREATE TABLE IF NOT EXISTS odrzucone_dopasowania (
-    klucz_rm    TEXT NOT NULL,
-    id_subiekt  INTEGER,
-    symbol      TEXT,
-    kto         TEXT,
-    kiedy       TEXT NOT NULL,
-    PRIMARY KEY (klucz_rm, id_subiekt)
-)
-"""
-
-
-def _polacz(path=None):
-    import sqlite3
-    p = path or subiekt_mapowania.DB_PATH
-    con = sqlite3.connect(p, timeout=15.0)
-    con.execute("PRAGMA journal_mode=DELETE")   # WAL nie działa po SMB
-    con.execute("PRAGMA busy_timeout=5000")
-    con.row_factory = sqlite3.Row
-    return con
+# Osobna tabela w tej samej bazie co mapowania — na RM_SERWER, operacje
+# `map-odrzuc` / `map-odrzucone-lista` (schemat: migracje serwera). Bez niej
+# „Odepnij" nic nie daje: automat przy następnym otwarciu ponownie dopasuje
+# po symbolu tę samą kartotekę, którą człowiek właśnie odrzucił.
+# Parametr `path=` został dla zgodności z wołającymi — ignorowany.
 
 
 def wczytaj_odrzucone(path=None) -> set:
     """{(KOD, id_subiekt)} — pary odrzucone przez człowieka."""
     try:
-        con = _polacz(path)
-        try:
-            con.execute(_DDL_ODRZUCONE)
-            return {(r["klucz_rm"], r["id_subiekt"])
-                    for r in con.execute(
-                        "SELECT klucz_rm, id_subiekt FROM odrzucone_dopasowania")}
-        finally:
-            con.close()
+        import rm_klient
+        return {(r["klucz_rm"], r["id_subiekt"])
+                for r in rm_klient.master_read("map-odrzucone-lista")}
     except Exception as e:
         print(f"⚠️  wczytaj_odrzucone: {e}")
         return set()
@@ -295,19 +271,12 @@ def odrzuc(kod: str, id_subiekt, symbol: str = "", kto: str = None,
     if not kod:
         return False
     try:
-        con = _polacz(path)
-        try:
-            con.execute(_DDL_ODRZUCONE)
-            con.execute(
-                "INSERT OR REPLACE INTO odrzucone_dopasowania "
-                "(klucz_rm, id_subiekt, symbol, kto, kiedy) VALUES (?,?,?,?,?)",
-                (kod, id_subiekt, symbol,
-                 kto or os.environ.get("USERNAME") or "?",
-                 datetime.now().isoformat(timespec="seconds")))
-            con.commit()
-            return True
-        finally:
-            con.close()
+        import rm_klient
+        rm_klient.master_exec("map-odrzuc", {
+            "klucz_rm": kod, "id_subiekt": id_subiekt, "symbol": symbol,
+            "kto": kto or os.environ.get("USERNAME") or "?",
+            "kiedy": datetime.now().isoformat(timespec="seconds")})
+        return True
     except Exception as e:
         print(f"⚠️  odrzuc: {e}")
         return False

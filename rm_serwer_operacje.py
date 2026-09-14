@@ -836,7 +836,23 @@ ODCZYT = {
         ["stary_symbol"],
     ),
     "map-dostawcy-nie-firmy": (
-        "SELECT supplier_id FROM dostawcy_decyzje WHERE decyzja = 'nie_firma'",
+        # Wartość z myślnikiem — tak zapisuje ją `subiekt_dostawcy_gui`
+        # („nie-firma"); pierwotne `'nie_firma'` nie trafiało w żaden wiersz.
+        "SELECT supplier_id FROM dostawcy_decyzje WHERE decyzja = 'nie-firma'",
+        [],
+    ),
+    # Lista numerów jako JSON rozwijany przez `json_each` — jedno zapytanie
+    # na cały BOM, bez limitu 999 zmiennych SQLite i bez sklejania `IN (?,?…)`.
+    # Klucze znormalizowane po stronie wołającego, jak w `map-get`.
+    "map-get-many": (
+        "SELECT * FROM mapowania"
+        " WHERE numer_rysunku IN (SELECT value FROM json_each(?))",
+        ["numery_json"],
+    ),
+    # Odrzucenia to pary (klucz_rm, id_subiekt) — odrzuca się KONKRETNĄ
+    # kartotekę, nie symbol (patrz `subiekt_dopasowanie.klasyfikuj`).
+    "map-odrzucone-lista": (
+        "SELECT klucz_rm, id_subiekt, symbol FROM odrzucone_dopasowania",
         [],
     ),
 
@@ -1904,6 +1920,13 @@ ZAPIS = {
     # UPSERT po numerze rysunku. COALESCE przy id/nazwie: dopasowanie
     # „luźne" nie zna Id kartoteki, więc nie może skasować tego, co wpisało
     # wcześniejsze dopasowanie dokładne.
+    #
+    # WHERE na DO UPDATE = reguła „ręczne ma pierwszeństwo": wpisu
+    # `sposob='reczny'` nie nadpisze automat (auto/luzny/zalozona/scalona),
+    # tylko kolejna decyzja ręczna. Reguła siedzi w SQL, a nie u wołającego,
+    # żeby obowiązywała tak samo dla `put`, `put_many` i scalania — i żeby
+    # nie było wyścigu „odczytaj czy ręczne → zapisz" między stacjami.
+    # Odrzucony wpis daje rowcount 0; wołający tak go rozpoznaje.
     "map-put": (
         "INSERT INTO mapowania"
         " (numer_rysunku, symbol_subiekt, id_subiekt, nazwa_subiekt, sposob,"
@@ -1916,7 +1939,8 @@ ZAPIS = {
         "   sposob         = excluded.sposob,"
         "   kto            = excluded.kto,"
         "   kiedy          = excluded.kiedy,"
-        "   uwagi          = COALESCE(excluded.uwagi, mapowania.uwagi)",
+        "   uwagi          = COALESCE(excluded.uwagi, mapowania.uwagi)"
+        " WHERE mapowania.sposob != 'reczny' OR excluded.sposob = 'reczny'",
         ["numer_rysunku", "symbol_subiekt", "id_subiekt", "nazwa_subiekt",
          "sposob", "kto", "kiedy", "uwagi"],
     ),
@@ -1924,20 +1948,43 @@ ZAPIS = {
         "DELETE FROM mapowania WHERE numer_rysunku = ?",
         ["numer_rysunku"],
     ),
+    # Scalanie kartotek, krok 2: mapowania BOM-u wskazujące wycofany symbol
+    # przechodzą na kartotekę docelową. `stary_symbol` użyty dwa razy —
+    # w uwagach (ślad) i w WHERE.
+    "map-przepnij-symbol": (
+        "UPDATE mapowania SET symbol_subiekt = ?, id_subiekt = ?,"
+        "   uwagi = COALESCE(uwagi || ' | ', '') || 'scalono z ' || ?"
+        " WHERE symbol_subiekt = ? COLLATE NOCASE",
+        ["nowy_symbol", "nowy_id", "stary_symbol", "stary_symbol"],
+    ),
+    # Dziennik, nie słownik: ten sam stary symbol może dostać kolejny wpis
+    # (np. cel scalono dalej) — `map-alias` czyta najnowszy.
     "map-alias-dodaj": (
         "INSERT INTO aliasy_scalen"
         " (stary_symbol, stary_id, nowy_symbol, nowy_id, kto, kiedy)"
         " VALUES (?, ?, ?, ?, ?, ?)",
         ["stary_symbol", "stary_id", "nowy_symbol", "nowy_id", "kto", "kiedy"],
     ),
+    # UPSERT: „nie firma" klika się w oknie dostawców wielokrotnie, a
+    # supplier_id jest kluczem głównym — zwykły INSERT padał za drugim razem.
     "map-dostawca-decyzja": (
         "INSERT INTO dostawcy_decyzje (supplier_id, nazwa, decyzja, kto, kiedy)"
-        " VALUES (?, ?, ?, ?, ?)",
+        " VALUES (?, ?, ?, ?, ?)"
+        " ON CONFLICT(supplier_id) DO UPDATE SET"
+        "   nazwa = excluded.nazwa, decyzja = excluded.decyzja,"
+        "   kto = excluded.kto, kiedy = excluded.kiedy",
         ["supplier_id", "nazwa", "decyzja", "kto", "kiedy"],
     ),
     "map-dostawca-decyzja-usun": (
         "DELETE FROM dostawcy_decyzje WHERE supplier_id = ?",
         ["supplier_id"],
+    ),
+    # „Odepnij" w oknie dopasowania. OR REPLACE po (klucz_rm, id_subiekt):
+    # ponowne odrzucenie tej samej pary tylko odświeża kto/kiedy.
+    "map-odrzuc": (
+        "INSERT OR REPLACE INTO odrzucone_dopasowania"
+        " (klucz_rm, id_subiekt, symbol, kto, kiedy) VALUES (?, ?, ?, ?, ?)",
+        ["klucz_rm", "id_subiekt", "symbol", "kto", "kiedy"],
     ),
 
     # ── „Zamówiono" odłożone przez wysyłkę ZD ─────────────────────────
@@ -2710,14 +2757,45 @@ MIGRACJE_MAPOWANIA = [
        )""",
     "CREATE INDEX IF NOT EXISTS idx_server_request_log_czas"
     " ON _server_request_log(created_at)",
+    # Schemat KLIENTA (`subiekt_dopasowanie`, 09.09.2026): odrzuca się parę
+    # (kod z BOM-u, Id kartoteki), bo odrzucona jest konkretna kartoteka,
+    # nie symbol. Patrz `napraw_odrzucone_dopasowania` niżej.
     """CREATE TABLE IF NOT EXISTS odrzucone_dopasowania (
-           numer_rysunku  TEXT NOT NULL,
-           symbol_subiekt TEXT NOT NULL,
-           kto            TEXT,
-           kiedy          TEXT NOT NULL,
-           PRIMARY KEY (numer_rysunku, symbol_subiekt)
+           klucz_rm    TEXT NOT NULL,
+           id_subiekt  INTEGER,
+           symbol      TEXT,
+           kto         TEXT,
+           kiedy       TEXT NOT NULL,
+           PRIMARY KEY (klucz_rm, id_subiekt)
        )""",
 ]
+
+
+def napraw_odrzucone_dopasowania(con):
+    """`odrzucone_dopasowania` w schemacie klienta — wołane PRZED migracjami.
+
+    Pierwsza wersja migracji (11.09.2026) zakładała klucz
+    (numer_rysunku, symbol_subiekt), a klient od początku pamięta odrzucenia
+    jako (klucz_rm, id_subiekt). Na produkcji nikt tego nie zauważył: plik
+    przyszedł z Y: już z tabelą klienta i `IF NOT EXISTS` ją zostawił.
+    Serwer postawiony od zera (M-OLD) dostał jednak pustą tabelę o złym
+    schemacie, której `IF NOT EXISTS` nigdy by nie poprawił.
+
+    Pusta → usuwamy, migracja założy właściwą. Z danymi (nie powinno się
+    zdarzyć — nic tam nie pisało) → zostaje pod nazwą `_stare`, żeby niczego
+    nie stracić. Zwraca opis do logu albo None, gdy nie było co robić.
+    """
+    kolumny = {r[1] for r in con.execute("PRAGMA table_info(odrzucone_dopasowania)")}
+    if not kolumny or "klucz_rm" in kolumny:
+        return None
+    ile = con.execute("SELECT COUNT(*) FROM odrzucone_dopasowania").fetchone()[0]
+    if ile:
+        con.execute("ALTER TABLE odrzucone_dopasowania"
+                    " RENAME TO odrzucone_dopasowania_stare")
+        return ("odrzucone_dopasowania: stary schemat z %d wierszami"
+                " przemianowany na odrzucone_dopasowania_stare" % ile)
+    con.execute("DROP TABLE odrzucone_dopasowania")
+    return "odrzucone_dopasowania: pusta tabela w starym schemacie usunięta"
 
 
 class BladOperacji(Exception):
