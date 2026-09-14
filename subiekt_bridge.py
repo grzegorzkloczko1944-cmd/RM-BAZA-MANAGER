@@ -471,45 +471,77 @@ KATALOG_STAGING_MOSTU = r"C:\iLogic\Subiekt\MOST_STAGING"
 #: różne rzeczy w jednym miejscu.
 PODFOLDER_MOSTU = "MOST"
 
-#: Gdzie szukać folderu SUBIEKT, gdy nie ma wpisu w konfiguracji.
-#: Ten sam zasób bywa zamapowany pod RÓŻNYMI literami — u większości Y:,
-#: u części Z: — więc sprawdzamy po kolei zamiast wpisywać jedną na sztywno.
-DOMYSLNE_ZRODLA_MOSTU = [
-    # Realna lokalizacja na serwerze (06.09.2026): folder SUBIEKT leży
-    # wewnątrz `iLogic\`, bo tak wygląda struktura u dewelopera i tak
-    # została skopiowana. Sprawdzamy OBA warianty — z `iLogic` i bez —
-    # żeby przeniesienie folderu nie wymagało zmiany kodu.
-    r"Y:\RMPAK_CLIENT\iLogic\Subiekt",
-    r"Z:\RMPAK_CLIENT\iLogic\Subiekt",
-    r"X:\RMPAK_CLIENT\iLogic\Subiekt",
-    r"V:\RMPAK_CLIENT\iLogic\Subiekt",
-    r"Y:\RMPAK_CLIENT\Subiekt",
-    r"Z:\RMPAK_CLIENT\Subiekt",
-    r"X:\RMPAK_CLIENT\Subiekt",
-    r"V:\RMPAK_CLIENT\Subiekt",
-]
+#: Skąd „Pobierz most" bierze binarkę: udział serwera z bazami projektów
+#: (`\\W2019S\RM_SERWER$` → `C:\Apps\RM_SERWER\dane\Projekty`), podfolder
+#: `MOST`. Ścieżka UNC, nie litera dysku — ten sam zasób bywał mapowany jako
+#: Y:/Z:/X:/V: i kod musiał zgadywać; udział serwera każdy widzi pod jedną
+#: nazwą, a RM_BAZA loguje się do niego kontem technicznym przy starcie
+#: (`udzial_serwera.zaloguj`). Decyzja 14.09.2026: odcięcie od `Y:` w całości —
+#: `Y:\RMPAK_CLIENT\iLogic\Subiekt\MOST` nie jest już aktualizowane.
+from udzial_serwera import UDZIAL as _UDZIAL_SERWERA
+DOMYSLNE_ZRODLA_MOSTU = [_UDZIAL_SERWERA]
+
+#: Końcówki ścieżek sprzed przenosin (dowolna litera dysku). Wpis
+#: `paths.bridge_dir` z sync_config.json, który tak się kończy, jest
+#: IGNOROWANY — patrz `_bridge_dir_z_configu`.
+_STARE_ZRODLA_MOSTU = (
+    r"\RMPAK_CLIENT\ILOGIC\SUBIEKT\MOST", r"\RMPAK_CLIENT\SUBIEKT\MOST",
+    r"\RMPAK_CLIENT\ILOGIC\SUBIEKT", r"\RMPAK_CLIENT\SUBIEKT",
+)
+
+
+def _stary_wpis_mostu(wpis):
+    """Czy `bridge_dir` wskazuje starą lokalizację na dysku sieciowym (Y: itp.)."""
+    tekst = str(wpis or "").replace("/", "\\").rstrip("\\").upper()
+    return any(tekst.endswith(ogon) for ogon in _STARE_ZRODLA_MOSTU)
+
+
+def _bridge_dir_z_configu():
+    r"""`paths.bridge_dir` z sync_config.json albo None.
+
+    ⚠️ Stacje mają w configu wpis z czasów, gdy most leżał na `Y:`
+    (`Y:\RMPAK_CLIENT\iLogic\Subiekt`). Tamten folder od 14.09.2026 nie
+    jest aktualizowany, więc taki wpis NIE może wygrywać z serwerem —
+    inaczej stacja pobierałaby w nieskończoność stary most i nikt by nie
+    wiedział, czemu poprawka „nie działa". Ta sama zasada co `_na_serwer()`
+    w RM_BAZA dla projektów i backupów: znane stare lokalizacje pomijamy,
+    naprawdę nietypową ścieżkę (inny serwer, inny udział) szanujemy.
+    """
+    try:
+        with open(r"C:\RMPAK_CLIENT\sync_config.json", encoding="utf-8") as f:
+            wpis = (json.load(f).get("paths") or {}).get("bridge_dir")
+    except Exception:
+        return None             # brak configu to nie błąd — mamy domyślne
+    if not wpis or _stary_wpis_mostu(wpis):
+        return None
+    return wpis
 
 
 def _zrodlo_mostu():
     """Folder z gotowym mostem, albo None.
 
-    Kolejność: wpis w sync_config.json → paths.bridge_dir (jeśli ktoś ma
-    nietypową ścieżkę), potem domyślne litery dysków. Szukamy folderu,
-    w którym FAKTYCZNIE leży NexoRecon.exe — sama obecność katalogu nie
-    wystarczy, bo pusty albo cudzy folder dałby mylący komunikat.
+    Kolejność: nietypowy wpis w sync_config.json → paths.bridge_dir, potem
+    udział serwera. Szukamy folderu, w którym FAKTYCZNIE leży NexoRecon.exe
+    — sama obecność katalogu nie wystarczy, bo pusty albo cudzy folder dałby
+    mylący komunikat.
 
     Dlaczego w ogóle: na stanowiskach RM_BAZA chodzi jako .exe — nie ma tam
     ani źródeł .cs, ani dotneta, więc budowanie u siebie odpada. Gotową
     binarkę wystawia jedna osoba, reszta ją pobiera (ustalone 06.09.2026).
     """
-    kandydaci = []
+    # Idempotentne: RM_BAZA loguje się do udziału przy starcie, ale ten moduł
+    # bywa wołany także poza nią (np. z konsoli) — bez sesji SMB `isfile`
+    # na UNC po prostu zwróciłby False i komunikat byłby mylący.
     try:
-        with open(r"C:\RMPAK_CLIENT\sync_config.json", encoding="utf-8") as f:
-            z_configu = (json.load(f).get("paths") or {}).get("bridge_dir")
-        if z_configu:
-            kandydaci.append(z_configu)
+        import udzial_serwera
+        udzial_serwera.zaloguj()
     except Exception:
-        pass                    # brak configu to nie błąd — mamy domyślne
+        pass
+
+    kandydaci = []
+    z_configu = _bridge_dir_z_configu()
+    if z_configu:
+        kandydaci.append(z_configu)
     kandydaci += DOMYSLNE_ZRODLA_MOSTU
 
     for folder in kandydaci:
@@ -647,12 +679,14 @@ def pobierz_most(uruchom_po=True):
     zrodlo = _zrodlo_mostu()
     if not zrodlo:
         return False, (
-            "Nie znaleziono folderu z mostem.\n\n"
+            "Nie znaleziono mostu na serwerze.\n\n"
             "Sprawdzono:\n"
-            + "\n".join(f"  • {s}" for s in DOMYSLNE_ZRODLA_MOSTU)
-            + "\n\nJeśli zasób jest pod inną literą, dopisz ścieżkę\n"
-              "w C:\\RMPAK_CLIENT\\sync_config.json:\n"
-              '  "paths": { "bridge_dir": "Y:\\\\RMPAK_CLIENT\\\\Subiekt" }')
+            + "\n".join(f"  • {os.path.join(s, PODFOLDER_MOSTU)}" for s in DOMYSLNE_ZRODLA_MOSTU)
+            + "\n\nAlbo udział serwera jest niedostępny (projekty też by się\n"
+              "nie otwierały), albo nikt jeszcze nie wystawił tam mostu.\n"
+              "Nietypową lokalizację można wskazać w C:\\RMPAK_CLIENT\\sync_config.json:\n"
+              '  "paths": { "bridge_dir": "\\\\\\\\SERWER\\\\udzial\\\\folder" }\n'
+              "(wpisy wskazujące stare foldery na Y:/Z:/X:/V: są pomijane).")
 
     wersja = _wersja_zrodla(zrodlo)
     if wersja and wersja.get("protokol") not in (None, PROTOKOL_MIN):

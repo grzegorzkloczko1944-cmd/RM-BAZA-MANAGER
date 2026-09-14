@@ -133,7 +133,7 @@ ale config w firmie dalej może wskazywać `Y:`.
 |---|---|
 | `DEFAULT_SERVER_DIR = "Y:/SERVER_PROJEKTY"` (`RM_BAZA:375`) | rysunki (DWF/PDF/DXF) naprawdę tam leżą; serwer CAD nigdzie się nie przeniósł; config ma `server_dir` do nadpisania |
 | `client_version.DEFAULT_SERVER_EXE = "Y:/RMPAK_CLIENT/RM_BAZA_v15_MAG.exe"` + `RM_BAZA_v15_MAG.spec:174` kopiuje build na `Y:\RMPAK_CLIENT` | kanał aktualizacji EXE — spójny sam ze sobą; `Y:` musi być zmapowane na stacjach **tylko** do tego. Przeniesienie na `\\W2019S\RM_SERWER$\RMPAK_CLIENT` to osobna decyzja (config ma już klucz `paths.server_exe`) |
-| `subiekt_bridge.py:478-490` lista `Y:\...\Subiekt`, `Z:`, `X:`, `V:` | sondowanie kandydatów tylko gdy mostu nie ma lokalnie; brak dysku = jeden `isfile()` |
+| ~~`subiekt_bridge.py` lista `Y:\...\Subiekt`, `Z:`, `X:`, `V:`~~ | **ZROBIONE 14.09.2026** — „Pobierz most" czyta z `\\W2019S\RM_SERWER$\MOST` (`udzial_serwera.UDZIAL`), litery dysków usunięte; stary `paths.bridge_dir` z configu stacji (`Y:\RMPAK_CLIENT\iLogic\Subiekt`) jest pomijany. Most `62f2f36` wystawiony na serwerze; `Y:\...\MOST` już NIE jest aktualizowane — stare `.exe` pobiorą nowy most dopiero po buildzie RM_BAZA |
 | `_na_serwer()` (`RM_BAZA:346`) | to jest właśnie mechanizm, który ratuje stacje ze starym configiem — zostaje, dopóki wszystkie configi nie będą poprawione |
 
 ---
@@ -143,5 +143,5 @@ ale config w firmie dalej może wskazywać `Y:`.
 ```
 grep -n "Y:" *.py | grep -v "^.*#" 
 ```
-powinno zostawić tylko: `DEFAULT_SERVER_DIR`, `client_version.DEFAULT_SERVER_EXE`,
-listę kandydatów w `subiekt_bridge.py` i spec.
+powinno zostawić tylko: `DEFAULT_SERVER_DIR`, `client_version.DEFAULT_SERVER_EXE`
+i spec (lista kandydatów mostu w `subiekt_bridge.py` zniknęła 14.09.2026).

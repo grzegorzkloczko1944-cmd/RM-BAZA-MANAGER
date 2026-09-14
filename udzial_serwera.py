@@ -67,10 +67,15 @@ def zaloguj(cichy: bool = True) -> bool:
         return True
     try:
         # CREATE_NO_WINDOW — inaczej przy starcie .exe mignęłoby czarne okno.
+        # `net use` pisze w stronie OEM konsoli (cp852 na polskim Windows),
+        # a `text=True` dekodowałoby cp1250 — polskie znaki w komunikacie
+        # („połączenie…") dawały UnicodeDecodeError w wątku czytającym wyjście
+        # (widoczne 14.09.2026 przy „Pobierz most"). Treść służy tylko do
+        # ostrzeżenia, więc `replace` zamiast wyjątku.
         wynik = subprocess.run(
             ["net", "use", UDZIAL, HASLO, "/user:" + KONTO, "/persistent:no"],
-            capture_output=True, text=True, timeout=20,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            capture_output=True, text=True, encoding="cp852", errors="replace",
+            timeout=20, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if wynik.returncode == 0:
             _zalogowano = True
             if not cichy:
