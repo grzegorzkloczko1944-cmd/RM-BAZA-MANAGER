@@ -102,6 +102,23 @@ class DatabaseManager:
         import rm_klient
         return rm_klient.master_batch(operacje, request_id=request_id)
 
+    def master_dostepny(self, timeout=3) -> bool:
+        """Czy RM_SERWER odpowiada — do strażników okien, które bez mastera nie mają sensu.
+
+        Zamiennik dawnego `if not self.master_con`. Po przejściu mastera na
+        serwer `master_con` jest ZAWSZE None (`connect_master` nic nie otwiera),
+        więc taki test odmawiał zawsze („Baza master nie jest dostępna"
+        w kalkulatorach, 14.09.2026), a w wariancie `if master_con: zrób X`
+        po cichu wyłączał X (zapis % odebranych, ograniczenie ADMIN
+        w ustawieniach ścieżek). Jeden ping TCP (~20 ms). NIE używać w pętlach
+        — tam po prostu wołać operację i łapać `BladSerwera`.
+        """
+        try:
+            import rm_klient
+            return rm_klient.ping(timeout=timeout) is not None
+        except Exception:
+            return False
+
     def _retire_project_con(self) -> None:
         """To samo co _retire_master_con, dla project_con.
 

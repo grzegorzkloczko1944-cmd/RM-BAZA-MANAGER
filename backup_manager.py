@@ -228,21 +228,26 @@ class BackupManager:
             "Backup mastera należy do RM_SERWER (katalog backup na serwerze). "
             "Klient nie kopiuje master.sqlite.")
     
-    def backup_project(self, project_id: int, skip_checkpoint: bool = False) -> Path:
+    def backup_project(self, project_id, skip_checkpoint: bool = False,
+                       project_db: Path = None) -> Path:
         """
         Backup pojedynczego projektu
-        
+
         Args:
-            project_id: ID projektu
+            project_id: ID projektu — albo klucz z nazwy pliku ("MAG_11" dla
+                        bazy magazynowej project_MAG_11.sqlite); wchodzi do
+                        nazw katalogu i plików backupu (project_<klucz>_...)
             skip_checkpoint: Jeśli True, pomija checkpoint (zakładamy że plik jest już zamknięty)
-        
+            project_db: gotowa ścieżka pliku; bez niej liczona ze wzorca
+
         Returns:
             Path do backupu
         """
-        # Ścieżka z użyciem wzorca (RM_BAZA: project_5.sqlite, RM_MANAGER: rm_manager_project_5.sqlite)
-        project_filename = self.project_name_pattern.format(id=project_id)
-        project_db = self.projects_dir / project_filename
-        
+        if project_db is None:
+            # Ścieżka z użyciem wzorca (RM_BAZA: project_5.sqlite, RM_MANAGER: rm_manager_project_5.sqlite)
+            project_filename = self.project_name_pattern.format(id=project_id)
+            project_db = self.projects_dir / project_filename
+
         if not project_db.exists():
             raise FileNotFoundError(f"Baza projektu {project_id} nie istnieje: {project_db}")
         
@@ -312,26 +317,35 @@ class BackupManager:
         else:
             search_pattern = "project_*.sqlite"
         
+        # Klucz projektu = to, co w nazwie pliku stoi po prefiksie wzorca:
+        # project_88.sqlite → "88", project_MAG_11.sqlite → "MAG_11".
+        #
+        # Bazy magazynowe (project_MAG_N.sqlite) leżą w TYM SAMYM katalogu
+        # i pasują do tego samego globa. Wcześniej brano ostatni człon nazwy
+        # ("11") i szukano project_11.sqlite — dla projektów tylko magazynowych
+        # takiego pliku nie ma, więc każdy start sypał „Błąd backupu
+        # project_MAG_11", a bazy MAG NIE były backupowane wcale (14.09.2026).
+        prefix = self.project_name_pattern.split("{id}")[0]
+
         # Znajdź wszystkie pliki projektów
         for project_db in sorted(self.projects_dir.glob(search_pattern)):
             try:
-                # Wyciągnij ID z nazwy pliku
-                # RM_BAZA: project_5.sqlite → ['project', '5'] → 5
-                # RM_MANAGER: rm_manager_project_5.sqlite → ['rm', 'manager', 'project', '5'] → 5
-                parts = project_db.stem.split('_')
-                project_id = int(parts[-1])  # Ostatnia część to zawsze ID
-                
+                stem = project_db.stem
+                project_id = stem[len(prefix):] if stem.startswith(prefix) else stem.split('_')[-1]
+                if project_id.isdigit():
+                    project_id = int(project_id)
+
                 # Sprawdź czy backup z dzisiejszą datą już istnieje (jeśli skip_existing_today=True)
                 if skip_existing_today:
                     today = datetime.now().strftime("%Y-%m-%d")
                     project_backup_subdir = self.projects_backup_dir / f"project_{project_id}"
                     backup_file = project_backup_subdir / f"project_{project_id}_{today}.sqlite"
-                    
+
                     if backup_file.exists():
                         print(f"⏭️  Projekt {project_id}: backup z dzisiejszą datą już istnieje, pomijam")
                         continue
-                
-                backup_path = self.backup_project(project_id)
+
+                backup_path = self.backup_project(project_id, project_db=project_db)
                 if backup_path:  # może być None jeśli pominięto
                     backups.append((project_id, backup_path))
             
@@ -427,7 +441,10 @@ class BackupManager:
         
         for backup_file in sorted(project_backup_subdir.glob(pattern), reverse=True):
             try:
-                date_str = backup_file.stem.split('_', 2)[2]  # project_5_2026-01-23
+                # Data = wszystko po `project_<klucz>_`. Nie `split('_', 2)[2]`:
+                # dla klucza magazynowego (project_MAG_11_2026-09-14) trzeci
+                # człon to „11_2026-09-14", nie data.
+                date_str = backup_file.stem[len(f"project_{project_id}_"):]
                 size_mb = backup_file.stat().st_size / (1024 * 1024)
                 
                 backups.append({
@@ -459,7 +476,11 @@ class BackupManager:
                 continue
             
             try:
-                project_id = int(project_subdir.name.split('_')[1])
+                # Klucz = to, co po `project_`: 88 albo MAG_11 (bazy magazynowe
+                # mają własne katalogi od 14.09.2026; `int()` na „MAG" sypało
+                # „Błąd listowania" dla każdego z nich).
+                klucz = project_subdir.name[len("project_"):]
+                project_id = int(klucz) if klucz.isdigit() else klucz
                 backups = self.list_project_backups(project_id)
                 if backups:
                     all_backups[project_id] = backups
@@ -1032,13 +1053,29 @@ def schedule_daily_backups(backup_manager: BackupManager):
 
 
 if __name__ == "__main__":
-    # Test
+    # Test: to samo, co robi RM_BAZA przy pierwszym starcie dnia — na tych
+    # samych katalogach (udział serwera, przenosiny 12.09.2026). Projekty
+    # z dzisiejszym backupem są pomijane, więc uruchomienie jest tanie.
+    import sys
     from pathlib import Path
-    
-    master_path = Path("Y:/RM_BAZA/master.sqlite")
-    projects_dir = Path("Y:/RM_BAZA/projects")
-    backup_dir = Path("Y:/RM_BAZA/backups")
-    
+    import udzial_serwera
+
+    # Konsola Windows to cp1250 — emoji w `print` rzuca UnicodeEncodeError
+    # i KOŃCZY proces (ta sama pułapka co przy starcie RM_BAZA i rm_serwer;
+    # wewnątrz RM_BAZA nie widać, bo ona przestawia stdout przy starcie).
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+    udzial_serwera.zaloguj(cichy=False)
+    # master_path: konstruktor go wymaga, ale klient mastera NIE kopiuje
+    # (robi to RM_SERWER u siebie — patrz `backup_master`).
+    master_path = Path(udzial_serwera.UDZIAL) / "master.sqlite"
+    projects_dir = Path(udzial_serwera.UDZIAL) / "RM_BAZA_projects"
+    backup_dir = Path(udzial_serwera.UDZIAL) / "backup_RM_BAZA"
+
     bm = BackupManager(master_path, projects_dir, backup_dir)
     
     # Wykonaj backup

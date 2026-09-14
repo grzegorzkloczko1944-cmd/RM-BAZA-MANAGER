@@ -378,23 +378,6 @@ LIBRARY_ROOT = "B:/"  # Biblioteka RM - komponenty wspólne (pozycje dwf_bibliot
                       # Zostaje na sztywno: dysk B: jest zmapowany tak samo na każdej stacji.
 
 
-def _czy_master_ro(db_manager):
-    """Czy master_con jest otwarte tylko do odczytu.
-
-    Sprawdzamy PROBA ZAPISU w transakcji, ktora natychmiast cofamy —
-    sqlite3 nie wystawia trybu otwarcia, a `PRAGMA query_only` nie wykryje
-    polaczenia otwartego jako "mode=ro" przez URI.
-    """
-    try:
-        con = db_manager.master_con
-        if con is None:
-            return False
-        con.execute("BEGIN IMMEDIATE")
-        con.rollback()
-        return False
-    except Exception as e:
-        return "readonly" in str(e).lower() or "locked" in str(e).lower()
-
 
 def get_assembly_tree_root():
     """Katalog z folderami projektów CAD (drzewko złożeń *_OUT.xlsx, rysunki .dwf).
@@ -1541,7 +1524,16 @@ class MainWindow(tk.Tk):
             prewarm_library_dwf_index(LIBRARY_ROOT)
         except Exception:
             pass
-        
+
+        # Most Subiekta też w tle: pierwsze wywołanie (zwykle przejęcie
+        # locka) płaciło ~9 s logowania do Sfery — patrz
+        # subiekt_bridge.rozgrzej_w_tle. Stanowisko bez Subiekta: nic.
+        try:
+            import subiekt_bridge
+            subiekt_bridge.rozgrzej_w_tle()
+        except Exception:
+            pass
+
         # Wybór użytkownika (po prawej)
         self.user_var = tk.StringVar()
         self.user_combo = ttk.Combobox(
@@ -3968,33 +3960,55 @@ class MainWindow(tk.Tk):
                     last_known_users.pop(uid, None)
             
             # Porównaj: czy ktoś zniknął?
-            missing_users = []
-            for uid, udata in last_known_users.items():
-                if uid not in current_users:
-                    missing_users.append(f"{udata['username']} ({udata['display_name']})")
-            
+            missing = {uid: udata for uid, udata in last_known_users.items()
+                       if uid not in current_users}
+            missing_users = [f"{u['username']} ({u['display_name']})" for u in missing.values()]
+
             # Porównaj: czy ktoś pojawił się nowy?
-            new_users = []
-            for uid, udata in current_users.items():
-                if uid not in last_known_users:
-                    new_users.append(f"{udata['username']} ({udata['display_name']})")
-            
+            new = {uid: udata for uid, udata in current_users.items()
+                   if uid not in last_known_users}
+            new_users = [f"{u['username']} ({u['display_name']})" for u in new.values()]
+
             if missing_users or new_users:
                 print(f"\n⚠️⚠️⚠️  WYKRYTO NIEOCZEKIWANE ZMIANY UŻYTKOWNIKÓW! ⚠️⚠️⚠️")
                 if missing_users:
                     print(f"    🔴 ZAGINĘLI użytkownicy: {', '.join(missing_users)}")
                 if new_users:
                     print(f"    🟢 POJAWILI SIĘ użytkownicy: {', '.join(new_users)}")
-                
-                # Zaloguj anomalię (master bywa READ-ONLY — wtedy pomijamy)
+
+                # Zaloguj anomalię RAZ i wyrównaj stan bazowy w tej samej
+                # transakcji: SNAPSHOT dla nowych, DELETE dla zaginionych.
+                #
+                # Bez tego ta sama „anomalia" wracała przy KAŻDYM starcie na
+                # każdej stacji (72 wpisy do 14.09.2026): siedmiu pierwotnych
+                # użytkowników (ADMIN, DAREK, GKI, GUEST, USER, USER$, USER$$)
+                # powstało przed wprowadzeniem audytu, więc dziennik nigdy nie
+                # miał dla nich SNAPSHOT/ADD — a `last_known_users` odtwarza się
+                # wyłącznie z dziennika. Dziennik ma pokazywać ZMIANY, nie ten
+                # sam stan w kółko; prawdziwa nowa zmiana i tak da nowy wpis.
+                teraz = datetime.now().isoformat()
+                wpisy = [{"operation": "user-audit-add", "params": {
+                    "action": "ANOMALY", "user_id": None, "username": None,
+                    "display_name": None, "role": None, "changed_by": "SYSTEM",
+                    "timestamp": teraz,
+                    "details": f"Missing: {missing_users}, New: {new_users}"}}]
+                wpisy += [{"operation": "user-audit-add", "params": {
+                    "action": "SNAPSHOT", "user_id": uid, "username": u["username"],
+                    "display_name": u["display_name"], "role": u["role"],
+                    "changed_by": "SYSTEM", "timestamp": teraz,
+                    "details": "Stan bazowy po anomalii (użytkownik istniał, dziennik go nie znał)"}}
+                    for uid, u in new.items()]
+                wpisy += [{"operation": "user-audit-add", "params": {
+                    "action": "DELETE", "user_id": uid, "username": u["username"],
+                    "display_name": u["display_name"], "role": u["role"],
+                    "changed_by": "SYSTEM", "timestamp": teraz,
+                    "details": "Stan bazowy po anomalii (użytkownika nie ma w bazie)"}}
+                    for uid, u in missing.items()]
+                # master bywa READ-ONLY — wtedy pomijamy
                 try:
-                    self.db_manager.master_exec("user-audit-add", {
-                        "action": "ANOMALY", "user_id": None, "username": None,
-                        "display_name": None, "role": None, "changed_by": "SYSTEM",
-                        "timestamp": datetime.now().isoformat(),
-                        "details": f"Missing: {missing_users}, New: {new_users}",
-                    })
-                    print(f"    📝 Zalogowano anomalię do user_changes_log\n")
+                    self.db_manager.master_batch(wpisy)
+                    print(f"    📝 Zalogowano anomalię i wyrównano stan bazowy "
+                          f"({len(new)} nowych, {len(missing)} zaginionych)\n")
                 except Exception as e:
                     if "readonly" in str(e).lower() or "read-only" in str(e).lower():
                         print(f"    ℹ️  Baza READ-ONLY - pominięto zapis anomalii\n")
@@ -4526,40 +4540,24 @@ class MainWindow(tk.Tk):
             widths = config['column_widths']
             print(f"  📏 Wczytano szerokości z {CONFIG_FILE}: {widths}")
             
-            # ZAPISYWANIE używa get_column_widths() która zwraca LISTĘ
-            # Więc musimy użyć set_column_widths() lub column_width() z each=False
-            
             success_count = 0
             method_used = None
-            
-            # Próba 1: column_width() z each=False (ustawia wiele kolumn naraz z listy)
+
+            # Próba 1: każda kolumna osobno przez column_width(column=idx, width=val).
+            # (Dawna „próba 1" wołała column_width(widths=lista) — takiego
+            # parametru tksheet 7 nie ma, więc przy każdym starcie sypała
+            # ostrzeżeniem i i tak lądowało tu. Usunięta 14.09.2026.)
             try:
-                # Konwertuj dict na listę (indeksy muszą być po kolei)
-                widths_list = []
-                for i in range(max(int(k) for k in widths.keys()) + 1):
-                    widths_list.append(widths.get(str(i), 100))
-                
-                if hasattr(self.sheet, 'column_width'):
-                    self.sheet.column_width(widths=widths_list)
-                    success_count = len(widths_list)
-                    method_used = "column_width(widths=list)"
-                    print(f"  ✅ Ustawiono szerokości metodą: {method_used}")
+                for col_idx_str, width in widths.items():
+                    col_idx = int(col_idx_str)
+                    if hasattr(self.sheet, 'column_width'):
+                        self.sheet.column_width(column=col_idx, width=width)
+                        success_count += 1
+                method_used = "column_width(column=X, width=Y)"
+                print(f"  ✅ Ustawiono szerokości metodą: {method_used}")
             except Exception as e:
-                print(f"  ⚠️  Próba 1 (column_width with list) nie zadziałała: {e}")
-            
-            # Próba 2: Ustaw każdą kolumnę osobno przez column_width(column=idx, width=val)
-            if success_count == 0:
-                try:
-                    for col_idx_str, width in widths.items():
-                        col_idx = int(col_idx_str)
-                        if hasattr(self.sheet, 'column_width'):
-                            self.sheet.column_width(column=col_idx, width=width)
-                            success_count += 1
-                    method_used = "column_width(column=X, width=Y)"
-                    print(f"  ✅ Ustawiono szerokości metodą: {method_used}")
-                except Exception as e:
-                    print(f"  ⚠️  Próba 2 (column_width per column) nie zadziałała: {e}")
-                    success_count = 0
+                print(f"  ⚠️  Próba 1 (column_width per column) nie zadziałała: {e}")
+                success_count = 0
             
             # Próba 3: Bezpośredni dostęp do MT.set_width()
             if success_count == 0 and hasattr(self.sheet, 'MT'):
@@ -4678,7 +4676,7 @@ class MainWindow(tk.Tk):
         (database is locked, mulenie GUI). Zapisuje też z krótkim busy_timeout
         żeby nigdy nie blokować GUI > 500 ms.
         """
-        if not self.db_manager or not self.db_manager.master_con:
+        if not self.db_manager:
             return
         cache = getattr(self, '_received_pct_cache', None)
         if cache is None:
@@ -4687,28 +4685,16 @@ class MainWindow(tk.Tk):
         if cache.get(pid) == db_str:
             return  # bez zmian — nie pisz
         try:
-            con = self.db_manager.master_con
-            try:
-                con.execute("PRAGMA busy_timeout=500")  # max 0.5s czekania
-            except Exception:
-                pass
-            con.execute(
-                "UPDATE projects SET received_percent = ? WHERE project_id = ?",
-                (db_str, pid),
-            )
-            self.db_manager.master_commit()
+            # Przez RM_SERWER (operacja `project-received-percent`). Dawny kod
+            # pisał wprost po `master_con`, a strażnik `if not master_con:
+            # return` po przejściu mastera na serwer po cichu wyłączył ten
+            # zapis (12–14.09.2026) — RM_MANAGER widział nieaktualny % odebranych.
+            self.db_manager.master_exec("project-received-percent",
+                                        {"received_percent": db_str, "project_id": pid})
             cache[pid] = db_str
-        except sqlite3.OperationalError as db_err:
-            # database is locked / readonly — pomiń, spróbujemy następnym razem
-            if "locked" not in str(db_err).lower() and "readonly" not in str(db_err).lower():
-                print(f"⚠️ BŁĄD zapisu received_percent: {db_err}")
         except Exception as db_err:
+            # serwer chwilowo nie odpowiada — pomiń, spróbujemy następnym razem
             print(f"⚠️ BŁĄD zapisu received_percent: {db_err}")
-        finally:
-            try:
-                con.execute("PRAGMA busy_timeout=5000")  # przywróć
-            except Exception:
-                pass
 
     def _update_odebrano_stat(self):
         """Aktualizuj statystykę ODEBRANO: procent = odebrane / (wszystkie - ZZ)
@@ -6430,6 +6416,22 @@ class MainWindow(tk.Tk):
             self.toolsm.add_command(label="📊 RM_MONITOR", command=self.launch_monitor)
             print(f"✅ Dodano opcję Monitor do menu Narzędzia (użytkownik: {self.current_user}, rola: {self.current_user_role})")
     
+    def _klucz_backupu(self, project_id, project_type=None):
+        """Klucz katalogu kopii projektu: `88` (maszynowy) albo `MAG_88` (magazynowy).
+
+        Bazy magazynowe (`project_MAG_N.sqlite`) leżą w tym samym katalogu co
+        maszynowe i od 14.09.2026 mają WŁASNE kopie — `backup_manager`
+        kluczuje po nazwie pliku, nie po samym numerze. Bez tego klucza okno
+        kopii projektu magazynowego szukałoby w `project_N/`, czyli w kopiach
+        INNEGO projektu o tym samym numerze, a przywrócenie nadpisałoby bazę
+        maszynową danymi magazynu. Ten sam klucz idzie do `restore_project`
+        (wzorzec `project_{id}.sqlite` daje wtedy `project_MAG_N.sqlite`).
+        """
+        typ = project_type
+        if typ is None and self.db_manager and project_id == self.current_project_id:
+            typ = self.db_manager.current_project_type
+        return f"MAG_{project_id}" if typ == "WAREHOUSE" else project_id
+
     def load_backup_dates(self):
         """Załaduj dostępne daty backupów dla bieżącego projektu"""
         if not self.current_project_id or not self.backup_manager:
@@ -6439,7 +6441,8 @@ class MainWindow(tk.Tk):
         
         try:
             # Pobierz listę backupów projektu
-            backups = self.backup_manager.list_project_backups(self.current_project_id)
+            backups = self.backup_manager.list_project_backups(
+                self._klucz_backupu(self.current_project_id))
             
             # Sortuj od najnowszych
             dates = [b['date'] for b in backups]
@@ -6822,8 +6825,9 @@ class MainWindow(tk.Tk):
         
         try:
             # Ścieżka do backupu
-            project_backup_subdir = self.backup_manager.projects_backup_dir / f"project_{self.current_project_id}"
-            backup_file = project_backup_subdir / f"project_{self.current_project_id}_{backup_date}.sqlite"
+            klucz = self._klucz_backupu(self.current_project_id)
+            project_backup_subdir = self.backup_manager.projects_backup_dir / f"project_{klucz}"
+            backup_file = project_backup_subdir / f"project_{klucz}_{backup_date}.sqlite"
             
             if not backup_file.exists():
                 messagebox.showerror("Błąd", f"Backup z {backup_date} nie istnieje!")
@@ -12543,8 +12547,9 @@ class MainWindow(tk.Tk):
         if not self.current_project_id:
             messagebox.showwarning("Brak projektu", "Najpierw wybierz projekt.")
             return
-        if not self.db_manager or not self.db_manager.master_con:
-            messagebox.showwarning("Brak połączenia", "Baza master nie jest dostępna.")
+        if not self.db_manager or not self.db_manager.master_dostepny():
+            messagebox.showwarning("Brak połączenia",
+                                   "RM_SERWER nie odpowiada — bez niego nie ma stawek ani dostawców.")
             return
         if not self.db_manager.project_con:
             messagebox.showwarning("Brak projektu", "Projekt nie jest otwarty.")
@@ -12692,8 +12697,9 @@ class MainWindow(tk.Tk):
 
     def material_calculator_dialog(self):
         """Samodzielny kalkulator materiału (na szybko, bez powiązania z pozycją)."""
-        if not self.db_manager or not self.db_manager.master_con:
-            messagebox.showwarning("Brak połączenia", "Baza master nie jest dostępna.")
+        if not self.db_manager or not self.db_manager.master_dostepny():
+            messagebox.showwarning("Brak połączenia",
+                                   "RM_SERWER nie odpowiada — bez niego nie ma cennika materiałów.")
             return
         from material_calculator import MaterialCalculatorDialog
         MaterialCalculatorDialog(self, self.db_manager.master_con)
@@ -20748,9 +20754,9 @@ class MainWindow(tk.Tk):
     
     def toggle_backup_on_release(self):
         """Przełącz opcję backup przy release_lock (tylko ADMIN)"""
-        # Sprawdź czy master DB jest połączona
-        if not self.db_manager or not self.db_manager.master_con:
-            messagebox.showerror("Błąd", "Baza danych nie jest połączona!")
+        # Sprawdź czy RM_SERWER odpowiada (master leży na serwerze)
+        if not self.db_manager or not self.db_manager.master_dostepny():
+            messagebox.showerror("Błąd", "RM_SERWER nie odpowiada — ustawienie nie zostanie zapisane.")
             # Przywróć poprzednią wartość
             self.backup_on_release_var.set(not self.backup_on_release_var.get())
             return
@@ -20883,11 +20889,15 @@ class MainWindow(tk.Tk):
         # Cache backupów
         backups_cache = {}
         
+        typ_projektu = {}     # id → MACHINE / WAREHOUSE (decyduje o kluczu katalogu kopii)
+
         def load_projects_list():
             """Załaduj listę projektów do combobox"""
             try:
                 projects = fetch_projects(self.db_manager.master_con)
-                # fetch_projects zwraca krotki: (id, name, path) lub (id, name, path, active)
+                # fetch_projects zwraca krotki: (id, nazwa, ścieżka, typ)
+                typ_projektu.clear()
+                typ_projektu.update({p[0]: (p[3] if len(p) > 3 else "MACHINE") for p in projects})
                 project_combo['values'] = [f"{p[0]}: {p[1]}" for p in projects]
                 if projects:
                     project_combo.current(0)
@@ -20940,13 +20950,16 @@ class MainWindow(tk.Tk):
                         ))
                         backups_cache[key] = b
 
-                    backups = self.backup_manager.list_project_backups(project_id)
+                    # Klucz katalogu kopii: MAG_N dla projektu magazynowego.
+                    # `restore_project` dostaje go z `b['project_id']`.
+                    klucz = self._klucz_backupu(project_id, typ_projektu.get(project_id))
+                    backups = self.backup_manager.list_project_backups(klucz)
 
                     for b in backups:
                         tree.insert("", tk.END, values=(
                             b['date'],
                             f"{b['size_mb']:.2f}",
-                            f"Projekt {project_id}"
+                            f"Projekt {klucz}"
                         ))
                         backups_cache[b['date']] = b
 
@@ -22356,21 +22369,14 @@ class MainWindow(tk.Tk):
                 tekst = str(ostatni_blad)
                 tresc = tekst.lower()
                 if "readonly" in tresc or "locked" in tresc:
-                    # Rozroznienie ma znaczenie: przy RO ponawianie nic nie da.
-                    tryb_ro = _czy_master_ro(self.db_manager)
-                    if tryb_ro:
-                        tekst = ("Baza glowna jest otwarta TYLKO DO ODCZYTU, "
-                                 "wiec zapis nie przejdzie." + NL + NL +
-                                 "Najczestsza przyczyna: przy logowaniu nie udalo sie "
-                                 "otworzyc master.sqlite w trybie zapisu (zajety plik "
-                                 "albo brak uprawnien do Y:)." + NL + NL +
-                                 "Przeloguj sie ponownie (USER -> Twoje konto). "
-                                 "Jesli to nie pomoze, sprawdz uprawnienia do pliku "
-                                 "Y:" + chr(92) + "RM_BAZA" + chr(92) + "master.sqlite.")
-                    else:
-                        tekst = ("Baza jest chwilowo zajeta przez inna operacje." + NL + NL +
-                                 "Sprobuj ponownie za chwile - jesli blad wraca, sprawdz, "
-                                 "czy RM_BAZA nie jest otwarta w drugim oknie.")
+                    # Master lezy na RM_SERWER — „locked" to chwilowa kolizja
+                    # po stronie serwera, nie tryb otwarcia pliku. Dawna galaz
+                    # „baza TYLKO DO ODCZYTU, sprawdz uprawnienia do Y:\..."
+                    # pytala `master_con`, ktore od przenosin jest zawsze None,
+                    # wiec nigdy sie nie pokazywala — a gdyby, to klamala.
+                    tekst = ("Baza jest chwilowo zajeta przez inna operacje." + NL + NL +
+                             "Sprobuj ponownie za chwile - jesli blad wraca, sprawdz, "
+                             "czy RM_BAZA nie jest otwarta w drugim oknie.")
                 messagebox.showerror("Blad", "Nie udalo sie zmienic statusu:\n" + tekst,
                                      parent=win)
         
@@ -31400,7 +31406,7 @@ class MainWindow(tk.Tk):
 
         project_name = None
         try:
-            if self.db_manager and self.db_manager.master_con:
+            if self.db_manager:
                 _w = self.db_manager.master_read("project-name", {"project_id": self.current_project_id})
                 row = _w[0]["name"] if _w else None
                 if row:
@@ -33017,8 +33023,10 @@ class MainWindow(tk.Tk):
     
     def menu_settings_paths(self):
         """Dialog ustawień ścieżek do baz danych"""
-        # Podczas normalnej pracy (gdy baza istnieje) - tylko ADMIN może zmieniać
-        if self.db_manager and self.db_manager.master_con:
+        # Podczas normalnej pracy (gdy db_manager już jest) - tylko ADMIN może zmieniać.
+        # ⚠️ Dawny test `master_con` po przejściu mastera na serwer był ZAWSZE
+        # fałszywy — ograniczenie do ADMIN-a przestało działać (12–14.09.2026).
+        if self.db_manager:
             if self.current_user_role != "ADMIN":
                 messagebox.showerror(
                     "Brak uprawnień", 
@@ -36409,7 +36417,7 @@ class ChatWindow(tk.Toplevel):
             # Pobierz display_name z bazy users
             display_name = self.username
             try:
-                if self.db_manager and self.db_manager.master_con:
+                if self.db_manager:
                     _w = self.db_manager.master_read("user-nazwa-po-id",
                                                      {"id": self.user_id})
                     row = (_w[0]["display_name"],) if _w else None

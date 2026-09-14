@@ -394,14 +394,18 @@ def _sprawdz_haslo_admina(rodzic, master_con):
     import hashlib
     import sqlite3
 
+    # Przez RM_SERWER. `master_con` zostaje w sygnaturze dla zgodności
+    # wołających i jest IGNOROWANY: po przejściu mastera na serwer był zawsze
+    # None, `master_con.commit()` kończyło się AttributeError i okno nie
+    # otwierało się wcale (14.09.2026). `users-do-logowania` zwraca tylko
+    # aktywnych — ten sam filtr, co dawny SELECT.
     admini = []
     try:
-        master_con.commit()             # zwolnij locki przed SELECT
-        kursor = master_con.execute(
-            "SELECT username, password_hash FROM users "
-            "WHERE role = 'ADMIN' AND is_active = 1 AND password_hash IS NOT NULL")
-        admini = [(u, h) for u, h in kursor.fetchall() if h]
-    except (sqlite3.Error, AttributeError) as e:
+        import rm_klient
+        admini = [(u["username"], u["password_hash"])
+                  for u in rm_klient.master_read("users-do-logowania")
+                  if u.get("role") == "ADMIN" and u.get("password_hash")]
+    except Exception as e:
         messagebox.showerror(
             "Polaczenie z Subiektem",
             "Nie udalo sie sprawdzic uprawnien:\n" + str(e), parent=rodzic)

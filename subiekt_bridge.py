@@ -271,6 +271,37 @@ def _czekaj_na_gotowosc(limit_s):
     return False
 
 
+def rozgrzej_w_tle():
+    """Uruchom most i zaloguj go do Sfery W TLE, zanim ktokolwiek go potrzebuje.
+
+    Pierwsze wywołanie Subiekta po starcie RM_BAZA — najczęściej przejęcie
+    locka (`wydanie-stan` + `zk-ilosci`) — płaciło pełny start mostu
+    i logowanie do Sfery: log mostu 14.09.2026 `session_start ok ms=8823`.
+    User klikał „Przejmij" i patrzył 9 s na nic; każde kolejne przejęcie
+    trwało 40 ms. Rozgrzewka przenosi ten koszt na chwilę tuż po starcie,
+    gdy user dopiero rozgląda się po oknie. Wątek-demon, nic nie blokuje;
+    kilka okien naraz nie uruchomi kilku mostów — `zapewnij_most` ma `_lock`.
+
+    Stanowisko bez Subiekta (brak binarki albo konfigu) — nic nie robi.
+    Nieudana rozgrzewka NIE zostawia `_most_niedostepny`: to próba
+    z wyprzedzeniem, a sticky flaga odesłałaby RM_BAZA na stare CLI do końca
+    procesu przez chwilową niedostępność SQL rano.
+    """
+    if not _find_exe() or not os.path.isfile(CONFIG_PATH):
+        return
+
+    def _run():
+        global _most_niedostepny
+        bylo = _most_niedostepny
+        try:
+            zapewnij_most()
+        except Exception as e:
+            _most_niedostepny = bylo
+            print(f"ℹ️  Rozgrzewka mostu w tle nieudana: {e}")
+
+    threading.Thread(target=_run, name="most-rozgrzewka", daemon=True).start()
+
+
 def zapewnij_most():
     """Upewnia się, że most działa (uruchamia go, gdy trzeba).
 
