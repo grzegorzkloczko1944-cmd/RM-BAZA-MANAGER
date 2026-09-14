@@ -220,6 +220,31 @@ Dla pozycji BEZ numeru rysunku (ZNORMALIZOWANE) klucz liczyć tą samą regułą
 co w dopasowaniu — `subiekt_projekt.symbol_z_nazwy` / `rozroznij_symbol` —
 inaczej ten sam detal miałby tu inny klucz niż w pozostałych oknach.
 
+## Kalkulator — ✅ ZROBIONE 15.09.2026
+
+Wszystkie cztery punkty planu:
+
+1. `calc_semi_subiekt_id` (INTEGER) w `_ensure_calc_columns` — do tej pory
+   tryb „semi" trzymał tylko NAZWĘ, więc powiązanie było tekstem i pękało
+   przy jej zmianie;
+2. `_podpowiedz_polprodukt()` przy wyborze pozycji: czyta relację po numerze
+   rysunku (`map-polprodukt`), ustawia tryb „semi", nazwę i cenę;
+3. ⚠️ cena z trybu `magazyn` mostu, NIE z `query_stock` — to drugie zwraca
+   stany, ale `CenaEwidencyjna` jest tam **null** (ta sama pułapka co w oknie
+   półproduktu). Liczona jako `cena kartoteki × ilosc_na_szt`, czyli za jeden
+   detal;
+4. przy ZAPISIE `calc_semi_price` i `calc_semi_subiekt_id` idą do bazy razem —
+   wycena pamięta, ile kosztowało i CZEGO dotyczyło.
+
+**Nie nadpisujemy cudzej pracy:** gdy pozycja ma już zapisaną kalkulację
+półproduktu, podpowiedź jej nie rusza. Bez mostu pole ceny zostaje puste —
+lepiej niż wpisać wartość, której nie potwierdziliśmy.
+
+Test na 3500: `2627-370.18` + relacja do `2430-300.57` × 2 szt. → tryb
+„semi", cena 208,26 (104,13 × 2), w bazie `calc_semi_subiekt_id = 100767`.
+
+### Oryginalny opis planu
+
 ## Kalkulator — wpiąć się w to, co JEST
 
 ⚠️ **Nie budować drugiego mechanizmu.** `items` ma już kolumny dodawane przez

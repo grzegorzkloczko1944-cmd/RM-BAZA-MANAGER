@@ -41,6 +41,10 @@ def _ensure_calc_columns(project_con):
     for col, coltype in [
         ("calc_hours", "REAL"), ("calc_material", "REAL"), ("calc_extra", "REAL"), ("calc_rate", "REAL"),
         ("calc_mode", "TEXT"), ("calc_semi_price", "REAL"), ("calc_semi_name", "TEXT"), ("calc_semi_supplier_id", "INTEGER"),
+        # Kartoteka polproduktu w Subiekcie. Do 15.09.2026 tryb „semi"
+        # trzymal tylko NAZWE — czyli powiazanie bylo tekstem i pekalo przy
+        # zmianie nazwy. `id` jest stabilne (POLPRODUKTY_PLAN.md).
+        ("calc_semi_subiekt_id", "INTEGER"),
     ]:
         if col not in existing:
             default = " DEFAULT 0" if coltype == "REAL" else ""
@@ -264,6 +268,10 @@ class RmpakCalculatorDialog:
 
         self._loaded_vals = None  # wartości załadowane z tabeli dla bieżącej pozycji
         self._prev_iid = None
+        # Powiazany polprodukt biezacej pozycji (z relacji) albo None.
+        # Ustawiane w `_podpowiedz_polprodukt`; tutaj, zeby zapis przed
+        # wyborem pozycji nie wywalil sie na AttributeError.
+        self._polprodukt = None
 
         self.lbl_prefix = tk.Label(bottom, text="Pozycja:", anchor="w")
         self.lbl_prefix.grid(row=0, column=0, sticky="w", padx=(0, 4), pady=(0, 6))
@@ -999,6 +1007,9 @@ class RmpakCalculatorDialog:
         self.semi_price_var.set(f"{semi_price:.2f}")
         self.semi_name_var.set(semi_name)
         self.semi_supplier_id = semi_supplier_id
+        # Powiazany polprodukt (PPM „Powiaz polprodukt" w arkuszu) —
+        # podpowiadamy go, gdy pozycja nie ma jeszcze wlasnej kalkulacji.
+        self._podpowiedz_polprodukt(iid, mode, semi_price, semi_name)
         self._update_semi_supplier_label()
         self._update_mode_widgets()
         self._updating = False
@@ -1011,6 +1022,61 @@ class RmpakCalculatorDialog:
                              self.semi_name_var.get().strip(),
                              str(self.semi_supplier_id))
         self._recalc()
+
+    def _podpowiedz_polprodukt(self, iid, mode, semi_price, semi_name):
+        """Wypelnia pola trybu „semi" z RELACJI + ceny z Subiekta.
+
+        Zrodla rozdzielone zgodnie z planem:
+          * `id` i ilosc na sztuke — z relacji (trwale, globalne),
+          * CENA — z Subiekta NA BIEZACO, bo w relacji jej nie trzymamy
+            („kopia po dniu klamie").
+
+        Nie nadpisujemy tego, co user juz policzyl: gdy pozycja ma zapisana
+        cene polproduktu, zostawiamy ja w spokoju — wycena sprzed pol roku
+        ma pokazywac cene z chwili kalkulacji.
+        """
+        self._polprodukt = None
+        vals = self.tree.item(iid, "values")
+        klucz = (str(vals[1]).strip() or str(vals[2]).strip())
+        if not klucz:
+            return
+        try:
+            import subiekt_mapowania as _MAP
+            rel = _MAP.polprodukty(klucz)
+        except Exception as e:
+            print("Kalkulator: nie odczytano polproduktu (%s)" % e)
+            return
+        if not rel:
+            return
+
+        w = rel[0]                      # przy kilku bierzemy pierwszy
+        self._polprodukt = dict(w)
+        if mode == "semi" and (semi_price or semi_name):
+            return                      # user ma wlasna kalkulacje — nie ruszamy
+
+        # Cena z Subiekta, na zywo. Bez mostu zostawiamy puste pole —
+        # lepiej niz wpisac wartosc, ktorej nie potwierdzilismy.
+        # ⚠️ NIE `query_stock` — ono zwraca stany, ale CenaEwidencyjna jest
+        # tam NULL (sprawdzone 15.09.2026, ta sama pulapka co w oknie
+        # polproduktu). Cene niesie tryb `magazyn`.
+        cena = None
+        try:
+            import subiekt_bridge
+            _w = subiekt_bridge.call("magazyn", {}, timeout=200, write=False)
+            _sym = (w["symbol"] or "").strip().upper()
+            for _p in (_w.get("pozycje") or []):
+                if (_p.get("Symbol") or "").strip().upper() == _sym:
+                    cena = _p.get("CenaEwidencyjna")
+                    break
+        except Exception as e:
+            print("Kalkulator: cena polproduktu nieodczytana (%s)" % e)
+
+        self.calc_mode_var.set("semi")
+        self.semi_name_var.set(w["nazwa"] or w["symbol"] or "")
+        if cena not in (None, ""):
+            # Cena za JEDEN detal: kartoteka x ilosc na sztuke.
+            self.semi_price_var.set("%.2f" % (float(cena)
+                                              * int(w["ilosc_na_szt"] or 1)))
 
     def _on_mode_change(self):
         self._update_mode_widgets()
@@ -1257,10 +1323,15 @@ class RmpakCalculatorDialog:
         else:
             self.project_con.execute(
                 """UPDATE items SET price_pln=?, calc_hours=?, calc_material=?, calc_extra=?, calc_rate=?,
-                       calc_mode=?, calc_semi_price=?, calc_semi_name=?, calc_semi_supplier_id=?
+                       calc_mode=?, calc_semi_price=?, calc_semi_name=?, calc_semi_supplier_id=?,
+                       calc_semi_subiekt_id=?
                    WHERE id=?""",
                 (price_per_unit, hours, material, extra, rate,
-                 mode, semi_price, semi_name, semi_supplier_id, self.selected_item_id)
+                 mode, semi_price, semi_name, semi_supplier_id,
+                 # `id` kartoteki polproduktu z relacji — utrwalone razem
+                 # z cena, zeby wycena wiedziala, CZEGO dotyczyla.
+                 (self._polprodukt or {}).get("id_subiekt") if mode == "semi" else None,
+                 self.selected_item_id)
             )
             self.project_con.commit()
 
