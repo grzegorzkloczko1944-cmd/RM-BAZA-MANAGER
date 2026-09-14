@@ -360,7 +360,19 @@ class RmpakCalculatorDialog:
 
         self.pw_status_var = tk.StringVar(value="PW: —")
         tk.Label(doc_frame, textvariable=self.pw_status_var, anchor="w",
+                 justify="left", wraplength=230,
                  font=("", 9)).pack(anchor="w", fill="x")
+
+        # Podpis pod przyciskiem: ile pozycji wejdzie na PW i czego brakuje.
+        self.pw_info_var = tk.StringVar(value="")
+        tk.Label(doc_frame, textvariable=self.pw_info_var, anchor="w",
+                 justify="left", wraplength=230, fg="gray30",
+                 font=("", 8)).pack(anchor="w", fill="x", pady=(6, 0))
+
+        self.btn_pw = tk.Button(doc_frame, text="📥 Wystaw PW",
+                                bg="#337ab7", fg="white", font=("", 9, "bold"),
+                                command=self._podglad_pw)
+        self.btn_pw.pack(anchor="e", fill="x", pady=(8, 0))
 
         tk.Button(sum_frame, text="Zamknij", command=self._on_close,
                   width=12, bg="#d9534f", fg="white", font=("", 9, "bold")).pack(anchor="e", pady=(10, 0))
