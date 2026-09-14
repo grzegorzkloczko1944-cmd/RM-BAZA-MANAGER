@@ -12912,26 +12912,16 @@ class MainWindow(tk.Tk):
             except Exception:
                 _gdzie = []
             if _gdzie:
-                _opis = (chr(10) + "    ").join(
-                    "%s  —  %s szt. na 1 detal" % (w["numer_rysunku"],
-                                                   w["ilosc_na_szt"])
-                    for w in _gdzie)
-                if messagebox.askyesno(
-                        "To jest półprodukt",
-                        "„%s” (%s) to KUPOWANY PÓŁFABRYKAT — pozycja "
-                        "z Subiekta.\n\n"
-                        "Powstaje z niej:\n    %s\n\n"
-                        "Do półproduktu NIE dopina się kolejnego "
-                        "półproduktu —\npowiązania prowadzi się na "
-                        "RYSUNKU.\n\n"
-                        "Otworzyć okno dla „%s”?"
-                        % ((cur[1] or _sym), _sym, _opis,
-                           _gdzie[0]["numer_rysunku"]), icon="info"):
-                    import subiekt_polprodukt_gui
-                    return subiekt_polprodukt_gui.otworz(
-                        self, _gdzie[0]["numer_rysunku"], "",
+                # Wlasne okno w stylu okna wiazania — z naglowkiem, tabela
+                # rysunkow, cena i stanem z Subiekta oraz kopiowaniem.
+                # Systemowy messagebox wygladal jak komunikat bledu.
+                import subiekt_polprodukt_gui as _PG
+                _PG.okno_informacyjne(
+                    self, _sym, (cur[1] or ""), _gdzie,
+                    otworz_rysunek=lambda nr: _PG.otworz(
+                        self, nr, "",
                         po_zmianie=self._po_zmianie_polproduktu,
-                        projekt_info=self._info_dla_polproduktu)
+                        projekt_info=self._info_dla_polproduktu))
                 return
 
         import subiekt_polprodukt_gui

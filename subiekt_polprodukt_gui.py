@@ -55,6 +55,181 @@ def _wysrodkuj(okno, rodzic, szer, wys):
     okno.geometry("%dx%d+%d+%d" % (szer, wys, max(0, x), max(0, y)))
 
 
+class InfoPolproduktWindow(tk.Toplevel):
+    """Wiersz JEST polproduktem — pokazujemy, z czego powstaje i gdzie leży.
+
+    Do polproduktu nie dopina sie kolejnego polproduktu, wiec zamiast edycji
+    dajemy podglad i przejscie do okna rysunku-rodzica. Uklad i kolory jak
+    w oknie wiazania, zeby nie wygladalo jak systemowy komunikat bledu.
+    """
+
+    def __init__(self, parent, symbol, nazwa, gdzie, otworz_rysunek=None):
+        super().__init__(parent)
+        self._otworz_rysunek = otworz_rysunek
+        self._rysunek = gdzie[0]["numer_rysunku"] if gdzie else None
+        self._kartoteka = {}
+        self._symbol = symbol
+        self._nazwa = nazwa or symbol
+
+        self.title("Półprodukt — %s" % symbol)
+        self.transient(parent)
+        self.configure(bg="#f7f9fa")
+        _wysrodkuj(self, parent, 760, 430)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+        # ── naglowek ─────────────────────────────────────────────────────
+        gora = tk.Frame(self, bg="#eaf2f8")
+        gora.pack(fill=tk.X)
+        tk.Label(gora, text="\U0001F4E6", font=("Segoe UI Emoji", 22),
+                 bg="#eaf2f8").pack(side=tk.LEFT, padx=(16, 10), pady=12)
+        opis = tk.Frame(gora, bg="#eaf2f8")
+        opis.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=12)
+        tk.Label(opis, text=nazwa or symbol, font=("Arial", 12, "bold"),
+                 bg="#eaf2f8", anchor="w").pack(fill=tk.X)
+        tk.Label(opis, text="%s   ·   kupowany półfabrykat z Subiekta"
+                            % symbol,
+                 font=("Arial", 9), fg="#5d6d7e", bg="#eaf2f8",
+                 anchor="w").pack(fill=tk.X)
+        # Symbol przepisuje sie do Subiekta i do maili — niech da sie kliknac.
+        tk.Button(gora, text="Kopiuj symbol", command=self._kopiuj_symbol,
+                  font=("Arial", 8), padx=8).pack(side=tk.RIGHT, padx=(0, 14))
+        tk.Frame(self, bg="#d5dbdb", height=1).pack(fill=tk.X)
+
+        # ── z czego powstaje / gdzie uzywany ─────────────────────────────
+        ramka = tk.LabelFrame(self, text=" Używany w rysunkach ",
+                              font=("Arial", 9, "bold"), bg="#f7f9fa")
+        ramka.pack(fill=tk.BOTH, expand=True, padx=14, pady=(12, 6))
+        tab = ttk.Treeview(ramka, columns=("rysunek", "ile"),
+                           show="headings", height=min(max(len(gdzie), 2), 6))
+        tab.heading("rysunek", text="Numer rysunku")
+        tab.heading("ile", text="Na 1 detal")
+        tab.column("rysunek", width=380, anchor="w")
+        tab.column("ile", width=100, anchor="e")
+        for w in gdzie:
+            tab.insert("", tk.END, values=(w["numer_rysunku"],
+                                           w["ilosc_na_szt"]))
+        tab.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self._tab = tab
+        tab.configure(selectmode="extended")
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Kopiuj numer rysunku",
+                         command=lambda: self._kopiuj_tabele(True))
+        menu.add_command(label="Kopiuj numer i ilość",
+                         command=lambda: self._kopiuj_tabele(False))
+        menu.add_separator()
+        menu.add_command(label="Kopiuj symbol półproduktu",
+                         command=self._kopiuj_symbol)
+        menu.add_command(label="Kopiuj symbol i nazwę",
+                         command=lambda: self._do_schowka(
+                             self._symbol + chr(9) + self._nazwa))
+
+        def ppm(e):
+            iid = tab.identify_row(e.y)
+            if iid and iid not in tab.selection():
+                tab.selection_set(iid)
+            menu.tk_popup(e.x_root, e.y_root)
+
+        tab.bind("<Button-3>", ppm)
+        tab.bind("<Control-c>", lambda _e: self._kopiuj_tabele(False))
+        tab.bind("<Control-C>", lambda _e: self._kopiuj_tabele(False))
+        tab.bind("<Control-a>",
+                 lambda _e: tab.selection_set(tab.get_children()))
+
+        # ── dane z Subiekta ──────────────────────────────────────────────
+        self.var_dane = tk.StringVar(value="Cena i stan: wczytuję…")
+        tk.Label(self, textvariable=self.var_dane, font=("Arial", 9),
+                 fg="#34495e", bg="#f7f9fa", anchor="w").pack(
+                     fill=tk.X, padx=16)
+
+        tk.Label(self,
+                 text="Do półproduktu nie dopina się kolejnego półproduktu —\n"
+                      "powiązania prowadzi się na RYSUNKU."
+                      "          (Ctrl+C kopiuje, PPM = menu)",
+                 font=("Arial", 9), fg="#7f8c8d", bg="#f7f9fa",
+                 justify="left", anchor="w").pack(fill=tk.X, padx=16,
+                                                  pady=(8, 0))
+
+        # ── przyciski ────────────────────────────────────────────────────
+        dol = tk.Frame(self, bg="#f7f9fa")
+        dol.pack(fill=tk.X, padx=14, pady=12)
+        tk.Button(dol, text="Zamknij", command=self.destroy,
+                  font=("Arial", 9), padx=16, pady=4).pack(side=tk.RIGHT)
+        if self._rysunek and callable(otworz_rysunek):
+            tk.Button(dol, text="Otwórz rysunek %s" % self._rysunek,
+                      command=self._przejdz, bg="#2980b9", fg="white",
+                      font=("Arial", 9, "bold"), padx=14, pady=4).pack(
+                          side=tk.RIGHT, padx=(0, 8))
+
+        self._wczytaj_dane(symbol)
+
+    def _do_schowka(self, tekst):
+        if not tekst:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(tekst)
+        self.var_dane.set("Skopiowano do schowka: %s"
+                          % (tekst.replace(chr(9), "  ")[:70]))
+
+    def _kopiuj_symbol(self):
+        self._do_schowka(self._symbol)
+
+    def _kopiuj_tabele(self, tylko_numer):
+        wiersze = []
+        for iid in (self._tab.selection() or self._tab.get_children()):
+            v = self._tab.item(iid, "values")
+            if not v:
+                continue
+            wiersze.append(str(v[0]) if tylko_numer
+                           else (str(v[0]) + chr(9) + str(v[1])))
+        self._do_schowka(chr(10).join(wiersze))
+
+    def _przejdz(self):
+        rysunek, akcja = self._rysunek, self._otworz_rysunek
+        self.destroy()
+        if callable(akcja):
+            akcja(rysunek)
+
+    def _wczytaj_dane(self, symbol):
+        """Cena, stan i lokacja — w tle, jak w oknie wiazania."""
+        def worker():
+            try:
+                import subiekt_bridge
+                w = subiekt_bridge.call("magazyn", {}, timeout=200,
+                                        write=False)
+                k = next((p for p in (w.get("pozycje") or [])
+                          if (p.get("Symbol") or "").strip().upper()
+                          == symbol.strip().upper()), None)
+            except Exception as e:
+                print("Polprodukt (info): stany nieodczytane: %s" % e)
+                return
+            try:
+                self.after(0, lambda: pokaz(k))
+            except (RuntimeError, tk.TclError):
+                pass
+
+        def pokaz(k):
+            try:
+                if not k:
+                    return self.var_dane.set("Nie znaleziono kartoteki "
+                                             "w Subiekcie.")
+                self.var_dane.set(
+                    "Cena: %s zł     ·     Dostępne: %s     ·     "
+                    "Zarezerwowane: %s     ·     Lokacja: %s"
+                    % (_zl(k.get("CenaEwidencyjna")) or "—",
+                       _ilo(k.get("Dostepne")), _ilo(k.get("Zarezerwowane")),
+                       k.get("Polozenie") or "—"))
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+
+def okno_informacyjne(parent, symbol, nazwa, gdzie, otworz_rysunek=None):
+    """Podglad wiersza, ktory SAM jest polproduktem."""
+    return InfoPolproduktWindow(parent, symbol, nazwa, gdzie, otworz_rysunek)
+
+
 class PolproduktWindow(tk.Toplevel):
     """Wyszukiwarka kartotek + lista już powiązanych półproduktów.
 
