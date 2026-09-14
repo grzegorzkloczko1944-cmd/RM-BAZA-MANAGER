@@ -124,12 +124,6 @@ def ustaw_termin(numer_zd, termin, timeout=TIMEOUT_S):
         return przez_cli()
 
 
-def _master():
-    """Ścieżka do master.sqlite — jedna definicja, ta z okna zamówień."""
-    from subiekt_zamowienia import _sciezka_master
-    return _sciezka_master()
-
-
 def _serwer():
     """RM_SERWER — jedyna droga do mastera. Konfigurację (adres, sekret)
     ustawia RM_BAZA przy starcie; ten moduł działa wewnątrz niej."""
@@ -139,18 +133,27 @@ def _serwer():
 
 def _katalog_pdf_domyslny():
     """
-    Katalog wydruków ZD: Y:\\RM_BAZA\\zd_pdf\\ — obok archiwum faktur KSeF.
+    Katalog wydruków ZD: `\\\\W2019S\\RM_SERWER$\\zd_pdf` — na udziale serwera,
+    obok chatu i historii Subiekta (przenosiny 12.09.2026; 6 PDF-ów sprzed
+    przenosin przeniesionych z `Y:\\RM_BAZA\\$zd_pdf` 14.09).
 
     ⚠️ NIE %TEMP%. Katalog tymczasowy jest LOKALNY, więc wydruk zamówienia
     wysłanego z jednego stanowiska nie istniał dla nikogo innego, a Windows
     i tak go kasuje. Wysłany PDF to dowód tego, co poszło do dostawcy —
     musi być wspólny i trwały (zgłoszone 05.09.2026).
 
-    Gdy dysk sieciowy jest niedostępny, schodzimy do %TEMP%: lepiej wysłać
+    ⚠️ Ścieżka WPROST z `udzial_serwera.UDZIAL`, nie liczona z mastera.
+    Dawne `Path(master).parent / "zd_pdf"` po przejściu mastera na serwer
+    wskazywało katalog liczony z ATRAPY ścieżki — trafiało akurat w korzeń
+    udziału, ale przez przypadek, a stare PDF-y zostały na `Y:`.
+
+    Gdy udział jest niedostępny, schodzimy do %TEMP%: lepiej wysłać
     zamówienie z lokalnego wydruku niż nie wysłać wcale.
     """
     try:
-        katalog = Path(_master()).parent / "zd_pdf"
+        import udzial_serwera
+        udzial_serwera.zaloguj()
+        katalog = Path(udzial_serwera.UDZIAL) / "zd_pdf"
         katalog.mkdir(parents=True, exist_ok=True)
         return katalog
     except Exception as e:

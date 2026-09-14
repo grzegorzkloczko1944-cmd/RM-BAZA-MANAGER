@@ -857,7 +857,14 @@ def pozycje_z_podobnymi(project_id, min_prefiks=4, con=None):
 # (start Sfery + przelot po Wszystkie()), a kartoteki zmieniają się rzadko —
 # bez cache każde pierwsze kliknięcie w oknie oznaczało kilkanaście sekund
 # czekania.
-KATALOG_CACHE = os.path.join(os.path.dirname(PROJECTS_DIR), "subiekt_katalog.json")
+#
+# LOKALNIE, obok reszty plików stanowiska (`subiekt_kolumny.json`,
+# `.nexo_sfera.json`). To cache, nie dane: nie ma powodu dzielić go między
+# stacjami ani czytać przez SMB. Dawne `dirname(PROJECTS_DIR)/subiekt_katalog.json`
+# po przenosinach wskazywało korzeń udziału z bazami projektów — i nigdy nie
+# zostało tam zapisane, więc każde otwarcie okna pobierało kartoteki od nowa
+# (audyt 14.09.2026).
+KATALOG_CACHE = r"C:\RMPAK_CLIENT\subiekt_katalog.json"
 KATALOG_WAZNY_H = 12          # po tylu godzinach odświeżamy w tle
 
 

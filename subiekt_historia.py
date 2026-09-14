@@ -44,15 +44,20 @@ import json
 import os
 from datetime import datetime
 
-from subiekt_stany import PROJECTS_DIR
-
 #: Lokalny ślad tej maszyny — ten sam katalog, którego moduły używały dotąd.
 LOG_DIR_LOKALNY = r"C:\RMPAK_CLIENT\subiekt_logi"
 
 
 def historia_dir():
-    """Wspólny katalog historii na serwerze — obok master.sqlite."""
-    return os.path.join(os.path.dirname(PROJECTS_DIR.rstrip("\\/")), "subiekt_historia")
+    """Wspólny katalog historii: `\\\\W2019S\\RM_SERWER$\\subiekt_historia`.
+
+    Wprost z `udzial_serwera.UDZIAL`, nie liczony z katalogu projektów.
+    Dawne `dirname(PROJECTS_DIR)/subiekt_historia` trafiało po przenosinach
+    w korzeń udziału PRZYPADKIEM (bo projekty leżą podfolder niżej) — ta sama
+    rodzina min co `zd_pdf` i cache katalogu (audyt 14.09.2026).
+    """
+    import udzial_serwera
+    return os.path.join(udzial_serwera.UDZIAL, "subiekt_historia")
 
 
 def zapisz_historie(rodzaj, wynik, project_id=None, plan=None, **dodatkowe):

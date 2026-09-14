@@ -108,11 +108,11 @@ def _master(master_db_path: str = None):
         # utf-8-sig: konfiguracja bywa zapisywana z BOM-em.
         # Kolejność: własny konfig stacji, potem wspólny HMAC.json na udziale
         # serwera (stacja bez sekretu — nowa albo po przeinstalowaniu).
-        # `Y:\RM_BAZA\sync_config.json` został na końcu jako zapas dla stacji,
-        # które nie dostały jeszcze nowego .exe — zniknie razem z Y:.
+        # Dawny trzeci zapas `Y:\RM_BAZA\sync_config.json` usunięty 14.09.2026
+        # (odcięcie od Y: — plik jest przemianowany na `$sync_config.json`,
+        # więc wpis i tak trafiał w pustkę).
         for sciezka in (r"C:\RMPAK_CLIENT\sync_config.json",
-                        r"\\W2019S\RM_SERWER$\HMAC.json",
-                        r"Y:\RM_BAZA\sync_config.json"):
+                        r"\\W2019S\RM_SERWER$\HMAC.json"):
             try:
                 with open(sciezka, encoding="utf-8-sig") as f:
                     wczytane = (json.load(f).get("rm_serwer") or {})

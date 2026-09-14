@@ -27,13 +27,9 @@ import subprocess
 import sys
 import tempfile
 
-from subiekt_stany import _find_exe, blad_mostu, CONFIG_PATH, PROJECTS_DIR
+from subiekt_stany import _find_exe, blad_mostu, CONFIG_PATH
 
 TIMEOUT_S = 300
-
-
-def _master_path():
-    return os.path.join(os.path.dirname(PROJECTS_DIR.rstrip("\\/")), "master.sqlite")
 
 
 def _serwer():

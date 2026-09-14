@@ -37,15 +37,6 @@ from subiekt_zamowienia import (MARKER, nasz_dokument, numer_projektu_z_uwag,
 DOSTAWCY_PRODUKCJA = ("RMPAK", "RMPAK + materiał")
 
 
-def _sciezka_master():
-    """master.sqlite — ta sama ścieżka co reszta RM_BAZA."""
-    try:
-        from subiekt_stany import PROJECTS_DIR
-        return os.path.join(os.path.dirname(PROJECTS_DIR), "master.sqlite")
-    except Exception:
-        return r"C:\RMPAK_CLIENT\RM_MANAGER\RM_BAZA\master.sqlite"
-
-
 def id_dostawcow_produkcji(master_path=None):
     """Id dostawców „produkcyjnych" (RMPAK itp.) — przez serwer.
     `master_path` ignorowany, zostaje dla wołających."""
