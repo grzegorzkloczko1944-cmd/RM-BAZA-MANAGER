@@ -526,6 +526,15 @@ class PolproduktWindow(tk.Toplevel):
                  ("Powiązanych półproduktów: %d" % len(wiersze) if wiersze
                   else "Ten rysunek nie ma jeszcze półproduktu."))
 
+    @staticmethod
+    def _bez_znacznika(nazwa):
+        """Nazwa bez „← nowy / ← zmiana / ← do usuniecia" z tabeli.
+
+        Tabela dokleja te znaczniki do KOLUMNY NAZWA, zeby bylo widac
+        niezapisane zmiany — ale do bazy ma isc czysta nazwa kartoteki.
+        """
+        return str(nazwa or "").split("  \u2190")[0].strip()
+
     def _zaznaczony(self):
         sel = self.tab_pow.selection()
         return int(sel[0]) if sel else None
@@ -540,7 +549,8 @@ class PolproduktWindow(tk.Toplevel):
         ile = self._zapytaj_o_ilosc(int(biezaca[2]))
         if ile is None:
             return
-        self._zmiany[id_sub] = {"symbol": biezaca[0], "nazwa": biezaca[1],
+        self._zmiany[id_sub] = {"symbol": biezaca[0],
+                                "nazwa": self._bez_znacznika(biezaca[1]),
                                 "ilosc": ile}
         self._do_usuniecia.discard(id_sub)
         self._odswiez_powiazane()
