@@ -664,7 +664,10 @@ class SchowekWindow(WydanieWindow):
         s = self._schowek()
         if not s:
             return self._uwaga("Schowek jest pusty — nie ma historii.", None)
+        if self._okno_potomne("_okno_historii"):
+            return
         okno = tk.Toplevel(self)
+        self._okno_historii = okno
         okno.title("Historia ruchów — schowek #%s" % s["id"])
         okno.geometry("860x460")
         okno.transient(self)
@@ -698,9 +701,6 @@ class SchowekWindow(WydanieWindow):
     def _popraw_ilosc(self):
         """Wpisanie NOWEJ ilości wprost — zamiast liczenia, ile zdjąć.
 
-        Magazynier pomylił się przy wpisywaniu i chce po prostu poprawić
-        liczbę (14.09.2026: „chcę móc edytować w schowku ilość W SCHOWKU").
-
         Pod spodem powstaje RUCH KORYGUJĄCY na różnicę, nie kasowanie
         historii — inaczej zniknąłby ślad, kto ile faktycznie wziął.
         """
@@ -711,37 +711,62 @@ class SchowekWindow(WydanieWindow):
                                "ilość.", None)
         teraz = 0.0
         for p in self.zawartosc:
-            if p["symbol"] == symbol and (p.get("projekt") or "") == (projekt or ""):
+            if (p["symbol"] == symbol
+                    and (p.get("projekt") or "") == (projekt or "")):
                 teraz = p["ilosc"]
                 break
 
-        okno = tk.Toplevel(self)
-        okno.title("Popraw ilości przyciskiem „Popraw ilość” albo usuń te pozycje "
-                "ze schowka, a potem wystaw ponownie.\n\n"
-                "Nie powstał ŻADEN dokument — pozostałe projekty też czekają."
-                % (lista, wiecej), parent=self)
-
-        opis = "\n".join(
-            "   %s: %d poz. / %s szt."
-            % (pr, len(poz), _ilo(sum(x["ilosc"] for x in poz)))
-            for pr, poz in sorted(grupy.items()))
-        if not messagebox.askyesno(
-                "Wydanie z magazynu",
-                "Powstanie %d dokument(ow) RW:\n\n%s\n\nWystawiamy?"
-                % (len(grupy), opis), parent=self):
+        if self._okno_potomne("_okno_popraw"):
             return
+        okno = tk.Toplevel(self)
+        self._okno_popraw = okno
+        okno.title("Popraw ilość")
+        okno.configure(bg=TLO_SEKCJI)
+        okno.transient(self)
+        okno.resizable(False, False)
+        tk.Label(okno, text=symbol, bg=TLO_SEKCJI, fg=TEKST,
+                 font=("Arial", 13, "bold")).pack(padx=24, pady=(16, 2))
+        tk.Label(okno, text="projekt %s   ·   teraz w schowku: %s szt."
+                 % (projekt or "—", _ilo(teraz)), bg=TLO_SEKCJI,
+                 fg=TEKST_SZARY, font=("Arial", 9)).pack(padx=24)
 
-        self.btn_zakoncz.config(state=tk.DISABLED, text="Zapisuję…")
-        self.update_idletasks()
-        udane, bledy = [], []
-        for projekt, pozycje in sorted(grupy.items()):
+        var = tk.StringVar(value=_ilo(teraz))
+        pole = tk.Spinbox(okno, textvariable=var, from_=0, to=999999,
+                          width=10, font=("Arial", 16), justify="center")
+        pole.pack(pady=12)
+        pole.focus_set()
+        pole.selection_range(0, tk.END)
+
+        def zapisz():
+            ile = _liczba(var.get(), -1)
+            if ile < 0:
+                return messagebox.showwarning(
+                    "Popraw ilość", "Podaj liczbę nie mniejszą od zera.",
+                    parent=okno)
             try:
-                numer = self._wystaw_rw(projekt, pozycje)
-                udane.append((projekt, numer, len(pozycje)))
-            except Exception as e:
-                bledy.append((projekt, str(e)))
-                break          # nie brniemy dalej — reszta zostaje w schowku
-        self._po_wystawieniu(s, udane, bledy)
+                nowa_ilosc = SCH.ustaw_ilosc(
+                    s["id"], symbol, ile, projekt=projekt,
+                    operator=(self.var_wydal.get() or "").strip())
+            except SCH.BladSchowka as e:
+                return messagebox.showerror("Popraw ilość", str(e), parent=okno)
+            okno.destroy()
+            self._okno_popraw = None
+            self._odswiez_zawartosc()
+            self._uwaga("✏ %s (projekt %s): %s → %s szt."
+                        % (symbol, projekt or "—", _ilo(teraz),
+                           _ilo(nowa_ilosc)), UWAGA_TLO)
+
+        przyciski = tk.Frame(okno, bg=TLO_SEKCJI)
+        przyciski.pack(pady=(0, 16))
+        tk.Button(przyciski, text="Zapisz", command=zapisz, bg="#27ae60",
+                  fg="white", font=("Arial", 10, "bold"), padx=20,
+                  pady=4).pack(side=tk.LEFT, padx=4)
+        tk.Button(przyciski, text="Anuluj", command=okno.destroy,
+                  font=("Arial", 9), padx=14).pack(side=tk.LEFT, padx=4)
+        okno.bind("<Return>", lambda _e: zapisz())
+        okno.bind("<Escape>", lambda _e: okno.destroy())
+        wysrodkuj(okno, self)
+        okno.grab_set()
 
     def _usun_z_sesji(self):
         """Kasuje pozycję razem z historią — cofnięcie POMYŁKI skanowania.
@@ -834,7 +859,10 @@ class SchowekWindow(WydanieWindow):
         for p in self.zawartosc:
             grupy.setdefault(p.get("projekt") or "(brak projektu)", []).append(p)
 
+        if self._okno_potomne("_okno_podgladu"):
+            return
         okno = tk.Toplevel(self)
+        self._okno_podgladu = okno
         okno.title("Podgląd — co powstanie w Subiekcie")
         okno.geometry("900x600")
         okno.transient(self)

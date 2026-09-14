@@ -658,6 +658,30 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         self.lbl_awaria.pack(expand=True)
         # Nie pakujemy ramki — pojawia się dopiero w _ustaw_blokade_awarii.
 
+    def _okno_potomne(self, nazwa):
+        """Istniejące okno podrzędne (podniesione) albo None — można tworzyć.
+
+        Klikanie „Podgląd RW" pięć razy dawało pięć identycznych okien jedno
+        na drugim, każde z własną kopią danych (14.09.2026). Zamiast
+        kolejnego okna podnosimy to, które już stoi.
+
+            if self._okno_potomne("_okno_podgladu"):
+                return
+            okno = tk.Toplevel(self)
+            self._okno_podgladu = okno
+        """
+        okno = getattr(self, nazwa, None)
+        try:
+            if okno is not None and okno.winfo_exists():
+                okno.deiconify()
+                okno.lift()
+                okno.focus_force()
+                return okno
+        except Exception:
+            pass
+        setattr(self, nazwa, None)
+        return None
+
     def _alarm_awarii(self, powod):
         """Duże czerwone okno na wierzchu. Magazynier MUSI je zamknąć.
 
@@ -1356,7 +1380,10 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         """Co pójdzie na dokument. NIC nie zapisuje."""
         if not self.sesja:
             return
+        if self._okno_potomne("_okno_podgladu"):
+            return
         okno = tk.Toplevel(self)
+        self._okno_podgladu = okno
         okno.title("Podgląd RW — co powstanie w Subiekcie")
         okno.geometry("820x520")
         okno.transient(self)
