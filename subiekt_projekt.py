@@ -171,11 +171,27 @@ def read_project_items(project_id):
         # prawdziwa kartoteka — i most zalozylby DRUGA kartoteke obok
         # istniejacej, dopisujac ja na ZK po raz kolejny. Duplikat towaru
         # i podwojne zamowienie przy kazdym przebiegu (14.09.2026).
-        if "notes" in cols:
-            where += ((" AND" if where else " WHERE")
-                      + " COALESCE(notes, '') NOT IN"
-                        " ('z zamówienia ZK')"
-                        " AND COALESCE(notes, '') NOT LIKE 'półprodukt%'")
+        # ⛔ CO PRZYSZLO Z SUBIEKTA, NIE WRACA DO SUBIEKTA.
+        #
+        # Ta sama regula, co znacznik 📦 w kolumnie Δ arkusza
+        # (`_czy_z_subiekta`): `is_manual` + BRAK numeru rysunku + symbol
+        # kartoteki + slad pochodzenia. User widzi dokladnie to, co pomija
+        # wysylka.
+        #
+        # ⚠️ Slad pochodzenia jest KONIECZNY. Bez niego warunek lapal tez
+        # zwykle pozycje dodane recznie z symbolem (np. „3333"), ktore
+        # wczesniej normalnie szly na ZK. A samego `subiekt_symbol` uzyc
+        # nie mozna: ma go 213 z 218 pozycji projektu 3500 — kazdy detal
+        # zasiany do Subiekta.
+        if {"subiekt_symbol", "is_manual", "notes"} <= cols:
+            where += ((" AND " if where else " WHERE ")
+                      + "NOT (COALESCE(is_manual, 0) = 1"
+                        "     AND COALESCE(subiekt_symbol, '') <> ''"
+                        "     AND COALESCE(NULLIF(TRIM(work_drawing_no), ''),"
+                        "                  NULLIF(TRIM(norm_drawing_no), ''),"
+                        "                  NULLIF(TRIM(src_drawing_no), ''), '') = ''"
+                        "     AND (COALESCE(notes, '') LIKE 'półprodukt%'"
+                        "          OR COALESCE(notes, '') = 'z zamówienia ZK'))")
         rows = con.execute(f"SELECT {', '.join(sel)} FROM items{where}").fetchall()
     finally:
         con.close()

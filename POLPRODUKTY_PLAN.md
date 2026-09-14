@@ -439,6 +439,26 @@ dopisana ręcznie w Subiekcie też się pojawi. Nazwy kartotek jednym
 `query_stock`, wiersz `is_manual=1`, numer pusty, symbol w `subiekt_symbol`,
 notatka `z zamówienia ZK`. Raport z listą — nic po cichu.
 
+### Znacznik pochodzenia 📦 w kolumnie Δ
+
+Decyzja użytkownika: **znacznik pochodzenia ma być w Δ**, tak jak 🛒.
+
+```
+  0 🛒     pod tą pozycją jest ZAKUP półfabrykatu (rysunek-rodzic)
+  0 📦     ta pozycja PRZYSZŁA z Subiekta — arkusz jej nie prowadzi
+```
+
+`_czy_z_subiekta(item)` to **jedna reguła** dla znacznika i dla filtra
+wysyłki, żeby user widział dokładnie to, co jest pomijane: `is_manual=1`
++ BRAK numeru rysunku + `subiekt_symbol` + ślad pochodzenia (symbol znany
+z relacji półproduktów albo notatka `z zamówienia ZK`).
+
+⚠️ **Sam `subiekt_symbol` NIE wystarcza** — ma go 213 z 218 pozycji projektu
+3500, bo dostaje go każdy detal zasiany do Subiekta. „Symbol bez numeru" też
+nie: to 51 pozycji ZNORMALIZOWANYCH (łożyska, paski), które zamawiamy
+normalnie. Bez śladu pochodzenia warunek odsiewał też ręcznie dodaną pozycję
+`3333`, która wcześniej normalnie szła na ZK.
+
 ### ⛔ Ochrona przed zapętleniem
 
 Wiersz dopisany z ZK ma **pusty numer rysunku**, więc `build_plan` policzyłby

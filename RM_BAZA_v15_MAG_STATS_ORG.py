@@ -7584,6 +7584,41 @@ class MainWindow(tk.Tk):
                          % (symbol, nazwa, _fmt_ilo(ile)))
         return opisy
 
+    def _czy_z_subiekta(self, item):
+        """True, gdy wiersz PRZYSZEDL z Subiekta, a nie z BOM-u.
+
+        Jedna regula dla znacznika @P@ w Delcie i dla filtra w
+        `subiekt_projekt.read_project_items` — zeby to, co user widzi,
+        bylo tym samym, co pomija wysylka na ZK.
+
+        Wiersz taki poznajemy po TRZECH rzeczach naraz:
+          * `is_manual=1` — zalozony poza drzewkiem,
+          * BRAK numeru rysunku — bo tozsamoscia jest kartoteka,
+          * `subiekt_symbol` wskazujacy kartoteke Subiekta.
+
+        ⚠️ Sam `subiekt_symbol` NIE WYSTARCZA: ma go kazda pozycja zasiana
+        do Subiekta (213 z 218 na projekcie 3500), a detale z rysunku musza
+        dalej trafiac na ZK. „Symbol bez numeru" tez nie — to 51 pozycji
+        ZNORMALIZOWANYCH (lozyska, paski), ktore zamawiamy normalnie.
+        Dopiero `is_manual` odroznia wiersz zalozony przez RM_BAZA
+        z kartoteki od pozycji BOM-u.
+        """
+        try:
+            if item.get("is_manual") != 1:
+                return False
+            if (item.get("drawing_no") or "").strip():
+                return False
+            symbol = (item.get("subiekt_symbol") or "").strip()
+        except Exception:
+            return False
+        if not symbol:
+            return False
+        # Polprodukt — pewne, bo symbol stoi w relacji.
+        if symbol.upper() in getattr(self, "_symbole_polproduktow", set()):
+            return True
+        # Pozycja dopisana z ZK — notatka jako slad pomocniczy.
+        return str(item.get("notes") or "").startswith("z zamówienia ZK")
+
     def _wiersz_polproduktu(self, item_id):
         """Opis relacji, gdy wiersz jest KUPOWANYM polfabrykatem. Inaczej None.
 
@@ -7978,11 +8013,21 @@ class MainWindow(tk.Tk):
         # Zbior KLUCZY (numer rysunku, a dla znormalizowanej nazwa) — do
         # znacznika wystarczy „czy jest", szczegoly pokazuje okno z PPM.
         self._ma_polprodukt = set()
+        self._symbole_polproduktow = set()
         try:
             import subiekt_mapowania as _MAP
             _klucze = [(i.get('drawing_no') or '').strip()
                        or (i.get('name') or '').strip() for i in items]
-            self._ma_polprodukt = set(_MAP.polprodukty_many(_klucze))
+            _rel = _MAP.polprodukty_many(_klucze)
+            self._ma_polprodukt = set(_rel)
+            # Symbole KARTOTEK polproduktow — po nich poznajemy wiersz, ktory
+            # sam dopisalem pod ta relacja. Zrodlem jest relacja, nie notatka
+            # w Uwagach (user moze ja skasowac) ani sam `subiekt_symbol`
+            # (ma go kazda pozycja zasiana do Subiekta).
+            self._symbole_polproduktow = {
+                (w["symbol"] or "").strip().upper()
+                for lista in _rel.values() for w in lista
+                if (w["symbol"] or "").strip()}
         except Exception as e:
             # Brak serwera nie moze zablokowac arkusza — znacznika po prostu
             # nie bedzie, reszta dziala.
@@ -8333,6 +8378,14 @@ class MainWindow(tk.Tk):
                 if _klucz_pp in self._ma_polprodukt:
                     delta_disp = (f"{delta_disp} 🛒" if delta_disp
                                   else "🛒")
+
+            # 📦 = POCHODZENIE: ta pozycja PRZYSZLA z Subiekta (polprodukt
+            # albo pozycja dopisana z ZK), wiec arkusz jej NIE prowadzi
+            # i nie wysyla jej z powrotem na ZK. To ten sam znacznik, po
+            # ktorym poznaje ja filtr w `read_project_items` — jedno zrodlo
+            # prawdy, widoczne dla uzytkownika (14.09.2026).
+            if self._czy_z_subiekta(item):
+                delta_disp = (f"{delta_disp} 📦" if delta_disp else "📦")
             
             # Zamówiono: ☑ data lub ☐
             ordered_disp = "☐"
