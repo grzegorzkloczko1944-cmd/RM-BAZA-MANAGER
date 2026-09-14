@@ -28,6 +28,15 @@ import subiekt_scalanie as S
 LIMIT_TRAFIEN = 300
 
 
+def _zl(x):
+    """Cena ewidencyjna albo pusto. Zero tez pokazujemy — to informacja,
+    ze kartoteka nie ma ustalonej ceny."""
+    try:
+        return ("%.2f" % float(x)).replace(".", ",")
+    except (TypeError, ValueError):
+        return ""
+
+
 def _ilo(x):
     try:
         f = float(x)
@@ -73,12 +82,15 @@ class PolproduktWindow(tk.Toplevel):
         # wiec anulowanie naprawde nic nie zostawia.
         self._zmiany = {}
         self._do_usuniecia = set()
+        # {SYMBOL: dane z trybu `magazyn`} — cena, stany, lokacja. Czytane
+        # na zywo, nie przechowywane w relacji.
+        self._kartoteki = {}
         self._katalog = []
         self._pobieranie = False
 
         self.title("Powiąż półprodukt — %s" % self.numer)
         self.transient(parent)
-        _wysrodkuj(self, parent, 760, 620)
+        _wysrodkuj(self, parent, 980, 640)
         self.protocol("WM_DELETE_WINDOW", self._zamknij)
         self.bind("<Escape>", lambda _e: self._zamknij())
 
@@ -98,6 +110,7 @@ class PolproduktWindow(tk.Toplevel):
 
         self._odswiez_powiazane()
         self._wczytaj_katalog()
+        self._wczytaj_stany()
         # ⚠️ BEZ `grab_set()`: okno ma NIE blokowac arkusza glownego —
         # user chce rownolegle przegladac pozycje w RM_BAZA (14.09.2026).
         # `transient` zostaje, zeby okno trzymalo sie arkusza na pulpicie.
@@ -120,6 +133,36 @@ class PolproduktWindow(tk.Toplevel):
             except Exception:
                 pass          # odswiezenie arkusza nie moze wywalic okna
         self.destroy()
+
+    def _wczytaj_stany(self):
+        """Cena i stany z Subiekta — w tle, zeby okno wstalo od razu.
+
+        Tryb `magazyn` zwraca CALY katalog jednym zapytaniem (~0,1 s z
+        cieplego mostu), wiec nie pytamy per symbol. Brak mostu = kolumny
+        zostaja puste; relacji to nie dotyczy.
+        """
+        def worker():
+            try:
+                import subiekt_bridge
+                w = subiekt_bridge.call("magazyn", {}, timeout=200, write=False)
+                dane = {(p.get("Symbol") or "").strip().upper(): p
+                        for p in (w.get("pozycje") or [])}
+            except Exception as e:
+                print("Polprodukt: stany z Subiekta nieodczytane: %s" % e)
+                return
+            try:
+                self.after(0, lambda: gotowe(dane))
+            except (RuntimeError, tk.TclError):
+                pass          # okno zamkniete zanim most odpowiedzial
+
+        def gotowe(dane):
+            try:
+                self._kartoteki = dane
+                self._odswiez_powiazane()
+            except tk.TclError:
+                pass                    # okno zamkniete w miedzyczasie
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ── kopiowanie ───────────────────────────────────────────────────────
     def _kopiuj_z(self, tabela, tylko_symbol=False):
@@ -176,11 +219,18 @@ class PolproduktWindow(tk.Toplevel):
         ramka.pack(fill=tk.X, padx=12, pady=(10, 6))
 
         self.tab_pow = ttk.Treeview(
-            ramka, columns=("symbol", "nazwa", "ile"), show="headings",
-            height=4)
-        for k, n, w, a in (("symbol", "Symbol", 170, "w"),
-                           ("nazwa", "Nazwa", 380, "w"),
-                           ("ile", "Na 1 detal", 80, "e")):
+            ramka, columns=("symbol", "nazwa", "ile", "cena", "stan",
+                            "rezerw", "lokacja"),
+            show="headings", height=4)
+        # Cena i stany NIE sa przechowywane w relacji — czytamy je na zywo
+        # z Subiekta (plan: „kopia po dniu klamie").
+        for k, n, w, a in (("symbol", "Symbol", 150, "w"),
+                           ("nazwa", "Nazwa", 260, "w"),
+                           ("ile", "Na 1 detal", 70, "e"),
+                           ("cena", "Cena", 80, "e"),
+                           ("stan", "Dostępne", 75, "e"),
+                           ("rezerw", "Rezerw.", 70, "e"),
+                           ("lokacja", "Lokacja", 80, "w")):
             self.tab_pow.heading(k, text=n)
             self.tab_pow.column(k, width=w, anchor=a,
                                 stretch=(k == "nazwa"))
@@ -228,10 +278,15 @@ class PolproduktWindow(tk.Toplevel):
         for id_sub, w in sorted(laczne.items()):
             znacznik = {"nowy": "  ← nowy", "zmiana": "  ← zmiana",
                         "usuniecie": "  ← do usunięcia"}.get(w["stan"], "")
+            kart = self._kartoteki.get((w["symbol"] or "").strip().upper(), {})
             self.tab_pow.insert(
                 "", tk.END, iid=str(id_sub),
                 values=(w["symbol"] or "(id %s)" % id_sub,
-                        (w["nazwa"] or "") + znacznik, w["ilosc"]),
+                        (w["nazwa"] or "") + znacznik, w["ilosc"],
+                        _zl(kart.get("CenaEwidencyjna")),
+                        _ilo(kart.get("Dostepne")) if kart else "…",
+                        _ilo(kart.get("Zarezerwowane")) if kart else "",
+                        kart.get("Polozenie") or ""),
                 tags=("czeka",) if w["stan"] else ())
         self.tab_pow.tag_configure("czeka", background="#fff3cd")
 
