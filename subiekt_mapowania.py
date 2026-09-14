@@ -221,11 +221,28 @@ def zapisz_scalenie(cel, cel_id, zrodla, path=None):
         operacje.append(_op_put(stary, cel, SPOSOB_SCALONA, cel_id, None,
                                 f"alias po scaleniu kartotek: {stary} → {cel}",
                                 kto, kiedy))
+        # Relacje polproduktow wskazujace wycofana kartoteke — ta sama
+        # transakcja, bez osobnego ostrzezenia dla uzytkownika
+        # (POLPRODUKTY_PLAN.md, „Kartoteka polproduktu nie znika").
+        # Bez `stary_id` nie ma czego przepinac: relacja trzyma ID, nie symbol.
+        if stary_id not in (None, ""):
+            operacje.append({"operation": "map-polprodukt-przepnij", "params": {
+                "nowy_id": cel_id, "nowy_symbol": cel,
+                "stary_id": int(stary_id)}})
+            # Resztki po `UPDATE OR IGNORE`: rysunki, ktore mialy JUZ relacje
+            # do kartoteki docelowej — inaczej zostalby wiersz na martwym ID.
+            operacje.append({
+                "operation": "map-polprodukt-usun-po-scaleniu",
+                "params": {"stary_id": int(stary_id)}})
     if not operacje:
         return 0
     wyniki = rm_klient.master_batch(operacje)
-    # Co trzeci wynik (1, 4, 7…) to UPDATE z kroku 2.
-    return sum((w or {}).get("rowcount") or 0 for w in wyniki[1::3])
+    # ⚠️ Liczymy po NAZWIE operacji, nie po pozycji w liscie: od 14.09.2026
+    # zrodlo z `stary_id` dokłada dwie operacje polproduktow, wiec dawne
+    # „co trzeci wynik" (`wyniki[1::3]`) wskazywaloby na cudze wiersze.
+    return sum((w or {}).get("rowcount") or 0
+               for op, w in zip(operacje, wyniki)
+               if op["operation"] == "map-przepnij-symbol")
 
 
 def alias_dla(symbol, path=None):
@@ -235,6 +252,85 @@ def alias_dla(symbol, path=None):
         return None
     w = rm_klient.master_read("map-alias", {"stary_symbol": s})
     return {"symbol": w[0]["nowy_symbol"], "id": w[0]["nowy_id"]} if w else None
+
+
+# ── Polprodukty zakupowe ─────────────────────────────────────────────────────
+# Detal czesto powstaje z KUPIONEGO polfabrykatu: rysunek „Kolo 5M_40 fi38"
+# to gotowe kolo zebate + obrobka otworu. Relacja mowi, CO trzeba kupic pod
+# ten rysunek i ILE sztuk na jeden detal (POLPRODUKTY_PLAN.md).
+#
+# ⚠️ `symbol` i `nazwa` w zwracanych wierszach to CACHE do wyswietlania.
+# Prawda o kartotece zyje w Subiekcie i ma tam `id_subiekt` — przy rozbieznosci
+# wygrywa Subiekt, a cache odswiezamy kolejnym `zapisz_polprodukt`. Ceny,
+# stanu i ilosci dostepnej NIE trzymamy wcale: kopia po dniu klamie.
+
+def polprodukty(numer, path=None):
+    """[wiersz, …] — polprodukty jednego rysunku. Pusta lista, gdy brak."""
+    k = _key(numer)
+    if not k:
+        return []
+    return rm_klient.master_read("map-polprodukt", {"numer_rysunku": k})
+
+
+def polprodukty_many(numery, path=None):
+    """{NUMER: [wiersz, …]} dla listy numerow — JEDNO zapytanie.
+
+    Wolane raz na caly arkusz (znacznik 🛒 w kolumnie Δ), nie per wiersz.
+    """
+    klucze = sorted({_key(n) for n in (numery or []) if _key(n)})
+    if not klucze:
+        return {}
+    out = {}
+    for i in range(0, len(klucze), _PACZKA):
+        for w in rm_klient.master_read(
+                "map-polprodukty-many",
+                {"numery_json": json.dumps(klucze[i:i + _PACZKA])}):
+            out.setdefault(w["numer_rysunku"], []).append(w)
+    return out
+
+
+def polprodukt_gdzie(id_subiekt, path=None):
+    """[wiersz, …] — w ktorych rysunkach uzywana jest ta kartoteka."""
+    if id_subiekt in (None, ""):
+        return []
+    return rm_klient.master_read("map-polprodukt-gdzie",
+                                 {"id_subiekt": int(id_subiekt)})
+
+
+def zapisz_polprodukt(numer, id_subiekt, ilosc_na_szt=1, symbol=None,
+                      nazwa=None, uwagi=None, path=None):
+    """Powiaz rysunek z kartoteka polfabrykatu. True = zapisano.
+
+    ⚠️ `ilosc_na_szt` jest CALKOWITA — „sztuka to sztuka, nic nie dzielimy".
+    Kupujemy N sztuk polproduktu na 1 detal, zwykle 1. Docinany walek to
+    zakup CALEGO walka, nie 0,3 sztuki (decyzja 14.09.2026).
+
+    Ponowne wywolanie dla tej samej pary (rysunek, kartoteka) zmienia ILOSC
+    i odswieza cache symbolu/nazwy — nie zaklada drugiego wiersza.
+    """
+    k = _key(numer)
+    if not k or id_subiekt in (None, ""):
+        return False
+    # ⚠️ NIE `int(x or 1)`: zero jest falszywe, wiec „0 sztuk" po cichu stalo
+    # sie „1 sztuka" zamiast bledem (zlapane testem 14.09.2026).
+    ile = 1 if ilosc_na_szt is None else int(ilosc_na_szt)
+    if ile < 1:
+        raise ValueError("ilosc na sztuke musi byc >= 1 (sztuki calkowite)")
+    return _zapisano(rm_klient.master_exec("map-polprodukt-zapisz", {
+        "numer_rysunku": k, "id_subiekt": int(id_subiekt),
+        "symbol": (symbol or "").strip() or None,
+        "nazwa": (nazwa or "").strip() or None,
+        "ilosc_na_szt": ile, "kto": _kto(), "kiedy": _teraz(),
+        "uwagi": uwagi}))
+
+
+def usun_polprodukt(numer, id_subiekt, path=None):
+    """Rozwiaz powiazanie. True = cos usunieto."""
+    k = _key(numer)
+    if not k or id_subiekt in (None, ""):
+        return False
+    return _zapisano(rm_klient.master_exec("map-polprodukt-usun", {
+        "numer_rysunku": k, "id_subiekt": int(id_subiekt)}))
 
 
 # ── Decyzje o dostawcach ─────────────────────────────────────────────────────

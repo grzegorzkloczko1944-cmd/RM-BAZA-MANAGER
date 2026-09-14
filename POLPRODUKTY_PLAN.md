@@ -1,6 +1,11 @@
 # Półprodukty zakupowe pod rysunki — plan
 
-Stan: **rozpisane, niezaimplementowane** (14.09.2026).
+Stan: **krok 1 (relacja) ZROBIONY 14.09.2026** — tabela, operacje serwera
+i funkcje klienta gotowe i przetestowane (28 asercji, 0 błędów, na domowym
+RM_SERWER). Kroki 2–5 (PPM, kalkulator, ZK, znacznik 🛒) — do zrobienia.
+
+⚠️ **Wdrożenie: serwer PRZED buildem `.exe`** — nowy klient woła operacje
+`map-polprodukt*`, których stary serwer nie zna.
 
 ## Problem
 
@@ -289,8 +294,20 @@ wejść w istniejący mechanizm, nie obok niego.
 
 ## Kolejność wdrożenia
 
-1. **Relacja** — tabela + operacje serwera + funkcje w `subiekt_mapowania.py`
-   (wdrożenie serwera PRZED buildem klienta, jak zawsze).
+1. ~~**Relacja** — tabela + operacje serwera + funkcje w `subiekt_mapowania.py`~~
+   **✅ ZROBIONE 14.09.2026.** Tabela `polprodukty` + indeks (migracje bazy
+   mapowań); operacje `map-polprodukt`, `map-polprodukty-many`,
+   `map-polprodukt-gdzie`, `map-polprodukt-zapisz`, `map-polprodukt-usun`,
+   `map-polprodukt-przepnij`, `map-polprodukt-usun-po-scaleniu`; klient:
+   `polprodukty()`, `polprodukty_many()`, `polprodukt_gdzie()`,
+   `zapisz_polprodukt()`, `usun_polprodukt()`.
+   Przy scalaniu kartotek `zapisz_scalenie` przepina też relacje — w TEJ SAMEJ
+   transakcji, bez osobnego ostrzeżenia (zgodnie z sekcją „Kartoteka
+   półproduktu nie znika"). Kolizja (rysunek ma już relację do celu)
+   rozwiązana: `UPDATE OR IGNORE` + sprzątnięcie resztek po martwym `id`.
+   ⚠️ `zapisz_scalenie` liczy teraz wynik **po nazwie operacji**, nie po
+   pozycji w batchu (`wyniki[1::3]` przestało być prawdą po dołożeniu
+   dwóch operacji półproduktów).
 2. **Wejście** — PPM „Powiąż półprodukt…" + okno wyboru + ilość na sztukę.
 3. **Kalkulator** — `calc_semi_subiekt_id`, podpowiedź, cena z Subiekta,
    utrwalenie przy zapisie.

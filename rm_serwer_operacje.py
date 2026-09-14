@@ -856,6 +856,32 @@ ODCZYT = {
         [],
     ),
 
+    # ── Polprodukty zakupowe: numer rysunku -> kartoteka polfabrykatu ──────
+    # Detal czesto powstaje z KUPIONEGO polproduktu (rysunek „Kolo 5M_40 fi38"
+    # = gotowe kolo + obrobka otworu). Wlascicielem kartoteki jest Subiekt,
+    # wlascicielem RELACJI RM_BAZA — to wiedza konstrukcyjna, nie magazynowa.
+    # Tabela lezy TU, a nie w `items`, bo `items` jest PER PROJEKT, a relacja
+    # ma dzialac w kazdym nastepnym projekcie (POLPRODUKTY_PLAN.md).
+    "map-polprodukt": (
+        "SELECT * FROM polprodukty WHERE numer_rysunku = ?"
+        " ORDER BY id_subiekt",
+        ["numer_rysunku"],
+    ),
+    # Jedno zapytanie na CALY arkusz — jak `map-get-many`, bez limitu 999
+    # zmiennych. Klucze normalizuje wolajacy (`subiekt_mapowania._key`).
+    "map-polprodukty-many": (
+        "SELECT * FROM polprodukty"
+        " WHERE numer_rysunku IN (SELECT value FROM json_each(?))"
+        " ORDER BY numer_rysunku, id_subiekt",
+        ["numery_json"],
+    ),
+    # Pytanie odwrotne: „w ktorych rysunkach uzywane jest to kolo".
+    "map-polprodukt-gdzie": (
+        "SELECT * FROM polprodukty WHERE id_subiekt = ?"
+        " ORDER BY numer_rysunku",
+        ["id_subiekt"],
+    ),
+
     # Stan zamówień ZD odkładany przez wysyłkę — nakładany przy przejęciu locka.
     # ══ WYSYŁKA ZD — dziennik i odłożone zamówienia (subiekt_wyslij_zd) ═══
     "zd-wyslane-terminy": (
@@ -1987,6 +2013,49 @@ ZAPIS = {
         ["klucz_rm", "id_subiekt", "symbol", "kto", "kiedy"],
     ),
 
+    # ── Polprodukty zakupowe ───────────────────────────────────────────────
+    # UPSERT po (numer_rysunku, id_subiekt): ponowne powiazanie tej samej
+    # kartoteki zmienia ILOSC, nie zaklada drugiego wiersza. `symbol`/`nazwa`
+    # to CACHE do wyswietlania — przy kolejnym zapisie odswiezane, bo
+    # prawda o nich zyje w Subiekcie (POLPRODUKTY_PLAN.md, „Co przechowujemy").
+    "map-polprodukt-zapisz": (
+        "INSERT INTO polprodukty"
+        " (numer_rysunku, id_subiekt, symbol, nazwa, ilosc_na_szt,"
+        "  kto, kiedy, uwagi)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(numer_rysunku, id_subiekt) DO UPDATE SET"
+        "   symbol       = COALESCE(excluded.symbol, polprodukty.symbol),"
+        "   nazwa        = COALESCE(excluded.nazwa, polprodukty.nazwa),"
+        "   ilosc_na_szt = excluded.ilosc_na_szt,"
+        "   kto          = excluded.kto,"
+        "   kiedy        = excluded.kiedy,"
+        "   uwagi        = COALESCE(excluded.uwagi, polprodukty.uwagi)",
+        ["numer_rysunku", "id_subiekt", "symbol", "nazwa", "ilosc_na_szt",
+         "kto", "kiedy", "uwagi"],
+    ),
+    "map-polprodukt-usun": (
+        "DELETE FROM polprodukty WHERE numer_rysunku = ? AND id_subiekt = ?",
+        ["numer_rysunku", "id_subiekt"],
+    ),
+    # Scalenie duplikatow kartotek: relacje wskazujace wycofana kartoteke
+    # przechodza na docelowa — ta sama droga co `map-przepnij-symbol` dla
+    # `mapowania`, w tej samej transakcji. Dlatego plan nie przewiduje
+    # osobnego ostrzezenia „kartoteka zniknela".
+    # OR IGNORE: gdy rysunek ma JUZ relacje do kartoteki docelowej, przepiecie
+    # zrobiloby duplikat klucza — wtedy stary wiersz zostaje skasowany nizej.
+    "map-polprodukt-przepnij": (
+        "UPDATE OR IGNORE polprodukty SET id_subiekt = ?, symbol = ?,"
+        "   uwagi = COALESCE(uwagi || ' | ', '') || 'scalono z id ' || ?"
+        " WHERE id_subiekt = ?",
+        ["nowy_id", "nowy_symbol", "stary_id", "stary_id"],
+    ),
+    # Sprzatanie po przepieciu: wiersze, ktorych UPDATE nie ruszyl, bo
+    # rysunek mial juz relacje do celu (patrz OR IGNORE wyzej).
+    "map-polprodukt-usun-po-scaleniu": (
+        "DELETE FROM polprodukty WHERE id_subiekt = ?",
+        ["stary_id"],
+    ),
+
     # ── „Zamówiono" odłożone przez wysyłkę ZD ─────────────────────────
     "zd-wyslane-dodaj": (
         "INSERT INTO zd_wyslane (numer_zd, dokument_id, adresat, nadawca,"
@@ -2768,6 +2837,24 @@ MIGRACJE_MAPOWANIA = [
            kiedy       TEXT NOT NULL,
            PRIMARY KEY (klucz_rm, id_subiekt)
        )""",
+    # Polprodukty zakupowe (POLPRODUKTY_PLAN.md). Klucz ZLOZONY, nie sam
+    # numer: jeden rysunek moze powstawac z dwoch kupionych czesci.
+    # `ilosc_na_szt` CALKOWITA — „sztuka to sztuka, nic nie dzielimy":
+    # docinany walek to zakup CALEGO walka, nie 0,3 sztuki. Material
+    # liczony metrami to inny mechanizm, nie zmiana typu tej kolumny.
+    """CREATE TABLE IF NOT EXISTS polprodukty (
+           numer_rysunku  TEXT NOT NULL,
+           id_subiekt     INTEGER NOT NULL,
+           symbol         TEXT,
+           nazwa          TEXT,
+           ilosc_na_szt   INTEGER NOT NULL DEFAULT 1,
+           kto            TEXT,
+           kiedy          TEXT NOT NULL,
+           uwagi          TEXT,
+           PRIMARY KEY (numer_rysunku, id_subiekt)
+       )""",
+    "CREATE INDEX IF NOT EXISTS idx_polprodukt_subiekt"
+    " ON polprodukty(id_subiekt)",
 ]
 
 
