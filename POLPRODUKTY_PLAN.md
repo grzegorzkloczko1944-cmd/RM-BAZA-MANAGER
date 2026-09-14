@@ -324,7 +324,17 @@ wejść w istniejący mechanizm, nie obok niego.
    to ten sam detal, nie półprodukt.
 3. **Kalkulator** — `calc_semi_subiekt_id`, podpowiedź, cena z Subiekta,
    utrwalenie przy zapisie.
-4. **ZK** — agregacja po `id_subiekt` w budowaniu zapotrzebowania.
+4. ~~**ZK** — agregacja po `id_subiekt` w budowaniu zapotrzebowania.~~
+   **✅ ZROBIONE 14.09.2026.** `subiekt_projekt.pozycje_polproduktow(pozycje)`
+   + `pozycje.extend(...)` w `build_plan` — półprodukty dokładane PO
+   zbudowaniu pozycji, bo liczą się z ich ilości. Agregacja po `id_subiekt`
+   (4+3+2 = 9 → jedna pozycja na ZK), rozbicie „skąd 9" zostaje w polu
+   `polprodukt_dla` (tylko do wyświetlenia).
+   Pominięte: kartoteka, która JUŻ jest pozycją BOM-u (ten sam symbol bywa
+   samodzielny i składnikiem) — inaczej liczyłaby się dwa razy.
+   Brak serwera nie blokuje zapisu projektu: półproduktów po prostu nie ma.
+   Most: suchy przebieg potwierdza `kartoteka … istnieje` (kupowany towar,
+   nic nie zakładamy) i `zk … do-utworzenia`.
 5. ~~**Znacznik w kolumnie Δ**~~ **✅ ZROBIONE 14.09.2026.** `_ma_polprodukt`
    — zbiór kluczy wczytywany JEDNYM `polprodukty_many()` przed pętlą wierszy
    (obok `rfq_by_drawing`), znacznik 🛒 doklejany w `delta_disp` po `●`.

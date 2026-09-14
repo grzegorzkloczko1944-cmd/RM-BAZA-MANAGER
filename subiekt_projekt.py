@@ -841,6 +841,89 @@ def ilosci_z_drzewa(kids, ilosci_korzeni):
     return wynik
 
 
+def pozycje_polproduktow(pozycje):
+    """[poz_planu, …] — kupowane polfabrykaty dla pozycji BOM-u.
+
+    Detal czesto powstaje z GOTOWEJ, kupionej czesci: rysunek „Kolo 5M_40 fi38"
+    to zakupione kolo zebate + obrobka otworu. Relacja rysunek -> kartoteka
+    polfabrykatu zyje w bazie mapowan (globalnie, nie per projekt), a tutaj
+    zamienia sie na zapotrzebowanie projektu (POLPRODUKTY_PLAN.md).
+
+    ⚠️ AGREGUJEMY PO KARTOTECE, nie po rysunku: trzy rozne rysunki uzywajace
+    tego samego kola daja JEDNA pozycje na ZK, nie trzy linie tego samego
+    towaru (4 + 3 + 2 = 9 szt.). Rozbicie „skad 9" zostaje w RM_BAZA.
+
+    ⚠️ Pomijamy pozycje, ktore juz SA polproduktem czegos innego — inaczej
+    kolo wpisane recznie do BOM-u policzyloby sie dwa razy.
+
+    Ilosci NIE odejmujemy od stanu magazynu: robi to most, porownujac
+    z zywym ZK, tak samo jak dla zwyklych pozycji.
+    """
+    if not pozycje:
+        return []
+    try:
+        import subiekt_mapowania
+    except Exception:
+        return []
+
+    # Klucz relacji = symbol pozycji planu (numer rysunku, a dla
+    # znormalizowanej jej nazwa) — ten sam, ktorego uzywa okno powiazania.
+    klucze = [(p.get("symbol") or "").strip() for p in pozycje]
+    try:
+        relacje = subiekt_mapowania.polprodukty_many(klucze) or {}
+    except Exception as e:
+        # Brak serwera nie moze zablokowac zapisu projektu — po prostu nie ma
+        # polproduktow, reszta planu idzie normalnie.
+        print("\u26a0\ufe0f  Polprodukty: nie doliczono do ZK: %s" % e)
+        return []
+    if not relacje:
+        return []
+
+    # {id_subiekt: {"symbol", "nazwa", "ilosc", "z_rysunkow": {…}}}
+    zebrane = {}
+    for p in pozycje:
+        klucz = (p.get("symbol") or "").strip().upper()
+        for r in relacje.get(klucz, ()):
+            try:
+                ile = float(p.get("ilosc") or 0) * int(r["ilosc_na_szt"] or 1)
+            except (TypeError, ValueError):
+                continue
+            if ile <= 0:
+                continue
+            w = zebrane.setdefault(r["id_subiekt"], {
+                "symbol": (r["symbol"] or "").strip(),
+                "nazwa": (r["nazwa"] or "").strip(),
+                "ilosc": 0.0, "z_rysunkow": {}})
+            w["ilosc"] += ile
+            w["z_rysunkow"][p.get("symbol")] = ile
+
+    # Kartoteka moze byc JEDNOCZESNIE zwykla pozycja BOM-u (ten sam symbol
+    # bywa samodzielny i skladnikiem — ANALIZA_ZK_DWA_ZRODLA_PRAWDY 6D.2b).
+    # Wtedy jej zapotrzebowanie liczy juz normalna sciezka.
+    w_planie = {(p.get("symbol") or "").strip().upper() for p in pozycje}
+
+    out = []
+    for id_sub, w in sorted(zebrane.items()):
+        symbol = w["symbol"]
+        if not symbol or symbol.upper() in w_planie:
+            continue
+        out.append({
+            "symbol": symbol,
+            "nazwa": w["nazwa"] or symbol,
+            "opis": "",
+            "typ": "ZNORMALIZOWANE",   # kupowany towar, nie detal z rysunku
+            "bez_numeru": True,        # tozsamoscia jest kartoteka, nie numer
+            "ilosc": w["ilosc"],
+            "skladniki": [],
+            "biblioteczne": False,
+            # Kupujemy — wiec ma wejsc na ZK. Nigdy produkcja wlasna.
+            "produkcja_wlasna": False,
+            # Tylko do wyswietlenia w oknie: skad ta suma.
+            "polprodukt_dla": dict(w["z_rysunkow"]),
+        })
+    return out
+
+
 def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
                ilosci_korzeni=None, bazowe_ilosci=None):
     """Buduje plan dla mostu + dane do wyświetlenia.
@@ -1001,6 +1084,12 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
     # Nazwa siedziała dotąd w Tytule, ale to pole SIĘ NIE DRUKUJE i od
     # 10.09.2026 niesie znacznik RM_BAZA (patrz Znacznik.cs po stronie mostu),
     # więc żeby nazwa nie przepadła, schodzi do Uwag.
+    # Polfabrykaty kupowane pod rysunki — dokladane PO zbudowaniu pozycji,
+    # bo licza sie z ILOSCI tych pozycji (POLPRODUKTY_PLAN.md, krok 4).
+    # Relacja nalezy do zapotrzebowania projektu, nie do ZK: logistyk moze
+    # ja dodac niezaleznie od tego, czy ZK juz istnieje.
+    pozycje.extend(pozycje_polproduktow(pozycje))
+
     numer = numer_projektu(project_name, project_id)
     plan = {
         "projekt": numer,
