@@ -408,6 +408,22 @@ pozycji jest Subiekt i relacja — ręczna zmiana nazwy zerwałaby powiązanie
 z kartoteką, a ilość i tak zostałaby nadpisana przy najbliższym zapisie
 projektu. Komunikat kieruje do PPM „Powiąż półprodukt…" na rysunku-rodzicu.
 
+## Okno powiązania — zasady (14.09.2026, po testach użytkownika)
+
+* **NIC nie zapisuje się samo.** „Powiąż", „Zmień ilość" i „Usuń" odkładają
+  zmianę do BUFORA w pamięci — górna tabela pokazuje ją na żółto ze znacznikiem
+  „← nowy / zmiana / do usunięcia". Do bazy idzie dopiero **„Zapisz"**, jedną
+  paczką. Zamknięcie okna z niezapisanym buforem pyta, czy porzucić.
+* **„Zapisz" robi CAŁĄ procedurę**, bez pytań pośrednich: relacje → wiersze
+  w arkuszu (`po_zmianie`) → ilości na ZK. Most ustawia ilość WPROST
+  (`UstawIlosc`), więc zmniejszenie „na 1 detal" obniża też pozycję na ZK.
+* **Okno NIE jest modalne** — bez `grab_set()`, arkusz działa równolegle.
+* **Kopiowanie do schowka** z obu list: Ctrl+C, Ctrl+A i menu pod PPM
+  („Kopiuj symbol" / „Kopiuj symbol i nazwę") — symbole kartotek przepisuje
+  się do Subiekta i do maili.
+* Komunikat przy braku zaznaczenia mówi wprost o **DOLNEJ** liście: w oknie
+  są dwie tabele i user miał zaznaczony wiersz w górnej.
+
 ## Kartoteka półproduktu nie znika
 
 Rozważane wcześniej ostrzeżenie „kartoteka zniknęła z Subiekta" jest

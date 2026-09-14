@@ -28,6 +28,14 @@ import subiekt_scalanie as S
 LIMIT_TRAFIEN = 300
 
 
+def _ilo(x):
+    try:
+        f = float(x)
+        return str(int(f)) if f == int(f) else ("%.2f" % f).rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return str(x)
+
+
 def _wysrodkuj(okno, rodzic, szer, wys):
     okno.update_idletasks()
     try:
@@ -47,14 +55,24 @@ class PolproduktWindow(tk.Toplevel):
     żeby ten sam detal nie miał tu innego klucza niż w pozostałych oknach.
     """
 
-    def __init__(self, parent, numer, opis="", po_zmianie=None):
+    def __init__(self, parent, numer, opis="", po_zmianie=None,
+                 projekt_info=None):
         super().__init__(parent)
         self.numer = (numer or "").strip()
         # Wolane po KAZDEJ zmianie relacji — arkusz ma odswiezyc znacznik 🛒
         # w kolumnie Δ. Bez tego znacznik pojawia sie dopiero po recznym
         # odswiezeniu i user nie wie, czy powiazanie w ogole weszlo.
         self._po_zmianie = po_zmianie
+        # Skad wziac projekt i jego pozycje do przeliczenia ZK. Callable,
+        # bo arkusz moze w miedzyczasie przelaczyc projekt.
+        self._projekt_info = projekt_info
         self._cos_zmienione = False
+        # ⚠️ NIC NIE ZAPISUJE SIE SAMO (decyzja 14.09.2026). Zmiany czekaja
+        # tutaj do „Zatwierdz zmiany": {id_subiekt: {...}} dla dopisania
+        # i zmiany ilosci, zbior id do usuniecia. Do bazy ida jedna paczka,
+        # wiec anulowanie naprawde nic nie zostawia.
+        self._zmiany = {}
+        self._do_usuniecia = set()
         self._katalog = []
         self._pobieranie = False
 
@@ -80,17 +98,76 @@ class PolproduktWindow(tk.Toplevel):
 
         self._odswiez_powiazane()
         self._wczytaj_katalog()
-        self.grab_set()
+        # ⚠️ BEZ `grab_set()`: okno ma NIE blokowac arkusza glownego —
+        # user chce rownolegle przegladac pozycje w RM_BAZA (14.09.2026).
+        # `transient` zostaje, zeby okno trzymalo sie arkusza na pulpicie.
         self.ent_szukaj.focus_set()
 
     def _zamknij(self):
         """Zamknij i daj znac arkuszowi, jesli cokolwiek sie zmienilo."""
+        # Niezapisany bufor nie moze zniknac po cichu — user ma go zatwierdzic
+        # albo swiadomie porzucic.
+        czeka = len(self._zmiany) + len(self._do_usuniecia)
+        if czeka and not messagebox.askyesno(
+                "Niezapisane zmiany",
+                "Masz %d niezatwierdzonych zmian.\n\n"
+                "Zamknąć okno i je PORZUCIĆ?" % czeka,
+                icon="warning", default="no", parent=self):
+            return
         if self._cos_zmienione and callable(self._po_zmianie):
             try:
                 self._po_zmianie()
             except Exception:
                 pass          # odswiezenie arkusza nie moze wywalic okna
         self.destroy()
+
+    # ── kopiowanie ───────────────────────────────────────────────────────
+    def _kopiuj_z(self, tabela, tylko_symbol=False):
+        """Zaznaczone wiersze do schowka: „SYMBOL<TAB>NAZWA" w wierszach.
+
+        Treeview nie ma wlasnego kopiowania, a symbole kartotek przepisuje
+        sie recznie do Subiekta i do maili — stad Ctrl+C i menu pod PPM.
+        """
+        wiersze = []
+        for iid in tabela.selection():
+            v = tabela.item(iid, "values")
+            if not v:
+                continue
+            symbol = str(v[0])
+            nazwa = str(v[1]).split("  ←")[0].strip() if len(v) > 1 else ""
+            wiersze.append(symbol if tylko_symbol
+                           else (symbol + chr(9) + nazwa).strip())
+        if not wiersze:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(chr(10).join(wiersze))
+        self.status.config(text="Skopiowano do schowka: %d wiersz(y)."
+                                % len(wiersze))
+
+    def _menu_kopiowania(self, tabela):
+        """Ctrl+C, Ctrl+A i menu pod prawym przyciskiem — dla jednej listy."""
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Kopiuj symbol",
+                         command=lambda: self._kopiuj_z(tabela, True))
+        menu.add_command(label="Kopiuj symbol i nazwę",
+                         command=lambda: self._kopiuj_z(tabela))
+        menu.add_separator()
+        menu.add_command(label="Zaznacz wszystko",
+                         command=lambda: tabela.selection_set(
+                             tabela.get_children()))
+
+        def pokaz(e):
+            iid = tabela.identify_row(e.y)
+            if iid and iid not in tabela.selection():
+                tabela.selection_set(iid)
+            menu.tk_popup(e.x_root, e.y_root)
+
+        tabela.configure(selectmode="extended")
+        tabela.bind("<Button-3>", pokaz)
+        tabela.bind("<Control-c>", lambda _e: self._kopiuj_z(tabela))
+        tabela.bind("<Control-C>", lambda _e: self._kopiuj_z(tabela))
+        tabela.bind("<Control-a>",
+                    lambda _e: tabela.selection_set(tabela.get_children()))
 
     # ── powiązane ────────────────────────────────────────────────────────
     def _sekcja_powiazane(self):
@@ -109,6 +186,7 @@ class PolproduktWindow(tk.Toplevel):
                                 stretch=(k == "nazwa"))
         self.tab_pow.pack(side=tk.LEFT, fill=tk.X, expand=True,
                           padx=(8, 0), pady=8)
+        self._menu_kopiowania(self.tab_pow)
 
         bok = tk.Frame(ramka)
         bok.pack(side=tk.RIGHT, fill=tk.Y, padx=8, pady=8)
@@ -116,6 +194,12 @@ class PolproduktWindow(tk.Toplevel):
                   font=("Arial", 9), width=14).pack(pady=(0, 4))
         tk.Button(bok, text="Usuń powiązanie", command=self._usun,
                   font=("Arial", 9), width=14).pack()
+        # JEDYNE miejsce, w ktorym cokolwiek idzie do bazy i do Subiekta.
+        self.btn_zatwierdz = tk.Button(
+            bok, text="Zapisz", command=self._zatwierdz,
+            bg="#27ae60", fg="white", font=("Arial", 9, "bold"),
+            width=14, state=tk.DISABLED)
+        self.btn_zatwierdz.pack(pady=(8, 0))
 
     def _odswiez_powiazane(self):
         self.tab_pow.delete(*self.tab_pow.get_children())
@@ -124,14 +208,42 @@ class PolproduktWindow(tk.Toplevel):
         except Exception as e:
             self.status.config(text="Nie odczytano powiązań: %s" % e)
             return
+        # Widok = stan z bazy NALOZONY buforem niezapisanych zmian, zeby
+        # user widzial to, co zatwierdzi, a nie to, co jest w bazie.
+        laczne = {}
         for w in wiersze:
+            laczne[w["id_subiekt"]] = {"symbol": w["symbol"] or "",
+                                       "nazwa": w["nazwa"] or "",
+                                       "ilosc": w["ilosc_na_szt"],
+                                       "stan": ""}
+        for id_sub, z in self._zmiany.items():
+            stary = laczne.get(id_sub)
+            laczne[id_sub] = {"symbol": z["symbol"], "nazwa": z["nazwa"],
+                              "ilosc": z["ilosc"],
+                              "stan": "zmiana" if stary else "nowy"}
+        for id_sub in self._do_usuniecia:
+            if id_sub in laczne:
+                laczne[id_sub]["stan"] = "usuniecie"
+
+        for id_sub, w in sorted(laczne.items()):
+            znacznik = {"nowy": "  ← nowy", "zmiana": "  ← zmiana",
+                        "usuniecie": "  ← do usunięcia"}.get(w["stan"], "")
             self.tab_pow.insert(
-                "", tk.END, iid=str(w["id_subiekt"]),
-                values=(w["symbol"] or "(id %s)" % w["id_subiekt"],
-                        w["nazwa"] or "", w["ilosc_na_szt"]))
+                "", tk.END, iid=str(id_sub),
+                values=(w["symbol"] or "(id %s)" % id_sub,
+                        (w["nazwa"] or "") + znacznik, w["ilosc"]),
+                tags=("czeka",) if w["stan"] else ())
+        self.tab_pow.tag_configure("czeka", background="#fff3cd")
+
+        czeka = len(self._zmiany) + len(self._do_usuniecia)
+        self.btn_zatwierdz.config(
+            state=tk.NORMAL if czeka else tk.DISABLED,
+            text="Zapisz (%d)" % czeka if czeka else "Zapisz")
         self.status.config(
-            text="Powiązanych półproduktów: %d" % len(wiersze)
-            if wiersze else "Ten rysunek nie ma jeszcze półproduktu.")
+            text=("Niezapisanych zmian: %d — kliknij „Zatwierdź zmiany”."
+                  % czeka).replace("Zatwierdź zmiany", "Zapisz") if czeka else
+                 ("Powiązanych półproduktów: %d" % len(wiersze) if wiersze
+                  else "Ten rysunek nie ma jeszcze półproduktu."))
 
     def _zaznaczony(self):
         sel = self.tab_pow.selection()
@@ -147,15 +259,13 @@ class PolproduktWindow(tk.Toplevel):
         ile = self._zapytaj_o_ilosc(int(biezaca[2]))
         if ile is None:
             return
-        try:
-            M.zapisz_polprodukt(self.numer, id_sub, ile,
-                                symbol=biezaca[0], nazwa=biezaca[1])
-        except Exception as e:
-            return messagebox.showerror("Zmień ilość", str(e), parent=self)
-        self._cos_zmienione = True
+        self._zmiany[id_sub] = {"symbol": biezaca[0], "nazwa": biezaca[1],
+                                "ilosc": ile}
+        self._do_usuniecia.discard(id_sub)
         self._odswiez_powiazane()
-        self.status.config(text="%s: %s szt. na 1 detal."
-                                % (biezaca[0], ile))
+        self.status.config(
+            text="Do zatwierdzenia: %s → %s szt. na 1 detal."
+                 % (biezaca[0], ile))
 
     def _usun(self):
         id_sub = self._zaznaczony()
@@ -173,13 +283,137 @@ class PolproduktWindow(tk.Toplevel):
                 "informacja, że ten detal powstaje z kupionego półproduktu."
                 % (self.numer, symbol), parent=self):
             return
+        self._do_usuniecia.add(id_sub)
+        self._zmiany.pop(id_sub, None)
+        self._odswiez_powiazane()
+        self.status.config(text="Do zatwierdzenia: usunięcie %s." % symbol)
+
+    def _zatwierdz(self):
+        """Zapisuje CALY bufor: relacje do bazy, potem pyta o ZK.
+
+        Do 14.09.2026 kazdy przycisk pisal do bazy od razu — user nie mial
+        jak sie rozmyslic. Teraz zapis jest jeden i jawny.
+        """
+        if not self._zmiany and not self._do_usuniecia:
+            return
+        opis = []
+        for id_sub, z in sorted(self._zmiany.items()):
+            opis.append("    %s — %s szt. na 1 detal"
+                        % (z["symbol"], _ilo(z["ilosc"])))
+        for id_sub in sorted(self._do_usuniecia):
+            wiersz = self.tab_pow.item(str(id_sub), "values")
+            opis.append("    USUNIĘCIE: %s" % (wiersz[0] if wiersz else id_sub))
+        if not messagebox.askyesno(
+                "Zapisz powiązania",
+                ("Rysunek %s:@N@@N@%s@N@@N@"
+                 "Zapis: powiązania → wiersze w arkuszu → ilości na ZK."
+                 % (self.numer, chr(10).join(opis))).replace("@N@", chr(10)),
+                parent=self):
+            return
+
         try:
-            M.usun_polprodukt(self.numer, id_sub)
+            for id_sub, z in self._zmiany.items():
+                M.zapisz_polprodukt(self.numer, id_sub, z["ilosc"],
+                                    symbol=z["symbol"], nazwa=z["nazwa"])
+            for id_sub in self._do_usuniecia:
+                M.usun_polprodukt(self.numer, id_sub)
         except Exception as e:
-            return messagebox.showerror("Usuń powiązanie", str(e), parent=self)
+            return messagebox.showerror("Zatwierdź zmiany", str(e), parent=self)
+
+        ile = len(self._zmiany) + len(self._do_usuniecia)
+        self._zmiany, self._do_usuniecia = {}, set()
         self._cos_zmienione = True
         self._odswiez_powiazane()
-        self.status.config(text="Usunięto powiązanie z %s." % symbol)
+        self.status.config(text="Zapisano %d zmian(y)." % ile)
+
+        # Reszta procedury bez dopytywania: user juz raz potwierdzil zapis.
+        # Wiersze w arkuszu dopisuje `po_zmianie` (arkusz ma lock), potem ZK.
+        if callable(self._po_zmianie):
+            try:
+                self._po_zmianie()
+                self._cos_zmienione = False     # arkusz juz odswiezony
+            except Exception:
+                pass
+        self._na_zk(po_zapisie=True)
+
+    def _na_zk(self, po_zapisie=False):
+        """Przelicza polprodukty projektu i ustawia ich ilosci na ZK.
+
+        `po_zapisie=True` — wolane w ciagu „Zapisz", wiec bez wlasnego
+        pytania: uzytkownik potwierdzil juz cala procedure.
+
+        Most ustawia ilosc WPROST (`UstawIlosc`), wiec dziala w gore i w dol:
+        zmiana „na 1 detal" z 1 na 11 podnosi pozycje na dokumencie, a powrot
+        do 1 ja obniza. Wysylamy TYLKO polprodukty — reszty planu nie ruszamy,
+        zeby przycisk w tym oknie nie robil cichego zapisu calego projektu.
+        """
+        if not callable(self._projekt_info):
+            return messagebox.showinfo(
+                "Zapisz na ZK",
+                "To okno nie zna projektu — otwórz je z arkusza (PPM na "
+                "pozycji).", parent=self)
+        dane = self._projekt_info() or {}
+        pid, pnazwa = dane.get("project_id"), dane.get("project_name")
+        if not pid or not pnazwa:
+            return messagebox.showinfo(
+                "Zapisz na ZK", "Najpierw wybierz projekt w arkuszu.",
+                parent=self)
+
+        try:
+            import subiekt_projekt as PR
+            pozycje = dane.get("pozycje") or []
+            polprodukty = PR.pozycje_polproduktow(pozycje)
+        except Exception as e:
+            return messagebox.showerror("Zapisz na ZK", str(e), parent=self)
+        if not polprodukty:
+            return messagebox.showinfo(
+                "Zapisz na ZK",
+                "Nie ma czego zapisać: żadna pozycja tego projektu nie ma "
+                "powiązanego półproduktu.", parent=self)
+
+        opis = chr(10).join("    %s — %s szt." % (p["symbol"], _ilo(p["ilosc"]))
+                            for p in polprodukty)
+        if not po_zapisie and not messagebox.askyesno(
+                "Zapisz na ZK",
+                "Na zamówieniu projektu %s zostaną USTAWIONE ilości:@NL@@NL@"
+                "%s@NL@@NL@"
+                "Ilość jest ustawiana wprost — także w dół, gdy zmniejszyłeś "
+                "„na 1 detal”.@NL@Pozostałych pozycji ZK to nie dotyka.@NL@@NL@"
+                "Zapisać?".replace("@NL@", chr(10)) % (pnazwa, opis),
+                parent=self):
+            return
+
+        self.config(cursor="watch")
+        self.status.config(text="Zapisuję na ZK…")
+        self.update_idletasks()
+        try:
+            plan = PR.build_plan(pid, pnazwa, dane.get("podmiot") or "",
+                                 pnazwa)[0]
+            mini = dict(plan)
+            mini["pozycje"] = [p for p in plan["pozycje"]
+                               if p.get("polprodukt_dla")]
+            wynik = PR.run_bridge(mini, zapisz=True)
+        except Exception as e:
+            self.config(cursor="")
+            self.status.config(text="Nie zapisano.")
+            return messagebox.showerror("Zapisz na ZK", str(e), parent=self)
+        self.config(cursor="")
+
+        blad = (wynik or {}).get("blad")
+        if blad:
+            self.status.config(text="Subiekt odmówił.")
+            return messagebox.showerror("Zapisz na ZK", str(blad), parent=self)
+
+        # NIC PO CICHU: raport z tego, co most naprawde zrobil.
+        linie = ["%s — %s" % (k.get("Symbol"), k.get("Szczegoly")
+                              or k.get("Status"))
+                 for k in (wynik.get("kroki") or [])
+                 if k.get("Rodzaj") in ("zk-poz", "zk")]
+        self.status.config(text="Zapisano na ZK.")
+        messagebox.showinfo(
+            "Zapisano na ZK",
+            (chr(10).join(linie) if linie else "Brak zmian na dokumencie."),
+            parent=self)
 
     # ── wyszukiwarka ─────────────────────────────────────────────────────
     def _sekcja_szukania(self):
@@ -219,6 +453,7 @@ class PolproduktWindow(tk.Toplevel):
         self.lista.configure(yscrollcommand=vs.set)
         self.lista.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vs.pack(side=tk.RIGHT, fill=tk.Y)
+        self._menu_kopiowania(self.lista)
 
         tk.Label(dol, text="Ile sztuk na 1 detal:",
                  font=("Arial", 9)).pack(side=tk.LEFT)
@@ -226,8 +461,9 @@ class PolproduktWindow(tk.Toplevel):
         tk.Spinbox(dol, textvariable=self.var_ile, from_=1, to=9999, width=6,
                    font=("Arial", 10), justify="center").pack(
                        side=tk.LEFT, padx=(6, 0))
-        tk.Label(dol, text="(sztuki całkowite)", font=("Arial", 8),
-                 fg="#555").pack(side=tk.LEFT, padx=(6, 0))
+        tk.Label(dol, text="(sztuki całkowite)   ·   Ctrl+C kopiuje "
+                            "zaznaczone, PPM = menu",
+                 font=("Arial", 8), fg="#555").pack(side=tk.LEFT, padx=(6, 0))
         tk.Button(dol, text="Powiąż ten półprodukt", command=self._powiaz,
                   bg="#2980b9", fg="white", font=("Arial", 9, "bold"),
                   padx=12, pady=4).pack(side=tk.RIGHT)
@@ -341,9 +577,15 @@ class PolproduktWindow(tk.Toplevel):
     def _powiaz(self):
         sel = self.lista.selection()
         if not sel:
+            # ⚠️ W oknie sa DWIE listy. Gorna to juz powiazane, dolna to
+            # wyszukiwarka — komunikat musi mowic, ktora (14.09.2026: user
+            # mial zaznaczony wiersz w gornej i nie wiedzial, czego okno chce).
             return messagebox.showinfo(
                 "Powiąż półprodukt",
-                "Zaznacz na liście kartotekę półproduktu.", parent=self)
+                "Zaznacz kartotekę na DOLNEJ liście "
+                "(„Wskaż kartotekę półproduktu”).@NL@@NL@"
+                "Górna tabela pokazuje to, co już jest powiązane."
+                .replace("@NL@", chr(10)), parent=self)
         poz = next((k for k in self._katalog if str(k["id"]) == sel[0]), None)
         if not poz:
             return
@@ -366,27 +608,16 @@ class PolproduktWindow(tk.Toplevel):
                 "Półprodukt to inna kartoteka — gotowa część, którą kupujesz\n"
                 "i dopiero obrabiasz.", parent=self)
 
-        try:
-            M.zapisz_polprodukt(self.numer, poz["id"], ile,
-                                symbol=poz["symbol"], nazwa=poz["nazwa"])
-        except Exception as e:
-            return messagebox.showerror("Powiąż półprodukt", str(e),
-                                        parent=self)
-        self._cos_zmienione = True
+        self._zmiany[poz["id"]] = {"symbol": poz["symbol"],
+                                   "nazwa": poz["nazwa"], "ilosc": ile}
+        self._do_usuniecia.discard(poz["id"])
         self._odswiez_powiazane()
-        # Okno spelnilo swoje zadanie — potwierdzamy i zamykamy. Zostawienie
-        # go otwartego kazalo zgadywac, czy powiazanie weszlo (14.09.2026).
-        messagebox.showinfo(
-            "Powiązano półprodukt",
-            "%s\n\npowstaje z:\n\n    %s\n    %s\n\n"
-            "Ilość: %d szt. na 1 detal.\n\n"
-            "W arkuszu pozycja dostaje znacznik 🛒 w kolumnie Δ."
-            % (self.numer, poz["symbol"], poz["nazwa"] or "", ile),
-            parent=self)
-        self._zamknij()
+        self.status.config(
+            text="Do zatwierdzenia: %s x %d szt. — kliknij „Zatwierdź zmiany”."
+                 % (poz["symbol"], ile))
 
 
-def otworz(parent, numer, opis="", po_zmianie=None):
+def otworz(parent, numer, opis="", po_zmianie=None, projekt_info=None):
     """Okno powiązania półproduktu. `numer` = klucz relacji (numer/nazwa).
 
     `po_zmianie` — wołane przy zamknięciu, gdy cokolwiek się zmieniło;
@@ -397,4 +628,4 @@ def otworz(parent, numer, opis="", po_zmianie=None):
                             "Ta pozycja nie ma numeru ani nazwy.",
                             parent=parent)
         return None
-    return PolproduktWindow(parent, numer, opis, po_zmianie)
+    return PolproduktWindow(parent, numer, opis, po_zmianie, projekt_info)

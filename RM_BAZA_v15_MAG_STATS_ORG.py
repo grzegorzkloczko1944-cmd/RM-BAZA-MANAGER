@@ -12765,7 +12765,38 @@ class MainWindow(tk.Tk):
         # nastepnym odswiezeniu i user nie wie, czy powiazanie weszlo.
         subiekt_polprodukt_gui.otworz(self, (cur[0] or "").strip(),
                                       (cur[1] or "").strip(),
-                                      po_zmianie=self._po_zmianie_polproduktu)
+                                      po_zmianie=self._po_zmianie_polproduktu,
+                                      projekt_info=self._info_dla_polproduktu)
+
+    def _info_dla_polproduktu(self):
+        """Projekt i jego pozycje — dla przycisku „Zapisz na ZK" w oknie.
+
+        Callable, a nie slownik przekazany raz: arkusz moze w miedzyczasie
+        przelaczyc projekt albo zmienic ilosci, a okno ma liczyc na swiezych
+        danych, nie na tych sprzed otwarcia.
+        """
+        try:
+            items = self.db_manager.get_project_items(self.current_project_id)
+            pozycje = [{"symbol": (i["drawing_no"] or "").strip()
+                                  or (i["name"] or "").strip(),
+                        "ilosc": (i["order_qty"]
+                                  if i["order_qty"] not in (None, "")
+                                  else (i["qty_bom"] or 0))}
+                       for i in items]
+        except Exception:
+            pozycje = []
+        # Nazwa z `projects_list` — atrybutu `current_project_name` NIE MA
+        # (to zmienna lokalna w kilku metodach); ta sama droga co przy
+        # komunikatach o locku.
+        nazwa = None
+        for pid, pname in (getattr(self, "projects_list", None) or ()):
+            if pid == self.current_project_id:
+                nazwa = pname
+                break
+        return {"project_id": self.current_project_id,
+                "project_name": nazwa,
+                "podmiot": "",
+                "pozycje": pozycje}
 
     def _po_zmianie_polproduktu(self):
         """Po zmianie powiazania: wiersze polproduktow w arkuszu + raport.
