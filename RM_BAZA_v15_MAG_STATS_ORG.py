@@ -13760,6 +13760,40 @@ class MainWindow(tk.Tk):
 
         if col == 0:  # Nr rysunku
             drawing_no = str(new_value).strip()
+
+            # ⚠️ POZYCJA W WYCENIE — zmiana numeru ZRYWA powiązanie z RFQ.
+            #
+            # RFQ dopasowuje po numerze rysunku (`rfq_results.drawing_number`),
+            # a nie po `item_id`. Zmiana numeru sprawia, że wiersz w portalu
+            # zostaje ze starą wartością: kooperanci dalej wyceniają, a arkusz
+            # przestaje tę wycenę widzieć — po cichu, bez błędu.
+            #
+            # Ten sam mechanizm ostrzega przy KASOWANIU pozycji
+            # (`_pozycje_w_rfq`, ok. linii 15447); przy edycji numeru go
+            # brakowało (14.09.2026). Czyta lokalny cache `rfq_results`, więc
+            # nie odpytuje portalu i działa też, gdy ten nie odpowiada.
+            _stary_nr = str(old_value or "").strip()
+            if _stary_nr and _stary_nr.upper() != drawing_no.upper():
+                try:
+                    _w_rfq = self._pozycje_w_rfq([_stary_nr])
+                except Exception:
+                    _w_rfq = {}
+                if _w_rfq:
+                    _kod, _ofert = list(_w_rfq.values())[0]
+                    _of = ", %d ofert(y)" % _ofert if _ofert else ""
+                    _tresc = (
+                        "„%s” jest w zapytaniu ofertowym %s%s.\n\n"
+                        "Po zmianie numeru na „%s” arkusz PRZESTANIE "
+                        "widzieć tę wycenę — w portalu zostanie stary "
+                        "numer, a kooperanci dalej beda wyceniac.\n\n"
+                        "Zmienić mimo to?"
+                        % (_stary_nr, _kod, _of, drawing_no))
+                    if not messagebox.askyesno(
+                            "Pozycja jest w wycenie", _tresc,
+                            icon="warning", default="no"):
+                        self.refresh_data()          # przywróć starą wartość
+                        return
+
             if drawing_no:
                 # Sprawdź czy istnieje już taki numer (poza bieżącym itemem)
                 cursor = self.db_manager.project_con.execute("""
