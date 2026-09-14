@@ -272,6 +272,7 @@ class RmpakCalculatorDialog:
         # Ustawiane w `_podpowiedz_polprodukt`; tutaj, zeby zapis przed
         # wyborem pozycji nie wywalil sie na AttributeError.
         self._polprodukt = None
+        self._polprodukty = []
 
         self.lbl_prefix = tk.Label(bottom, text="Pozycja:", anchor="w")
         self.lbl_prefix.grid(row=0, column=0, sticky="w", padx=(0, 4), pady=(0, 6))
@@ -1049,34 +1050,50 @@ class RmpakCalculatorDialog:
         if not rel:
             return
 
-        w = rel[0]                      # przy kilku bierzemy pierwszy
-        self._polprodukt = dict(w)
+        # ⚠️ RYSUNEK MOZE MIEC KILKA POLPRODUKTOW (klucz zlozony w tabeli
+        # `polprodukty`). Do 15.09.2026 bralismy `rel[0]` i koszt materialu
+        # byl ZANIZONY o pozostale: 2627-270.13X pokazywalo 200,00 zamiast
+        # 304,13 (104,13 x1 + 100,00 x2).
+        self._polprodukt = dict(rel[0])
+        self._polprodukty = [dict(r) for r in rel]
         if mode == "semi" and (semi_price or semi_name):
             return                      # user ma wlasna kalkulacje — nie ruszamy
 
-        # Cena z Subiekta, na zywo. Bez mostu zostawiamy puste pole —
-        # lepiej niz wpisac wartosc, ktorej nie potwierdzilismy.
         # ⚠️ NIE `query_stock` — ono zwraca stany, ale CenaEwidencyjna jest
-        # tam NULL (sprawdzone 15.09.2026, ta sama pulapka co w oknie
-        # polproduktu). Cene niesie tryb `magazyn`.
-        cena = None
+        # tam NULL (ta sama pulapka co w oknie polproduktu). Cene niesie
+        # tryb `magazyn`. Bez mostu zostawiamy pole puste — lepiej niz
+        # wpisac wartosc, ktorej nie potwierdzilismy.
+        ceny = {}
         try:
             import subiekt_bridge
             _w = subiekt_bridge.call("magazyn", {}, timeout=200, write=False)
-            _sym = (w["symbol"] or "").strip().upper()
-            for _p in (_w.get("pozycje") or []):
-                if (_p.get("Symbol") or "").strip().upper() == _sym:
-                    cena = _p.get("CenaEwidencyjna")
-                    break
+            ceny = {(_p.get("Symbol") or "").strip().upper():
+                    _p.get("CenaEwidencyjna")
+                    for _p in (_w.get("pozycje") or [])}
         except Exception as e:
             print("Kalkulator: cena polproduktu nieodczytana (%s)" % e)
 
+        razem, znane = 0.0, 0
+        for r in rel:
+            c = ceny.get((r["symbol"] or "").strip().upper())
+            if c in (None, ""):
+                continue                # kartoteka bez ceny — pomijamy
+            razem += float(c) * int(r["ilosc_na_szt"] or 1)
+            znane += 1
+
         self.calc_mode_var.set("semi")
-        self.semi_name_var.set(w["nazwa"] or w["symbol"] or "")
-        if cena not in (None, ""):
-            # Cena za JEDEN detal: kartoteka x ilosc na sztuke.
-            self.semi_price_var.set("%.2f" % (float(cena)
-                                              * int(w["ilosc_na_szt"] or 1)))
+        # Jeden polprodukt — nazwa; kilka — symbole z ilosciami, zeby bylo
+        # widac, z czego zlozyla sie cena.
+        if len(rel) == 1:
+            opis = rel[0]["nazwa"] or rel[0]["symbol"] or ""
+        else:
+            opis = " + ".join("%s x%s" % (r["symbol"], r["ilosc_na_szt"])
+                              for r in rel)
+        self.semi_name_var.set(opis)
+        if znane:
+            # Cena za JEDEN detal: suma (kartoteka x ilosc na sztuke).
+            self.semi_price_var.set("%.2f" % razem)
+
 
     def _on_mode_change(self):
         self._update_mode_widgets()
