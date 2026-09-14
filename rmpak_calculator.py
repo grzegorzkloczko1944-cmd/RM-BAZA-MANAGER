@@ -222,10 +222,14 @@ class RmpakCalculatorDialog:
         frame_table = tk.Frame(self.win)
         frame_table.pack(fill="both", expand=True, padx=8, pady=(0, 4))
 
-        cols = ("ID", "Nr rysunku", "Nazwa", "Szt.", "Godz./partia", "Materiał cięty", "Dodatkowe", "Stawka", "Cena/szt.", "Wartość partii", "Półprodukt", "Dostawca", "RMPAK")
+        # ⚠️ BEZ kolumny „Dostawca" (15.09.2026): most zwraca dla kartotek
+        # polproduktow `Dostawca: null`, wiec byla pusta z definicji.
+        cols = ("ID", "Nr rysunku", "Nazwa", "Szt.", "Godz./partia", "Materiał cięty", "Dodatkowe", "Stawka", "Cena/szt.", "Wartość partii", "Półprodukt", "RMPAK")
         self.tree = ttk.Treeview(frame_table, columns=cols, show="headings", selectmode="browse")
-        widths = (40, 110, 220, 45, 90, 90, 90, 70, 90, 110, 140, 140, 90)
-        anchors = ("center", "w", "w", "e", "e", "e", "e", "e", "e", "e", "w", "w", "center")
+        # 12 kolumn — „Dostawca" usunieta 15.09.2026. Polprodukt dostal
+        # jej szerokosc, bo przy kilku powiazaniach opis jest dluzszy.
+        widths = (40, 110, 220, 45, 90, 90, 90, 70, 90, 110, 260, 90)
+        anchors = ("center", "w", "w", "e", "e", "e", "e", "e", "e", "e", "w", "center")
         for col, w, a in zip(cols, widths, anchors):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=w, anchor=a)
@@ -346,11 +350,30 @@ class RmpakCalculatorDialog:
         self.semi_lista_frame = tk.Frame(bottom)
         self.semi_lista_frame.grid(row=4, column=0, columnspan=8, sticky="we",
                                    padx=(4, 8), pady=(2, 0))
-        self.semi_lista_var = tk.StringVar(value="")
-        self.semi_lista_label = tk.Label(
-            self.semi_lista_frame, textvariable=self.semi_lista_var,
-            justify="left", anchor="w", font=("Consolas", 8), fg="#31708f")
-        self.semi_lista_label.pack(anchor="w")
+        # ⚠️ Text, nie Label: z etykiety NIE DA SIE zaznaczyc tekstu,
+        # a symbole i nazwy polproduktow przepisuje sie do Subiekta
+        # i do maili (15.09.2026). `state="disabled"` trzyma pole
+        # tylko-do-odczytu, ale zaznaczanie i Ctrl+C dziala.
+        self.semi_lista_txt = tk.Text(
+            self.semi_lista_frame, height=1, wrap="none", relief="flat",
+            font=("Consolas", 8), fg="#31708f",
+            bg=self.semi_lista_frame.cget("bg"), state="disabled",
+            cursor="xterm", borderwidth=0, highlightthickness=0)
+        self.semi_lista_txt.pack(anchor="w", fill="x")
+
+        _menu_sl = tk.Menu(self.semi_lista_txt, tearoff=0)
+        _menu_sl.add_command(
+            label="Kopiuj zaznaczone",
+            command=lambda: self._kopiuj_rozbicie(tylko_zaznaczenie=True))
+        _menu_sl.add_command(
+            label="Kopiuj całość",
+            command=lambda: self._kopiuj_rozbicie(tylko_zaznaczenie=False))
+        self.semi_lista_txt.bind(
+            "<Button-3>", lambda e: _menu_sl.tk_popup(e.x_root, e.y_root))
+        self.semi_lista_txt.bind(
+            "<Control-c>", lambda _e: self._kopiuj_rozbicie(True))
+        self.semi_lista_txt.bind(
+            "<Control-C>", lambda _e: self._kopiuj_rozbicie(True))
 
         tk.Label(bottom, text="Stawka (PLN/h):").grid(row=5, column=0, sticky="e", padx=(4, 2), pady=(6, 0))
         self.item_rate_var = tk.StringVar(value=str(self.hourly_rate))
@@ -918,7 +941,7 @@ class RmpakCalculatorDialog:
             iid = self.tree.insert("", "end", tags=(tag,), values=(
                 lp, drawing_no or "", name or "", int(qty),
                 hours or 0, f"{material:.2f}", f"{extra:.2f}", rate_str, price_str, total_str,
-                semi_name or "", semi_supplier_name, rmpak_label
+                semi_name or "", rmpak_label
             ))
             self._items[iid] = item_id
             self._qtys[iid] = qty
@@ -1050,7 +1073,7 @@ class RmpakCalculatorDialog:
         """
         self._polprodukt = None
         self._polprodukty = []
-        self.semi_lista_var.set("")
+        self._ustaw_rozbicie("")
         vals = self.tree.item(iid, "values")
         klucz = (str(vals[1]).strip() or str(vals[2]).strip())
         if not klucz:
@@ -1101,8 +1124,10 @@ class RmpakCalculatorDialog:
         if len(rel) == 1:
             opis = rel[0]["nazwa"] or rel[0]["symbol"] or ""
         else:
-            opis = " + ".join("%s x%s" % (r["symbol"], r["ilosc_na_szt"])
-                              for r in rel)
+            # NAZWY, nie same symbole: „gdy jest wiecej niz 1 to w tabeli
+            # znika nazwa" (15.09.2026). Pelne rozbicie i tak jest nizej.
+            opis = " + ".join("%s x%s" % (r["nazwa"] or r["symbol"],
+                                          r["ilosc_na_szt"]) for r in rel)
         self.semi_name_var.set(opis)
         if znane:
             # Cena za JEDEN detal: suma (kartoteka x ilosc na sztuke).
@@ -1112,6 +1137,34 @@ class RmpakCalculatorDialog:
                                  for k, v in ceny.items()})
 
 
+    def _ustaw_rozbicie(self, tekst):
+        """Wpisuje rozbicie do pola tylko-do-odczytu i dopasowuje wysokosc."""
+        try:
+            self.semi_lista_txt.config(state="normal")
+            self.semi_lista_txt.delete("1.0", "end")
+            if tekst:
+                self.semi_lista_txt.insert("1.0", tekst)
+            self.semi_lista_txt.config(
+                state="disabled",
+                height=max(1, len(tekst.split(chr(10)))) if tekst else 1)
+        except tk.TclError:
+            pass
+
+    def _kopiuj_rozbicie(self, tylko_zaznaczenie=True):
+        """Ctrl+C / menu: zaznaczony fragment albo cale rozbicie."""
+        try:
+            if tylko_zaznaczenie and self.semi_lista_txt.tag_ranges("sel"):
+                tekst = self.semi_lista_txt.get("sel.first", "sel.last")
+            else:
+                tekst = self.semi_lista_txt.get("1.0", "end-1c")
+        except tk.TclError:
+            return
+        if not tekst.strip():
+            return
+        self.win.clipboard_clear()
+        self.win.clipboard_append(tekst)
+        return "break"
+
     def _opisz_polprodukty(self, ceny=None):
         """Wypelnia wiersz rozbicia pod polami polproduktu.
 
@@ -1120,7 +1173,7 @@ class RmpakCalculatorDialog:
         """
         rel = getattr(self, "_polprodukty", None)
         if not rel:
-            self.semi_lista_var.set("")
+            self._ustaw_rozbicie("")
             return
         linie, razem = [], 0.0
         for r in rel:
@@ -1139,8 +1192,8 @@ class RmpakCalculatorDialog:
         naglowek = ("Polprodukty (%d) — cena kartoteki x ilosc na detal:"
                     % len(rel))
         stopka = ("   RAZEM na 1 detal: %.2f PLN" % razem) if razem else ""
-        self.semi_lista_var.set(chr(10).join([naglowek] + linie
-                                             + ([stopka] if stopka else [])))
+        self._ustaw_rozbicie(chr(10).join([naglowek] + linie
+                                          + ([stopka] if stopka else [])))
 
     def _on_mode_change(self):
         self._update_mode_widgets()
@@ -1432,8 +1485,7 @@ class RmpakCalculatorDialog:
             vals[8] = f"{price_per_unit:.2f}"
             vals[9] = f"{price_per_unit * qty:.2f}"
             vals[10] = semi_name
-            vals[11] = semi_supplier_name
-            vals[12] = rmpak_label
+            vals[11] = rmpak_label
             self.tree.item(iid, values=vals)
 
         # Status „ile poz. na PW" i suma licza sie z BAZY, wiec po zapisie
