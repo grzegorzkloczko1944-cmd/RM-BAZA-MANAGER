@@ -81,7 +81,8 @@ używał `map-*` w **żadnym** miejscu — wszystkie 7+ wywołań szło po pliku
       z Y:), M-OLD dostał pusty zły → `napraw_odrzucone_dopasowania` (pusta →
       drop, z danymi → `_stare`) wołana przed migracjami.
 - [x] `baza_mapowania` — serwer już wskazuje właściwy plik, nic do zmiany.
-- [ ] **wdrożenie, w tej kolejności**: (1) `rm_serwer.py` + `rm_serwer_operacje.py`
+- [x] **(1) serwer WDROŻONY na W2019S 14.09 wieczorem** (commit `e4f736c`: „Wdrozone na W2019S 14.09, usluga zrestartowana" — kod po `62f2f36`, więc operacje `map-*` już są). Weryfikacja ze stacji: `python -c "import rm_klient; print(rm_klient.master_read('map-statystyki'))"` → 859/2/2.
+- [ ] **(2) build `.exe`** — dopiero po weryfikacji powyżej. Pierwotny plan kolejności: (1) `rm_serwer.py` + `rm_serwer_operacje.py`
       na W2019S (`Copy-Item -ToSession` po IP 192.168.100.84) +
       `Restart-Service RM_SERWER` — stary klient plikowy tego nie zauważy;
       (2) build `.exe` — nowy klient WYMAGA nowych operacji, więc nigdy przed (1).
