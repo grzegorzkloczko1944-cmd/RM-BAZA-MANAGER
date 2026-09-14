@@ -31052,9 +31052,10 @@ class MainWindow(tk.Tk):
         To NIE jest zamiennik starego skanera „Uzupełnianie DOSTARCZONO" —
         tamten obsługuje projekty prowadzone starą ścieżką i zostaje.
         """
-        # BEZ WYMOGU PROJEKTU (14.09.2026). Magazynier otwiera okno rano
-        # i pracuje na nim cały dzień; projekt wybiera w samym oknie, przy
-        # pozycji. Wymuszanie wyboru w arkuszu było zbędnym krokiem.
+        if not self.current_project_id:
+            messagebox.showwarning("Wydanie z magazynu",
+                                   "Najpierw wybierz projekt.", parent=self)
+            return
         if not self._okno_jedno_wystapienie("_okno_wydania"):
             return
         try:
@@ -31093,8 +31094,10 @@ class MainWindow(tk.Tk):
         idzie do poczekalni w master i arkusz nałoży go przy „Przejmij Lock"
         (SCHOWEK_RW_ALGORYTM.md §4.4). Dlatego okno otwieramy zawsze.
         """
-        # BEZ WYMOGU PROJEKTU: schowek jest JEDEN na stanowisko i nie
-        # należy do projektu — projekt wybiera się przy pozycji.
+        if not self.current_project_id:
+            messagebox.showwarning("Schowek wydań",
+                                   "Najpierw wybierz projekt.", parent=self)
+            return
         if not self._okno_jedno_wystapienie("_okno_schowka"):
             return
         try:
