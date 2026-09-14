@@ -294,23 +294,6 @@ class SchowekWindow(WydanieWindow):
         tk.Button(pasek, text="Odśwież", command=self._odswiez,
                   font=("Arial", 8)).pack(side=tk.RIGHT, padx=14)
 
-        # Diplodok — żart dla magazyniera. Brak pliku niczego nie psuje.
-        self._dino = None
-        try:
-            import os
-            from PIL import Image, ImageTk
-            plik = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "diplodok.png")
-            if os.path.isfile(plik):
-                im = Image.open(plik).convert("RGBA")
-                im.thumbnail((120, 56), Image.LANCZOS)
-                plansza = Image.new("RGBA", im.size, TLO_SEKCJI)
-                plansza.alpha_composite(im)
-                self._dino = ImageTk.PhotoImage(plansza.convert("RGB"))
-                tk.Label(pasek, image=self._dino, bg=TLO_SEKCJI).pack(
-                    side=tk.RIGHT, padx=(0, 10))
-        except Exception:
-            pass
 
     def _wczytaj_projekty(self):
         """Lista projektów do wyboru — te same, co w selektorze RM_BAZA."""

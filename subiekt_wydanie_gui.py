@@ -276,26 +276,6 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         tk.Button(pasek, text="Odśwież", command=self._odswiez,
                   font=("Arial", 8)).pack(side=tk.RIGHT, padx=14)
 
-        # Diplodok. Żart dla magazyniera — jedyne jego zadanie to stać
-        # na belce i patrzeć. Brak pliku niczego nie psuje.
-        self._dino = None
-        try:
-            import os
-            from PIL import Image, ImageTk
-            plik = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "diplodok.png")
-            if os.path.isfile(plik):
-                im = Image.open(plik).convert("RGBA")
-                im.thumbnail((150, 66), Image.LANCZOS)
-                # Tło paska pod przezroczystość — inaczej PNG z alfą wychodzi
-                # na czarno w tk.Label.
-                plansza = Image.new("RGBA", im.size, TLO_SEKCJI)
-                plansza.alpha_composite(im)
-                self._dino = ImageTk.PhotoImage(plansza.convert("RGB"))
-                tk.Label(pasek, image=self._dino, bg=TLO_SEKCJI).pack(
-                    side=tk.RIGHT, padx=(0, 10))
-        except Exception:
-            pass          # dinozaur wymarł, praca idzie dalej
 
     def _panel_skanera(self, rodzic):
         ram = tk.LabelFrame(rodzic, text=" Skaner ", bg=TLO_SEKCJI, fg=TEKST,
