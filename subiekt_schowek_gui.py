@@ -76,6 +76,9 @@ class SchowekWindow(WydanieWindow):
         self.schowek_id = None
         #: Zawartość: [{symbol, nazwa, ilosc, monterzy}]
         self.zawartosc = []
+        # {SYMBOL: stan w MASTER albo None} — z kartotek Subiekta, dla
+        # wszystkich pozycji schowka. Patrz `_stan_symbolu`.
+        self._stany_mag = {}
         super().__init__(parent, project_id, project_name)
         self.title("Schowek wydań — %s" % self.project_name)
 
@@ -248,7 +251,7 @@ class SchowekWindow(WydanieWindow):
         self.var_projekt = tk.StringVar(value=self.project_name)
         self.combo_projekt = ttk.Combobox(
             s, textvariable=self.var_projekt, width=26, state="readonly",
-            font=("Arial", 11, "bold"))
+            height=25, font=("Arial", 11, "bold"))
         self.combo_projekt.pack(anchor="w", pady=(2, 0))
         self.var_kontekst = tk.StringVar(value="")
         tk.Label(s, textvariable=self.var_kontekst, bg=TLO_SEKCJI,
@@ -304,6 +307,14 @@ class SchowekWindow(WydanieWindow):
                 nazwy = [w["name"] for w in db.master_read("projekty-do-selektora")
                          if w.get("active")
                          and (w.get("project_type") or "MACHINE") == "MACHINE"]
+                # Kolejnosc jak w selektorze RM_BAZA (`projects_list` jest
+                # juz posortowana jego `sort_key`: numery malejaco, potem
+                # ZP/FH... z numerem malejaco). Serwer daje ORDER BY name,
+                # czyli 3300 przed 3500 — odwrotnie niz w arkuszu.
+                kolejnosc = {n: i for i, (_pid, n) in enumerate(
+                    getattr(self._arkusz, "projects_list", None) or ())}
+                if kolejnosc:
+                    nazwy.sort(key=lambda n: kolejnosc.get(n, len(kolejnosc)))
         except Exception as e:
             print("Nie wczytano listy projektow: %s" % e)
         if self.project_name and self.project_name not in nazwy:
@@ -356,6 +367,7 @@ class SchowekWindow(WydanieWindow):
         self._przerysuj()
 
     def _przerysuj(self):
+        self._doczytaj_stany(p["symbol"] for p in self.zawartosc)
         self.tab.delete(*self.tab.get_children())
         for i, p in enumerate(self.zawartosc, 1):
             wpis = self.stan.get(p["symbol"].upper()) or {}
@@ -394,8 +406,37 @@ class SchowekWindow(WydanieWindow):
         self.btn_zakoncz.config(state=tk.NORMAL if gotowy else tk.DISABLED)
         self.btn_podglad_rw.config(state=tk.NORMAL if gotowy else tk.DISABLED)
 
+    def _doczytaj_stany(self, symbole):
+        """Stany z kartotek Subiekta dla symboli, ktorych jeszcze nie znamy.
+
+        ⚠️ `self.plan` to plan JEDNEGO projektu — tego z combo. Schowek trzyma
+        pozycje na kilka projektow naraz, wiec detal z 3500 przy wybranym 3300
+        nie byl w planie: Stan „—", brak czerwieni w podgladzie RW i w tabeli
+        (14.09.2026: „podswietlenie w oknie podglad RW zniknelo"). Stany
+        bierzemy wprost z kartotek, hurtem, jednym zapytaniem — tak samo jak
+        `_sprawdz_stany` przed RW.
+        """
+        brak = sorted({(s or "").strip() for s in symbole
+                       if (s or "").strip()
+                       and (s or "").strip().upper() not in self._stany_mag})
+        if not brak:
+            return
+        try:
+            import subiekt_stany
+            kartoteki = subiekt_stany.query_stock(brak, timeout=180) or {}
+        except Exception as e:
+            print("Nie doczytano stanow do schowka: %s" % e)
+            return
+        po_kluczu = {(k or "").strip().upper(): v for k, v in kartoteki.items()}
+        for s in brak:
+            k = po_kluczu.get(s.upper())
+            # Brak kartoteki = „nie wiem" (None), nie zero — zero maluje na
+            # czerwono, a tu po prostu nie ma czego sprawdzac.
+            self._stany_mag[s.upper()] = self._stan_w_magazynie(k) if k else None
+
     def _stan_symbolu(self, symbol):
-        """Stan magazynu z PLANU albo None, gdy nieznany.
+        """Stan magazynu z kartoteki Subiekta (cache `_stany_mag`), a gdy jej
+        nie doczytano — z PLANU. None, gdy nieznany.
 
         ⚠️ Rozróżnienie „0" od „nie wiem" jest tu istotne. `_zbuduj_plan`
         wpisuje `stan: 0.0` także wtedy, gdy kartoteka w ogóle nie przyszła
@@ -405,6 +446,8 @@ class SchowekWindow(WydanieWindow):
         „brak stanu", choć stanu po prostu nie sprawdzono.
         """
         klucz = (symbol or "").strip().upper()
+        if klucz in self._stany_mag:
+            return self._stany_mag[klucz]
         for w in (self.plan or ()):
             if (w.get("symbol") or "").strip().upper() == klucz:
                 stan = w.get("stan")
@@ -424,6 +467,7 @@ class SchowekWindow(WydanieWindow):
     def _po_odczycie(self, dane, blad, kartoteki=None):
         super()._po_odczycie(dane, blad, kartoteki)
         if not blad:
+            self._stany_mag = {}          # swieze stany po kazdym odczycie
             self._odswiez_zawartosc()
 
     # ── ruchy ────────────────────────────────────────────────────────────
@@ -477,6 +521,9 @@ class SchowekWindow(WydanieWindow):
                 wolne = stan - w_schowku
                 if ile > wolne:
                     return self._ponad_stan(p, ile, wolne, w_schowku)
+
+        if p.get("stan") is not None:
+            self._stany_mag[p["symbol"].strip().upper()] = p["stan"]
 
         funkcja = SCH.pobrano if kierunek > 0 else SCH.oddano
         etykieta = "POBRANO" if kierunek > 0 else "ODDANO"

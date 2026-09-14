@@ -13754,6 +13754,18 @@ class MainWindow(tk.Tk):
                     self.refresh_data()
                     return
 
+        # ⚠️ NAZWA pozycji ZNORMALIZOWANEJ (bez numeru rysunku) jest kluczem
+        # RFQ — arkusz dopasowuje wycene po `rfq_key = drawing_no or name`
+        # (ok. linii 8315). Jej zmiana zrywa powiazanie tak samo jak zmiana
+        # numeru (14.09.2026: "zmienilem nazwe, przypisanie zniknelo").
+        # Dla pozycji Z numerem nazwa to tylko opis — nie pytamy.
+        if col == 1 and self._pozycja_bez_numeru(item_id):
+            if not self._rfq_zrywa_powiazanie(
+                    self._stary_klucz_rfq(item_id, "nazwa"),
+                    str(new_value or "").strip(), "Nazwa"):
+                self.refresh_data()          # przywroc stara wartosc
+                return
+
         # ========================================================================
         # WALIDACJA: Nr Rysunku - NIE POZWÓL NA DUPLIKATY
         # ========================================================================
@@ -13772,27 +13784,11 @@ class MainWindow(tk.Tk):
             # (`_pozycje_w_rfq`, ok. linii 15447); przy edycji numeru go
             # brakowało (14.09.2026). Czyta lokalny cache `rfq_results`, więc
             # nie odpytuje portalu i działa też, gdy ten nie odpowiada.
-            _stary_nr = str(old_value or "").strip()
-            if _stary_nr and _stary_nr.upper() != drawing_no.upper():
-                try:
-                    _w_rfq = self._pozycje_w_rfq([_stary_nr])
-                except Exception:
-                    _w_rfq = {}
-                if _w_rfq:
-                    _kod, _ofert = list(_w_rfq.values())[0]
-                    _of = ", %d ofert(y)" % _ofert if _ofert else ""
-                    _tresc = (
-                        "„%s” jest w zapytaniu ofertowym %s%s.\n\n"
-                        "Po zmianie numeru na „%s” arkusz PRZESTANIE "
-                        "widzieć tę wycenę — w portalu zostanie stary "
-                        "numer, a kooperanci dalej beda wyceniac.\n\n"
-                        "Zmienić mimo to?"
-                        % (_stary_nr, _kod, _of, drawing_no))
-                    if not messagebox.askyesno(
-                            "Pozycja jest w wycenie", _tresc,
-                            icon="warning", default="no"):
-                        self.refresh_data()          # przywróć starą wartość
-                        return
+            if not self._rfq_zrywa_powiazanie(
+                    self._stary_klucz_rfq(item_id, "numer"), drawing_no,
+                    "Numer rysunku"):
+                self.refresh_data()          # przywroc stara wartosc
+                return
 
             if drawing_no:
                 # Sprawdź czy istnieje już taki numer (poza bieżącym itemem)
@@ -24538,38 +24534,104 @@ class MainWindow(tk.Tk):
         # porównanie bez wielkości liter — loginy bywają wpisywane różnie
         return any(w.lower() == me.lower() for w in watchers)
 
-    def _pozycje_w_rfq(self, numery, tylko_aktywne=True):
-        """{numer_rysunku: (kod_rfq, liczba_ofert)} dla tych z `numery`, które są
-        w zapytaniu ofertowym. Pusty słownik, gdy żadna nie jest (albo brak danych).
+    def _stary_klucz_rfq(self, item_id, pole):
+        """Numer rysunku ("numer") albo nazwa ("nazwa") pozycji — z BAZY,
+        czyli sprzed zapisu edytowanej komorki. Te same COALESCE co przy
+        budowie arkusza (work -> src), zeby klucz byl identyczny z tym,
+        ktory poszedl do portalu RFQ.
+        """
+        if pole == "numer":
+            sql = ("SELECT COALESCE(NULLIF(TRIM(work_drawing_no), ''), "
+                   "src_drawing_no) FROM items WHERE id = ?")
+        else:
+            sql = ("SELECT COALESCE(NULLIF(TRIM(work_name), ''), src_name) "
+                   "FROM items WHERE id = ?")
+        try:
+            row = self.db_manager.project_con.execute(sql, (item_id,)).fetchone()
+        except Exception:
+            return ""
+        return (row[0] or "") if row else ""
 
-        Używane przed operacjami, które w RM_BAZA są nieodwracalne, a w portalu
-        niewidoczne: kasowanie detalu z BOM i ponowna wysyłka do innego RFQ.
-        Czyta lokalny cache (rfq_results), więc działa też przy padniętym portalu.
+    def _rfq_zrywa_powiazanie(self, stary_klucz, nowy_klucz, co):
+        """True = wolno zapisac. False = user sie rozmyslil, cofnij zmiane.
+
+        RFQ dopasowuje pozycje po KLUCZU, ktorym jest numer rysunku, a dla
+        pozycji znormalizowanych (bez numeru) NAZWA — dokladnie tak, jak
+        RM_BAZA go wysyla (`rfq_key` przy budowie arkusza). Zmiana tego,
+        co jest kluczem, zostawia w portalu stara wartosc: kooperanci dalej
+        wyceniaja, a arkusz przestaje te wycene widziec. Po cichu.
+
+        Dlatego pytamy PRZED zapisem — i to samo dotyczy nazwy, jesli
+        pozycja nie ma numeru (14.09.2026: "zmienilem nazwe, przypisanie
+        zniknelo").
+
+        Czyta lokalny cache `rfq_results`, wiec nie odpytuje portalu.
+        """
+        stary = str(stary_klucz or "").strip()
+        nowy = str(nowy_klucz or "").strip()
+        if not stary or stary.upper() == nowy.upper():
+            return True
+        try:
+            w_rfq = self._pozycje_w_rfq([stary])
+        except Exception:
+            return True                 # nie umiemy sprawdzic - nie blokujemy
+        if not w_rfq:
+            return True
+        kod, ofert = list(w_rfq.values())[0]
+        of = ", %d ofert(y)" % ofert if ofert else ""
+        return messagebox.askyesno(
+            "Pozycja jest w wycenie",
+            "„%s” jest w zapytaniu ofertowym %s%s.\n\n"
+            "%s to KLUCZ, po ktorym arkusz odnajduje te wycene. "
+            "Po zmianie na „%s” wycena ZNIKNIE z arkusza — w portalu "
+            "zostanie stara wartosc, a kooperanci dalej beda wyceniac.\n\n"
+            "Zmienic mimo to?" % (stary, kod, of, co, nowy),
+            icon="warning", default="no")
+
+    def _pozycje_w_rfq(self, numery, tylko_aktywne=True):
+        """{klucz: (kod_rfq, liczba_ofert)} dla tych z `numery`, ktore sa
+        w zapytaniu ofertowym. Pusty slownik, gdy zadna nie jest (albo brak danych).
+
+        Uzywane przed operacjami, ktore w RM_BAZA sa nieodwracalne, a w portalu
+        niewidoczne: kasowanie detalu z BOM, ponowna wysylka do innego RFQ,
+        zmiana klucza (numer / nazwa znormalizowanej).
+
+        ⚠️ Czyta przez RM_SERWER (`master_read`), tak samo jak kolumna WYCENA
+        w arkuszu. Do 14.09.2026 czytalo `db_manager.master_con`, ktore od
+        przejscia na serwer jest ZAWSZE None — funkcja po cichu zwracala {}
+        i zadne z tych ostrzezen nigdy nie padlo.
+
+        Klucz w slowniku = wartosc z `numery` (dokladne dopasowanie, jak
+        `rfq_by_drawing` przy budowie arkusza). Przy kilku RFQ na ten sam
+        detal wygrywa NAJNOWSZE (rfq-wyniki sa po rfq_id rosnaco).
         """
         numery = [str(n).strip() for n in numery if str(n or "").strip()]
-        if not numery:
+        if not numery or not self.db_manager:
             return {}
+        zamkniete = ("archived", "cancelled", "decided", "ordered")
+        szukane = set(numery)
+        wynik = {}
         try:
-            con = self.db_manager.master_con if self.db_manager else None
-            if not con:
-                return {}
-            placeholders = ",".join("?" * len(numery))
-            # rfq_status: pomijamy zamknięte/zarchiwizowane — o nie nie ma sporu
-            warunek = ""
-            if tylko_aktywne:
-                warunek = ("AND COALESCE(rfq_status,'') NOT IN "
-                           "('archived','cancelled','decided','ordered')")
-            return {
-                r[0]: (r[1] or "?", r[2] or 0)
-                for r in con.execute(
-                    f"""SELECT drawing_number, rfq_code, COALESCE(offers_count, 0)
-                          FROM rfq_results
-                         WHERE drawing_number IN ({placeholders}) {warunek}""",
-                    numery).fetchall()
-            }
+            for w in self.db_manager.master_read("rfq-wyniki"):
+                nr = str(w["drawing_number"] or "").strip()
+                if nr not in szukane:
+                    continue
+                if tylko_aktywne and (w["rfq_status"] or "") in zamkniete:
+                    continue
+                wynik[nr] = ("?", w["offers_count"] or 0)
+            # rfq-wyniki nie niesie kodu RFQ — dobieramy go tylko dla trafien
+            # (zwykle 1-2), najnowsze zapytanie pierwsze (ORDER BY rfq_id DESC).
+            for nr in list(wynik):
+                for d in self.db_manager.master_read(
+                        "rfq-wycena-detalu", {"drawing_number": nr}):
+                    if tylko_aktywne and (d["rfq_status"] or "") in zamkniete:
+                        continue
+                    wynik[nr] = (d["rfq_code"] or "?", wynik[nr][1])
+                    break
         except Exception as e:
-            print(f"⚠️  RFQ: nie udało się sprawdzić pozycji w zapytaniach: {e}")
+            print(f"⚠️  RFQ: nie udalo sie sprawdzic pozycji w zapytaniach: {e}")
             return {}
+        return wynik
 
     def _rfq_pending_rows(self):
         """[(rfq_code, rfq_id, kooperant, dni_do_terminu, wszedł?)] — kooperanci,
@@ -25226,8 +25288,7 @@ class MainWindow(tk.Tk):
                 drawing_no = str(self.sheet.get_cell_data(row, 1) or "").strip()
             if not drawing_no:
                 return
-            master_con = self.db_manager.master_con if self.db_manager else None
-            if not master_con:
+            if not self.db_manager:
                 return
             # Detal MOŻE być w kilku RFQ naraz. Pokazujemy NAJNOWSZE (najwyższe
             # rfq_id) — bez ORDER BY wybór był arbitralny, zależny od kolejności
