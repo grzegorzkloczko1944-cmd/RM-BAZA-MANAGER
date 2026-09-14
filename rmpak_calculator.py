@@ -340,23 +340,35 @@ class RmpakCalculatorDialog:
         self.semi_supplier_btn.grid(row=3, column=7, sticky="w", padx=(4, 0), pady=(4, 0))
         self.semi_supplier_id = None
 
-        tk.Label(bottom, text="Stawka (PLN/h):").grid(row=4, column=0, sticky="e", padx=(4, 2), pady=(6, 0))
+        # ROZBICIE POLPRODUKTOW — wlasny wiersz, bo pole „Nazwa polproduktu"
+        # nie miesci nawet dwoch pozycji (15.09.2026). Jedna linia na
+        # polprodukt: symbol, nazwa, ilosc, cena kartoteki, koszt.
+        self.semi_lista_frame = tk.Frame(bottom)
+        self.semi_lista_frame.grid(row=4, column=0, columnspan=8, sticky="we",
+                                   padx=(4, 8), pady=(2, 0))
+        self.semi_lista_var = tk.StringVar(value="")
+        self.semi_lista_label = tk.Label(
+            self.semi_lista_frame, textvariable=self.semi_lista_var,
+            justify="left", anchor="w", font=("Consolas", 8), fg="#31708f")
+        self.semi_lista_label.pack(anchor="w")
+
+        tk.Label(bottom, text="Stawka (PLN/h):").grid(row=5, column=0, sticky="e", padx=(4, 2), pady=(6, 0))
         self.item_rate_var = tk.StringVar(value=str(self.hourly_rate))
         item_rate_entry = tk.Entry(bottom, textvariable=self.item_rate_var, width=10)
-        item_rate_entry.grid(row=4, column=1, padx=(0, 8), pady=(6, 0))
+        item_rate_entry.grid(row=5, column=1, padx=(0, 8), pady=(6, 0))
         self._bind_select_all(item_rate_entry)
         self.item_rate_var.trace_add("write", self._recalc)
 
-        tk.Label(bottom, text="Cena/szt.:").grid(row=4, column=2, sticky="e", padx=(4, 2), pady=(6, 0))
+        tk.Label(bottom, text="Cena/szt.:").grid(row=5, column=2, sticky="e", padx=(4, 2), pady=(6, 0))
         self.price_per_unit_var = tk.StringVar(value="—")
-        tk.Label(bottom, textvariable=self.price_per_unit_var, font=("", 11, "bold"), fg="darkgreen", width=10, anchor="w").grid(row=4, column=3, sticky="w", pady=(6, 0))
+        tk.Label(bottom, textvariable=self.price_per_unit_var, font=("", 11, "bold"), fg="darkgreen", width=10, anchor="w").grid(row=5, column=3, sticky="w", pady=(6, 0))
 
-        tk.Label(bottom, text="Wartość partii:").grid(row=4, column=4, sticky="e", padx=(4, 2), pady=(6, 0))
+        tk.Label(bottom, text="Wartość partii:").grid(row=5, column=4, sticky="e", padx=(4, 2), pady=(6, 0))
         self.price_total_var = tk.StringVar(value="—")
-        tk.Label(bottom, textvariable=self.price_total_var, font=("", 11, "bold"), fg="navy", width=12, anchor="w").grid(row=4, column=5, sticky="w", pady=(6, 0))
+        tk.Label(bottom, textvariable=self.price_total_var, font=("", 11, "bold"), fg="navy", width=12, anchor="w").grid(row=5, column=5, sticky="w", pady=(6, 0))
 
         tk.Button(bottom, text="💾 Zapisz cenę/szt.", command=self._save_price,
-                  bg="#4CAF50", fg="white", font=("", 10, "bold")).grid(row=4, column=6, columnspan=2, padx=(16, 0), pady=(6, 0))
+                  bg="#4CAF50", fg="white", font=("", 10, "bold")).grid(row=5, column=6, columnspan=2, padx=(16, 0), pady=(6, 0))
 
         self._update_mode_widgets()
 
@@ -1037,6 +1049,8 @@ class RmpakCalculatorDialog:
         ma pokazywac cene z chwili kalkulacji.
         """
         self._polprodukt = None
+        self._polprodukty = []
+        self.semi_lista_var.set("")
         vals = self.tree.item(iid, "values")
         klucz = (str(vals[1]).strip() or str(vals[2]).strip())
         if not klucz:
@@ -1093,7 +1107,40 @@ class RmpakCalculatorDialog:
         if znane:
             # Cena za JEDEN detal: suma (kartoteka x ilosc na sztuke).
             self.semi_price_var.set("%.2f" % razem)
+        # Rozbicie pod polami — z tych samych cen, wiec bez drugiego pytania.
+        self._opisz_polprodukty({k: {"CenaEwidencyjna": v}
+                                 for k, v in ceny.items()})
 
+
+    def _opisz_polprodukty(self, ceny=None):
+        """Wypelnia wiersz rozbicia pod polami polproduktu.
+
+        `ceny` — mapa {SYMBOL: pozycja z trybu `magazyn`}; gdy None, wiersz
+        pokazuje same ilosci (bez cen), zeby nie pytac mostu drugi raz.
+        """
+        rel = getattr(self, "_polprodukty", None)
+        if not rel:
+            self.semi_lista_var.set("")
+            return
+        linie, razem = [], 0.0
+        for r in rel:
+            k = (ceny or {}).get((r["symbol"] or "").strip().upper(), {})
+            cena = k.get("CenaEwidencyjna")
+            ile = int(r["ilosc_na_szt"] or 1)
+            if cena in (None, ""):
+                linie.append("   %-14s %-26s x%-3d  cena: — BRAK —"
+                             % (r["symbol"], (r["nazwa"] or "")[:26], ile))
+                continue
+            koszt = float(cena) * ile
+            razem += koszt
+            linie.append("   %-14s %-26s x%-3d  %8.2f  =  %9.2f"
+                         % (r["symbol"], (r["nazwa"] or "")[:26], ile,
+                            float(cena), koszt))
+        naglowek = ("Polprodukty (%d) — cena kartoteki x ilosc na detal:"
+                    % len(rel))
+        stopka = ("   RAZEM na 1 detal: %.2f PLN" % razem) if razem else ""
+        self.semi_lista_var.set(chr(10).join([naglowek] + linie
+                                             + ([stopka] if stopka else [])))
 
     def _on_mode_change(self):
         self._update_mode_widgets()
