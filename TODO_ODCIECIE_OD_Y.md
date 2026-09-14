@@ -23,7 +23,17 @@ Kolejność: pkt 0 (ustalenia) → 2 (bezpieczne) → 1 (główne) → 3 (porzą
       `subiekt_mapowania.stats()` pokaże liczby wpisów w każdym.
 - [ ] Co mają stacje w `C:\RMPAK_CLIENT\sync_config.json` → `paths.master`
       i `paths.projects_dir`? (wystarczy zajrzeć na 2–3 stanowiska)
-- [ ] Czy `Y:\RM_BAZA\` w ogóle jeszcze istnieje / jest zapisywalne?
+- [x] Czy `Y:\RM_BAZA\` jeszcze istnieje? **NIE — usunięte** (14.09.2026).
+      Program „działa", bo `subiekt_mapowania.get/get_many` zwracają `{}`
+      przy braku pliku, a `put_many` przy zasiewie jest połykany
+      (`subiekt_projekt.py:1116`, `return 0`). Jeśli config stacji ma
+      `master` na `Y:` → mapowania są MARTWE od dnia usunięcia: ręczne
+      dopasowania i scalenia kartotek nie są zapamiętywane, nikt o tym nie wie.
+- [ ] **Test rozstrzygający, na stacji, przed czymkolwiek:**
+      `python -c "import subiekt_mapowania as m; print(m.DB_PATH); print(m.stats())"`
+      Ścieżka na `Y:` + wyjątek/pusto = mapowania martwe (wariant 1).
+      Ścieżka na udziale serwera + liczby = plik żyje, ale poza RM_SERWER
+      (wariant 2 — serwer ma własny, pusty w `dane\`; scalić do niego).
 
 ---
 
