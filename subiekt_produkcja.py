@@ -358,11 +358,22 @@ def dokumenty_produkcji(numer_projektu, timeout=600):
 
 
 def pw_do_rw(numer_projektu, timeout=600):
-    """Pozycje potwierdzonego PW — źródło dla RW. Zwraca (pozycje, numer, blad).
+    """Pozycje WSZYSTKICH PW projektu — źródło dla RW.
+
+    Zwraca (pozycje, numery_pw, blad), gdzie `numery_pw` to opis źródła
+    do Uwag dokumentu („PW 5/MASTER/2026 + PW 6/MASTER/2026").
 
     RW NIE jest budowane z BOM-u ani z kalkulatora (§11 ustaleń): bierze
-    dokładnie to, co przyjęło PW. Dzięki temu przyjęcie i wydanie nie
+    dokładnie to, co przyjęły PW. Dzięki temu przyjęcie i wydanie nie
     rozjadą się, nawet gdy ktoś później zmieni ilości w projekcie.
+
+    ⚠️ SUMUJEMY PO SYMBOLU, bo projekt może mieć DOWOLNĄ liczbę PW
+    (14.09.2026). Wcześniej przy kilku PW funkcja odmawiała („nie wiem,
+    z którego budować") — a odpowiedzią jest suma ruchów po PROJEKT +
+    SYMBOL: przyjęto dwie partie po 3 szt., więc wydajemy 6.
+
+    Cena z PIERWSZEGO przyjęcia danego symbolu — i tak nie trafia na RW
+    (patrz `plan_rw`: RW idzie bez ceny, koszt rozchodu liczy Subiekt).
     """
     try:
         dok = dokumenty_produkcji(numer_projektu, timeout)
@@ -373,14 +384,23 @@ def pw_do_rw(numer_projektu, timeout=600):
     if not pw:
         return [], None, ("Nie znaleziono PW tego projektu w Subiekcie. "
                           "Najpierw wystaw PW — RW powstaje z przyjęcia, nie z BOM-u.")
-    if len(pw) > 1:
-        numery = ", ".join(d["numer"] for d in pw)
-        return [], None, (f"Dla tego projektu istnieje kilka PW ({numery}). "
-                          "RM_BAZA nie wie, z którego budować RW — zostaw jedno, "
-                          "usuwając zbędne w Subiekcie.")
-    if not pw[0]["pozycje"]:
-        return [], pw[0]["numer"], f"PW {pw[0]['numer']} nie ma pozycji."
-    return pw[0]["pozycje"], pw[0]["numer"], None
+
+    zebrane = {}
+    for dokument in pw:
+        for p in dokument.get("pozycje") or []:
+            klucz = (p.get("symbol") or "").strip().upper()
+            if not klucz:
+                continue
+            w = zebrane.setdefault(klucz, {"symbol": p["symbol"],
+                                           "nazwa": p.get("nazwa") or "",
+                                           "ilosc": 0.0,
+                                           "cena": p.get("cena") or 0})
+            w["ilosc"] += float(p.get("ilosc") or 0)
+
+    numery = " + ".join(d["numer"] for d in pw)
+    if not zebrane:
+        return [], numery, ("PW %s nie ma pozycji." % numery)
+    return ([zebrane[k] for k in sorted(zebrane)], numery, None)
 
 
 def plan_rw(numer_projektu, pozycje, numer_pw, magazyn="MASTER"):

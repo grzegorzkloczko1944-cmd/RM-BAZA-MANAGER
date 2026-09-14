@@ -437,6 +437,11 @@ danego symbolu pod projektem.
 „RW dopiero po PW" zostaje — wydanie z magazynu ma sens dopiero wtedy, gdy
 coś na ten magazyn przyjęto.
 
+**RW z kilku PW:** `pw_do_rw` sumuje pozycje ze WSZYSTKICH PW projektu
+po symbolu (dwie partie po 3 szt. → RW na 6). Wcześniej odmawiało:
+„RM_BAZA nie wie, z którego budować RW — zostaw jedno". Numer źródła
+w Uwagach RW to teraz lista („PW 5/MASTER/2026 + PW 6/MASTER/2026").
+
 **Jedyne, czego trzeba pilnować:** nie zdublować tej samej operacji. To
 ocena użytkownika, który widzi pozycje w podglądzie przed wystawieniem.
 Ostrzeżenie o POKRYWAJĄCYCH SIĘ pozycjach (te same symbole co na wcześniejszym
