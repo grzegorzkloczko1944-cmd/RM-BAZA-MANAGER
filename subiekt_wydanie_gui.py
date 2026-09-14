@@ -1697,8 +1697,16 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
 def open_window(parent, project_id, project_name=None):
     """Punkt wejścia dla RM_BAZA."""
     if not project_id:
-        messagebox.showwarning("Wydanie z magazynu",
-                               "Najpierw wybierz projekt.", parent=parent)
+        # Okno wydania LICZY potrzebe z ZK i PW konkretnego projektu, wiec
+        # bez niego nie ma czego pokazac. Mowimy to wprost, zamiast otwierac
+        # puste okno (14.09.2026 — schowek dziala inaczej: tam projekt
+        # siedzi przy pozycji i okno startuje bez niego).
+        messagebox.showinfo(
+            "Wydanie z magazynu",
+            "To okno pokazuje, co zostało do wydania W KONKRETNYM PROJEKCIE. "
+            "Wybierz projekt w arkuszu i otwórz ponownie. "
+            "Jeśli chcesz wydawać na różne projekty naraz — użyj SCHOWKA.",
+            parent=parent)
         return None
     return WydanieWindow(parent, project_id, project_name)
 

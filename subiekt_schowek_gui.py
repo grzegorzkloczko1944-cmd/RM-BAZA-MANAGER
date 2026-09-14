@@ -760,6 +760,222 @@ class SchowekWindow(WydanieWindow):
                 break          # nie brniemy dalej — reszta zostaje w schowku
         self._po_wystawieniu(s, udane, bledy)
 
+    def _usun_z_sesji(self):
+        """Kasuje pozycję razem z historią — cofnięcie POMYŁKI skanowania.
+
+        To nie jest zwrot: zwrot zostawia ślad (przycisk „Zdejmij"), a to
+        czyści tak, jakby skanu nigdy nie było.
+        """
+        s = self._schowek()
+        projekt, symbol = self._zaznaczony_wiersz()
+        if not s or not symbol:
+            return self._uwaga("Zaznacz wiersz, który chcesz usunąć.", None)
+        if not messagebox.askyesno(
+                "Usuń pozycję",
+                "Usunąć „%s” (projekt %s) razem z całą historią ruchów?\n\n"
+                "To jest cofnięcie POMYŁKI skanowania — nie zostanie żaden "
+                "ślad.\n"
+                "Jeśli monter fizycznie oddaje element, użyj „Zdejmij”."
+                % (symbol, projekt or "—"), parent=self):
+            return
+        try:
+            SCH.usun_pozycje(s["id"], symbol, projekt=projekt)
+        except SCH.BladSchowka as e:
+            return self._uwaga("⛔ %s" % e, BLAD_TLO)
+        self._odswiez_zawartosc()
+
+    def _wyczysc_sesje(self):
+        """Kasuje CAŁY schowek — wszystkie projekty naraz."""
+        s = self._schowek()
+        if not s or not self.zawartosc:
+            return
+        if not messagebox.askyesno(
+                "Wyczyść schowek",
+                "Usunąć WSZYSTKIE %d pozycji ze schowka?\n\n"
+                "Historia przepadnie — to nie jest zwrot towaru."
+                % len(self.zawartosc), parent=self):
+            return
+        try:
+            SCH.wyczysc(s["id"])
+        except SCH.BladSchowka as e:
+            return self._uwaga("⛔ %s" % e, BLAD_TLO)
+        self._odswiez_zawartosc()
+
+    def _pozycje_sesji(self):
+        """Wszystko, co w schowku — do podglądu i liczników."""
+        return [dict(p) for p in self.zawartosc]
+
+    @property
+    def sesja(self):
+        """Zgodność z oknem wydań: {SYMBOL: ilość}."""
+        return {p["symbol"]: p["ilosc"] for p in getattr(self, "zawartosc", [])}
+
+    @sesja.setter
+    def sesja(self, _wartosc):
+        # Okno wydań zeruje sesję po zapisie; w schowku o stanie decyduje
+        # plik roboczy, więc podstawienie ignorujemy.
+        pass
+
+    def _uwagi_rw(self, projekt, pozycje):
+        """Uwagi JEDNEGO dokumentu: numer projektu w 1. wierszu, ludzie niżej.
+
+        Monterów bierzemy z POZYCJI TEGO PROJEKTU — na dokument trafiają
+        tylko ci, którzy faktycznie coś z niego wzięli. Uwagi się drukują,
+        więc ma być widać, komu towar poszedł.
+        """
+        from subiekt_zamowienia import zloz_uwagi
+        czesci = []
+        wydal = (self.var_wydal.get() or "").strip()
+        if wydal:
+            czesci.append("WYDAŁ: %s" % wydal)
+        ludzie = []
+        for p in pozycje:
+            for n in (p.get("monterzy") or "").split(","):
+                n = n.strip()
+                if n and n not in ludzie:
+                    ludzie.append(n)
+        if ludzie:
+            czesci.append("POBRAŁ: %s" % ", ".join(ludzie))
+        return zloz_uwagi(projekt, "   ".join(czesci) if czesci else None)
+
+    def _podglad_rw(self):
+        """Co powstanie w Subiekcie — OSOBNA SEKCJA NA KAŻDY PROJEKT.
+
+        Nie dziedziczymy wersji z okna wydań: tamta woła `_uwagi_rw()` bez
+        argumentów i pokazuje jeden dokument, a tu powstaje ich tyle, ile
+        projektów.
+        """
+        if not self.zawartosc:
+            return
+        grupy = {}
+        for p in self.zawartosc:
+            grupy.setdefault(p.get("projekt") or "(brak projektu)", []).append(p)
+
+        okno = tk.Toplevel(self)
+        okno.title("Podgląd — co powstanie w Subiekcie")
+        okno.geometry("900x600")
+        okno.transient(self)
+        tk.Label(okno, text="POWSTANIE %d DOKUMENT(ÓW) RW" % len(grupy),
+                 bg="#2980b9", fg="white", font=("Arial", 11, "bold"),
+                 anchor="w", padx=12, pady=8).pack(fill=tk.X)
+
+        stopka = tk.Frame(okno, padx=12, pady=10)
+        stopka.pack(side=tk.BOTTOM, fill=tk.X)
+        tk.Button(stopka, text="Zamknij", command=okno.destroy,
+                  width=12).pack(side=tk.RIGHT)
+
+        plotno = tk.Frame(okno)
+        plotno.pack(fill=tk.BOTH, expand=True, padx=10, pady=(8, 0))
+        for projekt, poz in sorted(grupy.items()):
+            szt = sum(x["ilosc"] for x in poz)
+            tk.Label(plotno, text="RW — projekt %s   (%d poz. / %s szt.)"
+                     % (projekt, len(poz), _ilo(szt)), anchor="w",
+                     font=("Arial", 10, "bold"), bg="#eef3f7",
+                     padx=8, pady=4).pack(fill=tk.X, pady=(8, 0))
+            tk.Label(plotno, text="Uwagi: " + self._uwagi_rw(
+                         projekt, poz).replace(chr(10), "  ⏎  "),
+                     font=("Arial", 8), fg="gray30", anchor="w",
+                     padx=8).pack(fill=tk.X)
+            tab = ttk.Treeview(plotno, columns=("symbol", "nazwa", "ilosc",
+                                                "stan", "pobral"),
+                               show="headings", height=min(len(poz), 6))
+            for k, n, w in (("symbol", "Symbol", 150), ("nazwa", "Nazwa", 250),
+                            ("ilosc", "Ilość", 70), ("stan", "Stan", 60),
+                            ("pobral", "Pobrał", 130)):
+                tab.heading(k, text=n)
+                tab.column(k, width=w,
+                           anchor="e" if k in ("ilosc", "stan") else "w")
+            tab.tag_configure("brak", background=BLAD_TLO)
+            for x in poz:
+                stan = self._stan_symbolu(x["symbol"])
+                # Czerwony wiersz od razu mówi, czego Subiekt nie wyda.
+                zle = stan is not None and x["ilosc"] > stan
+                tab.insert("", tk.END, tags=("brak",) if zle else (),
+                           values=(x["symbol"], x.get("nazwa", ""),
+                                   _ilo(x["ilosc"]),
+                                   _ilo(stan) if stan is not None else "—",
+                                   x.get("monterzy") or "—"))
+            tab.pack(fill=tk.X, padx=8)
+        wysrodkuj(okno, self)
+
+    # ── rozliczenie: JEDNO RW NA PROJEKT ─────────────────────────────────
+    def _zakoncz(self):
+        """Tyle dokumentów, ile projektów w schowku.
+
+        NIE dziedziczymy `_zakoncz` z okna wydań: tamto zna jeden projekt
+        i wystawia jeden dokument. Schowek zbiera pozycje z wielu projektów
+        naraz, a każdy RW musi mieć SWÓJ numer w Uwagach — po nim Subiekt
+        liczy wydania per projekt (WydanieStan.cs).
+        """
+        if not self.polaczony:
+            return self._uwaga("⛔ Brak połączenia z Subiektem — "
+                               "kliknij „Odśwież”.", BLAD_TLO)
+        s = self._schowek()
+        if not s or not self.zawartosc:
+            return
+        grupy = {}
+        for poz in self.zawartosc:
+            grupy.setdefault(poz.get("projekt") or "", []).append(poz)
+        if "" in grupy:
+            return messagebox.showerror(
+                "Pozycje bez projektu",
+                "W schowku są pozycje bez przypisanego projektu.\n\n"
+                "Usuń je albo zeskanuj ponownie z wybranym projektem — "
+                "RW musi mieć numer projektu w Uwagach.", parent=self)
+
+        # ⛔ TWARDA BLOKADA — BRAKI ZATRZYMUJĄ CAŁE WYDANIE.
+        #
+        # Decyzja użytkownika (14.09.2026): „wszystkie ilości mają się
+        # zgadzać z magazynem, dopiero można puścić RW do realizacji.
+        # Bez wyjątków".
+        #
+        # Sprawdzone na demo: Subiekt i tak ODRZUCA RW ponad stan
+        # (zapisano=False, bez numeru), a suchy przebieg tego NIE wykrywa —
+        # zgłasza tylko brak ceny. Bez tej kontroli magazynier dowiadywałby
+        # się na końcu, z komunikatu, który nie mówi czego brakuje.
+        #
+        # Blokujemy CAŁE wydanie, nie tylko projekt z brakiem: dokumenty
+        # powstają w pętli, a przerwanie w środku zostawiłoby część
+        # projektów rozliczonych, a część nie.
+        braki = self._sprawdz_stany(grupy)
+        if braki:
+            lista = "\n".join(
+                "   %-20s potrzeba %s,  na stanie %s   →  BRAKUJE %s"
+                % (sym, _ilo(chc), _ilo(ma), _ilo(chc - ma))
+                for sym, chc, ma in braki[:15])
+            wiecej = ("\n   … i %d dalszych" % (len(braki) - 15)
+                      if len(braki) > 15 else "")
+            return messagebox.showerror(
+                "Nie można wydać — brakuje na magazynie",
+                "WYDANIE WSTRZYMANE. Subiekt nie wyda towaru, którego nie ma "
+                "na stanie.\n\n%s%s\n\n"
+                "Popraw ilości przyciskiem „Popraw ilość” albo usuń te "
+                "pozycje ze schowka, a potem wystaw ponownie.\n\n"
+                "Nie powstał ŻADEN dokument — pozostałe projekty też czekają."
+                % (lista, wiecej), parent=self)
+
+        opis = "\n".join(
+            "   %s: %d poz. / %s szt."
+            % (pr, len(poz), _ilo(sum(x["ilosc"] for x in poz)))
+            for pr, poz in sorted(grupy.items()))
+        if not messagebox.askyesno(
+                "Wydanie z magazynu",
+                "Powstanie %d dokument(ów) RW:\n\n%s\n\nWystawiamy?"
+                % (len(grupy), opis), parent=self):
+            return
+
+        self.btn_zakoncz.config(state=tk.DISABLED, text="Zapisuję…")
+        self.update_idletasks()
+        udane, bledy = [], []
+        for projekt, pozycje in sorted(grupy.items()):
+            try:
+                numer = self._wystaw_rw(projekt, pozycje)
+                udane.append((projekt, numer, len(pozycje)))
+            except Exception as e:
+                bledy.append((projekt, str(e)))
+                break          # nie brniemy dalej — reszta zostaje w schowku
+        self._po_wystawieniu(s, udane, bledy)
+
     def _sprawdz_stany(self, grupy):
         """[(symbol, chciane, na_stanie)] dla pozycji bez pokrycia.
 
@@ -896,9 +1112,8 @@ class SchowekWindow(WydanieWindow):
 def open_window(parent, project_id, project_name=None,
                 con_projektu=None, mamy_lock=False):
     """Punkt wejścia dla RM_BAZA."""
-    if not project_id:
-        messagebox.showwarning("Schowek wydań",
-                               "Najpierw wybierz projekt.", parent=parent)
-        return None
+    # BEZ WYMOGU PROJEKTU — schowek nie należy do projektu. Gdy w arkuszu
+    # nic nie wybrano, okno startuje z pustym polem „Projekt pozycji"
+    # i magazynier wybiera go z listy przed pierwszym skanem.
     return SchowekWindow(parent, project_id, project_name,
                          con_projektu=con_projektu, mamy_lock=mamy_lock)

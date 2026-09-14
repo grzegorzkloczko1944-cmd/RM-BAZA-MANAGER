@@ -31011,6 +31011,32 @@ class MainWindow(tk.Tk):
 
         subiekt_zlozenia_gui.open_window(self, self.current_project_id, project_name)
 
+    def _okno_jedno_wystapienie(self, pole):
+        """True = można otworzyć. False = okno już jest, podnosimy istniejące.
+
+        Dwa okna wydania to dwa niezależne bufory na ten sam magazyn —
+        magazynier skanowałby do jednego, patrzył w drugie i wydał dwa razy
+        ten sam towar. Dlatego zamiast drugiego okna PODNOSIMY to, które
+        już stoi (14.09.2026: „nie dało się odpalić duplikatów").
+        """
+        okno = getattr(self, pole, None)
+        try:
+            zyje = okno is not None and okno.winfo_exists()
+        except Exception:
+            zyje = False
+        if not zyje:
+            setattr(self, pole, None)
+            return True
+        try:
+            okno.deiconify()          # gdyby było zminimalizowane
+            okno.lift()
+            okno.focus_force()
+            okno.bell()
+        except Exception:
+            setattr(self, pole, None)
+            return True               # okno w złym stanie — pozwól otworzyć nowe
+        return False
+
     def open_wydanie_window(self):
         """Okno magazyniera „Wydanie z magazynu" — przycisk 📤 Wydaj.
 
@@ -31026,9 +31052,10 @@ class MainWindow(tk.Tk):
         To NIE jest zamiennik starego skanera „Uzupełnianie DOSTARCZONO" —
         tamten obsługuje projekty prowadzone starą ścieżką i zostaje.
         """
-        if not self.current_project_id:
-            messagebox.showwarning("Wydanie z magazynu",
-                                   "Najpierw wybierz projekt.", parent=self)
+        # BEZ WYMOGU PROJEKTU (14.09.2026). Magazynier otwiera okno rano
+        # i pracuje na nim cały dzień; projekt wybiera w samym oknie, przy
+        # pozycji. Wymuszanie wyboru w arkuszu było zbędnym krokiem.
+        if not self._okno_jedno_wystapienie("_okno_wydania"):
             return
         try:
             import subiekt_wydanie_gui
@@ -31050,7 +31077,8 @@ class MainWindow(tk.Tk):
         except Exception:
             project_name = None
 
-        subiekt_wydanie_gui.open_window(self, self.current_project_id, project_name)
+        self._okno_wydania = subiekt_wydanie_gui.open_window(
+            self, self.current_project_id, project_name)
 
     def open_schowek_window(self):
         """Okno „Schowek wydań" — przycisk 🧺 Schowek, obok „Wydaj".
@@ -31065,9 +31093,9 @@ class MainWindow(tk.Tk):
         idzie do poczekalni w master i arkusz nałoży go przy „Przejmij Lock"
         (SCHOWEK_RW_ALGORYTM.md §4.4). Dlatego okno otwieramy zawsze.
         """
-        if not self.current_project_id:
-            messagebox.showwarning("Schowek wydań",
-                                   "Najpierw wybierz projekt.", parent=self)
+        # BEZ WYMOGU PROJEKTU: schowek jest JEDEN na stanowisko i nie
+        # należy do projektu — projekt wybiera się przy pozycji.
+        if not self._okno_jedno_wystapienie("_okno_schowka"):
             return
         try:
             import subiekt_schowek_gui
@@ -31086,7 +31114,7 @@ class MainWindow(tk.Tk):
         except Exception:
             project_name = None
 
-        subiekt_schowek_gui.open_window(
+        self._okno_schowka = subiekt_schowek_gui.open_window(
             self, self.current_project_id, project_name,
             con_projektu=self.db_manager.project_con,
             mamy_lock=bool(self.have_lock))
