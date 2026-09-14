@@ -62,16 +62,47 @@ from subiekt_konfig import CONFIG_PATH
 # project_71.sqlite" (znalezione 2026-09-03). Czytamy teraz ten sam
 # sync_config.json co reszta apki, zamiast duplikowac logike.
 _SYNC_CONFIG_PATH = r"C:\RMPAK_CLIENT\sync_config.json"
-_PROJECTS_DIR_FALLBACK = r"Y:\RM_BAZA\projects"
+
+#: Bazy projektow leza na udziale serwera (przenosiny 12.09.2026).
+#: To ta sama wartosc, co DEFAULT_PROJECTS_DIR / PROJEKTY_NA_SERWERZE
+#: w RM_BAZA_v15_MAG_STATS_ORG.py — powtorzona, bo tamten modul to GUI
+#: i jego import uruchomilby cala aplikacje.
+_PROJEKTY_NA_SERWERZE = r"\\W2019S\RM_SERWER$\RM_BAZA_projects"
+
+#: Koncowki sciezek sprzed przenosin (dowolna litera dysku). Config stacji,
+#: ktory tak sie konczy, wskazuje katalog przemianowany na `$projects` —
+#: czyli nieistniejacy.
+_STARE_KATALOGI_PROJEKTOW = (r"\RM_BAZA\PROJECTS", r"\RM_BAZA\PROJECTS_MAG")
 
 
 def _projects_dir():
+    r"""Katalog z bazami projektow — z configu, ze stara sciezka podmieniona.
+
+    ⚠️ Stacje maja w `sync_config.json` wpisy sprzed przenosin
+    (`Y:/RM_BAZA/projects`). Arkusz glowny sam je przepisuje na udzial serwera
+    (`_na_serwer()` w RM_BAZA), ale okna Subiekta czytaly config SUROWO i
+    dostawaly katalog, ktorego juz nie ma.
+
+    Objaw nie byl bledem, tylko CISZA: `dane_z_bom()` (subiekt_zamowienia)
+    przy braku pliku robi `return {}`, wiec okno „Zamowienia do dostawcow"
+    otwieralo sie normalnie, tylko bez dostawcow, typow i przypisania do
+    projektu. U budujacego, z poprawionym configiem, wszystko dzialalo —
+    roznica miedzy stanowiskami, ktorej nikt nie umial wytlumaczyc
+    (zgloszone 14.09.2026). Ta sama pulapka co `project_71.sqlite`
+    z 03.09.2026, tylko bez wyjatku.
+    """
     try:
         with open(_SYNC_CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f)
-        return cfg["paths"]["projects_dir"]
+        wpis = cfg["paths"]["projects_dir"]
     except Exception:
-        return _PROJECTS_DIR_FALLBACK
+        return _PROJEKTY_NA_SERWERZE
+    if not wpis:
+        return _PROJEKTY_NA_SERWERZE
+    tekst = str(wpis).replace("/", "\\").rstrip("\\").upper()
+    if any(tekst.endswith(ogon) for ogon in _STARE_KATALOGI_PROJEKTOW):
+        return _PROJEKTY_NA_SERWERZE
+    return wpis
 
 
 PROJECTS_DIR = _projects_dir()

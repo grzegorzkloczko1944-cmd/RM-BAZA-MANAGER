@@ -228,11 +228,6 @@ def opis_stanu(info):
     return "⬜ brak"
 
 
-def _sciezka_master():
-    """Ścieżka do master.sqlite — leży obok katalogu projektów."""
-    return os.path.join(os.path.dirname(PROJECTS_DIR.rstrip("\\/")), "master.sqlite")
-
-
 def _serwer():
     """RM_SERWER — jedyna droga do mastera RM_BAZA. Konfigurację ustawia
     RM_BAZA przy starcie; ten moduł działa wewnątrz niej."""
@@ -246,20 +241,24 @@ def pracownik_rm_manager(login):
     Funkcja modułowa, nie metoda — korzystają z niej OBA okna prowadzące do
     wysyłki ZD (Zamówienia i Przegląd dokumentów), a każde ma inną klasę.
 
-    ⚠️ Źródłem jest rm_manager.sqlite (baza RM_MANAGER), NIE master.sqlite:
-    tam siedzą tylko `users` do logowania, a `employees` z imieniem, mailem
-    i telefonem — w osobnej bazie obok. Ta sama zasada co w RFQ
-    (_rm_manager_db_path w arkuszu głównym).
+    ⚠️ Źródłem jest baza RM_MANAGER, NIE master: w masterze siedzą tylko
+    `users` do logowania, a `employees` z imieniem, mailem i telefonem —
+    w osobnej bazie na serwerze (operacje z prefiksem `rmm-`).
     """
     try:
-        rm_db = os.path.join(os.path.dirname(os.path.dirname(_sciezka_master())),
-                             "RM_MANAGER", "rm_manager.sqlite")
-        if not os.path.isfile(rm_db):
-            return None
+        # Przez RM_SERWER (`rmm-employees-po-user-login`) — baza RM_MANAGER
+        # lezy na serwerze, nie obok katalogu projektow.
+        #
+        # ⚠️ Sciezka liczona z PROJECTS_DIR wskazywala
+        # `<projekty>/../RM_MANAGER/rm_manager.sqlite`, czyli plik, ktorego
+        # po przenosinach NIE MA NA ZADNEJ STACJI. Straznik `os.path.isfile`
+        # przed wywolaniem zwracal wtedy None i kontakt prowadzacego cicho
+        # znikal z wysylki ZD (14.09.2026). Sama `get_employee_by_user_login`
+        # chodzi przez serwer i sciezke ignoruje — blokowal tylko straznik.
         from rm_manager import get_employee_by_user_login
-        return get_employee_by_user_login(rm_db, login) or None
+        return get_employee_by_user_login(None, login) or None
     except Exception:
-        return None            # brak kontaktu nie może zablokować wysyłki ZD
+        return None            # brak kontaktu nie moze zablokowac wysylki ZD
 
 
 def _nazwy_dostawcow():
