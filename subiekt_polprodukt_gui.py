@@ -45,14 +45,64 @@ def _ilo(x):
         return str(x)
 
 
-def _wysrodkuj(okno, rodzic, szer, wys):
-    okno.update_idletasks()
+def _obszar_monitora(widget):
+    """(lewo, gora, szer, wys) monitora, na ktorym stoi `widget`.
+
+    Tk zna tylko pulpit wirtualny, wiec pytamy Windows o KONKRETNY ekran.
+    `MONITOR_DEFAULTTONEAREST` (2) daje najblizszy monitor takze wtedy, gdy
+    okno wystaje poza krawedz. Zwraca None, gdy sie nie uda — wolajacy ma
+    wtedy wlasny wariant zapasowy.
+    """
     try:
-        x = rodzic.winfo_rootx() + (rodzic.winfo_width() - szer) // 2
-        y = rodzic.winfo_rooty() + (rodzic.winfo_height() - wys) // 3
-    except tk.TclError:
-        x = y = 200
-    okno.geometry("%dx%d+%d+%d" % (szer, wys, max(0, x), max(0, y)))
+        import ctypes
+        from ctypes import wintypes
+
+        class RECT(ctypes.Structure):
+            _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG),
+                        ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", RECT),
+                        ("rcWork", RECT), ("dwFlags", wintypes.DWORD)]
+
+        hwnd = int(widget.winfo_id())
+        user32 = ctypes.windll.user32
+        # Uchwyt Tk wskazuje okno wewnetrzne — bierzemy okno najwyzszego
+        # poziomu, inaczej monitor liczylby sie dla niewlasciwego prostokata.
+        gora = user32.GetAncestor(hwnd, 2)          # GA_ROOT
+        mon = user32.MonitorFromWindow(gora or hwnd, 2)
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if not user32.GetMonitorInfoW(mon, ctypes.byref(info)):
+            return None
+        # rcWork — bez paska zadan, zeby okno nie chowalo sie pod nim.
+        r = info.rcWork
+        return (r.left, r.top, r.right - r.left, r.bottom - r.top)
+    except Exception:
+        return None
+
+
+def _wysrodkuj(okno, rodzic, szer, wys):
+    """Na SRODKU monitora, na ktorym stoi `rodzic`."""
+    okno.update_idletasks()
+    obszar = _obszar_monitora(rodzic if rodzic is not None else okno)
+    if obszar:
+        lewo, gora, mszer, mwys = obszar
+    else:
+        # Bez Win32: srodek pulpitu wirtualnego (moze byc kilka ekranow,
+        # ale to i tak lepsze niz roznica wzgledem okna rodzica).
+        try:
+            lewo, gora = okno.winfo_vrootx(), okno.winfo_vrooty()
+            mszer, mwys = okno.winfo_vrootwidth(), okno.winfo_vrootheight()
+        except tk.TclError:
+            lewo = gora = 0
+            mszer, mwys = 1920, 1080
+    x = lewo + (mszer - szer) // 2
+    y = gora + (mwys - wys) // 2
+    # Nie pozwalamy wyjsc poza monitor przy oknie wiekszym niz ekran.
+    x = max(lewo, x)
+    y = max(gora, y)
+    okno.geometry("%dx%d+%d+%d" % (szer, wys, x, y))
 
 
 class InfoPolproduktWindow(tk.Toplevel):
