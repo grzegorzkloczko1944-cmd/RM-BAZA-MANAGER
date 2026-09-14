@@ -1,6 +1,6 @@
 {
   "protokol": 1,
-  "zbudowano": "2026-09-10 12:38",
-  "sha": "e21b527",
-  "uwaga": "Nowy tryb zk-poz-usun (zmiana dostawcy zlozen) + cena na pozycji PW + PW w trybie dokumenty"
+  "zbudowano": "2026-09-12 15:21",
+  "sha": "4937834",
+  "uwaga": "Tytul dokumentu = sam znacznik RM_BAZA bez numeru projektu (numer ma jedno zrodlo: Uwagi); Uwagi ZD przyjmuja liste wielu projektow"
 }
