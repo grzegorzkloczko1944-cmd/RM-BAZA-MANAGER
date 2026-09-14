@@ -5316,8 +5316,17 @@ class MainWindow(tk.Tk):
             if lock_info:
                 username = lock_info.get('user', '')  # LOGIN
                 locked_by = self._get_user_display_name(username)  # NAZWA
-                # Format: "Nazwa projektu 🔒 [Nazwa Usera]"
-                display_name = f"{name} 🔒 [{locked_by}]"
+                # ⚠️ PORZUCONY LOCK wyglada inaczej niz zywy. Po zabiciu
+                # RM_BAZA (albo padzie stacji) wpis zostaje w tabeli i nikt
+                # go nie kasuje — serwer pozwala go przejac po wygasnieciu
+                # bicia serca, ale user tego NIE WIDZIAL i omijal projekt,
+                # mysac, ze ktos tam pracuje (15.09.2026).
+                minut = self._lock_martwy_od(lock_info)
+                if minut is not None:
+                    display_name = f"{name} 💤 [{locked_by}, {minut} min]"
+                else:
+                    # Format: "Nazwa projektu 🔒 [Nazwa Usera]"
+                    display_name = f"{name} 🔒 [{locked_by}]"
             else:
                 display_name = name
             # Znacznik dla zakonczonych/wstrzymanych - ten sam tekst statusu
@@ -5353,6 +5362,24 @@ class MainWindow(tk.Tk):
 
         print(f"✅ Załadowano {len(active_projects)} projektów ({project_type}, sortowanie: cyfry malejąco → litery A-Z + numery malejąco)")
     
+    def _lock_martwy_od(self, lock_info):
+        """Ile MINUT temu ucichlo bicie serca blokady. None = zywa.
+
+        Granica ta sama, co po stronie serwera (`locks.stale_seconds`,
+        domyslnie 300 s): powyzej niej `lock-przejmij` nadpisze wpis bez
+        pytania, wiec dla usera projekt jest wolny.
+        """
+        znacznik = (lock_info or {}).get("last_heartbeat")
+        if not znacznik:
+            return 9999               # brak bicia = na pewno porzucony
+        try:
+            ostatnie = datetime.fromisoformat(str(znacznik))
+        except (TypeError, ValueError):
+            return None
+        wiek = (datetime.now() - ostatnie).total_seconds()
+        limit = getattr(self.lock_manager, "stale_lock_seconds", 300)
+        return int(wiek // 60) if wiek >= limit else None
+
     def _get_user_display_name(self, username):
         """Pobierz display_name użytkownika na podstawie username (LOGIN)
         
