@@ -424,6 +424,33 @@ projektu. Komunikat kieruje do PPM „Powiąż półprodukt…" na rysunku-rodzi
 * Komunikat przy braku zaznaczenia mówi wprost o **DOLNEJ** liście: w oknie
   są dwie tabele i user miał zaznaczony wiersz w górnej.
 
+## Pozycje z ZK → arkusz (brakujący mechanizm, 14.09.2026)
+
+⚠️ **Tego w kodzie NIE BYŁO.** `_zapisz_ilosci_z_subiekta` szło po wierszach
+ARKUSZA i pytało, ile jest na ZK — pozycja obecna na zamówieniu, ale bez
+wiersza w BOM-ie, nie miała jak się pojawić. Istniał tylko kierunek
+„arkusz → sprawdź ilość na ZK". Półprodukty są pierwszym przypadkiem, gdy na
+ZK trafia coś, czego w BOM-ie nie ma, więc luka wyszła dopiero teraz.
+
+`_dopisz_pozycje_z_zk(con, ilosci, trafione, teraz)` — wołane na końcu
+`_zapisz_ilosci_z_subiekta`, czyli **przy przejmowaniu locka** (zwykłym
+i wymuszonym). Dotyczy KAŻDEJ pozycji z ZK, nie tylko półproduktów —
+dopisana ręcznie w Subiekcie też się pojawi. Nazwy kartotek jednym
+`query_stock`, wiersz `is_manual=1`, numer pusty, symbol w `subiekt_symbol`,
+notatka `z zamówienia ZK`. Raport z listą — nic po cichu.
+
+### ⛔ Ochrona przed zapętleniem
+
+Wiersz dopisany z ZK ma **pusty numer rysunku**, więc `build_plan` policzyłby
+mu symbol z NAZWY (`symbol_z_nazwy`): `M3 Z28 koło wrzeciona` → `M3Z28kolowrze`
+— **inny niż prawdziwa kartoteka** `2430-300.57`. Most założyłby DRUGĄ
+kartotekę obok istniejącej i dopisał ją na ZK, przy każdym przebiegu.
+
+`read_project_items` pomija więc wiersze z `notes = 'z zamówienia ZK'`
+oraz `notes LIKE 'półprodukt%'`: **pozycje pochodzące z Subiekta nie wracają
+do Subiekta**. Półprodukty i tak liczą się osobno, z relacji.
+Sprawdzone: trzy kolejne `build_plan` dają identyczny wynik.
+
 ## Kartoteka półproduktu nie znika
 
 Rozważane wcześniej ostrzeżenie „kartoteka zniknęła z Subiekta" jest

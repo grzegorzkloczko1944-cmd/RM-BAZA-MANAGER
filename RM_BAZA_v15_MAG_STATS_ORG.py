@@ -7443,6 +7443,7 @@ class MainWindow(tk.Tk):
 
         con = self.db_manager.project_con
         zmienione = 0
+        trafione = set()          # klucze z ZK, ktore maja juz wiersz
         try:
             wiersze = con.execute(
                 "SELECT id, COALESCE(NULLIF(TRIM(work_drawing_no), ''), "
@@ -7471,6 +7472,8 @@ class MainWindow(tk.Tk):
                 except Exception:
                     klucz = ""
 
+            if klucz:
+                trafione.add(klucz)
             if not klucz or klucz not in ilosci:
                 # POZYCJI NIE MA NA ZK → order_qty musi zniknąć.
                 #
@@ -7510,11 +7513,76 @@ class MainWindow(tk.Tk):
                     "UPDATE items SET order_qty = ?, subiekt_zasiew_at = ? WHERE id = ?",
                     (nowa, teraz, item_id))
             zmienione += 1
-        if zmienione or wyczyszczone:
+        dopisane = self._dopisz_pozycje_z_zk(con, ilosci, trafione, teraz)
+        if zmienione or wyczyszczone or dopisane:
             con.commit()
         print(f"✅ Ilości z {zk or 'ZK'}: zaktualizowano {zmienione} pozycji"
               + (f", wyczyszczono {wyczyszczone} (nie ma ich na ZK)"
-                 if wyczyszczone else ""))
+                 if wyczyszczone else "")
+              + (f", DOPISANO {len(dopisane)} z ZK" if dopisane else ""))
+        if dopisane:
+            # NIC PO CICHU: wiersze pojawiaja sie same, wiec user musi
+            # wiedziec, skad sie wziely i ze nie sa jego.
+            lista = (chr(10) + "    ").join(dopisane[:15])
+            wiecej = (chr(10) + "    … i %d dalszych" % (len(dopisane) - 15)
+                      if len(dopisane) > 15 else "")
+            messagebox.showinfo(
+                "Nowe pozycje z zamówienia",
+                "Na %s są pozycje, których nie było w arkuszu —\n"
+                "dopisano je na końcu (%d):\n\n    %s%s\n\n"
+                "To pozycje z SUBIEKTA: nazwa i ilość pochodzą z zamówienia,\n"
+                "więc arkusz ich nie prowadzi."
+                % (zk or "ZK", len(dopisane), lista, wiecej))
+
+    def _dopisz_pozycje_z_zk(self, con, ilosci, trafione, teraz):
+        """Pozycje z ZK bez wiersza w arkuszu → nowe wiersze. Lista opisow.
+
+        ⚠️ TEGO MECHANIZMU NIE BYLO (14.09.2026). `_zapisz_ilosci_z_subiekta`
+        szlo po wierszach ARKUSZA i pytalo, ile jest na ZK — pozycja obecna
+        na zamowieniu, ale nieobecna w BOM-ie, nie miala jak sie pojawic.
+        Logistyk widzial na ZK towar, ktorego arkusz nie zna: nie bylo gdzie
+        pokazac „Ilosci dostarczonych" ani przypiac wydania.
+
+        Dotyczy KAZDEJ pozycji z ZK, nie tylko polproduktow — dopisana recznie
+        w Subiekcie tez ma sie pojawic.
+
+        Wiersz jest `is_manual=1` (SPOZA DRZEWKA, jak schowek i polprodukty),
+        wiec „Przelicz" korzeni go nie dotyka. Numer zostaje PUSTY: symbol
+        z Subiekta nie jest numerem rysunku — ladnie w `subiekt_symbol`.
+        """
+        brakujace = {k: v for k, v in (ilosci or {}).items()
+                     if k and k not in trafione}
+        if not brakujace:
+            return []
+        # Nazwy z kartotek Subiekta — jedno zapytanie na wszystkie symbole.
+        nazwy = {}
+        try:
+            import subiekt_stany
+            for sym, k in (subiekt_stany.query_stock(
+                    sorted(brakujace), timeout=120) or {}).items():
+                nazwy[(sym or "").strip().upper()] = (k.get("Nazwa") or "").strip()
+        except Exception as e:
+            print(f"⚠️  Nazwy kartotek z ZK nieodczytane: {e}")
+
+        opisy = []
+        for symbol, ile in sorted(brakujace.items()):
+            nazwa = nazwy.get(symbol) or symbol
+            try:
+                con.execute(
+                    "INSERT INTO items (project_id, is_manual, is_hidden,"
+                    " src_drawing_no, src_name, src_qty,"
+                    " work_drawing_no, work_name, work_qty,"
+                    " order_qty, subiekt_symbol, subiekt_zasiew_at, notes,"
+                    " created_at, updated_at)"
+                    " VALUES (?, 1, 0, '', ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (self.current_project_id, nazwa, ile, nazwa, ile, ile,
+                     symbol, teraz, "z zamówienia ZK", teraz, teraz))
+            except Exception as e:
+                print(f"⚠️  Nie dopisano {symbol} z ZK: {e}")
+                continue
+            opisy.append("%s — %s (%s szt.)"
+                         % (symbol, nazwa, _fmt_ilo(ile)))
+        return opisy
 
     def _wiersz_polproduktu(self, item_id):
         """Opis relacji, gdy wiersz jest KUPOWANYM polfabrykatem. Inaczej None.

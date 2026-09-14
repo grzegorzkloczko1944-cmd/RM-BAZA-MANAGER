@@ -162,6 +162,20 @@ def read_project_items(project_id):
         # trafiać do Subiekta — COALESCE bo starsze wiersze mogą mieć NULL
         # zamiast 0 (ten sam wzorzec co database_manager.get_project_items).
         where = " WHERE COALESCE(is_hidden, 0) = 0" if "is_hidden" in cols else ""
+        # ⛔ POZYCJE POCHODZACE Z SUBIEKTA NIE WRACAJA DO SUBIEKTA.
+        #
+        # Wiersze dopisane przez `_dopisz_pozycje_z_zk` (sa juz na ZK) oraz
+        # polprodukty (`subiekt_polprodukt_bom`, ich ilosc liczy sie osobno
+        # z relacji) maja PUSTY numer rysunku i nazwe z kartoteki. Bez tego
+        # filtra `build_plan` policzylby im symbol z NAZWY — inny niz
+        # prawdziwa kartoteka — i most zalozylby DRUGA kartoteke obok
+        # istniejacej, dopisujac ja na ZK po raz kolejny. Duplikat towaru
+        # i podwojne zamowienie przy kazdym przebiegu (14.09.2026).
+        if "notes" in cols:
+            where += ((" AND" if where else " WHERE")
+                      + " COALESCE(notes, '') NOT IN"
+                        " ('z zamówienia ZK')"
+                        " AND COALESCE(notes, '') NOT LIKE 'półprodukt%'")
         rows = con.execute(f"SELECT {', '.join(sel)} FROM items{where}").fetchall()
     finally:
         con.close()
