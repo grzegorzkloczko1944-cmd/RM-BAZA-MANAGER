@@ -9,6 +9,11 @@ prawdziwej stacji, z prawdziwym configiem.
 
 Kolejność: pkt 0 (ustalenia) → 2 (bezpieczne) → 1 (główne) → 3 (porządki).
 
+**15.09.2026 — JAKO PIERWSZE w firmie: test z pkt 0 na stacji** (`m.DB_PATH` / `m.stats()`).
+Drugi, niezależny sygnał: w Edytorze kartotek (panel SUBIEKT) po scaleniu
+duplikatów raport ma wiersz `alias / blad / "aliasy w RM_BAZA nie zapisane"`
+— jeśli taki był, mapowania są martwe (`subiekt_edytor_gui.py:1284-1289`).
+
 ---
 
 ## 0. Do ustalenia PRZED zmianami (w firmie)
