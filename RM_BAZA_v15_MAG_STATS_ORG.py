@@ -3128,7 +3128,12 @@ class MainWindow(tk.Tk):
         """
         if not getattr(self, 'projects_list', None):
             return
-        nowe = {pid: (wlasciciele.get(pid) or {}).get('user')
+        # ⚠️ W kluczu TEZ wiek blokady: inaczej straznik nie zauwazy, ze
+        # zywy lock wlasnie stal sie porzucony, i etykieta wisi jako 🔒
+        # do najblizszej przebudowy listy (15.09.2026).
+        nowe = {pid: ((wlasciciele.get(pid) or {}).get('user'),
+                      self._lock_martwy_od(wlasciciele.get(pid))
+                      if (wlasciciele.get(pid) or {}).get('user') else None)
                 for pid, _ in self.projects_list}
         if nowe == getattr(self, '_combo_zamki', None):
             return                      # bez zmian — nie ruszamy GUI
@@ -3139,15 +3144,21 @@ class MainWindow(tk.Tk):
 
         biezaca = self.project_var.get()
         for i, (pid, _) in enumerate(self.projects_list):
-            baza = wartosci[i].split(" 🔒 [")[0]
-            user = nowe.get(pid)
-            wartosci[i] = (f"{baza} 🔒 [{self._get_user_display_name(user)}]"
-                           if user else baza)
+            # Obcinamy OBA znaczniki — lista moze nosic 🔒 albo 💤.
+            baza = wartosci[i].split(" 🔒 [")[0].split(" 💤 [")[0]
+            user, minut = nowe.get(pid, (None, None))
+            if not user:
+                wartosci[i] = baza
+            elif minut is not None:
+                wartosci[i] = (f"{baza} 💤 [{self._get_user_display_name(user)}"
+                               f", {minut} min]")
+            else:
+                wartosci[i] = f"{baza} 🔒 [{self._get_user_display_name(user)}]"
         self.project_combo['values'] = wartosci
         # Wyświetlana wartość też musi nadążyć — inaczej w polu zostaje stara
         # etykieta, a poprawna jest tylko na rozwiniętej liście.
         if biezaca:
-            stara_baza = biezaca.split(" 🔒 [")[0]
+            stara_baza = biezaca.split(" 🔒 [")[0].split(" 💤 [")[0]
             for nowa in wartosci:
                 if nowa.split(" 🔒 [")[0] == stara_baza:
                     if nowa != biezaca:
@@ -5419,6 +5430,9 @@ class MainWindow(tk.Tk):
             if lock_info:
                 username = lock_info.get('user', '')  # LOGIN
                 locked_by = self._get_user_display_name(username)  # NAZWA
+                _m = self._lock_martwy_od(lock_info)
+                if _m is not None:
+                    return f"{project_name} 💤 [{locked_by}, {_m} min]"
                 return f"{project_name} 🔒 [{locked_by}]"
         except Exception as e:
             print(f"⚠️ Błąd sprawdzania locka dla projektu {project_id}: {e}")
@@ -7196,8 +7210,11 @@ class MainWindow(tk.Tk):
         # Usuń suffix z informacją o locku jeśli istnieje (format: "Nazwa 🔒 [User]")
         # Usuwamy wszystko od " 🔒" do końca
         project_name = selected
-        if " 🔒 " in selected:
-            project_name = selected.split(" 🔒 ")[0]
+        # Oba znaczniki: 🔒 (lock zywy) i 💤 (porzucony) — patrz
+        # `_lock_martwy_od`. Bez tego nazwa niosla ogon „💤 [ADMIN, 14 min]".
+        for _zn in (" 🔒 ", " 💤 "):
+            if _zn in project_name:
+                project_name = project_name.split(_zn)[0]
         # Usuń prefiks ✅/⏸ (znacznik statusu "Zakończony"/"Wstrzymany") jeśli istnieje
         if project_name.startswith("✅ "):
             project_name = project_name[len("✅ "):]
@@ -11755,10 +11772,11 @@ class MainWindow(tk.Tk):
                 if hasattr(self, 'project_var'):
                     selected = self.project_var.get()
                     # Usuń suffix z lockiem jeśli jest (format: "Nazwa 🔒 [User]")
-                    if " 🔒 " in selected:
-                        project_name_for_modul = selected.split(" 🔒 ")[0]
-                    else:
-                        project_name_for_modul = selected
+                    project_name_for_modul = selected
+                    for _zn in (" 🔒 ", " 💤 "):
+                        if _zn in project_name_for_modul:
+                            project_name_for_modul = \
+                                project_name_for_modul.split(_zn)[0]
                     # Usuń prefiks ✅/⏸ (znacznik statusu) jeśli istnieje
                     if project_name_for_modul.startswith("✅ "):
                         project_name_for_modul = project_name_for_modul[len("✅ "):]
