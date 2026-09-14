@@ -429,11 +429,14 @@ class RmpakCalculatorDialog:
         pw, rw = dok.get("PW") or [], dok.get("RW") or []
         self.pw_status_var.set("PW: " + (", ".join(d["numer"] for d in pw) if pw else "—"))
         self.rw_status_var.set("RW: " + (", ".join(d["numer"] for d in rw) if rw else "—"))
-        # RW dopiero po PW — i tylko raz (§6: 1 projekt = 1 PW = 1 RW).
+        # RW dopiero po PW — ale BEZ limitu „tylko raz" (14.09.2026):
+        # projekt moze miec dowolna liczbe RW, tak samo jak PW. Warunek
+        # `pw` zostaje, bo wydanie z magazynu ma sens dopiero wtedy, gdy
+        # cos na ten magazyn przyjeto.
         try:
-            self.btn_rw.config(state="normal" if (pw and not rw) else "disabled",
-                               bg="#337ab7" if (pw and not rw) else "SystemButtonFace",
-                               fg="white" if (pw and not rw) else "gray40",
+            self.btn_rw.config(state="normal" if pw else "disabled",
+                               bg="#337ab7" if pw else "SystemButtonFace",
+                               fg="white" if pw else "gray40",
                                command=self._podglad_rw)
         except Exception:
             pass
@@ -724,25 +727,16 @@ class RmpakCalculatorDialog:
         „zapisać?" przed sprawdzeniem byłoby pytaniem w ciemno.
         """
         import subiekt_produkcja
-        # Czy PW już jest — pytamy SUBIEKTA, nie lokalnego zapisu. Odczyt
-        # na żywo, bo między otwarciem okna a kliknięciem ktoś mógł je wystawić.
-        try:
-            _dok = subiekt_produkcja.dokumenty_produkcji(self.project_name)
-            _pw = _dok.get("PW") or []
-        except Exception:
-            _pw = []                      # brak połączenia wyjdzie w suchym przebiegu
-        numer_ist = ", ".join(d["numer"] for d in _pw)
-        data_ist = _pw[0]["data"] if _pw else ""
-        if numer_ist:
-            # Blokada MIĘKKA (§15): pokazujemy istniejący, ale nie zamykamy drogi.
-            if not messagebox.askyesno(
-                    "PW już istnieje",
-                    f"Dla tego projektu zapisano już PW:\n\n    {numer_ist}\n    z {data_ist}\n\n"
-                    "Obowiązuje zasada 1 projekt = 1 PW.\n\n"
-                    "Wystawić mimo to KOLEJNY dokument?",
-                    icon="warning", default="no", parent=dlg):
-                return
-
+        # ⚠️ BEZ pytania „PW już istnieje" (14.09.2026). Projekt moze miec
+        # DOWOLNA liczbe PW: to dowod wewnetrzny, ustawa wymaga wlasnego
+        # numeru, daty i opisu operacji — nie ogranicza liczby dokumentow.
+        # Przy produkcji etapami kilka PW jest poprawniejsze, bo kazde
+        # dokumentuje faktyczne przyjecie w danym momencie. RM_BAZA sumuje
+        # ruchy po PROJEKT + SYMBOL, wiec numer dokumentu nie musi byc
+        # w relacji 1:1 z projektem.
+        #
+        # Jedyne, czego trzeba pilnowac, to NIEDUBLOWANIE tej samej operacji
+        # — ale to ocena uzytkownika, ktory widzi pozycje w podgladzie.
         plan = subiekt_produkcja.plan_pw(
             subiekt_produkcja.project_id_z_polaczenia(self.project_con),
             self.project_name, pozycje)

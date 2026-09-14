@@ -411,7 +411,40 @@ załatwiała. Po ustaleniu §2 (ilość z projektu) ten krok **odpada**.
 
 ---
 
-## 15. Blokada drugiego PW — miękka, nie twarda
+## 15. Liczba PW i RW na projekt — BEZ OGRANICZEŃ (zmiana 14.09.2026)
+
+⚠️ **Wcześniejsza treść tego paragrafu była błędna.** Zapis „1 projekt =
+1 PW = 1 RW" opisywał typowy przebieg, a nie wymóg księgowy — i został
+zaimplementowany jako ostrzeżenie przy PW oraz TWARDA blokada przy RW
+(przycisk wyszarzony po pierwszym RW).
+
+**Stan faktyczny:** PW to dowód wewnętrzny. Ustawa o rachunkowości wymaga
+od niego własnego numeru, daty i opisu operacji — **nie ogranicza liczby
+dokumentów na projekt**. Przy produkcji etapami kilka PW jest wręcz
+poprawniejsze, bo każde dokumentuje faktyczne przyjęcie w konkretnym
+momencie:
+
+```text
+PW 123/09/2026   projekt 2627   partia 1
+PW 137/09/2026   projekt 2627   partia 2
+```
+
+RM_BAZA sumuje ruchy po **PROJEKT + SYMBOL**, więc numery dokumentów nie
+muszą być w relacji 1:1 z projektem — liczy się suma ruchów magazynowych
+danego symbolu pod projektem.
+
+**Zdjęte:** ostrzeżenie „PW już istnieje" i blokada drugiego RW. Warunek
+„RW dopiero po PW" zostaje — wydanie z magazynu ma sens dopiero wtedy, gdy
+coś na ten magazyn przyjęto.
+
+**Jedyne, czego trzeba pilnować:** nie zdublować tej samej operacji. To
+ocena użytkownika, który widzi pozycje w podglądzie przed wystawieniem.
+Ostrzeżenie o POKRYWAJĄCYCH SIĘ pozycjach (te same symbole co na wcześniejszym
+PW) byłoby sensownym zabezpieczeniem — do rozważenia, nie zrobione.
+
+---
+
+## 15a. Historyczne uzasadnienie miękkiej blokady
 
 Proces normalny: `1 projekt = 1 PW = 1 RW`. Produkcji częściowej nie
 implementujemy.
