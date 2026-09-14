@@ -142,6 +142,12 @@ class RmpakCalculatorDialog:
         # --- legenda kolorów + odśwież ---
         legend_frame = tk.Frame(top)
         legend_frame.pack(side="right", padx=(0, 4))
+        for _txt, _bg in (("Na nowe PW", "#cfe2f3"),
+                          ("Już na PW", "#e8e8e8")):
+            tk.Label(legend_frame, text="  ", bg=_bg, relief="solid",
+                     borderwidth=1).pack(side="right", padx=(8, 2))
+            tk.Label(legend_frame, text=_txt, font=("", 8)).pack(side="right")
+
         tk.Button(legend_frame, text="Odśwież", command=self._load_items,
                   bg="#2980b9", fg="white", font=("", 9, "bold")).pack(side="left", padx=(0, 12))
         for color, label in (("#90EE90", "Zrealizowano"), ("#FFFACD", "Zamówiono")):
@@ -234,6 +240,11 @@ class RmpakCalculatorDialog:
         self.tree.tag_configure("even",      background="#ddeaf6")
         self.tree.tag_configure("delivered", background="#90EE90")
         self.tree.tag_configure("ordered",   background="#FFFACD")
+        # Produkcja wlasna wzgledem PW — patrz `_odswiez_znaczniki_pw`.
+        self.tree.tag_configure("na_pw",     background="#cfe2f3")
+        self.tree.tag_configure("juz_pw",    background="#e8e8e8",
+                                foreground="#7b7b7b")
+        self.tree.tag_configure("nadmiar_pw", background="#fcf3cf")
 
         vsb = ttk.Scrollbar(frame_table, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
@@ -445,6 +456,56 @@ class RmpakCalculatorDialog:
         # przy wydaniu ze schowka. Numery czytamy dalej, bo przydaja sie
         # w innych miejscach (`_dok_produkcji`).
 
+    def _odswiez_znaczniki_pw(self):
+        """Koloruje wiersze wg tego, co wejdzie na NOWE PW.
+
+        Zrodlem jest Subiekt (suma wszystkich PW projektu) — ten sam odczyt,
+        z ktorego korzysta podglad. Bez polaczenia po prostu nie kolorujemy:
+        brak znacznika jest uczciwszy niz znacznik zgadniety.
+
+        Wolane po kazdym wczytaniu listy, wiec po „Odswiez" i po wystawieniu
+        PW kolory same sie aktualizuja.
+        """
+        try:
+            import subiekt_produkcja
+            przyjete = subiekt_produkcja.przyjete_na_pw(self.project_name)
+        except Exception as e:
+            print("Kalkulator: znaczniki PW pominiete (%s)" % e)
+            return
+
+        for iid in self.tree.get_children():
+            vals = self.tree.item(iid, "values")
+            # Klucz jak wszedzie: numer rysunku, a gdy go brak — nazwa.
+            symbol = (str(vals[1]).strip() or str(vals[2]).strip()).upper()
+            try:
+                ile = float(vals[3] or 0)
+            except (ValueError, TypeError):
+                continue
+            juz = float(przyjete.get(symbol, 0))
+            tagi = [x for x in self.tree.item(iid, "tags")
+                    if x not in ("na_pw", "juz_pw", "nadmiar_pw")]
+            if juz > ile:
+                tagi.append("nadmiar_pw")
+            elif juz >= ile and ile > 0:
+                tagi.append("juz_pw")
+            elif ile > 0:
+                tagi.append("na_pw")
+            self.tree.item(iid, tags=tuple(tagi))
+
+    def _przelicz_sume(self):
+        """Suma wartosci partii ze WSZYSTKICH widocznych wierszy.
+
+        Liczona z tabeli, nie z bazy: tabela jest juz zaktualizowana po
+        zapisie, a ponowny odczyt bazy kosztowalby przelot po sieci.
+        """
+        suma = 0.0
+        for iid in self.tree.get_children():
+            try:
+                suma += float(str(self.tree.item(iid, "values")[9]).replace(" ", ""))
+            except (ValueError, IndexError):
+                pass
+        self.grand_total_var.set(f"{suma:,.2f} PLN")
+
     def _odswiez_status_pw(self):
         """Podpis pod przyciskiem: ile pozycji i czego brakuje.
 
@@ -481,6 +542,30 @@ class RmpakCalculatorDialog:
         Zgodnie z zasadą „nic po cichu": user widzi pełną listę z cenami
         i wartościami, zanim powstanie jakikolwiek dokument.
         """
+        # ⚠️ NIEZAPISANA KALKULACJA: podglad czyta baze OSOBNYM polaczeniem
+        # read-only, wiec zobaczylby „BRAK ceny" i zablokowal PW. Zamiast
+        # samego ostrzezenia proponujemy zapis od razu (15.09.2026).
+        if self._has_unsaved_changes():
+            odp = messagebox.askyesnocancel(
+                "Niezapisana kalkulacja",
+                "Masz niezapisane zmiany w kalkulatorze.\n\n"
+                "Zapisać je teraz, zanim policzymy PW?\n\n"
+                "„Nie” = podgląd policzy bez nich (pozycja może wyjść "
+                "jako BRAK ceny).",
+                parent=self.win)
+            if odp is None:
+                return
+            if odp:
+                self._save_price()
+
+        # Lista moze byc nieaktualna: ktos dodal pozycje w arkuszu albo
+        # zmienil ilosc. Przeladowanie jest tanie i gwarantuje, ze podglad
+        # i tabela pokazuja to samo.
+        try:
+            self._load_items()
+        except Exception as e:
+            print("Kalkulator: nie przeladowano listy przed PW: %s" % e)
+
         poz, pom = self._pozycje_pw()
         if poz is None:
             messagebox.showerror("PW", "Nie udało się odczytać listy pozycji z bazy projektu.",
@@ -820,6 +905,7 @@ class RmpakCalculatorDialog:
             self._modes[iid] = calc_mode or "cut"
             self._semi_data[iid] = (semi_price or 0.0, semi_name or "", semi_supplier_id)
         self.grand_total_var.set(f"{grand_total:,.2f} PLN")
+        self._odswiez_znaczniki_pw()
 
         if prev_item_id:
             for iid, item_id in self._items.items():
@@ -1214,6 +1300,15 @@ class RmpakCalculatorDialog:
             vals[11] = semi_supplier_name
             vals[12] = rmpak_label
             self.tree.item(iid, values=vals)
+
+        # Status „ile poz. na PW" i suma licza sie z BAZY, wiec po zapisie
+        # trzeba je przeliczyc — inaczej panel po prawej pokazywal stan
+        # z chwili otwarcia okna, a podglad PW mowil co innego (15.09.2026).
+        try:
+            self._przelicz_sume()
+            self._odswiez_status_pw()
+        except Exception as e:
+            print("Kalkulator: nie odswiezono podsumowania: %s" % e)
             self._rates[iid] = rate
             self._modes[iid] = mode
             self._semi_data[iid] = (semi_price, semi_name, semi_supplier_id)
