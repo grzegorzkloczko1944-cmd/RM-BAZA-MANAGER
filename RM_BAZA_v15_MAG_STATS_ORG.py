@@ -12882,7 +12882,11 @@ class MainWindow(tk.Tk):
                 "SELECT COALESCE(NULLIF(work_drawing_no,''), NULLIF(norm_drawing_no,''), "
                 "NULLIF(src_drawing_no,''), work_name, src_name),"
                 " COALESCE(NULLIF(work_name,''), src_name),"
-                " COALESCE(subiekt_symbol, '') FROM items WHERE id = ?",
+                " COALESCE(subiekt_symbol, ''),"
+                " COALESCE(NULLIF(TRIM(work_drawing_no), ''),"
+                "          NULLIF(TRIM(norm_drawing_no), ''),"
+                "          NULLIF(TRIM(src_drawing_no), ''), '')"
+                " FROM items WHERE id = ?",
                 (row_ids[row],)).fetchone()
         except Exception as e:
             messagebox.showerror("Powiąż półprodukt",
@@ -12894,10 +12898,14 @@ class MainWindow(tk.Tk):
         # Wiersz, ktory SAM jest polproduktem: sensowna informacja jest
         # odwrotna — „to jest polprodukt DO ktorego rysunku". Okno wiazania
         # dotyczy rysunku-rodzica, nie kupowanej kartoteki (14.09.2026).
-        # Wiersz BEZ numeru rysunku, ale z symbolem kartoteki — kandydat
-        # na polprodukt. Rozstrzyga dopiero odpowiedz serwera.
+        # ⚠️ Wykrycie po PRAWDZIWYM numerze rysunku (cur[3]), nie po kluczu:
+        # `COALESCE(..., work_name, src_name)` wyzej zwraca NAZWE, gdy numeru
+        # nie ma, wiec warunek „brak klucza" byl ZAWSZE falszywy i PPM
+        # otwieral edycje dla samego polproduktu — mozna bylo dopiac
+        # polprodukt do polproduktu (14.09.2026).
         _sym = (cur[2] or "").strip()
-        if _sym and not (cur[0] or "").strip():
+        _nr = (cur[3] or "").strip()
+        if _sym and not _nr:
             try:
                 import subiekt_mapowania as _MAP
                 _gdzie = _MAP.polprodukt_gdzie_symbol(_sym)
@@ -12908,21 +12916,23 @@ class MainWindow(tk.Tk):
                     "%s  —  %s szt. na 1 detal" % (w["numer_rysunku"],
                                                    w["ilosc_na_szt"])
                     for w in _gdzie)
-                if not messagebox.askyesno(
+                if messagebox.askyesno(
                         "To jest półprodukt",
-                        "„%s” (%s) to KUPOWANY PÓŁFABRYKAT.\n\n"
-                        "Powiązany z rysunkiem:\n    %s\n\n"
-                        "Powiązania prowadzi się na RYSUNKU, nie na "
-                        "półprodukcie.\n"
+                        "„%s” (%s) to KUPOWANY PÓŁFABRYKAT — pozycja "
+                        "z Subiekta.\n\n"
+                        "Powstaje z niej:\n    %s\n\n"
+                        "Do półproduktu NIE dopina się kolejnego "
+                        "półproduktu —\npowiązania prowadzi się na "
+                        "RYSUNKU.\n\n"
                         "Otworzyć okno dla „%s”?"
                         % ((cur[1] or _sym), _sym, _opis,
-                           _gdzie[0]["numer_rysunku"])):
-                    return
-                import subiekt_polprodukt_gui
-                return subiekt_polprodukt_gui.otworz(
-                    self, _gdzie[0]["numer_rysunku"], "",
-                    po_zmianie=self._po_zmianie_polproduktu,
-                    projekt_info=self._info_dla_polproduktu)
+                           _gdzie[0]["numer_rysunku"]), icon="info"):
+                    import subiekt_polprodukt_gui
+                    return subiekt_polprodukt_gui.otworz(
+                        self, _gdzie[0]["numer_rysunku"], "",
+                        po_zmianie=self._po_zmianie_polproduktu,
+                        projekt_info=self._info_dla_polproduktu)
+                return
 
         import subiekt_polprodukt_gui
         # Po zamknieciu okna (gdy cos sie zmienilo) przeladowujemy arkusz —

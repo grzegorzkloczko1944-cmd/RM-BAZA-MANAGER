@@ -159,6 +159,7 @@ class PolproduktWindow(tk.Toplevel):
             try:
                 self._kartoteki = dane
                 self._odswiez_powiazane()
+                self._filtruj()          # dolna lista tez dostaje cene i stan
             except tk.TclError:
                 pass                    # okno zamkniete w miedzyczasie
 
@@ -497,12 +498,20 @@ class PolproduktWindow(tk.Toplevel):
 
         wnetrze = tk.Frame(ramka)
         wnetrze.pack(fill=tk.BOTH, expand=True, padx=8)
-        self.lista = ttk.Treeview(wnetrze, columns=("symbol", "nazwa"),
-                                  show="headings", height=9)
-        self.lista.heading("symbol", text="Symbol")
-        self.lista.heading("nazwa", text="Nazwa")
-        self.lista.column("symbol", width=170, stretch=False)
-        self.lista.column("nazwa", width=420)
+        self.lista = ttk.Treeview(
+            wnetrze, columns=("symbol", "nazwa", "cena", "stan", "rezerw",
+                              "lokacja"),
+            show="headings", height=9)
+        # Te same dane co w tabeli powiazanych — cena i stan sa potrzebne
+        # WLASNIE przy wyborze kartoteki, nie dopiero po powiazaniu.
+        for k, n, w, a in (("symbol", "Symbol", 150, "w"),
+                           ("nazwa", "Nazwa", 300, "w"),
+                           ("cena", "Cena", 80, "e"),
+                           ("stan", "Dostępne", 75, "e"),
+                           ("rezerw", "Rezerw.", 70, "e"),
+                           ("lokacja", "Lokacja", 80, "w")):
+            self.lista.heading(k, text=n)
+            self.lista.column(k, width=w, anchor=a, stretch=(k == "nazwa"))
         vs = ttk.Scrollbar(wnetrze, orient="vertical",
                            command=self.lista.yview)
         self.lista.configure(yscrollcommand=vs.set)
@@ -577,8 +586,14 @@ class PolproduktWindow(tk.Toplevel):
             if len(trafienia) >= LIMIT_TRAFIEN:
                 break
         for poz in trafienia:
-            self.lista.insert("", tk.END, iid=str(poz["id"]),
-                              values=(poz["symbol"], poz["nazwa"]))
+            kart = self._kartoteki.get((poz["symbol"] or "").strip().upper(), {})
+            self.lista.insert(
+                "", tk.END, iid=str(poz["id"]),
+                values=(poz["symbol"], poz["nazwa"],
+                        _zl(kart.get("CenaEwidencyjna")),
+                        _ilo(kart.get("Dostepne")) if kart else "",
+                        _ilo(kart.get("Zarezerwowane")) if kart else "",
+                        kart.get("Polozenie") or ""))
         self.info.config(
             text="Pasujących kartotek: %d%s"
                  % (len(trafienia),
