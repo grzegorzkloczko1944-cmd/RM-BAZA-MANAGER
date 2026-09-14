@@ -111,20 +111,31 @@ ale config w firmie dalej może wskazywać `Y:`.
 
 ---
 
-## 3. Porządki (zero ryzyka, po pkt 1–2)
+## 3. Porządki — trupy w kodzie (zero ryzyka, NIC NIE PSUJE)
 
-- [ ] `RM_BAZA_v15_MAG_STATS_ORG.py:25959` `_rm_manager_db_path()` — usunąć.
-      Martwe: `get_employee_by_user_login()` czyta przez serwer
-      (`rmm-employees-po-user-login`), ścieżka ląduje tylko w treści
-      komunikatu błędu i wprowadza w błąd przy audycie.
+⚠️ **To jest KOD W GICIE, wspólny dla firmy i M-OLD** — nie „sprawa domowa".
+Sprawdzone na `main` po `36772d0` (14.09.2026 wieczór): wszystkie cztery
+pozycje nadal stoją. Żadna nic nie psuje — to martwe stałe i martwa metoda,
+które przy każdym audycie `Y:` wracają jako fałszywy alarm. Dlatego do
+wycięcia, ale bez pośpiechu i bez wiązania z wdrożeniem.
+
+- [ ] `RM_BAZA_v15_MAG_STATS_ORG.py:25980` `_rm_manager_db_path()` + jedyne
+      wywołanie w `:26015` — usunąć. Martwe: `get_employee_by_user_login()`
+      czyta przez serwer (`rmm-employees-po-user-login`), a wyliczona ścieżka
+      ląduje wyłącznie w treści komunikatu błędu („Baza: …"), więc może
+      wskazywać gdziekolwiek. To ona wygenerowała fałszywy trop przy audycie
+      14.09 („rm_manager.sqlite nie ma w firmie na Y:").
 - [ ] `DEFAULT_MASTER_PATH = "Y:/RM_BAZA/master.sqlite"` (`:338`),
-      `DEFAULT_LOCKS_DIR = "Y:/RM_BAZA/locks"` (`:342`) — master nie jest
-      już otwierany, blokady w tabeli. Zostawić jedynie to, co config
-      musi mieć jako kotwicę katalogu (po pkt 1 nie będzie musiał).
+      `DEFAULT_LOCKS_DIR = "Y:/RM_BAZA/locks"` (`:342`) — master nie jest już
+      otwierany (wszystko przez RM_SERWER), blokady siedzą w tabeli.
+      ⚠️ PRZED usunięciem sprawdzić, czy `MASTER_PATH` nie służy gdzieś jako
+      KOTWICA KATALOGU (np. `Path(MASTER_PATH).parent.parent` przy
+      `rm_manager.sqlite` — to samo miejsce co wyżej).
 - [ ] stary `C:\RMPAK_CLIENT\RM_BAZY\RM_BAZA\sync_config.json` na M-OLD
-      (same ścieżki `Y:`, nic go nie czyta) — skasować.
-- [ ] komentarze/komunikaty z `Y:` — przejrzeć greppem `Y:` i zostawić
-      tylko te, które opisują coś aktualnego.
+      (z lutego, same ścieżki `Y:`, nic go nie czyta — apka bierze
+      `C:\RMPAK_CLIENT\sync_config.json`) — skasować. **Jedyna pozycja
+      naprawdę dotycząca tylko M-OLD.**
+- [ ] komentarze/komunikaty z `Y:` — przejrzeć i zostawić tylko aktualne.
 
 ---
 
@@ -146,3 +157,9 @@ grep -n "Y:" *.py | grep -v "^.*#"
 ```
 powinno zostawić tylko: `DEFAULT_SERVER_DIR`, `client_version.DEFAULT_SERVER_EXE`
 i spec (lista kandydatów mostu w `subiekt_bridge.py` zniknęła 14.09.2026).
+
+**Stan 14.09.2026 wieczór — grep JUŻ PRZECHODZI.** Poza komentarzami zostały
+dokładnie cztery odwołania: `client_version.py:43` DEFAULT_SERVER_EXE,
+`RM_BAZA:375` DEFAULT_SERVER_DIR (oba świadome, patrz „NIE ruszać") oraz
+`RM_BAZA:338`/`:342` — dwie martwe stałe z pkt 3. Czyli po pkt 3 zostaną
+tylko te dwa świadome.
