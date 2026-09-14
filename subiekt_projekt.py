@@ -3706,9 +3706,16 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         # Ile pozycji jest na ZK w innej ilości niż w BOM-ie — most zgłasza to
         # osobnymi krokami „zk-poz". Musi wejść do opisu ZK, bo samo „dopisze
         # 0 poz." czytało się jak „nic się nie dzieje", a dane były rozjechane.
-        ile_roznic = sum(1 for k in (self.dry or {}).get("kroki", [])
-                         if k.get("Rodzaj") == "zk-poz"
-                         and k.get("Status") == "roznica-ilosci")
+        # ⚠️ STATUSY Z MOSTU: `do-uzupelnienia` i `do-zmniejszenia`
+        # (Projekt.cs:361-371). Wczesniej liczylismy `roznica-ilosci`, ktorego
+        # most nie wysyla — licznik zawsze byl 0 i user NIE WIDZIAL, ze zapis
+        # zmieni ilosci (14.09.2026).
+        _zmiany_ilosci = [k for k in (self.dry or {}).get("kroki", [])
+                          if k.get("Rodzaj") == "zk-poz"
+                          and k.get("Status") in ("do-uzupelnienia",
+                                                  "do-zmniejszenia",
+                                                  "roznica-ilosci")]
+        ile_roznic = len(_zmiany_ilosci)
         for k in (self.dry or {}).get("kroki", []):
             if k.get("Rodzaj") != "zk":
                 continue
@@ -3718,8 +3725,16 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             elif k.get("Status") == "bez-zmian":
                 opis_zk = f"  • {k['Symbol']} — bez zmian, wszystko już na dokumencie\n"
             if ile_roznic:
-                opis_zk += (f"    ⚠ {ile_roznic} pozycji ma na dokumencie INNĄ ILOŚĆ niż BOM "
-                            f"— zapis tego NIE zmieni\n")
+                # Most USTAWIA ilosc wprost, wiec zapis JA ZMIENI — dawny
+                # tekst („zapis tego NIE zmieni") mowil odwrotnie.
+                opis_zk += (f"    ⚠ ZMIANA ILOŚCI na {ile_roznic} pozycj"
+                            f"{'i' if ile_roznic == 1 else 'ach'} — zapis "
+                            f"USTAWI nowe ilości:\n")
+                for k in _zmiany_ilosci[:8]:
+                    opis_zk += (f"        {k.get('Symbol')} — "
+                                f"{k.get('Szczegoly') or ''}\n")
+                if ile_roznic > 8:
+                    opis_zk += f"        … i {ile_roznic - 8} dalszych\n"
             break
 
         # Cudze ZK na ten numer — most i tak wstrzyma zapis, ale user musi to
