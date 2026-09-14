@@ -7516,6 +7516,32 @@ class MainWindow(tk.Tk):
               + (f", wyczyszczono {wyczyszczone} (nie ma ich na ZK)"
                  if wyczyszczone else ""))
 
+    def _wiersz_polproduktu(self, item_id):
+        """Opis relacji, gdy wiersz jest KUPOWANYM polfabrykatem. Inaczej None.
+
+        Taki wiersz zaklada RM_BAZA (`subiekt_polprodukt_bom`), a jego
+        tozsamosc i ilosc wynikaja z kartoteki Subiekta i z relacji
+        „rysunek -> polprodukt". Arkusz ich NIE prowadzi: zmiana nazwy
+        zerwalaby powiazanie z kartoteka, a zmiana ilosci rozjechalaby sie
+        z ZK przy najblizszym zapisie projektu, ktory i tak ja przeliczy
+        (14.09.2026).
+
+        Rozpoznajemy po notatce zakladanej przy dopisaniu — trzymana
+        w bazie, wiec blokada dziala takze po restarcie.
+        """
+        try:
+            row = self.db_manager.project_con.execute(
+                "SELECT COALESCE(notes, ''), is_manual FROM items WHERE id = ?",
+                (item_id,)).fetchone()
+        except Exception:
+            return None
+        if not row:
+            return None
+        notes = row[0] or ""
+        if row[1] == 1 and notes.startswith("półprodukt"):
+            return notes
+        return None
+
     def _pobierz_zasiew_subiekt(self, item_id):
         """(symbol, data) gdy pozycja ma już kartotekę w Subiekcie, inaczej None.
 
@@ -12739,7 +12765,60 @@ class MainWindow(tk.Tk):
         # nastepnym odswiezeniu i user nie wie, czy powiazanie weszlo.
         subiekt_polprodukt_gui.otworz(self, (cur[0] or "").strip(),
                                       (cur[1] or "").strip(),
-                                      po_zmianie=self.refresh_data)
+                                      po_zmianie=self._po_zmianie_polproduktu)
+
+    def _po_zmianie_polproduktu(self):
+        """Po zmianie powiazania: wiersze polproduktow w arkuszu + raport.
+
+        Polprodukt wchodzi na ZK, wiec musi byc widoczny takze w arkuszu —
+        inaczej logistyk widzi na zamowieniu towar, ktorego nie ma w BOM-ie,
+        a „Ilosc dostarczonych" nie ma sie do czego przypiac (14.09.2026).
+
+        Wiersz jest SPOZA DRZEWKA (`is_manual=1`), jak pozycje ze schowka:
+        Inventor go nie zna, wiec „Przelicz" korzeni go nie dotyka.
+
+        Bez locka tylko odswiezamy widok — zapis do bazy projektu wymaga
+        locka, a wiersze i tak doliczy najblizszy zapis projektu.
+        """
+        try:
+            if not self.have_lock or not self.db_manager.project_con:
+                return self.refresh_data()
+            import subiekt_projekt, subiekt_polprodukt_bom
+            items = self.db_manager.get_project_items(self.current_project_id)
+            pozycje = [{"symbol": (i["drawing_no"] or "").strip()
+                                  or (i["name"] or "").strip(),
+                        "ilosc": (i["order_qty"]
+                                  if i["order_qty"] not in (None, "")
+                                  else (i["qty_bom"] or 0))}
+                       for i in items]
+            polprodukty = subiekt_projekt.pozycje_polproduktow(pozycje)
+            dodane, zmienione = subiekt_polprodukt_bom.zsynchronizuj(
+                self.db_manager.project_con, self.current_project_id,
+                polprodukty)
+        except Exception as e:
+            self.refresh_data()
+            messagebox.showwarning(
+                "Półprodukty w arkuszu",
+                "Nie udało się dopisać wierszy półproduktów:\n\n%s\n\n"
+                "Powiązanie zostało zapisane — wiersze doliczy "
+                "najbliższy zapis projektu." % e)
+            return
+
+        self.refresh_data()
+        if dodane or zmienione:
+            czesci = []
+            if dodane:
+                czesci.append("DOPISANE do arkusza (%d):\n    %s"
+                              % (len(dodane), ("\n    ".join(dodane))))
+            if zmienione:
+                czesci.append("ZAKTUALIZOWANE ilości (%d):\n    %s"
+                              % (len(zmienione), ("\n    ".join(zmienione))))
+            messagebox.showinfo(
+                "Półprodukty w arkuszu",
+                ("\n\n".join(czesci))
+                + "\n\nTych wierszy nie prowadzi arkusz: nazwa pochodzi "
+                  "z kartoteki\nSubiekta, ilość z powiązania. Na ZK trafią "
+                  "przy zapisie projektu.")
 
     def jump_to_bom_item(self, project_id, item_id):
         """Pokaz wiersz BOM-u o danym id w arkuszu - z innego okna.
@@ -13763,6 +13842,30 @@ class MainWindow(tk.Tk):
             if zast and str(new_value or "").strip().upper() == zast.upper():
                 new_value = ""
         
+        # ========================================================================
+        # WIERSZ POLPRODUKTU — NIE PROWADZI GO ARKUSZ
+        # ========================================================================
+        # Kupowany polfabrykat dopisany pod rysunek: tozsamosc bierze sie
+        # z kartoteki Subiekta, a ilosc z relacji (ilosc detali x na sztuke).
+        # Recznie zmieniona nazwa zerwalaby powiazanie z kartoteka, a ilosc
+        # i tak zostalaby nadpisana przy najblizszym zapisie projektu.
+        if col in (0, 1, 3, 4):
+            _pp = self._wiersz_polproduktu(item_id)
+            if _pp:
+                messagebox.showwarning(
+                    "Półprodukt — prowadzi go Subiekt",
+                    "Ten wiersz to KUPOWANY PÓŁFABRYKAT, dopisany "
+                    "automatycznie:\n\n    %s\n\n"
+                    "Nazwa i numer pochodzą z kartoteki Subiekta, a ilość "
+                    "z powiązania\n(ilość detali x ilość na sztukę) — "
+                    "arkusz ich nie prowadzi.\n\n"
+                    "Żeby to zmienić: PPM na rysunku, do którego ten "
+                    "półprodukt należy,\ni „Powiąż półprodukt…” "
+                    "(tam zmienia się ilość na sztukę albo usuwa "
+                    "powiązanie)." % _pp)
+                self.refresh_data()
+                return
+
         # ========================================================================
         # BLOKADA EDYCJI ILOŚCI BOM gdy jest symbol (więcej niż jeden moduł)
         # ========================================================================

@@ -377,6 +377,37 @@ pytać per wiersz.
 **Szczegóły po kliknięciu** — okno podglądu relacji (sekcja „Co przechowujemy")
 otwierane z PPM, z żywymi danymi z Subiekta. W arkuszu zostaje sam znacznik.
 
+## Wiersz półproduktu w arkuszu (dodane 14.09.2026)
+
+⚠️ **Luka w pierwotnym planie.** Plan przewidywał tylko znacznik 🛒 na
+rysunku-rodzicu, więc półprodukt trafiał na ZK, ale w BOM-ie nie miał
+wiersza: logistyk widział na zamówieniu towar, którego nie ma w arkuszu,
+„Ilość (zam.)" nie miała gdzie się pokazać, a „Ilość dostarczonych"
+i odczyt wydań z Subiekta nie miały do czego się przypiąć.
+
+Decyzja użytkownika: **wiersz ma być** — to zmienia ilości BOM-u tylko
+w „płaskiej gałęzi", która nie ma wpływu na drzewko.
+
+`subiekt_polprodukt_bom.zsynchronizuj(con, project_id, pozycje)`:
+
+* wiersz `is_manual=1` — SPOZA DRZEWKA, jak pozycje ręczne i ze schowka;
+  Inventor go nie zna, więc „Przelicz" korzeni go nie dotyka;
+* nazwa z kartoteki Subiekta, **numer pusty** (to towar handlowy, nie
+  rysunek), symbol kartoteki w `subiekt_symbol`, ilość z relacji;
+* notatka `półprodukt do: 2609-100.07 (3 szt.)` — mówi, skąd ta ilość;
+* ⚠️ rozpoznanie własnego wiersza idzie po `subiekt_symbol`, NIE po nazwie:
+  wiersz zakłada się z nazwą kartoteki w polu nazwy, więc szukanie po
+  samym symbolu nie trafiało we własny wpis i każde wywołanie dokładało
+  DUPLIKAT (złapane testem 14.09.2026);
+* aktualizuje tylko wiersze z własną notatką — cudzego „Ilość (zam.)"
+  nie nadpisuje.
+
+**Edycja zablokowana** (`_wiersz_polproduktu` + warunek w `on_cell_edited`,
+przed pozostałymi blokadami): numer, nazwa i obie ilości. Właścicielem tych
+pozycji jest Subiekt i relacja — ręczna zmiana nazwy zerwałaby powiązanie
+z kartoteką, a ilość i tak zostałaby nadpisana przy najbliższym zapisie
+projektu. Komunikat kieruje do PPM „Powiąż półprodukt…" na rysunku-rodzicu.
+
 ## Kartoteka półproduktu nie znika
 
 Rozważane wcześniej ostrzeżenie „kartoteka zniknęła z Subiekta" jest
