@@ -3147,11 +3147,8 @@ class MainWindow(tk.Tk):
             # Obcinamy OBA znaczniki — lista moze nosic 🔒 albo 💤.
             baza = wartosci[i].split(" 🔒 [")[0].split(" 💤 [")[0]
             user, minut = nowe.get(pid, (None, None))
-            if not user:
-                wartosci[i] = baza
-            elif minut is not None:
-                wartosci[i] = (f"{baza} 💤 [{self._get_user_display_name(user)}"
-                               f", {minut} min]")
+            if not user or minut is not None:
+                wartosci[i] = baza      # wolny albo porzucony — bez klodki
             else:
                 wartosci[i] = f"{baza} 🔒 [{self._get_user_display_name(user)}]"
         self.project_combo['values'] = wartosci
@@ -5332,9 +5329,11 @@ class MainWindow(tk.Tk):
                 # go nie kasuje — serwer pozwala go przejac po wygasnieciu
                 # bicia serca, ale user tego NIE WIDZIAL i omijal projekt,
                 # mysac, ze ktos tam pracuje (15.09.2026).
-                minut = self._lock_martwy_od(lock_info)
-                if minut is not None:
-                    display_name = f"{name} 💤 [{locked_by}, {minut} min]"
+                # PORZUCONY LOCK = BRAK KLODKI. Serwer i tak pozwoli go
+                # przejac zwyklym „Przejmij Lock", wiec projekt jest wolny
+                # i ma tak wygladac (15.09.2026).
+                if self._lock_martwy_od(lock_info) is not None:
+                    display_name = name
                 else:
                     # Format: "Nazwa projektu 🔒 [Nazwa Usera]"
                     display_name = f"{name} 🔒 [{locked_by}]"
@@ -5430,9 +5429,8 @@ class MainWindow(tk.Tk):
             if lock_info:
                 username = lock_info.get('user', '')  # LOGIN
                 locked_by = self._get_user_display_name(username)  # NAZWA
-                _m = self._lock_martwy_od(lock_info)
-                if _m is not None:
-                    return f"{project_name} 💤 [{locked_by}, {_m} min]"
+                if self._lock_martwy_od(lock_info) is not None:
+                    return project_name          # porzucony = wolny
                 return f"{project_name} 🔒 [{locked_by}]"
         except Exception as e:
             print(f"⚠️ Błąd sprawdzania locka dla projektu {project_id}: {e}")

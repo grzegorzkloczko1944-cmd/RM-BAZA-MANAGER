@@ -2344,7 +2344,9 @@ class RMManagerGUI:
         else:
             # Nie mamy locka - sprawdź czy ktoś inny ma
             owner = self.lock_manager.get_project_lock_owner(self.selected_project_id)
-            if owner:
+            # Porzucona blokada (zabita aplikacja) = projekt WOLNY: serwer
+            # i tak pozwoli ja przejac zwyklym „Przejmij Lock" (15.09.2026).
+            if owner and self._lock_martwy_od(owner) is None:
                 locked_by = self._get_user_display_name(owner.get('user', '?'))
                 self.lock_status_label.config(text=f"🔴 {locked_by}", fg="#e74c3c")
             else:
@@ -4771,10 +4773,8 @@ class RMManagerGUI:
                 lock_info = wlasciciele.get(pid)
                 if lock_info and lock_info.get('user'):
                     locked_by = self._get_user_display_name(lock_info['user'])
-                    minut = self._lock_martwy_od(lock_info)
-                    name = (f"{name} 💤 [{locked_by}, {minut} min]"
-                            if minut is not None
-                            else f"{name} 🔒 [{locked_by}]")
+                    if self._lock_martwy_od(lock_info) is None:
+                        name = f"{name} 🔒 [{locked_by}]"
             combo_values.append(f"{status_prefix}     {name}")
         self.project_combo['values'] = combo_values
         if current_idx >= 0:
@@ -4822,11 +4822,8 @@ class RMManagerGUI:
             # Obcinamy OBA znaczniki — pasek moze nosic 🔒 albo 💤.
             baza = wartosci[i].split(" 🔒 [")[0].split(" 💤 [")[0]
             user, minut = nowe.get(pid, (None, None))
-            if not user:
-                wartosci[i] = baza
-            elif minut is not None:
-                wartosci[i] = (f"{baza} 💤 [{self._get_user_display_name(user)}"
-                               f", {minut} min]")
+            if not user or minut is not None:
+                wartosci[i] = baza      # wolny albo porzucony — bez klodki
             else:
                 wartosci[i] = f"{baza} 🔒 [{self._get_user_display_name(user)}]"
         self.project_combo['values'] = wartosci
@@ -4940,10 +4937,8 @@ class RMManagerGUI:
                         lock_info = self.lock_manager.get_project_lock_owner(pid)
                         if lock_info and lock_info.get('user'):
                             locked_by = self._get_user_display_name(lock_info['user'])
-                            _m = self._lock_martwy_od(lock_info)
-                            name = (f"{name} 💤 [{locked_by}, {_m} min]"
-                                    if _m is not None
-                                    else f"{name} 🔒 [{locked_by}]")
+                            if self._lock_martwy_od(lock_info) is None:
+                                name = f"{name} 🔒 [{locked_by}]"
                     except Exception:
                         pass
                 combo_values.append(f"{status_prefix}     {name}")
@@ -18287,10 +18282,8 @@ class RMManagerGUI:
                         _lock_info = self.lock_manager.get_project_lock_owner(pid)
                         if _lock_info and _lock_info.get('user'):
                             _locked_by = self._get_user_display_name(_lock_info['user'])
-                            _m = self._lock_martwy_od(_lock_info)
-                            _lock_suffix = (f" 💤 [{_locked_by}, {_m} min]"
-                                            if _m is not None
-                                            else f" 🔒 [{_locked_by}]")
+                            if self._lock_martwy_od(_lock_info) is None:
+                                _lock_suffix = f" 🔒 [{_locked_by}]"
                 except Exception:
                     pass
                 name_lbl = f"{info['name']}{_lock_suffix}"
@@ -18396,10 +18389,9 @@ class RMManagerGUI:
                     if not getattr(self.lock_manager, '_STUB', False):
                         li = self.lock_manager.get_project_lock_owner(pid)
                         if li and li.get('user'):
-                            _m = self._lock_martwy_od(li)
-                            _kto = self._get_user_display_name(li['user'])
-                            suffix = (f" 💤 [{_kto}, {_m} min]" if _m is not None
-                                      else f" 🔒 [{_kto}]")
+                            if self._lock_martwy_od(li) is None:
+                                suffix = (" 🔒 [%s]"
+                                          % self._get_user_display_name(li['user']))
                     lbl.config(text=f"{base_name}{suffix}")
                 except Exception:
                     pass
@@ -21933,11 +21925,9 @@ class RMManagerGUI:
                 is_primary = (lpid == pid)
                 prefix = "▶ " if is_primary else "  "
                 owner = self.lock_manager.get_project_lock_owner(lpid)
-                if owner:
-                    _m = self._lock_martwy_od(owner)
-                    _kto = self._get_user_display_name(owner['user'])
-                    owner_txt = (f" 💤 [{_kto}, {_m} min]" if _m is not None
-                                 else f" 🔒 [{_kto}]")
+                if owner and self._lock_martwy_od(owner) is None:
+                    owner_txt = (" 🔒 [%s]"
+                                 % self._get_user_display_name(owner['user']))
                 else:
                     owner_txt = ""
                 tk.Label(panel, text=f"{prefix}{lname}{owner_txt}",
