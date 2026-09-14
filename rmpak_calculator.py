@@ -350,30 +350,19 @@ class RmpakCalculatorDialog:
         self.semi_lista_frame = tk.Frame(bottom)
         self.semi_lista_frame.grid(row=4, column=0, columnspan=8, sticky="we",
                                    padx=(4, 8), pady=(2, 0))
-        # ⚠️ Text, nie Label: z etykiety NIE DA SIE zaznaczyc tekstu,
-        # a symbole i nazwy polproduktow przepisuje sie do Subiekta
-        # i do maili (15.09.2026). `state="disabled"` trzyma pole
-        # tylko-do-odczytu, ale zaznaczanie i Ctrl+C dziala.
-        self.semi_lista_txt = tk.Text(
-            self.semi_lista_frame, height=1, wrap="none", relief="flat",
-            font=("Consolas", 8), fg="#31708f",
-            bg=self.semi_lista_frame.cget("bg"), state="disabled",
-            cursor="xterm", borderwidth=0, highlightthickness=0)
-        self.semi_lista_txt.pack(anchor="w", fill="x")
+        self.semi_lista_var = tk.StringVar(value="")
+        self.semi_lista_label = tk.Label(
+            self.semi_lista_frame, textvariable=self.semi_lista_var,
+            justify="left", anchor="w", font=("Consolas", 8), fg="#31708f")
+        self.semi_lista_label.pack(anchor="w")
 
-        _menu_sl = tk.Menu(self.semi_lista_txt, tearoff=0)
-        _menu_sl.add_command(
-            label="Kopiuj zaznaczone",
-            command=lambda: self._kopiuj_rozbicie(tylko_zaznaczenie=True))
-        _menu_sl.add_command(
-            label="Kopiuj całość",
-            command=lambda: self._kopiuj_rozbicie(tylko_zaznaczenie=False))
-        self.semi_lista_txt.bind(
+        # Kopiowanie pod PPM — etykiety nie da sie zaznaczyc mysza, ale
+        # menu nie zmienia jej wygladu (uzytkownik wolal ten wyglad).
+        _menu_sl = tk.Menu(self.semi_lista_label, tearoff=0)
+        _menu_sl.add_command(label="Kopiuj rozbicie",
+                             command=self._kopiuj_rozbicie)
+        self.semi_lista_label.bind(
             "<Button-3>", lambda e: _menu_sl.tk_popup(e.x_root, e.y_root))
-        self.semi_lista_txt.bind(
-            "<Control-c>", lambda _e: self._kopiuj_rozbicie(True))
-        self.semi_lista_txt.bind(
-            "<Control-C>", lambda _e: self._kopiuj_rozbicie(True))
 
         tk.Label(bottom, text="Stawka (PLN/h):").grid(row=5, column=0, sticky="e", padx=(4, 2), pady=(6, 0))
         self.item_rate_var = tk.StringVar(value=str(self.hourly_rate))
@@ -1093,8 +1082,6 @@ class RmpakCalculatorDialog:
         # 304,13 (104,13 x1 + 100,00 x2).
         self._polprodukt = dict(rel[0])
         self._polprodukty = [dict(r) for r in rel]
-        if mode == "semi" and (semi_price or semi_name):
-            return                      # user ma wlasna kalkulacje — nie ruszamy
 
         # ⚠️ NIE `query_stock` — ono zwraca stany, ale CenaEwidencyjna jest
         # tam NULL (ta sama pulapka co w oknie polproduktu). Cene niesie
@@ -1109,6 +1096,14 @@ class RmpakCalculatorDialog:
                     for _p in (_w.get("pozycje") or [])}
         except Exception as e:
             print("Kalkulator: cena polproduktu nieodczytana (%s)" % e)
+
+        # Rozbicie pokazujemy ZAWSZE — takze gdy user ma wlasna kalkulacje.
+        # To wlasnie przy wycenionych pozycjach chce sie sprawdzic, z czego
+        # wzieta jest cena (15.09.2026).
+        self._opisz_polprodukty({k: {"CenaEwidencyjna": v}
+                                 for k, v in ceny.items()})
+        if mode == "semi" and (semi_price or semi_name):
+            return                      # pola kalkulacji zostawiamy w spokoju
 
         razem, znane = 0.0, 0
         for r in rel:
@@ -1132,38 +1127,18 @@ class RmpakCalculatorDialog:
         if znane:
             # Cena za JEDEN detal: suma (kartoteka x ilosc na sztuke).
             self.semi_price_var.set("%.2f" % razem)
-        # Rozbicie pod polami — z tych samych cen, wiec bez drugiego pytania.
-        self._opisz_polprodukty({k: {"CenaEwidencyjna": v}
-                                 for k, v in ceny.items()})
 
 
     def _ustaw_rozbicie(self, tekst):
-        """Wpisuje rozbicie do pola tylko-do-odczytu i dopasowuje wysokosc."""
-        try:
-            self.semi_lista_txt.config(state="normal")
-            self.semi_lista_txt.delete("1.0", "end")
-            if tekst:
-                self.semi_lista_txt.insert("1.0", tekst)
-            self.semi_lista_txt.config(
-                state="disabled",
-                height=max(1, len(tekst.split(chr(10)))) if tekst else 1)
-        except tk.TclError:
-            pass
+        self.semi_lista_var.set(tekst)
 
-    def _kopiuj_rozbicie(self, tylko_zaznaczenie=True):
-        """Ctrl+C / menu: zaznaczony fragment albo cale rozbicie."""
-        try:
-            if tylko_zaznaczenie and self.semi_lista_txt.tag_ranges("sel"):
-                tekst = self.semi_lista_txt.get("sel.first", "sel.last")
-            else:
-                tekst = self.semi_lista_txt.get("1.0", "end-1c")
-        except tk.TclError:
-            return
+    def _kopiuj_rozbicie(self):
+        """PPM na rozbiciu → cale rozbicie do schowka."""
+        tekst = self.semi_lista_var.get()
         if not tekst.strip():
             return
         self.win.clipboard_clear()
         self.win.clipboard_append(tekst)
-        return "break"
 
     def _opisz_polprodukty(self, ceny=None):
         """Wypelnia wiersz rozbicia pod polami polproduktu.
