@@ -8736,15 +8736,24 @@ class MainWindow(tk.Tk):
 
         filtered = []
         for item in items:
-            # Filtr tekstowy (szukaj w: drawing_no, name, descr)
+            # Filtr tekstowy (szukaj w: drawing_no, name, descr, subiekt_symbol)
             if search_text:
                 drawing_no = str(item.get('drawing_no') or '').lower()
                 name = str(item.get('name') or '').lower()
                 descr = str(item.get('descr') or '').lower()
-                if search_text not in drawing_no and search_text not in name and search_text not in descr:
+                # ⚠️ SYMBOL Z SUBIEKTA tez: pozycje bez numeru rysunku
+                # (polprodukty, dopisane z ZK, znormalizowane po zasiewie)
+                # maja `drawing_no` PUSTE, a arkusz pokazuje w tej kolumnie
+                # wlasnie `subiekt_symbol`. Bez tego wpisanie symbolu
+                # widocznego na ekranie nic nie znajdowalo (14.09.2026).
+                symbol = str(item.get('subiekt_symbol') or '').lower()
+                if (search_text not in drawing_no and search_text not in name
+                        and search_text not in descr
+                        and search_text not in symbol):
                     if not search_norm:
                         continue
-                    zbite = re.sub(r"[\s\-_./]+", "", f"{drawing_no}\x00{name}\x00{descr}")
+                    zbite = re.sub(r"[\s\-_./]+", "",
+                                   f"{drawing_no}\x00{name}\x00{descr}\x00{symbol}")
                     if search_norm not in zbite:
                         continue
             
