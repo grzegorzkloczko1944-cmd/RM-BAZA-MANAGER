@@ -77,7 +77,7 @@ class SchowekWindow(WydanieWindow):
         #: Zawartość: [{symbol, nazwa, ilosc, monterzy}]
         self.zawartosc = []
         super().__init__(parent, project_id, project_name)
-        self.title("Schowek wydań — %s" % self.project_name)
+        self.title("Schowek wydań — %s" % (self.project_name or "wybierz projekt"))
 
     # ── budowa: różnice względem okna wydań ──────────────────────────────
     def _panel_sesji(self, rodzic):
@@ -250,6 +250,10 @@ class SchowekWindow(WydanieWindow):
             s, textvariable=self.var_projekt, width=26, state="readonly",
             font=("Arial", 11, "bold"))
         self.combo_projekt.pack(anchor="w", pady=(2, 0))
+        # Wybor projektu dociaga potrzebe i stany — inaczej kolumny
+        # „Potrzeba / Wydano" zostalyby puste az do „Odswiez".
+        self.combo_projekt.bind("<<ComboboxSelected>>",
+                                lambda _e: self._projekt_zmieniony())
         self.var_kontekst = tk.StringVar(value="")
         tk.Label(s, textvariable=self.var_kontekst, bg=TLO_SEKCJI,
                  fg=TEKST_SZARY, font=("Arial", 8), anchor="w").pack(anchor="w")
@@ -331,6 +335,19 @@ class SchowekWindow(WydanieWindow):
                 self.var_projekt.set(self.project_name)
         except Exception:
             pass
+
+    def _projekt_zmieniony(self):
+        """Magazynier wybrał projekt w nagłówku — dociągamy jego dane.
+
+        Przy pierwszym wyborze (okno otwarte bez projektu) ustawiamy też
+        `project_name`, bo od niego zależy odczyt z Subiekta i tytuł okna.
+        """
+        wybrany = (self.var_projekt.get() or "").strip()
+        if not wybrany:
+            return
+        self.project_name = wybrany
+        self.title("Schowek wydań — %s" % wybrany)
+        self._odswiez()
 
     def _projekt_pozycji(self):
         """Numer projektu dla KOLEJNEJ skanowanej pozycji."""
@@ -437,6 +454,30 @@ class SchowekWindow(WydanieWindow):
         wydano / stan" — ale rysuje je `_przerysuj`.
         """
         self._przerysuj()
+
+    def _odswiez(self):
+        """Stan z Subiekta — TYLKO gdy znamy projekt.
+
+        ⚠️ Bez projektu most odrzuca `wydanie-stan` (pusty numer = kod 1),
+        a okno pokazywało to jako CZERWONY ALARM „brak połączenia
+        z Subiektem" — mylące, bo połączenie było w porządku, brakowało
+        tylko projektu (14.09.2026).
+
+        Schowek działa bez projektu: magazynier wybiera go z listy przed
+        pierwszym skanem. Do tego czasu nie ma czego liczyć — kolumny
+        „Potrzeba / Wydano" i tak dotyczą konkretnego projektu.
+        """
+        if not (self.project_name or "").strip():
+            self.polaczony = True          # most jest sprawny, brak tylko projektu
+            self._ustaw_blokade_awarii(False)
+            self.var_polaczenie.set("● Połączono z Subiektem NEXO")
+            self.lbl_polaczenie.config(fg=OK_ZIELONY)
+            self.var_status.set("Wybierz projekt w nagłówku, żeby zobaczyć "
+                                "potrzebę i stany")
+            self.stan, self.plan = {}, []
+            self._odswiez_zawartosc()
+            return
+        super()._odswiez()
 
     def _po_odczycie(self, dane, blad, kartoteki=None):
         super()._po_odczycie(dane, blad, kartoteki)
