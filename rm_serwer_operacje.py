@@ -876,6 +876,14 @@ ODCZYT = {
         ["numery_json"],
     ),
     # Pytanie odwrotne: „w ktorych rysunkach uzywane jest to kolo".
+    # To samo pytanie, ale po SYMBOLU — arkusz zna symbol kartoteki
+    # (`subiekt_symbol` wiersza), nie jej `id`.
+    "map-polprodukt-gdzie-symbol": (
+        "SELECT * FROM polprodukty"
+        " WHERE LOWER(TRIM(COALESCE(symbol, ''))) = LOWER(TRIM(?))"
+        " ORDER BY numer_rysunku",
+        ["symbol"],
+    ),
     "map-polprodukt-gdzie": (
         "SELECT * FROM polprodukty WHERE id_subiekt = ?"
         " ORDER BY numer_rysunku",

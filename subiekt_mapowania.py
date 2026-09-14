@@ -297,6 +297,18 @@ def polprodukt_gdzie(id_subiekt, path=None):
                                  {"id_subiekt": int(id_subiekt)})
 
 
+def polprodukt_gdzie_symbol(symbol, path=None):
+    """[wiersz, …] — do jakich RYSUNKOW nalezy ta kartoteka.
+
+    Po symbolu, bo arkusz zna `subiekt_symbol` wiersza, a nie `id` kartoteki.
+    Uzywane, gdy user klika PPM na wierszu, ktory SAM jest polproduktem.
+    """
+    s = (symbol or "").strip()
+    if not s:
+        return []
+    return rm_klient.master_read("map-polprodukt-gdzie-symbol", {"symbol": s})
+
+
 def zapisz_polprodukt(numer, id_subiekt, ilosc_na_szt=1, symbol=None,
                       nazwa=None, uwagi=None, path=None):
     """Powiaz rysunek z kartoteka polfabrykatu. True = zapisano.

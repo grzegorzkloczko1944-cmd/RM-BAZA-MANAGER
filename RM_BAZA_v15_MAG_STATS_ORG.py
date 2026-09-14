@@ -12881,7 +12881,8 @@ class MainWindow(tk.Tk):
             cur = self.db_manager.project_con.execute(
                 "SELECT COALESCE(NULLIF(work_drawing_no,''), NULLIF(norm_drawing_no,''), "
                 "NULLIF(src_drawing_no,''), work_name, src_name),"
-                " COALESCE(NULLIF(work_name,''), src_name) FROM items WHERE id = ?",
+                " COALESCE(NULLIF(work_name,''), src_name),"
+                " COALESCE(subiekt_symbol, '') FROM items WHERE id = ?",
                 (row_ids[row],)).fetchone()
         except Exception as e:
             messagebox.showerror("Powiąż półprodukt",
@@ -12889,6 +12890,40 @@ class MainWindow(tk.Tk):
             return
         if not cur:
             return
+
+        # Wiersz, ktory SAM jest polproduktem: sensowna informacja jest
+        # odwrotna — „to jest polprodukt DO ktorego rysunku". Okno wiazania
+        # dotyczy rysunku-rodzica, nie kupowanej kartoteki (14.09.2026).
+        # Wiersz BEZ numeru rysunku, ale z symbolem kartoteki — kandydat
+        # na polprodukt. Rozstrzyga dopiero odpowiedz serwera.
+        _sym = (cur[2] or "").strip()
+        if _sym and not (cur[0] or "").strip():
+            try:
+                import subiekt_mapowania as _MAP
+                _gdzie = _MAP.polprodukt_gdzie_symbol(_sym)
+            except Exception:
+                _gdzie = []
+            if _gdzie:
+                _opis = (NL + "    ").join(
+                    "%s  —  %s szt. na 1 detal" % (w["numer_rysunku"],
+                                                   w["ilosc_na_szt"])
+                    for w in _gdzie)
+                if not messagebox.askyesno(
+                        "To jest półprodukt",
+                        "„%s” (%s) to KUPOWANY PÓŁFABRYKAT.\n\n"
+                        "Powiązany z rysunkiem:\n    %s\n\n"
+                        "Powiązania prowadzi się na RYSUNKU, nie na "
+                        "półprodukcie.\n"
+                        "Otworzyć okno dla „%s”?"
+                        % ((cur[1] or _sym), _sym, _opis,
+                           _gdzie[0]["numer_rysunku"])):
+                    return
+                import subiekt_polprodukt_gui
+                return subiekt_polprodukt_gui.otworz(
+                    self, _gdzie[0]["numer_rysunku"], "",
+                    po_zmianie=self._po_zmianie_polproduktu,
+                    projekt_info=self._info_dla_polproduktu)
+
         import subiekt_polprodukt_gui
         # Po zamknieciu okna (gdy cos sie zmienilo) przeladowujemy arkusz —
         # inaczej znacznik 🛒 w kolumnie Δ pojawilby sie dopiero przy
