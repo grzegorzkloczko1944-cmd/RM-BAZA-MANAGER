@@ -2345,6 +2345,8 @@ class MainWindow(tk.Tk):
         self.sheet.popup_menu_add_command("Pokaż złożenie", self.show_assembly_tree)
         self.sheet.popup_menu_add_command("Karta pozycji (Subiekt, złożenie)",
                                           self.show_position_card)
+        self.sheet.popup_menu_add_command("Powiąż półprodukt…",
+                                          self.powiaz_polprodukt)
         self.sheet.popup_menu_add_command("Wyślij do RFQ", self.send_selected_to_rfq)
         self.sheet.popup_menu_add_command("Odśwież wyceny z portalu", self._refresh_rfq_data)
         self.sheet.popup_menu_add_command("Wyczyść śmieci wycen", self._reconcile_rfq_data)
@@ -12670,6 +12672,43 @@ class MainWindow(tk.Tk):
             return
         import subiekt_pozycja_gui
         subiekt_pozycja_gui.otworz(self, symbol, self.current_project_id)
+
+    def powiaz_polprodukt(self):
+        """Okno powiazania rysunku z kartoteka kupowanego polfabrykatu.
+
+        Detal czesto powstaje z gotowej czesci: rysunek „Kolo 5M_40 fi38" to
+        kupione kolo zebate + obrobka otworu. Konstruktor przypina polprodukt
+        raz, a relacja dziala GLOBALNIE — w kazdym nastepnym projekcie, bo
+        lezy w bazie mapowan na serwerze, nie w `items` (POLPRODUKTY_PLAN.md).
+
+        Klucz liczymy tak samo jak `show_position_card` i reszta integracji:
+        numer rysunku, a dla pozycji znormalizowanej jej nazwa. Inaczej ten
+        sam detal mialby tu inny klucz niz w pozostalych oknach.
+        """
+        try:
+            selection = self.sheet.get_currently_selected()
+            if not selection:
+                messagebox.showinfo("Powiąż półprodukt",
+                                    "Zaznacz najpierw wiersz.")
+                return
+            row = selection[0]
+            row_ids = getattr(self, "_sheet_row_ids", [])
+            if row >= len(row_ids):
+                return
+            cur = self.db_manager.project_con.execute(
+                "SELECT COALESCE(NULLIF(work_drawing_no,''), NULLIF(norm_drawing_no,''), "
+                "NULLIF(src_drawing_no,''), work_name, src_name),"
+                " COALESCE(NULLIF(work_name,''), src_name) FROM items WHERE id = ?",
+                (row_ids[row],)).fetchone()
+        except Exception as e:
+            messagebox.showerror("Powiąż półprodukt",
+                                 "Nie udalo sie odczytac pozycji:\n" + str(e))
+            return
+        if not cur:
+            return
+        import subiekt_polprodukt_gui
+        subiekt_polprodukt_gui.otworz(self, (cur[0] or "").strip(),
+                                      (cur[1] or "").strip())
 
     def jump_to_bom_item(self, project_id, item_id):
         """Pokaz wiersz BOM-u o danym id w arkuszu - z innego okna.

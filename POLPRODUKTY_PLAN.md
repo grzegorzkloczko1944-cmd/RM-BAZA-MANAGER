@@ -308,7 +308,20 @@ wejść w istniejący mechanizm, nie obok niego.
    ⚠️ `zapisz_scalenie` liczy teraz wynik **po nazwie operacji**, nie po
    pozycji w batchu (`wyniki[1::3]` przestało być prawdą po dołożeniu
    dwóch operacji półproduktów).
-2. **Wejście** — PPM „Powiąż półprodukt…" + okno wyboru + ilość na sztukę.
+2. ~~**Wejście** — PPM „Powiąż półprodukt…" + okno wyboru + ilość na sztukę.~~
+   **✅ ZROBIONE 14.09.2026.** `subiekt_polprodukt_gui.py` (nowy moduł):
+   sekcja „Z czego powstaje ten detal" (powiązane + Zmień ilość / Usuń)
+   i wyszukiwarka kartotek z polem „ile sztuk na 1 detal".
+   W arkuszu: PPM „Powiąż półprodukt…" → `powiaz_polprodukt()`, klucz liczony
+   tym samym `COALESCE` co `show_position_card`.
+   ⚠️ Metody z okna scalania NIE dało się użyć ponownie — `_szukaj_w_subiekcie`
+   i `_okno_szukania` są zrośnięte z jego stanem (`self.tree`, `self._katalog`,
+   `self._subiekt`, `_refill`). Wspólne jest to, co samodzielne:
+   `subiekt_scalanie.wczytaj_katalog_subiekta()` (cache z dysku → okno otwiera
+   się natychmiast, pobranie z mostu w tle tylko gdy cache pusty)
+   i `norm_kod()` do filtrowania.
+   Blokada: nie można powiązać rysunku z kartoteką o tym samym symbolu —
+   to ten sam detal, nie półprodukt.
 3. **Kalkulator** — `calc_semi_subiekt_id`, podpowiedź, cena z Subiekta,
    utrwalenie przy zapisie.
 4. **ZK** — agregacja po `id_subiekt` w budowaniu zapotrzebowania.
