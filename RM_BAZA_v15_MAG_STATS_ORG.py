@@ -3422,8 +3422,23 @@ class MainWindow(tk.Tk):
             # Ustaw stan menu Plik na podstawie domyślnego typu projektu
             self.update_menu_state()
 
-            # Wykonaj backup w tle (po 2 sekundach, żeby nie blokować GUI)
-            self.after(2000, self.run_backup_in_background)
+            # ⛔ BACKUP ROBI RM_SERWER (14.09.2026), nie klient.
+            #
+            # Tutaj stało `self.after(2000, self.run_backup_in_background)` —
+            # JEDNO wywołanie po starcie programu i koniec. Aplikacja chodząca
+            # bez restartu nie robiła kopii ANI RAZU: stacja startowała
+            # w poniedziałek, user edytował projekty cały tydzień, a jedyna
+            # kopia była z poniedziałku rano. Liczby kopii per dzień mówiły
+            # nie o ilości pracy, tylko o tym, kto restartował aplikację
+            # (14.09: RM_BAZA 0 kopii przy pięciu pracujących stacjach).
+            #
+            # Serwer chodzi bez przerwy jako usługa, sprawdza co godzinę
+            # i kopiuje przez Online Backup API — spójnie, nawet gdy ktoś
+            # akurat pisze do pliku (`rm_serwer._backup_projektow`).
+            # `backup_manager` zostaje w kliencie: okno „Przywróć backup"
+            # czyta z niego kopie, a kopie PRZEDIMPORTOWE (`_PRE_`) nadal
+            # robi klient — tam liczy się moment tuż przed groźną operacją,
+            # a nie pora doby.
             
             # Uruchom timer heartbeat dla locków
             self._start_heartbeat_timer()

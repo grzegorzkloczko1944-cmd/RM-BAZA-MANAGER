@@ -39,6 +39,7 @@ import hmac
 import json
 import os
 import queue
+import re
 import socket
 import sqlite3
 import struct
@@ -46,7 +47,7 @@ import sys
 import threading
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import rm_serwer_operacje as ops
 
@@ -116,6 +117,9 @@ def wczytaj_config(sciezka=None):
         "backup_katalog": dane.get("backup_katalog",
                                    os.path.join(KATALOG, "backup")),
         "backup_ile": int(dane.get("backup_ile", 20)),
+        # Kopie projektów trzymamy po DACIE, nie po liczbie: 30 dni, jak
+        # `retention_days` u klienta, który robił to wcześniej.
+        "backup_dni": int(dane.get("backup_dni", 30)),
         "log_katalog": dane.get("log_katalog", os.path.join(KATALOG, "logi")),
     }
 
@@ -564,7 +568,156 @@ class Serwer:
             except Exception as e:
                 # Nieudany backup jednej bazy nie może zablokować pozostałych.
                 log("⚠️  Backup %s nieudany: %s" % (prefiks, e))
+
+        # Pliki projektów obu programów — patrz `_backup_projektow`.
+        for ktora, wzorzec in (("BAZA", "RM_BAZA_projects"),
+                               ("MANAGER", "RM_MANAGER_projects")):
+            try:
+                ile = self._backup_projektow(ktora, wzorzec)
+                stare = self._rotacja_projektow(ktora)
+                if ile or stare:
+                    log("Backup projektów RM_%s: nowych kopii %d, usunięto starszych niż %d dni: %d"
+                        % (ktora, ile, max(1, int(self.config.get("backup_dni", 30))), stare))
+            except Exception as e:
+                log("⚠️  Backup projektów RM_%s nieudany: %s" % (ktora, e))
         return zrobione
+
+    def _backup_projektow(self, ktora: str, wzorzec: str):
+        """Kopie WSZYSTKICH plików projektów jednego programu.
+
+        Bazy projektowe zostały plikami na udziale (decyzja 12.09.2026:
+        przepisanie 302 zapytań na protokół dawało 20× wolniejszą pracę),
+        więc serwer kopiuje je jak zwykłe pliki — ale przez `sqlite3.backup`,
+        nie `copy2`: plik bywa akurat w trakcie zapisu ze stacji, a Online
+        Backup API zapewnia spójność bez blokowania piszącego.
+
+        ⚠️ DLACZEGO TUTAJ, A NIE W KLIENCIE (14.09.2026). RM_BAZA i RM_MANAGER
+        robiły to same, ale wyłącznie RAZ, 2–3 s po starcie programu
+        (`run_backup_in_background`). Aplikacja chodząca bez restartu nie
+        robiła kopii ANI RAZU: stacja startowała w poniedziałek, user edytował
+        projekty cały tydzień, a jedyna kopia była z poniedziałku rano. Liczby
+        kopii per dzień odzwierciedlały nie ilość pracy, tylko to, kto tego dnia
+        restartował aplikację (14.09: RM_BAZA 0 kopii przy pięciu pracujących
+        stacjach). Serwer chodzi bez przerwy jako usługa i sprawdza to co
+        godzinę — kopia powstaje niezależnie od tego, czy ktokolwiek pracuje.
+
+        Nazwy i układ katalogów ZGODNE Z KLIENTEM (`backup_manager.create_backup`),
+        żeby okno „Przywróć backup" widziało jedno i drugie:
+
+            backup_RM_BAZA\\projects\\project_88\\project_88_2026-09-14.sqlite
+                                                 project_88_2026-09-14.json
+
+        Jeden plik na dobę — powtórzone wywołanie tego samego dnia nadpisuje
+        kopię (stan z końca dnia jest cenniejszy niż z jego początku).
+        """
+        katalog_zrodla = os.path.join(os.path.dirname(self.baza), "Projekty", wzorzec)
+        korzen = os.path.join(os.path.dirname(self.baza), "Projekty",
+                              "backup_RM_%s" % ktora, "projects")
+        if not os.path.isdir(katalog_zrodla):
+            return 0
+
+        dzis = datetime.now().strftime("%Y-%m-%d")
+        zrobione = 0
+        for nazwa in sorted(os.listdir(katalog_zrodla)):
+            if not nazwa.endswith(".sqlite"):
+                continue
+            # Klucz projektu = nazwa pliku bez rozszerzenia i bez prefiksu
+            # programu: `project_88` albo `rm_manager_project_44` → `44`.
+            # Bazy magazynowe RM_BAZA (`project_MAG_11`) mają WŁASNY klucz
+            # `MAG_11` i własny katalog — inaczej kopia magazynu wylądowałaby
+            # wśród kopii projektu maszynowego o tym samym numerze, a
+            # przywrócenie nadpisałoby niewłaściwą bazę (poprawka 14.09.2026).
+            rdzen = nazwa[:-len(".sqlite")]
+            if ktora == "MANAGER":
+                if not rdzen.startswith("rm_manager_project_"):
+                    continue
+                klucz = rdzen[len("rm_manager_project_"):]
+            else:
+                if not rdzen.startswith("project_"):
+                    continue
+                klucz = rdzen[len("project_"):]
+            if not klucz:
+                continue
+
+            podkatalog = os.path.join(korzen, "project_%s" % klucz)
+            cel = os.path.join(podkatalog, "project_%s_%s.sqlite" % (klucz, dzis))
+            if os.path.isfile(cel):
+                continue                     # kopia z dziś już jest
+
+            zrodlo = os.path.join(katalog_zrodla, nazwa)
+            try:
+                os.makedirs(podkatalog, exist_ok=True)
+                # mode=ro: kopiujemy CUDZY plik — nie zakładamy na nim blokady
+                # zapisu i nie tworzymy dziennika obok niego.
+                zrodlowe = sqlite3.connect("file:%s?mode=ro" % zrodlo.replace("?", "%3f"),
+                                           uri=True, timeout=30)
+                try:
+                    docelowe = sqlite3.connect(cel)
+                    try:
+                        zrodlowe.backup(docelowe)
+                    finally:
+                        docelowe.close()
+                finally:
+                    zrodlowe.close()
+                # Metryka obok kopii — ten sam format co u klienta.
+                with open(os.path.splitext(cel)[0] + ".json", "w", encoding="utf-8") as f:
+                    json.dump({"source": zrodlo,
+                               "created_at": datetime.now().isoformat(),
+                               "size_bytes": os.path.getsize(cel),
+                               "by": "RM_SERWER"}, f, indent=2)
+                zrobione += 1
+            except Exception as e:
+                # Jeden uszkodzony plik nie może zatrzymać kopii pozostałych.
+                log("⚠️  Backup %s nieudany: %s" % (nazwa, e))
+                for smiec in (cel, os.path.splitext(cel)[0] + ".json"):
+                    try:
+                        os.remove(smiec)     # niepełna kopia gorsza niż żadna
+                    except OSError:
+                        pass
+                try:
+                    os.rmdir(podkatalog)     # pusty katalog udawałby kopie
+                except OSError:
+                    pass                     # są w nim starsze kopie — zostaje
+        return zrobione
+
+    def _rotacja_projektow(self, ktora: str) -> int:
+        """Kasuje kopie projektów starsze niż `backup_dni` (domyślnie 30).
+
+        Ta sama reguła, którą stosował klient (`retention_days = 30`).
+        Kopie ręczne i przedimportowe (`_PRE_`) zostają — ktoś zrobił je
+        świadomie przed groźną zmianą.
+        """
+        korzen = os.path.join(os.path.dirname(self.baza), "Projekty",
+                              "backup_RM_%s" % ktora, "projects")
+        if not os.path.isdir(korzen):
+            return 0
+        dni = max(1, int(self.config.get("backup_dni", 30)))
+        granica = datetime.now() - timedelta(days=dni)
+        usuniete = 0
+        for podkatalog in sorted(os.listdir(korzen)):
+            sciezka = os.path.join(korzen, podkatalog)
+            if not os.path.isdir(sciezka):
+                continue
+            for plik in sorted(os.listdir(sciezka)):
+                if not plik.endswith((".sqlite", ".json")) or "_PRE_" in plik:
+                    continue
+                # Data z nazwy, nie z mtime: mtime zmienia się przy kopiowaniu
+                # katalogu i skasowałby kopie, które wcale nie są stare.
+                m = re.search(r"(\d{4})-(\d{2})-(\d{2})(?=\.|_)", plik)
+                if not m:
+                    continue
+                try:
+                    kiedy = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                except ValueError:
+                    continue
+                if kiedy >= granica:
+                    continue
+                try:
+                    os.remove(os.path.join(sciezka, plik))
+                    usuniete += 1
+                except OSError:
+                    pass
+        return usuniete
 
     def _katalog_backupu(self, ktora: str) -> str:
         """Katalog `master\\` wewnątrz backupów danego programu.

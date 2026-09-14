@@ -798,8 +798,12 @@ class RMManagerGUI:
         # Sprawdź czy potrzebna synchronizacja przy starcie (w tle, po załadowaniu projektów)
         self.root.after(2000, self._check_startup_sync)
         
-        # Sprawdź czy potrzebny codzienny backup (w tle)
-        self.root.after(3000, self.run_backup_in_background)
+        # ⛔ BACKUP ROBI RM_SERWER (14.09.2026), nie klient — patrz
+        # `rm_serwer._backup_projektow`. Tutaj stało
+        # `self.root.after(3000, self.run_backup_in_background)`: jedno
+        # wywołanie po starcie, więc aplikacja chodząca bez restartu nie
+        # robiła kopii wcale (kopie RM_MANAGER stały od 12.09 do 14.09).
+        # Serwer chodzi jako usługa i sprawdza co godzinę.
 
     # ========================================================================
     # Per-projekt helpers + lock lifecycle
