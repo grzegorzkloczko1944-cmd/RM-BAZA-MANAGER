@@ -361,23 +361,6 @@ class RmpakCalculatorDialog:
         self.pw_status_var = tk.StringVar(value="PW: —")
         tk.Label(doc_frame, textvariable=self.pw_status_var, anchor="w",
                  font=("", 9)).pack(anchor="w", fill="x")
-        self.rw_status_var = tk.StringVar(value="RW: —")
-        tk.Label(doc_frame, textvariable=self.rw_status_var, anchor="w",
-                 font=("", 9)).pack(anchor="w", fill="x")
-
-        # Ile pozycji faktycznie pójdzie na dokument — liczone z BAZY, nie
-        # z widocznych wierszy. User musi to widzieć ZANIM kliknie (§8).
-        self.pw_info_var = tk.StringVar(value="")
-        tk.Label(doc_frame, textvariable=self.pw_info_var, anchor="w",
-                 font=("", 8), fg="gray30", wraplength=225,
-                 justify="left").pack(anchor="w", fill="x", pady=(6, 0))
-
-        self.btn_pw = tk.Button(doc_frame, text="📥 Wystaw PW", command=self._podglad_pw,
-                                bg="#337ab7", fg="white", font=("", 9, "bold"))
-        self.btn_pw.pack(anchor="e", fill="x", pady=(8, 0))
-        self.btn_rw = tk.Button(doc_frame, text="📤 Wystaw RW", state="disabled",
-                                font=("", 9, "bold"))
-        self.btn_rw.pack(anchor="e", fill="x", pady=(4, 0))
 
         tk.Button(sum_frame, text="Zamknij", command=self._on_close,
                   width=12, bg="#d9534f", fg="white", font=("", 9, "bold")).pack(anchor="e", pady=(10, 0))
@@ -386,15 +369,32 @@ class RmpakCalculatorDialog:
 
     # ── Dokumenty produkcji (PW / RW) ────────────────────────────────────
     def _pozycje_pw(self):
-        """(pozycje, pominiete_komplety) z BAZY. (None, None) gdy się nie da."""
+        """(pozycje, pominiete_komplety) z BAZY. (None, None) gdy się nie da.
+
+        Pozycje mają dołożone `juz_pw`, `do_pw` i `nadmiar` — PW jest
+        RÓŻNICOWE: przyjmujemy tylko to, czego jeszcze nie przyjęto
+        (ilość w projekcie minus suma wszystkich PW po symbolu).
+        Dzięki temu nie ma trybu „kolejne PW": dopisanie sztuk w bazie
+        sprawia, że następny dokument bierze samą różnicę.
+
+        Gdy Subiekt nie odpowie, `juz_pw` zostaje 0 — lepiej pokazać pełne
+        ilości i dać userowi decyzję niż odmówić wystawienia PW.
+        """
         try:
             import subiekt_produkcja
             pid = subiekt_produkcja.project_id_z_polaczenia(self.project_con)
             if pid is None:
                 return None, None
-            return subiekt_produkcja.lista_do_pw(pid)
+            poz, pom = subiekt_produkcja.lista_do_pw(pid)
         except Exception:
             return None, None
+        try:
+            przyjete = subiekt_produkcja.przyjete_na_pw(self.project_name)
+        except Exception as e:
+            print("PW: nie odczytano wcześniejszych PW: %s" % e)
+            przyjete = {}
+        subiekt_produkcja.rozliczenie_pw(poz, przyjete)
+        return poz, pom
 
     def _odswiez_numery_dokumentow(self):
         """PW/RW z Subiekta — W TLE, bo odczyt idzie przez most (~1 s).
@@ -423,23 +423,15 @@ class RmpakCalculatorDialog:
         """Wynik odczytu na etykiety. None = nie udało się połączyć."""
         if dok is None:
             self.pw_status_var.set("PW: (brak połączenia)")
-            self.rw_status_var.set("RW: (brak połączenia)")
             return
         self._dok_produkcji = dok
         pw, rw = dok.get("PW") or [], dok.get("RW") or []
+        # Numery do komunikatu „kolejne PW jedzie na roznicy".
+        self._numery_pw = [d["numer"] for d in pw]
         self.pw_status_var.set("PW: " + (", ".join(d["numer"] for d in pw) if pw else "—"))
-        self.rw_status_var.set("RW: " + (", ".join(d["numer"] for d in rw) if rw else "—"))
-        # RW dopiero po PW — ale BEZ limitu „tylko raz" (14.09.2026):
-        # projekt moze miec dowolna liczbe RW, tak samo jak PW. Warunek
-        # `pw` zostaje, bo wydanie z magazynu ma sens dopiero wtedy, gdy
-        # cos na ten magazyn przyjeto.
-        try:
-            self.btn_rw.config(state="normal" if pw else "disabled",
-                               bg="#337ab7" if pw else "SystemButtonFace",
-                               fg="white" if pw else "gray40",
-                               command=self._podglad_rw)
-        except Exception:
-            pass
+        # RW NIE POWSTAJE w kalkulatorze (15.09.2026) — robi to magazyn
+        # przy wydaniu ze schowka. Numery czytamy dalej, bo przydaja sie
+        # w innych miejscach (`_dok_produkcji`).
 
     def _odswiez_status_pw(self):
         """Podpis pod przyciskiem: ile pozycji i czego brakuje.
@@ -484,6 +476,24 @@ class RmpakCalculatorDialog:
             return
         import subiekt_produkcja
         braki = subiekt_produkcja.braki_przed_pw(poz)
+        # Na dokument idzie TYLKO to, czego jeszcze nie przyjeto.
+        do_dokumentu = [p for p in poz if p.get("do_pw", p.get("ilosc", 0)) > 0]
+        nadmiarowe = [p for p in poz if p.get("nadmiar")]
+        juz_bylo = any(p.get("juz_pw") for p in poz)
+        numery_pw = ", ".join(self._numery_pw) if getattr(self, "_numery_pw", None) else "wcześniejsze PW"
+
+        if not do_dokumentu:
+            komunikat = ("Wszystko z tego projektu jest już przyjęte na PW.\n\n"
+                         "Jeśli dopiszesz sztuki albo nową pozycję w RM_BAZA, "
+                         "kolejne PW obejmie samą różnicę.")
+            if nadmiarowe:
+                komunikat += ("\n\n⚠ Na PW przyjęto WIĘCEJ, niż jest w projekcie:\n    "
+                              + "\n    ".join("%s — nadmiar %g szt."
+                                              % (p["symbol"], p["nadmiar"])
+                                              for p in nadmiarowe[:8]))
+            messagebox.showinfo("PW — nie ma czego przyjąć", komunikat,
+                                parent=self.win)
+            return
 
         dlg = tk.Toplevel(self.win)
         dlg.title("Podgląd PW — przyjęcie produkcji własnej")
@@ -493,6 +503,18 @@ class RmpakCalculatorDialog:
         tk.Label(dlg, text=f"ZOSTANIE UTWORZONY DOKUMENT PW — {self.project_name}",
                  bg="#337ab7", fg="white", font=("", 10, "bold"),
                  anchor="w", padx=12, pady=8).pack(fill="x")
+
+        # KOLEJNE PW JEDZIE NA RÓŻNICY — user musi to wiedzieć, zanim
+        # zobaczy mniejsze ilości niż w projekcie i uzna to za błąd.
+        if juz_bylo:
+            tk.Label(dlg, bg="#d9edf7", fg="#31708f", anchor="w",
+                     justify="left", wraplength=790, padx=12, pady=8,
+                     font=("", 9),
+                     text="ℹ To KOLEJNE PW dla tego projektu — dokument "
+                          "obejmie TYLKO RÓŻNICĘ.\n"
+                          "Kolumna „Do PW” = ilość w projekcie − to, co już "
+                          "przyjęto wcześniejszymi PW (%s)." % numery_pw
+                     ).pack(fill="x")
 
         # Braki NA GÓRZE, nie w stopce — to one decydują, czy PW w ogóle
         # powstanie, więc nie mogą wymagać przewijania.
@@ -519,24 +541,35 @@ class RmpakCalculatorDialog:
                               "kliknij „💾 Zapisz cenę/szt.”, potem otwórz podgląd ponownie."
                          ).pack(anchor="w", pady=(6, 0))
 
-        cols = ("Symbol", "Nazwa", "Ilość", "Cena/szt.", "Wartość")
+        cols = ("Symbol", "Nazwa", "W projekcie", "Już PW", "Do PW",
+                "Cena/szt.", "Wartość")
         tree = ttk.Treeview(dlg, columns=cols, show="headings", height=14)
-        for c, w in zip(cols, (150, 300, 70, 90, 100)):
+        for c, w in zip(cols, (140, 250, 80, 70, 70, 85, 95)):
             tree.heading(c, text=c)
-            tree.column(c, width=w, anchor="e" if c in ("Ilość", "Cena/szt.", "Wartość") else "w")
+            tree.column(c, width=w,
+                        anchor="w" if c in ("Symbol", "Nazwa") else "e")
         tree.pack(fill="both", expand=True, padx=10, pady=(8, 0))
 
         razem = 0.0
-        for p in poz:
+        for p in do_dokumentu:
             cena = p["cena"]
-            wart = (cena or 0) * p["ilosc"]
+            wart = (cena or 0) * p["do_pw"]
             razem += wart
             tree.insert("", "end", values=(
                 p["symbol"], p["nazwa"], f"{p['ilosc']:g}",
+                f"{p['juz_pw']:g}", f"{p['do_pw']:g}",
                 f"{cena:.2f}" if cena else "— BRAK —",
                 f"{wart:.2f}" if cena else "—"),
                 tags=() if cena else ("brak",))
+        # Nadmiar: przyjeto WIECEJ, niz jest w projekcie (ktos zmniejszyl
+        # ilosc po PW). Nie wystawiamy „ujemnego PW" — pokazujemy fakt.
+        for p in nadmiarowe:
+            tree.insert("", "end", values=(
+                p["symbol"], p["nazwa"], f"{p['ilosc']:g}",
+                f"{p['juz_pw']:g}", "0",
+                "—", "NADMIAR %g szt." % p["nadmiar"]), tags=("nadmiar",))
         tree.tag_configure("brak", background="#f2dede")
+        tree.tag_configure("nadmiar", background="#fcf3cf")
 
         # STOPKA NA DOLE OKNA (side="bottom") i PRZED tabelą w kolejności
         # pakowania — inaczej tabela z expand=True zjada wysokość i przyciski
@@ -549,6 +582,10 @@ class RmpakCalculatorDialog:
         rzad_opis.pack(fill="x")
         tk.Label(rzad_opis, text=f"RAZEM: {razem:,.2f} PLN".replace(",", " "),
                  font=("", 12, "bold"), fg="darkred").pack(side="left")
+        tk.Label(rzad_opis,
+                 text="   ·   do przyjęcia: %g szt. w %d poz."
+                      % (sum(p["do_pw"] for p in do_dokumentu), len(do_dokumentu)),
+                 font=("", 9), fg="gray30").pack(side="left")
 
         # Format Uwag czytamy ze ŹRÓDŁA (plan_pw), nie powtarzamy go tutaj —
         # własna kopia rozjeżdżała się z tym, co naprawdę idzie na dokument.
@@ -562,7 +599,9 @@ class RmpakCalculatorDialog:
         tk.Button(rzad_btn, text="Zamknij", command=dlg.destroy, width=12).pack(side="right")
         btn = tk.Button(rzad_btn, text="Wystaw PW", width=14, font=("", 9, "bold"),
                         bg="#337ab7", fg="white")
-        btn.config(command=lambda: self._wystaw_pw(poz, dlg, btn))
+        btn.config(command=lambda: self._wystaw_pw(
+            [dict(p, ilosc=p.get("do_pw", p["ilosc"])) for p in do_dokumentu],
+            dlg, btn))
         if braki:
             btn.config(state="disabled", bg="#cccccc", fg="gray40")
         btn.pack(side="right", padx=(0, 8))
@@ -575,149 +614,15 @@ class RmpakCalculatorDialog:
                           + ", ".join(p["symbol"] for p in pom[:12])
                           + (" …" if len(pom) > 12 else "")).pack(fill="x", pady=(0, 8))
 
-    def _podglad_rw(self):
-        """Okno „co pójdzie na RW". Źródłem jest POTWIERDZONE PW, nie BOM.
-
-        Ilości nie są tu edytowane (§16 v2): RW wydaje dokładnie to, co
-        przyjęło PW, żeby oba dokumenty nie rozjechały się po późniejszej
-        zmianie w projekcie.
-        """
-        import subiekt_produkcja
-        poz, numer_pw, blad = subiekt_produkcja.pw_do_rw(self.project_name)
-        if blad:
-            messagebox.showwarning("RW", blad, parent=self.win)
-            return
-
-        dlg = tk.Toplevel(self.win)
-        dlg.title("Podgląd RW — wydanie produkcji na projekt")
-        dlg.transient(self.win)
-        dlg.geometry("820x520")
-
-        tk.Label(dlg, text=f"ZOSTANIE UTWORZONY DOKUMENT RW — {self.project_name}",
-                 bg="#e67e22", fg="white", font=("", 10, "bold"),
-                 anchor="w", padx=12, pady=8).pack(fill="x")
-        tk.Label(dlg, text=f"Źródło: {numer_pw}   ·   ilości i pozycje prosto z PW, bez przeliczania",
-                 bg="#fdebd0", fg="#7d4b12", font=("", 9), anchor="w",
-                 padx=12, pady=6).pack(fill="x")
-
-        # Ceny NIE IDĄ na dokument — kolumny mówią to wprost, żeby nikt nie
-        # brał ich za wartość, którą RW faktycznie będzie miało. Wartość
-        # rozchodu liczy Subiekt ze swojej ewidencji: ten sam detal bywa na
-        # magazynie w kilku partiach po różnych cenach i tylko magazyn wie,
-        # którą zdejmuje (FIFO / średnia ważona).
-        # STOPKA PAKOWANA PRZED TABELĄ — inaczej przy ciasnym oknie tabela
-        # (expand=True) zjada całą wysokość i przyciski wypadają poza ekran.
-        # Ten sam błąd co w oknie decyzji o złożeniach bez składu; tutaj
-        # objawiał się schowanym „Wystaw RW" (zgłoszone 10.09.2026).
-        stopka = tk.Frame(dlg, padx=12, pady=10)
-        stopka.pack(side="bottom", fill="x")
-
-        # Dwa rzędy: przyciski osobno od opisów. W jednym rzędzie długie
-        # etykiety (koszt magazynowy + Uwagi) wypychały „Wystaw RW" poza
-        # prawą krawędź okna.
-        rzad_opis = tk.Frame(stopka)
-        rzad_opis.pack(fill="x")
-        razem = sum(p["cena"] * p["ilosc"] for p in poz)
-        tk.Label(rzad_opis, text=f"WG PW: {razem:,.2f} PLN".replace(",", " "),
-                 font=("", 12, "bold"), fg="darkred").pack(side="left")
-        tk.Label(rzad_opis, text="— wartość RW to KOSZT MAGAZYNOWY, liczy go Subiekt z ceny przyjęcia",
-                 font=("", 8), fg="gray40").pack(side="left", padx=(6, 0))
-
-        from subiekt_zamowienia import zloz_uwagi
-        rzad_btn = tk.Frame(stopka)
-        rzad_btn.pack(fill="x", pady=(6, 0))
-        tk.Label(rzad_btn,
-                 text="Uwagi: " + zloz_uwagi(self.project_name,
-                                             f"PW: {numer_pw}").replace("\n", " ⏎ "),
-                 font=("", 8), fg="gray30", anchor="w").pack(side="left")
-        tk.Button(rzad_btn, text="Zamknij", command=dlg.destroy, width=12).pack(side="right")
-        btn = tk.Button(rzad_btn, text="Wystaw RW", width=14, font=("", 9, "bold"),
-                        bg="#e67e22", fg="white")
-        btn.config(command=lambda: self._wystaw_rw(poz, numer_pw, dlg, btn))
-        btn.pack(side="right", padx=(0, 8))
-
-        cols = ("Symbol", "Nazwa", "Ilość", "Cena z PW", "Wartość wg PW")
-        tree = ttk.Treeview(dlg, columns=cols, show="headings", height=13)
-        for c, w in zip(cols, (150, 290, 70, 95, 110)):
-            tree.heading(c, text=c)
-            tree.column(c, width=w, anchor="e" if c in ("Ilość", "Cena z PW", "Wartość wg PW") else "w")
-        tree.pack(fill="both", expand=True, padx=10, pady=(8, 0))
-        for p in poz:
-            tree.insert("", "end", values=(p["symbol"], p["nazwa"], f"{p['ilosc']:g}",
-                                           f"{p['cena']:.2f}", f"{p['cena'] * p['ilosc']:.2f}"))
-
-    def _wystaw_rw(self, pozycje, numer_pw, dlg, btn):
-        """Suchy przebieg → potwierdzenie → zapis → read-back względem PW."""
-        import subiekt_produkcja
-        plan = subiekt_produkcja.plan_rw(self.project_name, pozycje, numer_pw)
-
-        btn.config(state="disabled", text="Sprawdzam…")
-        dlg.update_idletasks()
-        try:
-            sucho = subiekt_produkcja.wyslij_rw(plan, zapisz=False)
-        except Exception as e:
-            btn.config(state="normal", text="Wystaw RW")
-            messagebox.showerror("RW", f"Nie udało się połączyć z Subiektem:\n\n{e}", parent=dlg)
-            return
-        bledy = [k for k in (sucho or {}).get("kroki", []) if k.get("Status") == "blad"]
-        if bledy:
-            btn.config(state="normal", text="Wystaw RW")
-            opis = "\n".join(f"• {k.get('Symbol') or '—'}: {k.get('Szczegoly')}" for k in bledy[:12])
-            messagebox.showerror(
-                "RW — suchy przebieg wykrył problemy",
-                f"Dokument NIE został utworzony.\n\n{opis}"
-                + ("\n…" if len(bledy) > 12 else "")
-                + "\n\nCzęsty powód: za mały stan magazynowy — RW zdejmuje "
-                  "z magazynu to, co PW na niego przyjęło.", parent=dlg)
-            return
-
-        razem = sum(p["cena"] * p["ilosc"] for p in pozycje)
-        if not messagebox.askyesno(
-                "Potwierdź zapis RW",
-                f"Subiekt utworzy dokument RW:\n\n"
-                f"    pozycji:  {len(pozycje)}\n"
-                f"    wg PW:    {razem:,.2f} PLN  (koszt magazynowy policzy Subiekt)\n".replace(",", " ")
-                + f"    magazyn:  {plan['magazyn']}\n"
-                  f"    źródło:   {numer_pw}\n"
-                  f"    uwagi:    {plan['uwagi']}\n"
-                  f"    tytuł:    {plan.get('tytul', '')}\n\n"
-                  "To ZDEJMIE towar ze stanu magazynu.\n"
-                  "Dokumentu magazynowego nie cofa się jednym kliknięciem.\n\nZapisać?",
-                icon="question", default="no", parent=dlg):
-            btn.config(state="normal", text="Wystaw RW")
-            return
-
-        btn.config(text="Zapisuję…")
-        dlg.update_idletasks()
-        try:
-            wynik = subiekt_produkcja.wyslij_rw(plan, zapisz=True)
-        except Exception as e:
-            btn.config(state="normal", text="Wystaw RW")
-            messagebox.showerror(
-                "RW", f"Zapis nie powiódł się:\n\n{e}\n\n"
-                "NIE ponawiaj automatycznie — najpierw sprawdź w Subiekcie, "
-                "czy dokument mimo to nie powstał.", parent=dlg)
-            return
-
-        ok, numer, uwagi = subiekt_produkcja.sprawdz_rw(wynik, plan, numer_pw)
-        if ok:
-            self._odswiez_status_pw()
-            messagebox.showinfo(
-                "RW zapisane i potwierdzone",
-                f"✅ {numer}\n\nProjekt: {self.project_name}\nŹródło: {numer_pw}\n"
-                f"{len(pozycje)} pozycji\n\n"
-                "Wartość dokumentu to KOSZT MAGAZYNOWY, wyliczony przez Subiekta\n"
-                "z ceny przyjęcia — sprawdzisz go w Przeglądzie dokumentów."
-                + "\n\n✅ PROCES RMPAK ZAKOŃCZONY", parent=dlg)
-            dlg.destroy()
-        else:
-            messagebox.showwarning(
-                "NIE POTWIERDZONO ZAPISU RW",
-                (f"Dokument {numer} mógł zostać zapisany, ale odczyt z Subiekta "
-                 f"nie zgadza się z PW {numer_pw}:\n\n" if numer else "Zapis nieudany:\n\n")
-                + "\n".join(f"• {u}" for u in uwagi[:10])
-                + "\n\nNIE twórz drugiego RW — sprawdź dokument w Subiekcie.", parent=dlg)
-            btn.config(state="normal", text="Wystaw RW")
+    # ⚠️ USUNIETE 15.09.2026: `_podglad_rw` i `_wystaw_rw`.
+    #
+    # RW nie powstaje w kalkulatorze — robi je MAGAZYN przy wydaniu
+    # ze schowka (monter pobiera, magazynier skanuje). Kalkulator
+    # odpowiada za wyliczenie kosztu produkcji i przyjecie detalu
+    # na magazyn, czyli za PW.
+    #
+    # Odczyt RW z Subiekta zostaje w calym systemie: arkusz pokazuje
+    # z niego „Ilosc dostarczonych".
 
     def _wystaw_pw(self, pozycje, dlg, btn):
         """Suchy przebieg → potwierdzenie → zapis → read-back → numer w bazie.

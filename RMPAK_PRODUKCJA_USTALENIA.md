@@ -449,6 +449,43 @@ PW) byłoby sensownym zabezpieczeniem — do rozważenia, nie zrobione.
 
 ---
 
+## 15b. Podział: Kalkulator = PW, Magazyn = RW (15.09.2026)
+
+```
+KALKULATOR RMPAK              MAGAZYN / SCHOWEK
+  wylicza koszt                 monter pobiera
+       ↓                             ↓
+  [ WYSTAW PW ]                 magazynier skanuje
+       ↓                             ↓
+  detal na magazyn              [ WYSTAW RW ]
+```
+
+Z kalkulatora **usunięty** przycisk „Wystaw RW", wiersz „RW:" w panelu oraz
+metody `_podglad_rw` / `_wystaw_rw` (144 linie). Odczyt RW z Subiekta
+zostaje w całym systemie — arkusz pokazuje z niego „Ilość dostarczonych".
+`pw_do_rw` i `plan_rw` zostają w `subiekt_produkcja.py` dla magazynu.
+
+### PW różnicowe — bez trybu „kolejne PW"
+
+```
+Do PW = ilość w RM_BAZA − suma WSZYSTKICH PW (projekt + symbol)
+```
+
+Kalkulator nie pamięta, które PW było poprzednie: za każdym razem pyta
+Subiekta i liczy od nowa (`przyjete_na_pw` + `rozliczenie_pw`). Dlatego:
+
+* dopisanie sztuk albo nowej pozycji w bazie → kolejne PW bierze **samą różnicę**;
+* dwa kliknięcia pod rząd bez zmian w projekcie → „Wszystko z tego projektu
+  jest już przyjęte na PW", zamiast duplikatu;
+* zmniejszenie ilości po PW → `Do PW = 0` i **nadmiar** pokazany
+  informacyjnie (żółty wiersz), NIGDY ujemne PW.
+
+Okno pokazuje kolumny `W projekcie / Już PW / Do PW`, a przy kolejnym PW —
+niebieski pasek: „To KOLEJNE PW — dokument obejmie TYLKO RÓŻNICĘ", z numerami
+wcześniejszych dokumentów. Bez tego mniejsze ilości wyglądałyby na błąd.
+
+---
+
 ## 15a. Historyczne uzasadnienie miękkiej blokady
 
 Proces normalny: `1 projekt = 1 PW = 1 RW`. Produkcji częściowej nie

@@ -180,6 +180,41 @@ def lista_do_pw(project_id, projects_dir=None):
     return pozycje, pominiete
 
 
+def przyjete_na_pw(numer_projektu, timeout=600):
+    """{SYMBOL: ilosc} — suma WSZYSTKICH PW projektu. Rzuca przy bledzie.
+
+    Zrodlem jest Subiekt, nie lokalny zapis: dokumenty moga powstac albo
+    zniknac poza RM_BAZA, a licza sie faktyczne ruchy magazynowe.
+    """
+    dok = dokumenty_produkcji(numer_projektu, timeout)
+    suma = {}
+    for d in dok.get("PW") or []:
+        for p in d.get("pozycje") or []:
+            klucz = (p.get("symbol") or "").strip().upper()
+            if klucz:
+                suma[klucz] = suma.get(klucz, 0.0) + float(p.get("ilosc") or 0)
+    return suma
+
+
+def rozliczenie_pw(pozycje, przyjete):
+    """Dokłada do pozycji `juz_pw`, `do_pw` i `nadmiar`. Zwraca te sama liste.
+
+        do_pw   = ilosc w projekcie - juz przyjete na PW   (nigdy < 0)
+        nadmiar = ile przyjeto PONAD projekt               (gdy ktos zmniejszyl)
+
+    ⚠️ Nie wystawiamy „ujemnego PW". Gdy w projekcie jest 4, a na PW poszlo
+    5, `do_pw` = 0 i `nadmiar` = 1 — informacyjnie, bo korekte robi sie
+    w Subiekcie, nie tutaj.
+    """
+    for p in pozycje or []:
+        juz = float((przyjete or {}).get((p["symbol"] or "").strip().upper(), 0))
+        ile = float(p.get("ilosc") or 0)
+        p["juz_pw"] = juz
+        p["do_pw"] = max(0.0, ile - juz)
+        p["nadmiar"] = max(0.0, juz - ile)
+    return pozycje
+
+
 def braki_przed_pw(pozycje):
     """Czego brakuje, żeby wystawić PW. [] = można wystawiać.
 
@@ -192,8 +227,14 @@ def braki_przed_pw(pozycje):
     """
     braki = []
     for p in pozycje:
-        if not p.get("ilosc") or p["ilosc"] <= 0:
-            braki.append((p["symbol"], "brak ilości"))
+        # Przy PW roznicowym pytamy o `do_pw`, gdy jest policzone: pozycja
+        # w calosci przyjeta wczesniej nie wchodzi na dokument, wiec jej brak
+        # ceny niczego nie blokuje.
+        ile = p["do_pw"] if "do_pw" in p else p.get("ilosc")
+        if not ile or ile <= 0:
+            if "do_pw" not in p:
+                braki.append((p["symbol"], "brak ilości"))
+            continue
         if p.get("cena") is None or p["cena"] <= 0:
             braki.append((p["symbol"], "brak ceny"))
     return braki
@@ -359,6 +400,10 @@ def dokumenty_produkcji(numer_projektu, timeout=600):
 
 def pw_do_rw(numer_projektu, timeout=600):
     """Pozycje WSZYSTKICH PW projektu — źródło dla RW.
+
+    ⚠️ NIEUŻYWANE od 15.09.2026: RW wyszło z kalkulatora (Kalkulator = PW,
+    magazyn = RW). Funkcja zostaje, bo magazyn/schowek będzie jej
+    potrzebował — kasowanie oznaczałoby pisanie tego samego od nowa.
 
     Zwraca (pozycje, numery_pw, blad), gdzie `numery_pw` to opis źródła
     do Uwag dokumentu („PW 5/MASTER/2026 + PW 6/MASTER/2026").
