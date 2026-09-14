@@ -12912,7 +12912,7 @@ class MainWindow(tk.Tk):
             except Exception:
                 _gdzie = []
             if _gdzie:
-                _opis = (NL + "    ").join(
+                _opis = (chr(10) + "    ").join(
                     "%s  —  %s szt. na 1 detal" % (w["numer_rysunku"],
                                                    w["ilosc_na_szt"])
                     for w in _gdzie)
@@ -22121,7 +22121,7 @@ class MainWindow(tk.Tk):
                 if brakujace:
                     raise RuntimeError(
                         "Nie udalo sie odczytac schematu tabeli 'projects' "
-                        "(brak kolumn: " + ", ".join(brakujace) + ")." + NL +
+                        "(brak kolumn: " + ", ".join(brakujace) + ").\n" +
                         "Najczestsza przyczyna: baza jest chwilowo zajeta przez "
                         "inna operacje - sprobuj ponownie za chwile.")
 
@@ -22768,7 +22768,7 @@ class MainWindow(tk.Tk):
                     # „baza TYLKO DO ODCZYTU, sprawdz uprawnienia do Y:\..."
                     # pytala `master_con`, ktore od przenosin jest zawsze None,
                     # wiec nigdy sie nie pokazywala — a gdyby, to klamala.
-                    tekst = ("Baza jest chwilowo zajeta przez inna operacje." + NL + NL +
+                    tekst = ("Baza jest chwilowo zajeta przez inna operacje.\n\n" +
                              "Sprobuj ponownie za chwile - jesli blad wraca, sprawdz, "
                              "czy RM_BAZA nie jest otwarta w drugim oknie.")
                 messagebox.showerror("Blad", "Nie udalo sie zmienic statusu:\n" + tekst,
