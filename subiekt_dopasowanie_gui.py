@@ -30,6 +30,15 @@ except ImportError:
         pass
 
 
+def _ilo(x):
+    """Liczba bez zbednego ,0 — jak w reszcie RM_BAZA."""
+    try:
+        f = float(x)
+        return str(int(f)) if f == int(f) else ("%.2f" % f).rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return str(x)
+
+
 class DopasowanieWindow(tk.Toplevel):
     """Lista pozycji + panel kandydatów. Decyduje człowiek, nie automat."""
 
@@ -39,6 +48,13 @@ class DopasowanieWindow(tk.Toplevel):
     ZAKL_PODPOWIEDZI = "Podpowiedzi"
 
     #: Zakładki: (etykieta, stany do pokazania)
+    #: Napisy przyciskow. Legenda bierze je STAD, a nie z wlasnej kopii —
+    #: inaczej rozjezdzaja sie po cichu przy pierwszej zmianie tekstu
+    #: (zgloszone 16.09.2026: „na legencie inne opisy a klawisze inne").
+    BTN_ZAPISZ = "💾 Zapisz decyzje"
+    BTN_SKLEJ = "🔗 Sklej duplikaty"
+    BTN_PRZYPISZ = "Przypisz wybraną"
+
     ZAKLADKI = (
         ("Do decyzji", (D.STAN_NAZWA, D.STAN_NIEJEDNOZNACZNE)),
         ("Dopasowane", (D.STAN_ZAPAMIETANE, D.STAN_SYMBOL)),
@@ -94,6 +110,62 @@ class DopasowanieWindow(tk.Toplevel):
         self.after(60, self._dopasuj_kolumny)
         return "break"
 
+    def _buduj_legende(self):
+        """Kolejność kroków i znaczenie kolorów — nad tabelami.
+
+        Okno robi trzy różne rzeczy (dopasowanie, zapis powiązań, sklejanie
+        duplikatów) i bez tego nie było wiadomo, co po czym — zgłoszone
+        15.09.2026. Kolejność NIE jest umowna: każdy krok karmi następny.
+        """
+        ramka = tk.Frame(self, bg="#f4f6f7", bd=1, relief=tk.SOLID)
+        ramka.pack(fill=tk.X, padx=12, pady=(0, 6))
+
+        kroki = tk.Frame(ramka, bg="#f4f6f7")
+        kroki.pack(fill=tk.X, padx=10, pady=(7, 3))
+        tk.Label(kroki, text="KOLEJNOŚĆ:", bg="#f4f6f7", fg="#2c3e50",
+                 font=("Arial", 8, "bold")).pack(side=tk.LEFT)
+        # ⚠️ Napisy MUSZA byc te same, co na przyciskach — stad `BTN_*`.
+        # Krok 4 dzieje sie POZA tym oknem, wiec jest opisany czynnoscia,
+        # nie nazwa nieistniejacego tu przycisku.
+        for nr, tekst, opis in (
+                ("1", self.BTN_PRZYPISZ,
+                 "zakładka „Do decyzji”: zaznacz wiersz, wybierz kartotekę"),
+                ("2", self.BTN_ZAPISZ,
+                 "wpisuje symbol do wierszy — bez tego krok 3 nic nie widzi"),
+                ("3", self.BTN_SKLEJ,
+                 "łączy wiersze o TYM SAMYM symbolu i sumuje sztuki"),
+                ("4", "→ w arkuszu RM_BAZA",
+                 "zapis projektu — dopiero wtedy poprawia się ilość na ZK")):
+            pole = tk.Frame(kroki, bg="#f4f6f7")
+            pole.pack(side=tk.LEFT, padx=(10, 0))
+            tk.Label(pole, text=" %s " % nr, bg="#2471a3", fg="white",
+                     font=("Arial", 8, "bold")).pack(side=tk.LEFT)
+            tk.Label(pole, text=" " + tekst, bg="#f4f6f7", fg="#2c3e50",
+                     font=("Arial", 8, "bold")).pack(side=tk.LEFT)
+            tk.Label(pole, text="— " + opis, bg="#f4f6f7", fg="#7f8c8d",
+                     font=("Arial", 8)).pack(side=tk.LEFT, padx=(3, 0))
+
+        kolory = tk.Frame(ramka, bg="#f4f6f7")
+        kolory.pack(fill=tk.X, padx=10, pady=(0, 7))
+        tk.Label(kolory, text="STAN:", bg="#f4f6f7", fg="#2c3e50",
+                 font=("Arial", 8, "bold")).pack(side=tk.LEFT)
+        # Znaki i barwy MUSZĄ zgadzać się z `_odswiez_liste` i `OPIS_STANU`
+        # — legenda kłamiąca o kolorach jest gorsza niż jej brak.
+        for stan, znak in ((D.STAN_SYMBOL, "✓"), (D.STAN_ZAPAMIETANE, "✓"),
+                           (D.STAN_NAZWA, "⚠"),
+                           (D.STAN_NIEJEDNOZNACZNE, "?"), (D.STAN_BRAK, "✕")):
+            opis, kolor = D.OPIS_STANU[stan]
+            tk.Label(kolory, text=" %s %s " % (znak, opis), bg=kolor,
+                     fg="#2c3e50", font=("Arial", 8), bd=1,
+                     relief=tk.SOLID).pack(side=tk.LEFT, padx=(8, 0))
+        tk.Label(kolory, text=" ● Twój wybór ", bg="#d6eaf8", fg="#2c3e50",
+                 font=("Arial", 8), bd=1, relief=tk.SOLID).pack(
+                     side=tk.LEFT, padx=(8, 0))
+        tk.Label(kolory,
+                 text="Ilość = sztuki z BOM-u (nie z ZK).",
+                 bg="#f4f6f7", fg="#7f8c8d",
+                 font=("Arial", 8)).pack(side=tk.LEFT, padx=(16, 0))
+
     def _dopasuj_kolumny(self):
         """Przelicza szerokości obu tabel na ich AKTUALNEJ szerokości."""
         if not self.winfo_exists():
@@ -133,16 +205,25 @@ class DopasowanieWindow(tk.Toplevel):
         e.pack(side=tk.LEFT, pady=6)
         e.bind("<KeyRelease>", lambda _e: self._odswiez_liste())
 
+        self._buduj_legende()
+
         # Stopka przed treścią — przyciski nie mogą wypaść poza ekran.
         stopka = tk.Frame(self)
         stopka.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=10)
         tk.Button(stopka, text="Zamknij", command=self.destroy,
                   padx=16, pady=4).pack(side=tk.LEFT)
         self.btn_zapisz = tk.Button(
-            stopka, text="💾 Zapisz decyzje", command=self._zapisz,
+            stopka, text=self.BTN_ZAPISZ, command=self._zapisz,
             bg="#2471a3", fg="white", relief=tk.FLAT, font=("Arial", 10, "bold"),
             padx=20, pady=6, state=tk.DISABLED, cursor="hand2")
         self.btn_zapisz.pack(side=tk.RIGHT)
+        # Sklejanie wierszy wskazujacych jedna kartoteke — patrz
+        # `subiekt_sklej_duplikaty`. Osobno od zapisu powiazan, bo KASUJE
+        # wiersze BOM-u.
+        self.btn_sklej = tk.Button(
+            stopka, text=self.BTN_SKLEJ, command=self._sklej_duplikaty,
+            bg="#8e44ad", fg="white", font=("Arial", 9, "bold"), padx=10)
+        self.btn_sklej.pack(side=tk.RIGHT, padx=(0, 8))
         tk.Label(stopka, text="Zapis wiąże kod z Id kartoteki — nie zmienia BOM-u.",
                  fg="#7f8c8d", font=("Arial", 8)).pack(side=tk.RIGHT, padx=12)
 
@@ -240,7 +321,7 @@ class DopasowanieWindow(tk.Toplevel):
         # (zgłoszone 09.09.2026 — ta sama pułapka co w raporcie po zapisie).
         akcje = tk.Frame(prawa)
         akcje.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
-        tk.Button(akcje, text="Przypisz wybraną", command=self._przypisz,
+        tk.Button(akcje, text=self.BTN_PRZYPISZ, command=self._przypisz,
                   bg="#2471a3", fg="white", relief=tk.FLAT,
                   font=("Arial", 9, "bold"), padx=14, pady=5).pack(side=tk.LEFT)
         tk.Button(akcje, text="⛓ Odepnij", command=self._odepnij,
@@ -479,8 +560,8 @@ class DopasowanieWindow(tk.Toplevel):
             self.btn_zakladki[i].config(text=f"{etykieta}  {ile}")
         self.btn_zapisz.config(
             state=tk.NORMAL if self.decyzje else tk.DISABLED,
-            text=(f"💾 Zapisz decyzje ({len(self.decyzje)})"
-                  if self.decyzje else "💾 Zapisz decyzje"))
+            text=(f"{self.BTN_ZAPISZ} ({len(self.decyzje)})"
+                  if self.decyzje else self.BTN_ZAPISZ))
 
     # ── kandydaci ──────────────────────────────────────────────────────
     def _biezaca_pozycja(self):
@@ -676,6 +757,108 @@ class DopasowanieWindow(tk.Toplevel):
         D.odrzuc(p["kod"], biezacy.get("id"), biezacy.get("symbol") or "")
         self.decyzje.pop(p["kod"], None)
         self._wczytaj_async()
+
+    def _sklej_duplikaty(self):
+        """Laczy wiersze BOM-u wskazujace TE SAMA kartoteke Subiekta.
+
+        Po dowiazaniu w tym oknie w arkuszu zostaja dwie pozycje na jeden
+        towar (2627: „WS-10 L240mm" 4 szt. i „WS-10 L240mm --- --" 20 szt.).
+        Zostaje WAZNIEJSZA — ta z Subiekta — i przejmuje SUME sztuk;
+        pozostale znikaja. Ilosc na ZK poprawi sie przy najblizszym zapisie
+        projektu (most: „na ZK: 4 → ustawi 24").
+
+        ⚠️ To KASUJE wiersze, wiec najpierw pokazujemy, co dokladnie
+        zniknie, a zapis idzie przez baze projektu (wymaga locka).
+        """
+        import sqlite3, os
+        try:
+            import subiekt_sklej_duplikaty as SD
+            from subiekt_stany import PROJECTS_DIR
+        except Exception as e:
+            return messagebox.showerror("Sklej duplikaty", str(e), parent=self)
+
+        sciezka = os.path.join(PROJECTS_DIR,
+                               "project_%s.sqlite" % self.project_id)
+        if not os.path.isfile(sciezka):
+            return messagebox.showerror(
+                "Sklej duplikaty", "Nie znaleziono bazy projektu:\n" + sciezka,
+                parent=self)
+        # ⚠️ ZAZNACZENIE MA ZNACZENIE. Przycisk stoi w oknie, w ktorym
+        # uzytkownik zaznacza wiersze — jechanie po CALYM projekcie bylo
+        # myloce (zgloszenie 15.09.2026). Symbol bierzemy WPROST z kolumny
+        # "Symbol Subiekt": to ta sama wartosc, po ktorej grupuje modul.
+        symbole = set()
+        for iid in self.tab.selection():
+            s = (self.tab.set(iid, "symbol") or "").strip()
+            if s and s != "\u2014":
+                symbole.add(s.upper())
+
+        try:
+            con = sqlite3.connect(sciezka)
+            grupy = SD.znajdz_duplikaty(con)
+        except Exception as e:
+            return messagebox.showerror("Sklej duplikaty", str(e), parent=self)
+
+        zakres = "Caly projekt"
+        if symbole:
+            zakres = "Zaznaczone pozycje"
+            wybrane = [g for g in grupy
+                       if g["symbol"].strip().upper() in symbole]
+            if not wybrane:
+                con.close()
+                return messagebox.showinfo(
+                    "Sklej duplikaty",
+                    "Zaznaczone pozycje nie maja duplikatow.\n\n"
+                    "Odznacz wszystko, zeby przejrzec caly projekt.",
+                    parent=self)
+            grupy = wybrane
+
+        if not grupy:
+            con.close()
+            return messagebox.showinfo(
+                "Sklej duplikaty",
+                "Nie znaleziono wierszy o tym samym symbolu kartoteki.\n\n"
+                "Pozycje podobne z nazwy, ale o roznych symbolach,\n"
+                "NIE sa laczone — to moga byc rozne kartoteki.",
+                parent=self)
+
+        opis = []
+        for g in grupy[:12]:
+            z = g["zostaje"]
+            opis.append("  %s  →  %s szt." % (g["symbol"], _ilo(g["suma"])))
+            opis.append("      zostaje: %s (%s szt.)"
+                        % (z["nazwa"] or z["symbol"], _ilo(z["ilosc"])))
+            for u in g["do_usuniecia"]:
+                opis.append("      ZNIKA:   %s (%s szt.)"
+                            % (u["nazwa"] or u["symbol"], _ilo(u["ilosc"])))
+        wiecej = ("\n  … i %d dalszych" % (len(grupy) - 12)
+                  if len(grupy) > 12 else "")
+
+        if not messagebox.askyesno(
+                "Sklej duplikaty",
+                zakres + " \u2014 wiersze o TYM SAMYM symbolu kartoteki.\n"
+                "Zostanie jedna pozycja z SUMA sztuk:\n\n"
+                + "\n".join(opis) + wiecej
+                + "\n\nIlosc na ZK poprawi sie przy najblizszym zapisie "
+                  "projektu.\nSkleic?",
+                icon="warning", default="no", parent=self):
+            con.close()
+            return
+
+        try:
+            raport = SD.sklej(con, grupy)
+        except Exception as e:
+            con.close()
+            return messagebox.showerror("Sklej duplikaty", str(e), parent=self)
+        con.close()
+
+        messagebox.showinfo(
+            "Sklejono",
+            "\n".join("  %s — usunieto %d, razem %s szt."
+                      % (s, ile, _ilo(suma)) for s, ile, suma in raport)
+            + "\n\nOdswiez arkusz, zeby zobaczyc zmiane.",
+            parent=self)
+        self._wczytaj_async(wymus=True)
 
     def _zapisz(self):
         if not self.decyzje:
