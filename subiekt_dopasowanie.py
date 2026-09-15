@@ -243,6 +243,261 @@ def podsumowanie(pozycje: List[Dict]) -> Dict[str, int]:
     return out
 
 
+# ── Podpowiedzi dla „brak kartoteki" ────────────────────────────────────────
+#
+# ⚠️ TO NIE JEST DOPASOWANIE — TO PROPOZYCJE DO OBEJRZENIA PRZEZ CZŁOWIEKA.
+#
+# Reguła jeden-do-jednego (klasyfikuj() wyżej) odpowiada na pytanie „które Id",
+# i albo trafia dokładnie, albo mówi „brak kartoteki" z pustą listą. W projekcie
+# 89 takich pozycji było 46 na 123 — panel kandydatów świecił pustką, choć
+# kartoteka często istniała pod minimalnie innym zapisem („9261 SGS-M10x1,25"
+# vs „SGS-M10x1,25", „ASK KFL 001" vs „KFL 001").
+#
+# ⚠️ DLACZEGO TO NIGDY NIE MOŻE PRZYPINAĆ SAMO (pomiar 04.09.2026,
+# subiekt_podobne.py): 389 par RÓŻNYCH detali przekracza każdy sensowny próg —
+# „Płyta zewnętrzna" vs „Płyta wewnętrzna" = 0.933, „Korek 14mm" vs „Korek
+# 64mm" = 0.889. Prawdziwe trafienia dają 1.000, fałszywe siedzą tuż pod nimi
+# i żaden próg ich nie rozdziela. Zatwierdzone błędne skojarzenie trafiłoby do
+# GLOBALNYCH mapowań i po cichu działało we wszystkich przyszłych projektach.
+# Dlatego: podpowiedź pokazujemy, wybiera CZŁOWIEK, nic nie dzieje się samo.
+#
+# Porównujemy KAŻDE pole z każdym (nazwa i symbol po obu stronach) i bierzemy
+# najlepszy wynik — pomiar na projekcie 89 pokazał, że samo porównanie nazw
+# gubi trafienia oczywiste dla człowieka: „Korpus zaworu" = 1.000 wychodzi
+# dopiero z pary nazwa~nazwa, a „3304" → „3304 RS 20x52x22,2" z nazwa~symbol.
+
+#: Domyślny próg. Wybrany na realnych danych (projekt 89, 46 pozycji):
+#: 0.70 zostawia trafne (DIN 6923, KFL 001, SGS-M10x1,25) i odcina szum
+#: („Nypel do węża" → „Oś napędowa" = 0.64, „3304" → „DR3430" = 0.60).
+PROG_PODPOWIEDZI = 0.70
+
+#: Ile propozycji na pozycję. Więcej niż 5 i tak nikt nie przegląda.
+TOP_PODPOWIEDZI = 5
+
+
+def _pola_zrodlowe(poz: Dict) -> List[tuple]:
+    """(etykieta, tekst) z pozycji RM_BAZA — nazwa i kod/numer rysunku.
+
+    Dla pozycji BEZ numeru rysunku `kod` jest symbolem wyliczonym z nazwy
+    (obcięcie do 13 znaków), więc niesie mniej niż sama nazwa — ale bywa
+    jedynym miejscem, gdzie został np. numer katalogowy producenta.
+    """
+    return [("nazwa", (poz.get("nazwa_rm") or "").strip()),
+            ("symbol", (poz.get("kod") or "").strip())]
+
+
+def podpowiedzi(poz: Dict, katalog: List[Dict], prog: float = PROG_PODPOWIEDZI,
+                top_n: int = TOP_PODPOWIEDZI, pomijaj_symbole=(),
+                bez_numeru_rysunku: bool = False) -> List[Dict]:
+    """[{wynik, skad, kartoteka}] — najbardziej podobne kartoteki, najlepsza pierwsza.
+
+    `pomijaj_symbole` — kartoteki już przypisane innym pozycjom tego projektu;
+    bez tego ta sama kartoteka podpowiada się kilku detalom naraz.
+
+    `bez_numeru_rysunku` wyłącza porównania, w których po stronie RM_BAZA stoi
+    kod/numer rysunku. Numery z jednej rodziny projektów są do siebie podobne
+    z natury („ZP179-401.00ZZ" vs „ZP196-000.00ZZ" = 0.75), a nie mówią nic
+    o tym, czy to ta sama część — użytkownik przełącza to w oknie.
+    """
+    try:
+        from subiekt_podobne import podobienstwo
+    except ImportError:
+        return []
+
+    zrodla = [(nz, t) for nz, t in _pola_zrodlowe(poz) if t]
+    if bez_numeru_rysunku:
+        zrodla = [(nz, t) for nz, t in zrodla if nz != "symbol"]
+    if not zrodla:
+        return []
+
+    pomijane = {str(s).strip().upper() for s in (pomijaj_symbole or ()) if s}
+    out = []
+    for k in katalog or []:
+        if (k.get("symbol") or "").strip().upper() in pomijane:
+            continue
+        best, skad = 0.0, ""
+        for nz, tekst in zrodla:
+            for np_, cel in (("nazwa", k.get("nazwa")), ("symbol", k.get("symbol"))):
+                if not cel:
+                    continue
+                w = podobienstwo(tekst, cel)
+                if w > best:
+                    # Skrót, nie pełne słowa: „symbol ~ symbol" nie mieści się
+                    # w kolumnie i ucinało się do „symbol ~ sy…" (15.09.2026).
+                    # n = nazwa, s = symbol; po stronie RM_BAZA → Subiekta.
+                    best, skad = w, f"{nz[0]}→{np_[0]}".upper()
+        if best >= prog:
+            out.append({"wynik": best, "skad": skad, "kartoteka": k})
+
+    # Malejąco; przy remisie krótsza nazwa pierwsza — zwykle jest tą ogólną,
+    # a nie wariantem z dopiskiem.
+    out.sort(key=lambda d: (-d["wynik"], len(d["kartoteka"].get("nazwa") or "")))
+    return out[:top_n]
+
+
+def zajete_symbole(pozycje: List[Dict]) -> set:
+    """Symbole kartotek już przypisanych w tym projekcie."""
+    out = set()
+    for p in pozycje or []:
+        w = p.get("wybrany") or {}
+        s = (w.get("symbol") or "").strip().upper()
+        if s:
+            out.add(s)
+    return out
+
+
+# ── Dopisanie symbolu do BOM-u ──────────────────────────────────────────────
+def _powod_pominiecia(con, cols, nazwa_col, nazwa) -> str:
+    """Czemu UPDATE nic nie zmienił — żeby okno mogło powiedzieć user-owi.
+
+    Kolejność pytań od najbardziej konkretnego: „to pozycja z Subiekta" jest
+    ważniejszą informacją niż „ma już numer", bo znaczy „tak ma być".
+    """
+    if {"subiekt_symbol", "is_manual", "notes"} <= cols:
+        z_subiekta = con.execute(
+            f"SELECT COUNT(*) FROM items WHERE {nazwa_col} = ?"
+            "  AND COALESCE(is_manual, 0) = 1"
+            "  AND COALESCE(subiekt_symbol, '') <> ''"
+            "  AND (COALESCE(notes, '') LIKE 'półprodukt%'"
+            "       OR COALESCE(notes, '') = 'z zamówienia ZK')",
+            (nazwa,)).fetchone()[0]
+        if z_subiekta:
+            return "pozycja pochodzi z Subiekta — nie ruszamy"
+    if "ordered_flag" in cols:
+        zamowione = con.execute(
+            f"SELECT COUNT(*) FROM items WHERE {nazwa_col} = ?"
+            "  AND COALESCE(ordered_flag, 0) = 1", (nazwa,)).fetchone()[0]
+        if zamowione:
+            return "pozycja jest już na ZK/ZD"
+    return "pozycja ma już numer rysunku"
+
+
+def wpisz_numery_do_bom(project_id, pary: Dict[str, Dict]) -> Dict:
+    """Przepisuje pozycję BOM na dane z kartoteki Subiekta.
+
+    `pary` to {nazwa pozycji w BOM: {"symbol": ..., "nazwa": ...}}.
+    Dopasowujemy po NAZWIE, bo te pozycje z definicji nie mają numeru —
+    nazwa jest ich jedyną tożsamością.
+
+    Wpisuje OBA pola (decyzja użytkownika 15.09.2026):
+
+        przed:  numer = (pusto)     nazwa = „6004 RS"
+        po:     numer = „6004RS"    nazwa = „6004RS INOX"
+
+    Po co: arkusz zaczyna mówić tym samym językiem co Subiekt, więc przy
+    NASTĘPNYM projekcie ta sama pozycja trafi od razu regułą jeden-do-jednego
+    (symbol == symbol) i nie wróci do „brak kartoteki". To jest cel całego
+    okna: uzupełnić BOM, ZANIM pójdzie do Subiekta.
+
+    Zwraca {"wpisane": n, "pominiete": [(nazwa, powód), ...]}.
+
+    ⚠️ TO JEST JEDYNE MIEJSCE, W KTÓRYM TO OKNO ZMIENIA BOM. Reszta wiąże
+    tylko kod z Id kartoteki w globalnych mapowaniach.
+
+    ⛔ NIE RUSZAMY POZYCJI JUŻ ZAMÓWIONYCH (`ordered_flag`). Detal, który
+    wszedł na ZK/ZD, jest własnością dokumentu w Subiekcie — podmiana numeru
+    rozjechałaby powiązanie ZD→pozycja i „Zamówiono" przestałoby wracać do
+    arkusza.
+
+    ⛔ NIE NADPISUJEMY ISTNIEJĄCEGO NUMERU. Warunek w SQL wymaga, żeby
+    wszystkie trzy kolumny numeru były puste — inaczej pozycja nie jest tą,
+    o której mówimy, a cudza wartość nie może zniknąć po cichu.
+
+    ⚠️ NAZWĘ NADPISUJEMY, ale tylko w `work_name` — kolumnie ROBOCZEJ.
+    `src_name` zostaje nietknięta: to zapis z importu BOM-u i po nim wraca
+    pierwotna nazwa z arkusza konstruktora, gdyby trzeba było się cofnąć.
+    """
+    import sqlite3
+    from subiekt_stany import PROJECTS_DIR
+    import os
+
+    wynik = {"wpisane": 0, "pominiete": []}
+    if not pary:
+        return wynik
+
+    sciezka = os.path.join(PROJECTS_DIR, f"project_{project_id}.sqlite")
+    if not os.path.exists(sciezka):
+        wynik["pominiete"] = [(n, "brak bazy projektu") for n in pary]
+        return wynik
+
+    con = sqlite3.connect(sciezka)
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(items)")}
+        if "work_drawing_no" not in cols:
+            wynik["pominiete"] = [(n, "baza bez work_drawing_no") for n in pary]
+            return wynik
+
+        pusty_numer = ("COALESCE(NULLIF(TRIM(work_drawing_no), ''),"
+                       "         NULLIF(TRIM(norm_drawing_no), ''),"
+                       "         NULLIF(TRIM(src_drawing_no), ''), '') = ''")
+        # Starsze bazy projektów mogą nie mieć flagi zamówienia — wtedy nie ma
+        # czego sprawdzać, a brak kolumny nie może zablokować całej operacji.
+        warunek_zam = ("AND COALESCE(ordered_flag, 0) = 0"
+                       if "ordered_flag" in cols else "")
+
+        # ⛔ CO PRZYSZŁO Z SUBIEKTA, NIE WRACA DO SUBIEKTA.
+        #
+        # Wiersze dopisane przez `_dopisz_pozycje_z_zk` i półprodukty są
+        # ROZPOZNAWANE PO BRAKU NUMERU RYSUNKU (patrz filtr w
+        # subiekt_projekt.read_project_items). Wpisanie im numeru zdjęłoby tę
+        # ochronę: `build_plan` policzyłby symbol z nazwy, most założyłby DRUGĄ
+        # kartotekę obok istniejącej i dopisał ją na ZK przy każdym przebiegu
+        # — duplikat towaru i podwójne zamówienie (awaria z 14.09.2026).
+        #
+        # Dlatego omijamy je TYM SAMYM warunkiem, którym rozpoznaje je tamten
+        # filtr. Warunek jest jawny, a nie oparty na tym, jak dane wyglądają
+        # dziś: dopisanie `notes` albo `is_manual` w przyszłości nie otworzy
+        # tu furtki.
+        warunek_z_subiekta = ""
+        if {"subiekt_symbol", "is_manual", "notes"} <= cols:
+            warunek_z_subiekta = (
+                "AND NOT (COALESCE(is_manual, 0) = 1"
+                "         AND COALESCE(subiekt_symbol, '') <> ''"
+                "         AND (COALESCE(notes, '') LIKE 'półprodukt%'"
+                "              OR COALESCE(notes, '') = 'z zamówienia ZK'))")
+        nazwa_col = ("COALESCE(NULLIF(TRIM(work_name), ''), TRIM(src_name))"
+                     if {"work_name", "src_name"} <= cols else "TRIM(src_name)")
+
+        # Nazwę przepisujemy tylko wtedy, gdy baza ma kolumnę roboczą —
+        # w starszych projektach zostaje sam numer.
+        pisz_nazwe = "work_name" in cols
+
+        for nazwa, dane in pary.items():
+            nazwa = (nazwa or "").strip()
+            if isinstance(dane, str):          # zgodność ze starym wywołaniem
+                dane = {"symbol": dane}
+            symbol = (dane.get("symbol") or "").strip()
+            nazwa_sub = (dane.get("nazwa") or "").strip()
+            if not nazwa or not symbol:
+                continue
+            # Najpierw sprawdzamy, CZY jest co ruszać i dlaczego nie.
+            ile_pasuje = con.execute(
+                f"SELECT COUNT(*) FROM items WHERE {nazwa_col} = ?",
+                (nazwa,)).fetchone()[0]
+            if not ile_pasuje:
+                wynik["pominiete"].append((nazwa, "nie ma takiej pozycji w BOM"))
+                continue
+            ustaw = ["work_drawing_no = ?"]
+            wart = [symbol]
+            if pisz_nazwe and nazwa_sub:
+                ustaw.append("work_name = ?")
+                wart.append(nazwa_sub)
+            cur = con.execute(
+                f"UPDATE items SET {', '.join(ustaw)} "
+                f"WHERE {nazwa_col} = ? AND {pusty_numer} "
+                f"{warunek_zam} {warunek_z_subiekta}",
+                (*wart, nazwa))
+            if cur.rowcount:
+                wynik["wpisane"] += cur.rowcount
+            else:
+                wynik["pominiete"].append((nazwa, _powod_pominiecia(
+                    con, cols, nazwa_col, nazwa)))
+        con.commit()
+    finally:
+        con.close()
+    return wynik
+
+
 # ── odrzucone dopasowania ───────────────────────────────────────────────
 #
 # Osobna tabela w tej samej bazie co mapowania — na RM_SERWER, operacje

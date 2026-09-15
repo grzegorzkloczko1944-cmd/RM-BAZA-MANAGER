@@ -1,0 +1,80 @@
+﻿# Memory Index
+
+- [Linia Produkcyjna â€” implementacja](project_linia_feature.md) â€” lockowanie linii, propagacja etapĂłw rĂłwnolegĹ‚ych, multi-projekt integracja
+- [Optimizer Readiness â€” wskaĹşnik gotowoĹ›ci](project_optimizer_readiness.md) â€” âšˇ w selektorze, check_optimizer_readiness(), warunek: staff w stage_staff_assignments
+- [ĹšcieĹĽki do bazy danych](reference_db_paths.md) â€” realnie z sync_config.json (Y:/RM_BAZA/), locki w Y:/RM_BAZA/locks/
+- [Kalkulator RMPAK â€” bug iloĹ›ci](project_rmpak_calc_qty_bug.md) â€” dzieliĹ‚ cenÄ™/szt przez 1 gdy work_qty/order_qty NULL; fix src_qty; nie przelicza wstecz
+- [KolejnoĹ›Ä‡ pracownikĂłw â€” WyĹĽej/NiĹĽej](project_worker_reorder.md) â€” assign_staff_dialog + _open_worker_editor, Master = top of list (2026-06-10)
+- [Git push â€” tylko na polecenie](feedback_git_push.md) â€” nie pushuj bez wyraĹşnej zgody uĹĽytkownika
+- [Parser_RM_BAZA â€” anomalie cenowe](project_parser_rm_baza.md) â€” read-only, ceny jednostkowe, kody katalogowe vs fuzzy, Ĺ›cieĹĽka RM_MANAGER/RM_BAZA (nie RM_BAZY/RM_BAZA)
+- [RozkĹ‚ad dysku: kod vs dane](project_disk_layout.md) â€” caĹ‚y kod w repo git, RM_MANAGER/ na dysku to tylko ĹĽywe bazy (2026-07-06 posprzÄ…tano Ĺ›mieci/backupy)
+- [Start etapu blokowany — status NEW](project_stage_start_status_bug.md) — milestone PRZYJETY vs project_status, retry na zablokowany master + samonaprawa w GUI
+- [ReguĹ‚y etapĂłw P3/P5](project_stage_rules_p3_p5.md) â€” zamknij gotowy projekt 1 klikiem + walidacja kolejnoĹ›ci dat; P4 odrzucony (faĹ‚szywy import)
+- [Blok URLOPY â€” rozliczanie nieobecnoĹ›ci](project_urlopy_block.md) â€” okno "đźŹ– Urlopy", godziny+pula roczna+CSV, zastÄ…piĹ‚ zakĹ‚adkÄ™ NiedostÄ™pnoĹ›Ä‡ w optymalizatorze
+- [ModuĹ‚ kadrowy â€” rozbudowa UrlopĂłw](project_kadry_module.md) â€” workflow wnioskĂłw (status/decyzja), kalendarz zespoĹ‚u, typy ustawowe+limity, PDF przez matplotlib (2026-07-20)
+- [Pasek gĂłrny â€” dwa wiersze](project_topbar_two_rows.md) â€” narzÄ™dzia w wierszu 2 (top_frame2), krytyczne w wierszu 1; nowe przyciski narzÄ™dzi na top_frame2
+- [Okna statystyk z RM_STATS](project_stats_views_from_rmstats.md) â€” Podsumowanie + Status projektĂłw; stats_*.py verbatim z RM_STATS + adapter db.py, Ĺ‚atwa migracja
+- [Emoji print / cp1250](project_cp1250_emoji_print.md) — print z emoji wywala import na polskiej konsoli; fix: reconfigure stdout UTF-8 na starcie rm_manager_gui.py
+- [Selektor projektu â€” tooltip](project_project_combo_tooltip.md) â€” dĹ‚ugie nazwy: dymek, NIE poszerzanie popdown (ttk to blokuje); pasek nietkniÄ™ty
+- [PuĹ‚apka .exe â€” trwaĹ‚e Ĺ›cieĹĽki](project_exe_persistent_paths.md) â€” onefile kasuje pliki obok __file__; klucz API AI w C:\RMPAK_CLIENT\.ai_api_key
+- [AI Asystent â€” rysowanie wykresĂłw](project_ai_chart_rendering.md) â€” render_chart (Gantt/bar), matplotlibâ†’PNG w tk.Text, matplotlib w .spec
+- [AI Optimizer â€” Ĺ›cieĹĽki etapĂłw i bug](project_ai_optimizer_stages_paths.md) â€” project_stages w RM_MANAGER_projects, dwie bazy master, bazy 62/64 uszkodzone
+- [IAM MACRO â€” pomysĹ‚y](project_iam_macro_ideas.md) â€” TODO: Kopiuj i podmieĹ„ IPT/IAM; inne podĹ›wietlenie klawisza gdy plik poza folderem projektu
+- [Blok Serwis â€” grafik serwisantĂłw](project_serwis_block.md) â€” przycisk obok Kadry; linie A (1/projekt z RM_MANAGER) + B (wyjazdy service_trips); kolizja Bâ©milestone
+- [Import cen z faktury KSEF](project_ksef_price_import.md) â€” WSTRZYMANE do czasu dostÄ™pu do KSeF; trzy typy faktur (A parsowalny / B rÄ™czny / C brak kartotek normaliĂłw)
+- [WydajnoĹ›Ä‡ wczytywania projektu](project_rm_manager_load_perf.md) â€” zacinka = latencja Y: Ă— ~34 otwarÄ‡; scalone PRAGMA, migracje raz/sesjÄ™, get_milestones_bulk
+- [PowiÄ…zania krzyĹĽowe urlopy âź· wyjazdy serwisowe](project_serwis_urlopy_crosslink.md) â€” czerwone ostrzeĹĽenia w obie strony + jasnoczerwone tĹ‚o (#f2b8b8) nieobecnoĹ›ci na grafiku B
+- [Dwa agenty AI — osobne narzędzia](project_ai_agents_two_places.md) — RM_MANAGER (rm_ai_optimizer.py + ai_rules.txt na Y:) vs RM_STATS; zmiana w jednym nie propaguje się
+- [Subiekt nexo PRO â€” integracja przez SferÄ™](project_subiekt_nexo_sfera.md) â€” nexo SDK w C:/iLogic, czytnik doc.py, most C# NexoRecon zbudowany; brakuje haseĹ‚ SQL+nexo; NIE REST API/pythonnet
+- [Subiekt â€” STAN NA 05.09.2026](project_subiekt_stan_05_09_2026.md) â€” punkt kontrolny f65b4e6: ZamĂłwiono z ZD przez master+hooki locka, adres BOM per projekt, puĹ‚apki Sfery, co otwarte
+- [WysyĹ‚ka ZD mailem](project_subiekt_wysylka_zd.md) â€” PDF ze Sfery + rysunki + Outlook COM; jawne interfejsy, most w Release, mail po NIP; UX â€žkasztan" do poprawy
+- [Subiekt: ZK + komplety Z/ZZ](project_subiekt_zk_komplety.md) â€” DZIAĹA na produkcji (03.09.2026); projekt=ZK, komplety tylko Z/ZZ, ZZ w ZZ, puĹ‚apka kolumn *_over
+- [ZamĂłwienia ZD w portalu RFQ](project_rfq_zamowienia_subiekt.md) â€” zakĹ‚adka Subiekt: archiwum, termin wiszenia, podglÄ…d bez licznika; wdroĹĽenie WinRM na W2019S
+- [Okno Magazyn â€” progi, ZD na skĹ‚ad, RW, usuwanie kartotek](project_subiekt_magazyn.md) â€” tryby mostu progi/rw/kartoteka-usun; zakres magazynowy Add() przed polami; Usun() milczy o odmowie
+- [Staly most Sfery — zrealizowany](project_subiekt_most_stan_serwera.md) — architektura, N+1, dystrybucja binarki; RM_BAZA i Subiekt MOGA pracowac rownoczesnie (producent, 06.09.2026)
+- [Start RM_BAZA vs RM_MANAGER](feedback_start_rm_baza.md) — "odpal RM_BAZA" = RM_BAZA_v15_MAG_STATS_ORG.py, nie rm_manager_gui.py
+- [Okno logowania do Subiekta](project_subiekt_okno_logowania.md) â€” Ustawieniaâ†’PoĹ‚Ä…czenie; hasĹ‚o ADMIN odblokowuje narzÄ™dzie nie rolÄ™; puĹ‚apki icacls i _most_niedostepny
+- [Przelogowanie usera a most Subiekta](project_subiekt_przelogowanie_usera.md) â€” konto nexo = MASZYNA nie czĹ‚owiek; przelogowanie NIE ma ruszaÄ‡ mostu (odĹ‚oĹĽone)
+- [Karta pozycji â€” nawigator po zĹ‚oĹĽeniu](project_subiekt_karta_pozycji.md) â€” jedno okno, 3 ĹşrĂłdĹ‚a (Inventor/RM_BAZA/Subiekt), tryb komplet w moĹ›cie; puĹ‚apki tksheet i wÄ…tkĂłw Tk
+- [Watchdog master â†’ READ-ONLY](project_master_watchdog_ro.md) â€” ensure_master_alive degradowaĹ‚ sesjÄ™ do RO po "locked"; ciche zapisy, nieĹ›wieĹĽe odczyty (07.09.2026)
+- [Build: leniwe importy a PyInstaller](project_build_leniwe_importy.md) â€” .exe RM_BAZA nie zawieraĹ‚ moduĹ‚Ăłw Subiekta (import w funkcji â‰  widziany przez PyInstaller)
+- [Zerowanie stanĂłw magazynu](project_subiekt_zerowanie_magazynu.md) â€” brak trybu "zeruj"; magazyn+rw, partie po 200, komplety osobno; otwarte ZD przeĹĽywajÄ…
+- [Symbol ze spacjÄ… wiodÄ…cÄ…](project_subiekt_symbol_spacja.md) â€” most trimuje wszÄ™dzie â†’ "brak kartoteki" w rw, "juĹĽ poprawny" w symbole; widaÄ‡ tylko na liĹ›cie Asortymentu
+- [Migracja magazynu nr 2](project_magazyn_nr2_migracja.md) â€” peĹ‚na procedura 8 krokĂłw (rwâ†’magazyn-zalozâ†’kartotekaâ†’pwâ†’kartoteka-edytujâ†’pola-wlasne), wykonana 07.09.2026
+- [RM_BAZA a symbol magazynu](project_rm_baza_magazyn_hardcoded.md) — MAG na sztywno ale TYLKO w zapisach; odczyt sumuje wszystkie magazyny
+- [ZakĹ‚adanie magazynu przez SferÄ™](project_subiekt_magazyn_zaloz.md) â€” wymaga jednostki organizacyjnej; puĹ‚apka dwĂłch rĂłĹĽnych "jednostek" w SDK
+- [Edytor kartotek Subiekta](project_subiekt_edytor_kartotek.md) â€” model grafowy, puĹ‚apki Treeview, reguĹ‚y wspĂłlne z resztÄ… systemu (08.09.2026)
+- [Projekt w Subiekcie z pliku CSV](project_subiekt_projekt_z_csv.md) â€” NIEDOKOĹCZONE: zapis nieprzetestowany, do skoĹ„czenia w domu
+- [Okna a trzy monitory](project_okna_trzy_monitory.md) â€” wysrodkuj() musi uĹĽywaÄ‡ granic wirtualnego pulpitu, wspĂłĹ‚rzÄ™dne bywajÄ… ujemne
+- [Master w journal_mode=delete â€” celowo](project_master_journal_delete.md) â€” NIE proponowaÄ‡ WAL po SMB; journal + chwilowy lock to norma; TRAY nie sieje, podwĂłjne PID-y = onefile
+- [Bramka wersji .exe + sesje klientĂłw](project_client_version_gate.md) â€” client_version.py; blokuje TYLKO stary .exe po publikacji na Y:/RMPAK_CLIENT; ĹşrĂłdĹ‚a/dev-build przechodzÄ…; tabela client_sessions
+- [Crash 0xc0000005 — close() dzielonego master_con](project_master_con_retire_crash.md) — _retire_master_con zamiast close(); watchdog 3 s vs busy 5 s; project_con nieobjęty
+- [Model poĹ‚Ä…czeĹ„ RM_BAZA â€” decyzja: zostaje, docelowo HTTP](project_rm_baza_db_model_decision.md) â€” NIE proponowaÄ‡ refaktoru warstwy SQLite; nowe wÄ…tki = wĹ‚asne poĹ‚Ä…czenie; fakty o lockach
+- [Subiekt: puste zĹ‚oĹĽenia â†’ decyzje](project_subiekt_puste_zlozenia_decyzje.md) â€” kaĹĽde Z/ZZ bez skĹ‚adu idzie do â€žDecyzje"; â€žPopraw drzewko" = szary Zapisz, nie przycisk; nocne 2 bĹ‚Ä™dy byĹ‚y na innej kopii danych
+- [MOST w gicie â€” zasada](feedback_most_w_gicie.md) â€” ĹşrĂłdĹ‚a .cs na main, binarka w most-server/most-dist (worktree); wystawiaÄ‡ na RM_SERWER$/MOST przez WinRM, NIE na Y:; przed wystawieniem git diff sha..HEAD
+- [Zapis do bazy projektu](project_zapis_do_bazy_projektu.md) — TYLKO przez db_manager.project_con; przy locku RM_BAZA pisze do kopii lokalnej, zapis wprost na Y: ginie
+- [Scalanie duplikatĂłw kartotek Subiekta](project_subiekt_scalanie_kartotek.md) â€” panel 5 edytora + tryb `scal`; symbole nietykalne, cel wygrywa, sumowanie w kompletach, aliasy; Sfera NIE MA flagi nieaktywna; odmowa = raport z kodem 0
+- [Dokumenty Subiekta: Uwagi vs TytuĹ‚](project_subiekt_uwagi_tytul.md) â€” UWAGI = â€ž<numer> Projektâ€ť + uwagi usera (drukujÄ… siÄ™), TYTUĹ = znacznik RM_BAZA = uprawnienie do zmian
+- [Formularze dokumentĂłw â€” test zapisu na DEMO](project_formularze_dokumentow_test_demo.md) â€” RW/PW/ZD/ZK sprawdzone TYLKO suchym przebiegiem; realny zapis do zrobienia w domu
+- [Master: wiszÄ…ca transakcja po nieudanym commit](project_master_stuck_transaction.md) â€” PRZYCZYNA rodziny â€žmaster lockedâ€ť: brak rollback â†’ RESERVED do koĹ„ca procesu, zakleszczenie samoodtwarzajÄ…ce; fix master_commit()+siatka; kto trzyma: Otwarte pliki na \nic
+- [Plan RM_SERWER â€” 3 etapy](project_rm_serwer_plan.md) â€” PLAN_RM_SERWER.md v8: master â†’ projekty+locki (checkout/checkin, reguĹ‚y 1:1) â†’ pliki bez Y:; etap 1 do kodowania; zasady po 4 recenzjach
+- [RM_SERWER â€” wdroĹĽenie na W2019S](project_rm_serwer_wdrozenie.md) â€” usluga NSSM, port 5060, C:\Apps\RM_SERWER; pulapki WinRM (brak Y:, proces ginie z sesja) i cp1250
+- [RM_SERWER â€” etap 1+2.5 domkniÄ™ty](project_rm_serwer_etap25_domkniecie.md) â€” koniec z plikiem mastera; routing 3 baz, HMAC, atrapa poĹ‚Ä…czenia, guardy os.path.exists
+- [Bazy projektowe: konto techniczne, nie protokĂłĹ‚](project_bazy_projektowe_konto_techniczne.md) â€” decyzja 12.09.2026 + pomiary plik vs protokĂłĹ‚ vs HTTP
+- [UdziaĹ‚ ukryty RM_SERWER$](project_udzial_ukryty_rm_serwer.md) â€” stary RM_SERWER usuniÄ™ty; puĹ‚apka: usuniÄ™cie mapowania zabiera hasĹ‚o SMB, RM_MANAGER pada bez bĹ‚Ä™du
+- [Blokady RM_BAZA przez serwer](project_locki_rm_baza_serwer.md) â€” DWA osobne systemy (lock-* vs rmm-lock-*), bo numery projektĂłw kolidujÄ… w 81/85; bazy przeniesione na serwer
+- [OdciÄ™cie od Y:](project_odciecie_od_Y.md) â€” 12.09.2026 wszystko na serwerze; puĹ‚apka `master_path.parent`, reset Ĺ›ledzenia; 14.09 most teĹĽ na serwerze (RM_SERWER$/MOST), na Y: tylko .exe RM_BAZA
+- [Autoaktualizacja .exe przez literÄ™ Y:](project_autoaktualizacja_exe.md) â€” bramka Ĺ›lepa poza Y: (W:/U: dominujÄ…) â€” 14.09 dwa stare buildy pisaĹ‚y na udziaĹ‚; decyzja: na Y: zostaje TYLKO RMPAK_CLIENT z binarkÄ…
+- [Mapowania Subiekta â€” stan 14.09.2026](project_mapowania_subiekta_stan_14_09.md) â€” ZROBIONE 14.09 (commit 62f2f36, serwer wdroĹĽony): klient tylko przez map-*; zostaje build .exe; przed nadpisaniem plikĂłw serwera diff z repo (byĹ‚y poprawki spoza gita)
+- [Audyt min po przenosinach](project_audyt_min_po_przenosinach.md) â€” 14.09 peĹ‚ny przeglÄ…d: co naprawione (PROJECTS_DIR, kontakt ZD), co zostaje i dlaczego; miny dajÄ… ciszÄ™, nie bĹ‚Ä…d
+- [Backupy tylko przy starcie programu](project_backupy_tylko_przy_starcie.md) â€” aplikacja chodzÄ…ca tydzieĹ„ nie robi kopii; Ĺ›wiadomie zostawione 14.09, warianty fixu w Ĺ›rodku
+- [Nie czekaÄ‡ w pÄ™tli na dĹ‚ugie operacje](feedback_nie_czekaj_na_dlugie_operacje.md) â€” odpaliÄ‡, potwierdziÄ‡ start, oddaÄ‡ gĹ‚os; wynik sprawdziÄ‡ pĂłĹşniej jednym zapytaniem
+- [PĂłĹ‚produkty zakupowe pod rysunki](project_polprodukty_do_rysunkow.md) â€” relacja w bazie mapowaĹ„, NIE komplet (rozjazd drzewek), NIE pola wĹ‚asne; kalkulator ma juĹĽ calc_semi_*
+- [backup_nic.bat poza gitem](project_backup_nic_poza_gitem.md) â€” lustro serwera na NAS, codziennie 2:00; skrypt tylko na serwerze (hasĹ‚o do nic\mongo), decyzja: zostaje tak
+- [Nie zamykaj okien usera](feedback_nie_zamykaj_okien_usera.md) â€” RM_BAZA/RM_MANAGER na ekranie to jego praca; przy "inna instancja dziaĹ‚a" pytaÄ‡, nie ubijaÄ‡; restart serwera teĹĽ uzgadniaÄ‡
+- [RM_DWF â€” Ĺ›cieĹĽki na serwer](project_rm_dwf_sciezki_serwer.md) â€” is_file() na UNC RZUCA, nie zwraca False; config poza gitem i przepisywany przez apkÄ™; RM_DWF nie robi backupĂłw
+- [NAS \\nic — poświadczenia i błąd 1219](project_nas_nic_poswiadczenia.md) — ⛔ JEDEN wpis w Menedżerze, jako `Mongo` bez prefiksu; drugi = 1219 i martwe V:/B:/Y:, RM_BAZA muli 3 s/wiersz; naprawa = restart
+- [PDF zamówienia ZD — brakujące DLL](project_zd_pdf_brakujace_dll.md) — Stimulsoft czyta 7 bibliotek InsERT OBOK .exe (nie przez .NET); diagnoza: `wydruk-recon` → pole `bledy_wydruku`; build kładzie hardlinki do SDK (f7bd51c)
+
+- [Szablon adresowy ZD](project_zd_szablon_adresowy.md) — bez Odbiorcy, dostawa na AdresMojejFirmy (Techniczna 2); Subiekt wypełniał to sam i wysyłał dostawcę do RMPAK-u; żadnych Id na sztywno
+- [Dopasowanie kartotek — podpowiedzi](project_dopasowanie_podpowiedzi.md) — zakładka Podpowiedzi (fuzzy DO WYBORU, nigdy automat: 389 fałszywych par); przepisywanie pozycji BOM na symbol+nazwę z Subiekta; pułapki szerokości kolumn
