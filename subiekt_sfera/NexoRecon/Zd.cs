@@ -197,6 +197,8 @@ internal static class Zd
                         }
                         catch { /* pole opcjonalne w niektórych konfiguracjach */ }
 
+                        UstawAdresyZamowienia(zd, dostawca, kroki);
+
                         // Uwagi z planu — okno magazynu wpisuje "MAGAZYN", okno
                         // zapotrzebowania (12.09.2026) listę projektów rozdzieloną
                         // przecinkiem ("2627,3500 Projekt"), bo ZD grupuje pozycje
@@ -311,6 +313,97 @@ internal static class Zd
 
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
     static int Bezp2(Func<int> f) { try { return f(); } catch { return 0; } }
+
+    /// <summary>
+    /// STALY SZABLON ADRESOWY ZAMOWIENIA: bez Odbiorcy, dostawa na nasz adres.
+    ///
+    /// PO CO (zgloszone 15.09.2026 na wydruku ZD 12/09/2026, odrecznie:
+    /// „DELETE" przy Odbiorcy, „ZMIANA na Techniczna" przy adresie dostawy)
+    ///
+    /// Subiekt wypelnial te sekcje SAM, biorac je z kartoteki i konfiguracji
+    /// dokumentu — RM_BAZA nigdzie ich nie ustawiala. Na wydruku wychodzilo:
+    ///     Odbiorca:      RMPAK Sp. z o.o., Kazimierza Pulaskiego 20, Konstancin
+    ///     Adres dostawy: Kazimierza Pulaskiego 20, Konstancin
+    /// czyli dostawca dostawal polecenie wyslania towaru do RMPAK-u, podczas
+    /// gdy material przyjezdza do nas na Techniczna 2.
+    ///
+    /// Co robimy:
+    ///   * Odbiorca (Podmiot + PodmiotHistoria) -> null. Wzorzec wydruku
+    ///     drukuje sekcje tylko wtedy, gdy podmiot jest ustawiony.
+    ///   * Adres dostawy -> AdresMojejFirmy (Techniczna 2). Sfera trzyma go
+    ///     w kilku polach naraz (MiejsceDostawyZewnetrzne, AdresOdbiorcy,
+    ///     AdresDostawOdbiorcy, AdresKorespondencyjnyOdbiorcy) — wszystkie
+    ///     wskazywaly Konstancin, wiec czyscimy komplet i podstawiamy nasz.
+    ///
+    /// ⚠️ NIE WPISUJEMY ID NA SZTYWNO. Na produkcji adres firmy ma Id 101251,
+    /// a Konstancin 100013, ale to numery TEJ bazy — na innej instalacji beda
+    /// inne. Bierzemy adres z samego dokumentu (AdresMojejFirmy), ktory
+    /// Subiekt wypelnia poprawnie.
+    ///
+    /// Nie rzuca: zly szablon adresowy nie moze zablokowac zalozenia
+    /// zamowienia. Gdy cos sie nie uda, leci krok „uwaga" do raportu.
+    /// </summary>
+    static void UstawAdresyZamowienia(dynamic zd, string dostawca, List<Krok> kroki)
+    {
+        object dane;
+        try { dane = zd.Dane; } catch { return; }
+
+        // 1. Odbiorca znika — towar idzie do nas, nie do klienta koncowego.
+        foreach (var pole in new[] { "Odbiorca", "OdbiorcaWybrany" })
+            UstawNaNull(dane, pole);
+
+        // 2. Adres dostawy = adres naszej firmy z tego samego dokumentu.
+        object? nasz = null;
+        try { nasz = dane.GetType().GetProperty("AdresMojejFirmy")?.GetValue(dane); }
+        catch { }
+        if (nasz == null)
+        {
+            kroki.Add(new Krok("zd", dostawca, "uwaga",
+                "nie odczytano AdresMojejFirmy — adres dostawy zostaje domyslny"));
+            return;
+        }
+
+        foreach (var pole in new[] { "MiejsceDostawyZewnetrzne", "AdresOdbiorcy",
+                                     "AdresDostawOdbiorcy", "AdresKorespondencyjnyOdbiorcy" })
+            UstawWartosc(dane, pole, nasz);
+    }
+
+    /// <summary>Zeruje wlasciwosc — takze przy jawnej implementacji interfejsu.</summary>
+    static void UstawNaNull(object obj, string nazwa) => UstawWartosc(obj, nazwa, null);
+
+    /// <summary>
+    /// Ustawia wlasciwosc, obchodzac pulapke Sfery: setter przy JAWNEJ
+    /// implementacji interfejsu potrafi po cichu nic nie zrobic (ten sam
+    /// problem co przy Uwagach i Tytule — patrz komentarze wyzej). Stad
+    /// proba na typie, potem po interfejsach, z odczytem kontrolnym.
+    /// </summary>
+    static void UstawWartosc(object obj, string nazwa, object? wartosc)
+    {
+        var p = obj.GetType().GetProperty(nazwa);
+        if (p != null && p.CanWrite)
+        {
+            try
+            {
+                p.SetValue(obj, wartosc);
+                if (Rowne(p.GetValue(obj), wartosc)) return;
+            }
+            catch { }
+        }
+        foreach (var i in obj.GetType().GetInterfaces())
+        {
+            var pi = i.GetProperty(nazwa);
+            if (pi == null || !pi.CanWrite) continue;
+            try
+            {
+                pi.SetValue(obj, wartosc);
+                if (Rowne(pi.GetValue(obj), wartosc)) return;
+            }
+            catch { }
+        }
+    }
+
+    static bool Rowne(object? a, object? b) =>
+        a == null && b == null || a != null && b != null && ReferenceEquals(a, b);
 
     /// <summary>
     /// Cena pozycji dokumentu. Zwraca opis drogi, ktora zadzialala, albo null.

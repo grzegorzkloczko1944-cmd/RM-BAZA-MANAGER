@@ -59,6 +59,7 @@ $nazwy = $Biblioteki -split ';' | Where-Object { $_ }
 $dowiazane = 0
 $skopiowane = 0
 $brakujace = @()
+$zajete = @()
 
 foreach ($nazwa in $nazwy) {
     $src = Join-Path $zrodlo "$nazwa.dll"
@@ -66,9 +67,24 @@ foreach ($nazwa in $nazwy) {
 
     if (-not (Test-Path $src)) { $brakujace += $nazwa; continue }
 
-    # Zawsze od nowa: ClickOnce przy aktualizacji PODMIENIA plik, wiec stare
-    # dowiazanie moze wskazywac na nieaktualna wersje.
-    if (Test-Path $dst) { Remove-Item $dst -Force -ErrorAction SilentlyContinue }
+    # ⚠️ NIE KASUJEMY PLIKU, KTORY JUZ JEST AKTUALNY. ClickOnce przy
+    # aktualizacji PODMIENIA pliki, wiec stare dowiazanie moze wskazywac na
+    # nieaktualna wersje — ale bezwarunkowe Remove-Item wywracalo CALY build,
+    # gdy plik trzymal OTWARTY SUBIEKT (te same biblioteki, MSB3027 „Plik jest
+    # zablokowany przez: Subiekt"; zdarzylo sie 15.09.2026). Rozmiar + czas
+    # zapisu wystarcza, zeby poznac, ze to ten sam plik.
+    if (Test-Path $dst) {
+        $a = Get-Item $dst
+        $b = Get-Item $src
+        if ($a.Length -eq $b.Length -and $a.LastWriteTimeUtc -eq $b.LastWriteTimeUtc) {
+            $dowiazane++
+            continue
+        }
+        Remove-Item $dst -Force -ErrorAction SilentlyContinue
+        # Nadal jest = trzyma go inny proces. Zostawiamy: stara wersja tej
+        # samej biblioteki jest lepsza niz przerwany build.
+        if (Test-Path $dst) { $zajete += $nazwa; continue }
+    }
 
     try {
         New-Item -ItemType HardLink -Path $dst -Target $src -ErrorAction Stop | Out-Null
@@ -85,6 +101,7 @@ foreach ($nazwa in $nazwy) {
 
 $opis = "  (wydruk) biblioteki PDF: $dowiazane dowiazanych"
 if ($skopiowane) { $opis += ", $skopiowane skopiowanych" }
+if ($zajete) { $opis += ", $($zajete.Count) zajetych (otwarty Subiekt) — zostaja stare" }
 Write-Host "$opis  [$zrodlo]"
 if ($brakujace) { Write-Host "  (wydruk) NIE ZNALEZIONO: $($brakujace -join ', ') — PDF zamowienia nie powstanie" }
 

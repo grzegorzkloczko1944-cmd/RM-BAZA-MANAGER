@@ -81,6 +81,30 @@ internal static class WydrukRecon
         }
         catch { /* rozpoznanie — brak maila nie przerywa reszty */ }
 
+        // ── 1a2. Pola ADRESOWE dokumentu ──────────────────────────────────
+        // Wydruk ZD ma sekcje „Odbiorca" i „Adres dostawy", ktorych RM_BAZA
+        // nigdzie nie ustawia — wypelnia je Subiekt sam. Zeby je opanowac
+        // (uzytkownik 15.09.2026: Odbiorca ma znikac, dostawa zawsze na
+        // Techniczna 2), trzeba najpierw wiedziec, JAK sie nazywaja.
+        try
+        {
+            var polaAdr = dok.GetType().GetProperties()
+                .Where(p => p.Name.Contains("Adres", StringComparison.OrdinalIgnoreCase)
+                         || p.Name.Contains("Odbiorc", StringComparison.OrdinalIgnoreCase)
+                         || p.Name.Contains("Dostaw", StringComparison.OrdinalIgnoreCase)
+                         || p.Name.Contains("Miejsce", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            raport["pola_adresowe"] = polaAdr.Select(p =>
+            {
+                string wartosc;
+                try { wartosc = SzukajWlasciwosci(dok, p.Name)?.ToString() ?? "null"; }
+                catch (Exception e) { wartosc = "BLAD: " + e.GetType().Name; }
+                var zapis = p.CanWrite ? "zapisywalne" : "tylko odczyt";
+                return $"{p.Name} ({p.PropertyType.Name}) = {wartosc} [{zapis}]";
+            }).ToList();
+        }
+        catch { /* rozpoznanie — brak pol adresowych nie przerywa reszty */ }
+
         // ── 1b. Pola DAT na dokumencie — czy jest termin realizacji? ───────
         try
         {
