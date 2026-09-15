@@ -427,6 +427,12 @@ class DopasowanieWindow(tk.Toplevel):
 
     def _odswiez_liste(self):
         self.tab.delete(*self.tab.get_children())
+        # ⚠️ `iid` MUSI byc unikalny. Po dowiazaniu dwa wiersze BOM-u moga
+        # miec ten sam kod (pozycja bez numeru przejmuje symbol z Subiekta)
+        # — drugie `insert` rzucalo TclError i URYWALO CALA LISTE
+        # (15.09.2026). Trzymamy mape iid -> kod do odczytu zaznaczenia.
+        self._iid_kod = {}
+        uzyte = set()
         znaki = {D.STAN_ZAPAMIETANE: "✓", D.STAN_SYMBOL: "✓",
                  D.STAN_NAZWA: "⚠", D.STAN_NIEJEDNOZNACZNE: "?",
                  D.STAN_BRAK: "✕"}
@@ -444,7 +450,12 @@ class DopasowanieWindow(tk.Toplevel):
             nr = p["kod"]
             if p.get("bez_numeru"):
                 nr = wyb.get("symbol") or ""
-            self.tab.insert("", "end", iid=p["kod"], values=(
+            iid = p["kod"]
+            if iid in uzyte:
+                iid = "%s#%d" % (p["kod"], len(uzyte))
+            uzyte.add(iid)
+            self._iid_kod[iid] = p["kod"]
+            self.tab.insert("", "end", iid=iid, values=(
                 znaki.get(p["stan"], ""),
                 nr,
                 p["nazwa_rm"] or p["kod"],
@@ -473,10 +484,29 @@ class DopasowanieWindow(tk.Toplevel):
 
     # ── kandydaci ──────────────────────────────────────────────────────
     def _biezaca_pozycja(self):
+        """Pozycja spod zaznaczenia — po `iid`, nie po kodzie.
+
+        ⚠️ Dwa wiersze BOM-u moga miec TEN SAM kod (pozycja bez numeru
+        przejmuje symbol z Subiekta po dowiazaniu). Szukanie po kodzie
+        zwracalo wtedy zawsze PIERWSZA z nich, wiec panel kandydatow
+        pokazywal dane nie tej pozycji, ktora kliknieto (15.09.2026).
+        """
         sel = self.tab.selection()
         if not sel:
             return None
-        return next((p for p in self.pozycje if p["kod"] == sel[0]), None)
+        iid = sel[0]
+        kod = getattr(self, "_iid_kod", {}).get(iid, iid)
+        # Przy powtorzonym kodzie bierzemy pozycje o tym numerze porzadkowym,
+        # ktory niesie iid („KOD#1" = druga pozycja z tym kodem).
+        pasujace = [p for p in self.pozycje if p["kod"] == kod]
+        if not pasujace:
+            return None
+        if "#" in iid:
+            try:
+                return pasujace[int(iid.rsplit("#", 1)[1])]
+            except (ValueError, IndexError):
+                pass
+        return pasujace[0]
 
     def _pokaz_kandydatow(self, _e=None):
         p = self._biezaca_pozycja()
