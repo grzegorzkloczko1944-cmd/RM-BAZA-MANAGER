@@ -54,4 +54,50 @@
                                Condition="$([System.String]::Copy('%(Filename)').StartsWith('InsERT.'))" />
     </ItemGroup>
   </Target>
+
+  <!--
+    SIEDEM BIBLIOTEK POD WYDRUK PDF — TWARDE DOWIAZANIA, NIE KOPIE.
+
+    Silnik wydruku (Stimulsoft, wzorzec ZD) NIE laduje przez .NET: sklada
+    sciezke jako tekst (katalog .exe + nazwa) i czyta plik z dysku. Zaden hook
+    rozwiazywania assembly tego nie przechwyci — sprawdzone 15.09.2026 na
+    AssemblyLoadContext.Resolving, AppDomain.AssemblyResolve i APP_PATHS
+    w runtimeconfig. Wszystkie trzy przeszly bez efektu: `Eksport()` NIE
+    RZUCA WYJATKU, po prostu nic nie zapisuje. Objaw u uzytkownika: mail do
+    dostawcy z rysunkami, ale bez PDF-a zamowienia.
+    Diagnoza: tryb `wydruk-recon`, pole `bledy_wydruku`.
+
+    Skoro plik MUSI fizycznie lezec obok .exe, klademy tam dowiazanie twarde
+    (hardlink) — drugi wpis katalogowy do TEGO SAMEGO pliku, wiec:
+      * dla Stimulsoftu plik istnieje i ma poprawna tresc,
+      * nie ma drugiej kopii, ktora zamrozilaby wersje.
+
+    ⚠️ DLACZEGO NIE ZWYKLA KOPIA. Kopia zostaje na starej wersji, a baza
+    aktualizuje sie sama przy starcie Subiekta. Sfera odmawia wtedy
+    polaczenia ("Wersja bazy danych to 61.1.1.9471, a wersja Sfery to
+    61.1.0.9431"), most startuje, odpowiada na ping, ale NIGDY nie osiaga
+    ready, a RM_BAZA wisi na przejeciu locka (awaria z 09.09.2026).
+    Do tego .NET laduje z katalogu aplikacji ZANIM odezwie sie hook, wiec
+    kopia zabija tez wykrywanie nowszych bibliotek w SdkLoader.
+
+    ⚠️ Hardlink nie wymaga uprawnien administratora (symlink WYMAGA — nie
+    uzywac). Dziala tylko w obrebie jednego wolumenu; SDK i repo sa na C:.
+    Gdy sie nie uda (inny dysk, system plikow bez twardych dowiazan),
+    schodzimy na kopie: lepiej dzialajacy wydruk niz zaden, a SdkLoader i tak
+    zglosi niezgodnosc wersji czytelnym komunikatem.
+
+    ⚠️ ClickOnce przy aktualizacji PODMIENIA pliki, wiec dowiazanie moze
+    zostac przy starej wersji. Dlatego zakladamy je na nowo przy KAZDYM
+    buildzie, a most ma wlasne odswiezanie przy starcie (SdkLoader).
+  -->
+  <Target Name="DowiazBibliotekiWydruku" AfterTargets="Build">
+    <PropertyGroup>
+      <_wydrukDll>InsERT.Moria.Narzedzia;InsERT.Mox.Core;InsERT.Moria.API;InsERT.Mox.EntityFrameworkSupport;InsERT.Moria.ModelDanych;InsERT.Moria.PolaWlasne;InsERT.Mox.EntityFramework.Core</_wydrukDll>
+    </PropertyGroup>
+    <ItemGroup>
+      <_WydrukDll Include="$(_wydrukDll)" />
+    </ItemGroup>
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\dowiaz_biblioteki_wydruku.ps1&quot; -Wyjscie &quot;$(TargetDir.TrimEnd('\'))&quot; -SdkBin &quot;$(nexoSdkBinPath.TrimEnd('\'))&quot; -Biblioteki &quot;$(_wydrukDll)&quot;"
+          ContinueOnError="true" />
+  </Target>
 </Project>
