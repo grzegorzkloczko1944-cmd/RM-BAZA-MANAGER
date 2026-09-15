@@ -179,5 +179,105 @@ internal static class SdkLoader
             var p = Path.Combine(sdkBin, name.Name + ".dll");
             return File.Exists(p) ? ctx.LoadFromAssemblyPath(p) : null;
         };
+        ZadbajOBibliotekiWydruku(sdkBin);
+    }
+
+    /// <summary>
+    /// Biblioteki, ktorych SILNIK WYDRUKU (Stimulsoft) szuka OBOK .exe.
+    ///
+    /// Stimulsoft nie laduje przez .NET: sklada sciezke jako tekst
+    /// (katalog aplikacji + nazwa) i czyta plik z dysku. Zaden hook
+    /// rozwiazywania assembly tego nie przechwyci — sprawdzone 15.09.2026 na
+    /// AssemblyLoadContext.Resolving, AppDomain.AssemblyResolve i APP_PATHS
+    /// w runtimeconfig. `Eksport()` NIE RZUCA WYJATKU, tylko cicho nic nie
+    /// zapisuje: mail do dostawcy wychodzi z rysunkami, ale bez PDF-a.
+    /// </summary>
+    /// <remarks>
+    /// Lista ustalona DOSWIADCZALNIE na czystym katalogu (tryb `wydruk-recon`,
+    /// pole `bledy_wydruku` podaje brakujacy plik po nazwie — dokladamy po
+    /// jednym, az `pdf_powstal` bedzie true). Dziewiec pozycji: siedem
+    /// InsERT-a i dwie samego Stimulsoftu.
+    /// ⚠️ U dewelopera bibliotek Stimulsoftu NIE WIDAC — build kopiuje je do
+    /// bin\Release, wiec PDF dziala. Na stanowisko jedzie PIEC plikow i tam
+    /// ich brakuje. Testowac zawsze na katalogu z samym mostem.
+    /// </remarks>
+    static readonly string[] _bibliotekiWydruku =
+    {
+        "InsERT.Moria.Narzedzia", "InsERT.Mox.Core", "InsERT.Moria.API",
+        "InsERT.Mox.EntityFrameworkSupport", "InsERT.Moria.ModelDanych",
+        "InsERT.Moria.PolaWlasne", "InsERT.Mox.EntityFramework.Core",
+        "Stimulsoft.Base", "Stimulsoft.Report",
+    };
+
+    /// <summary>
+    /// Klade obok .exe twarde dowiazania do bibliotek wydruku — JESLI ich tam
+    /// nie ma albo wskazuja na inna wersje niz SDK.
+    ///
+    /// ⚠️ DLACZEGO PRZY STARCIE, A NIE TYLKO PRZY BUILDZIE (15.09.2026)
+    /// Build klade je w bin\Release, ale na stanowisko trafia PIEC PLIKOW
+    /// (NexoRecon.exe + dll + 2 json + wersja.json) do C:\iLogic\Subiekt\MOST —
+    /// bez bibliotek. Most zbudowany poprawnie u dewelopera NIE robilby wiec
+    /// PDF-a u nikogo innego. Kazde stanowisko ma wlasne SDK Sfery, wiec
+    /// dowiazanie musi powstac TAM, gdzie most realnie stoi.
+    ///
+    /// ⚠️ DOWIAZANIE, NIE KOPIA. Kopia zamraza wersje, a baza aktualizuje sie
+    /// sama przy starcie Subiekta — Sfera odmawia wtedy polaczenia i most
+    /// nigdy nie osiaga ready (awaria z 09.09.2026). Hardlink to drugi wpis
+    /// katalogowy do TEGO SAMEGO pliku, wiec tresc zawsze zgadza sie z SDK.
+    ///
+    /// Cicho i bez wyjatkow: brak uprawnien do katalogu, SDK na innym
+    /// wolumenie czy system plikow bez twardych dowiazan nie moga wywrocic
+    /// startu mostu. Wtedy po prostu nie bedzie PDF-a — tak jak przedtem.
+    /// </summary>
+    static void ZadbajOBibliotekiWydruku(string sdkBin)
+    {
+        try
+        {
+            var obok = AppContext.BaseDirectory;
+            if (string.IsNullOrEmpty(obok) || !Directory.Exists(sdkBin)) return;
+
+            foreach (var nazwa in _bibliotekiWydruku)
+            {
+                var zrodlo = Path.Combine(sdkBin, nazwa + ".dll");
+                var cel = Path.Combine(obok, nazwa + ".dll");
+                if (!File.Exists(zrodlo)) continue;
+
+                // Ten sam plik (rozmiar + czas zapisu) — nie ruszamy. Inaczej
+                // kazdy start kasowalby i zakladal dowiazania od nowa, a przy
+                // kilku mostach naraz jeden kasowalby plik drugiemu.
+                if (File.Exists(cel))
+                {
+                    try
+                    {
+                        var a = new FileInfo(cel);
+                        var b = new FileInfo(zrodlo);
+                        if (a.Length == b.Length && a.LastWriteTimeUtc == b.LastWriteTimeUtc)
+                            continue;
+                        File.Delete(cel);
+                    }
+                    catch { continue; }   // zajety przez inny proces — zostawiamy
+                }
+
+                if (!TworzTwardeDowiazanie(cel, zrodlo))
+                {
+                    // Inny wolumen albo system plikow bez dowiazan — kopia jest
+                    // gorsza (zamraza wersje), ale lepsza niz brak wydruku.
+                    try { File.Copy(zrodlo, cel, overwrite: true); } catch { }
+                }
+            }
+        }
+        catch { /* wydruk to nie jest powod, zeby most nie wstal */ }
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode,
+        SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    static extern bool CreateHardLinkW(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
+
+    /// <summary>Twarde dowiazanie `cel` → `zrodlo`. False, gdy sie nie da.</summary>
+    static bool TworzTwardeDowiazanie(string cel, string zrodlo)
+    {
+        try { return CreateHardLinkW(cel, zrodlo, IntPtr.Zero); }
+        catch { return false; }
     }
 }

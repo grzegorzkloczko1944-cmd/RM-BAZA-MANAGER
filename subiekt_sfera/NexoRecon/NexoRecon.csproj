@@ -92,7 +92,11 @@
   -->
   <Target Name="DowiazBibliotekiWydruku" AfterTargets="Build">
     <PropertyGroup>
-      <_wydrukDll>InsERT.Moria.Narzedzia;InsERT.Mox.Core;InsERT.Moria.API;InsERT.Mox.EntityFrameworkSupport;InsERT.Moria.ModelDanych;InsERT.Moria.PolaWlasne;InsERT.Mox.EntityFramework.Core</_wydrukDll>
+      <!-- Ta sama lista co SdkLoader._bibliotekiWydruku (9 pozycji: 7 InsERT
+           + 2 Stimulsoft). Most zaklada je tez sam przy starcie — build robi
+           to z wyprzedzeniem, zeby PDF dzialal juz przy PIERWSZYM
+           uruchomieniu, a nie dopiero przy drugim. -->
+      <_wydrukDll>InsERT.Moria.Narzedzia;InsERT.Mox.Core;InsERT.Moria.API;InsERT.Mox.EntityFrameworkSupport;InsERT.Moria.ModelDanych;InsERT.Moria.PolaWlasne;InsERT.Mox.EntityFramework.Core;Stimulsoft.Base;Stimulsoft.Report</_wydrukDll>
     </PropertyGroup>
     <ItemGroup>
       <_WydrukDll Include="$(_wydrukDll)" />
