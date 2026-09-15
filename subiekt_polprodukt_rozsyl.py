@@ -73,7 +73,10 @@ def plan_polproduktow(project_id, nazwa_projektu, podmiot=""):
     kartotece.
     """
     import subiekt_projekt as PR
-    plan = PR.build_plan(project_id, nazwa_projektu, podmiot or "",
+    # Pusty podmiot = blad mostu „nie znaleziono podmiotu" i BRAK ZK.
+    # Domyslny jak w oknie Projekt/Aktualizacja.
+    plan = PR.build_plan(project_id, nazwa_projektu,
+                         (podmiot or "").strip() or "RMPAK",
                          nazwa_projektu)[0]
     pozycje = [p for p in plan["pozycje"] if p.get("polprodukt_dla")]
     if not pozycje:

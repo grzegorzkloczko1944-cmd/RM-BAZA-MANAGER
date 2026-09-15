@@ -13003,7 +13003,11 @@ class MainWindow(tk.Tk):
                 break
         return {"project_id": self.current_project_id,
                 "project_name": nazwa,
-                "podmiot": "",
+                # ⚠️ Ten sam domyslny podmiot co w oknie Projekt/Aktualizacja
+                # (`subiekt_projekt`, var_podmiot). Pusty string konczyl sie
+                # bledem mostu „nie znaleziono podmiotu" i ZK NIE POWSTAWALO
+                # (15.09.2026).
+                "podmiot": "RMPAK",
                 "pozycje": pozycje}
 
     def _po_zmianie_polproduktu(self):
