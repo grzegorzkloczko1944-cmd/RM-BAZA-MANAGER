@@ -117,6 +117,13 @@ internal sealed class NexoSession : IDisposable
         }
         catch (Exception ex)
         {
+            // ⚠️ SPRZATAMY PO NIEUDANEJ PROBIE (15.09.2026).
+            // Bez tego polowicznie zestawione polaczenie zostawalo w _mp/_sfera
+            // az do nastepnego Connect(). Przy uporczywej awarii (SQL nie
+            // odpowiada, baza w aktualizacji) kazda kolejna komenda dokladala
+            // nastepne — most urosl do 1,3 GB RAM, trzymajac wylacznie trupy
+            // po nieudanych probach. Rozlacz() jest idempotentny i nie rzuca.
+            Rozlacz();
             Stan = StanSesji.Error;
             throw new SesjaException(2,
                 "BLAD POLACZENIA (Polacz): " + ex.Message + "\n" +
@@ -126,6 +133,11 @@ internal sealed class NexoSession : IDisposable
 
         if (!_sfera.ZalogujOperatora(_cfg.NexoLogin, _cfg.NexoHaslo))
         {
+            // To samo co wyzej: polaczenie ZYJE (Polacz przeszedl), padlo
+            // dopiero logowanie operatora — np. gdy ktos zmienil haslo GKI
+            // albo Subiekt trzyma juz sesje tego operatora. Zostawiony uchwyt
+            // wisialby do konca procesu.
+            Rozlacz();
             Stan = StanSesji.Error;
             throw new SesjaException(3,
                 $"BLAD: logowanie operatora nexo '{_cfg.NexoLogin}' nie powiodlo sie " +

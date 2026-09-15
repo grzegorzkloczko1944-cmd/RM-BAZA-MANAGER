@@ -262,6 +262,19 @@ internal static class ServerHost
         catch (SesjaException ex)
         {
             Log($"reconnect_FAIL (pre-check) {ex.Message.Replace("\n", " | ")}");
+            // ⚠️ SESJA ZOSTAJE ODBUDOWYWALNA (15.09.2026).
+            // Nieudana odbudowa NIE jest wyrokiem na proces: przyczyny sa
+            // zwykle przejsciowe (SQL wstaje po restarcie, baza konczy
+            // aktualizacje, siec wraca). Stan `Error` sam z siebie nie blokuje
+            // kolejnej proby — warunek na gorze tej metody przepuszcza kazdy
+            // stan != Ready — ale `_ostatniaAktywnosc` MUSI zostac cofniete,
+            // inaczej po udanej komendzie licznik bezczynnosci zaczyna biec od
+            // nowa i przez minute nikt sesji nie sprawdza.
+            //
+            // Do 15.09.2026 most po takiej porazce wymagal RECZNEGO ubicia
+            // procesu: uzytkownik dostawal „Sesja Sfery padla" przy kazdej
+            // operacji az do konca dnia.
+            _ostatniaAktywnosc = DateTime.MinValue;
             // Nic nie ruszylo, wiec klient moze bezpiecznie ponowic — takze zapis.
             return Blad("SESSION_LOST",
                 "Sesja Sfery padla (np. po uspieniu komputera) i nie udalo sie jej odbudowac. " +

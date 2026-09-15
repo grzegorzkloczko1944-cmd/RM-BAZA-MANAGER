@@ -305,9 +305,18 @@ internal static class WydrukRecon
                             ? $"PDF POWSTAŁ: {string.Join(", ", powstale)}"
                             : "Eksport nie rzucił wyjątku, ale pliku PDF nie ma");
 
+                        // Lista błędów ze Sfery — ToString() na List<string> dawał
+                        // samą nazwę typu i gubił jedyne miejsce, w którym Sfera
+                        // mówi, DLACZEGO Eksport() nic nie zapisał (15.09.2026).
                         var bledy = wydruk.GetType().GetMethod("PobierzListeBledow");
                         if (bledy != null)
-                            raport["bledy_wydruku"] = bledy.Invoke(wydruk, null)?.ToString();
+                        {
+                            var lista = bledy.Invoke(wydruk, null);
+                            raport["bledy_wydruku"] = lista is System.Collections.IEnumerable e
+                                                      && lista is not string
+                                ? e.Cast<object?>().Select(x => x?.ToString()).ToArray()
+                                : (object?)lista?.ToString();
+                        }
                     }
                     catch (TargetInvocationException tie)
                     {
