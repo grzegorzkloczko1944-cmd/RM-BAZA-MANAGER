@@ -148,6 +148,10 @@ def read_project_items(project_id):
         # na ZK. Kolejność jak w reszcie RM_BAZA: COALESCE(order_qty, work_qty, src_qty).
         name_cols = [c for c in ("work_name", "src_name") if c in cols]
         qty_cols = [c for c in ("order_qty", "work_qty", "src_qty") if c in cols]
+        # Ilosc Z SAMEGO BOM-u, bez `order_qty` — do sumowania pozycji
+        # dowiazanych do jednej kartoteki (`scal_po_kartotece`). Ta sama
+        # kolejnosc, ktorej uzywa PW (`ilosc_produkcyjna`).
+        bom_cols = [c for c in ("work_qty", "src_qty") if c in cols]
         cls_cols = [c for c in ("class_manual", "class_effective", "class_auto") if c in cols]
         bib_col = ["dwf_biblioteka"] if "dwf_biblioteka" in cols else []
         # Opis („wykonać z PP", „LEWY / PRAWY", „6-6mm (D14L22)") — ta sama
@@ -157,7 +161,7 @@ def read_project_items(project_id):
         # (RMPAK_PRODUKCJA_USTALENIA.md §9). Kolumny może nie być w starszych
         # bazach projektów, więc jak wszystkie pozostałe: opcjonalnie.
         sup_col = ["supplier_id"] if "supplier_id" in cols else []
-        sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols + qty_cols + cls_cols + bib_col + desc_cols + sup_col
+        sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols + qty_cols + bom_cols + cls_cols + bib_col + desc_cols + sup_col
         # Ukryte pozycje (przycisk „Ukryj zaznaczone" w arkuszu) nie mają
         # trafiać do Subiekta — COALESCE bo starsze wiersze mogą mieć NULL
         # zamiast 0 (ten sam wzorzec co database_manager.get_project_items).
@@ -198,7 +202,8 @@ def read_project_items(project_id):
 
     n0 = 3
     q0 = n0 + len(name_cols)
-    c0 = q0 + len(qty_cols)
+    b0 = q0 + len(qty_cols)     # poczatek kolumn ilosci Z BOM-u
+    c0 = b0 + len(bom_cols)
     c1 = c0 + len(cls_cols)     # koniec kolumn typu, przed dwf_biblioteka
     d0 = c1 + len(bib_col)      # początek kolumn opisu
     s0 = d0 + len(desc_cols)    # supplier_id — ostatnia, jeśli w ogóle jest
@@ -259,7 +264,9 @@ def read_project_items(project_id):
             "bez_numeru": not nr,    # do rozpoznania przy zakładaniu kartotek
             "nazwa": nazwa,
             "opis": jedna_linia(first(r[d0:s0] if sup_col else r[d0:])) if d0 < len(r) else "",
-            "qty": first(r[q0:c0]),
+            "qty": first(r[q0:b0]),
+            # Ilosc z BOM-u (work_qty > src_qty), BEZ order_qty.
+            "qty_bom": first(r[b0:c0]),
             "typ": typ,
             "biblioteczne": biblioteczne,
             "produkcja_wlasna": _produkcja_wlasna(sup_id, typ, id_produkcji),
@@ -871,6 +878,69 @@ def ilosci_z_drzewa(kids, ilosci_korzeni):
     return wynik
 
 
+def scal_po_kartotece(pozycje):
+    """Sumuje ilosci pozycji wskazujacych TE SAMA kartoteke Subiekta.
+
+    Po dowiazaniu w „Dopasowaniu kartotek" dwa wiersze BOM-u moga wskazywac
+    jeden symbol w Subiekcie (np. „UCFL 201" i „UCFL201 ---" → `UCFL201`).
+    Most ustawia ilosc WPROST, wiec bez scalenia druga pozycja NADPISUJE
+    pierwsza i na dokumencie zostaje mniejsza liczba (15.09.2026).
+
+    Klucz: symbol z mapowania, a gdy go brak — wlasny symbol pozycji.
+    Zwraca NOWA liste; pierwsza pozycja z grupy zostaje i przejmuje sume,
+    reszta znika (nie duplikujemy wiersza na dokumencie).
+
+    Bez polaczenia z serwerem mapowan zwracamy liste bez zmian — lepiej
+    wyslac jak dotad niz zgadywac powiazania.
+    """
+    if not pozycje:
+        return pozycje
+    try:
+        import subiekt_mapowania
+        mapy = subiekt_mapowania.get_many(
+            [(p.get("symbol") or "").strip() for p in pozycje]) or {}
+    except Exception as e:
+        print("\u26a0\ufe0f  Scalanie po kartotece pominiete: %s" % e)
+        return pozycje
+
+    def kartoteka(p):
+        wlasny = (p.get("symbol") or "").strip()
+        m = mapy.get(wlasny.upper()) or mapy.get(wlasny)
+        docelowy = (m or {}).get("symbol_subiekt") or wlasny
+        return docelowy.strip().upper()
+
+    out, gdzie, scalone = [], {}, []
+    for p in pozycje:
+        k = kartoteka(p)
+        if not k:
+            out.append(p)
+            continue
+        if k not in gdzie:
+            gdzie[k] = p
+            out.append(p)
+            continue
+        pierwsza = gdzie[k]
+        # ⚠️ SUMUJEMY ILOSCI Z BOM-u, nie te odbite z ZK. `bazowe_ilosci`
+        # nadpisuje ilosc stanem dokumentu, a przy dowiazaniu OBA wiersze
+        # pytaja o ten sam symbol i dostaja te sama liczbe — sumowanie
+        # tamtych dawalo 7+7=14 zamiast 7+1=8, i rosloby przy kazdym
+        # zapisie (2627, 15.09.2026).
+        try:
+            suma = float(pierwsza.get("ilosc_bom",
+                                      pierwsza.get("ilosc")) or 0) \
+                 + float(p.get("ilosc_bom", p.get("ilosc")) or 0)
+        except (TypeError, ValueError):
+            continue
+        pierwsza["ilosc"] = suma
+        pierwsza["ilosc_bom"] = suma
+        scalone.append((p.get("symbol"), pierwsza.get("symbol"), suma))
+
+    for co, do_czego, suma in scalone:
+        print("\u2795 Scalono na ZK: %s \u2192 %s (razem %g szt.)"
+              % (co, do_czego, suma))
+    return out
+
+
 def pozycje_polproduktow(pozycje):
     """[poz_planu, …] — kupowane polfabrykaty dla pozycji BOM-u.
 
@@ -1083,6 +1153,17 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
             # dokumencie było już 1, a zapis „nic nie robił" (09.09.2026).
             # Żywy stan ZK ma pierwszeństwo przed BOM-em, ale edycja usera
             # (przeliczone poddrzewo albo ręczna ilość) ma pierwszeństwo nad wszystkim.
+            # ⚠️ Ilosc Z BOM-u ZANIM nadpisze ja stan ZK — sluzy do
+            # sumowania pozycji dowiazanych do tej samej kartoteki
+            # (`scal_po_kartotece`). Bez tego obie dostawaly ilosc
+            # Z DOKUMENTU i suma rosla przy kazdym zapisie (15.09.2026).
+            # Z BOM-u, nie z ZK: `it["qty"]` moze juz byc odbiciem dokumentu
+            # (COALESCE bierze order_qty pierwsze).
+            try:
+                qty_bom = float(str(it.get("qty_bom")).replace(",", ".")) \
+                    if it.get("qty_bom") not in (None, "") else qty
+            except (TypeError, ValueError):
+                qty_bom = qty
             if bazowe_ilosci:
                 na_zk = bazowe_ilosci.get(it["nr"].strip().upper())
                 if na_zk is not None:
@@ -1092,8 +1173,9 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
                 if policzona is not None:
                     qty = policzona
         except (TypeError, ValueError):
-            qty = 1.0
+            qty = qty_bom = 1.0
         pozycje.append({
+            "ilosc_bom": qty_bom,
             "symbol": it["nr"],
             "nazwa": it["nazwa"] or it["nr"],
             "opis": it.get("opis") or "",
@@ -1114,6 +1196,10 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
     # Nazwa siedziała dotąd w Tytule, ale to pole SIĘ NIE DRUKUJE i od
     # 10.09.2026 niesie znacznik RM_BAZA (patrz Znacznik.cs po stronie mostu),
     # więc żeby nazwa nie przepadła, schodzi do Uwag.
+    # ⚠️ NAJPIERW scalamy pozycje wskazujace te sama kartoteke Subiekta —
+    # inaczej druga nadpisze pierwsza na ZK (most ustawia ilosc wprost).
+    pozycje = scal_po_kartotece(pozycje)
+
     # Polfabrykaty kupowane pod rysunki — dokladane PO zbudowaniu pozycji,
     # bo licza sie z ILOSCI tych pozycji (POLPRODUKTY_PLAN.md, krok 4).
     # Relacja nalezy do zapotrzebowania projektu, nie do ZK: logistyk moze
