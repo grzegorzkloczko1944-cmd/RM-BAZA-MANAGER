@@ -100,7 +100,8 @@ except Exception as _e:
     print(f"(spec) NIE wystawiono na {WYSTAWKA}: {_e}")
     print( "(spec) Skopiuj recznie z dist, gdy udzial wroci.")
 
-try:
-    _os.startfile(_os.path.join(_os.path.abspath(DISTPATH), ''))
-except Exception as _e:
-    print(f"(spec) Nie udalo sie otworzyc folderu dist: {_e}")
+# ⛔ NIE OTWIERAĆ `dist` PRZEZ startfile() PO BUILDZIE — patrz komentarz
+# w RM_BAZA_v15_MAG.spec. Skrótowo: w `dist` leży katalog RM_KOD z .exe,
+# a Eksplorator przy wchodzeniu do folderu URUCHAMIA go — po jednym buildzie
+# w systemie wisiały 152 procesy RM_KOD (15.09.2026).
+# Ścieżka do gotowego pliku jest wypisana wyżej; folder user otwiera sam.

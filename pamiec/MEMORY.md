@@ -79,3 +79,4 @@
 - [Szablon adresowy ZD](project_zd_szablon_adresowy.md) — bez Odbiorcy, dostawa na AdresMojejFirmy (Techniczna 2); Subiekt wypełniał to sam i wysyłał dostawcę do RMPAK-u; żadnych Id na sztywno
 - [Dopasowanie kartotek — podpowiedzi](project_dopasowanie_podpowiedzi.md) — zakładka Podpowiedzi (fuzzy DO WYBORU, nigdy automat: 389 fałszywych par); przepisywanie pozycji BOM na symbol+nazwę z Subiekta; pułapki szerokości kolumn
 - [PLAN AUTOMATYKA](project_plan_automatyka.md) — NIE klonować MACHINES (WAREHOUSE to 99 rozsianych warunków, nie moduł); magazyn/pw/rw już działają, brakuje kartotek w Subiekcie; czeka na eksport ze schematów
+- [startfile w .spec odpalał RM_KOD](project_spec_startfile_rm_kod.md) — ⛔ nigdy `startfile(DISTPATH)` w .spec: Eksplorator uruchamiał RM_KOD.exe z dist, 152 procesy po jednym buildzie

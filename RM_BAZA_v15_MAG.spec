@@ -134,14 +134,19 @@ exe = EXE(
     icon=['rm_baza_icon.ico'],
 )
 
-# Po zbudowaniu EXE otwórz folder dist w Eksploratorze Windows.
-# (kod .spec wykonuje się jako Python; obiekt EXE powyżej buduje plik,
-#  więc tutaj build jest już gotowy)
+# ⛔ NIE OTWIERAĆ `dist` PRZEZ startfile() PO BUILDZIE.
+#
+# Do 15.09.2026 stało tu:
+#     _os.startfile(_os.path.abspath(DISTPATH))
+# czyli „pokaż folder dist w Eksploratorze". Skutek: w `dist` leży też katalog
+# `RM_KOD` z `RM_KOD.exe`, a Eksplorator przy wchodzeniu do folderu URUCHOMIŁ
+# go — i to nie raz. Po buildzie o 21:00 w systemie wisiały **152 procesy
+# RM_KOD**, wszystkie wystartowane w ciągu 5 sekund po otwarciu folderu
+# (zgłoszone: „odpalasz mi miliony RM_KOD").
+#
+# Ścieżkę do gotowego pliku wypisuje niżej sekcja PUBLIKACJA — to wystarczy,
+# a folder user otwiera sam, gdy chce.
 import os as _os
-try:
-    _os.startfile(_os.path.join(_os.path.abspath(DISTPATH), ''))
-except Exception as _e:
-    print(f"(spec) Nie udalo sie otworzyc folderu dist: {_e}")
 
 # ── PUBLIKACJA: KATALOG TESTOWY ──────────────────────────────────────────────
 # Gotowy .exe leci do Y:\RMPAK_CLIENT\TESTY RM_BAZA, a NIE do Y:\RMPAK_CLIENT.
