@@ -128,6 +128,10 @@ def _przelicz_dokumenty(data):
         "pozycje": [{
             "symbol": p.get("Symbol") or "",
             "nazwa": p.get("Nazwa") or "",
+            # Opis z kartoteki asortymentu (wymiary, gatunek, norma). Stare
+            # mosty tego pola nie zwracają — pusty string, kolumna po prostu
+            # zostaje pusta i nic się nie wywraca.
+            "opis": p.get("Opis") or "",
             "ilosc": float(p.get("Ilosc") or 0),
             "jm": p.get("Jm") or "szt",
             "cena": float(p.get("Cena") or 0),
@@ -208,7 +212,12 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
                ("pozycji", "Pozycji", 65), ("wartosc", "Wartość", 90),
                ("termin", "Termin dostawy", 100), ("wyslano", "Wysłano", 105),
                ("pdf", "PDF", 40), ("status", "Status", 140)]
+    #: „Opis" to pole z KARTOTEKI asortymentu (wymiary, gatunek, norma) — stoi
+    #: zaraz za Nazwą, bo razem czyta się je jako jeden opis pozycji. Sama
+    #: nazwa bywa za krótka, żeby rozpoznać detal przy zamawianiu (zgłoszone
+    #: 15.09.2026: „dodaj kolumnę Opis, bardzo jej brakuje").
     KOL_POZ = [("symbol", "Nr rysunku / symbol", 200), ("nazwa", "Nazwa", 330),
+               ("opis", "Opis", 260),
                ("ilosc", "Ilość", 70), ("jm", "J.m.", 50),
                ("cena", "Cena netto", 90), ("wartosc", "Wartość", 90)]
     #: Dokumenty MAGAZYNOWE: wartość niesie koszt magazynowy, nie cena netto
@@ -1076,10 +1085,14 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         mag = d["rodzaj"] in self.RODZAJE_MAGAZYNOWE
         naglowki = [k[1] for k in self.KOL_POZ]
         if mag:
-            naglowki[4], naglowki[5] = self.NAGL_KOSZT
+            # Indeksy liczone z KOL_POZ, nie wpisane na sztywno: po dołożeniu
+            # kolumny „Opis" zapis [4], [5] wskazywałby już J.m. i Cenę.
+            i_cena = [k[0] for k in self.KOL_POZ].index("cena")
+            naglowki[i_cena], naglowki[i_cena + 1] = self.NAGL_KOSZT
         self.sheet_poz.headers(naglowki)
         self.sheet_poz.set_sheet_data(
-            [[p["symbol"], p["nazwa"], f"{p['ilosc']:g}", p["jm"],
+            [[p["symbol"], p["nazwa"], p.get("opis", ""),
+              f"{p['ilosc']:g}", p["jm"],
               (f"{p['koszt_jedn']:.2f}" if p.get("koszt_jedn") else "") if mag
               else (f"{p['cena']:.2f}" if p["cena"] else ""),
               (f"{p['koszt']:.2f}" if p.get("koszt") else "") if mag

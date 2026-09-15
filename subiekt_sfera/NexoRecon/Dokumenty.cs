@@ -93,6 +93,12 @@ internal static class Dokumenty
                     {
                         Symbol = p.AsortymentAktualny.Symbol,
                         Nazwa = p.AsortymentAktualny.Nazwa,
+                        // Opis z kartoteki — to, co w Subiekcie stoi pod nazwa
+                        // (wymiary, gatunek, norma). Nazwa sama bywa za krotka,
+                        // zeby rozpoznac pozycje przy zamawianiu. Idzie TA SAMA
+                        // projekcja co Nazwa, wiec nie kosztuje dodatkowego
+                        // zapytania (⚠️ patrz komentarz wyzej o N+1).
+                        Opis = p.AsortymentAktualny.Opis,
                         p.Ilosc,
                         Jm = p.JednostkaMiaryAs.JednostkaMiary.Symbol,
                         Cena = p.Cena.NettoPoRabacie,
@@ -134,7 +140,8 @@ internal static class Dokumenty
                         // wiedziało, gdzie postawić „Zamówiono" (05.09.2026).
                         czyZd ? Zapotrzebowanie.ProjektZk(p.Pozycja) : "",
                         decimal.Round(p.KosztJedn, 2),
-                        decimal.Round(p.Koszt, 2)));
+                        decimal.Round(p.Koszt, 2),
+                        (p.Opis ?? "").Trim()));
                 }
 
                 wynik.Add(new Dok(
@@ -191,7 +198,11 @@ internal static class Dokumenty
                            // Koszt magazynowy: dla PW/RW/WZ to ON niesie wartość,
                            // nie „Cena". Osobne pola, żeby okno mogło pokazać
                            // właściwą miarę zależnie od rodzaju dokumentu.
-                           decimal KosztJedn = 0, decimal Koszt = 0);
+                           decimal KosztJedn = 0, decimal Koszt = 0,
+                           // Opis z kartoteki asortymentu — dopisany na KOŃCU,
+                           // żeby nie przesunąć argumentów pozycyjnych w już
+                           // istniejących wywołaniach.
+                           string Opis = "");
 
     /// <param name="Id">Trwały klucz dokumentu — w odróżnieniu od Numer,
     /// którego Subiekt używa ponownie po usunięciu (patrz komentarz przy

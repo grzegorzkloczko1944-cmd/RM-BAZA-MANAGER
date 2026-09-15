@@ -188,6 +188,12 @@ internal static class Zapotrzebowanie
                                        d.DataWprowadzenia,
                                        Podmiot = d.Podmiot.NazwaSkrocona,
                                        Status = d.StatusDokumentu.Nazwa,
+                                       // Znacznik "RM_BAZA" — po nim okno pozna
+                                       // ZD wystawione RECZNIE w Subiekcie (Tytul
+                                       // pusty) i pokaze je innym kolorem: brak
+                                       // wysylki z RM_BAZA nie jest tam zalegloscia,
+                                       // bo zamowienie poszlo inna droga.
+                                       d.Tytul,
                                        Pozycje = d.Pozycje.Select(poz => new
                                        {
                                            Symbol = poz.AsortymentAktualny.Symbol,
@@ -226,7 +232,8 @@ internal static class Zapotrzebowanie
                         zamowione.Add(new PozZd(sym!.Trim(),
                             poz.Nazwa ?? "",
                             poz.Ilosc, numer, dostawca, data, status,
-                            NumerZk(poz.Pozycja), ProjektZk(poz.Pozycja)));
+                            NumerZk(poz.Pozycja), ProjektZk(poz.Pozycja),
+                            d.Tytul ?? ""));
                     }
                 }
                 catch { /* dokument bez czytelnych pozycji — pomijamy */ }
@@ -331,8 +338,12 @@ internal static class Zapotrzebowanie
         return null;
     }
 
+    /// <param name="Tytul">Znacznik pochodzenia: "RM_BAZA …" = dokument
+    /// wystawiła RM_BAZA, pusto = ktoś wystawił ZD ręcznie w Subiekcie.
+    /// Dopisany na KOŃCU, żeby nie przesunąć argumentów pozycyjnych.</param>
     internal record PozZd(string Symbol, string Nazwa, decimal Ilosc, string Numer,
-                          string Dostawca, string Data, string Status, string Zk, string Projekt);
+                          string Dostawca, string Data, string Status, string Zk, string Projekt,
+                          string Tytul = "");
     internal record Poz(string Symbol, string Nazwa, decimal Ilosc,
                         decimal Dostepne, decimal Zadysponowane, decimal Zarezerwowane,
                         decimal StanMinimalny, decimal StanOptymalny,

@@ -112,6 +112,11 @@ def pobierz_zapotrzebowanie(timeout=TIMEOUT_S):
         "zk": z.get("Zk") or "",
         # Numer projektu z Uwag ZK — to ZK wie, dla kogo powstała, nie BOM.
         "projekt": z.get("Projekt") or "",
+        # Tytuł dokumentu — znacznik „RM_BAZA". Pusty = ZD wystawione RĘCZNIE
+        # w Subiekcie; okno pokazuje takie inaczej, bo brak wysyłki z RM_BAZA
+        # nie jest tam zaległością (patrz _refill). Stare mosty tego pola nie
+        # zwracają — wtedy pusto i wszystko wygląda jak dotąd.
+        "zd_tytul": z.get("Tytul") or "",
     } for z in data.get("zamowione", [])]
 
     # Podmioty przychodzą tym samym wywołaniem — okno potrzebuje ich do listy
@@ -798,6 +803,10 @@ def zbuduj_wiersze(zapotrzebowanie, bom, podmioty=(), tylko_projekt=None, zamowi
             "zd": _zd_z_iloscia(grupa),
             "zd_status": z.get("status", ""),
             "zd_data": z.get("data", ""),
+            # Czy KTÓREKOLWIEK ZD tej pozycji wystawiła RM_BAZA. Kolumna ZD
+            # bywa zbiorcza (kilka dokumentów), więc „ręczne" znaczy: żadne
+            # z nich nie ma znacznika w Tytule.
+            "zd_nasze": any(nasz_dokument(x.get("zd_tytul")) for x in grupa),
             "bom_ref": refy_bom(b, projekty_zk),
         })
 
@@ -1172,6 +1181,8 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
                  ).pack(side=tk.LEFT, padx=(18, 4), pady=2)
         for kolor, opis in (("#dfeaf7", "ZD jest, ale NIEWYSŁANE — dostawca nie wie"),
                             ("#b3d1ec", "ZD wysłane do dostawcy"),
+                            ("#f5b041", "niewysłane z RM_BAZA — zaległość"),
+                            ("#fad7a0", "ZD wystawione ręcznie w Subiekcie"),
                             ("#eef1f3", "pokryte ze stanu — nic nie kupujemy")):
             tk.Label(leg, text="  ", bg=kolor, relief=tk.SOLID, bd=1).pack(side=tk.LEFT, padx=(6, 2), pady=2)
             tk.Label(leg, text=opis, bg="#f8f9f9", fg="#7f8c8d",
@@ -1826,9 +1837,20 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
                         row=i, column=self.COL_PDF, bg=tlo,
                         fg="#2e6da4" if wyslane else "#b0b8bf")
                 # Niewysłane ZD — data na pomarańczowo, bo to jest zaległość.
+                #
+                # ⚠️ ALE NIE KAŻDY BRAK WYSYŁKI TO ZALEGŁOŚĆ. ZD wystawione
+                # RĘCZNIE w Subiekcie (brak znacznika „RM_BAZA" w Tytule)
+                # nigdy nie miało pójść mailem z RM_BAZA — zamówienie poszło
+                # do dostawcy inną drogą. Mocny pomarańcz krzyczał tam
+                # o robocie, której nikt nie ma do zrobienia (zgłoszone
+                # 15.09.2026). Stąd JAŚNIEJSZY pomarańcz: widać, że wysyłki
+                # z RM_BAZA nie było, ale nie wygląda to jak zaległość.
                 if not wyslane:
-                    self.sheet.highlight_cells(row=i, column=self.COL_WYSLANO,
-                                               bg="#f5b041", fg="#7d3c00")
+                    reczne = not w.get("zd_nasze", True)
+                    self.sheet.highlight_cells(
+                        row=i, column=self.COL_WYSLANO,
+                        bg="#fad7a0" if reczne else "#f5b041",
+                        fg="#7d3c00")
                 # ZK odbudowane z powiązania ZD→ZK: zamówienie klienta nadal
                 # istnieje, ale ta pozycja nie jest już w zapotrzebowaniu.
                 # Szara czcionka mówi „informacja historyczna", a nie
