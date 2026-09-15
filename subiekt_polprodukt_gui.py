@@ -626,6 +626,75 @@ class PolproduktWindow(tk.Toplevel):
             except Exception:
                 pass
         self._na_zk(po_zapisie=True)
+        self._rozeslij_do_projektow()
+
+    def _rozeslij_do_projektow(self):
+        """Dopisuje polprodukt na ZK POZOSTALYCH aktywnych projektow.
+
+        Relacja jest globalna, wiec dotyczy kazdego projektu z tym rysunkiem.
+        Bez tego trzeba bylo otwierac Projekt/Aktualizacja osobno dla kazdego
+        (15.09.2026).
+
+        ⚠️ Piszemy takze do projektow, ktore ktos trzyma na locku — ZK zyje
+        w Subiekcie, nie w bazie projektu, a arkusz zaciagnie pozycje sam
+        przy najblizszym przejeciu locka. To decyzja uzytkownika.
+        """
+        try:
+            import subiekt_polprodukt_rozsyl as R
+        except Exception as e:
+            print("Polprodukty: rozsylka niedostepna (%s)" % e)
+            return
+
+        dane = self._projekt_info() if callable(self._projekt_info) else {}
+        biezacy = (dane or {}).get("project_id")
+        try:
+            gdzie = [g for g in R.projekty_z_rysunkiem(self.numer)
+                     if g[0] != biezacy]
+        except Exception as e:
+            print("Polprodukty: nie sprawdzono projektow (%s)" % e)
+            return
+        if not gdzie:
+            return
+
+        lista = chr(10).join("    %s  (%g szt.)" % (n, ile)
+                             for _p, n, ile in gdzie[:12])
+        wiecej = (chr(10) + "    … i %d dalszych" % (len(gdzie) - 12)
+                  if len(gdzie) > 12 else "")
+        if not messagebox.askyesno(
+                "Ten rysunek jest w innych projektach",
+                "„%s” występuje jeszcze w %d aktywnych projektach:@N@@N@%s%s@N@@N@"
+                "Dopisać półprodukt na ICH ZK teraz?@N@@N@"
+                "(Bez tego trzeba otworzyć każdy projekt osobno przez "
+                "Projekt / Aktualizacja.)".replace("@N@", chr(10))
+                % (self.numer, len(gdzie), lista, wiecej),
+                parent=self):
+            return
+
+        self.config(cursor="watch")
+        self.status.config(text="Dopisuję na ZK pozostałych projektów…")
+        self.update_idletasks()
+        try:
+            wynik = R.rozeslij(self.numer, podmiot=(dane or {}).get("podmiot") or "",
+                               pomin_projekt=biezacy, zapisz=True)
+        except Exception as e:
+            self.config(cursor="")
+            return messagebox.showerror("Dopisywanie na ZK", str(e), parent=self)
+        self.config(cursor="")
+
+        # NIC PO CICHU: raport z tego, co powstalo w kazdym projekcie.
+        ok = [(n, o) for _p, n, o, b in wynik if not b]
+        zle = [(n, b) for _p, n, o, b in wynik if b]
+        czesci = []
+        if ok:
+            czesci.append("ZAPISANE (%d):@N@    %s" % (
+                len(ok), (chr(10) + "    ").join("%s — %s" % x for x in ok)))
+        if zle:
+            czesci.append("NIE UDAŁO SIĘ (%d):@N@    %s" % (
+                len(zle), (chr(10) + "    ").join("%s — %s" % x for x in zle)))
+        messagebox.showinfo(
+            "Dopisano na ZK",
+            (chr(10) + chr(10)).join(czesci).replace("@N@", chr(10))
+            or "Nic nie wymagało zmian.", parent=self)
 
     def _na_zk(self, po_zapisie=False):
         """Przelicza polprodukty projektu i ustawia ich ilosci na ZK.
