@@ -1966,10 +1966,10 @@ class MainWindow(tk.Tk):
             command=self.refresh_data_with_rfq,
             bg="#3498db",
             fg="white",
-            font=("Arial", 10),
-            padx=15,
-            pady=5
-        ).pack(side=tk.LEFT, padx=10, pady=10)
+            font=("Arial", 9),
+            padx=8,
+            pady=2
+        ).pack(side=tk.LEFT, padx=(8, 4), pady=6)
         
         # Separator
         tk.Frame(bt_r1, bg="#2c3e50", width=2).pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=5)
@@ -1977,72 +1977,72 @@ class MainWindow(tk.Tk):
         # Przyciski masowej edycji
         tk.Button(
             bt_r1,
-            text="📅 Zamówiono dla zaznaczonych",
+            text="📅 Zamówiono\ndla zaznaczonych",
             command=self.bulk_set_ordered,
             bg="#27ae60",
             fg="white",
-            font=("Arial", 9),
-            padx=10,
-            pady=5
-        ).pack(side=tk.LEFT, padx=5, pady=10)
+            font=("Arial", 8),
+            padx=4,
+            pady=1
+        ).pack(side=tk.LEFT, padx=2, pady=6)
         
         tk.Button(
             bt_r1,
-            text="📆 Termin dla zaznaczonych",
+            text="📆 Termin\ndla zaznaczonych",
             command=self.bulk_set_deadline,
             bg="#e67e22",
             fg="white",
-            font=("Arial", 9),
-            padx=10,
-            pady=5
-        ).pack(side=tk.LEFT, padx=5, pady=10)
+            font=("Arial", 8),
+            padx=4,
+            pady=1
+        ).pack(side=tk.LEFT, padx=2, pady=6)
         
         tk.Button(
             bt_r1,
-            text="⏰ ALARM dla zaznaczonych",
+            text="⏰ ALARM\ndla zaznaczonych",
             command=self.bulk_set_alarm,
             bg="#c0392b",
             fg="white",
-            font=("Arial", 9),
-            padx=10,
-            pady=5
-        ).pack(side=tk.LEFT, padx=5, pady=10)
+            font=("Arial", 8),
+            padx=4,
+            pady=1
+        ).pack(side=tk.LEFT, padx=2, pady=6)
         
         tk.Button(
             bt_r1,
-            text="🏢 Dostawca dla zaznaczonych",
+            text="🏢 Dostawca\ndla zaznaczonych",
             command=self.bulk_set_supplier,
             bg="#8e44ad",
             fg="white",
-            font=("Arial", 9),
-            padx=10,
-            pady=5
-        ).pack(side=tk.LEFT, padx=5, pady=10)
+            font=("Arial", 8),
+            padx=4,
+            pady=1
+        ).pack(side=tk.LEFT, padx=2, pady=6)
         
         tk.Button(
             bt_r1,
-            text="💰 Cena dla zaznaczonych",
+            text="💰 Cena\ndla zaznaczonych",
             command=self.bulk_set_price,
             bg="#16a085",
             fg="white",
-            font=("Arial", 9),
-            padx=10,
-            pady=5
-        ).pack(side=tk.LEFT, padx=5, pady=10)
+            font=("Arial", 8),
+            padx=4,
+            pady=1
+        ).pack(side=tk.LEFT, padx=2, pady=6)
         
         # Przycisk USUŃ DLA ZAZNACZONYCH (tylko WAREHOUSE)
         self.btn_delete_selected = tk.Button(
             bt_r1,
-            text="🗑️ Usuń dla zaznaczonych",
+            text="🗑️ Usuń\ndla zaznaczonych",
             command=self.bulk_delete_selected,
             bg="#e74c3c",
             fg="white",
-            font=("Arial", 9),
-            padx=10,
-            pady=5,
+            font=("Arial", 8),
+            padx=4,
+            pady=1,
             state=tk.DISABLED  # Domyślnie wyłączony, aktywny tylko dla WAREHOUSE
         )
-        self.btn_delete_selected.pack(side=tk.LEFT, padx=5, pady=10)
+        self.btn_delete_selected.pack(side=tk.LEFT, padx=2, pady=6)
         
         # WIERSZ 2: SKANUJ + stat + Zamknij
         # Separator
