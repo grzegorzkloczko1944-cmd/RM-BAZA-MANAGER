@@ -249,7 +249,12 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # Okno i tak zwezi sie do ekranu: wysrodkuj() przycina rozmiar do
         # granic pulpitu, a _dopasuj_kolumny_listy rozdziela szerokosc
         # proporcjonalnie, wiec na mniejszym monitorze nic nie wypada.
-        self.geometry("1900x860")
+        # Układ kolumn (ustalony 16.09.2026): 500 / 510 / 726 px.
+        # Szerokość okna WYNIKA z tych trzech liczb — panel 1 i środek mają
+        # stałą szerokość, więc reszta idzie do paneli 3/4. Przy 1760 px
+        # wychodzi dokładnie 726. Zmieniając którąkolwiek, przelicz tę liczbę,
+        # inaczej nadmiar znów urośnie po prawej.
+        self.geometry("1760x860")
 
         # ── MODEL (graf, patrz docstring) ────────────────────────────────
         self.pozycje = {}        # symbol -> Kartoteka
@@ -730,7 +735,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         ram = tk.LabelFrame(rodzic, text=" 1. Struktura kartoteki (drzewo) ",
                             bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9, "bold"))
         ram.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=(0, 6))
-        ram.configure(width=420)
+        # 420 → 500 px: po dołożeniu kolumny „Cena" nazwa detalu ścinała się
+        # już przy dwóch poziomach wcięcia (16.09.2026). Szerokość okna jest
+        # do tego dobrana — patrz geometry() w __init__.
+        ram.configure(width=500)
         ram.pack_propagate(False)
 
         wrap = tk.Frame(ram, bg=TLO_SEKCJI)
@@ -751,22 +759,40 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # "sym" to kolumna ROBOCZA (displaycolumns ja ukrywa): trzyma symbol
         # pozycji — patrz _symbol_wezla. "typ" pokazuje skrot rodzaju wlasnym
         # kolorem; w tekscie wezla nie da sie pokolorowac samego fragmentu.
-        self.tree = ttk.Treeview(wrap, columns=("ilosc", "sym", "typ"),
+        self.tree = ttk.Treeview(wrap, columns=("ilosc", "sym", "typ", "cena"),
                                  # "extended", nie "browse": Ctrl+klik i Shift+klik
                                  # zaznaczaja wiele wezlow naraz, zeby dalo sie
                                  # skasowac je jednym Del (10.09.2026).
                                  show="tree headings", selectmode="extended",
-                                 displaycolumns=("typ", "ilosc"),
+                                 # Cena PO ilosci — czyta sie „ile sztuk po ile"
+                                 # (zgloszone 16.09.2026). `sym` zostaje ukryty:
+                                 # jest w tekscie wezla, kolumna sluzy tylko
+                                 # do odczytu symbolu z kodu.
+                                 displaycolumns=("typ", "ilosc", "cena"),
                                  style="Edytor.Treeview")
         self.tree.heading("#0", text="Symbol / Nazwa")
         self.tree.heading("typ", text="Typ")
         self.tree.heading("ilosc", text="Ilość")
-        self.tree.column("typ", width=38, minwidth=38, anchor="center",
+        self.tree.heading("cena", text="Cena")
+        # ⚠️ KOLUMNY LICZBOWE MUSZĄ SIĘ ZMIEŚCIĆ PRZY WĄSKIM PANELU.
+        #
+        # Panel 1 ma sztywne 420 px, więc na drzewo zostaje ~404 px. Kolumny
+        # sumowały się do 460 px (300+38+60+62) i ostatnia („Cena") wypadała
+        # poza krawędź — user widział tylko Typ i Ilość (zgłoszone 16.09.2026).
+        #
+        # ⚠️ `minwidth` TEGO NIE NAPRAWIA: ttk używa go tylko jako dolnej
+        # granicy przy RĘCZNYM przeciąganiu i przy rozciąganiu (`stretch`),
+        # ale sam z siebie nigdy kolumny nie zwęzi. Dlatego szerokość nazwy
+        # liczymy z realnej szerokości drzewa — i przeliczamy przy każdej
+        # zmianie rozmiaru (`_dopasuj_kolumny_drzewa`).
+        self.tree.column("cena", width=62, minwidth=52, anchor="e",
                          stretch=False)
-        # minwidth wiekszy niz width: kolumna rosnie z oknem, a poziomy pasek
-        # pozwala dojechac do konca glebokich wciec zamiast je scinac.
-        self.tree.column("#0", width=300, minwidth=300, stretch=True)
-        self.tree.column("ilosc", width=60, anchor="e", stretch=False)
+        self.tree.column("typ", width=38, minwidth=32, anchor="center",
+                         stretch=False)
+        self.tree.column("ilosc", width=60, minwidth=46, anchor="e",
+                         stretch=False)
+        self.tree.column("#0", width=200, minwidth=120, stretch=False)
+        self.tree.bind("<Configure>", self._dopasuj_kolumny_drzewa, add="+")
         sc = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
         sc_poz = ttk.Scrollbar(wrap, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=sc.set, xscrollcommand=sc_poz.set)
@@ -830,8 +856,15 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # pod nim. Osobna ramka, bo oba maja byc jedna kolumna miedzy
         # drzewem a skladem, a pack(side=LEFT) na dwoch panelach ustawilby
         # je obok siebie.
-        kolumna = tk.Frame(rodzic, bg=TLO)
-        kolumna.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=6)
+        # Szerokość STAŁA, nie `expand=True`: wcześniej środek i panel składu
+        # dzieliły wolne miejsce po połowie (po 728 px przy oknie 1900), przez
+        # co panel szczegółów był szerszy, niż potrzebuje — pola formularza
+        # i tak mają swoją szerokość, a rozciągała się sama pustka. Zwężony
+        # o 30% (728 → 510 px) oddaje te ~218 px panelowi składu, gdzie widać
+        # więcej wierszy naraz (zgłoszone 16.09.2026).
+        kolumna = tk.Frame(rodzic, bg=TLO, width=510)
+        kolumna.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=6)
+        kolumna.pack_propagate(False)
         ram = tk.LabelFrame(kolumna, text=" 2. Kartoteka — szczegóły ",
                             bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9, "bold"))
         ram.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -937,9 +970,13 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
     #: Kolumny tabeli scalania. Szersze od 10.09.2026, odkąd panel „Po
     #: scaleniu" zszedł pod tabelę i przestał zabierać ~340 px — to Symbol,
     #: Nazwa i Opis identyfikują duplikaty, więc miejsce idzie do nich.
+    # Cena obok stanu: przy wyborze, KTÓRA kartoteka ma zostać celem, liczy
+    # się nie tylko nazwa, ale i to, która jest „żywa" — ma stan i cenę
+    # zakupu (zgłoszone 16.09.2026).
     KOL_SCAL = [("cel", "●", 26), ("symbol", "Symbol", 180),
                 ("nazwa", "Nazwa", 300), ("opis", "Opis", 240),
-                ("ilosc", "Ilość", 52), ("rodzaj", "Rodzaj", 60)]
+                ("ilosc", "Ilość", 52), ("cena", "Cena", 62),
+                ("rodzaj", "Rodzaj", 60)]
 
     def _panel_scalanie(self, rodzic):
         """Scalanie zduplikowanych kartotek Subiekta w jedna docelowa.
@@ -1042,9 +1079,12 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             self.tab_scal.delete(w)
         for p in self._scal_pozycje:
             cel = p["symbol"] == self._scal_cel
+            cena = p.get("cena") or 0
             self.tab_scal.insert("", "end", iid=p["symbol"], values=(
                 "●" if cel else "", p["symbol"], p["nazwa"],
-                p.get("opis", ""), self._ilosc_txt(p.get("stan")), p["rodzaj"]),
+                p.get("opis", ""), self._ilosc_txt(p.get("stan")),
+                f"{cena:.2f}".replace(".", ",") if cena else "",
+                p["rodzaj"]),
                 tags=("cel",) if cel else ())
         bledy = self._scal_waliduj()
         self.lbl_scal.config(text=bledy[0] if bledy else
@@ -1085,7 +1125,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # klinieciu jednej — zaznaczenie w drzewie doklejalo sie do wyboru
         # z listy.
         etykiety = {"komplet": "Komplet", "usluga": "Usługa", "towar": "Towar"}
-        kandydaci = []                       # [(symbol, nazwa, opis, rodzaj)]
+        kandydaci = []                # [(symbol, nazwa, opis, rodzaj, cena)]
         nowe_bez_subiekta = []
         for it in self.tree.selection():
             sym = self._symbol_wezla(it)
@@ -1096,7 +1136,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 nowe_bez_subiekta.append(sym)
                 continue
             kandydaci.append((sym, k.nazwa, k.opis or "",
-                              etykiety.get(k.rodzaj, k.rodzaj)))
+                              etykiety.get(k.rodzaj, k.rodzaj), k.cena))
 
         if not kandydaci and not nowe_bez_subiekta:
             messagebox.showinfo(
@@ -1108,14 +1148,14 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
 
         znane = {p["symbol"] for p in self._scal_pozycje}
         dodane, juz = [], []
-        for sym, naz, opis, rodzaj in kandydaci:
+        for sym, naz, opis, rodzaj, cena in kandydaci:
             if sym in znane:
                 if sym not in juz:
                     juz.append(sym)
                 continue
             self._scal_pozycje.append({"symbol": sym, "nazwa": naz,
                                        "opis": opis or "", "rodzaj": rodzaj,
-                                       "stan": None})
+                                       "cena": cena, "stan": None})
             znane.add(sym)
             dodane.append(sym)
         # Pierwsza dodana staje sie celem — zwykle to ta "wlasciwa", a i tak
@@ -1193,12 +1233,16 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         _scal_odswiez() kasuje wynik sprawdzenia i gubi zaznaczenie, a stan
         dochodzi asynchronicznie, gdy user moze juz klikac dalej.
         """
+        # Indeks LICZONY z KOL_SCAL, nie wpisany na sztywno: po dołożeniu
+        # kolumny „Cena" (16.09.2026) twarde `w[4]` nadpisywałoby przy
+        # następnej zmianie układu cudzą wartość.
+        i_ilosc = [k[0] for k in self.KOL_SCAL].index("ilosc")
         for p in self._scal_pozycje:
             if not self.tab_scal.exists(p["symbol"]):
                 continue
             w = list(self.tab_scal.item(p["symbol"], "values"))
-            if len(w) >= 5:
-                w[4] = self._ilosc_txt(p.get("stan"))
+            if len(w) > i_ilosc:
+                w[i_ilosc] = self._ilosc_txt(p.get("stan"))
                 self.tab_scal.item(p["symbol"], values=w)
 
     def _scal_ustaw_cel(self):
@@ -1780,7 +1824,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # zapętlić GUI. Sam Subiekt też takiego składu nie przyjmie.
         if symbol in sciezka:
             self.tree.insert(rodzic_id, "end", text=f"⟲ {symbol} (cykl!)",
-                             values=("", symbol, "!"))
+                             values=("", symbol, "!", ""))
             return
         tagi = [k.rodzaj]
         if not k.w_subiekcie:
@@ -1790,8 +1834,12 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         wid = self.tree.insert(
             rodzic_id, "end",
             text=f"{symbol}   {k.nazwa or BEZ_NAZWY}",
+            # Cena pusta, gdy zerowa — „0,00" przy każdej pozycji bez ceny
+            # robiłoby kolumnę szumu zamiast informacji.
             values=(f"x{ilosc:g}" if ilosc else "", symbol,
-                    SKROT.get(k.rodzaj, "??")), tags=tuple(tagi))
+                    SKROT.get(k.rodzaj, "??"),
+                    f"{k.cena:.2f}".replace(".", ",") if k.cena else ""),
+            tags=tuple(tagi))
         for dziecko, il in self._dzieci(symbol):
             self._wstaw_wezel(wid, dziecko, il, sciezka | {symbol})
 
@@ -1820,10 +1868,74 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         for c in self.tree.get_children(item):
             self._wyczysc_rodzica(c)
 
+    def _dopasuj_kolumny_drzewa(self, _e=None):
+        """Nazwa zabiera dokładnie tyle, ile zostaje po kolumnach liczbowych.
+
+        ttk nie umie ZWĘZIĆ kolumny samo: `stretch` tylko rozszerza, a
+        `minwidth` jest dolną granicą przy przeciąganiu. Bez tego przeliczenia
+        suma szerokości (460 px) przekraczała drzewo (404 px) i „Cena"
+        wypadała poza krawędź — widoczna dopiero po przewinięciu w poziomie
+        (zgłoszone 16.09.2026: „kolumny nie są związane z ramami okna").
+        """
+        try:
+            dostepne = self.tree.winfo_width()
+            if dostepne <= 1:
+                return                  # okno jeszcze nie rozłożone
+            liczbowe = sum(self.tree.column(k, "width")
+                           for k in ("typ", "ilosc", "cena"))
+            # 4 px zapasu na obramowanie — bez tego ostatnia kolumna
+            # potrafi zostać ścięta o włos i pojawia się poziomy pasek.
+            nazwa = max(120, dostepne - liczbowe - 4)
+            if nazwa != self.tree.column("#0", "width"):
+                self.tree.column("#0", width=nazwa)
+        except tk.TclError:
+            pass                        # okno zamykane w międzyczasie
+
+    def _wyczysc_panel_szczegolow(self):
+        """Panel 2 pusty — nie ma czego pokazywać.
+
+        Wołane po skasowaniu pozycji z drzewa: wcześniej panel zostawał
+        z danymi USUNIĘTEJ kartoteki, więc user widział symbol i nazwę
+        czegoś, czego już nie ma (zgłoszone 16.09.2026). Gorzej: pola były
+        dalej edytowalne, a `_pole_zmienione` odkładał zmiany do
+        `self.pozycje[self._zaznaczony]`, którego już nie istnieje.
+        """
+        self._zaznaczony = None
+        self._z_listy = False
+        self._blokada = True
+        try:
+            self.pola["symbol"][0].set("")
+            self.pola["nazwa"][0].set("")
+            self.pola["symbol"][1].config(state="normal")
+            self.btn_auto.config(state="normal")
+            self.var_rodzaj.set(RODZAJE[0][0])
+            self.var_jm.set("szt")
+            self.var_cena.set("0,00")
+            self.txt_opis.delete("1.0", "end")
+            self.var_vat_sprzedaz.set("")
+            self.var_vat_zakup.set("")
+            for v in self.pola_wlasne_var.values():
+                v.set("")
+            self.var_polozenie.set("")
+        except tk.TclError:
+            pass                    # okno zamykane w międzyczasie
+        finally:
+            self._blokada = False
+        try:
+            self._wyczysc_sklad()
+            self._odswiez_etykiete_celu()
+            self._aktualizuj_przycisk_pozycji()
+        except Exception:
+            pass
+
     def _na_wybor_wezla(self, _e=None):
         self._podswietl_rodzica()
         sym = self._symbol_wezla()
         if not sym or sym not in self.pozycje:
+            # Nic nie zaznaczone (np. po skasowaniu) — panel ma być PUSTY,
+            # a nie pokazywać dane poprzedniej pozycji.
+            if not self.tree.selection():
+                self._wyczysc_panel_szczegolow()
             return
         self._zaznaczony = sym
         self._z_listy = False
@@ -2000,9 +2112,23 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             k.nazwa = self.pola["nazwa"][0].get().strip()
         elif klucz == "symbol" and not k.w_subiekcie:
             nowy = self.pola["symbol"][0].get().strip()
-            if nowy and nowy != k.symbol and nowy not in self.pozycje:
+            # ⚠️ PUSTE POLE MUSI DAĆ SIĘ WPISAĆ. `trace_add("write")` leci po
+            # KAŻDYM znaku, a na końcu tej metody stoi _odswiez_drzewo() +
+            # _zaznacz_w_drzewie(), które przepisują pole ze STAREJ wartości
+            # kartoteki. Przy kasowaniu symbolu w całości user kasował ostatni
+            # znak, a pole natychmiast wracało — wyglądało to tak, jakby
+            # program „na siłę zostawiał jeden znak" (zgłoszone 16.09.2026).
+            # Puste pole zostaje puste; braku symbolu i tak nie przepuści
+            # walidacja przed zapisem (Subiekt bez symbolu nie zapisze).
+            if not nowy:
+                return
+            if nowy != k.symbol and nowy not in self.pozycje:
                 self._zmien_symbol(k.symbol, nowy)
                 return
+            # Wpisany symbol JUŻ ISTNIEJE albo równa się obecnemu — nie
+            # przepisujemy pola, bo to kasowałoby to, co user właśnie pisze
+            # (np. „ABC" w drodze do „ABC-2", gdy „ABC" jest zajęte).
+            return
         elif klucz == "rodzaj":
             etykieta = self.var_rodzaj.get()
             nowy_rodzaj = dict((e, w) for e, w in RODZAJE).get(etykieta, "towar")
@@ -2385,9 +2511,15 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         return f"{baza}-{i:02d}"
 
     def _dodaj_pozycje(self):
-        """Nowa pozycja jako KORZEŃ drzewa (samodzielny produkt/komplet)."""
+        """Nowa pozycja jako KORZEŃ drzewa.
+
+        Domyślnie TOWAR w SZT, nie komplet w kpl (zgłoszone 16.09.2026):
+        ręcznie dodaje się prawie zawsze pojedynczy towar handlowy, a komplet
+        powstaje z rozbicia projektu. Rodzaj i jednostkę i tak można zmienić
+        w panelu obok — chodzi o to, co jest częstsze bez klikania.
+        """
         sym = self._nowy_symbol()
-        self.pozycje[sym] = Kartoteka(sym, "", "komplet", "kpl")
+        self.pozycje[sym] = Kartoteka(sym, "", "towar", "szt")
         self.korzenie.append(sym)
         self._odswiez_drzewo()
         self._zaznacz_w_drzewie(sym)
@@ -2520,6 +2652,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self._zaznaczony = None
         self._zmienione = True
         self._odswiez_drzewo()
+        # Panel 2 pokazywał dane SKASOWANEJ pozycji — czyścimy wprost, bo
+        # po przebudowie drzewa zdarzenie <<TreeviewSelect>> nie zawsze leci
+        # (gdy nic nie zostaje zaznaczone, Tk go nie generuje).
+        if not self.tree.selection():
+            self._wyczysc_panel_szczegolow()
         return "break"
 
     def _usun_jeden(self, sym, rodzic):
