@@ -224,7 +224,13 @@ def przygotuj_pozycje(items: List[Dict], indeks: Indeks,
                           mapowania.get(norm_kod(kod)) or mapowania.get(kod),
                           odrzucone, nazwa=nazwa, bez_numeru=bez_nr)
         info["nazwa_rm"] = nazwa
-        info["ilosc"] = it.get("qty")
+        # ILOSC Z BOM-u, nie z ZK. `qty` to COALESCE(order_qty, ...),
+        # a `order_qty` jest ODBICIEM dokumentu: dwa wiersze dowiazane
+        # do jednej kartoteki widza TE SAMA pozycje ZK i pokazywaly
+        # obie 4.0, majac w BOM-ie 4 i 20 (15.09.2026).
+        info["ilosc"] = (it.get("qty_bom")
+                         if it.get("qty_bom") not in (None, "")
+                         else it.get("qty"))
         # Czy `kod` to PRAWDZIWY numer rysunku z BOM-u, czy symbol wyliczony
         # z nazwy przez symbol_z_nazwy() (obcięcie do 13 znaków, bez spacji).
         # Dla pozycji bez numeru rysunku ten drugi jest fikcją: w bazie go

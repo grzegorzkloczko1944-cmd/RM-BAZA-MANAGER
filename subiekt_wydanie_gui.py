@@ -54,6 +54,8 @@ OK_ZIELONY = "#1e8449"
 UWAGA_TLO = "#fcf3cf"
 BLAD_TLO = "#f2dede"
 SKAN_TLO = "#eaf2f8"
+#: Tlo aktywnego przycisku trybu LISTA/SKANER.
+AKCENT = "#2471a3"
 
 #: Magazyn, z którego wydajemy. Ten sam domyślny co w produkcji RMPAK.
 MAGAZYN = "MASTER"
@@ -133,6 +135,23 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                 ("stan", "Stan", 46), ("teraz", "Teraz", 46),
                 ("status", "Status", 122)]
 
+    #: Filtry listy kompletacyjnej: (klucz, etykieta, podpowiedz).
+    #: Kolejnosc = kolejnosc zakladek. „mozliwe" jest domyslne, bo to
+    #: jest praca magazyniera (zgloszone 16.09.2026).
+    FILTRY = (
+        ("mozliwe", "Możliwe do wydania",
+         "Jest stan w magazynie i coś jeszcze zostało do wydania"),
+        ("czesciowe", "Częściowo wydane",
+         "Część już wydana wcześniej — reszta czeka"),
+        ("wydane", "Wydane",
+         "Domknięte — wydano wszystko, czego trzeba było"),
+        ("brak", "Brak stanu",
+         "Magazyn nie ma tego towaru albo ma za mało"),
+        ("gotowe", "Przygotowane teraz",
+         "Dołożone do tej sesji — pójdzie na RW"),
+        ("wszystkie", "Wszystkie", "Cały plan projektu, bez filtra"),
+    )
+
     def __init__(self, parent, project_id, project_name=None):
         super().__init__(parent)
         self.project_id = project_id
@@ -207,6 +226,8 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         prawa.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._panel_sesji(prawa)
 
+        self._ustaw_tryb("lista")
+
     def _pasek_gorny(self):
         """Nagłówek: projekt, magazyn, kto pobiera, data, co powstanie."""
         # Zapamiętany, bo belka awarii wpina się zaraz POD nagłówkiem.
@@ -278,16 +299,35 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
 
 
     def _panel_skanera(self, rodzic):
-        ram = tk.LabelFrame(rodzic, text=" Skaner ", bg=TLO_SEKCJI, fg=TEKST,
+        ram = tk.LabelFrame(rodzic, text=" Wydawanie ", bg=TLO_SEKCJI, fg=TEKST,
                             font=("Arial", 9, "bold"), width=640)
         ram.pack(fill=tk.BOTH, expand=True)
         ram.pack_propagate(False)
 
+        # ── przelacznik trybu ────────────────────────────────────────
+        # Domyslnie LISTA, bo dziala ZAWSZE. Skaner jest przyspieszeniem,
+        # a nie warunkiem pracy: detal bez kodu kreskowego byl wczesniej
+        # nie do wydania (zgloszone 16.09.2026).
+        tryby = tk.Frame(ram, bg=TLO_SEKCJI)
+        tryby.pack(fill=tk.X, padx=8, pady=(8, 0))
+        self.btn_tryb_lista = tk.Button(
+            tryby, text="☰  Z LISTY", command=lambda: self._ustaw_tryb("lista"),
+            font=("Arial", 11, "bold"), relief=tk.FLAT, cursor="hand2", pady=8)
+        self.btn_tryb_lista.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.btn_tryb_skaner = tk.Button(
+            tryby, text="▌▌▌  SKANER", command=lambda: self._ustaw_tryb("skaner"),
+            font=("Arial", 11, "bold"), relief=tk.FLAT, cursor="hand2", pady=8)
+        self.btn_tryb_skaner.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                                  padx=(8, 0))
+
         naglowek = tk.Frame(ram, bg=SKAN_TLO)
         naglowek.pack(fill=tk.X, padx=8, pady=(8, 0))
+        #: Ramka skanera — w trybie LISTA chowana przez `_ustaw_tryb`.
+        self.ramka_skanera = naglowek
         tk.Label(naglowek, text="▌▌▌  SKANUJ KOD KRESKOWY", bg=SKAN_TLO,
                  fg=TEKST, font=("Arial", 13, "bold")).pack(pady=(8, 0))
-        tk.Label(naglowek, text="Zeskanuj kod albo wpisz numer rysunku ręcznie",
+        tk.Label(naglowek,
+                 text="Zeskanuj kod albo wpisz SYMBOL / numer rysunku ręcznie",
                  bg=SKAN_TLO, fg=TEKST_SZARY, font=("Arial", 8)).pack(pady=(0, 6))
 
         self.var_kod = tk.StringVar()
@@ -298,7 +338,14 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         self.ent_kod.bind("<Return>", lambda _e: self._skanuj())
         self.ent_kod.bind("<Escape>", lambda _e: self._wyczysc_pozycje())
 
-        # ── dane zeskanowanej pozycji + miniatura rysunku ────────────
+        # W trybie LISTA to jest naglowek „co brac teraz"; w trybie SKANER
+        # opisuje pozycje, ktora wlasnie zeskanowano.
+        self.lbl_naglowek_poz = tk.Label(
+            ram, text="", bg=TLO_SEKCJI, fg="#1a5276",
+            font=("Arial", 10, "bold"), anchor="w")
+        self.lbl_naglowek_poz.pack(fill=tk.X, padx=10, pady=(10, 0))
+
+        # ── dane pozycji + miniatura rysunku ─────────────────────────
         dane = tk.Frame(ram, bg=TLO_SEKCJI)
         dane.pack(fill=tk.X, padx=10, pady=(10, 0))
 
@@ -399,8 +446,140 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                                    fg="white", font=("Arial", 10, "bold"),
                                    state=tk.DISABLED)
         self.btn_dodaj.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Button(przyciski, text="Wyczyść (ESC)", command=self._wyczysc_pozycje,
-                  font=("Arial", 9)).pack(side=tk.LEFT, padx=(8, 0))
+        # W trybie LISTA magazynier musi moc ominac pozycje, ktorej nie ma
+        # na polce — bez tego utknalby na pierwszym braku.
+        self.btn_nastepna = tk.Button(
+            przyciski, text="»  Pomiń / następna", command=self._nastepna_pozycja,
+            font=("Arial", 9, "bold"))
+        self.btn_nastepna.pack(side=tk.LEFT, padx=(8, 0))
+        self.btn_wyczysc = tk.Button(
+            przyciski, text="Wyczyść (ESC)", command=self._wyczysc_pozycje,
+            font=("Arial", 9))
+        self.btn_wyczysc.pack(side=tk.LEFT, padx=(8, 0))
+
+    # ── tryb pracy: LISTA / SKANER ─────────────────────────────────────
+    def _ustaw_tryb(self, tryb):
+        """Przełącza między pracą z listy a skanowaniem.
+
+        LISTA działa ZAWSZE — także dla detali bez kodu kreskowego, których
+        w tym oknie nie dało się wcześniej wydać (zgłoszone 16.09.2026).
+        """
+        self.tryb = tryb
+        aktywny = dict(bg=AKCENT, fg="white")
+        bierny = dict(bg="#d5dbdb", fg=TEKST)
+        self.btn_tryb_lista.config(**(aktywny if tryb == "lista" else bierny))
+        self.btn_tryb_skaner.config(**(aktywny if tryb == "skaner" else bierny))
+
+        if tryb == "skaner":
+            self.ramka_skanera.pack(fill=tk.X, padx=8, pady=(8, 0),
+                                    before=self.lbl_naglowek_poz)
+            self.btn_dodaj.config(text="✔ Dodaj do wydania (Enter)")
+            self.btn_nastepna.pack_forget()
+            self.btn_wyczysc.pack(side=tk.LEFT, padx=(8, 0))
+            self.lbl_naglowek_poz.config(text="")
+            self._wyczysc_pozycje()
+            self.ent_kod.focus_set()
+        else:
+            self.ramka_skanera.pack_forget()
+            self.btn_dodaj.config(text="📦  WYDAJ  (Enter)")
+            self.btn_wyczysc.pack_forget()
+            self.btn_nastepna.pack(side=tk.LEFT, padx=(8, 0))
+            # Pokaż pierwszą pozycję, którą faktycznie da się wydać.
+            if not self._z_listy_biezacy():
+                self._nastepna_pozycja()
+
+    def _z_listy_biezacy(self):
+        """Wypełnia lewy panel z ZAZNACZONEGO wiersza. True, gdy się udało.
+
+        ⚠️ Dane bierzemy z PLANU, nie z Subiekta: plan ma już symbol, nazwę,
+        lokację, stan i „pozostało" (patrz `_zbuduj_plan`). Odpytywanie mostu
+        przy każdym kliknięciu dokładałoby sekundy na pozycję.
+        """
+        if getattr(self, "tryb", "lista") != "lista":
+            return False
+        p = self._zaznaczony()
+        if not p:
+            return False
+
+        sym = p["symbol"]
+        w_sesji = self.sesja.get(sym.upper(), 0.0)
+        self.poz_biezaca = {
+            "symbol": sym, "nazwa": p["nazwa"], "lokacja": p["lokacja"],
+            "stan": _liczba(p["stan"]), "potrzeba": p["potrzeba"],
+            "zrodlo": p.get("zrodlo"), "wydano": _liczba(p["wydano"]),
+            "w_sesji": w_sesji,
+        }
+        self.var_symbol.set(sym)
+        self.var_nazwa.set(p["nazwa"] or "—")
+        self.var_lokacja.set(p["lokacja"] or "—")
+        self.var_stan.set(_ilo(p["stan"]))
+        self.var_wydano.set(_ilo(_liczba(p["wydano"]) + w_sesji))
+
+        if p["potrzeba"] is None:
+            self.var_potrzeba.set("—")
+            self.var_pozostalo.set("—")
+            domyslna = 0
+        else:
+            pozostalo = max(0.0, _liczba(p["potrzeba"])
+                            - _liczba(p["wydano"]) - w_sesji)
+            self.var_potrzeba.set(_ilo(p["potrzeba"]))
+            self.var_pozostalo.set(_ilo(pozostalo))
+            domyslna = min(pozostalo, _liczba(p["stan"]))
+
+        self.var_ilosc.set(_ilo(domyslna) if domyslna > 0 else "")
+        self.lbl_naglowek_poz.config(
+            text="➜  IDŹ DO %s   ·   WEŹ %s szt."
+                 % (p["lokacja"] or "— (brak lokacji)",
+                    _ilo(domyslna) if domyslna > 0 else "?"))
+        self._pokaz_rysunek(sym)
+        self.var_meta.set("Źródło: %s   |   Status: %s"
+                          % (p.get("zrodlo") or "—",
+                             self._status_wiersza(p, w_sesji)[0]))
+
+        if _liczba(p["stan"]) <= 0:
+            self._uwaga("⚠ %s — BRAK NA STANIE. Pomiń albo wydaj to, "
+                        "co jest fizycznie na półce." % sym, UWAGA_TLO)
+        else:
+            self._uwaga("")
+        self.btn_dodaj.config(
+            state=tk.NORMAL if _liczba(p["stan"]) > 0 else tk.DISABLED)
+        self.spin_ilosc.focus_set()
+        self.spin_ilosc.selection_range(0, tk.END)
+        return True
+
+    def _nastepna_pozycja(self):
+        """Zaznacza następny wiersz, który da się wydać.
+
+        Kolejność jest ta sama, co w tabeli — a ta jest sortowana naturalnie
+        po lokacji (`_widoczne_wiersze`), więc magazynier idzie po regałach,
+        a nie R1 → R18 → R3.
+        """
+        wiersze = self.tab.get_children()
+        if not wiersze:
+            self.lbl_naglowek_poz.config(text="✔  Nie ma nic do wydania.")
+            return
+        zazn = self.tab.selection()
+        start = (wiersze.index(zazn[0]) + 1) if zazn and zazn[0] in wiersze else 0
+
+        widoczne = self._widoczne_wiersze()
+        # Dwa okrazenia: od biezacej w dol, potem od poczatku — zeby
+        # „Pomin" na koncu listy wrocil na jej gore, a nie zatrzymal prace.
+        for i in list(range(start, len(wiersze))) + list(range(0, start)):
+            if i >= len(widoczne):
+                continue
+            p = widoczne[i]
+            if _liczba(p["stan"]) <= 0:
+                continue
+            if p["pozostalo"] is not None and p["pozostalo"] <= 0:
+                continue
+            self.tab.selection_set(wiersze[i])
+            self.tab.see(wiersze[i])
+            self._z_listy_biezacy()
+            return
+        self.lbl_naglowek_poz.config(
+            text="✔  Nic więcej nie da się wydać (brak stanu albo wszystko "
+                 "przygotowane).")
+        self._wyczysc_pozycje()
 
     def _panel_sesji(self, rodzic):
         ram = tk.Frame(rodzic, bg=TLO_SEKCJI, bd=1, relief=tk.SOLID)
@@ -461,11 +640,24 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                   font=("Arial", 8)).pack(side=tk.LEFT, padx=6)
         tk.Button(akcje, text="✖ Wyczyść sesję", command=self._wyczysc_sesje,
                   font=("Arial", 8)).pack(side=tk.LEFT)
+        # Zostaje dla zgodnosci: `_widoczne_wiersze` i stary kod czytaja
+        # te zmienna. Filtr „wszystkie" ja zeruje.
         self.var_tylko_do_wydania = tk.IntVar(value=1)
-        tk.Checkbutton(akcje, text="tylko pozostałe do wydania",
-                       variable=self.var_tylko_do_wydania, bg=TLO_SEKCJI,
-                       font=("Arial", 8), activebackground=TLO_SEKCJI,
-                       command=self._odswiez_plan).pack(side=tk.RIGHT)
+
+        # ── pasek filtrow ────────────────────────────────────────────
+        filtry = tk.Frame(ram, bg=TLO_SEKCJI)
+        filtry.pack(fill=tk.X, padx=10, pady=(6, 0))
+        tk.Label(filtry, text="POKAŻ:", bg=TLO_SEKCJI, fg=TEKST,
+                 font=("Arial", 8, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+        self.filtr = "mozliwe"
+        self.btn_filtry = {}
+        for klucz, etykieta, podpowiedz in self.FILTRY:
+            b = tk.Button(filtry, text=etykieta, relief=tk.FLAT,
+                          font=("Arial", 8), padx=10, pady=4, cursor="hand2",
+                          command=lambda k=klucz: self._ustaw_filtr(k))
+            b.pack(side=tk.LEFT, padx=(0, 4))
+            self._dymek(b, podpowiedz)
+            self.btn_filtry[klucz] = b
 
         wrap = tk.Frame(ram, bg=TLO_SEKCJI)
         wrap.pack(fill=tk.BOTH, expand=True, padx=10, pady=(4, 0))
@@ -492,10 +684,15 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         # Status kolorem wiersza — bez popupu przy każdym skanie, bo
         # magazynier skanuje seriami (§8 planu).
         self.tab.tag_configure("gotowe", background="#e8f8e8")
+        self.tab.tag_configure("wydane", background="#eaeded",
+                               foreground="#7f8c8d")
         self.tab.tag_configure("czesciowo", background=UWAGA_TLO)
         self.tab.tag_configure("brak_stanu", background=BLAD_TLO)
         self.tab.tag_configure("poza_bom", background="#f4ecf7")
         self.tab.bind("<Double-1>", lambda _e: self._popraw_ilosc())
+        # Pojedynczy klik w trybie LISTA = „pokaz mi te pozycje". W trybie
+        # SKANER nic nie robi, zeby nie kasowac tego, co wlasnie zeskanowano.
+        self.tab.bind("<<TreeviewSelect>>", lambda _e: self._z_listy_biezacy())
         self.tab.bind("<Delete>", lambda _e: self._usun_z_sesji())
 
     #: Kolumny historii skanów: (klucz, nagłówek, szerokość)
@@ -1046,7 +1243,10 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         if not zostaw_uwage:
             self._uwaga("")
         self.btn_dodaj.config(state=tk.DISABLED)
-        self.ent_kod.focus_set()
+        # ⚠️ W trybie LISTA pole skanera jest SCHOWANE — oddanie mu fokusu
+        # zabieralo go z okna i Enter przestawal dzialac (16.09.2026).
+        if getattr(self, "tryb", "skaner") == "skaner":
+            self.ent_kod.focus_set()
 
     def _dodaj_do_sesji(self):
         """Dokłada zeskanowaną pozycję do sesji. NIC jeszcze nie idzie do Subiekta."""
@@ -1105,6 +1305,10 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
             self._uwaga("⚠ %s — %s" % (p["symbol"], uwaga), UWAGA_TLO)
         # Fokus WRACA DO SKANERA — magazynier skanuje dalej bez sięgania po mysz.
         self._wyczysc_pozycje(zostaw_uwage=bool(uwaga))
+        # W trybie LISTA nie konczymy na pustym panelu: pokazujemy OD RAZU,
+        # po co magazynier ma isc dalej (16.09.2026).
+        if getattr(self, "tryb", "skaner") == "lista":
+            self._nastepna_pozycja()
 
     def _pozycje_sesji(self):
         """Sesja jako lista pozycji do wydania — w kolejności z planu.
@@ -1213,9 +1417,12 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         okno.title("Ilość do wydania")
         okno.transient(self)
         okno.resizable(False, False)
+        # ⚠️ pady=(12, 4) NALEZY DO `pack`, nie do konstruktora:
+        # widget przyjmuje pojedyncza odleglosc, a krotka wywalala cale
+        # okno (TclError: bad screen distance) — zostawala pusta ramka.
         tk.Label(okno, text="%s\n%s" % (p["symbol"], p.get("nazwa") or ""),
-                 font=("Arial", 10, "bold"), padx=16, pady=(12, 4),
-                 justify="left").pack(anchor="w")
+                 font=("Arial", 10, "bold"), padx=16,
+                 justify="left").pack(anchor="w", pady=(12, 4))
         tk.Label(okno, padx=16, fg=TEKST_SZARY, font=("Arial", 8),
                  justify="left", anchor="w",
                  text="pozostało: %s      stan magazynu: %s"
@@ -1285,10 +1492,53 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         self.var_przygotowano.set("%d %s / %s szt."
                                   % (len(w_sesji), _poz(len(w_sesji)), _ilo(sztuk)))
         self.var_licznik.set("%d %s" % (len(widoczne), _poz(len(widoczne))))
+        self._odswiez_filtry()
 
         stan = tk.NORMAL if w_sesji else tk.DISABLED
         self.btn_zakoncz.config(state=stan)
         self.btn_podglad_rw.config(state=stan)
+
+    def _ustaw_filtr(self, klucz):
+        """Przełącza zakładkę filtra listy kompletacyjnej."""
+        self.filtr = klucz
+        # ⚠️ „Wydane" tez musi wylaczyc ten filtr: pozycja domknieta ma
+        # `pozostalo = 0`, wiec „tylko pozostale do wydania" usuwalaby ja
+        # ZANIM zakladka zdazy ja pokazac — licznik dodatni, tabela pusta.
+        self.var_tylko_do_wydania.set(
+            0 if klucz in ("wszystkie", "wydane") else 1)
+        self._odswiez_plan()
+        # Po zmianie filtra bieżąca pozycja mogła zniknąć z widoku —
+        # w trybie LISTA pokazujemy pierwszą z nowego zestawu.
+        if getattr(self, "tryb", "skaner") == "lista":
+            self._nastepna_pozycja()
+
+    def _pasuje_do_filtra(self, p):
+        """Czy wiersz należy do wybranej zakładki.
+
+        ⚠️ Kategorie liczymy TAK SAMO jak `_status_wiersza`, inaczej filtr
+        pokazywałby co innego niż kolumna „Status".
+        """
+        teraz = self.sesja.get(p["symbol"].upper(), 0.0)
+        if self.filtr == "wszystkie":
+            return True
+        if self.filtr == "gotowe":
+            return teraz > 0
+        if self.filtr == "brak":
+            # Brak stanu ALBO za mało, żeby domknąć pozycję.
+            return (p["stan"] <= 0
+                    or (p["pozostalo"] is not None
+                        and p["pozostalo"] > p["stan"]))
+        if self.filtr == "wydane":
+            # Domkniete: cos wydano i nic juz nie zostalo. Ten sam warunek,
+            # ktorego uzywa `_status_wiersza` — jedno zrodlo prawdy.
+            return (_liczba(p["wydano"]) > 0
+                    and p["pozostalo"] is not None and p["pozostalo"] <= 0)
+        if self.filtr == "czesciowe":
+            return _liczba(p["wydano"]) > 0 and (p["pozostalo"] is None
+                                                 or p["pozostalo"] > 0)
+        # „mozliwe": jest co wydać i jest z czego.
+        zostalo = p["pozostalo"] is None or p["pozostalo"] > 0
+        return zostalo and p["stan"] > 0
 
     def _widoczne_wiersze(self):
         """Plan po filtrze i sortowaniu."""
@@ -1299,6 +1549,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
             wiersze = [p for p in wiersze
                        if (p["pozostalo"] is None or p["pozostalo"] > 0
                            or self.sesja.get(p["symbol"].upper(), 0) > 0)]
+        wiersze = [p for p in wiersze if self._pasuje_do_filtra(p)]
 
         k = self._sort_kolumna
 
@@ -1321,6 +1572,51 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         wiersze.sort(key=klucz, reverse=self._sort_malejaco)
         return wiersze
 
+    def _odswiez_filtry(self):
+        """Liczniki na zakładkach i podświetlenie aktywnej.
+
+        Licznik liczymy na CAŁYM planie, nie na tym, co widać — inaczej
+        aktywna zakładka pokazywałaby swoją własną liczbę, a pozostałe zera.
+        """
+        biezacy = self.filtr
+        try:
+            for klucz, etykieta, _p in self.FILTRY:
+                self.filtr = klucz
+                ile = sum(1 for p in self.plan if self._pasuje_do_filtra(p))
+                aktywna = klucz == biezacy
+                self.btn_filtry[klucz].config(
+                    text="%s  %d" % (etykieta, ile),
+                    bg=AKCENT if aktywna else "#eaeded",
+                    fg="white" if aktywna else TEKST,
+                    font=("Arial", 8, "bold" if aktywna else "normal"))
+        finally:
+            self.filtr = biezacy
+
+    def _dymek(self, widget, tekst):
+        """Podpowiedź po najechaniu — bez dokładania miejsca w oknie."""
+        def pokaz(_e=None):
+            self._ukryj_dymek()
+            x = widget.winfo_rootx()
+            y = widget.winfo_rooty() + widget.winfo_height() + 2
+            self._dymek_okno = tk.Toplevel(self)
+            self._dymek_okno.wm_overrideredirect(True)
+            self._dymek_okno.wm_geometry("+%d+%d" % (x, y))
+            tk.Label(self._dymek_okno, text=tekst, bg="#fdf6d8", fg=TEKST,
+                     font=("Arial", 8), bd=1, relief=tk.SOLID,
+                     padx=6, pady=3).pack()
+
+        widget.bind("<Enter>", pokaz)
+        widget.bind("<Leave>", lambda _e: self._ukryj_dymek())
+
+    def _ukryj_dymek(self):
+        okno = getattr(self, "_dymek_okno", None)
+        if okno is not None:
+            try:
+                okno.destroy()
+            except Exception:
+                pass
+            self._dymek_okno = None
+
     def _status_wiersza(self, p, teraz):
         """Status i kolor wiersza — czytelne bez wczytywania się w liczby."""
         if teraz > 0:
@@ -1332,6 +1628,20 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         if p["pozostalo"] is not None and p["pozostalo"] > p["stan"]:
             return "⚠ za mały stan", "brak_stanu"
         if p["wydano"] > 0:
+            # ⚠️ ROZROZNIAMY „czesciowo" od „w calosci". Wczesniej kazda
+            # pozycja z jakimkolwiek wydaniem dostawala „czesciowo wydane",
+            # takze ta domknieta (potrzeba 1, wydano 1, pozostalo 0) — i nie
+            # zgadzala sie z licznikiem filtra, ktory pytal tez o reszte
+            # (zgloszone 16.09.2026).
+            zostalo = p["pozostalo"] is None or p["pozostalo"] > 0
+            if not zostalo:
+                if (p["potrzeba"] is not None
+                        and _liczba(p["wydano"]) > _liczba(p["potrzeba"])):
+                    # ⚠️ Kolor „wydane", nie „czesciowo": pozycja JEST
+                    # domknieta. Zolty znaczy „wroc tu pozniej", a tu nie
+                    # ma po co wracac — nadmiar niesie sama etykieta.
+                    return "✔ wydane z nadmiarem", "wydane"
+                return "✔ wydane", "wydane"
             return "🟠 częściowo wydane", "czesciowo"
         return "🔴 do wydania", ""
 

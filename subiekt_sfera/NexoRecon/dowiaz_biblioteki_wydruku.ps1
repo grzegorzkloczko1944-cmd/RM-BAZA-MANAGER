@@ -1,4 +1,4 @@
-<#
+﻿<#
     Kladzie obok NexoRecon.exe twarde dowiazania (hardlinki) do bibliotek
     InsERT-u, ktorych wymaga SILNIK WYDRUKU przy eksporcie ZD do PDF.
 
