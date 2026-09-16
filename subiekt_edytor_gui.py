@@ -227,9 +227,13 @@ KOL_LISTA_STALE = 28
 
 
 class EdytorWindow(tk.Toplevel, Kreciolek):
-    KOL_SKLAD = [("lp", "Lp.", 40), ("symbol", "Symbol", 130),
-                 ("nazwa", "Nazwa", 220), ("ilosc", "Ilość", 70),
-                 ("jm", "JM", 50)]
+    #: JM usunieta (16.09.2026): jednostka nie niosla tu informacji,
+    #: a zabierala miejsce. W zamian Opis/Rodzaj/Stan/Cena — te same
+    #: dane, po ktorych rozroznia sie warianty w panelu 4.
+    KOL_SKLAD = [("lp", "Lp.", 32), ("symbol", "Symbol", 108),
+                 ("nazwa", "Nazwa", 170), ("opis", "Opis", 130),
+                 ("rodzaj", "Rodzaj", 56), ("ilosc", "Ilość", 44),
+                 ("stan", "Stan", 42), ("cena", "Cena", 54)]
     #: Opis miedzy Nazwa a Rodzaj (10.09.2026) — sam symbol i nazwa nie
     #: wystarczaly, zeby odroznic warianty tej samej czesci na liscie.
     KOL_LISTA = [("w", "✓", KOL_LISTA_STALE), ("symbol", "Symbol", 130), ("nazwa", "Nazwa", 190),
@@ -277,6 +281,9 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self._dnd_aktywny = False # True dopiero po ruchu > prog
 
         self._buduj()
+        # Jedno zaznaczenie na cale okno: niebieski = tabela z fokusem,
+        # szary = pozostale (16.09.2026).
+        self._wpnij_fokus_tabel()
         self._podepnij_klawiature()
         wysrodkuj(self, parent)
         self.after(100, self._wczytaj_katalog)
@@ -800,6 +807,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sc.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.bind("<<TreeviewSelect>>", self._na_wybor_wezla)
+        # Insert — nowa pozycja WEWNATRZ zaznaczonego kompletu. Po zamianie
+        # przyciskow na +TW/+KT/+US (16.09.2026) nie ma juz „+ Skladnik",
+        # a sama funkcja jest potrzebna.
+        self.tree.bind("<Insert>", lambda _e: self._dodaj_skladnik())
         # Przeciaganie myszą — patrz _dnd_start / _dnd_ruch / _dnd_koniec.
         self.tree.bind("<Button-1>", self._dnd_start, add="+")
         self.tree.bind("<B1-Motion>", self._dnd_ruch)
@@ -816,8 +827,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
 
         pa = tk.Frame(ram, bg=TLO_SEKCJI)
         pa.pack(fill=tk.X, padx=6, pady=(0, 6))
-        for txt, cmd in (("+ Pozycja", self._dodaj_pozycje),
-                         ("+ Składnik", self._dodaj_skladnik),
+        # Skroty jak w kolumnie „Typ" drzewa: TW / KT / US — nazwa
+        # przycisku mowi wprost, jaki wiersz powstanie (16.09.2026).
+        for txt, cmd in (("+ TW", self._dodaj_towar),
+                         ("+ KT", self._dodaj_komplet),
+                         ("+ US", self._dodaj_usluge),
                          ("+ Istniejąca", self._dodaj_istniejaca)):
             tk.Button(pa, text=txt, command=cmd, font=("Arial", 8)).pack(side=tk.LEFT, padx=2)
         pb = tk.Frame(ram, bg=TLO_SEKCJI)
@@ -973,10 +987,19 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
     # Cena obok stanu: przy wyborze, KTÓRA kartoteka ma zostać celem, liczy
     # się nie tylko nazwa, ale i to, która jest „żywa" — ma stan i cenę
     # zakupu (zgłoszone 16.09.2026).
-    KOL_SCAL = [("cel", "●", 26), ("symbol", "Symbol", 180),
-                ("nazwa", "Nazwa", 300), ("opis", "Opis", 240),
-                ("ilosc", "Ilość", 52), ("cena", "Cena", 62),
-                ("rodzaj", "Rodzaj", 60)]
+    #: ⚠️ SUMA SZEROKOSCI MUSI MIESCIC SIE W PANELU. Kolumna srodkowa ma
+    #: TWARDE `width=510`, wiec na tabele zostaje ~470 px po ramce,
+    #: marginesach i pasku przewijania. Uklad 532 px ucinal CENE
+    #: (16.09.2026) — teraz 462 px. Wczesniej
+    #: bylo 920 px przy `minwidth` = `width`, wiec Tk nie mogl kolumn
+    #: scisnac i Opis/Stan/Cena/Rodzaj WYPADALY POZA WIDOK — uzytkownik
+    #: widzial tylko Symbol i Nazwe (16.09.2026).
+    #: Kolumna „Stan", nie „Ilosc": `_scal_odswiez` wpisuje tam stan
+    #: magazynowy, tak samo jak panel 4.
+    KOL_SCAL = [("cel", "●", 20), ("symbol", "Symbol", 96),
+                ("nazwa", "Nazwa", 112), ("opis", "Opis", 86),
+                ("rodzaj", "Rodzaj", 50), ("stan", "Stan", 36),
+                ("cena", "Cena", 40)]
 
     def _panel_scalanie(self, rodzic):
         """Scalanie zduplikowanych kartotek Subiekta w jedna docelowa.
@@ -1010,10 +1033,14 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                                      show="headings", height=4, selectmode="browse")
         for klucz, naglowek, szer in self.KOL_SCAL:
             self.tab_scal.heading(klucz, text=naglowek)
-            self.tab_scal.column(klucz, width=szer, minwidth=szer,
-                                 stretch=(klucz == "nazwa"),
+            # ⚠️ `minwidth` MNIEJSZY niz `width`: rowne wartosci blokowaly
+            # zwezanie i kolumny wypadaly poza panel (16.09.2026).
+            self.tab_scal.column(klucz, width=szer,
+                                 minwidth=22 if klucz == "cel" else 34,
+                                 stretch=(klucz in ("nazwa", "opis")),
                                  anchor="center" if klucz == "cel"
-                                 else "e" if klucz == "ilosc" else "w")
+                                 else "e" if klucz in ("stan", "cena")
+                                 else "w")
         sc = ttk.Scrollbar(wrap, orient="vertical", command=self.tab_scal.yview)
         self.tab_scal.configure(yscrollcommand=sc.set)
         self.tab_scal.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1024,7 +1051,9 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
 
         przyciski = tk.Frame(lewa, bg=TLO_SEKCJI)
         przyciski.pack(fill=tk.X, pady=(3, 0))
-        tk.Button(przyciski, text="+ Zaznaczone w drzewie",
+        # Nie „w drzewie": zrodlem jest tabela z fokusem, wiec nazwa nie
+        # moze wskazywac jednej z nich (16.09.2026).
+        tk.Button(przyciski, text="+ Dodaj zaznaczone",
                   command=self._scal_dodaj_z_listy, font=("Arial", 8)).pack(side=tk.LEFT)
         tk.Button(przyciski, text="● Ustaw jako docelową", command=self._scal_ustaw_cel,
                   font=("Arial", 8)).pack(side=tk.LEFT, padx=4)
@@ -1082,9 +1111,9 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             cena = p.get("cena") or 0
             self.tab_scal.insert("", "end", iid=p["symbol"], values=(
                 "●" if cel else "", p["symbol"], p["nazwa"],
-                p.get("opis", ""), self._ilosc_txt(p.get("stan")),
-                f"{cena:.2f}".replace(".", ",") if cena else "",
-                p["rodzaj"]),
+                p.get("opis", ""), p["rodzaj"],
+                self._ilosc_txt(p.get("stan")),
+                f"{cena:.2f}".replace(".", ",") if cena else ""),
                 tags=("cel",) if cel else ())
         bledy = self._scal_waliduj()
         self.lbl_scal.config(text=bledy[0] if bledy else
@@ -1110,39 +1139,69 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         return []
 
     def _scal_dodaj_z_listy(self):
-        """Dodaje do scalania zaznaczone kartoteki — z listy 4 I z drzewa.
+        """Dodaje do scalania zaznaczone kartoteki Z TABELI Z FOKUSEM.
 
-        Pierwsza wersja czytala tylko liste 4. User zaznaczal pozycje
-        w DRZEWIE (tam tez sa kartoteki z Subiekta) i klikal przycisk —
-        a ten brał stare zaznaczenie listy 4, trafial na "juz jest" i cicho
-        nic nie robil (10.09.2026). Teraz: oba zrodla + kartoteka otwarta
-        w panelu 2, i zawsze komunikat, co sie stalo.
+        Fokus na sekcji 1 (drzewo) -> bierze z drzewa.
+        Fokus na sekcji 4 (lista)  -> bierze z listy.
+        Fokus gdzie indziej        -> drzewo, jak dotad.
+
+        Zrodlo poznaje sie po NIEBIESKIM podswietleniu — pozostale tabele
+        trzymaja swoje zaznaczenie na szaro i nie wchodza do gry. Komunikat
+        leci ZAWSZE: cichy brak reakcji wygladal jak zepsuty przycisk.
         """
-        # ZRODLEM JEST WYLACZNIE DRZEWO (okno 1) — decyzja usera, 10.09.2026.
-        # Drzewo pelni role podrecznej listy: kartoteki wciaga sie do niego
-        # dwuklikiem z listy 4, wiec i tak przechodza tamtedy. Czytanie kilku
-        # zrodel naraz (lista 4 + drzewo + panel 2) dawalo dwie pozycje po
-        # klinieciu jednej — zaznaczenie w drzewie doklejalo sie do wyboru
-        # z listy.
+        # ZRODLO = TABELA Z FOKUSEM (16.09.2026). Wczesniej bylo wylacznie
+        # drzewo, bo czytanie dwoch zrodel naraz dawalo dwie pozycje po
+        # klinieciu jednej. Odkad okno ma JEDEN fokus, zrodlo jest
+        # jednoznaczne: user widzi na niebiesko, skad pojdzie dodanie.
+        #
+        # Panele 3 i 5 NIE sa zrodlem: 3 to sklad kompletu, 5 to lista
+        # docelowa (dodawanie do samej siebie). Przy nich bierzemy drzewo.
         etykiety = {"komplet": "Komplet", "usluga": "Usługa", "towar": "Towar"}
         kandydaci = []                # [(symbol, nazwa, opis, rodzaj, cena)]
         nowe_bez_subiekta = []
-        for it in self.tree.selection():
-            sym = self._symbol_wezla(it)
-            k = self.pozycje.get(sym) if sym else None
-            if not k:
-                continue
-            if not k.w_subiekcie:            # nowa, niezapisana — nie ma czego scalac
-                nowe_bez_subiekta.append(sym)
-                continue
-            kandydaci.append((sym, k.nazwa, k.opis or "",
-                              etykiety.get(k.rodzaj, k.rodzaj), k.cena))
+        skad = getattr(self, "_fokus_tabeli", "tree")
+        if skad == "tab_lista" and self.tab_lista.selection():
+            zrodlo_txt = "listy kartotek (sekcja 4)"
+            kol = [k[0] for k in self.KOL_LISTA]
+            i_sym, i_naz = kol.index("symbol"), kol.index("nazwa")
+            i_opis, i_rodz = kol.index("opis"), kol.index("rodzaj")
+            i_cena = kol.index("cena")
+            for it in self.tab_lista.selection():
+                w = self.tab_lista.item(it, "values")
+                if len(w) <= i_cena:
+                    continue
+                sym = str(w[i_sym]).strip()
+                if not sym:
+                    continue
+                try:
+                    cena = float(str(w[i_cena]).replace(",", ".") or 0)
+                except ValueError:
+                    cena = 0.0
+                # Kartoteki z listy 4 SA w Subiekcie z definicji.
+                kandydaci.append((sym, str(w[i_naz]).strip(),
+                                  str(w[i_opis]).strip(),
+                                  str(w[i_rodz]).strip(), cena))
+        else:
+            zrodlo_txt = "drzewa (sekcja 1)"
+            for it in self.tree.selection():
+                sym = self._symbol_wezla(it)
+                k = self.pozycje.get(sym) if sym else None
+                if not k:
+                    continue
+                if not k.w_subiekcie:        # nowa, niezapisana — nie ma czego scalac
+                    nowe_bez_subiekta.append(sym)
+                    continue
+                kandydaci.append((sym, k.nazwa, k.opis or "",
+                                  etykiety.get(k.rodzaj, k.rodzaj), k.cena))
 
         if not kandydaci and not nowe_bez_subiekta:
             messagebox.showinfo(
                 "Scalanie",
-                "Zaznacz pozycje w drzewie (sekcja 1) — Ctrl / Shift = kilka naraz.\n\n"
-                "Kartoteki z listy 4 wciąga się do drzewa dwuklikiem.",
+                "Nic nie jest zaznaczone w %s.\n\n"
+                "Zaznacz pozycje tam, gdzie widzisz NIEBIESKIE podświetlenie "
+                "— Ctrl / Shift = kilka naraz.\n"
+                "Dodawać można z drzewa (sekcja 1) i z listy kartotek "
+                "(sekcja 4)." % zrodlo_txt,
                 parent=self)
             return
 
@@ -1236,7 +1295,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # Indeks LICZONY z KOL_SCAL, nie wpisany na sztywno: po dołożeniu
         # kolumny „Cena" (16.09.2026) twarde `w[4]` nadpisywałoby przy
         # następnej zmianie układu cudzą wartość.
-        i_ilosc = [k[0] for k in self.KOL_SCAL].index("ilosc")
+        i_ilosc = [k[0] for k in self.KOL_SCAL].index("stan")
         for p in self._scal_pozycje:
             if not self.tab_scal.exists(p["symbol"]):
                 continue
@@ -1891,7 +1950,236 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         except tk.TclError:
             pass                        # okno zamykane w międzyczasie
 
-    def _wyczysc_panel_szczegolow(self):
+    # ── jedno zaznaczenie na cale okno ─────────────────────────────────
+    #: Tabele objete regula „jeden fokus". Kolejnosc = numeracja paneli.
+    TABELE_FOKUS = ("tree", "tab_sklad", "tab_lista", "tab_scal")
+
+    #: Niebieski dla tabeli z fokusem, szary dla pozostalych. Szary MUSI
+    #: byc widoczny — zaznaczenie ma sie „nie gubic do konca".
+    SEL_AKTYWNA = "#3498db"
+    SEL_BIERNA = "#d5d8dc"
+
+    def _wpnij_fokus_tabel(self):
+        """Kazdej tabeli wlasny styl, zeby kolor zaznaczenia byl niezalezny.
+
+        ttk styluje PER STYL, nie per widget — bez osobnych nazw stylu
+        zmiana koloru w jednej tabeli przemalowalaby wszystkie.
+        """
+        from tkinter import ttk
+        style = ttk.Style(self)
+        for nazwa in self.TABELE_FOKUS:
+            tab = getattr(self, nazwa, None)
+            if tab is None:
+                continue
+            wlasny = "Fokus%s.Treeview" % nazwa.title().replace("_", "")
+            style.configure(wlasny)
+            tab.configure(style=wlasny)
+            tab._styl_fokusu = wlasny
+            tab.bind("<FocusIn>", lambda _e, n=nazwa: self._ustaw_fokus(n),
+                     add="+")
+            # Klik tez nadaje fokus — Treeview nie zawsze bierze go sam.
+            tab.bind("<Button-1>", lambda _e, n=nazwa: self._ustaw_fokus(n),
+                     add="+")
+            tab.bind("<<TreeviewSelect>>",
+                     lambda _e, n=nazwa: self._po_zmianie_zaznaczenia(n),
+                     add="+")
+        self._fokus_tabeli = None
+        self._ustaw_fokus("tree")
+
+    def _ustaw_fokus(self, nazwa):
+        """Ta tabela dostaje niebieskie zaznaczenie, reszta szare."""
+        from tkinter import ttk
+        if getattr(self, "_fokus_tabeli", None) == nazwa:
+            return
+        self._fokus_tabeli = nazwa
+        style = ttk.Style(self)
+        for inna in self.TABELE_FOKUS:
+            tab = getattr(self, inna, None)
+            if tab is None or not hasattr(tab, "_styl_fokusu"):
+                continue
+            aktywna = inna == nazwa
+            style.map(tab._styl_fokusu,
+                      background=[("selected", self.SEL_AKTYWNA if aktywna
+                                   else self.SEL_BIERNA)],
+                      foreground=[("selected", "white" if aktywna
+                                   else TEKST)])
+        self._po_zmianie_zaznaczenia(nazwa)
+
+    def _po_zmianie_zaznaczenia(self, nazwa):
+        """Panel 2: jedna pozycja = szczegoly, wiele = PUSTO.
+
+        Reaguje tylko na tabele Z FOKUSEM — inaczej doczytanie stanow
+        w tle (`tab_scal`) kasowaloby panel w trakcie pisania.
+        """
+        if getattr(self, "_fokus_tabeli", None) != nazwa:
+            return
+        tab = getattr(self, nazwa, None)
+        if tab is None:
+            return
+        ile = len(tab.selection())
+        if ile > 1:
+            # „Gdy jest wiele pozycji zaznaczonych, w oknie 2 jest pusto."
+            # Sklad zostaje — patrz `zostaw_sklad`.
+            self._wyczysc_panel_szczegolow(zostaw_sklad=True)
+            return
+        if ile == 1 and nazwa in ("tab_scal", "tab_sklad"):
+            # Sekcja 3 i 5 -> szczegoly w sekcji 2.
+            # ⚠️ `bez_skladu=True` dla sekcji 3: pokazujemy dane skladnika,
+            # ale NIE przebudowujemy sekcji 3 — inaczej zniknalby wiersz,
+            # ktory user wlasnie kliknal (16.09.2026).
+            self._pokaz_w_panelu2(self._symbol_z_wiersza(tab, nazwa),
+                                  bez_skladu=(nazwa == "tab_sklad"))
+
+    @staticmethod
+    def _symbol_z_wiersza(tab, nazwa):
+        """Symbol z zaznaczonego wiersza — indeks Z DEFINICJI kolumn."""
+        wyb = tab.selection()
+        if not wyb:
+            return None
+        if nazwa == "tab_scal":
+            return wyb[0]          # iid TO symbol
+        wartosci = tab.item(wyb[0], "values")
+        kolumny = [k[0] for k in EdytorWindow.KOL_SKLAD]
+        i = kolumny.index("symbol")
+        return wartosci[i] if len(wartosci) > i else None
+
+    def _pokaz_w_panelu2(self, symbol, bez_skladu=False):
+        """Szczegoly kartoteki w panelu 2 — bez zmiany drzewa.
+
+        ⚠️ NIE DUBLUJEMY wypelniania pol. Robi to juz `_na_wybor_z_listy`
+        (panel 4) i `_na_wybor_wezla` (panel 1); trzecia kopia rozjechalaby
+        sie przy pierwszym dolozonym polu. Podstawiamy wiersz w panelu 4
+        i wolamy tamta obsluge — kartoteka i tak musi trafic do modelu,
+        bo `_pole_zmienione` odklada zmiany do `self.pozycje`.
+        """
+        symbol = (symbol or "").strip()
+        if not symbol:
+            self._wyczysc_panel_szczegolow()
+            return
+        if self._zaznaczony == symbol:
+            return
+        # ⚠️ Z sekcji 3 NIE przestawiamy listy 4 ani drzewa: obie te
+        # sciezki przebudowuja sekcje 3. Pola wypelniamy wprost z modelu.
+        if bez_skladu:
+            k = self.pozycje.get(symbol)
+            if k is None:
+                # ⚠️ Skladnik wczytany Z SUBIEKTA nie jest w modelu
+                # (`_pokaz_sklad_z_subiekta` go tam nie wklada), wiec
+                # sekcja 2 zostalaby pusta. Skladamy kartoteke z tego,
+                # co wiersz JUZ pokazuje (16.09.2026).
+                k = self._kartoteka_z_wiersza_skladu(symbol)
+            if k is None:
+                self._wyczysc_panel_szczegolow(zostaw_sklad=True)
+                return
+            self._zaznaczony = symbol
+            self._z_listy = True
+            self._pola_z_kartoteki(k)
+            return
+
+        # Szukamy tej kartoteki w panelu 4 — on zna jej pelne dane.
+        for iid in self.tab_lista.get_children():
+            wartosci = self.tab_lista.item(iid, "values")
+            if len(wartosci) > 1 and str(wartosci[1]).strip() == symbol:
+                self._zaznaczony = None      # zdejmij blokade w handlerze
+                self._z_listy = True
+                self.tab_lista.selection_set(iid)
+                self.tab_lista.see(iid)
+                self._na_wybor_z_listy()
+                return
+        # Nie ma jej w liscie 4 (np. pozycja wlasna z drzewa) — bierzemy
+        # z modelu, jesli tam jest.
+        if symbol in self.pozycje:
+            self._zaznaczony = None
+            self._z_listy = True
+            self._pokaz_z_modelu(symbol)
+        else:
+            self._wyczysc_panel_szczegolow()
+
+    def _kartoteka_z_wiersza_skladu(self, symbol):
+        """`Kartoteka` zlozona z wiersza sekcji 3 — dla skladnika spoza modelu.
+
+        NIE dopisujemy jej do `self.pozycje`: to podglad, a nie wciagniecie
+        pozycji do struktury. Indeksy kolumn z `KOL_SKLAD`.
+        """
+        kol = [k[0] for k in self.KOL_SKLAD]
+        for iid in self.tab_sklad.get_children():
+            w = self.tab_sklad.item(iid, "values")
+            if len(w) <= kol.index("cena"):
+                continue
+            if str(w[kol.index("symbol")]).strip() != symbol:
+                continue
+            rodzaj = str(w[kol.index("rodzaj")]).strip().lower()
+            rodzaj_n = ("komplet" if "omplet" in rodzaj else
+                        "usluga" if "slug" in rodzaj or "ślug" in rodzaj
+                        else "towar")
+            try:
+                cena = float(str(w[kol.index("cena")]).replace(",", ".") or 0)
+            except ValueError:
+                cena = 0.0
+            return Kartoteka(symbol, str(w[kol.index("nazwa")]).strip(),
+                             rodzaj_n, "kpl" if rodzaj_n == "komplet" else "szt",
+                             cena=cena,
+                             opis=str(w[kol.index("opis")]).strip(),
+                             w_subiekcie=True)
+        return None
+
+    def _pola_z_kartoteki(self, k):
+        """Pola sekcji 2 z obiektu `Kartoteka`, BEZ ruszania sekcji 3.
+
+        Uzywane przy klinieciu w sklad (sekcja 3): tamte wiersze musza
+        przezyc, wiec nie wolno isc przez `_na_wybor_wezla`/`_na_wybor_z_listy`,
+        ktore przebudowuja sklad.
+        """
+        self._blokada = True
+        try:
+            self.pola["symbol"][0].set(k.symbol)
+            self.pola["nazwa"][0].set(k.nazwa)
+            self.pola["symbol"][1].config(
+                state="readonly" if k.w_subiekcie else "normal")
+            self.btn_auto.config(state="disabled" if k.w_subiekcie else "normal")
+            for etykieta, wartosc in RODZAJE:
+                if wartosc == k.rodzaj:
+                    self.var_rodzaj.set(etykieta)
+            self.var_jm.set(k.jm)
+            self.var_cena.set(f"{k.cena:.2f}".replace(".", ","))
+            self.txt_opis.delete("1.0", "end")
+            self.txt_opis.insert("1.0", k.opis or "")
+            self.var_vat_sprzedaz.set(k.vat_sprzedaz or "")
+            self.var_vat_zakup.set(k.vat_zakup or "")
+            for pole, v in self.pola_wlasne_var.items():
+                v.set(k.pola_wlasne.get(pole, ""))
+            self.var_polozenie.set(k.polozenie or "")
+        except tk.TclError:
+            pass
+        finally:
+            self._blokada = False
+        try:
+            self._aktualizuj_przycisk_pozycji()
+        except Exception:
+            pass
+
+    def _pokaz_z_modelu(self, symbol):
+        """Panel 2 z `self.pozycje` — dla pozycji spoza listy 4.
+
+        Zaznacza wezel w drzewie, jesli tam jest; wtedy cala robote robi
+        `_na_wybor_wezla` i nie powstaje kolejna kopia wypelniania pol.
+        """
+        for iid in self._wszystkie_wezly():
+            if self._symbol_wezla(iid) == symbol:
+                self.tree.selection_set(iid)
+                self.tree.see(iid)
+                return
+        self._wyczysc_panel_szczegolow()
+
+    def _wszystkie_wezly(self, rodzic=""):
+        """Plaska lista iid calego drzewa."""
+        out = []
+        for iid in self.tree.get_children(rodzic):
+            out.append(iid)
+            out.extend(self._wszystkie_wezly(iid))
+        return out
+
+    def _wyczysc_panel_szczegolow(self, zostaw_sklad=False):
         """Panel 2 pusty — nie ma czego pokazywać.
 
         Wołane po skasowaniu pozycji z drzewa: wcześniej panel zostawał
@@ -1922,7 +2210,12 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         finally:
             self._blokada = False
         try:
-            self._wyczysc_sklad()
+            # ⚠️ `zostaw_sklad=True` przy samej UTRACIE ZAZNACZENIA: sekcja 3
+            # pokazuje sklad kompletu, ktory dalej istnieje, a jego odbudowa
+            # to zapytanie do mostu. Kasujemy go tylko wtedy, gdy pozycji
+            # naprawde juz nie ma (16.09.2026).
+            if not zostaw_sklad:
+                self._wyczysc_sklad()
             self._odswiez_etykiete_celu()
             self._aktualizuj_przycisk_pozycji()
         except Exception:
@@ -1932,10 +2225,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self._podswietl_rodzica()
         sym = self._symbol_wezla()
         if not sym or sym not in self.pozycje:
-            # Nic nie zaznaczone (np. po skasowaniu) — panel ma być PUSTY,
-            # a nie pokazywać dane poprzedniej pozycji.
+            # Nic nie zaznaczone — panel 2 ma byc PUSTY, ale sekcja 3
+            # ZOSTAJE: user chce widziec skladniki, mimo ze zgubil
+            # zaznaczenie w drzewie (16.09.2026).
             if not self.tree.selection():
-                self._wyczysc_panel_szczegolow()
+                self._wyczysc_panel_szczegolow(zostaw_sklad=True)
             return
         self._zaznaczony = sym
         self._z_listy = False
@@ -1965,7 +2259,12 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             self.var_polozenie.set(k.polozenie or "")
         finally:
             self._blokada = False
-        self._odswiez_sklad()
+        # ⚠️ Sklad przebudowujemy tylko przy JEDNEJ zaznaczonej pozycji.
+        # Przy kilku `_symbol_wezla()` bierze pierwsza z brzegu i gdy
+        # nie jest kompletem, sekcja 3 robila sie PUSTA — wygladalo to
+        # jak gubienie zawartosci (16.09.2026).
+        if len(self.tree.selection()) <= 1:
+            self._odswiez_sklad()
         self._aktualizuj_przycisk_pozycji()
 
     def _na_wybor_z_listy(self, _e=None):
@@ -1988,10 +2287,14 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         "+ Istniejaca". Zapis pojedynczej pozycji dziala mimo to, bo idzie
         przez _plan_pozycji(sym), a nie przez _osadzone().
         """
-        # Blokuje tylko zaznaczenie W DRZEWIE. Wlasny poprzedni wybor z listy
-        # nie moze blokowac nastepnego — inaczej dalo by sie kliknac tylko
-        # PIERWSZA kartoteke, a kolejne bylyby ignorowane.
-        if self._zaznaczony and not self._z_listy:
+        # ⚠️ Bramka dziala TYLKO gdy fokus jest gdzie indziej niz ta lista.
+        # Pierwotnie chronila edycje w panelu 2 przed podmiana przypadkowym
+        # klikiem w sekcje 4. Odkad okno ma JEDEN FOKUS (16.09.2026), klik
+        # w sekcje 4 znaczy „teraz pracuje tutaj" — blokowanie go sprawialo,
+        # ze pozycja z listy NIE POKAZYWALA SIE w panelu 2, dopoki cos bylo
+        # zaznaczone w drzewie.
+        if (getattr(self, "_fokus_tabeli", None) != "tab_lista"
+                and self._zaznaczony and not self._z_listy):
             return
         wyb = self.tab_lista.selection()
         if not wyb:
@@ -2043,10 +2346,17 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
 
         # Sklad kompletu w sekcji 3. Gdy kartoteka jest juz w modelu, sklad
         # bierzemy STAMTAD (moze byc zmieniony), a nie z Subiekta.
-        if rodzaj_n == "komplet" and not self._dzieci(sym):
-            self._pokaz_sklad_z_subiekta(sym)
-        else:
-            self._odswiez_sklad()
+        #
+        # ⚠️ TOWAR NIE RUSZA SEKCJI 3. Wczesniej `else` wolalo
+        # `_odswiez_sklad()` takze dla towaru — a ten skladu nie ma, wiec
+        # sekcja 3 robila sie PUSTA po klinieciu w dowolna pozycje listy
+        # („po klinieciu w 4 czysci mi 3", 16.09.2026). Sklad nalezy do
+        # KOMPLETU wybranego wczesniej i ma go przezyc.
+        if rodzaj_n == "komplet":
+            if not self._dzieci(sym):
+                self._pokaz_sklad_z_subiekta(sym)
+            else:
+                self._odswiez_sklad()
 
         self._oznacz_w_liscie()
         self._aktualizuj_przycisk_pozycji()
@@ -2091,9 +2401,15 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 return
             skl = dane.get("skladniki") or []
             for i, poz in enumerate(skl, start=1):
+                sym_s = (poz.get("symbol") or "").strip()
+                cena_s = float(poz.get("cena") or poz.get("CenaEwidencyjna") or 0)
                 self.tab_sklad.insert("", "end", values=(
-                    i, poz.get("symbol") or "", poz.get("nazwa") or "",
-                    f"{float(poz.get('ilosc') or 0):g}", poz.get("jm") or ""))
+                    i, sym_s, poz.get("nazwa") or "",
+                    str(poz.get("opis") or "").strip(),
+                    poz.get("rodzaj") or "",
+                    f"{float(poz.get('ilosc') or 0):g}",
+                    self._stan_txt(self._stany.get(sym_s.upper())),
+                    f"{cena_s:g}" if cena_s else ""))
             if hasattr(self, "lbl_sklad"):
                 self.lbl_sklad.config(
                     text=f"dla: {symbol}  ({len(skl)} składników)")
@@ -2496,10 +2812,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         if not hasattr(self, "lbl_cel"):
             return
         if cel:
-            self.lbl_cel.config(text="+ Skladnik / + Istniejaca  ->  do skladu: " + cel,
+            self.lbl_cel.config(text="Insert / + Istniejaca  ->  do skladu: " + cel,
                                 fg=TEKST)
         else:
-            self.lbl_cel.config(text="+ Skladnik / + Istniejaca  ->  na dol, luzno "
+            self.lbl_cel.config(text="Insert / + Istniejaca  ->  na dol, luzno "
                                      "(zaznacz komplet, zeby dodawac do srodka; "
                                      "luzne wciagniesz przeciagnieciem)",
                                 fg=TEKST_SZARY)
@@ -2510,16 +2826,33 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             i += 1
         return f"{baza}-{i:02d}"
 
-    def _dodaj_pozycje(self):
-        """Nowa pozycja jako KORZEŃ drzewa.
+    def _dodaj_towar(self):
+        """+ TW — nowy TOWAR jako korzeń drzewa."""
+        self._dodaj_pozycje("towar", "szt")
 
-        Domyślnie TOWAR w SZT, nie komplet w kpl (zgłoszone 16.09.2026):
-        ręcznie dodaje się prawie zawsze pojedynczy towar handlowy, a komplet
-        powstaje z rozbicia projektu. Rodzaj i jednostkę i tak można zmienić
-        w panelu obok — chodzi o to, co jest częstsze bez klikania.
+    def _dodaj_komplet(self):
+        """+ KT — nowy KOMPLET jako korzeń drzewa.
+
+        Komplet jest pojemnikiem: skladniki wklada sie do niego przyciskiem
+        „+ Istniejąca" (z listy 4) albo przeciagnieciem w drzewie.
         """
-        sym = self._nowy_symbol()
-        self.pozycje[sym] = Kartoteka(sym, "", "towar", "szt")
+        self._dodaj_pozycje("komplet", "kpl")
+
+    def _dodaj_usluge(self):
+        """+ US — nowa USŁUGA jako korzeń drzewa."""
+        self._dodaj_pozycje("usluga", "szt")
+
+    def _dodaj_pozycje(self, rodzaj="towar", jm="szt"):
+        """Nowa pozycja jako KORZEŃ drzewa, o zadanym rodzaju.
+
+        Rodzaj wybiera przycisk (+TW / +KT / +US), a nie ustawienie
+        domyślne — wcześniej każdy nowy wiersz był towarem i komplet
+        trzeba było przestawiać ręcznie w panelu 2 (16.09.2026).
+        Jednostkę i rodzaj nadal można zmienić w panelu obok.
+        """
+        przedrostek = {"komplet": "KPL", "usluga": "USL"}.get(rodzaj, "NOWA")
+        sym = self._nowy_symbol(przedrostek)
+        self.pozycje[sym] = Kartoteka(sym, "", rodzaj, jm)
         self.korzenie.append(sym)
         self._odswiez_drzewo()
         self._zaznacz_w_drzewie(sym)
@@ -2745,15 +3078,24 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         for i, (dziecko, il) in enumerate(dzieci, 1):
             kd = self.pozycje.get(dziecko)
             self.tab_sklad.insert("", "end", values=(
-                i, dziecko, (kd.nazwa or BEZ_NAZWY) if kd else "", f"{il:g}",
-                kd.jm if kd else ""))
+                i, dziecko, (kd.nazwa or BEZ_NAZWY) if kd else "",
+                (kd.opis or "") if kd else "",
+                (kd.rodzaj or "") if kd else "",
+                f"{il:g}",
+                self._stan_txt(self._stany.get(dziecko.upper())),
+                f"{kd.cena:g}" if kd and kd.cena else ""))
 
     def _edytuj_ilosc(self, _e=None):
         wyb = self.tab_sklad.selection()
         if not wyb or not self._zaznaczony:
             return
         wartosci = self.tab_sklad.item(wyb[0], "values")
-        dziecko, obecna = wartosci[1], wartosci[3]
+        # ⚠️ INDEKSY Z `KOL_SKLAD`, nie na sztywno: po dolozeniu
+        # Opis/Rodzaj/Stan/Cena (16.09.2026) `wartosci[3]` to juz OPIS,
+        # wiec dwuklik na ilosci podstawialby tekst zamiast liczby.
+        kl = [k[0] for k in self.KOL_SKLAD]
+        dziecko = wartosci[kl.index("symbol")]
+        obecna = wartosci[kl.index("ilosc")]
         dlg = tk.Toplevel(self)
         dlg.title("Ilość")
         dlg.configure(bg=TLO)
@@ -2794,7 +3136,8 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         wyb = self.tab_sklad.selection()
         if not wyb or not self._zaznaczony:
             return
-        dziecko = self.tab_sklad.item(wyb[0], "values")[1]
+        i_sym = [k[0] for k in self.KOL_SKLAD].index("symbol")
+        dziecko = self.tab_sklad.item(wyb[0], "values")[i_sym]
         for i, (r, d, _il) in enumerate(self.relacje):
             if r == self._zaznaczony and d == dziecko:
                 self.relacje.pop(i)
