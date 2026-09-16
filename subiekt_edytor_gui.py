@@ -738,7 +738,13 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         return "break"
 
     def _anuluj(self):
-        """Zamknięcie edytora — z ostrzeżeniem, jeśli są niezapisane zmiany."""
+        """Zamknięcie edytora — z ostrzeżeniem, jeśli są niezapisane zmiany.
+
+        ⚠️ Najpierw `_domknij_opis()`: tekst wklejony myszka nie zapalil
+        jeszcze flagi zmian, wiec bez tego edytor zamykalby sie bez pytania
+        mimo pracy w polu (16.09.2026).
+        """
+        self._domknij_opis()
         if self._zmienione:
             # `default="no"` — Enter/Esc na tym oknie ma ZOSTAWIAC prace,
             # a nie ja kasowac. Wymieniamy pozycje, zeby bylo widac, co
@@ -972,7 +978,17 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                  anchor="nw", width=12).grid(row=6, column=0, sticky="nw", padx=8, pady=6)
         self.txt_opis = tk.Text(pod, height=5, width=44, font=("Arial", 9), wrap="word")
         self.txt_opis.grid(row=6, column=1, sticky="we", padx=4, pady=6)
-        self.txt_opis.bind("<KeyRelease>", lambda _e: self._pole_zmienione("opis"))
+        # ⚠️ `tk.Text` NIE MA `trace_add` jak StringVar, wiec sam KeyRelease
+        # nie wystarcza: tekst WKLEJONY myszka (menu podreczne, przeciagniecie)
+        # nie wyzwala zdarzenia klawiatury i przepadal przy zmianie pozycji
+        # (16.09.2026). Lapiemy wiec takze utrate fokusu i wklejenie.
+        for zdarzenie in ("<KeyRelease>", "<FocusOut>", "<<Paste>>",
+                          "<ButtonRelease-2>", "<ButtonRelease-3>"):
+            self.txt_opis.bind(
+                zdarzenie,
+                lambda _e: self.after_idle(
+                    lambda: self._pole_zmienione("opis")),
+                add="+")
         pod.grid_columnconfigure(1, weight=1)
 
         # ZAPIS SAMEJ TEJ POZYCJI — obok "Załóż / Zapisz" z paska górnego,
@@ -2260,6 +2276,14 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             pass
 
     def _na_wybor_wezla(self, _e=None):
+        # ⚠️ NAJPIERW domykamy opis POPRZEDNIEJ pozycji. Panel zaraz
+        # przepisze pole z modelu, wiec cokolwiek zostalo w `tk.Text`
+        # bez zdarzenia klawiatury, przepadloby bezpowrotnie.
+        self._domknij_opis()
+        # Opuszczasz pozycje w trakcie edycji? Pytamy, zanim panel 2
+        # pokaze co innego.
+        if not self._czy_porzucic_edycje(self._symbol_wezla()):
+            return
         self._podswietl_rodzica()
         sym = self._symbol_wezla()
         if not sym or sym not in self.pozycje:
@@ -2308,6 +2332,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
     def _na_wybor_z_listy(self, _e=None):
         """Kartoteka zaznaczona w sekcji 4 — do EDYCJI w panelu 2.
 
+        ⚠️ Zaczyna od `_domknij_opis()`: ta metoda tez przepisuje pola
+        panelu 2, wiec opis wklejony myszka przepadlby tak samo jak przy
+        zmianie wezla w drzewie (16.09.2026).
+
         Dziala TYLKO gdy w drzewie nic nie jest zaznaczone (a wiec zwykle
         gdy drzewo jest puste): panel 2 stalby wtedy pusty, mimo ze user
         patrzy na konkretna kartotekę z Subiekta. Gdy cos jest wybrane
@@ -2331,6 +2359,14 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # w sekcje 4 znaczy „teraz pracuje tutaj" — blokowanie go sprawialo,
         # ze pozycja z listy NIE POKAZYWALA SIE w panelu 2, dopoki cos bylo
         # zaznaczone w drzewie.
+        self._domknij_opis()
+        wyb_l = self.tab_lista.selection()
+        nowy = None
+        if wyb_l:
+            w = self.tab_lista.item(wyb_l[0], "values")
+            nowy = str(w[1]).strip() if len(w) > 1 else None
+        if not self._czy_porzucic_edycje(nowy):
+            return
         if (getattr(self, "_fokus_tabeli", None) != "tab_lista"
                 and self._zaznaczony and not self._z_listy):
             return
@@ -2454,12 +2490,64 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _czy_porzucic_edycje(self, nowy_symbol=None):
+        """True, gdy wolno przejsc na inna pozycje.
+
+        Pyta TYLKO gdy biezaca pozycja byla edytowana w polach panelu 2 —
+        przy zwyklym przegladaniu drzewa okno nie moze zaczepiac
+        (16.09.2026).
+        """
+        edytowana = getattr(self, "_edytowana", None)
+        if not edytowana or edytowana == nowy_symbol:
+            return True
+        if edytowana not in self.pozycje:
+            self._edytowana = None
+            return True
+        k = self.pozycje[edytowana]
+        opis = "%s — %s" % (edytowana, k.nazwa or "(bez nazwy)")
+        if messagebox.askyesno(
+                "Pozycja w trakcie edycji",
+                "Edytujesz pozycję:\n\n    %s\n\n"
+                "Zmiany są w pamięci edytora, ale NIE zapisano ich jeszcze\n"
+                "do Subiekta (robi to „Zapisz tę pozycję” albo "
+                "„Załóż / Zapisz”).\n\nPrzejść do innej pozycji?" % opis,
+                icon="warning", default="no", parent=self):
+            self._edytowana = None
+            return True
+        # Zostajemy — przywracamy zaznaczenie na edytowanej pozycji.
+        self.after_idle(lambda s=edytowana: self._zaznacz_w_drzewie(s))
+        return False
+
+    def _domknij_opis(self):
+        """Przepisuje tresc pola Opis do modelu, zanim zmieni sie pozycja.
+
+        `tk.Text` nie ma `trace`, a `<KeyRelease>` nie lapie wklejenia
+        myszka — bez tego wywolania opis ginal przy przelaczeniu wiersza
+        (16.09.2026).
+        """
+        if self._blokada or not getattr(self, "_zaznaczony", None):
+            return
+        k = self.pozycje.get(self._zaznaczony)
+        if k is None:
+            return
+        try:
+            tresc = self.txt_opis.get("1.0", "end-1c").strip()
+        except tk.TclError:
+            return
+        if tresc != (k.opis or ""):
+            k.opis = tresc
+            self._zmienione = True
+            self._edytowana = self._zaznaczony
+
     def _pole_zmienione(self, klucz):
         if self._blokada or not self._zaznaczony:
             return
         k = self.pozycje.get(self._zaznaczony)
         if k is None:
             return
+        # Ta pozycja jest teraz EDYTOWANA — przy probie przejscia dalej
+        # zapytamy, czy na pewno ja zostawiamy (16.09.2026).
+        self._edytowana = self._zaznaczony
         if klucz == "nazwa":
             # Skasowanie nazwy zostawia pusto (i zapala blad w walidacji),
             # zamiast po cichu wpisywac symbol.
@@ -3775,6 +3863,8 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 # Zapis POJEDYNCZEJ pozycji nie gasi flagi (reszta drzewa
                 # dalej jest niezapisana), ale samo przerysowanie tez nie
                 # moze jej zapalac na nowo.
+                if getattr(self, "_edytowana", None) == tylko_sym:
+                    self._edytowana = None
                 self._odswiez_drzewo(_bez_znacznika=True)
                 self._zaznacz_w_drzewie(tylko_sym)
                 self.status.config(
@@ -3783,6 +3873,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             for sym in self._osadzone():
                 self.pozycje[sym].w_subiekcie = True
             self._zmienione = False
+            self._edytowana = None
             self._odswiez_drzewo(_bez_znacznika=True)
             self.status.config(
                 text=f"✔ Zapisano do Subiekta: założonych {wynik.get('zalozonych', 0)}, "

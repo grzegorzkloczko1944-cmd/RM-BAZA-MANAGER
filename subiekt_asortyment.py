@@ -423,6 +423,9 @@ def okno_nowa_kartoteka(parent, symbol="", nazwa="", rodzaj="towar",
         p["cena"] = var_cena.get().strip()
         etykieta = var_rodzaj.get()
         p["rodzaj"] = next((k for k, o in RODZAJE if o == etykieta), "towar")
+        # Ten wiersz jest teraz EDYTOWANY — przy probie przejscia dalej
+        # zapytamy, czy na pewno go zostawiamy (16.09.2026).
+        edytowany["i"] = biezacy["i"]
         odswiez_tabele()
 
     def z_listy_do_formularza(_e=None):
@@ -436,6 +439,24 @@ def okno_nowa_kartoteka(parent, symbol="", nazwa="", rodzaj="towar",
                                % len(wyb), fg="#7f8c8d")
             return
         i = int(wyb[0])
+        # Opuszczasz wiersz, ktory wlasnie edytowales? Pytamy — tak samo
+        # jak edytor kartotek przy zmianie pozycji (16.09.2026).
+        poprz = edytowany["i"]
+        if (poprz is not None and poprz != i and poprz < len(lista)
+                and lista[poprz].get("tag") != "zalozona"):
+            pp = lista[poprz]
+            if not messagebox.askyesno(
+                    "Pozycja w trakcie edycji",
+                    "Edytujesz pozycję %d:\n\n    %s — %s\n\n"
+                    "Nie założono jej jeszcze w Subiekcie.\n\n"
+                    "Przejść do innej pozycji?"
+                    % (poprz + 1, pp.get("symbol") or "(brak symbolu)",
+                       pp.get("nazwa") or ""),
+                    icon="warning", default="no", parent=dlg):
+                # Zostajemy — wracamy zaznaczeniem na edytowany wiersz.
+                dlg.after_idle(lambda s=str(poprz): tabela.selection_set(s))
+                return
+            edytowany["i"] = None
         biezacy["i"] = i
         p = lista[i]
         # Bez odsylania do listy w trakcie podstawiania — inaczej `trace`
@@ -550,6 +571,40 @@ def okno_nowa_kartoteka(parent, symbol="", nazwa="", rodzaj="towar",
 
         krok(0)
 
+    # ── ochrona przed utrata pracy ───────────────────────────────────
+    edytowany = {"i": None}     # ktory wiersz tabeli jest w trakcie edycji
+
+    def _cos_wpisane():
+        """Czy w formularzu jest cokolwiek warte ostrzezenia."""
+        return any(v.get().strip() for v in
+                   (var_symbol, var_nazwa, var_opis, var_cena))
+
+    def _nietkniete(p):
+        """Czy wiersz tabeli zostal przy wartosciach z arkusza."""
+        return not (p.get("symbol") or "").strip()
+
+    def zamknij():
+        """Anuluj / krzyzyk — z pytaniem, gdy cos jest wpisane."""
+        if tabela is not None:
+            niezalozone = [p for p in lista if p.get("tag") != "zalozona"]
+            if niezalozone and not messagebox.askyesno(
+                    "Zamknąć okno?",
+                    "W tabeli jest %d %s, których NIE założono\n"
+                    "w Subiekcie.\n\nZamknąć i porzucić je?"
+                    % (len(niezalozone), _odmiana_kartotek(len(niezalozone))),
+                    icon="warning", default="no", parent=dlg):
+                return
+        elif _cos_wpisane() and not messagebox.askyesno(
+                "Zamknąć okno?",
+                "Formularz jest wypełniony, ale kartoteki NIE założono\n"
+                "w Subiekcie.\n\nZamknąć i porzucić dane?",
+                icon="warning", default="no", parent=dlg):
+            return
+        dlg.destroy()
+
+    # ⚠️ Krzyzyk MUSI isc ta sama droga — inaczej omija pytanie.
+    dlg.protocol("WM_DELETE_WINDOW", zamknij)
+
     box = tk.Frame(dlg)
     box.pack(pady=(4, 12))
     tk.Button(box, text="🔍 Sprawdź", command=sprawdz, font=("Arial", 9),
@@ -563,7 +618,7 @@ def okno_nowa_kartoteka(parent, symbol="", nazwa="", rodzaj="towar",
                               padx=14, pady=3)
     if tabela is not None:
         btn_wszystkie.pack(side=tk.LEFT, padx=4)
-    tk.Button(box, text="Anuluj", command=dlg.destroy, font=("Arial", 9),
+    tk.Button(box, text="Anuluj", command=zamknij, font=("Arial", 9),
               padx=12, pady=3).pack(side=tk.LEFT, padx=4)
 
     ent_symbol.focus_set()
