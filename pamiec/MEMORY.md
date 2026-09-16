@@ -82,3 +82,5 @@
 - [startfile w .spec odpalał RM_KOD](project_spec_startfile_rm_kod.md) — ⛔ nigdy `startfile(DISTPATH)` w .spec: Eksplorator uruchamiał RM_KOD.exe z dist, 152 procesy po jednym buildzie
 - [Znikające dyski = uśpienie komputera](project_dyski_znikaja_uspienie.md) — ⛔ NIE sieć, NIE poświadczenia, NIE backup_nic.bat: plan „Zrównoważony" usypiał po 30 min (System Idle), błąd 85 przy wybudzeniu; naprawa powercfg standby-timeout-ac 0
 - [Sklejanie duplikatów BOM](project_sklejanie_duplikatow_bom.md) — tylko identyczny subiekt_symbol; heurystyka po nazwie ODRZUCONA (UCFL 201 vs UCFL201 to różne kartoteki)
+- [Most aktualizuje się sam przy starcie](project_most_auto_aktualizacja.md) — ⛔ BOM w `wersja.json` uciszał CAŁE wykrywanie (utf-8-sig!); automat tylko przy starcie, nie w trakcie pracy
+- [Zrywane połączenie — brama znika pierwsza](project_diagnostyka_resetuje_karte.md) — ⛔ NIE klikać „Zdiagnozuj i napraw": msdt RESETUJE kartę i pogłębia; przyczyna w routerze/kablu, nie w Windows

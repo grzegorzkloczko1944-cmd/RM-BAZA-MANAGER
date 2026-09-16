@@ -1530,6 +1530,18 @@ class MainWindow(tk.Tk):
         # subiekt_bridge.rozgrzej_w_tle. Stanowisko bez Subiekta: nic.
         try:
             import subiekt_bridge
+
+            def _most_zaktualizowany(tekst):
+                # Aktualizacja leci w WĄTKU TLA, a Tk wolno dotykać tylko
+                # z głównego — stąd `after(0, ...)`. Bez tego okienko
+                # potrafiłoby wywalić aplikację przy starcie.
+                try:
+                    self.after(0, lambda: messagebox.showinfo(
+                        "Most Subiekta", tekst, parent=self))
+                except Exception:
+                    pass          # okno zamknięte w międzyczasie
+
+            subiekt_bridge.po_aktualizacji_mostu = _most_zaktualizowany
             subiekt_bridge.rozgrzej_w_tle()
         except Exception:
             pass

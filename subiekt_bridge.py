@@ -294,12 +294,70 @@ def rozgrzej_w_tle():
         global _most_niedostepny
         bylo = _most_niedostepny
         try:
+            aktualizuj_przy_starcie()
             zapewnij_most()
         except Exception as e:
             _most_niedostepny = bylo
             print(f"ℹ️  Rozgrzewka mostu w tle nieudana: {e}")
 
     threading.Thread(target=_run, name="most-rozgrzewka", daemon=True).start()
+
+
+#: Wołane po udanej automatycznej aktualizacji — GUI podstawia tu funkcję,
+#: która pokaże potwierdzenie. Domyślnie nic: moduł nie zna Tk i nie ma
+#: prawa go wymagać (most bywa wołany z CLI i z testów).
+po_aktualizacji_mostu = None
+
+
+def aktualizuj_przy_starcie():
+    """Podmienia most na nowszy z serwera — SAMA, przy starcie RM_BAZA.
+
+    ⚠️ DLACZEGO TU, A NIE W PANELU (16.09.2026)
+
+    Dotąd nowszy most był tylko PROPONOWANY przyciskiem „Pobierz most",
+    a sprawdzenie chodziło raz na dobę (`SPRAWDZAJ_NOWSZY_CO_S`). Skutek:
+    most wystawiony w południe docierał do stacji dopiero NAZAJUTRZ, i to
+    wyłącznie u kogoś, kto akurat otworzył panel Subiekta. Poprawka PDF-ów
+    zamówień leżała na serwerze, a userzy pracowali na starej binarce
+    i nie mieli o tym pojęcia (zgłoszone: „user odpalił nowy EXE i nie
+    pociągnęło samo mostu").
+
+    ⚠️ DLACZEGO TYLKO PRZY STARCIE, A NIE PRZY KAŻDYM SPRAWDZENIU
+
+    Zastrzeżenie z `_proponuj_aktualizacje` zostaje w mocy: podmiana
+    RESTARTUJE most, więc w trakcie pracy mogłaby przerwać komuś zapis ZK
+    albo ZD. Tutaj jest bezpieczna, bo RM_BAZA dopiero wstaje — nikt nie ma
+    otwartej operacji. Panel dalej tylko proponuje.
+
+    Nic nie rzuca: brak serwera, zajęty plik czy inny protokół nie mogą
+    zatrzymać startu programu. Wtedy zostaje stary most i propozycja
+    w panelu, tak jak dotąd.
+    """
+    if not czy_z_binarki():
+        return                      # u budującego źródłem prawdy jest repo
+    try:
+        # `wymuszone` omija bramkę dobową: przy starcie pytamy ZAWSZE.
+        # Odczyt to jeden mały plik z dysku sieciowego — koszt pomijalny
+        # wobec 9 s, które i tak kosztuje logowanie do Sfery.
+        nowszy, opis = dostepna_nowsza(wymuszone=True)
+        if not nowszy:
+            return
+        print(f"ℹ️  {opis}")
+        ok, komunikat = pobierz_most(uruchom_po=False)
+        print(("  ✅ Most zaktualizowany automatycznie." if ok
+               else f"  ⚠️  Automatyczna aktualizacja mostu nieudana: {komunikat}"))
+        # User MA WIEDZIEĆ, że binarka się zmieniła — inaczej „czemu nagle
+        # działa inaczej?" zostaje bez odpowiedzi. Wersję czytamy PO
+        # podmianie, żeby pokazać to, co realnie leży na stanowisku.
+        if ok and callable(po_aktualizacji_mostu):
+            w = wersja_lokalna() or {}
+            po_aktualizacji_mostu(
+                "Most Subiekta został zaktualizowany.\n\n"
+                f"Wersja: {w.get('zbudowano') or '?'}"
+                + (f"  ({w.get('sha')})" if w.get('sha') else "")
+                + (f"\n\n{w['uwaga']}" if w.get("uwaga") else ""))
+    except Exception as e:
+        print(f"ℹ️  Sprawdzenie nowszego mostu nieudane: {e}")
 
 
 def zapewnij_most():
@@ -589,9 +647,18 @@ def _zrodlo_mostu():
 
 
 def _wersja_zrodla(folder):
-    """{'protokol': int, 'zbudowano': str} z wersja.json w folderze, albo None."""
+    """{'protokol': int, 'zbudowano': str} z wersja.json w folderze, albo None.
+
+    ⚠️ `utf-8-sig`, NIE `utf-8`. Plik bywa wystawiany z PowerShella, a
+    `Set-Content -Encoding utf8` w Windows PowerShell 5.1 dopisuje BOM.
+    Na `utf-8` json.load() wywalał się wtedy na „Unexpected UTF-8 BOM",
+    funkcja zwracała None i CAŁE wykrywanie nowszego mostu milkło: żadnej
+    propozycji, żadnego przycisku „Pobierz most", most wystawiony na serwerze
+    nie docierał do nikogo (16.09.2026 — „user odpalił nowy EXE i nie
+    pociągnęło samo mostu"). `utf-8-sig` czyta oba warianty.
+    """
     try:
-        with open(os.path.join(folder, "wersja.json"), encoding="utf-8") as f:
+        with open(os.path.join(folder, "wersja.json"), encoding="utf-8-sig") as f:
             return json.load(f)
     except Exception:
         return None
