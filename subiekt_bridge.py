@@ -335,6 +335,19 @@ def aktualizuj_przy_starcie():
     """
     if not czy_z_binarki():
         return                      # u budującego źródłem prawdy jest repo
+
+    # ⛔ NIGDY NIE NADPISUJEMY KATALOGU BUILDU.
+    #
+    # `czy_z_binarki()` mówi tylko, że RM_BAZA chodzi jako .exe — a na
+    # maszynie budującego .exe i repo stoją obok siebie. `_find_exe()` bierze
+    # PIERWSZE trafienie z EXE_CANDIDATES, czyli `bin\Release` z repo, zanim
+    # dojdzie do `C:\iLogic\Subiekt\MOST`. Bez tego warunku uruchomienie .exe
+    # u budującego ściągnęłoby most z serwera PROSTO NA świeży build ze
+    # źródeł — czyli skasowało to, co przed chwilą skompilował (16.09.2026).
+    uzywany = _find_exe() or ""
+    if os.path.sep + os.path.join("bin", "Release") in uzywany:
+        return
+
     try:
         # `wymuszone` omija bramkę dobową: przy starcie pytamy ZAWSZE.
         # Odczyt to jeden mały plik z dysku sieciowego — koszt pomijalny
