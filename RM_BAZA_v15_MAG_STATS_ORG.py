@@ -31535,15 +31535,54 @@ class MainWindow(tk.Tk):
         except ImportError as e:
             messagebox.showerror("Subiekt", f"Brak modułu subiekt_asortyment.py\n\n{e}", parent=self)
             return
-        symbol = nazwa = ""
+        # ⚠️ WSZYSTKIE zaznaczone wiersze, nie tylko ostatnio klikniety.
+        # `get_selected_rows()` to ta sama metoda, ktorej uzywaja operacje
+        # masowe arkusza („Ustaw Zamowiono" i spolka) — zaznaczenie widac
+        # jako ciemnoniebieskie wiersze w kolumnie ID (16.09.2026).
+        pozycje = []
         try:
-            row = getattr(self, "_selected_row_idx", None)
-            if row is not None:
-                symbol = str(self.sheet.get_cell_data(row, 0) or "").strip()
-                nazwa = str(self.sheet.get_cell_data(row, 1) or "").strip()
+            wiersze = sorted(set(self.sheet.get_selected_rows() or []))
         except Exception:
-            pass
-        subiekt_asortyment.okno_nowa_kartoteka(self, symbol=symbol, nazwa=nazwa)
+            wiersze = []
+        if not wiersze:
+            row = getattr(self, "_selected_row_idx", None)
+            wiersze = [row] if row is not None else []
+
+        for r in wiersze:
+            try:
+                nr = str(self.sheet.get_cell_data(r, 0) or "").strip()
+                naz = str(self.sheet.get_cell_data(r, 1) or "").strip()
+            except Exception:
+                continue
+            if not nr and not naz:
+                continue
+            # Kolumny arkusza: 0 Nr rysunku, 1 Nazwa, 2 Opis, 7 Typ,
+            # 11 Cena 1szt.
+            def _kom(kol):
+                try:
+                    return str(self.sheet.get_cell_data(r, kol) or "").strip()
+                except Exception:
+                    return ""
+            opis = _kom(2)
+            cena = _kom(11)
+            # ⚠️ Typ w arkuszu (X/XX/Z/ZZ/ZNORM/STANDARD) mowi o POCHODZENIU
+            # detalu, nie o rodzaju kartoteki w Subiekcie. Zlozenia (Z, ZZ)
+            # to komplety, reszta to towar. Rodzaj i tak da sie zmienic
+            # w formularzu — chodzi o najczestszy przypadek bez klikania.
+            typ = _kom(7).upper()
+            rodzaj = "komplet" if typ in ("Z", "ZZ") else "towar"
+            pozycje.append({"symbol": nr, "nazwa": naz, "opis": opis,
+                            "rodzaj": rodzaj,
+                            "jm": "kpl" if rodzaj == "komplet" else "szt",
+                            "cena": cena, "typ_arkusz": typ})
+
+        if len(pozycje) > 1:
+            subiekt_asortyment.okno_nowa_kartoteka(self, pozycje=pozycje)
+            return
+        pierwsza = pozycje[0] if pozycje else {}
+        subiekt_asortyment.okno_nowa_kartoteka(
+            self, symbol=pierwsza.get("symbol", ""),
+            nazwa=pierwsza.get("nazwa", ""))
 
     def open_subiekt_dokumenty(self):
         """Okno „Przegląd dokumentów" (menu 📦 SUBIEKT).

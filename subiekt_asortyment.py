@@ -23,6 +23,7 @@ import subprocess
 import tempfile
 import threading
 import tkinter as tk
+from tkinter import ttk
 from tkinter import ttk, messagebox
 
 from subiekt_stany import _find_exe, blad_mostu, wysrodkuj, CONFIG_PATH
@@ -41,6 +42,20 @@ RODZAJE = [("towar", "Towar (materiał, część)"),
            ("usluga", "Usługa (robocizna, transport)"),
            ("komplet", "Komplet (złożenie ze składników)")]
 JEDNOSTKI = ["szt", "kpl", "m", "mb", "kg", "l", "op", "rbg"]
+
+
+def _odmiana_kartotek(n):
+    """1 kartotek\u0119 / 2-4 kartoteki / 5+ kartotek.
+
+    Komunikat przed zapisem do bazy PRODUKCYJNEJ ma brzmiec po polsku,
+    a nie „2 kartotek" (16.09.2026).
+    """
+    if n == 1:
+        return "kartotek\u0119"
+    reszta100, reszta10 = n % 100, n % 10
+    if 2 <= reszta10 <= 4 and not 12 <= reszta100 <= 14:
+        return "kartoteki"
+    return "kartotek"
 
 
 def zaloz_kartoteke(symbol, nazwa, rodzaj="towar", jm="szt", cena=None, opis="",
@@ -93,8 +108,20 @@ def _kartoteka_cli(plan_dane, zapisz, timeout):
         return json.load(f)
 
 
-def okno_nowa_kartoteka(parent, symbol="", nazwa="", rodzaj="towar", po_zapisie=None):
-    """Formularz nowej kartoteki. Zwraca okno (Toplevel)."""
+def okno_nowa_kartoteka(parent, symbol="", nazwa="", rodzaj="towar",
+                        po_zapisie=None, pozycje=None):
+    """Formularz nowej kartoteki. Zwraca okno (Toplevel).
+
+    `pozycje` — lista slownikow {symbol, nazwa, opis, rodzaj, jm, cena}
+    z zaznaczenia w arkuszu. Gdy jest dluzsza niz 1, nad formularzem staje
+    TABELA: klik w wiersz wczytuje go do pol, a „Zaloz wszystkie" przechodzi
+    po kolei cala liste (16.09.2026).
+    """
+    lista = [dict(p) for p in (pozycje or []) if p]
+    if lista and not symbol and not nazwa:
+        symbol = lista[0].get("symbol") or ""
+        nazwa = lista[0].get("nazwa") or ""
+        rodzaj = lista[0].get("rodzaj") or rodzaj
     dlg = tk.Toplevel(parent)
     dlg.title("Nowa kartoteka w Subiekcie")
     dlg.transient(parent)
@@ -102,6 +129,44 @@ def okno_nowa_kartoteka(parent, symbol="", nazwa="", rodzaj="towar", po_zapisie=
 
     tk.Label(dlg, text="➕ Dodaj asortyment do Subiekta", bg="#34495e", fg="white",
              font=("Arial", 10, "bold"), anchor="w", padx=12, pady=8).pack(fill=tk.X)
+
+    # ── tabela pozycji (tylko przy wielu zaznaczonych) ───────────────
+    tabela = None
+    if len(lista) > 1:
+        ramka_tab = tk.LabelFrame(
+            dlg, text=" Pozycje z arkusza (%d) — kliknij, żeby edytować "
+                      % len(lista),
+            font=("Arial", 9, "bold"), padx=8, pady=6)
+        ramka_tab.pack(fill=tk.BOTH, expand=True, padx=14, pady=(10, 0))
+        # „Typ" to wartosc Z ARKUSZA (X/XX/Z/ZZ/ZNORM) — pokazujemy ja
+        # obok „Rodzaju", zeby bylo widac, skad wzial sie komplet vs towar.
+        kol = (("lp", "Lp.", 30), ("symbol", "Symbol", 104),
+               ("nazwa", "Nazwa", 170), ("opis", "Opis", 120),
+               ("typ", "Typ", 46), ("rodzaj", "Rodzaj", 66),
+               ("jm", "JM", 36), ("stan", "Stan", 86),
+               ("cena", "Cena", 56))
+        wrap_t = tk.Frame(ramka_tab)
+        wrap_t.pack(fill=tk.BOTH, expand=True)
+        # `extended` — Ctrl / Shift zaznacza wiele pozycji do zalozenia
+        # (16.09.2026). Edycja w formularzu dotyczy JEDNEJ zaznaczonej.
+        tabela = ttk.Treeview(wrap_t, columns=[k[0] for k in kol],
+                              show="headings", height=8,
+                              selectmode="extended")
+        for klucz, naglowek, szer in kol:
+            tabela.heading(klucz, text=naglowek)
+            tabela.column(klucz, width=szer, minwidth=30,
+                          stretch=(klucz in ("nazwa", "opis")),
+                          anchor="e" if klucz == "cena" else "w")
+        sc_t = ttk.Scrollbar(wrap_t, orient="vertical", command=tabela.yview)
+        tabela.configure(yscrollcommand=sc_t.set)
+        tabela.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sc_t.pack(side=tk.RIGHT, fill=tk.Y)
+        tabela.tag_configure("zalozona", background="#e8f8e8")
+        tabela.tag_configure("blad", background="#f2dede")
+        tk.Label(ramka_tab,
+                 text="Klik = edycja w polach niżej.   "
+                      "Ctrl / Shift + klik = zaznacz kilka do założenia.",
+                 font=("Arial", 8), fg="#7f8c8d", anchor="w").pack(fill=tk.X)
 
     body = tk.Frame(dlg, padx=14, pady=10)
     body.pack(fill=tk.BOTH, expand=True)
@@ -177,25 +242,27 @@ def okno_nowa_kartoteka(parent, symbol="", nazwa="", rodzaj="towar", po_zapisie=
     tk.Button(ramka_sym, text="⚙ Generuj", command=generuj_symbol,
               font=("Arial", 8), padx=8, pady=1).grid(row=0, column=1, padx=(6, 0))
 
-    wiersz(3, "Rodzaj:")
-    var_rodzaj = tk.StringVar(value=next((o for k, o in RODZAJE if k == rodzaj), RODZAJE[0][1]))
-    ttk.Combobox(body, textvariable=var_rodzaj, values=[o for _, o in RODZAJE],
-                 state="readonly", font=("Arial", 9)).grid(row=3, column=1, sticky="ew", pady=4)
-
-    wiersz(4, "Jednostka:")
-    var_jm = tk.StringVar(value="szt")
-    ttk.Combobox(body, textvariable=var_jm, values=JEDNOSTKI,
-                 font=("Arial", 9), width=10).grid(row=4, column=1, sticky="w", pady=4)
-
-    wiersz(5, "Cena ewid. (opcjonalnie):")
-    var_cena = tk.StringVar()
-    tk.Entry(body, textvariable=var_cena, font=("Arial", 10), width=12).grid(
-        row=5, column=1, sticky="w", pady=4)
-
-    wiersz(6, "Opis (opcjonalnie):")
+    # OPIS zaraz za NAZWA — tak samo jak w tabeli wyzej. Wczesniej byl na
+    # samym koncu i oko szukalo go w dwoch roznych miejscach (16.09.2026).
+    wiersz(3, "Opis (opcjonalnie):")
     var_opis = tk.StringVar()
     tk.Entry(body, textvariable=var_opis, font=("Arial", 10)).grid(
-        row=6, column=1, sticky="ew", pady=4)
+        row=3, column=1, sticky="ew", pady=4)
+
+    wiersz(4, "Rodzaj:")
+    var_rodzaj = tk.StringVar(value=next((o for k, o in RODZAJE if k == rodzaj), RODZAJE[0][1]))
+    ttk.Combobox(body, textvariable=var_rodzaj, values=[o for _, o in RODZAJE],
+                 state="readonly", font=("Arial", 9)).grid(row=4, column=1, sticky="ew", pady=4)
+
+    wiersz(5, "Jednostka:")
+    var_jm = tk.StringVar(value="szt")
+    ttk.Combobox(body, textvariable=var_jm, values=JEDNOSTKI,
+                 font=("Arial", 9), width=10).grid(row=5, column=1, sticky="w", pady=4)
+
+    wiersz(6, "Cena ewid. (opcjonalnie):")
+    var_cena = tk.StringVar()
+    tk.Entry(body, textvariable=var_cena, font=("Arial", 10), width=12).grid(
+        row=6, column=1, sticky="w", pady=4)
 
     status = tk.Label(dlg, text="", font=("Arial", 8), fg="#7f8c8d", anchor="w", padx=14)
     status.pack(fill=tk.X)
@@ -311,6 +378,178 @@ def okno_nowa_kartoteka(parent, symbol="", nazwa="", rodzaj="towar", po_zapisie=
                 messagebox.showerror("Kartoteka", w.get("szczegoly") or "Nieznany błąd", parent=dlg)
         w_tle(lambda: zaloz_kartoteke(**d, zapisz=True), gotowe)
 
+    # ── tabela: wypelnienie i dwustronna synchronizacja ──────────────
+    biezacy = {"i": 0}          # ktory wiersz listy jest w formularzu
+    blokada = {"on": False}     # nie odsylaj do listy w trakcie podstawiania
+
+    def _txt_ceny(c):
+        try:
+            return ("%.2f" % float(str(c).replace(",", "."))).replace(".", ",")
+        except (TypeError, ValueError):
+            return ""
+
+    def _etykieta_rodzaju(klucz):
+        return next((o for k, o in RODZAJE if k == (klucz or "towar")),
+                    RODZAJE[0][1])
+
+    def odswiez_tabele():
+        if tabela is None:
+            return
+        zazn = tabela.selection()
+        for w in tabela.get_children():
+            tabela.delete(w)
+        for i, p in enumerate(lista):
+            tabela.insert("", "end", iid=str(i), values=(
+                i + 1, p.get("symbol") or "", p.get("nazwa") or "",
+                p.get("opis") or "", p.get("typ_arkusz") or "",
+                _etykieta_rodzaju(p.get("rodzaj")),
+                p.get("jm") or "szt", p.get("stan") or "",
+                _txt_ceny(p.get("cena"))),
+                tags=(p["tag"],) if p.get("tag") else ())
+        if zazn and tabela.exists(zazn[0]):
+            tabela.selection_set(zazn[0])
+
+    def z_formularza_do_listy(*_a):
+        """Kazda zmiana w polach wraca do wiersza tabeli."""
+        if tabela is None or blokada["on"]:
+            return
+        if not (0 <= biezacy["i"] < len(lista)):
+            return
+        p = lista[biezacy["i"]]
+        p["symbol"] = var_symbol.get().strip()
+        p["nazwa"] = var_nazwa.get().strip()
+        p["opis"] = var_opis.get().strip()
+        p["jm"] = var_jm.get().strip() or "szt"
+        p["cena"] = var_cena.get().strip()
+        etykieta = var_rodzaj.get()
+        p["rodzaj"] = next((k for k, o in RODZAJE if o == etykieta), "towar")
+        odswiez_tabele()
+
+    def z_listy_do_formularza(_e=None):
+        wyb = tabela.selection() if tabela else ()
+        if not wyb:
+            return
+        if len(wyb) > 1:
+            # Wiele zaznaczonych = wybor do ZALOZENIA, nie do edycji —
+            # pola zostaja przy ostatnio edytowanej pozycji.
+            status.config(text="Zaznaczono %d pozycji do założenia"
+                               % len(wyb), fg="#7f8c8d")
+            return
+        i = int(wyb[0])
+        biezacy["i"] = i
+        p = lista[i]
+        # Bez odsylania do listy w trakcie podstawiania — inaczej `trace`
+        # nadpisalby WLASNIE wybrany wiersz danymi poprzedniego.
+        blokada["on"] = True
+        try:
+            var_symbol.set(p.get("symbol") or "")
+            var_nazwa.set(p.get("nazwa") or "")
+            var_opis.set(p.get("opis") or "")
+            var_jm.set(p.get("jm") or "szt")
+            var_cena.set(_txt_ceny(p.get("cena")))
+            var_rodzaj.set(_etykieta_rodzaju(p.get("rodzaj")))
+        finally:
+            blokada["on"] = False
+        status.config(text="Pozycja %d z %d" % (i + 1, len(lista)),
+                      fg="#7f8c8d")
+
+    if tabela is not None:
+        for v in (var_symbol, var_nazwa, var_opis, var_jm, var_cena,
+                  var_rodzaj):
+            v.trace_add("write", z_formularza_do_listy)
+        tabela.bind("<<TreeviewSelect>>", z_listy_do_formularza)
+        odswiez_tabele()
+        tabela.selection_set("0")
+
+    def zaloz_wszystkie():
+        """Zaklada ZAZNACZONE pozycje (albo cala liste, gdy nic nie zawezono).
+
+        Wynik kazdej widac w kolumnie „Stan": zielone = zalozona,
+        czerwone = blad. Juz zalozone sa pomijane, wiec przycisk mozna
+        kliknac drugi raz po poprawieniu bledow.
+        """
+        zazn = [int(i) for i in (tabela.selection() if tabela else ())]
+        # Jeden zaznaczony wiersz to normalny stan po klinieciu w tabele —
+        # nie traktujemy go jako „zawezenia do jednego".
+        wybrane = zazn if len(zazn) > 1 else list(range(len(lista)))
+        do_zrobienia = [i for i in wybrane
+                        if lista[i].get("tag") != "zalozona"]
+        if not do_zrobienia:
+            messagebox.showinfo(
+                "Kartoteki",
+                "Wybrane pozycje są już założone." if len(zazn) > 1
+                else "Wszystkie pozycje są już założone.", parent=dlg)
+            return
+        podglad = "\n".join(
+            "  %s  -  %s" % (lista[i].get("symbol") or "(brak symbolu)",
+                             lista[i].get("nazwa") or "")
+            for i in do_zrobienia[:12])
+        if len(do_zrobienia) > 12:
+            podglad += "\n  ... i %d dalszych" % (len(do_zrobienia) - 12)
+        if not messagebox.askyesno(
+                "Zapis do Subiekta",
+                "Baza PRODUKCYJNA.\n\nZa\u0142o\u017cy\u0107 %d %s "
+                "(%s):\n\n%s\n\n"
+                "Kartoteki nie da si\u0119 \u0142atwo usun\u0105\u0107."
+                % (len(do_zrobienia),
+                   _odmiana_kartotek(len(do_zrobienia)),
+                   "zaznaczone" if len(zazn) > 1 else "ca\u0142a lista",
+                   podglad),
+                parent=dlg, icon="warning", default="no"):
+            return
+
+        btn_zapisz.config(state=tk.DISABLED)
+        btn_wszystkie.config(state=tk.DISABLED)
+
+        def krok(nr):
+            if nr >= len(do_zrobienia):
+                btn_zapisz.config(state=tk.NORMAL)
+                btn_wszystkie.config(state=tk.NORMAL)
+                ile_ok = sum(1 for p in lista if p.get("tag") == "zalozona")
+                status.config(text="Gotowe: %d z %d" % (ile_ok, len(lista)),
+                              fg="#1e8449")
+                return
+            i = do_zrobienia[nr]
+            p = lista[i]
+            status.config(text="Zakladam %d/%d: %s..."
+                               % (nr + 1, len(do_zrobienia), p.get("symbol")),
+                          fg="#7f8c8d")
+            sym = (p.get("symbol") or "").strip()
+            if not sym:
+                p["tag"], p["stan"] = "blad", "brak symbolu"
+                odswiez_tabele()
+                dlg.after(10, lambda: krok(nr + 1))
+                return
+            surowa = str(p.get("cena") or "").strip()
+            try:
+                cena = float(surowa.replace(",", ".")) if surowa else None
+            except ValueError:
+                cena = None
+
+            def gotowe(w, err):
+                if err:
+                    p["tag"], p["stan"] = "blad", str(err)[:40]
+                else:
+                    stan = w.get("status")
+                    p["tag"] = ("zalozona" if stan in ("zalozona", "istnieje")
+                                else "blad")
+                    p["stan"] = {"zalozona": "zalozona",
+                                 "istnieje": "juz byla"}.get(
+                        stan, (w.get("szczegoly") or stan or "blad")[:40])
+                    if w.get("symbol"):
+                        p["symbol"] = w["symbol"]
+                    if po_zapisie and p["tag"] == "zalozona":
+                        po_zapisie(dict(p, status=stan))
+                odswiez_tabele()
+                dlg.after(10, lambda: krok(nr + 1))
+
+            w_tle(lambda: zaloz_kartoteke(
+                symbol=sym, nazwa=p.get("nazwa") or sym,
+                rodzaj=p.get("rodzaj") or "towar", jm=p.get("jm") or "szt",
+                cena=cena, opis=p.get("opis") or "", zapisz=True), gotowe)
+
+        krok(0)
+
     box = tk.Frame(dlg)
     box.pack(pady=(4, 12))
     tk.Button(box, text="🔍 Sprawdź", command=sprawdz, font=("Arial", 9),
@@ -318,9 +557,17 @@ def okno_nowa_kartoteka(parent, symbol="", nazwa="", rodzaj="towar", po_zapisie=
     btn_zapisz = tk.Button(box, text="💾 Załóż w Subiekcie", command=zapisz, bg="#e67e22",
                            fg="white", font=("Arial", 9, "bold"), padx=14, pady=3)
     btn_zapisz.pack(side=tk.LEFT, padx=4)
+    btn_wszystkie = tk.Button(box, text="\U0001f4da Załóż zaznaczone w Subiekcie",
+                              command=zaloz_wszystkie, bg="#2471a3",
+                              fg="white", font=("Arial", 9, "bold"),
+                              padx=14, pady=3)
+    if tabela is not None:
+        btn_wszystkie.pack(side=tk.LEFT, padx=4)
     tk.Button(box, text="Anuluj", command=dlg.destroy, font=("Arial", 9),
               padx=12, pady=3).pack(side=tk.LEFT, padx=4)
 
     ent_symbol.focus_set()
-    wysrodkuj(dlg, parent, 560, 380)
+    # Tabela potrzebuje miejsca — okno rosnie tylko w trybie wsadowym.
+    wysrodkuj(dlg, parent, 780 if tabela is not None else 560,
+              680 if tabela is not None else 380)
     return dlg
