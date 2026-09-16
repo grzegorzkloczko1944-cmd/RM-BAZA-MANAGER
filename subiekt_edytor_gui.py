@@ -281,6 +281,14 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self._dnd_aktywny = False # True dopiero po ruchu > prog
 
         self._buduj()
+        # ⚠️ KRZYZYK NA BELCE OKNA. Bez tego [X] omija `_anuluj()`
+        # i niszczy okno od razu — niezapisane zmiany przepadaly BEZ
+        # OSTRZEZENIA, mimo ze przycisk Anuluj i Esc o nie pytaly
+        # (16.09.2026).
+        self.protocol("WM_DELETE_WINDOW", self._anuluj)
+        # Dopiero teraz zmiany w modelu licza sie jako „niezapisane":
+        # rysowanie pustego drzewa przy starcie nia nie jest.
+        self._okno_gotowe = True
         # Jedno zaznaczenie na cale okno: niebieski = tabela z fokusem,
         # szary = pozostale (16.09.2026).
         self._wpnij_fokus_tabel()
@@ -731,11 +739,25 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
 
     def _anuluj(self):
         """Zamknięcie edytora — z ostrzeżeniem, jeśli są niezapisane zmiany."""
-        if self._zmienione and not messagebox.askyesno(
-                "Zamknąć edytor?",
-                "W edytorze są zmiany, których nie zapisano do Subiekta.\n\n"
-                "Zamknąć i porzucić je?", parent=self):
-            return
+        if self._zmienione:
+            # `default="no"` — Enter/Esc na tym oknie ma ZOSTAWIAC prace,
+            # a nie ja kasowac. Wymieniamy pozycje, zeby bylo widac, co
+            # dokladnie przepadnie.
+            niezapisane = [s for s, k in self.pozycje.items()
+                           if not k.w_subiekcie]
+            szczegoly = ""
+            if niezapisane:
+                lista = ", ".join(sorted(niezapisane)[:8])
+                szczegoly = ("\n\nNie ma ich jeszcze w Subiekcie (%d): %s%s"
+                             % (len(niezapisane), lista,
+                                " …" if len(niezapisane) > 8 else ""))
+            if not messagebox.askyesno(
+                    "Zamknąć edytor?",
+                    "W edytorze są zmiany, których NIE zapisano "
+                    "do Subiekta." + szczegoly
+                    + "\n\nZamknąć i porzucić je?",
+                    icon="warning", default="no", parent=self):
+                return
         self.destroy()
 
     def _panel_drzewo(self, rodzic):
@@ -1830,7 +1852,23 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
     def _dzieci(self, symbol):
         return [(d, il) for (r, d, il) in self.relacje if r == symbol]
 
-    def _odswiez_drzewo(self):
+    def _odswiez_drzewo(self, _bez_znacznika=False):
+        """Przerysowuje drzewo i ZNACZY model jako zmieniony.
+
+        ⚠️ To jest JEDYNE miejsce, w ktorym zapala sie `_zmienione`.
+        Wczesniej flage wpisywano recznie w pieciu funkcjach, a model
+        zmienialo dwanascie — wiec „+ TW", „Duplikuj", „Z pliku...", zmiana
+        symbolu czy ilosci skladnika NIE liczyly sie jako zmiana i edytor
+        zamykal sie bez ostrzezenia (16.09.2026).
+
+        `_bez_znacznika=True` tylko dla odswiezenia PO ZAPISIE, gdzie flaga
+        zostala wlasnie wygaszona.
+        """
+        if not _bez_znacznika and getattr(self, "_okno_gotowe", False):
+            self._zmienione = True
+        return self._rysuj_drzewo()
+
+    def _rysuj_drzewo(self):
         for w in self.tree.get_children(""):
             self.tree.delete(w)
         for sym in self.korzenie:
@@ -3734,7 +3772,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             if tylko_sym:
                 if tylko_sym in self.pozycje:
                     self.pozycje[tylko_sym].w_subiekcie = True
-                self._odswiez_drzewo()
+                # Zapis POJEDYNCZEJ pozycji nie gasi flagi (reszta drzewa
+                # dalej jest niezapisana), ale samo przerysowanie tez nie
+                # moze jej zapalac na nowo.
+                self._odswiez_drzewo(_bez_znacznika=True)
                 self._zaznacz_w_drzewie(tylko_sym)
                 self.status.config(
                     text=f"✔ Zapisano do Subiekta: {tylko_sym}", fg=OK_ZIELONY)
@@ -3742,7 +3783,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             for sym in self._osadzone():
                 self.pozycje[sym].w_subiekcie = True
             self._zmienione = False
-            self._odswiez_drzewo()
+            self._odswiez_drzewo(_bez_znacznika=True)
             self.status.config(
                 text=f"✔ Zapisano do Subiekta: założonych {wynik.get('zalozonych', 0)}, "
                      f"zmienionych {wynik.get('zmienionych', 0)}, "
