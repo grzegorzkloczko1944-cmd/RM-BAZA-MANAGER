@@ -80,3 +80,4 @@
 - [Dopasowanie kartotek — podpowiedzi](project_dopasowanie_podpowiedzi.md) — zakładka Podpowiedzi (fuzzy DO WYBORU, nigdy automat: 389 fałszywych par); przepisywanie pozycji BOM na symbol+nazwę z Subiekta; pułapki szerokości kolumn
 - [PLAN AUTOMATYKA](project_plan_automatyka.md) — NIE klonować MACHINES (WAREHOUSE to 99 rozsianych warunków, nie moduł); magazyn/pw/rw już działają, brakuje kartotek w Subiekcie; czeka na eksport ze schematów
 - [startfile w .spec odpalał RM_KOD](project_spec_startfile_rm_kod.md) — ⛔ nigdy `startfile(DISTPATH)` w .spec: Eksplorator uruchamiał RM_KOD.exe z dist, 152 procesy po jednym buildzie
+- [Znikające dyski = uśpienie komputera](project_dyski_znikaja_uspienie.md) — ⛔ NIE sieć, NIE poświadczenia, NIE backup_nic.bat: plan „Zrównoważony" usypiał po 30 min (System Idle), błąd 85 przy wybudzeniu; naprawa powercfg standby-timeout-ac 0
