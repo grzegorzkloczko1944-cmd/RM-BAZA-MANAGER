@@ -109,7 +109,7 @@ TYPY = [
     ("towar",    "TW",  "Towar handlowy",          "z kartoteki dostawcy",       "#d5f0dd"),
     ("usluga",   "US",  "Usługa",                  "nie wchodzi na stan",        "#eaecee"),
     ("zbiorcza", "ZB",  "Pozycja zbiorcza",        "jedna linia = wiele detali", "#f4ecf7"),
-    ("rysunek",  "RM",  "Detal z naszego rysunku", "numer rysunku RM, projekt",  "#d6eaf8"),
+    ("rysunek",  "RM",  "Rysunek RMPAK", "szukany po numerze rysunku",  "#d6eaf8"),
 ]
 #: klucz typu → skrót do kolumny „Typ" w tabeli pozycji.
 SKROT_TYPU = {t[0]: t[1] for t in TYPY}
@@ -134,16 +134,34 @@ DYMKI_TYPU = {
                  "zaśmiecającą się przy każdej kolejnej fakturze) i nie idzie\n"
                  "na PZ. Oznaczenie mówi: „ta linia nie ma odpowiednika\n"
                  "magazynowego i tak ma być” — licznik braków schodzi do zera."),
-    "rysunek": ("NASZ RYSUNEK — to NIE jest rodzaj kartoteki Subiekta.\n\n"
-                "Wasz detal zlecony kooperantowi, który wraca jako dostawa.\n"
-                "Tożsamością jest NUMER RYSUNKU, nie symbol dostawcy.\n"
-                "Przykład (AMB FV 45/07/2026): „013-100.30B Bok transportera”\n"
-                "— 5/5 numerów jest w BOM-ach projektów, 0/5 w kartotece.\n\n"
-                "Dlatego szukamy po numerze rysunku w BOM-ach (podpowiadamy\n"
-                "projekty) i zapisujemy do tabeli `mapowania`, a nie jako\n"
-                "powiązanie symbolu dostawcy w Subiekcie.\n\n"
-                "Kartoteka jest opcjonalna; jeśli ją wskażesz, w Subiekcie\n"
-                "pozostaje zwykłym TW albo KT — rodzaj bierze się stamtąd."),
+    "rysunek": ("Detal zlecony kooperantowi, który wraca jako dostawa.\n"
+                "Tożsamością jest NUMER RYSUNKU, nie symbol dostawcy — więc\n"
+                "szuka go w BOM-ach projektów, a nie w kartotece.\n"
+                "W Subiekcie kartoteka (jeśli jest) pozostaje zwykłym TW lub KT.\n"
+                "\n"
+                "Co daje zamiast TW:\n"
+                "\n"
+                "1. AUTOMAT TRAFIA. Numeru 013-100.30B nie ma w kartotece\n"
+                "   (AMB: 0/5), ale jest w BOM-ach (5/5). Przy TW ta pozycja\n"
+                "   zostałaby na zawsze „bez decyzji”.\n"
+                "\n"
+                "2. PODPOWIADA PROJEKT. Pole „Projekt (z BOM-ów)” pokazuje,\n"
+                "   gdzie ten rysunek występuje — 013-100.30B w sześciu\n"
+                "   projektach. Przy TW pole jest wyszarzone.\n"
+                "\n"
+                "3. MAPOWANIE DZIAŁA DLA KAŻDEGO DOSTAWCY. TW zapamiętuje\n"
+                "   symbol u JEDNEGO dostawcy (w Subiekcie); RM zapisuje\n"
+                "   numer rysunku → kartoteka w tabeli `mapowania`, z której\n"
+                "   korzysta cała RM_BAZA. Ten sam detal od AMB, kooperanta\n"
+                "   X i Y dopasuje się tak samo.\n"
+                "\n"
+                "4. NIE BLOKUJE PZ. Detal z rysunku bez kartoteki jest\n"
+                "   rozstrzygnięty — bo to normalne, że jej nie ma. Towar\n"
+                "   handlowy bez kartoteki to naprawdę brak decyzji.\n"
+                "\n"
+                "Kiedy RM nic nie daje: gdy detal MA kartotekę w Subiekcie\n"
+                "i bierze go zawsze od jednego kooperanta — wtedy TW\n"
+                "zadziała tak samo."),
 }
 
 #: Odznaki faktur w drzewie. „Rozstrzygnięta" celowo zamiast „Rozliczona"
