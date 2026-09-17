@@ -51,7 +51,7 @@ internal static class CommandDispatcher
         "kartoteka", "kartoteka-usun", "kartoteka-edytuj", "projekt", "zd", "zd-usun",
         "dostawcy", "progi", "rw", "pw", "termin", "symbole", "komplet-napraw", "magazyn-zaloz",
         "magazyn-usun", "projekt-cofnij", "kartoteki", "zk-poz-usun", "scal", "zk-nowe",
-        "migracja-uwagi",
+        "migracja-uwagi", "symbole-dostawcy",
     };
 
     /// <summary>
@@ -75,7 +75,7 @@ internal static class CommandDispatcher
         "progi", "wydruk", "projekt", "komplet", "komplet-napraw", "kartoteka-edytuj",
         "pola-wlasne", "magazyn-zaloz", "magazyn-usun", "pw", "projekt-cofnij",
         "kartoteki", "zapotrzebowanie-test", "zk-ilosci", "zk-poz-usun", "scal", "zk-nowe",
-        "migracja-uwagi", "wydanie-stan",
+        "migracja-uwagi", "wydanie-stan", "symbole-dostawcy",
     };
 
     public static bool Zna(string tryb) => Tryby.Contains(tryb, StringComparer.OrdinalIgnoreCase);
@@ -191,6 +191,12 @@ internal static class CommandDispatcher
             case "dostawcy":
                 if (k.PlanPath is null) return Brak("dostawcy: brak --plan=plik.json");
                 return Dostawcy.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
+
+            // Symbol dostawcy -> kartoteka. Sfera ma to wbudowane
+            // (DaneAsortymentuDlaPodmiotu), wiec NIE dorabiamy wlasnej tabeli.
+            case "symbole-dostawcy":
+                if (k.PlanPath is null) return Brak("symbole-dostawcy: brak --plan=plik.json");
+                return SymboleDostawcy.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
 
             case "zd":
                 if (k.PlanPath is null) return Brak("zd: brak --plan=plik.json");

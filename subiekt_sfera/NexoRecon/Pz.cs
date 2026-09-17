@@ -155,7 +155,49 @@ internal static class Pz
         if (outPath is null) Console.WriteLine(json);
         else File.WriteAllText(outPath, json, new UTF8Encoding(false));
         Console.WriteLine($"PZ odczytanych: {wynik.Count} — NIC NIE ZAPISANO.");
+
+        SymboleDostawcow(sfera);
         return 0;
+    }
+
+    /// <summary>
+    /// POMIAR (17.09.2026): czy Subiekt JUZ pamieta symbole dostawcow.
+    ///
+    /// `DaneAsortymentuDlaPodmiotu.Symbol` = „Symbol asortymentu dla powiazanego
+    /// podmiotu", a `IAsortymentyDane.WyszukajPoSymboluDostawcy(symbol, podmiot)`
+    /// wyszukuje po nim asortyment. Czyli para (dostawca, symbol) -> kartoteka
+    /// jest WBUDOWANA w Sfere i wlasnej tabeli na to NIE trzeba.
+    ///
+    /// Pytanie, na ktore odpowiada ten pomiar, brzmi wiec nie „czy da sie",
+    /// tylko „ile tych powiazan realnie jest" — bo puste pole znaczy, ze
+    /// mechanizm istnieje, ale nikt go dotad nie wypelnial.
+    /// </summary>
+    static void SymboleDostawcow(Uchwyt sfera)
+    {
+        try
+        {
+            var pary = sfera.Asortymenty().Dane.Wszystkie()
+                .SelectMany(a => a.DaneAsortymentuDlaPodmiotow.Select(d => new
+                {
+                    Kartoteka = a.Symbol,
+                    Dostawca = d.Podmiot.NazwaSkrocona,
+                    SymbolDostawcy = d.Symbol,
+                    NazwaUDostawcy = d.Nazwa,
+                }))
+                .ToList();
+
+            var zSymbolem = pary.Where(p => !string.IsNullOrWhiteSpace(p.SymbolDostawcy)).ToList();
+            Console.WriteLine();
+            Console.WriteLine("=== SYMBOLE DOSTAWCOW (DaneAsortymentuDlaPodmiotu) ===");
+            Console.WriteLine($"  powiazan asortyment-dostawca: {pary.Count}");
+            Console.WriteLine($"  z wypelnionym symbolem:       {zSymbolem.Count}");
+            foreach (var p in zSymbolem.Take(15))
+                Console.WriteLine($"    {p.Dostawca,-28} {p.SymbolDostawcy,-22} -> {p.Kartoteka}");
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine("SYMBOLE DOSTAWCOW: nie udalo sie odczytac — " + e.Message);
+        }
     }
 
     static string Data(Dokument d) => Bezp(() =>
