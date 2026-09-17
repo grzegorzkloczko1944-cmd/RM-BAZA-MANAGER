@@ -935,6 +935,8 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
             self.lbl_most.config(text="⚠ most niedostępny — kartoteka z cache", fg="#f5b041")
             self.status.config(text=f"Most niedostępny: {blad}" if blad else "Most niedostępny.")
             self._przelicz_odznaki()
+            if self._biezaca:
+                self._ustaw_kontrahenta(getattr(self, "_nip", ""))   # „—", nie „sprawdzam…"
             return
         self.most_ok = w.get("most", False)
         if not self.most_ok:
@@ -961,6 +963,9 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         self._przelicz_odznaki()
         if self._biezaca:
             self._dopasuj_biezaca()
+            # Faktura wybrana PRZED odpowiedzią mostu miała „Kontrahent
+            # w Subiekcie: sprawdzam…" na zawsze (zrzut 18.09.2026).
+            self._ustaw_kontrahenta(getattr(self, "_nip", ""))
             # Użytkownik mógł już kliknąć pozycję, zanim most odpowiedział —
             # panel ma dostać kartotekę z powiązania, nie zostać „pusty".
             if self._wybrany_lp is not None and self._wiersz_lp(self._wybrany_lp) is not None:
