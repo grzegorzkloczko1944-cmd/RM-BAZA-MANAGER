@@ -85,3 +85,4 @@
 - [Most aktualizuje się sam przy starcie](project_most_auto_aktualizacja.md) — ⛔ BOM w `wersja.json` uciszał CAŁE wykrywanie (utf-8-sig!); automat tylko przy starcie, nie w trakcie pracy
 - [Zrywane połączenie — brama znika pierwsza](project_diagnostyka_resetuje_karte.md) — ⛔ NIE klikać „Zdiagnozuj i napraw": msdt RESETUJE kartę i pogłębia; przyczyna w routerze/kablu, nie w Windows
 - [Archiwum KSeF — kolumny pozycji i brak dziennika](project_ksef_archiwum_kolumny.md) — FV_KSEF bez _server_request_log blokowała KAŻDY zapis; pola pozycji różne u każdego dostawcy
+- [Obieg przyjęć: DOSTAWA → PZ → kontrola FZ](project_obieg_przyjec_dostawa_pz.md) — faktura kontroluje, nie tworzy; PZ nie powstaje bez kartoteki; model wiele-do-wielu
