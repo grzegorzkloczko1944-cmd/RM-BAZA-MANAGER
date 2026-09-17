@@ -399,6 +399,15 @@ class Serwer:
                 "baza": self.baza,
             }}
 
+        # Indeks rysunkow z BOM-ow: skanuje PLIKI projektow, nie baze serwera,
+        # wiec nie przechodzi przez `wykonaj_odczyt`. Robi to SERWER, bo ma
+        # bazy lokalnie — przelot po 92 projektach trwa u niego <1 s, podczas
+        # gdy stacja czytalaby je przez SMB (17.09.2026).
+        if cmd == "indeks-rysunkow":
+            dane = self._indeks_rysunkow(bool(args.get("odswiez")))
+            self.odczytow += 1
+            return {"ok": True, "data": dane}
+
         if cmd == "master-read":
             operacja = args.get("operation")
             wiersze = ops.wykonaj_odczyt(self._polaczenie(operacja), operacja,
@@ -410,6 +419,62 @@ class Serwer:
             return self._zapis(cmd, args, kto, rid)
 
         raise ops.BladOperacji("nieznana komenda: %r" % (cmd,))
+
+    #: Indeks rysunkow: {numer: [{projekt, nazwa, ilosc}]} + znacznik czasu.
+    #: Trzymany w pamieci procesu — 6712 wierszy to ~0,45 MB, a przelot trwa
+    #: ulamek sekundy, wiec plik na dysku bylby tylko dodatkowym stanem do
+    #: uniewaznienia.
+    _indeks_cache = None
+    _indeks_czas = 0.0
+    #: Po tylu sekundach indeks przeliczamy sam z siebie. Projekty zmieniaja
+    #: sie przez caly dzien, ale pojedyncza pozycja rzadko decyduje o tym,
+    #: czy dostawe da sie powiazac z ZD.
+    INDEKS_WAZNY_S = 600
+
+    def _indeks_rysunkow(self, odswiez=False):
+        """{"rysunki": {numer: [{projekt, nazwa, ilosc}]}, "zbudowany": ts, "projektow": n}
+
+        Numery rysunku trzymamy DOKLADNIE tak, jak stoja w BOM-ie — bez
+        podnoszenia wielkosci liter. `013-100.30a` i `013-100.30B` to ROZNE
+        detale i zlanie ich zepsuloby powiazanie dostawy z ZD.
+        """
+        teraz = time.time()
+        if (not odswiez and self._indeks_cache is not None
+                and teraz - self._indeks_czas < self.INDEKS_WAZNY_S):
+            return {"rysunki": self._indeks_cache, "zbudowany": self._indeks_czas,
+                    "projektow": len({w["projekt"] for l in self._indeks_cache.values() for w in l}),
+                    "z_cache": True}
+
+        katalog = os.path.join(os.path.dirname(self.baza), "Projekty", "RM_BAZA_projects")
+        rysunki, projektow = {}, 0
+        if os.path.isdir(katalog):
+            for nazwa in sorted(os.listdir(katalog)):
+                if not (nazwa.startswith("project_") and nazwa.endswith(".sqlite")):
+                    continue
+                klucz = nazwa[len("project_"):-len(".sqlite")]
+                sciezka = os.path.join(katalog, nazwa)
+                try:
+                    con = sqlite3.connect(
+                        "file:" + sciezka.replace(os.sep, "/") + "?mode=ro", uri=True)
+                    for numer, opis, ilosc in con.execute(
+                            "SELECT COALESCE(work_drawing_no, src_drawing_no),"
+                            "       COALESCE(work_name, src_name),"
+                            "       COALESCE(order_qty, work_qty, src_qty)"
+                            "  FROM items"
+                            " WHERE COALESCE(work_drawing_no, src_drawing_no) IS NOT NULL"
+                            "   AND COALESCE(work_drawing_no, src_drawing_no) != ''"):
+                        rysunki.setdefault((numer or "").strip(), []).append(
+                            {"projekt": klucz, "nazwa": opis or "", "ilosc": ilosc})
+                    con.close()
+                    projektow += 1
+                except sqlite3.Error:
+                    # Baza bez tabeli `items` (np. swiezo zalozona) albo
+                    # uszkodzona — pomijamy, jedna nie moze zablokowac reszty.
+                    continue
+
+        self._indeks_cache, self._indeks_czas = rysunki, teraz
+        return {"rysunki": rysunki, "zbudowany": teraz, "projektow": projektow,
+                "z_cache": False}
 
     def _zapis(self, cmd, args, kto, rid):
         """Zapis + wpis do dziennika w JEDNEJ transakcji (§3)."""

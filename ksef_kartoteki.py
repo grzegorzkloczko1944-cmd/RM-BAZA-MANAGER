@@ -88,12 +88,25 @@ _SAM_RYSUNEK = re.compile(r"^[A-Z0-9]{2,}-[0-9]{2,}\.[0-9]+[A-Za-z]{0,2}$")
 def jest_numerem_rysunku(s):
     r"""Czy tekst wygląda na numer rysunku RM (`027-200.01`, `2602-100.41X`).
 
-    ⚠️ Porównania numerów rysunku robimy Z ZACHOWANIEM WIELKOŚCI LITER:
-    `013-100.30a` i `013-100.30B` to RÓŻNE detale, a normalizacja do wielkich
-    liter by je zlepiła. To ten sam rodzaj błędu, przed którym ostrzega
-    nagłówek `subiekt_podobne.py`.
+    ⚠️ Porównania numerów rysunku są NIEWRAŻLIWE NA WIELKOŚĆ LITER — zmierzone
+    17.09.2026 na 4554 numerach z 91 BOM-ów: różnicę niesie litera jako taka
+    (`.30a` / `.30b` / `.30c` to kolejne długości boku transportera), ale NIE
+    jej wielkość. Jedyna kolizja po podniesieniu do wielkich liter to
+    `Uszczelka` / `uszczelka`, czyli nie numer rysunku.
+
+    Faktura AMB pisze `013-100.30B`, BOM ma `013-100.30b` — to TEN SAM detal
+    i rozróżnianie ich gubiłoby 6 z 6 trafień.
     """
     return bool(_SAM_RYSUNEK.match((s or "").strip()))
+
+
+def klucz_rysunku(s):
+    """Numer rysunku sprowadzony do porównywalnej postaci (wielkie litery).
+
+    Patrz `jest_numerem_rysunku` — wielkość liter jest w tych numerach
+    przypadkowa, a `a`/`b`/`c` na końcu i tak zostają rozróżnione.
+    """
+    return (s or "").strip().upper()
 
 
 def rozpoznaj_identyfikator(pozycja):

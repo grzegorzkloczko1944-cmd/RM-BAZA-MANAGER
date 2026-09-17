@@ -182,9 +182,15 @@ QUAY: tam symbole są w kartotece (11/55), ale w BOM-ach ich nie ma.
 ⚠️ **Ten sam rysunek występuje w WIELU projektach** (`013-100.30B` w sześciu),
 więc systemu nie da się zmusić do wskazania ZD — wybiera człowiek.
 
-⚠️ **Numery rysunku porównujemy Z ZACHOWANIEM WIELKOŚCI LITER.**
-`013-100.30a` i `013-100.30B` to RÓŻNE detale; normalizacja do wielkich liter
-by je zlepiła.
+⚠️ **Numery rysunku porównujemy IGNORUJĄC WIELKOŚĆ LITER** — sprawdzone na
+4554 numerach z 91 BOM-ów (17.09.2026). Faktura AMB pisze `013-100.30B`, BOM ma
+`013-100.30b`: to TEN SAM detal, a rozróżnianie gubiło 6 z 6 trafień. Różnicę
+niesie litera jako taka (`.30a` / `.30b` / `.30c` = kolejne długości boku
+transportera), nie jej wielkość. Jedyna kolizja po `upper()` na 4554 numerach
+to `Uszczelka` / `uszczelka` — czyli nie numer rysunku.
+
+⚠️ Pierwotnie założyłem odwrotnie („zachować wielkość liter") i było to BŁĘDNE —
+pomiar to obalił.
 
 **Bez nowej tabeli:** `mapowania` (klucz `numer_rysunku`) jest dokładnie do
 tego; `mapowania_dostawcow` do cudzych symboli; `dostawa_zd_pozycje` do

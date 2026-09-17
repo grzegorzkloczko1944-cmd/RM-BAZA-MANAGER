@@ -280,6 +280,22 @@ def master_read(operation, params=None, timeout=TIMEOUT_S):
     return dane.get("rows") or []
 
 
+def indeks_rysunkow(odswiez=False, timeout=60):
+    """{"rysunki": {numer: [{projekt, nazwa, ilosc}]}, "zbudowany", "projektow"}.
+
+    Numery rysunku ze WSZYSTKICH BOM-ow projektowych — do wskazania, z ktorego
+    ZD pochodzi pozycja dostawy. Buduje SERWER, bo ma bazy lokalnie: przelot
+    po 92 projektach trwa u niego ulamek sekundy, a stacja czytalaby je przez
+    SMB. Wynik trzyma w pamieci przez 10 minut; `odswiez=True` wymusza
+    przeliczenie.
+
+    ⚠️ Numery porownywac Z ZACHOWANIEM WIELKOSCI LITER — `013-100.30a`
+    i `013-100.30B` to ROZNE detale.
+    """
+    return zapytaj("indeks-rysunkow", {"odswiez": bool(odswiez)},
+                   request_id=str(uuid.uuid4()), timeout=timeout)
+
+
 def master_exec(operation, params=None, request_id=None, timeout=TIMEOUT_S):
     """Pojedynczy zapis. Zwraca {'rowcount', 'lastrowid'}.
 
