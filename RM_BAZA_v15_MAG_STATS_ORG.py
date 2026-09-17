@@ -31622,6 +31622,22 @@ class MainWindow(tk.Tk):
             messagebox.showerror("Faktury z KSeF",
                                  f"Nie udało się otworzyć okna:\n{e}", parent=self)
 
+    def open_subiekt_dostawa(self):
+        """Okno „Przyjęcie dostawy" (panel SUBIEKT): DOSTAWA → PZ.
+
+        Towar wchodzi na stan, gdy PRZYJDZIE — nie gdy przyjdzie faktura.
+        Faktura (okno Faktury z KSeF) tylko kontroluje przyjęcia po numerze WZ.
+        Nie wymaga wybranego projektu.
+        """
+        try:
+            import subiekt_dostawa_gui
+            subiekt_dostawa_gui.open_window(self)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Przyjęcie dostawy",
+                                 f"Nie udało się otworzyć okna:\n{e}", parent=self)
+
     def open_subiekt_zlozenia(self):
         """Okno „Złożenia projektu" (menu 📦 SUBIEKT). Tylko odczyt.
 

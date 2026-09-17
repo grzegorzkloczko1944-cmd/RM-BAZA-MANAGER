@@ -144,6 +144,11 @@ def _przelicz_dokumenty(data):
             # Projekt pozycji z Uwag ZK, którą realizuje — „2632, 3000" gdy
             # jedno ZD zbiera detale z kilku projektów. Tylko przy ZD.
             "projekt": p.get("Projekt") or "",
+            # Id pozycji i ilość DO REALIZACJI — dla okna przyjęcia dostawy,
+            # które wskazuje Sferze konkretne pozycje ZD do przyjęcia
+            # (WypelnijNaPodstawieZD). Stare mosty ich nie zwracają → 0.
+            "id": int(p.get("Id") or 0),
+            "do_realizacji": float(p.get("DoRealizacji") or 0),
         } for p in (d.get("Pozycje") or [])],
     } for d in data.get("dokumenty", [])]
 

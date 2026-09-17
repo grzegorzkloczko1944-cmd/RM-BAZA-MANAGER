@@ -110,6 +110,9 @@ internal static class Dokumenty
                         // metody wyceny rozchodu, więc czytamy, a nie ustawiamy.
                         KosztJedn = p.JednostkowyKosztMagazynowy,
                         Koszt = p.KosztMagazynowy,
+                        // Id pozycji — okno przyjęcia dostawy wskazuje nim
+                        // Sferze, które pozycje ZD przyjąć (WypelnijNaPodstawieZD).
+                        p.Id,
                         Pozycja = p,        // do ProjektZk() przy ZD
                     }),
                 })
@@ -141,7 +144,13 @@ internal static class Dokumenty
                         czyZd ? Zapotrzebowanie.ProjektZk(p.Pozycja) : "",
                         decimal.Round(p.KosztJedn, 2),
                         decimal.Round(p.Koszt, 2),
-                        (p.Opis ?? "").Trim()));
+                        (p.Opis ?? "").Trim(),
+                        p.Id,
+                        // Ile z pozycji ZD zostało do przyjęcia. Czytane PO
+                        // materializacji z encji (nie w projekcji EF) — gdyby
+                        // Sfera liczyła to pole, a nie trzymała w kolumnie,
+                        // nieprzetłumaczalne wyrażenie wywaliłoby cały tryb.
+                        czyZd ? DoRealizacji(p.Pozycja, p.Ilosc) : 0m));
                 }
 
                 wynik.Add(new Dok(
@@ -193,6 +202,15 @@ internal static class Dokumenty
 
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
 
+    /// Ilość do realizacji pozycji ZD; gdy pole niedostępne — cała ilość
+    /// (lepiej pokazać „nic nie przyjęto" niż zero i ukryć pozycję).
+    static decimal DoRealizacji(object poz, decimal calosc)
+    {
+        // `IloscDoRealizacji` to OBIEKT — liczba siedzi w `PozostalaIlosc`.
+        try { return (decimal)((dynamic)poz).IloscDoRealizacji.PozostalaIlosc; }
+        catch { return calosc; }
+    }
+
     internal record PozDok(string Symbol, string Nazwa, decimal Ilosc, string Jm,
                            decimal Cena, string Projekt,
                            // Koszt magazynowy: dla PW/RW/WZ to ON niesie wartość,
@@ -202,7 +220,11 @@ internal static class Dokumenty
                            // Opis z kartoteki asortymentu — dopisany na KOŃCU,
                            // żeby nie przesunąć argumentów pozycyjnych w już
                            // istniejących wywołaniach.
-                           string Opis = "");
+                           string Opis = "",
+                           // Id pozycji i ilość do realizacji (tylko ZD) — dla
+                           // okna przyjęcia dostawy. Też na końcu, z tego
+                           // samego powodu.
+                           int Id = 0, decimal DoRealizacji = 0);
 
     /// <param name="Id">Trwały klucz dokumentu — w odróżnieniu od Numer,
     /// którego Subiekt używa ponownie po usunięciu (patrz komentarz przy

@@ -51,7 +51,7 @@ internal static class CommandDispatcher
         "kartoteka", "kartoteka-usun", "kartoteka-edytuj", "projekt", "zd", "zd-usun",
         "dostawcy", "progi", "rw", "pw", "termin", "symbole", "komplet-napraw", "magazyn-zaloz",
         "magazyn-usun", "projekt-cofnij", "kartoteki", "zk-poz-usun", "scal", "zk-nowe",
-        "migracja-uwagi", "symbole-dostawcy",
+        "migracja-uwagi", "symbole-dostawcy", "pz-utworz",
     };
 
     /// <summary>
@@ -77,7 +77,7 @@ internal static class CommandDispatcher
         "progi", "wydruk", "projekt", "komplet", "komplet-napraw", "kartoteka-edytuj",
         "pola-wlasne", "magazyn-zaloz", "magazyn-usun", "pw", "projekt-cofnij",
         "kartoteki", "zapotrzebowanie-test", "zk-ilosci", "zk-poz-usun", "scal", "zk-nowe",
-        "migracja-uwagi", "wydanie-stan", "symbole-dostawcy",
+        "migracja-uwagi", "wydanie-stan", "symbole-dostawcy", "pz-utworz",
     };
 
     public static bool Zna(string tryb) => Tryby.Contains(tryb, StringComparer.OrdinalIgnoreCase);
@@ -196,6 +196,12 @@ internal static class CommandDispatcher
 
             // Symbol dostawcy -> kartoteka. Sfera ma to wbudowane
             // (DaneAsortymentuDlaPodmiotu), wiec NIE dorabiamy wlasnej tabeli.
+            // PRZYJECIE ZEWNETRZNE z dostawy — realizuje pozycje ZD przez
+            // WypelnijNaPodstawieZD, zeby powiazania ZD↔PZ trzymal Subiekt.
+            case "pz-utworz":
+                if (k.PlanPath is null) return Brak("pz-utworz: brak --plan=plik.json");
+                return PzUtworz.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
+
             // Bez planu = ODCZYT listy istniejacych powiazan (okno faktur).
             case "symbole-dostawcy":
                 return k.PlanPath is null

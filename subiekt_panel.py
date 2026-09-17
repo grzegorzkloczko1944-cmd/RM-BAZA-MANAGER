@@ -370,6 +370,11 @@ class PanelSubiekt(tk.Toplevel):
                 # w archiwum faktur. Stare archiwum zostaje w menu KSeF.
                 ("🧾", "Faktury z KSeF", "pozycje → kartoteki, decyzje",
                  "zapis", "open_subiekt_faktury", None),
+                # Przyjęcie towaru: DOSTAWA → PZ w Subiekcie. Z ZD dostawcy
+                # (realizacja) albo pozycje spoza zamówienia. PZ jest
+                # nieodwracalne — stąd trójkąt.
+                ("📦", "Przyjęcie dostawy", "DOSTAWA → PZ, z ZD lub bez",
+                 "nieodwracalny", "open_subiekt_dostawa", None),
                 # Komplet nie trafia na żaden dokument (nie ma własnego stanu),
                 # więc w przeglądzie dokumentów go NIE MA — stąd osobne wejście.
                 ("🧩", "Złożenia projektu", "komplety w Subiekcie: skład, sieroty",

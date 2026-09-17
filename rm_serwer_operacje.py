@@ -2943,6 +2943,57 @@ def wykonaj_zapis(con, nazwa, params=None):
     return {"rowcount": kur.rowcount, "lastrowid": kur.lastrowid}
 
 
+#: DOSTAWY — zdarzenie operacyjne przyjęcia towaru (obieg: ZD → DOSTAWA → PZ,
+#: patrz pamiec/project_obieg_przyjec_dostawa_pz.md). To NIE jest kopia
+#: relacji dokumentów Subiekta (te trzyma Sfera: PZ realizuje ZD przez
+#: WypelnijNaPodstawieZD). DOSTAWA opisuje, CO fizycznie przyszło, kiedy,
+#: z jakim WZ i kto odebrał; `pz_numer`/`pz_id` to WYNIK, nic więcej.
+#:
+#: Uproszczenie względem notatki: zamiast osobnej tabeli `dostawa_zd_pozycje`
+#: (wiele-do-wielu) linia dostawy niesie `zd_id`/`zd_pozycja_id` wprost —
+#: jedna linia przyjęcia realizuje jedną pozycję ZD (albo żadną). 100 szt.
+#: z ZD przychodzące 40+35+25 to trzy dostawy, każda z własną linią.
+#: `zrodlo_przyjecia`: NORMALNE | REKONSTRUKCJA_HISTORYCZNA (odtwarzanie
+#: FZ, które nigdy nie weszły na stan) — żeby za rok nikt nie uznał
+#: rekonstrukcji za standardowy proces.
+MIGRACJE_DOSTAWY = [
+    ("""CREATE TABLE IF NOT EXISTS dostawy (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            supplier_id         INTEGER,
+            nip                 TEXT,
+            dostawca            TEXT,
+            data_przyjecia      TEXT,
+            identyfikator_wlasny TEXT,
+            nr_wz_dostawcy      TEXT,
+            nr_zamowienia       TEXT,
+            magazyn             TEXT,
+            pz_numer            TEXT,
+            pz_id               INTEGER,
+            status              TEXT,
+            zrodlo_przyjecia    TEXT DEFAULT 'NORMALNE',
+            uwagi               TEXT,
+            kto                 TEXT,
+            kiedy               TEXT
+        )""", None),
+    ("""CREATE TABLE IF NOT EXISTS dostawy_pozycje (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            dostawa_id      INTEGER NOT NULL,
+            symbol          TEXT,
+            nazwa           TEXT,
+            asortyment_id   INTEGER,
+            ilosc           REAL,
+            jednostka       TEXT,
+            cena            REAL,
+            zd_numer        TEXT,
+            zd_id           INTEGER,
+            zd_pozycja_id   INTEGER,
+            ilosc_zd        REAL
+        )""", None),
+    ("CREATE INDEX IF NOT EXISTS idx_dostawy_poz ON dostawy_pozycje(dostawa_id)", None),
+    ("CREATE INDEX IF NOT EXISTS idx_dostawy_nip ON dostawy(nip)", None),
+]
+
+
 def zastosuj_migracje(con):
     """Schemat mastera do bieżącej wersji. Wykonuje TYLKO właściciel pliku.
 
@@ -2950,7 +3001,7 @@ def zastosuj_migracje(con):
     sprawdzeniem kolumny. Zwraca listę tego, co faktycznie dołożono.
     """
     zrobione = []
-    for sql, warunek in MIGRACJE + MIGRACJE_RFQ:
+    for sql, warunek in MIGRACJE + MIGRACJE_RFQ + MIGRACJE_DOSTAWY:
         if warunek is not None:
             tabela, kolumna = warunek
             try:
@@ -2970,6 +3021,55 @@ def zastosuj_migracje(con):
     if zrobione:
         con.commit()
     return zrobione
+
+
+# ── operacje dostaw (master) ─────────────────────────────────────────────
+ODCZYT.update({
+    "dostawy-lista": (
+        "SELECT id, supplier_id, nip, dostawca, data_przyjecia, identyfikator_wlasny,"
+        "       nr_wz_dostawcy, nr_zamowienia, magazyn, pz_numer, pz_id, status,"
+        "       zrodlo_przyjecia, uwagi, kto, kiedy,"
+        "       (SELECT COUNT(*) FROM dostawy_pozycje p WHERE p.dostawa_id = dostawy.id) AS pozycji"
+        "  FROM dostawy ORDER BY data_przyjecia DESC, id DESC",
+        [],
+    ),
+    "dostawy-pozycje": (
+        "SELECT id, symbol, nazwa, asortyment_id, ilosc, jednostka, cena,"
+        "       zd_numer, zd_id, zd_pozycja_id, ilosc_zd"
+        "  FROM dostawy_pozycje WHERE dostawa_id = ? ORDER BY id",
+        ["dostawa_id"],
+    ),
+    # Ile z danej pozycji ZD JUŻ przyjęto naszymi dostawami — zapas na wypadek,
+    # gdyby most nie zwrócił IloscDoRealizacji (stara binarka).
+    "dostawy-przyjete-z-zd": (
+        "SELECT zd_pozycja_id, SUM(ilosc) AS przyjeto FROM dostawy_pozycje"
+        " WHERE zd_id = ? AND zd_pozycja_id IS NOT NULL GROUP BY zd_pozycja_id",
+        ["zd_id"],
+    ),
+})
+
+ZAPIS.update({
+    "dostawa-zapisz": (
+        "INSERT INTO dostawy (supplier_id, nip, dostawca, data_przyjecia, identyfikator_wlasny,"
+        "  nr_wz_dostawcy, nr_zamowienia, magazyn, status, zrodlo_przyjecia, uwagi, kto, kiedy)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ["supplier_id", "nip", "dostawca", "data_przyjecia", "identyfikator_wlasny",
+         "nr_wz_dostawcy", "nr_zamowienia", "magazyn", "status", "zrodlo_przyjecia",
+         "uwagi", "kto", "kiedy"],
+    ),
+    "dostawa-pozycja-zapisz": (
+        "INSERT INTO dostawy_pozycje (dostawa_id, symbol, nazwa, asortyment_id, ilosc,"
+        "  jednostka, cena, zd_numer, zd_id, zd_pozycja_id, ilosc_zd)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ["dostawa_id", "symbol", "nazwa", "asortyment_id", "ilosc", "jednostka", "cena",
+         "zd_numer", "zd_id", "zd_pozycja_id", "ilosc_zd"],
+    ),
+    # Wynik przyjęcia: numer i Id PZ z Subiekta albo status błędu.
+    "dostawa-pz-ustaw": (
+        "UPDATE dostawy SET pz_numer = ?, pz_id = ?, status = ? WHERE id = ?",
+        ["pz_numer", "pz_id", "status", "id"],
+    ),
+})
 
 
 def zastosuj_migracje_ksef(con):

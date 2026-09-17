@@ -89,3 +89,4 @@
 - [Okno faktur KSeF — stan prac 17.09.2026](project_ksef_okno_stan_17_09.md) — PUNKT WZNOWIENIA: okno nie wygląda jak makieta, co działa, co wdrożone, plan dalej
 - [Symbole dostawcy w Sferze](project_symbole_dostawcy_w_sferze.md) — para (dostawca, symbol) JEST w Subiekcie (DaneAsortymentuDlaPodmiotu), nie dorabiac tabeli; Rola=2, Waluta wymagana, Add przed polami
 - [Okno Faktury z KSeF — WDROŻONE](project_ksef_okno_faktur_wdrozone.md) — ksef_faktury_gui.py, kafel 🧾; decyzje: Subiekt (symbol dostawcy) / mapowania (rysunek) / FV_KSEF.pozycje.decyzja; serwer wdrażać razem; ubicie serwera zamyka RM_BAZA także na M-OLD
+- [Przyjęcie dostawy → PZ — WDROŻONE](project_przyjecie_dostawy_pz.md) — subiekt_dostawa_gui.py, kafel 📦; PZ przez WypelnijNaPodstawieZD (Subiekt trzyma realizację), tabele dostawy na masterze; pułapki: IloscDoRealizacji.PozostalaIlosc, dynamic Utworz, snake_case w planie
