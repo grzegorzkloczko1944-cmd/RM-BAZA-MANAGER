@@ -59,10 +59,12 @@ internal static class CommandDispatcher
     /// tylko z planem — bez niego to czysty odczyt progow.
     /// </summary>
     public static bool CzyZapis(Komenda k) =>
-        // "progi" i "pola-wlasne" licza sie jako zapis TYLKO z planem —
-        // bez planu to czysty odczyt (progow / metadanych pol wlasnych).
+        // "progi", "pola-wlasne" i "symbole-dostawcy" licza sie jako zapis
+        // TYLKO z planem — bez planu to czysty odczyt (progow / metadanych
+        // pol wlasnych / listy powiazan symboli dostawcow).
         k.Tryb.Equals("progi", StringComparison.OrdinalIgnoreCase)
         || k.Tryb.Equals("pola-wlasne", StringComparison.OrdinalIgnoreCase)
+        || k.Tryb.Equals("symbole-dostawcy", StringComparison.OrdinalIgnoreCase)
             ? !string.IsNullOrWhiteSpace(k.PlanPath)
             : Zapisujace.Contains(k.Tryb);
 
@@ -194,9 +196,11 @@ internal static class CommandDispatcher
 
             // Symbol dostawcy -> kartoteka. Sfera ma to wbudowane
             // (DaneAsortymentuDlaPodmiotu), wiec NIE dorabiamy wlasnej tabeli.
+            // Bez planu = ODCZYT listy istniejacych powiazan (okno faktur).
             case "symbole-dostawcy":
-                if (k.PlanPath is null) return Brak("symbole-dostawcy: brak --plan=plik.json");
-                return SymboleDostawcy.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
+                return k.PlanPath is null
+                    ? SymboleDostawcy.Lista(sfera, k.OutPath)
+                    : SymboleDostawcy.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
 
             case "zd":
                 if (k.PlanPath is null) return Brak("zd: brak --plan=plik.json");

@@ -364,6 +364,12 @@ class PanelSubiekt(tk.Toplevel):
                  "zapis", "open_subiekt_zamowienia", "zapotrzebowanie"),
                 ("📚", "Przegląd dokumentów", "ZK / ZD / PW / RW / WZ",
                  "odczyt", "open_subiekt_dokumenty", "dokumenty"),
+                # Faktury zakupu z KSeF: pozycja po pozycji — czym jest, która
+                # kartoteka, który projekt. Zapisuje powiązania symboli
+                # dostawcy W SUBIEKCIE (DaneAsortymentuDlaPodmiotu) i decyzje
+                # w archiwum faktur. Stare archiwum zostaje w menu KSeF.
+                ("🧾", "Faktury z KSeF", "pozycje → kartoteki, decyzje",
+                 "zapis", "open_subiekt_faktury", None),
                 # Komplet nie trafia na żaden dokument (nie ma własnego stanu),
                 # więc w przeglądzie dokumentów go NIE MA — stąd osobne wejście.
                 ("🧩", "Złożenia projektu", "komplety w Subiekcie: skład, sieroty",

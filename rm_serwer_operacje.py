@@ -2982,7 +2982,8 @@ def zastosuj_migracje_ksef(con):
     """
     zrobione = []
     warunkowe = {_ALTER_POZYCJE_INDEKS: ("pozycje", "indeks"),
-                 _ALTER_POZYCJE_DODATKOWE: ("pozycje", "dodatkowe")}
+                 _ALTER_POZYCJE_DODATKOWE: ("pozycje", "dodatkowe"),
+                 _ALTER_POZYCJE_DECYZJA: ("pozycje", "decyzja")}
     for sql in MIGRACJE_KSEF:
         warunek = warunkowe.get(sql)
         if warunek is not None:
@@ -3035,6 +3036,12 @@ def znane_operacje():
 #: serwera (petla po MIGRACJE_KSEF nie lapie wyjatkow).
 _ALTER_POZYCJE_INDEKS = "ALTER TABLE pozycje ADD COLUMN indeks TEXT"
 _ALTER_POZYCJE_DODATKOWE = "ALTER TABLE pozycje ADD COLUMN dodatkowe TEXT"
+#: Decyzja czlowieka o pozycji faktury (okno „Faktury z KSeF", 17.09.2026):
+#: JSON {typ: towar|usluga|zbiorcza|rysunek, asortyment_id, symbol, nazwa,
+#: numer_rysunku, projekt, komentarz, kto, kiedy}. To dane RM_BAZA, nie
+#: Subiekta — powiazanie symbol dostawcy -> kartoteka idzie do Subiekta
+#: (DaneAsortymentuDlaPodmiotu), a TU zostaje tylko „czym jest ta linia".
+_ALTER_POZYCJE_DECYZJA = "ALTER TABLE pozycje ADD COLUMN decyzja TEXT"
 
 MIGRACJE_KSEF = [
     """CREATE TABLE IF NOT EXISTS faktury (
@@ -3068,6 +3075,7 @@ MIGRACJE_KSEF = [
     # (klucze nadaje wystawca, u kazdego inne — stad JSON, nie kolumny).
     _ALTER_POZYCJE_INDEKS,
     _ALTER_POZYCJE_DODATKOWE,
+    _ALTER_POZYCJE_DECYZJA,
     "CREATE INDEX IF NOT EXISTS idx_fakt_nip  ON faktury(sprzedawca_nip)",
     "CREATE INDEX IF NOT EXISTS idx_fakt_data ON faktury(data_wystawienia)",
     # Dziennik idempotencji — jak w pozostalych bazach serwera. FV_KSEF go
@@ -3110,9 +3118,17 @@ ODCZYT.update({
     ),
     "ksef-pozycje": (
         "SELECT nr_wiersza, nazwa, jednostka, ilosc, cena_netto, wartosc_netto,"
-        "       indeks, dodatkowe"
+        "       indeks, dodatkowe, decyzja"
         "  FROM pozycje WHERE ksef_number = ? ORDER BY nr_wiersza",
         ["ksef_number"],
+    ),
+    # Wszystkie pozycje naraz — okno faktur liczy z nich odznaki w drzewie
+    # („N bez decyzji") dla KAZDEJ faktury bez N osobnych zapytan.
+    "ksef-pozycje-wszystkie": (
+        "SELECT ksef_number, nr_wiersza, nazwa, jednostka, ilosc, indeks,"
+        "       dodatkowe, decyzja"
+        "  FROM pozycje ORDER BY ksef_number, nr_wiersza",
+        [],
     ),
     "ksef-xml": (
         "SELECT xml, plik FROM faktury WHERE ksef_number = ?",
@@ -3152,6 +3168,12 @@ ZAPIS.update({
     "ksef-pozycje-usun": (
         "DELETE FROM pozycje WHERE ksef_number = ?",
         ["ksef_number"],
+    ),
+    # Decyzja o pozycji — NULL cofa ja. UPDATE, nie INSERT OR REPLACE:
+    # nadpisanie calego wiersza skasowaloby indeks/dodatkowe.
+    "ksef-decyzja-zapisz": (
+        "UPDATE pozycje SET decyzja = ? WHERE ksef_number = ? AND nr_wiersza = ?",
+        ["decyzja", "ksef_number", "nr_wiersza"],
     ),
     "ksef-pozycja-zapisz": (
         "INSERT OR REPLACE INTO pozycje"

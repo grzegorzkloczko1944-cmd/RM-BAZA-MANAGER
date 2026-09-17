@@ -445,7 +445,13 @@ class Serwer:
                     "projektow": len({w["projekt"] for l in self._indeks_cache.values() for w in l}),
                     "z_cache": True}
 
-        katalog = os.path.join(os.path.dirname(self.baza), "Projekty", "RM_BAZA_projects")
+        # W firmie bazy projektow leza w `dane\Projekty\RM_BAZA_projects`;
+        # na stacji domowej (M-OLD) obok mastera, w `projects/`. Bierzemy
+        # pierwszy istniejacy — bez tego indeks u budujacego byl pusty
+        # (0 projektow, 17.09.2026) i okno faktur nie podpowiadalo projektow.
+        kandydaci = [os.path.join(os.path.dirname(self.baza), "Projekty", "RM_BAZA_projects"),
+                     os.path.join(os.path.dirname(self.baza), "projects")]
+        katalog = next((k for k in kandydaci if os.path.isdir(k)), kandydaci[0])
         rysunki, projektow = {}, 0
         if os.path.isdir(katalog):
             for nazwa in sorted(os.listdir(katalog)):

@@ -5,6 +5,11 @@ metadata:
   type: project
 ---
 
+> ⚠️ **NIEAKTUALNE od 17.09.2026 wieczorem** — okno zostało zbudowane od zera
+> jako `ksef_faktury_gui.py`, patrz [[project_ksef_okno_faktur_wdrozone]].
+> Tabela `mapowania_dostawcow` z planu ODPADŁA (Sfera ma to wbudowane,
+> [[project_symbole_dostawcy_w_sferze]]). Reszta notatki to kontekst historyczny.
+
 **Punkt wznowienia pracy.** Sesja 17.09.2026, przerwana na przebudowie okna.
 Kolejność czytania: ten plik → [[project_obieg_przyjec_dostawa_pz]] (decyzje
 architektoniczne) → [[project_ksef_archiwum_kolumny]] (pułapki archiwum).

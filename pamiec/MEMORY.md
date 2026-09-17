@@ -88,3 +88,4 @@
 - [Obieg przyjęć: DOSTAWA → PZ → kontrola FZ](project_obieg_przyjec_dostawa_pz.md) — faktura kontroluje, nie tworzy; PZ nie powstaje bez kartoteki; model wiele-do-wielu
 - [Okno faktur KSeF — stan prac 17.09.2026](project_ksef_okno_stan_17_09.md) — PUNKT WZNOWIENIA: okno nie wygląda jak makieta, co działa, co wdrożone, plan dalej
 - [Symbole dostawcy w Sferze](project_symbole_dostawcy_w_sferze.md) — para (dostawca, symbol) JEST w Subiekcie (DaneAsortymentuDlaPodmiotu), nie dorabiac tabeli; Rola=2, Waluta wymagana, Add przed polami
+- [Okno Faktury z KSeF — WDROŻONE](project_ksef_okno_faktur_wdrozone.md) — ksef_faktury_gui.py, kafel 🧾; decyzje: Subiekt (symbol dostawcy) / mapowania (rysunek) / FV_KSEF.pozycje.decyzja; serwer wdrażać razem; ubicie serwera zamyka RM_BAZA także na M-OLD

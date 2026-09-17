@@ -193,8 +193,65 @@ internal static class SymboleDostawcy
         return 0;
     }
 
+    /// <summary>
+    /// ODCZYT (bez --plan): wszystkie powiazania symbol dostawcy -> kartoteka,
+    /// jakie Subiekt juz zna. Okno faktur wola to raz przy otwarciu i podaje
+    /// wynik do `ksef_kartoteki.dopasuj()` jako mapowania z pierwszenstwem.
+    ///
+    /// NIP i nazwe podmiotu bierzemy ze slownika Id -> podmiot zbudowanego
+    /// osobno (jak w Dostawcy.cs), a NIE z projekcji `d.Podmiot.NIP` — typ
+    /// NIP-u w modelu nie jest zwyklym stringiem i EF nie umie go przetlumaczyc.
+    /// </summary>
+    public static int Lista(Uchwyt sfera, string? outPath)
+    {
+        var podmioty = new Dictionary<int, (string Nazwa, string Nip)>();
+        foreach (var p in sfera.Podmioty().Dane.WszystkieFirmy().ToList())
+        {
+            var nazwa = (Bezp(() => p.NazwaSkrocona) ?? "").Trim();
+            var nip = (Bezp(() => (string?)p.NIP) ?? "").Replace("-", "").Trim();
+            podmioty[p.Id] = (nazwa, nip);
+        }
+
+        var surowe = sfera.Asortymenty().Dane.Wszystkie()
+            .SelectMany(a => a.DaneAsortymentuDlaPodmiotow.Select(d => new
+            {
+                AsortymentId = a.Id,
+                a.Symbol,
+                a.Nazwa,
+                PodmiotId = d.Podmiot.Id,
+                SymbolDostawcy = d.Symbol,
+                NazwaUDostawcy = d.Nazwa,
+            }))
+            .ToList();
+
+        var pary = new List<PowWynik>();
+        foreach (var s in surowe)
+        {
+            if (string.IsNullOrWhiteSpace(s.SymbolDostawcy)) continue;
+            podmioty.TryGetValue(s.PodmiotId, out var pod);
+            pary.Add(new PowWynik(s.AsortymentId, (s.Symbol ?? "").Trim(), (s.Nazwa ?? "").Trim(),
+                                  s.PodmiotId, pod.Nazwa ?? "", pod.Nip ?? "",
+                                  s.SymbolDostawcy.Trim(), (s.NazwaUDostawcy ?? "").Trim()));
+        }
+
+        var json = JsonSerializer.Serialize(new { powiazania = pary },
+            new JsonSerializerOptions
+            {
+                WriteIndented = false,
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            });
+        if (outPath is null) Console.WriteLine(json);
+        else File.WriteAllText(outPath, json, new UTF8Encoding(false));
+        Console.WriteLine($"Powiazan symbol dostawcy -> kartoteka: {pary.Count}");
+        return 0;
+    }
+
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
     static dynamic? Bezp2(Func<dynamic?> f) { try { return f(); } catch { return null; } }
+
+    internal record PowWynik(int AsortymentId, string Symbol, string Nazwa,
+                             int PodmiotId, string Podmiot, string Nip,
+                             string SymbolDostawcy, string NazwaUDostawcy);
 
     internal record Pow(string? Nip, string? SymbolDostawcy, string? Symbol,
                         int? AsortymentId, string? NazwaUDostawcy,

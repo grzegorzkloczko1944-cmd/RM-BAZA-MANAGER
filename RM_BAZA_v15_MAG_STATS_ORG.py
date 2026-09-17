@@ -31601,6 +31601,27 @@ class MainWindow(tk.Tk):
             return
         subiekt_dokumenty_gui.open_window(self)
 
+    def open_subiekt_faktury(self):
+        """Okno „Faktury z KSeF" (panel SUBIEKT).
+
+        Nowe okno decyzji per pozycja faktury — OSOBNE od archiwum w menu
+        KSeF (`menu_ksef_archiwum`), które zostaje bez zmian. Nie wymaga
+        wybranego projektu: faktury są firmowe, nie projektowe.
+        """
+        try:
+            with open(CONFIG_FILE) as f:
+                ksef_cfg = json.load(f).get("ksef", {})
+        except Exception:
+            ksef_cfg = {}
+        try:
+            import ksef_faktury_gui
+            ksef_faktury_gui.open_window(self, self._ksef_base_dir(), ksef_cfg)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Faktury z KSeF",
+                                 f"Nie udało się otworzyć okna:\n{e}", parent=self)
+
     def open_subiekt_zlozenia(self):
         """Okno „Złożenia projektu" (menu 📦 SUBIEKT). Tylko odczyt.
 
