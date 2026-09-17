@@ -36,6 +36,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import ttk, messagebox, filedialog
 
+import ksef_kartoteki as kk
 from ksef_invoice_parser import parse_ksef_invoice_xml
 from rm_kreciolek import Kreciolek
 
@@ -445,18 +446,52 @@ class OknoArchiwum(tk.Toplevel, Kreciolek):
     #: dostawca wypelnia je inaczej (QUAY: Opis/Marka/Numer wydania,
     #: alu-frost: sam Indeks, AMB PRODUKT: nic).
     KOL_POZYCJE = [
-        ("lp",      "Lp.",                 45,  "e"),
-        ("indeks",  "Indeks",              130, "w"),
-        ("nazwa",   "Nazwa towaru/usługi", 260, "w"),
-        (None,      "Opis",                130, "w"),
-        (None,      "Marka",               100, "w"),
-        ("jm",      "J.m.",                55,  "c"),
-        ("ilosc",   "Ilość",               80,  "e"),
-        ("cena",    "Cena netto",          95,  "e"),
-        ("wartosc", "Wartość netto",       100, "e"),
-        (None,      "Numer wydania",       120, "w"),
-        (None,      "Numer zamówienia",    130, "w"),
+        ("lp",        "Lp.",                 42,  "e"),
+        ("ident",     "Identyfikator",       150, "w"),
+        ("typ",       "Typ",                 78,  "c"),
+        ("rysunek",   "Numer rysunku",       115, "w"),
+        ("nazwa",     "Nazwa / opis",        230, "w"),
+        (None,        "Opis",                110, "w"),
+        (None,        "Marka",               85,  "w"),
+        ("ilosc",     "Ilość",               65,  "e"),
+        ("jm",        "J.m.",                48,  "c"),
+        ("cena",      "Cena netto",          88,  "e"),
+        ("wartosc",   "Wartość netto",       95,  "e"),
+        ("kartoteka", "Kartoteka",           95,  "w"),
+        ("zd",        "ZD",                  110, "w"),
+        ("status",    "Status",              130, "w"),
+        (None,        "Numer wydania",       115, "w"),
+        (None,        "Numer zamówienia",    120, "w"),
     ]
+
+    #: Etykiety typu identyfikatora — kolumna „Typ".
+    ETYKIETY_TYPU = {
+        kk.IDENT_SYMBOL: "Dostawca",
+        kk.IDENT_INDEKS: "Dostawca",
+        kk.IDENT_RYSUNEK: "Rysunek",
+        kk.IDENT_BRAK: "Opis",
+    }
+
+    #: Etykiety statusu — kolumna „Status". Tekstowo, bez ikon: Treeview
+    #: renderuje je w jednym kroju, a emoji rozjeżdżają szerokość kolumny.
+    ETYKIETY_STATUSU = {
+        kk.KARTOTEKA: "✓ KARTOTEKA",
+        kk.NOWA_KARTOTEKA: "✓ NOWA KARTOTEKA",
+        kk.RYSUNEK_RM: "◣ RYSUNEK RM",
+        kk.POZYCJA_ZBIORCZA: "◫ POZYCJA ZBIORCZA",
+        kk.USLUGA: "— USŁUGA",
+        kk.BRAK_DECYZJI: "! BRAK DECYZJI",
+    }
+
+    #: Kolory wierszy wg statusu — ten sam podział, co na makiecie.
+    KOLORY_STATUSU = {
+        kk.KARTOTEKA: "#eafaf1",
+        kk.NOWA_KARTOTEKA: "#eafaf1",
+        kk.RYSUNEK_RM: "#eaf2fb",
+        kk.POZYCJA_ZBIORCZA: "#f4ecfa",
+        kk.USLUGA: "#f4f6f7",
+        kk.BRAK_DECYZJI: "#fdecea",
+    }
 
     def __init__(self, parent, katalog, ksef_cfg=None):
         super().__init__(parent)
@@ -578,8 +613,21 @@ class OknoArchiwum(tk.Toplevel, Kreciolek):
 
         dol = tk.Frame(panel)
         panel.add(dol, weight=2)
-        tk.Label(dol, text="Pozycje faktury", bg="#ecf0f1", anchor="w",
-                 font=("Arial", 8, "bold"), padx=8, pady=3).pack(side=tk.TOP, fill=tk.X)
+        pasek = tk.Frame(dol, bg="#ecf0f1")
+        pasek.pack(side=tk.TOP, fill=tk.X)
+        tk.Label(pasek, text="Pozycje faktury", bg="#ecf0f1", anchor="w",
+                 font=("Arial", 8, "bold"), padx=8, pady=4).pack(side=tk.LEFT)
+        self.btn_kartoteki = tk.Button(
+            pasek, text="➕ Załóż brakujące kartoteki", command=self._okno_kartotek,
+            bg="#27ae60", fg="white", font=("Arial", 8), padx=8, pady=1,
+            relief=tk.RAISED, bd=1, state=tk.DISABLED)
+        self.btn_kartoteki.pack(side=tk.LEFT, padx=10, pady=3)
+        tk.Button(pasek, text="🔄 Dopasuj ponownie", command=self._dopasuj_ponownie,
+                  font=("Arial", 8), padx=6, pady=1).pack(side=tk.LEFT, padx=2, pady=3)
+        # Liczniki: bez nich nie widać, ile pozycji zostało do rozstrzygnięcia.
+        self.lbl_liczniki = tk.Label(pasek, text="", bg="#ecf0f1", anchor="e",
+                                     font=("Arial", 8), padx=10)
+        self.lbl_liczniki.pack(side=tk.RIGHT)
         # Kolumny ustawia `_przebuduj_kolumny` — JEDEN mechanizm, bo w
         # `KOL_POZYCJE` sa pozycje z `pole=None` (miejsca na `DodatkowyOpis`)
         # i `heading(None, ...)` wywala Tk. Na start: uklad bez zadnych
@@ -663,13 +711,105 @@ class OknoArchiwum(tk.Toplevel, Kreciolek):
         uklad = self._uklad_kolumn(obecne)
         self._przebuduj_kolumny(uklad)
 
+        dopasowania = self._dopasuj_wiersze(wiersze)
+        rysunki = self._indeks_rysunkow()
+
         self.tv_p.delete(*self.tv_p.get_children())
-        for lp, nazwa, jm, ilosc, cena, wart, indeks, dodatkowe in wiersze:
-            stale = {"lp": lp, "nazwa": nazwa, "indeks": indeks, "jm": jm,
-                     "ilosc": _zl(ilosc), "cena": _zl(cena), "wartosc": _zl(wart)}
-            self.tv_p.insert("", "end", values=[
+        for (lp, nazwa, jm, ilosc, cena, wart, indeks, dodatkowe), d in zip(wiersze, dopasowania):
+            jest_rys = d.zrodlo_identyfikatora == kk.IDENT_RYSUNEK
+            # Kolumna ZD: w ilu projektach ten rysunek występuje. Konkretny
+            # wybór należy do człowieka — ten sam detal bywa w sześciu
+            # projektach naraz, więc pokazujemy liczbę, nie zgadujemy.
+            projekty = sorted({w["projekt"] for w in
+                               rysunki.get(kk.klucz_rysunku(d.identyfikator), [])}) if jest_rys else []
+            if len(projekty) == 1:
+                zd = "ZD %s" % projekty[0]
+            elif projekty:
+                zd = "%d projektów" % len(projekty)
+            else:
+                zd = "—"
+
+            stale = {
+                "lp": lp,
+                "ident": d.identyfikator or "—",
+                "typ": self.ETYKIETY_TYPU.get(d.zrodlo_identyfikatora, ""),
+                "rysunek": d.identyfikator if jest_rys else "—",
+                "nazwa": d.nazwa_pozycji or nazwa,
+                "jm": jm,
+                "ilosc": _zl(ilosc),
+                "cena": _zl(cena),
+                "wartosc": _zl(wart),
+                "kartoteka": ("ID %s" % d.asortyment_id) if d.asortyment_id else "—",
+                "zd": zd,
+                "status": self.ETYKIETY_STATUSU.get(d.status, d.status),
+            }
+            self.tv_p.insert("", "end", tags=(d.status,), values=[
                 stale[pole] if pole else dodatkowe.get(etykieta, "")
                 for pole, etykieta, *_ in uklad])
+
+        for status, kolor in self.KOLORY_STATUSU.items():
+            self.tv_p.tag_configure(status, background=kolor)
+        self._dopasowania = dopasowania
+        self._pokaz_liczniki(dopasowania)
+
+    # ── dopasowanie do kartotek ────────────────────────────────────────────
+    def _dopasuj_wiersze(self, wiersze):
+        """[Dopasowanie] dla pozycji z bazy.
+
+        `dopasuj()` oczekuje obiektów z atrybutami parsera, a z bazy dostajemy
+        krotki — odtwarzamy więc lekki obiekt zamiast dublować logikę.
+        """
+        class _Poz:
+            __slots__ = ("nr_wiersza", "nazwa", "jednostka", "ilosc",
+                         "cena_netto", "wartosc_netto", "indeks", "dodatkowe")
+
+        pozycje = []
+        for lp, nazwa, jm, ilosc, cena, wart, indeks, dodatkowe in wiersze:
+            o = _Poz()
+            (o.nr_wiersza, o.nazwa, o.jednostka, o.ilosc, o.cena_netto,
+             o.wartosc_netto, o.indeks, o.dodatkowe) = (
+                lp, nazwa, jm, ilosc, cena, wart, indeks, dodatkowe)
+            pozycje.append(o)
+        return kk.dopasuj(pozycje, self._katalog())
+
+    def _katalog(self):
+        """Kartoteka Subiekta z cache na dysku. Pusta lista, gdy cache brak —
+        okno ma się otworzyć nawet bez mostu, tylko bez dopasowań."""
+        if getattr(self, "_katalog_cache", None) is None:
+            try:
+                from subiekt_scalanie import wczytaj_katalog_subiekta
+                self._katalog_cache = wczytaj_katalog_subiekta(tylko_cache=True) or []
+            except Exception:
+                self._katalog_cache = []
+        return self._katalog_cache
+
+    def _indeks_rysunkow(self):
+        """{numer_upper: [{projekt, nazwa, ilosc}]} — z serwera, raz na sesję.
+
+        Serwer trzyma to w pamięci i przelicza co 10 minut; tutaj pytamy raz,
+        żeby przełączanie faktur nie kosztowało ruchu po sieci.
+        """
+        if getattr(self, "_rysunki_cache", None) is None:
+            try:
+                import rm_klient
+                dane = rm_klient.indeks_rysunkow()
+                self._rysunki_cache = {kk.klucz_rysunku(k): v
+                                       for k, v in (dane.get("rysunki") or {}).items()}
+            except Exception:
+                self._rysunki_cache = {}
+        return self._rysunki_cache
+
+    def _pokaz_liczniki(self, dopasowania):
+        """Pasek nad tabelą: ile czego. Bez liczników nie widać, co zostało."""
+        p = kk.podsumowanie(dopasowania)
+        self.lbl_liczniki.config(text=(
+            "Pozycji: %d    Kartoteka: %d    Rysunek RM: %d    "
+            "Zbiorcze: %d    Usługi: %d    Brak decyzji: %d" % (
+                p["razem"], p["znalezione"], p["rysunki"],
+                p["zbiorcze"], p["uslugi"], p["brak"])))
+        self.btn_kartoteki.config(
+            text="➕ Załóż brakujące kartoteki (%d)" % p["brak"],
+            state=(tk.NORMAL if p["brak"] else tk.DISABLED))
 
     def _uklad_kolumn(self, obecne):
         """Kolumny do pokazania: stale + te klucze, ktore faktura ma.
@@ -704,6 +844,180 @@ class OknoArchiwum(tk.Toplevel, Kreciolek):
             self.tv_p.heading(key, text=etykieta)
             self.tv_p.column(key, width=szer, anchor=kotwica,
                              stretch=(pole == "nazwa"), minwidth=45)
+
+    def _dopasuj_ponownie(self):
+        """Odswieza kartoteke i indeks, po czym przelicza dopasowania."""
+        self._katalog_cache = None
+        self._rysunki_cache = None
+        try:
+            from subiekt_scalanie import wczytaj_katalog_subiekta
+            self._katalog_cache = wczytaj_katalog_subiekta() or []
+        except Exception as e:
+            messagebox.showwarning("Dopasuj ponownie",
+                                   "Nie udalo sie odswiezyc kartoteki:\n%s" % e,
+                                   parent=self)
+        self._wybrano()
+
+    def _okno_kartotek(self):
+        """Decyzja, CZYM jest kazda nierozstrzygnieta pozycja.
+
+        To okno NIE pyta „czy zalozyc kartoteke" — przy czesci pozycji to zle
+        pytanie. `013-100.30B` z faktury AMB to detal z NASZEGO rysunku,
+        `OBSLUGA` z QUAY to usluga, a `Detale ciete laserem` u alu-frost jedna
+        linia opisujaca wiele detali. Dopiero po wskazaniu typu wiadomo, co
+        zrobic dalej.
+        """
+        dop = [d for d in getattr(self, "_dopasowania", [])
+               if d.status == kk.BRAK_DECYZJI]
+        if not dop:
+            messagebox.showinfo("Kartoteki",
+                                "Wszystkie pozycje maja rozstrzygniety status.",
+                                parent=self)
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Decyzja dla pozycji bez dopasowania (%d)" % len(dop))
+        dlg.geometry("1080x560")
+        dlg.transient(self)
+
+        tk.Label(dlg, text="Zaznacz pozycje i wskaz, czym sa. Domyslnie zaznaczone sa towary; "
+                           "uslugi i pozycje zbiorcze zostaw odznaczone.",
+                 font=("Arial", 9), anchor="w", padx=12, pady=8).pack(side=tk.TOP, fill=tk.X)
+
+        ramka = tk.Frame(dlg)
+        ramka.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 6))
+        kol = [("zazn", "v", 34, "c"), ("ident", "Identyfikator", 170, "w"),
+               ("typ", "Typ", 90, "c"), ("marka", "Marka", 95, "w"),
+               ("nazwa", "Proponowana nazwa w Subiekcie", 330, "w"),
+               ("jm", "J.m.", 50, "c"), ("ilosc", "Ilosc", 70, "e"),
+               ("decyzja", "Decyzja", 150, "w")]
+        tv = ttk.Treeview(ramka, columns=[k for k, *_ in kol], show="headings")
+        for key, et, szer, kot in kol:
+            tv.heading(key, text=et)
+            tv.column(key, width=szer, anchor=kot, stretch=(key == "nazwa"), minwidth=34)
+        sb = ttk.Scrollbar(ramka, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        stan = {}
+        for d in dop:
+            usluga = kk.wyglada_na_usluge(d.pozycja)
+            rysunek = d.zrodlo_identyfikatora == kk.IDENT_RYSUNEK
+            if usluga:
+                decyzja, zazn = kk.USLUGA, False
+            elif not d.identyfikator:
+                decyzja, zazn = kk.POZYCJA_ZBIORCZA, False
+            elif rysunek:
+                decyzja, zazn = kk.RYSUNEK_RM, True
+            else:
+                decyzja, zazn = kk.NOWA_KARTOTEKA, True
+            iid = tv.insert("", "end", values=(
+                "TAK" if zazn else "-", d.identyfikator or "-",
+                self.ETYKIETY_TYPU.get(d.zrodlo_identyfikatora, ""),
+                (d.pozycja.dodatkowe or {}).get("Marka", ""),
+                kk.proponowana_nazwa(d.pozycja),
+                d.pozycja.jednostka, _zl(d.pozycja.ilosc),
+                self.ETYKIETY_STATUSU.get(decyzja, decyzja)))
+            stan[iid] = {"dop": d, "decyzja": decyzja, "zazn": zazn}
+
+        def odswiez_licznik():
+            ile = sum(1 for v in stan.values()
+                      if v["zazn"] and v["decyzja"] == kk.NOWA_KARTOTEKA)
+            btn.config(text="Zaloz zaznaczone kartoteki (%d)" % ile,
+                       state=(tk.NORMAL if ile else tk.DISABLED))
+
+        def przelacz(_ev=None):
+            for iid in tv.selection():
+                stan[iid]["zazn"] = not stan[iid]["zazn"]
+                tv.set(iid, "zazn", "TAK" if stan[iid]["zazn"] else "-")
+            odswiez_licznik()
+
+        def ustaw(decyzja):
+            for iid in tv.selection():
+                stan[iid]["decyzja"] = decyzja
+                stan[iid]["zazn"] = decyzja in (kk.NOWA_KARTOTEKA, kk.RYSUNEK_RM)
+                tv.set(iid, "decyzja", self.ETYKIETY_STATUSU.get(decyzja, decyzja))
+                tv.set(iid, "zazn", "TAK" if stan[iid]["zazn"] else "-")
+            odswiez_licznik()
+
+        tv.bind("<space>", przelacz)
+        tv.bind("<Double-1>", przelacz)
+
+        typy = tk.Frame(dlg)
+        typy.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 6))
+        tk.Label(typy, text="Zaznaczone pozycje to:",
+                 font=("Arial", 8, "bold")).pack(side=tk.LEFT)
+        for etykieta, dec in (("Towar handlowy", kk.NOWA_KARTOTEKA),
+                              ("Usluga", kk.USLUGA),
+                              ("Pozycja zbiorcza", kk.POZYCJA_ZBIORCZA),
+                              ("Detal z naszego rysunku", kk.RYSUNEK_RM)):
+            tk.Button(typy, text=etykieta, font=("Arial", 8), padx=8,
+                      command=lambda d=dec: ustaw(d)).pack(side=tk.LEFT, padx=3)
+
+        stopka = tk.Frame(dlg)
+        stopka.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=8)
+        tk.Label(stopka, text="Spacja lub dwuklik przelacza zaznaczenie. "
+                              "Kartoteki zakladamy tylko dla typu: towar handlowy.",
+                 font=("Arial", 8), anchor="w").pack(side=tk.LEFT)
+
+        def zapisz():
+            do_zalozenia = [(iid, v) for iid, v in stan.items()
+                            if v["zazn"] and v["decyzja"] == kk.NOWA_KARTOTEKA]
+            if not do_zalozenia:
+                return
+            if not messagebox.askyesno(
+                    "Zakladanie kartotek",
+                    "Zalozyc %d kartotek w Subiekcie?\n\n"
+                    "Symbol po zapisie jest kluczem NIE do zmiany." % len(do_zalozenia),
+                    parent=dlg):
+                return
+            import subiekt_asortyment
+            ok, bledy = 0, []
+            for iid, v in do_zalozenia:
+                d = v["dop"]
+                try:
+                    w = subiekt_asortyment.zaloz_kartoteke(
+                        symbol=d.identyfikator,
+                        nazwa=tv.set(iid, "nazwa"),
+                        rodzaj="towar",
+                        jm=(d.pozycja.jednostka or "szt").rstrip("."),
+                        cena=d.pozycja.cena_netto,
+                        zapisz=True)
+                    if (w or {}).get("status") in ("zalozona", "istnieje"):
+                        ok += 1
+                    else:
+                        bledy.append((d.identyfikator, (w or {}).get("szczegoly", "?")))
+                except Exception as e:
+                    bledy.append((d.identyfikator, str(e)))
+            tresc = "Zalozono/istnialo: %d" % ok
+            if bledy:
+                tresc += "\nNie udalo sie: %d (patrz konsola)" % len(bledy)
+                for sym, b in bledy:
+                    print("!  %s: %s" % (sym, b))
+            messagebox.showinfo("Zakladanie kartotek", tresc, parent=dlg)
+            dlg.destroy()
+            self._dopasuj_ponownie()
+
+        tk.Button(stopka, text="Zamknij", font=("Arial", 9), padx=12,
+                  command=dlg.destroy).pack(side=tk.RIGHT, padx=4)
+        btn = tk.Button(stopka, text="Zaloz zaznaczone kartoteki", bg="#27ae60",
+                        fg="white", font=("Arial", 9, "bold"), padx=14, pady=3,
+                        command=zapisz)
+        btn.pack(side=tk.RIGHT, padx=4)
+        odswiez_licznik()
+        self._wysrodkuj_okno(dlg)
+
+    def _wysrodkuj_okno(self, okno):
+        """To samo, co `_wysrodkuj`, ale dla okna podrzednego."""
+        try:
+            self.update_idletasks()
+            okno.update_idletasks()
+            x = self.winfo_rootx() + (self.winfo_width() - okno.winfo_width()) // 2
+            y = self.winfo_rooty() + (self.winfo_height() - okno.winfo_height()) // 2
+            okno.geometry("+%d+%d" % (x, y))
+        except Exception:
+            pass
 
     def _otworz_xml(self):
         """Pokazuje XML faktury — z BAZY, nie z katalogu na dysku.
