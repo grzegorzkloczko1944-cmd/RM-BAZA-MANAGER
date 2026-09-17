@@ -86,3 +86,4 @@
 - [Zrywane połączenie — brama znika pierwsza](project_diagnostyka_resetuje_karte.md) — ⛔ NIE klikać „Zdiagnozuj i napraw": msdt RESETUJE kartę i pogłębia; przyczyna w routerze/kablu, nie w Windows
 - [Archiwum KSeF — kolumny pozycji i brak dziennika](project_ksef_archiwum_kolumny.md) — FV_KSEF bez _server_request_log blokowała KAŻDY zapis; pola pozycji różne u każdego dostawcy
 - [Obieg przyjęć: DOSTAWA → PZ → kontrola FZ](project_obieg_przyjec_dostawa_pz.md) — faktura kontroluje, nie tworzy; PZ nie powstaje bez kartoteki; model wiele-do-wielu
+- [Okno faktur KSeF — stan prac 17.09.2026](project_ksef_okno_stan_17_09.md) — PUNKT WZNOWIENIA: okno nie wygląda jak makieta, co działa, co wdrożone, plan dalej
