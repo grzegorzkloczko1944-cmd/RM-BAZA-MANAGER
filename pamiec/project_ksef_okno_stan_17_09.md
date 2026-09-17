@@ -37,6 +37,24 @@ sposób pracy.
 **Nie zapytano jeszcze o priorytet przebudowy:** (a) sam panel decyzji na dole,
 (b) cały układ naraz, (c) tylko wygląd tabeli i liczniki.
 
+### ⚠️ GUI zostało COFNIĘTE (`f894e7f` cofa `c904d07`)
+
+Tamta zmiana nie tylko dokładała kolumny do starego okna zamiast budować nowe —
+**rozwaliła układ tabeli, który użytkownik sam wcześniej ustawił**: zniknęła
+kolumna `Indeks`, `Nazwa towaru/usługi` zmieniła się w `Nazwa / opis`, `Ilość`
+przeskoczyła przed `J.m.`, szerokości zostały zwężone. 16 kolumn zamiast 11,
+w innej kolejności.
+
+Po rewercie stare okno wróciło do stanu, który działał — sprawdzone: QUAY
+55 wierszy / 11 kolumn, AMB i alu-frost po 7 kolumn (bez `DodatkowyOpis`,
+bo te faktury go nie mają). RM_BAZA uruchomiona i potwierdzona jako sprawna.
+
+**Kolumny, które MAJĄ BYĆ w starym oknie** (nie zmieniać bez pytania):
+`Lp. | Indeks | Nazwa towaru/usługi | Opis | Marka | J.m. | Ilość |
+Cena netto | Wartość netto | Numer wydania | Numer zamówienia`
+
+**Nowe okno budować OSOBNO, od zera** — nie przez dokładanie do starego.
+
 ## Co DZIAŁA (wdrożone i zmierzone)
 
 **Import XML z dysku** — przycisk w archiwum. Klucz trójstopniowo: numer KSeF
@@ -52,7 +70,11 @@ plików = trzy faktury, zero duplikatów.
 **Warstwa dopasowania** `ksef_kartoteki.py` — trzy typy identyfikatora,
 hierarchia z numerem rysunku przed symbolem katalogowym, statusy:
 KARTOTEKA / NOWA_KARTOTEKA / USLUGA / POZYCJA_ZBIORCZA / RYSUNEK_RM /
-BRAK_DECYZJI.
+BRAK_DECYZJI. ⚠️ **Nie ma jeszcze ŻADNEGO GUI** — po rewercie `f894e7f`
+moduł jest gotowy i zmierzony, ale nikt go nie woła z okna. Nowe okno
+korzysta z niego bez zmian: `kk.dopasuj(pozycje, katalog, mapowania)`
+zwraca listę `Dopasowanie` z polami `identyfikator`, `nazwa_pozycji`,
+`zrodlo_identyfikatora`, `status`, `asortyment_id`.
 
 **Indeks rysunków z BOM-ów** — `rm_klient.indeks_rysunkow()`, buduje SERWER
 (komenda `indeks-rysunkow`), cache 10 min w pamięci procesu. Zmierzone:
@@ -65,7 +87,7 @@ BRAK_DECYZJI.
 
 | gdzie | co |
 |---|---|
-| git `main` | wypchnięte do `c904d07` |
+| git `main` | wypchnięte; GUI cofnięte rewertem `f894e7f` |
 | serwer `C:\Apps\RM_SERWER` | `rm_serwer.py`, `rm_serwer_operacje.py` aktualne (backupy `.bak_20260917_*`) |
 | most `MOST\` | **STARY** (sha `4aca0ff`) — bez trybu `pz` |
 | `rm_klient.py` na serwerze | z 11.09, ale serwer go NIE importuje — nieużywany |
@@ -108,6 +130,17 @@ nie tworzy PZ dla pozycji bez kartoteki. `FZ 24/09/2026` QUAY — 53 pozycje,
   (blokada „Self-Modification" — użytkownik musi wkleić ręcznie):
   `PowerShell(New-PSSession -ComputerName 192.168.100.84 *)`,
   `PowerShell(Copy-Item -ToSession *)`, `PowerShell(Restart-Service RM_SERWER *)`
+
+## ⚠️ Wniosek o sposobie pracy
+
+Zapytałem o zakres („tylko kolumny czy całe okno") w momencie, gdy z całej
+rozmowy jasno wynikało, że mówimy o NOWYM oknie — i potraktowałem odpowiedź
+jako zgodę na dokładanie do starego. To był błąd w odczytaniu intencji, nie
+w wykonaniu.
+
+**Na przyszłość:** gdy rozmowa dotyczy przebudowy, a makieta pokazuje nowy
+układ — budować nowe, a nie doklejać do istniejącego. I nie ruszać układu,
+który użytkownik sam ustawił, przy okazji innej zmiany.
 
 ## Pułapki z tej sesji
 
