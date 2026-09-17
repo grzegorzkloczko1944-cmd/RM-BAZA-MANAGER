@@ -73,6 +73,10 @@ ZRODLO_RYSUNEK = "rysunek"
 
 #: Jednostki, po których poznajemy usługę, gdy dostawca nie oznaczył jej inaczej.
 _JEDNOSTKI_USLUG = {"usl", "usł", "usl.", "usł.", "godz", "godz.", "h", "rbh"}
+#: „Usługa kurierska", „Usługi transportowe", „OBSLUGA", „Obsługa
+#: zamówienia" — na POCZĄTKU tekstu. Sam początek, bo „usług" w środku
+#: nazwy bywa częścią nazwy towaru.
+_NAZWA_USLUGI = re.compile(r"^(us[łl]ug[aiy]?|obs[łl]ug[aiy]?)\b")
 
 
 #: Kod rysunku RM w postaci `013-100.30a`, `ROTO-100.01`, `2557-100.15X` —
@@ -187,15 +191,30 @@ def wyglada_na_usluge(pozycja):
     """Czy pozycja to raczej usługa niż towar magazynowy.
 
     Podpowiedź dla okna, NIE rozstrzygnięcie: decyzję podejmuje człowiek.
-    `OBSLUGA` z faktury QUAY ma jednostkę `usł.` i tak właśnie ją łapiemy —
-    nie ma sensu zakładać jej kartoteki magazynowej tylko po to, żeby
-    licznik pokazał 55/55.
+
+    ⚠️ Zmierzone 18.09.2026 (wcześniejszy opis tej funkcji KŁAMAŁ): `OBSLUGA`
+    z faktury QUAY ma jednostkę `szt.`, nie `usł.`, a jej `Opis` to „Obsluga"
+    — ani jednostka, ani „usług" w opisie jej nie łapały. Pozycja dostawała
+    TW, a „Usługi: 1" w liczniku pochodziło z ręcznej decyzji. Stąd trzeci
+    test: nazwa/indeks/Opis zaczynające się od „usługa…" albo „obsługa…".
+    Nie ma sensu zakładać takim pozycjom kartoteki magazynowej tylko po to,
+    żeby licznik pokazał 55/55.
     """
     jm = (getattr(pozycja, "jednostka", "") or "").strip().lower()
     if jm in _JEDNOSTKI_USLUG:
         return True
-    opis = (getattr(pozycja, "dodatkowe", None) or {}).get("Opis", "")
-    return "usług" in opis.lower() or "uslug" in opis.lower()
+    opis = (getattr(pozycja, "dodatkowe", None) or {}).get("Opis", "") or ""
+    if "usług" in opis.lower() or "uslug" in opis.lower():
+        return True
+    # Nazwa, indeks albo Opis ZACZYNAJĄCE się od „Usługa…"/„Obsługa…".
+    # alu-frost: „Usługa Kurierska", `szt`, bez DodatkowyOpis. QUAY:
+    # „OBSLUGA", `szt.`, Opis „Obsluga". Żadnej z nich nie widziały dwa
+    # powyższe testy (18.09.2026). Tylko początek tekstu — patrz _NAZWA_USLUGI.
+    for tekst in ((getattr(pozycja, "nazwa", "") or ""),
+                  (getattr(pozycja, "indeks", "") or ""), opis):
+        if _NAZWA_USLUGI.match(tekst.strip().lower()):
+            return True
+    return False
 
 
 def proponowana_nazwa(pozycja):
