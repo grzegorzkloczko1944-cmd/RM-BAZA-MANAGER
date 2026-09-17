@@ -138,7 +138,12 @@ KOL_POZYCJE = [
     ("typ", "Typ", 70), ("nazwa", "Nazwa / opis", 200),
     ("ilosc", "Ilość", 60), ("jm", "J.m.", 50),
     ("cena", "Cena netto", 85), ("wz", "Numer wydania", 105),
-    ("kartoteka", "Kartoteka", 140), ("nazwa_kart", "Nazwa kartoteki", 190),
+    ("kartoteka", "Kartoteka", 85),
+    # Symbol kartoteki OSOBNO od jej Id — nazwa kolumny ta sama co w oknie
+    # dokumentów („Nr rysunku / symbol"), bo to dokładnie to samo pole:
+    # dla detalu własnego symbolem JEST numer rysunku.
+    ("symbol_kart", "Nr rysunku / symbol", 150),
+    ("nazwa_kart", "Nazwa kartoteki", 190),
     # „Opis" to pole z KARTOTEKI (wymiary, gatunek, norma) — ta sama kolumna
     # i ten sam powód co w oknie dokumentów: sama nazwa bywa za krótka, żeby
     # rozpoznać detal.
@@ -150,6 +155,7 @@ KOL_POZYCJE = [
 K_LP = 0
 K_TYP = 2
 K_KARTOTEKA = 8
+K_SYMBOL_KART = 9
 K_STATUS = len(KOL_POZYCJE) - 1
 
 #: Lista faktur — drzewo (grupowanie po dacie), więc zostaje ttk.Treeview.
@@ -1250,15 +1256,16 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
             rys = ident if d.zrodlo_identyfikatora == kk.IDENT_RYSUNEK or d.status == kk.RYSUNEK_RM else ""
             if rys and (p.decyzja or {}).get("numer_rysunku"):
                 rys = p.decyzja["numer_rysunku"]
-            kart = ""
-            if d.asortyment_id:
-                kart = f"ID {d.asortyment_id}  {d.symbol_subiekt}"
-                if d.zrodlo == kk.ZRODLO_NORMALIZACJA:
-                    kart += "  (kandydat)"
-            # Nazwa kartoteki z Subiekta — do porównania z opisem z faktury.
+            # Kartoteka rozbita na trzy kolumny: Id, symbol (= nr rysunku dla
+            # detali własnych), nazwa. Wcześniej Id i symbol siedziały razem
+            # w jednej komórce i symbolu nie dało się czytać ani sortować.
             # `nazwa_subiekt` bywa puste przy starszych decyzjach, więc gdy
-            # trzeba, dociągamy ją z kartoteki po Id.
+            # trzeba, dociągamy dane z kartoteki po Id.
             kart_rec = self._kat_po_id.get(d.asortyment_id) or {}
+            kart = f"ID {d.asortyment_id}" if d.asortyment_id else ""
+            symbol_kart = d.symbol_subiekt or kart_rec.get("symbol", "")
+            if symbol_kart and d.zrodlo == kk.ZRODLO_NORMALIZACJA:
+                symbol_kart += "  (kandydat)"
             nazwa_kart = d.nazwa_subiekt or kart_rec.get("nazwa", "")
             opis_kart = kart_rec.get("opis", "") if d.asortyment_id else ""
             proj = ""
@@ -1276,7 +1283,8 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
                          rys or ident, _etykieta_typu(d), _opis_pozycji(d),
                          _ilosc(p.ilosc), p.jednostka, _zl(p.cena_netto),
                          (p.dodatkowe or {}).get("Numer wydania", ""),
-                         kart, nazwa_kart, opis_kart, proj, STATUSY[d.status][0]])
+                         kart, symbol_kart, nazwa_kart, opis_kart, proj,
+                         STATUSY[d.status][0]])
             kolory.append((d, bool(dec)))
 
         try:
@@ -1293,7 +1301,7 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
             if d.zrodlo == kk.ZRODLO_NORMALIZACJA:
                 # Kandydat po normalizacji — pomarańczowo, jak niewysłane ZD
                 # w oknie dokumentów: „jest, ale wymaga sprawdzenia".
-                self.sheet.highlight_cells(row=i, column=K_KARTOTEKA, bg="#f5b041", fg="#7d3c00")
+                self.sheet.highlight_cells(row=i, column=K_SYMBOL_KART, bg="#f5b041", fg="#7d3c00")
         self.sheet.redraw()
 
         s = kk.podsumowanie(self._dop)
