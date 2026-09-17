@@ -159,8 +159,8 @@ K_SYMBOL_KART = 9
 K_STATUS = len(KOL_POZYCJE) - 1
 
 #: Lista faktur — drzewo (grupowanie po dacie), więc zostaje ttk.Treeview.
-KOL_FAKTURY = [("dostawca", "Dostawca", 130), ("netto", "Netto", 80),
-               ("stan", "Stan", 110)]
+KOL_FAKTURY = [("dostawca", "Dostawca", 95), ("netto", "Netto", 65),
+               ("stan", "Stan", 95)]
 
 #: Filtr dostawcy w pasku — ta sama konwencja napisu co w oknie dokumentów
 #: (`PROJ_WSZYSTKIE`).
@@ -442,10 +442,15 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 4))
 
-        lewy = tk.Frame(paned)
+        # Lista faktur niesie cztery krótkie pola, a tabela pozycji czternaście
+        # kolumn — stąd wąski lewy panel. Przy 2:7 lista miała ~380 px i świeciła
+        # pustką (zgłoszone 18.09.2026). `width` ustawia szerokość startową,
+        # bo sama waga działa dopiero przy rozciąganiu okna.
+        lewy = tk.Frame(paned, width=300)
         prawy = tk.Frame(paned)
-        paned.add(lewy, weight=2)
-        paned.add(prawy, weight=7)
+        lewy.pack_propagate(False)
+        paned.add(lewy, weight=0)
+        paned.add(prawy, weight=1)
 
         self._panel_faktur(lewy)
 
@@ -564,7 +569,7 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         self.tv_f = ttk.Treeview(wrap, columns=[k[0] for k in KOL_FAKTURY],
                                  show="tree headings", selectmode="browse")
         self.tv_f.heading("#0", text="Data / numer")
-        self.tv_f.column("#0", width=150, minwidth=110)
+        self.tv_f.column("#0", width=120, minwidth=95)
         for klucz, naglowek, szer in KOL_FAKTURY:
             self.tv_f.heading(klucz, text=naglowek)
             self.tv_f.column(klucz, width=szer, minwidth=60,
