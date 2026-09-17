@@ -85,6 +85,36 @@ NIE testowane: „Załóż nową kartotekę" (formularz `subiekt_asortyment` +
 `po_zapisie` → dowiązanie symbolu), „Pobierz nowe z KSeF" (brak tokena),
 mapowania RM przy rysunku Z kartoteką.
 
+## ⚠️ TEN SAM SYMBOL W KILKU WIERSZACH TO NIE DUPLIKAT
+
+Faktura QUAY `RVQ/05195/26` ma `CP 5M 25` w wierszach 35 (6 szt.) i 36
+(2 szt.), w tej samej cenie 11,35. Podobnie `RCK80 25x34` (47 i 48),
+`PGIKR 8 D` / `PGIKR 16 D`. Wygląda na błąd wystawcy i tak zostało
+zgłoszone (17.09.2026), ale to poprawne zachowanie:
+
+| Lp. | ilość | Numer wydania |
+|---|---:|---|
+| 35 | 6 szt. | `WZ/01578/26` |
+| 36 | 2 szt. | `WZ/01584/26` |
+
+Towar przyszedł **dwiema dostawami** i każda ma własny wiersz z własnym WZ.
+
+**Okno NIE SKLEJA takich wierszy — celowo:**
+* WZ to krok 1 kojarzenia faktury z przyjęciami ([[project_obieg_przyjec_dostawa_pz]]);
+  sklejenie do 8 szt. gubi informację, z której dostawy co przyszło,
+* na PZ te pozycje idą osobno, bo to osobne przyjęcia,
+* decyzja zapisuje się per `nr_wiersza` — zlanie rozjechałoby się z archiwum.
+
+Obie linie dopasowują się do tej samej kartoteki i to jest w porządku.
+
+Otwarte (nie zrobione): dyskretny znacznik „1 z 2 / 2 z 2" przy powtórzonym
+symbolu, żeby nie trzeba było porównywać kolumny WZ wzrokiem.
+
+⚠️ Co u QUAY faktycznie utrudnia dopasowanie (i z czym okno już sobie radzi):
+wiodące spacje w `P_7`, symbol z doklejonym zamiennikiem
+(`618/4 2Z=684 2Z`, `3304 2RS=5304 EE`), brak `<Indeks>`, `OBSLUGA` jako
+trzy osobne wiersze.
+
 ## Pułapki, które kosztowały rundy
 
 - **Grid Tk odbiera miejsce kolumnom z wagą, gdy treść jest za szeroka** —
