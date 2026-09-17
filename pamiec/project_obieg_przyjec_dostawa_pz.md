@@ -114,17 +114,102 @@ przyszłych fakturach tego dostawcy. Trwałe mapowanie = decyzja człowieka.
 [[project_ksef_price_import]] i nagłówek `subiekt_podobne.py`: 389 par RÓŻNYCH
 detali przekroczyło próg (`Płyta zewnętrzna` vs `Płyta wewnętrzna` = 0,933).
 
+## ⚠️ NIE KAŻDA POZYCJA MA SYMBOL — trzy układy, ta sama schema FA(3)
+
+Zmierzone na trzech fakturach 17.09.2026:
+
+| dostawca | `<Indeks>` | `P_7` | identyfikator |
+|---|---|---|---|
+| **QUAY** | brak | czysty symbol `618/6 2Z` | całe `P_7` |
+| **AMB PRODUKT** | **nie istnieje** | kod **+** nazwa: `013-100.30a Bok transportera 0,3mb` | kod wyłuskany regexem — **PROPOZYCJA** |
+| **alu-frost** | jest, ale to **KATEGORIA** | `Detale cięte laserem - projekt 2630` | **BRAK** |
+
+⚠️ **`<Indeks>` u alu-frost to nie symbol** — `Detale cięte laserem` powtarza się
+w 3 z 4 wierszy, pozycje różnią się dopiero pełnym `P_7`. Taka linia może
+odpowiadać **wielu detalom z kilku ZD**, więc faktura nie daje relacji 1:1.
+Stąd status `POZYCJA_ZBIORCZA`: nie zakładamy kartoteki na siłę, nie blokujemy
+rozliczenia, ale też nie udajemy, że jedna linia = jeden element magazynowy.
+
+⚠️ Regex na kod rysunku (`_KOD_RYSUNKU`) jest celowo **wąski**: `człon-liczba
+.liczba[literka]`. Szerszy rozbijał symbole QUAY (`618/4 2Z=684 2Z` → `618/4`
++ reszta), a to cały symbol, nie kod z nazwą.
+
+Wynik: `mapowania_dostawcow` NIE MOŻE wymagać symbolu — musi być opcjonalny.
+Pełne `P_7` zachowujemy zawsze jako `tekst_pozycji`.
+
+Kolumny okna: **Identyfikator dostawcy | Nazwa / opis | Źródło**, gdzie źródło
+to `INDEKS` / `SYMBOL` / `NAZWA` (wykryty) / `BRAK`.
+
+## Ten sam rozdział istnieje po stronie BOM-u
+
+`items` w bazie projektu ma numer rysunku i nazwę W OSOBNYCH kolumnach:
+`src_drawing_no` / `work_drawing_no` / `norm_drawing_no` oraz `src_name` /
+`work_name`. Zmierzone na `project_10`:
+
+| klasa | pozycji bez numeru rysunku |
+|---|---|
+| ZNORMALIZOWANE (normalia) | **77 z 78** |
+| STANDARD (detale własne) | 0 z 69 |
+| X | 0 z 78 |
+
+Normalia mają identyfikator **w nazwie** (`3304`, `170833 DFM-16-20-P-A-GF`,
+`554225_ADNGF-20-30-P-A`), detale własne mają numer rysunku zawsze. Dopasowując
+pozycję faktury do BOM-u: numer rysunku gdy jest, nazwa gdy pusty —
+`class_effective` mówi, którego przypadku się spodziewać.
+
+## ⚠️ TRZECI TYP: detal z NASZEGO rysunku
+
+Obok towaru handlowego i pozycji opisowej jest trzeci typ, którego tożsamością
+jest **numer rysunku RM**, a nie symbol dostawcy: `027-200.01 Korpus`,
+`2602-100.41X Płyta zewnętrzna`. To Wasze elementy projektowe zlecone
+kooperantowi, które wracają jako dostawa.
+
+**Pomiar rozstrzygający (faktura AMB PRODUKT, 5 pozycji, 17.09.2026):**
+
+| numer rysunku | BOM-y projektów | kartoteka Subiekta |
+|---|---|---|
+| `013-100.30a` | 25, 48, 54 | BRAK |
+| `013-100.30B` | 9, 10, 21, 25, 29, 65 | BRAK |
+| `013-100.30c` | 25, 50, 73 | BRAK |
+| `ROTO-100.01` | 29, 48, 50, 54, 65 | BRAK |
+| `DUO-100.06` | 73 | BRAK |
+| **razem** | **5 / 5** | **0 / 5** |
+
+Dla takiej pozycji szukanie w kartotece jest **z definicji bezowocne** — stąd
+numer rysunku IDZIE PRZED symbolem katalogowym w hierarchii. Odwrotnie niż
+QUAY: tam symbole są w kartotece (11/55), ale w BOM-ach ich nie ma.
+
+⚠️ **Ten sam rysunek występuje w WIELU projektach** (`013-100.30B` w sześciu),
+więc systemu nie da się zmusić do wskazania ZD — wybiera człowiek.
+
+⚠️ **Numery rysunku porównujemy Z ZACHOWANIEM WIELKOŚCI LITER.**
+`013-100.30a` i `013-100.30B` to RÓŻNE detale; normalizacja do wielkich liter
+by je zlepiła.
+
+**Bez nowej tabeli:** `mapowania` (klucz `numer_rysunku`) jest dokładnie do
+tego; `mapowania_dostawcow` do cudzych symboli; `dostawa_zd_pozycje` do
+powiązania z ZD. Semantyka rozdziela się sama.
+
+**Pytanie w oknie brzmi „czym to jest", nie „załóż kartotekę":**
+towar handlowy / usługa / pozycja zbiorcza / detal z naszego rysunku.
+
+Kolumny okna: `Lp. | Identyfikator | Typ | Numer rysunku | Nazwa/opis | Ilość |
+JM | Kartoteka | ZD | Status`.
+
 ## Cztery statusy pozycji
 
 ```
 ✓ KARTOTEKA        → konkretny asortyment Subiekta
 ✓ NOWA_KARTOTEKA   → utworzona teraz
 — USLUGA           → nie bierze udziału w PZ
+◫ POZYCJA_ZBIORCZA → jedna linia = wiele detali (alu-frost); nie na PZ
+📐 RYSUNEK_RM      → nasz detal; wiąże się z ZD, kartoteka opcjonalna
 ! BRAK_DECYZJI     → blokuje utworzenie PZ
 ```
 
 ```python
-can_create_pz = all(p.status in ("KARTOTEKA", "NOWA_KARTOTEKA", "USLUGA")
+can_create_pz = all(p.status in ("KARTOTEKA", "NOWA_KARTOTEKA",
+                                 "USLUGA", "POZYCJA_ZBIORCZA")
                     for p in pozycje)
 # do PZ ida tylko KARTOTEKA i NOWA_KARTOTEKA
 ```
