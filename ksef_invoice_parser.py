@@ -15,7 +15,7 @@ wyszukiwanie odbywa się po lokalnej nazwie tagu (bez namespace).
 """
 
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -28,6 +28,14 @@ class KsefInvoiceLine:
     cena_netto: float
     wartosc_netto: float
     stawka_vat: str
+    #: `Indeks` z wiersza — pole standardu FA(3), ale NIE u kazdego dostawcy
+    #: jest symbolem: alu-frost wpisuje tam kategorie uslugi ("Detale ciete
+    #: laserem") powtorzona w wielu wierszach. Pokazujemy to, co przyslal.
+    indeks: str = ""
+    #: Pary klucz-wartosc z `DodatkowyOpis`, dowiazane po `NrWiersza`.
+    #: Nazwy kluczy nadaje WYSTAWCA (QUAY: "Opis", "Marka", "Numer wydania"),
+    #: wiec nie da sie ich zakodowac na sztywno — trzymamy slownik.
+    dodatkowe: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -102,12 +110,27 @@ def parse_ksef_invoice_xml(path):
                 sprzedawca_nazwa = _find_child_text(child, 'Nazwa') or ''
                 sprzedawca_nip = _find_child_text(child, 'NIP') or ''
 
+    # `DodatkowyOpis` lezy w <Fa> OBOK wierszy, nie w srodku nich — wiaze sie
+    # z pozycja przez <NrWiersza>. Klucze nadaje wystawca, wiec zbieramy je
+    # takie, jakie sa. Wpisy bez NrWiersza dotycza calej faktury — pomijamy.
+    dodatkowe_wg_wiersza = {}
+    for child in fa:
+        if _local_tag(child) != 'DodatkowyOpis':
+            continue
+        nr = _find_child_text(child, 'NrWiersza')
+        klucz = _find_child_text(child, 'Klucz')
+        wartosc = _find_child_text(child, 'Wartosc')
+        if not nr or not klucz:
+            continue
+        dodatkowe_wg_wiersza.setdefault(nr.strip(), {})[klucz.strip()] = (wartosc or '').strip()
+
     pozycje = []
     for child in fa:
         if _local_tag(child) != 'FaWiersz':
             continue
         nr_str = _find_child_text(child, 'NrWierszaFa')
         nazwa = _find_child_text(child, 'P_7') or ''
+        indeks = _find_child_text(child, 'Indeks') or ''
         jednostka = _find_child_text(child, 'P_8A') or ''
         ilosc = _to_float(_find_child_text(child, 'P_8B'))
         cena_netto = _to_float(_find_child_text(child, 'P_9A'))
@@ -122,6 +145,8 @@ def parse_ksef_invoice_xml(path):
             cena_netto=cena_netto if cena_netto is not None else 0.0,
             wartosc_netto=wartosc_netto if wartosc_netto is not None else 0.0,
             stawka_vat=stawka_vat.strip(),
+            indeks=indeks.strip(),
+            dodatkowe=dodatkowe_wg_wiersza.get((nr_str or '').strip(), {}),
         ))
 
     if not pozycje:

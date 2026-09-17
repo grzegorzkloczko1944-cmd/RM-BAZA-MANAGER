@@ -38,3 +38,6 @@ rm_serwer_config.json
 
 # Konfiguracja z sekretem HMAC — NIGDY do repozytorium.
 sync_config.json
+
+# Hasło do konta na NAS-ie — żyje tylko na serwerze (CLAUDE.md).
+backup_nic.bat

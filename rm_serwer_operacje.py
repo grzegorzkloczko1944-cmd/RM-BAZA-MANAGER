@@ -2972,6 +2972,38 @@ def zastosuj_migracje(con):
     return zrobione
 
 
+def zastosuj_migracje_ksef(con):
+    """Schemat archiwum KSeF. Idempotentne — wolne do puszczenia przy kazdym starcie.
+
+    ALTER-y odpalamy tylko wtedy, gdy kolumny naprawde nie ma: `CREATE TABLE
+    IF NOT EXISTS` pomija istniejaca tabele, wiec dolozone pozniej kolumny
+    (`indeks`, `dodatkowe` — 17.09.2026) trzeba dodac osobno, a powtorzony
+    ALTER rzuca "duplicate column".
+    """
+    zrobione = []
+    warunkowe = {_ALTER_POZYCJE_INDEKS: ("pozycje", "indeks"),
+                 _ALTER_POZYCJE_DODATKOWE: ("pozycje", "dodatkowe")}
+    for sql in MIGRACJE_KSEF:
+        warunek = warunkowe.get(sql)
+        if warunek is not None:
+            tabela, kolumna = warunek
+            try:
+                kolumny = {r[1] for r in con.execute("PRAGMA table_info(%s)" % tabela)}
+            except sqlite3.Error:
+                continue                 # tabeli nie ma — CREATE wyzej ja zrobi
+            if not kolumny or kolumna in kolumny:
+                continue
+        try:
+            con.execute(sql)
+            zrobione.append(sql.split("\n")[0].strip()[:70])
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+    if zrobione:
+        con.commit()
+    return zrobione
+
+
 def wyczysc_dziennik(con, starsze_niz_h=24):
     """Kasuje wpisy `_server_request_log` starsze niż N godzin (§3)."""
     granica = datetime.now().timestamp() - starsze_niz_h * 3600
@@ -2998,6 +3030,12 @@ def znane_operacje():
 # niej naturalnym miejscem. `plik` zostaje — niesie oryginalna nazwe, pod
 # ktora XML trafil z KSeF (12.09.2026).
 
+#: ALTER-y dla baz, ktore juz istnieja. Trzymane osobno, bo wykonuje sie je
+#: warunkowo — powtorzony ALTER rzuca "duplicate column" i zabilby start
+#: serwera (petla po MIGRACJE_KSEF nie lapie wyjatkow).
+_ALTER_POZYCJE_INDEKS = "ALTER TABLE pozycje ADD COLUMN indeks TEXT"
+_ALTER_POZYCJE_DODATKOWE = "ALTER TABLE pozycje ADD COLUMN dodatkowe TEXT"
+
 MIGRACJE_KSEF = [
     """CREATE TABLE IF NOT EXISTS faktury (
            ksef_number      TEXT PRIMARY KEY,
@@ -3019,11 +3057,32 @@ MIGRACJE_KSEF = [
            ilosc         REAL,
            cena_netto    REAL,
            wartosc_netto REAL,
+           indeks        TEXT,
+           dodatkowe     TEXT,
            PRIMARY KEY (ksef_number, nr_wiersza)
        )""",
     "CREATE INDEX IF NOT EXISTS idx_poz_nazwa ON pozycje(nazwa)",
+    # Kolumny dolozone 17.09.2026 — `CREATE TABLE IF NOT EXISTS` nie ruszy
+    # tabeli, ktora juz istnieje, wiec dla wdrozonych baz ida ALTER-y.
+    # `indeks` to <Indeks> z wiersza, `dodatkowe` to JSON z <DodatkowyOpis>
+    # (klucze nadaje wystawca, u kazdego inne — stad JSON, nie kolumny).
+    _ALTER_POZYCJE_INDEKS,
+    _ALTER_POZYCJE_DODATKOWE,
     "CREATE INDEX IF NOT EXISTS idx_fakt_nip  ON faktury(sprzedawca_nip)",
     "CREATE INDEX IF NOT EXISTS idx_fakt_data ON faktury(data_wystawienia)",
+    # Dziennik idempotencji — jak w pozostalych bazach serwera. FV_KSEF go
+    # NIE mial, wiec kazdy zapis `ksef-*` konczyl sie bledem "no such table:
+    # _server_request_log" (17.09.2026). Musi byc w TEJ bazie, bo zapis i wpis
+    # do dziennika ida jedna transakcja, a ta nie rozciaga sie na dwa pliki.
+    """CREATE TABLE IF NOT EXISTS _server_request_log (
+           request_id  TEXT PRIMARY KEY,
+           operation   TEXT NOT NULL,
+           kto         TEXT,
+           result_json TEXT,
+           created_at  TEXT NOT NULL
+       )""",
+    "CREATE INDEX IF NOT EXISTS idx_server_request_log_czas"
+    " ON _server_request_log(created_at)",
 ]
 
 # ── operacje archiwum KSeF ──────────────────────────────────────────────
@@ -3050,7 +3109,8 @@ ODCZYT.update({
         ["wzor", "wzor2", "nip", "wzor3"],
     ),
     "ksef-pozycje": (
-        "SELECT nr_wiersza, nazwa, jednostka, ilosc, cena_netto, wartosc_netto"
+        "SELECT nr_wiersza, nazwa, jednostka, ilosc, cena_netto, wartosc_netto,"
+        "       indeks, dodatkowe"
         "  FROM pozycje WHERE ksef_number = ? ORDER BY nr_wiersza",
         ["ksef_number"],
     ),
@@ -3095,9 +3155,10 @@ ZAPIS.update({
     ),
     "ksef-pozycja-zapisz": (
         "INSERT OR REPLACE INTO pozycje"
-        " (ksef_number, nr_wiersza, nazwa, jednostka, ilosc, cena_netto, wartosc_netto)"
-        " VALUES (?,?,?,?,?,?,?)",
+        " (ksef_number, nr_wiersza, nazwa, jednostka, ilosc, cena_netto,"
+        "  wartosc_netto, indeks, dodatkowe)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
         ["ksef_number", "nr_wiersza", "nazwa", "jednostka", "ilosc",
-         "cena_netto", "wartosc_netto"],
+         "cena_netto", "wartosc_netto", "indeks", "dodatkowe"],
     ),
 })

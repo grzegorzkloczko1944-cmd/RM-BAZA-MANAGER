@@ -352,9 +352,9 @@ class Serwer:
             # była dotąd rejestrowana u klienta — przy zapytaniach przez serwer
             # musi istnieć TUTAJ, inaczej `no such function: LOWER_PL`.
             self.con_ksef.create_function("LOWER_PL", 1, _uprosc_pl)
-            for sql in ops.MIGRACJE_KSEF:
-                self.con_ksef.execute(sql)
-            self.con_ksef.commit()
+            zrobione = ops.zastosuj_migracje_ksef(self.con_ksef)
+            for co in zrobione:
+                log("   + %s" % co)
             log("KSEF: %s" % sciezka_ksef)
 
     # ── wykonanie pojedynczego żądania (w wątku roboczym) ─────────────

@@ -69,7 +69,7 @@ internal static class CommandDispatcher
     /// <summary>Wszystkie tryby obslugiwane przez dispatcher.</summary>
     public static readonly string[] Tryby =
     {
-        "stan", "katalog", "kontrahenci", "dokumenty", "faktury", "kartoteka",
+        "stan", "katalog", "kontrahenci", "dokumenty", "faktury", "pz", "kartoteka",
         "stan-pozycji", "dostawcy", "zapotrzebowanie", "zd", "magazyn",
         "zd-usun", "wydruk-recon", "termin", "symbole", "rw", "kartoteka-usun",
         "progi", "wydruk", "projekt", "komplet", "komplet-napraw", "kartoteka-edytuj",
@@ -126,6 +126,10 @@ internal static class CommandDispatcher
 
             case "faktury":
                 return Faktury.Uruchom(sfera, k.Limit > 15 ? k.Limit : 60, k.OutPath);
+
+            // POMIAR przyjec zewnetrznych — tylko odczyt, zero zapisu.
+            case "pz":
+                return Pz.Uruchom(sfera, k.Limit > 15 ? k.Limit : 60, k.OutPath);
 
             case "stan-pozycji":
                 if (k.Symbole is not { Count: > 0 })
