@@ -1,6 +1,6 @@
 {
   "protokol": 1,
-  "zbudowano": "2026-09-14 12:09",
-  "sha": "62f2f36",
-  "uwaga": "WydanieStan: usuniety limit Take(400) - liczniki wydano/potrzeba licza po WSZYSTKICH dokumentach projektu (limit odcinal starsze RW i dawal ciche podwojne wydania)"
+  "zbudowano": "2026-09-18 00:26",
+  "sha": "3b8ab7c",
+  "uwaga": "pz (pomiar), symbole-dostawcy (powiazania symbol dostawcy -> kartoteka), pz-utworz (PZ z dostawy realizujace ZD), dokumenty: Id i DoRealizacji pozycji"
 }
