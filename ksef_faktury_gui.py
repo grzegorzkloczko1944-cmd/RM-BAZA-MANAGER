@@ -59,62 +59,111 @@ import ksef_kartoteki as kk
 from ksef_archiwum import (ArchiwumKsef, pobierz_nowe, uprosc, _zl,
                            _bezpieczna_nazwa, WZOR_NUMERU_KSEF)
 from rm_kreciolek import Kreciolek
-from subiekt_panel import TLO, TLO_SEKCJI, OBRAMOWANIE, TEKST, TEKST_SZARY
-from subiekt_stany import wysrodkuj
+from subiekt_stany import wysrodkuj, podepnij_szerokosci
+
+try:
+    from tksheet import Sheet
+except ImportError:
+    Sheet = None
+
+# ── paleta: TA SAMA co w „Dokumenty w Subiekcie" (subiekt_dokumenty_gui) ────
+#: Okna zakładki SUBIEKT mają wyglądać jak jeden program, a nie jak zbiór
+#: osobnych narzędzi — stąd te same kolory, ten sam granatowy pasek tytułu,
+#: te same małe przyciski i ta sama stopka. Zmiana tutaj = rozjazd z resztą.
+GRANAT = "#34495e"          # pasek tytułu, pasek panelu, stopka
+GRANAT_CIEMNY = "#2c3e50"   # selectcolor checkbuttonów na granacie, tekst
+SZARY = "#ecf0f1"           # pasek filtrów, podsumowanie, legenda
+TEKST = "#2c3e50"
+TEKST_SZARY = "#7f8c8d"
+NIEBIESKI = "#3498db"       # Odśwież
+ZIELONY = "#27ae60"         # akcja tworząca (nowa kartoteka)
+GRANAT_AKCJA = "#2980b9"    # akcja główna (zapis decyzji)
+SZAROSC_AKCJA = "#95a5a6"   # akcja drugorzędna
+STAL = "#7f8c8d"            # akcja trzeciorzędna
+CZERWONY = "#c0392b"
 
 # ── wygląd statusów ─────────────────────────────────────────────────────────
-#: status → (etykieta, tło wiersza, kolor tekstu). Kolory świadomie stonowane:
-#: wiersz ma być czytelny, nie krzyczeć.
+#: status → (etykieta, tło wiersza, kolor tekstu). Odcienie z rodziny
+#: „Dokumentów": pastelowe tła z legendy, nie własna paleta.
 STATUSY = {
-    kk.KARTOTEKA:        ("✔  KARTOTEKA",         "#e8f8e8", "#1e7e34"),
-    kk.NOWA_KARTOTEKA:   ("✔  NOWA KARTOTEKA",    "#e8f8e8", "#1e7e34"),
-    kk.RYSUNEK_RM:       ("📐  RYSUNEK RM",       "#e8f0fb", "#1f5fa8"),
-    kk.POZYCJA_ZBIORCZA: ("◫  POZYCJA ZBIORCZA",  "#f1e8fb", "#6c3fb5"),
-    kk.USLUGA:           ("—  USŁUGA",            "#f2f2f2", "#666666"),
-    kk.BRAK_DECYZJI:     ("!  BRAK DECYZJI",      "#fdecea", "#c0392b"),
+    kk.KARTOTEKA:        ("✔ KARTOTEKA",        "#d5f0dd", "#1e7e34"),
+    kk.NOWA_KARTOTEKA:   ("✔ NOWA KARTOTEKA",   "#d5f0dd", "#1e7e34"),
+    kk.RYSUNEK_RM:       ("📐 RYSUNEK RM",      "#d6eaf8", "#1f5fa8"),
+    kk.POZYCJA_ZBIORCZA: ("◫ POZYCJA ZBIORCZA", "#f4ecf7", "#6c3fb5"),
+    kk.USLUGA:           ("— USŁUGA",           "#eaecee", "#566573"),
+    kk.BRAK_DECYZJI:     ("! BRAK DECYZJI",     "#fdebd0", "#a04000"),
 }
 
 #: Cztery typy pozycji do wyboru w panelu decyzji. To pytanie brzmi „czym
 #: to jest", NIE „załóż kartotekę" — przy części pozycji kartoteka jest złym
 #: pytaniem (usługa, pozycja zbiorcza alu-frost, detal z naszego rysunku).
+#: Kolory = tła statusów, żeby wybór typu i kolor wiersza znaczyły to samo.
+#:
+#: Skróty TW / US wg nomenklatury z reszty okien (`subiekt_edytor_gui.SKROT`,
+#: `subiekt_asortyment_gui.KODY_RODZAJU`): TW = towar, KT = komplet, US =
+#: usługa. ZB i RM są WŁASNE — pozycja zbiorcza i detal z naszego rysunku nie
+#: mają odpowiednika wśród rodzajów kartotek Subiekta, bo to nie są rodzaje
+#: kartoteki, tylko odpowiedzi na pytanie „czym jest ta linia faktury".
+#: Kompletu (KT) tu nie ma świadomie: faktura dostawcy nie dostarcza złożeń.
 TYPY = [
-    ("towar",    "Towar handlowy",       "z kartoteki dostawcy",        "#e8f8e8"),
-    ("usluga",   "Usługa",               "nie wchodzi na stan",         "#f2f2f2"),
-    ("zbiorcza", "Pozycja zbiorcza",     "jedna linia = wiele detali",  "#f1e8fb"),
-    ("rysunek",  "Detal z naszego rysunku", "numer rysunku RM, projekt", "#e8f0fb"),
+    ("towar",    "TW",  "Towar handlowy",          "z kartoteki dostawcy",       "#d5f0dd"),
+    ("usluga",   "US",  "Usługa",                  "nie wchodzi na stan",        "#eaecee"),
+    ("zbiorcza", "ZB",  "Pozycja zbiorcza",        "jedna linia = wiele detali", "#f4ecf7"),
+    ("rysunek",  "RM",  "Detal z naszego rysunku", "numer rysunku RM, projekt",  "#d6eaf8"),
 ]
+#: klucz typu → skrót do kolumny „Typ" w tabeli pozycji.
+SKROT_TYPU = {t[0]: t[1] for t in TYPY}
 
-#: Odznaki faktur w drzewie. „Gotowa do PZ" celowo zamiast „Rozliczona" z
-#: makiety — rozliczenie to osobny etap (FZ w Subiekcie), którego to okno
+#: Odznaki faktur w drzewie. „Rozstrzygnięta" celowo zamiast „Rozliczona"
+#: z makiety — rozliczenie to osobny etap (FZ w Subiekcie), którego to okno
 #: nie robi. Nie obiecujemy więcej, niż wiemy.
 ODZNAKI = {
-    "nowa":   ("Nowa",           "#eaf3fb"),
-    "wtoku":  ("W toku",         "#fdf2e6"),
-    "gotowa": ("Rozstrzygnięta", "#e8f8e8"),
-    "pusta":  ("Bez pozycji",    "#f2f2f2"),
+    "nowa":   ("Nowa",           "#d6eaf8"),
+    "wtoku":  ("W toku",         "#fdebd0"),
+    "gotowa": ("Rozstrzygnięta", "#d5f0dd"),
+    "pusta":  ("Bez pozycji",    "#eaecee"),
 }
 
-#: Szerokości dobrane tak, żeby przy 1540 px CAŁA tabela — ze Statusem —
-#: mieściła się bez przewijania w bok. Numer rysunku nie ma własnej kolumny:
-#: dla detalu z rysunku identyfikatorem JEST numer rysunku, a panel decyzji
-#: pokazuje go osobno.
+#: (klucz, nagłówek, szerokość) — ten sam format co `KOL_DOK` w oknie
+#: dokumentów, bo szerokości zapamiętuje ten sam `podepnij_szerokosci`.
+#: Numer rysunku nie ma własnej kolumny: dla detalu z rysunku identyfikatorem
+#: JEST numer rysunku, a panel decyzji pokazuje go osobno.
+#: ⚠️ „Nazwa / opis" występuje DWA razy i to celowo:
+#:   * kolumna 3  — opis z FAKTURY (co napisał dostawca),
+#:   * kolumna 9  — nazwa KARTOTEKI z Subiekta (co mamy u siebie).
+#: Zestawienie ich obok siebie jest sednem tego okna: widać, czy wskazana
+#: kartoteka faktycznie odpowiada temu, co jest na fakturze.
 KOL_POZYCJE = [
-    ("lp",        "Lp.",            38,  "e"),
-    ("ident",     "Identyfikator",  140, "w"),
-    ("typ",       "Typ",            62,  "c"),
-    ("nazwa",     "Nazwa / opis",   190, "w"),
-    ("ilosc",     "Ilość",          52,  "e"),
-    ("jm",        "JM",             40,  "c"),
-    ("cena",      "Cena netto",     72,  "e"),
-    ("wz",        "WZ",             84,  "w"),
-    ("kartoteka", "Kartoteka",      150, "w"),
-    ("projekty",  "Projekty",       78,  "w"),
-    ("status",    "Status",         140, "w"),
+    ("lp", "Lp.", 40), ("ident", "Identyfikator", 150),
+    ("typ", "Typ", 70), ("nazwa", "Nazwa / opis", 200),
+    ("ilosc", "Ilość", 60), ("jm", "J.m.", 50),
+    ("cena", "Cena netto", 85), ("wz", "Numer wydania", 105),
+    ("kartoteka", "Kartoteka", 140), ("nazwa_kart", "Nazwa kartoteki", 190),
+    # „Opis" to pole z KARTOTEKI (wymiary, gatunek, norma) — ta sama kolumna
+    # i ten sam powód co w oknie dokumentów: sama nazwa bywa za krótka, żeby
+    # rozpoznać detal.
+    ("opis_kart", "Opis kartoteki", 160),
+    ("projekty", "Projekty", 90), ("status", "Status", 150),
 ]
+#: Indeksy kolumn używane przy kolorowaniu — trzymane obok definicji, żeby
+#: dołożenie kolumny nie wymagało szukania magicznych liczb w kodzie.
+K_LP = 0
+K_TYP = 2
+K_KARTOTEKA = 8
+K_STATUS = len(KOL_POZYCJE) - 1
+
+#: Lista faktur — drzewo (grupowanie po dacie), więc zostaje ttk.Treeview.
+KOL_FAKTURY = [("dostawca", "Dostawca", 130), ("netto", "Netto", 80),
+               ("stan", "Stan", 110)]
+
+#: Filtr dostawcy w pasku — ta sama konwencja napisu co w oknie dokumentów
+#: (`PROJ_WSZYSTKIE`).
+DOST_WSZYSCY = "— wszyscy —"
 
 FONT = ("Arial", 9)
+FONT_S = ("Arial", 8)
 FONT_B = ("Arial", 9, "bold")
-FONT_TYTUL = ("Arial", 15, "bold")
+FONT_TYTUL = ("Arial", 14, "bold")
 
 
 class Pozycja:
@@ -304,9 +353,8 @@ def _typ_z_dopasowania(d):
 
 
 def _etykieta_typu(d):
-    typ = _typ_z_dopasowania(d)
-    return {"towar": "Dostawca", "usluga": "Usługa",
-            "zbiorcza": "Opis", "rysunek": "Rysunek"}[typ]
+    """Skrót typu do kolumny „Typ" — TW / US / ZB / RM (nomenklatura okien)."""
+    return SKROT_TYPU[_typ_z_dopasowania(d)]
 
 
 def _opis_pozycji(d):
@@ -333,10 +381,15 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         self.parent_app = parent
         self.arch = ArchiwumKsef(katalog)
         self.ksef_cfg = ksef_cfg or {}
-        self.title("🧾 RM_BAZA — Faktury z KSeF")
-        self.geometry("1540x920")
-        self.minsize(1180, 700)
-        self.configure(bg=TLO)
+        self.title("Faktury z KSeF — pozycje, kartoteki, decyzje")
+        self.geometry("1450x860")
+        self.minsize(1100, 650)
+        # Jak w oknie dokumentów: startujemy zmaksymalizowani, bo tabela
+        # pozycji ma jedenaście kolumn i w oknie 1100 px nie widać Statusu.
+        try:
+            self.state("zoomed")
+        except tk.TclError:
+            pass
 
         # dane w tle
         self.katalog_sub = []          # [{"id","symbol","nazwa"}]
@@ -355,6 +408,8 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         self._xml = ""
         self._pozycje = []
         self._dop = []
+        self._widoczne = []            # podzbiór `_dop` pokazany w arkuszu
+        self.filtr_pozycji = None
         self._map_rysunki = {}
         self._wybrany_lp = None
         self._wybrana_kartoteka = None
@@ -371,120 +426,187 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
 
     # ── budowa ─────────────────────────────────────────────────────────────
     def _buduj(self):
-        self._pasek_narzedzi()
+        self._pasek_tytulu()
+        self._pasek_filtrow()
+        self._legenda()
 
-        glowny = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        glowny.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+        # Dwa panele OBOK SIEBIE — jak w „Dokumentach": lista po lewej,
+        # szczegóły po prawej. Faktur bywa kilkadziesiąt, a pozycji w jednej
+        # ponad pięćdziesiąt, więc dzielenie wysokości dusiłoby obie tabele.
+        paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 4))
 
-        lewy = tk.Frame(glowny, bg=TLO_SEKCJI, highlightthickness=1,
-                        highlightbackground=OBRAMOWANIE)
+        lewy = tk.Frame(paned)
+        prawy = tk.Frame(paned)
+        paned.add(lewy, weight=2)
+        paned.add(prawy, weight=7)
+
         self._panel_faktur(lewy)
-        glowny.add(lewy, weight=0)
 
-        prawy = ttk.PanedWindow(glowny, orient=tk.VERTICAL)
-        gora = tk.Frame(prawy, bg=TLO)
+        # Po prawej: nagłówek faktury + zakładki, a pod nimi panel decyzji.
+        pion = ttk.PanedWindow(prawy, orient=tk.VERTICAL)
+        pion.pack(fill=tk.BOTH, expand=True)
+        gora = tk.Frame(pion)
+        dol = tk.Frame(pion)
+        pion.add(gora, weight=5)
+        pion.add(dol, weight=3)
         self._naglowek_faktury(gora)
         self._zakladki(gora)
-        prawy.add(gora, weight=3)
-        dol = tk.Frame(prawy, bg=TLO_SEKCJI, highlightthickness=1,
-                       highlightbackground=OBRAMOWANIE)
         self._panel_decyzji(dol)
-        prawy.add(dol, weight=0)
-        glowny.add(prawy, weight=1)
 
         self._pasek_stanu()
 
-    def _pasek_narzedzi(self):
-        p = tk.Frame(self, bg=TLO)
-        p.pack(fill=tk.X, padx=8, pady=8)
+    def _pasek_tytulu(self):
+        """Granatowy pasek z tytułem i akcjami — wzorzec z okna dokumentów."""
+        top = tk.Frame(self, bg=GRANAT, height=42)
+        top.pack(side=tk.TOP, fill=tk.X)
+        top.pack_propagate(False)
+        tk.Label(top, text="🧾 Faktury z KSeF — pozycje, kartoteki, decyzje",
+                 bg=GRANAT, fg="white", font=("Arial", 11, "bold")).pack(side=tk.LEFT, padx=12)
+        # Stan mostu w miejscu, gdzie „Dokumenty" pokazują wiek odczytu —
+        # tu ważniejsze jest, czy w ogóle mamy kartotekę i powiązania.
+        self.lbl_most = tk.Label(top, text="most: sprawdzam…", bg=GRANAT,
+                                 fg="#f5b041", font=("Arial", 9, "bold"))
+        self.lbl_most.pack(side=tk.LEFT, padx=(16, 0))
 
-        def przycisk(tekst, cmd, **kw):
-            b = tk.Button(p, text=tekst, command=cmd, bg="white", fg=TEKST,
-                          relief=tk.SOLID, bd=1, font=FONT, padx=12, pady=5,
-                          cursor="hand2", **kw)
-            b.pack(side=tk.LEFT, padx=(0, 8))
+        def akcja(tekst, cmd, kolor, pad=(0, 4)):
+            b = tk.Button(top, text=tekst, command=cmd, bg=kolor, fg="white",
+                          font=FONT_S, padx=8, pady=2, relief=tk.RAISED, bd=1,
+                          cursor="hand2")
+            b.pack(side=tk.RIGHT, padx=pad, pady=8)
             return b
 
-        przycisk("📂  Wczytaj XML z dysku", self._wczytaj_pliki)
-        self.btn_pobierz = przycisk("☁  Pobierz nowe z KSeF", self._pobierz)
-        przycisk("⟳  Odśwież", self._odswiez_wszystko)
-        self.lbl_licznik = tk.Label(p, text="", bg=TLO, fg=TEKST, font=FONT_B)
-        self.lbl_licznik.pack(side=tk.RIGHT, padx=(8, 0))
-        self.lbl_most = tk.Label(p, text="most: sprawdzam…", bg=TLO, fg=TEKST_SZARY, font=FONT)
-        self.lbl_most.pack(side=tk.RIGHT, padx=(8, 16))
+        self.btn_odswiez = akcja("🔄 Odśwież", self._odswiez_wszystko, NIEBIESKI, (0, 10))
+        self.btn_pobierz = akcja("☁ Pobierz nowe z KSeF", self._pobierz, GRANAT_AKCJA)
+        akcja("📂 Wczytaj XML z dysku", self._wczytaj_pliki, ZIELONY)
 
-    def _panel_faktur(self, r):
-        tk.Label(r, text="Faktury (archiwum)", bg=TLO_SEKCJI, fg=TEKST,
-                 font=("Arial", 11, "bold"), anchor="w").pack(fill=tk.X, padx=10, pady=(10, 4))
-        szuk = tk.Frame(r, bg=TLO_SEKCJI)
-        szuk.pack(fill=tk.X, padx=10, pady=(0, 6))
+    def _pasek_filtrow(self):
+        f = tk.Frame(self, bg=SZARY)
+        f.pack(side=tk.TOP, fill=tk.X)
+        tk.Label(f, text="Szukaj:", bg=SZARY, font=FONT).pack(side=tk.LEFT, padx=(12, 3), pady=6)
         self.var_szukaj = tk.StringVar()
-        e = ttk.Entry(szuk, textvariable=self.var_szukaj, font=FONT)
-        e.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        e = tk.Entry(f, textvariable=self.var_szukaj, width=26, font=FONT)
+        e.pack(side=tk.LEFT, pady=6)
         e.bind("<KeyRelease>", self._szukaj_opoznione)
         e.bind("<Return>", lambda _e: self._odswiez_liste())
-        tk.Label(szuk, text="  numer, dostawca, NIP, pozycja", bg=TLO_SEKCJI,
-                 fg=TEKST_SZARY, font=("Arial", 8)).pack(side=tk.LEFT)
+        tk.Label(f, text="(numer faktury, dostawca, NIP, nazwa pozycji)", bg=SZARY,
+                 fg=TEKST_SZARY, font=FONT_S).pack(side=tk.LEFT, padx=(4, 0))
 
-        wrap = tk.Frame(r, bg=TLO_SEKCJI)
-        wrap.pack(fill=tk.BOTH, expand=True, padx=(10, 0), pady=(0, 6))
-        self.tv_f = ttk.Treeview(wrap, columns=("dostawca", "netto", "stan"),
+        tk.Label(f, text="Dostawca:", bg=SZARY, font=FONT).pack(side=tk.LEFT, padx=(14, 3), pady=6)
+        self.var_dostawca = tk.StringVar(value=DOST_WSZYSCY)
+        self.cmb_dost = ttk.Combobox(f, textvariable=self.var_dostawca, width=22,
+                                     state="readonly", font=FONT, values=[DOST_WSZYSCY])
+        self.cmb_dost.pack(side=tk.LEFT, pady=6)
+        self.cmb_dost.bind("<<ComboboxSelected>>", lambda _e: self._wypelnij_drzewo())
+
+        self.var_tylko_braki = tk.IntVar(value=0)
+        tk.Checkbutton(f, text="tylko z brakami decyzji", variable=self.var_tylko_braki,
+                       command=self._wypelnij_drzewo, bg=SZARY, font=FONT_S,
+                       activebackground=SZARY).pack(side=tk.LEFT, padx=(12, 0), pady=6)
+
+        tk.Button(f, text="🗑️", command=self._wyczysc_filtry, bg=SZAROSC_AKCJA, fg="white",
+                  font=("Arial", 11, "bold"), width=3, relief=tk.RAISED, bd=2,
+                  cursor="hand2").pack(side=tk.LEFT, padx=(10, 2), pady=4)
+
+        # Akcje dotyczące WYBRANEJ faktury — po prawej, jak w „Dokumentach".
+        tk.Button(f, text="📄 Eksport do CSV", command=self._eksport_csv, bg=STAL, fg="white",
+                  font=FONT_S, padx=8, pady=2, relief=tk.RAISED, bd=1,
+                  cursor="hand2").pack(side=tk.RIGHT, padx=(0, 12), pady=4)
+        tk.Button(f, text="⏭ Następny brak", command=self._nastepny_brak, bg=SZAROSC_AKCJA,
+                  fg="white", font=FONT_S, padx=8, pady=2, relief=tk.RAISED, bd=1,
+                  cursor="hand2").pack(side=tk.RIGHT, padx=(0, 4), pady=4)
+        self.btn_dopasuj = tk.Button(f, text="🔎 Dopasuj ponownie", command=self._dopasuj_ponownie,
+                                     bg=GRANAT_AKCJA, fg="white", font=FONT_S, padx=8, pady=2,
+                                     relief=tk.RAISED, bd=1, cursor="hand2")
+        self.btn_dopasuj.pack(side=tk.RIGHT, padx=(0, 4), pady=4)
+
+        self.summary = tk.Label(self, text="Wczytywanie…", bg=SZARY, fg=TEKST,
+                                font=FONT, anchor="w", padx=12, pady=6)
+        self.summary.pack(side=tk.TOP, fill=tk.X)
+
+    def _legenda(self):
+        """Kolory statusów — próbka obok znaczenia, jak w oknie dokumentów.
+
+        ⚠️ Wartości MUSZĄ się zgadzać ze słownikiem `STATUSY` — inaczej
+        legenda kłamie.
+        """
+        leg = tk.Frame(self, bg=SZARY)
+        leg.pack(side=tk.TOP, fill=tk.X)
+        tk.Label(leg, text="Legenda:", bg=SZARY, fg=TEKST_SZARY,
+                 font=("Arial", 8, "bold")).pack(side=tk.LEFT, padx=(12, 6), pady=(0, 5))
+        for status, opis in ((kk.KARTOTEKA, "kartoteka wskazana"),
+                             (kk.RYSUNEK_RM, "detal z naszego rysunku"),
+                             (kk.POZYCJA_ZBIORCZA, "pozycja zbiorcza — nie na PZ"),
+                             (kk.USLUGA, "usługa — nie wchodzi na stan"),
+                             (kk.BRAK_DECYZJI, "brak decyzji — blokuje PZ")):
+            tk.Label(leg, text="  ", bg=STATUSY[status][1], relief=tk.SOLID, bd=1).pack(
+                side=tk.LEFT, padx=(6, 3), pady=(0, 5))
+            tk.Label(leg, text=opis, bg=SZARY, fg=TEKST, font=FONT_S).pack(
+                side=tk.LEFT, pady=(0, 5))
+        tk.Label(leg, text="✎ = zapisana decyzja człowieka (wygrywa z automatem)",
+                 bg=SZARY, fg=TEKST_SZARY, font=FONT_S).pack(side=tk.LEFT, padx=(16, 0), pady=(0, 5))
+
+    def _panel_faktur(self, r):
+        pasek = tk.Frame(r, bg=GRANAT)
+        pasek.pack(side=tk.TOP, fill=tk.X)
+        tk.Label(pasek, text="Faktury w archiwum", bg=GRANAT, fg="white",
+                 font=("Arial", 9, "bold"), anchor="w", padx=10, pady=4).pack(
+            side=tk.LEFT, fill=tk.X, expand=True)
+
+        wrap = tk.Frame(r)
+        wrap.pack(fill=tk.BOTH, expand=True)
+        self.tv_f = ttk.Treeview(wrap, columns=[k[0] for k in KOL_FAKTURY],
                                  show="tree headings", selectmode="browse")
         self.tv_f.heading("#0", text="Data / numer")
-        self.tv_f.heading("dostawca", text="Dostawca")
-        self.tv_f.heading("netto", text="Netto")
-        self.tv_f.heading("stan", text="Stan")
-        self.tv_f.column("#0", width=135, minwidth=110)
-        self.tv_f.column("dostawca", width=112, minwidth=80)
-        self.tv_f.column("netto", width=68, anchor="e", minwidth=60)
-        self.tv_f.column("stan", width=104, minwidth=70)
+        self.tv_f.column("#0", width=150, minwidth=110)
+        for klucz, naglowek, szer in KOL_FAKTURY:
+            self.tv_f.heading(klucz, text=naglowek)
+            self.tv_f.column(klucz, width=szer, minwidth=60,
+                             anchor="e" if klucz == "netto" else "w")
         sc = ttk.Scrollbar(wrap, orient="vertical", command=self.tv_f.yview)
         self.tv_f.configure(yscrollcommand=sc.set)
         self.tv_f.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sc.pack(side=tk.RIGHT, fill=tk.Y)
         for klucz, (_, tlo) in ODZNAKI.items():
             self.tv_f.tag_configure(klucz, background=tlo)
-        self.tv_f.tag_configure("data", font=FONT_B, background="#f4f6f8")
+        self.tv_f.tag_configure("data", font=FONT_B, background=SZARY)
         self.tv_f.bind("<<TreeviewSelect>>", self._wybrano_fakture)
 
-        self.lbl_razem = tk.Label(r, text="", bg=TLO_SEKCJI, fg=TEKST_SZARY,
-                                  font=("Arial", 8), anchor="w")
-        self.lbl_razem.pack(fill=tk.X, padx=10, pady=(0, 8))
-
     def _naglowek_faktury(self, r):
-        n = tk.Frame(r, bg=TLO_SEKCJI, highlightthickness=1, highlightbackground=OBRAMOWANIE)
-        n.pack(fill=tk.X, padx=(6, 0), pady=(0, 6))
+        n = tk.Frame(r, bg="white", highlightthickness=1, highlightbackground="#bdc3c7")
+        n.pack(fill=tk.X, pady=(0, 4))
         # ⚠️ Bez wag na kolumnach z wartościami. Gdy treść jest szersza niż
         # ramka, grid ODBIERA miejsce kolumnom z wagą — lewa kolumna wartości
         # zapadała się do zera i „Data wystawienia" stała pusta obok „Numery
         # WZ" (zrzut z testu 17.09.2026). Nadmiar bierze pusta kolumna 5.
         n.columnconfigure(5, weight=1)
 
-        tyt = tk.Frame(n, bg=TLO_SEKCJI)
-        tyt.grid(row=0, column=0, columnspan=4, sticky="w", padx=12, pady=(10, 2))
-        self.lbl_numer = tk.Label(tyt, text="— wybierz fakturę —", bg=TLO_SEKCJI,
+        tyt = tk.Frame(n, bg="white")
+        tyt.grid(row=0, column=0, columnspan=4, sticky="w", padx=12, pady=(8, 2))
+        self.lbl_numer = tk.Label(tyt, text="— wybierz fakturę —", bg="white",
                                   fg=TEKST, font=FONT_TYTUL)
         self.lbl_numer.pack(side=tk.LEFT)
-        self.lbl_odznaka = tk.Label(tyt, text="", bg=TLO_SEKCJI, fg="white",
-                                    font=FONT_B, padx=8, pady=2)
+        self.lbl_odznaka = tk.Label(tyt, text="", bg="white", fg=TEKST,
+                                    font=("Arial", 8, "bold"), padx=8, pady=2,
+                                    relief=tk.SOLID, bd=1)
         self.lbl_odznaka.pack(side=tk.LEFT, padx=(12, 0))
-        self.lbl_zrodlo = tk.Label(tyt, text="", bg=TLO_SEKCJI, fg=TEKST_SZARY, font=FONT)
+        self.lbl_zrodlo = tk.Label(tyt, text="", bg="white", fg=TEKST_SZARY, font=FONT_S)
         self.lbl_zrodlo.pack(side=tk.LEFT, padx=(8, 0))
 
         self._pola_nagl = {}
 
         def pole(wiersz, kol, etykieta, klucz, przycisk=None):
-            tk.Label(n, text=etykieta, bg=TLO_SEKCJI, fg=TEKST_SZARY, font=FONT,
+            tk.Label(n, text=etykieta, bg="white", fg=TEKST_SZARY, font=FONT_S,
                      anchor="w").grid(row=wiersz, column=kol, sticky="w", padx=(12, 6), pady=1)
-            f = tk.Frame(n, bg=TLO_SEKCJI)
+            f = tk.Frame(n, bg="white")
             f.grid(row=wiersz, column=kol + 1, sticky="w", pady=1)
-            l = tk.Label(f, text="", bg=TLO_SEKCJI, fg=TEKST, font=FONT_B, anchor="w")
+            l = tk.Label(f, text="", bg="white", fg=TEKST, font=FONT_B, anchor="w")
             l.pack(side=tk.LEFT)
             self._pola_nagl[klucz] = l
             if przycisk:
-                tk.Button(f, text=przycisk[0], command=przycisk[1], font=("Arial", 8),
-                          relief=tk.FLAT, bg="#eef2f6", cursor="hand2", padx=6
-                          ).pack(side=tk.LEFT, padx=(8, 0))
+                tk.Button(f, text=przycisk[0], command=przycisk[1], font=FONT_S,
+                          bg=SZARY, fg=TEKST, relief=tk.RAISED, bd=1, cursor="hand2",
+                          padx=6).pack(side=tk.LEFT, padx=(8, 0))
 
         pole(1, 0, "Data wystawienia", "data_wystawienia")
         pole(2, 0, "Data sprzedaży", "data_sprzedazy")
@@ -497,79 +619,75 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
 
         # dostawca / nabywca — jeden POD drugim po prawej. Obok siebie blok
         # miał ~500 px i przy 1540 px okna nabywca wychodził poza ramkę.
-        strony = tk.Frame(n, bg=TLO_SEKCJI)
+        strony = tk.Frame(n, bg="white")
         strony.grid(row=0, column=4, rowspan=5, sticky="ne", padx=12, pady=(8, 6))
         self._strony = {}
         for i, (klucz, tytul) in enumerate((("podmiot1", "Dostawca (Podmiot1)"),
                                             ("podmiot2", "Nabywca (Podmiot2)"))):
-            b = tk.Frame(strony, bg=TLO_SEKCJI)
+            b = tk.Frame(strony, bg="white")
             b.grid(row=i, column=0, sticky="nw", pady=(0, 4))
-            tk.Label(b, text=tytul, bg=TLO_SEKCJI, fg=TEKST, font=FONT_B,
+            tk.Label(b, text=tytul, bg="white", fg=TEKST_SZARY, font=("Arial", 8, "bold"),
                      anchor="w").pack(fill=tk.X)
-            l = tk.Label(b, text="", bg=TLO_SEKCJI, fg=TEKST, font=FONT,
-                         anchor="w", justify="left", wraplength=300)
+            l = tk.Label(b, text="", bg="white", fg=TEKST, font=FONT_S,
+                         anchor="w", justify="left", wraplength=320)
             l.pack(fill=tk.X)
             self._strony[klucz] = l
 
     def _zakladki(self, r):
         self.nb = ttk.Notebook(r)
-        self.nb.pack(fill=tk.BOTH, expand=True, padx=(6, 0))
+        self.nb.pack(fill=tk.BOTH, expand=True)
 
         # ── Pozycje ──
-        poz = tk.Frame(self.nb, bg=TLO_SEKCJI)
+        poz = tk.Frame(self.nb)
         self.nb.add(poz, text="Pozycje")
-        pas = tk.Frame(poz, bg=TLO_SEKCJI)
-        pas.pack(fill=tk.X, padx=8, pady=6)
 
-        def mały(tekst, cmd):
-            b = tk.Button(pas, text=tekst, command=cmd, bg="white", fg=TEKST,
-                          relief=tk.SOLID, bd=1, font=FONT, padx=10, pady=3, cursor="hand2")
-            b.pack(side=tk.LEFT, padx=(0, 6))
-            return b
-
-        self.btn_dopasuj = mały("⟳  Dopasuj ponownie", self._dopasuj_ponownie)
-        mały("📄  Eksport do CSV", self._eksport_csv)
-        mały("⏭  Następny brak", self._nastepny_brak)
-
-        # Liczniki w OSOBNYM rzędzie — w jednym z przyciskami nachodziły na
-        # siebie i „Brak decyzji" wyświetlało się jako „ak decyzji".
-        chipy = tk.Frame(poz, bg=TLO_SEKCJI)
-        chipy.pack(fill=tk.X, padx=8, pady=(0, 4))
+        pasek = tk.Frame(poz, bg=GRANAT)
+        pasek.pack(side=tk.TOP, fill=tk.X)
+        self.lbl_poz = tk.Label(pasek, text="Pozycje — kliknij wiersz, żeby zdecydować",
+                                bg=GRANAT, fg="white", font=("Arial", 9, "bold"),
+                                anchor="w", padx=10, pady=4)
+        self.lbl_poz.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # Liczniki są FILTRAMI — klik pokazuje tylko pozycje danego rodzaju,
+        # drugi klik wraca do wszystkich. Wcześniej wyglądały jak filtry,
+        # ale nic nie robiły (zgłoszone 17.09.2026).
         self._chipy = {}
-        for klucz, etykieta, kolor in (("razem", "Pozycji", TEKST),
-                                       ("kartoteka", "Kartoteka", "#1e7e34"),
-                                       ("rysunki", "Rysunek RM", "#1f5fa8"),
-                                       ("zbiorcze", "Zbiorcze", "#6c3fb5"),
-                                       ("uslugi", "Usługi", "#666666"),
-                                       ("brak", "Brak decyzji", "#c0392b")):
-            l = tk.Label(chipy, text=f"{etykieta}: –", bg="#f4f6f8", fg=kolor, font=FONT_B,
-                         padx=8, pady=3, relief=tk.FLAT)
-            l.pack(side=tk.LEFT, padx=(0, 6))
+        self.filtr_pozycji = None
+        for klucz, etykieta, kolor in (("brak", "Brak decyzji", "#f5b041"),
+                                       ("uslugi", "Usługi", "#d5dbdb"),
+                                       ("zbiorcze", "Zbiorcze", "#d7bde2"),
+                                       ("rysunki", "Rysunek RM", "#aed6f1"),
+                                       ("kartoteka", "Kartoteka", "#a9dfbf"),
+                                       ("razem", "Pozycji", "white")):
+            l = tk.Label(pasek, text=f"{etykieta}: –", bg=GRANAT, fg=kolor, font=FONT_B,
+                         cursor="hand2", padx=6, pady=2)
+            l.pack(side=tk.RIGHT, padx=(4, 0), pady=3)
+            l.bind("<Button-1>", lambda _e, k=klucz: self._filtruj_pozycje(k))
             self._chipy[klucz] = l
+        tk.Label(pasek, text="filtr:", bg=GRANAT, fg="#95a5a6", font=FONT_S).pack(
+            side=tk.RIGHT, padx=(10, 2))
 
-        wrap = tk.Frame(poz, bg=TLO_SEKCJI)
-        wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-        self.tv_p = ttk.Treeview(wrap, columns=[k[0] for k in KOL_POZYCJE],
-                                 show="headings", selectmode="browse")
-        for klucz, etykieta, szer, kotw in KOL_POZYCJE:
-            self.tv_p.heading(klucz, text=etykieta)
-            self.tv_p.column(klucz, width=szer, anchor=kotw, minwidth=40,
-                             stretch=(klucz in ("nazwa", "kartoteka")))
-        sc = ttk.Scrollbar(wrap, orient="vertical", command=self.tv_p.yview)
-        scx = ttk.Scrollbar(wrap, orient="horizontal", command=self.tv_p.xview)
-        self.tv_p.configure(yscrollcommand=sc.set, xscrollcommand=scx.set)
-        self.tv_p.grid(row=0, column=0, sticky="nsew")
-        sc.grid(row=0, column=1, sticky="ns")
-        scx.grid(row=1, column=0, sticky="ew")
-        wrap.rowconfigure(0, weight=1)
-        wrap.columnconfigure(0, weight=1)
-        for status, (_, tlo, fg) in STATUSY.items():
-            self.tv_p.tag_configure(status, background=tlo)
-        self.tv_p.bind("<<TreeviewSelect>>", self._wybrano_pozycje)
-        self.tv_p.bind("<Double-1>", lambda _e: self.ent_kart.focus_set())
+        if Sheet is None:
+            tk.Label(poz, text="Brak biblioteki tksheet", fg=CZERWONY).pack(pady=20)
+            self.sheet = None
+            return
+        self.sheet = Sheet(poz, headers=[k[1] for k in KOL_POZYCJE],
+                           column_width=120, theme="light blue")
+        self.sheet.set_options(show_selected_cells_border=True,
+                               enable_edit_cell_auto_resize=False,
+                               empty_horizontal=0, empty_vertical=0)
+        self.sheet.enable_bindings((
+            "single_select", "drag_select", "ctrl_select", "select_all",
+            "column_width_resize", "arrowkeys", "right_click_popup_menu",
+            "rc_select", "copy",
+        ))
+        podepnij_szerokosci(self, self.sheet, "ksef_faktury_pozycje",
+                            [k[2] for k in KOL_POZYCJE])
+        self.sheet.bind("<ButtonRelease-1>", self._wybrano_pozycje, add="+")
+        self.sheet.bind("<Double-Button-1>", lambda _e: self.ent_kart.focus_set(), add="+")
+        self.sheet.pack(fill=tk.BOTH, expand=True)
 
         # ── Dodatkowe informacje ──
-        info = tk.Frame(self.nb, bg=TLO_SEKCJI)
+        info = tk.Frame(self.nb)
         self.nb.add(info, text="Dodatkowe informacje")
         self.txt_info = tk.Text(info, font=("Consolas", 10), wrap="word", bg="white",
                                 relief=tk.FLAT, padx=12, pady=10)
@@ -581,15 +699,15 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         self.txt_info.tag_configure("k", foreground=TEKST_SZARY)
 
         # ── Plik XML ──
-        x = tk.Frame(self.nb, bg=TLO_SEKCJI)
+        x = tk.Frame(self.nb)
         self.nb.add(x, text="Plik XML")
-        px = tk.Frame(x, bg=TLO_SEKCJI)
-        px.pack(fill=tk.X, padx=8, pady=6)
-        tk.Button(px, text="Otwórz w programie systemowym", command=self._otworz_xml,
-                  bg="white", fg=TEKST, relief=tk.SOLID, bd=1, font=FONT, padx=10, pady=3,
-                  cursor="hand2").pack(side=tk.LEFT)
-        self.lbl_plik = tk.Label(px, text="", bg=TLO_SEKCJI, fg=TEKST_SZARY, font=FONT)
-        self.lbl_plik.pack(side=tk.LEFT, padx=12)
+        px = tk.Frame(x, bg=SZARY)
+        px.pack(fill=tk.X)
+        tk.Button(px, text="📂 Otwórz w programie systemowym", command=self._otworz_xml,
+                  bg=STAL, fg="white", font=FONT_S, padx=8, pady=2, relief=tk.RAISED,
+                  bd=1, cursor="hand2").pack(side=tk.LEFT, padx=8, pady=4)
+        self.lbl_plik = tk.Label(px, text="", bg=SZARY, fg=TEKST_SZARY, font=FONT_S)
+        self.lbl_plik.pack(side=tk.LEFT, padx=8)
         self.txt_xml = tk.Text(x, font=("Consolas", 9), wrap="none", bg="white",
                                relief=tk.FLAT, padx=8, pady=6)
         scy = ttk.Scrollbar(x, orient="vertical", command=self.txt_xml.yview)
@@ -598,51 +716,60 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         scy.pack(side=tk.RIGHT, fill=tk.Y)
 
     def _panel_decyzji(self, r):
-        self.lbl_decyzja_tytul = tk.Label(r, text="Decyzja dla wybranej pozycji",
-                                          bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 11, "bold"),
-                                          anchor="w")
-        self.lbl_decyzja_tytul.pack(fill=tk.X, padx=12, pady=(8, 2))
+        pasek = tk.Frame(r, bg=GRANAT)
+        pasek.pack(side=tk.TOP, fill=tk.X)
+        self.lbl_decyzja_tytul = tk.Label(pasek, text="Decyzja — wybierz pozycję",
+                                          bg=GRANAT, fg="white", font=("Arial", 9, "bold"),
+                                          anchor="w", padx=10, pady=4)
+        self.lbl_decyzja_tytul.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.var_potwierdzaj = tk.BooleanVar(value=True)
+        tk.Checkbutton(pasek, text="pytaj przed zapisem do Subiekta",
+                       variable=self.var_potwierdzaj, bg=GRANAT, fg="white",
+                       selectcolor=GRANAT_CIEMNY, activebackground=GRANAT,
+                       activeforeground="white", font=FONT_S).pack(side=tk.RIGHT, padx=(6, 10))
 
-        body = tk.Frame(r, bg=TLO_SEKCJI)
-        body.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+        body = tk.Frame(r, bg="white")
+        body.pack(fill=tk.BOTH, expand=True)
         body.columnconfigure(1, weight=1)
         body.columnconfigure(2, weight=1)
 
         # typ pozycji — cztery „karty"
-        typy = tk.Frame(body, bg=TLO_SEKCJI)
-        typy.grid(row=0, column=0, sticky="nw", padx=(0, 14))
-        tk.Label(typy, text="Czym jest ta pozycja?", bg=TLO_SEKCJI, fg=TEKST,
+        typy = tk.Frame(body, bg="white")
+        typy.grid(row=0, column=0, sticky="nw", padx=(12, 14), pady=8)
+        tk.Label(typy, text="Czym jest ta pozycja?", bg="white", fg=TEKST,
                  font=FONT_B, anchor="w").pack(fill=tk.X, pady=(0, 4))
         self.var_typ = tk.StringVar(value="towar")
         self._radio_typ = {}
-        for klucz, tytul, opis, kolor in TYPY:
-            rb = tk.Radiobutton(typy, text=f"{tytul}\n{opis}", value=klucz,
+        for klucz, skrot, tytul, opis, kolor in TYPY:
+            rb = tk.Radiobutton(typy, text=f"{skrot}  —  {tytul}\n{opis}", value=klucz,
                                 variable=self.var_typ, indicatoron=0, justify="left",
-                                anchor="w", bg="white", selectcolor=kolor, relief=tk.RIDGE,
-                                bd=1, padx=10, pady=5, font=FONT, width=24,
+                                anchor="w", bg="white", selectcolor=kolor, relief=tk.RAISED,
+                                bd=1, padx=10, pady=4, font=FONT_S, width=26,
                                 command=self._zmiana_typu, cursor="hand2")
             rb.pack(fill=tk.X, pady=2)
             self._radio_typ[klucz] = rb
 
         # pola
-        pola = tk.Frame(body, bg=TLO_SEKCJI)
-        pola.grid(row=0, column=1, sticky="nsew", padx=(0, 14))
+        pola = tk.Frame(body, bg="white")
+        pola.grid(row=0, column=1, sticky="nsew", padx=(0, 14), pady=8)
         pola.columnconfigure(1, weight=1)
 
         def wiersz(i, etykieta):
-            tk.Label(pola, text=etykieta, bg=TLO_SEKCJI, fg=TEKST_SZARY, font=FONT,
+            tk.Label(pola, text=etykieta, bg="white", fg=TEKST_SZARY, font=FONT_S,
                      anchor="w").grid(row=i, column=0, sticky="w", padx=(0, 8), pady=3)
 
         wiersz(0, "Identyfikator z faktury")
         self.var_ident = tk.StringVar()
-        ttk.Entry(pola, textvariable=self.var_ident, font=FONT, state="readonly"
-                  ).grid(row=0, column=1, sticky="ew", pady=3)
+        tk.Entry(pola, textvariable=self.var_ident, font=FONT, state="readonly",
+                 readonlybackground=SZARY, relief=tk.SOLID, bd=1
+                 ).grid(row=0, column=1, sticky="ew", pady=3)
         wiersz(1, "Źródło identyfikatora")
-        self.lbl_zrodlo_id = tk.Label(pola, text="", bg=TLO_SEKCJI, fg=TEKST, font=FONT, anchor="w")
+        self.lbl_zrodlo_id = tk.Label(pola, text="", bg="white", fg=TEKST, font=FONT_S, anchor="w")
         self.lbl_zrodlo_id.grid(row=1, column=1, sticky="w", pady=3)
         wiersz(2, "Numer rysunku RM")
         self.var_rysunek = tk.StringVar()
-        self.ent_rysunek = ttk.Entry(pola, textvariable=self.var_rysunek, font=FONT)
+        self.ent_rysunek = tk.Entry(pola, textvariable=self.var_rysunek, font=FONT,
+                                    relief=tk.SOLID, bd=1)
         self.ent_rysunek.grid(row=2, column=1, sticky="ew", pady=3)
         self.ent_rysunek.bind("<KeyRelease>", lambda _e: self._odswiez_projekty())
         wiersz(3, "Projekt (z BOM-ów)")
@@ -652,74 +779,72 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         self.cb_projekt.grid(row=3, column=1, sticky="ew", pady=3)
         wiersz(4, "Komentarz")
         self.var_komentarz = tk.StringVar()
-        ttk.Entry(pola, textvariable=self.var_komentarz, font=FONT
-                  ).grid(row=4, column=1, sticky="ew", pady=3)
+        tk.Entry(pola, textvariable=self.var_komentarz, font=FONT, relief=tk.SOLID, bd=1
+                 ).grid(row=4, column=1, sticky="ew", pady=3)
 
         # kartoteka — wyszukiwarka
-        kart = tk.Frame(body, bg=TLO_SEKCJI)
-        kart.grid(row=0, column=2, sticky="nsew", padx=(0, 14))
+        kart = tk.Frame(body, bg="white")
+        kart.grid(row=0, column=2, sticky="nsew", padx=(0, 14), pady=8)
         kart.columnconfigure(0, weight=1)
         kart.rowconfigure(2, weight=1)
-        tk.Label(kart, text="Kartoteka w Subiekcie", bg=TLO_SEKCJI, fg=TEKST_SZARY,
-                 font=FONT, anchor="w").grid(row=0, column=0, sticky="w", pady=(0, 3))
-        sz = tk.Frame(kart, bg=TLO_SEKCJI)
+        tk.Label(kart, text="Kartoteka w Subiekcie", bg="white", fg=TEKST_SZARY,
+                 font=FONT_S, anchor="w").grid(row=0, column=0, sticky="w", pady=(0, 3))
+        sz = tk.Frame(kart, bg="white")
         sz.grid(row=1, column=0, sticky="ew")
         sz.columnconfigure(0, weight=1)
         self.var_kart = tk.StringVar()
-        self.ent_kart = ttk.Entry(sz, textvariable=self.var_kart, font=FONT)
+        self.ent_kart = tk.Entry(sz, textvariable=self.var_kart, font=FONT,
+                                 relief=tk.SOLID, bd=1)
         self.ent_kart.grid(row=0, column=0, sticky="ew")
         self.ent_kart.bind("<KeyRelease>", lambda _e: self._szukaj_kartoteki())
         self.ent_kart.bind("<Return>", lambda _e: self._wybierz_pierwsza())
         self.ent_kart.bind("<Down>", lambda _e: self.lb_kart.focus_set())
-        tk.Button(sz, text="✕", command=self._wyczysc_kartoteke, font=("Arial", 8),
-                  relief=tk.FLAT, bg="#eef2f6", cursor="hand2", padx=6
+        tk.Button(sz, text="✕", command=self._wyczysc_kartoteke, font=FONT_S,
+                  bg=SZARY, fg=TEKST, relief=tk.RAISED, bd=1, cursor="hand2", padx=6
                   ).grid(row=0, column=1, padx=(4, 0))
         self.lb_kart = tk.Listbox(kart, height=5, font=FONT, activestyle="none",
-                                  selectbackground="#d6e4f0", selectforeground=TEKST)
+                                  relief=tk.SOLID, bd=1,
+                                  selectbackground="#b3d1ec", selectforeground=TEKST)
         self.lb_kart.grid(row=2, column=0, sticky="nsew", pady=(3, 3))
         self.lb_kart.bind("<<ListboxSelect>>", self._wybrano_z_listy)
         self.lb_kart.bind("<Return>", self._wybrano_z_listy)
         self.lb_kart.bind("<Double-1>", self._wybrano_z_listy)
-        self.lbl_kart = tk.Label(kart, text="— nie wskazano —", bg="#f4f6f8", fg=TEKST,
-                                 font=FONT_B, anchor="w", padx=8, pady=4)
+        self.lbl_kart = tk.Label(kart, text="— nie wskazano —", bg=SZARY, fg=TEKST,
+                                 font=FONT_S, anchor="w", padx=8, pady=4,
+                                 relief=tk.SOLID, bd=1, justify="left")
         self.lbl_kart.grid(row=3, column=0, sticky="ew")
         self._kandydaci_kart = []
 
         # akcje
-        akcje = tk.Frame(body, bg=TLO_SEKCJI)
-        akcje.grid(row=0, column=3, sticky="ne")
-        self.btn_zapisz = tk.Button(akcje, text="✔  Zapisz decyzję", command=self._zapisz_decyzje,
-                                    bg="#2980b9", fg="white", disabledforeground="#a9cce8",
-                                    relief=tk.FLAT, font=FONT_B, padx=14, pady=7, cursor="hand2",
-                                    state=tk.DISABLED)
+        akcje = tk.Frame(body, bg="white")
+        akcje.grid(row=0, column=3, sticky="ne", padx=(0, 12), pady=8)
+        self.btn_zapisz = tk.Button(akcje, text="✔ Zapisz decyzję", command=self._zapisz_decyzje,
+                                    bg=GRANAT_AKCJA, fg="white", disabledforeground="#bdc3c7",
+                                    font=FONT_B, padx=12, pady=6, relief=tk.RAISED, bd=1,
+                                    cursor="hand2", state=tk.DISABLED)
         self.btn_zapisz.pack(fill=tk.X, pady=(0, 6))
-        self.btn_nowa = tk.Button(akcje, text="➕  Załóż nową kartotekę", command=self._zaloz_kartoteke,
-                                  bg="white", fg=TEKST, relief=tk.SOLID, bd=1, font=FONT,
-                                  padx=12, pady=5, cursor="hand2", state=tk.DISABLED)
+        self.btn_nowa = tk.Button(akcje, text="➕ Załóż nową kartotekę", command=self._zaloz_kartoteke,
+                                  bg=ZIELONY, fg="white", disabledforeground="#bdc3c7",
+                                  font=FONT_S, padx=10, pady=4, relief=tk.RAISED, bd=1,
+                                  cursor="hand2", state=tk.DISABLED)
         self.btn_nowa.pack(fill=tk.X, pady=(0, 6))
-        self.btn_wyczysc = tk.Button(akcje, text="↶  Cofnij decyzję", command=self._cofnij_decyzje,
-                                     bg="white", fg=TEKST, relief=tk.SOLID, bd=1, font=FONT,
-                                     padx=12, pady=5, cursor="hand2", state=tk.DISABLED)
-        self.btn_wyczysc.pack(fill=tk.X, pady=(0, 6))
-        self.var_potwierdzaj = tk.BooleanVar(value=True)
-        tk.Checkbutton(akcje, text="pytaj przed zapisem\ndo Subiekta", variable=self.var_potwierdzaj,
-                       bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8), justify="left",
-                       anchor="w").pack(fill=tk.X)
+        self.btn_wyczysc = tk.Button(akcje, text="↶ Cofnij decyzję", command=self._cofnij_decyzje,
+                                     bg=SZAROSC_AKCJA, fg="white", disabledforeground="#d5d8dc",
+                                     font=FONT_S, padx=10, pady=4, relief=tk.RAISED, bd=1,
+                                     cursor="hand2", state=tk.DISABLED)
+        self.btn_wyczysc.pack(fill=tk.X)
 
         # co zostanie zapisane (PRZED) / co się zapisało (PO)
-        self.lbl_plan = tk.Label(r, text="Kliknij pozycję w tabeli.", bg="#f4f6f8", fg=TEKST,
-                                 font=FONT, anchor="w", justify="left", padx=12, pady=6)
-        self.lbl_plan.pack(fill=tk.X, padx=12, pady=(0, 8))
+        self.lbl_plan = tk.Label(r, text="Kliknij pozycję w tabeli.", bg=SZARY, fg=TEKST,
+                                 font=FONT_S, anchor="w", justify="left", padx=12, pady=5)
+        self.lbl_plan.pack(fill=tk.X, side=tk.BOTTOM)
         for v in (self.var_typ, self.var_rysunek, self.var_projekt, self.var_komentarz):
             v.trace_add("write", lambda *_a: self._odswiez_plan())
 
     def _pasek_stanu(self):
-        p = tk.Frame(self, bg="#eef2f6")
-        p.pack(fill=tk.X, side=tk.BOTTOM)
-        self.status = tk.Label(p, text="Gotowe.", bg="#eef2f6", fg=TEKST, font=FONT, anchor="w")
-        self.status.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=12, pady=5)
-        tk.Label(p, text=f"Zalogowany: {_kto()}", bg="#eef2f6", fg=TEKST_SZARY,
-                 font=FONT).pack(side=tk.RIGHT, padx=12)
+        self.status = tk.Label(self, text="Wczytywanie…", anchor="w", padx=12, pady=3,
+                               bg=GRANAT, fg=SZARY, font=FONT_S)
+        self.status.pack(side=tk.BOTTOM, fill=tk.X)
 
     # ── pętla wyników z wątków ─────────────────────────────────────────────
     def _pompuj(self):
@@ -747,7 +872,10 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
 
     # ── dane w tle: kartoteka, powiązania, kontrahenci, rysunki ──────────
     def _start_tla(self):
-        # 1. kartoteka z cache — natychmiast, żeby tabela miała z czym pracować
+        # 1. kartoteka z cache — natychmiast, żeby tabela miała z czym pracować.
+        #    Cache nie ma `Opis` (zapisuje go `wczytaj_katalog_subiekta` bez
+        #    tego pola), więc kolumna „Opis kartoteki" zostaje pusta do czasu
+        #    odpowiedzi mostu. Lepsze to niż puste okno przez 10 s.
         try:
             import subiekt_scalanie
             self._ustaw_katalog(subiekt_scalanie.wczytaj_katalog_subiekta(tylko_cache=True))
@@ -760,14 +888,23 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
 
     def _tlo_praca(self):
         import subiekt_bridge
-        import subiekt_scalanie
         wynik = {"most": False}
         try:
             subiekt_bridge.zapewnij_most()
             wynik["most"] = True
         except Exception:
             return wynik                          # bez mostu: zostaje cache
-        wynik["katalog"] = subiekt_scalanie.wczytaj_katalog_subiekta()
+        # Katalog czytamy WPROST z mostu, nie przez `wczytaj_katalog_subiekta`:
+        # tamta funkcja zwraca tylko {id, symbol, nazwa} i gubi `Opis`, a to
+        # osobna kolumna tego okna. Wspólnej funkcji nie ruszamy — używają jej
+        # inne okna i jej format jest ich kontraktem.
+        dane = subiekt_bridge.call("katalog", {}, timeout=120)
+        wynik["katalog"] = [{"id": k.get("Id"),
+                             "symbol": (k.get("Symbol") or "").strip(),
+                             "nazwa": (k.get("Nazwa") or "").strip(),
+                             "opis": (k.get("Opis") or "").strip(),
+                             "rodzaj": (k.get("Rodzaj") or "").strip()}
+                            for k in (dane or {}).get("pozycje", [])]
         dane = subiekt_bridge.call("symbole-dostawcy", {}, timeout=60)
         wynik["powiazania"] = (dane or {}).get("powiazania", [])
         k = subiekt_bridge.call("kontrahenci", {}, timeout=60)
@@ -778,15 +915,17 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         self.stop_kreciolek()
         if blad or not w:
             self.most_ok = False
-            self.lbl_most.config(text="most: niedostępny — kartoteka z cache", fg="#c0392b")
+            self.lbl_most.config(text="⚠ most niedostępny — kartoteka z cache", fg="#f5b041")
             self.status.config(text=f"Most niedostępny: {blad}" if blad else "Most niedostępny.")
             self._przelicz_odznaki()
             return
         self.most_ok = w.get("most", False)
         if not self.most_ok:
-            self.lbl_most.config(text="most: niedostępny — kartoteka z cache", fg="#c0392b")
+            self.lbl_most.config(text="⚠ most niedostępny — kartoteka z cache", fg="#f5b041")
         else:
-            self.lbl_most.config(text="most: ONLINE", fg="#1e7e34")
+            # Jasna zieleń, nie #1e7e34 — ciemny zielony na granacie jest
+            # nieczytelny (zrzut z 17.09.2026).
+            self.lbl_most.config(text="most: ONLINE", fg="#a9dfbf")
             self._ustaw_katalog(w.get("katalog") or self.katalog_sub)
             self.powiazania = {}
             for p in w.get("powiazania", []):
@@ -807,8 +946,8 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
             self._dopasuj_biezaca()
             # Użytkownik mógł już kliknąć pozycję, zanim most odpowiedział —
             # panel ma dostać kartotekę z powiązania, nie zostać „pusty".
-            if self._wybrany_lp is not None and self.tv_p.exists(str(self._wybrany_lp)):
-                self.tv_p.selection_set(str(self._wybrany_lp))
+            if self._wybrany_lp is not None and self._wiersz_lp(self._wybrany_lp) is not None:
+                self._zaznacz_wiersz(self._wybrany_lp)
                 self._wybrano_pozycje()
 
     def _ustaw_katalog(self, katalog):
@@ -861,9 +1000,19 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
     def _wypelnij_drzewo(self):
         zaznaczona = self._biezaca
         self.tv_f.delete(*self.tv_f.get_children())
-        po_dacie = {}
+
+        dostawca = self.var_dostawca.get()
+        tylko_braki = bool(self.var_tylko_braki.get())
+        widoczne, po_dacie = 0, {}
         for f in self.faktury:
-            po_dacie.setdefault(f[1] or "bez daty", []).append(f)
+            ksef, data, numer, sprzedawca, nip = f[0], f[1], f[2], f[3], f[4]
+            if dostawca != DOST_WSZYSCY and (sprzedawca or nip or "") != dostawca:
+                continue
+            if tylko_braki and not (self.stan_faktur.get(ksef) or {}).get("brak"):
+                continue
+            po_dacie.setdefault(data or "bez daty", []).append(f)
+            widoczne += 1
+
         for data in sorted(po_dacie, reverse=True):
             grupa = po_dacie[data]
             iid_d = f"d:{data}"
@@ -878,11 +1027,37 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
                 self.tv_f.insert(iid_d, "end", iid=ksef, text=numer or "(bez numeru)",
                                  values=(sprzedawca or nip or "", _zl(wartosc), tekst),
                                  tags=(odz,))
-        self.lbl_razem.config(text=f"Razem faktur: {len(self.faktury)}")
-        self.lbl_licznik.config(text=f"{len(self.faktury)} faktur")
+
+        # Lista dostawców do filtra — z tego, co realnie jest w archiwum.
+        dostawcy = sorted({(f[3] or f[4] or "") for f in self.faktury if (f[3] or f[4])})
+        self.cmb_dost["values"] = [DOST_WSZYSCY] + dostawcy
+        if dostawca != DOST_WSZYSCY and dostawca not in dostawcy:
+            self.var_dostawca.set(DOST_WSZYSCY)
+
+        # Podsumowanie w pasku — jak „Dokumentów: 63 z 63" w oknie dokumentów.
+        braki = sum(1 for f in self.faktury if (self.stan_faktur.get(f[0]) or {}).get("brak"))
+        poz = sum((self.stan_faktur.get(f[0]) or {}).get("razem", 0) for f in self.faktury)
+        licz = {}
+        for f in self.faktury:
+            odz = (self.stan_faktur.get(f[0]) or {}).get("odznaka", "nowa")
+            licz[odz] = licz.get(odz, 0) + 1
+        self.summary.config(text=(
+            f"Faktur: {widoczne} z {len(self.faktury)}    "
+            + "   ".join(f"{ODZNAKI[k][0]}: {licz.get(k, 0)}"
+                         for k in ("nowa", "wtoku", "gotowa") if licz.get(k))
+            + f"    pozycji łącznie: {poz}"
+            + (f"    ⚠ z brakami decyzji: {braki}" if braki else "")))
+
         if zaznaczona and self.tv_f.exists(zaznaczona):
             self.tv_f.selection_set(zaznaczona)
             self.tv_f.see(zaznaczona)
+
+    def _wyczysc_filtry(self):
+        """Zeruje wyszukiwarkę i filtry — ta sama ikona i zachowanie co w arkuszu."""
+        self.var_szukaj.set("")
+        self.var_dostawca.set(DOST_WSZYSCY)
+        self.var_tylko_braki.set(0)
+        self._odswiez_liste()
 
     def _przelicz_odznaki(self):
         """Odznaki w drzewie — z dopasowania WSZYSTKICH faktur, w tle."""
@@ -1003,11 +1178,19 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         self._pola_nagl["kontrahent"].config(text=tekst, fg=kolor)
 
     def _ustaw_odznake(self, ksef):
+        """Odznaka przy numerze faktury — pastel z legendy + ciemny tekst.
+
+        Te same kolory co wiersze w drzewie, żeby odznaka i lista mówiły
+        to samo; wcześniej były to dwie różne palety.
+        """
         stan = self.stan_faktur.get(ksef)
         odz = stan["odznaka"] if stan else "nowa"
         etykieta, tlo = ODZNAKI[odz]
-        kolory = {"nowa": "#2980b9", "wtoku": "#e67e22", "gotowa": "#1e7e34", "pusta": "#7f8c8d"}
-        self.lbl_odznaka.config(text=etykieta, bg=kolory[odz])
+        fg = {"nowa": "#1f5fa8", "wtoku": "#a04000",
+              "gotowa": "#1e7e34", "pusta": "#566573"}[odz]
+        if stan and stan.get("brak"):
+            etykieta += f" — {stan['brak']} bez decyzji"
+        self.lbl_odznaka.config(text=etykieta, bg=tlo, fg=fg)
 
     def _dopasuj_biezaca(self):
         if not self._biezaca:
@@ -1040,9 +1223,22 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         self._wypelnij_tabele()
 
     def _wypelnij_tabele(self):
+        """Tabela pozycji w tksheet — jak arkusze w oknie dokumentów.
+
+        Kolor niesie KOLUMNA STATUS, nie cały wiersz: przy jedenastu kolumnach
+        pełne tło dawało pasiastą ścianę, w której nie dało się czytać nazw.
+        Tam, gdzie kolor znaczy coś jeszcze (kandydat po normalizacji, zapisana
+        decyzja), podświetlamy tę konkretną komórkę.
+        """
+        if self.sheet is None:
+            return
         zaznacz = self._wybrany_lp
-        self.tv_p.delete(*self.tv_p.get_children())
-        for d in self._dop:
+        # `_widoczne` to podzbiór `_dop` pokazany w arkuszu — wiersz i-ty
+        # arkusza to `_widoczne[i]`, NIE `_dop[i]`. Wszystko, co mapuje
+        # wiersz na pozycję, musi iść przez `_widoczne`.
+        self._widoczne = [d for d in self._dop if self._pasuje_do_filtra(d)]
+        dane, kolory = [], []
+        for d in self._widoczne:
             p = d.pozycja
             ident = d.identyfikator or ""
             rys = ident if d.zrodlo_identyfikatora == kk.IDENT_RYSUNEK or d.status == kk.RYSUNEK_RM else ""
@@ -1053,6 +1249,12 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
                 kart = f"ID {d.asortyment_id}  {d.symbol_subiekt}"
                 if d.zrodlo == kk.ZRODLO_NORMALIZACJA:
                     kart += "  (kandydat)"
+            # Nazwa kartoteki z Subiekta — do porównania z opisem z faktury.
+            # `nazwa_subiekt` bywa puste przy starszych decyzjach, więc gdy
+            # trzeba, dociągamy ją z kartoteki po Id.
+            kart_rec = self._kat_po_id.get(d.asortyment_id) or {}
+            nazwa_kart = d.nazwa_subiekt or kart_rec.get("nazwa", "")
+            opis_kart = kart_rec.get("opis", "") if d.asortyment_id else ""
             proj = ""
             dec = p.decyzja or {}
             if dec.get("projekt"):
@@ -1061,11 +1263,33 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
                 lista = self.rysunki.get(rys.upper(), [])
                 nr = sorted({str(x.get("projekt")) for x in lista})
                 proj = ", ".join(nr[:4]) + (f" +{len(nr) - 4}" if len(nr) > 4 else "")
-            self.tv_p.insert("", "end", iid=str(p.nr_wiersza), tags=(d.status,), values=(
-                p.nr_wiersza, rys or ident, _etykieta_typu(d), _opis_pozycji(d),
-                _ilosc(p.ilosc), p.jednostka, _zl(p.cena_netto),
-                (p.dodatkowe or {}).get("Numer wydania", ""), kart, proj,
-                STATUSY[d.status][0]))
+            # ✎ przy Lp. = decyzja człowieka, zgodnie z legendą. Numer wiersza
+            # tksheet rysuje sam po lewej, ale to numer WIDOKU — Lp. z faktury
+            # zostaje, bo to ono jest w decyzji i w komunikatach.
+            dane.append([f"✎ {p.nr_wiersza}" if dec else p.nr_wiersza,
+                         rys or ident, _etykieta_typu(d), _opis_pozycji(d),
+                         _ilosc(p.ilosc), p.jednostka, _zl(p.cena_netto),
+                         (p.dodatkowe or {}).get("Numer wydania", ""),
+                         kart, nazwa_kart, opis_kart, proj, STATUSY[d.status][0]])
+            kolory.append((d, bool(dec)))
+
+        try:
+            self.sheet.dehighlight_all()
+        except Exception:
+            pass
+        self.sheet.set_sheet_data(dane, reset_col_positions=False, redraw=False)
+        for i, (d, ma_decyzje) in enumerate(kolory):
+            tlo, fg = STATUSY[d.status][1], STATUSY[d.status][2]
+            self.sheet.highlight_cells(row=i, column=K_STATUS, bg=tlo, fg=fg)
+            self.sheet.highlight_cells(row=i, column=K_TYP, bg=tlo, fg=fg)
+            if ma_decyzje:
+                self.sheet.highlight_cells(row=i, column=K_LP, bg="#d6eaf8", fg="#1f5fa8")
+            if d.zrodlo == kk.ZRODLO_NORMALIZACJA:
+                # Kandydat po normalizacji — pomarańczowo, jak niewysłane ZD
+                # w oknie dokumentów: „jest, ale wymaga sprawdzenia".
+                self.sheet.highlight_cells(row=i, column=K_KARTOTEKA, bg="#f5b041", fg="#7d3c00")
+        self.sheet.redraw()
+
         s = kk.podsumowanie(self._dop)
         self._chipy["razem"].config(text=f"Pozycji: {s['razem']}")
         self._chipy["kartoteka"].config(text=f"Kartoteka: {s['znalezione']}")
@@ -1073,9 +1297,58 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         self._chipy["zbiorcze"].config(text=f"Zbiorcze: {s['zbiorcze']}")
         self._chipy["uslugi"].config(text=f"Usługi: {s['uslugi']}")
         self._chipy["brak"].config(text=f"Brak decyzji: {s['brak']}",
-                                   bg="#fdecea" if s["brak"] else "#e8f8e8")
-        if zaznacz is not None and self.tv_p.exists(str(zaznacz)):
-            self.tv_p.selection_set(str(zaznacz))
+                                   fg="#f5b041" if s["brak"] else "#a9dfbf")
+        # Aktywny filtr widać po podświetleniu licznika.
+        for klucz, l in self._chipy.items():
+            wlaczony = (klucz == self.filtr_pozycji)
+            l.config(bg="#1a2530" if wlaczony else GRANAT,
+                     relief=tk.SOLID if wlaczony else tk.FLAT, bd=1 if wlaczony else 0)
+        self.lbl_poz.config(text=(
+            "Pozycje — kliknij wiersz, żeby zdecydować" if not self.filtr_pozycji
+            else f"Pozycje — filtr: {self._chipy[self.filtr_pozycji].cget('text')}"
+                 f"  (kliknij licznik ponownie, żeby pokazać wszystkie)"))
+        if zaznacz is not None:
+            self._zaznacz_wiersz(zaznacz)
+
+    def _pasuje_do_filtra(self, d):
+        """Czy pozycja wchodzi do widoku przy aktywnym filtrze licznika."""
+        f = self.filtr_pozycji
+        if not f or f == "razem":
+            return True
+        if f == "brak":
+            return d.status == kk.BRAK_DECYZJI
+        if f == "uslugi":
+            return d.status == kk.USLUGA
+        if f == "zbiorcze":
+            return d.status == kk.POZYCJA_ZBIORCZA
+        if f == "rysunki":
+            return d.status == kk.RYSUNEK_RM
+        if f == "kartoteka":
+            return d.status in (kk.KARTOTEKA, kk.NOWA_KARTOTEKA)
+        return True
+
+    def _filtruj_pozycje(self, klucz):
+        """Klik w licznik = filtr; klik w ten sam albo w „Pozycji" = wszystkie."""
+        self.filtr_pozycji = None if (klucz in ("razem", self.filtr_pozycji)) else klucz
+        self._wypelnij_tabele()
+
+    # ── praca na wierszach tksheet (odpowiedniki iid z Treeview) ──────────
+    def _wiersz_lp(self, lp):
+        """Indeks WIDOCZNEGO wiersza dla danego Lp. — albo None (odfiltrowany)."""
+        for i, d in enumerate(getattr(self, "_widoczne", self._dop)):
+            if str(d.pozycja.nr_wiersza) == str(lp):
+                return i
+        return None
+
+    def _zaznacz_wiersz(self, lp):
+        i = self._wiersz_lp(lp)
+        if i is None or self.sheet is None:
+            return
+        try:
+            self.sheet.select_row(i)
+            self.sheet.see(row=i, column=0)
+        except Exception:
+            pass
 
     def _wypelnij_info(self):
         n = self._naglowek
@@ -1156,10 +1429,16 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         return next((d for d in self._dop if str(d.pozycja.nr_wiersza) == str(lp)), None)
 
     def _wybrano_pozycje(self, _e=None):
-        sel = self.tv_p.selection()
-        if not sel:
+        if self.sheet is None:
             return
-        d = self._dop_dla(sel[0])
+        try:
+            wiersze = sorted(set(self.sheet.get_selected_rows(get_cells_as_rows=True)))
+        except Exception:
+            wiersze = []
+        widoczne = getattr(self, "_widoczne", self._dop)
+        if not wiersze or wiersze[0] >= len(widoczne):
+            return
+        d = widoczne[wiersze[0]]
         if d is None:
             return
         # Klik człowieka w INNĄ pozycję kasuje raport z poprzedniego zapisu;
@@ -1495,9 +1774,13 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         kolejnosc = self._dop[start:] + self._dop[:start]
         for d in kolejnosc:
             if d.status == kk.BRAK_DECYZJI:
-                iid = str(d.pozycja.nr_wiersza)
-                self.tv_p.selection_set(iid)
-                self.tv_p.see(iid)
+                # Filtr nie może ukryć celu skoku — gdy pozycji nie widać,
+                # zdejmujemy filtr zamiast udawać, że braków nie ma.
+                if self._wiersz_lp(d.pozycja.nr_wiersza) is None:
+                    self.filtr_pozycji = None
+                    self._wypelnij_tabele()
+                self._zaznacz_wiersz(d.pozycja.nr_wiersza)
+                self._wybrano_pozycje()
                 return
         self.status.config(text="Ta faktura nie ma już pozycji bez decyzji.")
 
@@ -1521,8 +1804,9 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
             sym = (w.get("symbol") or symbol).strip()
 
             def praca():
-                import subiekt_scalanie
-                return subiekt_scalanie.wczytaj_katalog_subiekta(max_wiek_h=0)
+                # Świeży katalog Z OPISEM — ta sama ścieżka co przy starcie,
+                # żeby nowa kartoteka od razu pokazała Nazwę i Opis.
+                return self._tlo_praca().get("katalog")
 
             def potem(kat, blad):
                 if kat:
@@ -1564,11 +1848,15 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         with open(sciezka, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f, delimiter=";")
             w.writerow([k[1] for k in KOL_POZYCJE] + ["Wartość netto", "Komentarz"])
-            for iid in self.tv_p.get_children():
-                d = self._dop_dla(iid)
-                w.writerow(list(self.tv_p.item(iid, "values"))
-                           + [_zl(d.pozycja.wartosc_netto) if d else "",
-                              ((d.pozycja.decyzja or {}).get("komentarz", "") if d else "")])
+            # Eksportujemy TO, CO WIDAĆ — z filtrem włącznie. Inaczej plik nie
+            # odpowiadałby temu, na co patrzy człowiek klikając „Eksport".
+            for i, d in enumerate(getattr(self, "_widoczne", self._dop)):
+                try:
+                    wiersz = list(self.sheet.get_row_data(i))
+                except Exception:
+                    wiersz = []
+                w.writerow(wiersz + [_zl(d.pozycja.wartosc_netto),
+                                     (d.pozycja.decyzja or {}).get("komentarz", "")])
         self.status.config(text=f"Zapisano {sciezka}")
 
     def _wczytaj_pliki(self):
