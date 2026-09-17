@@ -114,6 +114,38 @@ TYPY = [
 #: klucz typu → skrót do kolumny „Typ" w tabeli pozycji.
 SKROT_TYPU = {t[0]: t[1] for t in TYPY}
 
+#: Dymki przy przyciskach typu. ⚠️ TW i US to rodzaje kartotek Subiekta,
+#: ale ZB i RM NIE SĄ — Subiekt czegoś takiego nie zna. Skróty są w tym samym
+#: stylu, więc bez tego wyjaśnienia wyglądają jak typy Subiekta (zgłoszone
+#: 18.09.2026: „myślałem że w Subiekcie mam TW, KT, USL — co to za RM?").
+DYMKI_TYPU = {
+    "towar": ("TW — towar handlowy (rodzaj kartoteki Subiekta)\n"
+              "Towar z kartoteki dostawcy: łożysko, pas, uszczelka.\n"
+              "Wchodzi na PZ i na stan magazynu."),
+    "usluga": ("US — usługa (rodzaj kartoteki Subiekta)\n"
+               "Np. „OBSLUGA” z faktury QUAY, transport, cięcie.\n"
+               "NIE wchodzi na stan — nie blokuje wystawienia PZ."),
+    "zbiorcza": ("BEZ KARTOTEKI — to NIE jest rodzaj kartoteki Subiekta.\n\n"
+                 "Jedna linia faktury = WIELE różnych detali, rozliczonych\n"
+                 "ryczałtem. Przykład (alu-frost FVS/LAS/26/07/00417):\n"
+                 "    „Detale cięte laserem - projekt 2630”\n"
+                 "— jedna pozycja obejmuje kilkanaście detali z kilku ZD.\n\n"
+                 "Dlatego NIE zakładamy dla niej kartoteki (byłaby fikcją,\n"
+                 "zaśmiecającą się przy każdej kolejnej fakturze) i nie idzie\n"
+                 "na PZ. Oznaczenie mówi: „ta linia nie ma odpowiednika\n"
+                 "magazynowego i tak ma być” — licznik braków schodzi do zera."),
+    "rysunek": ("NASZ RYSUNEK — to NIE jest rodzaj kartoteki Subiekta.\n\n"
+                "Wasz detal zlecony kooperantowi, który wraca jako dostawa.\n"
+                "Tożsamością jest NUMER RYSUNKU, nie symbol dostawcy.\n"
+                "Przykład (AMB FV 45/07/2026): „013-100.30B Bok transportera”\n"
+                "— 5/5 numerów jest w BOM-ach projektów, 0/5 w kartotece.\n\n"
+                "Dlatego szukamy po numerze rysunku w BOM-ach (podpowiadamy\n"
+                "projekty) i zapisujemy do tabeli `mapowania`, a nie jako\n"
+                "powiązanie symbolu dostawcy w Subiekcie.\n\n"
+                "Kartoteka jest opcjonalna; jeśli ją wskażesz, w Subiekcie\n"
+                "pozostaje zwykłym TW albo KT — rodzaj bierze się stamtąd."),
+}
+
 #: Odznaki faktur w drzewie. „Rozstrzygnięta" celowo zamiast „Rozliczona"
 #: z makiety — rozliczenie to osobny etap (FZ w Subiekcie), którego to okno
 #: nie robi. Nie obiecujemy więcej, niż wiemy.
@@ -765,6 +797,9 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
                                 command=self._zmiana_typu, cursor="hand2")
             rb.pack(fill=tk.X, pady=2)
             self._radio_typ[klucz] = rb
+            self._dymek(rb, DYMKI_TYPU[klucz])
+        tk.Label(typy, text="najedź na przycisk — wyjaśnienie w dymku", bg="white",
+                 fg=TEKST_SZARY, font=("Arial", 7)).pack(anchor="w", pady=(2, 0))
 
         # pola
         pola = tk.Frame(body, bg="white")
@@ -857,6 +892,50 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         self.lbl_plan.pack(fill=tk.X, side=tk.BOTTOM)
         for v in (self.var_typ, self.var_rysunek, self.var_projekt, self.var_komentarz):
             v.trace_add("write", lambda *_a: self._odswiez_plan())
+
+    def _dymek(self, widget, tekst):
+        """Dymek po najechaniu — ten sam wygląd co w arkuszu głównym RM_BAZA
+        (`_show_bom_tooltip`): żółte tło, cienka ramka, Arial 9.
+
+        Pokazuje się po 400 ms, znika przy zjechaniu myszą albo kliknięciu —
+        bez auto-ukrywania po czasie, bo te opisy się czyta, a nie zerka.
+        """
+        stan = {"po": None, "okno": None}
+
+        def pokaz(x, y):
+            schowaj()
+            t = tk.Toplevel(self)
+            t.wm_overrideredirect(True)
+            t.wm_geometry(f"+{x + 14}+{y + 16}")
+            tk.Label(t, text=tekst, background="#ffffcc", foreground="#000000",
+                     relief="solid", borderwidth=1, padx=8, pady=5,
+                     font=("Arial", 9), justify="left", anchor="w").pack()
+            stan["okno"] = t
+
+        def schowaj(_e=None):
+            if stan["po"] is not None:
+                try:
+                    self.after_cancel(stan["po"])
+                except Exception:
+                    pass
+                stan["po"] = None
+            if stan["okno"] is not None:
+                try:
+                    stan["okno"].destroy()
+                except Exception:
+                    pass
+                stan["okno"] = None
+
+        def wejscie(e):
+            schowaj()
+            x, y = e.x_root, e.y_root
+            stan["po"] = self.after(400, lambda: pokaz(x, y))
+
+        widget.bind("<Enter>", wejscie, add="+")
+        widget.bind("<Leave>", schowaj, add="+")
+        widget.bind("<Button-1>", schowaj, add="+")
+        # Zamknięcie okna z otwartym dymkiem zostawiłoby wiszący Toplevel.
+        self.bind("<Destroy>", schowaj, add="+")
 
     def _pasek_stanu(self):
         self.status = tk.Label(self, text="Wczytywanie…", anchor="w", padx=12, pady=3,
