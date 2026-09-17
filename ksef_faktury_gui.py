@@ -675,6 +675,12 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         self.sheet.set_options(show_selected_cells_border=True,
                                enable_edit_cell_auto_resize=False,
                                empty_horizontal=0, empty_vertical=0)
+        # ⚠️ Numerator wierszy tksheet WYŁĄCZONY: obok kolumny „Lp." dawał dwie
+        # kolumny z numerami obok siebie i wyglądał jak zdublowane ID
+        # (zgłoszone 17.09.2026). Prawdziwym numerem jest Lp. Z FAKTURY — to
+        # ono siedzi w decyzji i w komunikatach; numer widoku nie znaczy nic,
+        # a przy włączonym filtrze wręcz myli (wiersz 1 = Lp. 11).
+        self.sheet.hide("row_index")
         self.sheet.enable_bindings((
             "single_select", "drag_select", "ctrl_select", "select_all",
             "column_width_resize", "arrowkeys", "right_click_popup_menu",
