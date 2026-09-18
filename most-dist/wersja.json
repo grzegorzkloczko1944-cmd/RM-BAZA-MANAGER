@@ -1,6 +1,6 @@
 {
   "protokol": 1,
-  "zbudowano": "2026-09-18 14:52",
-  "sha": "45ac501",
-  "uwaga": "efaktury: pozycje faktur z kolejki KSeF przez PobierzDane (Xml jako byte[] jest nieczytelny), plus numery WZ i zamowien"
+  "zbudowano": "2026-09-18 15:04",
+  "sha": "c1e3533",
+  "uwaga": "efaktury: DodatkowyOpis pozycji (Numer wydania/WZ, Opis, Marka, Numer zamowienia) \u2014 dane z widoku E-FAKTURA - MF"
 }
