@@ -88,11 +88,21 @@ KOL_ZD = [("zd", "ZD", 130), ("data", "Data ZD", 80), ("symbol", "Nr rysunku / s
           ("nazwa", "Nazwa", 220), ("zam", "Zamówiono", 85), ("doreal", "Do realizacji", 90),
           ("jm", "J.m.", 45), ("cena", "Cena netto", 80), ("projekt", "Projekt", 90)]
 
+#: ⚠️ `wz` jest PER POZYCJA, nie per dostawa. Dostawca wystawia wiele WZ-tek
+#: i fakturuje je zbiorczo (QUAY: 55 pozycji faktury = 11 różnych WZ), a TEN
+#: SAM produkt potrafi przyjść na dwóch WZ-tkach naraz. Jedno pole w nagłówku
+#: nie dałoby tego zapisać — druga WZ-tka przepadała (18.09.2026).
+#:
+#: Numer przepisuje magazynier z papierowej WZ-tki dostawcy. Ten sam numer
+#: dostawca podaje potem przy pozycji faktury (`DodatkowyOpis/Numer wydania`),
+#: więc to on pozwala rozliczyć fakturę z przyjęciem co do pozycji.
 KOL_PRZ = [("symbol", "Nr rysunku / symbol", 150), ("nazwa", "Nazwa", 220),
            ("ilosc", "Ilość przyjęta", 90), ("jm", "J.m.", 45), ("cena", "Cena netto", 80),
+           ("wz", "WZ dostawcy", 110),
            ("zd", "Z ZD", 130), ("doreal", "Do realizacji", 85)]
 K_PRZ_ILOSC = 2
 K_PRZ_CENA = 4
+K_PRZ_WZ = 5
 
 KOL_HIST = [("id", "Nr", 45), ("data", "Data", 80), ("dostawca", "Dostawca", 170),
             ("wz", "WZ dostawcy", 110), ("zam", "Nr zamówienia", 100), ("ident", "Identyfikator", 100),
@@ -226,7 +236,7 @@ class OknoDostawa(tk.Toplevel, Kreciolek):
                             (KOL_DODANE, "już na liście przyjęcia")):
             tk.Label(leg, text="  ", bg=kolor, relief=tk.SOLID, bd=1).pack(side=tk.LEFT, padx=(6, 3), pady=(0, 5))
             tk.Label(leg, text=opis, bg=SZARY, fg=TEKST, font=FONT_S).pack(side=tk.LEFT, pady=(0, 5))
-        tk.Label(leg, text="Ilość i cenę w tabeli przyjęcia edytujesz dwuklikiem.",
+        tk.Label(leg, text="Ilość, cenę i WZ w tabeli przyjęcia edytujesz dwuklikiem.",
                  bg=SZARY, fg=TEKST_SZARY, font=FONT_S).pack(side=tk.LEFT, padx=(16, 0), pady=(0, 5))
 
         self.nb = ttk.Notebook(self)
@@ -289,7 +299,7 @@ class OknoDostawa(tk.Toplevel, Kreciolek):
         self._ustaw_arkusz(self.sheet_prz, "dostawa_przyjecie", KOL_PRZ, edytowalny=True)
         try:
             self.sheet_prz.readonly_columns(columns=[i for i in range(len(KOL_PRZ))
-                                                     if i not in (K_PRZ_ILOSC, K_PRZ_CENA)])
+                                                     if i not in (K_PRZ_ILOSC, K_PRZ_CENA, K_PRZ_WZ)])
         except Exception:
             pass
         self.sheet_prz.pack(fill=tk.BOTH, expand=True)
@@ -592,7 +602,10 @@ class OknoDostawa(tk.Toplevel, Kreciolek):
                 "symbol": w["symbol"], "nazwa": w["nazwa"], "ilosc": w["do_realizacji"],
                 "jm": w["jm"], "cena": w["cena"], "zd_numer": w["zd_numer"], "zd_id": w["zd_id"],
                 "zd_pozycja_id": w["zd_pozycja_id"], "ilosc_zd": w["ilosc_zd"],
-                "do_realizacji": w["do_realizacji"], "asortyment_id": None})
+                "do_realizacji": w["do_realizacji"], "asortyment_id": None,
+                # WZ dziedziczy z naglowka — przy jednej WZ-tce w paczce nic
+                # nie trzeba wpisywac. Gdy przyszly dwie, poprawiasz w arkuszu.
+                "wz": self.var_wz.get().strip()})
             dodano += 1
         self._wypelnij_przyjecie()
         self._wypelnij_zd()
@@ -651,7 +664,8 @@ class OknoDostawa(tk.Toplevel, Kreciolek):
             self._przyjecie.append({
                 "symbol": k["symbol"], "nazwa": k["nazwa"], "ilosc": il, "jm": "szt",
                 "cena": cena, "zd_numer": "", "zd_id": None, "zd_pozycja_id": None,
-                "ilosc_zd": None, "do_realizacji": None, "asortyment_id": k["id"]})
+                "ilosc_zd": None, "do_realizacji": None, "asortyment_id": k["id"],
+                "wz": self.var_wz.get().strip()})
             self._wypelnij_przyjecie()
             dlg.destroy()
 
@@ -679,6 +693,7 @@ class OknoDostawa(tk.Toplevel, Kreciolek):
         if self.sheet_prz is None:
             return
         dane = [[r["symbol"], r["nazwa"], _il(r["ilosc"]), r["jm"], _zl(r["cena"]),
+                 r.get("wz") or "",
                  r["zd_numer"] or "(spoza ZD)", _il(r["do_realizacji"]) if r["do_realizacji"] is not None else ""]
                 for r in self._przyjecie]
         try:
@@ -686,15 +701,18 @@ class OknoDostawa(tk.Toplevel, Kreciolek):
         except Exception:
             pass
         self.sheet_prz.set_sheet_data(dane, reset_col_positions=False, redraw=False)
+        # Kolumna „Z ZD" przesunęła się po dołożeniu WZ — liczymy z definicji,
+        # nie na sztywno, żeby następna zmiana nie pokolorowała złej komórki.
+        kol_zd = [k[0] for k in KOL_PRZ].index("zd")
         for i, r in enumerate(self._przyjecie):
             if not r.get("zd_id"):
-                self.sheet_prz.highlight_cells(row=i, column=5, bg=KOL_ZD_CZESC, fg="#7d3c00")
+                self.sheet_prz.highlight_cells(row=i, column=kol_zd, bg=KOL_ZD_CZESC, fg="#7d3c00")
         self.sheet_prz.redraw()
         self.lbl_prz.config(text=f"Pozycje przyjęcia ({len(self._przyjecie)})")
         self._odswiez_plan()
 
     def _zczytaj_edycje(self):
-        """Ilość i cena wpisane w arkuszu → do `_przyjecie`."""
+        """Ilość, cena i WZ wpisane w arkuszu → do `_przyjecie`."""
         if self.sheet_prz is None:
             return
         try:
@@ -706,6 +724,7 @@ class OknoDostawa(tk.Toplevel, Kreciolek):
                 break
             r["ilosc"] = _liczba(dane[i][K_PRZ_ILOSC], r["ilosc"])
             r["cena"] = _liczba(dane[i][K_PRZ_CENA], r["cena"])
+            r["wz"] = (dane[i][K_PRZ_WZ] or "").strip()
 
     def _odswiez_plan(self):
         n = len(self._przyjecie)
@@ -721,6 +740,14 @@ class OknoDostawa(tk.Toplevel, Kreciolek):
             linie.append("Subiekt sam powiąże PZ z ZD (realizacja) — zamówienie zejdzie o przyjęte ilości.")
         if not (self.var_wz.get().strip() or self.var_zam.get().strip() or self.var_ident.get().strip()):
             linie.append("⚠️ Bez WZ / nr zamówienia / identyfikatora faktura nie znajdzie tego przyjęcia automatycznie.")
+        # ⚠️ PZ ma JEDNO pole `NumerZewnetrzny`, a w paczce mogą być dwie WZ-tki.
+        # Mówimy o tym wprost: w RM_BAZA zapiszą się obie (kolumna przy pozycji),
+        # ale na dokumencie Subiekta znajdzie się tylko numer z nagłówka.
+        wz_poz = sorted({(r.get("wz") or "").strip() for r in self._przyjecie if (r.get("wz") or "").strip()})
+        if len(wz_poz) > 1:
+            linie.append(f"⚠️ Pozycje z {len(wz_poz)} różnych WZ ({', '.join(wz_poz[:3])}"
+                         f"{'…' if len(wz_poz) > 3 else ''}). W RM_BAZA zapiszą się wszystkie, "
+                         f"ale PZ przyjmie tylko jeden numer — z pola „WZ dostawcy” u góry.")
         self.lbl_plan.config(text="\n".join(linie), bg="#fdf2e6" if any(l.startswith("⚠️") for l in linie) else SZARY)
 
     # ── przyjęcie → DOSTAWA + PZ ───────────────────────────────────────────
@@ -796,7 +823,9 @@ class OknoDostawa(tk.Toplevel, Kreciolek):
                     "dostawa_id": dostawa_id, "symbol": p["symbol"], "nazwa": p["nazwa"],
                     "asortyment_id": p.get("asortyment_id"), "ilosc": p["ilosc"], "jednostka": p["jm"],
                     "cena": p["cena"], "zd_numer": p.get("zd_numer") or None, "zd_id": p.get("zd_id"),
-                    "zd_pozycja_id": p.get("zd_pozycja_id"), "ilosc_zd": p.get("ilosc_zd")})
+                    "zd_pozycja_id": p.get("zd_pozycja_id"), "ilosc_zd": p.get("ilosc_zd"),
+                    # WZ per pozycja — klucz do rozliczenia faktury z przyjeciem.
+                    "wz": p.get("wz") or naglowek.get("nr_wz_dostawcy") or None})
             # 3. PZ w Subiekcie — ZAPIS, bez ponawiania
             self._wyniki.put(lambda: self.tekst_kreciolka("Wystawiam PZ w Subiekcie"))
             plan["uwagi"] = f"DOSTAWA {dostawa_id}" + (f" WZ {naglowek['nr_wz_dostawcy']}" if naglowek["nr_wz_dostawcy"] else "") \

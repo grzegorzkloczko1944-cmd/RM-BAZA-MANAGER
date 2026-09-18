@@ -2991,6 +2991,13 @@ MIGRACJE_DOSTAWY = [
         )""", None),
     ("CREATE INDEX IF NOT EXISTS idx_dostawy_poz ON dostawy_pozycje(dostawa_id)", None),
     ("CREATE INDEX IF NOT EXISTS idx_dostawy_nip ON dostawy(nip)", None),
+    # ⚠️ WZ PER POZYCJA — dolozone 18.09.2026. `dostawy.nr_wz_dostawcy` trzyma
+    # jedno WZ na cala dostawe, a to za malo: dostawca potrafi przyslac TEN SAM
+    # produkt na dwoch WZ-tkach, a fakture wystawic zbiorczo (QUAY: 55 pozycji
+    # = 11 roznych WZ). Bez tej kolumny druga WZ-tka przepadala i faktury nie
+    # dalo sie rozliczyc co do pozycji.
+    ("ALTER TABLE dostawy_pozycje ADD COLUMN wz TEXT", ("dostawy_pozycje", "wz")),
+    ("CREATE INDEX IF NOT EXISTS idx_dostawy_poz_wz ON dostawy_pozycje(wz)", None),
 ]
 
 
@@ -3035,7 +3042,7 @@ ODCZYT.update({
     ),
     "dostawy-pozycje": (
         "SELECT id, symbol, nazwa, asortyment_id, ilosc, jednostka, cena,"
-        "       zd_numer, zd_id, zd_pozycja_id, ilosc_zd"
+        "       zd_numer, zd_id, zd_pozycja_id, ilosc_zd, wz"
         "  FROM dostawy_pozycje WHERE dostawa_id = ? ORDER BY id",
         ["dostawa_id"],
     ),
@@ -3059,10 +3066,10 @@ ZAPIS.update({
     ),
     "dostawa-pozycja-zapisz": (
         "INSERT INTO dostawy_pozycje (dostawa_id, symbol, nazwa, asortyment_id, ilosc,"
-        "  jednostka, cena, zd_numer, zd_id, zd_pozycja_id, ilosc_zd)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "  jednostka, cena, zd_numer, zd_id, zd_pozycja_id, ilosc_zd, wz)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         ["dostawa_id", "symbol", "nazwa", "asortyment_id", "ilosc", "jednostka", "cena",
-         "zd_numer", "zd_id", "zd_pozycja_id", "ilosc_zd"],
+         "zd_numer", "zd_id", "zd_pozycja_id", "ilosc_zd", "wz"],
     ),
     # Wynik przyjęcia: numer i Id PZ z Subiekta albo status błędu.
     "dostawa-pz-ustaw": (
