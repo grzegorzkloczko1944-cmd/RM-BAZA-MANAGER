@@ -1249,8 +1249,8 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
             if szuk and szuk not in f"{numer} {sprzedawca} {nip}".lower():
                 continue
             wynik.append((ksef, (x.get("DataWystawienia") or "")[:10], numer,
-                          sprzedawca, nip, 0, x.get("Wartosc") or 0,
-                          x.get("StatusNazwa") or ""))
+                          sprzedawca, nip, len(x.get("Pozycje") or []),
+                          x.get("Wartosc") or 0, x.get("StatusNazwa") or ""))
         return wynik
 
     def _fz_praca(self):
@@ -1498,9 +1498,15 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         # choć bez kolumn decyzyjnych: decyzje dotyczą pozycji faktury z KSeF,
         # a to jest dokument Subiekta. Lepsze to niż pusty arkusz.
         numer_fz = (f[2] if f else "").strip()
-        zrodlo = next((x for x in (self._fz_subiekt or [])
-                       if (x.get("Numer") or x.get("NumerOryginalny") or "").strip() == numer_fz),
-                      None)
+        if z_kolejki:
+            # Kolejka e-Faktur — pozycje przychodza wprost z mostu
+            # (`PobierzDane`), wiec pokazujemy je tak samo jak dla FZ.
+            zrodlo = next((x for x in (self._efaktury or [])
+                           if (x.get("NumerDokumentu") or "").strip() == numer_fz), None)
+        else:
+            zrodlo = next((x for x in (self._fz_subiekt or [])
+                           if (x.get("Numer") or x.get("NumerOryginalny") or "").strip() == numer_fz),
+                          None)
         poz = (zrodlo or {}).get("Pozycje") or []
         if self.sheet is not None:
             # Kolejność kolumn: lp, ident, typ, nazwa, ilosc, jm, cena, wz,
@@ -1512,21 +1518,27 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
             for i, q in enumerate(poz, 1):
                 w = [""] * len(KOL_POZYCJE)
                 w[indeks["lp"]] = i
-                w[indeks["ident"]] = (q.get("Symbol") or "").strip()
-                w[indeks["nazwa"]] = (q.get("NazwaNaDokumencie")
+                # Kolejka e-Faktur i FZ maja INNE nazwy pol — `Indeks`/`Nazwa`
+                # kontra `Symbol`/`NazwaNaDokumencie`. Czytamy oba warianty.
+                w[indeks["lp"]] = q.get("Lp") or i
+                w[indeks["ident"]] = (q.get("Symbol") or q.get("Indeks") or "").strip()
+                w[indeks["nazwa"]] = (q.get("NazwaNaDokumencie") or q.get("Nazwa")
                                       or q.get("NazwaKartoteki") or "").strip()
                 w[indeks["ilosc"]] = _ilosc(q.get("Ilosc") or 0)
                 w[indeks["jm"]] = (q.get("Jm") or "").strip()
-                w[indeks["cena"]] = _zl(q.get("Cena") or 0)
+                w[indeks["cena"]] = _zl(q.get("Cena") or q.get("CenaNetto") or 0)
                 w[indeks["nazwa_kart"]] = (q.get("NazwaKartoteki") or "").strip()
                 w[indeks["status"]] = "—"
                 wiersze.append(w)
             self.sheet.set_sheet_data(wiersze)
         if z_kolejki:
+            wz = (zrodlo or {}).get("WydaniaZewnetrzne") or ""
+            if wz:
+                self._pola_nagl["wz"].config(text=wz[:70])
             self.status.config(
-                text=f'„{numer}” czeka w kolejce KSeF — NIE jest jeszcze dokumentem '
-                     f'Subiekta. Pozycje zobaczysz po pobraniu jej do archiwum '
-                     f'albo po przetworzeniu w Subiekcie.')
+                text=f'„{numer}” czeka w kolejce KSeF ({len(poz)} poz.) — nie jest '
+                     f'jeszcze dokumentem Subiekta, więc decyzji o kartotekach '
+                     f'tu nie zapisujemy.')
         else:
             self.status.config(
                 text=f'„{numer}” to faktura zakupu z Subiekta. Pozycje i decyzje są '

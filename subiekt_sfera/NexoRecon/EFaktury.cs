@@ -21,6 +21,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Text.Json;
+using InsERT.Moria.Dokumenty.Logistyka;
 using InsERT.Moria.ModelDanych;
 using InsERT.Moria.Sfera;
 
@@ -31,9 +32,10 @@ internal static class EFaktury
     public static int Uruchom(Uchwyt sfera, int limit, string? outPath)
     {
         var wynik = new List<EFak>();
+        var kartoteka = sfera.DokumentyElektroniczne();
         try
         {
-            foreach (var d in sfera.DokumentyElektroniczne().Dane.Wszystkie()
+            foreach (var d in kartoteka.Dane.Wszystkie()
                                    .OrderByDescending(x => x.Id)
                                    .Take(limit).ToList())
             {
@@ -42,6 +44,39 @@ internal static class EFaktury
                 var flagaKolor = Bezp(() => d.FlagaWlasna?.Kolor) ?? "";
                 var flagaNazwa = Bezp(() => d.FlagaWlasna?.Nazwa) ?? "";
                 var flagaOpis = Bezp(() => d.FlagHeader?.Description) ?? "";
+
+                // ⚠️ NIE czytamy `d.Xml` — to byte[] z trescia w postaci, ktorej
+                // nie da sie odczytac wprost (ani UTF-8, ani gzip/zlib; 1576
+                // bajtow szumu na cala fakture, 18.09.2026). Od tego jest
+                // `PobierzDane`, ktore zwraca gotowy obiekt danych e-Faktury.
+                var pozycje = new List<PozEFak>();
+                var wz = "";
+                var zamowienia = "";
+                try
+                {
+                    var dane = kartoteka.PobierzDane(d);
+                    if (dane != null)
+                    {
+                        foreach (var w in dane.Wiersze ?? Enumerable.Empty<IDaneWierszaFaktury>())
+                        {
+                            pozycje.Add(new PozEFak(
+                                // ⚠️ `LP` to STRING (numer wiersza z faktury,
+                                // moze byc "1.1"), nie liczba — oddajemy tekstem.
+                                Bezp(() => w.LP) ?? "",
+                                Bezp(() => w.NazwaTowaru) ?? "",
+                                Bezp(() => w.Indeks) ?? "",
+                                Bezp(() => w.JednostkaMiary) ?? "",
+                                Kwota(() => w.Ilosc),
+                                KwotaN(() => w.CenaNetto),
+                                KwotaN(() => w.WartoscNetto),
+                                Bezp(() => w.StawkaVat?.ToString()) ?? ""));
+                        }
+                        // Numery WZ i zamowien — klucz do zestawienia z PZ.
+                        wz = Zlacz(() => dane.WydaniaZewnetrzne);
+                        zamowienia = Zlacz(() => dane.NumeryZamowien);
+                    }
+                }
+                catch (Exception ex) { Console.WriteLine("  (pozycje e-Faktury: " + ex.Message + ")"); }
 
                 byte status = 0;
                 try { status = d.StatusPrzetworzenia; } catch { }
@@ -62,7 +97,9 @@ internal static class EFaktury
                     flagaNazwa,
                     flagaOpis,
                     // Id utworzonej FZ — gdy e-Faktura zostala juz przetworzona.
-                    Liczba(() => d.DokumentPowiazanyId)));
+                    Liczba(() => d.DokumentPowiazanyId),
+                    wz, zamowienia, pozycje,
+                    pozycje.Count));
             }
         }
         catch (Exception ex)
@@ -101,11 +138,26 @@ internal static class EFaktury
 
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
     static decimal Kwota(Func<decimal> f) { try { return decimal.Round(f(), 2); } catch { return 0; } }
+
+    //: To samo dla pol nullowalnych — na wierszu e-Faktury ceny sa decimal?,
+    //: a ilosc juz nie. Bez tego kompilator odbija kazde uzycie.
+    static decimal KwotaN(Func<decimal?> f) { try { return decimal.Round(f() ?? 0, 2); } catch { return 0; } }
     static int Liczba(Func<int?> f) { try { return f() ?? 0; } catch { return 0; } }
+
+    static string Zlacz(Func<IEnumerable<string>?> f)
+    {
+        try { return string.Join(", ", f() ?? Enumerable.Empty<string>()); }
+        catch { return ""; }
+    }
 
     internal record EFak(string NumerKSeF, string NumerDokumentu, string DataWystawienia,
                          string Sprzedawca, string Nip, decimal Wartosc,
                          byte Status, string StatusNazwa, byte Rodzaj,
                          string FlagaKolor, string FlagaNazwa, string FlagaOpis,
-                         int DokumentPowiazanyId);
+                         int DokumentPowiazanyId, string WydaniaZewnetrzne,
+                         string NumeryZamowien, List<PozEFak> Pozycje, int PozycjiIle);
+
+    internal record PozEFak(string Lp, string Nazwa, string Indeks, string Jm,
+                            decimal Ilosc, decimal CenaNetto, decimal WartoscNetto,
+                            string StawkaVat);
 }
