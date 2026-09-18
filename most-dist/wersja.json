@@ -1,6 +1,6 @@
 {
   "protokol": 1,
-  "zbudowano": "2026-09-18 00:26",
-  "sha": "3b8ab7c",
-  "uwaga": "pz (pomiar), symbole-dostawcy (powiazania symbol dostawcy -> kartoteka), pz-utworz (PZ z dostawy realizujace ZD), dokumenty: Id i DoRealizacji pozycji"
+  "zbudowano": "2026-09-18 14:03",
+  "sha": "9968890",
+  "uwaga": "faktury: kwoty faktury, jednostka miary i nazwa pozycji BEZ kartoteki (uslugi/transport pokazywaly sama cene); pole NumerKSeF przemianowane na NumeryRealizowanych (trzymalo numery zamowien), dolozony prawdziwy NumerKSeF"
 }

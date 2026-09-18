@@ -16,13 +16,13 @@
           "InsERT.Mox.Core": "1.0.0.0",
           "InsERT.Mox.EntityFramework.Core": "6.0.0.0",
           "InsERT.Mox.EntityFrameworkSupport": "1.0.0.0",
-          "runtimepack.Microsoft.Windows.SDK.NET.Ref": "10.0.17763.56"
+          "runtimepack.Microsoft.Windows.SDK.NET.Ref": "10.0.17763.57"
         },
         "runtime": {
           "NexoRecon.dll": {}
         }
       },
-      "runtimepack.Microsoft.Windows.SDK.NET.Ref/10.0.17763.56": {
+      "runtimepack.Microsoft.Windows.SDK.NET.Ref/10.0.17763.57": {
         "runtime": {
           "Microsoft.Windows.SDK.NET.dll": {
             "assemblyVersion": "10.0.17763.38",
@@ -4354,7 +4354,7 @@
       "serviceable": false,
       "sha512": ""
     },
-    "runtimepack.Microsoft.Windows.SDK.NET.Ref/10.0.17763.56": {
+    "runtimepack.Microsoft.Windows.SDK.NET.Ref/10.0.17763.57": {
       "type": "runtimepack",
       "serviceable": false,
       "sha512": ""
