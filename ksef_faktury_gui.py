@@ -230,10 +230,41 @@ DOST_WSZYSCY = "— wszyscy —"
 #: najpierw trzeba ustalić, czy Sfera w ogóle wystawia tę kolejkę.
 ZR_ARCHIWUM = "archiwum"
 ZR_SUBIEKT = "subiekt"
+ZR_DP_REALIZUJE = "dp_zielona"
+ZR_DP_OCZEKUJE = "dp_czerwona"
+ZR_DP_POMARANCZ = "dp_pomarancz"
+
+#: Kolejka odbioru e-Faktur — `StatusPrzetworzenia` 2 = „DO PRZETWORZENIA".
+#: Rozroznienie 3/4/5 idzie po FLADZE nadanej przez czlowieka w Subiekcie.
+STATUS_DO_PRZETWORZENIA = 2
+
+#: ⚠️ Kolory flag NIE sa stalymi nexo — to slownik uzytkownika (Operacje →
+#: Flagi). Dopasowujemy po NAZWIE z `FlagaWlasna.Nazwa`, a kolor RGB trzymamy
+#: jako zapasowe rozpoznanie, gdyby ktos flage przemianowal.
+FLAGA_ZIELONA = ("zielona", "#FF008000")
+FLAGA_CZERWONA = ("czerwona", "#FFFF0000")
+FLAGA_POMARANCZOWA = ("pomarańczowa", "#FFFFA500")
+
 ZRODLA = {
     ZR_ARCHIWUM: ("Faktury w archiwum", "pobrane z KSeF do bazy RM_BAZA"),
     ZR_SUBIEKT: ("Przetworzone w Subiekcie", "FZ z numerem KSeF"),
+    ZR_DP_REALIZUJE: ("Do przetworzenia — realizuje", "kolejka KSeF, flaga zielona"),
+    ZR_DP_OCZEKUJE: ("Do przetworzenia — oczekująca", "kolejka KSeF, flaga czerwona"),
+    ZR_DP_POMARANCZ: ("Do przetworzenia — oczekująca (pomarańczowa)",
+                      "kolejka KSeF, flaga pomarańczowa"),
 }
+
+#: Ktory tryb filtruje po ktorej fladze — jedno miejsce, zeby nie rozjechalo sie
+#: miedzy budowaniem listy a etykietami.
+ZRODLA_FLAGI = {
+    ZR_DP_REALIZUJE: FLAGA_ZIELONA,
+    ZR_DP_OCZEKUJE: FLAGA_CZERWONA,
+    ZR_DP_POMARANCZ: FLAGA_POMARANCZOWA,
+}
+
+def _z_kolejki(kod):
+    """Czy ten tryb czyta kolejke e-Faktur (a nie archiwum/FZ)."""
+    return kod in ZRODLA_FLAGI
 
 FONT = ("Arial", 9)
 FONT_S = ("Arial", 8)
@@ -482,6 +513,8 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         #: i nic nie przyszło. Rozróżnienie jest istotne: bez niego nieudane
         #: pobranie powtarzałoby zapytanie przy każdym przełączeniu zakładki.
         self._fz_subiekt = None
+        #: Kolejka e-Faktur (tryby 3/4/5) — `None` = jeszcze nie pytalismy.
+        self._efaktury = None
         self._biezaca = None
         self._naglowek = {}
         self._xml = ""
@@ -647,12 +680,16 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         # nie ma go tu, bo Sfera nie daje nam do niej dostępu (patrz _zrodlo_zmienione).
         wyb = tk.Frame(r, bg=SZARY)
         wyb.pack(side=tk.TOP, fill=tk.X)
+        # Piec pozycji nie miesci sie w rzedzie przyciskow przy tej szerokosci
+        # panelu — lista rozwijana. Kolejnosc jak w ZRODLA.
+        tk.Label(wyb, text="Pokaż:", bg=SZARY, font=FONT_S).pack(side=tk.LEFT, padx=(8, 3), pady=3)
         self.var_zrodlo = tk.StringVar(value=ZR_ARCHIWUM)
-        for kod, (etykieta, _opis) in ZRODLA.items():
-            tk.Radiobutton(wyb, text=etykieta.split(" — ")[0], variable=self.var_zrodlo,
-                           value=kod, command=self._zrodlo_zmienione, bg=SZARY,
-                           font=FONT_S, anchor="w", selectcolor="white",
-                           activebackground=SZARY).pack(side=tk.LEFT, padx=(8, 2), pady=2)
+        self._etykiety_zrodel = {e: k for k, (e, _o) in ZRODLA.items()}
+        self.cmb_zrodlo = ttk.Combobox(wyb, state="readonly", font=FONT_S, width=40,
+                                       values=[e for (e, _o) in ZRODLA.values()])
+        self.cmb_zrodlo.set(ZRODLA[ZR_ARCHIWUM][0])
+        self.cmb_zrodlo.pack(side=tk.LEFT, pady=3)
+        self.cmb_zrodlo.bind("<<ComboboxSelected>>", self._zrodlo_wybrane)
 
         wrap = tk.Frame(r)
         wrap.pack(fill=tk.BOTH, expand=True)
@@ -1147,10 +1184,20 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
             self.after_cancel(self._szukaj_po)
         self._szukaj_po = self.after(350, self._odswiez_liste)
 
+    def _zrodlo_wybrane(self, _e=None):
+        self.var_zrodlo.set(self._etykiety_zrodel.get(self.cmb_zrodlo.get(), ZR_ARCHIWUM))
+        self._zrodlo_zmienione()
+
     def _zrodlo_zmienione(self):
         """Przełączenie ARCHIWUM ⇄ SUBIEKT — przeładowuje listę."""
         kod = self.var_zrodlo.get()
         self.lbl_panel_zrodlo.config(text=ZRODLA[kod][0])
+        if _z_kolejki(kod) and self._efaktury is None:
+            # Kolejka odbioru — jedno zapytanie obsluguje wszystkie trzy tryby
+            # (3/4/5), bo roznia sie tylko flaga. Filtrujemy juz po naszej stronie.
+            self.status.config(text="Pytam Subiekta o kolejkę e-Faktur…")
+            self._w_tle(self._efak_praca, self._efak_gotowe)
+            return
         if kod == ZR_SUBIEKT and self._fz_subiekt is None:
             # Pierwsze wejście: dociągamy FZ z mostu. Kolejne przełączenia idą
             # już z pamięci — „Odśwież" przeładowuje jedno i drugie.
@@ -1158,6 +1205,53 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
             self._w_tle(self._fz_praca, self._fz_gotowe)
             return
         self._odswiez_liste()
+
+    def _efak_praca(self):
+        import subiekt_bridge
+        subiekt_bridge.zapewnij_most()
+        dane = subiekt_bridge.call("efaktury", {"limit": 300}, timeout=180)
+        return (dane or {}).get("efaktury", [])
+
+    def _efak_gotowe(self, w, blad):
+        if blad or w is None:
+            self._efaktury = []
+            self.status.config(text=f"Nie udało się pobrać kolejki e-Faktur: {blad or 'brak danych'}")
+        else:
+            self._efaktury = w
+            ile = sum(1 for x in w if x.get("Status") == STATUS_DO_PRZETWORZENIA)
+            self.status.config(text=f"Kolejka e-Faktur: {len(w)}, w tym do przetworzenia: {ile}")
+        self._odswiez_liste()
+
+    def _efaktury_z_kolejki(self, kod, szukaj=""):
+        """Kolejka e-Faktur zawezona do „do przetworzenia" + wskazanej flagi.
+
+        Krotka ma ten sam uklad co w archiwum (patrz `_faktury_z_subiekta`),
+        zeby `_wypelnij_drzewo` nie musialo znac zrodla.
+
+        ⚠️ Flagi dopasowujemy po NAZWIE, nie po kolorze — kolor to slownik
+        uzytkownika i da sie go zmienic w Subiekcie. Kolor zostaje jako
+        rozpoznanie zapasowe, gdyby flage przemianowano.
+        """
+        nazwa_f, kolor_f = ZRODLA_FLAGI[kod]
+        wynik = []
+        szuk = (szukaj or "").strip().lower()
+        for x in self._efaktury or []:
+            if x.get("Status") != STATUS_DO_PRZETWORZENIA:
+                continue
+            nazwa = (x.get("FlagaNazwa") or "").strip().lower()
+            kolor = (x.get("FlagaKolor") or "").strip().upper()
+            if not (nazwa == nazwa_f or (not nazwa and kolor == kolor_f.upper())):
+                continue
+            numer = (x.get("NumerDokumentu") or "").strip()
+            sprzedawca = (x.get("Sprzedawca") or "").strip()
+            nip = (x.get("Nip") or "").strip()
+            ksef = (x.get("NumerKSeF") or "").strip() or f"efak:{numer}"
+            if szuk and szuk not in f"{numer} {sprzedawca} {nip}".lower():
+                continue
+            wynik.append((ksef, (x.get("DataWystawienia") or "")[:10], numer,
+                          sprzedawca, nip, 0, x.get("Wartosc") or 0,
+                          x.get("StatusNazwa") or ""))
+        return wynik
 
     def _fz_praca(self):
         import subiekt_bridge
@@ -1213,7 +1307,12 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
 
     def _odswiez_liste(self):
         self._szukaj_po = None
-        if self.var_zrodlo.get() == ZR_SUBIEKT:
+        kod = self.var_zrodlo.get()
+        if _z_kolejki(kod):
+            self.faktury = self._efaktury_z_kolejki(kod, self.var_szukaj.get().strip())
+            self._wypelnij_drzewo()
+            return
+        if kod == ZR_SUBIEKT:
             self.faktury = self._faktury_z_subiekta(self.var_szukaj.get().strip())
             self._wypelnij_drzewo()
             return
@@ -1228,7 +1327,8 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         zaznaczona = self._biezaca
         self.tv_f.delete(*self.tv_f.get_children())
 
-        subiekt = self.var_zrodlo.get() == ZR_SUBIEKT
+        kod_zr = self.var_zrodlo.get()
+        subiekt = kod_zr == ZR_SUBIEKT or _z_kolejki(kod_zr)
         dostawca = self.var_dostawca.get()
         tylko_braki = bool(self.var_tylko_braki.get())
         widoczne, po_dacie = 0, {}
@@ -1279,9 +1379,14 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         # numer FZ. Pokazywały „Nowa: 120, pozycji łącznie: 0" — obie liczby
         # nieprawdziwe. Zamiast nich mówimy, co to za lista.
         if subiekt:
-            self.summary.config(text=(
-                f"Faktur zakupu z Subiekta: {widoczne} z {len(self.faktury)}"
-                "    (pozycje i decyzje — tylko dla faktur z archiwum KSeF)"))
+            if _z_kolejki(kod_zr):
+                self.summary.config(text=(
+                    f"{ZRODLA[kod_zr][0]}: {widoczne} z {len(self.faktury)}"
+                    "    (kolejka KSeF — te faktury NIE są jeszcze dokumentami Subiekta)"))
+            else:
+                self.summary.config(text=(
+                    f"Faktur zakupu z Subiekta: {widoczne} z {len(self.faktury)}"
+                    "    (pozycje i decyzje — tylko dla faktur z archiwum KSeF)"))
             if zaznaczona and self.tv_f.exists(zaznaczona):
                 self.tv_f.selection_set(zaznaczona)
                 self.tv_f.see(zaznaczona)
@@ -1373,12 +1478,15 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         self._pozycje, self._dop, self._widoczne = [], [], []
         numer = (f[2] if f else "") or klucz
         self.lbl_numer.config(text=numer)
-        self.lbl_zrodlo.config(text="(FZ z Subiekta)")
+        z_kolejki = _z_kolejki(self.var_zrodlo.get())
+        self.lbl_zrodlo.config(text="(kolejka KSeF)" if z_kolejki else "(FZ z Subiekta)")
         # Odznaka liczy się z pozycji archiwum — dla FZ nie ma czego liczyć.
         # Bez tego zostawała wartość po POPRZEDNIO oglądanej fakturze
         # („Nowa — 44 bez decyzji" przy zupełnie innym dokumencie).
         etykieta, tlo = ODZNAKI["pusta"]
-        self.lbl_odznaka.config(text="Brak w archiwum KSeF", bg=tlo, fg="#566573")
+        self.lbl_odznaka.config(
+            text="Do przetworzenia w Subiekcie" if z_kolejki else "Brak w archiwum KSeF",
+            bg=tlo, fg="#566573")
         for k, pole in self._pola_nagl.items():
             pole.config(text="—")
         if f:
@@ -1414,9 +1522,15 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
                 w[indeks["status"]] = "—"
                 wiersze.append(w)
             self.sheet.set_sheet_data(wiersze)
-        self.status.config(
-            text=f'„{numer}” to faktura zakupu z Subiekta. Pozycje i decyzje są '
-                 f'tylko dla faktur z archiwum KSeF — przełącz na „Faktury w archiwum”.')
+        if z_kolejki:
+            self.status.config(
+                text=f'„{numer}” czeka w kolejce KSeF — NIE jest jeszcze dokumentem '
+                     f'Subiekta. Pozycje zobaczysz po pobraniu jej do archiwum '
+                     f'albo po przetworzeniu w Subiekcie.')
+        else:
+            self.status.config(
+                text=f'„{numer}” to faktura zakupu z Subiekta. Pozycje i decyzje są '
+                     f'tylko dla faktur z archiwum KSeF — przełącz na „Faktury w archiwum”.')
 
     def _pokaz_fakture(self, ksef):
         self._biezaca = ksef
@@ -1426,7 +1540,7 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         # (patrz `_faktury_z_subiekta`). Archiwum indeksuje po numerze KSeF,
         # więc pytanie go o ten klucz ZAWSZE zwróci pustkę — nie pytamy wcale
         # i mówimy wprost, czego brakuje, zamiast pokazywać puste pola.
-        if self.var_zrodlo.get() == ZR_SUBIEKT:
+        if self.var_zrodlo.get() == ZR_SUBIEKT or _z_kolejki(self.var_zrodlo.get()):
             self._pokaz_fz_bez_archiwum(f, ksef)
             return
         try:
@@ -2150,6 +2264,11 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
     def _odswiez_wszystko(self):
         # „Odśwież" ma dociągnąć FZ na nowo — inaczej lista z Subiekta zostałaby
         # taka, jaka była przy pierwszym przełączeniu (dane trzymamy w pamięci).
+        if _z_kolejki(self.var_zrodlo.get()):
+            self._efaktury = None
+            self._zrodlo_zmienione()
+            self._w_tle(lambda: self.arch._czytaj("ksef-pozycje-wszystkie"), self._pozycje_gotowe)
+            return
         if self.var_zrodlo.get() == ZR_SUBIEKT:
             self._fz_subiekt = None
             self._zrodlo_zmienione()

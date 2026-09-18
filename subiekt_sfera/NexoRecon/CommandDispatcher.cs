@@ -78,6 +78,7 @@ internal static class CommandDispatcher
         "pola-wlasne", "magazyn-zaloz", "magazyn-usun", "pw", "projekt-cofnij",
         "kartoteki", "zapotrzebowanie-test", "zk-ilosci", "zk-poz-usun", "scal", "zk-nowe",
         "migracja-uwagi", "wydanie-stan", "symbole-dostawcy", "pz-utworz",
+        "efaktury",
     };
 
     public static bool Zna(string tryb) => Tryby.Contains(tryb, StringComparer.OrdinalIgnoreCase);
@@ -128,6 +129,11 @@ internal static class CommandDispatcher
 
             case "faktury":
                 return Faktury.Uruchom(sfera, k.Limit > 15 ? k.Limit : 60, k.OutPath);
+
+            // KOLEJKA ODBIORU e-Faktur (modul KSeF), NIE dokumenty zakupu —
+            // patrz naglowek EFaktury.cs.
+            case "efaktury":
+                return EFaktury.Uruchom(sfera, k.Limit > 15 ? k.Limit : 200, k.OutPath);
 
             // POMIAR przyjec zewnetrznych — tylko odczyt, zero zapisu.
             case "pz":
