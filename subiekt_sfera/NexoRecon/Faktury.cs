@@ -88,18 +88,45 @@ internal static class Faktury
                         // Symbol z mapy po Id — patrz komentarz wyzej.
                         var id = 0;
                         try { id = p.AsortymentAktualnyId ?? 0; } catch { }
-                        // Uwaga: na fakturach zakupu to pole bywa PUSTE (0) —
-                        // patrz wynik rozpoznania 04.09.2026: 0 z 305 pozycji
-                        // mialo dopasowany asortyment.
+                        // Gdy "aktualny" jest pusty, probujemy "wybranego" —
+                        // na FZ z e-Faktury czesc pozycji ma wypelnione tylko to.
+                        if (id == 0) { try { id = p.AsortymentWybranyId; } catch { } }
                         wgId.TryGetValue(id, out var kart);
                         decimal cena = 0;
                         try { cena = p.Cena.NettoPoRabacie; } catch { }
+                        // ⚠️ Pozycje BEZ kartoteki (uslugi, koszty transportu)
+                        // maja id = 0, wiec symbol i nazwa kartoteki sa puste,
+                        // a `Opis` bywa niewypelniony — w oknie zostawala sama
+                        // cena i nie dalo sie poznac, co to za pozycja
+                        // (zgloszone 18.09.2026). Nazwe skladamy z tego, co jest.
+                        var opis = Bezp(() => p.Opis) ?? "";
+                        var nazwaNaDok = opis.Length > 0 ? opis
+                                       : (kart.Nazwa ?? "").Length > 0 ? kart.Nazwa
+                                       : Bezp(() => p.AsortymentWybrany?.Nazwa) ?? "";
+                        // Uslugi kosztowe e-Faktury sa oznaczone osobna encja —
+                        // gdy nie ma ZADNEJ nazwy, przynajmniej nazwijmy rodzaj.
+                        if (nazwaNaDok.Length == 0)
+                        {
+                            var uslugaKosztowa = Bezp(() =>
+                                p.DanePozycjiDokumentuElektronicznego?.UslugaKosztowa == true
+                                    ? "(usługa kosztowa)" : null);
+                            nazwaNaDok = uslugaKosztowa ?? "(pozycja bez kartoteki)";
+                        }
+                        decimal wartosc = 0;
+                        // `Wartosc` na pozycji to obiekt (jak `Cena`) — bierzemy
+                        // netto PO rabacie, spojnie z cena wyzej.
+                        try { wartosc = decimal.Round(p.Wartosc.NettoPoRabacie, 2); } catch { }
                         pozycje.Add(new PozFak(
                             kart.Symbol ?? "",
                             kart.Nazwa ?? "",
-                            Bezp(() => p.Opis) ?? "",
+                            nazwaNaDok,
                             p.Ilosc,
-                            decimal.Round(cena, 2)));
+                            decimal.Round(cena, 2),
+                            // JednostkaMiaryAs to JednostkaMiaryAsortymentu —
+                            // wlasciwa nazwa siedzi w zagniezdzonym JednostkaMiary.
+                            Bezp(() => p.JednostkaMiaryAs?.JednostkaMiary?.Symbol)
+                                ?? Bezp(() => p.JednostkaMiaryAs?.JednostkaMiary?.Nazwa) ?? "",
+                            wartosc));
                     }
                 }
                 catch { }
@@ -117,7 +144,17 @@ internal static class Faktury
                     Bezp(() => d.Uwagi) ?? "",
                     pozycje.Count,
                     pozycje.Count(p => p.Symbol.Length > 0),
-                    pozycje));
+                    pozycje,
+                    // Kwota faktury — w oknie kolumna "Netto" pokazywala 0,00
+                    // dla KAZDEJ FZ, bo rekord w ogole jej nie niosl.
+                    // ⚠️ `Wartosc` to decimal ("kwota do zaplaty"), NIE obiekt
+                    // z .Netto/.Brutto — netto skladamy z towarow i uslug.
+                    Kwota(() => d.WartoscTowarowNetto + d.WartoscUslugNetto),
+                    Kwota(() => d.Wartosc.BruttoPoRabacie),
+                    // Numer KSeF jest WPROST na dokumencie — `NumerKSeFDokumentu`
+                    // (klasa bazowa `Dokument`, nie `DokumentZakupu`). Bez niego
+                    // nie da sie zestawic FZ z archiwum FV_KSEF.
+                    Bezp(() => d.NumerKSeFDokumentu?.Numer) ?? ""));
             }
         }
         catch (Exception ex)
@@ -145,10 +182,17 @@ internal static class Faktury
 
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
 
-    internal record PozFak(string Symbol, string NazwaKartoteki, string NazwaNaDokumencie,
-                           decimal Ilosc, decimal Cena);
+    static decimal Kwota(Func<decimal> f) { try { return decimal.Round(f(), 2); } catch { return 0; } }
 
+    internal record PozFak(string Symbol, string NazwaKartoteki, string NazwaNaDokumencie,
+                           decimal Ilosc, decimal Cena, string Jm, decimal Wartosc);
+
+    // ⚠️ `NumeryRealizowanych` to NIE numer KSeF — to numery ZAMOWIEN (ZD),
+    // ktore ta faktura realizuje. Pole nazywalo sie kiedys `NumerKSeF` i ta
+    // nazwa kosztowala pol dnia szukania: filtr po niej pokazywal 3 faktury
+    // ze 120 (18.09.2026). Prawdziwy numer KSeF jest w `NumerKSeF` nizej.
     internal record Fak(string Numer, string NumerOryginalny, string Data, string Podmiot,
-                        string Status, string NumerKSeF, string Uwagi,
-                        int Pozycji, int Dopasowanych, List<PozFak> Pozycje);
+                        string Status, string NumeryRealizowanych, string Uwagi,
+                        int Pozycji, int Dopasowanych, List<PozFak> Pozycje,
+                        decimal WartoscNetto, decimal WartoscBrutto, string NumerKSeF);
 }

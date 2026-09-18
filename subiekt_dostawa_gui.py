@@ -183,10 +183,18 @@ class OknoDostawa(tk.Toplevel, Kreciolek):
 
         tk.Label(f, text="Dostawca:", bg=SZARY, font=FONT).pack(side=tk.LEFT, padx=(12, 3), pady=6)
         self.var_dostawca = tk.StringVar(value=DOST_WYBIERZ)
+        # ⚠️ NIE `state="readonly"` — przy 117 kontrahentach jedyną drogą było
+        # przewijanie popdownu. Pole jest edytowalne i DOWOLNY wpisany fragment
+        # zawęża listę (nie tylko początek nazwy: „quay" ma trafić w
+        # `"QUAY" BHU Sp. z o.o.`, gdzie nazwa zaczyna się od cudzysłowu).
         self.cmb_dost = ttk.Combobox(f, textvariable=self.var_dostawca, width=34,
-                                     state="readonly", font=FONT, values=[DOST_WYBIERZ])
+                                     font=FONT, values=[DOST_WYBIERZ])
         self.cmb_dost.pack(side=tk.LEFT, pady=6)
-        self.cmb_dost.bind("<<ComboboxSelected>>", lambda _e: self._wypelnij_zd())
+        self.cmb_dost.bind("<<ComboboxSelected>>", self._dostawca_wybrany)
+        self.cmb_dost.bind("<KeyRelease>", self._filtruj_dostawcow)
+        # Wejście w pole = zaczynasz szukać: czyścimy „— wybierz dostawcę —",
+        # żeby nie trzeba go było kasować przed wpisaniem fragmentu.
+        self.cmb_dost.bind("<FocusIn>", self._dostawca_focus)
 
         self.var_data = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
         pole("Data przyjęcia:", 11, self.var_data)
@@ -425,6 +433,9 @@ class OknoDostawa(tk.Toplevel, Kreciolek):
                 z_zd.append(d["podmiot"])
         reszta = sorted({k["NazwaSkrocona"].strip() for k in self.kontrahenci} - set(z_zd))
         wartosci = [DOST_WYBIERZ] + [f"{n}   (otwarte ZD)" for n in sorted(z_zd)] + reszta
+        # Zapamiętujemy PEŁNĄ listę — filtr podmienia `values`, więc bez tej
+        # kopii skasowanie znaku nie miałoby czego przywrócić.
+        self._dost_wszystkie = tuple(wartosci)
         self.cmb_dost["values"] = wartosci
         magazyny = sorted({d["magazyn"] for d in zd if d.get("magazyn")} | {MAGAZYN_DOMYSLNY})
         self.cmb_mag["values"] = magazyny
@@ -437,6 +448,53 @@ class OknoDostawa(tk.Toplevel, Kreciolek):
             self._wypelnij_historie()
 
     # ── dostawca / ZD ──────────────────────────────────────────────────────
+    #: Pełna lista pozycji selektora dostawcy — źródło prawdy dla filtra.
+    #:
+    #: `cmb_dost["values"]` NIE nadaje się do tej roli, bo filtr sam je podmienia:
+    #: po pierwszym wpisanym znaku zostałaby tam garstka trafień i kolejne
+    #: litery filtrowałyby już tylko ją (skasowanie znaku nie przywracałoby
+    #: reszty). Lista jest odtwarzana przy każdym `_gotowe_tlo`.
+    _dost_wszystkie = (DOST_WYBIERZ,)
+
+    def _dostawca_focus(self, _e=None):
+        """Wejście w pole = start szukania — kasujemy placeholder."""
+        if self.var_dostawca.get() == DOST_WYBIERZ:
+            self.var_dostawca.set("")
+            self.cmb_dost["values"] = list(self._dost_wszystkie)
+
+    def _dostawca_wybrany(self, _e=None):
+        """Po wyborze z listy: pełna lista z powrotem i przeładowanie ZD."""
+        self.cmb_dost["values"] = list(self._dost_wszystkie)
+        self.cmb_dost.selection_clear()
+        self._wypelnij_zd()
+
+    def _filtruj_dostawcow(self, event=None):
+        """Zawęża listę do pozycji zawierających wpisany fragment.
+
+        Szukamy `in`, nie `startswith` — nazwy bywają w cudzysłowie albo
+        zaczynają się od formy prawnej („P.P.H.U. …"), więc użytkownik i tak
+        pamięta środek: „quay" ma znaleźć `"QUAY" BHU Sp. z o.o.`.
+
+        ⚠️ Strzałki, Enter i Escape przepuszczamy BEZ filtrowania — inaczej
+        nie dałoby się zejść strzałką na rozwiniętą listę ani zatwierdzić
+        wyboru (każde wciśnięcie przebudowywałoby `values` pod kursorem).
+        """
+        if event and event.keysym in ("Up", "Down", "Return", "Escape", "Tab",
+                                      "Left", "Right", "Home", "End"):
+            return
+        fragment = self.var_dostawca.get().strip().lower()
+        if not fragment:
+            self.cmb_dost["values"] = list(self._dost_wszystkie)
+            return
+        trafienia = [v for v in self._dost_wszystkie
+                     if v != DOST_WYBIERZ and fragment in v.lower()]
+        # Bez trafień zostawiamy pełną listę — pusty popdown wygląda jak awaria
+        # programu, a tak widać, że po prostu nic nie pasuje do wpisanego tekstu.
+        self.cmb_dost["values"] = trafienia or list(self._dost_wszystkie)
+        self.status.config(text=(f'Dostawcy pasujący do „{fragment}”: {len(trafienia)}'
+                                 if trafienia else
+                                 f'Żaden dostawca nie pasuje do „{fragment}”'))
+
     def _nazwa_dostawcy(self):
         v = self.var_dostawca.get()
         if v == DOST_WYBIERZ:

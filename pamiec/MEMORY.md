@@ -92,3 +92,5 @@
 - [Przyjęcie dostawy → PZ — WDROŻONE](project_przyjecie_dostawy_pz.md) — subiekt_dostawa_gui.py, kafel 📦; PZ przez WypelnijNaPodstawieZD (Subiekt trzyma realizację), tabele dostawy na masterze; pułapki: IloscDoRealizacji.PozostalaIlosc, dynamic Utworz, snake_case w planie
 - [Rozliczanie faktury z PZ — PLAN, do wznowienia](project_rozliczanie_faktury_z_pz_plan.md) — 5 szczebli (WZ → nr zam. → ZD → symbol+ilość → człowiek), statusy per linia, zapis w FV_KSEF; otwarte: czy oznaczać PZ w Subiekcie (18.09.2026)
 - [Wdrozenie 18.09.2026 — most + serwer dostaw](project_wdrozenie_18_09_dostawy.md) — TrustedHosts tylko po IP; kod serwera nie przez udzial; "37 migracji" to nie zaleglosc
+- [Sfera: kolejka e-Faktur KSeF](project_sfera_kolejka_efaktur.md) — DokumentyElektroniczne() to OSOBNA kartoteka (nie DokumentyZakupu); statusy zakladek + flagi czytelne; most jeszcze nie uzywa
+- [Most, tryb faktury — braki](project_most_faktury_braki.md) — ⛔ pole NumerKSeF trzyma numery ZAMOWIEN; brak kwoty i numeru KSeF; most ma jedna kolejke

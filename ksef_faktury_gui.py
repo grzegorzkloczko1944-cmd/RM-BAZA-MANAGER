@@ -216,6 +216,25 @@ KOL_FAKTURY = [("dostawca", "Dostawca", 95), ("netto", "Netto", 65),
 #: (`PROJ_WSZYSTKIE`).
 DOST_WSZYSCY = "— wszyscy —"
 
+#: Źródło listy faktur — przełącznik nad drzewem.
+#:
+#: ⚠️ ARCHIWUM i SUBIEKT to DWA RÓŻNE ZBIORY, nie dwa widoki tego samego:
+#: archiwum to faktury pobrane z KSeF do naszej bazy `FV_KSEF`, a SUBIEKT to
+#: faktury zakupu (FZ) z numerem KSeF — czyli te, które ktoś w Subiekcie
+#: przetworzył na dokument. Faktura może być w jednym i nie być w drugim.
+#:
+#: Trzeciego zbioru — nieprzetworzonej kolejki nexo („KSeF → Odbiór →
+#: DO PRZETWORZENIA", tam gdzie są kolorowe flagi) — TU NIE MA. Te faktury
+#: nie są jeszcze dokumentami Subiekta, a most czyta `DokumentyZakupu`,
+#: więc z definicji ich nie widzi. Nie dokładać tego trybu „na czuja":
+#: najpierw trzeba ustalić, czy Sfera w ogóle wystawia tę kolejkę.
+ZR_ARCHIWUM = "archiwum"
+ZR_SUBIEKT = "subiekt"
+ZRODLA = {
+    ZR_ARCHIWUM: ("Faktury w archiwum", "pobrane z KSeF do bazy RM_BAZA"),
+    ZR_SUBIEKT: ("Przetworzone w Subiekcie", "FZ z numerem KSeF"),
+}
+
 FONT = ("Arial", 9)
 FONT_S = ("Arial", 8)
 FONT_B = ("Arial", 9, "bold")
@@ -459,6 +478,10 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
 
         # bieżąca faktura
         self.faktury = []
+        #: FZ z Subiekta — `None` = jeszcze nie pytaliśmy mostu, `[]` = pytaliśmy
+        #: i nic nie przyszło. Rozróżnienie jest istotne: bez niego nieudane
+        #: pobranie powtarzałoby zapytanie przy każdym przełączeniu zakładki.
+        self._fz_subiekt = None
         self._biezaca = None
         self._naglowek = {}
         self._xml = ""
@@ -610,9 +633,26 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
     def _panel_faktur(self, r):
         pasek = tk.Frame(r, bg=GRANAT)
         pasek.pack(side=tk.TOP, fill=tk.X)
-        tk.Label(pasek, text="Faktury w archiwum", bg=GRANAT, fg="white",
-                 font=("Arial", 9, "bold"), anchor="w", padx=10, pady=4).pack(
-            side=tk.LEFT, fill=tk.X, expand=True)
+        self.lbl_panel_zrodlo = tk.Label(pasek, text=ZRODLA[ZR_ARCHIWUM][0], bg=GRANAT, fg="white",
+                                         font=("Arial", 9, "bold"), anchor="w", padx=10, pady=4)
+        self.lbl_panel_zrodlo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # ── przełącznik źródła listy ──
+        #
+        # Trzy różne zbiory, mylone ze sobą przy omawianiu okna:
+        #   * ARCHIWUM  — nasza baza FV_KSEF (to, co pobraliśmy z KSeF),
+        #   * SUBIEKT   — faktury zakupu (FZ) z numerem KSeF, czyli te, które
+        #                 ktoś w Subiekcie PRZETWORZYŁ na dokument.
+        # Nieprzetworzona kolejka nexo („DO PRZETWORZENIA") to trzeci zbiór —
+        # nie ma go tu, bo Sfera nie daje nam do niej dostępu (patrz _zrodlo_zmienione).
+        wyb = tk.Frame(r, bg=SZARY)
+        wyb.pack(side=tk.TOP, fill=tk.X)
+        self.var_zrodlo = tk.StringVar(value=ZR_ARCHIWUM)
+        for kod, (etykieta, _opis) in ZRODLA.items():
+            tk.Radiobutton(wyb, text=etykieta.split(" — ")[0], variable=self.var_zrodlo,
+                           value=kod, command=self._zrodlo_zmienione, bg=SZARY,
+                           font=FONT_S, anchor="w", selectcolor="white",
+                           activebackground=SZARY).pack(side=tk.LEFT, padx=(8, 2), pady=2)
 
         wrap = tk.Frame(r)
         wrap.pack(fill=tk.BOTH, expand=True)
@@ -1107,8 +1147,76 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
             self.after_cancel(self._szukaj_po)
         self._szukaj_po = self.after(350, self._odswiez_liste)
 
+    def _zrodlo_zmienione(self):
+        """Przełączenie ARCHIWUM ⇄ SUBIEKT — przeładowuje listę."""
+        kod = self.var_zrodlo.get()
+        self.lbl_panel_zrodlo.config(text=ZRODLA[kod][0])
+        if kod == ZR_SUBIEKT and self._fz_subiekt is None:
+            # Pierwsze wejście: dociągamy FZ z mostu. Kolejne przełączenia idą
+            # już z pamięci — „Odśwież" przeładowuje jedno i drugie.
+            self.status.config(text="Pytam Subiekta o faktury zakupu…")
+            self._w_tle(self._fz_praca, self._fz_gotowe)
+            return
+        self._odswiez_liste()
+
+    def _fz_praca(self):
+        import subiekt_bridge
+        subiekt_bridge.zapewnij_most()
+        # ⚠️ Most ma JEDNĄ kolejkę (`BlockingCollection` w ServerHost) — to
+        # zapytanie czeka za `katalog`/`symbole-dostawcy`/`kontrahenci` ze startu
+        # okna, a samo dociąga pozycje każdej FZ. Limit 500 potrafił wisieć
+        # minutami; 120 ostatnich FZ w zupełności wystarcza do zestawienia
+        # z archiwum, a odpowiedź przychodzi w kilkanaście sekund.
+        dane = subiekt_bridge.call("faktury", {"limit": 120}, timeout=180)
+        return (dane or {}).get("faktury", [])
+
+    def _fz_gotowe(self, w, blad):
+        if blad or w is None:
+            self._fz_subiekt = []
+            self.status.config(text=f"Nie udało się pobrać faktur z Subiekta: {blad or 'brak danych'}")
+        else:
+            self._fz_subiekt = w
+            self.status.config(text=f"Faktur zakupu z numerem KSeF w Subiekcie: {len(w)}")
+        self._odswiez_liste()
+
+    def _faktury_z_subiekta(self, szukaj=""):
+        """FZ z mostu w kształcie krotek `arch.faktury()` — reszta okna nie wie o różnicy.
+
+        ⚠️ Kolejność pól MUSI się zgadzać z `_wypelnij_drzewo`, które czyta je
+        po indeksach (0=ksef, 1=data, 2=numer, 3=sprzedawca, 4=nip, 5=pozycji,
+        6=wartość). Zmiana tu bez zmiany tam = ciche przestawienie kolumn.
+
+        ⚠️ **Pole `NumerKSeF` z mostu NIE ZAWIERA numeru KSeF.** Rekord `Fak`
+        w `Faktury.cs` ma je na szóstej pozycji, a konstruktor wstawia tam
+        `d.NumeryDokumentowRealizowanych` — czyli numery ZAMÓWIEŃ realizowanych
+        przez tę fakturę. Nazwa pola wprowadza w błąd; filtrowanie po nim
+        pokazywało 3 faktury z kilkudziesięciu (tylko te realizujące ZD).
+        Dlatego pokazujemy WSZYSTKIE FZ, a jako klucz bierzemy numer dokumentu.
+        """
+        wynik = []
+        szuk = (szukaj or "").strip().lower()
+        for f in self._fz_subiekt or []:
+            numer = (f.get("Numer") or f.get("NumerOryginalny") or "").strip()
+            podmiot = (f.get("Podmiot") or "").strip()
+            data = (f.get("Data") or "")[:10]
+            # Klucz wiersza: numer FZ. To NIE jest numer KSeF, więc kliknięcie
+            # takiej faktury nie trafi w archiwum — okno mówi o tym wprost.
+            klucz = numer or f"fz:{podmiot}:{data}"
+            if szuk and szuk not in f"{numer} {podmiot}".lower():
+                continue
+            # Ostatnie pole krotki niesie STATUS DOKUMENTU z Subiekta
+            # (`d.StatusDokumentu?.Nazwa`) — w archiwum jest tam `None`.
+            wynik.append((klucz, data, numer, podmiot, "",
+                          f.get("Pozycji") or 0, f.get("WartoscNetto") or 0,
+                          (f.get("Status") or "").strip()))
+        return wynik
+
     def _odswiez_liste(self):
         self._szukaj_po = None
+        if self.var_zrodlo.get() == ZR_SUBIEKT:
+            self.faktury = self._faktury_z_subiekta(self.var_szukaj.get().strip())
+            self._wypelnij_drzewo()
+            return
         try:
             self.faktury = self.arch.faktury(szukaj=self.var_szukaj.get().strip())
         except Exception as e:
@@ -1120,6 +1228,7 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         zaznaczona = self._biezaca
         self.tv_f.delete(*self.tv_f.get_children())
 
+        subiekt = self.var_zrodlo.get() == ZR_SUBIEKT
         dostawca = self.var_dostawca.get()
         tylko_braki = bool(self.var_tylko_braki.get())
         widoczne, po_dacie = 0, {}
@@ -1139,10 +1248,20 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
                              open=True, tags=("data",))
             for ksef, _d, numer, sprzedawca, nip, pozycji, wartosc, _x in grupa:
                 stan = self.stan_faktur.get(ksef)
-                odz = stan["odznaka"] if stan else "nowa"
-                tekst = ODZNAKI[odz][0]
-                if stan and stan.get("brak"):
-                    tekst += f" ({stan['brak']})"
+                # ⚠️ `stan_faktur` jest indeksowane NUMEREM KSeF z archiwum.
+                # Wiersze z listy SUBIEKT mają jako klucz numer FZ, więc `stan`
+                # jest tam ZAWSZE None — domyślna odznaka „Nowa" kłamałaby, że
+                # jest co rozstrzygać. Pokazujemy myślnik: stan liczymy tylko
+                # dla faktur z archiwum.
+                if subiekt:
+                    # Status dokumentu z Subiekta (np. „Zatwierdzony"), NIE
+                    # odznaka decyzji — tamta dotyczy pozycji z archiwum KSeF.
+                    odz, tekst = "pusta", (_x or "—")
+                else:
+                    odz = stan["odznaka"] if stan else "nowa"
+                    tekst = ODZNAKI[odz][0]
+                    if stan and stan.get("brak"):
+                        tekst += f" ({stan['brak']})"
                 self.tv_f.insert(iid_d, "end", iid=ksef, text=numer or "(bez numeru)",
                                  values=(sprzedawca or nip or "", _zl(wartosc), tekst),
                                  tags=(odz,))
@@ -1154,6 +1273,19 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
             self.var_dostawca.set(DOST_WSZYSCY)
 
         # Podsumowanie w pasku — jak „Dokumentów: 63 z 63" w oknie dokumentów.
+        #
+        # W trybie SUBIEKT liczniki odznak i pozycji NIE MAJĄ sensu: liczą się
+        # ze `stan_faktur` (archiwum, klucz = numer KSeF), a tu kluczem jest
+        # numer FZ. Pokazywały „Nowa: 120, pozycji łącznie: 0" — obie liczby
+        # nieprawdziwe. Zamiast nich mówimy, co to za lista.
+        if subiekt:
+            self.summary.config(text=(
+                f"Faktur zakupu z Subiekta: {widoczne} z {len(self.faktury)}"
+                "    (pozycje i decyzje — tylko dla faktur z archiwum KSeF)"))
+            if zaznaczona and self.tv_f.exists(zaznaczona):
+                self.tv_f.selection_set(zaznaczona)
+                self.tv_f.see(zaznaczona)
+            return
         braki = sum(1 for f in self.faktury if (self.stan_faktur.get(f[0]) or {}).get("brak"))
         poz = sum((self.stan_faktur.get(f[0]) or {}).get("razem", 0) for f in self.faktury)
         licz = {}
@@ -1229,10 +1361,74 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
             return
         self._pokaz_fakture(sel[0])
 
+    def _pokaz_fz_bez_archiwum(self, f, klucz):
+        """Widok FZ z Subiekta: pokazuje to, co dał most, i mówi czego brak.
+
+        FZ nie ma u nas XML-a ani pozycji z decyzjami — te są tylko w archiwum
+        KSeF. Zamiast pustego okna (wyglądającego jak błąd wczytywania)
+        wypełniamy, co się da, i nazywamy brakujące wprost.
+        """
+        self._xml, self._plik = "", ""
+        self._naglowek = {}
+        self._pozycje, self._dop, self._widoczne = [], [], []
+        numer = (f[2] if f else "") or klucz
+        self.lbl_numer.config(text=numer)
+        self.lbl_zrodlo.config(text="(FZ z Subiekta)")
+        # Odznaka liczy się z pozycji archiwum — dla FZ nie ma czego liczyć.
+        # Bez tego zostawała wartość po POPRZEDNIO oglądanej fakturze
+        # („Nowa — 44 bez decyzji" przy zupełnie innym dokumencie).
+        etykieta, tlo = ODZNAKI["pusta"]
+        self.lbl_odznaka.config(text="Brak w archiwum KSeF", bg=tlo, fg="#566573")
+        for k, pole in self._pola_nagl.items():
+            pole.config(text="—")
+        if f:
+            self._pola_nagl["data_wystawienia"].config(text=_data_pl(f[1]))
+        # Sprzedawca z listy — reszta pól nagłówka pochodzi z XML-a, którego nie ma.
+        for klucz, lab in (self._strony or {}).items():
+            lab.config(text=((f[3] if f else "") or "—") if klucz == "podmiot1" else "—")
+        # Pozycje FZ most ZWRACA (symbol, nazwa, ilość, cena) — pokazujemy je,
+        # choć bez kolumn decyzyjnych: decyzje dotyczą pozycji faktury z KSeF,
+        # a to jest dokument Subiekta. Lepsze to niż pusty arkusz.
+        numer_fz = (f[2] if f else "").strip()
+        zrodlo = next((x for x in (self._fz_subiekt or [])
+                       if (x.get("Numer") or x.get("NumerOryginalny") or "").strip() == numer_fz),
+                      None)
+        poz = (zrodlo or {}).get("Pozycje") or []
+        if self.sheet is not None:
+            # Kolejność kolumn: lp, ident, typ, nazwa, ilosc, jm, cena, wz,
+            # kartoteka, symbol_kart, nazwa_kart, opis_kart, projekty, status.
+            # Budujemy wiersz po nazwach, nie „na oko" — pomyłka o jedną pozycję
+            # wsadza cenę w kolumnę WZ i nikt tego nie zauważy.
+            indeks = {k: i for i, (k, _n, _s) in enumerate(KOL_POZYCJE)}
+            wiersze = []
+            for i, q in enumerate(poz, 1):
+                w = [""] * len(KOL_POZYCJE)
+                w[indeks["lp"]] = i
+                w[indeks["ident"]] = (q.get("Symbol") or "").strip()
+                w[indeks["nazwa"]] = (q.get("NazwaNaDokumencie")
+                                      or q.get("NazwaKartoteki") or "").strip()
+                w[indeks["ilosc"]] = _ilosc(q.get("Ilosc") or 0)
+                w[indeks["jm"]] = (q.get("Jm") or "").strip()
+                w[indeks["cena"]] = _zl(q.get("Cena") or 0)
+                w[indeks["nazwa_kart"]] = (q.get("NazwaKartoteki") or "").strip()
+                w[indeks["status"]] = "—"
+                wiersze.append(w)
+            self.sheet.set_sheet_data(wiersze)
+        self.status.config(
+            text=f'„{numer}” to faktura zakupu z Subiekta. Pozycje i decyzje są '
+                 f'tylko dla faktur z archiwum KSeF — przełącz na „Faktury w archiwum”.')
+
     def _pokaz_fakture(self, ksef):
         self._biezaca = ksef
         self._wybrany_lp = None
         f = next((x for x in self.faktury if x[0] == ksef), None)
+        # ⚠️ W trybie SUBIEKT kluczem wiersza jest NUMER FZ, nie numer KSeF
+        # (patrz `_faktury_z_subiekta`). Archiwum indeksuje po numerze KSeF,
+        # więc pytanie go o ten klucz ZAWSZE zwróci pustkę — nie pytamy wcale
+        # i mówimy wprost, czego brakuje, zamiast pokazywać puste pola.
+        if self.var_zrodlo.get() == ZR_SUBIEKT:
+            self._pokaz_fz_bez_archiwum(f, ksef)
+            return
         try:
             w = self.arch._czytaj("ksef-xml", {"ksef_number": ksef})
             r = w[0] if w else {}
@@ -1952,6 +2148,13 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         self._w_tle(self._tlo_praca, self._tlo_gotowe)
 
     def _odswiez_wszystko(self):
+        # „Odśwież" ma dociągnąć FZ na nowo — inaczej lista z Subiekta zostałaby
+        # taka, jaka była przy pierwszym przełączeniu (dane trzymamy w pamięci).
+        if self.var_zrodlo.get() == ZR_SUBIEKT:
+            self._fz_subiekt = None
+            self._zrodlo_zmienione()
+            self._w_tle(lambda: self.arch._czytaj("ksef-pozycje-wszystkie"), self._pozycje_gotowe)
+            return
         self._odswiez_liste()
         self._w_tle(lambda: self.arch._czytaj("ksef-pozycje-wszystkie"), self._pozycje_gotowe)
         if self._biezaca:
