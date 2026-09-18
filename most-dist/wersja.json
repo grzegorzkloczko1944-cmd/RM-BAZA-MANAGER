@@ -1,6 +1,6 @@
 {
   "protokol": 1,
-  "zbudowano": "2026-09-18 16:11",
-  "sha": "376d0eb",
-  "uwaga": "faktury: RodzajPozycji (Towar/Usluga) i znacznik Jednorazowa z pozycji FZ \u2014 typ pozycji czytany ZE STANU Subiekta zamiast zgadywania po nazwie"
+  "zbudowano": "2026-09-18 16:21",
+  "sha": "f4ff4ce",
+  "uwaga": "faktury: NIP kontrahenta (bez niego zapis powiazan byl zablokowany na KAZDEJ FZ); RodzajPozycji tylko do diagnostyki, BezKartoteki zamiast blednego Jednorazowa"
 }
