@@ -91,3 +91,4 @@
 - [Okno Faktury z KSeF — WDROŻONE](project_ksef_okno_faktur_wdrozone.md) — ksef_faktury_gui.py, kafel 🧾; decyzje: Subiekt (symbol dostawcy) / mapowania (rysunek) / FV_KSEF.pozycje.decyzja; serwer wdrażać razem; ubicie serwera zamyka RM_BAZA także na M-OLD
 - [Przyjęcie dostawy → PZ — WDROŻONE](project_przyjecie_dostawy_pz.md) — subiekt_dostawa_gui.py, kafel 📦; PZ przez WypelnijNaPodstawieZD (Subiekt trzyma realizację), tabele dostawy na masterze; pułapki: IloscDoRealizacji.PozostalaIlosc, dynamic Utworz, snake_case w planie
 - [Rozliczanie faktury z PZ — PLAN, do wznowienia](project_rozliczanie_faktury_z_pz_plan.md) — 5 szczebli (WZ → nr zam. → ZD → symbol+ilość → człowiek), statusy per linia, zapis w FV_KSEF; otwarte: czy oznaczać PZ w Subiekcie (18.09.2026)
+- [Wdrozenie 18.09.2026 — most + serwer dostaw](project_wdrozenie_18_09_dostawy.md) — TrustedHosts tylko po IP; kod serwera nie przez udzial; "37 migracji" to nie zaleglosc
