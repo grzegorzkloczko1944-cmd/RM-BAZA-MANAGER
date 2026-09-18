@@ -9,6 +9,14 @@ v2 opisuje przepływ w całości i pozostaje w mocy. Ten dokument zbiera
 rozstrzygnięcia, stan faktyczny kodu i poprawki do v2. **Gdzie oba się
 różnią, obowiązuje ten.**
 
+> **Skąd kalkulator weźmie realny czas i materiał:**
+> [`TERMINAL_TOKARSKI_PRZEPLYW.md`](TERMINAL_TOKARSKI_PRZEPLYW.md) — terminal
+> przy tokarce (skaner CODE128 + Flask + baza produkcji). Dziś kalkulator
+> liczy z wartości wpisanych ręcznie; terminal ma je zastąpić pomiarem
+> z hali. Granica jest ostra: **terminal ZBIERA dane, kalkulator LICZY
+> koszt** — terminal nie jest drugim kalkulatorem. Dokument opisuje projekt,
+> kodu jeszcze nie ma (18.09.2026).
+
 ---
 
 ## 1. Punkt wyjścia
