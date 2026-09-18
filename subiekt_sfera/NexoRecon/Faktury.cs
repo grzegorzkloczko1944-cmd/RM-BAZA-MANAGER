@@ -122,11 +122,16 @@ internal static class Faktury
                         // NA DOKUMENCIE — „Towar" / „Usługa". To odczyt ze stanu
                         // Subiekta, nie zgadywanie po nazwie (18.09.2026).
                         var rodzajPoz = Bezp(() => p.RodzajAsortymentu?.Nazwa) ?? "";
-                        // UJ = usluga BEZ kartoteki (wpisana wprost na dokument).
-                        // Sam brak kartoteki nie wystarcza: pozycje towarowe tez
-                        // bywaja bez asortymentu, a „Dostawa" z MA-JA kartoteke MA.
-                        var jednorazowa = id == 0
-                            && rodzajPoz.StartsWith("Us", StringComparison.OrdinalIgnoreCase);
+                        // ⛔ `RodzajAsortymentu` NIE mowi, czym pozycja jest —
+                        // mowi, czy ma podpieta KARTOTEKE. Zmierzone na 536
+                        // pozycjach: „Towar" = ma symbol 277/277, „Usługa" =
+                        // nie ma symbolu 249/259. Zwykle towary bez kartoteki
+                        // („Worki na smieci") wychodzily jako usluga.
+                        //
+                        // Dlatego NIE wyprowadzamy stad UJ. Oddajemy surowy
+                        // rodzaj (do diagnostyki) i sam fakt braku kartoteki;
+                        // co z tym zrobic, rozstrzyga okno albo czlowiek.
+                        var bezKartoteki = id == 0;
 
                         decimal wartosc = 0;
                         // `Wartosc` na pozycji to obiekt (jak `Cena`) — bierzemy
@@ -144,7 +149,7 @@ internal static class Faktury
                                 ?? Bezp(() => p.JednostkaMiaryAs?.JednostkaMiary?.Nazwa) ?? "",
                             wartosc,
                             rodzajPoz,
-                            jednorazowa));
+                            bezKartoteki));
                     }
                 }
                 catch { }
@@ -154,6 +159,10 @@ internal static class Faktury
                     Bezp(() => d.NumerZewnetrzny) ?? "",
                     Data(d),
                     Bezp(() => d.Podmiot?.NazwaSkrocona) ?? "",
+                    // ⚠️ NIP jest KLUCZEM kontrahenta w oknie faktur: bez niego
+                    // „Kontrahent w Subiekcie" zawsze pokazuje BRAK i zapis
+                    // powiazan symboli jest zablokowany (18.09.2026).
+                    Bezp(() => d.Podmiot?.NIP) ?? "",
                     Bezp(() => d.StatusDokumentu?.Nazwa) ?? "",
                     // Numery zamowien, ktore ta faktura realizuje — Subiekt trzyma
                     // to powiazanie SAM. To odpowiedz na pytanie „jak dopasowac
@@ -204,14 +213,14 @@ internal static class Faktury
 
     internal record PozFak(string Symbol, string NazwaKartoteki, string NazwaNaDokumencie,
                            decimal Ilosc, decimal Cena, string Jm, decimal Wartosc,
-                           string RodzajPozycji, bool Jednorazowa);
+                           string RodzajPozycji, bool BezKartoteki);
 
     // ⚠️ `NumeryRealizowanych` to NIE numer KSeF — to numery ZAMOWIEN (ZD),
     // ktore ta faktura realizuje. Pole nazywalo sie kiedys `NumerKSeF` i ta
     // nazwa kosztowala pol dnia szukania: filtr po niej pokazywal 3 faktury
     // ze 120 (18.09.2026). Prawdziwy numer KSeF jest w `NumerKSeF` nizej.
     internal record Fak(string Numer, string NumerOryginalny, string Data, string Podmiot,
-                        string Status, string NumeryRealizowanych, string Uwagi,
+                        string Nip, string Status, string NumeryRealizowanych, string Uwagi,
                         int Pozycji, int Dopasowanych, List<PozFak> Pozycje,
                         decimal WartoscNetto, decimal WartoscBrutto, string NumerKSeF);
 }

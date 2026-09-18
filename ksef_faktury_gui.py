@@ -286,7 +286,7 @@ class Pozycja:
 
     __slots__ = ("nr_wiersza", "nazwa", "jednostka", "ilosc", "cena_netto",
                  "wartosc_netto", "indeks", "dodatkowe", "decyzja",
-                 "rodzaj_subiekt", "jednorazowa")
+                 "rodzaj_subiekt", "bez_kartoteki")
 
     def __init__(self, w):
         self.nr_wiersza = w.get("nr_wiersza")
@@ -300,7 +300,9 @@ class Pozycja:
         self.decyzja = _json_lub(w.get("decyzja"), None)
         #: Rodzaj pozycji wg Subiekta — tylko dla FZ; w archiwum pusty.
         self.rodzaj_subiekt = (w.get("rodzaj_subiekt") or "").strip()
-        self.jednorazowa = bool(w.get("jednorazowa"))
+        #: Pozycja FZ bez podpietej kartoteki — sam fakt, bez wnioskowania
+        #: czym jest (patrz komentarz w `_typ_z_dopasowania`).
+        self.bez_kartoteki = bool(w.get("bez_kartoteki"))
 
 
 def _int_lub(wartosc, domyslnie):
@@ -478,14 +480,16 @@ def _typ_z_dopasowania(d):
         return dec["typ"]
     if d.status == kk.RYSUNEK_RM or d.zrodlo_identyfikatora == kk.IDENT_RYSUNEK:
         return "rysunek"
-    # Rodzaj Z SUBIEKTA wygrywa z heurystyką po nazwie — to odczyt ze stanu.
-    if getattr(d.pozycja, "jednorazowa", False):
-        return "jednorazowa"
-    rodzaj = (getattr(d.pozycja, "rodzaj_subiekt", "") or "").lower()
-    if rodzaj.startswith("usług") or rodzaj.startswith("uslug"):
-        return "usluga"
-    if rodzaj.startswith("towar"):
-        return "towar"
+    # ⛔ NIE UŻYWAĆ `rodzaj_subiekt` do rozstrzygania towar/usługa.
+    #
+    # `PozycjaDokumentu.RodzajAsortymentu` NIE mówi, czym rzecz jest — mówi
+    # tylko, czy pozycja ma podpiętą kartotekę. Zmierzone na 536 pozycjach
+    # (18.09.2026): „Towar" = ma symbol 277/277, „Usługa" = nie ma symbolu
+    # 249/259. Dlatego „Worki na śmieci" i „SMART BEE" (zwykłe towary bez
+    # kartoteki) wychodziły jako US — zgłoszone przez użytkownika.
+    #
+    # Rodzaj trzymamy dalej w `Pozycja`, bo przydaje się w diagnostyce,
+    # ale typu z niego NIE wyprowadzamy.
     if d.status == kk.USLUGA or kk.wyglada_na_usluge(d.pozycja):
         return "usluga"
     if d.status == kk.POZYCJA_ZBIORCZA or not d.identyfikator:
@@ -1595,7 +1599,7 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
             # UJ. To odczyt ze stanu, nie heurystyka po nazwie — dostępny tylko
             # dla FZ, bo w kolejce KSeF dokumentu jeszcze nie ma.
             "rodzaj_subiekt": q.get("RodzajPozycji") or "",
-            "jednorazowa": bool(q.get("Jednorazowa")),
+            "bez_kartoteki": bool(q.get("BezKartoteki")),
         }) for i, q in enumerate(poz, 1)]
         self._wszystkie_pozycje[klucz] = self._pozycje
         self._ustaw_kontrahenta(re.sub(r"\D", "", (zrodlo or {}).get("Nip") or ""))
