@@ -25,6 +25,14 @@ Dwa źródła pozycji — oba w jednym oknie (decyzja 18.09.2026):
 dostawca i data; WZ / nr zamówienia / własny identyfikator są opcjonalne,
 ale KTÓRYŚ warto wpisać, bo po nim faktura znajdzie to przyjęcie.
 
+⛔ ŻELAZNA ZASADA: jedna WZ-tka dostawcy = JEDNO PZ (polecenie 18.09.2026).
+Przyjęcie z pozycjami z dwóch różnych WZ jest BLOKOWANE. Powód: PZ ma jedno
+pole `NumerZewnetrzny`, więc drugi numer by przepadł, a rozliczenie faktury
+(pozycja → `Numer wydania` → PZ) przestałoby być jednoznaczne. Dostawca
+wystawia wiele WZ-tek i fakturuje je zbiorczo (QUAY: 55 pozycji = 11 WZ),
+a ten sam produkt potrafi przyjść na dwóch — dlatego WZ jest PER POZYCJA
+(kolumna w tabeli przyjęcia), a nie jedno pole na całą dostawę.
+
 Co się zapisuje i gdzie:
   * DOSTAWA + pozycje       → master (`dostawy`, `dostawy_pozycje`) — zdarzenie
                               operacyjne: co przyszło, kiedy, kto odebrał
@@ -740,14 +748,21 @@ class OknoDostawa(tk.Toplevel, Kreciolek):
             linie.append("Subiekt sam powiąże PZ z ZD (realizacja) — zamówienie zejdzie o przyjęte ilości.")
         if not (self.var_wz.get().strip() or self.var_zam.get().strip() or self.var_ident.get().strip()):
             linie.append("⚠️ Bez WZ / nr zamówienia / identyfikatora faktura nie znajdzie tego przyjęcia automatycznie.")
-        # ⚠️ PZ ma JEDNO pole `NumerZewnetrzny`, a w paczce mogą być dwie WZ-tki.
-        # Mówimy o tym wprost: w RM_BAZA zapiszą się obie (kolumna przy pozycji),
-        # ale na dokumencie Subiekta znajdzie się tylko numer z nagłówka.
+        # ⛔ ŻELAZNA ZASADA: jedna WZ-tka = jedno PZ (polecenie 18.09.2026).
+        # PZ ma JEDNO pole `NumerZewnetrzny`, więc przyjęcie z dwóch WZ-tek
+        # gubiłoby drugi numer i faktury nie dałoby się rozliczyć co do pozycji.
+        # To BLOKADA, nie ostrzeżenie — przyjmujemy paczkę po paczce.
         wz_poz = sorted({(r.get("wz") or "").strip() for r in self._przyjecie if (r.get("wz") or "").strip()})
         if len(wz_poz) > 1:
-            linie.append(f"⚠️ Pozycje z {len(wz_poz)} różnych WZ ({', '.join(wz_poz[:3])}"
-                         f"{'…' if len(wz_poz) > 3 else ''}). W RM_BAZA zapiszą się wszystkie, "
-                         f"ale PZ przyjmie tylko jeden numer — z pola „WZ dostawcy” u góry.")
+            linie.append(f"⛔ Pozycje z {len(wz_poz)} różnych WZ: {', '.join(wz_poz[:4])}"
+                         f"{'…' if len(wz_poz) > 4 else ''}. Jedna WZ-tka = jedno PZ — "
+                         f"przyjmij je osobno (użyj „Usuń zaznaczone” i zrób drugie przyjęcie).")
+        elif wz_poz:
+            # Pozycje bez wpisanego WZ trafią na to samo PZ, więc dostaną jego
+            # numer. Mówimy to wprost, żeby nikt nie odkrył tego przy fakturze.
+            bez = sum(1 for r in self._przyjecie if not (r.get("wz") or "").strip())
+            linie.append(f"WZ {wz_poz[0]} → PZ (NumerZewnetrzny)."
+                         + (f" {bez} poz. bez wpisanego WZ — wejdą na to samo PZ." if bez else ""))
         self.lbl_plan.config(text="\n".join(linie), bg="#fdf2e6" if any(l.startswith("⚠️") for l in linie) else SZARY)
 
     # ── przyjęcie → DOSTAWA + PZ ───────────────────────────────────────────
@@ -764,6 +779,26 @@ class OknoDostawa(tk.Toplevel, Kreciolek):
         zle = [r["symbol"] for r in self._przyjecie if r["ilosc"] <= 0]
         if zle:
             messagebox.showwarning("Przyjęcie", "Ilość musi być dodatnia:\n" + ", ".join(zle), parent=self)
+            return
+        # ⛔ ŻELAZNA ZASADA: jedna WZ-tka dostawcy = jedno PZ w Subiekcie.
+        #
+        # PZ ma JEDNO pole `NumerZewnetrzny` — przyjęcie z dwóch WZ-tek
+        # zapisałoby w Subiekcie tylko jeden numer, a rozliczenie faktury
+        # (pozycja → `Numer wydania` → PZ) przestałoby być jednoznaczne.
+        # Dlatego to blokada, nie ostrzeżenie (polecenie użytkownika 18.09.2026).
+        wz_roznych = sorted({(r.get("wz") or "").strip()
+                             for r in self._przyjecie if (r.get("wz") or "").strip()})
+        if len(wz_roznych) > 1:
+            messagebox.showerror(
+                "Jedna WZ-tka = jedno PZ",
+                "Na liście są pozycje z RÓŻNYCH WZ dostawcy:\n\n    "
+                + "\n    ".join(wz_roznych)
+                + "\n\nKażda WZ-tka musi mieć własne PZ — inaczej w Subiekcie "
+                  "zapisze się tylko jeden numer i faktura nie rozliczy się "
+                  "co do pozycji.\n\n"
+                  "Zostaw pozycje z jednej WZ-tki (przycisk „Usuń zaznaczone”), "
+                  "przyjmij je, a potem zrób drugie przyjęcie dla pozostałych.",
+                parent=self)
             return
         try:
             datetime.strptime(self.var_data.get().strip(), "%Y-%m-%d")
