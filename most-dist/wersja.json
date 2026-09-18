@@ -1,6 +1,6 @@
 {
   "protokol": 1,
-  "zbudowano": "2026-09-18 14:03",
-  "sha": "9968890",
-  "uwaga": "faktury: kwoty faktury, jednostka miary i nazwa pozycji BEZ kartoteki (uslugi/transport pokazywaly sama cene); pole NumerKSeF przemianowane na NumeryRealizowanych (trzymalo numery zamowien), dolozony prawdziwy NumerKSeF"
+  "zbudowano": "2026-09-18 14:41",
+  "sha": "4f2a6a4",
+  "uwaga": "NOWY tryb efaktury: kolejka odbioru e-Faktur KSeF (DokumentyElektroniczne) ze statusem zakladki i flaga (kolor+nazwa); plus wczesniejsze kwoty/jm/nazwy pozycji w trybie faktury"
 }
