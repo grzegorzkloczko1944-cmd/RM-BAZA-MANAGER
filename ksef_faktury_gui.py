@@ -480,16 +480,24 @@ def _typ_z_dopasowania(d):
         return dec["typ"]
     if d.status == kk.RYSUNEK_RM or d.zrodlo_identyfikatora == kk.IDENT_RYSUNEK:
         return "rysunek"
-    # ⛔ NIE UŻYWAĆ `rodzaj_subiekt` do rozstrzygania towar/usługa.
+    # ── JEST KARTOTEKA → CZYTAMY Z SUBIEKTA, nie zgadujemy ──────────────
     #
-    # `PozycjaDokumentu.RodzajAsortymentu` NIE mówi, czym rzecz jest — mówi
-    # tylko, czy pozycja ma podpiętą kartotekę. Zmierzone na 536 pozycjach
-    # (18.09.2026): „Towar" = ma symbol 277/277, „Usługa" = nie ma symbolu
-    # 249/259. Dlatego „Worki na śmieci" i „SMART BEE" (zwykłe towary bez
-    # kartoteki) wychodziły jako US — zgłoszone przez użytkownika.
+    # Gdy pozycja ma wskazaną kartotekę, jej rodzaj („Towar"/„Usługa"/
+    # „Komplet") jest FAKTEM z bazy i ma pierwszeństwo przed heurystyką.
+    # Dopiero pozycja BEZ kartoteki jest zgadywana z nazwy.
     #
-    # Rodzaj trzymamy dalej w `Pozycja`, bo przydaje się w diagnostyce,
-    # ale typu z niego NIE wyprowadzamy.
+    # ⛔ NIE używać do tego `PozycjaDokumentu.RodzajAsortymentu` — to pole
+    # NIE mówi, czym rzecz jest, tylko czy pozycja ma podpiętą kartotekę.
+    # Zmierzone na 536 pozycjach (18.09.2026): „Towar" = ma symbol 277/277,
+    # „Usługa" = nie ma symbolu 249/259. Zwykłe towary bez kartoteki
+    # („Worki na śmieci", „SMART BEE") wychodziły przez nie jako US.
+    rodzaj_kart = (getattr(d, "rodzaj_kartoteki", "") or "").lower()
+    if rodzaj_kart:
+        if rodzaj_kart.startswith("usług") or rodzaj_kart.startswith("uslug"):
+            return "usluga"
+        return "towar"          # Towar i Komplet wchodzą na stan
+
+    # ── BEZ KARTOTEKI → dopiero tutaj wolno proponować ──────────────────
     if d.status == kk.USLUGA or kk.wyglada_na_usluge(d.pozycja):
         return "usluga"
     if d.status == kk.POZYCJA_ZBIORCZA or not d.identyfikator:

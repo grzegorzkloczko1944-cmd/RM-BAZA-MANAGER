@@ -246,12 +246,17 @@ class Dopasowanie:
 
     __slots__ = ("pozycja", "status", "asortyment_id", "symbol_subiekt",
                  "nazwa_subiekt", "zrodlo", "identyfikator", "nazwa_pozycji",
-                 "zrodlo_identyfikatora")
+                 "zrodlo_identyfikatora", "rodzaj_kartoteki")
 
     def __init__(self, pozycja, status=BRAK_DECYZJI, asortyment_id=None,
                  symbol_subiekt="", nazwa_subiekt="", zrodlo="",
-                 identyfikator="", nazwa_pozycji="", zrodlo_identyfikatora=IDENT_BRAK):
+                 identyfikator="", nazwa_pozycji="", zrodlo_identyfikatora=IDENT_BRAK,
+                 rodzaj_kartoteki=""):
         self.pozycja = pozycja
+        #: Rodzaj WSKAZANEJ kartoteki Subiekta („Towar"/„Usługa"/„Komplet").
+        #: Pusty, gdy pozycja nie ma kartoteki — wtedy i tylko wtedy wolno
+        #: zgadywać typ z nazwy.
+        self.rodzaj_kartoteki = rodzaj_kartoteki
         self.status = status
         self.asortyment_id = asortyment_id
         self.symbol_subiekt = symbol_subiekt
@@ -356,7 +361,10 @@ def dopasuj(pozycje, katalog, mapowania=None):
                 (kart or {}).get("id") or (kart or {}).get("Id"),
                 (kart or {}).get("symbol") or (kart or {}).get("Symbol") or "",
                 (kart or {}).get("nazwa") or (kart or {}).get("Nazwa") or "",
-                zrodlo, ident, nazwa_poz, zrodlo_id)
+                zrodlo, ident, nazwa_poz, zrodlo_id,
+                # Rodzaj WSKAZANEJ kartoteki — to jest odczyt ze stanu Subiekta
+                # i ma pierwszeństwo przed zgadywaniem typu z nazwy.
+                (kart or {}).get("rodzaj") or (kart or {}).get("Rodzaj") or "")
 
         # Bez identyfikatora nie ma czego szukać w kartotece — od razu
         # decyzja człowieka (kandydat na POZYCJA_ZBIORCZA).
