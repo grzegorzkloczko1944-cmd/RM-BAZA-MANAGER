@@ -17,9 +17,18 @@ PZ jako relacji, gdzie „pierwszy sposób, który zadziała, wygrywa". To jest
 BŁĘDNE uproszczenie — użytkownik to wychwycił:
 
 * jedna pozycja faktury może pokrywać SUMĘ kilku PZ (100 szt. na fakturze =
-  60 szt. z PZ 101 + 40 szt. z PZ 108 → ROZLICZONA, nie „różna ilość");
+  60 szt. z PZ 101 + 40 szt. z PZ 108 → ROZLICZONA, nie „różna ilość") —
+  ten sam towar potrafi przyjść na DWÓCH różnych WZ-tkach;
 * jedno PZ może być fakturowane częściowo przez kilka faktur;
-* jeden WZ może mieć dwa PZ; jedna faktura — pozycje z kilku WZ.
+* jedna faktura niesie pozycje z wielu WZ (QUAY `RVQ/05195/26`: 55 pozycji
+  = 11 różnych WZ).
+
+⚠️ **Czego już NIE MA na tej liście (zmiana 18.09.2026):** „jeden WZ może
+mieć dwa PZ". Wprowadzona została ŻELAZNA ZASADA **1 WZ = 1 PZ**
+([[feedback_jedno_pz_na_wz]]) — okno przyjęcia dostawy BLOKUJE przyjęcie
+jednym dokumentem pozycji z różnych WZ-tek. Dzięki temu `NumerZewnetrzny`
+na PZ jest kluczem jednoznacznym i **szczebel 1 (po WZ) nie wymaga już
+rozstrzygania niejednoznaczności** — patrz poprawiona uwaga o teście niżej.
 
 Więc model NIE jest `faktura_pozycja → PZ` (1:1 ani nawet N:1). Jest to
 osobna tabela rozliczeń, N:M, z ILOŚCIĄ na każdej krawędzi:
@@ -48,12 +57,23 @@ z pojedynczego dopasowania:
 | kilka PZ pasuje jednakowo dobrze, algorytm nie umie rozbić ilości jednoznacznie | — | **NIEJEDNOZNACZNE** → człowiek |
 
 ⚠️ **Test jednoznaczności na KAŻDYM szczeblu kojarzenia (1–4 niżej), nie
-tylko na kroku 4.** Nawet dopasowanie po WZ (krok 1, „PEWNE") musi sprawdzić:
-czy suma PZ pod tym WZ daje jednoznaczny podział ilości? Jeśli WZ ma dwa PZ
-i obie mają nadwyżkę względem pozycji faktury — mimo pewnego klucza WZ,
-wynik i tak leci do człowieka z podpowiedzią kandydatów, NIE zapisuje się
-automatycznie. „Pierwszy sposób który zadziała" znaczy „pierwszy szczebel,
-na którym test jednoznaczności przechodzi" — nie „pierwszy znaleziony rekord".
+tylko na kroku 4.** „Pierwszy sposób który zadziała" znaczy „pierwszy
+szczebel, na którym test jednoznaczności przechodzi" — nie „pierwszy
+znaleziony rekord".
+
+Co ten test sprawdza na poszczególnych szczeblach po zasadzie 1 WZ = 1 PZ:
+
+| szczebel | jednoznaczność DOKUMENTU | co nadal trzeba sprawdzić |
+|---|---|---|
+| **1. WZ** | ✔ gwarantowana przez [[feedback_jedno_pz_na_wz]] — jeden `NumerZewnetrzny` = jedno PZ | czy ilości się domykają (pozycja faktury może brać z kilku WZ → kilka wierszy rozliczenia, to normalne, nie niejednoznaczność) |
+| **2. nr zamówienia** | ✘ niegwarantowana — jedno zamówienie bywa realizowane wieloma dostawami | pełny test: ile PZ pasuje, czy da się rozbić ilość |
+| **3. przez ZD** | ✘ niegwarantowana — jedno ZD realizuje kilka PZ (dostawy częściowe) | pełny test |
+| **4. symbol + ilość** | ✘ z definicji heurystyka | trafienie TYLKO gdy pasuje dokładnie jedno PZ |
+
+⚠️ Historyczny przykład z pierwszej wersji tej notatki („WZ ma dwa PZ, oba
+z nadwyżką → człowiek") jest już NIEAKTUALNY — taka sytuacja nie powstanie,
+bo okno przyjęcia jej nie dopuści. Zostawiam ślad, żeby nikt nie wprowadził
+jej z powrotem jako „przypadku brzegowego do obsłużenia".
 
 ## Historia decyzji człowieka — WYMAGANE, nie „miło by było"
 
@@ -77,7 +97,10 @@ wydania jest. PZ z okna przyjęcia nosi ten sam numer w `NumerZewnetrzny`.
 ## Algorytm — kolejność z notatki o obiegu, od najpewniejszego
 
 1. **Po WZ** — pozycje faktury grupowane po `Numer wydania`; dla każdego WZ
-   szukamy PZ z tym `NumerZewnetrzny` (i DOSTAWY z `nr_wz_dostawcy`). PEWNE.
+   szukamy PZ z tym `NumerZewnetrzny` (i DOSTAWY z `nr_wz_dostawcy`). PEWNE —
+   od 18.09.2026 **gwarantowane** zasadą 1 WZ = 1 PZ
+   ([[feedback_jedno_pz_na_wz]]), bo okno przyjęcia nie dopuści PZ mieszającego
+   WZ-tki. Zostaje tylko domknięcie ilości, nie wybór dokumentu.
 2. **Po numerze zamówienia** — `Numer zamówienia` z faktury vs
    `dostawy.nr_zamowienia` (gdy dostawca drukuje, a magazynier wpisał).
 3. **Przez ZD** — najmocniejszy szczebel, NIE wymaga numeru od dostawcy:
@@ -167,6 +190,25 @@ zapisaniu planu.
 | historia decyzji człowieka (`zatwierdzil`/`kiedy`/`uwaga`) | **rozstrzygnięte** — wymagane |
 | czy oznaczać PZ w Subiekcie (`ZmienStatusFakturowania`) | OTWARTE — rekomendacja: na start tylko RM_BAZA |
 | czy w ogóle budować teraz | OTWARTE — czeka na ustalenia z logistyką i księgowością |
+| **co gdy faktura przyszła, a przyjęcia nikt nie zrobił** | **OTWARTE** — pytanie postawione 18.09.2026, bez odpowiedzi; patrz niżej |
+
+### ⚠️ Otwarte pytanie z 18.09.2026: faktura bez przyjęcia
+
+Użytkownik zapytał „faktura robi przyjęcia?". Kierunek **faktura tworzy PZ
+został ODRZUCONY 17.09.2026** na podstawie pomiaru (`FZ 24/09/2026`:
+53 pozycje, 0 dopasowanych, zero stanu) — faktura KONTROLUJE, nie tworzy.
+
+Ale został wyjątek do rozstrzygnięcia: **co zrobić, gdy faktura już jest,
+a przyjęcia nikt nie zrobił i towar fizycznie leży w magazynie?** Czy okno
+ma pozwolić wygenerować PZ z pozycji faktury (jako świadomy, oznaczony
+wyjątek — por. `zrodlo_przyjecia = REKONSTRUKCJA_HISTORYCZNA` w
+[[project_przyjecie_dostawy_pz]]), czy magazynier ma to wpisać ręcznie
+w oknie przyjęcia.
+
+⚠️ Odpowiedź wpływa na zakres rozliczania: jeśli TAK, status BRAK przestaje
+być ślepym zaułkiem i dostaje akcję „utwórz PZ z tej pozycji".
+
+Patrz [[project_sesja_18_09_faktury_ksef]].
 
 ## Dane do testu (demo M-OLD, stan na 18.09.2026 00:30)
 
