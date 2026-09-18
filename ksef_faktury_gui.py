@@ -108,6 +108,7 @@ STATUSY = {
 TYPY = [
     ("towar",    "TW",  "Towar handlowy",          "z kartoteki dostawcy",       "#d5f0dd"),
     ("usluga",   "US",  "Usługa",                  "nie wchodzi na stan",        "#eaecee"),
+    ("jednorazowa", "UJ", "Usługa jednorazowa",    "bez kartoteki, wprost na dokument", "#eaecee"),
     ("zbiorcza", "ZB",  "Pozycja zbiorcza",        "jedna linia = wiele detali", "#f4ecf7"),
     ("rysunek",  "RM",  "Rysunek RMPAK", "szukany po numerze rysunku",  "#d6eaf8"),
 ]
@@ -125,6 +126,14 @@ DYMKI_TYPU = {
     "usluga": ("US — usługa (rodzaj kartoteki Subiekta)\n"
                "Np. „OBSLUGA” z faktury QUAY, transport, cięcie.\n"
                "NIE wchodzi na stan — nie blokuje wystawienia PZ."),
+    "jednorazowa": ("UJ — usługa jednorazowa (tak oznacza ją Subiekt na FZ)\n\n"
+                    "Pozycja BEZ KARTOTEKI, wpisana wprost na dokument —\n"
+                    "np. „Dostawa” 250 zł od MA-JA. W Subiekcie jednorazowa\n"
+                    "i kartotekowa to światy rozłączne: takiej pozycji NIE MA\n"
+                    "w kartotece i nie zakłada się jej tam tylko dla porządku.\n\n"
+                    "⚠️ e-Faktura tego nie niesie — podział powstaje dopiero\n"
+                    "przy przetwarzaniu na FZ. Tu jest to Twoja decyzja.\n"
+                    "NIE wchodzi na stan — nie blokuje wystawienia PZ."),
     "zbiorcza": ("BEZ KARTOTEKI — to NIE jest rodzaj kartoteki Subiekta.\n\n"
                  "Jedna linia faktury = WIELE różnych detali, rozliczonych\n"
                  "ryczałtem. Przykład (alu-frost FVS/LAS/26/07/00417):\n"
@@ -276,7 +285,8 @@ class Pozycja:
     """Wiersz faktury z archiwum + decyzja człowieka (dict albo None)."""
 
     __slots__ = ("nr_wiersza", "nazwa", "jednostka", "ilosc", "cena_netto",
-                 "wartosc_netto", "indeks", "dodatkowe", "decyzja")
+                 "wartosc_netto", "indeks", "dodatkowe", "decyzja",
+                 "rodzaj_subiekt", "jednorazowa")
 
     def __init__(self, w):
         self.nr_wiersza = w.get("nr_wiersza")
@@ -288,6 +298,21 @@ class Pozycja:
         self.indeks = (w.get("indeks") or "").strip()
         self.dodatkowe = _json_lub(w.get("dodatkowe"), {})
         self.decyzja = _json_lub(w.get("decyzja"), None)
+        #: Rodzaj pozycji wg Subiekta — tylko dla FZ; w archiwum pusty.
+        self.rodzaj_subiekt = (w.get("rodzaj_subiekt") or "").strip()
+        self.jednorazowa = bool(w.get("jednorazowa"))
+
+
+def _int_lub(wartosc, domyslnie):
+    """`Lp` z e-Faktury bywa tekstem („1", „1.1") — bierzemy czesc calkowita.
+
+    Numer wiersza jest kluczem decyzji i musi byc liczba; przy „1.1" liczy sie
+    wiersz nadrzedny, bo to on odpowiada pozycji faktury.
+    """
+    try:
+        return int(str(wartosc).split(".")[0])
+    except (TypeError, ValueError):
+        return domyslnie
 
 
 def _json_lub(tekst, domyslne):
@@ -428,7 +453,9 @@ def nalozyc_decyzje(d):
         d.symbol_subiekt = dec.get("symbol") or d.symbol_subiekt
         d.nazwa_subiekt = dec.get("nazwa") or d.nazwa_subiekt
         d.zrodlo = "decyzja"
-    if typ == "usluga":
+    if typ in ("usluga", "jednorazowa"):
+        # UJ dzieli status z US: nie wchodzi na stan, nie blokuje PZ.
+        # Różnica jest w kartotece — jednorazowa jej NIE MA z definicji.
         d.status = kk.USLUGA
     elif typ == "zbiorcza":
         d.status = kk.POZYCJA_ZBIORCZA
@@ -451,6 +478,14 @@ def _typ_z_dopasowania(d):
         return dec["typ"]
     if d.status == kk.RYSUNEK_RM or d.zrodlo_identyfikatora == kk.IDENT_RYSUNEK:
         return "rysunek"
+    # Rodzaj Z SUBIEKTA wygrywa z heurystyką po nazwie — to odczyt ze stanu.
+    if getattr(d.pozycja, "jednorazowa", False):
+        return "jednorazowa"
+    rodzaj = (getattr(d.pozycja, "rodzaj_subiekt", "") or "").lower()
+    if rodzaj.startswith("usług") or rodzaj.startswith("uslug"):
+        return "usluga"
+    if rodzaj.startswith("towar"):
+        return "towar"
     if d.status == kk.USLUGA or kk.wyglada_na_usluge(d.pozycja):
         return "usluga"
     if d.status == kk.POZYCJA_ZBIORCZA or not d.identyfikator:
@@ -461,6 +496,39 @@ def _typ_z_dopasowania(d):
 def _etykieta_typu(d):
     """Skrót typu do kolumny „Typ" — TW / US / ZB / RM (nomenklatura okien)."""
     return SKROT_TYPU[_typ_z_dopasowania(d)]
+
+
+#: Klucze `DodatkowyOpis`, ktore maja WLASNE kolumny i stale miejsce w tabeli
+#: — wstawiane PRZED „Numer wydania". Reszta kluczy (nowy dostawca: „Numer
+#: awiza", „ROHS", „Waga"…) dochodzi na koncu. Ten sam mechanizm co w oknie
+#: „Archiwum faktur KSeF" (`ksef_archiwum.KOL_POZYCJE` + `_uklad_kolumn`):
+#: kolumna, ktorej dana faktura nie ma, NIE jest pokazywana — inaczej przy
+#: dostawcy bez dodatkowego opisu wisialoby kilka pustych kolumn.
+KLUCZE_WLASNE_KOLUMNY = ("Opis", "Marka", "Numer zamówienia")
+
+
+def uklad_kolumn(obecne_klucze):
+    """(naglowki, mapa klucz→indeks) dla tabeli pozycji.
+
+    `obecne_klucze` to klucze `DodatkowyOpis`, jakie realnie przyszly na tej
+    fakturze. Zwracamy naglowki w kolejnosci wyswietlania oraz mape, gdzie
+    wpisac kazdy klucz — dzieki temu budowanie wiersza nie zna numerow kolumn.
+    """
+    naglowki, mapa = [], {}
+    obecne = list(obecne_klucze)
+    for pole, etykieta, _szer in KOL_POZYCJE:
+        if pole == "wz":
+            # przed „Numer wydania" wchodza kolumny dodatkowego opisu
+            for klucz in KLUCZE_WLASNE_KOLUMNY:
+                if klucz in obecne:
+                    mapa[klucz] = len(naglowki)
+                    naglowki.append(klucz)
+        naglowki.append(etykieta)
+    for klucz in obecne:
+        if klucz not in mapa and klucz not in ("Numer wydania",):
+            mapa[klucz] = len(naglowki)
+            naglowki.append(klucz)
+    return naglowki, mapa
 
 
 def _opis_pozycji(d):
@@ -1508,53 +1576,45 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
                            if (x.get("Numer") or x.get("NumerOryginalny") or "").strip() == numer_fz),
                           None)
         poz = (zrodlo or {}).get("Pozycje") or []
-        if self.sheet is not None:
-            # Kolejność kolumn: lp, ident, typ, nazwa, ilosc, jm, cena, wz,
-            # kartoteka, symbol_kart, nazwa_kart, opis_kart, projekty, status.
-            # Budujemy wiersz po nazwach, nie „na oko" — pomyłka o jedną pozycję
-            # wsadza cenę w kolumnę WZ i nikt tego nie zauważy.
-            indeks = {k: i for i, (k, _n, _s) in enumerate(KOL_POZYCJE)}
-            wiersze = []
-            for i, q in enumerate(poz, 1):
-                w = [""] * len(KOL_POZYCJE)
-                w[indeks["lp"]] = i
-                # Kolejka e-Faktur i FZ maja INNE nazwy pol — `Indeks`/`Nazwa`
-                # kontra `Symbol`/`NazwaNaDokumencie`. Czytamy oba warianty.
-                w[indeks["lp"]] = q.get("Lp") or i
-                w[indeks["ident"]] = (q.get("Symbol") or q.get("Indeks") or "").strip()
-                w[indeks["nazwa"]] = (q.get("NazwaNaDokumencie") or q.get("Nazwa")
-                                      or q.get("NazwaKartoteki") or "").strip()
-                w[indeks["ilosc"]] = _ilosc(q.get("Ilosc") or 0)
-                w[indeks["jm"]] = (q.get("Jm") or "").strip()
-                w[indeks["cena"]] = _zl(q.get("Cena") or q.get("CenaNetto") or 0)
-                w[indeks["nazwa_kart"]] = (q.get("NazwaKartoteki") or "").strip()
-                # `DodatkowyOpis` z e-Faktury (widok „E-FAKTURA - MF") — te same
-                # klucze, na ktorych stoi archiwum. Wystawca nadaje je dowolnie,
-                # wiec „Numer wydania" bierzemy po nazwie, a calosc pokazujemy
-                # w „Opis kartoteki", zeby nic nie przepadlo.
-                dod = q.get("Dodatkowe") or {}
-                if dod:
-                    w[indeks["wz"]] = dod.get("Numer wydania", "")
-                    opis = dod.get("Opis", "")
-                    if opis and not w[indeks["nazwa"]]:
-                        w[indeks["nazwa"]] = opis
-                    w[indeks["opis_kart"]] = "  ".join(
-                        f"{k}: {v}" for k, v in dod.items() if k != "Numer wydania")
-                w[indeks["status"]] = "—"
-                wiersze.append(w)
-            self.sheet.set_sheet_data(wiersze)
+        # Pozycje z mostu przepisujemy na `Pozycja` — ten sam ksztalt co
+        # z archiwum. Dzieki temu dopasowanie do kartotek i panel „Decyzja"
+        # dzialaja TA SAMA droga, bez osobnej sciezki dla kolejki/FZ.
+        # ⚠️ Decyzji NIE MA i miec nie moze: `ksef-decyzja-zapisz` pisze do
+        # archiwum po numerze KSeF, a tych faktur tam jeszcze nie ma. Z tych
+        # trybow zapisujemy WYLACZNIE powiazanie symbolu z kartoteka Subiekta.
+        self._pozycje = [Pozycja({
+            "nr_wiersza": _int_lub(q.get("Lp"), i),
+            "nazwa": q.get("Nazwa") or q.get("NazwaNaDokumencie") or q.get("NazwaKartoteki") or "",
+            "jednostka": q.get("Jm") or "",
+            "ilosc": q.get("Ilosc"),
+            "cena_netto": q.get("CenaNetto") if q.get("CenaNetto") is not None else q.get("Cena"),
+            "wartosc_netto": q.get("WartoscNetto"),
+            "indeks": q.get("Indeks") or q.get("Symbol") or "",
+            "dodatkowe": q.get("Dodatkowe") or {},
+            # Rodzaj Z POZYCJI DOKUMENTU Subiekta („Towar"/„Usługa") i znacznik
+            # UJ. To odczyt ze stanu, nie heurystyka po nazwie — dostępny tylko
+            # dla FZ, bo w kolejce KSeF dokumentu jeszcze nie ma.
+            "rodzaj_subiekt": q.get("RodzajPozycji") or "",
+            "jednorazowa": bool(q.get("Jednorazowa")),
+        }) for i, q in enumerate(poz, 1)]
+        self._wszystkie_pozycje[klucz] = self._pozycje
+        self._ustaw_kontrahenta(re.sub(r"\D", "", (zrodlo or {}).get("Nip") or ""))
+        # `_dopasuj_biezaca` samo konczy `_wypelnij_tabele()` — rysowanie idzie
+        # TA SAMA sciezka co dla archiwum (kolumny dynamiczne, kolory, filtr,
+        # panel decyzji). Zadnej osobnej kopii budowania arkusza.
+        self._dopasuj_biezaca()
         if z_kolejki:
             wz = (zrodlo or {}).get("WydaniaZewnetrzne") or ""
             if wz:
                 self._pola_nagl["wz"].config(text=wz[:70])
             self.status.config(
-                text=f'„{numer}” czeka w kolejce KSeF ({len(poz)} poz.) — nie jest '
-                     f'jeszcze dokumentem Subiekta, więc decyzji o kartotekach '
-                     f'tu nie zapisujemy.')
+                text=f'„{numer}” czeka w kolejce KSeF ({len(poz)} poz.). Możesz tu '
+                     f'powiązać symbol dostawcy z kartoteką — Subiekt użyje tego '
+                     f'przy przetwarzaniu faktury.')
         else:
             self.status.config(
-                text=f'„{numer}” to faktura zakupu z Subiekta. Pozycje i decyzje są '
-                     f'tylko dla faktur z archiwum KSeF — przełącz na „Faktury w archiwum”.')
+                text=f'„{numer}” to faktura zakupu z Subiekta ({len(poz)} poz.). '
+                     f'Możesz tu powiązać symbol dostawcy z kartoteką.')
 
     def _pokaz_fakture(self, ksef):
         self._biezaca = ksef
@@ -1732,6 +1792,10 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
             self.sheet.dehighlight_all()
         except Exception:
             pass
+        # Powrot do kolumn STALYCH: tryby kolejki/FZ przestawiaja naglowki pod
+        # `DodatkowyOpis` danej faktury, wiec bez tego archiwum odziedziczyloby
+        # kolumny po poprzednio ogladanym dokumencie.
+        self.sheet.headers([k[1] for k in KOL_POZYCJE])
         self.sheet.set_sheet_data(dane, reset_col_positions=False, redraw=False)
         for i, (d, ma_decyzje) in enumerate(kolory):
             tlo, fg = STATUSY[d.status][1], STATUSY[d.status][2]
@@ -2134,11 +2198,21 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         self.btn_zapisz.config(state=tk.DISABLED)
         self.start_kreciolek("Zapisuję decyzję")
 
+        # ⚠️ Faktury z kolejki KSeF i FZ z Subiekta NIE SA w archiwum `FV_KSEF`,
+        # a `ksef-decyzja-zapisz` pisze wlasnie tam (po numerze KSeF i numerze
+        # wiersza). Zapis poszedlby w prozne albo rzucil bledem. Z tych trybow
+        # zapisujemy WYLACZNIE powiazanie symbolu dostawcy z kartoteka Subiekta
+        # — i to wystarcza, bo Subiekt sam uzywa tych powiazan przy
+        # „Przetworz na dokument Subiekta" (decyzja uzytkownika 18.09.2026).
+        bez_archiwum = self.var_zrodlo.get() != ZR_ARCHIWUM
+
         def praca():
             wynik = {"archiwum": False, "subiekt": None, "mapowania": None}
-            self.arch._pisz("ksef-decyzja-zapisz", {
-                "decyzja": json.dumps(dec, ensure_ascii=False), "ksef_number": ksef, "nr_wiersza": lp})
-            wynik["archiwum"] = True
+            if not bez_archiwum:
+                self.arch._pisz("ksef-decyzja-zapisz", {
+                    "decyzja": json.dumps(dec, ensure_ascii=False),
+                    "ksef_number": ksef, "nr_wiersza": lp})
+                wynik["archiwum"] = True
             if do_sub:
                 import subiekt_bridge
                 odp = subiekt_bridge.call("symbole-dostawcy",
@@ -2187,6 +2261,15 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
             self.status.config(text="   ".join(raport))
             self._raport = "✔ " + "   ".join(raport)
             self._auto_skok = True
+            # Swieze powiazanie dopisujemy do pamieci od razu — bez tego kolejna
+            # pozycja tego samego symbolu nie dopasowalaby sie do nastepnego
+            # pobrania z mostu (a w trybach bez archiwum nie ma decyzji, ktora
+            # by to przykryla).
+            if do_sub and (w.get("subiekt") or {}).get("Status") not in ("blad", None):
+                nip_p = do_sub.get("nip") or ""
+                self.powiazania.setdefault(nip_p, {})[(do_sub["symbolDostawcy"] or "").upper()] = {
+                    "asortyment_id": do_sub["asortymentId"],
+                    "symbol": do_sub["symbol"], "nazwa": dec.get("nazwa", "")}
             self._dopasuj_biezaca()
             self._przelicz_odznaki()
             self.after(150, self._nastepny_brak)
@@ -2195,6 +2278,14 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
 
     def _cofnij_decyzje(self):
         if self._wybrany_lp is None or not self._biezaca:
+            return
+        if self.var_zrodlo.get() != ZR_ARCHIWUM:
+            messagebox.showinfo(
+                "Cofnij decyzję",
+                "Tu nie ma czego cofać — w tym widoku nie zapisujemy decyzji "
+                "do archiwum, tylko powiązania symbolu z kartoteką.\n\n"
+                "Powiązanie zmienia się w Subiekcie albo w edytorze kartotek.",
+                parent=self)
             return
         if not messagebox.askyesno(
                 "Cofnij decyzję",
@@ -2243,6 +2334,19 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
     def _zaloz_kartoteke(self):
         d = self._dop_dla(self._wybrany_lp) if self._wybrany_lp is not None else None
         if d is None:
+            return
+        # ⚠️ Usługa jednorazowa NIE MA kartoteki — w Subiekcie jednorazowa
+        # i kartotekowa to światy rozłączne (SDK ma na to osobny błąd
+        # walidacji: `AsortymentJednorazowyPodlaczonyDoKartotekowegoBlad`).
+        # Zakładanie kartoteki dla UJ przeczyłoby temu, czym ten typ jest.
+        if self.var_typ.get() == "jednorazowa":
+            messagebox.showinfo(
+                "Usługa jednorazowa",
+                "Dla pozycji UJ nie zakłada się kartoteki — to pozycja wpisywana "
+                "wprost na dokument, bez asortymentu.\n\n"
+                "Jeśli ta usługa ma się powtarzać, wybierz typ US i wskaż "
+                "(albo załóż) kartotekę usługową.",
+                parent=self)
             return
         try:
             import subiekt_asortyment

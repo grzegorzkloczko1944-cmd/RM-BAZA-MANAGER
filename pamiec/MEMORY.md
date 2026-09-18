@@ -94,3 +94,4 @@
 - [Wdrozenie 18.09.2026 — most + serwer dostaw](project_wdrozenie_18_09_dostawy.md) — TrustedHosts tylko po IP; kod serwera nie przez udzial; "37 migracji" to nie zaleglosc
 - [Sfera: kolejka e-Faktur KSeF](project_sfera_kolejka_efaktur.md) — DokumentyElektroniczne() to OSOBNA kartoteka (nie DokumentyZakupu); statusy zakladek + flagi czytelne; most jeszcze nie uzywa
 - [Most, tryb faktury — braki](project_most_faktury_braki.md) — ⛔ pole NumerKSeF trzyma numery ZAMOWIEN; brak kwoty i numeru KSeF; most ma jedna kolejke
+- [UJ — usluga jednorazowa](project_usluga_jednorazowa_uj.md) — pozycja BEZ kartoteki wpisana na dokument; e-Faktura tego nie niesie, kartoteka zna tylko Towar/Komplet/Usluga

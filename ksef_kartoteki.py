@@ -76,7 +76,13 @@ _JEDNOSTKI_USLUG = {"usl", "usł", "usl.", "usł.", "godz", "godz.", "h", "rbh"}
 #: „Usługa kurierska", „Usługi transportowe", „OBSLUGA", „Obsługa
 #: zamówienia" — na POCZĄTKU tekstu. Sam początek, bo „usług" w środku
 #: nazwy bywa częścią nazwy towaru.
-_NAZWA_USLUGI = re.compile(r"^(us[łl]ug[aiy]?|obs[łl]ug[aiy]?)\b")
+#: ⚠️ Lista rozszerzona 18.09.2026: „Dostawa" (MA-JA, `szt`, bez Opisu)
+#: dostawala TW i „BRAK DECYZJI", choc w kartotece Subiekta stoi jako
+#: `12 — Usluga dostawy`, rodzaj „Usluga". Takie pozycje nie wchodza na stan
+#: i nie maja po co blokowac PZ. To nadal PODPOWIEDZ — czlowiek moze zmienic.
+_NAZWA_USLUGI = re.compile(
+    r"^(us[łl]ug[aiy]?|obs[łl]ug[aiy]?|dostaw[ay]?|transport(?:u|em|ow\w*)?"
+    r"|przesy[łl]k[ai]?|fracht\w*|op[łl]at[ay]?|pakowani\w*|spedycj\w*)\b")
 
 
 #: Kod rysunku RM w postaci `013-100.30a`, `ROTO-100.01`, `2557-100.15X` —
@@ -269,6 +275,42 @@ class Dopasowanie:
             self.asortyment_id, self.zrodlo)
 
 
+def _usluga_po_nazwie(katalog, nazwa):
+    """Kartoteka rodzaju „Usługa" pasująca nazwą do pozycji faktury.
+
+    Dopasowanie jest luźne (jedna nazwa zawiera drugą), bo dostawca pisze
+    „Dostawa", a kartoteka nazywa się „Usługa dostawy". Wolno tak TYLKO dla
+    usług: nie wchodzą na stan, więc pomyłka nie psuje magazynu, a i tak
+    zostaje widoczna w oknie i do zmiany przez człowieka.
+
+    Zwraca kartotekę tylko przy JEDNYM trafieniu — dwa znaczą, że nazwa nie
+    rozstrzyga, i wtedy lepiej zostawić wybór człowiekowi.
+    """
+    n = _rdzen(nazwa)
+    if len(n) < 4:
+        return None
+    trafienia = []
+    for k in katalog:
+        rodzaj = (k.get("rodzaj") or k.get("Rodzaj") or "").strip().lower()
+        if not rodzaj.startswith("usług") and not rodzaj.startswith("uslug"):
+            continue
+        # Porównujemy RDZENIE słów, bo nazwy różnią się odmianą:
+        # „Dostawa" na fakturze vs „Usługa dostawy" w kartotece.
+        slowa = {_rdzen(s) for s in (k.get("nazwa") or k.get("Nazwa") or "").split()}
+        if n in slowa:
+            trafienia.append(k)
+    return trafienia[0] if len(trafienia) == 1 else None
+
+
+def _rdzen(slowo):
+    """Słowo bez końcówki fleksyjnej — „dostawa"/„dostawy" → „dostaw"."""
+    s = (slowo or "").strip().lower()
+    for k in ("ami", "ach", "owy", "owa", "ego", "ej", "y", "a", "i", "u", "e", "ę", "ą"):
+        if len(s) > 4 and s.endswith(k):
+            return s[: -len(k)]
+    return s
+
+
 def _indeksuj_katalog(katalog):
     """Dwie mapy: po symbolu dokładnym i po znormalizowanym.
 
@@ -339,12 +381,24 @@ def dopasuj(pozycje, katalog, mapowania=None):
         #    (`013-100.30B` w sześciu), więc ZD wybiera człowiek.
         if zrodlo_id == IDENT_RYSUNEK:
             k = doslownie.get(ident.upper())
+            # ⚠️ Numer rysunku, ktory MA dokladna kartoteke w Subiekcie, jest
+            # zwykla pozycja katalogowa — nie ma powodu wyrozniac go statusem
+            # RYSUNEK_RM.
+            #
+            # Inaczej wynik zalezal od tego, czy dostawca powtorzyl numer
+            # w nazwie towaru: `REG-300.11X Podkladka lozyska oporowego`
+            # szlo tedy i dostawalo „RYSUNEK RM", a `REG-300.20` z nazwa
+            # „Nakretka szesciokatna Tr16x4" bylo rozpoznawane jako INDEKS
+            # i dostawalo „KARTOTEKA" — mimo ze obie kartoteki sa identyczne
+            # co do budowy i obie sa rodzaju „Towar" (zgloszone 18.09.2026).
+            #
+            # RYSUNEK_RM zostaje dla numerow BEZ kartoteki — tam faktycznie
+            # trzeba siegnac do mapowan po numerze rysunku i wybrac projekt.
+            if k:
+                wynik.append(_mk(KARTOTEKA, k, ZRODLO_SYMBOL))
+                continue
             wynik.append(Dopasowanie(
-                p, RYSUNEK_RM,
-                (k or {}).get("id") or (k or {}).get("Id"),
-                (k or {}).get("symbol") or (k or {}).get("Symbol") or "",
-                (k or {}).get("nazwa") or (k or {}).get("Nazwa") or "",
-                ZRODLO_RYSUNEK if k else "", ident, nazwa_poz, zrodlo_id))
+                p, RYSUNEK_RM, None, "", "", "", ident, nazwa_poz, zrodlo_id))
             continue
 
         # 3. Dokładny symbol katalogowy.
@@ -360,8 +414,24 @@ def dopasuj(pozycje, katalog, mapowania=None):
             wynik.append(_mk(KARTOTEKA, kandydaci[0], ZRODLO_NORMALIZACJA))
             continue
 
-        # 5. Brak — usługę podpowiadamy w oknie, ale statusu nie nadajemy
-        #    automatycznie: to też jest decyzja człowieka.
+        # 5. USŁUGA — pozycja bez symbolu, która wygląda na usługę (dostawa,
+        #    transport, obsługa…). Nie wchodzi na stan, więc nie ma po co
+        #    blokować PZ statusem „brak decyzji" (18.09.2026).
+        #
+        #    Gdy w kartotece Subiekta stoi pozycja rodzaju „Usługa" o tej samej
+        #    nazwie, wskazujemy ją wprost — `12 — Usługa dostawy` dla „Dostawa"
+        #    z MA-JA. To dopasowanie po NAZWIE, więc tylko dla usług: przy
+        #    towarach nazwa bywa wieloznaczna i zgadywanie po niej dało 389
+        #    fałszywych par (patrz notatka o podpowiedziach).
+        if wyglada_na_usluge(p):
+            k = _usluga_po_nazwie(katalog, nazwa_poz or ident)
+            if k:
+                wynik.append(_mk(USLUGA, k, ZRODLO_SYMBOL))
+            else:
+                wynik.append(_mk(USLUGA))
+            continue
+
+        # 6. Brak — statusu nie nadajemy automatycznie: to decyzja człowieka.
         wynik.append(_mk(BRAK_DECYZJI))
 
     return wynik

@@ -112,6 +112,22 @@ internal static class Faktury
                                     ? "(usługa kosztowa)" : null);
                             nazwaNaDok = uslugaKosztowa ?? "(pozycja bez kartoteki)";
                         }
+                        // ⚠️ `UJ` (usluga jednorazowa) — tak Subiekt oznacza pozycje
+                        // WPISANA WPROST NA DOKUMENT, bez kartoteki. To NIE jest
+                        // rodzaj kartoteki: kartoteka zna tylko Towar/Komplet/Usluga,
+                        // a SDK ma osobny blad walidacji na probe polaczenia
+                        // jednorazowej z kartotekowa. Czytamy to Z POZYCJI DOKUMENTU,
+                        // bo tylko tam ta informacja istnieje (18.09.2026).
+                        // `RodzajAsortymentu` NA POZYCJI mowi, czym ta linia jest
+                        // NA DOKUMENCIE — „Towar" / „Usługa". To odczyt ze stanu
+                        // Subiekta, nie zgadywanie po nazwie (18.09.2026).
+                        var rodzajPoz = Bezp(() => p.RodzajAsortymentu?.Nazwa) ?? "";
+                        // UJ = usluga BEZ kartoteki (wpisana wprost na dokument).
+                        // Sam brak kartoteki nie wystarcza: pozycje towarowe tez
+                        // bywaja bez asortymentu, a „Dostawa" z MA-JA kartoteke MA.
+                        var jednorazowa = id == 0
+                            && rodzajPoz.StartsWith("Us", StringComparison.OrdinalIgnoreCase);
+
                         decimal wartosc = 0;
                         // `Wartosc` na pozycji to obiekt (jak `Cena`) — bierzemy
                         // netto PO rabacie, spojnie z cena wyzej.
@@ -126,7 +142,9 @@ internal static class Faktury
                             // wlasciwa nazwa siedzi w zagniezdzonym JednostkaMiary.
                             Bezp(() => p.JednostkaMiaryAs?.JednostkaMiary?.Symbol)
                                 ?? Bezp(() => p.JednostkaMiaryAs?.JednostkaMiary?.Nazwa) ?? "",
-                            wartosc));
+                            wartosc,
+                            rodzajPoz,
+                            jednorazowa));
                     }
                 }
                 catch { }
@@ -185,7 +203,8 @@ internal static class Faktury
     static decimal Kwota(Func<decimal> f) { try { return decimal.Round(f(), 2); } catch { return 0; } }
 
     internal record PozFak(string Symbol, string NazwaKartoteki, string NazwaNaDokumencie,
-                           decimal Ilosc, decimal Cena, string Jm, decimal Wartosc);
+                           decimal Ilosc, decimal Cena, string Jm, decimal Wartosc,
+                           string RodzajPozycji, bool Jednorazowa);
 
     // ⚠️ `NumeryRealizowanych` to NIE numer KSeF — to numery ZAMOWIEN (ZD),
     // ktore ta faktura realizuje. Pole nazywalo sie kiedys `NumerKSeF` i ta
