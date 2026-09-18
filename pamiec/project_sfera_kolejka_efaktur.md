@@ -38,6 +38,32 @@ i wymagac eager loadingu; w projekcji brac wprost `FlagaWlasna.Kolor` itd.
 Flagi w nexo sa konfigurowalne przez uzytkownika, wiec znaczenie koloru
 czytac z `FlagHeader.Description`, NIE zakladac z gory.
 
+## Pozycje faktury z kolejki (18.09.2026)
+
+⛔ **`DokumentElektroniczny.Xml` (byte[], „Tresc dokumentu") JEST NIECZYTELNY
+wprost.** Nie jest to UTF-8 ani gzip/zlib/raw deflate — 1576 bajtow szumu
+o wysokiej entropii na cala fakture. Proba zdekodowania go jako string psuje
+bajty nieodwracalnie (C# GetString gubi dane, base64 pokazal prawdziwa
+zawartosc). Encja NIE MA tez zadnej wlasciwosci z pozycjami.
+
+✅ **Wlasciwa droga:** `IDokumentyElektroniczne.PobierzDane(dokument)` zwraca
+`IDaneEFaktury` z gotowymi, rozkodowanymi danymi:
+
+| co | gdzie |
+|---|---|
+| pozycje | `Wiersze` → `IEnumerable<IDaneWierszaFaktury>` |
+| pola wiersza | `LP` (**STRING**, moze byc „1.1"), `NazwaTowaru`, `Indeks`, `JednostkaMiary`, `Ilosc` (decimal), `CenaNetto`/`WartoscNetto` (**decimal?**) |
+| numery WZ | `WydaniaZewnetrzne` — klucz do zestawienia z PZ ([[project_rozliczanie_faktury_z_pz_plan]]) |
+| numery zamowien | `NumeryZamowien` |
+| naglowek | `NumerFaktury`, `DataWystawienia`, `KwotaDoZaplaty`, `DaneSprzedawcy`, `TabelaVAT` |
+
+⚠️ Typy sa niespojne: `Ilosc` to `decimal`, ale ceny `decimal?` — potrzebne
+dwa helpery (`Kwota` / `KwotaN`), inaczej kompilator odbija kazde uzycie.
+
+Sprawdzone na produkcji: 16/16 faktur „do przetworzenia" ma pozycje (42 razem),
+z nazwami, jednostkami i cenami; transport jako osobna linia; numery WZ
+przychodza (np. Neumo: szesc numerow na jednej fakturze).
+
 **How to apply:**
 - Most tego jeszcze NIE UZYWA — do zrobienia nowy tryb CLI (np. `efaktury`)
   obok istniejacego `faktury`. Dopiero wtedy okno faktur dostanie trzeci tryb
