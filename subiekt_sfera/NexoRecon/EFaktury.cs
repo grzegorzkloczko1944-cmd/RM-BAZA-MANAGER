@@ -59,6 +59,29 @@ internal static class EFaktury
                     {
                         foreach (var w in dane.Wiersze ?? Enumerable.Empty<IDaneWierszaFaktury>())
                         {
+                            // ⚠️ `DodatkowyOpis` to SEDNO widoku „E-FAKTURA - MF":
+                            // pary klucz-wartosc nadane przez WYSTAWCE (QUAY:
+                            // „Opis", „Marka", „Numer zamowienia", „Numer wydania").
+                            // RM_BAZA opiera na nich kolumny i dopasowanie kartotek,
+                            // wiec bez nich okno pokazuje goly numer i cene.
+                            // Kluczy NIE da sie zakodowac na sztywno — u kazdego
+                            // dostawcy sa inne. Oddajemy slownik, jaki przyszedl.
+                            var dodatkowe = new Dictionary<string, string>();
+                            try
+                            {
+                                foreach (var o in w.DodatkowyOpis ?? Enumerable.Empty<DodatkowyOpisEFaktury>())
+                                {
+                                    var klucz = (o.Klucz ?? "").Trim();
+                                    if (klucz.Length == 0) continue;
+                                    // Ten sam klucz moze sie powtorzyc — sklejamy,
+                                    // zeby nie zgubic drugiej wartosci.
+                                    var wart = (o.Wartosc ?? "").Trim();
+                                    dodatkowe[klucz] = dodatkowe.TryGetValue(klucz, out var byl) && byl.Length > 0
+                                        ? byl + "; " + wart : wart;
+                                }
+                            }
+                            catch { }
+
                             pozycje.Add(new PozEFak(
                                 // ⚠️ `LP` to STRING (numer wiersza z faktury,
                                 // moze byc "1.1"), nie liczba — oddajemy tekstem.
@@ -69,7 +92,8 @@ internal static class EFaktury
                                 Kwota(() => w.Ilosc),
                                 KwotaN(() => w.CenaNetto),
                                 KwotaN(() => w.WartoscNetto),
-                                Bezp(() => w.StawkaVat?.ToString()) ?? ""));
+                                Bezp(() => w.StawkaVat?.ToString()) ?? "",
+                                dodatkowe));
                         }
                         // Numery WZ i zamowien — klucz do zestawienia z PZ.
                         wz = Zlacz(() => dane.WydaniaZewnetrzne);
@@ -159,5 +183,5 @@ internal static class EFaktury
 
     internal record PozEFak(string Lp, string Nazwa, string Indeks, string Jm,
                             decimal Ilosc, decimal CenaNetto, decimal WartoscNetto,
-                            string StawkaVat);
+                            string StawkaVat, Dictionary<string, string> Dodatkowe);
 }

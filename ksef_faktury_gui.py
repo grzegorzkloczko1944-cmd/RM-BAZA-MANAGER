@@ -1528,6 +1528,18 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
                 w[indeks["jm"]] = (q.get("Jm") or "").strip()
                 w[indeks["cena"]] = _zl(q.get("Cena") or q.get("CenaNetto") or 0)
                 w[indeks["nazwa_kart"]] = (q.get("NazwaKartoteki") or "").strip()
+                # `DodatkowyOpis` z e-Faktury (widok „E-FAKTURA - MF") — te same
+                # klucze, na ktorych stoi archiwum. Wystawca nadaje je dowolnie,
+                # wiec „Numer wydania" bierzemy po nazwie, a calosc pokazujemy
+                # w „Opis kartoteki", zeby nic nie przepadlo.
+                dod = q.get("Dodatkowe") or {}
+                if dod:
+                    w[indeks["wz"]] = dod.get("Numer wydania", "")
+                    opis = dod.get("Opis", "")
+                    if opis and not w[indeks["nazwa"]]:
+                        w[indeks["nazwa"]] = opis
+                    w[indeks["opis_kart"]] = "  ".join(
+                        f"{k}: {v}" for k, v in dod.items() if k != "Numer wydania")
                 w[indeks["status"]] = "—"
                 wiersze.append(w)
             self.sheet.set_sheet_data(wiersze)
