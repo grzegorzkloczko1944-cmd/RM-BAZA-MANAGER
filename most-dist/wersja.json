@@ -1,6 +1,6 @@
 {
   "protokol": 1,
-  "zbudowano": "2026-09-18 14:41",
-  "sha": "4f2a6a4",
-  "uwaga": "NOWY tryb efaktury: kolejka odbioru e-Faktur KSeF (DokumentyElektroniczne) ze statusem zakladki i flaga (kolor+nazwa); plus wczesniejsze kwoty/jm/nazwy pozycji w trybie faktury"
+  "zbudowano": "2026-09-18 14:52",
+  "sha": "45ac501",
+  "uwaga": "efaktury: pozycje faktur z kolejki KSeF przez PobierzDane (Xml jako byte[] jest nieczytelny), plus numery WZ i zamowien"
 }
