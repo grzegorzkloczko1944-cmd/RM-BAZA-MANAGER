@@ -96,3 +96,4 @@
 - [Most, tryb faktury — braki](project_most_faktury_braki.md) — ⛔ pole NumerKSeF trzyma numery ZAMOWIEN; brak kwoty i numeru KSeF; most ma jedna kolejke
 - [UJ — usluga jednorazowa](project_usluga_jednorazowa_uj.md) — pozycja BEZ kartoteki wpisana na dokument; e-Faktura tego nie niesie, kartoteka zna tylko Towar/Komplet/Usluga
 - [ŻELAZNA ZASADA: jedno PZ na jedną WZ](feedback_jedno_pz_na_wz.md) — nigdy nie łączyć pozycji z różnych WZ-tek w jednym przyjęciu; NumerZewnetrzny ma być kluczem jednoznacznym
+- [Sesja 18.09.2026 — faktury KSeF](project_sesja_18_09_faktury_ksef.md) — przebieg dnia, 5 ślepych uliczek SDK, zasada „jest kartoteka → czytaj z Subiekta"
