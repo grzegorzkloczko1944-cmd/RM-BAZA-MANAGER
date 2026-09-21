@@ -32,5 +32,16 @@ przechodzi. Realnie się na tym przewrócono przy zmianie dostawcy złożeń
   plik lokalny z serwerowym — patrz [[project_master_watchdog_ro]], gdzie
   ten sam objaw miał inną przyczynę (połączenie RO).
 
+**Powiązane pułapki tej samej rodziny** (z notatki lokalnej M-OLD, 10.09.2026):
+
+* **Nie zerować ilości na ZK zamiast usuwania pozycji.** Sfera nie wystawia
+  `Usun` dla pozycji ZK (tylko dla dokumentów księgowych i windykacyjnych).
+  Zero z ZK **wraca do bazy projektu** przez `_zapisz_ilosci_z_subiekta` jako
+  `order_qty=0` i pozycja znika z BOM-u — nie da się jej już edytować.
+  Lepiej powiedzieć „usuń ręcznie w Subiekcie".
+* **`Zapisz()==true` nie znaczy, że zmiana weszła.** Most raportował
+  „usunięto 3 poz.", a na dokumencie stały wszystkie. Po każdym zapisie robić
+  read-back i podawać liczbę potwierdzoną odczytem.
+
 Master (`master.sqlite`) działa inaczej — tam nie ma kopii lokalnej, patrz
 [[project_master_journal_delete]] i [[project_rm_baza_db_model_decision]].
