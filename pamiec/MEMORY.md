@@ -97,3 +97,39 @@
 - [UJ — usluga jednorazowa](project_usluga_jednorazowa_uj.md) — pozycja BEZ kartoteki wpisana na dokument; e-Faktura tego nie niesie, kartoteka zna tylko Towar/Komplet/Usluga
 - [ŻELAZNA ZASADA: jedno PZ na jedną WZ](feedback_jedno_pz_na_wz.md) — nigdy nie łączyć pozycji z różnych WZ-tek w jednym przyjęciu; NumerZewnetrzny ma być kluczem jednoznacznym
 - [Sesja 18.09.2026 — faktury KSeF](project_sesja_18_09_faktury_ksef.md) — przebieg dnia, 5 ślepych uliczek SDK, zasada „jest kartoteka → czytaj z Subiekta"
+
+- [Urlopy — dni robocze](project_urlopy_dni_robocze.md) — nieobecności liczone wg kalendarza (weekendy/święta pomijane), days_override, compute_absence_days()
+- [Święta — auto-zasiew](project_swieta_auto_seed.md) — polskie święta wpisywane do company_calendar przy starcie, Wielkanoc algorytmem Gaussa
+- [Status projektu — odchylenie](project_status_odchylenie.md) — status = przewidywany koniec vs plan, NIE suma variance_days etapów
+- [TODO: import urlopów XLSX](project_import_urlopow_xlsx_todo.md) — zablokowane, czeka na plik XLSX od księgowej; wzorzec: menu_import_ceny_ksef w RM_BAZA
+- [Subiekt na M-OLD (dom)](project_subiekt_integracja_m_old.md) — środowisko testowe osobne od firmy, dane rozdzielone, kod wspólny przez git
+- [Git pull przed zmianami — 2 maszyny](feedback_git_pull_multi_maszyna.md) — praca na main z firmy i M-OLD, zawsze pull/status przed edycją kodu
+- [Wydruk ZD do PDF — nie działa na demo](project_wydruk_zd_pdf_demo.md) — w firmie OK, na M-OLD Eksport() nie tworzy pliku; nie przepisywać kodu
+- [ZD magic-linkiem przez portal RFQ](project_zd_portal_rfq.md) — zakładka Subiekt, dopasowanie po NIP z Subiekta, base_url do ustawienia w firmie
+- [Most NexoRecon — tryby i kasowanie](project_most_nexorecon_tryby.md) — stan/katalog/magazyn, zd-usun kasuje ZK/ZD/RW/WZ, po git pull dotnet build
+- [Stały most Sfera — zaimplementowany](project_subiekt_staly_most.md) — NexoRecon.exe server, branch most-server, ~10s narzutu zlikwidowane, zapisy nieprzetestowane
+- [Numer rysunku i symbol kartoteki](project_numer_rysunku_i_symbol.md) — format RMPAK z RM_IMPORT, symbol_z_nazwy wspólny dla ręcznego i automatu
+- [Projekt/Aktualizacja — potwierdzone dodawanie pozycji](project_projekt_aktualizacja_potwierdzone.md) — dołożenie do BOM + Przelicz działa poprawnie jako "dokładka"
+- [NIC PO CICHU — zawsze okno przed i raport po](feedback_nic_po_cichu.md) — każda zmiana danych musi być pokazana PRZED i PO, z wartościami
+- [ZK: rozjazd ilości — tylko raportowany](project_zk_ilosci_nie_porownywane.md) — naprawiona warstwa informacyjna, most NIE zapisuje ilości (celowo)
+- [Jedno źródło prawdy dla ilości](project_jedno_zrodlo_prawdy_ilosci.md) — kierunek docelowy: blokada komórek w arkuszu + odczyt z Subiekta przy locku
+- [Blokada klucza po zasiewie](project_blokada_klucza_zasiew.md) — WDROŻONA: numer rysunku / nazwa znormalizowanej nieedytowalne dla pozycji w Subiekcie
+- [Edycja ilości w oknie Projekt/Aktualizacja](project_edycja_ilosci_w_oknie.md) — WDROŻONA: ilość docelowa korzenia przelicza poddrzewo, most dopisuje różnicę
+- [Edytor kartotek — Z pliku, Położenie](project_edytor_kartotek_z_pliku.md) — CSV płaskie (matka z nazwy pliku) vs XLSX drzewko (matka już w środku)
+- [Zieleń "na ZK" w arkuszu](project_zielen_na_zk_arkusz.md) — kolumna Ilość dostarczonych, jeden odcień #E8F8E8, wariant dwukolorowy odrzucony (2026-09-09)
+- [Dokumentacja Sfery — lokalnie](reference_dokumentacja_sfery.md) — C:\iLogic\Subiekt_nexo_PRO_dokumentacja, indeks TSV 82k wpisów, grep zamiast refleksji
+- [Cena na pozycji PW](project_cena_na_pozycji_pw.md) — Cena.NettoPoRabacie (obiekt, nie liczba), ICena.UstawCene to cennik — nie nadaje się (2026-09-09)
+- [Most: rebuild w Release + ubicie procesu](feedback_most_rebuild_release.md) — Python bierze bin/Release; stały most trzyma stary kod (2026-09-09)
+- [Produkcja RMPAK — PW/RW](project_rmpak_produkcja_pw_rw.md) — własne detale poza ZK, ilość z BOM, kroki 0-4 gotowe, zostaje RW (2026-09-10)
+- [Koszt magazynowy vs cena netto](project_koszt_magazynowy_vs_cena.md) — PW/RW/WZ: wartość w KosztMagazynowy, cena netto = 0 (2026-09-10)
+- [tksheet: indeksy kolumn](project_tksheet_indeksy_kolumn.md) — widok vs dane przy ukrytych kolumnach; data_c() zamiast ręcznego +1 (2026-09-10)
+- [Uwagi i Tytuł dokumentów](project_uwagi_tytul_dokumentow.md) — numer projektu w 1. wierszu Uwag (drukują się), znacznik RM_BAZA w Tytule
+- [Szukanie w drzewku](project_szukanie_w_drzewku.md) — Projekt/Aktualizacja: rozwija gałęzie z trafieniami, NIE filtruje
+- [Blokady PW/RW — do ustalenia](project_pw_rw_blokady_do_ustalenia.md) — miękka blokada 2. PW jest CELOWA (§15), czeka na logistyka, nie naprawiać
+- [Okno wydania RW (magazynier)](project_okno_wydania_rw.md) — nowe okno OBOK starego skanera, kompatybilność wsteczna wymagana
+- [Symbole ze spacją](project_symbole_ze_spacja.md) — `6212 2RS`, `DIN 933 M8x30`; NIGDY nie ciąć kodu na pierwszej spacji
+- [Środowisko domowe M-OLD](project_srodowisko_domowe_m_old.md) — udawany udział W2019S, BackConnectionHostNames, kolejność startu
+- [Bez limitu Take() na dokumentach](project_bez_limitu_take_dokumenty.md) — limit odcina starsze dokumenty projektu, ciche podwojne ZK/wydania
+- [Odcięcie od Y: — mapowania](project_odciecie_od_y_mapowania.md) — mapowania już przez RM_SERWER (14.09.2026); zostało wdrożenie serwera w firmie PRZED buildem .exe; po pull w domu restart rm_serwer.py
+- [Nigdy nie edytuj baz bezposrednio](feedback_no_direct_db_edits.md) — zmiany SQLite tylko przez kod RM_MANAGER, nie recznie
+- [RM_MANAGER na lokalnej kopii baz](project_local_copy_rm_manager.md) — kopia per-projekt; platnosci i kody PLC MUSZA zostac na Y:

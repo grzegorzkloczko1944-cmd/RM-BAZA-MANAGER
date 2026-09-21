@@ -221,6 +221,17 @@ K_STATUS = len(KOL_POZYCJE) - 1
 KOL_FAKTURY = [("dostawca", "Dostawca", 95), ("netto", "Netto", 65),
                ("stan", "Stan", 95)]
 
+#: Lista wyboru kartoteki pod polem „Kartoteka w Subiekcie".
+#: ⚠️ Stan i „dostępne" NIE przychodzą z trybu `katalog` — ten świadomie ich
+#: nie liczy (`StanyMagazynowe` per kartoteka to najdroższa część odczytu).
+#: Dociągamy je osobno trybem `stan`, w tle i tylko dla POKAZANYCH pozycji.
+#: ⚠️ Bez jednostki miary — tryb `stan` jej NIE zwraca (rekord `Poz` ma
+#: Dostepne/Zadysponowane/cenę, ale nie j.m.). Pusta kolumna tylko myli;
+#: gdyby była potrzebna, trzeba ją najpierw dołożyć w moście.
+KOL_KARTOTEKI = [("symbol", "Symbol", 150), ("nazwa", "Nazwa", 240),
+                 ("opis", "Opis", 170), ("stan", "Na magazynie", 95),
+                 ("dostepne", "Dostępne", 85)]
+
 #: Filtr dostawcy w pasku — ta sama konwencja napisu co w oknie dokumentów
 #: (`PROJ_WSZYSTKIE`).
 DOST_WSZYSCY = "— wszyscy —"
@@ -1029,18 +1040,44 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         tk.Button(sz, text="✕", command=self._wyczysc_kartoteke, font=FONT_S,
                   bg=SZARY, fg=TEKST, relief=tk.RAISED, bd=1, cursor="hand2", padx=6
                   ).grid(row=0, column=1, padx=(4, 0))
-        self.lb_kart = tk.Listbox(kart, height=5, font=FONT, activestyle="none",
-                                  relief=tk.SOLID, bd=1,
-                                  selectbackground="#b3d1ec", selectforeground=TEKST)
-        self.lb_kart.grid(row=2, column=0, sticky="nsew", pady=(3, 3))
-        self.lb_kart.bind("<<ListboxSelect>>", self._wybrano_z_listy)
-        self.lb_kart.bind("<Return>", self._wybrano_z_listy)
-        self.lb_kart.bind("<Double-1>", self._wybrano_z_listy)
+        # Tabela zamiast listy jednolinijkowej: symbol, nazwa, opis, stan,
+        # dostępne i jednostka. Człowiek wybiera kartotekę patrząc na STAN,
+        # nie tylko na nazwę — przy dwóch podobnych pozycjach to często
+        # jedyna rozróżniająca informacja (prośba użytkownika 21.09.2026).
+        if Sheet is None:
+            self.lb_kart = tk.Listbox(kart, height=5, font=FONT, activestyle="none",
+                                      relief=tk.SOLID, bd=1,
+                                      selectbackground="#b3d1ec", selectforeground=TEKST)
+            self.lb_kart.grid(row=2, column=0, sticky="nsew", pady=(3, 3))
+            self.lb_kart.bind("<<ListboxSelect>>", self._wybrano_z_listy)
+            self.lb_kart.bind("<Return>", self._wybrano_z_listy)
+            self.lb_kart.bind("<Double-1>", self._wybrano_z_listy)
+            self.sheet_kart = None
+        else:
+            self.lb_kart = None
+            self.sheet_kart = Sheet(kart, headers=[k[1] for k in KOL_KARTOTEKI],
+                                    height=130, theme="light blue")
+            self.sheet_kart.set_options(show_selected_cells_border=True,
+                                        empty_horizontal=0, empty_vertical=0)
+            self.sheet_kart.hide("row_index")
+            self.sheet_kart.hide("top_left")
+            self.sheet_kart.enable_bindings(("single_select", "row_select",
+                                             "column_width_resize", "arrowkeys"))
+            for i, (_k, _n, szer) in enumerate(KOL_KARTOTEKI):
+                self.sheet_kart.column_width(i, szer)
+            self.sheet_kart.grid(row=2, column=0, sticky="nsew", pady=(3, 3))
+            self.sheet_kart.bind("<<SheetSelect>>", self._wybrano_z_listy)
+            self.sheet_kart.bind("<Return>", self._wybrano_z_listy)
+            self.sheet_kart.bind("<Double-1>", self._wybrano_z_listy)
         self.lbl_kart = tk.Label(kart, text="— nie wskazano —", bg=SZARY, fg=TEKST,
                                  font=FONT_S, anchor="w", padx=8, pady=4,
                                  relief=tk.SOLID, bd=1, justify="left")
         self.lbl_kart.grid(row=3, column=0, sticky="ew")
         self._kandydaci_kart = []
+        #: Stany magazynowe kartotek — {id: {stan, dostepne, jm}}. Cache na całe
+        #: okno: raz dociągnięty symbol nie jest pytany drugi raz.
+        self._stany_kart = {}
+        self._stany_zapytanie = None
 
         # akcje
         akcje = tk.Frame(body, bg="white")
@@ -2056,9 +2093,9 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
     # ── kartoteka: wyszukiwarka ────────────────────────────────────────────
     def _szukaj_kartoteki(self, domyslnie=None):
         fraza = uprosc(self.var_kart.get().strip() or domyslnie or "")
-        self.lb_kart.delete(0, tk.END)
         self._kandydaci_kart = []
         if not fraza or not self.katalog_sub:
+            self._pokaz_kandydatow()
             return
         # Najpierw po znormalizowanym symbolu (IR 12*16*20 ~ IR12-16-20),
         # potem po podciągu w symbolu/nazwie. Bez fuzzy po nazwie — celowo.
@@ -2084,19 +2121,96 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
                         if len(reszta) >= 40:
                             break
         self._kandydaci_kart = (trafione + reszta)[:60]
+        self._pokaz_kandydatow(len(trafione))
+        # Stany dociągamy W TLE i tylko dla POKAZANYCH pozycji — tryb `katalog`
+        # ich nie niesie, a pytanie mostu przy każdym znaku zabiłoby okno
+        # (most ma jedną kolejkę).
+        self._dociagnij_stany()
+
+    def _pokaz_kandydatow(self, ile_trafionych=0):
+        """Wypełnia listę kandydatów — tabelą albo listboxem (gdy brak tksheet)."""
+        if self.sheet_kart is None:
+            self.lb_kart.delete(0, tk.END)
+            for k in self._kandydaci_kart:
+                self.lb_kart.insert(tk.END, f"{k.get('symbol')}   —   {k.get('nazwa')}")
+            if ile_trafionych:
+                self.lb_kart.itemconfig(0, bg="#e8f8e8")
+            return
+        wiersze = []
         for k in self._kandydaci_kart:
-            self.lb_kart.insert(tk.END, f"{k.get('symbol')}   —   {k.get('nazwa')}")
-        if trafione:
-            self.lb_kart.itemconfig(0, bg="#e8f8e8")
+            st = self._stany_kart.get(k.get("id")) or {}
+            wiersze.append([k.get("symbol") or "", k.get("nazwa") or "", k.get("opis") or "",
+                            st.get("stan", ""), st.get("dostepne", "")])
+        self.sheet_kart.set_sheet_data(wiersze, reset_col_positions=False, redraw=False)
+        try:
+            self.sheet_kart.dehighlight_all()
+            # Dokładne trafienie na zielono — tak samo jak w liście.
+            for i in range(ile_trafionych):
+                self.sheet_kart.highlight_rows(rows=[i], bg="#e8f8e8", fg=TEKST)
+        except Exception:
+            pass
+        self.sheet_kart.redraw()
+
+    def _dociagnij_stany(self):
+        """Stany magazynowe dla pokazanych kartotek — trybem `stan`, w tle."""
+        symbole = [k.get("symbol") for k in self._kandydaci_kart
+                   if k.get("symbol") and k.get("id") not in self._stany_kart]
+        if not symbole or self.sheet_kart is None:
+            return
+        symbole = symbole[:60]
+        # Zapamiętujemy, o co pytamy — odpowiedź przyjdzie po chwili i może
+        # dotyczyć JUŻ NIEAKTUALNEJ frazy; wtedy ją pomijamy.
+        znacznik = object()
+        self._stany_zapytanie = znacznik
+
+        def praca():
+            import subiekt_bridge
+            subiekt_bridge.zapewnij_most()
+            # ⚠️ Parametr nazywa się `symbols` (tablica) — `symbole` trafiłoby
+            # w `SymboleCsv` i most nie dostałby listy.
+            return subiekt_bridge.call("stan", {"symbols": symbole}, timeout=90)
+
+        def potem(w, blad):
+            if blad or not w or self._stany_zapytanie is not znacznik:
+                return
+            # ⚠️ Symbole w Subiekcie bywają ze SPACJĄ na końcu („REG-300.11X ")
+            # — most oddaje je takimi, jakie są. Po obu stronach `strip()`,
+            # inaczej dopasowanie cicho gubi te pozycje
+            # (patrz pamiec/project_subiekt_symbol_spacja.md).
+            wg_symbolu = {(k.get("symbol") or "").strip().upper(): k.get("id")
+                          for k in self.katalog_sub}
+            for poz in (w or {}).get("pozycje", []):
+                if not poz.get("Istnieje"):
+                    continue
+                sym = (poz.get("Symbol") or poz.get("Pytany") or "").strip().upper()
+                kid = wg_symbolu.get(sym)
+                if kid is None:
+                    continue
+                # „Na magazynie" = dostępne + zadysponowane (czyli fizyczny
+                # stan), „Dostępne" = to, czym można dysponować.
+                self._stany_kart[kid] = {
+                    "stan": _ilosc((poz.get("Dostepne") or 0) + (poz.get("Zadysponowane") or 0)),
+                    "dostepne": _ilosc(poz.get("Dostepne") or 0)}
+            self._pokaz_kandydatow()
+
+        self._w_tle(praca, potem)
 
     def _wybierz_pierwsza(self):
         if self._kandydaci_kart:
             self._ustaw_kartoteke(self._kandydaci_kart[0], zrodlo="ręcznie")
 
     def _wybrano_z_listy(self, _e=None):
-        sel = self.lb_kart.curselection()
-        if sel and sel[0] < len(self._kandydaci_kart):
-            self._ustaw_kartoteke(self._kandydaci_kart[sel[0]], zrodlo="ręcznie")
+        if self.sheet_kart is None:
+            sel = self.lb_kart.curselection()
+            i = sel[0] if sel else None
+        else:
+            try:
+                wiersze = sorted(set(self.sheet_kart.get_selected_rows(get_cells_as_rows=True)))
+            except Exception:
+                wiersze = []
+            i = wiersze[0] if wiersze else None
+        if i is not None and i < len(self._kandydaci_kart):
+            self._ustaw_kartoteke(self._kandydaci_kart[i], zrodlo="ręcznie")
 
     def _ustaw_kartoteke(self, k, zrodlo=""):
         self._wybrana_kartoteka = {"id": k.get("id"), "symbol": k.get("symbol") or "",
