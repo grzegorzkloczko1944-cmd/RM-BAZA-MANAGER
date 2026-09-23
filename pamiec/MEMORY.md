@@ -132,3 +132,4 @@
 - [Odcięcie od Y: — mapowania](project_odciecie_od_y_mapowania.md) — mapowania już przez RM_SERWER (14.09.2026); zostało wdrożenie serwera w firmie PRZED buildem .exe; po pull w domu restart rm_serwer.py
 - [Bazy tylko przez kod, nigdy wprost](feedback_no_direct_db_edits.md) — nie edytować plików SQLite w RM_BAZY; zmiany schematu/danych wyłącznie jako migracje w kodzie
 - [RM_MANAGER: lokalna kopia baz](project_local_copy_rm_manager.md) — pracuje na kopii per-projekt; płatności i kody PLC MUSZĄ zostać bezpośrednio na Y:
+- [Drugi OUT uzupełnia drzewo — DO ZROBIENIA](project_drugi_out_uzupelnia_drzewo.md) — doklejanie poddrzewa w miejsce pustego złożenia bibliotecznego; ilości ×krotność węzła; robimy w domu
