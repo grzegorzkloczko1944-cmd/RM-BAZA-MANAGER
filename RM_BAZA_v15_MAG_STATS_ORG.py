@@ -930,6 +930,7 @@ class MainWindow(tk.Tk):
         self.filem.add_command(label="Import BOM…", command=self.menu_import_bom, state='disabled')
         self.filem.add_command(label="Aktualizuj BOM…", command=self.menu_aktualizuj_bom, state='disabled')
         self.filem.add_command(label="Dodaj BOM…", command=self.menu_dodaj_bom, state='disabled')
+        self.filem.add_command(label="Doklej złożenie z OUT…", command=self.menu_doklej_zlozenie, state='disabled')
         self.filem.add_command(label="Import moduł…", command=self.menu_import_modul, state='disabled')
         self.filem.add_command(label="Aktualizuj ilości…", command=self.menu_aktualizuj_ilosci, state='disabled')
         self.filem.add_separator()
@@ -7045,30 +7046,46 @@ class MainWindow(tk.Tk):
         # 0: Import BOM… (tylko MACHINE)
         # 1: Aktualizuj BOM… (tylko MACHINE)
         # 2: Dodaj BOM… (tylko MACHINE)
-        # 3: Import moduł… (tylko WAREHOUSE)
-        # 4: Aktualizuj ilości… (MACHINE + WAREHOUSE)
-        
+        # 3: Doklej złożenie z OUT… (tylko MACHINE)
+        # 4: Import moduł… (tylko WAREHOUSE)
+        # 5: Aktualizuj ilości… (MACHINE + WAREHOUSE)
+        #
+        # UWAGA: indeksy muszą się zgadzać z kolejnością add_command w menu
+        # Plik (ok. linii 930). Dołożenie pozycji w środku przesuwa WSZYSTKIE
+        # kolejne — dlatego pozycje są tu wyliczone z etykiet, a nie wpisane
+        # na sztywno: przy następnej zmianie menu nic się nie rozjedzie po cichu.
+        idx = {}
+        try:
+            for i in range(self.filem.index('end') + 1):
+                try:
+                    etykieta = self.filem.entrycget(i, 'label')
+                except Exception:
+                    continue          # separator nie ma etykiety
+                if etykieta:
+                    idx[etykieta] = i
+        except Exception:
+            idx = {}
+
+        MACHINE_ONLY = ("Import BOM…", "Aktualizuj BOM…", "Dodaj BOM…",
+                        "Doklej złożenie z OUT…")
+        WAREHOUSE_ONLY = ("Import moduł…",)
+        OBA = ("Aktualizuj ilości…",)
+
+        def ustaw(etykiety, stan):
+            for et in etykiety:
+                if et in idx:
+                    self.filem.entryconfig(idx[et], state=stan)
+
         if project_type == "MACHINE":
-            # PRODUKCJA: włącz "Import BOM…", "Aktualizuj BOM…" i "Dodaj BOM…", wyłącz "Import moduł…"
-            self.filem.entryconfig(0, state='normal')
-            self.filem.entryconfig(1, state='normal')
-            self.filem.entryconfig(2, state='normal')
-            self.filem.entryconfig(3, state='disabled')
-            self.filem.entryconfig(4, state='normal')
+            ustaw(MACHINE_ONLY, 'normal')
+            ustaw(WAREHOUSE_ONLY, 'disabled')
+            ustaw(OBA, 'normal')
         elif project_type == "WAREHOUSE":
-            # MAGAZYN: włącz "Import moduł…", wyłącz "Import BOM…", "Aktualizuj BOM…" i "Dodaj BOM…"
-            self.filem.entryconfig(0, state='disabled')
-            self.filem.entryconfig(1, state='disabled')
-            self.filem.entryconfig(2, state='disabled')
-            self.filem.entryconfig(3, state='normal')
-            self.filem.entryconfig(4, state='normal')
+            ustaw(MACHINE_ONLY, 'disabled')
+            ustaw(WAREHOUSE_ONLY, 'normal')
+            ustaw(OBA, 'normal')
         else:
-            # Domyślnie wyłącz wszystkie
-            self.filem.entryconfig(0, state='disabled')
-            self.filem.entryconfig(1, state='disabled')
-            self.filem.entryconfig(2, state='disabled')
-            self.filem.entryconfig(3, state='disabled')
-            self.filem.entryconfig(4, state='disabled')
+            ustaw(MACHINE_ONLY + WAREHOUSE_ONLY + OBA, 'disabled')
         
         # Aktualizuj przycisk "Usuń dla zaznaczonych" - tylko WAREHOUSE
         if hasattr(self, 'btn_delete_selected'):
@@ -20388,6 +20405,721 @@ class MainWindow(tk.Tk):
                 except Exception as close_err:
                     print(f"⚠️  Błąd zamykania workbooka: {close_err}")
     
+    def menu_doklej_zlozenie(self):
+        """
+        DOKLEJ ZŁOŻENIE Z OUT — wstaw biblioteczne poddrzewo pod pusty węzeł.
+
+        Złożenie z biblioteki bywa w drzewku projektu PUSTYM liściem, bo jego
+        rozwinięcie siedzi w osobnym pliku *_OUT.xlsx. Ta funkcja dokleja jego
+        zawartość do BOM-u projektu.
+
+        Różnica wobec „Dodaj BOM" — sumowanie jest sterowane PER WIERSZ:
+        - KORZEŃ drzewka (to samo złożenie, które w projekcie już jest jako
+          pusty węzeł) → ilość NIE jest sumowana, zostaje ta z BOM-u projektu.
+          Bez tego „Dodaj BOM" robi z jednego elewatora dwa (1+1=2).
+        - SKŁADNIKI → ilości sumowane normalnie, więc część występująca
+          w obu elewatorach dostaje sumę (5+5=10).
+
+        Moduł zapisywany jako „MODUŁ(ilość), MODUŁ(ilość)" — format
+        z „Import moduł", żeby było widać, ile sztuk wchodzi z którego modułu.
+
+        Korzeń MUSI zostać w BOM-ie: subiekt_projekt.build_plan zakłada komplet
+        iterując po items po typie Z/ZZ. Bez korzenia nie ma kompletu
+        w Subiekcie, a składniki wiszą luzem.
+        """
+        # Sprawdzenia
+        if self.current_user_role not in ("ADMIN", "USER$$"):
+            messagebox.showinfo("Brak uprawnień", "Dodawanie BOM jest dostępne tylko dla ADMIN i USER$$.")
+            return
+        
+        if not self.have_lock:
+            messagebox.showwarning("Brak locka", "Przejmij lock projektu aby importować!")
+            return
+        
+        if not self.current_project_id:
+            messagebox.showwarning("Brak projektu", "Wybierz projekt najpierw!")
+            return
+        
+        # Informacja o działaniu funkcji
+        project_name = self.project_var.get().strip() if hasattr(self, 'project_var') else f"Projekt {self.current_project_id}"
+        
+        if not messagebox.askyesno(
+            "🧩 DOKLEJ ZŁOŻENIE Z OUT",
+            f"Projekt: {project_name}\\n\\n"
+            "Ta operacja:\\n"
+            "• Doda nowe pozycje z pliku\\n"
+            "• Jeśli pozycja już istnieje - SUMUJE ilości:\\n"
+            "  - Ilość BOM = aktualna + importowana\\n"
+            "  - Ilość (Zam.) = aktualna + importowana\\n\\n"
+            "💡 Wszystko dzieje się automatycznie bez pytania\\n\\n"
+            "Czy kontynuować?",
+            icon='question'
+        ):
+            return
+        
+        # Dialog wyboru pliku
+        from tkinter import filedialog
+        from tkinter import simpledialog
+        from pathlib import Path
+        
+        xlsx_path = filedialog.askopenfilename(
+            title="Wybierz plik *_OUT.xlsx z rozwinięciem złożenia",
+            filetypes=[("Excel / CSV", "*.xlsx *.csv"), ("Excel", "*.xlsx"), ("CSV", "*.csv"), ("Wszystkie pliki", "*.*")]
+        )
+
+        if not xlsx_path:
+            return
+
+        # KORZEŃ drzewka — to jego ilości nie wolno sumować. Ustalamy PRZED
+        # kopią zapasową, żeby przy złym pliku nie robić jej niepotrzebnie.
+        from doklej_zlozenie import znajdz_korzen_drzewka, scal_moduly
+        korzen_nr = znajdz_korzen_drzewka(xlsx_path)
+        if not korzen_nr:
+            messagebox.showerror(
+                "Brak drzewka",
+                "W tym pliku nie ma arkusza „DRZEWKO TEKST”, więc nie da się "
+                "rozpoznać korzenia złożenia.\\n\\n"
+                "Bez tego funkcja zsumowałaby ilość korzenia z ilością już "
+                "wpisaną w projekcie (np. 1 + 1 = 2).\\n\\n"
+                "Wskaż plik *_OUT.xlsx wygenerowany z Inventora."
+            )
+            return
+        korzen_norm = korzen_nr.strip().upper()
+        print(f"🧩 Korzeń złożenia: {korzen_nr} (jego ilość NIE będzie sumowana)")
+
+        # Kopia sprzed importu
+        if not self._backup_before_import("doklej_zlozenie"):
+            return
+
+        # Pytaj o mnożnik
+        multiplier = simpledialog.askinteger(
+            "Mnożnik ilości",
+            "Ile dodać kompletów?\n\n"
+            "Wszystkie ilości z pliku zostaną pomnożone przez tę wartość.",
+            parent=self,
+            minvalue=1,
+            initialvalue=1
+        )
+        
+        if multiplier is None:
+            return  # Użytkownik anulował
+        
+        # Workbook do zamknięcia
+        wb_colors = None
+        
+        try:
+            excel_path = Path(xlsx_path)
+            
+            # Auto-konwersja CSV → XLSX
+            if excel_path.suffix.lower() == ".csv":
+                from import_bom import csv_to_xlsx
+                print(f"🔄 Wykryto CSV - konwertuję na XLSX...")
+                excel_path = csv_to_xlsx(excel_path)
+                print(f"✅ Skonwertowano: {excel_path.name}")
+            
+            print(f"\\n{'='*60}")
+            print(f"🧩 DOKLEJ ZŁOŻENIE Z OUT")
+            print(f"{'='*60}")
+            print(f"Projekt: {self.current_project_id}")
+            print(f"Excel: {excel_path}")
+            print(f"Mnożnik: {multiplier}x")
+            print(f"Mam lock: {self.have_lock}")
+            
+            # Wymuś przeładowanie modułu import_bom
+            import importlib
+            import import_bom
+            importlib.reload(import_bom)
+            
+            from import_bom import iter_zbiorczy_data_rows, norm, normalize_type_label, infer_type_from_drawing_no
+            
+            # Sprawdź czy tabela items ma kolumny src_modul/work_modul
+            columns_info = self.db_manager.project_con.execute("PRAGMA table_info(items)").fetchall()
+            column_names = [col[1] for col in columns_info]
+            has_modul_columns = 'src_modul' in column_names
+            
+            if has_modul_columns:
+                print(f"✅ Projekt ma kolumny MODUŁ")
+            else:
+                print(f"⚠️  Projekt NIE ma kolumn MODUŁ (starszy projekt) - kolumna MODUŁ będzie pominięta")
+            
+            # Pobierz wszystkie istniejące pozycje z bazy
+            existing_items = {}  # {drawing_no_norm: [list of (id, full_row_data)]}
+            existing_items_by_name = {}  # {name_norm: [list of (id, full_row_data)]} dla ZNORMALIZOWANE
+            
+            if has_modul_columns:
+                rows = self.db_manager.project_con.execute(
+                    """
+                    SELECT id,
+                           COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) AS drawing_no,
+                           COALESCE(NULLIF(work_name, ''), src_name) AS name,
+                           COALESCE(NULLIF(work_desc, ''), src_desc) AS descr,
+                           COALESCE(work_qty, src_qty) AS qty,
+                           order_qty,
+                           mat_manual_text,
+                           supplier_id,
+                           class_manual,
+                           work_modul,
+                           is_hidden,
+                           dwf_biblioteka
+                    FROM items
+                    WHERE project_id = ?
+                    """,
+                    (self.current_project_id,)
+                ).fetchall()
+            else:
+                rows = self.db_manager.project_con.execute(
+                    """
+                    SELECT id,
+                           COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) AS drawing_no,
+                           COALESCE(NULLIF(work_name, ''), src_name) AS name,
+                           COALESCE(NULLIF(work_desc, ''), src_desc) AS descr,
+                           COALESCE(work_qty, src_qty) AS qty,
+                           order_qty,
+                           mat_manual_text,
+                           supplier_id,
+                           class_manual,
+                           is_hidden,
+                           dwf_biblioteka
+                    FROM items
+                    WHERE project_id = ?
+                    """,
+                    (self.current_project_id,)
+                ).fetchall()
+            
+            for row in rows:
+                if has_modul_columns:
+                    item_id, dn, name, desc, qty, order_qty, mat, sup_id, cls, modul, hidden, bib = row
+                else:
+                    item_id, dn, name, desc, qty, order_qty, mat, sup_id, cls, hidden, bib = row
+                    modul = None
+                dn_norm = norm(dn) if dn else ""
+                name_norm = norm(name) if name else ""
+                
+                # Oblicz DELTA
+                delta = None
+                try:
+                    if qty is not None and order_qty is not None:
+                        delta = int(round(float(order_qty) - float(qty)))
+                except:
+                    delta = None
+                
+                item_data = {
+                    'id': item_id,
+                    'drawing_no': dn,
+                    'name': name,
+                    'desc': desc,
+                    'qty': qty,
+                    'order_qty': order_qty,
+                    'delta': delta,
+                    'material': mat,
+                    'supplier_id': sup_id,
+                    'class': cls,
+                    'modul': modul,
+                    'is_hidden': hidden,
+                    'dwf_biblioteka': bib
+                }
+                
+                if dn_norm:
+                    if dn_norm not in existing_items:
+                        existing_items[dn_norm] = []
+                    existing_items[dn_norm].append(item_data)
+                elif name_norm:
+                    if name_norm not in existing_items_by_name:
+                        existing_items_by_name[name_norm] = []
+                    existing_items_by_name[name_norm].append(item_data)
+            
+            print(f"📊 Znaleziono {len(rows)} pozycji w bazie")
+            print(f"📊 Unikatowych numerów rysunków: {len(existing_items)}")
+            print(f"📊 Pozycji bez numeru (wg nazwy): {len(existing_items_by_name)}")
+            
+            # Otwórz Excel do sprawdzania kolorów
+            import openpyxl
+            
+            has_excel = False
+            ws_colors = None
+            temp_wb = None
+            
+            try:
+                print(f"📊 Ładowanie Excela...")
+                temp_wb = openpyxl.load_workbook(excel_path, data_only=True, keep_vba=False, read_only=True)
+                ws_colors = temp_wb["ZBIORCZY"] if "ZBIORCZY" in temp_wb.sheetnames else temp_wb[temp_wb.sheetnames[0]]
+                wb_colors = temp_wb
+                has_excel = True
+                print(f"✅ Excel załadowany")
+            except Exception as excel_err:
+                if temp_wb is not None:
+                    try:
+                        temp_wb.close()
+                    except:
+                        pass
+                print(f"⚠️  Błąd ładowania Excela: {excel_err}")
+                print(f"⚠️  Import będzie kontynuowany bez sprawdzania flag BIBLIOTEKA")
+                wb_colors = None
+                ws_colors = None
+                has_excel = False
+            
+            # Funkcja sprawdzająca kolor czcionki
+            def check_blue_font(row_num):
+                if not has_excel or ws_colors is None:
+                    return 0
+                try:
+                    cell = ws_colors.cell(row_num, 1)
+                    if cell.font and cell.font.color and hasattr(cell.font.color, '__dict__'):
+                        color_dict = cell.font.color.__dict__
+                        if 'rgb' in color_dict and color_dict['rgb'] == '000000FF':
+                            return 1
+                except Exception:
+                    pass
+                return 0
+            
+            # Mapuj numery rysunków → wiersze Excel
+            drawing_to_row = {}
+            if has_excel and ws_colors is not None:
+                try:
+                    for row_num in range(1, ws_colors.max_row + 1):
+                        val = ws_colors.cell(row_num, 1).value
+                        if val:
+                            drawing_to_row[norm(str(val))] = row_num
+                    print(f"📊 Zmapowano {len(drawing_to_row)} numerów rysunków")
+                except Exception as map_err:
+                    print(f"⚠️  Błąd mapowania numerów: {map_err}")
+                    drawing_to_row = {}
+            
+            # Statystyki importu
+            imported = 0
+            summed = 0  # Zliczaj pozycje które zostały zsumowane
+            korzen_zachowany = 0  # ile razy pominięto sumowanie korzenia
+            
+            # Iteruj po pozycjach z Excela
+            for i, rec in enumerate(iter_zbiorczy_data_rows(excel_path), start=1):
+                src_drawing = rec.get("Nr rysunku")
+                src_name = rec.get("Nazwa")
+                src_desc = rec.get("Opis")
+                src_qty = rec.get("Ilość całkowita")
+                src_order_qty = rec.get("Ilość (zam.)")
+                src_mat = rec.get("Materiał")
+                src_sup = rec.get("Dostawca")
+                src_typ = rec.get("Typ")
+                src_modul_val = rec.get("Katalog")
+                src_uwagi = rec.get("Uwagi")
+                
+                # Nazwa musi być
+                name_n = norm(src_name)
+                if not name_n:
+                    continue
+                
+                dn_n = norm(src_drawing)
+                dn_db = dn_n if dn_n else None
+
+                # Czy to wiersz KORZENIA? Numer korzenia wzięty z arkusza
+                # „DRZEWKO TEKST" (jedyny wiersz o ścieżce długości 1).
+                jest_korzeniem = bool(dn_n) and dn_n.strip().upper() == korzen_norm
+                
+                # Sprawdź kolor czcionki
+                dwf_bib = 0
+                if dn_n and dn_n in drawing_to_row:
+                    dwf_bib = check_blue_font(drawing_to_row[dn_n])
+                
+                # Ilość jako float
+                qty_db = None
+                if src_qty:
+                    if str(src_qty).strip() == "●":
+                        if src_order_qty:
+                            try:
+                                qty_db = float(str(src_order_qty).replace(",", "."))
+                            except:
+                                qty_db = None
+                    else:
+                        try:
+                            qty_db = float(str(src_qty).replace(",", "."))
+                        except:
+                            qty_db = None
+                else:
+                    if src_order_qty:
+                        try:
+                            qty_db = float(str(src_order_qty).replace(",", "."))
+                        except:
+                            qty_db = None
+                
+                # Pomnóż przez mnożnik
+                if qty_db is not None:
+                    qty_db = qty_db * multiplier
+                
+                # Materiał
+                mat_n = norm(src_mat) if src_mat else None
+                
+                # Typ - klasyfikacja
+                typ_cell = norm(src_typ) if src_typ else ""
+                if not typ_cell:
+                    typ_n = infer_type_from_drawing_no(dn_n)
+                else:
+                    typ_n = normalize_type_label(typ_cell)
+                    if typ_n == "UNKNOWN":
+                        typ_n = infer_type_from_drawing_no(dn_n)
+                
+                # SPRAWDŹ CZY JUŻ ISTNIEJE
+                if dn_n and dn_n in existing_items:
+                    # KONFLIKT - automatycznie sumuj dla każdej istniejącej pozycji z tym numerem
+                    existing_list = existing_items[dn_n]
+                    
+                    for existing in existing_list:
+                        # Przygotuj dane do automatycznego sumowania
+                        new_data = {
+                            'drawing_no': src_drawing,
+                            'name': src_name,
+                            'desc': src_desc,
+                            'qty': qty_db,  # Już pomnożone przez mnożnik
+                            'material': src_mat,
+                            'class': typ_n,
+                            'modul': src_modul_val,
+                            'dwf_biblioteka': dwf_bib,
+                            # KORZEŃ: nie sumuj. To złożenie jest już w BOM-ie
+                            # projektu jako pusty węzeł, a w tym pliku występuje
+                            # jako wiersz nr 1 — sumowanie zrobiłoby z jednego
+                            # elewatora dwa. Składniki sumujemy normalnie.
+                            'sum_quantities': not jest_korzeniem,
+                            'modul_merged': scal_moduly(
+                                existing.get('modul'), src_modul_val, qty_db),
+                        }
+                        
+                        # Pobierz pełne dane z bazy (potrzebne dla _auto_accept_conflict)
+                        if has_modul_columns:
+                            existing_full = self.db_manager.project_con.execute(
+                                """
+                                SELECT id,
+                                       COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) AS drawing_no,
+                                       src_name AS name,
+                                       src_desc AS descr,
+                                       COALESCE(work_qty, src_qty) AS qty,
+                                       COALESCE(order_qty, work_qty, src_qty) AS order_qty,
+                                       delivered_qty,
+                                       COALESCE(mat_manual_text, mat_auto_text) AS mat_effective_text,
+                                       COALESCE(class_manual, class_auto) AS class_effective,
+                                       COALESCE(work_modul, src_modul) AS modul,
+                                       notes,
+                                       dwf_biblioteka
+                                FROM items
+                                WHERE id = ?
+                                """,
+                                (existing['id'],)
+                            ).fetchone()
+                            
+                            if existing_full:
+                                _, dn_f, name_f, desc_f, qty_f, order_qty_f, del_qty_f, mat_f, cls_f, mod_f, notes_f, bib_f = existing_full
+                                delta_f = None
+                                try:
+                                    if qty_f is not None and order_qty_f is not None:
+                                        delta_f = int(round(float(order_qty_f) - float(qty_f)))
+                                except:
+                                    delta_f = None
+                                
+                                existing_full_dict = {
+                                    'drawing_no': dn_f,
+                                    'name': name_f,
+                                    'desc': desc_f,
+                                    'qty': qty_f,
+                                    'order_qty': order_qty_f,
+                                    'delivered_qty': del_qty_f,
+                                    'delta': delta_f,
+                                    'material': mat_f,
+                                    'class': cls_f,
+                                    'modul': mod_f,
+                                    'notes': notes_f,
+                                    'dwf_biblioteka': bib_f
+                                }
+                        else:
+                            existing_full = self.db_manager.project_con.execute(
+                                """
+                                SELECT id,
+                                       COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) AS drawing_no,
+                                       src_name AS name,
+                                       src_desc AS descr,
+                                       COALESCE(work_qty, src_qty) AS qty,
+                                       COALESCE(order_qty, work_qty, src_qty) AS order_qty,
+                                       delivered_qty,
+                                       COALESCE(mat_manual_text, mat_auto_text) AS mat_effective_text,
+                                       COALESCE(class_manual, class_auto) AS class_effective,
+                                       notes,
+                                       dwf_biblioteka
+                                FROM items
+                                WHERE id = ?
+                                """,
+                                (existing['id'],)
+                            ).fetchone()
+                            
+                            if existing_full:
+                                _, dn_f, name_f, desc_f, qty_f, order_qty_f, del_qty_f, mat_f, cls_f, notes_f, bib_f = existing_full
+                                delta_f = None
+                                try:
+                                    if qty_f is not None and order_qty_f is not None:
+                                        delta_f = int(round(float(order_qty_f) - float(qty_f)))
+                                except:
+                                    delta_f = None
+                                
+                                existing_full_dict = {
+                                    'drawing_no': dn_f,
+                                    'name': name_f,
+                                    'desc': desc_f,
+                                    'qty': qty_f,
+                                    'order_qty': order_qty_f,
+                                    'delivered_qty': del_qty_f,
+                                    'delta': delta_f,
+                                    'material': mat_f,
+                                    'class': cls_f,
+                                    'modul': None,
+                                    'notes': notes_f,
+                                    'dwf_biblioteka': bib_f
+                                }
+                        
+                        # Automatyczne sumowanie bez dialogu
+                        self._auto_accept_conflict(existing, existing_full_dict, new_data, has_modul_columns)
+                        summed += 1
+                    
+                    # Po obsłudze konfliktów - nie dodawaj nowej pozycji
+                    continue
+                
+                elif not dn_n and name_n and name_n in existing_items_by_name:
+                    # KONFLIKT PO NAZWIE (dla ZNORMALIZOWANE bez numeru)
+                    existing_list = existing_items_by_name[name_n]
+                    
+                    for existing in existing_list:
+                        new_data = {
+                            'drawing_no': src_drawing,
+                            'name': src_name,
+                            'desc': src_desc,
+                            'qty': qty_db,  # Już pomnożone przez mnożnik
+                            'material': src_mat,
+                            'class': typ_n,
+                            'modul': src_modul_val,
+                            'dwf_biblioteka': dwf_bib,
+                            'sum_quantities': not jest_korzeniem,
+                            'modul_merged': scal_moduly(
+                                existing.get('modul'), src_modul_val, qty_db),
+                        }
+                        
+                        # Pobierz pełne dane
+                        if has_modul_columns:
+                            existing_full = self.db_manager.project_con.execute(
+                                """
+                                SELECT id,
+                                       COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) AS drawing_no,
+                                       src_name AS name,
+                                       src_desc AS descr,
+                                       COALESCE(work_qty, src_qty) AS qty,
+                                       COALESCE(order_qty, work_qty, src_qty) AS order_qty,
+                                       delivered_qty,
+                                       COALESCE(mat_manual_text, mat_auto_text) AS mat_effective_text,
+                                       COALESCE(class_manual, class_auto) AS class_effective,
+                                       COALESCE(work_modul, src_modul) AS modul,
+                                       notes,
+                                       dwf_biblioteka
+                                FROM items
+                                WHERE id = ?
+                                """,
+                                (existing['id'],)
+                            ).fetchone()
+                            
+                            if existing_full:
+                                _, dn_f, name_f, desc_f, qty_f, order_qty_f, del_qty_f, mat_f, cls_f, mod_f, notes_f, bib_f = existing_full
+                                delta_f = None
+                                try:
+                                    if qty_f is not None and order_qty_f is not None:
+                                        delta_f = int(round(float(order_qty_f) - float(qty_f)))
+                                except:
+                                    delta_f = None
+                                
+                                existing_full_dict = {
+                                    'drawing_no': dn_f,
+                                    'name': name_f,
+                                    'desc': desc_f,
+                                    'qty': qty_f,
+                                    'order_qty': order_qty_f,
+                                    'delivered_qty': del_qty_f,
+                                    'delta': delta_f,
+                                    'material': mat_f,
+                                    'class': cls_f,
+                                    'modul': mod_f,
+                                    'notes': notes_f,
+                                    'dwf_biblioteka': bib_f
+                                }
+                        else:
+                            existing_full = self.db_manager.project_con.execute(
+                                """
+                                SELECT id,
+                                       COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) AS drawing_no,
+                                       src_name AS name,
+                                       src_desc AS descr,
+                                       COALESCE(work_qty, src_qty) AS qty,
+                                       COALESCE(order_qty, work_qty, src_qty) AS order_qty,
+                                       delivered_qty,
+                                       COALESCE(mat_manual_text, mat_auto_text) AS mat_effective_text,
+                                       COALESCE(class_manual, class_auto) AS class_effective,
+                                       notes,
+                                       dwf_biblioteka
+                                FROM items
+                                WHERE id = ?
+                                """,
+                                (existing['id'],)
+                            ).fetchone()
+                            
+                            if existing_full:
+                                _, dn_f, name_f, desc_f, qty_f, order_qty_f, del_qty_f, mat_f, cls_f, notes_f, bib_f = existing_full
+                                delta_f = None
+                                try:
+                                    if qty_f is not None and order_qty_f is not None:
+                                        delta_f = int(round(float(order_qty_f) - float(qty_f)))
+                                except:
+                                    delta_f = None
+                                
+                                existing_full_dict = {
+                                    'drawing_no': dn_f,
+                                    'name': name_f,
+                                    'desc': desc_f,
+                                    'qty': qty_f,
+                                    'order_qty': order_qty_f,
+                                    'delivered_qty': del_qty_f,
+                                    'delta': delta_f,
+                                    'material': mat_f,
+                                    'class': cls_f,
+                                    'modul': None,
+                                    'notes': notes_f,
+                                    'dwf_biblioteka': bib_f
+                                }
+                        
+                        self._auto_accept_conflict(existing, existing_full_dict, new_data, has_modul_columns)
+                        if jest_korzeniem:
+                            korzen_zachowany += 1
+                            print(f"   🧩 {src_drawing}: korzen - ilosc zostawiona bez sumowania")
+                        else:
+                            summed += 1
+                    
+                    continue
+                
+                # NOWA POZYCJA - dodaj do bazy
+                # Znajdź supplier_id
+                supplier_id_val = None
+                sup_norm = norm(src_sup) if src_sup else None
+                if sup_norm:
+                    try:
+                        _w = self.db_manager.master_read(
+                            "supplier-po-normalizacji", {"name_normalized": sup_norm})
+                        row = (_w[0]["id"],) if _w else None
+                        if row:
+                            supplier_id_val = row[0]
+                    except:
+                        pass
+                
+                # Uwagi
+                uwagi_val = str(src_uwagi).strip() if src_uwagi else None
+
+                # Moduł nowej pozycji też w formacie „MODUŁ(ilość)" — inaczej
+                # składniki miałyby samo „820", a pozycje istniejące już
+                # „820(5)", i kolumna byłaby niespójna.
+                modul_nowy = scal_moduly("", src_modul_val, qty_db) or src_modul_val
+                
+                # INSERT
+                if has_modul_columns:
+                    self.db_manager.project_con.execute(
+                        """
+                        INSERT INTO items (
+                            project_id, src_drawing_no, src_name, src_desc,
+                            src_qty, order_qty, mat_auto_text, supplier_id,
+                            class_auto, src_modul, dwf_biblioteka, notes, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                        """,
+                        (self.current_project_id, dn_db, src_name, src_desc, qty_db, qty_db,
+                         mat_n, supplier_id_val, typ_n, modul_nowy, dwf_bib, uwagi_val)
+                    )
+                else:
+                    self.db_manager.project_con.execute(
+                        """
+                        INSERT INTO items (
+                            project_id, src_drawing_no, src_name, src_desc,
+                            src_qty, order_qty, mat_auto_text, supplier_id,
+                            class_auto, dwf_biblioteka, notes, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                        """,
+                        (self.current_project_id, dn_db, src_name, src_desc, qty_db, qty_db,
+                         mat_n, supplier_id_val, typ_n, dwf_bib, uwagi_val)
+                    )
+                
+                # Log
+                cursor = self.db_manager.project_con.execute("SELECT last_insert_rowid()")
+                new_item_id = cursor.fetchone()[0]
+                import_desc = f"{dn_db or '(brak nr)'} - {name_n}"
+                self._log_item_change(new_item_id, 'IMPORT', 'menu_doklej_zlozenie', None, import_desc)
+                
+                imported += 1
+                
+                if (imported + summed) % 20 == 0:
+                    print(f"   Dodano nowych: {imported}, zsumowano: {summed}...")
+            
+            # COMMIT
+            print(f"\\n💾 Wykonuję commit...")
+            self.db_manager.project_con.commit()
+            print(f"✅ Commit zakończony!")
+            
+            # Statystyki
+            print(f"\\n✅ DOKLEJ ZŁOŻENIE zakończony:")
+            print(f"   Dodano nowych: {imported}")
+            print(f"   Zsumowano istniejących: {summed}")
+            print(f"   Korzeń bez sumowania: {korzen_zachowany} ({korzen_nr})")
+            print(f"   Mnożnik: {multiplier}x")
+            
+            # Odśwież dane w arkuszu
+            self.refresh_data()
+            
+            # Pokaż wynik
+            messagebox.showinfo(
+                "✅ Doklej złożenie - Sukces",
+                f"Import zakończony!\\n\\n"
+                f"Dodano nowych pozycji: {imported}\\n"
+                f"Zsumowano istniejących: {summed}\\n"
+                f"Korzeń {korzen_nr} - ilość bez zmian\\n"
+                f"Mnożnik: {multiplier}x\\n\\n"
+                f"Projekt: {project_name}\\n"
+                f"Plik: {excel_path.name}"
+            )
+            
+        except Exception as e:
+            error_msg = str(e)
+            
+            if "PatternFill" in error_msg or "extLst" in error_msg or "Nie udało się otworzyć pliku Excel" in error_msg:
+                messagebox.showerror(
+                    "Błąd formatowania Excel", 
+                    f"Błąd importu - problem z formatowaniem pliku Excel:\\n\\n{error_msg}\\n\\n"
+                    "💡 ROZWIĄZANIE:\\n"
+                    "Plik został prawdopodobnie edytowany w programie innym niż Microsoft Excel (np. PlanMaker, LibreOffice).\\n\\n"
+                    "Aby naprawić:\\n"
+                    "1. Otwórz plik w Microsoft Excel\\n"
+                    "2. Zapisz ponownie (Ctrl+S)\\n"
+                    "3. Spróbuj zaimportować jeszcze raz\\n\\n"
+                    "LUB skopiuj dane do nowego pliku Excel."
+                )
+            else:
+                messagebox.showerror("Błąd importu", f"Nie udało się zaimportować:\\n\\n{e}")
+            
+            import traceback
+            traceback.print_exc()
+            
+            # Rollback
+            try:
+                self.db_manager.project_con.rollback()
+                print("⚠️  Rollback wykonany")
+            except:
+                pass
+        
+        finally:
+            # Zamknij workbook
+            if wb_colors is not None:
+                try:
+                    wb_colors.close()
+                    print("📕 Workbook zamknięty - plik Excel zwolniony")
+                except Exception as close_err:
+                    print(f"⚠️  Błąd zamykania workbooka: {close_err}")
+
     # ========================================================================
     # KONIEC MODUŁU DODAJ BOM
     # ========================================================================
