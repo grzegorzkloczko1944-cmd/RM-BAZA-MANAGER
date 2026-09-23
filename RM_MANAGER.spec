@@ -16,7 +16,17 @@ hiddenimports += ['rm_klient', 'lock_manager_serwer', 'lock_manager_v2',
                   'rm_serwer_operacje',
                   # Logowanie do udzialu kontem technicznym — bez tego user
                   # bez praw sieciowych dostaje okno o poswiadczenia.
-                  'udzial_serwera']
+                  'udzial_serwera',
+                  # ── dolozone 23.09.2026 (audyt AST, ta sama pulapka) ──────
+                  # `rm_optimizer` wchodzi leniwie (rm_manager_gui.py:28371
+                  # i 28515) — jest w datas, wiec .py lezy obok .exe, ale bez
+                  # wpisu w hiddenimports PyInstaller nie widzi jego wlasnych
+                  # zaleznosci.
+                  'rm_optimizer',
+                  # bramka wersji — rm_manager_gui.py:1499, import w funkcji
+                  'client_version',
+                  # `requests` wchodzi TYLKO przez rm_manager.py:7812, leniwie
+                  'requests']
 tmp_ret = collect_all('anthropic')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('plotly')

@@ -92,6 +92,22 @@ hiddenimports += [
     'subiekt_wydane_do_arkusza',
     # warstwa danych i miniatury DWF
     'database_manager', 'import_bom', 'dwf_thumb',
+
+    # ── dolozone 23.09.2026 (audyt AST w domu, po poprawce z firmy) ─────────
+    # `subiekt_schowek` to warstwa danych schowka montazowego: wchodzi leniwie
+    # z `subiekt_schowek_gui` (linia 40, `import subiekt_schowek as SCH`).
+    # Do .spec trafily GUI i BOM schowka, ale nie on sam — kafel „Schowek"
+    # wywalilby ModuleNotFoundError u usera.
+    'subiekt_schowek',
+    # ⚠️ `schedule` CELOWO POMINIETY: nie jest zainstalowany w srodowisku
+    # (sprawdzone 23.09.2026), a w backup_manager.py:1029 siedzi w try/except
+    # jako zaleznosc OPCJONALNA — funkcja schedule_daily_backups() i tak nie
+    # dziala. Wpisanie go tutaj WYWALILOBY build („module not found").
+    # Gdyby kiedys doszedl harmonogram kopii: najpierw `pip install schedule`,
+    # potem wpis.
+    # `pandas` — RM_BAZA_v15_MAG_STATS_ORG.py:17051, import wewnatrz funkcji.
+    # `psutil` — linia 234, tez leniwie (kontrola procesow przy starcie).
+    'pandas', 'psutil',
 ]
 
 # Zrodla modulow leniwych obok .exe — jak pozostale w datas wyzej.
