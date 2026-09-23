@@ -128,10 +128,11 @@
 - [Okno wydania RW (magazynier)](project_okno_wydania_rw.md) — nowe okno OBOK starego skanera, kompatybilność wsteczna wymagana
 - [Symbole ze spacją](project_symbole_ze_spacja.md) — `6212 2RS`, `DIN 933 M8x30`; NIGDY nie ciąć kodu na pierwszej spacji
 - [Środowisko domowe M-OLD](project_srodowisko_domowe_m_old.md) — udawany udział W2019S, BackConnectionHostNames, kolejność startu
+- [sync_config.json zeruje się przy ubiciu](project_sync_config_zerowanie.md) — open(w) obcina plik przed zapisem, 9 miejsc; po odtworzeniu wraca FIRMOWY adres serwera; fix = os.replace
 - [Bez limitu Take() na dokumentach](project_bez_limitu_take_dokumenty.md) — limit odcina starsze dokumenty projektu, ciche podwojne ZK/wydania
 - [Odcięcie od Y: — mapowania](project_odciecie_od_y_mapowania.md) — mapowania już przez RM_SERWER (14.09.2026); zostało wdrożenie serwera w firmie PRZED buildem .exe; po pull w domu restart rm_serwer.py
 - [Bazy tylko przez kod, nigdy wprost](feedback_no_direct_db_edits.md) — nie edytować plików SQLite w RM_BAZY; zmiany schematu/danych wyłącznie jako migracje w kodzie
 - [RM_MANAGER: lokalna kopia baz](project_local_copy_rm_manager.md) — pracuje na kopii per-projekt; płatności i kody PLC MUSZĄ zostać bezpośrednio na Y:
 - [Drugi OUT uzupełnia drzewo](project_drugi_out_uzupelnia_drzewo.md) — mechanizm JUŻ działa (wszystkie OUT-y z folderu sklejane po nr rysunku), ilości mnożą się same; cena: obce OUT-y zaśmiecają okno Decyzje
-- [TODO: ostrzeżenie o kolizji rodzica w OUT](project_todo_ostrzezenie_kolizja_rodzica_out.md) — dwa OUT-y z różnym składem tego samego rodzica = cicha hybryda; fix ~15 linii w read_tree
+- [Kolizja rodzica w OUT — ostrzeżenie ZROBIONE](project_todo_ostrzezenie_kolizja_rodzica_out.md) — read_tree wykrywa różny skład tego samego złożenia w dwóch plikach i mówi, która ilość wygrała
 - [Doklej złożenie z OUT — WDROŻONE](project_doklej_zlozenie_z_out.md) — menu Plik; korzeń NIE sumowany, składniki tak, moduł MODUŁ(ilość); flaga sum_quantities per wiersz

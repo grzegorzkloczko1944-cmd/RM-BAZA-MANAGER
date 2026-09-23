@@ -506,6 +506,14 @@ def read_tree(project_name):
     # o pozycjach z obcym prefiksem wyglądają wtedy na błąd RM_BAZA
     # (zgłoszone 10.09.2026: „ostrzeżenia wyskakują z obcego projektu").
     zrodla = {}
+    # Kto wniosl danego rodzica — {RODZIC: nazwa pliku}. Bez tego rozjazd
+    # miedzy plikami przechodzil PO CICHU: przy tym samym numerze dziecka
+    # wygrywa wpis dopisany PIERWSZY (patrz nizej), a o kolejnosci decyduje
+    # alfabet nazw plikow (`sorted(glob)` w find_out_files). Dwa pliki
+    # opisujace ten sam wezel innym skladem dawaly wiec HYBRYDE: sume obu
+    # list, czyli sklad, ktorego nie ma w ZADNYM pliku — i nikt tego nie widzial.
+    skad = {}
+    rozjazdy = []          # komunikaty dla usera, skladane na koncu w `warn`
     for out_path in find_out_files(folder):
         rows = find_assembly_tree_rows(out_path)
         if not rows:
@@ -529,8 +537,29 @@ def read_tree(project_name):
             # z którego okno może ją wziąć (w BOM-ie ich nie ma).
             nazwy.setdefault(child.upper(), (row.get("nazwa") or "").strip())
             kids.setdefault(parent, [])
-            if not any(c[0].upper() == child.upper() for c in kids[parent]):
+            skad.setdefault(parent, out_path.name)
+            istnieje = next((c for c in kids[parent]
+                             if c[0].upper() == child.upper()), None)
+            if istnieje is None:
                 kids[parent].append((child, qty))
+                # Rodzic obsadzony przez INNY plik, a ten dokłada mu dziecko,
+                # którego tamten nie znał — składy się różnią.
+                if skad[parent] != out_path.name:
+                    rozjazdy.append(
+                        f"{parent}: „{child}” jest w {out_path.name}, "
+                        f"ale nie ma go w {skad[parent]}")
+            elif skad[parent] != out_path.name:
+                # To samo dziecko w obu plikach, ale w INNEJ ilości —
+                # zostaje ta z pliku przeczytanego wcześniej.
+                try:
+                    rozne = abs(float(istnieje[1]) - float(qty)) > 1e-9
+                except (TypeError, ValueError):
+                    rozne = str(istnieje[1]) != str(qty)
+                if rozne:
+                    rozjazdy.append(
+                        f"{parent}/{child}: {skad[parent]} podaje "
+                        f"{istnieje[1]}, {out_path.name} podaje {qty} "
+                        f"— zostaje {istnieje[1]}")
 
         zrodla[out_path.name] = len(kids) - przed
 
@@ -543,6 +572,23 @@ def read_tree(project_name):
     if len(zrodla) > 1:
         opis = ", ".join(f"{nazwa} ({ile})" for nazwa, ile in zrodla.items())
         print(f"📄 Drzewko „{project_name}” z {len(zrodla)} plików: {opis}")
+
+    # Rozjazd miedzy plikami MUSI byc widoczny przed zapisem: sklejony sklad
+    # nie odpowiada wtedy zadnemu z plikow, a komplet w Subiekcie powstalby
+    # z hybrydy. Pokazujemy pierwsze pozycje — przy dlugiej liscie reszta
+    # i tak nie zmienia decyzji, a okno musi pozostac czytelne.
+    if rozjazdy:
+        for r in rozjazdy:
+            print(f"⚠️  Rozjazd drzewek: {r}")
+        ile = len(rozjazdy)
+        pokaz = rozjazdy[:5]
+        if ile > len(pokaz):
+            pokaz.append(f"… i {ile - len(pokaz)} więcej (szczegóły w konsoli)")
+        warn_rozjazd = ("Pliki *_OUT.xlsx w folderze projektu podają RÓŻNY skład "
+                        "tego samego złożenia:\n  • " + "\n  • ".join(pokaz) +
+                        "\n\nSkład sklejono z obu plików — sprawdź, czy któryś "
+                        "nie jest starą wersją.")
+        return kids, warn_rozjazd, nazwy
 
     return kids, None, nazwy
 

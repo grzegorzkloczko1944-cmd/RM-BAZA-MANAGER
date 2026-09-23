@@ -1,12 +1,13 @@
 ---
 name: project_todo_ostrzezenie_kolizja_rodzica_out
-description: "DO ZROBIENIA: read_tree milczy, gdy dwa pliki OUT podaja rozny sklad tego samego rodzica — dopisac wykrywanie rozjazdu i ostrzezenie do warn (~15 linii)"
+description: "ZROBIONE 24.09.2026: read_tree ostrzega, gdy dwa pliki OUT podaja rozny sklad tego samego rodzica — dopisac wykrywanie rozjazdu i ostrzezenie do warn (~15 linii)"
 metadata:
   node_type: memory
   type: project
 ---
 
-**Zadanie ustalone 23.09.2026. Kodu NIE MA — ponizej gotowy plan.**
+**✅ ZROBIONE 24.09.2026** (wariant minimalny — wykryj i ostrzez).
+Ponizej opis problemu i co dokladnie zaimplementowano.
 Nie pilne: dzisiejsze dane (projekt 2637 + dwa OUT-y elewatorow) kolizji
 NIE MAJA. Uderzy, gdy biblioteka dostanie zagniezdzone zlozenia.
 
@@ -53,6 +54,28 @@ i zdecyduje ([[feedback_nic_po_cichu]]).
 
 **Koszt:** ~15 linii. **Ryzyko regresji: zerowe** — dane bez kolizji
 przechodza identycznie.
+
+
+## Jak zaimplementowano (24.09.2026)
+
+W `read_tree` doszly dwa slowniki: `skad = {RODZIC: nazwa pliku}` i lista
+`rozjazdy`. Przy dopisywaniu dziecka do rodzica obsadzonego juz z INNEGO
+pliku sprawdzany jest sklad:
+
+- dziecko, ktorego tamten plik nie znal → „jest w X, ale nie ma go w Y";
+- to samo dziecko w INNEJ ilosci → „X podaje 5, Y podaje 99 — zostaje 5"
+  (jawnie mowimy, ktora wartosc wygrala).
+
+Zgodne sklady → cisza. Rozjazd → komunikat leci do `warn` (widoczny
+w oknie PRZED zapisem) i pelna lista do konsoli; w oknie pierwsze 5 pozycji
+plus „… i N wiecej".
+
+### Test
+
+| przypadek | wynik |
+|---|---|
+| prawdziwy projekt 2637 (4 pliki OUT) | `warn = None` — zero falszywych alarmow |
+| sztuczna kolizja (kopia OUT-a, ilosc 5 → 99) | wykryta, z nazwami plikow i zwyciezca |
 
 ## Warianty odrzucone (nie wracac)
 
