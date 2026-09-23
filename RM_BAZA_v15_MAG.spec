@@ -78,6 +78,20 @@ hiddenimports += [
     'client_version',
     # zewnetrzne wchodzace tylko przez powyzsze (importy dynamiczne)
     'requests', 'win32com', 'win32com.client', 'pythoncom', 'pywintypes',
+
+    # ── dolozone 23.09.2026 (wyliczone z AST, jak opisuje naglowek) ──────────
+    # Okna faktur KSeF i przyjecia dostawy powstaly 17-18.09 i NIE BYLY tu
+    # wpisane: build przechodzil, .exe startowalo, a kafle „Faktury z KSeF"
+    # i „Przyjecie dostawy" wywalalyby ModuleNotFoundError U USERA. Dokladnie
+    # ta sama pulapka co 07.09 — patrz naglowek tej sekcji.
+    'ksef_faktury_gui', 'ksef_kartoteki', 'subiekt_dostawa_gui',
+    # polprodukty, schowek BOM i sklejanie duplikatow — tez importowane
+    # leniwie, tez nieobecne w liscie
+    'subiekt_polprodukt_bom', 'subiekt_polprodukt_gui', 'subiekt_polprodukt_rozsyl',
+    'subiekt_schowek_bom', 'subiekt_schowek_gui', 'subiekt_sklej_duplikaty',
+    'subiekt_wydane_do_arkusza',
+    # warstwa danych i miniatury DWF
+    'database_manager', 'import_bom', 'dwf_thumb',
 ]
 
 # Zrodla modulow leniwych obok .exe — jak pozostale w datas wyzej.
