@@ -926,13 +926,27 @@ class MainWindow(tk.Tk):
         menubar = tk.Menu(self)
         
         # Menu Plik
+        #
+        # Sześć funkcji importu robi SZEŚĆ różnych rzeczy, a z samej nazwy nie
+        # widać których — „Import BOM" kasuje cały projekt, „Dodaj BOM" sumuje
+        # ilości, „Aktualizuj BOM" je zastępuje. Pomyłka kosztuje projekt albo
+        # daje ciche podwojenie, dlatego przy każdej pozycji stoi krótki opis
+        # (accelerator = szara kolumna po prawej), a pełne porównanie siedzi
+        # w „❓ Którą funkcję wybrać?" na końcu grupy.
         self.filem = tk.Menu(menubar, tearoff=0)
-        self.filem.add_command(label="Import BOM…", command=self.menu_import_bom, state='disabled')
-        self.filem.add_command(label="Aktualizuj BOM…", command=self.menu_aktualizuj_bom, state='disabled')
-        self.filem.add_command(label="Dodaj BOM…", command=self.menu_dodaj_bom, state='disabled')
-        self.filem.add_command(label="Doklej złożenie z OUT…", command=self.menu_doklej_zlozenie, state='disabled')
-        self.filem.add_command(label="Import moduł…", command=self.menu_import_modul, state='disabled')
-        self.filem.add_command(label="Aktualizuj ilości…", command=self.menu_aktualizuj_ilosci, state='disabled')
+        self.filem.add_command(label="Import BOM…", command=self.menu_import_bom, state='disabled',
+                               accelerator="   ⛔ KASUJE projekt, wgrywa od zera")
+        self.filem.add_command(label="Aktualizuj BOM…", command=self.menu_aktualizuj_bom, state='disabled',
+                               accelerator="   dokłada, przy konflikcie PYTA (ilość z pliku)")
+        self.filem.add_command(label="Dodaj BOM…", command=self.menu_dodaj_bom, state='disabled',
+                               accelerator="   dokłada, SUMUJE ilości bez pytania")
+        self.filem.add_command(label="Doklej złożenie z OUT…", command=self.menu_doklej_zlozenie, state='disabled',
+                               accelerator="   poddrzewo z biblioteki, korzeń bez sumowania")
+        self.filem.add_command(label="Import moduł…", command=self.menu_import_modul, state='disabled',
+                               accelerator="   tylko projekty MAGAZYNOWE")
+        self.filem.add_command(label="Aktualizuj ilości…", command=self.menu_aktualizuj_ilosci, state='disabled',
+                               accelerator="   TYLKO ilości, reszta pól nietknięta")
+        self.filem.add_command(label="❓ Którą funkcję wybrać?", command=self.menu_pomoc_importy)
         self.filem.add_separator()
         self.filem.add_command(label="Odśwież", command=self.refresh_data_with_rfq)
         self.filem.add_separator()
@@ -16545,6 +16559,80 @@ class MainWindow(tk.Tk):
                 f"Kontynuować mimo to?",
                 icon='warning'
             )
+
+    def menu_pomoc_importy(self):
+        """Sciaga: ktora funkcja importu co robi.
+
+        Szesc pozycji w menu Plik rozni sie tym, co dzieje sie z pozycjami,
+        ktore JUZ sa w projekcie - a tego z nazwy nie widac. Najgrozniejsza
+        para to "Dodaj BOM" (sumuje) i "Aktualizuj BOM" (zastepuje): obie
+        wygladaja niewinnie, a daja inny wynik na tych samych danych.
+        """
+        okno = tk.Toplevel(self)
+        okno.title("Ktora funkcje importu wybrac?")
+        okno.configure(bg="#f0f0f0")
+        okno.transient(self)
+
+        tk.Label(okno, text="Którą funkcję importu wybrać?", font=("Arial", 13, "bold"),
+                 bg="#f0f0f0").pack(anchor="w", padx=16, pady=(14, 2))
+        tk.Label(okno, text="Każda robi kopię zapasową przed startem i wymaga locka projektu.",
+                 font=("Arial", 9), fg="#555", bg="#f0f0f0").pack(anchor="w", padx=16, pady=(0, 10))
+
+        NL = chr(10)
+        pozycje = [
+            ("Import BOM…", "#c0392b",
+             "Pierwsze wgranie projektu albo świadome wgranie od zera.",
+             "⛔ KASUJE WSZYSTKIE pozycje projektu, potem wgrywa plik." + NL +
+             "Ręczne poprawki, ukryte pozycje i ceny PRZEPADAJĄ."),
+            ("Aktualizuj BOM…", "#2c3e50",
+             "Przyszła nowa wersja tego samego BOM-u.",
+             "Dokłada nowe pozycje. Przy numerze, który już jest, pokazuje okno" + NL +
+             "porównania — decydujesz sam. Ilość BIERZE Z PLIKU (nie sumuje)."),
+            ("Dodaj BOM…", "#2c3e50",
+             "Dokładasz drugą maszynę albo kolejny egzemplarz tego samego.",
+             "Dokłada nowe pozycje. Przy numerze, który już jest, SUMUJE ilości" + NL +
+             "bez pytania (5 + 5 = 10). Pyta o mnożnik na starcie."),
+            ("Doklej złożenie z OUT…", "#1e7e34",
+             "Złożenie z biblioteki jest w projekcie PUSTE, a jego rozwinięcie siedzi" + NL +
+             "w osobnym pliku *_OUT.xlsx.",
+             "Jak „Dodaj BOM”, ale KORZENIA złożenia nie sumuje — zostaje tyle" + NL +
+             "sztuk, ile już jest w projekcie (inaczej 1 + 1 = 2 elewatory)." + NL +
+             "Moduł zapisuje jako MODUŁ(ilość)."),
+            ("Import moduł…", "#7f8c8d",
+             "Projekt MAGAZYNOWY (w produkcyjnym pozycja jest szara).",
+             "Dokłada moduł do projektu magazynowego; przy konflikcie pyta."),
+            ("Aktualizuj ilości…", "#2c3e50",
+             "Zmieniły się same ilości — nic poza nimi.",
+             "Rusza WYŁĄCZNIE „Ilość BOM” i „Ilość (zam.)”. Nazwy, materiały," + NL +
+             "moduły, dostawcy i dostawy zostają nietknięte."),
+        ]
+
+        for nazwa, kolor, kiedy, co in pozycje:
+            ramka = tk.Frame(okno, bg="#ffffff", relief=tk.GROOVE, bd=1)
+            ramka.pack(fill=tk.X, padx=16, pady=4)
+            tk.Label(ramka, text=nazwa, font=("Arial", 11, "bold"), fg=kolor,
+                     bg="#ffffff").pack(anchor="w", padx=10, pady=(7, 0))
+            tk.Label(ramka, text="KIEDY:  " + kiedy, font=("Arial", 9), fg="#333",
+                     bg="#ffffff", justify="left").pack(anchor="w", padx=10)
+            tk.Label(ramka, text=co, font=("Consolas", 9), fg="#000",
+                     bg="#ffffff", justify="left").pack(anchor="w", padx=10, pady=(2, 8))
+
+        tk.Label(okno, text="Nie masz pewności? Kopia sprzed importu leży w backupach —" + NL +
+                            "poza „Import BOM”, który kasuje od razu.",
+                 font=("Arial", 9), fg="#555", bg="#f0f0f0",
+                 justify="left").pack(anchor="w", padx=16, pady=(8, 4))
+
+        tk.Button(okno, text="Zamknij", command=okno.destroy, width=14,
+                  bg="#7f8c8d", fg="white", font=("Arial", 10, "bold")).pack(pady=(4, 14))
+
+        okno.update_idletasks()
+        try:
+            # Centrowanie liczone z granic WIRTUALNEGO pulpitu — przy trzech
+            # monitorach współrzędne bywają ujemne i okno lądowało poza ekranem.
+            from subiekt_stany import wysrodkuj
+            wysrodkuj(okno, self)
+        except Exception:
+            pass
 
     def menu_import_bom(self):
         """
