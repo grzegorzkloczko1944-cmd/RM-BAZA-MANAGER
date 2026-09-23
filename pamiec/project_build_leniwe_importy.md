@@ -51,3 +51,60 @@ o parametrach.
 **How to apply:** Po każdej zmianie w oknach Subiekta i przed rozesłaniem `.exe`
 sprawdzić punkt 2 — obecność modułów w archiwum. Patrz
 [[project_exe_persistent_paths]], [[project_subiekt_karta_pozycji]].
+
+---
+
+## Stan po audycie 23.09.2026 — WSZYSTKIE `.spec` domknięte
+
+Pułapka wróciła po raz trzeci, bo okna z 17–18.09 nie zostały dopisane.
+Naprawione w dwóch krokach, oba na `main`:
+
+| commit | gdzie | co |
+|---|---|---|
+| `7ba48ff` (firma) | `RM_BAZA_v15_MAG.spec` | 13 modułów: `ksef_faktury_gui`, `ksef_kartoteki`, `subiekt_dostawa_gui`, półprodukty (3), schowek GUI+BOM, `subiekt_sklej_duplikaty`, `subiekt_wydane_do_arkusza`, `database_manager`, `import_bom`, `dwf_thumb` |
+| `b145036` (dom) | `RM_BAZA_v15_MAG.spec` + **`RM_MANAGER.spec`** | 5 modułów przeoczonych wyżej |
+
+Dom dołożył:
+* **`subiekt_schowek`** — warstwa danych schowka. Do `.spec` trafiły
+  `subiekt_schowek_gui` i `subiekt_schowek_bom`, ale nie moduł, z którego
+  OBA korzystają (`subiekt_schowek_gui:40`). Kafel „Schowek" padłby u usera.
+* **`pandas`** (linia 17051), **`psutil`** (linia 234) — leniwe w RM_BAZA.
+* **`RM_MANAGER.spec`**, nietknięty od 16.09, miał tę samą dziurę:
+  `rm_optimizer` (`rm_manager_gui:28371, 28515`), `client_version` (`:1499`),
+  `requests` (`rm_manager.py:7812`).
+
+**Audyt wszystkich pięciu `.spec` jest teraz czysty.** `RM_KOD.spec`
+i oba `RM_Tray_Organizer.spec` nie mają leniwych importów.
+
+### ⚠️ `schedule` — NIE dopisywać, mimo że audyt go wskazuje
+
+`backup_manager.py:1029` importuje `schedule` w `try/except` jako zależność
+**opcjonalną**, a pakiet NIE JEST zainstalowany. Wpis w `.spec` wywali build
+(„module not found"). Gdyby kiedyś doszedł harmonogram kopii: najpierw
+`pip install schedule`, potem wpis. Powód siedzi też w komentarzu w `.spec`.
+
+### `datas` ze źródłami `.py` — NIE jest wymagane
+
+30 modułów jest w `hiddenimports` BEZ wpisu w `datas` i działa (m.in.
+`material_calculator`, `rm_klient`, `lock_manager_serwer`). Sprawdzone:
+nic w kodzie nie ładuje modułów z pliku (`spec_from_file_location`, `exec`,
+`SourceFileLoader` — zero trafień), więc `hiddenimports` wystarcza.
+Nie dopisywać źródeł „dla symetrii".
+
+### Fałszywe alarmy audytu — nie dopisywać
+
+Skrypt zgłasza też moduły, które PyInstaller widzi sam:
+moduł **wejściowy** `.spec`, oraz importy **top-level** (`backup_manager`
+w RM_BAZA, `rm_manager` w RM_MANAGER). Każde zgłoszenie weryfikować
+`grep -n "import X"` — z 9 kandydatów realnych było 5.
+
+### Skrypt audytu: `audyt_spec.py`
+
+```
+python audyt_spec.py
+```
+
+Przechodzi wszystkie `.spec` w repo, dla każdego znajduje moduł wejściowy
+(obsługuje `.py` i `.pyw`), liczy domknięcie leniwych importów przez AST
+i wypisuje, czego brakuje. Uruchomić **po dołożeniu każdego nowego okna**
+i przed budowaniem `.exe` do rozesłania.
