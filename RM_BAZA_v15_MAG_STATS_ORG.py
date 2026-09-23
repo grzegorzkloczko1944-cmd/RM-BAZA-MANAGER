@@ -34425,19 +34425,25 @@ class MainWindow(tk.Tk):
 
         # Projekty
         tk.Label(fields_frame, text="Folder projektów:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=2, column=0, sticky="w", pady=8)
-        e_projects = tk.Entry(fields_frame, width=50, font=("Arial", 9))
+        e_projects = tk.Entry(fields_frame, width=50, font=("Arial", 9),
+                            disabledbackground="#e4e7e9", disabledforeground="#4a4a4a")
         e_projects.insert(0, current_projects)
         e_projects.grid(row=2, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_projects, "Folder projektów")).grid(row=2, column=2, pady=8)
-        _opis(3, "⬅ TO POLE DZIAŁA. Bazy project_6.sqlite itd.  (\\\\W2019S\\RM_SERWER$\\RM_BAZA_projects)", True)
+        e_projects.configure(state="disabled")
+        tk.Button(fields_frame, text="📁", width=3, state="disabled",
+                  command=lambda: browse_dir(e_projects, "Folder projektów")).grid(row=2, column=2, pady=8)
+        _opis(3, "Ustawiane automatycznie — bazy project_6.sqlite itd. na udziale serwera.")
 
         # Projekty magazynowe
         tk.Label(fields_frame, text="Folder proj. magazynowych:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=4, column=0, sticky="w", pady=8)
-        e_projects_mag = tk.Entry(fields_frame, width=50, font=("Arial", 9))
+        e_projects_mag = tk.Entry(fields_frame, width=50, font=("Arial", 9),
+                            disabledbackground="#e4e7e9", disabledforeground="#4a4a4a")
         e_projects_mag.insert(0, current_projects_mag)
         e_projects_mag.grid(row=4, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_projects_mag, "Folder projektów magazynowych")).grid(row=4, column=2, pady=8)
-        _opis(5, "⬅ TO POLE DZIAŁA. Bazy project_MAG_10.sqlite itd. — leżą w tym samym katalogu co zwykłe.", True)
+        e_projects_mag.configure(state="disabled")
+        tk.Button(fields_frame, text="📁", width=3, state="disabled",
+                  command=lambda: browse_dir(e_projects_mag, "Folder projektów magazynowych")).grid(row=4, column=2, pady=8)
+        _opis(5, "Ustawiane automatycznie — ten sam katalog co projekty zwykłe.")
 
         # Serwer projekty
         current_server = paths.get("server_dir", DEFAULT_SERVER_DIR)
@@ -34450,27 +34456,36 @@ class MainWindow(tk.Tk):
 
         # Lokalny
         tk.Label(fields_frame, text="Folder lokalny:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=8, column=0, sticky="w", pady=8)
-        e_local = tk.Entry(fields_frame, width=50, font=("Arial", 9))
+        e_local = tk.Entry(fields_frame, width=50, font=("Arial", 9),
+                            disabledbackground="#e4e7e9", disabledforeground="#4a4a4a")
         e_local.insert(0, current_local)
         e_local.grid(row=8, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_local, "Folder lokalny")).grid(row=8, column=2, pady=8)
-        _opis(9, "⬅ TO POLE DZIAŁA. Tu leży sync_config.json i kopie robocze projektów.", True)
+        e_local.configure(state="disabled")
+        tk.Button(fields_frame, text="📁", width=3, state="disabled",
+                  command=lambda: browse_dir(e_local, "Folder lokalny")).grid(row=8, column=2, pady=8)
+        _opis(9, "Ustawiane automatycznie — tu leży sync_config.json i kopie robocze projektów.")
 
         # Locki
         tk.Label(fields_frame, text="Folder locków:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=10, column=0, sticky="w", pady=8)
-        e_locks = tk.Entry(fields_frame, width=50, font=("Arial", 9))
+        e_locks = tk.Entry(fields_frame, width=50, font=("Arial", 9),
+                            disabledbackground="#e4e7e9", disabledforeground="#4a4a4a")
         e_locks.insert(0, current_locks)
         e_locks.grid(row=10, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_locks, "Folder locków")).grid(row=10, column=2, pady=8)
+        e_locks.configure(state="disabled")
+        tk.Button(fields_frame, text="📁", width=3, state="disabled",
+                  command=lambda: browse_dir(e_locks, "Folder locków")).grid(row=10, column=2, pady=8)
         _opis(11, "NIEUŻYWANE — blokady projektów pilnuje RM_SERWER, nie pliki .lock. Pole bez wpływu na działanie.")
 
         # Backupy
         tk.Label(fields_frame, text="Folder backupów:", font=("Arial", 10, "bold"), bg="#f0f0f0").grid(row=12, column=0, sticky="w", pady=8)
-        e_backup = tk.Entry(fields_frame, width=50, font=("Arial", 9))
+        e_backup = tk.Entry(fields_frame, width=50, font=("Arial", 9),
+                            disabledbackground="#e4e7e9", disabledforeground="#4a4a4a")
         e_backup.insert(0, current_backup)
         e_backup.grid(row=12, column=1, sticky="ew", padx=5, pady=8)
-        tk.Button(fields_frame, text="📁", width=3, command=lambda: browse_dir(e_backup, "Folder backupów")).grid(row=12, column=2, pady=8)
-        _opis(13, "⬅ TO POLE DZIAŁA. Codzienne backupy projektów  (\\\\W2019S\\RM_SERWER$\\backup_RM_BAZA)", True)
+        e_backup.configure(state="disabled")
+        tk.Button(fields_frame, text="📁", width=3, state="disabled",
+                  command=lambda: browse_dir(e_backup, "Folder backupów")).grid(row=12, column=2, pady=8)
+        _opis(13, "Ustawiane automatycznie — codzienne backupy projektów na udziale serwera.")
 
         # Separator
         tk.Frame(fields_frame, height=2, bg="#bdc3c7").grid(row=14, column=0, columnspan=3, sticky="ew", pady=10)
@@ -34671,20 +34686,28 @@ class MainWindow(tk.Tk):
         def reset_to_defaults():
             """Przywróć domyślne ścieżki"""
             if messagebox.askyesno("Potwierdzenie", "Czy na pewno przywrócić domyślne ścieżki?"):
-                e_master.delete(0, tk.END)
-                e_master.insert(0, DEFAULT_MASTER_PATH)
-                e_projects.delete(0, tk.END)
-                e_projects.insert(0, DEFAULT_PROJECTS_DIR)
-                e_projects_mag.delete(0, tk.END)
-                e_projects_mag.insert(0, DEFAULT_PROJECTS_MAG_DIR)
-                e_server.delete(0, tk.END)
-                e_server.insert(0, DEFAULT_SERVER_DIR)
-                e_local.delete(0, tk.END)
-                e_local.insert(0, DEFAULT_LOCAL_DIR)
-                e_locks.delete(0, tk.END)
-                e_locks.insert(0, DEFAULT_LOCKS_DIR)
-                e_backup.delete(0, tk.END)
-                e_backup.insert(0, DEFAULT_BACKUP_DIR)
+                # Pola wyłączone (Master i ścieżki ustawiane automatycznie) nie
+                # przyjmują delete/insert — Tk rzuca TclError na stanie
+                # "disabled". Zdejmujemy blokadę na czas wpisu i zakładamy
+                # z powrotem, żeby „Domyślne" nie wysypywało całego okna.
+                def _wpisz(pole, wartosc):
+                    stan = str(pole.cget("state"))
+                    if stan == "disabled":
+                        pole.configure(state="normal")
+                    pole.delete(0, tk.END)
+                    pole.insert(0, wartosc)
+                    if stan == "disabled":
+                        pole.configure(state="disabled")
+
+                _wpisz(e_projects, DEFAULT_PROJECTS_DIR)
+                _wpisz(e_projects_mag, DEFAULT_PROJECTS_MAG_DIR)
+                _wpisz(e_server, DEFAULT_SERVER_DIR)
+                _wpisz(e_local, DEFAULT_LOCAL_DIR)
+                _wpisz(e_locks, DEFAULT_LOCKS_DIR)
+                _wpisz(e_backup, DEFAULT_BACKUP_DIR)
+                # e_master pomijamy: trzyma OPIS połączenia („RM_SERWER
+                # 127.0.0.1:5060"), nie ścieżkę — wpisanie tam DEFAULT_MASTER_PATH
+                # pokazywałoby nieprawdę (master chodzi po TCP, nie z pliku).
                 e_alarms_exe.delete(0, tk.END)
                 e_alarms_exe.insert(0, str(Path(DEFAULT_LOCAL_DIR) / "RM_ALARM.EXE"))
                 e_copy_files_exe.delete(0, tk.END)
