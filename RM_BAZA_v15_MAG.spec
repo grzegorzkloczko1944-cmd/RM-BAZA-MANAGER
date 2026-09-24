@@ -108,6 +108,16 @@ hiddenimports += [
     # `pandas` — RM_BAZA_v15_MAG_STATS_ORG.py:17051, import wewnatrz funkcji.
     # `psutil` — linia 234, tez leniwie (kontrola procesow przy starcie).
     'pandas', 'psutil',
+
+    # ── dolozone 24.09.2026 ─────────────────────────────────────────────────
+    # `doklej_zlozenie` — doklejanie poddrzewa z drugiego OUT-a. Wchodzi
+    # leniwie z RM_BAZA_v15_MAG_STATS_ORG.py:20563 (`from doklej_zlozenie
+    # import znajdz_korzen_drzewka, scal_moduly` WEWNATRZ menu_doklej_zlozenie).
+    # Modul powstal po audycie z 23.09, wiec wypadl poza jego wynik — menu
+    # „Doklej zlozenie z OUT..." wywalaloby ModuleNotFoundError u usera.
+    # Bez wpisu w `datas`: `hiddenimports` wystarcza, patrz notatka
+    # pamiec/project_build_leniwe_importy.md.
+    'doklej_zlozenie',
 ]
 
 # Zrodla modulow leniwych obok .exe — jak pozostale w datas wyzej.
