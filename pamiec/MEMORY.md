@@ -136,3 +136,6 @@
 - [Drugi OUT uzupełnia drzewo](project_drugi_out_uzupelnia_drzewo.md) — mechanizm JUŻ działa (wszystkie OUT-y z folderu sklejane po nr rysunku), ilości mnożą się same; cena: obce OUT-y zaśmiecają okno Decyzje
 - [Kolizja rodzica w OUT — ostrzeżenie ZROBIONE](project_todo_ostrzezenie_kolizja_rodzica_out.md) — read_tree wykrywa różny skład tego samego złożenia w dwóch plikach i mówi, która ilość wygrała
 - [Doklej złożenie z OUT — WDROŻONE](project_doklej_zlozenie_z_out.md) — menu Plik; korzeń NIE sumowany, składniki tak, moduł MODUŁ(ilość); flaga sum_quantities per wiersz
+- [Dopasuj kartotekę Subiekta (PPM w arkuszu)](project_dopasuj_kartoteke_wiersza.md) — jedna pozycja, TYLKO niezaimportowane (subiekt_symbol broni starych), bez zapisu do mapowań
+- [Dopasowanie: wyłączone czytanie mapowań](project_dopasowanie_wylaczone_mapowania.md) — od 24.09.2026, odwracalne jedną linią; scalanie ilości na ZK zostaje żywe
+- [Scal kody: duplikaty identycznego zapisu](project_scalanie_duplikaty_identyczne.md) — filtr patrzył na warianty pisowni, nie na liczbę wierszy; dwa identyczne wiersze były niewidoczne

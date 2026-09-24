@@ -165,10 +165,21 @@ def pobierz_katalog(timeout=TIMEOUT_S):
 
 
 def _przelicz(data):
-    """Surowa odpowiedź mostu -> lista kartotek w formacie tego modułu."""
+    """Surowa odpowiedź mostu -> lista kartotek w formacie tego modułu.
+
+    ⚠️ NIE OBCINAĆ do symbolu i nazwy. Most zwraca też Opis, Rodzaj
+    i CenaEwidencyjna, a bez nich nie da się wybrać właściwej kartoteki
+    tam, gdzie nazwa jest równa symbolowi — „KFL000/001/002/004" albo
+    „7810210" (zgłoszone 24.09.2026). Okna czytają ten sam katalog przez
+    `subiekt_scalanie.wczytaj_katalog_subiekta()`, więc pola muszą być
+    już tutaj.
+    """
     return [{"id": p.get("Id"),
              "symbol": p.get("Symbol") or "",
-             "nazwa": p.get("Nazwa") or ""}
+             "nazwa": p.get("Nazwa") or "",
+             "opis": (p.get("Opis") or "").strip(),
+             "rodzaj": (p.get("Rodzaj") or "").strip(),
+             "cena": p.get("CenaEwidencyjna")}
             for p in data.get("pozycje", [])]
 
 

@@ -241,7 +241,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                  ("rodzaj", "Rodzaj", 75), ("stan", "Stan", 55),
                  ("cena", "Cena netto", 75)]
 
-    def __init__(self, parent, symbol=None):
+    def __init__(self, parent, symbol=None, nowa=None):
         super().__init__(parent)
         self.title("Edytor kartotek — Subiekt nexo PRO")
         self.configure(bg=TLO)
@@ -297,6 +297,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.after(100, self._wczytaj_katalog)
         if symbol:
             self.after(200, lambda: self._wczytaj_istniejaca(symbol))
+        elif nowa:
+            # Tryb „nowa z gotowymi danymi" — wolany z arkusza RM_BAZA.
+            # Po katalogu (after 100), zeby lista 4 byla juz wypelniona
+            # i user od razu widzial, czy podobna kartoteka juz istnieje.
+            self.after(150, lambda: self._nowa_z_danych(nowa))
 
     # ── BUDOWA OKNA ─────────────────────────────────────────────────────
 
@@ -1818,6 +1823,65 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 wartosci[0] = fajka
                 self.tab_lista.item(w, values=wartosci,
                                     tags=("w_drzewie",) if w_drzewie else ())
+
+    def _nowa_z_danych(self, dane):
+        """Nowa kartoteka z polami wypelnionymi danymi z arkusza RM_BAZA.
+
+        Wolane z okna „Dopasuj kartoteke Subiekta" (PPM w arkuszu), gdy
+        pozycja nie ma odpowiednika w Subiekcie. Zamiast zakladac kartoteke
+        z czterema wartosciami wzietymi z automatu, otwieramy edytor
+        z WYPELNIONYMI polami — user poprawia nazwe, wybiera rodzaj,
+        jednostke, cene i polozenie, po czym zapisuje sam.
+
+        Powod (24.09.2026, uzytkownik): pozycja w arkuszu bywa samym kodem
+        („7810210"), wiec automat robil kartoteke „7810210 / 7810210" — czyli
+        dokladnie ten balagan, ktory porzadkowanie ma usuwac. Nazwe musi
+        nadac czlowiek, patrzac na to, co ma przed soba.
+
+        `dane`: {"symbol": ..., "nazwa": ...}. Nic nie zapisuje do Subiekta —
+        zapis jest tam, gdzie byl: pod zielonym przyciskiem panelu 2.
+        """
+        sym = str((dane or {}).get("symbol") or "").strip()
+        naz = str((dane or {}).get("nazwa") or "").strip()
+        if not sym:
+            sym = self._nowy_symbol("NOWA")
+
+        # Symbol z arkusza moze juz byc zajety — wtedy nie podstawiamy go
+        # po cichu (user zapisalby zmiany NA CUDZEJ kartotece). Dajemy
+        # symbol roboczy i mowimy, ze taka kartoteka juz jest.
+        zajety = sym in self.pozycje
+        if not zajety:
+            for poz in (self.katalog or []):
+                if str(poz.get("symbol") or "").strip().upper() == sym.upper():
+                    zajety = True
+                    break
+        if zajety:
+            self.status.config(
+                text=f"Symbol {sym} jest juz w Subiekcie — szukam go na liscie "
+                     f"(sekcja 4). Nowa pozycja dostala symbol roboczy.",
+                fg=BLAD_CZERWONY)
+            try:
+                # trace_add na var_szukaj sam wola _odswiez_liste
+                self.var_szukaj.set(sym)
+            except Exception:
+                pass
+            sym = self._nowy_symbol("NOWA")
+
+        self.pozycje[sym] = Kartoteka(sym, naz, "towar", "szt")
+        self.korzenie.append(sym)
+        self._odswiez_drzewo()
+        self._zaznacz_w_drzewie(sym)
+        # Fokus na NAZWE — to ona wymaga reki czlowieka. Symbol przyszedl
+        # z arkusza, reszta pol ma sensowne wartosci domyslne.
+        try:
+            self.pola["nazwa"][1].focus_set()
+        except Exception:
+            pass
+        if not zajety:
+            self.status.config(
+                text="Nowa kartoteka z arkusza RM_BAZA — uzupelnij nazwe "
+                     "i pozostale pola, potem zapisz (panel 2).",
+                fg=TEKST_SZARY)
 
     def _wczytaj_istniejaca(self, symbol):
         """Tryb edycji: wciąga kartotekę z Subiekta wraz ze składem."""
@@ -4017,6 +4081,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         wysrodkuj(okno, self)
 
 
-def open_window(parent, symbol=None):
-    """Otwiera Edytor kartotek. symbol != None → tryb edycji istniejącej."""
-    return EdytorWindow(parent, symbol=symbol)
+def open_window(parent, symbol=None, nowa=None):
+    """Otwiera Edytor kartotek.
+
+    symbol != None → tryb edycji istniejącej kartoteki.
+    nowa != None   → nowa pozycja z wypełnionymi polami; `nowa` to
+                     {"symbol": ..., "nazwa": ...} z arkusza RM_BAZA.
+    """
+    return EdytorWindow(parent, symbol=symbol, nowa=nowa)

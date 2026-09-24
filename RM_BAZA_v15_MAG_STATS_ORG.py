@@ -2367,14 +2367,32 @@ class MainWindow(tk.Tk):
         self.bind_all("<Control-p>", lambda e: self.print_to_default_printer() if hasattr(self, 'btn_print') and self.btn_print['state'] == tk.NORMAL else None, add="+")
         self.bind_all("<Control-P>", lambda e: self.print_to_default_printer() if hasattr(self, 'btn_print') and self.btn_print['state'] == tk.NORMAL else None, add="+")
         
+        # ── SKROTY F2-F6 (zyczenie uzytkownika 24.09.2026) ──────────────
+        # Te same akcje co w menu prawego klawisza; klawisz jest dopisany
+        # do nazwy w menu, zeby bylo widac, co wcisnac.
+        #
+        # ⚠️ `bind_all` lapie klawisz TAKZE w polach tekstowych (Szukaj,
+        # edycja komorki). F2-F6 nie sluza tam do wpisywania znakow, wiec
+        # to nie przeszkadza — ale dlatego kazda akcja sama sprawdza, czy
+        # ma zaznaczony wiersz, zamiast zakladac, ze fokus jest w arkuszu.
+        for klawisz, akcja in (("<F2>", "show_position_card"),
+                               ("<F3>", "send_selected_to_rfq"),
+                               ("<F4>", "dopasuj_kartoteke_wiersza"),
+                               ("<F5>", "refresh_data"),
+                               ("<F6>", "show_assembly_tree")):
+            self.bind_all(klawisz,
+                          lambda e, a=akcja: self._skrot_arkusza(e, a), add="+")
+
         # Custom prawy klik - dodaj "Powrót do BOM"
         self.sheet.popup_menu_add_command("Powrót do BOM", self.on_restore_to_bom)
-        self.sheet.popup_menu_add_command("Pokaż złożenie", self.show_assembly_tree)
-        self.sheet.popup_menu_add_command("Karta pozycji (Subiekt, złożenie)",
+        self.sheet.popup_menu_add_command("Pokaż złożenie   (F6)", self.show_assembly_tree)
+        self.sheet.popup_menu_add_command("Karta pozycji (Subiekt, złożenie)   (F2)",
                                           self.show_position_card)
         self.sheet.popup_menu_add_command("Powiąż półprodukt…",
                                           self.powiaz_polprodukt)
-        self.sheet.popup_menu_add_command("Wyślij do RFQ", self.send_selected_to_rfq)
+        self.sheet.popup_menu_add_command("Dopasuj kartotekę Subiekta…   (F4)",
+                                          self.dopasuj_kartoteke_wiersza)
+        self.sheet.popup_menu_add_command("Wyślij do RFQ   (F3)", self.send_selected_to_rfq)
         self.sheet.popup_menu_add_command("Odśwież wyceny z portalu", self._refresh_rfq_data)
         self.sheet.popup_menu_add_command("Wyczyść śmieci wycen", self._reconcile_rfq_data)
 
@@ -12941,6 +12959,83 @@ class MainWindow(tk.Tk):
             return
         import subiekt_pozycja_gui
         subiekt_pozycja_gui.otworz(self, symbol, self.current_project_id)
+
+    def _skrot_arkusza(self, event, nazwa_akcji):
+        """Skrot F2-F6 — tylko gdy fokus jest w GLOWNYM oknie RM_BAZA.
+
+        ⚠️ `bind_all` lapie zdarzenie w CALEJ aplikacji, takze w oknach
+        Toplevel (Scal kody, Dopasuj kartoteke, Edytor kartotek). Bez tego
+        filtra F5 wcisniety w oknie scalania odswiezalby arkusz w tle,
+        a F4 otwieralby kolejne okno dopasowania (24.09.2026).
+        """
+        try:
+            if event is not None and getattr(event, "widget", None) is not None:
+                if event.widget.winfo_toplevel() is not self:
+                    return
+        except Exception:
+            pass            # nie potrafimy ustalic okna — nie blokujemy
+        akcja = getattr(self, nazwa_akcji, None)
+        if callable(akcja):
+            akcja()
+
+    def dopasuj_kartoteke_wiersza(self):
+        """Dopasowanie POJEDYNCZEJ pozycji do kartoteki Subiekta (PPM).
+
+        Porzadkowanie elementow znormalizowanych PRZED importem projektu do
+        Subiekta: patrzysz na wiersz, wybierasz kartoteke albo zakladasz nowa,
+        arkusz dostaje symbol i nazwe z Subiekta (decyzja uzytkownika,
+        24.09.2026). Okno „Dopasowanie kartotek" robi to samo, ale lista dla
+        calego BOM-u — tu chodzi o prace sztuka po sztuce.
+
+        ⛔ DZIALA TYLKO NA POZYCJACH NIEZAIMPORTOWANYCH. Blokade sprawdza
+        `subiekt_dopasuj_wiersz.sprawdz_edytowalnosc()` po tym samym znaczniku
+        (`subiekt_symbol`), ktorym blokowana jest edycja nazwy w komorce.
+        Dzieki temu w dokladce BOM-u po imporcie obrobisz nowe wiersze, a stare
+        same sie obronia.
+        """
+        try:
+            selection = self.sheet.get_currently_selected()
+            if not selection:
+                messagebox.showinfo("Dopasuj kartotekę",
+                                    "Zaznacz najpierw wiersz.")
+                return
+            row = selection[0]
+            row_ids = getattr(self, "_sheet_row_ids", [])
+            if row >= len(row_ids):
+                return
+            item_id = row_ids[row]
+        except Exception as e:
+            messagebox.showerror("Dopasuj kartotekę",
+                                 "Nie udalo sie odczytac pozycji:\n" + str(e))
+            return
+        if not item_id:
+            return
+
+        # ⛔ BEZ LOCKA BAZA JEST READ-ONLY. Bez tego okno otwieralo sie
+        # normalnie, user wybieral kartoteke i dopiero zapis konczyl sie
+        # surowym „attempt to write a readonly database" — praca na darmo
+        # (zgloszone 24.09.2026).
+        if not getattr(self, "have_lock", False):
+            messagebox.showwarning(
+                "Projekt tylko do odczytu",
+                "Nie masz locka na tym projekcie, wiec zapis do arkusza\n"
+                "nie przejdzie.\n\n"
+                "Kliknij „Przejmij Lock\" na gornym pasku, a potem otworz\n"
+                "to okno ponownie (prawy klik na wierszu).")
+            return
+
+        # Import w funkcji — okno Subiekta nie moze opozniac startu RM_BAZA.
+        # ⚠️ Modul MUSI byc w hiddenimports w .spec (pulapka leniwych importow,
+        # project_build_leniwe_importy) — dopisany razem z ta funkcja.
+        try:
+            import subiekt_dopasuj_wiersz_gui as _DW
+        except Exception as e:
+            messagebox.showerror("Dopasuj kartotekę",
+                                 "Nie udalo sie zaladowac okna:\n" + str(e))
+            return
+
+        _DW.open_window(self, self.db_manager.project_con, item_id,
+                        on_zapisano=self.refresh_data)
 
     def powiaz_polprodukt(self):
         """Okno powiazania rysunku z kartoteka kupowanego polfabrykatu.

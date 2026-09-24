@@ -659,7 +659,11 @@ class ScalanieWindow(tk.Toplevel):
         tylko = self.var_tylko_kolizje.get()
         pokazane = 0
         for p in self.pozycje:
-            ma_co = bool(p["identyczne"] or p["podobne"])
+            # `rodzenstwo` > 0 = ten sam kod stoi w kilku WIERSZACH arkusza
+            # i pozycja zostala rozbita na osobne wpisy. Taki wpis nie ma
+            # wariantow pisowni (`identyczne` puste), a jest najwazniejszym
+            # powodem do scalenia — bez tego znikal z listy (24.09.2026).
+            ma_co = bool(p["identyczne"] or p["podobne"] or p.get("rodzenstwo"))
             if tylko and not ma_co and p["klucz"] not in self._zaznaczone:
                 continue
             pokazane += 1
@@ -671,6 +675,10 @@ class ScalanieWindow(tk.Toplevel):
                 naj = f"{w}  ({n} proj.)"
 
             podobne = [s["kod"] for s in p["podobne"]] + [f"= {k}" for k in p["identyczne"]]
+            # Rozbity duplikat nie ma czego pokazac w tej kolumnie, a wlasnie
+            # on jest do scalenia — mowimy o tym wprost.
+            if p.get("rodzenstwo"):
+                podobne.insert(0, f"⚠ ten sam kod w {p['rodzenstwo']} wierszach")
             tags = ("zaz",) if zaz else (() if ma_co else ("cichy",))
             self.tree.insert("", "end", iid=p["klucz"], tags=tags, values=(
                 "☑" if zaz else "☐",
@@ -684,7 +692,8 @@ class ScalanieWindow(tk.Toplevel):
 
         wybrane = [p for p in self.pozycje if p["klucz"] in self._zaznaczone]
         suma = sum(p["ilosc_bom"] for p in wybrane)
-        z_kolizja = sum(1 for p in self.pozycje if p["identyczne"] or p["podobne"])
+        z_kolizja = sum(1 for p in self.pozycje
+                        if p["identyczne"] or p["podobne"] or p.get("rodzenstwo"))
         opis = (f"Kodów handlowych: {len(self.pozycje)}    z podobnymi: {z_kolizja}    "
                 f"pokazanych: {pokazane}    SUBIEKT: {self._subiekt_stan}    ")
         if wybrane:
@@ -874,13 +883,38 @@ class ScalanieWindow(tk.Toplevel):
 
         x = self.ent_nazwa.winfo_rootx()
         y = self.ent_nazwa.winfo_rooty() + self.ent_nazwa.winfo_height() + 2
-        szer = max(self.ent_nazwa.winfo_width(), 420)
-        popup.geometry(f"{szer}x{min(len(trafienia), 12) * 26 + 2}+{x}+{y}")
+        # Szerokosc = SUMA kolumn, zmierzona w Tk (Consolas 7 px/znak,
+        # Segoe UI 6 px/znak) + paddingi. Kolumny maja stale szerokosci,
+        # wiec kazdy nadmiar to pusta plama po prawej — byla 232 px.
+        szer = 730
+        popup.geometry(f"{szer}x{min(len(trafienia), 12) * 26 + 24}+{x}+{y}")
 
         ramka = tk.Frame(popup, bg="#b0b8bd", bd=0)
         ramka.pack(fill=tk.BOTH, expand=True)
         wnetrze = tk.Frame(ramka, bg="white")
         wnetrze.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+
+        # Nagłówek — bez niego sześć kolumn to nieczytelna ściana tekstu.
+        hdr = tk.Frame(wnetrze, bg="#f4f6f7", height=20)
+        hdr.pack(fill=tk.X)
+        hdr.pack_propagate(False)
+        for txt, szer_k, kotwica, rozciag in (
+                ("Symbol", 16, "w", False), ("Nazwa", 30, "w", False),
+                ("Opis", 40, "w", False), ("Rodzaj", 9, "w", False),
+                ("Stan", 7, "e", False), ("Cena netto", 10, "e", False)):
+            # ⚠️ KAZDA kolumna naglowka TA SAMA czcionka co jej dane:
+            # `width` w Tk liczy sie w ZNAKACH biezacej czcionki, a Consolas
+            # jest szersza od Segoe UI (7 vs 6 px na znak). Przy width=16
+            # daje to 16 px rozjazdu — zmierzone, nie zgadniete.
+            czcionka = ("Consolas", 9) if txt == "Symbol" else ("Segoe UI", 9)
+            lbl = tk.Label(hdr, text=txt, bg="#f4f6f7", fg="#7f8c8d",
+                           anchor=kotwica, font=czcionka)
+            if rozciag:
+                lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+            else:
+                lbl.configure(width=szer_k)
+                lbl.pack(side=tk.LEFT,
+                         padx=((8, 4) if txt == "Symbol" else (0, 4)))
 
         def wybierz(nazwa):
             self.var_nazwa.set(nazwa)
@@ -892,11 +926,25 @@ class ScalanieWindow(tk.Toplevel):
             w = tk.Frame(wnetrze, bg="white", height=26)
             w.pack(fill=tk.X)
             w.pack_propagate(False)
-            # Symbol na szaro po lewej, nazwa czarna — od razu widać, co jest czym.
+            # Symbol na szaro po lewej, nazwa czarna — od razu widać, co jest
+            # czym. Dalej Opis/Rodzaj/Stan/Cena: gdy nazwa jest równa
+            # symbolowi, dopiero one rozstrzygają wybór (24.09.2026).
             tk.Label(w, text=poz["symbol"], bg="white", fg="#7f8c8d", anchor="w",
                      width=16, font=("Consolas", 9)).pack(side=tk.LEFT, padx=(8, 4))
             tk.Label(w, text=nazwa, bg="white", fg="#2c3e50", anchor="w",
-                     font=("Segoe UI", 9)).pack(side=tk.LEFT, fill=tk.X, expand=True)
+                     width=30, font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 4))
+            tk.Label(w, text=(poz.get("opis") or ""), bg="white", fg="#566573",
+                     anchor="w", width=40, font=("Segoe UI", 9)).pack(
+                         side=tk.LEFT, padx=(0, 4))
+            tk.Label(w, text=(poz.get("rodzaj") or ""), bg="white", fg="#7f8c8d",
+                     anchor="w", width=9,
+                     font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 4))
+            tk.Label(w, text=self._stan_txt(poz), bg="white",
+                     fg="#2c3e50", anchor="e", width=7,
+                     font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 4))
+            tk.Label(w, text=self._cena_txt(poz.get("cena")), bg="white",
+                     fg="#2c3e50", anchor="e", width=10,
+                     font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 8))
 
             def podswietl(_e, ramka=w, kolor="#eaf2f8"):
                 for dziecko in [ramka] + list(ramka.winfo_children()):
@@ -907,6 +955,31 @@ class ScalanieWindow(tk.Toplevel):
                 widget.bind("<Leave>", lambda e, r=w: podswietl(e, r, "white"))
                 widget.bind("<Button-1>", lambda _e, n=nazwa: wybierz(n))
                 widget.configure(cursor="hand2")
+
+    @staticmethod
+    def _stan_txt(poz):
+        """Stan magazynowy z KATALOGU — czysty odczyt, bez pytania Subiekta.
+
+        Ta lista ma tylko WYSWIETLAC to, co juz wiadomo (decyzja uzytkownika,
+        24.09.2026). Gdy katalog nie niesie stanu, kolumna zostaje pusta.
+        """
+        v = poz.get("stan") if isinstance(poz, dict) else None
+        if v in (None, ""):
+            return ""
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return str(v)
+        return str(int(f)) if f == int(f) else ("%.2f" % f).rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _cena_txt(v):
+        """Cena ewidencyjna; zero pokazujemy jako puste — nic nie znaczy."""
+        try:
+            f = float(v or 0)
+        except (TypeError, ValueError):
+            return ""
+        return f"{f:g}" if f else ""
 
     def _ustaw_nazwe(self, wartosc):
         self.var_nazwa.set(wartosc)
@@ -937,9 +1010,21 @@ class ScalanieWindow(tk.Toplevel):
             kody.append(p["kod"])
             kody.extend(p["identyczne"])
         wiersze = S.wiersze_kodu(self.project_id, kody, con=self.con)
+
+        # ⚠️ Duplikat w arkuszu jest rozbity na OSOBNE wpisy listy, każdy ze
+        # swoim `item_id` (patrz pozycje_z_podobnymi). Wtedy scalamy DOKŁADNIE
+        # zaznaczone wiersze — inaczej zaznaczenie jednego wciągnęłoby oba,
+        # a wybór ma być jawny (24.09.2026).
+        wskazane = {p["item_id"] for p in wybrane if p.get("item_id")}
+        if wskazane:
+            wiersze = [w for w in wiersze if w["id"] in wskazane]
+
         if len(wiersze) < 2:
-            messagebox.showerror("Scalanie", "Nie znaleziono wierszy do połączenia — "
-                                 "odśwież i spróbuj ponownie.", parent=self)
+            messagebox.showerror(
+                "Scalanie",
+                "Do połączenia trzeba co najmniej dwóch wierszy.\n\n"
+                "Zaznacz oba wiersze tej pozycji (albo dwie różne pozycje), "
+                "a potem kliknij „Scal zaznaczone\".", parent=self)
             return
 
         suma = sum(p["ilosc_bom"] for p in wybrane)

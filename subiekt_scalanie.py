@@ -812,8 +812,43 @@ def pozycje_z_podobnymi(project_id, min_prefiks=4, con=None):
     # Materiał i ilości per zapis — różny materiał przy podobnej nazwie
     # zwykle znaczy, że to jednak inne elementy (uwaga użytkownika).
     szczegoly = {}
-    for w in wiersze_kodu(project_id, [oryginal[k] for k in klucze], con=con):
-        d = szczegoly.setdefault(norm_kod(w["nazwa"]), {"materialy": set(), "ilosc": 0})
+    znalezione = wiersze_kodu(project_id, [oryginal[k] for k in klucze], con=con)
+
+    # ⚠️ JEDEN WIERSZ = JEDEN KLUCZ. `wiersze_kodu()` przechodzi po WSZYSTKICH
+    # kolumnach nazw, więc wiersz przepisany na inną nazwę wraca DWA RAZY:
+    # raz pod starą (`src_name`), raz pod nową (`work_name`). Przy rozbijaniu
+    # na osobne pozycje listy dawało to klucz `#id` w dwóch różnych pozycjach
+    # naraz — Treeview odrzucał kolizję iid i CAŁA pozycja znikała z okna
+    # (24.09.2026: wiersz 264 jako „6004" i jako „SS 6004 2RS 20x42x12").
+    #
+    # Wiersz należy do klucza swojej AKTUALNEJ nazwy — tej, którą user widzi
+    # w arkuszu. Kolejność jak w RM_BAZA: robocza przed importową.
+    pierwszenstwo = {c: i for i, c in enumerate(KOLUMNY_NAZW)}
+    aktualna = {}
+    for w in znalezione:
+        poprzednia = aktualna.get(w["id"])
+        if (poprzednia is None
+                or pierwszenstwo.get(w["kolumna"], 99)
+                < pierwszenstwo.get(poprzednia["kolumna"], 99)):
+            aktualna[w["id"]] = w
+
+    for w in znalezione:
+        d = szczegoly.setdefault(norm_kod(w["nazwa"]),
+                                 {"materialy": set(), "ilosc": 0, "wiersze": []})
+        # Pojedyncze wiersze BOM-u — potrzebne, zeby duplikat tego samego
+        # zapisu rozbic na OSOBNE pozycje listy (patrz nizej). Tylko dla
+        # nazwy AKTUALNEJ, inaczej wiersz trafilby pod dwa klucze.
+        if aktualna.get(w["id"]) is w:
+            q_w = w["ilosci"].get("work_qty")
+            if q_w in (None, ""):
+                q_w = w["ilosci"].get("src_qty") or 0
+            try:
+                q_w = float(q_w)
+            except (TypeError, ValueError):
+                q_w = 0.0
+            d["wiersze"].append({"id": w["id"], "nazwa": w["nazwa"],
+                                 "material": w.get("material") or "",
+                                 "ilosc": q_w})
         if w["material"]:
             d["materialy"].add(w["material"])
         # Jak arkusz: COALESCE(work_qty, src_qty) — work_qty to ręczna korekta
@@ -830,9 +865,8 @@ def pozycje_z_podobnymi(project_id, min_prefiks=4, con=None):
     for k in klucze:
         zapisy = sorted(wg[k])
         w_bazie = cala_baza.get(k, {})
-        sz = szczegoly.get(k, {"materialy": set(), "ilosc": 0})
-        out.append({
-            "klucz": k,
+        sz = szczegoly.get(k, {"materialy": set(), "ilosc": 0, "wiersze": []})
+        wspolne = {
             "kod": zapisy[0],
             "ile": sum(v["ile"] for v in wg[k].values()),
             "material": " / ".join(sorted(sz["materialy"])),
@@ -845,10 +879,46 @@ def pozycje_z_podobnymi(project_id, min_prefiks=4, con=None):
             ],
             # Jak ten kod zapisuje reszta firmy — podpowiedź do nazwy docelowej.
             "w_bazie": {w: len(v["projekty"]) for w, v in w_bazie.items()},
-        })
+        }
+
+        # ⚠️ DUPLIKAT W ARKUSZU = OSOBNE WIERSZE W OKNIE (24.09.2026).
+        #
+        # Gdy ten sam kod stoi w kilku wierszach BOM-u zapisany TAK SAMO,
+        # jeden wpis na liście nie da się scalić: „Scal zaznaczone" wymaga
+        # DWÓCH zaznaczonych wierszy, a użytkownik widzi jeden. Rozbijamy
+        # więc taką pozycję na tyle wpisów, ile jest wierszy w arkuszu —
+        # dokładnie to, co user ma przed oczami w RM_BAZA.
+        #
+        # Klucz musi zostać UNIKALNY: jest tożsamością wiersza w oknie
+        # (iid w Treeview i element zbioru `_zaznaczone`).
+        #
+        # Różne ZAPISY tego samego klucza („KOŁO" vs „Koło") NIE są tu
+        # rozbijane — tam scala się przemianowaniem, `identyczne` niesie
+        # komplet wariantów.
+        wiersze_k = sz.get("wiersze") or []
+        if len(zapisy) == 1 and len(wiersze_k) > 1:
+            for w in sorted(wiersze_k, key=lambda x: x["id"]):
+                out.append({**wspolne,
+                            "klucz": f"{k}#{w['id']}",
+                            "item_id": w["id"],
+                            "kod": w["nazwa"],
+                            "ile": 1,
+                            "material": w["material"],
+                            "ilosc_bom": w["ilosc"],
+                            # Rodzeństwo z arkusza — powód, dla którego ten
+                            # wiersz w ogóle trafia na listę.
+                            "rodzenstwo": len(wiersze_k)})
+        else:
+            out.append({**wspolne, "klucz": k, "item_id": None,
+                        "rodzenstwo": 0})
 
     # Najpierw te, przy których jest co decydować.
-    out.sort(key=lambda p: (-(len(p["identyczne"]) * 10 + len(p["podobne"])), p["kod"]))
+    # Duplikaty (rodzenstwo>0) licza się jak warianty pisowni, żeby stały
+    # wysoko; `kod` trzyma wiersze tej samej pozycji obok siebie.
+    out.sort(key=lambda p: (-(len(p["identyczne"]) * 10
+                              + (10 if p.get("rodzenstwo") else 0)
+                              + len(p["podobne"])),
+                            p["kod"], p.get("item_id") or 0))
     return out
 
 
@@ -884,7 +954,11 @@ def wczytaj_katalog_subiekta(tylko_cache=False, max_wiek_h=None):
             if tylko_cache or wiek_ok:
                 with open(KATALOG_CACHE, encoding="utf-8") as f:
                     dane = json.load(f)
-                if isinstance(dane, list) and dane:
+                # ⚠️ Cache sprzed 24.09.2026 ma tylko id/symbol/nazwa.
+                # Bez opisu i ceny okna nie odróżnią wariantów tej samej
+                # części, więc taki plik traktujemy jak nieważny — inaczej
+                # nowe kolumny zostałyby puste aż do ręcznego „Kartoteki".
+                if isinstance(dane, list) and dane and "opis" in dane[0]:
                     return dane
     except Exception:
         pass          # uszkodzony cache nie może blokować pobrania
@@ -894,6 +968,28 @@ def wczytaj_katalog_subiekta(tylko_cache=False, max_wiek_h=None):
 
     import subiekt_podobne
     katalog = subiekt_podobne.pobierz_katalog()
+
+    # Stany: tryb mostu „katalog" ich NIE CZYTA (to najdroższa część odczytu),
+    # więc dociągamy je jednym zapytaniem — tak samo jak Edytor kartotek
+    # (`_katalog_worker`) i okno „Dopasuj kartotekę Subiekta". `magazyn`
+    # zwraca komplet w ~0,1 s przez stały most, więc kolumna „Stan" nie
+    # kosztuje już tego, co kiedyś.
+    #
+    # Błąd stanów NIE MOŻE przewrócić katalogu: bez nich okna działają
+    # dalej, tylko kolumna zostaje pusta.
+    try:
+        from subiekt_magazyn_gui import pobierz_magazyn
+        stany = {}
+        for p in pobierz_magazyn(tylko_niezerowe=True) or []:
+            sym = str(p.get("Symbol") or "").strip().upper()
+            if sym:
+                stany[sym] = (float(p.get("Dostepne") or 0)
+                              + float(p.get("Zarezerwowane") or 0))
+        for poz in katalog:
+            poz["stan"] = stany.get(str(poz.get("symbol") or "").strip().upper())
+    except Exception:
+        pass
+
     try:
         os.makedirs(os.path.dirname(KATALOG_CACHE), exist_ok=True)
         with open(KATALOG_CACHE, "w", encoding="utf-8") as f:

@@ -57,6 +57,9 @@ hiddenimports += [
     'subiekt_edytor_gui', 'subiekt_historia',
     # dopasowanie znormalizowanych do kartotek (okno z menu SUBIEKT)
     'subiekt_dopasowanie_gui', 'subiekt_dopasowanie',
+    # dopasowanie POJEDYNCZEGO wiersza (PPM w arkuszu) — import leniwy
+    # w dopasuj_kartoteke_wiersza(), wiec statyczna analiza go NIE WIDZI
+    'subiekt_dopasuj_wiersz_gui', 'subiekt_dopasuj_wiersz',
     # produkcja wlasna RMPAK (PW/RW) + okno zlozen projektu
     'subiekt_produkcja', 'subiekt_zlozenia_gui',
     # formularze dokumentow z Edytora kartotek (10-11.09.2026) — importowane
@@ -128,6 +131,7 @@ datas += [(f'{m}.py', '.') for m in (
     'subiekt_projekt', 'subiekt_wyslij_zd', 'subiekt_bridge', 'subiekt_konfig',
     'subiekt_edytor_gui', 'subiekt_historia',
     'subiekt_dopasowanie_gui', 'subiekt_dopasowanie',
+    'subiekt_dopasuj_wiersz_gui', 'subiekt_dopasuj_wiersz',
     'subiekt_produkcja', 'subiekt_zlozenia_gui',
     'subiekt_dokument_form', 'subiekt_rw_gui', 'subiekt_pw_gui',
     'subiekt_zd_gui', 'subiekt_zk_gui',
