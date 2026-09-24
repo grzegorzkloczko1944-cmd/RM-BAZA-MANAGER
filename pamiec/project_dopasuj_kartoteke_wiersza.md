@@ -99,6 +99,32 @@ pozycje do Subiekta":
 * Okno dopasowania **zostaje otwarte** i czeka z callbackiem; zamyka sie
   dopiero po udanej podmianie.
 
+## Edytor: JEDNO okno dla obu wejsc + „Klonuj" w panelu 2
+
+**Jedno okno** (zgloszenie 25.09.2026: „dlaczego okna edytora sie roznia?").
+Przycisk „Wstaw do arkusza RM_BAZA" powstawal tylko przy `do_arkusza`, wiec
+edytor z menu SUBIEKT wygladal inaczej niz ten z F4. Teraz przycisk jest
+ZAWSZE — bez kontekstu arkusza wyszarzony, a podpis mowi dlaczego:
+„nieaktywne — otworz edytor klawiszem F4 z wiersza arkusza".
+
+**„Klonuj" w panelu 2**, obok „Zapisz te pozycje". Logika ta sama co
+„Duplikuj" w panelu 1 (drzewo) — ale pod reka tam, gdzie user patrzy na
+POLA kartoteki. Oba przyciski zostaja.
+
+Klon przenosi komplet: nazwa, rodzaj, jednostka, cena, opis, VAT-y, pola
+wlasne i sklad kompletu. NIE przenosi `polozenie` (regal jest wlasnoscia
+konkretnej kartoteki, nie wzoru). Dostaje wolny symbol roboczy
+(`_nowy_symbol`), wiec oryginalu nie nadpisze; fokus ladu je na polu Symbol
+z zaznaczona trescia, bo to jedyne pole do zmiany.
+
+⚠️ **`_domknij_opis()` PRZED klonowaniem.** `tk.Text` nie ma trace, wiec
+swiezo wpisany opis siedzi w widgecie, nie w modelu — bez tego klon
+dostawalby stara wartosc, a wpisany tekst przepadal przy przerysowaniu
+drzewa (ta sama pulapka co 16.09.2026, wykryta testem).
+
+Symbol kartoteki juz zapisanej do Subiekta jest `readonly` (`w_subiekcie`),
+wiec klon jest jedynym sposobem na zrobienie jej wariantu.
+
 ## Do arkusza ida TRZY kolumny
 
 Numer rysunku (symbol), Nazwa i **Opis** — zyczenie uzytkownika. Opis idzie

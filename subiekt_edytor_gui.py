@@ -266,6 +266,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         #: kartoteka w edytorze"). Steruje widocznoscia przycisku
         #: „Podmien w arkuszu RM_BAZA" (24.09.2026).
         self._do_arkusza = do_arkusza
+        #: Czy pole Symbol ma byc zablokowane mimo `w_subiekcie=False`.
+        #: Ustawiane przy wejsciu z F4 (symbol pochodzi z arkusza), zdejmowane
+        #: przez „Klonuj" (25.09.2026).
+        self._symbol_zablokowany = False
         self.pozycje = {}        # symbol -> Kartoteka
         self.relacje = []        # [(rodzic, dziecko, ilosc)]
         self.korzenie = []       # symbole bez rodzica — wierzchołki drzewa
@@ -1013,6 +1017,18 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             bg="#27ae60", fg="white", font=("Arial", 9, "bold"),
             padx=10, pady=4, cursor="hand2")
         self.btn_zapisz_pozycje.pack(side=tk.LEFT)
+        # „Klonuj" — ta sama logika co „Duplikuj" w panelu 1, ale pod reka
+        # tam, gdzie user patrzy na POLA kartoteki (zyczenie 25.09.2026).
+        # Klon ma wszystkie wartosci oryginalu i WOLNY symbol roboczy, wiec
+        # da sie go edytowac; oryginal zostaje nietkniety.
+        self.btn_klonuj = tk.Button(
+            pasek_poz, text="Klonuj", command=self._klonuj_pozycje,
+            state=tk.DISABLED, bg="#7f8c8d", fg="white",
+            font=("Arial", 9, "bold"), padx=10, pady=4, cursor="hand2",
+            activebackground="#6c7a7b", activeforeground="white",
+            relief="flat", bd=0, disabledforeground="#d5dbdb")
+        self.btn_klonuj.pack(side=tk.LEFT, padx=(8, 0))
+
         tk.Label(pasek_poz, text="tylko ta kartoteka — bez reszty drzewa",
                  bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8)).pack(
             side=tk.LEFT, padx=(8, 0))
@@ -1025,22 +1041,27 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # stoi juz „Zapisz te pozycje do Subiekta" + etykieta „tylko ta
         # kartoteka — bez reszty drzewa" i na trzeci element brakuje miejsca:
         # przycisk wychodzil poza panel, widac bylo samo „w arku".
-        self.btn_do_arkusza = None
-        if self._do_arkusza:
-            pasek_ark = tk.Frame(pod, bg=TLO_SEKCJI)
-            pasek_ark.grid(row=8, column=0, columnspan=3, sticky="we",
-                           padx=8, pady=(2, 2))
-            self.btn_do_arkusza = tk.Button(
-                pasek_ark, text="Wstaw do arkusza RM_BAZA",
-                command=self._podmien_w_arkuszu, state=tk.DISABLED,
-                bg="#2980b9", fg="white", font=("Arial", 9, "bold"),
-                padx=10, pady=4, cursor="hand2",
-                activebackground="#2471a3", activeforeground="white",
-                relief="flat", bd=0, disabledforeground="#d5dbdb")
-            self.btn_do_arkusza.pack(side=tk.LEFT)
-            tk.Label(pasek_ark, text="numer, nazwa i opis → wiersz, z którego przyszedłeś",
-                     bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8)).pack(
-                side=tk.LEFT, padx=(8, 0))
+        # ⚠️ Przycisk jest ZAWSZE — okno ma wygladac TAK SAMO niezaleznie od
+        # tego, czy przyszlismy z arkusza (F4), czy z menu SUBIEKT
+        # (zgloszone 25.09.2026: „dlaczego okna edytora sie roznia?").
+        # Bez kontekstu arkusza zostaje wyszarzony, a podpis mowi dlaczego.
+        pasek_ark = tk.Frame(pod, bg=TLO_SEKCJI)
+        pasek_ark.grid(row=8, column=0, columnspan=3, sticky="we",
+                       padx=8, pady=(2, 2))
+        self.btn_do_arkusza = tk.Button(
+            pasek_ark, text="Wstaw do arkusza RM_BAZA",
+            command=self._podmien_w_arkuszu, state=tk.DISABLED,
+            bg="#2980b9", fg="white", font=("Arial", 9, "bold"),
+            padx=10, pady=4, cursor="hand2",
+            activebackground="#2471a3", activeforeground="white",
+            relief="flat", bd=0, disabledforeground="#d5dbdb")
+        self.btn_do_arkusza.pack(side=tk.LEFT)
+        tk.Label(pasek_ark,
+                 text=("numer, nazwa i opis → wiersz, z którego przyszedłeś"
+                       if self._do_arkusza else
+                       "nieaktywne — otwórz edytor klawiszem F4 z wiersza arkusza"),
+                 bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8)).pack(
+            side=tk.LEFT, padx=(8, 0))
 
         self.lbl_info = tk.Label(
             pod, text="Symbol po zapisie do Subiekta nie podlega zmianie —\n"
@@ -1908,10 +1929,28 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             self.pola["nazwa"][1].focus_set()
         except Exception:
             pass
+        # ⛔ SYMBOL ZABLOKOWANY (zyczenie uzytkownika 25.09.2026).
+        #
+        # Pozycja z F4 ma `w_subiekcie=False` (bo jej tam naprawde nie ma),
+        # wiec pole Symbol bylo edytowalne od razu — inaczej niz przy
+        # kartotece z listy 4, ktora jest `readonly`. A symbol przyszedl
+        # z arkusza i policzyla go ta sama funkcja, ktorej uzyje zasiew
+        # projektu: przypadkowa zmiana rozjechalaby kartoteke z wierszem.
+        #
+        # Swiadome odblokowanie idzie przez „Klonuj" — on tworzy NOWA
+        # pozycje, ktorej symbol wolno ustalic od zera.
+        self._symbol_zablokowany = True
+        try:
+            self.pola["symbol"][1].config(state="readonly")
+            self.btn_auto.config(state="disabled")
+        except Exception:
+            pass
         if not zajety:
             self.status.config(
                 text="Nowa kartoteka z arkusza RM_BAZA — uzupelnij nazwe "
-                     "i pozostale pola, potem zapisz (panel 2).",
+                     "i pozostale pola, potem zapisz (panel 2). "
+                     "Symbol z arkusza jest zablokowany — użyj „Klonuj”, "
+                     "żeby zrobić wariant pod innym symbolem.",
                 fg=TEKST_SZARY)
 
     def _wczytaj_istniejaca(self, symbol):
@@ -2397,11 +2436,15 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             self.pola["symbol"][0].set(k.symbol)
             self.pola["nazwa"][0].set(k.nazwa)
             # Symbol istniejącej kartoteki jest kluczem — nie wolno go zmieniać.
+            # `_symbol_zablokowany` obejmuje takze pozycje z F4: jej symbol
+            # przyszedl z arkusza i ma zostac, dopoki user nie kliknie
+            # „Klonuj" (25.09.2026).
+            _zablok = k.w_subiekcie or getattr(self, "_symbol_zablokowany", False)
             self.pola["symbol"][1].config(
-                state="readonly" if k.w_subiekcie else "normal")
+                state="readonly" if _zablok else "normal")
             # Auto tez wygaszamy — zeby nie kusilo kliknięciem, ktore i tak
             # skonczy sie odmowa.
-            self.btn_auto.config(state="disabled" if k.w_subiekcie else "normal")
+            self.btn_auto.config(state="disabled" if _zablok else "normal")
             for etykieta, wartosc in RODZAJE:
                 if wartosc == k.rodzaj:
                     self.var_rodzaj.set(etykieta)
@@ -2647,7 +2690,8 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             # Skasowanie nazwy zostawia pusto (i zapala blad w walidacji),
             # zamiast po cichu wpisywac symbol.
             k.nazwa = self.pola["nazwa"][0].get().strip()
-        elif klucz == "symbol" and not k.w_subiekcie:
+        elif (klucz == "symbol" and not k.w_subiekcie
+              and not getattr(self, "_symbol_zablokowany", False)):
             nowy = self.pola["symbol"][0].get().strip()
             # ⚠️ PUSTE POLE MUSI DAĆ SIĘ WPISAĆ. `trace_add("write")` leci po
             # KAŻDYM znaku, a na końcu tej metody stoi _odswiez_drzewo() +
@@ -2659,8 +2703,13 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             # walidacja przed zapisem (Subiekt bez symbolu nie zapisze).
             if not nowy:
                 return
+            # Klon lezy pod kluczem technicznym (`\x00klon:...`), a `k.symbol`
+            # jest wtedy symbolem ORYGINALU — przekazanie go do
+            # `_zmien_symbol` skasowaloby wpis zrodla. Ruszamy wiec klucz,
+            # pod ktorym pozycja naprawde siedzi (25.09.2026).
+            klucz_biezacy = self._zaznaczony
             if nowy != k.symbol and nowy not in self.pozycje:
-                self._zmien_symbol(k.symbol, nowy)
+                self._zmien_symbol(klucz_biezacy, nowy)
                 return
             # Wpisany symbol JUŻ ISTNIEJE albo równa się obecnemu — nie
             # przepisujemy pola, bo to kasowałoby to, co user właśnie pisze
@@ -2781,7 +2830,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # dostalyby ten sam symbol i jedna nadpisalaby druga przy zapisie.
         zajete = {str(p.get("Symbol") or "").strip().upper()
                   for p in self.katalog}
-        zajete |= {s2.upper() for s2 in self.pozycje if s2 != sym}
+        # Klucze techniczne klonow (`\x00klon:...`) nie sa symbolami —
+        # bierzemy z nich `Kartoteka.symbol`, inaczej „Auto" uznaloby
+        # nieistniejacy ciag za zajety.
+        zajete |= {(k2.symbol or s2).upper()
+                   for s2, k2 in self.pozycje.items() if s2 != sym}
         zajete.discard("")
 
         kandydat = symbol_z_nazwy(nazwa)
@@ -3579,6 +3632,13 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             return
         aktywny = bool(self._zaznaczony and self._zaznaczony in self.pozycje)
         btn.config(state=tk.NORMAL if aktywny else tk.DISABLED)
+        # „Klonuj" rzadzi sie tym samym: bez zaznaczonej kartoteki nie ma
+        # czego kopiowac. Dziala TAKZE na pozycji juz zapisanej do Subiekta
+        # — wtedy klon jest jedynym sposobem, zeby zrobic jej wariant,
+        # bo symbol oryginalu jest wowczas readonly (25.09.2026).
+        btn_kl = getattr(self, "btn_klonuj", None)
+        if btn_kl is not None:
+            btn_kl.config(state=tk.NORMAL if aktywny else tk.DISABLED)
 
     def _plan_pozycji(self, sym):
         """Plan dla JEDNEJ kartoteki — ten sam kształt, co _zbuduj_plan().
@@ -3595,13 +3655,124 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         """Błędy blokujące zapis tej jednej kartoteki."""
         bledy = []
         k = self.pozycje[sym]
-        if not sym.strip():
+        # ⚠️ W komunikatach pokazujemy SYMBOL, nie klucz slownika: klon lezy
+        # pod kluczem technicznym („NUL+klon:...”), ktory nie ma prawa
+        # trafic userowi przed oczy (25.09.2026).
+        opis = (k.symbol or sym).strip()
+        if not (k.symbol or "").strip():
             bledy.append("pozycja bez symbolu")
         if not (k.nazwa or "").strip():
-            bledy.append(f"„{sym}” nie ma nazwy — uzupełnij pole Nazwa")
+            bledy.append(f"„{opis}” nie ma nazwy — uzupełnij pole Nazwa")
         if k.czy_komplet() and not self._dzieci(sym):
-            bledy.append(f"„{sym}” to komplet bez składników — Subiekt go odrzuci")
+            bledy.append(f"„{opis}” to komplet bez składników — Subiekt go odrzuci")
         return bledy
+
+    def _klonuj_pozycje(self):
+        """Kopia zaznaczonej kartoteki — CALA OPERACJA W PANELU 2.
+
+        Po co: kartoteki roznia sie czesto jednym szczegolem („DZSO50" vs
+        „DZSO75"), wiec szybciej jest sklonowac i poprawic niz wypelniac
+        wszystkie pola od zera (zyczenie uzytkownika 25.09.2026).
+
+        ⛔ NIE DOTYKA DRZEWA (panel 1). Pierwsza wersja dopisywala tam klon
+        i klikanie po liscie kartotek zasypywalo drzewo pozycjami
+        „KOPIA-01..07". Klon wchodzi WYLACZNIE do modelu (`self.pozycje`) —
+        tak samo jak kartoteka wybrana z listy 4 w `_na_wybor_z_listy()`:
+        model jest potrzebny, zeby pola mialy co zapisywac i zeby dzialal
+        „Zapisz te pozycje" (idzie przez `_plan_pozycji`, nie przez drzewo).
+        Do drzewa pozycje wprowadza dwuklik albo „+ Istniejaca".
+
+        SYMBOL zostaje DOKLADNIE taki jak w oryginale — zadnych sufiksow.
+        Pole jest edytowalne i ma zaznaczona tresc, wiec user nadpisuje je
+        jednym ruchem. Wewnetrznie klon lezy pod kluczem technicznym
+        (patrz komentarz nizej), zeby nie nadpisac zrodla w pamieci.
+        """
+        # ⚠️ `_domknij_opis()` przepisuje POLE do modelu — ale tylko wtedy,
+        # gdy pole faktycznie pokazuje TE pozycje. Przy kartotece swiezo
+        # wybranej z listy 4 pole bywa jeszcze puste, a domkniecie
+        # WYCZYSCILOBY opis zrodla. Domykamy wiec tylko, gdy w polu cos
+        # jest albo model tez jest pusty (25.09.2026).
+        try:
+            _w_polu = self.txt_opis.get("1.0", "end-1c").strip()
+        except Exception:
+            _w_polu = ""
+        _k = self.pozycje.get(self._zaznaczony or "")
+        if _w_polu or not (_k and (_k.opis or "").strip()):
+            self._domknij_opis()
+        sym = self._zaznaczony
+        if not sym or sym not in self.pozycje:
+            messagebox.showinfo("Klonowanie",
+                                "Zaznacz najpierw kartotekę — w drzewie albo "
+                                "na liście kartotek Subiekta.", parent=self)
+            return
+        zrodlo = self.pozycje[sym]
+
+        # ⚠️ KLUCZ TECHNICZNY, SYMBOL ORYGINALNY (25.09.2026: „nie dodawaj -2").
+        #
+        # `self.pozycje` to slownik PO SYMBOLU, wiec klon o tym samym symbolu
+        # nadpisalby wpis zrodla w PAMIECI — jeszcze zanim user zdazy wpisac
+        # nowy. Klon lezy wiec pod kluczem `\x00klon:<symbol>`: znak NUL jest
+        # niewpisywalny z klawiatury i nie wystepuje w zadnym symbolu, wiec
+        # kolizji nie bedzie. W POLU stoi oryginalny symbol.
+        #
+        # `_zmien_symbol()` przy pierwszej edycji przeniesie pozycje pod
+        # normalny klucz i techniczny zniknie. Gdyby user zapisal bez zmiany,
+        # do Subiekta pojdzie `Kartoteka.symbol` (oryginalny), a duplikat
+        # odrzuci sam Subiekt — i to jest wlasciwa reakcja.
+        klucz, n = f"\x00klon:{zrodlo.symbol}", 2
+        while klucz in self.pozycje:
+            klucz = f"\x00klon{n}:{zrodlo.symbol}"
+            n += 1
+        klon = Kartoteka(zrodlo.symbol, zrodlo.nazwa, zrodlo.rodzaj,
+                         zrodlo.jm, zrodlo.cena, zrodlo.opis)
+        klon.vat_sprzedaz = zrodlo.vat_sprzedaz
+        klon.vat_zakup = zrodlo.vat_zakup
+        klon.pola_wlasne = dict(zrodlo.pola_wlasne)
+        # `w_subiekcie` ZOSTAJE FALSE — to nowa kartoteka, a dzieki temu
+        # pole Symbol jest edytowalne i „Auto" dziala.
+        self.pozycje[klucz] = klon
+        self._zaznaczony = klucz
+        self._z_listy = True          # nie pochodzi z drzewa
+        # Klon to NOWA kartoteka — jej symbol wolno ustalic od zera, wiec
+        # zdejmujemy blokade zalozona przy wejsciu z F4.
+        self._symbol_zablokowany = False
+
+        # Pola panelu 2 — jak w `_na_wybor_z_listy`, z blokada zapisu
+        # zwrotnego na czas wypelniania.
+        self._blokada = True
+        try:
+            self.pola["symbol"][0].set(klon.symbol)
+            self.pola["nazwa"][0].set(klon.nazwa)
+            self.pola["symbol"][1].config(state="normal")
+            self.btn_auto.config(state="normal")
+            for etykieta, wartosc in RODZAJE:
+                if wartosc == klon.rodzaj:
+                    self.var_rodzaj.set(etykieta)
+            self.var_jm.set(klon.jm)
+            self.var_cena.set(f"{klon.cena:.2f}".replace(".", ","))
+            self.txt_opis.delete("1.0", "end")
+            self.txt_opis.insert("1.0", klon.opis or "")
+            self.var_vat_sprzedaz.set(klon.vat_sprzedaz or "")
+            self.var_vat_zakup.set(klon.vat_zakup or "")
+            for pole, v in self.pola_wlasne_var.items():
+                v.set(klon.pola_wlasne.get(pole, ""))
+            # Polozenie NIE jest kopiowane: regal to wlasnosc konkretnej
+            # kartoteki, nie wzoru.
+            self.var_polozenie.set("")
+        finally:
+            self._blokada = False
+
+        self._odswiez_etykiete_celu()
+        self._aktualizuj_przycisk_pozycji()
+        # Fokus na SYMBOL z zaznaczona trescia — to jedyne pole do zmiany.
+        try:
+            self.pola["symbol"][1].focus_set()
+            self.pola["symbol"][1].select_range(0, tk.END)
+        except Exception:
+            pass
+        self.status.config(
+            text=f"Klon „{zrodlo.symbol}” — zmień symbol i zapisz. "
+                 f"Oryginał nietknięty.", fg=TEKST_SZARY)
 
     def _podmien_w_arkuszu(self):
         """Wstawia zaznaczona kartoteke do wiersza arkusza RM_BAZA.
