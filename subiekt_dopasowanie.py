@@ -212,7 +212,22 @@ def przygotuj_pozycje(items: List[Dict], indeks: Indeks,
         wybrane.append(it)
 
     kody = [(it.get("nr") or "").strip() for it in wybrane]
-    mapowania = subiekt_mapowania.get_many(kody) or {}
+    # ⛔ DOPASOWANIE WYLACZONE (24.09.2026, decyzja uzytkownika) ──────────────
+    # Algorytm ma WIDZIEC PUSTA TABELE mapowan: kazda pozycja trafia do okna
+    # jako „do decyzji" / „brak kartoteki", nic nie jest podpowiadane z tego,
+    # co zapisano wczesniej. Dane w tabeli mapowan SA NIETKNIETE — to tylko
+    # odciecie odczytu w tym jednym miejscu.
+    #
+    # ⚠️ NIE ROZSZERZAC tego wylaczenia na `subiekt_projekt.py` (scalanie
+    # ilosci na ZK). Tamto korzysta z tej samej tabeli, ale robi co innego:
+    # skleja wiersze BOM-u wskazujace JEDNA kartoteke. Bez niego most —
+    # ktory ustawia ilosc WPROST, nie dodaje — pozwala drugiej pozycji
+    # nadpisac pierwsza i na dokumencie zostaje mniejsza liczba
+    # (7+1 dawalo 1 zamiast 8; projekt 2627, 15.09.2026).
+    #
+    # POWROT: skasowac te trzy linie i odkomentowac `get_many` ponizej.
+    mapowania = {}
+    # mapowania = subiekt_mapowania.get_many(kody) or {}
     odrzucone = wczytaj_odrzucone()
 
     out = []
