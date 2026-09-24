@@ -1,36 +1,19 @@
 ---
 name: project_zapis_do_bazy_projektu
-description: "Zapis do bazy projektu TYLKO przez db_manager.project_con — nigdy własnym połączeniem do pliku na Y:, bo RM_BAZA pracuje na kopii lokalnej"
-metadata: 
-  node_type: memory
+description: Zapis do bazy projektu MUSI isc przez db_manager.project_con - RM_BAZA pracuje na kopii lokalnej i nadpisuje plik na Y:
+metadata:
   type: project
-  originSessionId: b4b4fbd4-107b-4ece-9328-8ca8b8a060fc
-  modified: 2026-09-10T10:41:32.018Z
 ---
 
-Każdy zapis do bazy projektu (`items` i reszta) MUSI iść przez
-**`db_manager.project_con`** — nigdy przez własne `sqlite3.connect()` do
-pliku na `Y:/RM_BAZA/projects/project_<id>.sqlite`.
+RM_BAZA pracuje na **kopii lokalnej** projektu i przy zwalnianiu/odświeżaniu locka kopiuje ją na dysk sieciowy (`shutil.copy2(local_db, remote_db)`, `RM_BAZA_v15_MAG_STATS_ORG.py` ok. 10239) — **nadpisując plik w całości**.
 
-**Why:** przy przejętym locku RM_BAZA pracuje na **kopii lokalnej**
-(`C:/RMPAK_CLIENT/project_<id>.sqlite`) i dopiero przy zwalnianiu locka
-nadpisuje nią plik na serwerze. Zapis „obok", wprost na `Y:`, ginie
-bezpowrotnie w momencie zwolnienia locka — a wygląda na udany, bo commit
-przechodzi. Realnie się na tym przewrócono przy zmianie dostawcy złożeń
-(09/10.09.2026, `RMPAK_ZMIANA_DOSTAWCY_ZLOZEN.md`).
+**Skutek:** zapis zrobiony osobnym połączeniem `sqlite3.connect()` do pliku na `Y:` znika przy pierwszym odświeżeniu locka. Zmiana jest widoczna w oknie, a potem cicho wraca do poprzedniej wartości.
 
-**How to apply:**
-- Zapis: `self.db_manager.project_con.execute(...)` + `commit()`.
-- Odczyt „na boku" (diagnostyka, statystyki) może iść własnym połączeniem
-  RO, ale wtedy pamiętać, że przy locku widzi STAN SERWERA, nie to, co
-  user właśnie zmienił — dlatego przy sprawdzaniu skutków zapisu czytać
-  przez `project_con` albo po zwolnieniu locka.
-- Ten sam wzorzec dotyczy nowych modułów: `subiekt_produkcja.plan_rw()` /
-  `wyslij_rw()` i planowany bufor schowka montażowego
-  ([[project_rmpak_produkcja_pw_rw]] jeśli powstanie).
-- Diagnoza „zapisałem, a nie ma": sprawdzić, CZY jest lock, i porównać
-  plik lokalny z serwerowym — patrz [[project_master_watchdog_ro]], gdzie
-  ten sam objaw miał inną przyczynę (połączenie RO).
+**Zawsze pisać przez `db_manager.project_con`** — to samo połączenie, którego używa arkusz. Tak robi kalkulator RMPAK przy cenach (`_save_item` w RM_BAZA) i tak musi robić każde okno.
+
+Bez locka to połączenie jest **READ-ONLY** (log startowy: `REMOTE READ-ONLY`), więc akcje zapisujące trzeba wyszarzać z góry, sprawdzając `self.master.have_lock`.
+
+Wykryte 2026-09-10 przy zmianie dostawcy złożeń: QUAY ustawiony na `2627-650.11ZZ` znikał po każdym odświeżeniu locka.
 
 **Powiązane pułapki tej samej rodziny** (z notatki lokalnej M-OLD, 10.09.2026):
 
@@ -45,3 +28,5 @@ przechodzi. Realnie się na tym przewrócono przy zmianie dostawcy złożeń
 
 Master (`master.sqlite`) działa inaczej — tam nie ma kopii lokalnej, patrz
 [[project_master_journal_delete]] i [[project_rm_baza_db_model_decision]].
+
+**How to apply:** przed dodaniem jakiegokolwiek zapisu do bazy projektu sprawdzić, skąd bierze się połączenie. Kontekst: [[project_rmpak_produkcja_pw_rw]], [[feedback_most_rebuild_release]].
