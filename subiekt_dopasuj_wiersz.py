@@ -67,22 +67,15 @@ def czytaj_wiersz(con, item_id) -> Optional[Dict]:
         maja = [f"NULLIF(TRIM({c}), '')" for c in nazwy if c in cols]
         return f"COALESCE({', '.join(maja)}, '')" if maja else "''"
 
+    ma_flage = "ordered_flag" in cols
     sql = (f"SELECT {wybierz('work_name', 'src_name')},"
            f"       {wybierz('work_drawing_no', 'norm_drawing_no', 'src_drawing_no')},"
            f"       {wybierz('subiekt_symbol')},"
-           f"       COALESCE(ordered_flag, 0),"
+           f"       {'COALESCE(ordered_flag, 0)' if ma_flage else '0'},"
            f"       COALESCE(is_manual, 0),"
            f"       COALESCE(notes, ''),"
-           f"       {wybierz('subiekt_zasiew_at')}"
-           f" FROM items WHERE id = ?"
-           if {"ordered_flag"} <= cols else
-           f"SELECT {wybierz('work_name', 'src_name')},"
-           f"       {wybierz('work_drawing_no', 'norm_drawing_no', 'src_drawing_no')},"
-           f"       {wybierz('subiekt_symbol')},"
-           f"       0,"
-           f"       COALESCE(is_manual, 0),"
-           f"       COALESCE(notes, ''),"
-           f"       {wybierz('subiekt_zasiew_at')}"
+           f"       {wybierz('subiekt_zasiew_at')},"
+           f"       {wybierz('work_desc', 'src_desc')}"
            f" FROM items WHERE id = ?")
     try:
         row = con.execute(sql, (item_id,)).fetchone()
@@ -99,6 +92,7 @@ def czytaj_wiersz(con, item_id) -> Optional[Dict]:
         "is_manual": int(row[4] or 0),
         "notes": row[5] or "",
         "zasiew_at": (row[6] or "").strip(),
+        "opis": (row[7] or "").strip(),
         "cols": cols,
     }
 
@@ -203,17 +197,20 @@ def kandydaci(wiersz: Dict, indeks, fraza: str = "", ile: int = 40) -> List[Dict
     return (dokladne + reszta)[:ile]
 
 
-def _opis_wiersza(symbol: str, nazwa: str) -> str:
-    """„SYMBOL   Nazwa" — jedna linia opisująca stan wiersza.
+def _opis_wiersza(symbol: str, nazwa: str, opis: str = "") -> str:
+    """„SYMBOL   Nazwa   (opis)" — jedna linia opisująca stan wiersza.
 
-    Tak, jak user widzi go w arkuszu: symbol i nazwa obok siebie, a nie
-    dwa osobne pola do sklejania w głowie (uwaga użytkownika 24.09.2026).
+    Tak, jak user widzi go w arkuszu: symbol, nazwa i opis obok siebie,
+    a nie osobne pola do sklejania w głowie (uwaga użytkownika 24.09.2026).
     """
     symbol = (symbol or "").strip()
     nazwa = (nazwa or "").strip()
-    if symbol and nazwa:
-        return f"{symbol}   {nazwa}"
-    return symbol or nazwa or "(pusto)"
+    opis = (opis or "").strip()
+    czesci = [c for c in (symbol, nazwa) if c]
+    linia = "   ".join(czesci) if czesci else ""
+    if opis:
+        linia = f"{linia}   ({opis})" if linia else f"({opis})"
+    return linia or "(pusto)"
 
 
 def podglad_wyboru(wiersz: Dict, kartoteka: Dict) -> Dict:
@@ -231,19 +228,24 @@ def podglad_wyboru(wiersz: Dict, kartoteka: Dict) -> Dict:
     """
     symbol = (kartoteka.get("symbol") or "").strip()
     nazwa = (kartoteka.get("nazwa") or "").strip()
+    opis = (kartoteka.get("opis") or "").strip()
 
     # Czego kartoteka nie niesie, to na wierszu zostaje bez zmian.
     symbol_po = symbol or wiersz["numer"]
     nazwa_po = nazwa or wiersz["nazwa"]
+    opis_po = opis or wiersz.get("opis", "")
 
     zmiany = []
     if symbol and symbol != wiersz["numer"]:
         zmiany.append(("Numer / symbol", wiersz["numer"] or "(pusto)", symbol))
     if nazwa and nazwa != wiersz["nazwa"]:
         zmiany.append(("Nazwa", wiersz["nazwa"] or "(pusto)", nazwa))
+    if opis and opis != wiersz.get("opis", ""):
+        zmiany.append(("Opis", wiersz.get("opis") or "(pusto)", opis))
 
-    return {"teraz": _opis_wiersza(wiersz["numer"], wiersz["nazwa"]),
-            "bedzie": _opis_wiersza(symbol_po, nazwa_po),
+    return {"teraz": _opis_wiersza(wiersz["numer"], wiersz["nazwa"],
+                                   wiersz.get("opis")),
+            "bedzie": _opis_wiersza(symbol_po, nazwa_po, opis_po),
             "zmiany": zmiany,
             "bez_zmian": not zmiany}
 
@@ -281,6 +283,12 @@ def zastosuj_wybor(con, item_id, kartoteka: Dict) -> Dict:
     if nazwa and "work_name" in cols:
         ustaw.append("work_name = ?")
         wart.append(nazwa)
+    # Opis z kartoteki — do kolumny ROBOCZEJ, jak nazwa. `src_desc`
+    # z importu zostaje nietknieta (zyczenie uzytkownika 24.09.2026).
+    opis = (kartoteka.get("opis") or "").strip()
+    if opis and "work_desc" in cols:
+        ustaw.append("work_desc = ?")
+        wart.append(opis)
     if not ustaw:
         return {"ok": False, "blokada": {
             "powod": "stara_baza", "tytul": "Baza sprzed migracji",
@@ -309,8 +317,9 @@ def zastosuj_wybor(con, item_id, kartoteka: Dict) -> Dict:
                     "Jesli lock mial juz byc Twoj — ktos mogl go wymusic\n"
                     "z drugiej maszyny.")}}
         raise
-    return {"ok": True, "symbol": symbol, "nazwa": nazwa,
-            "przed": {"numer": wiersz["numer"], "nazwa": wiersz["nazwa"]}}
+    return {"ok": True, "symbol": symbol, "nazwa": nazwa, "opis": opis,
+            "przed": {"numer": wiersz["numer"], "nazwa": wiersz["nazwa"],
+                      "opis": wiersz.get("opis", "")}}
 
 
 def plan_nowej_kartoteki(wiersz: Dict, jm: str = "szt") -> Dict:

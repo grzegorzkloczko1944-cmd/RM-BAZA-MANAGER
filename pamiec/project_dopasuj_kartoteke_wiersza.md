@@ -75,6 +75,40 @@ istniejącej kartoteki i założy **DUPLIKAT** obok niej.
 - **Symbol** liczy `subiekt_projekt.symbol_z_nazwy()` — ta sama funkcja,
   której użyje zasiew projektu; trafia do edytora jako wartość początkowa.
 
+## Lancuch F4 -> edytor -> arkusz (domkniety 24.09.2026)
+
+Pierwsza wersja urywala sie w polowie: „Nowa kartoteka w edytorze" otwierala
+edytor i **zamykala okno dopasowania** (`self.destroy()`). Po zapisaniu
+kartoteki i zamknieciu edytora **wiersz w arkuszu zostawal nietkniety** —
+nikt do niego nie wracal.
+
+Rozwiazanie (pomysl uzytkownika): przycisk **w EDYTORZE**, obok „Zapisz te
+pozycje do Subiekta":
+
+```
+⬅ Podmień w arkuszu RM_BAZA
+```
+
+* **Widoczny tylko wtedy**, gdy edytor otwarto z arkusza przez F4 —
+  `open_window(..., do_arkusza=callback)`. Przy zwyklym otwarciu z menu
+  SUBIEKT przycisku NIE MA (sprawdzone).
+* **Szary do czasu zapisu** kartoteki do Subiekta. Wstawienie do arkusza
+  symbolu, ktorego w Subiekcie nie ma, dawaloby wiersz wskazujacy na nic,
+  a zasiew projektu zalozylby DRUGA kartoteke obok. Aktywuje sie
+  w `_zapis_gotowy` razem z `w_subiekcie = True`.
+* Okno dopasowania **zostaje otwarte** i czeka z callbackiem; zamyka sie
+  dopiero po udanej podmianie.
+
+## Do arkusza ida TRZY kolumny
+
+Numer rysunku (symbol), Nazwa i **Opis** — zyczenie uzytkownika. Opis idzie
+do `work_desc`, tak samo jak nazwa do `work_name`: kolumna ROBOCZA,
+`src_desc` z importu zostaje nietknieta.
+
+Sprawdzone na atrapie bazy: po podmianie `work_drawing_no`, `work_name`
+i `work_desc` maja dane z kartoteki, `src_name` i `src_desc` bez zmian,
+blokada zasiewu dalej odmawia.
+
 ## Podglad zmiany: DWIE linie, nie cztery pola
 
 Pierwsza wersja pokazywala kazde pole osobno:

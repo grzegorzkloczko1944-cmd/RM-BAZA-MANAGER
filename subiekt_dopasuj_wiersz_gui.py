@@ -333,11 +333,51 @@ class DopasujWierszWindow(tk.Toplevel):
         if nazwa and W.norm_kod(nazwa) == W.norm_kod(plan["symbol"]):
             nazwa = ""
 
-        _E.open_window(self.master, nowa={"symbol": plan["symbol"],
-                                          "nazwa": nazwa})
-        # Okno dopasowania zamykamy: po zapisie w edytorze katalog jest inny,
-        # a nieodswiezona lista kandydatow klamalaby. Wracasz przez PPM.
+        # ⚠️ NIE ZAMYKAMY tego okna. Wczesniej szlo tu `self.destroy()`,
+        # wiec lancuch „F4 -> nowa kartoteka -> zapis -> zamkniecie edytora"
+        # konczyl sie niczym: wiersz w arkuszu zostawal nietkniety, bo nikt
+        # do niego nie wracal (zgloszone 24.09.2026).
+        #
+        # Zamiast tego edytor dostaje callback i pokazuje przycisk
+        # „Podmien w arkuszu RM_BAZA" — to user decyduje, kiedy wiersz
+        # ma dostac dane z kartoteki.
+        _E.open_window(self.master,
+                       nowa={"symbol": plan["symbol"], "nazwa": nazwa},
+                       do_arkusza=self._wstaw_z_edytora)
+
+    def _wstaw_z_edytora(self, kartoteka):
+        """Callback dla edytora: wstawia jego kartoteke do naszego wiersza.
+
+        Zwraca False, gdy zapis nie przeszedl — edytor wtedy milczy, bo
+        komunikat pokazalismy juz tutaj.
+        """
+        if self.blokada:
+            messagebox.showwarning(self.blokada["tytul"],
+                                   self.blokada["tekst"], parent=self)
+            return False
+        try:
+            wynik = W.zastosuj_wybor(self.con, self.item_id, kartoteka)
+        except Exception as e:
+            messagebox.showerror("Podmiana w arkuszu", str(e), parent=self)
+            return False
+        if not wynik.get("ok"):
+            blok = wynik.get("blokada") or {}
+            messagebox.showwarning(blok.get("tytul", "Nie zapisano"),
+                                   blok.get("tekst", "—"), parent=self)
+            return False
+
+        przed = wynik["przed"]
+        messagebox.showinfo(
+            "Podmieniono w arkuszu",
+            f"Wiersz przepisany na kartotekę z edytora:\n\n"
+            f"    było:   {W._opis_wiersza(przed['numer'], przed['nazwa'], przed.get('opis'))}\n"
+            f"    jest:   {W._opis_wiersza(wynik['symbol'], wynik['nazwa'], wynik.get('opis'))}",
+            parent=self)
+        if self.on_zapisano:
+            self.on_zapisano()
+        # Wiersz ma juz kartoteke — to okno nie ma tu nic wiecej do roboty.
         self.destroy()
+        return True
 
     def _odswiez_katalog_i_szukaj(self, fraza):
         """Po założeniu kartoteki cache katalogu jest nieaktualny."""

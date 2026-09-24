@@ -241,7 +241,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                  ("rodzaj", "Rodzaj", 75), ("stan", "Stan", 55),
                  ("cena", "Cena netto", 75)]
 
-    def __init__(self, parent, symbol=None, nowa=None):
+    def __init__(self, parent, symbol=None, nowa=None, do_arkusza=None):
         super().__init__(parent)
         self.title("Edytor kartotek — Subiekt nexo PRO")
         self.configure(bg=TLO)
@@ -261,6 +261,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.geometry("1760x860")
 
         # ── MODEL (graf, patrz docstring) ────────────────────────────────
+        #: Callback „wstaw te kartoteke do wiersza arkusza" albo None.
+        #: Ustawiany tylko, gdy edytor otwarto z arkusza (F4 -> „Nowa
+        #: kartoteka w edytorze"). Steruje widocznoscia przycisku
+        #: „Podmien w arkuszu RM_BAZA" (24.09.2026).
+        self._do_arkusza = do_arkusza
         self.pozycje = {}        # symbol -> Kartoteka
         self.relacje = []        # [(rodzic, dziecko, ilosc)]
         self.korzenie = []       # symbole bez rodzica — wierzchołki drzewa
@@ -1012,11 +1017,37 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                  bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8)).pack(
             side=tk.LEFT, padx=(8, 0))
 
+        # „Podmien w arkuszu" — TYLKO gdy edytor otwarto z arkusza przez F4.
+        # Bez tego lancuch F4 -> nowa kartoteka -> zapis konczyl sie niczym:
+        # wiersz w RM_BAZA zostawal nietkniety (24.09.2026).
+        #
+        # ⚠️ WLASNY WIERSZ, nie obok zielonego przycisku. W tamtym wierszu
+        # stoi juz „Zapisz te pozycje do Subiekta" + etykieta „tylko ta
+        # kartoteka — bez reszty drzewa" i na trzeci element brakuje miejsca:
+        # przycisk wychodzil poza panel, widac bylo samo „w arku".
+        self.btn_do_arkusza = None
+        if self._do_arkusza:
+            pasek_ark = tk.Frame(pod, bg=TLO_SEKCJI)
+            pasek_ark.grid(row=8, column=0, columnspan=3, sticky="we",
+                           padx=8, pady=(2, 2))
+            self.btn_do_arkusza = tk.Button(
+                pasek_ark, text="Wstaw do arkusza RM_BAZA",
+                command=self._podmien_w_arkuszu, state=tk.DISABLED,
+                bg="#2980b9", fg="white", font=("Arial", 9, "bold"),
+                padx=10, pady=4, cursor="hand2",
+                activebackground="#2471a3", activeforeground="white",
+                relief="flat", bd=0, disabledforeground="#d5dbdb")
+            self.btn_do_arkusza.pack(side=tk.LEFT)
+            tk.Label(pasek_ark, text="numer, nazwa i opis → wiersz, z którego przyszedłeś",
+                     bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8)).pack(
+                side=tk.LEFT, padx=(8, 0))
+
         self.lbl_info = tk.Label(
             pod, text="Symbol po zapisie do Subiekta nie podlega zmianie —\n"
                       "jest kluczem w kodach kreskowych, dokumentach i składach kompletów.",
             bg="#eaf2f8", fg=TEKST_SZARY, font=("Arial", 8), justify="left", anchor="w")
-        self.lbl_info.grid(row=8, column=0, columnspan=2, sticky="we", padx=8, pady=(6, 8))
+        # row=9: wiersz 8 zajmuje „Wstaw do arkusza" (gdy jest).
+        self.lbl_info.grid(row=9, column=0, columnspan=2, sticky="we", padx=8, pady=(6, 8))
 
         self._karta_handlowe()
         self._karta_magazyn()
@@ -3572,6 +3603,52 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             bledy.append(f"„{sym}” to komplet bez składników — Subiekt go odrzuci")
         return bledy
 
+    def _podmien_w_arkuszu(self):
+        """Wstawia zaznaczona kartoteke do wiersza arkusza RM_BAZA.
+
+        Widoczne tylko wtedy, gdy edytor otwarto Z ARKUSZA (F4 ->
+        „Nowa kartoteka w edytorze"). Przenosi Numer rysunku (symbol),
+        Nazwe i Opis — czyli to, co arkusz o kartotece trzyma.
+
+        ⚠️ Kartoteka musi byc JUZ w Subiekcie. Wstawienie do arkusza symbolu,
+        ktorego w Subiekcie nie ma, dawaloby wiersz wskazujacy na nic —
+        a przy zasiewie projektu most zalozylby DRUGA kartoteke obok.
+        """
+        sym = self._zaznaczony
+        if not sym or sym not in self.pozycje:
+            messagebox.showinfo("Podmiana w arkuszu",
+                                "Zaznacz najpierw pozycję w drzewie.", parent=self)
+            return
+        k = self.pozycje[sym]
+        if not k.w_subiekcie:
+            messagebox.showwarning(
+                "Podmiana w arkuszu",
+                "Ta kartoteka nie jest jeszcze w Subiekcie.\n\n"
+                "Najpierw „Zapisz tę pozycję do Subiekta”, a potem wstaw ją\n"
+                "do arkusza — inaczej wiersz wskazywałby symbol, którego\n"
+                "w Subiekcie nie ma, a zasiew projektu założyłby drugą\n"
+                "kartotekę obok.", parent=self)
+            return
+
+        try:
+            wynik = self._do_arkusza({"symbol": k.symbol,
+                                      "nazwa": k.nazwa,
+                                      "opis": (k.opis or "").strip()})
+        except Exception as e:
+            messagebox.showerror("Podmiana w arkuszu", str(e), parent=self)
+            return
+        if wynik is False:
+            return              # okno arkusza samo powiedzialo, co nie gra
+
+        # ⚠️ ZAMYKAMY NA TWARDO — z pominieciem `_anuluj()` i pytania
+        # o niezapisane zmiany (zyczenie uzytkownika 24.09.2026). Robota
+        # jest skonczona: kartoteka poszla do Subiekta, wiersz dostal dane.
+        # Gaszenie `_zmienione` przed `destroy()` jest po to, zeby ewentualny
+        # inny hook na zamkniecie tez nie zapytal.
+        self._zmienione = False
+        self._okno_gotowe = False
+        self.destroy()
+
     def _zapisz_pozycje(self):
         """Wysyła do Subiekta wyłącznie kartotekę zaznaczoną w drzewie."""
         sym = self._zaznaczony
@@ -3915,7 +3992,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             return
         kroki = wynik.get("kroki") or []
         bledy = [k for k in kroki if "blad" in str(k.get("Status", ""))]
-        self._pokaz_raport(wynik, kroki, bledy, zapisz)
+        self._pokaz_raport(wynik, kroki, bledy, zapisz, tylko_sym)
         if zapisz and not bledy:
             # Po udanym zapisie symbole blokujemy — ale tylko tym pozycjom,
             # ktore faktycznie poszly. Przy zapisie pojedynczej pozycji jest
@@ -3924,6 +4001,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             if tylko_sym:
                 if tylko_sym in self.pozycje:
                     self.pozycje[tylko_sym].w_subiekcie = True
+                # Kartoteka jest juz w Subiekcie — teraz wolno ja wstawic
+                # do arkusza (przycisk aktywny tylko po udanym zapisie).
+                if getattr(self, "btn_do_arkusza", None) is not None:
+                    self.btn_do_arkusza.config(state=tk.NORMAL)
                 # Zapis POJEDYNCZEJ pozycji nie gasi flagi (reszta drzewa
                 # dalej jest niezapisana), ale samo przerysowanie tez nie
                 # moze jej zapalac na nowo.
@@ -3945,7 +4026,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                      f"składów {wynik.get('skladow', 0)}",
                 fg=OK_ZIELONY)
 
-    def _pokaz_raport(self, wynik, kroki, bledy, zapisz):
+    def _pokaz_raport(self, wynik, kroki, bledy, zapisz, tylko_sym=None):
         okno = tk.Toplevel(self)
         okno.title("Sprawdzenie całości" if not zapisz else "Wynik zapisu")
         okno.configure(bg=TLO)
@@ -3962,8 +4043,35 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                     f"zmienionych: {wynik.get('zmienionych', 0)}   "
                     f"składów: {wynik.get('skladow', 0)}") if zapisz else \
                    f"pozycji w planie: {len(kroki)}"
+
+        # ⚠️ Przy JEDNEJ kartotece licznik zer nic nie mowi. „zalozonych: 0,
+        # zmienionych: 0" plus wiersz „bez-zmian" wyglada jak awaria, a zwykle
+        # znaczy tylko, ze taka kartoteka JUZ JEST w Subiekcie i nie bylo
+        # czego zmieniac (zgloszone 24.09.2026). Mowimy to wprost.
+        podtytul = None
+        if zapisz and tylko_sym:
+            status = str((kroki[0].get("Status") if kroki else "") or "")
+            nazwa_k = (self.pozycje[tylko_sym].nazwa
+                       if tylko_sym in self.pozycje else "")
+            opis_k = f"{tylko_sym}" + (f" — {nazwa_k}" if nazwa_k else "")
+            if bledy:
+                naglowek = f"Nie udało się zapisać: {opis_k}"
+            elif "bez-zmian" in status or "istnieje" in status:
+                naglowek = f"Kartoteka już była w Subiekcie: {opis_k}"
+                podtytul = ("Nic nie trzeba było zmieniać — możesz ją teraz "
+                            "wstawić do arkusza.")
+            elif wynik.get("zalozonych"):
+                naglowek = f"Założono kartotekę: {opis_k}"
+                podtytul = "Teraz „Wstaw do arkusza RM_BAZA”."
+            elif wynik.get("zmienionych"):
+                naglowek = f"Zmieniono kartotekę: {opis_k}"
+                podtytul = "Teraz „Wstaw do arkusza RM_BAZA”."
+
         tk.Label(okno, text=naglowek, bg=TLO, fg=BLAD_CZERWONY if bledy else OK_ZIELONY,
                  font=("Arial", 10, "bold")).pack(padx=12, pady=(12, 2), anchor="w")
+        if podtytul:
+            tk.Label(okno, text=podtytul, bg=TLO, fg=TEKST_SZARY,
+                     font=("Arial", 9)).pack(padx=12, pady=(0, 2), anchor="w")
 
         # Legenda — przy dlugiej liscie mowi od razu, czy cos wymaga uwagi,
         # bez przegladania wiersz po wierszu. Puste grupy pomijamy.
@@ -4081,11 +4189,15 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         wysrodkuj(okno, self)
 
 
-def open_window(parent, symbol=None, nowa=None):
+def open_window(parent, symbol=None, nowa=None, do_arkusza=None):
     """Otwiera Edytor kartotek.
 
-    symbol != None → tryb edycji istniejącej kartoteki.
-    nowa != None   → nowa pozycja z wypełnionymi polami; `nowa` to
-                     {"symbol": ..., "nazwa": ...} z arkusza RM_BAZA.
+    symbol != None     → tryb edycji istniejącej kartoteki.
+    nowa != None       → nowa pozycja z wypełnionymi polami; `nowa` to
+                         {"symbol": ..., "nazwa": ...} z arkusza RM_BAZA.
+    do_arkusza != None → pokazuje przycisk „Podmień w arkuszu RM_BAZA”.
+                         Callback dostaje {"symbol", "nazwa", "opis"}
+                         i wpisuje je do wiersza, z którego przyszliśmy.
     """
-    return EdytorWindow(parent, symbol=symbol, nowa=nowa)
+    return EdytorWindow(parent, symbol=symbol, nowa=nowa,
+                        do_arkusza=do_arkusza)
