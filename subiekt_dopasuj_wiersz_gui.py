@@ -51,6 +51,11 @@ class DopasujWierszWindow(tk.Toplevel):
         self._buduj()
         wysrodkuj(self, parent, 1150, 620)
 
+        # F5 = wymus swiezy katalog. `bind` (nie `bind_all`) — skroty F2-F6
+        # glownego okna sa CELOWO odfiltrowane w oknach Toplevel
+        # (`_skrot_arkusza` w RM_BAZA), wiec bez tego F5 tutaj nic nie robi.
+        self.bind("<F5>", self._na_f5)
+
         if self.blokada:
             self._pokaz_blokade()
         else:
@@ -341,9 +346,24 @@ class DopasujWierszWindow(tk.Toplevel):
         # Zamiast tego edytor dostaje callback i pokazuje przycisk
         # „Podmien w arkuszu RM_BAZA" — to user decyduje, kiedy wiersz
         # ma dostac dane z kartoteki.
+        # ⚠️ `po_zamknieciu` DOPIERO OD 25.09.2026 (zgloszenie usera).
+        # `_odswiez_katalog_i_szukaj` istniala tu od poczatku, ale NIKT
+        # JEJ NIE WOLAL — martwy kod. Efekt: user zakladal kartoteke
+        # w edytorze, wracal do tego okna i swojej kartoteki NIE WIDZIAL,
+        # bo lista szla dalej ze starego cache.
+        #
+        # Szukamy po SYMBOLU nowej kartoteki, nie po dotychczasowej frazie:
+        # user wlasnie ja zalozyl, wiec chce ja zobaczyc.
         _E.open_window(self.master,
                        nowa={"symbol": plan["symbol"], "nazwa": nazwa},
-                       do_arkusza=self._wstaw_z_edytora)
+                       do_arkusza=self._wstaw_z_edytora,
+                       po_zamknieciu=lambda: self._po_edytorze(plan["symbol"]))
+
+    def _po_edytorze(self, symbol):
+        """Powrot z edytora — katalog moze miec nowa kartoteke."""
+        if not self.winfo_exists():
+            return          # user zamknal okno w miedzyczasie
+        self._odswiez_katalog_i_szukaj(symbol)
 
     def _wstaw_z_edytora(self, kartoteka):
         """Callback dla edytora: wstawia jego kartoteke do naszego wiersza.
@@ -378,6 +398,16 @@ class DopasujWierszWindow(tk.Toplevel):
         # Wiersz ma juz kartoteke — to okno nie ma tu nic wiecej do roboty.
         self.destroy()
         return True
+
+    def _na_f5(self, event=None):
+        """F5 — wymus pobranie katalogu od nowa, z zachowaniem frazy.
+
+        Potrzebne, gdy kartoteka powstala POZA ta sciezka (wprost
+        w Subiekcie albo na drugiej maszynie) — wtedy nikt nie skasowal
+        naszego cache.
+        """
+        self._odswiez_katalog_i_szukaj(self.var_fraza.get())
+        return "break"
 
     def _odswiez_katalog_i_szukaj(self, fraza):
         """Po założeniu kartoteki cache katalogu jest nieaktualny."""

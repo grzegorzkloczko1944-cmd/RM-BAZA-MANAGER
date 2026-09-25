@@ -77,11 +77,29 @@ def zaloz_kartoteke(symbol, nazwa, rodzaj="towar", jm="szt", cena=None, opis="",
         args["zapisz"] = True
     try:
         import subiekt_bridge
-        return subiekt_bridge.call(
+        wynik = subiekt_bridge.call(
             "kartoteka", args, timeout=timeout, write=zapisz,
             fallback=lambda: _kartoteka_cli(plan, zapisz, timeout))
     except ImportError:
-        return _kartoteka_cli(plan, zapisz, timeout)
+        wynik = _kartoteka_cli(plan, zapisz, timeout)
+
+    # ⚠️ NOWA KARTOTEKA UNIEWAZNIA CACHE KATALOGU (25.09.2026).
+    #
+    # Zgloszenie: user zaklada kartoteke i NIE WIDZI jej w oknie „Dopasuj
+    # kartoteke Subiekta" — lista szla z `subiekt_katalog.json` sprzed
+    # max. 12 h. Kasujemy cache TUTAJ, u zrodla, a nie w oknach: tedy
+    # przechodzi KAZDA sciezka zakladania (edytor kartotek, „Zaloz
+    # wszystkie", kartoteki z faktury KSeF), takze te dopisane pozniej.
+    #
+    # Tylko realny zapis — suchy przebieg (`zapisz=False`) niczego
+    # w Subiekcie nie zmienia, wiec cache zostaje wazny.
+    if zapisz and isinstance(wynik, dict) and wynik.get("status") == "zalozona":
+        try:
+            import subiekt_scalanie
+            subiekt_scalanie.uniewaznij_katalog()
+        except Exception:
+            pass        # cache to predkosc, nie poprawnosc — nie psujemy zapisu
+    return wynik
 
 
 def _kartoteka_cli(plan_dane, zapisz, timeout):

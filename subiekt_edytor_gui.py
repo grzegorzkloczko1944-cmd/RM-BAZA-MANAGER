@@ -241,7 +241,8 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                  ("rodzaj", "Rodzaj", 75), ("stan", "Stan", 55),
                  ("cena", "Cena netto", 75)]
 
-    def __init__(self, parent, symbol=None, nowa=None, do_arkusza=None):
+    def __init__(self, parent, symbol=None, nowa=None, do_arkusza=None,
+                 po_zamknieciu=None):
         super().__init__(parent)
         self.title("Edytor kartotek — Subiekt nexo PRO")
         self.configure(bg=TLO)
@@ -266,6 +267,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         #: kartoteka w edytorze"). Steruje widocznoscia przycisku
         #: „Podmien w arkuszu RM_BAZA" (24.09.2026).
         self._do_arkusza = do_arkusza
+        # Wolane RAZ przy zamknieciu, kazda droga (X, Anuluj, po zapisie).
+        # Okno, ktore nas otwarlo, odswieza sobie katalog — kartoteka moze
+        # byc nowa (25.09.2026).
+        self._po_zamknieciu = po_zamknieciu
         #: Czy pole Symbol ma byc zablokowane mimo `w_subiekcie=False`.
         #: Ustawiane przy wejsciu z F4 (symbol pochodzi z arkusza), zdejmowane
         #: przez „Klonuj" (25.09.2026).
@@ -779,6 +784,23 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                     icon="warning", default="no", parent=self):
                 return
         self.destroy()
+
+    def destroy(self):
+        """Jedyne wyjscie z okna — stad wolamy `po_zamknieciu`.
+
+        W `destroy`, nie w `_anuluj`: zamkniecie idzie takze przyciskiem
+        zapisu i „Podmien w arkuszu", a callback ma polecic dokladnie raz.
+        Bledu z niego nie propagujemy — okno i tak sie zamyka.
+        """
+        cb, self._po_zamknieciu = getattr(self, "_po_zamknieciu", None), None
+        try:
+            super().destroy()
+        finally:
+            if cb:
+                try:
+                    cb()
+                except Exception:
+                    pass
 
     def _panel_drzewo(self, rodzic):
         ram = tk.LabelFrame(rodzic, text=" 1. Struktura kartoteki (drzewo) ",
@@ -1787,6 +1809,44 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             text=f"Kartotek w Subiekcie: {len(dane)}   (na stanie: {ze_stanem})",
             fg=TEKST_SZARY)
 
+    def _dociagnij_katalog_po_zapisie(self, symbol=None):
+        """Swiezy katalog do panelu 4 po zapisie kartoteki — w TLE.
+
+        W watku, bo pobranie idzie przez most (~9 s przy zimnym starcie)
+        i nie moze zamrozic okna zaraz po zapisie. Do czasu powrotu lista
+        pokazuje stare dane — to lepsze niz zablokowany edytor.
+
+        Kasujemy tez wspolny cache na dysku, zeby POZOSTALE okna (Dopasuj
+        kartoteke, Scal kody) nie czytaly katalogu bez tej kartoteki.
+        """
+        try:
+            import subiekt_scalanie
+            subiekt_scalanie.uniewaznij_katalog()
+        except Exception:
+            pass
+
+        def robota():
+            try:
+                dane = pobierz_katalog()
+            except Exception:
+                return          # cicho: zapis sie udal, to tylko odswiezenie
+            def gotowe():
+                if not self.winfo_exists():
+                    return
+                self.katalog = dane
+                self._odswiez_liste()
+                if symbol:
+                    self.status.config(
+                        text=f"✔ Zapisano do Subiekta: {symbol}   "
+                             f"(lista odświeżona: {len(dane)} kartotek)",
+                        fg=OK_ZIELONY)
+            try:
+                self.after(0, gotowe)
+            except Exception:
+                pass            # okno zamkniete w trakcie pobierania
+
+        threading.Thread(target=robota, daemon=True).start()
+
     @staticmethod
     def _stan_txt(v):
         """Ilość w magazynie do komórki listy 4.
@@ -2421,6 +2481,21 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self._podswietl_rodzica()
         sym = self._symbol_wezla()
         if not sym or sym not in self.pozycje:
+            # ⚠️ POZYCJA Z PANELU 2 (klon, wybor z listy 4) NIE MA WEZLA
+            # W DRZEWIE — i nie ma go miec. Czyszczenie panelu zabraloby
+            # userowi formularz, nad ktorym wlasnie pracuje (25.09.2026).
+            #
+            # Tk dostarcza `<<TreeviewSelect>>` PO powrocie z funkcji, ktora
+            # ruszyla drzewo, wiec blokada po stronie wolajacego (`_z_listy`
+            # w `_zmien_symbol`) tego nie lapie — zdarzenie przychodzi
+            # pozniej, przy dowolnej nastepnej akcji. Dlatego filtr stoi
+            # TUTAJ, na koncu lancucha.
+            #
+            # Objaw: user klonowal pozycje, zmienial symbol, wpisywal nazwe
+            # — i CALY PANEL SIE KASOWAL (`_zaznaczony = None`), a zapis
+            # przestawal byc mozliwy.
+            if getattr(self, "_z_listy", False) and self._zaznaczony in self.pozycje:
+                return
             # Nic nie zaznaczone — panel 2 ma byc PUSTY, ale sekcja 3
             # ZOSTAJE: user chce widziec skladniki, mimo ze zgubil
             # zaznaczenie w drzewie (16.09.2026).
@@ -2874,11 +2949,20 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                         for (r, d, il) in self.relacje]
         self.korzenie = [nowy if s == stary else s for s in self.korzenie]
         self._zaznaczony = nowy
+        # ⚠️ POZYCJA SPOZA DRZEWA: NIE DOTYKAMY DRZEWA W OGOLE (25.09.2026).
+        #
+        # Klon i wybor z listy 4 nie maja wezla w Treeview. `_odswiez_drzewo()`
+        # przebudowuje je i GUBI ZAZNACZENIE, a to odpala `<<TreeviewSelect>>`
+        # -> `_na_wybor_wezla`, ktore przy pustym zaznaczeniu czysci panel 2
+        # i ustawia `_zaznaczony = None`. Efekt dla usera: dopisuje jeden znak
+        # do symbolu klona, a CALE POLE SIE KASUJE (zgloszone 25.09.2026).
+        #
+        # Poprzednia proba (e5a7fb8) zdjela samo `_zaznacz_w_drzewie` — za
+        # malo, bo czysci nie zaznaczanie, tylko przebudowa drzewa.
+        if getattr(self, "_z_listy", False):
+            return
         self._odswiez_drzewo()
-        # Pozycja spoza drzewa (klon, wybor z listy 4) — nie ma czego
-        # zaznaczac; patrz komentarz na koncu _pole_zmienione.
-        if not getattr(self, "_z_listy", False):
-            self._zaznacz_w_drzewie(nowy)
+        self._zaznacz_w_drzewie(nowy)
 
     def _zaznacz_w_drzewie(self, symbol):
         def szukaj(rodzic=""):
@@ -4192,10 +4276,33 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 # moze jej zapalac na nowo.
                 if getattr(self, "_edytowana", None) == tylko_sym:
                     self._edytowana = None
-                self._odswiez_drzewo(_bez_znacznika=True)
-                self._zaznacz_w_drzewie(tylko_sym)
+                # ⚠️ KLON ZYJE TYLKO W PANELU 2 — drzewa NIE DOTYKAMY.
+                #
+                # Klon (i wybor z listy 4) nie ma wezla w drzewie. Odswiezenie
+                # gubi tam zaznaczenie, co odpala `<<TreeviewSelect>>` ->
+                # `_na_wybor_wezla` -> wyczyszczenie panelu 2. User zapisywal
+                # klona, dostawal potwierdzenie i PATRZYL NA PUSTY FORMULARZ,
+                # wiec wygladalo to tak, jakby zapis nie doszedl (zgloszone
+                # 25.09.2026 — kartoteka byla w Subiekcie przez caly czas).
+                #
+                # Symbol pokazujemy z `Kartoteka.symbol`, nie z klucza: klon
+                # siedzi pod kluczem technicznym („NUL+klon:...”), ktory nie
+                # ma prawa trafic userowi przed oczy.
+                k_zap = self.pozycje.get(tylko_sym)
+                widoczny = (k_zap.symbol if k_zap else tylko_sym) or tylko_sym
+                if not getattr(self, "_z_listy", False):
+                    self._odswiez_drzewo(_bez_znacznika=True)
+                    self._zaznacz_w_drzewie(tylko_sym)
                 self.status.config(
-                    text=f"✔ Zapisano do Subiekta: {tylko_sym}", fg=OK_ZIELONY)
+                    text=f"✔ Zapisano do Subiekta: {widoczny}", fg=OK_ZIELONY)
+                # ⚠️ PANEL 4 MA POKAZAC SWIEZO ZAPISANA KARTOTEKE (25.09.2026).
+                #
+                # `self.katalog` wczytuje sie RAZ przy otwarciu okna. Po zapisie
+                # nikt go nie odswiezal, wiec user zapisywal kartoteke, szukal
+                # jej na liscie 4 — i JEJ TAM NIE BYLO, mimo ze w Subiekcie
+                # siedziala. Zgloszone na „ELGD-BS": lista pokazywala samo
+                # „ELGD" (starszy wariant), bo pochodzila sprzed zapisu.
+                self._dociagnij_katalog_po_zapisie(widoczny)
                 return
             for sym in self._osadzone():
                 self.pozycje[sym].w_subiekcie = True
@@ -4371,15 +4478,18 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         wysrodkuj(okno, self)
 
 
-def open_window(parent, symbol=None, nowa=None, do_arkusza=None):
+def open_window(parent, symbol=None, nowa=None, do_arkusza=None,
+                po_zamknieciu=None):
     """Otwiera Edytor kartotek.
 
     symbol != None     → tryb edycji istniejącej kartoteki.
     nowa != None       → nowa pozycja z wypełnionymi polami; `nowa` to
                          {"symbol": ..., "nazwa": ...} z arkusza RM_BAZA.
+    po_zamknieciu      → wołane RAZ przy zamknięciu okna (dowolną drogą);
+                         wołający odświeża sobie katalog Subiekta.
     do_arkusza != None → pokazuje przycisk „Podmień w arkuszu RM_BAZA”.
                          Callback dostaje {"symbol", "nazwa", "opis"}
                          i wpisuje je do wiersza, z którego przyszliśmy.
     """
     return EdytorWindow(parent, symbol=symbol, nowa=nowa,
-                        do_arkusza=do_arkusza)
+                        do_arkusza=do_arkusza, po_zamknieciu=po_zamknieciu)

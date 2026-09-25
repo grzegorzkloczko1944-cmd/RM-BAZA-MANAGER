@@ -1090,7 +1090,14 @@ def pozycje_z_podobnymi(project_id, min_prefiks=4, con=None):
 # zostało tam zapisane, więc każde otwarcie okna pobierało kartoteki od nowa
 # (audyt 14.09.2026).
 KATALOG_CACHE = r"C:\RMPAK_CLIENT\subiekt_katalog.json"
-KATALOG_WAZNY_H = 12          # po tylu godzinach odświeżamy w tle
+KATALOG_WAZNY_H = 1           # po tylu godzinach odświeżamy w tle
+
+# ⚠️ Bylo 12 h (do 25.09.2026). Skrocone, bo cache nie wie o kartotekach
+# zalozonych POZA RM_BAZA — wprost w Subiekcie, przez druga osobe. Po
+# zalozeniu kartoteki Z RM_BAZA cache pada od razu (`uniewaznij_katalog`
+# w `subiekt_asortyment.zaloz_kartoteke`), wiec ten limit jest juz tylko
+# siatka bezpieczenstwa na zmiany z zewnatrz. Koszt: ~9 s przy pierwszym
+# otwarciu okna raz na godzine.
 
 
 def wczytaj_katalog_subiekta(tylko_cache=False, max_wiek_h=None):
@@ -1152,6 +1159,29 @@ def wczytaj_katalog_subiekta(tylko_cache=False, max_wiek_h=None):
     except Exception:
         pass          # brak zapisu cache to strata prędkości, nie błąd
     return katalog
+
+
+def uniewaznij_katalog():
+    """Kasuje cache katalogu — nastepny odczyt pojdzie do Subiekta.
+
+    JEDNO MIEJSCE na uniewaznienie. Wolane automatycznie po zalozeniu
+    kartoteki (`subiekt_asortyment.zaloz_kartoteke`) i recznie z F5.
+
+    Zgloszone 25.09.2026: user zakladal kartoteke i nie widzial jej
+    w oknie „Dopasuj kartoteke Subiekta", bo lista szla z cache sprzed
+    max. 12 h. Kasujemy PLIK, a nie tylko pamiec procesu — cache jest
+    wspolny dla wszystkich okien i przezywa ich zamkniecie.
+
+    Nie rzuca: brak pliku albo zajety przez inny proces to nie blad,
+    najwyzej nastepny odczyt bedzie wolniejszy.
+    """
+    try:
+        if os.path.isfile(KATALOG_CACHE):
+            os.remove(KATALOG_CACHE)
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def katalog_wiek_h():

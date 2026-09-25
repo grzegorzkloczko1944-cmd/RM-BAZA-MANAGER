@@ -2402,7 +2402,7 @@ class MainWindow(tk.Tk):
         for klawisz, akcja in (("<F2>", "show_position_card"),
                                ("<F3>", "send_selected_to_rfq"),
                                ("<F4>", "dopasuj_kartoteke_wiersza"),
-                               ("<F5>", "refresh_data"),
+                               ("<F5>", "odswiez_wszystko"),
                                ("<F6>", "show_assembly_tree")):
             self.bind_all(klawisz,
                           lambda e, a=akcja: self._skrot_arkusza(e, a), add="+")
@@ -13006,6 +13006,31 @@ class MainWindow(tk.Tk):
         akcja = getattr(self, nazwa_akcji, None)
         if callable(akcja):
             akcja()
+
+    def odswiez_wszystko(self):
+        """F5 — pelne odswiezenie: arkusz ORAZ cache katalogu Subiekta.
+
+        ⚠️ NIE wpinamy tego w `refresh_data()`. Tamta leci po KAZDEJ edycji
+        komorki — w repo jest ponad 130 jej wywolan — a pobranie katalogu
+        kosztuje ~9 s (3444 kartoteki przez most). Kasowanie cache w tamtej
+        sciezce dawaloby kilkusekundowa zwloke przy zwyklym wpisywaniu
+        liczby do komorki.
+
+        Tutaj jest bezpiecznie: to swiadome wcisniecie F5 przez usera.
+        Samego katalogu NIE pobieramy — tylko kasujemy cache, wiec F5 jest
+        natychmiastowe. Koszt ~9 s zaplaci dopiero okno, ktore katalogu
+        naprawde potrzebuje, i zrobi to w swoim watku (25.09.2026).
+        """
+        self.refresh_data()
+        try:
+            import subiekt_scalanie
+            subiekt_scalanie.uniewaznij_katalog()
+        except Exception:
+            pass        # brak modulu Subiekta nie moze zepsuc odswiezenia arkusza
+        try:
+            self.update_status("Odświeżono — katalog Subiekta zostanie pobrany od nowa")
+        except Exception:
+            pass
 
     def dopasuj_kartoteke_wiersza(self):
         """Dopasowanie POJEDYNCZEJ pozycji do kartoteki Subiekta (PPM).
