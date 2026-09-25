@@ -808,7 +808,15 @@ class DatabaseManager:
                 i.updated_at
             FROM items i
             WHERE i.project_id = ? AND COALESCE(i.is_hidden, 0) = ?
-            ORDER BY drawing_no COLLATE NOCASE, name COLLATE NOCASE, i.id
+            -- ZNORMALIZOWANE ZAWSZE NA GORZE, potem rysunki (25.09.2026).
+            -- Znormalia mialy pusty numer rysunku, wiec NULL sortowal je na
+            -- poczatek „przy okazji". Po przypisaniu kartoteki (Podmien /
+            -- Nazwij / Scal) w work_drawing_no laduje symbol Subiekta
+            -- („626 ZZ") i taki wiersz spadal miedzy rysunki, alfabetycznie.
+            -- Kolejnosc ma wynikac z KLASY, nie z tego, czy numer jest pusty.
+            ORDER BY CASE WHEN COALESCE(i.class_manual, i.class_auto) = 'ZNORMALIZOWANE'
+                          THEN 0 ELSE 1 END,
+                     drawing_no COLLATE NOCASE, name COLLATE NOCASE, i.id
         """
         
         print(f"   SQL parametry: project_id={project_id}, is_hidden={target_is_hidden}")
