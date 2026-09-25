@@ -1115,6 +1115,23 @@ def call(command, args=None, timeout=TIMEOUT_S, write=False, fallback=None):
     return odp.get("data") or {}
 
 
+#: Argumenty `--klucz=wartosc`, ktore ZAWSZE ida do mostu jako tekst.
+#: Symbol kartoteki i numer projektu bywaja z samych cyfr („172", „2637"),
+#: a C# czyta je przez `GetValue<string>()` — liczba rzuca tam wyjatkiem
+#: (25.09.2026). Patrz komentarz w `wywolaj`.
+POLA_TEKSTOWE = frozenset((
+    "symbole",      # kartoteka-usun, symbole, scal — lista po srednikach
+    "symbol",       # pojedyncza kartoteka
+    "projekt",      # numer projektu, np. „2637"
+    "numery",       # numery dokumentow
+    "numer",
+    "magazyn",      # symbol magazynu, np. „2"
+    "data",
+    "tytul",
+    "uwagi",
+))
+
+
 def wywolaj(tryb, argv=(), timeout=TIMEOUT_S, plan=None, symbole=None,
             fallback=None):
     """Most z argumentami w stylu CLI.
@@ -1145,7 +1162,24 @@ def wywolaj(tryb, argv=(), timeout=TIMEOUT_S, plan=None, symbole=None,
             klucz = klucz.replace("-", "_")
             if klucz in ("out", "plan", "symbols_file"):
                 continue          # most nie używa plików pośrednich
-            args[klucz] = int(wartosc) if wartosc.isdigit() else wartosc
+            # ⚠️ POLA TEKSTOWE ZOSTAJĄ TEKSTEM, nawet gdy są z samych cyfr.
+            #
+            # Symbol kartoteki „172" albo numer projektu „2637" to dla nas
+            # NAPIS, ale `isdigit()` widział liczbę i wysyłał do mostu
+            # `{"symbole": 172}`. C# czyta te pola przez `GetValue<string>()`
+            # i sypał wyjątkiem:
+            #     An element of type 'Number' cannot be converted
+            #     to a 'System.String'
+            # — zgłoszone 25.09.2026 przy kasowaniu kartoteki o symbolu „172".
+            # Objaw był mylący: „kilka usunęło, kilka ma błąd" — padały
+            # dokładnie te symbole, które składały się z samych cyfr.
+            #
+            # Konwersja na int zostaje dla pól, które NAPRAWDĘ są liczbami
+            # (limit, dni, id); reszta idzie jako string.
+            if klucz in POLA_TEKSTOWE:
+                args[klucz] = wartosc
+            else:
+                args[klucz] = int(wartosc) if wartosc.isdigit() else wartosc
     if zapisz:
         args["zapisz"] = True
     if plan is not None:

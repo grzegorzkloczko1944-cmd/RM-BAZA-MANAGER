@@ -182,6 +182,26 @@ def usun_kartoteki(symbole, zapisz=False, timeout=TIMEOUT_S):
     return _uruchom("kartoteka-usun", argv, os.path.join(tmp, "wynik.json"), timeout)
 
 
+def zmien_symbole(pozycje, zapisz=False, timeout=TIMEOUT_S):
+    """Zmienia SYMBOL istniejacych kartotek. `pozycje`: [{id, stary, nowy}].
+
+    Tryb mostu „symbole". Identyfikuje kartoteke po **Id**, nie po symbolu —
+    symbol jest wlasnie tym, co zmieniamy. Przed zapisem most WERYFIKUJE
+    pole `stary`: gdy kartoteka ma dzis inny symbol (ktos ja poprawil),
+    pozycja jest pomijana zamiast nadpisana.
+
+    Zwraca {zmienione, kroki:[{Id, Stary, Nowy, Status, Szczegoly}]}.
+    `zapisz=False` = suchy przebieg.
+    """
+    tmp = tempfile.mkdtemp(prefix="subiekt_sym_")
+    plan_path = os.path.join(tmp, "plan.json")
+    with open(plan_path, "w", encoding="utf-8") as f:
+        json.dump([{"id": p["id"], "stary": p["stary"], "nowy": p["nowy"]}
+                   for p in pozycje], f, ensure_ascii=False)
+    argv = [f"--plan={plan_path}"] + (["--zapisz"] if zapisz else [])
+    return _uruchom("symbole", argv, os.path.join(tmp, "wynik.json"), timeout)
+
+
 def _liczba(tekst, domyslna=0.0):
     try:
         return float(str(tekst).replace(",", ".").strip() or 0)

@@ -106,6 +106,16 @@ internal static class Katalog
                 // Sam Count() jest tania agregacja w tej samej projekcji —
                 // nie sciagamy skladnikow, tylko ich liczbe.
                 Skladnikow = a.SkladnikiKompletu.Count(),
+                // NaDokumentach — na ilu POZYCJACH DOKUMENTOW stoi ta kartoteka
+                // (25.09.2026). Bez tego RM_BAZA nie umiala powiedziec, czy
+                // kartoteke da sie skasowac: Subiekt odmawia z komunikatem
+                // "Nie mozna usunac asortymentu, ktory jest uzyty na dokumencie",
+                // a katalog niosl tylko stan i komplety. Zgloszone na
+                // 011-100.32 "Zacisk belki" — zero kompletow, a mimo to odmowa.
+                //
+                // Liczymy Count() w TEJ SAMEJ projekcji, jak WKompletach:
+                // to agregacja po stronie serwera, nie sciaganie pozycji.
+                NaDokumentach = a.PozycjeDokumentu.Count(),
             })
             .ToList()
             .Select(a => new Kart(
@@ -116,7 +126,8 @@ internal static class Katalog
                 decimal.Round(a.CenaEwidencyjna, 2),
                 (a.Rodzaj ?? "").Trim(),
                 a.WKompletach,
-                a.Skladnikow))
+                a.Skladnikow,
+                a.NaDokumentach))
             .Where(k => k.Symbol.Length > 0)
             .ToList();
 
@@ -137,5 +148,6 @@ internal static class Katalog
     // różnie, Id nie).
     internal record Kart(int Id, string Symbol, string Nazwa, string Opis,
                          decimal CenaEwidencyjna,
-                         string Rodzaj, int WKompletach, int Skladnikow);
+                         string Rodzaj, int WKompletach, int Skladnikow,
+                         int NaDokumentach);
 }

@@ -183,9 +183,18 @@ class Kartoteka:
         #: "nie było w formularzu, nie ruszaj" — inaczej zapis kartoteki
         #: z pustym polem skasowałby regał wgrany przy migracji magazynu.
         self.polozenie = None
-        #: Czy kartoteka jest już w Subiekcie — blokuje zmianę symbolu
-        #: i decyduje, czy to „założymy" czy „zmienimy".
+        #: Czy kartoteka jest już w Subiekcie — decyduje, czy to „założymy"
+        #: czy „zmienimy". Symbolu SAM W SOBIE juz nie blokuje: kartoteke
+        #: nieuzywana (bez dokumentow, stanu i kompletow) wolno przemianowac
+        #: — patrz `_wolna_kartoteka` (25.09.2026).
         self.w_subiekcie = w_subiekcie
+        #: Id kartoteki w Subiekcie — tryb mostu „symbole" identyfikuje
+        #: pozycje po Id, nie po symbolu (symbol wlasnie zmieniamy).
+        self.id_subiekt = None
+        #: Symbol, z ktorym kartoteka przyszla z Subiekta. Tryb „symbole"
+        #: WERYFIKUJE te wartosc przed zapisem i pomija pozycje, gdy ktos
+        #: zmienil symbol w miedzyczasie — dlatego trzymamy oryginal osobno.
+        self.symbol_zrodlowy = symbol if w_subiekcie else None
 
     def czy_komplet(self):
         return self.rodzaj == "komplet"
@@ -672,6 +681,13 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # Esc — na oknie, nie na widgetach: lapie niezaleznie od tego,
         # co ma fokus.
         self.bind("<Escape>", self._na_escape)
+        # F5 = pobierz katalog Subiekta OD NOWA (25.09.2026).
+        #
+        # ⚠️ Dwa komunikaty tego okna odsylaly do „F5", a klawisza NIGDY tu
+        # nie bylo — obiecywaly cos, czego nie da sie zrobic. Skroty F2-F8
+        # z arkusza sa CELOWO odfiltrowane w oknach Toplevel
+        # (`_skrot_arkusza` w RM_BAZA), wiec potrzebny jest wlasny bind.
+        self.bind("<F5>", self._na_f5)
 
         # Del kasuje zaznaczone — osobno w drzewie i w skladzie, bo to dwie
         # rozne operacje (wezel struktury vs skladnik kompletu). NIE na oknie:
@@ -704,6 +720,16 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.tab_lista.bind("<Return>", lambda _e: self._dodaj_istniejaca())
         # Enter w polu Nazwa przenosi do listy — typowy odruch po wpisaniu.
         self.pola["nazwa"][1].bind("<Return>", lambda _e: self.tab_lista.focus_set())
+
+    def _na_f5(self, _e=None):
+        """F5 — swiezy katalog z Subiekta do listy 4.
+
+        Ta sama droga co po zapisie kartoteki: kasuje wspolny cache na dysku
+        i dociaga katalog w tle, wiec okno nie zamarza.
+        """
+        self.status.config(text="Odświeżam katalog Subiekta…", fg=TEKST_SZARY)
+        self._dociagnij_katalog_po_zapisie()
+        return "break"
 
     def _na_escape(self, _e=None):
         """Esc: z pola tekstowego oddaj fokus liscie, z tabeli zamknij okno."""
@@ -972,28 +998,44 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                                   font=("Arial", 8), padx=6)
         self.btn_auto.grid(row=0, column=2, sticky="w", padx=(0, 8), pady=6)
 
-        tk.Label(pod, text="Rodzaj:", bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9),
+        # OPIS MIEDZY NAZWA A RODZAJEM (zyczenie uzytkownika 25.09.2026).
+        # Czytamy pozycje „symbol - nazwa - opis" jednym ciagiem, a opis
+        # stal na koncu, za czterema polami technicznymi.
+        #
+        # Wysokosc 1 WIERSZ, nie 5: opisy to krotkie doprecyzowania („Oring",
+        # „Lozysko kulkowe zwykle"), a piec pustych linii rozpychalo panel.
+        # `tk.Text` (nie Entry) ZOSTAJE — cala reszta okna czyta go przez
+        # `txt_opis.get("1.0", "end")` i tak podpieta jest obsluga wklejania.
+        tk.Label(pod, text="Opis:", bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9),
                  anchor="w", width=12).grid(row=2, column=0, sticky="w", padx=8, pady=6)
+        self.txt_opis = tk.Text(pod, height=1, width=44, font=("Arial", 9), wrap="none")
+        self.txt_opis.grid(row=2, column=1, sticky="we", padx=4, pady=6)
+        # Enter w jednowierszowym polu tylko rozpychalby widok — nie wpisujemy
+        # nowej linii, oddajemy fokus dalej.
+        self.txt_opis.bind("<Return>", lambda _e: "break")
+
+        tk.Label(pod, text="Rodzaj:", bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9),
+                 anchor="w", width=12).grid(row=3, column=0, sticky="w", padx=8, pady=6)
         self.var_rodzaj = tk.StringVar(value=RODZAJE[0][0])
         cb = ttk.Combobox(pod, textvariable=self.var_rodzaj, state="readonly",
                           values=[r[0] for r in RODZAJE], width=20, font=("Arial", 9))
-        cb.grid(row=2, column=1, sticky="w", padx=4, pady=6)
+        cb.grid(row=3, column=1, sticky="w", padx=4, pady=6)
         cb.bind("<<ComboboxSelected>>", lambda _e: self._pole_zmienione("rodzaj"))
 
         tk.Label(pod, text="Jednostka:", bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9),
-                 anchor="w", width=12).grid(row=3, column=0, sticky="w", padx=8, pady=6)
+                 anchor="w", width=12).grid(row=4, column=0, sticky="w", padx=8, pady=6)
         self.var_jm = tk.StringVar(value="szt")
         cbj = ttk.Combobox(pod, textvariable=self.var_jm, values=JEDNOSTKI,
                            width=12, font=("Arial", 9))
-        cbj.grid(row=3, column=1, sticky="w", padx=4, pady=6)
+        cbj.grid(row=4, column=1, sticky="w", padx=4, pady=6)
         cbj.bind("<<ComboboxSelected>>", lambda _e: self._pole_zmienione("jm"))
         self.var_jm.trace_add("write", lambda *_a: self._pole_zmienione("jm"))
 
         tk.Label(pod, text="Cena ewid.:", bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9),
-                 anchor="w", width=12).grid(row=4, column=0, sticky="w", padx=8, pady=6)
+                 anchor="w", width=12).grid(row=5, column=0, sticky="w", padx=8, pady=6)
         self.var_cena = tk.StringVar(value="0,00")
         ec = tk.Entry(pod, textvariable=self.var_cena, font=("Arial", 9), width=14)
-        ec.grid(row=4, column=1, sticky="w", padx=4, pady=6)
+        ec.grid(row=5, column=1, sticky="w", padx=4, pady=6)
         self.var_cena.trace_add("write", lambda *_a: self._pole_zmienione("cena"))
 
         # POŁOŻENIE tutaj, nie tylko w zakładce Magazyn: przy kompletowaniu
@@ -1001,19 +1043,15 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # (09.09.2026). To ta sama zmienna co w karcie Magazyn — jedno pole
         # w dwóch miejscach, więc wpis widać od razu w obu.
         tk.Label(pod, text="Położenie:", bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9),
-                 anchor="w", width=12).grid(row=5, column=0, sticky="w", padx=8, pady=6)
+                 anchor="w", width=12).grid(row=6, column=0, sticky="w", padx=8, pady=6)
         self.var_polozenie = tk.StringVar()
         tk.Entry(pod, textvariable=self.var_polozenie, font=("Arial", 9),
-                 width=20).grid(row=5, column=1, sticky="w", padx=4, pady=6)
+                 width=20).grid(row=6, column=1, sticky="w", padx=4, pady=6)
         self.var_polozenie.trace_add(
             "write", lambda *_a: self._pole_zmienione("polozenie"))
         tk.Label(pod, text="regał / półka", bg=TLO_SEKCJI, fg=TEKST_SZARY,
-                 font=("Arial", 8), anchor="w").grid(row=5, column=2, sticky="w", padx=(0, 8))
+                 font=("Arial", 8), anchor="w").grid(row=6, column=2, sticky="w", padx=(0, 8))
 
-        tk.Label(pod, text="Opis:", bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9),
-                 anchor="nw", width=12).grid(row=6, column=0, sticky="nw", padx=8, pady=6)
-        self.txt_opis = tk.Text(pod, height=5, width=44, font=("Arial", 9), wrap="word")
-        self.txt_opis.grid(row=6, column=1, sticky="we", padx=4, pady=6)
         # ⚠️ `tk.Text` NIE MA `trace_add` jak StringVar, wiec sam KeyRelease
         # nie wystarcza: tekst WKLEJONY myszka (menu podreczne, przeciagniecie)
         # nie wyzwala zdarzenia klawiatury i przepadal przy zmianie pozycji
@@ -1727,14 +1765,43 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         tk.Label(sz, text="Szukaj:", bg=TLO_SEKCJI, fg=TEKST,
                  font=("Arial", 9)).pack(side=tk.LEFT)
         self.var_szukaj = tk.StringVar()
-        tk.Entry(sz, textvariable=self.var_szukaj, font=("Arial", 9)).pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+        # Pole NIE rozciaga sie juz na cala szerokosc (`expand=False`): przy
+        # 1900 px okna zajmowalo ~700 px, choc szuka sie po kilkunastu znakach.
+        # Odzyskane miejsce idzie na przycisk usuwania po prawej (25.09.2026).
+        tk.Entry(sz, textvariable=self.var_szukaj, font=("Arial", 9), width=46).pack(
+            side=tk.LEFT, padx=6)
         self.var_szukaj.trace_add("write", lambda *_a: self._odswiez_liste())
+        # FILTR „tylko nieuzywane" (zyczenie uzytkownika 25.09.2026).
+        #
+        # Pokazuje kartoteki, ktore da sie SKASOWAC albo ktorym wolno zmienic
+        # symbol — czyli bez stanu i bez uzycia w komplecie. To te same dwa
+        # warunki, ktore sprawdza `_usun_z_subiekta` przed wyslaniem do mostu.
+        #
+        # ⚠️ To filtr POMOCNICZY, nie gwarancja: Subiekt odmawia takze przy
+        # DOKUMENTACH (WZ, PZ, ZD), a tego katalog nie niesie. Kartoteka moze
+        # wiec przejsc filtr i mimo to zostac odrzucona — z podanym powodem.
+        self.var_tylko_wolne = tk.BooleanVar(value=False)
+        tk.Checkbutton(sz, text="tylko nieużywane", variable=self.var_tylko_wolne,
+                       command=self._odswiez_liste, bg=TLO_SEKCJI, fg=TEKST,
+                       font=("Arial", 8), activebackground=TLO_SEKCJI,
+                       cursor="hand2").pack(side=tk.LEFT, padx=(4, 0))
+        # Kasowanie kartotek — ten sam obieg co w oknie Magazyn. Szare, nie
+        # czerwone: przycisk stoi przy liscie, po ktorej user klika caly czas,
+        # wiec nie ma kusic kolorem. Ostrzezenia niesie okno potwierdzenia.
+        tk.Button(sz, text="\U0001f5d1 Usun zaznaczone z Subiekta\u2026",
+                  command=self._usun_z_subiekta, bg="#7f8c8d", fg="white",
+                  font=("Arial", 8), relief=tk.FLAT, padx=10,
+                  cursor="hand2").pack(side=tk.RIGHT)
 
         wrap_l = tk.Frame(dol, bg=TLO_SEKCJI)
         wrap_l.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        # `extended` — Ctrl/Shift+klik zaznacza wiele kartotek naraz. Domyslny
+        # `browse` pozwalal na jedna, wiec kasowanie szloby po jednej pozycji
+        # (25.09.2026). Reszta okna czyta `selection()[0]`, wiec pojedynczy
+        # wybor dziala jak dotad.
         self.tab_lista = ttk.Treeview(wrap_l, columns=[k[0] for k in self.KOL_LISTA],
-                                      show="headings", height=8)
+                                      show="headings", height=8,
+                                      selectmode="extended")
         for klucz, naglowek, szer in self.KOL_LISTA:
             self.tab_lista.heading(klucz, text=naglowek)
             # minwidth=40, NIE szer: _dopasuj_kolumny_listy zweza kolumny przy
@@ -1751,6 +1818,22 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.tab_lista.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sc_l.pack(side=tk.RIGHT, fill=tk.Y)
         self.tab_lista.tag_configure("w_drzewie", foreground=TEKST_SZARY)
+        # NIEUZYWANE (bez stanu, poza kompletami) na jasnoczerwonym tle —
+        # zyczenie uzytkownika 25.09.2026, ma byc widac ZAWSZE, nie tylko
+        # po wlaczeniu filtra. Te kartoteki wolno skasowac i wolno im zmienic
+        # symbol; reszta jest w uzyciu.
+        #
+        # ⚠️ Odcien ten sam co tlo „brak kartoteki" w Karcie pozycji (#fdeaea)
+        # i nieobecnosci na grafiku serwisu — jasnoczerwony w tej aplikacji
+        # znaczy „nie ma / nie uzywane", nie „blad".
+        #
+        # Wariant „w drzewie I nieuzywane" musi byc OSOBNYM tagiem: Treeview
+        # bierze pierwszy tag, ktory ustawia dana wlasciwosc, wiec dwa tagi
+        # naraz dalyby szary tekst BEZ tla albo tlo bez szarosci, zaleznie
+        # od kolejnosci.
+        self.tab_lista.tag_configure("nieuzywana", background="#fdeaea")
+        self.tab_lista.tag_configure("nieuzywana_w_drzewie", background="#fdeaea",
+                                     foreground=TEKST_SZARY)
         # WSZYSTKIE KOLUMNY ZAWSZE WIDOCZNE (10.09.2026): szerokosci z KOL_LISTA
         # to tylko proporcje startowe. Przy kazdej zmianie rozmiaru panelu
         # rozdzielamy dostepna szerokosc miedzy kolumny wedlug tych proporcji,
@@ -1759,7 +1842,8 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.tab_lista.bind("<Configure>", self._dopasuj_kolumny_listy)
         self.tab_lista.bind("<Double-1>", lambda _e: self._dodaj_istniejaca())
         self.tab_lista.bind("<<TreeviewSelect>>", self._na_wybor_z_listy)
-        tk.Label(dol, text="Dwuklik = dodaj jako składnik zaznaczonego kompletu",
+        tk.Label(dol, text="Dwuklik = dodaj jako składnik zaznaczonego kompletu   •   "
+                           "czerwone tło = nieużywana (można skasować / zmienić symbol)",
                  bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8), anchor="w").pack(
             fill=tk.X, padx=6, pady=(0, 6))
 
@@ -1840,6 +1924,13 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                         text=f"✔ Zapisano do Subiekta: {symbol}   "
                              f"(lista odświeżona: {len(dane)} kartotek)",
                         fg=OK_ZIELONY)
+                else:
+                    # Bez symbolu = odswiezenie recznie (F5). Bez tej galezi
+                    # pasek wisial na „Odswiezam katalog…" i nie bylo wiadomo,
+                    # czy juz skonczyl (25.09.2026).
+                    self.status.config(
+                        text=f"✔ Katalog odświeżony: {len(dane)} kartotek",
+                        fg=OK_ZIELONY)
             try:
                 self.after(0, gotowe)
             except Exception:
@@ -1870,6 +1961,8 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         czterysetka. 3469 wierszy to dla Treeview ulamek sekundy.
         """
         szukaj = (self.var_szukaj.get() or "").strip().lower()
+        tylko_wolne = bool(getattr(self, "var_tylko_wolne", None)
+                           and self.var_tylko_wolne.get())
         osadzone = set(self._osadzone())      # patrz _oznacz_w_liscie
         for w in self.tab_lista.get_children():
             self.tab_lista.delete(w)
@@ -1880,14 +1973,25 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             if (szukaj and szukaj not in sym.lower() and szukaj not in naz.lower()
                     and szukaj not in opis_k.lower()):
                 continue
+            if tylko_wolne and not self._wolna_kartoteka(k, sym):
+                continue
             w_drzewie = sym in osadzone
+            wolna = self._wolna_kartoteka(k, sym)
+            if wolna and w_drzewie:
+                tagi = ("nieuzywana_w_drzewie",)
+            elif wolna:
+                tagi = ("nieuzywana",)
+            elif w_drzewie:
+                tagi = ("w_drzewie",)
+            else:
+                tagi = ()
             self.tab_lista.insert("", "end", values=(
                 "✓" if w_drzewie else "", sym, naz,
                 str(k.get("Opis") or "").strip(),
                 k.get("Rodzaj") or "",
                 self._stan_txt(self._stany.get(sym.upper())),
                 f"{float(k.get('CenaEwidencyjna') or 0):g}"),
-                tags=("w_drzewie",) if w_drzewie else ())
+                tags=tagi)
 
     def _dopasuj_kolumny_listy(self, _e=None):
         """Rozciaga kolumny sekcji 4 na cala szerokosc widoku.
@@ -2382,9 +2486,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         try:
             self.pola["symbol"][0].set(k.symbol)
             self.pola["nazwa"][0].set(k.nazwa)
+            # jak wyzej: nieuzywana kartoteka ma symbol do zmiany
+            _zablok2 = k.w_subiekcie and not self._wolna_po_symbolu(k.symbol)
             self.pola["symbol"][1].config(
-                state="readonly" if k.w_subiekcie else "normal")
-            self.btn_auto.config(state="disabled" if k.w_subiekcie else "normal")
+                state="readonly" if _zablok2 else "normal")
+            self.btn_auto.config(state="disabled" if _zablok2 else "normal")
             for etykieta, wartosc in RODZAJE:
                 if wartosc == k.rodzaj:
                     self.var_rodzaj.set(etykieta)
@@ -2474,6 +2580,20 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # przepisze pole z modelu, wiec cokolwiek zostalo w `tk.Text`
         # bez zdarzenia klawiatury, przepadloby bezpowrotnie.
         self._domknij_opis()
+        # ⚠️ PRACUJESZ W PANELU 2? To zdarzenie CIE NIE DOTYCZY (25.09.2026).
+        #
+        # Klon i wybor z listy 4 nie maja wezla w drzewie. Przemianowanie
+        # takiej pozycji przebudowuje drzewo, Tk wysyla <<TreeviewSelect>>,
+        # a `_czy_porzucic_edycje` porownuje `_edytowana` z SYMBOLEM WEZLA —
+        # ktorym klon nie jest. Efekt: po zmianie symbolu i przejsciu do pola
+        # Nazwa wyskakiwalo „Pozycja w trakcie edycji", choc user ani na
+        # chwile nie opuscil swojej pozycji (zgloszone na DIN555-5-M12).
+        #
+        # Filtr nizej (`sym not in self.pozycje`) chronil juz panel przed
+        # wyczyszczeniem, ale stal PO strazniku — pytanie padalo wczesniej.
+        if (getattr(self, "_z_listy", False)
+                and self._zaznaczony in self.pozycje):
+            return
         # Opuszczasz pozycje w trakcie edycji? Pytamy, zanim panel 2
         # pokaze co innego.
         if not self._czy_porzucic_edycje(self._symbol_wezla()):
@@ -2514,7 +2634,13 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             # `_symbol_zablokowany` obejmuje takze pozycje z F4: jej symbol
             # przyszedl z arkusza i ma zostac, dopoki user nie kliknie
             # „Klonuj" (25.09.2026).
-            _zablok = k.w_subiekcie or getattr(self, "_symbol_zablokowany", False)
+            # Symbol istniejacej kartoteki jest kluczem — ale kartoteki
+            # NIEUZYWANEJ (bez dokumentow, stanu i kompletow) nikt jeszcze
+            # nie uzywa, wiec wolno ja przemianowac. Skoro wolno ja SKASOWAC,
+            # to tym bardziej zmienic jej symbol (zyczenie usera 25.09.2026).
+            _wolna = k.w_subiekcie and self._wolna_po_symbolu(k.symbol)
+            _zablok = ((k.w_subiekcie and not _wolna)
+                       or getattr(self, "_symbol_zablokowany", False))
             self.pola["symbol"][1].config(
                 state="readonly" if _zablok else "normal")
             # Auto tez wygaszamy — zeby nie kusilo kliknięciem, ktore i tak
@@ -2608,14 +2734,26 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self._zaznaczony = sym
         self._z_listy = True
         k = self.pozycje[sym]
+        # Id z katalogu — tryb mostu „symbole" identyfikuje kartoteke po Id,
+        # bo symbol jest wlasnie tym, co zmieniamy (25.09.2026).
+        if not getattr(k, "id_subiekt", None):
+            for kat in (self.katalog or []):
+                if str(kat.get("Symbol") or "").strip() == sym:
+                    k.id_subiekt = kat.get("Id")
+                    break
 
         self._blokada = True
         try:
             self.pola["symbol"][0].set(k.symbol)
             self.pola["nazwa"][0].set(k.nazwa)
-            # Symbol kartoteki z Subiekta jest kluczem — nie do zmiany.
-            self.pola["symbol"][1].config(state="readonly")
-            self.btn_auto.config(state="disabled")
+            # Symbol kartoteki z Subiekta jest kluczem — ALE kartoteke
+            # NIEUZYWANA (bez dokumentow, stanu, kompletow) wolno
+            # przemianowac: skoro wolno ja skasowac, to tym bardziej zmienic
+            # symbol (zyczenie usera 25.09.2026).
+            _zablok3 = not self._wolna_po_symbolu(sym)
+            self.pola["symbol"][1].config(
+                state="readonly" if _zablok3 else "normal")
+            self.btn_auto.config(state="disabled" if _zablok3 else "normal")
             for etykieta, wartosc in RODZAJE:
                 if wartosc == k.rodzaj:
                     self.var_rodzaj.set(etykieta)
@@ -2949,6 +3087,14 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                         for (r, d, il) in self.relacje]
         self.korzenie = [nowy if s == stary else s for s in self.korzenie]
         self._zaznaczony = nowy
+        # ⚠️ `_edytowana` MUSI isc za kluczem. Trzyma symbol pozycji, ktora
+        # user wlasnie zmienia, a `_czy_porzucic_edycje` porownuje go
+        # z nowym zaznaczeniem. Po przemianowaniu zostawal tam STARY symbol,
+        # wiec zwykle przejscie z pola Symbol do Nazwy wygladalo jak zmiana
+        # pozycji i wyskakiwalo „Pozycja w trakcie edycji" — bez powodu
+        # (zgloszone 25.09.2026 przy klonie DIN555-5-M12).
+        if getattr(self, "_edytowana", None) == stary:
+            self._edytowana = nowy
         # ⚠️ POZYCJA SPOZA DRZEWA: NIE DOTYKAMY DRZEWA W OGOLE (25.09.2026).
         #
         # Klon i wybor z listy 4 nie maja wezla w Treeview. `_odswiez_drzewo()`
@@ -3252,6 +3398,266 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self._odswiez_drzewo()
         self._zaznacz_w_drzewie(sym)
         self.pola["nazwa"][1].focus_set()   # jak wyżej: najpierw nazwa
+
+    def _zmien_symbol_w_subiekcie(self, k, stary, nowy):
+        """Zmienia symbol kartoteki w Subiekcie. True = poszlo.
+
+        Wolane PRZED zapisem reszty pol (`_zapisz_pozycje`), bo
+        `kartoteka-edytuj` szuka kartoteki PO SYMBOLU — po zmianie klucza
+        musi juz znac nowy.
+
+        Kartoteke identyfikujemy po **Id**; gdy go nie mamy (pozycja doszla
+        inna droga niz lista 4), dobieramy z katalogu po starym symbolu.
+        """
+        NL = chr(10)
+        id_sub = getattr(k, "id_subiekt", None)
+        if not id_sub:
+            for kat in (self.katalog or []):
+                if str(kat.get("Symbol") or "").strip().upper() == stary.upper():
+                    id_sub = kat.get("Id")
+                    break
+        if not id_sub:
+            messagebox.showerror(
+                "Zmiana symbolu",
+                "Nie znam Id tej kartoteki w Subiekcie, a tryb „symbole” "
+                "identyfikuje pozycje wlasnie po Id." + NL + NL
+                + "Odswiez liste 4 (F5) i sprobuj ponownie.",
+                parent=self)
+            return False
+
+        # Symbol jest kluczem w kodach kreskowych, dokumentach i skladach —
+        # zmiana musi byc swiadoma, wiec pokazujemy stary i nowy obok siebie.
+        if not messagebox.askyesno(
+                "Zmiana symbolu w Subiekcie",
+                "Baza PRODUKCYJNA Subiekta." + NL + NL
+                + "    bylo:  " + stary + NL
+                + "    jest:  " + nowy + NL + NL
+                + "Ta kartoteka jest NIEUZYWANA (bez dokumentow, stanu "
+                  "i kompletow), wiec zmiana symbolu jest bezpieczna." + NL
+                + "Subiekt odmowi, jesli cos sie zmienilo od ostatniego "
+                  "odczytu." + NL + NL + "Zmienic?",
+                parent=self, icon="warning"):
+            return False
+
+        try:
+            from subiekt_magazyn_gui import zmien_symbole
+            wynik = zmien_symbole([{"id": id_sub, "stary": stary, "nowy": nowy}],
+                                  zapisz=True)
+        except Exception as e:
+            messagebox.showerror("Zmiana symbolu", str(e), parent=self)
+            return False
+
+        # ⚠️ STATUSY WPROST Z MOSTU (`Symbole.cs`): "zmieniono" = sukces,
+        # "pominieto" = nic nie trzeba bylo robic (symbol juz poprawny albo
+        # ktos go zmienil w miedzyczasie), "blad" = odmowa.
+        # Wczesniej sprawdzalem ("zmieniony", "ok") — nazw, ktorych most NIGDY
+        # nie zwraca — wiec udana zmiana meldowala sie jako blad:
+        # „Subiekt nie zmienil symbolu: zmieniono" (zgloszone 25.09.2026).
+        kroki = (wynik or {}).get("kroki") or []
+        zle = [x for x in kroki
+               if str(x.get("Status", "")).strip().lower() == "blad"]
+        pominiete = [x for x in kroki
+                     if str(x.get("Status", "")).strip().lower() == "pominieto"]
+        if zle:
+            x = zle[0]
+            messagebox.showerror(
+                "Zmiana symbolu",
+                "Subiekt nie zmienil symbolu:" + NL + NL
+                + "  " + str(x.get("Szczegoly") or x.get("Status")),
+                parent=self)
+            return False
+        if pominiete:
+            # Najczestszy powod: ktos zmienil symbol w miedzyczasie, wiec most
+            # CELOWO nie nadpisuje cudzej zmiany. Model zostaje przy starym
+            # symbolu, bo w Subiekcie nic sie nie stalo.
+            x = pominiete[0]
+            messagebox.showwarning(
+                "Zmiana symbolu",
+                "Symbol NIE zostal zmieniony:" + NL + NL
+                + "  " + str(x.get("Szczegoly") or "pominieto") + NL + NL
+                + "Odswiez liste (F5) i sprawdz, jak jest teraz w Subiekcie.",
+                parent=self)
+            return False
+
+        # Model idzie za Subiektem: klucz w `self.pozycje`, symbol kartoteki
+        # i punkt odniesienia dla kolejnej zmiany.
+        if k.symbol in self.pozycje and self.pozycje[k.symbol] is k:
+            self.pozycje.pop(k.symbol)
+            self.pozycje[nowy] = k
+            if self._zaznaczony == stary:
+                self._zaznaczony = nowy
+        k.symbol = nowy
+        k.symbol_zrodlowy = nowy
+        k.id_subiekt = id_sub
+        self.status.config(text="\u2714 Symbol zmieniony: %s \u2192 %s" % (stary, nowy),
+                           fg=OK_ZIELONY)
+        # Katalog ma stary symbol — bez odswiezenia lista 4 i filtr
+        # klamalyby az do ponownego otwarcia okna.
+        self._dociagnij_katalog_po_zapisie(nowy)
+        return True
+
+    def _wolna_po_symbolu(self, symbol):
+        """Czy kartoteka o tym symbolu jest nieuzywana (wg katalogu).
+
+        Skrot do `_wolna_kartoteka` dla miejsc, ktore maja tylko symbol.
+        Brak w katalogu = nie wiemy = traktujemy jak UZYWANA (bezpieczniej).
+        """
+        s = str(symbol or "").strip().upper()
+        if not s:
+            return False
+        for k in (self.katalog or []):
+            if str(k.get("Symbol") or "").strip().upper() == s:
+                return self._wolna_kartoteka(k, symbol)
+        return False
+
+    def _wolna_kartoteka(self, k, symbol):
+        """Czy kartoteke da sie skasowac / zmienic jej symbol.
+
+        TRZY warunki z katalogu: BRAK DOKUMENTOW, BRAK UZYCIA W KOMPLECIE
+        i BRAK STANU. Te same sprawdza `_usun_z_subiekta` przed wyslaniem
+        do mostu, wiec filtr pokazuje dokladnie to, co ma szanse przejsc.
+
+        `NaDokumentach` doszlo 25.09.2026 (tryb "katalog" mostu,
+        `Asortyment.PozycjeDokumentu.Count()`). Bez niego walidacja byla ZLA:
+        kartoteka bez stanu i poza kompletami wygladala na wolna, a Subiekt
+        odmawial z "Nie mozna usunac asortymentu, ktory jest uzyty na
+        dokumencie" — zgloszone na 011-100.32 (3 dokumenty) i KASZTAM (1).
+        Po poprawce realnie usuwalnych jest 29 z 1630, nie 112.
+
+        ⚠️ `self._stany` niesie WYLACZNIE pozycje ze stanem niezerowym
+        (`pobierz_magazyn(tylko_niezerowe=True)`), wiec BRAK WPISU = brak
+        stanu. Ale gdy slownik jest PUSTY, stanow po prostu nie wczytano
+        i filtr nie ma czego obiecywac — wtedy nie przepuszczamy nic.
+        """
+        if k.get("WKompletach") or k.get("NaDokumentach"):
+            return False
+        if not self._stany:
+            return False        # stanow nie wczytano — nie zgadujemy
+        return not self._stany.get(str(symbol).strip().upper())
+
+    def _usun_z_subiekta(self):
+        """Kasuje ZAZNACZONE kartoteki z listy 4 \u2014 NIEODWRACALNIE.
+
+        Ten sam obieg co w oknie Magazyn i \u201eNowa kartoteka": ostrzegamy
+        o tym, co da sie sprawdzic z gory (stan, uzycie w komplecie),
+        potwierdzamy z lista symboli, kasujemy przez most, pokazujemy raport
+        per pozycja (zyczenie uzytkownika 25.09.2026).
+
+        \u26a0\ufe0f Glowna siatka bezpieczenstwa jest po stronie SUBIEKTA:
+        odmawia usuniecia kartoteki z dokumentami, stanem albo uzyciem
+        w komplecie (`MoznaUsunac`). Nasze ostrzezenia tylko oszczedzaja
+        userowi raportu z samymi bledami \u2014 nie zastepuja tamtej kontroli.
+        """
+        NL = chr(10)            # modul nie ma stalej NL (inaczej niz magazyn_gui)
+        wyb = self.tab_lista.selection()
+        if not wyb:
+            messagebox.showinfo(
+                "Usuwanie kartotek",
+                "Zaznacz kartoteki na li\u015bcie (sekcja 4)." + NL + NL
+                + "Zaznaczenie wielu: Ctrl+klik albo Shift+klik.",
+                parent=self)
+            return
+
+        symbole = [str(self.tab_lista.item(i, "values")[1]).strip() for i in wyb]
+        symbole = [s for s in symbole if s]
+        if not symbole:
+            return
+
+        # Pelne dane z `self.katalog` \u2014 lista 4 pokazuje tylko czesc kolumn,
+        # a `WKompletach` jest wlasnie w katalogu (165 z 1630 kartotek).
+        po_symbolu = {str(k.get("Symbol") or "").strip().upper(): k
+                      for k in (self.katalog or [])}
+        ze_stanem, w_kompletach, na_dokumentach = [], [], []
+        for s in symbole:
+            k = po_symbolu.get(s.upper()) or {}
+            stan = self._stany.get(s.upper())
+            if stan:
+                ze_stanem.append("%s (stan %g)" % (s, stan))
+            if k.get("WKompletach"):
+                w_kompletach.append("%s (w %s kompl.)" % (s, k["WKompletach"]))
+            # Dokumenty to NAJCZESTSZY powod odmowy — i jedyny, ktorego
+            # katalog dlugo nie znal (25.09.2026).
+            if k.get("NaDokumentach"):
+                na_dokumentach.append("%s (na %s dok.)" % (s, k["NaDokumentach"]))
+
+        if ze_stanem or w_kompletach or na_dokumentach:
+            czesci = []
+            if na_dokumentach:
+                czesci.append("S\u0104 NA DOKUMENTACH:" + NL
+                              + NL.join("  \u2022 " + x for x in na_dokumentach[:10]))
+            if ze_stanem:
+                czesci.append("MAJ\u0104 STAN:" + NL
+                              + NL.join("  \u2022 " + x for x in ze_stanem[:10]))
+            if w_kompletach:
+                czesci.append("S\u0104 SK\u0141ADNIKIEM KOMPLETU:" + NL
+                              + NL.join("  \u2022 " + x for x in w_kompletach[:10]))
+            messagebox.showwarning(
+                "Usuwanie kartotek",
+                "Tych kartotek Subiekt nie pozwoli usun\u0105\u0107:" + NL + NL
+                + (NL + NL).join(czesci) + NL + NL
+                + "Stan zdejmiesz RW (okno Magazyn), pozycj\u0119 wyjmiesz ze "
+                  "sk\u0142adu kompletu \u2014 ale KARTOTEKI Z DOKUMENTEM nie da si\u0119 "
+                  "usun\u0105\u0107 wcale. Historia dokument\u00f3w musi zosta\u0107 sp\u00f3jna."
+                + NL + NL + "Odznacz je i spr\u00f3buj ponownie.",
+                parent=self)
+            return
+
+        if not messagebox.askyesno(
+                "Usuwanie kartotek \u2014 NIEODWRACALNE",
+                "Baza PRODUKCYJNA Subiekta." + NL + NL
+                + "Usun\u0105\u0107 %d kartotek z katalogu?" % len(symbole) + NL
+                + NL.join("  \u2022 " + x for x in symbole[:12])
+                + ("" if len(symbole) <= 12
+                   else NL + "  \u2026 i %d wi\u0119cej" % (len(symbole) - 12))
+                + NL + NL
+                + "Kartoteki z dokumentami Subiekt pominie i poda pow\u00f3d." + NL
+                + "Usuni\u0119tych NIE da si\u0119 przywr\u00f3ci\u0107. Kontynuowa\u0107?",
+                parent=self, icon="warning"):
+            return
+
+        self.start_kreciolek("Usuwam %d kartotek z Subiekta" % len(symbole))
+        threading.Thread(target=self._usun_z_subiekta_worker,
+                         args=(symbole,), daemon=True).start()
+
+    def _usun_z_subiekta_worker(self, symbole):
+        try:
+            from subiekt_magazyn_gui import usun_kartoteki
+            wynik, blad = usun_kartoteki(symbole, zapisz=True), None
+        except Exception as e:
+            wynik, blad = None, str(e)
+        self.after(0, lambda: self._usun_z_subiekta_gotowe(wynik, blad, symbole))
+
+    def _usun_z_subiekta_gotowe(self, wynik, blad, symbole):
+        self.stop_kreciolek("")
+        if blad:
+            messagebox.showerror("Usuwanie kartotek", blad, parent=self)
+            return
+
+        NL = chr(10)
+        kroki = (wynik or {}).get("kroki") or []
+        ok = [k for k in kroki if "blad" not in str(k.get("Status", ""))]
+        zle = [k for k in kroki if "blad" in str(k.get("Status", ""))]
+
+        linie = ["Usuni\u0119to: %d z %d" % (len(ok), len(symbole))]
+        if zle:
+            linie.append("")
+            linie.append("Subiekt ODM\u00d3WI\u0141 dla tych pozycji:")
+            # ⚠️ `Szczegoly`, NIE `Opis` — most wpisuje powod odmowy
+            # wlasnie tam (`record Krok(Symbol, Status, Szczegoly)`). Czytanie
+            # `Opis` dawalo gole „blad" bez przyczyny, wiec user nie wiedzial,
+            # czego kartotece brakuje (25.09.2026).
+            for k in zle[:12]:
+                linie.append("  \u2022 %s \u2014 %s" % (
+                    k.get("Symbol"), k.get("Szczegoly") or k.get("Status")))
+            if len(zle) > 12:
+                linie.append("  \u2026 i %d wi\u0119cej" % (len(zle) - 12))
+        messagebox.showinfo("Usuwanie kartotek", NL.join(linie), parent=self)
+
+        if ok:
+            # Katalog ma teraz mniej pozycji \u2014 bez tego lista 4 dalej
+            # pokazywalaby skasowane kartoteki (pamiec/
+            # project_katalog_cache_odswiezanie).
+            self._dociagnij_katalog_po_zapisie()
 
     def _dodaj_istniejaca(self):
         """Kartoteka z Subiekta jako składnik zaznaczonego kompletu."""
@@ -3758,9 +4164,30 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             bledy.append("pozycja bez symbolu")
         if not (k.nazwa or "").strip():
             bledy.append(f"„{opis}” nie ma nazwy — uzupełnij pole Nazwa")
-        if k.czy_komplet() and not self._dzieci(sym):
+        if k.czy_komplet() and not self._dzieci(sym) and not self._ma_sklad_w_subiekcie(k):
             bledy.append(f"„{opis}” to komplet bez składników — Subiekt go odrzuci")
         return bledy
+
+    def _ma_sklad_w_subiekcie(self, k):
+        """Czy ten komplet ma juz sklad PO STRONIE SUBIEKTA.
+
+        ⚠️ `_dzieci()` czyta `self.relacje`, czyli DRZEWO EDYTORA (panel 1).
+        Kartoteka wybrana z listy 4 nie jest w drzewie, a jej sklad pokazuje
+        panel 3 czytany wprost z Subiekta i CELOWO nie wkladany do modelu
+        (`_pokaz_sklad_z_subiekta`). Walidacja patrzyla wiec tylko na drzewo
+        i blokowala zapis komunikatem „komplet bez skladnikow" dla kompletu,
+        ktory ma ich 11 — zgloszone 25.09.2026 na 2627-200.28ZZ.
+
+        Zrodlem prawdy jest tu `Skladnikow` z katalogu (tryb "katalog" mostu
+        liczy `SkladnikiKompletu.Count()`).
+        """
+        sym = str(getattr(k, "symbol_zrodlowy", None) or k.symbol or "").strip().upper()
+        if not sym:
+            return False
+        for kat in (self.katalog or []):
+            if str(kat.get("Symbol") or "").strip().upper() == sym:
+                return bool(kat.get("Skladnikow"))
+        return False
 
     def _klonuj_pozycje(self):
         """Kopia zaznaczonej kartoteki — CALA OPERACJA W PANELU 2.
@@ -3946,6 +4373,26 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 return
         if not self._potwierdz_zapis_pozycji(sym):
             return
+        # ZMIANA SYMBOLU idzie OSOBNYM trybem mostu i MUSI byc pierwsza.
+        #
+        # `kartoteka-edytuj` identyfikuje kartoteke PO SYMBOLU i celowo go
+        # nie rusza („Symbolu NIE rusza — od tego jest tryb symbole"
+        # w CommandDispatcher.cs). Gdybysmy zapisali pola najpierw, poszlyby
+        # pod STARY symbol, a zmiana klucza dopiero potem — albo wcale.
+        k = self.pozycje[sym]
+        nowy_symbol = (self.pola["symbol"][0].get() or "").strip()
+        stary_symbol = (k.symbol_zrodlowy or "").strip()
+        if (k.w_subiekcie and stary_symbol and nowy_symbol
+                and nowy_symbol != stary_symbol):
+            if not self._zmien_symbol_w_subiekcie(k, stary_symbol, nowy_symbol):
+                return          # nie udalo sie — nie zapisujemy reszty pol
+            # ⚠️ KLUCZ SIE ZMIENIL. `_zmien_symbol_w_subiekcie` przenosi wpis
+            # w `self.pozycje` pod NOWY symbol, wiec dalsze `sym` (stare)
+            # juz tam nie istnieje — `_plan_pozycji(sym)` leci KeyError
+            # i zapis pol NIE WYCHODZI (zgloszone 25.09.2026: „nic sie nie
+            # da zapisac przy edycji").
+            sym = nowy_symbol
+
         self.start_kreciolek(f"Zapisuję {sym}")
         threading.Thread(target=self._zapis_worker,
                          args=(self._plan_pozycji(sym), True, sym),
@@ -4085,7 +4532,12 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 bledy.append("pozycja bez symbolu")
             if not (k.nazwa or "").strip():
                 bledy.append(f"„{sym}” nie ma nazwy — uzupełnij pole Nazwa")
-            if k.czy_komplet() and not self._dzieci(sym):
+            # `_ma_sklad_w_subiekcie` — komplet wciagniety z Subiekta moze miec
+            # sklad TAM, a nie w drzewie edytora (patrz komentarz przy tej
+            # metodzie). Bez tego zapis calosci blokowal sie tak samo jak
+            # zapis pojedynczej pozycji (25.09.2026).
+            if (k.czy_komplet() and not self._dzieci(sym)
+                    and not self._ma_sklad_w_subiekcie(k)):
                 bledy.append(f"„{sym}” to komplet bez składników — Subiekt go odrzuci")
         # Cykl: komplet zawierający sam siebie (choćby pośrednio).
         def cykl(sym, sciezka):
