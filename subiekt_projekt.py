@@ -37,7 +37,7 @@ from rm_kreciolek import Kreciolek
 
 import subiekt_mapowania
 from subiekt_stany import (_find_exe, blad_mostu, jedna_linia, CONFIG_PATH,
-                           PROJECTS_DIR, looks_like_drawing_no, wysrodkuj,
+                           PROJECTS_DIR, wyglada_na_towar, wysrodkuj,
                            wczytaj_szerokosci, zapisz_szerokosci)
 
 TIMEOUT_S = 600          # zapis bywa wolniejszy od odczytu — kartoteki idą pojedynczo
@@ -1095,11 +1095,22 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
         items = read_items_csv(csv_path)
     else:
         items = read_project_items(project_id)
-    # Pozycje z numerem rysunku muszą wyglądać jak numer (odsiewa opisy wpisane
-    # w to pole). Pozycje BEZ numeru — znormalizowane, identyfikowane nazwą —
-    # przepuszczamy, bo inaczej wypadłyby łożyska, paski i simmeringi.
+    # Odsiewamy OPISY wpisane w pole numeru („Przygotowanie powietrza"),
+    # a nie symbole. Pozycje BEZ numeru — znormalizowane, identyfikowane
+    # nazwą — przepuszczamy zawsze.
+    #
+    # ⚠️ `wyglada_na_towar`, NIE `looks_like_drawing_no` (25.09.2026).
+    # Ta druga odrzuca wszystko ze SPACJA — jej wlasny docstring o tym
+    # ostrzega. Dopoki normalia nie miala numeru, wchodzila jako
+    # „bez_numeru"; po przypisaniu kartoteki w RM_BAZA symbol Subiekta
+    # laduje w `work_drawing_no`, pozycja przestaje byc „bez numeru",
+    # a symbol ze spacja nie przechodzil testu — i WYPADALA Z OKNA.
+    # Zgloszone na 2637: „6004 ZZ 20x42x12" (25 szt.) nie bylo widac
+    # w Projekt/Aktualizacja, choc siedzi w BOM-ie (id 2307). Dotyczy
+    # kazdego symbolu ze spacja: „626 ZZ", „UCFL 204", „DIN 933 M8x30".
+    # Spacje w symbolach sa DOZWOLONE — patrz pamiec/project_symbole_ze_spacja.
     items = [it for it in items
-             if it.get("bez_numeru") or looks_like_drawing_no(it["nr"])]
+             if it.get("bez_numeru") or wyglada_na_towar(it["nr"])]
     if csv_path:
         kids, nazwy_drzewka, _sym, _naz = tree_z_csv(csv_path, items)
         warn = None

@@ -175,9 +175,28 @@ def _nazwy_handlowe(con):
     name_cols = [c for c in KOLUMNY_NAZW if c in cols]
     if not name_cols:
         return []
+    # KLASA rozstrzyga, co jest handlowe — nie ksztalt numeru (25.09.2026).
+    # `looks_like_drawing_no` uznawala za „numer rysunku" kazdy tekst
+    # z cyfra i bez spacji. Po przypisaniu kartoteki w RM_BAZA symbol
+    # Subiekta laduje w work_drawing_no — normalia „6004ZZ" czy „UCFL201"
+    # (bez spacji) wygladala wtedy na detal i ZNIKALA z tego okna; „6004 ZZ"
+    # (ze spacja) zostawala tylko przypadkiem. Spacje w symbolach sa
+    # dozwolone (pamiec/project_symbole_ze_spacja), wiec test tekstu jest
+    # bezuzyteczny. Klasa z importu (ZNORMALIZOWANE / STANDARD / X / Z…)
+    # jest jednoznaczna; stary test zostaje TYLKO dla baz bez kolumn klasy.
+    ma_klase = "class_auto" in cols
     sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols
+    if ma_klase:
+        sel.append("COALESCE(class_manual, class_auto)")
     where = " WHERE COALESCE(is_hidden, 0) = 0" if "is_hidden" in cols else ""
     wiersze = [tuple(r) for r in con.execute(f"SELECT {', '.join(sel)} FROM items{where}")]
+
+    def _detal(r):
+        """Czy wiersz to detal wlasny (ma swoj klucz, nie jest handlowy)."""
+        if ma_klase:
+            return (r[-1] or "").strip().upper() != "ZNORMALIZOWANE"
+        nr = next((v for v in r[0:3] if v not in (None, "") and str(v).strip()), None)
+        return nr is not None and looks_like_drawing_no(str(nr))
 
     # ── WYJATEK: numer rysunku POWTORZONY (25.09.2026) ───────────────────────
     #
@@ -193,20 +212,21 @@ def _nazwy_handlowe(con):
     ile_rysunkow = {}
     for r in wiersze:
         nr = next((v for v in r[0:3] if v not in (None, "") and str(v).strip()), None)
-        if nr is not None and looks_like_drawing_no(str(nr)):
+        if nr is not None and _detal(r):
             k = str(nr).strip().upper()
             ile_rysunkow[k] = ile_rysunkow.get(k, 0) + 1
     powtorzone = {k for k, n in ile_rysunkow.items() if n > 1}
 
+    n_nazw = len(name_cols)
     out = []
     for r in wiersze:
         nr = next((v for v in r[0:3] if v not in (None, "") and str(v).strip()), None)
-        # Ma numer rysunku → detal własny, ma swój klucz. Nie dotykamy —
-        # chyba ze ten numer stoi w kilku wierszach (patrz wyzej).
-        if nr is not None and looks_like_drawing_no(str(nr)):
-            if str(nr).strip().upper() not in powtorzone:
+        # Detal wlasny ma swoj klucz — nie dotykamy, chyba ze jego numer
+        # stoi w kilku wierszach (patrz wyzej).
+        if _detal(r):
+            if nr is None or str(nr).strip().upper() not in powtorzone:
                 continue
-        nazwa = next((v for v in r[3:] if v not in (None, "") and str(v).strip()), None)
+        nazwa = next((v for v in r[3:3 + n_nazw] if v not in (None, "") and str(v).strip()), None)
         if nazwa:
             out.append(str(nazwa).strip())
     return out

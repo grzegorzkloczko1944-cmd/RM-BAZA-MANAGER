@@ -71,7 +71,10 @@ def kody_z_projektu(path):
         if not name_cols:
             return []
         extra = [c for c in ("src_supplier_text",) if c in cols]
-        sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols + extra
+        # Klasa na koncu — po niej poznajemy handlowe (patrz nizej).
+        ma_klase = "class_auto" in cols
+        klasa = ["COALESCE(class_manual, class_auto)"] if ma_klase else []
+        sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols + extra + klasa
         where = " WHERE COALESCE(is_hidden, 0) = 0" if "is_hidden" in cols else ""
         rows = con.execute(f"SELECT {', '.join(sel)} FROM items{where}").fetchall()
     except sqlite3.DatabaseError:
@@ -82,15 +85,23 @@ def kody_z_projektu(path):
     n0 = 3
     n1 = n0 + len(name_cols)
     out = []
+    n2 = n1 + len(extra)
     for r in rows:
-        nr = next((v for v in r[0:3] if v not in (None, "") and str(v).strip()), None)
-        # Pozycja z numerem rysunku to detal własny — ma swój klucz, pomijamy.
-        if nr is not None and looks_like_drawing_no(str(nr)):
-            continue
+        # Handlowe = KLASA ZNORMALIZOWANE, nie „brak numeru" (25.09.2026).
+        # Po przypisaniu kartoteki w RM_BAZA symbol Subiekta laduje
+        # w work_drawing_no i normalia bez spacji („6004ZZ") wygladala na
+        # detal — wypadala z raportu. Stary test tylko dla baz bez klasy.
+        if ma_klase:
+            if (r[-1] or "").strip().upper() != "ZNORMALIZOWANE":
+                continue
+        else:
+            nr = next((v for v in r[0:3] if v not in (None, "") and str(v).strip()), None)
+            if nr is not None and looks_like_drawing_no(str(nr)):
+                continue
         nazwa = next((v for v in r[n0:n1] if v not in (None, "") and str(v).strip()), None)
         if not nazwa:
             continue
-        dost = next((v for v in r[n1:] if v not in (None, "") and str(v).strip()), "")
+        dost = next((v for v in r[n1:n2] if v not in (None, "") and str(v).strip()), "")
         out.append((str(nazwa).strip(), str(dost).strip()))
     return out
 
