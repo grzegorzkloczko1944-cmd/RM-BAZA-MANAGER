@@ -496,6 +496,72 @@ def find_out_files(project_folder: Path) -> list:
     return sorted(project_folder.glob("*_OUT.xlsx"))
 
 
+def zlozenia_tylko_znormalizowane(out_path) -> set:
+    """{NUMER} — zlozenia „Z", ktore w OUT maja WYLACZNIE znormalizowane.
+
+    Po co: arkusz „DRZEWKO TEKST" nie zawiera ANI JEDNEJ pozycji
+    znormalizowanej (sprawdzone na 2637 Feniks: 329 wierszy, zero bez numeru
+    rysunku). Zlozenie, ktorego calym skladem sa nakretki, wyglada tam wiec
+    na LISC BEZ DZIECI — a `subiekt_projekt` traktowal kazde bezdzietne Z/ZZ
+    jako „pusty komplet" i zadal decyzji uzytkownika.
+
+    Tymczasem to poprawny przypadek i ma swoja regule: element wykonawczy
+    (rama ciecia z profili i spawana) dostaje W OUT ten sam numer i nazwe co
+    zlozenie — celowo, zeby nie dublowal sie w czesciach ani znormaliach.
+    Taka pozycja idzie do Subiekta jako zwykly TOWAR, nie komplet.
+
+    Rozpoznajemy po sekcjach „PELNA TABELA (BOM)": naglowek
+    `<numer> <nazwa> - ilosc calkowita Nszt`, pod nim skladniki. Pomijamy
+    wiersze o TYM SAMYM numerze co naglowek (to wlasnie sama rama).
+
+    ⚠️ Zwracamy TYLKO te, gdzie po odrzuceniu samej siebie zostaly same
+    znormalizowane. Sekcja CALKIEM pusta NIE trafia tutaj — to realny brak
+    danych i ma dalej isc do decyzji uzytkownika (zyczenie z 25.09.2026).
+    """
+    import re as _re
+    out_path = Path(out_path)
+    NAGL = _re.compile(r"^(\S+)\s+.*?-\s+ilo[śs][ćc]\s+ca[łl]kowita", _re.I)
+    POMIN = {"ELEMENTY STANDARD", "ELEMENTY ZNORMALIZOWANE", "ELEMENTY MODUŁY (ZZ)",
+             "ELEMENTY DO CIĘCIA (X)", "ELEMENTY DO CIĘCIA GIĘCIA (XX)"}
+    wb = None
+    try:
+        wb = openpyxl.load_workbook(out_path, data_only=True, read_only=True)
+        if "PEŁNA TABELA (BOM)" not in wb.sheetnames:
+            return set()
+        sekcje, biezaca = {}, None
+        for r in wb["PEŁNA TABELA (BOM)"].iter_rows(values_only=True):
+            kom = ["" if c is None else str(c).strip() for c in r]
+            pelne = [x for x in kom if x]
+            tekst = " ".join(pelne).strip()
+            if not tekst:
+                continue
+            m = NAGL.match(tekst)
+            if m and len(pelne) == 1:           # naglowek sekcji stoi sam
+                biezaca = m.group(1).upper()
+                sekcje.setdefault(biezaca, [])
+                continue
+            if tekst.startswith("Poz.") or tekst in POMIN:
+                continue
+            if biezaca and len(pelne) > 3:
+                sekcje[biezaca].append((kom[1] if len(kom) > 1 else "",))
+        wynik = set()
+        for numer, skladniki in sekcje.items():
+            obce = [x for x in skladniki if x[0] and x[0].upper() != numer]
+            znorm = [x for x in skladniki if not x[0]]
+            if znorm and not obce:
+                wynik.add(numer)
+        return wynik
+    except Exception as e:
+        print("⚠️  Sekcje BOM nieodczytane (%s): %s" % (out_path.name, e))
+        return set()
+    finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass
+
+
 def find_assembly_tree_rows(out_path: Path) -> list:
     """
     Czyta arkusz "DRZEWKO TEKST" z pliku *_OUT.xlsx.

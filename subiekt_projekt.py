@@ -1155,10 +1155,42 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
     # wyłączyć z tego zapisu), zamiast to przechodziło po cichu.
     biblioteczne_bez_skladu = {}
     z_biblioteki = set()        # ktore z powyzszych pochodza z biblioteki B:\
+
+    # ── ZLOZENIE „Z" ZE SKLADEM WYLACZNIE ZNORMALIZOWANYM = TOWAR ───────────
+    #
+    # Arkusz „DRZEWKO TEKST" NIE ZAWIERA znormalizowanych (2637 Feniks:
+    # 329 wierszy, zero bez numeru rysunku), wiec zlozenie, ktorego calym
+    # skladem sa nakretki, wyglada tam na LISC i wpadalo nizej do „bez ani
+    # jednego skladnika" — czyli do decyzji uzytkownika.
+    #
+    # To poprawny przypadek i ma regule po stronie importera OUT: element
+    # wykonawczy (rama ciecia z profili i spawana) dostaje TEN SAM numer
+    # i nazwe co zlozenie, zeby nie dublowal sie w czesciach ani znormaliach.
+    # Taki „Z" idzie do Subiekta jako zwykly TOWAR, nie komplet.
+    #
+    # ⚠️ Zlozenie CALKIEM puste (ani detalu, ani znormaliow) nadal leci do
+    # decyzji — to realny brak danych (decyzja uzytkownika 25.09.2026).
+    # Sprawdzone na 2637: 18 kompletow bez zmian, 1 TOWAR, 0 falszywych alarmow.
+    tylko_znormalizowane = set()
+    try:
+        from pathlib import Path as _P
+        from import_bom import (find_project_folder, find_out_files,
+                                zlozenia_tylko_znormalizowane)
+        _root = _P("V:/")
+        _f = find_project_folder(_root, project_name) if _root.exists() else None
+        for _out in (find_out_files(_f) if _f else []):
+            tylko_znormalizowane |= zlozenia_tylko_znormalizowane(_out)
+        if tylko_znormalizowane:
+            print("ℹ️  Sklad tylko znormalizowany, ida jako TOWAR: %s"
+                  % ", ".join(sorted(tylko_znormalizowane)))
+    except Exception as _e:
+        print("⚠️  Nie odczytano sekcji BOM: %s" % _e)
+
     ukryte = read_hidden_drawings(project_id)
     pozycje = []
     for it in items:
         skladniki = []
+        typ_poz = it["typ"]     # nadpisywany tylko dla „Z" ze skladem znormalizowanym
         if it["typ"] in KOMPLETY:
             for child_nr, child_qty in kids.get(it["nr"].upper(), []):
                 # Do składu kompletu bierzemy tylko to, co jest w BOM-ie —
@@ -1173,8 +1205,20 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
                     else:
                         powod, nazwa_ch = "nieznana", nazwy_drzewka.get(klucz_ch, "")
                     poza_bom.setdefault(it["nr"], []).append((child_nr, powod, nazwa_ch))
-            if not skladniki:
-                # KAŻDE złożenie bez składników idzie do jawnej decyzji usera
+            if not skladniki and it["nr"].strip().upper() in tylko_znormalizowane:
+                # Caly sklad to znormalizowane — patrz komentarz wyzej.
+                # To nie komplet, tylko zwykly TOWAR. Bez decyzji usera.
+                #
+                # ⚠️ Samo pominiecie alarmu NIE WYSTARCZA: pozycja szla dalej
+                # z typ="Z" i pustym skladem, a trzy liczniki w oknie
+                # (`blad` → „Popraw drzewko", `puste_blad` → „BEZ SKLADU (blad
+                # danych!)", krok mostu „pominiety-brak-skladnikow") kluczuja
+                # po `typ in KOMPLETY and not skladniki` z PLANU. Dlatego
+                # przepisujemy typ na STANDARD — tak jak zwykly towar (patrz
+                # mapowanie rodzaj→typ przy „Dodaj pozycje spoza BOM").
+                typ_poz = "STANDARD"
+            elif not skladniki:
+                # KAŻDE inne złożenie bez składników idzie do jawnej decyzji usera
                 # (załóż bez składu / pomiń), nie tylko biblioteczne. Do
                 # 09.09.2026 złożenie z projektu bez składu było twardym
                 # „błędem danych": szary zapis z napisem „Popraw drzewko" i
@@ -1225,7 +1269,7 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
             "symbol": it["nr"],
             "nazwa": it["nazwa"] or it["nr"],
             "opis": it.get("opis") or "",
-            "typ": it["typ"],
+            "typ": typ_poz,
             # Pozycje bez numeru rysunku (znormalizowane) mają symbol = nazwa.
             # Okno pokazuje to wprost, żeby nie wyglądało na błąd danych.
             "bez_numeru": bool(it.get("bez_numeru")),
