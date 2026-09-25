@@ -1739,6 +1739,30 @@ class MainWindow(tk.Tk):
         )
         self.cmb_filter_supplier.pack(side=tk.LEFT, padx=2, pady=8)
         self.cmb_filter_supplier.bind("<<ComboboxSelected>>", lambda e: self.refresh_data())
+        # Dlugie nazwy dostawcow: pokazuj POCZATEK nazwy, nie koncowke.
+        #
+        # `width=18` to 18 znakow PRZELICZONYCH NA PIKSELE wg czcionki, wiec
+        # przy innym DPI albo podmienionej czcionce prog ucinania wypada
+        # gdzie indziej — u jednego usera bylo widac same koncowki
+        # („...ODUKT lasery"), u innego te same nazwy mieszcza sie w calosci
+        # (zgloszone 25.09.2026). To NIE jest roznica .exe vs zrodla: Tk
+        # zachowuje sie tak samo, rozni sie MASZYNA.
+        #
+        # Readonly Combobox to w srodku Entry — przy tekscie szerszym niz pole
+        # przewija sie na KONIEC, bo tam stoi kursor. `xview_moveto(0)` cofa
+        # widok na poczatek, czyli na te czesc nazwy, ktora odroznia dostawcow
+        # („AMBProdukt…" zamiast „…lasery").
+        #
+        # Poszerzanie pola odrzucone: rozpycha druga belke, a najdluzszych
+        # nazw i tak nie pomiesci.
+        #
+        # ⛔ DYMEK Z PELNA NAZWA — PROBOWANE 25.09.2026, USUNIETY. Zolty
+        # Toplevel na <Enter> nad polem nie dzialal i user uznal go za
+        # zbedny. Nie wracac do tego pomyslu; sam `xview_moveto(0)`
+        # wystarcza, bo poczatek nazwy odroznia dostawcow.
+        self.cmb_filter_supplier.bind(
+            "<<ComboboxSelected>>",
+            lambda e: self.cmb_filter_supplier.xview_moveto(0), add="+")
         
         # Ikona koła zębatego - lista dostawców
         tk.Button(
