@@ -81,6 +81,11 @@ from subiekt_stany import PROJECTS_DIR, looks_like_drawing_no
 # Kolumny, w których siedzi nazwa/kod pozycji. Kolejność jak w reszcie
 # integracji (work_ przed src_) — patrz subiekt_stany.read_project_drawings.
 KOLUMNY_NAZW = ("work_name", "src_name")
+#: Numer rysunku, w tej samej kolejnosci waznosci co nazwy: roboczy przed
+#: importowym. Dwa wiersze o TYM SAMYM numerze to duplikat nawet wtedy, gdy
+#: nazwy sie roznia — arkusz sygnalizuje to czerwonym paskiem „DUPLIKATY
+#: NUMEROW RYSUNKOW", a okno scalania dlugo tego nie widzialo (25.09.2026).
+KOLUMNY_RYSUNKU = ("work_drawing_no", "src_drawing_no")
 
 _SEPARATORY = re.compile(r"[\s\-_./]+")
 
@@ -169,13 +174,35 @@ def _nazwy_handlowe(con):
         return []
     sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols
     where = " WHERE COALESCE(is_hidden, 0) = 0" if "is_hidden" in cols else ""
-    out = []
-    for r in con.execute(f"SELECT {', '.join(sel)} FROM items{where}"):
-        r = tuple(r)          # połączenie arkusza ma row_factory=Row
+    wiersze = [tuple(r) for r in con.execute(f"SELECT {', '.join(sel)} FROM items{where}")]
+
+    # ── WYJATEK: numer rysunku POWTORZONY (25.09.2026) ───────────────────────
+    #
+    # Regula nizej odsiewa wiersze z numerem rysunku — to detale wlasne, maja
+    # swoj klucz i nie sa „kodami handlowymi". Ale element handlowy tez bywa
+    # opisany numerem: 2637 Feniks ma dwa wiersze `HGH15SO` (szyna liniowa)
+    # o roznych nazwach — „HGH15CA" i „HGH15CA Z0". Arkusz krzyczal o nich
+    # czerwonym paskiem „DUPLIKATY NUMEROW RYSUNKOW", a tutaj nie wchodzily
+    # w ogole, wiec nie bylo czego zaznaczyc ani scalic.
+    #
+    # Wpuszczamy WYLACZNIE numery wystepujace WIECEJ NIZ RAZ. Detal wlasny
+    # z unikalnym numerem zostaje poza oknem, dokladnie jak dotad.
+    ile_rysunkow = {}
+    for r in wiersze:
         nr = next((v for v in r[0:3] if v not in (None, "") and str(v).strip()), None)
-        # Ma numer rysunku → detal własny, ma swój klucz. Nie dotykamy.
         if nr is not None and looks_like_drawing_no(str(nr)):
-            continue
+            k = str(nr).strip().upper()
+            ile_rysunkow[k] = ile_rysunkow.get(k, 0) + 1
+    powtorzone = {k for k, n in ile_rysunkow.items() if n > 1}
+
+    out = []
+    for r in wiersze:
+        nr = next((v for v in r[0:3] if v not in (None, "") and str(v).strip()), None)
+        # Ma numer rysunku → detal własny, ma swój klucz. Nie dotykamy —
+        # chyba ze ten numer stoi w kilku wierszach (patrz wyzej).
+        if nr is not None and looks_like_drawing_no(str(nr)):
+            if str(nr).strip().upper() not in powtorzone:
+                continue
         nazwa = next((v for v in r[3:] if v not in (None, "") and str(v).strip()), None)
         if nazwa:
             out.append(str(nazwa).strip())
@@ -332,10 +359,23 @@ def wiersze_kodu(project_id, kody, con=None):
         mat_cols = [c for c in ("mat_manual_text", "mat_effective_text",
                                 "mat_auto_text", "src_material_text") if c in cols]
         extra = [c for c in ("src_modul", "src_row") if c in cols]
+        # Numer rysunku — po nim poznajemy duplikat, ktorego NAZWY sie roznia
+        # („HGH15CA" vs „HGH15CA Z0" przy tym samym work_drawing_no).
+        rys_cols = [c for c in KOLUMNY_RYSUNKU if c in cols]
 
         out = []
+        # ⚠️ JEDEN WIERSZ = JEDEN WPIS. `name_cols` to work_name i src_name;
+        # wiersz, ktory ma w obu ten sam zapis, wpadal tu DWA RAZY z tym
+        # samym `id`. Przy scalaniu dwoch duplikatow dawalo to cztery wiersze
+        # zamiast dwoch: okno pytalo „Polaczyc 4 wiersze?", ilosci sumowaly
+        # sie podwojnie, a `scal_wiersze()` dostawalo powtorzone id.
+        # Ta sama rodzina bledu co „jeden wiersz pod dwoma kluczami" przy
+        # budowaniu listy (pamiec/project_scalanie_duplikaty_identyczne.md) —
+        # tam naprawione 24.09, tutaj zostalo. Kolejnosc KOLUMNY_NAZW jest
+        # istotna: wygrywa nazwa AKTUALNA, ta ktora user widzi w arkuszu.
+        widziane = set()
         for col in name_cols:
-            sel = ["id", col] + ilosci + praca + mat_cols + extra
+            sel = ["id", col] + ilosci + praca + mat_cols + extra + rys_cols
             q = f"SELECT {', '.join(dict.fromkeys(sel))} FROM items"
             if "is_hidden" in cols:
                 q += " WHERE COALESCE(is_hidden, 0) = 0"
@@ -343,6 +383,9 @@ def wiersze_kodu(project_id, kody, con=None):
                 nazwa = (r[col] or "").strip()
                 if nazwa not in szukane:
                     continue
+                if r["id"] in widziane:
+                    continue
+                widziane.add(r["id"])
                 material = next((str(r[c]).strip() for c in mat_cols
                                  if r[c] not in (None, "") and str(r[c]).strip()), "")
                 out.append({
@@ -354,6 +397,9 @@ def wiersze_kodu(project_id, kody, con=None):
                     # Co na wierszu jest już wypełnione — do ostrzeżenia.
                     "praca": {c: r[c] for c in praca if r[c] not in (None, "", 0)},
                     "modul": r["src_modul"] if "src_modul" in r.keys() else None,
+                    # Aktualny numer rysunku (work_ przed src_), pusty gdy brak.
+                    "rysunek": next((str(r[c]).strip() for c in rys_cols
+                                     if r[c] not in (None, "") and str(r[c]).strip()), ""),
                 })
         return sorted(out, key=lambda w: w["id"])
     finally:
@@ -848,6 +894,7 @@ def pozycje_z_podobnymi(project_id, min_prefiks=4, con=None):
                 q_w = 0.0
             d["wiersze"].append({"id": w["id"], "nazwa": w["nazwa"],
                                  "material": w.get("material") or "",
+                                 "rysunek": w.get("rysunek") or "",
                                  "ilosc": q_w})
         if w["material"]:
             d["materialy"].add(w["material"])
@@ -911,6 +958,50 @@ def pozycje_z_podobnymi(project_id, min_prefiks=4, con=None):
         else:
             out.append({**wspolne, "klucz": k, "item_id": None,
                         "rodzenstwo": 0})
+
+    # ── DUPLIKAT PO NUMERZE RYSUNKU (25.09.2026) ─────────────────────────────
+    #
+    # Wszystko powyzej grupuje po NAZWIE. Dwa wiersze o tym samym numerze
+    # rysunku, ale roznych nazwach, wypadaly wiec z okna calkiem — user
+    # widzial w arkuszu czerwony pasek „DUPLIKATY NUMEROW RYSUNKOW", a tutaj
+    # nie mial czego zaznaczyc (2637 Feniks: id 936/937, oba `HGH15SO`,
+    # nazwy „HGH15CA" i „HGH15CA Z0").
+    #
+    # Takie wiersze dokladamy jako OSOBNE wpisy — po jednym na wiersz, tak
+    # samo jak przy duplikacie tego samego zapisu, zeby dalo sie zaznaczyc
+    # oba i scalic. Klucz `rys:<numer>#<id>` nie koliduje z kluczami nazw.
+    wg_rysunku = {}
+    for sz in szczegoly.values():
+        for w in sz.get("wiersze") or []:
+            r = (w.get("rysunek") or "").strip().upper()
+            if r:
+                wg_rysunku.setdefault(r, []).append(w)
+
+    juz_rozbite = {p["item_id"] for p in out if p.get("item_id")}
+    for rys, wiersze_r in sorted(wg_rysunku.items()):
+        if len(wiersze_r) < 2:
+            continue
+        # Nie dublujemy wierszy, ktore juz stoja na liscie osobno (ten sam
+        # zapis nazwy) — tam user ma je pod wlasnym kluczem.
+        if all(w["id"] in juz_rozbite for w in wiersze_r):
+            continue
+        for w in sorted(wiersze_r, key=lambda x: x["id"]):
+            out.append({
+                "klucz": f"rys:{rys}#{w['id']}",
+                "item_id": w["id"],
+                "kod": w["nazwa"],
+                "ile": 1,
+                "material": w["material"],
+                "ilosc_bom": w["ilosc"],
+                "identyczne": [],
+                "podobne": [],
+                "w_bazie": {},
+                "rodzenstwo": 0,
+                # Powod, dla ktorego ten wiersz jest na liscie — GUI pokazuje
+                # to w kolumnie „Podobne w tym projekcie".
+                "rysunek_dubel": rys,
+                "rysunek_ile": len(wiersze_r),
+            })
 
     # Najpierw te, przy których jest co decydować.
     # Duplikaty (rodzenstwo>0) licza się jak warianty pisowni, żeby stały

@@ -663,7 +663,8 @@ class ScalanieWindow(tk.Toplevel):
             # i pozycja zostala rozbita na osobne wpisy. Taki wpis nie ma
             # wariantow pisowni (`identyczne` puste), a jest najwazniejszym
             # powodem do scalenia — bez tego znikal z listy (24.09.2026).
-            ma_co = bool(p["identyczne"] or p["podobne"] or p.get("rodzenstwo"))
+            ma_co = bool(p["identyczne"] or p["podobne"] or p.get("rodzenstwo")
+                         or p.get("rysunek_dubel"))
             if tylko and not ma_co and p["klucz"] not in self._zaznaczone:
                 continue
             pokazane += 1
@@ -679,6 +680,11 @@ class ScalanieWindow(tk.Toplevel):
             # on jest do scalenia — mowimy o tym wprost.
             if p.get("rodzenstwo"):
                 podobne.insert(0, f"⚠ ten sam kod w {p['rodzenstwo']} wierszach")
+            # Duplikat po NUMERZE RYSUNKU — nazwy sie roznia, wiec kolumna
+            # „Podobne" nie ma czego pokazac, a to wlasnie powod scalania.
+            if p.get("rysunek_dubel"):
+                podobne.insert(0, "⚠ ten sam nr rysunku %s w %d wierszach"
+                               % (p["rysunek_dubel"], p.get("rysunek_ile", 2)))
             tags = ("zaz",) if zaz else (() if ma_co else ("cichy",))
             self.tree.insert("", "end", iid=p["klucz"], tags=tags, values=(
                 "☑" if zaz else "☐",
@@ -693,7 +699,8 @@ class ScalanieWindow(tk.Toplevel):
         wybrane = [p for p in self.pozycje if p["klucz"] in self._zaznaczone]
         suma = sum(p["ilosc_bom"] for p in wybrane)
         z_kolizja = sum(1 for p in self.pozycje
-                        if p["identyczne"] or p["podobne"] or p.get("rodzenstwo"))
+                        if p["identyczne"] or p["podobne"] or p.get("rodzenstwo")
+                        or p.get("rysunek_dubel"))
         opis = (f"Kodów handlowych: {len(self.pozycje)}    z podobnymi: {z_kolizja}    "
                 f"pokazanych: {pokazane}    SUBIEKT: {self._subiekt_stan}    ")
         if wybrane:
