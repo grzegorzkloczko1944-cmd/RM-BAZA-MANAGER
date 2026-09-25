@@ -212,6 +212,13 @@ class ScalanieWindow(tk.Toplevel):
         self._wysrodkuj(parent, 1100, 620)
 
         self._build_ui()
+        # ESC zamyka okno (zyczenie uzytkownika 25.09.2026).
+        #
+        # ⚠️ `_na_escape`, nie `_zamknij` wprost: w polu nazwy ESC ma NAJPIERW
+        # schowac liste podpowiedzi (bind na `ent_nazwa`), a dopiero drugie
+        # wcisniecie zamknac okno. Bez tego user zamykalby cale okno,
+        # probujac tylko zwinac podpowiedzi.
+        self.bind("<Escape>", self._na_escape)
         self._pokaz_wiek_katalogu()
         # Licznik idzie dalej, gdy okno stoi otwarte — inaczej „sprzed 5 min"
         # wisiałoby godzinami.
@@ -868,6 +875,14 @@ class ScalanieWindow(tk.Toplevel):
         zapis = self._najczestszy_zapis()
         if zapis:
             self._ustaw_nazwe(zapis)
+
+    def _na_escape(self, _event=None):
+        """ESC — najpierw chowa podpowiedzi, potem zamyka okno."""
+        if getattr(self, "_popup", None) is not None:
+            self._ukryj_podpowiedzi()
+            return "break"
+        self._zamknij()
+        return "break"
 
     def _zamknij(self):
         """Zamknięcie okna — sprząta też podpowiedzi (osobne okno bez ramki)."""

@@ -1373,7 +1373,7 @@ class MainWindow(tk.Tk):
         # rysunku — ich kod katalogowy bywa wpisany różnie ('UCFL 201' /
         # 'UCFL201'), co robi osobną kartotekę z każdego wariantu.
         subiekt_menu.add_separator()
-        subiekt_menu.add_command(label="🔗 Scal kody handlowe w tym projekcie…",
+        subiekt_menu.add_command(label="🔗 Scal kody handlowe w tym projekcie…   (F7)",
                                  command=self.open_subiekt_scalanie)
         subiekt_menu.add_command(label="🔎 Dopasowanie kartotek Subiekta…",
                                  command=self.open_subiekt_dopasowanie)
@@ -2403,7 +2403,13 @@ class MainWindow(tk.Tk):
                                ("<F3>", "send_selected_to_rfq"),
                                ("<F4>", "dopasuj_kartoteke_wiersza"),
                                ("<F5>", "odswiez_wszystko"),
-                               ("<F6>", "show_assembly_tree")):
+                               ("<F6>", "show_assembly_tree"),
+                               # F7 = Scal kody handlowe (zyczenie usera
+                               # 25.09.2026). Okno dotyczy CALEGO projektu,
+                               # nie zaznaczonego wiersza — `_skrot_arkusza`
+                               # tylko pilnuje, zeby klawisz nie dzialal
+                               # z wnetrza innego okna.
+                               ("<F7>", "open_subiekt_scalanie")):
             self.bind_all(klawisz,
                           lambda e, a=akcja: self._skrot_arkusza(e, a), add="+")
 
@@ -12990,12 +12996,14 @@ class MainWindow(tk.Tk):
         subiekt_pozycja_gui.otworz(self, symbol, self.current_project_id)
 
     def _skrot_arkusza(self, event, nazwa_akcji):
-        """Skrot F2-F6 — tylko gdy fokus jest w GLOWNYM oknie RM_BAZA.
+        """Skrot F2-F7 — tylko gdy fokus jest w GLOWNYM oknie RM_BAZA.
 
         ⚠️ `bind_all` lapie zdarzenie w CALEJ aplikacji, takze w oknach
         Toplevel (Scal kody, Dopasuj kartoteke, Edytor kartotek). Bez tego
         filtra F5 wcisniety w oknie scalania odswiezalby arkusz w tle,
         a F4 otwieralby kolejne okno dopasowania (24.09.2026).
+
+        Po otwarciu okna ODDAJEMY MU FOKUS — patrz `_oddaj_fokus_nowemu`.
         """
         try:
             if event is not None and getattr(event, "widget", None) is not None:
@@ -13004,8 +13012,55 @@ class MainWindow(tk.Tk):
         except Exception:
             pass            # nie potrafimy ustalic okna — nie blokujemy
         akcja = getattr(self, nazwa_akcji, None)
-        if callable(akcja):
-            akcja()
+        if not callable(akcja):
+            return
+        przed = self._otwarte_toplevele()
+        akcja()
+        self._oddaj_fokus_nowemu(przed)
+
+    def _otwarte_toplevele(self):
+        """Zbior id() okien Toplevel otwartych w tej chwili."""
+        try:
+            return {id(w) for w in self.winfo_children()
+                    if isinstance(w, tk.Toplevel)}
+        except Exception:
+            return set()
+
+    def _oddaj_fokus_nowemu(self, przed, proba=0):
+        """Nadaje fokus oknu, ktore wlasnie otworzyl skrot funkcyjny.
+
+        ⚠️ Zgloszone 25.09.2026: „okna po otwarciu klawiszem funkcyjnym nie
+        maja focusa, focus jest na arkuszu, dlatego ESC nie zamyka okienka".
+        Klawisz zlapal `bind_all` na GLOWNYM oknie, wiec fokus tam zostawal —
+        nowe okno bylo tylko narysowane. Dotyczy F2, F3, F4, F6 i F7.
+
+        Robimy to TUTAJ, a nie w kazdym oknie z osobna: okien jest piec,
+        kazde otwierane inna funkcja, a czesc z nich (Karta pozycji) bywa
+        tylko odswiezana zamiast tworzona od nowa.
+
+        Ponawiamy kilka razy przez `after`, bo czesc okien buduje sie
+        asynchronicznie i w chwili powrotu z akcji jeszcze nie istnieje.
+        `grab_set()` NIE ruszamy — okna maja byc niemodalne, user ma prawo
+        kliknac w arkusz i wrocic.
+        """
+        try:
+            nowe = [w for w in self.winfo_children()
+                    if isinstance(w, tk.Toplevel) and id(w) not in przed]
+        except Exception:
+            return
+        if not nowe:
+            # Jeszcze sie nie pojawilo — sprobuj ponownie, ale nie w nieskonczonosc.
+            if proba < 6:
+                self.after(80, lambda: self._oddaj_fokus_nowemu(przed, proba + 1))
+            return
+        okno = nowe[-1]             # najswiezsze
+        try:
+            if not okno.winfo_exists():
+                return
+            okno.lift()
+            okno.focus_force()
+        except tk.TclError:
+            pass                    # okno zdazylo sie zamknac
 
     def odswiez_wszystko(self):
         """F5 — pelne odswiezenie: arkusz ORAZ cache katalogu Subiekta.
@@ -16507,6 +16562,8 @@ class MainWindow(tk.Tk):
         # kliknięcia tam nie docierają i powiększenie zostawało na wierzchu.
         win.bind("<Button-1>", self._on_any_click_hide_dwf_zoom, add="+")
         win.bind("<Button-3>", self._on_any_click_hide_dwf_zoom, add="+")
+        # ESC zamyka okno zlozenia (zyczenie uzytkownika 25.09.2026).
+        win.bind("<Escape>", lambda _e: (win.destroy(), "break")[1])
 
         win_w, win_h = 640, 480
         try:
@@ -28056,6 +28113,10 @@ class MainWindow(tk.Tk):
         dlg.title("Wyślij do RFQ   (F11 = pełna wysokość okna)")
         dlg.transient(self)
         dlg.grab_set()
+        # ESC = to samo co przycisk „Anuluj" (zyczenie uzytkownika 25.09.2026).
+        # Nic nie jest jeszcze wyslane — wybor pozycji i kooperantow zyje tylko
+        # w tym oknie, wiec zamkniecie niczego nie gubi po stronie portalu.
+        dlg.bind("<Escape>", lambda _e: (dlg.destroy(), "break")[1])
 
         # Wyśrodkowanie względem okna RM_BAZA, a nie ekranu — przy dwóch
         # monitorach samo geometry("820x620") zostawia pozycję Windowsowi

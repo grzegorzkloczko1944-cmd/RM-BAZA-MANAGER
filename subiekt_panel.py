@@ -389,7 +389,9 @@ class PanelSubiekt(tk.Toplevel):
                  "nieodwracalny", "open_subiekt_edytor", None),
                 ("🤝", "Powiąż dostawców", "z kontrahentami",
                  "zapis", "open_subiekt_dostawcy", None),
-                ("🔗", "Scal kody handlowe", "w tym projekcie",
+                # Skrot w podtytule — tak samo, jak menu prawego klawisza
+                # podaje „(F6)" przy Pokaz zlozenie (25.09.2026).
+                ("🔗", "Scal kody handlowe", "w tym projekcie   (F7)",
                  "zapis", "open_subiekt_scalanie", None),
                 ("🔎", "Dopasowanie kartotek", "znormalizowane → Subiekt",
                  "zapis", "open_subiekt_dopasowanie", None),

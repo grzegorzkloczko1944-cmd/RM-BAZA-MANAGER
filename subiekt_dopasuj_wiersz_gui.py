@@ -55,6 +55,10 @@ class DopasujWierszWindow(tk.Toplevel):
         # glownego okna sa CELOWO odfiltrowane w oknach Toplevel
         # (`_skrot_arkusza` w RM_BAZA), wiec bez tego F5 tutaj nic nie robi.
         self.bind("<F5>", self._na_f5)
+        # ESC zamyka okno (zyczenie uzytkownika 25.09.2026). To okno nie ma
+        # wlasnych popupow ani niezapisanych zmian — wybor kartoteki zapisuje
+        # sie dopiero przyciskiem, wiec zamkniecie niczego nie gubi.
+        self.bind("<Escape>", lambda _e: (self.destroy(), "break")[1])
 
         if self.blokada:
             self._pokaz_blokade()

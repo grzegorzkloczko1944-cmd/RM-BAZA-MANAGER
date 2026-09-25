@@ -29,6 +29,13 @@ from tkinter import messagebox
 from rm_kreciolek import Kreciolek
 
 TLO = "#ecf0f1"
+#: Tlo CALEJ karty mowi, czy pozycja ma kartoteke w Subiekcie
+#: (zyczenie uzytkownika 25.09.2026 — „zeby bylo widac na pierwszy rzut oka").
+#: Odcienie celowo BLADE: sekcje sa biale i musza zostac czytelne, a kolor
+#: ma informowac, nie krzyczec. Zielony jak „na ZK" w arkuszu (#E8F8E8),
+#: czerwony dobrany do niego jasnoscia.
+TLO_JEST = "#e8f8e8"        # kartoteka JEST w Subiekcie
+TLO_BRAK = "#fdeaea"        # kartoteki NIE MA
 TLO_SEKCJI = "#ffffff"
 TEKST = "#2c3e50"
 TEKST_SZARY = "#7f8c8d"
@@ -238,6 +245,10 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
         # Zamkniecie karty (X albo Alt+F4) musi zwolnic uchwyt, inaczej
         # kolejne wywolanie probowaloby ozywic martwe okno.
         self.protocol("WM_DELETE_WINDOW", self._zamknij)
+        # ESC zamyka karte (zyczenie uzytkownika 25.09.2026). Przez `_zamknij`,
+        # NIE `destroy()` — tamta zwalnia globalny uchwyt `_OTWARTA`, bez tego
+        # kolejne F2 probowaloby ozywic martwe okno.
+        self.bind("<Escape>", lambda _e: (self._zamknij(), "break")[1])
         global _OTWARTA
         _OTWARTA = self
         self.pokaz(nr, zapamietaj=False)
@@ -325,6 +336,31 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
         self.status = tk.Label(self, text="", anchor="w", padx=12, pady=3,
                                bg="#d6dbdf", fg=TEKST, font=("Arial", 8))
         self.status.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def _tlo_wg_kartoteki(self, istnieje):
+        """Maluje tlo karty: zielone = kartoteka jest, czerwone = nie ma.
+
+        `istnieje=None` (jeszcze nie wiadomo / most nie odpowiedzial) wraca
+        do neutralnego TLO — zgadywanie koloru byloby gorsze niz jego brak.
+
+        Malujemy okno, canvas i `wnetrze`: sekcje maja wlasne biale tlo,
+        wiec kolor widac jako ramke wokol nich i w przerwach miedzy nimi.
+        """
+        kolor = TLO if istnieje is None else (TLO_JEST if istnieje else TLO_BRAK)
+        try:
+            self.configure(bg=kolor)
+            self.canvas.configure(bg=kolor)
+            self.wnetrze.configure(bg=kolor)
+            # Odstepy miedzy sekcjami to ramki na TLO — te tez trzeba przemalowac,
+            # inaczej zostalyby szare paski na kolorowym tle.
+            for w in self.wnetrze.winfo_children():
+                try:
+                    if isinstance(w, tk.Frame) and w.cget("bg") in (TLO, TLO_JEST, TLO_BRAK):
+                        w.configure(bg=kolor)
+                except tk.TclError:
+                    pass
+        except tk.TclError:
+            pass            # okno zamkniete w miedzyczasie
 
     def _kolko(self, event):
         self.canvas.yview_scroll(-1 * (event.delta // 120), "units")
@@ -653,6 +689,10 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
             pass
         threading.Thread(target=self._projekty_worker, args=(nr, self._subiekt_watek + 1),
                          daemon=True).start()
+        # Nowa pozycja — kolor poprzedniej NIE MOZE wisiec, dopoki nie wiemy.
+        # Inaczej karta twierdzilaby przez chwile „jest w kartotece" o czyms,
+        # czego jeszcze nie sprawdzono.
+        self._tlo_wg_kartoteki(None)
         self.start_kreciolek("Pytam Subiekta o " + nr)
         self._subiekt_watek += 1
         threading.Thread(target=self._subiekt_worker, args=(nr, self._subiekt_watek),
@@ -730,6 +770,10 @@ class KartaPozycji(tk.Toplevel, Kreciolek):
             _log("  -> odrzucona (stary watek)")
             return
         self.stop_kreciolek("")
+        # Tlo karty = odpowiedz na pytanie „czy ta pozycja jest w kartotece".
+        # Blad mostu zostawia tlo NEUTRALNE: nie wiemy, a zielone/czerwone
+        # twierdziloby cos, czego nie sprawdzilismy (25.09.2026).
+        self._tlo_wg_kartoteki(None if blad else bool(dane and dane.get("Istnieje")))
         # ⚠️ Etykieta "czekam" moze juz nie istniec: przy "Wstecz" _wypelnij
         # kasuje cala tresc i buduje nowa sekcje, wiec self.lbl_subiekt
         # wskazuje na zniszczony widget. destroy() rzucalo wtedy TclError,
@@ -985,7 +1029,16 @@ def otworz(rodzic, nr, project_id=None, project_name=None):
         except tk.TclError:
             _OTWARTA = None         # okno padlo w miedzyczasie — tworzymy nowe
     try:
-        return KartaPozycji(rodzic, nr, project_id, project_name)
+        karta = KartaPozycji(rodzic, nr, project_id, project_name)
+        # Fokus takze przy PIERWSZYM otwarciu — sciezka ponownego uzycia
+        # (wyzej) miala go od dawna, nowa karta nie. Bez tego ESC nie zamyka
+        # okna otwartego klawiszem F2 (25.09.2026).
+        try:
+            karta.lift()
+            karta.focus_force()
+        except tk.TclError:
+            pass
+        return karta
     except Exception as e:
         messagebox.showerror("Karta pozycji", "Nie udało się otworzyć karty:\n" + str(e),
                              parent=rodzic)
