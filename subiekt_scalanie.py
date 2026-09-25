@@ -86,6 +86,9 @@ KOLUMNY_NAZW = ("work_name", "src_name")
 #: nazwy sie roznia — arkusz sygnalizuje to czerwonym paskiem „DUPLIKATY
 #: NUMEROW RYSUNKOW", a okno scalania dlugo tego nie widzialo (25.09.2026).
 KOLUMNY_RYSUNKU = ("work_drawing_no", "src_drawing_no")
+#: Opis pozycji — kolejnosc jak wyzej: roboczy przed importowym. Okno
+#: scalania pokazuje go obok nazwy, tak jak arkusz RM_BAZA (25.09.2026).
+KOLUMNY_OPISU = ("work_desc", "src_desc")
 
 _SEPARATORY = re.compile(r"[\s\-_./]+")
 
@@ -362,6 +365,7 @@ def wiersze_kodu(project_id, kody, con=None):
         # Numer rysunku — po nim poznajemy duplikat, ktorego NAZWY sie roznia
         # („HGH15CA" vs „HGH15CA Z0" przy tym samym work_drawing_no).
         rys_cols = [c for c in KOLUMNY_RYSUNKU if c in cols]
+        opis_cols = [c for c in KOLUMNY_OPISU if c in cols]
 
         out = []
         # ⚠️ JEDEN WIERSZ = JEDEN WPIS. `name_cols` to work_name i src_name;
@@ -375,7 +379,8 @@ def wiersze_kodu(project_id, kody, con=None):
         # istotna: wygrywa nazwa AKTUALNA, ta ktora user widzi w arkuszu.
         widziane = set()
         for col in name_cols:
-            sel = ["id", col] + ilosci + praca + mat_cols + extra + rys_cols
+            sel = (["id", col] + ilosci + praca + mat_cols + extra
+                   + rys_cols + opis_cols)
             q = f"SELECT {', '.join(dict.fromkeys(sel))} FROM items"
             if "is_hidden" in cols:
                 q += " WHERE COALESCE(is_hidden, 0) = 0"
@@ -400,6 +405,9 @@ def wiersze_kodu(project_id, kody, con=None):
                     # Aktualny numer rysunku (work_ przed src_), pusty gdy brak.
                     "rysunek": next((str(r[c]).strip() for c in rys_cols
                                      if r[c] not in (None, "") and str(r[c]).strip()), ""),
+                    # Opis jak w arkuszu: roboczy przeslania importowy.
+                    "opis": next((str(r[c]).strip() for c in opis_cols
+                                  if r[c] not in (None, "") and str(r[c]).strip()), ""),
                 })
         return sorted(out, key=lambda w: w["id"])
     finally:
@@ -419,8 +427,15 @@ def zmien_nazwy(project_id, zmiany, backup_dir=None, tylko_probnie=False, con=No
     (arkusz RM_BAZA przy locku), bez `con` — do pliku, i wtedy `backup_dir`
     jest wymagany.
     """
-    zmiany = [(s, n) for s, n in zmiany
-              if (s or "").strip() and (n or "").strip() and s != n]
+    # Wpis to (stary_zapis, nowa_nazwa) albo (stary_zapis, nowa_nazwa, opis).
+    # Opis jest OPCJONALNY — pusty znaczy „nie ruszaj kolumny opisu".
+    znormalizowane = []
+    for wpis in zmiany:
+        st, nw = wpis[0], wpis[1]
+        op = wpis[2] if len(wpis) > 2 else ""
+        if (st or "").strip() and (nw or "").strip() and st != nw:
+            znormalizowane.append((st, nw, (op or "").strip()))
+    zmiany = znormalizowane
     raport = {"project_id": project_id, "zmienionych": 0,
               "szczegoly": [], "backup": None, "probnie": tylko_probnie}
     if not zmiany:
@@ -441,7 +456,12 @@ def zmien_nazwy(project_id, zmiany, backup_dir=None, tylko_probnie=False, con=No
     try:
         cols = _kolumny(con)
         name_cols = [c for c in KOLUMNY_NAZW if c in cols]
-        for stary, nowy in zmiany:
+        # Opis piszemy do kolumny ROBOCZEJ — `src_desc` z importu zostaje
+        # nietknieta, tak samo jak przy nazwie (work_ przeslania src_).
+        # Wczesniej opis nie byl przenoszony w ogole: pozycja dostawala nazwe
+        # z Subiekta, a opis zostawal stary (zgloszone 25.09.2026).
+        opis_col = next((c for c in KOLUMNY_OPISU if c in cols), None)
+        for stary, nowy, opis in zmiany:
             for c in name_cols:
                 # TRIM w warunku — zapisy bywają z białymi znakami na końcu.
                 n = con.execute(
@@ -449,8 +469,13 @@ def zmien_nazwy(project_id, zmiany, backup_dir=None, tylko_probnie=False, con=No
                 if not n:
                     continue
                 if not tylko_probnie:
-                    con.execute(f"UPDATE items SET {c} = ? WHERE TRIM({c}) = ?",
-                                (nowy, stary))
+                    if opis and opis_col:
+                        con.execute(
+                            f"UPDATE items SET {c} = ?, {opis_col} = ? "
+                            f"WHERE TRIM({c}) = ?", (nowy, opis, stary))
+                    else:
+                        con.execute(f"UPDATE items SET {c} = ? WHERE TRIM({c}) = ?",
+                                    (nowy, stary))
                 raport["zmienionych"] += n
                 raport["szczegoly"].append((c, stary, nowy, n))
         if not tylko_probnie:
@@ -463,7 +488,7 @@ def zmien_nazwy(project_id, zmiany, backup_dir=None, tylko_probnie=False, con=No
 
 
 def scal_wiersze(project_id, wiersze_ids, nazwa_docelowa, backup_dir=None,
-                 tylko_probnie=False, con=None):
+                 tylko_probnie=False, con=None, opis_docelowy=None):
     """Zastępuje kilka wierszy BOM JEDNYM nowym: suma ilości, wspólna nazwa.
 
     Stare wiersze są USUWANE, a na ich miejsce wstawiany jest nowy — nie
@@ -584,6 +609,14 @@ def scal_wiersze(project_id, wiersze_ids, nazwa_docelowa, backup_dir=None,
             # pozycja nie zniknęła z widoku filtrującego po tej kolumnie.
             if any(r[c] not in (None, "") for r in rows):
                 nowy[c] = nazwa_docelowa
+        # OPIS docelowy — do kolumny ROBOCZEJ, jak przy `zmien_nazwy`.
+        # None znaczy „nie narzucaj": zostaje to, co wyszlo z reguly pol
+        # wspolnych wyzej. Pusty string rowniez nie nadpisuje, bo user
+        # zwykle po prostu nie wybral kartoteki (25.09.2026).
+        if opis_docelowy:
+            opis_col = next((c for c in KOLUMNY_OPISU if c in cols), None)
+            if opis_col:
+                nowy[opis_col] = opis_docelowy
         nowy.update(raport["sumy"])
 
         if not tylko_probnie:
@@ -895,6 +928,7 @@ def pozycje_z_podobnymi(project_id, min_prefiks=4, con=None):
             d["wiersze"].append({"id": w["id"], "nazwa": w["nazwa"],
                                  "material": w.get("material") or "",
                                  "rysunek": w.get("rysunek") or "",
+                                 "opis": w.get("opis") or "",
                                  "ilosc": q_w})
         if w["material"]:
             d["materialy"].add(w["material"])
@@ -913,7 +947,13 @@ def pozycje_z_podobnymi(project_id, min_prefiks=4, con=None):
         zapisy = sorted(wg[k])
         w_bazie = cala_baza.get(k, {})
         sz = szczegoly.get(k, {"materialy": set(), "ilosc": 0, "wiersze": []})
+        # Nr rysunku i Opis — jak w arkuszu RM_BAZA. Bierzemy z pierwszego
+        # wiersza tego kodu; przy rozbiciu na osobne wpisy (nizej) kazdy
+        # dostaje swoje wlasne (25.09.2026).
+        _w0 = (sz.get("wiersze") or [{}])[0]
         wspolne = {
+            "rysunek": _w0.get("rysunek", ""),
+            "opis": _w0.get("opis", ""),
             "kod": zapisy[0],
             "ile": sum(v["ile"] for v in wg[k].values()),
             "material": " / ".join(sorted(sz["materialy"])),
@@ -949,6 +989,8 @@ def pozycje_z_podobnymi(project_id, min_prefiks=4, con=None):
                             "klucz": f"{k}#{w['id']}",
                             "item_id": w["id"],
                             "kod": w["nazwa"],
+                            "rysunek": w.get("rysunek", ""),
+                            "opis": w.get("opis", ""),
                             "ile": 1,
                             "material": w["material"],
                             "ilosc_bom": w["ilosc"],
@@ -990,6 +1032,8 @@ def pozycje_z_podobnymi(project_id, min_prefiks=4, con=None):
                 "klucz": f"rys:{rys}#{w['id']}",
                 "item_id": w["id"],
                 "kod": w["nazwa"],
+                "rysunek": w.get("rysunek", ""),
+                "opis": w.get("opis", ""),
                 "ile": 1,
                 "material": w["material"],
                 "ilosc_bom": w["ilosc"],

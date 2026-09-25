@@ -153,12 +153,17 @@ class OknoDialog(tk.Toplevel):
 class ScalanieWindow(tk.Toplevel):
     COLS = [
         ("zaz",      "",                       34, "c"),
-        ("kod",      "Kod w projekcie",       220, "w"),
-        # Materiał zaraz za kodem — różny materiał to najczęstszy sygnał,
-        # że dwa podobne kody to jednak inne elementy, więc ma być widoczny
-        # od razu przy nazwie, a nie na końcu wiersza.
-        ("material", "Materiał",              110, "w"),
+        # Uklad jak w arkuszu RM_BAZA: Nr rysunku · Nazwa · Opis · Ilosc —
+        # user porownuje oba okna obok siebie i szuka tych samych kolumn
+        # w tej samej kolejnosci (zyczenie uzytkownika 25.09.2026).
+        ("rysunek",  "Nr rysunku",            110, "w"),
+        ("kod",      "Nazwa",                 220, "w"),
+        ("opis",     "Opis",                  170, "w"),
+        # Ilosc zaraz po Opisie — kolejnosc z arkusza. Material tuz za nia:
+        # rozny material to najczestszy sygnal, ze dwa podobne kody to jednak
+        # inne elementy, wiec ma byc widoczny przy pozycji, nie na koncu.
         ("ilosc",    "Ilość BOM",              70, "e"),
+        ("material", "Materiał",              110, "w"),
         ("subiekt",  "SUBIEKT (kartoteka)",   240, "w"),
         ("baza",     "Najczęściej w firmie",  170, "w"),
         ("podobne",  "Podobne w tym projekcie", 220, "w"),
@@ -350,11 +355,23 @@ class ScalanieWindow(tk.Toplevel):
                                   font=("Consolas", 11), relief=tk.SOLID, bd=1)
         self.ent_nazwa.pack(side=tk.LEFT, padx=(8, 6), ipady=4, fill=tk.X, expand=True)
         self.ent_nazwa.bind("<KeyRelease>", self._podpowiedz_nazwy)
+        # Reczna edycja rozjezdza pole z wybrana kartoteka — pasek chowamy,
+        # zeby nie twierdzil czegos, co juz nieprawda.
+        self.ent_nazwa.bind("<KeyRelease>", lambda _e: self._pokaz_wybrana(None),
+                            add="+")
         self.ent_nazwa.bind("<FocusOut>", lambda _e: self.after(150, self._ukryj_podpowiedzi))
         self.ent_nazwa.bind("<Escape>", lambda _e: self._ukryj_podpowiedzi())
         self._popup = None
         # Pole zostaje PUSTE, dopóki user sam czegoś nie wpisze albo nie użyje
         # przycisków obok — nazwa docelowa to decyzja, nie domysł programu.
+
+        # Co wybrano z podpowiedzi — Entry pokazuje SAMA NAZWE, wiec symbol,
+        # opis, rodzaj, stan i cena znikaly w chwili kliknięcia i nie bylo jak
+        # sprawdzic, czy trafilo sie w te kartoteke (zgloszone 25.09.2026).
+        # Ten sam uklad kolumn co lista podpowiedzi i co arkusz.
+        self.lbl_wybrana = tk.Label(self, text="", anchor="w", padx=12,
+                                    font=("Segoe UI", 8), fg="#1e8449",
+                                    bg="#eafaf1", justify=tk.LEFT)
 
         # Gdy któraś z zaznaczonych pozycji ma już kartotekę, najlepszą nazwą
         # docelową jest ta z Subiekta — inaczej scalenie tworzy kolejny wariant
@@ -688,13 +705,20 @@ class ScalanieWindow(tk.Toplevel):
             tags = ("zaz",) if zaz else (() if ma_co else ("cichy",))
             self.tree.insert("", "end", iid=p["klucz"], tags=tags, values=(
                 "☑" if zaz else "☐",
+                p.get("rysunek", ""),
                 p["kod"],
-                p["material"],
+                p.get("opis", ""),
                 f"{p['ilosc_bom']:g}",
+                p["material"],
                 self._opis_subiekt(p),
                 naj,
                 "   ·   ".join(podobne),
             ))
+
+        # Pasek „Wybrano" niesie ILOSC z zaznaczonych — po zmianie zaznaczenia
+        # trzeba go przeliczyc, inaczej pokazywalby poprzednia sume.
+        if getattr(self, "_wybrana_poz", None):
+            self._pokaz_wybrana(self._wybrana_poz)
 
         wybrane = [p for p in self.pozycje if p["klucz"] in self._zaznaczone]
         suma = sum(p["ilosc_bom"] for p in wybrane)
@@ -792,6 +816,7 @@ class ScalanieWindow(tk.Toplevel):
     def _odznacz(self):
         self._zaznaczone.clear()
         self.var_nazwa.set("")      # nowe zaznaczenie = nowa decyzja o nazwie
+        self._pokaz_wybrana(None)   # ...wiec i pasek „Wybrano" jest nieaktualny
         self._refill()
 
     def _kartoteki_zaznaczonych(self):
@@ -818,6 +843,12 @@ class ScalanieWindow(tk.Toplevel):
             nazwa = (poz.get("nazwa") or "").strip() or (poz.get("symbol") or "").strip()
             if nazwa:
                 self._ustaw_nazwe(nazwa)
+                # ⚠️ ZAPAMIETUJEMY CALA KARTOTEKE, nie tylko nazwe — z niej
+                # bierze sie OPIS przy scalaniu i nazywaniu. Bez tego
+                # „Wklej z Subiekt" dawal nazwe, a opis zostawal pusty
+                # (zgloszone 25.09.2026). `_ustaw_nazwe` czysci pasek
+                # „Wybrano", wiec ustawiamy PO nim.
+                self._pokaz_wybrana(poz)
                 return
 
     def _najczestszy_zapis(self):
@@ -890,11 +921,20 @@ class ScalanieWindow(tk.Toplevel):
 
         x = self.ent_nazwa.winfo_rootx()
         y = self.ent_nazwa.winfo_rooty() + self.ent_nazwa.winfo_height() + 2
-        # Szerokosc = SUMA kolumn, zmierzona w Tk (Consolas 7 px/znak,
-        # Segoe UI 6 px/znak) + paddingi. Kolumny maja stale szerokosci,
-        # wiec kazdy nadmiar to pusta plama po prawej — byla 232 px.
-        szer = 730
-        popup.geometry(f"{szer}x{min(len(trafienia), 12) * 26 + 24}+{x}+{y}")
+        # Szerokosc LICZONA Z UKLADU, nie wpisana na sztywno.
+        #
+        # ⚠️ Bylo `szer = 730` z wyliczenia „znaki × px czcionki" (Consolas 7,
+        # Segoe UI 6). To ZA MALO: Tk dolicza kazdej etykiecie wewnetrzny
+        # padding, wiec realny rzad ma 856 px i dwie ostatnie kolumny (Stan,
+        # Cena netto) wypadaly poza krawedz — user widzial ucieta liste
+        # (zgloszone 25.09.2026). `winfo_reqwidth()` zmierzonego rzadu jest
+        # odporny na zmiane czcionki, DPI i szerokosci kolumn.
+        szer = self._szerokosc_podpowiedzi()
+        wys = min(len(trafienia), 12) * 26 + 24
+        # Popup nie moze wyjsc poza prawa krawedz ekranu — przy polu blisko
+        # brzegu przesuwamy go w lewo zamiast chowac tresc.
+        x = max(0, min(x, popup.winfo_screenwidth() - szer - 8))
+        popup.geometry(f"{szer}x{wys}+{x}+{y}")
 
         ramka = tk.Frame(popup, bg="#b0b8bd", bd=0)
         ramka.pack(fill=tk.BOTH, expand=True)
@@ -905,26 +945,19 @@ class ScalanieWindow(tk.Toplevel):
         hdr = tk.Frame(wnetrze, bg="#f4f6f7", height=20)
         hdr.pack(fill=tk.X)
         hdr.pack_propagate(False)
-        for txt, szer_k, kotwica, rozciag in (
-                ("Symbol", 16, "w", False), ("Nazwa", 30, "w", False),
-                ("Opis", 40, "w", False), ("Rodzaj", 9, "w", False),
-                ("Stan", 7, "e", False), ("Cena netto", 10, "e", False)):
-            # ⚠️ KAZDA kolumna naglowka TA SAMA czcionka co jej dane:
-            # `width` w Tk liczy sie w ZNAKACH biezacej czcionki, a Consolas
-            # jest szersza od Segoe UI (7 vs 6 px na znak). Przy width=16
-            # daje to 16 px rozjazdu — zmierzone, nie zgadniete.
-            czcionka = ("Consolas", 9) if txt == "Symbol" else ("Segoe UI", 9)
-            lbl = tk.Label(hdr, text=txt, bg="#f4f6f7", fg="#7f8c8d",
-                           anchor=kotwica, font=czcionka)
-            if rozciag:
-                lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-            else:
-                lbl.configure(width=szer_k)
-                lbl.pack(side=tk.LEFT,
-                         padx=((8, 4) if txt == "Symbol" else (0, 4)))
+        # ⚠️ KAZDA kolumna naglowka TA SAMA czcionka, szerokosc i padx co jej
+        # dane — wszystko z `KOL_PODPOWIEDZI`, zeby naglowek, wiersze
+        # i szerokosc popupu nie mogly sie rozjechac. `width` w Tk liczy sie
+        # w ZNAKACH biezacej czcionki, a Consolas jest szersza od Segoe UI
+        # (7 vs 6 px na znak) — stad osobna czcionka per kolumna.
+        for txt, szer_k, czcionka, (pl, pr), kotwica in self.KOL_PODPOWIEDZI:
+            tk.Label(hdr, text=txt, bg="#f4f6f7", fg="#7f8c8d",
+                     anchor=kotwica, font=czcionka, width=szer_k).pack(
+                         side=tk.LEFT, padx=(pl, pr))
 
-        def wybierz(nazwa):
+        def wybierz(nazwa, poz=None):
             self.var_nazwa.set(nazwa)
+            self._pokaz_wybrana(poz)
             self._ukryj_podpowiedzi()
             self._refill()
 
@@ -936,22 +969,18 @@ class ScalanieWindow(tk.Toplevel):
             # Symbol na szaro po lewej, nazwa czarna — od razu widać, co jest
             # czym. Dalej Opis/Rodzaj/Stan/Cena: gdy nazwa jest równa
             # symbolowi, dopiero one rozstrzygają wybór (24.09.2026).
-            tk.Label(w, text=poz["symbol"], bg="white", fg="#7f8c8d", anchor="w",
-                     width=16, font=("Consolas", 9)).pack(side=tk.LEFT, padx=(8, 4))
-            tk.Label(w, text=nazwa, bg="white", fg="#2c3e50", anchor="w",
-                     width=30, font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 4))
-            tk.Label(w, text=(poz.get("opis") or ""), bg="white", fg="#566573",
-                     anchor="w", width=40, font=("Segoe UI", 9)).pack(
-                         side=tk.LEFT, padx=(0, 4))
-            tk.Label(w, text=(poz.get("rodzaj") or ""), bg="white", fg="#7f8c8d",
-                     anchor="w", width=9,
-                     font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 4))
-            tk.Label(w, text=self._stan_txt(poz), bg="white",
-                     fg="#2c3e50", anchor="e", width=7,
-                     font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 4))
-            tk.Label(w, text=self._cena_txt(poz.get("cena")), bg="white",
-                     fg="#2c3e50", anchor="e", width=10,
-                     font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 8))
+            # Wartosci w kolejnosci KOL_PODPOWIEDZI — ta sama stala rzadzi
+            # naglowkiem, tymi wierszami i szerokoscia popupu.
+            wartosci = (poz["symbol"], nazwa, poz.get("opis") or "",
+                        poz.get("rodzaj") or "", self._stan_txt(poz),
+                        self._cena_txt(poz.get("cena")))
+            kolory = ("#7f8c8d", "#2c3e50", "#566573", "#7f8c8d",
+                      "#2c3e50", "#2c3e50")
+            for (_t, szer_k, czcionka, (pl, pr), kotwica), tekst, kolor in zip(
+                    self.KOL_PODPOWIEDZI, wartosci, kolory):
+                tk.Label(w, text=tekst, bg="white", fg=kolor, anchor=kotwica,
+                         width=szer_k, font=czcionka).pack(side=tk.LEFT,
+                                                           padx=(pl, pr))
 
             def podswietl(_e, ramka=w, kolor="#eaf2f8"):
                 for dziecko in [ramka] + list(ramka.winfo_children()):
@@ -960,8 +989,45 @@ class ScalanieWindow(tk.Toplevel):
             for widget in [w] + list(w.winfo_children()):
                 widget.bind("<Enter>", podswietl)
                 widget.bind("<Leave>", lambda e, r=w: podswietl(e, r, "white"))
-                widget.bind("<Button-1>", lambda _e, n=nazwa: wybierz(n))
+                widget.bind("<Button-1>",
+                            lambda _e, n=nazwa, p=poz: wybierz(n, p))
                 widget.configure(cursor="hand2")
+
+    #: Kolumny listy podpowiedzi: (naglowek, width w znakach, czcionka, padx).
+    #: JEDNO zrodlo prawdy — naglowek, wiersze i szerokosc popupu czytaja
+    #: stad, wiec nie da sie ich rozjechac przy zmianie jednej z trzech rzeczy.
+    KOL_PODPOWIEDZI = (
+        ("Symbol",      16, ("Consolas", 9), (8, 4), "w"),
+        ("Nazwa",       30, ("Segoe UI", 9), (0, 4), "w"),
+        ("Opis",        40, ("Segoe UI", 9), (0, 4), "w"),
+        ("Rodzaj",       9, ("Segoe UI", 9), (0, 4), "w"),
+        ("Stan",         7, ("Segoe UI", 9), (0, 4), "e"),
+        ("Cena netto",  10, ("Segoe UI", 9), (0, 8), "e"),
+    )
+
+    def _szerokosc_podpowiedzi(self):
+        """Realna szerokosc rzadu podpowiedzi w pikselach.
+
+        Mierzymy `winfo_reqwidth()` etykiet zbudowanych tak samo jak te
+        w liscie — `width` w Tk liczy sie w znakach czcionki, ale do tego
+        dochodzi wewnetrzny padding widgetu, ktorego nie da sie policzyc
+        z samej czcionki. Wynik pamietamy: pomiar wymaga stworzenia
+        widgetow, a uklad nie zmienia sie w trakcie sesji.
+        """
+        if getattr(self, "_szer_podpowiedzi", None):
+            return self._szer_podpowiedzi
+        probne = tk.Toplevel(self)
+        probne.withdraw()
+        rzad = tk.Frame(probne)
+        rzad.pack()
+        for txt, szer_k, czcionka, (pl, pr), kotwica in self.KOL_PODPOWIEDZI:
+            tk.Label(rzad, text=txt, width=szer_k, font=czcionka,
+                     anchor=kotwica).pack(side=tk.LEFT, padx=(pl, pr))
+        rzad.update_idletasks()
+        szer = rzad.winfo_reqwidth() + 2      # ramka popupu: padx 1 + 1
+        probne.destroy()
+        self._szer_podpowiedzi = szer
+        return szer
 
     @staticmethod
     def _stan_txt(poz):
@@ -988,8 +1054,66 @@ class ScalanieWindow(tk.Toplevel):
             return ""
         return f"{f:g}" if f else ""
 
+    def _opis_docelowy(self):
+        """Opis z kartoteki wybranej w podpowiedziach albo None.
+
+        None, a nie "", zeby `scal_wiersze` i `zmien_nazwy` wiedzialy, ze
+        kolumny opisu NIE NALEZY ruszac — user po prostu nie wskazal
+        kartoteki, wiec nie mamy czym jej nadpisac.
+        """
+        wybrana = getattr(self, "_wybrana_poz", None) or {}
+        opis = (wybrana.get("opis") or "").strip()
+        if opis:
+            return opis
+        # Nie klikales podpowiedzi, ale zaznaczone pozycje MAJA juz kartoteke
+        # w Subiekcie (kolumna SUBIEKT) — bierzemy opis stamtad. Inaczej opis
+        # przepadal wszedzie poza jedna sciezka: klikniecie w podpowiedz.
+        for _p, poz in self._kartoteki_zaznaczonych():
+            opis = (poz.get("opis") or "").strip()
+            if opis:
+                return opis
+        return None
+
+    def _pokaz_wybrana(self, poz):
+        """Pasek pod polem: co dokladnie wybrano z podpowiedzi.
+
+        Entry niesie sama nazwe — reszta danych kartoteki (symbol, opis,
+        rodzaj, stan, cena) przepadala po kliknieciu. Pokazujemy je obok,
+        w tej samej kolejnosci co lista podpowiedzi i arkusz.
+        """
+        lbl = getattr(self, "lbl_wybrana", None)
+        if lbl is None:
+            return
+        if not poz:
+            self._wybrana_poz = None
+            lbl.pack_forget()
+            return
+        # ⚠️ KAZDE pole pokazujemy ZAWSZE, takze puste — jako „—".
+        # Wczesniej puste byly pomijane, wiec pasek raz mial szesc czlonow,
+        # raz trzy, a kartoteka z cena 0 wygladala tak samo jak taka, dla
+        # ktorej ceny nie znamy (zgloszone 25.09.2026).
+        #
+        # ILOSC nie jest wlasnoscia kartoteki — to suma z BOM-u tego, co
+        # wlasnie scalasz. Bierzemy ja z zaznaczonych pozycji, zeby w jednym
+        # miejscu bylo widac: dokad scalam i ile tego jest.
+        wybrane = [x for x in self.pozycje if x["klucz"] in self._zaznaczone]
+        ilosc = sum(x.get("ilosc_bom") or 0 for x in wybrane)
+        self._wybrana_poz = poz     # do przerysowania, gdy zmieni sie ilosc
+        czesci = [
+            "Wybrano:  %s" % ((poz.get("symbol") or "").strip() or "—"),
+            (poz.get("nazwa") or "").strip() or "—",
+            (poz.get("opis") or "").strip() or "—",
+            (poz.get("rodzaj") or "").strip() or "—",
+            "stan %s" % (self._stan_txt(poz) or "—"),
+            "ilość %g szt." % ilosc if wybrane else "ilość —",
+            "cena %s" % (self._cena_txt(poz.get("cena")) or "—"),
+        ]
+        lbl.config(text="   ·   ".join(czesci))
+        lbl.pack(side=tk.BOTTOM, fill=tk.X, before=self.status)
+
     def _ustaw_nazwe(self, wartosc):
         self.var_nazwa.set(wartosc)
+        self._pokaz_wybrana(None)
         self._refill()
 
     # ── zapis ──────────────────────────────────────────────────────────────
@@ -1022,9 +1146,22 @@ class ScalanieWindow(tk.Toplevel):
         # swoim `item_id` (patrz pozycje_z_podobnymi). Wtedy scalamy DOKŁADNIE
         # zaznaczone wiersze — inaczej zaznaczenie jednego wciągnęłoby oba,
         # a wybór ma być jawny (24.09.2026).
+        # ⚠️ Filtr dotyczy TYLKO pozycji rozbitych na wiersze. Wpis zbiorczy
+        # (`item_id is None`) reprezentuje WSZYSTKIE swoje wiersze, wiec
+        # trzeba je zachowac — inaczej zaznaczenie „rozbity + zbiorczy"
+        # odsiewalo ten drugi i zostawal JEDEN wiersz: „Do polaczenia trzeba
+        # co najmniej dwoch wierszy" przy dwoch zaznaczonych pozycjach
+        # (zgloszone 25.09.2026, projekt 75: 6004 + 6004ZZ).
         wskazane = {p["item_id"] for p in wybrane if p.get("item_id")}
+        zbiorcze = [p for p in wybrane if not p.get("item_id")]
         if wskazane:
-            wiersze = [w for w in wiersze if w["id"] in wskazane]
+            kody_zbiorczych = set()
+            for p in zbiorcze:
+                for kod in [p["kod"]] + p["identyczne"]:
+                    kody_zbiorczych.add((kod or "").strip().upper())
+            wiersze = [w for w in wiersze
+                       if w["id"] in wskazane
+                       or (w["nazwa"] or "").strip().upper() in kody_zbiorczych]
 
         if len(wiersze) < 2:
             messagebox.showerror(
@@ -1051,6 +1188,9 @@ class ScalanieWindow(tk.Toplevel):
         dlg.ramka_pozycji(pozycje_txt)
         dlg.akapit(f"→   {nazwa}          razem {suma:g} szt.",
                    pogrubiony=True, kolor="#1e8449")
+        _opis = self._opis_docelowy()
+        if _opis:
+            dlg.akapit(f"Opis:   {_opis}", kolor="#5d6d7e", odstep=(0, 4))
 
         # Id kartoteki dopiero tutaj — w liście byłoby szumem, ale przy
         # zatwierdzaniu pozwala jednoznacznie wskazać pozycję w Subiekcie.
@@ -1070,8 +1210,12 @@ class ScalanieWindow(tk.Toplevel):
         self.status.config(text="Zapisuję…")
         try:
             backup = self._kopia_przed_zmiana()
+            # JEDEN CYKL: nazwa + opis + polaczenie wierszy jednym kliknieciem
+            # (zyczenie uzytkownika 25.09.2026). Opis z kartoteki wybranej
+            # w podpowiedziach / wklejonej / juz przypisanej; None = nie ruszaj.
             r = S.scal_wiersze(self.project_id, [w["id"] for w in wiersze], nazwa,
-                               backup_dir=BACKUP_DIR, con=self.con)
+                               backup_dir=BACKUP_DIR, con=self.con,
+                               opis_docelowy=self._opis_docelowy())
             backup = backup or r["backup"]
             self._zapisz_audit(wiersze, nazwa, r)
             self._zatwierdz_reczne()      # dopiero teraz — razem ze zmianą w BOM
@@ -1096,25 +1240,39 @@ class ScalanieWindow(tk.Toplevel):
         self._load_async()
 
     def _zmiany_nazw(self):
-        """[(zapis w BOM, nazwa kartoteki)] dla zaznaczonych pozycji.
+        """[(zapis w BOM, nazwa z pola „Nazwa po scaleniu", opis)].
 
-        Bierzemy też warianty pisowni (`identyczne`), żeby po operacji nie
-        zostały rozjechane zapisy tej samej rzeczy. Porównanie „czy jest co
-        zmieniać" jest dosłowne — 'UCFL201' → 'UCFL 201' to realna zmiana
-        zapisu, mimo że po normalizacji to jedno i to samo.
+        ⚠️ NAZWE BIERZEMY Z DOLNEGO POLA, nie z kartoteki per zapis
+        (decyzja uzytkownika 25.09.2026).
+
+        Bylo: dla KAZDEGO wariantu pisowni osobno szukalismy kartoteki
+        i brali JEJ nazwe. Rozne wiersze trafialy wiec w rozne kartoteki,
+        a przez warianty pisowni takze w CUDZE. Na projekcie 75 trzy rozne
+        lozyska („6004" = SKF 6004 DIN 625, „6004ZZ", „6004 ZZ 20x42x12")
+        dostaly jedna nazwe „Lozysko kulkowe zwykle 20x42x12". Nazwa
+        docelowa to decyzja czlowieka — stoi w polu na dole i obowiazuje
+        WSZYSTKIE zaznaczone.
+
+        OPIS bierzemy z kartoteki wybranej w podpowiedziach (`_wybrana_poz`),
+        gdy user ja wskazal — inaczej zostaje pusty i `zmien_nazwy` go nie
+        rusza. Wczesniej opis nie byl przenoszony w ogole.
+
+        Warianty pisowni (`identyczne`) nadal wchodza do listy, zeby po
+        operacji nie zostaly rozjechane zapisy tej samej rzeczy.
         """
+        nazwa = self.var_nazwa.get().strip()
+        if not nazwa:
+            return []
+        opis = self._opis_docelowy() or ""
         zmiany = []
         for p in self.pozycje:
             if p["klucz"] not in self._zaznaczone:
                 continue
             for kod in [p["kod"]] + p["identyczne"]:
-                poz = self._subiekt.get(kod)
-                if not poz:
-                    continue
-                nazwa = (poz.get("nazwa") or "").strip() or (poz.get("symbol") or "").strip()
-                if nazwa and nazwa != kod.strip():
-                    zmiany.append((kod, nazwa))
+                if kod.strip() and kod.strip() != nazwa:
+                    zmiany.append((kod, nazwa, opis))
         return zmiany
+
 
     def _nazwij_z_subiekta(self):
         """Każda zaznaczona pozycja dostaje nazwę SWOJEJ kartoteki z Subiekta.
@@ -1129,12 +1287,21 @@ class ScalanieWindow(tk.Toplevel):
                 parent=self)
             return
 
+        if not self.var_nazwa.get().strip():
+            messagebox.showwarning(
+                "Nazywanie",
+                "Wpisz nazwę w polu „Nazwa po scaleniu” na dole okna —"
+                " to ona zostanie nadana zaznaczonym pozycjom.\n\n"
+                "Możesz wkleić ją z kartoteki („⬅ Wklej z Subiekt”)"
+                " albo wybrać z podpowiedzi pod polem.", parent=self)
+            self.ent_nazwa.focus_set()
+            return
+
         zmiany = self._zmiany_nazw()
         if not zmiany:
             messagebox.showinfo(
                 "Nazywanie",
-                "Zaznaczone pozycje mają już nazwy zgodne z Subiektem\n"
-                "albo nie mają jeszcze kartoteki.", parent=self)
+                "Zaznaczone pozycje mają już tę nazwę.", parent=self)
             return
 
         dlg = OknoDialog(self, "Nazywanie — potwierdzenie",
@@ -1143,7 +1310,11 @@ class ScalanieWindow(tk.Toplevel):
         dlg.akapit("Nazwy zostaną przepisane z kartotek Subiekta. "
                    "Wiersze ZOSTAJĄ osobno — to nie jest scalanie.",
                    kolor="#5d6d7e", odstep=(0, 8))
-        dlg.ramka_pozycji(list(zmiany))
+        # `zmiany` to trojki (stary, nowy, opis) — pokazujemy czytelnie,
+        # z opisem tylko gdy jakis jest.
+        dlg.ramka_pozycji([
+            "%s   →   %s%s" % (st, nw, ("   ·   " + op) if op else "")
+            for st, nw, op in zmiany])
         dlg.sciezka("Kopia pliku projektu przed zmianą:", BACKUP_DIR)
         dlg.przyciski(potwierdz="Zmień nazwy", anuluj="Anuluj", kolor="#2980b9")
         if not dlg.pokaz():
