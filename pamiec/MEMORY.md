@@ -139,3 +139,6 @@
 - [Dopasuj kartotekę Subiekta (PPM w arkuszu)](project_dopasuj_kartoteke_wiersza.md) — jedna pozycja, TYLKO niezaimportowane (subiekt_symbol broni starych), bez zapisu do mapowań
 - [Dopasowanie: wyłączone czytanie mapowań](project_dopasowanie_wylaczone_mapowania.md) — od 24.09.2026, odwracalne jedną linią; scalanie ilości na ZK zostaje żywe
 - [Scal kody: duplikaty identycznego zapisu](project_scalanie_duplikaty_identyczne.md) — filtr patrzył na warianty pisowni, nie na liczbę wierszy; dwa identyczne wiersze były niewidoczne
+- [Normalia po KLASIE, nie po symbolu](project_normalia_po_klasie.md) — ZNORMALIZOWANE z importu; looks_like_drawing_no tylko dla baz bez klasy; znormalia zawsze na górze arkusza
+- [Złożenie ze składem tylko znormalizowanym](project_zlozenie_tylko_znormalizowane.md) — idzie jako TOWAR/STANDARD; DRZEWKO TEKST nie zawiera znormaliów, więc wyglądało na pusty komplet
+- [Arkusz: Ilość BOM i filtr Dostawca](project_arkusz_ilosc_bom_i_filtr.md) — liczba zamiast krążka (też w XLSX), xview_moveto(0) pokazuje początek nazwy; dymek odrzucony

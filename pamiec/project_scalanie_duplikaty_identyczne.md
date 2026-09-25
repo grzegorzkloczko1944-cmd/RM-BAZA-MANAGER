@@ -1,6 +1,6 @@
 ---
 name: project_scalanie_duplikaty_identyczne
-description: "Scal kody handlowe nie widziało dwóch wierszy o IDENTYCZNYM zapisie — filtr patrzył na warianty pisowni, nie na liczbę wierszy"
+description: "Scal kody handlowe: duplikaty identycznego zapisu ORAZ tego samego numeru rysunku jako osobne wiersze; okno przebudowane 25.09.2026 (układ jak arkusz, opis, jeden cykl scalania)"
 metadata:
   type: project
 ---
@@ -106,6 +106,71 @@ i ilosc sumuja sie jak dotad, bo tam duplikat nie szkodzil.
 Po naprawie na projekcie 73: 90 wpisow, wszystkie klucze unikalne, zaden
 wiersz BOM nie wystepuje w dwoch pozycjach, rozbite tylko `SS 6004 2RS`.
 
+## Duplikaty po NUMERZE RYSUNKU (25.09.2026, `9ed1ff2`)
+
+Zgłoszenie: 2637 Feniks — czerwony pasek arkusza krzyczał o duplikacie
+numeru rysunku (`HGH15SO` ×2), a okno scalania **nie miało czego zaznaczyć**.
+
+`_nazwy_handlowe()` odsiewa wiersze z numerem rysunku (detale własne).
+Element handlowy też bywa opisany numerem, więc wpuszczamy **WYŁĄCZNIE
+numery powtórzone w kilku wierszach**; detal z numerem unikalnym zostaje
+poza oknem jak dotąd.
+
+`pozycje_z_podobnymi()` dokłada wpisy `rys:<numer>#<id>` dla wierszy o tym
+samym numerze i **różnych nazwach** — każdy osobno, żeby dało się zaznaczyć
+oba i scalić. GUI opisuje je „ten sam nr rysunku X w N wierszach".
+
+⚠️ Od 25.09.2026 „handlowe" rozstrzyga **KLASA**, nie kształt numeru —
+patrz [[project_normalia_po_klasie]].
+
+## ⚠️ Wiersz liczony DWA RAZY (ta sama rodzina błędu)
+
+`wiersze_kodu()` przechodziło po `work_name` i `src_name`, więc wiersz
+z **tym samym zapisem w obu kolumnach** wracał dwa razy z tym samym `id`:
+scalanie dwóch duplikatów widziało **cztery** wiersze i **podwajało ilości**.
+Teraz wiersz liczy się raz.
+
+To ten sam mechanizm co pułapka „jeden wiersz pod dwoma kluczami" wyżej —
+`KOLUMNY_NAZW` przy każdym nowym użyciu trzeba sprawdzić pod tym kątem.
+
+## Przebudowa okna (25.09.2026, `88624c9`)
+
+Po sesji z użytkownikiem na projekcie 75:
+
+* **kolumny jak w arkuszu RM_BAZA**: Nr rysunku · Nazwa · Opis · Ilość BOM ·
+  Materiał · SUBIEKT · Najczęściej · Podobne. Opis czytany z `KOLUMNY_OPISU`
+  (`work_desc` przed `src_desc`) — wcześniej w tym oknie nie istniał.
+* **szerokość listy podpowiedzi liczona z układu** (`winfo_reqwidth`), nie
+  wpisana na sztywno: 730 px było za mało (realnie 856) i kolumny Stan
+  oraz Cena netto wypadały poza krawędź. Nagłówek, wiersze i szerokość
+  czytają z jednej stałej `KOL_PODPOWIEDZI`; popup nie wychodzi za ekran.
+* **pasek „Wybrano"** pod polem nazwy: symbol · nazwa · opis · rodzaj · stan ·
+  ilość (suma zaznaczonych, przeliczana) · cena; puste pola jako „—".
+
+### ⛔ Nazwa docelowa bierze się z DOLNEGO POLA
+
+Wcześniej **każdy wariant pisowni brał nazwę SWOJEJ kartoteki** — trzy różne
+łożyska (`6004`, `6004ZZ`, `6004 ZZ 20x42x12`) dostawały jedną nazwę. Teraz
+nazwa z dolnego pola idzie na **wszystkie zaznaczone**.
+
+**OPIS** przenoszony przy nazywaniu i scalaniu (kolumna robocza) z trzech
+źródeł: kliknięcie w podpowiedź, „Wklej z Subiekt" (wcześniej **gubił
+kartotekę**), kartoteka już przypisana do zaznaczonych. `None` = kolumny
+nie ruszamy.
+
+**JEDEN CYKL:** „Scal zaznaczone" nadaje nazwę, dopisuje opis i łączy wiersze
+z sumą ilości. Okno potwierdzenia pokazuje opis **przed** zapisem
+([[feedback_nic_po_cichu]]).
+
+⚠️ Filtr po `item_id` **zachowuje wpisy zbiorcze** (`item_id=None`).
+Zaznaczenie „rozbity + zbiorczy" odsiewało ten drugi i kończyło się
+„Do połączenia trzeba co najmniej dwóch wierszy" przy dwóch zaznaczonych
+pozycjach.
+
+Sprawdzone na 75: `6004` + `6004ZZ` → jeden wiersz 25 szt., nazwa
+„6004 ZZ 20x42x12", opis „Łożysko kulkowe zwykłe"; `HGH15CA` / `HGH15CA Z0`
+widoczne, zaznaczenie obu → 2 wiersze (1263, 1264), suma 5 szt.
+
 ## (historyczne) Przycisk „Scal zaznaczone” milczal
 
 Samo pokazanie pozycji nie wystarczyło. Lista pokazuje **jeden wpis na kod**,
@@ -142,4 +207,5 @@ identyczne wiersze faktycznie nie mają czego podmieniać.
 Duplikaty scala się przyciskiem **„Scal zaznaczone"** (scalanie WIERSZY,
 `scal_wiersze`), nie przemianowaniem.
 
-Powiązane: [[project_sklejanie_duplikatow_bom]], [[project_dopasuj_kartoteke_wiersza]].
+Powiązane: [[project_sklejanie_duplikatow_bom]], [[project_dopasuj_kartoteke_wiersza]],
+[[project_normalia_po_klasie]].

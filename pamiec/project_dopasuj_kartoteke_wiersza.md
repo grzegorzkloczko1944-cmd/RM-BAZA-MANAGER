@@ -209,5 +209,21 @@ nie może blokować wyboru kartoteki.
 i datas) — import jest leniwy, więc PyInstaller sam go nie zobaczy
 ([[project_build_leniwe_importy]], piąty nawrót tej pułapki).
 
+## ⚠️ Po „Klonuj" NIE zaznaczamy pozycji w drzewie (25.09.2026, `e5a7fb8`)
+
+Klon leży pod **kluczem technicznym**, ale `k.symbol` to symbol
+**ORYGINAŁU**. Każda zmiana pola kończyła się
+`_zaznacz_w_drzewie(k.symbol)` — drzewo zaznaczało oryginał,
+`_na_wybor_wezla` widziało, że edytowany był klon, i przy
+**KAŻDYM znaku** pytało „Przejść do innej pozycji?".
+
+Skutki „Tak": panel przełączał się na
+oryginał i **user pisał dalej w oryginał myśląc, że w klonie**;
+tą samą drogą „Podmień w arkuszu" wpisywał do wiersza symbol
+i nazwę **INNEJ kartoteki** — wyglądało to na skasowanie wiersza.
+
+Reguła: **pozycji spoza drzewa** (klon, wybór z listy sekcji 4)
+nie zaznaczamy w drzewie — w `_pole_zmienione` i `_zmien_symbol`.
+
 Powiązane: [[project_dopasowanie_podpowiedzi]], [[project_blokada_klucza_zasiew]],
 [[feedback_nic_po_cichu]].
