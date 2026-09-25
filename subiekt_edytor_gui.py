@@ -2740,7 +2740,15 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             k.polozenie = tekst or None
             self._zmienione = True
         self._odswiez_drzewo()
-        self._zaznacz_w_drzewie(k.symbol)
+        # ⚠️ KLON (i kazda pozycja spoza drzewa, `_z_listy`) NIE JEST w drzewie.
+        # `k.symbol` klona to symbol ORYGINALU, wiec zaznaczenie po nim
+        # wybieralo w drzewie oryginal → <<TreeviewSelect>> → _na_wybor_wezla
+        # → `_czy_porzucic_edycje` widzialo, ze edytowany byl klon, i przy
+        # KAZDYM znaku pytalo „Przejsc do innej pozycji?". „Tak" przelaczalo
+        # panel na oryginal i user dalej pisal juz W ORYGINALE, myslac ze
+        # w klonie (zgloszone 25.09.2026: „cyrki z nazwami po Klonuj").
+        if not getattr(self, "_z_listy", False):
+            self._zaznacz_w_drzewie(k.symbol)
 
     def _zmien_rodzaj(self, k, nowy_rodzaj):
         """Zmiana rodzaju pozycji. False = user sie rozmyslil.
@@ -2867,7 +2875,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.korzenie = [nowy if s == stary else s for s in self.korzenie]
         self._zaznaczony = nowy
         self._odswiez_drzewo()
-        self._zaznacz_w_drzewie(nowy)
+        # Pozycja spoza drzewa (klon, wybor z listy 4) — nie ma czego
+        # zaznaczac; patrz komentarz na koncu _pole_zmienione.
+        if not getattr(self, "_z_listy", False):
+            self._zaznacz_w_drzewie(nowy)
 
     def _zaznacz_w_drzewie(self, symbol):
         def szukaj(rodzic=""):
