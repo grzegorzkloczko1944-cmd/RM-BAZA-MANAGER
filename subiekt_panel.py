@@ -385,7 +385,7 @@ class PanelSubiekt(tk.Toplevel):
                  "zapis", "open_subiekt_asortyment", "asortyment"),
                 ("➕", "Nowa kartoteka", "dodaj do Subiekta",
                  "nieodwracalny", "open_subiekt_nowa_kartoteka", None),
-                ("✎", "Edytor kartotek", "drzewo, komplety, wsad",
+                ("✎", "Edytor kartotek", "drzewo, komplety, wsad   (F8)",
                  "nieodwracalny", "open_subiekt_edytor", None),
                 ("🤝", "Powiąż dostawców", "z kontrahentami",
                  "zapis", "open_subiekt_dostawcy", None),

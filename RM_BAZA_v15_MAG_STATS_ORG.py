@@ -2409,7 +2409,11 @@ class MainWindow(tk.Tk):
                                # nie zaznaczonego wiersza — `_skrot_arkusza`
                                # tylko pilnuje, zeby klawisz nie dzialal
                                # z wnetrza innego okna.
-                               ("<F7>", "open_subiekt_scalanie")):
+                               ("<F7>", "open_subiekt_scalanie"),
+                               # F8 = Edytor kartotek (zyczenie usera
+                               # 25.09.2026). Jak F7: okno nie dotyczy
+                               # zaznaczonego wiersza, tylko calego Subiekta.
+                               ("<F8>", "open_subiekt_edytor")):
             self.bind_all(klawisz,
                           lambda e, a=akcja: self._skrot_arkusza(e, a), add="+")
 
