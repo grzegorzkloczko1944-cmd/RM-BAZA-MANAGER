@@ -8612,15 +8612,20 @@ class MainWindow(tk.Tk):
                 # Baza bez kolumny modul - pomiń
                 modul_disp = ""
             
-            # ILOŚĆ BOM: gdy pozycja należy do kilku modułów Z ILOŚCIAMI, jedna
-            # liczba nie oddaje rozbicia - pokazujemy symbol, szczegóły są w
-            # kolumnie MODUŁ. Dotyczy obu trybów (WAREHOUSE i MACHINE).
-            # Warunek na nawias jest istotny: stary format MACHINE ('300,600')
-            # nie niesie ilości, więc symbol tylko ukryłby liczbę nic nie dając.
-            # Po reimporcie importerem V17 ('300(2),600(1)') symbol pojawi się sam.
+            # ILOŚĆ BOM: ZAWSZE liczba, takze przy pozycji w kilku modulach.
+            #
+            # ⛔ Bylo tu podmienianie sumy na „●" (pozycja w >1 module
+            # z ilosciami, np. MODUL = „300(2),600(1)"). USUNIETE 25.09.2026
+            # na zyczenie uzytkownika: symbol zaslanial liczbe, ktora i tak
+            # jest policzona, a przy okazji tworzyl pulapke w edycji —
+            # blokada ponizej (`on_cell_edited`, kol. 3) sprawdzala
+            # `new_value == "●"`, wiec lapala tylko wyjscie z komorki BEZ
+            # zmiany. Gdy user zaczynal pisac, „●" znikalo jak kazdy
+            # zaznaczony tekst, warunek nie zachodzil i `work_qty` szlo do
+            # zapisu — rozbicie na moduly rozjezdzalo sie z suma.
+            #
+            # Szczegoly rozbicia widac w kolumnie MODUL i to wystarcza.
             qty_bom_display = fmt_qty(qty_bom)
-            if modul_disp and ',' in modul_disp and '(' in modul_disp:
-                qty_bom_display = "●"
             
             # Casting: licznik ofert / ile z ceną / status wysłania zapytania
             casting_disp = ""
@@ -14272,20 +14277,16 @@ class MainWindow(tk.Tk):
                 return
 
         # ========================================================================
-        # BLOKADA EDYCJI ILOŚCI BOM gdy jest symbol (więcej niż jeden moduł)
+        # ILOSC BOM a pozycja w kilku modulach
         # ========================================================================
-        if col == 3:  # Ilość BOM
-            if new_value == "●":
-                messagebox.showinfo(
-                    "ILOŚĆ BOM - suma modułów",
-                    "Ta pozycja ma wiele modułów.\n\n"
-                    "ILOŚĆ BOM jest sumą ilości z kolumny MODUŁ.\n"
-                    "Nie można jej edytować bezpośrednio.\n\n"
-                    "Aby zmienić ilości, edytuj poszczególne moduły\n"
-                    "w kolumnie MODUŁ."
-                )
-                self.refresh_data()
-                return
+        # Byla tu blokada `if new_value == <symbol>` — zdjeta 25.09.2026
+        # razem z samym symbolem (patrz `qty_bom_display`). Byla zreszta
+        # dziurawa: sprawdzala WARTOSC PO EDYCJI, a symbol znikal z komorki
+        # gdy tylko user zaczynal pisac — wiec lapala wylacznie wyjscie
+        # z komorki BEZ zmiany, czyli przypadek i tak nieszkodliwy.
+        #
+        # ⚠️ Reczne wpisanie ustawia `work_qty` dla CALEJ pozycji, a rozbicie
+        # w kolumnie MODUL zostaje bez zmian — suma przestaje sie z nim zgadzac.
         
         # ========================================================================
         # BLOKADA KLUCZA POZYCJI ZASIANEJ DO SUBIEKTA
@@ -36014,11 +36015,13 @@ class MainWindow(tk.Tk):
                 except (KeyError, TypeError):
                     modul = ""
                 
-                # ILOŚĆ BOM: symbol gdy kilka modułów Z ILOŚCIAMI - spójnie z UI
-                # (patrz _display_items_in_sheet, tam pełne wyjaśnienie warunku).
+                # ILOSC BOM: ZAWSZE liczba — tak jak w arkuszu.
+                # ⛔ Bylo tu podmienianie sumy na symbol przy pozycji w >1
+                # module. USUNIETE 25.09.2026 razem z wersja w UI.
+                # Skutek uboczny BYL taki, ze wyeksportowany plik nie
+                # niosl ilosci, a import (`raw_bom_val == symbol`) podstawial
+                # za nia „Ilosc (zam.)". Teraz w pliku jest prawdziwa suma.
                 qty_bom_display = fmt_qty(qty_bom)
-                if modul and ',' in modul and '(' in modul:
-                    qty_bom_display = "●"
                 
                 row = [
                     drawing, name, desc,
