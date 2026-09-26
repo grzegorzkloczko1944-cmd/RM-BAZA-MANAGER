@@ -80,11 +80,21 @@ def _ilo(x):
 
 
 def zsynchronizuj(con, project_id, pozycje_polproduktow):
-    """Dopisuje brakujące wiersze i odświeża ilości istniejących.
+    """Dopisuje brakujące wiersze, odświeża ilości istniejących i USUWA
+    wiersze półproduktów, dla których relacji już nie ma.
 
     `pozycje_polproduktow` — wynik `subiekt_projekt.pozycje_polproduktow()`.
-    Zwraca (dodane, zaktualizowane) jako listy opisów do raportu — NIC PO
-    CICHU: wołający pokazuje je użytkownikowi.
+    Zwraca (dodane, zaktualizowane, usunięte) jako listy opisów do raportu
+    — NIC PO CICHU: wołający pokazuje je użytkownikowi.
+
+    ⚠️ CZWARTA ŚCIEŻKA — usuwanie (26.09.2026). Do tej pory funkcja umiała
+    tylko dodać i zaktualizować, więc po ODWIĄZANIU półproduktu relacja
+    na serwerze znikała, a wiersz w BOM-ie zostawał na zawsze i przy każdym
+    przeliczeniu szedł dalej jak zwykła pozycja (zgłoszone na 2637 Feniks).
+    Jedno źródło prawdy to RELACJA; wiersz jest jej odbiciem — jest relacja,
+    jest wiersz; nie ma relacji, nie ma wiersza. Usuwamy WYŁĄCZNIE wiersze
+    rozpoznane tym samym warunkiem, którym od zawsze chronimy cudze przy
+    aktualizacji: `is_manual = 1` i notatka zaczynająca się od „półprodukt".
 
     ⚠️ Aktualizujemy TYLKO wiersze, które sami założyliśmy (`is_manual=1`
     i nasza notatka). Gdyby ten sam symbol był prawdziwą pozycją BOM-u,
@@ -92,8 +102,16 @@ def zsynchronizuj(con, project_id, pozycje_polproduktow):
     dane. Taki przypadek i tak nie powinien wystąpić, bo
     `pozycje_polproduktow` pomija kartoteki obecne w planie.
     """
-    dodane, zmienione = [], []
+    dodane, zmienione, usuniete = [], [], []
     teraz = datetime.now().isoformat()
+
+    # Symbole, które MAJĄ być w arkuszu — reszta „naszych" wierszy odpada.
+    chciane = {(p.get("symbol") or "").strip().lower()
+               for p in pozycje_polproduktow or []
+               if (p.get("symbol") or "").strip()}
+    chciane |= {(p.get("nazwa") or "").strip().lower()
+                for p in pozycje_polproduktow or []
+                if (p.get("nazwa") or "").strip()}
 
     for p in pozycje_polproduktow or []:
         symbol = (p.get("symbol") or "").strip()
@@ -131,6 +149,20 @@ def zsynchronizuj(con, project_id, pozycje_polproduktow):
             (ile, ile, uwaga, teraz, istnieje))
         zmienione.append("%s — %s → %s szt." % (nazwa, _ilo(stara), _ilo(ile)))
 
-    if dodane or zmienione:
+    # ── USUŃ: nasze wiersze, których relacja już nie obejmuje ────────────
+    for r in con.execute(
+            "SELECT id, COALESCE(subiekt_symbol,''), COALESCE(work_name,''),"
+            "       COALESCE(src_name,''), COALESCE(order_qty, work_qty, src_qty, 0)"
+            "  FROM items WHERE project_id = ? AND is_manual = 1"
+            "   AND COALESCE(is_hidden, 0) = 0"
+            "   AND notes LIKE 'półprodukt%'", (project_id,)).fetchall():
+        rid, sym, wn, sn, ile = r
+        klucze = {sym.strip().lower(), wn.strip().lower(), sn.strip().lower()} - {""}
+        if klucze & chciane:
+            continue                     # nadal potrzebny
+        con.execute("DELETE FROM items WHERE id = ?", (rid,))
+        usuniete.append("%s — %s szt." % (wn.strip() or sn.strip() or sym.strip(), _ilo(ile)))
+
+    if dodane or zmienione or usuniete:
         con.commit()
-    return dodane, zmienione
+    return dodane, zmienione, usuniete

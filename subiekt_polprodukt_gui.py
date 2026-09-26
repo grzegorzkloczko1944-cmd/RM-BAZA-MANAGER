@@ -606,12 +606,25 @@ class PolproduktWindow(tk.Toplevel):
             for id_sub, z in self._zmiany.items():
                 M.zapisz_polprodukt(self.numer, id_sub, z["ilosc"],
                                     symbol=z["symbol"], nazwa=z["nazwa"])
+            # Symbole ODWIAZYWANYCH polproduktow — po `usun_polprodukt` nie
+            # bedzie juz skad ich wziac, a trzeba je zdjac z ZK (patrz
+            # _zdejmij_z_zk_po_odwiazaniu).
+            try:
+                _przed = {w["id_subiekt"]: (w["symbol"] or "").strip()
+                          for w in M.polprodukty(self.numer)}
+            except Exception:
+                _przed = {}
+            _odwiazane = [_przed[i] for i in self._do_usuniecia if _przed.get(i)]
             for id_sub in self._do_usuniecia:
                 M.usun_polprodukt(self.numer, id_sub)
         except Exception as e:
             return messagebox.showerror("Zatwierdź zmiany", str(e), parent=self)
 
         ile = len(self._zmiany) + len(self._do_usuniecia)
+        # Czy zapis COS DODAL/ZMIENIL? Same odwiazania nie maja czego
+        # ustawiac na ZK ani rozsylac do innych projektow — a pytanie
+        # „Dopisac polprodukt na ICH ZK?" i tak wyskakiwalo (26.09.2026).
+        _bylo_dodane = bool(self._zmiany)
         self._zmiany, self._do_usuniecia = {}, set()
         self._cos_zmienione = True
         self._odswiez_powiazane()
@@ -625,8 +638,188 @@ class PolproduktWindow(tk.Toplevel):
                 self._cos_zmienione = False     # arkusz juz odswiezony
             except Exception:
                 pass
-        self._na_zk(po_zapisie=True)
-        self._rozeslij_do_projektow()
+        if _bylo_dodane:
+            self._na_zk(po_zapisie=True)
+        self._zdejmij_z_zk_po_odwiazaniu(_odwiazane)
+        self._zdejmij_z_innych_projektow(_odwiazane)
+        if _bylo_dodane:
+            self._rozeslij_do_projektow()
+
+    def _zdejmij_z_zk_po_odwiazaniu(self, symbole):
+        """Odwiazany polprodukt schodzi TAKZE z ZK — inaczej wraca do arkusza.
+
+        `_na_zk` tylko USTAWIA ilosci biezacych polproduktow; pozycji, ktorej
+        relacja wlasnie zniknela, nigdy nie zdejmowal. Zostawala na ZK
+        w Subiekcie, a arkusz przy nastepnym locku sciagal ja z powrotem
+        jako „z zamowienia ZK" (`_dopisz_pozycje_z_zk`) — user odwiazywal,
+        a wiersz „nie chcial sie skasowac" (zgloszone 26.09.2026, T5-525/10).
+
+        Zdejmujemy WYLACZNIE symbole, ktorych NIE potrzebuje juz zaden inny
+        rysunek w projekcie (relacja jest globalna — to samo kolo moze byc
+        polproduktem trzech rysunkow). Bezpiecznik mostu jak wszedzie:
+        pozycja, ktora poszla na ZD, zostaje (status „realizowana").
+        """
+        symbole = [s for s in (symbole or []) if s]
+        if not symbole or not callable(self._projekt_info):
+            return
+        dane = self._projekt_info() or {}
+        pid, pnazwa = dane.get("project_id"), dane.get("project_name")
+        if not pid:
+            return
+        try:
+            import subiekt_projekt as PR
+            import subiekt_bridge
+            potrzebne = {(p.get("symbol") or "").strip().upper()
+                         for p in PR.pozycje_polproduktow(dane.get("pozycje") or [])}
+        except Exception as e:
+            messagebox.showwarning(
+                "Zdjęcie z ZK",
+                "Nie sprawdzono, czy odwiązany półprodukt jest jeszcze potrzebny:\n%s\n\n"
+                "Pozycja została na ZK — zdejmij ją z arkusza przez PPM → "
+                "„Zdejmij z ZK (Subiekt)…”." % e, parent=self)
+            return
+        do_zdjecia = [s for s in symbole if s.strip().upper() not in potrzebne]
+        if not do_zdjecia:
+            return                      # inny rysunek nadal go uzywa — zostaje
+        plan = {"projekt": PR.numer_projektu(pnazwa, pid), "symbole": do_zdjecia}
+        self.config(cursor="watch")
+        self.status.config(text="Zdejmuję odwiązane półprodukty z ZK…")
+        self.update_idletasks()
+        try:
+            wynik = subiekt_bridge.call("zk-poz-usun", {"plan": plan, "zapisz": True},
+                                        timeout=PR.TIMEOUT_S, write=True)
+        except Exception as e:
+            self.config(cursor="")
+            messagebox.showwarning(
+                "Zdjęcie z ZK",
+                "Most nie zdjął pozycji z ZK:\n%s\n\nZostały na dokumencie: %s\n"
+                "Zdejmij je z arkusza przez PPM → „Zdejmij z ZK (Subiekt)…”."
+                % (e, ", ".join(do_zdjecia)), parent=self)
+            return
+        self.config(cursor="")
+        kroki = (wynik or {}).get("kroki", [])
+        zapisane = next((k for k in kroki if k.get("Status") == "zapisane"), None)
+        nieusuwalne = [k for k in kroki if k.get("Status") == "nie-do-usuniecia"]
+        realizowane = [k for k in kroki if k.get("Status") == "realizowana"]
+        czesci = []
+        if zapisane:
+            czesci.append("✓ " + (zapisane.get("Szczegoly") or "zdjęto z ZK: " + ", ".join(do_zdjecia)))
+        if nieusuwalne:
+            czesci.append("⚠ ZOSTAŁY NA ZK — usuń ręcznie w Subiekcie: "
+                          + ", ".join(k.get("Symbol", "") for k in nieusuwalne))
+        if realizowane:
+            czesci.append("⚠ NIE usunięto — są już na ZD: "
+                          + ", ".join("%s → %s" % (k.get("Symbol", ""), k.get("Szczegoly", ""))
+                                      for k in realizowane))
+        if not czesci:
+            czesci.append("Odwiązanych pozycji nie było na ZK.")
+        self.status.config(text="Odwiązane półprodukty: " + czesci[0][:70])
+        messagebox.showinfo("Odwiązanie — ZK", "\n".join(czesci), parent=self)
+        # Wiersz „z zamowienia ZK" w arkuszu ma znacznik zasiewu, ktory wlasnie
+        # przestal byc prawdziwy — arkusz odswiezy go sam przy najblizszym
+        # przeliczeniu z ZK; do reki jest PPM -> „Zdejmij z ZK" + „Usun wiersz".
+        if callable(self._po_zmianie):
+            try:
+                self._po_zmianie()
+            except Exception:
+                pass
+
+    def _zdejmij_z_innych_projektow(self, symbole):
+        """Lustrzane odbicie rozsylu: odwiazany polprodukt schodzi z ZK
+        POZOSTALYCH projektow z tym rysunkiem.
+
+        Rozsyl („Dopisac polprodukt na ICH ZK?") zaklada pozycje — a nawet
+        cale ZK — w innych projektach, ale nie mial drogi powrotnej.
+        Po odwiazaniu polprodukt znikal z biezacego projektu, a w tamtych
+        zostawal na dokumentach (26.09.2026: T5-525/10 na ZK 3/09/2026
+        i ZK 4/09/2026, zalozonych tego dnia przez rozsyl).
+
+        Zdejmujemy tylko tam, gdzie po odwiazaniu ZADEN rysunek projektu
+        nie potrzebuje juz tego symbolu (plan polproduktow liczony tak samo,
+        jak przy rozsylaniu). Pytamy przed, raportujemy po; pozycje na ZD
+        most zostawia (status „realizowana").
+        """
+        symbole = [s for s in (symbole or []) if s]
+        if not symbole:
+            return
+        try:
+            import subiekt_polprodukt_rozsyl as R
+            import subiekt_projekt as PR
+            import subiekt_bridge
+        except Exception as e:
+            print("Polprodukty: zdjecie z innych projektow niedostepne (%s)" % e)
+            return
+        dane = self._projekt_info() if callable(self._projekt_info) else {}
+        biezacy = (dane or {}).get("project_id")
+        podmiot = (dane or {}).get("podmiot") or ""
+        try:
+            projekty = [g for g in R.projekty_z_rysunkiem(self.numer)
+                        if g[0] != biezacy]
+        except Exception as e:
+            print("Polprodukty: nie sprawdzono projektow (%s)" % e)
+            return
+        if not projekty:
+            return
+
+        # Gdzie symbol jest jeszcze potrzebny (inny rysunek go uzywa)?
+        # Tam NIE ruszamy. Reszta -> kandydaci do zdjecia.
+        kandydaci = []
+        szukane = {x.strip().upper() for x in symbole}
+        for pid, nazwa, _ile in projekty:
+            try:
+                plan, pozycje = R.plan_polproduktow(pid, nazwa, podmiot)
+                potrzebne = {(p.get("symbol") or "").strip().upper()
+                             for p in (pozycje or [])}
+            except Exception:
+                potrzebne = set()
+            zbedne = sorted(szukane - potrzebne)
+            if zbedne:
+                kandydaci.append((pid, nazwa, zbedne))
+        if not kandydaci:
+            return
+
+        lista = chr(10).join("    %s:  %s" % (n, ", ".join(z))
+                             for _p, n, z in kandydaci[:12])
+        wiecej = (chr(10) + "    … i %d dalszych" % (len(kandydaci) - 12)
+                  if len(kandydaci) > 12 else "")
+        if not messagebox.askyesno(
+                "Odwiązany półprodukt jest na ZK innych projektów",
+                "Rysunek „%s” występuje w %d innych projektach, a odwiązany\n"
+                "półprodukt nie jest tam już potrzebny:@N@@N@%s%s@N@@N@"
+                "Zdjąć go z ICH ZK teraz?@N@@N@"
+                "(Pozycje, które poszły już na ZD, most zostawi i powie o tym.)"
+                .replace("@N@", chr(10))
+                % (self.numer, len(kandydaci), lista, wiecej),
+                parent=self):
+            return
+
+        self.config(cursor="watch")
+        self.status.config(text="Zdejmuję z ZK pozostałych projektów…")
+        self.update_idletasks()
+        raport = []
+        for pid, nazwa, zbedne in kandydaci:
+            plan = {"projekt": PR.numer_projektu(nazwa, pid), "symbole": zbedne}
+            try:
+                w = subiekt_bridge.call("zk-poz-usun", {"plan": plan, "zapisz": True},
+                                        timeout=PR.TIMEOUT_S, write=True)
+            except Exception as e:
+                raport.append("⚠ %s: most nie wykonał (%s)" % (nazwa, e))
+                continue
+            kroki = (w or {}).get("kroki", [])
+            zap = next((k for k in kroki if k.get("Status") == "zapisane"), None)
+            real = [k.get("Symbol", "") for k in kroki if k.get("Status") == "realizowana"]
+            brak = [k for k in kroki if k.get("Status") in ("brak", "brak-na-zk")]
+            if zap:
+                raport.append("✓ %s: %s" % (nazwa, zap.get("Szczegoly") or "zdjęto"))
+            elif real:
+                raport.append("⚠ %s: na ZD, zostaje: %s" % (nazwa, ", ".join(real)))
+            elif brak and len(brak) == len(kroki):
+                raport.append("· %s: nie było na ZK" % nazwa)
+            else:
+                raport.append("· %s: bez zmian" % nazwa)
+        self.config(cursor="")
+        self.status.config(text="Zdjęto z ZK innych projektów: %d" % len(kandydaci))
+        messagebox.showinfo("Odwiązanie — inne projekty", chr(10).join(raport), parent=self)
 
     def _rozeslij_do_projektow(self):
         """Dopisuje polprodukt na ZK POZOSTALYCH aktywnych projektow.

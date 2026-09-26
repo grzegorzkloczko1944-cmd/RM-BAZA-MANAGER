@@ -2424,6 +2424,13 @@ class MainWindow(tk.Tk):
                                           self.show_position_card)
         self.sheet.popup_menu_add_command("Powiąż półprodukt…",
                                           self.powiaz_polprodukt)
+        # Sprzatanie po polproduktach i testach (26.09.2026): pozycja
+        # ZDJETA z ZK w Subiekcie, a dopiero potem skasowana z arkusza —
+        # inaczej wraca przy nastepnym locku (`_dopisz_pozycje_z_zk`).
+        self.sheet.popup_menu_add_command("Zdejmij z ZK (Subiekt)…",
+                                          self.zdejmij_z_zk)
+        self.sheet.popup_menu_add_command("Usuń wiersz dodany ręcznie…",
+                                          self.usun_wiersz_reczny)
         self.sheet.popup_menu_add_command("Dopasuj kartotekę Subiekta…   (F4)",
                                           self.dopasuj_kartoteke_wiersza)
         self.sheet.popup_menu_add_command("Wyślij do RFQ   (F3)", self.send_selected_to_rfq)
@@ -13150,6 +13157,219 @@ class MainWindow(tk.Tk):
         _DW.open_window(self, self.db_manager.project_con, item_id,
                         on_zapisano=self.refresh_data)
 
+    # ── Sprzatanie: zdjecie z ZK i kasowanie wiersza recznego ──────────────
+    def _nazwa_biezacego_projektu(self):
+        """Nazwa projektu z `projects_list` — atrybutu `current_project_name`
+        NIE MA (patrz _info_dla_polproduktu)."""
+        for pid, pname in (getattr(self, "projects_list", None) or ()):
+            if pid == self.current_project_id:
+                return pname
+        return ""
+
+    def _zaznaczony_item(self, kolumny):
+        """(item_id, wiersz) zaznaczonej pozycji albo (None, None) + komunikat."""
+        try:
+            selection = self.sheet.get_currently_selected()
+            if not selection:
+                messagebox.showinfo("Brak zaznaczenia", "Zaznacz najpierw wiersz.")
+                return None, None
+            row = selection[0]
+            row_ids = getattr(self, "_sheet_row_ids", [])
+            if not isinstance(row, int) or row >= len(row_ids):
+                # Zaznaczona kolumna/naglowek albo arkusz w trakcie przebudowy.
+                # Bez komunikatu user klikal drugi i trzeci raz, nie wiedzac,
+                # czemu „nic sie nie dzieje" (26.09.2026).
+                messagebox.showinfo("Brak zaznaczenia",
+                                    "Kliknij w KOMÓRKĘ wiersza, który chcesz obsłużyć.")
+                return None, None
+            item_id = row_ids[row]
+            cur = self.db_manager.project_con.execute(
+                "SELECT " + kolumny + " FROM items WHERE id = ?", (item_id,)).fetchone()
+            if not cur:
+                messagebox.showinfo("Brak pozycji",
+                                    "Tego wiersza nie ma już w bazie (ID %s) — odśwież arkusz (F5)." % item_id)
+            return item_id, cur
+        except Exception as e:
+            messagebox.showerror("Zaznaczenie", "Nie udało się odczytać pozycji:\n" + str(e))
+            return None, None
+
+    def _zdejmij_znacznik_zasiewu(self, item_id, stary, czesci):
+        """Kasuje `subiekt_zasiew_at` na wierszu (wymaga locka) i dopisuje do raportu.
+
+        Wolane, gdy pozycji NIE MA juz na ZK — czy to dlatego, ze most ja
+        wlasnie zdjal, czy dlatego, ze ZK nigdy nie powstalo / zostalo
+        skasowane w Subiekcie. W obu przypadkach znacznik klamie, a bez
+        jego zdjecia „Usun wiersz" odmawia i user laduje w pacie
+        (zgloszone 26.09.2026: „dawny zasiew, nie ma ZK, nie moge skasowac").
+        """
+        if not (self.have_lock and self.db_manager.project_con):
+            czesci.append("ℹ bez locka znacznik zasiewu w arkuszu zostaje —"
+                          " przejmij lock i powtórz, potem „Usuń wiersz dodany ręcznie…”")
+            return
+        try:
+            self._log_item_change(item_id, 'ZK_USUN', 'subiekt_zasiew_at', stary or None, None)
+            self.db_manager.project_con.execute(
+                "UPDATE items SET subiekt_zasiew_at = NULL, order_qty = 0,"
+                " updated_at = ? WHERE id = ?", (datetime.now().isoformat(), item_id))
+            self.db_manager.project_con.commit()
+            czesci.append("✓ w arkuszu: zdjęto znacznik zasiewu, Ilość (zam.) = 0"
+                          " — wiersz można już usunąć")
+        except Exception as e:
+            czesci.append("⚠ nie zdjęto znacznika w arkuszu: %s" % e)
+
+    def zdejmij_z_zk(self):
+        """PPM → „Zdejmij z ZK": usuwa zaznaczona pozycje z ZK projektu w Subiekcie.
+
+        Po co: wiersz sciagniety z ZK („z zamowienia ZK") albo polprodukt,
+        ktory poszedl na ZK, WRACA do arkusza przy kazdym locku, dopoki
+        pozycja jest na dokumencie. Kasowanie wiersza nic nie daje — zrodlo
+        jest w Subiekcie. Most ma do tego tryb `zk-poz-usun` (dotad podpiety
+        tylko pod zmiane dostawcy na RMPAK) — tu wystawiony jako akcja
+        na wierszu (zyczenie uzytkownika 26.09.2026).
+
+        Bezpiecznik ten sam co w moscie: pozycja, ktora poszla dalej na ZD,
+        NIE jest usuwana (status „realizowana") — user rozstrzyga w Subiekcie.
+        Lock NIE jest wymagany (ZK zyje w Subiekcie), ale bez locka nie
+        zdejmiemy znacznika zasiewu z wiersza — o tym mowi raport.
+        """
+        if not self.current_project_id:
+            return
+        item_id, cur = self._zaznaczony_item(
+            "COALESCE(subiekt_symbol,''), "
+            "COALESCE(NULLIF(work_drawing_no,''), NULLIF(src_drawing_no,''), ''), "
+            "COALESCE(NULLIF(work_name,''), src_name, ''), "
+            "COALESCE(subiekt_zasiew_at,''), COALESCE(order_qty, 0)")
+        if not cur:
+            return
+        symbol = (cur[0] or "").strip() or (cur[1] or "").strip() or (cur[2] or "").strip()
+        nazwa = (cur[2] or "").strip()
+        if not symbol:
+            messagebox.showinfo("Zdejmij z ZK",
+                                "Ta pozycja nie ma symbolu — nie ma czego szukać na ZK.")
+            return
+        try:
+            import subiekt_projekt, subiekt_bridge
+        except Exception as e:
+            messagebox.showerror("Zdejmij z ZK", "Nie udało się załadować mostu:\n" + str(e))
+            return
+        numer = subiekt_projekt.numer_projektu(self._nazwa_biezacego_projektu(),
+                                               self.current_project_id)
+        if not messagebox.askyesno(
+                "Zdejmij z ZK — potwierdzenie",
+                "Usunąć z ZK projektu %s pozycję:\n\n    %s   %s\n    (na ZK: %g szt.)\n\n"
+                "Zapis idzie do SUBIEKTA. Pozycja, która poszła już na ZD,\n"
+                "NIE zostanie usunięta — most ją pominie i powie o tym.\n\n"
+                "Wiersz w arkuszu ZOSTAJE — skasujesz go potem przez\n"
+                "„Usuń wiersz dodany ręcznie…”."
+                % (numer, symbol, nazwa, float(cur[4] or 0))):
+            return
+        plan = {"projekt": numer, "symbole": [symbol]}
+        # Most przy zimnej sesji potrafi myslec ~9 s. Bez kursora i blokady
+        # user klikal ponownie, a kolejne wywolanie startowalo rownolegle
+        # z pierwszym (26.09.2026: „dopiero za ktoryms razem usunelo").
+        if getattr(self, "_zk_usun_w_toku", False):
+            messagebox.showinfo("Zdejmij z ZK", "Operacja już trwa — poczekaj na wynik.")
+            return
+        self._zk_usun_w_toku = True
+        self.config(cursor="watch")
+        self.update_idletasks()
+        try:
+            wynik = subiekt_bridge.call("zk-poz-usun", {"plan": plan, "zapisz": True},
+                                        timeout=subiekt_projekt.TIMEOUT_S, write=True)
+        except Exception as e:
+            messagebox.showerror("Zdejmij z ZK",
+                                 "Most nie wykonał operacji:\n\n%s\n\nPozycja została na ZK." % e)
+            return
+        finally:
+            self._zk_usun_w_toku = False
+            try:
+                self.config(cursor="")
+            except Exception:
+                pass
+        # Ta sama interpretacja krokow co w subiekt_projekt._sprzatnij_zk.
+        kroki = (wynik or {}).get("kroki", [])
+        zapisane = next((k for k in kroki if k.get("Status") == "zapisane"), None)
+        nieusuwalne = [k for k in kroki if k.get("Status") == "nie-do-usuniecia"]
+        realizowane = [k for k in kroki if k.get("Status") == "realizowana"]
+        czesci = []
+        if zapisane:
+            czesci.append("✓ " + (zapisane.get("Szczegoly") or "zdjęto z ZK"))
+            self._zdejmij_znacznik_zasiewu(item_id, cur[3], czesci)
+        if nieusuwalne:
+            czesci.append("⚠ ZOSTAŁA NA ZK — usuń ręcznie w Subiekcie: "
+                          + ", ".join(k.get("Symbol", "") for k in nieusuwalne))
+        if realizowane:
+            czesci.append("⚠ NIE usunięto — pozycja jest już na ZD: "
+                          + ", ".join("%s → %s" % (k.get("Symbol", ""), k.get("Szczegoly", ""))
+                                      for k in realizowane))
+        if not czesci:
+            # Most nie znalazl pozycji na ZK: ZK nie ma albo pozycja juz
+            # z niego zeszla. Znacznik zasiewu na wierszu jest wiec martwy
+            # — bez jego zdjecia „Usun wiersz" odmawialby w nieskonczonosc.
+            czesci.append("Nic nie było na ZK pod tym symbolem"
+                          " — znacznik zasiewu na wierszu był nieaktualny.")
+            self._zdejmij_znacznik_zasiewu(item_id, cur[3], czesci)
+        self.refresh_data()
+        messagebox.showinfo("Zdejmij z ZK — wynik", "\n".join(czesci))
+
+    def usun_wiersz_reczny(self):
+        """PPM → „Usuń wiersz dodany ręcznie": DELETE pojedynczego wiersza spoza drzewka.
+
+        W PRODUKCJA nie bylo ZADNEJ drogi do skasowania wiersza: „Delete"
+        czysci komorke, „Ukryj" tylko chowa, „Usun dla zaznaczonych" dziala
+        wylacznie w MAGAZYNIE. Po testach polproduktow zostawaly wiersze,
+        ktorych nie dalo sie posprzatac (zgloszone 26.09.2026).
+
+        Kasujemy WYLACZNIE `is_manual = 1` (pozycje spoza drzewka Inventora:
+        schowek, polprodukt, „z zamowienia ZK", dodane recznie) i tylko BEZ
+        znacznika zasiewu — pozycja na ZK wrocilaby przy nastepnym locku,
+        wiec najpierw „Zdejmij z ZK". Z pytaniem i wpisem do dziennika,
+        jak w wersji magazynowej.
+        """
+        if not self.current_project_id:
+            return
+        if not self.have_lock or not self.db_manager.project_con:
+            messagebox.showwarning("Brak uprawnień", "Przejmij lock, żeby usuwać wiersze.")
+            return
+        item_id, cur = self._zaznaczony_item(
+            "COALESCE(is_manual,0), COALESCE(subiekt_zasiew_at,''), "
+            "COALESCE(NULLIF(work_drawing_no,''), NULLIF(src_drawing_no,''), ''), "
+            "COALESCE(NULLIF(work_name,''), src_name, ''), COALESCE(notes,'')")
+        if not cur:
+            return
+        manual, zasiew, nr, nazwa, notes = int(cur[0] or 0), cur[1], cur[2], cur[3], cur[4]
+        if manual != 1:
+            messagebox.showwarning(
+                "Usuń wiersz",
+                "To pozycja z drzewka Inventora — nie kasujemy jej ręcznie.\n\n"
+                "Zniknie przy następnym imporcie, gdy nie będzie jej w *_OUT.xlsx;\n"
+                "do tego czasu użyj „Ukryj zaznaczone”.")
+            return
+        if zasiew:
+            messagebox.showwarning(
+                "Usuń wiersz",
+                "Ta pozycja jest na ZK w Subiekcie (zasiew %s).\n\n"
+                "Skasowana tutaj WRÓCI przy następnym locku — arkusz dopisuje\n"
+                "pozycje z żywego ZK. Najpierw „Zdejmij z ZK (Subiekt)…”." % zasiew[:16])
+            return
+        opis = " ".join(x for x in (nr, nazwa) if x) or ("ID %s" % item_id)
+        if not messagebox.askyesno(
+                "Usuń wiersz — potwierdzenie",
+                "Usunąć z arkusza wiersz:\n\n    %s\n    (%s)\n\n"
+                "Operacja jest zapisywana w dzienniku zmian i idzie do lokalnej\n"
+                "kopii projektu; na serwer trafi przy zwolnieniu locka."
+                % (opis, notes or "bez notatki")):
+            return
+        try:
+            self._log_item_change(item_id, 'DELETE', None, "%s (ID %s)" % (opis, item_id), None)
+            self.db_manager.project_con.execute("DELETE FROM items WHERE id = ?", (item_id,))
+            self.db_manager.project_con.commit()
+        except Exception as e:
+            messagebox.showerror("Usuń wiersz", "Nie udało się usunąć:\n" + str(e))
+            return
+        self.refresh_data()
+        messagebox.showinfo("Usuń wiersz", "Usunięto z arkusza:\n\n    %s" % opis)
+
     def powiaz_polprodukt(self):
         """Okno powiazania rysunku z kartoteka kupowanego polfabrykatu.
 
@@ -13286,7 +13506,7 @@ class MainWindow(tk.Tk):
                                   else (i["qty_bom"] or 0))}
                        for i in items]
             polprodukty = subiekt_projekt.pozycje_polproduktow(pozycje)
-            dodane, zmienione = subiekt_polprodukt_bom.zsynchronizuj(
+            dodane, zmienione, usuniete = subiekt_polprodukt_bom.zsynchronizuj(
                 self.db_manager.project_con, self.current_project_id,
                 polprodukty)
         except Exception as e:
@@ -13299,7 +13519,7 @@ class MainWindow(tk.Tk):
             return
 
         self.refresh_data()
-        if dodane or zmienione:
+        if dodane or zmienione or usuniete:
             czesci = []
             if dodane:
                 czesci.append("DOPISANE do arkusza (%d):\n    %s"
@@ -13307,6 +13527,11 @@ class MainWindow(tk.Tk):
             if zmienione:
                 czesci.append("ZAKTUALIZOWANE ilości (%d):\n    %s"
                               % (len(zmienione), ("\n    ".join(zmienione))))
+            # Odwiazanie zabiera wiersz z arkusza — pokazujemy to tak samo
+            # jak dopisanie (zasada „nic po cichu", 26.09.2026).
+            if usuniete:
+                czesci.append("USUNIĘTE z arkusza (%d):\n    %s"
+                              % (len(usuniete), ("\n    ".join(usuniete))))
             messagebox.showinfo(
                 "Półprodukty w arkuszu",
                 ("\n\n".join(czesci))
