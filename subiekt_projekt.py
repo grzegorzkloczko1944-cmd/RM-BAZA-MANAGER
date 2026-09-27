@@ -3812,9 +3812,12 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         starym projekcie uzupełni zaległości, kolejne będą szybkie, bo
         wszystko odsieje warunek „ma już zdjęcie".
 
-        Cicho w razie kłopotu: to dodatek do zasiewu, nie jego część.
-        Raport idzie do paska stanu i do konsoli, nie w okno — zasiew ma
-        już swoje podsumowanie i nie chcemy go przykrywać drugim.
+        Błąd miniatury nie przerywa zasiewu (to dodatek, nie jego część).
+        ⚠️ Ale BRAK rysunków NIE może przejść po cichu (28.09.2026): projekt
+        2637 na M-OLD dostał miniatury tylko dla 74 z 348 kartotek, bo folderu
+        projektu na V: nie było — a podsumowanie poszło wyłącznie na konsolę.
+        Gdy coś zostaje bez rysunku, pokazujemy okno: ile, przykłady i GDZIE
+        szukaliśmy. Ponowny zapis uzupełni braki (ma-zdjęcie jest pomijane).
         """
         symbole = [(k.get("Symbol") or "").strip()
                    for k in (wynik or {}).get("kroki", [])
@@ -3825,8 +3828,24 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             return
         rodzic = self.master            # arkusz RM_BAZA — on zna ścieżki do DWF
 
+        # Gdzie szukamy — do komunikatu o brakach. Korzeń folderów projektów
+        # zna główny moduł RM_BAZA (get_assembly_tree_root, ustawienie
+        # „Serwer projekty"); tu tylko go odczytujemy.
+        gdzie = []
+        try:
+            import os as _os
+            import __main__
+            _korzen = __main__.get_assembly_tree_root()
+            _folder = _os.path.join(str(_korzen), self.project_name or "")
+            gdzie.append("folder projektu: %s%s" % (
+                _folder, "" if _os.path.isdir(_folder) else "   ⛔ NIE ISTNIEJE"))
+        except Exception:
+            pass
+        gdzie.append("biblioteka: B:\\")
+
         def robota():
             wyslane, pominiete, bez_rysunku, bledy = 0, 0, 0, []
+            bez_przyklady = []
             try:
                 import subiekt_bridge
             except Exception as e:
@@ -3842,6 +3861,8 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                         sciezka = rodzic._dwf_thumb_path_for_drawing(symbol)
                     if not sciezka:
                         bez_rysunku += 1
+                        if len(bez_przyklady) < 8:
+                            bez_przyklady.append(symbol)
                         continue
                     # Ma już zdjęcie? Nie dokładamy drugiego.
                     stan = subiekt_bridge.call(
@@ -3873,6 +3894,19 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                 self.after(0, lambda: self.status.config(text=podsumowanie))
             except Exception:
                 pass                     # okno mogło się już zamknąć
+            if bez_rysunku or bledy:
+                tekst = (podsumowanie + ".\n\n"
+                         "Bez rysunku DWF zostało %d kartotek, np.:\n  %s\n\n"
+                         "Szukałem w:\n  %s\n\n"
+                         "Gdy rysunki będą dostępne, zapisz projekt ponownie —\n"
+                         "kartoteki, które już mają zdjęcie, zostaną pominięte."
+                         % (bez_rysunku, "\n  ".join(bez_przyklady) or "—",
+                            "\n  ".join(gdzie)))
+                try:
+                    self.after(0, lambda: messagebox.showwarning(
+                        "Miniatury DWF — braki", tekst, parent=self))
+                except Exception:
+                    pass                     # okno mogło się już zamknąć
 
         threading.Thread(target=robota, daemon=True).start()
 
