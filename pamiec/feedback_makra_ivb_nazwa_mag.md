@@ -35,3 +35,12 @@ załadowanego projektu przez COM (E_INVALIDARG), a stara kopia w pamięci
 potrafi nadpisać nową przy zapisie z edytora.
 Test bez UI: `InventorVBAMembers.Item(...).Execute()` na projekcie
 tymczasowym z `VBAProjects.Add()` — uruchamia Sub przez COM.
+
+**Gdzie MAG żyje u usera (28.09.2026):** w `Module9` projektu aplikacji
+`Default.ivb` („miałem jechać normalnie na zwykłym Module9"). NIE osobny
+`MAG.ivb`, NIE projekty tymczasowe. ⛔ Nie zakładać w jego sesji Inventora
+projektów testowych (`VBAProjects.Add`) bez pytania — `MAG_KOMP_TMP` został
+na liście po błędzie kompilacji (VBA w [break], komunikat na ekranie usera).
+⚠️ Inventor 2013 (M-OLD) ma **VBA 6 32-bit** (`Inventor32bitHost.exe`) — bez
+`PtrSafe`/`LongPtr`; deklaracje API tylko w `#If VBA7 … #Else`.
+
