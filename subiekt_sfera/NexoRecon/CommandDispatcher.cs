@@ -1,4 +1,4 @@
-// CommandDispatcher — jedno miejsce, ktore wie, jaki tryb wola ktory handler.
+﻿// CommandDispatcher — jedno miejsce, ktore wie, jaki tryb wola ktory handler.
 //
 // Do tej pory ta wiedza byla drabinka `if (tryb == "...")` w Program.cs.
 // Tryb "server" potrzebuje tej samej mapy, a duplikowanie jej to prosta droga
@@ -52,6 +52,9 @@ internal static class CommandDispatcher
         "dostawcy", "progi", "rw", "pw", "termin", "symbole", "komplet-napraw", "magazyn-zaloz",
         "magazyn-usun", "projekt-cofnij", "kartoteki", "zk-poz-usun", "scal", "zk-nowe",
         "migracja-uwagi", "symbole-dostawcy", "pz-utworz",
+        // "zdjecie" — akcje dodaj/usun/glowne zapisuja; sama "lista" nie,
+        // ale plan jest zawsze, wiec rozroznia to CzyZapis ponizej.
+        "zdjecie",
     };
 
     /// <summary>
@@ -78,7 +81,7 @@ internal static class CommandDispatcher
         "pola-wlasne", "magazyn-zaloz", "magazyn-usun", "pw", "projekt-cofnij",
         "kartoteki", "zapotrzebowanie-test", "zk-ilosci", "zk-poz-usun", "scal", "zk-nowe",
         "migracja-uwagi", "wydanie-stan", "symbole-dostawcy", "pz-utworz",
-        "efaktury",
+        "efaktury", "zdjecie",
     };
 
     public static bool Zna(string tryb) => Tryby.Contains(tryb, StringComparer.OrdinalIgnoreCase);
@@ -249,6 +252,12 @@ internal static class CommandDispatcher
 
             case "kartoteka-usun":
                 return KartotekaUsun.Uruchom(sfera, k.SymboleCsv, k.OutPath, k.Zapisz);
+
+            // GALERIA ZDJEC kartoteki: lista / dodaj / usun / glowne.
+            // Miniatury robi Subiekt sam — patrz naglowek Zdjecia.cs.
+            case "zdjecie":
+                if (k.PlanPath is null) return Brak("zdjecie: brak --plan=plik.json");
+                return Zdjecia.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
 
             // Scalanie zduplikowanych kartotek w jedna docelowa: przepiecie
             // uzycia w kompletach + wycofanie zrodel. Symboli NIE rusza.
