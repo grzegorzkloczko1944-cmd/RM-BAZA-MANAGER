@@ -9,7 +9,7 @@ metadata:
 
 Napisany 27.09.2026: `indeks_modeli_3d.py` + tabela `modele_3d`
 w `subiekt_mapowania.sqlite` (operacje `map-model3d-*`, koniec
-`rm_serwer_operacje.py`). Szczegóły: `PLAN_MAKRO_MAGAZYN_3D.md`, sekcja 6a.
+`rm_serwer_operacje.py`). Szczegóły: `PLAN_MAG.md`, sekcja 6a.
 
 Sprawdzony na serwerze testowym (port 5099, bazy w scratchpadzie), NIE na
 produkcji. Serwer na W2019S nie zna jeszcze tych operacji.

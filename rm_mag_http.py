@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""rm_makro_http.py — serwer HTTP TYLKO DO ODCZYTU dla makra Inventora.
+"""rm_mag_http.py — serwer HTTP TYLKO DO ODCZYTU dla makra MAG (Inventor).
 
     makro VBA ──HTTP GET──► :5061 ──► subiekt_kopia.sqlite   (kartoteki, stany, miniatury)
                                   └─► subiekt_mapowania.sqlite (modele_3d)
 
 Po co osobne wejście: RM_SERWER mówi własnym protokołem po TCP z HMAC-SHA256,
 czego w VBA praktycznie nie da się zrobić. `MSXML2.XMLHTTP` umie HTTP GET —
-stąd ten serwer (PLAN_MAKRO_MAGAZYN_3D.md, sekcja 3; ustalenia: osobny port,
+stąd ten serwer (PLAN_MAG.md, sekcja 3; ustalenia: osobny port,
 bez uwierzytelniania, sieć lokalna, sam odczyt).
 
 ⚠️ NIGDY ZAPISU. Bazy otwierane są `mode=ro`, a serwer zna tylko GET.
@@ -15,11 +15,11 @@ Dane pisze wyłącznie wątek roboczy RM_SERWER (synchronizacja ze stacji —
 
 ADRESY (wszystkie GET, odpowiedź JSON; `&format=tsv` = tekst dla VBA)
 
-    /makro/status                     wiek kopii, liczba kartotek
-    /makro/szukaj?q=łożysko 6004      symbol, nazwa, opis, nazwa pliku 3D
-    /makro/kartoteka?symbol=016-100.03
-    /makro/modele?symbol=016-100.03   pliki .ipt/.iam do wstawienia
-    /makro/miniatura?symbol=016-100.03   obrazek (image/png, image/jpeg…)
+    /mag/status                     wiek kopii, liczba kartotek
+    /mag/szukaj?q=łożysko 6004      symbol, nazwa, opis, nazwa pliku 3D
+    /mag/kartoteka?symbol=016-100.03
+    /mag/modele?symbol=016-100.03   pliki .ipt/.iam do wstawienia
+    /mag/miniatura?symbol=016-100.03   obrazek (image/png, image/jpeg…)
 
 TSV: pierwszy wiersz = nazwy kolumn, dalej po wierszu na rekord, pola
 rozdzielone TAB. Tabulatory i końce linii w danych zamieniane na spację —
@@ -28,7 +28,7 @@ w VBA wystarcza `Split(tekst, vbLf)` i `Split(wiersz, vbTab)`.
 Uruchamiany z `rm_serwer.uruchom` jako wątek (jedna usługa NSSM), albo
 samodzielnie do testów:
 
-    python rm_makro_http.py --kopia dane\\subiekt_kopia.sqlite
+    python rm_mag_http.py --kopia dane\\subiekt_kopia.sqlite
                             --mapowania dane\\subiekt_mapowania.sqlite --port 5061
 """
 from __future__ import annotations
@@ -242,8 +242,10 @@ def status(bazy):
             modeli = con.execute(
                 "SELECT COUNT(DISTINCT numer_rysunku) FROM map.modele_3d"
                 " WHERE sciezka != ''").fetchone()[0]
+        # Płasko, nie zagnieżdżone — TSV dla VBA nie niesie słowników.
         return {"kartotek": ile, "miniatur": mini, "rysunkow_z_modelem": modeli,
-                "synchronizacja": ostatnie}
+                "kartoteki_z": ostatnie.get("kartoteki"),
+                "miniatury_z": ostatnie.get("miniatury")}
     finally:
         con.close()
 
@@ -264,7 +266,7 @@ def _tsv(wiersze, kolumny):
 
 def zbuduj_handler(bazy, log):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "RM_MAKRO/1.0"
+        server_version = "RM_MAG/1.0"
 
         def log_message(self, fmt, *args):     # zamiast stderr — do logu serwera
             pass
@@ -297,16 +299,16 @@ def zbuduj_handler(bazy, log):
             tsv = p.get("format", "").lower() == "tsv"
             sciezka = url.path.rstrip("/")
             try:
-                if sciezka == "/makro/status":
+                if sciezka == "/mag/status":
                     self._dane(200, status(bazy), tsv)
-                elif sciezka == "/makro/szukaj":
+                elif sciezka == "/mag/szukaj":
                     try:
                         limit = min(int(p.get("limit") or LIMIT_DOMYSLNY), LIMIT_MAX)
                     except ValueError:
                         limit = LIMIT_DOMYSLNY
                     self._dane(200, szukaj(bazy, p.get("q", ""), limit), tsv,
                                KOLUMNY_SZUKAJ)
-                elif sciezka == "/makro/kartoteka":
+                elif sciezka == "/mag/kartoteka":
                     d = kartoteka(bazy, p.get("symbol", ""))
                     if d is None:
                         self._dane(404, {"blad": "nie ma takiej kartoteki"}, tsv)
@@ -314,7 +316,7 @@ def zbuduj_handler(bazy, log):
                         if tsv:
                             d = {k: v for k, v in d.items() if k != "magazyny"}
                         self._dane(200, d, tsv)
-                elif sciezka == "/makro/modele":
+                elif sciezka == "/mag/modele":
                     d = modele(bazy, p.get("symbol", ""))
                     if tsv:
                         # TSV: po wierszu na model; brak wierszy + nagłówek
@@ -325,7 +327,7 @@ def zbuduj_handler(bazy, log):
                                      "text/plain; charset=utf-8")
                     else:
                         self._dane(200, d, False)
-                elif sciezka == "/makro/miniatura":
+                elif sciezka == "/mag/miniatura":
                     m = miniatura(bazy, p.get("symbol", ""))
                     if m is None:
                         self._wyslij(404, b"", "text/plain")
@@ -333,19 +335,19 @@ def zbuduj_handler(bazy, log):
                         self._wyslij(200, m[0], m[1])
                 else:
                     self._dane(404, {"blad": "nieznany adres",
-                                     "adresy": ["/makro/status", "/makro/szukaj?q=",
-                                                "/makro/kartoteka?symbol=",
-                                                "/makro/modele?symbol=",
-                                                "/makro/miniatura?symbol="]}, tsv)
+                                     "adresy": ["/mag/status", "/mag/szukaj?q=",
+                                                "/mag/kartoteka?symbol=",
+                                                "/mag/modele?symbol=",
+                                                "/mag/miniatura?symbol="]}, tsv)
             except FileNotFoundError as e:
                 self._dane(503, {"blad": str(e)}, tsv)
             except Exception as e:
-                log("⚠️  makro HTTP %s: %s" % (self.path, e))
+                log("⚠️  MAG HTTP %s: %s" % (self.path, e))
                 self._dane(500, {"blad": "%s: %s" % (type(e).__name__, e)}, tsv)
             finally:
                 ms = (time.time() - t0) * 1000
                 if ms > 500:
-                    log("makro HTTP wolne: %s %.0f ms" % (self.path, ms))
+                    log("MAG HTTP wolne: %s %.0f ms" % (self.path, ms))
 
     return Handler
 
@@ -359,18 +361,18 @@ def uruchom_w_tle(kopia, mapowania, port, nasluch="0.0.0.0", log=_log_domyslny):
         srv = ThreadingHTTPServer((nasluch, port),
                                   zbuduj_handler(Bazy(kopia, mapowania), log))
     except OSError as e:
-        log("⛔ makro HTTP: nie mogę zająć portu %d: %s" % (port, e))
+        log("⛔ MAG HTTP: nie mogę zająć portu %d: %s" % (port, e))
         return None
     srv.daemon_threads = True
-    threading.Thread(target=srv.serve_forever, name="makro-http",
+    threading.Thread(target=srv.serve_forever, name="mag-http",
                      daemon=True).start()
-    log("Makro HTTP: %s:%d (tylko odczyt)" % (nasluch, port))
+    log("MAG HTTP: %s:%d (tylko odczyt)" % (nasluch, port))
     return srv
 
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    ap = argparse.ArgumentParser(description="Serwer HTTP dla makra Inventora")
+    ap = argparse.ArgumentParser(description="Serwer HTTP dla makra MAG")
     ap.add_argument("--kopia", required=True, help="subiekt_kopia.sqlite")
     ap.add_argument("--mapowania", help="subiekt_mapowania.sqlite (modele_3d)")
     ap.add_argument("--port", type=int, default=5061)

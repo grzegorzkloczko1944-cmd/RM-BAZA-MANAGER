@@ -61,7 +61,7 @@ eksport STEP"). `import_bom.py:369` ją czyta i nic z nią nie robi; w
 
 **Dopasowanie „nazwa pliku = symbol kartoteki" dało 14 z 723 (2%).**
 Porzucone — brakujących modeli nie ma pod ŻADNĄ nazwą, to nie był problem
-nazewnictwa. Pełny opis: `PLAN_MAKRO_MAGAZYN_3D.md`, sekcja 5a.
+nazewnictwa. Pełny opis: `PLAN_MAG.md`, sekcja 5a.
 
 **Samo dopasowanie po ilości daje 28%.** Wszystko o ilości 1 wpada do jednego
 worka kandydatów. Trzeba łączyć ilość z kodem katalogowym.
@@ -93,7 +93,7 @@ To robota dla człowieka — ale **42 pozycje, nie 723**.
 * **Czytanie tabelki wprost z IDW** — dałoby kolejność pozycji jako dodatkowy
   klucz; może podnieść 66%.
 
-Plan makra: `PLAN_MAKRO_MAGAZYN_3D.md` (sekcja 5a).
+Plan makra: `PLAN_MAG.md` (sekcja 5a).
 
 Powiązane: [[project_numer_rysunku_i_symbol]],
 [[project_normalia_po_klasie]], [[project_symbole_ze_spacja]]

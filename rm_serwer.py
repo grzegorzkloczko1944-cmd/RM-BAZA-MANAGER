@@ -89,10 +89,10 @@ DOMYSLNA_BAZA_KSEF = os.path.join(KATALOG, "dane", "FV_KSEF.sqlite")
 #: Inventora. Odtwarzalna w każdej chwili synchronizacją ze stacji, dlatego
 #: bez backupu — patrz `rm_serwer_operacje.MIGRACJE_SUBIEKT_KOPIA`.
 DOMYSLNA_BAZA_SUBIEKT = os.path.join(KATALOG, "dane", "subiekt_kopia.sqlite")
-#: Port serwera HTTP dla makra (`rm_makro_http.py`) — osobny, żeby nie
-#: ruszać protokołu na 5060 (PLAN_MAKRO_MAGAZYN_3D.md, ustalenie 1).
+#: Port serwera HTTP dla makra (`rm_mag_http.py`) — osobny, żeby nie
+#: ruszać protokołu na 5060 (PLAN_MAG.md, ustalenie 1).
 #: 0 w konfiguracji wyłącza serwer HTTP.
-DOMYSLNY_PORT_MAKRO = 5061
+DOMYSLNY_PORT_MAG = 5061
 DOMYSLNY_PORT = 5060
 
 #: Ile trzymamy odpowiedzi w `_server_request_log` (§3 planu).
@@ -120,7 +120,7 @@ def wczytaj_config(sciezka=None):
         "baza_rm_manager": dane.get("baza_rm_manager", DOMYSLNA_BAZA_RM_MANAGER),
         "baza_ksef": dane.get("baza_ksef", DOMYSLNA_BAZA_KSEF),
         "baza_subiekt": dane.get("baza_subiekt", DOMYSLNA_BAZA_SUBIEKT),
-        "port_makro": int(dane.get("port_makro", DOMYSLNY_PORT_MAKRO)),
+        "port_mag": int(dane.get("port_mag", DOMYSLNY_PORT_MAG)),
         "port": int(dane.get("port", DOMYSLNY_PORT)),
         "nasluch": dane.get("nasluch", "0.0.0.0"),
         "sekret": dane.get("sekret"),          # None = HMAC wyłączony
@@ -368,7 +368,7 @@ class Serwer:
                 log("   + %s" % co)
             log("KSEF: %s" % sciezka_ksef)
 
-        # Piąta baza: kopia Subiekta dla makra Inventora. Pisze ją TEN wątek
+        # Piąta baza: kopia Subiekta dla makra MAG. Pisze ją TEN wątek
         # (synchronizacja ze stacji), czyta serwer HTTP z własnym połączeniem.
         # WAL, nie DELETE: czytelnik HTTP nie może czekać na zapis paczki,
         # a ta baza nie ma backupu kopiowaniem pliku i leży na lokalnym
@@ -953,18 +953,18 @@ def uruchom(config):
     serwer = Serwer(config)
     threading.Thread(target=serwer.worker, name="worker", daemon=True).start()
 
-    # Serwer HTTP dla makra Inventora — sam odczyt, osobny port. Błąd tutaj
+    # Serwer HTTP dla makra MAG — sam odczyt, osobny port. Błąd tutaj
     # NIE zatrzymuje RM_SERWER: 5060 obsługuje dziesięć stanowisk, makro
-    # jest dodatkiem (PLAN_MAKRO_MAGAZYN_3D.md, sekcja 3).
-    if config.get("port_makro"):
+    # jest dodatkiem (PLAN_MAG.md, sekcja 3).
+    if config.get("port_mag"):
         try:
-            import rm_makro_http
-            rm_makro_http.uruchom_w_tle(config.get("baza_subiekt"),
+            import rm_mag_http
+            rm_mag_http.uruchom_w_tle(config.get("baza_subiekt"),
                                         config.get("baza_mapowania"),
-                                        config["port_makro"], config["nasluch"],
+                                        config["port_mag"], config["nasluch"],
                                         log=log)
         except Exception as e:
-            log("⚠️  makro HTTP nie wystartował: %s" % e)
+            log("⚠️  MAG HTTP nie wystartował: %s" % e)
 
     nasluch = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     nasluch.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

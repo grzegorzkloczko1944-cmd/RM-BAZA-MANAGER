@@ -146,4 +146,5 @@
 - [Opóźniony <<TreeviewSelect>> kasuje panel 2](project_treeviewselect_czysci_panel.md) — klon żyje poza drzewem; filtr MUSI być w _na_wybor_wezla, nie u wołającego; update() ≠ mainloop()
 - [Znormalia → model 3D ze złożeń](project_znormalia_model_3d_z_zlozen.md) — Part Number dla detali RMPAK, para OUT+IAM dla normaliów (66%); „Pliki 3D" w OUT to flaga STP, nie ścieżka; ZZ/2RS to uszczelnienie
 - [Indeks modeli 3D — etap 1 makra](project_indeks_modeli_3d.md) — indeks_modeli_3d.py + modele_3d; skan TYLKO w firmie (M-OLD = Inventor 2013), C:\BibliotekaRM = B:
-- [Kopia Subiekta + HTTP dla makra](project_kopia_subiekta_http_makro.md) — stacja pisze subiekt_kopia.sqlite (sub-*), serwer podaje przez :5061; W2019S nie ma mostu; NIE wdrożone
+- [MAG — kopia Subiekta + HTTP](project_mag_kopia_subiekta_http.md) — stacja pisze subiekt_kopia.sqlite (sub-*), serwer podaje przez :5061; W2019S nie ma mostu; NIE wdrożone
+- [Makra: .ivb, nazwa MAG](feedback_makra_ivb_nazwa_mag.md) — makra oddawać jako .ivb; makro magazynowe = MAG wszędzie (MAG.ivb, /mag/, PLAN_MAG.md); nie mylić z magazynem MAG w Subiekcie

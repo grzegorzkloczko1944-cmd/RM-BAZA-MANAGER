@@ -5,8 +5,8 @@
     python subiekt_kopia_sync.py --bez-miniatur   # tylko kartoteki i stany (~1 s)
     python subiekt_kopia_sync.py --miniatury-od-nowa
 
-Po co: makro Inventora (PLAN_MAKRO_MAGAZYN_3D.md) czyta kartoteki przez HTTP
-z serwera (`rm_makro_http.py`), a serwer W2019S nie ma mostu Sfery — ten
+Po co: makro MAG (Inventor) (PLAN_MAG.md) czyta kartoteki przez HTTP
+z serwera (`rm_mag_http.py`), a serwer W2019S nie ma mostu Sfery — ten
 działa tylko na stacjach z SDK w `C:\\iLogic\\Subiekt\\Bin`. Stacja czyta więc
 Subiekta mostem i odkłada KOPIĘ do `subiekt_kopia.sqlite` operacjami `sub-*`.
 

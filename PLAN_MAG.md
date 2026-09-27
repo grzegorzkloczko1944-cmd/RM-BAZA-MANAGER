@@ -1,4 +1,4 @@
-# PLAN — makro „Wstaw z magazynu" (Inventor ↔ Subiekt)
+# PLAN — makro MAG (Inventor ↔ Subiekt)
 
 Stan: **etap 1 napisany (27.09.2026), jeszcze nie uruchomiony na produkcji.**
 Spisany 27.09.2026 po rozpoznaniu na żywych danych. Wszystkie liczby niżej
@@ -99,10 +99,10 @@ a nie podstawiać cokolwiek.
 Inventor / VBA                nowy endpoint HTTP            istniejące
 ──────────────                ──────────────────            ──────────
 okno „Wstaw z magazynu"
-  ├─ szukaj ───────────────►  /makro/szukaj?q=…    ────────► most: katalog
+  ├─ szukaj ───────────────►  /mag/szukaj?q=…    ────────► most: katalog
   │  ◄── symbol, nazwa, stan, cena, miniatura, modele ◄──── most: zdjecie
   │                                                  ◄──── modele_3d (SQLite)
-  └─ [Wstaw] ──────────────►  /makro/modele?symbol=… ──────► lista ścieżek
+  └─ [Wstaw] ──────────────►  /mag/modele?symbol=… ──────► lista ścieżek
         └─► Occurrences.Add dla KAŻDEGO modelu
 ```
 
@@ -317,7 +317,7 @@ wpis z automatu od decyzji człowieka.
 | etap | zakres | ryzyko |
 |---|---|---|
 | **1** | skrypt na stacji: skan `B:` + Apprentice → `map-model3d-zapisz` | żadne — czysty odczyt, zapis tylko do tabeli mapowań |
-| **2** | endpoint `/makro/szukaj` i `/makro/modele` (tylko odczyt) | restart usługi |
+| **2** | endpoint `/mag/szukaj` i `/mag/modele` (tylko odczyt) | restart usługi |
 | **3** | makro: okno + wyszukiwarka + stan + miniatura, **bez wstawiania** | żadne |
 | **4** | wstawianie modeli (`Occurrences.Add`) | dotyka dokumentu użytkownika |
 
@@ -382,15 +382,15 @@ stacja z mostem                          W2019S
 subiekt_kopia_sync.py ── sub-* ────────► subiekt_kopia.sqlite  (kartoteki, stany, miniatury)
   katalog 0,2 s + magazyn 0,8 s                   │
   zdjecie 0,08 s / kartotekę                      ▼
-                                         rm_makro_http.py :5061 ◄── makro VBA (GET)
+                                         rm_mag_http.py :5061 ◄── makro VBA (GET)
                                            + subiekt_mapowania.sqlite (modele_3d)
 ```
 
 * `rm_serwer.py`: piąta baza `subiekt_kopia.sqlite` (prefiks `sub-`, WAL —
   lokalny dysk, czytelnik HTTP nie czeka na zapis), wątek HTTP na
-  `port_makro` (domyślnie 5061, 0 = wyłączony; błąd portu nie zatrzymuje 5060).
-* Adresy: `/makro/status`, `/makro/szukaj?q=`, `/makro/kartoteka?symbol=`,
-  `/makro/modele?symbol=`, `/makro/miniatura?symbol=`. `&format=tsv` —
+  `port_mag` (domyślnie 5061, 0 = wyłączony; błąd portu nie zatrzymuje 5060).
+* Adresy: `/mag/status`, `/mag/szukaj?q=`, `/mag/kartoteka?symbol=`,
+  `/mag/modele?symbol=`, `/mag/miniatura?symbol=`. `&format=tsv` —
   tekst z TAB-ami dla VBA (VBA nie ma parsera JSON).
 * Kartoteki podmieniane kompletem w jednej transakcji (`kartoteki_nowe` →
   `kartoteki`); pusty katalog z mostu NIE podmienia kopii.
@@ -406,7 +406,7 @@ harmonogramu na stacji? RM_BAZA przy starcie?); zdjęcia zmienione
 w Subiekcie wracają tylko z `--miniatury-od-nowa`.
 
 **Wdrożenie (do uzgodnienia):** `rm_serwer.py`, `rm_serwer_operacje.py`,
-`rm_makro_http.py` na W2019S przez WinRM + restart usługi RM_SERWER,
+`rm_mag_http.py` na W2019S przez WinRM + restart usługi RM_SERWER,
 **otworzyć port 5061 w zaporze** W2019S, potem `subiekt_kopia_sync.py`
 na stacji firmowej.
 

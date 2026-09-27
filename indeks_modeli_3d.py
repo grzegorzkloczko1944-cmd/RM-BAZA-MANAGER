@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""indeks_modeli_3d.py — indeks „numer rysunku -> model 3D" dla makra Inventora.
+"""indeks_modeli_3d.py — indeks „numer rysunku -> model 3D" dla makra MAG.
 
     python indeks_modeli_3d.py                     # suchy przebieg — NIC nie zapisuje
     python indeks_modeli_3d.py --zapisz            # zapis do serwera
     python indeks_modeli_3d.py --zapisz --pelny    # przebudowa od zera
     python indeks_modeli_3d.py --root "B:\\Czujniki RM" --raport r.txt
 
-Etap 1 planu `PLAN_MAKRO_MAGAZYN_3D.md`. Uruchamiany na STACJI z Inventorem
+Etap 1 planu `PLAN_MAG.md`. Uruchamiany na STACJI z Inventorem
 (W2019S go nie ma), wynik trafia do `subiekt_mapowania.sqlite` na serwerze,
 tabela `modele_3d`, operacjami `map-model3d-*`.
 

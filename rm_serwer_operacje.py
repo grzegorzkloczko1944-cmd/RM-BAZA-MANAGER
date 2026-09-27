@@ -3297,7 +3297,7 @@ ZAPIS.update({
 # MODELE 3D — numer rysunku -> pliki .ipt/.iam  (subiekt_mapowania.sqlite)
 # ═══════════════════════════════════════════════════════════════════════
 #
-# Indeks dla makra „Wstaw z magazynu" (PLAN_MAKRO_MAGAZYN_3D.md, sekcja 4).
+# Indeks dla makra „Wstaw z magazynu" (PLAN_MAG.md, sekcja 4).
 # Buduje go STACJA z Inventorem (`indeks_modeli_3d.py`, ApprenticeServer
 # czyta referencje z IDW) — W2019S Inventora nie ma. Leży obok `polprodukty`,
 # bo to ta sama rodzina wiedzy: rysunek -> coś, co nie jest kartoteką.
@@ -3389,11 +3389,11 @@ ZAPIS.update({
 # KOPIA SUBIEKTA — kartoteki, stany, miniatury  (subiekt_kopia.sqlite)
 # ═══════════════════════════════════════════════════════════════════════
 #
-# Po co: makro Inventora (PLAN_MAKRO_MAGAZYN_3D.md) ma pokazywać kartoteki
+# Po co: makro MAG (Inventor) (PLAN_MAG.md) ma pokazywać kartoteki
 # ze stanem i miniaturą. Most Sfery działa TYLKO na stacjach (SDK w
 # `C:\iLogic\Subiekt\Bin`, logowanie operatora), a W2019S go nie ma —
 # więc stacja czyta Subiekta (`subiekt_kopia_sync.py`) i odkłada KOPIĘ tutaj,
-# a serwer HTTP (`rm_makro_http.py`) podaje ją makru bez dotykania Sfery.
+# a serwer HTTP (`rm_mag_http.py`) podaje ją makru bez dotykania Sfery.
 #
 # ⚠️ To KOPIA DO ODCZYTU. Źródłem prawdy zostaje Subiekt — nic, co zmienia
 # dane, nie może stąd czytać (stan może być sprzed kilku minut). Każdy
