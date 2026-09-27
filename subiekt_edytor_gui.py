@@ -990,7 +990,12 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             # 28 zamiast 44 znakow: pole i tak rozciaga sie z oknem
             # (sticky="we"), a sztywne 44 wypychalo zawartosc poza ramke.
             e = tk.Entry(pod, textvariable=v, font=("Arial", 9), width=28)
-            e.grid(row=i, column=1, sticky="we", padx=4, pady=6)
+            # SYMBOL / NAZWA / OPIS na CALA SZEROKOSC panelu (27.09.2026):
+            # zdjecie stoi w kolumnie 3 od wiersza „Rodzaj" w dol, wiec te
+            # trzy pola moga isc przez wszystkie kolumny. Symbol konczy sie
+            # przed przyciskiem „Auto" (kolumna 2), reszta idzie do konca.
+            e.grid(row=i, column=1, columnspan=1 if klucz == "symbol" else 3,
+                   sticky="we", padx=4, pady=6)
             v.trace_add("write", lambda *_a, k=klucz: self._pole_zmienione(k))
             self.pola[klucz] = (v, e)
         # Auto — nadaje nastepny wolny symbol, zeby nie wymyslac go recznie.
@@ -1009,7 +1014,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         tk.Label(pod, text="Opis:", bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9),
                  anchor="w", width=12).grid(row=2, column=0, sticky="w", padx=8, pady=6)
         self.txt_opis = tk.Text(pod, height=1, width=44, font=("Arial", 9), wrap="none")
-        self.txt_opis.grid(row=2, column=1, sticky="we", padx=4, pady=6)
+        self.txt_opis.grid(row=2, column=1, columnspan=3, sticky="we", padx=4, pady=6)
         # Enter w jednowierszowym polu tylko rozpychalby widok — nie wpisujemy
         # nowej linii, oddajemy fokus dalej.
         self.txt_opis.bind("<Return>", lambda _e: "break")
@@ -1038,6 +1043,50 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         ec.grid(row=5, column=1, sticky="w", padx=4, pady=6)
         self.var_cena.trace_add("write", lambda *_a: self._pole_zmienione("cena"))
 
+        # ── ZDJĘCIE KARTOTEKI (kolumna 2, na wysokości Rodzaj/JM/Cena) ─────
+        #
+        # Miejsce po prawej stoi puste, a magazynier szuka „016-100.05" nie
+        # wiedząc, jak ta rzecz wygląda (życzenie użytkownika 27.09.2026).
+        #
+        # ⚠️ MINIATURY ROBI SUBIEKT SAM — wysyłamy oryginał, a do podglądu
+        # bierzemy `PobierzZawartoscMiniatury()`. Nic nie skalujemy przed
+        # wysłaniem (patrz nagłówek subiekt_sfera/NexoRecon/Zdjecia.cs).
+        #
+        # ⚠️ Plik idzie jako BASE64, nie ścieżka: most chodzi na serwerze
+        # i nie widzi dysku stacji. `DodajZdjecie(sciezka)` zostaje dla
+        # wywołań CLI na tej samej maszynie co Subiekt.
+        ramka_foto = tk.Frame(pod, bg=TLO_SEKCJI)
+        # ⚠️ KOLUMNA 3, nie 2: w kolumnie 2 siedzi podpis „regał / półka"
+        # przy Położeniu — zdjęcie na nią nachodziło (27.09.2026).
+        # `rowspan=3` (Rodzaj/JM/Cena), bez wiersza Położenia.
+        ramka_foto.grid(row=3, column=3, rowspan=3, sticky="n", padx=(10, 8), pady=6)
+        # ⚠️ ROZMIAR W PIKSELACH, nie w znakach. `width`/`height` na Label
+        # liczy sie w ZNAKACH czcionki, gdy etykieta ma tekst — ramka 20x7
+        # wychodzila malenka (27.09.2026). Trzymamy stala ramke przez
+        # `pack_propagate(False)`: podglad ma miec te sama wielkosc niezaleznie
+        # od tego, czy pokazuje obrazek, czy napis „(brak zdjecia)".
+        self._FOTO_W, self._FOTO_H = 150, 170
+        ramka_podgl = tk.Frame(ramka_foto, width=self._FOTO_W, height=self._FOTO_H,
+                               bg="white", relief=tk.SOLID, bd=1)
+        ramka_podgl.pack()
+        ramka_podgl.pack_propagate(False)
+        self.lbl_foto = tk.Label(ramka_podgl, text="(brak zdjęcia)", bg="white",
+                                 fg=TEKST_SZARY, font=("Arial", 9))
+        self.lbl_foto.pack(expand=True)
+        self._foto_obraz = None          # referencja — inaczej Tk zwolni obrazek
+        self._foto_symbol = None         # dla jakiej kartoteki jest podgląd
+        pasek_foto = tk.Frame(ramka_foto, bg=TLO_SEKCJI)
+        pasek_foto.pack(fill=tk.X, pady=(4, 0))
+        self.btn_foto_dodaj = tk.Button(pasek_foto, text="📷 Dodaj zdjęcie",
+                                        command=self._zdjecie_dodaj,
+                                        font=("Arial", 8), cursor="hand2")
+        self.btn_foto_dodaj.pack(side=tk.LEFT)
+        self.btn_foto_usun = tk.Button(pasek_foto, text="✕", width=3,
+                                       command=self._zdjecie_usun,
+                                       font=("Arial", 8), cursor="hand2",
+                                       state=tk.DISABLED)
+        self.btn_foto_usun.pack(side=tk.LEFT, padx=(4, 0))
+
         # POŁOŻENIE tutaj, nie tylko w zakładce Magazyn: przy kompletowaniu
         # trzeba wiedzieć, z której półki wziąć detal, bez klikania w zakładki
         # (09.09.2026). To ta sama zmienna co w karcie Magazyn — jedno pole
@@ -1063,14 +1112,18 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 lambda _e: self.after_idle(
                     lambda: self._pole_zmienione("opis")),
                 add="+")
+        # Rosnie TYLKO kolumna 1 (Nazwa/Opis). Kolumna 3 ze zdjeciem ma stala
+        # szerokosc — inaczej podglad zabieral miejsce polom tekstowym
+        # i „Wykonanie kontroli dokumentacji DTR…" bylo uciete (27.09.2026).
         pod.grid_columnconfigure(1, weight=1)
+        pod.grid_columnconfigure(3, weight=0, minsize=self._FOTO_W + 18)
 
         # ZAPIS SAMEJ TEJ POZYCJI — obok "Załóż / Zapisz" z paska górnego,
         # który wysyła CAŁE drzewo. Przy poprawianiu jednej kartoteki
         # (nazwa, cena, położenie) wysyłanie wszystkiego jest i wolne,
         # i ryzykowne — dotyka pozycji, których user w ogóle nie tknął.
         pasek_poz = tk.Frame(pod, bg=TLO_SEKCJI)
-        pasek_poz.grid(row=7, column=0, columnspan=3, sticky="we", padx=8, pady=(10, 2))
+        pasek_poz.grid(row=7, column=0, columnspan=4, sticky="we", padx=8, pady=(10, 2))
         self.btn_zapisz_pozycje = tk.Button(
             pasek_poz, text="\U0001f4be Zapisz tę pozycję do Subiekta",
             command=self._zapisz_pozycje, state=tk.DISABLED,
@@ -1106,7 +1159,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # (zgloszone 25.09.2026: „dlaczego okna edytora sie roznia?").
         # Bez kontekstu arkusza zostaje wyszarzony, a podpis mowi dlaczego.
         pasek_ark = tk.Frame(pod, bg=TLO_SEKCJI)
-        pasek_ark.grid(row=8, column=0, columnspan=3, sticky="we",
+        pasek_ark.grid(row=8, column=0, columnspan=4, sticky="we",
                        padx=8, pady=(2, 2))
         self.btn_do_arkusza = tk.Button(
             pasek_ark, text="Wstaw do arkusza RM_BAZA",
@@ -1128,7 +1181,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                       "jest kluczem w kodach kreskowych, dokumentach i składach kompletów.",
             bg="#eaf2f8", fg=TEKST_SZARY, font=("Arial", 8), justify="left", anchor="w")
         # row=9: wiersz 8 zajmuje „Wstaw do arkusza" (gdy jest).
-        self.lbl_info.grid(row=9, column=0, columnspan=2, sticky="we", padx=8, pady=(6, 8))
+        self.lbl_info.grid(row=9, column=0, columnspan=4, sticky="we", padx=8, pady=(6, 8))
 
         self._karta_handlowe()
         self._karta_magazyn()
@@ -2507,6 +2560,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             pass
         finally:
             self._blokada = False
+        self._odswiez_zdjecie()
         try:
             self._aktualizuj_przycisk_pozycji()
         except Exception:
@@ -2563,6 +2617,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             pass                    # okno zamykane w międzyczasie
         finally:
             self._blokada = False
+        self._odswiez_zdjecie()
         try:
             # ⚠️ `zostaw_sklad=True` przy samej UTRACIE ZAZNACZENIA: sekcja 3
             # pokazuje sklad kompletu, ktory dalej istnieje, a jego odbudowa
@@ -2660,6 +2715,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             self.var_polozenie.set(k.polozenie or "")
         finally:
             self._blokada = False
+        self._odswiez_zdjecie()
         # ⚠️ Sklad przebudowujemy tylko przy JEDNEJ zaznaczonej pozycji.
         # Przy kilku `_symbol_wezla()` bierze pierwsza z brzegu i gdy
         # nie jest kompletem, sekcja 3 robila sie PUSTA — wygladalo to
@@ -2768,6 +2824,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             self.var_polozenie.set(k.polozenie or "")
         finally:
             self._blokada = False
+        self._odswiez_zdjecie()
 
         # Sklad kompletu w sekcji 3. Gdy kartoteka jest juz w modelu, sklad
         # bierzemy STAMTAD (moze byc zmieniony), a nie z Subiekta.
@@ -4283,6 +4340,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             self.var_polozenie.set("")
         finally:
             self._blokada = False
+        self._odswiez_zdjecie()
 
         self._odswiez_etykiete_celu()
         self._aktualizuj_przycisk_pozycji()
@@ -4341,6 +4399,237 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self._zmienione = False
         self._okno_gotowe = False
         self.destroy()
+
+    # ── ZDJĘCIE KARTOTEKI ──────────────────────────────────────────────
+    def _symbol_w_subiekcie(self):
+        """Symbol zaznaczonej kartoteki, ale TYLKO gdy jest już w Subiekcie.
+
+        Galeria zdjęć żyje przy kartotece w bazie Subiekta — pozycji, która
+        jeszcze nie została zapisana, nie ma do czego podpiąć.
+        """
+        sym = getattr(self, "_zaznaczony", None)
+        k = self.pozycje.get(sym) if sym else None
+        if k is None:
+            return None, None
+        return (k.symbol if k.w_subiekcie else None), k
+
+    def _odswiez_zdjecie(self):
+        """Podgląd miniatury dla zaznaczonej kartoteki. W tle, bez blokowania."""
+        lbl = getattr(self, "lbl_foto", None)
+        if lbl is None:
+            return
+        symbol, k = self._symbol_w_subiekcie()
+        self._foto_symbol = symbol
+        self._foto_obraz = None
+        try:
+            self.btn_foto_usun.config(state=tk.DISABLED)
+            self.btn_foto_dodaj.config(state=tk.NORMAL if symbol else tk.DISABLED)
+        except tk.TclError:
+            return
+        if not symbol:
+            lbl.config(image="", text="(zapisz kartotekę,\nżeby dodać zdjęcie)"
+                       if k is not None else "(brak zdjęcia)")
+            return
+        lbl.config(image="", text="wczytuję…")
+
+        def robota(sym=symbol):
+            dane, blad = None, None
+            try:
+                import subiekt_bridge
+                dane = subiekt_bridge.call(
+                    "zdjecie", {"plan": {"akcja": "lista", "symbol": sym},
+                                "zapisz": False}, timeout=120, write=False)
+            except Exception as e:
+                blad = e
+            self.after(0, lambda: self._zdjecie_gotowe(sym, dane, blad))
+
+        threading.Thread(target=robota, daemon=True).start()
+
+    def _zdjecie_gotowe(self, symbol, dane, blad):
+        """Rysuje miniaturę. Ignoruje wynik dla INNEJ kartoteki niż bieżąca."""
+        if symbol != getattr(self, "_foto_symbol", None):
+            return                       # user zdążył przełączyć pozycję
+        lbl = getattr(self, "lbl_foto", None)
+        if lbl is None:
+            return
+        if blad is not None:
+            lbl.config(image="", text="(nie odczytano:\n%s)" % str(blad)[:40])
+            return
+        zdjecia = (dane or {}).get("zdjecia") or []
+        self._foto_lista = zdjecia
+        if not zdjecia:
+            lbl.config(image="", text="(brak zdjęcia)")
+            return
+        # Główne, a gdy nie oznaczono — pierwsze.
+        z = next((x for x in zdjecia if x.get("Glowne") or x.get("glowne")), zdjecia[0])
+        self._foto_numer = z.get("Numer") or z.get("numer")
+        opis = "%s  %sx%s" % (z.get("Typ") or z.get("typ") or "",
+                              z.get("Szerokosc") or z.get("szerokosc") or "?",
+                              z.get("Wysokosc") or z.get("wysokosc") or "?")
+        try:
+            self.btn_foto_usun.config(state=tk.NORMAL)
+        except tk.TclError:
+            pass
+        # Same metadane wystarczą, gdy nie ma Pillow — tekst zamiast obrazka.
+        lbl.config(image="", text="%s\n(%d zdj.)" % (opis, len(zdjecia)))
+        self._pobierz_miniature(symbol, self._foto_numer, len(zdjecia), opis)
+
+    def _pobierz_miniature(self, symbol, numer, ile, opis):
+        """Dociąga BAJTY miniatury i wstawia jako obrazek (gdy jest Pillow)."""
+        def robota():
+            dane, blad = None, None
+            try:
+                import subiekt_bridge
+                dane = subiekt_bridge.call(
+                    "zdjecie", {"plan": {"akcja": "lista", "symbol": symbol,
+                                         "miniatura": numer}, "zapisz": False},
+                    timeout=120, write=False)
+            except Exception as e:
+                blad = e
+            self.after(0, lambda: self._miniatura_gotowa(symbol, dane, blad, ile, opis))
+        threading.Thread(target=robota, daemon=True).start()
+
+    def _miniatura_gotowa(self, symbol, dane, blad, ile, opis):
+        if symbol != getattr(self, "_foto_symbol", None):
+            return
+        b64 = (dane or {}).get("miniatura_b64")
+        if blad is not None or not b64:
+            return                       # zostaje opis tekstowy — to nie błąd
+        try:
+            import base64, io as _io
+            from PIL import Image, ImageTk
+            obraz = Image.open(_io.BytesIO(base64.b64decode(b64)))
+            obraz.thumbnail((getattr(self, "_FOTO_W", 260) - 8,
+                             getattr(self, "_FOTO_H", 200) - 8))
+            self._foto_obraz = ImageTk.PhotoImage(obraz)
+            self.lbl_foto.config(image=self._foto_obraz, text="")
+        except Exception as e:
+            print("⚠️  Miniatura nieodczytana: %s" % e)
+
+    def _zdjecie_dodaj(self):
+        """Wybór pliku i wysłanie go do galerii kartoteki (jako base64)."""
+        symbol, _k = self._symbol_w_subiekcie()
+        if not symbol:
+            messagebox.showinfo(
+                "Zdjęcie",
+                "Najpierw zapisz kartotekę do Subiekta — zdjęcie podpina się\n"
+                "do istniejącej kartoteki.", parent=self)
+            return
+        sciezka = filedialog.askopenfilename(
+            parent=self, title="Wybierz zdjęcie dla %s" % symbol,
+            filetypes=[("Obrazy", "*.jpg *.jpeg *.png *.gif *.bmp"),
+                       ("Wszystkie pliki", "*.*")])
+        if not sciezka:
+            return
+        import os, base64
+        rozmiar = os.path.getsize(sciezka)
+        nazwa = os.path.basename(sciezka)
+        typ = os.path.splitext(nazwa)[1].lstrip(".").lower() or "jpg"
+        if not messagebox.askyesno(
+                "Dodać zdjęcie?",
+                "Kartoteka:  %s\nPlik:  %s\nRozmiar:  %.1f kB\n\n"
+                "Zdjęcie trafi do Subiekta i będzie widoczne dla wszystkich.\n"
+                "Miniaturę Subiekt zrobi sam." % (symbol, nazwa, rozmiar / 1024),
+                parent=self):
+            return
+        try:
+            with open(sciezka, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("ascii")
+        except Exception as e:
+            messagebox.showerror("Zdjęcie", "Nie odczytano pliku:\n%s" % e, parent=self)
+            return
+        self.config(cursor="watch")
+        self.status.config(text="Wysyłam zdjęcie do Subiekta…")
+        self.update_idletasks()
+
+        def robota():
+            wynik, blad = None, None
+            try:
+                import subiekt_bridge
+                wynik = subiekt_bridge.call(
+                    "zdjecie", {"plan": {"akcja": "dodaj", "symbol": symbol,
+                                         "nazwa": nazwa, "typ": typ,
+                                         "dane_b64": b64},
+                                "zapisz": True}, timeout=300, write=True)
+            except Exception as e:
+                blad = e
+            self.after(0, lambda: self._zdjecie_dodane(symbol, wynik, blad))
+
+        threading.Thread(target=robota, daemon=True).start()
+
+    def _zdjecie_dodane(self, symbol, wynik, blad):
+        try:
+            self.config(cursor="")
+        except tk.TclError:
+            return
+        if blad is not None:
+            self.status.config(text="Zdjęcie: błąd.")
+            messagebox.showerror("Zdjęcie", "Nie udało się dodać:\n\n%s" % blad, parent=self)
+            return
+        kroki = (wynik or {}).get("kroki") or []
+        bledy = [k for k in kroki if k.get("Status") == "blad"]
+        if bledy:
+            messagebox.showwarning(
+                "Zdjęcie", "Subiekt nie przyjął zdjęcia:\n\n"
+                + "\n".join(k.get("Szczegoly") or "" for k in bledy), parent=self)
+            self.status.config(text="Zdjęcie: odrzucone.")
+            return
+        zdjecia = (wynik or {}).get("zdjecia") or []
+        # NIC PO CICHU: pokazujemy, co Subiekt zapisał i jaką zrobił miniaturę.
+        opis = []
+        for z in zdjecia:
+            opis.append("nr %s  %s  %sx%s  %s kB  miniatura %s B%s" % (
+                z.get("Numer"), z.get("Nazwa") or "", z.get("Szerokosc"),
+                z.get("Wysokosc"),
+                round((z.get("RozmiarBajty") or 0) / 1024, 1),
+                z.get("MiniaturaBajty"),
+                "  ← główne" if z.get("Glowne") else ""))
+        self.status.config(text="Zdjęcie dodane.")
+        messagebox.showinfo("Zdjęcie dodane",
+                            "Kartoteka %s ma teraz %d zdjęć:\n\n%s"
+                            % (symbol, len(zdjecia), "\n".join(opis)), parent=self)
+        self._odswiez_zdjecie()
+
+    def _zdjecie_usun(self):
+        """Odłącza zdjęcie główne od kartoteki (OdlaczZdjecie w moście)."""
+        symbol, _k = self._symbol_w_subiekcie()
+        numer = getattr(self, "_foto_numer", None)
+        if not symbol or numer is None:
+            return
+        if not messagebox.askyesno(
+                "Usunąć zdjęcie?",
+                "Odłączyć zdjęcie nr %s od kartoteki %s?\n\n"
+                "Zmiana dotyczy Subiekta i widzą ją wszyscy." % (numer, symbol),
+                parent=self):
+            return
+        self.config(cursor="watch")
+        self.update_idletasks()
+
+        def robota():
+            wynik, blad = None, None
+            try:
+                import subiekt_bridge
+                wynik = subiekt_bridge.call(
+                    "zdjecie", {"plan": {"akcja": "usun", "symbol": symbol,
+                                         "numery": [numer]}, "zapisz": True},
+                    timeout=300, write=True)
+            except Exception as e:
+                blad = e
+            self.after(0, lambda: self._zdjecie_usuniete(wynik, blad))
+
+        threading.Thread(target=robota, daemon=True).start()
+
+    def _zdjecie_usuniete(self, wynik, blad):
+        try:
+            self.config(cursor="")
+        except tk.TclError:
+            return
+        if blad is not None:
+            messagebox.showerror("Zdjęcie", "Nie udało się odłączyć:\n\n%s" % blad,
+                                 parent=self)
+            return
+        self.status.config(text="Zdjęcie odłączone.")
+        self._odswiez_zdjecie()
 
     def _zapisz_pozycje(self):
         """Wysyła do Subiekta wyłącznie kartotekę zaznaczoną w drzewie."""
