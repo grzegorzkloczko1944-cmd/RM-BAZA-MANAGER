@@ -3291,3 +3291,95 @@ ZAPIS.update({
          "cena_netto", "wartosc_netto", "indeks", "dodatkowe"],
     ),
 })
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# MODELE 3D — numer rysunku -> pliki .ipt/.iam  (subiekt_mapowania.sqlite)
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Indeks dla makra „Wstaw z magazynu" (PLAN_MAKRO_MAGAZYN_3D.md, sekcja 4).
+# Buduje go STACJA z Inventorem (`indeks_modeli_3d.py`, ApprenticeServer
+# czyta referencje z IDW) — W2019S Inventora nie ma. Leży obok `polprodukty`,
+# bo to ta sama rodzina wiedzy: rysunek -> coś, co nie jest kartoteką.
+#
+# `sciezka = ''` znaczy „rysunek NIE MA modelu" (19% biblioteki, sprawdzone
+# z userem). To informacja, nie brak danych — bez tego wpisu każde
+# odświeżenie indeksu otwierałoby taki IDW na nowo, a makro nie odróżniłoby
+# „nie ma modelu" od „jeszcze nie skanowano".
+#
+# `zrodlo`: 'idw' (automat z referencji rysunku), 'reczny' (decyzja
+# człowieka). Automat NIGDY nie rusza wierszy ręcznych — ta sama zasada co
+# `sposob = 'reczny'` w `mapowania`.
+#
+# `part_number` modelu: dla detali RMPAK równy numerowi rysunku. Zapisany
+# jako KONTROLA — rozjazd znaczy, że IDW wskazuje cudzy model.
+MIGRACJE_MAPOWANIA.extend([
+    """CREATE TABLE IF NOT EXISTS modele_3d (
+           numer_rysunku  TEXT NOT NULL,
+           sciezka        TEXT NOT NULL DEFAULT '',
+           kolejnosc      INTEGER NOT NULL DEFAULT 0,
+           part_number    TEXT,
+           idw            TEXT,
+           idw_mtime      REAL,
+           zrodlo         TEXT NOT NULL DEFAULT 'idw',
+           kto            TEXT,
+           kiedy          TEXT NOT NULL,
+           PRIMARY KEY (numer_rysunku, sciezka)
+       )""",
+    "CREATE INDEX IF NOT EXISTS idx_modele_3d_sciezka ON modele_3d(sciezka)",
+])
+
+ODCZYT.update({
+    "map-model3d": (
+        "SELECT * FROM modele_3d WHERE numer_rysunku = ?"
+        " ORDER BY kolejnosc, sciezka",
+        ["numer_rysunku"],
+    ),
+    # Hurtem — jak `map-polprodukty-many`, bez limitu 999 zmiennych.
+    "map-model3d-many": (
+        "SELECT * FROM modele_3d"
+        " WHERE numer_rysunku IN (SELECT value FROM json_each(?))"
+        " ORDER BY numer_rysunku, kolejnosc, sciezka",
+        ["numery_json"],
+    ),
+    # Cały indeks — skaner porównuje `idw_mtime` i pomija niezmienione IDW.
+    "map-model3d-wszystkie": (
+        "SELECT numer_rysunku, sciezka, kolejnosc, part_number, idw,"
+        "       idw_mtime, zrodlo FROM modele_3d"
+        " ORDER BY numer_rysunku, kolejnosc",
+        [],
+    ),
+})
+
+ZAPIS.update({
+    # UPSERT, ale decyzja człowieka wygrywa: automat nie nadpisze wiersza
+    # 'reczny' (rowcount 0 = odrzucony, jak `map-put`).
+    "map-model3d-zapisz": (
+        "INSERT INTO modele_3d"
+        " (numer_rysunku, sciezka, kolejnosc, part_number, idw, idw_mtime,"
+        "  zrodlo, kto, kiedy)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(numer_rysunku, sciezka) DO UPDATE SET"
+        "   kolejnosc   = excluded.kolejnosc,"
+        "   part_number = excluded.part_number,"
+        "   idw         = excluded.idw,"
+        "   idw_mtime   = excluded.idw_mtime,"
+        "   zrodlo      = excluded.zrodlo,"
+        "   kto         = excluded.kto,"
+        "   kiedy       = excluded.kiedy"
+        " WHERE modele_3d.zrodlo != 'reczny' OR excluded.zrodlo = 'reczny'",
+        ["numer_rysunku", "sciezka", "kolejnosc", "part_number", "idw",
+         "idw_mtime", "zrodlo", "kto", "kiedy"],
+    ),
+    # Przed ponownym zapisem jednego rysunku: model mógł zniknąć z IDW albo
+    # się zmienić, a UPSERT nie usunąłby starej ścieżki. Ręczne zostają.
+    "map-model3d-usun-auto": (
+        "DELETE FROM modele_3d WHERE numer_rysunku = ? AND zrodlo != 'reczny'",
+        ["numer_rysunku"],
+    ),
+    # Pełna przebudowa indeksu (`--pelny`). Ręczne zostają.
+    "map-model3d-czysc": (
+        "DELETE FROM modele_3d WHERE zrodlo != 'reczny'",
+        [],
+    ),
+})

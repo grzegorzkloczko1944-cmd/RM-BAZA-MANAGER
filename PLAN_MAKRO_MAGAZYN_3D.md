@@ -1,7 +1,8 @@
 # PLAN — makro „Wstaw z magazynu" (Inventor ↔ Subiekt)
 
-Stan: **plan, nic nie zaimplementowane.** Spisany 27.09.2026 po rozpoznaniu
-na żywych danych. Wszystkie liczby niżej są **zmierzone**, nie szacowane.
+Stan: **etap 1 napisany (27.09.2026), jeszcze nie uruchomiony na produkcji.**
+Spisany 27.09.2026 po rozpoznaniu na żywych danych. Wszystkie liczby niżej
+są **zmierzone**, nie szacowane. Przebieg etapu 1 — sekcja 6a.
 
 ## Czego ma dotyczyć
 
@@ -324,6 +325,57 @@ Etapy 1–3 nic nie psują. Dopiero 4 zmienia cokolwiek w Inventorze.
 
 ---
 
+## 6a. Etap 1 — zrobione (27.09.2026)
+
+**Kod:** `indeks_modeli_3d.py` (skaner) + tabela `modele_3d` i operacje
+`map-model3d`, `-many`, `-wszystkie`, `-zapisz`, `-usun-auto`, `-czysc`
+w `rm_serwer_operacje.py` (koniec pliku).
+
+```
+python indeks_modeli_3d.py                    # suchy przebieg (domyślnie)
+python indeks_modeli_3d.py --zapisz           # zapis, tylko zmienione IDW
+python indeks_modeli_3d.py --zapisz --pelny   # przebudowa (ręczne zostają)
+python indeks_modeli_3d.py --raport r.txt     # pełna lista do pliku
+```
+
+**Sprawdzone** na osobnym serwerze testowym (port 5099, puste bazy):
+zapis, drugi przebieg pomija niezmienione IDW, wpis `reczny` przeżywa
+`--pelny`, `part_number` zapisany.
+
+**Rozstrzygnięte przy implementacji:**
+
+* rysunek bez modelu = wiersz z `sciezka = ''` (nie osobna tabela) —
+  jedno zapytanie odróżnia „bez modelu" od „nie skanowano";
+* `zrodlo` = `idw` / `reczny`; automat nigdy nie rusza ręcznych (reguła
+  w SQL, jak `map-put`);
+* `part_number` modelu zapisywany jako **kontrola** — rozjazd z numerem
+  rysunku idzie do raportu;
+* pomijane katalogi: `OldVersions`, `Nieaktualne`, `Templates`; numery
+  z apostrofem (`2020-300.10'`) to wersje wycofane;
+* **203 numery leżą na `B:` w dwóch miejscach** (np. `!BIBLIOTEKA\Elewator`
+  i `WaterFall EWTR`) — wygrywa nowszy IDW, rozbieżne modele (po nazwie
+  pliku) raport pokazuje jako konflikt;
+* model **poza `B:`** albo nieistniejący → zapisany jako „bez modelu",
+  a w raporcie widać, co IDW wskazywał.
+
+**⚠️ Pułapki znalezione na M-OLD:**
+
+* **Inventor 2013 na M-OLD** nie otwiera IDW zapisanych nowszym Inventorem —
+  w `Czujniki RM` 33 z 61 plików (wszystkie z 2024–2026). Pełny skan
+  **tylko na stacji firmowej**; skrypt sam ostrzega przy masowych błędach.
+* **IDW pamiętają ścieżkę autora** `C:\BibliotekaRM\…`. Na M-OLD taki katalog
+  istnieje (to ten sam, który jest udostępniony jako `B:`), więc Apprentice
+  rozwiązywał referencje na `C:`. Skaner przepisuje `C:\BibliotekaRM\` →
+  `B:\` (stała `TEN_SAM_KATALOG`), tylko gdy plik na `B:` istnieje.
+  `C:\Biblioteka` (bez „RM") to INNY katalog — `016-100.05` wskazuje tam
+  model, którego na `B:` nie ma, zgodnie z tym, co mówił użytkownik.
+
+**Do zrobienia przed etapem 2:** wdrożyć `rm_serwer_operacje.py` na
+W2019S (restart usługi — uzgodnić), potem `indeks_modeli_3d.py --zapisz`
+na stacji z Inventorem firmowym i przejrzeć raport (konflikty, PN ≠ numer).
+
+---
+
 ## 7. Ustalenia (27.09.2026)
 
 | # | sprawa | decyzja |
@@ -335,9 +387,9 @@ Etapy 1–3 nic nie psują. Dopiero 4 zmienia cokolwiek w Inventorze.
 | 5 | zakres dysków | **tylko `B:`**; `V:` poza planem |
 
 Bez odpowiedzi zostaje tylko to, co rozstrzygnie się przy pisaniu kodu:
-* gdzie ustawiać kolejne wystąpienia przy wielu modelach (sekcja 5);
-* czy rysunki bez modelu trzymać w osobnej tabeli, czy jako pusty wiersz
-  (sekcja 4).
+* gdzie ustawiać kolejne wystąpienia przy wielu modelach (sekcja 5).
+
+(Rysunki bez modelu — pusty wiersz, patrz 6a.)
 
 ---
 
