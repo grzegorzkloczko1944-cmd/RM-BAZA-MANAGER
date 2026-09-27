@@ -385,6 +385,14 @@ class Serwer:
                 self.con_sub.execute(sql)
             self.con_sub.commit()
             log("Kopia Subiekta: %s" % sciezka_sub)
+            # Katalog łożysk z pliku w repo — wczytywany tylko po zmianie pliku.
+            try:
+                opis = ops.zaladuj_katalog_lozysk(
+                    self.con_sub, os.path.join(KATALOG, "katalog_lozysk", "lozyska_kulkowe.json"))
+                if opis:
+                    log("   + %s" % opis)
+            except Exception as e:
+                log("⚠️  Katalog łożysk nie wczytany: %s" % e)
 
     # ── wykonanie pojedynczego żądania (w wątku roboczym) ─────────────
     def _polaczenie(self, operacja):

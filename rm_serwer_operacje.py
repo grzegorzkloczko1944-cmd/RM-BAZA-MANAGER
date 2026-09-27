@@ -3597,3 +3597,73 @@ ZAPIS.update({
         ["status", "wynik", "id", "wykonawca"],
     ),
 })
+
+
+# ── KATALOG ŁOŻYSK (subiekt_kopia.sqlite) ────────────────────────────────
+#
+# Łożyska kulkowe zwykłe z katalogów producentów (Timken + FBJ, wymiary
+# sprawdzone krzyżowo) — plik `katalog_lozysk/lozyska_kulkowe.json` w repo,
+# budowany przez `katalog_lozysk/zbuduj_katalog.py`. RM_SERWER ładuje go
+# przy starcie (`zaladuj_katalog_lozysk`), a MAG: kolumna „Wymiary" przy
+# kartotekach + okno „Katalog łożysk".
+#
+# Dane są z pliku w gicie, więc tabela jest odtwarzalna w każdej chwili —
+# stąd miejsce w `subiekt_kopia.sqlite` (bez backupu), obok kopii Subiekta.
+MIGRACJE_SUBIEKT_KOPIA.extend([
+    """CREATE TABLE IF NOT EXISTS lozyska (
+           oznaczenie   TEXT PRIMARY KEY,   -- bazowe: 6004, 61804, 618/8
+           seria        TEXT,
+           d            REAL NOT NULL,      -- mm: średnica wewnętrzna
+           dz           REAL NOT NULL,      -- mm: zewnętrzna (D; SQLite nie odróżnia d/D)
+           b            REAL NOT NULL,      -- mm: szerokość
+           r_min        REAL,
+           cr_kn        REAL,               -- nośność dynamiczna
+           c0r_kn       REAL,               -- nośność statyczna
+           n_smar       REAL,               -- obroty graniczne / referencyjne, RPM
+           n_olej       REAL,
+           masa_kg      REAL,
+           aliasy       TEXT,               -- ' 688 ' — nazwy handlowe, spacjami
+           uwaga        TEXT,
+           zrodlo       TEXT,
+           koszyk_mosiezny INTEGER
+       )""",
+    """CREATE TABLE IF NOT EXISTS lozyska_meta (
+           klucz   TEXT PRIMARY KEY,
+           wartosc TEXT
+       )""",
+])
+
+
+def zaladuj_katalog_lozysk(con, sciezka):
+    """Wczytuje katalog z JSON do tabeli `lozyska`, gdy plik się zmienił.
+
+    Wersja = rozmiar + czas modyfikacji pliku, zapamiętana w `lozyska_meta`.
+    Zwraca opis do logu albo None (bez zmian / brak pliku). Jedna transakcja:
+    czytający nigdy nie widzi pustego katalogu.
+    """
+    import json
+    import os
+    if not sciezka or not os.path.isfile(sciezka):
+        return None
+    st = os.stat(sciezka)
+    wersja = "%d:%d" % (st.st_size, int(st.st_mtime))
+    stara = con.execute("SELECT wartosc FROM lozyska_meta WHERE klucz = 'wersja'").fetchone()
+    if stara and stara[0] == wersja:
+        return None
+    with open(sciezka, encoding="utf-8") as f:
+        dane = json.load(f)
+    wiersze = [(r["oznaczenie"], r.get("seria"), r["d"], r["D"], r["B"], r.get("r_min"),
+                r.get("Cr_kN"), r.get("C0r_kN"), r.get("n_smar"), r.get("n_olej"),
+                r.get("masa_kg"), " %s " % " ".join(r.get("aliasy") or []), r.get("uwaga") or "",
+                r.get("zrodlo"), 1 if r.get("koszyk_mosiezny") else 0)
+               for r in dane.get("lozyska", [])]
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        con.execute("DELETE FROM lozyska")
+        con.executemany("INSERT INTO lozyska VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", wiersze)
+        con.execute("INSERT OR REPLACE INTO lozyska_meta VALUES ('wersja', ?)", (wersja,))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    return "katalog łożysk: %d pozycji (%s)" % (len(wiersze), wersja)

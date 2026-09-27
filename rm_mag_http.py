@@ -22,6 +22,8 @@ ADRESY (wszystkie GET, odpowiedź JSON; `&format=tsv` = tekst dla VBA)
     /mag/kartoteka?symbol=016-100.03
     /mag/modele?symbol=016-100.03   pliki .ipt/.iam do wstawienia
     /mag/miniatura?symbol=016-100.03   obrazek (image/png, image/jpeg…)
+    /mag/lozyska?q=600|688|20x42&d=&dz=&b=&seria=&na_stanie=1
+                                      katalog łożysk kulkowych + stan w Subiekcie
     POST /mag/synchronizuj?miniatury=1&kto=GKI   zlecenie synchronizacji —
                                       wykona stacja z mostem (MONGO pierwsza)
 
@@ -41,6 +43,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -63,7 +66,80 @@ TYPY_OBRAZKOW = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
 #: Kolumny wyniku wyszukiwania — kolejność = kolejność w TSV.
 KOLUMNY_SZUKAJ = ["symbol", "nazwa", "opis", "rodzaj", "dostepne",
                   "zarezerwowane", "cena", "ma_miniature", "modeli",
-                  "bez_modelu", "id"]
+                  "bez_modelu", "id", "lozysko", "wymiary"]
+
+#: Kolumny katalogu łożysk (/mag/lozyska) — kolejność = kolejność w TSV.
+KOLUMNY_LOZYSKA = ["oznaczenie", "seria", "d", "dz", "b", "wymiary", "cr_kn",
+                   "c0r_kn", "n_smar", "n_olej", "masa_kg", "aliasy", "uwaga",
+                   "zrodlo", "kartotek", "na_stanie", "symbole"]
+
+
+# ── katalog łożysk: rozpoznanie kartoteki po symbolu ───────────────────────
+#
+# Symbol kartoteki łożyska to oznaczenie + wariant: „6004 ZZ", „6001ZZ",
+# „SS 6008 2RS" (nierdzewne), „16004ZZ", „688ZZ", „6004-2RS". Rozpoznajemy
+# TYLKO na początku symbolu i TYLKO oznaczenia obecne w katalogu (z aliasami
+# handlowymi 688 = 618/8, 6804 = 61804) — numer rysunku „013-100.03" czy
+# „2453-600.21" nie ma prawa zostać łożyskiem.
+_OZN_W_SYMBOLU = re.compile(r"^(?:S{1,2}[\s-]*)?(\d{3,5}(?:/\d+(?:\.\d+)?)?)(?=$|[\s\-A-Z])")
+_katalog = {"wersja": None, "po_nazwie": {}, "wiersze": []}
+_katalog_lock = threading.Lock()
+
+
+def _liczba(x):
+    """20.0 -> '20', 2.5 -> '2.5'."""
+    return "" if x is None else ("%g" % x)
+
+
+def wymiary_tekst(r):
+    return "%sx%sx%s" % (_liczba(r["d"]), _liczba(r["dz"]), _liczba(r["b"]))
+
+
+def katalog_lozysk(con):
+    """{nazwa (oznaczenie i aliasy): wiersz} — z pamięci, odświeżane po zmianie wersji."""
+    try:
+        w = con.execute("SELECT wartosc FROM lozyska_meta WHERE klucz = 'wersja'").fetchone()
+    except sqlite3.Error:
+        return {}                              # serwer bez tabeli łożysk
+    wersja = w[0] if w else None
+    with _katalog_lock:
+        if wersja != _katalog["wersja"]:
+            wiersze = [dict(r) for r in con.execute("SELECT * FROM lozyska ORDER BY seria, d, dz")]
+            po = {}
+            for r in wiersze:
+                r["wymiary"] = wymiary_tekst(r)
+                po[r["oznaczenie"].upper()] = r
+                for a in (r.get("aliasy") or "").split():
+                    po.setdefault(a.upper(), r)
+            _katalog.update(wersja=wersja, po_nazwie=po, wiersze=wiersze)
+        return _katalog["po_nazwie"]
+
+
+def rozpoznaj_lozysko(symbol, po_nazwie):
+    """Wiersz katalogu dla symbolu kartoteki albo None."""
+    m = _OZN_W_SYMBOLU.match((symbol or "").strip().upper())
+    return po_nazwie.get(m.group(1)) if m else None
+
+
+# Wymiar w zapytaniu (user, 28.09.2026): „6x" = otwór 6, „12x30" = otwór
+# i średnica, „12x30x8" = komplet, „x30" = sama średnica zewnętrzna.
+# Pusta część = dowolna. Litera x MUSI być, żeby „6004" zostało oznaczeniem.
+_WYMIAR_W_ZAPYTANIU = re.compile(
+    r"^(\d+(?:[.,]\d+)?)?x(\d+(?:[.,]\d+)?)?(?:x(\d+(?:[.,]\d+)?))?$")
+
+
+def _wymiar_z_tokenu(tok):
+    """'6x' / '12x30' / '12x30x8' / 'x30' -> (d|None, D|None, B|None) albo None."""
+    m = _WYMIAR_W_ZAPYTANIU.match((tok or "").lower())
+    if not m or not any(m.groups()):
+        return None
+    return tuple(float(x.replace(",", ".")) if x else None for x in m.groups())
+
+
+def _pasuje_wymiar(r, wym):
+    d, dz, b = wym
+    return (r is not None and (d is None or r["d"] == d)
+            and (dz is None or r["dz"] == dz) and (b is None or r["b"] == b))
 
 
 def uprosc(s):
@@ -138,8 +214,13 @@ def szukaj(bazy, q, limit):
     slowa = [w for w in uprosc(q).split() if w]
     if not slowa:
         return []
+    # „20x42" / „20x42x12" = wymiar łożyska — filtr po katalogu, nie po tekście.
+    wymiary = [_wymiar_z_tokenu(w) for w in slowa]
+    wym = next((x for x in wymiary if x), None)
+    slowa = [w for w, x in zip(slowa, wymiary) if not x]
     con, ma_modele = bazy.polacz()
     try:
+        po_nazwie = katalog_lozysk(con)
         warunki, parametry = [], []
         for w in slowa:
             wzor = "%" + w.replace("%", "").replace("_", "") + "%"
@@ -158,12 +239,23 @@ def szukaj(bazy, q, limit):
                "       EXISTS (SELECT 1 FROM miniatury z WHERE z.id_subiekt = k.id"
                "               AND z.dane_b64 != '') AS ma_miniature, "
                + _modele_sql(ma_modele) +
-               "  FROM kartoteki k WHERE " + " AND ".join(warunki) +
+               "  FROM kartoteki k WHERE " + (" AND ".join(warunki) or "1") +
                " ORDER BY (UPROSC(k.symbol) = ?) DESC,"
-               "          (UPROSC(k.symbol) LIKE ?) DESC, k.symbol"
-               " LIMIT ?")
-        parametry += [calosc, calosc + "%", limit]
-        return [dict(w) for w in con.execute(sql, parametry)]
+               "          (UPROSC(k.symbol) LIKE ?) DESC, k.symbol")
+        parametry += [calosc, calosc + "%"]
+        wynik = []
+        # Bez LIMIT w SQL, gdy filtrujemy po wymiarze — limit liczy się PO filtrze.
+        for w in con.execute(sql + ("" if wym else " LIMIT %d" % int(limit)), parametry):
+            w = dict(w)
+            r = rozpoznaj_lozysko(w["symbol"], po_nazwie)
+            if wym and not _pasuje_wymiar(r, wym):
+                continue
+            w["lozysko"] = r["oznaczenie"] if r else ""
+            w["wymiary"] = r["wymiary"] if r else ""
+            wynik.append(w)
+            if len(wynik) >= limit:
+                break
+        return wynik
     finally:
         con.close()
 
@@ -184,6 +276,11 @@ def kartoteka(bazy, symbol):
             d["magazyny"] = json.loads(d.pop("magazyny_json") or "[]")
         except ValueError:
             d["magazyny"] = []
+        r = rozpoznaj_lozysko(d["symbol"], katalog_lozysk(con))
+        d["lozysko"] = r["oznaczenie"] if r else ""
+        d["wymiary"] = r["wymiary"] if r else ""
+        d["lozysko_cr_kn"] = r["cr_kn"] if r else None
+        d["lozysko_n_smar"] = r["n_smar"] if r else None
         return d
     finally:
         con.close()
@@ -212,6 +309,57 @@ def modele(bazy, symbol):
                 "znany": bool(wiersze)}
     finally:
         con.close()
+
+
+def lozyska(bazy, q="", d=None, dz=None, b=None, seria="", tylko_na_stanie=False):
+    """Katalog łożysk + co z tego jest w Subiekcie (kartotek, stan, symbole).
+
+    q: oznaczenie / alias od początku („600" -> 6000..6009, „688")
+       albo wymiar „20x42" / „20x42x12". d/dz/b: dokładne wymiary w mm.
+    """
+    con, _ = bazy.polacz()
+    try:
+        po_nazwie = katalog_lozysk(con)
+        # Kartoteki -> łożyska: jeden przelot po kopii (~3,5 tys. symboli).
+        w_sub = {}
+        for k in con.execute("SELECT symbol, dostepne FROM kartoteki"):
+            r = rozpoznaj_lozysko(k["symbol"], po_nazwie)
+            if r:
+                x = w_sub.setdefault(r["oznaczenie"], {"kartotek": 0, "na_stanie": 0.0, "symbole": []})
+                x["kartotek"] += 1
+                x["na_stanie"] += k["dostepne"] or 0
+                x["symbole"].append(k["symbol"])
+        wiersze = list(_katalog["wiersze"])
+    finally:
+        con.close()
+
+    q = (q or "").strip().upper()
+    wym = _wymiar_z_tokenu(q.lower()) if q else None
+    wynik = []
+    for r in wiersze:
+        if wym and not _pasuje_wymiar(r, wym):
+            continue
+        if q and not wym:
+            nazwy = [r["oznaczenie"].upper()] + (r.get("aliasy") or "").upper().split()
+            if not any(n.startswith(q) for n in nazwy):
+                continue
+        if d is not None and r["d"] != d:
+            continue
+        if dz is not None and r["dz"] != dz:
+            continue
+        if b is not None and r["b"] != b:
+            continue
+        if seria and r["seria"] != seria:
+            continue
+        x = w_sub.get(r["oznaczenie"], {"kartotek": 0, "na_stanie": 0.0, "symbole": []})
+        if tylko_na_stanie and not x["kartotek"]:
+            continue
+        w = dict(r)
+        w["aliasy"] = " ".join((r.get("aliasy") or "").split())
+        w.update(kartotek=x["kartotek"], na_stanie=x["na_stanie"],
+                 symbole=", ".join(sorted(x["symbole"])[:6]))
+        wynik.append(w)
+    return wynik
 
 
 def miniatura(bazy, symbol):
@@ -347,6 +495,16 @@ def zbuduj_handler(bazy, log, zlec=None):
                         limit = LIMIT_DOMYSLNY
                     self._dane(200, szukaj(bazy, p.get("q", ""), limit), tsv,
                                KOLUMNY_SZUKAJ)
+                elif sciezka == "/mag/lozyska":
+                    def liczba(k):
+                        try:
+                            return float(p[k].replace(",", ".")) if p.get(k) else None
+                        except ValueError:
+                            return None
+                    self._dane(200, lozyska(bazy, p.get("q", ""), liczba("d"), liczba("dz"),
+                                            liczba("b"), p.get("seria", ""),
+                                            p.get("na_stanie") == "1"),
+                               tsv, KOLUMNY_LOZYSKA)
                 elif sciezka == "/mag/kartoteka":
                     d = kartoteka(bazy, p.get("symbol", ""))
                     if d is None:
