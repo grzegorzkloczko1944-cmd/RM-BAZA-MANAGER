@@ -21,13 +21,17 @@ MAG. ⚠️ Nie mylić z symbolem magazynu `MAG` w Subiekcie
 ([[project_rm_baza_magazyn_hardcoded]]) — w kodzie Subiekta „MAG" to
 magazyn, w makrach i serwerze HTTP to nazwa makra.
 
-**Aktualizacja = wklejenie tekstu** (użytkownik 27.09.2026: „a nie prościej
-zrobić makro jako tekst i przeklejać z VS Code?"). Źródło to `.vba`
-w `NOW/MAKRA/MAG_zrodla/`, user wkleja je Ctrl+A/Ctrl+V do modułu
-i kodu okna. Dlatego okna makr zakładają kontrolki W KODZIE
-(`Me.Controls.Add` + `WithEvents` w `UserForm_Initialize`), a w projekcie
-okno jest puste — kontrolki z projektanta nie dają się przenieść tekstem.
+**Aktualizacja = wklejenie JEDNEGO pliku** (użytkownik 27.09.2026: „makro
+jako tekst przeklejany z VS Code" → „wszystko musi być w tym makrze, jeden
+cały plik do wklejenia"). Źródło: `NOW/MAKRA/MAG_zrodla/MAG.vba`, wklejane
+do jednego modułu. Kod okna siedzi w tym samym pliku w liniach `'@|`;
+makro przy starcie samo zakłada okno przez VBIDE (`VBComponents.Add(3)`)
+w KAŻDYM projekcie z tym modułem, a kontrolki zakłada kod okna
+(`Me.Controls.Add` + `WithEvents`). Odwołanie do okna TYLKO po nazwie
+(`VBA.UserForms.Add("MAG_okno")`) — bezpośrednie `MAG_okno.Show` nie
+kompiluje się, gdy okna jeszcze nie ma („Can't find project or library").
 ⛔ Nie przebudowywać `.ivb` skryptem przy każdej zmianie: Inventor nie zamyka
 załadowanego projektu przez COM (E_INVALIDARG), a stara kopia w pamięci
 potrafi nadpisać nową przy zapisie z edytora.
-
+Test bez UI: `InventorVBAMembers.Item(...).Execute()` na projekcie
+tymczasowym z `VBAProjects.Add()` — uruchamia Sub przez COM.
