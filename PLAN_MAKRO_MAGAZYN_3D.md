@@ -194,36 +194,120 @@ Do rozstrzygnięcia przy implementacji:
 
 ---
 
-## 5a. Znormalia — model po SYMBOLU kartoteki
+## 5a. Znormalia — model z pary OUT + IAM (inżynieria odwrotna)
 
-Znormalia (łożyska, śruby, siłowniki) **nie mają numeru rysunku ani IDW**,
-więc droga z sekcji 2 ich nie obejmuje. Reguła jest inna i prostsza:
-**nazwa pliku modelu = symbol kartoteki Subiekta** (decyzja użytkownika).
+Znormalia (łożyska, siłowniki, paski) **nie mają numeru rysunku ani IDW**,
+więc droga z sekcji 2 ich nie obejmuje. Pierwsze podejście — „nazwa pliku
+modelu = symbol kartoteki" — dało **14 z 723 (2%)** i zostało **porzucone**:
+brakujących modeli nie ma pod żadną nazwą, więc to nie był problem
+nazewnictwa.
 
-Dopasowanie odporne na spacje, myślniki i wielkość liter — `6004 ZZ`
-znajduje `6004ZZ.ipt`.
+### Skąd naprawdę wziąć mapowanie
 
-Zmierzone na żywych danych (27.09.2026): **14 z 723 znormaliów** ma dziś
-model w bibliotece. Działające przykłady:
+Pomysł użytkownika (27.09.2026): normalia **siedzą w złożeniach**, a tam
+mają przypisany model. Zmierzone i potwierdzone.
 
-```
-6004 ZZ     → 6004ZZ.ipt          UCFL 201    → UCFL201.iam
-5M 25 CP    → 5M 25 CP.ipt        oring 20x3  → oring_20x3.ipt
-```
-
-⚠️ Te 2% to **stan początkowy, nie sufit metody**. Pozostałych 709 modeli
-po prostu NIE MA w bibliotece — to nie kwestia nazewnictwa:
+Łańcuch danych, którym powstaje BOM:
 
 ```
-DN25 AISI 316   KRÓCIEC 28x1,5       (pliku .ipt nie ma nigdzie na B:)
-Z 7640051       UCHWYT PLEKSI 4
-GN 474-B12      GN 474-B12 Łącznik dwukierunkowy
+model 3D → IDW (tabelka — TU użytkownik poprawia nazwy) → CSV → importer → OUT.xlsx
 ```
 
-**Kierunek docelowy:** modele wiąże się z Subiektem i nazywa nomenklaturą
-Subiekta. Wtedy pokrycie rośnie samo, bez zmiany kodu — dopasowanie po
-symbolu już działa. Kartoteka bez modelu zachowuje się jak rysunek bez
-modelu: makro pokazuje stan i miniaturę, ale nie wstawia niczego.
+Stąd dwa źródła, które trzeba zestawić:
+
+| źródło | co wie | czego nie wie |
+|---|---|---|
+| `OUT.xlsx`, arkusz `ELEMENTY ZNORMALIZOWANE` | nazwę wg tabelki IDW (`688ZZ`) + ilość | pliku modelu |
+| IAM przez `ApprenticeServer` | plik modelu + ilość wystąpień | nazwy z tabelki |
+
+⚠️ Kolumna **`Pliki 3D` w OUT to NIE ścieżka** — trzyma flagę `STP`
+(„istnieje eksport STEP"). `import_bom.py:369` ją czyta i nic z nią nie robi.
+Sprawdzone: w `C:\iLogic` nie ma kodu, który by ją wypełniał ścieżką.
+
+### Part Number — most dla zwykłych detali
+
+Detale RMPAK mają w modelu `Part Number` równy numerowi rysunku, więc dla
+nich mapowanie jest **pewne bez żadnej heurystyki**:
+
+```
+Oś kół pozycjonera.ipt      PN=PL-300.06
+Koło pod łańcuch 06-B2.ipt  PN=PL-300.05
+```
+
+Znormalia mają `PN` **puste** — bo nazwę (`688ZZ`) nadaje się w tabelce IDW,
+nie w modelu. Dlatego tylko one wymagają dopasowania.
+
+### Reguła dopasowania (zmierzona)
+
+Kandydaci = komponenty złożenia **bez Part Number**. Punktacja:
+
+| sygnał | pkt |
+|---|---|
+| cały symbol z OUT zawarty w nazwie komponentu/pliku | 20 |
+| wspólny kod katalogowy (≥4 znaki, zawiera cyfrę) | 12 + długość |
+| kod jako podciąg | 9 |
+| wspólne słowa (≥4 litery) | 2 / słowo |
+| zgodna ilość | 3 |
+
+Przyjęcie: **≥12 pkt i przewaga ≥6 pkt** nad drugim kandydatem.
+
+⚠️ `ZZ` / `2RS` / `2Z` to **typ uszczelnienia, nie część kodu** — bez ich
+obcinania `6004ZZ` nie trafia w `6004 2Z Łożysko….ipt`. Ta jedna poprawka
+podniosła wynik z 52% na 66%.
+
+### Wynik pomiaru — `B:\!BIBLIOTEKA`, 27.09.2026
+
+23 złożenia, 124 pozycje znormalizowane, czas **15 s**:
+
+| | pozycji | |
+|---|---|---|
+| **pewne** (automat) | 82 | **66%** |
+| **niepewne** (człowiek) | 42 | 34% |
+
+46 unikalnych symboli zmapowanych pewnie, **1 konflikt** (`6004ZZ` wskazuje
+różne modele w różnych złożeniach — rozstrzyga człowiek).
+
+Trafienia:
+
+```
+61804ZZ                  → 61804.ipt
+688ZZ                    → C688ZZ.ipt
+6404ZZ                   → 6404 2Z Łożysko nierdzwne 20x72x19.ipt
+VTT.60-B-M12             → Three-lobe handwheel VTT.60-B-M12.ipt
+170849 DFM-25-30-P-A-GF  → DFM-25-30-P-A-GF Siłownik z prowadzeniem.iam
+1059632 SICK GL6G-P4211  → GL6G-P4211 Sick 1059632.iam
+```
+
+### Czego automat nie ruszy — i to jest robota dla człowieka
+
+Te 34% to pozycje, w których nazwa w tabelce nie ma **nic wspólnego**
+z nazwą modelu. Żadna heurystyka tego nie złapie:
+
+```
+SP-1,2/10,6/30 Sprężyna 1,2x10,6x30   →  sprężyna klawiszy wewn.ipt
+Silnik 86BYG-118 8,5Nm                →  silnik Sanyo Denki 8,5Nm.ipt
+Pasek T5/260 szer. 16mm               →  Pasek obrotnicy t5-260.ipt
+```
+
+To **42 pozycje, nie 723** — skala pracy na kilkanaście minut. Narzędzie dla
+współpracownika (lista kartotek bez modelu + szukajka po `B:` + podgląd)
+ma sens dopiero po pomiarze na całej `B:`; przy takim rzędzie wielkości może
+wystarczyć ręczne uzupełnienie listy.
+
+Kolumna `kto` w tabeli `modele_3d` (sekcja 4) jest właśnie na to: odróżnia
+wpis z automatu od decyzji człowieka.
+
+### Otwarte
+
+* **Pomiar na całej `B:`** — zmierzono tylko `!BIBLIOTEKA` (23 złożenia).
+  Na całym dysku będzie tego kilkaset i statystyka może wyglądać inaczej,
+  zwłaszcza w starszych projektach. **To trzeba zrobić przed budowaniem
+  narzędzia dla współpracownika.**
+* **Czytanie tabelki wprost z IDW** — pomiar bierze nazwy z OUT (który już
+  niesie edycje z tabelki). Sięgnięcie do IDW dałoby dodatkowo *kolejność
+  pozycji* jako klucz dopasowania i mogłoby podnieść te 66%.
+* Wpis z automatu ma trafiać jako propozycja do potwierdzenia czy od razu
+  jako mapowanie — do rozstrzygnięcia przy implementacji.
 
 ---
 
@@ -247,7 +331,7 @@ Etapy 1–3 nic nie psują. Dopiero 4 zmienia cokolwiek w Inventorze.
 | 1 | port | **osobny** (np. 5061), nie ruszamy protokołu na 5060 |
 | 2 | uwierzytelnienie | **bez** — endpoint tylko do odczytu, w LAN |
 | 3 | wyszukiwanie | po **symbolu**, **nazwie kartoteki**, **numerze rysunku** i **nazwie pliku 3D** |
-| 4 | znormalia | model dopasowywany **po symbolu** — patrz sekcja 5a |
+| 4 | znormalia | ~~po symbolu~~ → **z pary OUT + IAM**, patrz sekcja 5a (zmierzone 66%) |
 | 5 | zakres dysków | **tylko `B:`**; `V:` poza planem |
 
 Bez odpowiedzi zostaje tylko to, co rozstrzygnie się przy pisaniu kodu:
@@ -259,7 +343,14 @@ Bez odpowiedzi zostaje tylko to, co rozstrzygnie się przy pisaniu kodu:
 
 ## 8. Pliki rozpoznania
 
-Skrypty zwiadowcze użyte do pomiarów leżą w scratchpadzie sesji
-(`zwiad_ole.py`, `pomiar_b2.py`, `test_katalog.py`) — nie w repo, bo to
-narzędzia jednorazowe. Gdyby trzeba było powtórzyć pomiar, sekcja 2
-zawiera komplet potrzebnych wywołań.
+`pomiar_modele_znormalia.py` (w repo) — pomiar z sekcji 5a. Czysty
+odczyt, `--root` wskazuje katalog, `--json` zapisuje pary. Powtarzalny:
+
+```
+python pomiar_modele_znormalia.py --root "B:\!BIBLIOTEKA"
+python pomiar_modele_znormalia.py --root "B:\\" --json pary.json
+```
+
+Skrypty jednorazowe (`zwiad_ole.py`, `pomiar_b2.py`, `test_katalog.py`)
+zostały w scratchpadzie sesji — sekcja 2 zawiera komplet potrzebnych
+wywołań, gdyby trzeba było je odtworzyć.

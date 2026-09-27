@@ -144,3 +144,4 @@
 - [Arkusz: Ilość BOM i filtr Dostawca](project_arkusz_ilosc_bom_i_filtr.md) — liczba zamiast krążka (też w XLSX), xview_moveto(0) pokazuje początek nazwy; dymek odrzucony
 - [Cache katalogu Subiekta — dwie warstwy](project_katalog_cache_odswiezanie.md) — plik na dysku (1 h) + kopia w pamięci okna; unieważnianie w zaloz_kartoteke, F5 w oknach i w arkuszu
 - [Opóźniony <<TreeviewSelect>> kasuje panel 2](project_treeviewselect_czysci_panel.md) — klon żyje poza drzewem; filtr MUSI być w _na_wybor_wezla, nie u wołającego; update() ≠ mainloop()
+- [Znormalia → model 3D ze złożeń](project_znormalia_model_3d_z_zlozen.md) — Part Number dla detali RMPAK, para OUT+IAM dla normaliów (66%); „Pliki 3D" w OUT to flaga STP, nie ścieżka; ZZ/2RS to uszczelnienie
