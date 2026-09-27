@@ -148,3 +148,4 @@
 - [Indeks modeli 3D — etap 1 makra](project_indeks_modeli_3d.md) — indeks_modeli_3d.py + modele_3d; skan TYLKO w firmie (M-OLD = Inventor 2013), C:\BibliotekaRM = B:
 - [MAG — kopia Subiekta + HTTP](project_mag_kopia_subiekta_http.md) — stacja pisze subiekt_kopia.sqlite (sub-*), serwer podaje przez :5061; W2019S nie ma mostu; NIE wdrożone
 - [Makra: .ivb, nazwa MAG](feedback_makra_ivb_nazwa_mag.md) — makra oddawać jako .ivb; makro magazynowe = MAG wszędzie (MAG.ivb, /mag/, PLAN_MAG.md); nie mylić z magazynem MAG w Subiekcie
+- [Zrzut ekranu a skalowanie DPI](project_zrzut_ekranu_dpi.md) — RM_BAZA nie DPI-aware, 150%: Tk logiczne vs ImageGrab fizyczne; wycinać po kursorze w kontekście per-monitor, nie mnożnikiem

@@ -160,6 +160,51 @@ def zapisz_kartoteki(plan, zapisz, timeout=TIMEOUT_S):
                     timeout, plan=plan, write=zapisz)
 
 
+# ── zrzut fragmentu ekranu: piksele FIZYCZNE ────────────────────────────────
+#
+# RM_BAZA nie jest „DPI-aware", więc Windows podaje jej współrzędne
+# przeskalowane (przy 150%: pulpit 7680 px zamiast 11520), a ImageGrab
+# robi zrzut w pikselach fizycznych. Żeby trafić w zaznaczony fragment,
+# pozycję kursora czytamy na chwilę w kontekście per-monitor (-4) — wtedy
+# Windows podaje piksele fizyczne, w układzie tego samego zrzutu. Działa
+# przy dowolnym skalowaniu, także różnym na każdym monitorze.
+
+_DPI_PER_MONITOR_V2 = -4
+
+
+def _w_kontekscie_fizycznym(funkcja):
+    import ctypes
+    u = ctypes.windll.user32
+    u.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+    u.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+    stary = u.SetThreadDpiAwarenessContext(_DPI_PER_MONITOR_V2)
+    try:
+        return funkcja(u)
+    finally:
+        if stary:
+            u.SetThreadDpiAwarenessContext(stary)
+
+
+def _kursor_fizyczny():
+    """(x, y) kursora w pikselach fizycznych pulpitu wirtualnego."""
+    import ctypes
+    from ctypes import wintypes
+
+    def czytaj(u):
+        pt = wintypes.POINT()
+        u.GetCursorPos(ctypes.byref(pt))
+        return pt.x, pt.y
+    return _w_kontekscie_fizycznym(czytaj)
+
+
+def _poczatek_pulpitu_fizyczny():
+    """(x, y) lewego górnego rogu pulpitu wirtualnego — tu zaczyna się
+    obraz z `ImageGrab.grab(all_screens=True)`. Ujemne, gdy jest monitor
+    po lewej albo nad głównym."""
+    return _w_kontekscie_fizycznym(
+        lambda u: (u.GetSystemMetrics(76), u.GetSystemMetrics(77)))
+
+
 class Kartoteka:
     """Jedna kartoteka — dane wspólne dla WSZYSTKICH wystąpień w drzewie."""
 
@@ -4519,11 +4564,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         go w oknie, to trzy kroki za dużo (życzenie użytkownika 27.09.2026).
 
         ⚠️ `ImageGrab.grab(all_screens=True)` obejmuje CAŁY pulpit wirtualny
-        (tu 7680x1440, trzy monitory), a jego układ współrzędnych zaczyna się
-        w lewym górnym rogu tego prostokąta — NIE w (0,0) monitora głównego.
-        Przy monitorze po lewej `winfo_vrootx()` jest UJEMNY, więc pozycję
-        z Tk trzeba przesunąć o ten offset, inaczej wycinek pochodzi z innego
-        miejsca ekranu (pamiec/project_okna_trzy_monitory).
+        w pikselach FIZYCZNYCH, a Tk widzi go przeskalowanego (skalowanie
+        Windows 150% → 1,5x mniej). Nakładkę rozpinamy w układzie Tk, ale
+        wycinamy po pozycji kursora w pikselach fizycznych — patrz
+        `_kursor_fizyczny` (pamiec/project_zrzut_ekranu_dpi).
         """
         symbol, _k = self._symbol_w_subiekcie()
         if not symbol:
@@ -4569,10 +4613,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                  bg="#ffffe0", fg="black", font=("Arial", 11, "bold"),
                  padx=10, pady=4).place(x=20, y=20)
 
-        stan = {"x0": 0, "y0": 0, "ramka": None}
+        stan = {"x0": 0, "y0": 0, "ramka": None, "p0": None}
 
         def start(e):
             stan["x0"], stan["y0"] = e.x, e.y
+            stan["p0"] = _kursor_fizyczny()
             if stan["ramka"] is not None:
                 plotno.delete(stan["ramka"])
             stan["ramka"] = plotno.create_rectangle(e.x, e.y, e.x, e.y,
@@ -4585,15 +4630,22 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         def koniec(e):
             x0, y0 = stan["x0"], stan["y0"]
             x1, y1 = e.x, e.y
+            p0, p1 = stan["p0"], _kursor_fizyczny()
             nakladka.destroy()
-            lewo, prawo = sorted((x0, x1))
-            gora, dol = sorted((y0, y1))
-            if prawo - lewo < 8 or dol - gora < 8:
+            if abs(x1 - x0) < 8 or abs(y1 - y0) < 8:
                 return                    # przypadkowe kliknięcie, nie wycinek
             try:
-                # Współrzędne Tk są WZGLĘDEM nakładki, a ta stoi w (vx, vy)
-                # pulpitu wirtualnego — obraz z ImageGrab ma własny układ
-                # zaczynający się w jego lewym górnym rogu.
+                # ⚠️ NIE współrzędne Tk. RM_BAZA nie jest „DPI-aware", więc
+                # przy skalowaniu 150% Tk widzi pulpit 7680x1441 od x=-2560,
+                # a ImageGrab zwraca FIZYCZNE piksele: 11520x2161 od x=-3840.
+                # Wycinek po współrzędnych Tk był 1,5x za mały i przesunięty —
+                # „losowe wyrywki, czasem tło Inventora" (27.09.2026).
+                # Pozycja kursora w pikselach fizycznych jest w TYM SAMYM
+                # układzie co zrzut, niezależnie od skalowania, liczby
+                # i ułożenia monitorów (w firmie inny układ niż w domu).
+                ox, oy = _poczatek_pulpitu_fizyczny()
+                lewo, prawo = sorted((p0[0] - ox, p1[0] - ox))
+                gora, dol = sorted((p0[1] - oy, p1[1] - oy))
                 wycinek = pulpit.crop((lewo, gora, prawo, dol))
             except Exception as ex:
                 messagebox.showerror("Zrzut ekranu",
