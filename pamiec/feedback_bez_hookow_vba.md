@@ -14,8 +14,10 @@ komputer użytkownika: klawiatura i mysz przestały reagować, musiał się
 wylogować przyciskiem na obudowie. Stracił otwartą pracę.
 
 **How to apply:**
-- Przewijanie list w oknach MSForms — tylko pasek przewijania. Kółko myszy
-  w MSForms nie działa i tak zostaje; nie proponować go ponownie.
+- Kółko myszy w oknie VBA robi się BEZ hooka: lista jako kontrolka
+  WebBrowser (Shell.Explorer.2) przewija się kółkiem natywnie — tak działa
+  MAG od 28.09.2026 ([[project_mag_okno_przegladarka]]). Czyste MSForms:
+  tylko pasek przewijania.
 - Kod, który może zawiesić system, NIE jest uruchamiany na maszynie usera
   „do sprawdzenia" — najpierw pytanie, czy w ogóle go chce, z jasnym ryzykiem.
 - Deklaracje API w VBA: jedna linia na `Declare` (łamanie ` _` w gałęzi

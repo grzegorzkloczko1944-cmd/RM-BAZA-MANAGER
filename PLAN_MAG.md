@@ -1,6 +1,9 @@
 # PLAN — makro MAG (Inventor ↔ Subiekt)
 
-Stan: **etap 1 napisany (27.09.2026), jeszcze nie uruchomiony na produkcji.**
+Stan: **etapy 1-3 napisane; etap 3 (okno MAG) DZIAŁA na M-OLD 28.09.2026** —
+lista w WebBrowser (kółko natywnie), 7 osobnych kolumn, klik przez MSHTML
+onclick, synchronizacja zleceniem z okna. Produkcja (W2019S/MONGO) wciąż
+nie wdrożona. Pułapki VBA: pamiec/project_mag_okno_przegladarka.
 Spisany 27.09.2026 po rozpoznaniu na żywych danych. Wszystkie liczby niżej
 są **zmierzone**, nie szacowane. Przebieg etapu 1 — sekcja 6a.
 
