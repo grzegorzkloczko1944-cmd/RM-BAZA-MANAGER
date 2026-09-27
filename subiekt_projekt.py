@@ -3826,6 +3826,33 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         if not self.plan:
             return
 
+        # ⛔ LOCK = TYLKO PODGLĄD (27.09.2026, żądanie użytkownika).
+        #
+        # To okno czyta BOM z PLIKU projektu na serwerze (`read_project_items`,
+        # mode=ro), a przy przejętym locku arkusz RM_BAZA pracuje na KOPII
+        # LOKALNEJ i przepisuje ją na serwer dopiero przy zwalnianiu locka.
+        # Zapis z tego okna szedłby więc ze stanu SPRZED Twoich zmian:
+        # do Subiekta poleciałyby stare ilości i stary skład, a po zwolnieniu
+        # locka plik i tak zostałby nadpisany kopią — rozjazd w obie strony.
+        #
+        # Blokada stoi TUTAJ, a nie na wyszarzeniu przycisku: user ma
+        # zobaczyć powód dopiero wtedy, gdy naprawdę chce zapisać, i wiedzieć
+        # dokładnie, co zrobić (zwolnić lock i przeliczyć).
+        if self._mam_lock():
+            komunikat(self,
+                "Projekt jest na Twoim locku",
+                "Trzymasz lock na tym projekcie, więc okno działa TYLKO "
+                "W TRYBIE PODGLĄDU.\n\n"
+                "Dane na liście pochodzą z pliku projektu na serwerze, a Twoje "
+                "zmiany z arkusza siedzą na razie w kopii lokalnej — zapis "
+                "wysłałby do Subiekta STAN SPRZED tych zmian.\n\n"
+                "Co zrobić:\n"
+                "   1. zwolnij lock w RM_BAZA („Zwolnij Lock”),\n"
+                "   2. kliknij „Przelicz” w tym oknie,\n"
+                "   3. dopiero wtedy „Zapisz do Subiekta”.",
+                rodzaj="warn")
+            return
+
         # Ostatnia bariera — przycisk bywa wyszarzony, ale gdyby stan zdążył
         # się rozjechać (np. „Przelicz" wykrył nowe pozycje), zapis nie może
         # przejść bez decyzji. Zamiast samego „nie da się" prowadzimy wprost
@@ -4571,10 +4598,27 @@ def open_window_csv(parent):
 
 
 def open_window(parent, project_id, project_name=None):
-    """Punkt wejścia dla RM_BAZA."""
+    """Punkt wejścia dla RM_BAZA.
+
+    Przy przejętym locku okno OTWIERA SIĘ, ale tylko do podglądu — mówimy
+    o tym od razu, żeby nikt nie liczył pozycji z nieaktualnego pliku
+    i nie dowiadywał się o blokadzie dopiero przy zapisie. Sama blokada
+    stoi w `_write_async` (27.09.2026).
+    """
     if not project_id:
         komunikat(parent, "Subiekt", "Najpierw wybierz projekt.", rodzaj="warn")
         return None
+    if getattr(parent, "have_lock", False):
+        komunikat(parent,
+            "Projekt na locku — tryb podglądu",
+            "Trzymasz lock na tym projekcie, więc okno otworzy się TYLKO "
+            "DO PODGLĄDU — zapis do Subiekta będzie zablokowany.\n\n"
+            "Lista czytana jest z pliku projektu na serwerze, a Twoje zmiany "
+            "z arkusza są na razie w kopii lokalnej i trafią tam dopiero przy "
+            "zwolnieniu locka.\n\n"
+            "Żeby zapisać: zwolnij lock, kliknij „Przelicz”, potem "
+            "„Zapisz do Subiekta”.",
+            rodzaj="warn")
     return SubiektProjektWindow(parent, project_id, project_name)
 
 
