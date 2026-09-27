@@ -3383,3 +3383,137 @@ ZAPIS.update({
         [],
     ),
 })
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# KOPIA SUBIEKTA — kartoteki, stany, miniatury  (subiekt_kopia.sqlite)
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Po co: makro Inventora (PLAN_MAKRO_MAGAZYN_3D.md) ma pokazywać kartoteki
+# ze stanem i miniaturą. Most Sfery działa TYLKO na stacjach (SDK w
+# `C:\iLogic\Subiekt\Bin`, logowanie operatora), a W2019S go nie ma —
+# więc stacja czyta Subiekta (`subiekt_kopia_sync.py`) i odkłada KOPIĘ tutaj,
+# a serwer HTTP (`rm_makro_http.py`) podaje ją makru bez dotykania Sfery.
+#
+# ⚠️ To KOPIA DO ODCZYTU. Źródłem prawdy zostaje Subiekt — nic, co zmienia
+# dane, nie może stąd czytać (stan może być sprzed kilku minut). Każdy
+# wiersz niesie `zsynchronizowano`, a makro pokazuje wiek danych.
+#
+# Wymiana kompletu przez tabelę `_nowe`: synchronizacja wysyła paczki do
+# `kartoteki_nowe`, a na końcu `sub-kartoteki-zamien` podmienia zawartość
+# JEDNĄ transakcją. Bez tego makro czytające w trakcie synchronizacji
+# widziałoby pół katalogu.
+#
+# Miniatury jako base64 w TEXT: SQLite nie ma dekodera base64, a operacje
+# nie wykonują kodu — dekoduje serwer HTTP przy wysyłce.
+MIGRACJE_SUBIEKT_KOPIA = [
+    """CREATE TABLE IF NOT EXISTS kartoteki (
+           id              INTEGER PRIMARY KEY,
+           symbol          TEXT NOT NULL,
+           nazwa           TEXT,
+           opis            TEXT,
+           rodzaj          TEXT,
+           cena            REAL,
+           dostepne        REAL,
+           zarezerwowane   REAL,
+           zadysponowane   REAL,
+           stan_min        REAL,
+           stan_opt        REAL,
+           dostawca        TEXT,
+           magazyny_json   TEXT,
+           zsynchronizowano TEXT NOT NULL
+       )""",
+    "CREATE INDEX IF NOT EXISTS idx_kart_symbol ON kartoteki(symbol COLLATE NOCASE)",
+    # Bliźniak do wymiany kompletu — ten sam schemat, bez indeksów.
+    "CREATE TABLE IF NOT EXISTS kartoteki_nowe AS SELECT * FROM kartoteki WHERE 0",
+    """CREATE TABLE IF NOT EXISTS miniatury (
+           id_subiekt      INTEGER PRIMARY KEY,
+           symbol          TEXT NOT NULL,
+           numer_zdjecia   INTEGER,
+           typ             TEXT,
+           dane_b64        TEXT,          -- '' = kartoteka BEZ zdjęcia
+           zsynchronizowano TEXT NOT NULL
+       )""",
+    """CREATE TABLE IF NOT EXISTS synchronizacje (
+           id        INTEGER PRIMARY KEY AUTOINCREMENT,
+           co        TEXT NOT NULL,
+           ile       INTEGER,
+           sekund    REAL,
+           kto       TEXT,
+           komputer  TEXT,
+           kiedy     TEXT NOT NULL
+       )""",
+    # Dziennik idempotencji w TEJ SAMEJ bazie co zapis (§3 planu serwera).
+    """CREATE TABLE IF NOT EXISTS _server_request_log (
+           request_id  TEXT PRIMARY KEY,
+           operation   TEXT NOT NULL,
+           kto         TEXT,
+           result_json TEXT,
+           created_at  TEXT NOT NULL
+       )""",
+    "CREATE INDEX IF NOT EXISTS idx_server_request_log_czas"
+    " ON _server_request_log(created_at)",
+]
+
+ODCZYT.update({
+    "sub-kartoteka": (
+        "SELECT * FROM kartoteki WHERE symbol = ? COLLATE NOCASE",
+        ["symbol"],
+    ),
+    # Synchronizacja miniatur pyta, które kartoteki już mają wpis — żeby
+    # drugi przebieg nie ściągał 3,5 tys. galerii od nowa.
+    "sub-miniatury-stan": (
+        "SELECT id_subiekt, symbol, numer_zdjecia, zsynchronizowano"
+        "  FROM miniatury",
+        [],
+    ),
+    "sub-synchronizacje": (
+        "SELECT * FROM synchronizacje ORDER BY id DESC LIMIT 50",
+        [],
+    ),
+})
+
+ZAPIS.update({
+    "sub-kartoteki-nowe-czysc": (
+        "DELETE FROM kartoteki_nowe",
+        [],
+    ),
+    "sub-kartoteka-nowa": (
+        "INSERT INTO kartoteki_nowe"
+        " (id, symbol, nazwa, opis, rodzaj, cena, dostepne, zarezerwowane,"
+        "  zadysponowane, stan_min, stan_opt, dostawca, magazyny_json,"
+        "  zsynchronizowano)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ["id", "symbol", "nazwa", "opis", "rodzaj", "cena", "dostepne",
+         "zarezerwowane", "zadysponowane", "stan_min", "stan_opt",
+         "dostawca", "magazyny_json", "zsynchronizowano"],
+    ),
+    # Podmiana kompletu — wołana w JEDNYM batchu z `sub-kartoteki-wstaw`,
+    # więc czytający widzi albo stary katalog, albo nowy, nigdy pusty.
+    "sub-kartoteki-usun-wszystkie": (
+        "DELETE FROM kartoteki",
+        [],
+    ),
+    "sub-kartoteki-wstaw": (
+        "INSERT INTO kartoteki SELECT * FROM kartoteki_nowe",
+        [],
+    ),
+    "sub-miniatura-zapisz": (
+        "INSERT OR REPLACE INTO miniatury"
+        " (id_subiekt, symbol, numer_zdjecia, typ, dane_b64, zsynchronizowano)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        ["id_subiekt", "symbol", "numer_zdjecia", "typ", "dane_b64",
+         "zsynchronizowano"],
+    ),
+    # Kartoteki skasowane w Subiekcie — ich miniatury nie mają już do czego
+    # należeć. Wołane po podmianie katalogu.
+    "sub-miniatury-sieroty-usun": (
+        "DELETE FROM miniatury WHERE id_subiekt NOT IN (SELECT id FROM kartoteki)",
+        [],
+    ),
+    "sub-synchronizacja-dodaj": (
+        "INSERT INTO synchronizacje (co, ile, sekund, kto, komputer, kiedy)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        ["co", "ile", "sekund", "kto", "komputer", "kiedy"],
+    ),
+})

@@ -85,6 +85,14 @@ DOMYSLNA_BAZA_RM_MANAGER = os.path.join(KATALOG, "dane", "rm_manager.sqlite")
 #: Czwarta baza: archiwum faktur KSeF. Trzyma TRESC XML w kolumnie `xml`,
 #: wiec nie ma obok niej katalogu z plikami — cale archiwum to jeden plik.
 DOMYSLNA_BAZA_KSEF = os.path.join(KATALOG, "dane", "FV_KSEF.sqlite")
+#: Piąta baza: KOPIA Subiekta (kartoteki, stany, miniatury) dla makra
+#: Inventora. Odtwarzalna w każdej chwili synchronizacją ze stacji, dlatego
+#: bez backupu — patrz `rm_serwer_operacje.MIGRACJE_SUBIEKT_KOPIA`.
+DOMYSLNA_BAZA_SUBIEKT = os.path.join(KATALOG, "dane", "subiekt_kopia.sqlite")
+#: Port serwera HTTP dla makra (`rm_makro_http.py`) — osobny, żeby nie
+#: ruszać protokołu na 5060 (PLAN_MAKRO_MAGAZYN_3D.md, ustalenie 1).
+#: 0 w konfiguracji wyłącza serwer HTTP.
+DOMYSLNY_PORT_MAKRO = 5061
 DOMYSLNY_PORT = 5060
 
 #: Ile trzymamy odpowiedzi w `_server_request_log` (§3 planu).
@@ -111,6 +119,8 @@ def wczytaj_config(sciezka=None):
         "baza_mapowania": dane.get("baza_mapowania", DOMYSLNA_BAZA_MAPOWANIA),
         "baza_rm_manager": dane.get("baza_rm_manager", DOMYSLNA_BAZA_RM_MANAGER),
         "baza_ksef": dane.get("baza_ksef", DOMYSLNA_BAZA_KSEF),
+        "baza_subiekt": dane.get("baza_subiekt", DOMYSLNA_BAZA_SUBIEKT),
+        "port_makro": int(dane.get("port_makro", DOMYSLNY_PORT_MAKRO)),
         "port": int(dane.get("port", DOMYSLNY_PORT)),
         "nasluch": dane.get("nasluch", "0.0.0.0"),
         "sekret": dane.get("sekret"),          # None = HMAC wyłączony
@@ -268,6 +278,7 @@ class Serwer:
         self.con_map = None            # subiekt_mapowania.sqlite — osobny plik
         self.con_rmm = None            # rm_manager.sqlite — osobny plik
         self.con_ksef = None           # FV_KSEF.sqlite — archiwum faktur
+        self.con_sub = None            # subiekt_kopia.sqlite — kopia dla makra
         self.start_czas = time.time()
         self.zapisow = 0
         self.odczytow = 0
@@ -357,6 +368,24 @@ class Serwer:
                 log("   + %s" % co)
             log("KSEF: %s" % sciezka_ksef)
 
+        # Piąta baza: kopia Subiekta dla makra Inventora. Pisze ją TEN wątek
+        # (synchronizacja ze stacji), czyta serwer HTTP z własnym połączeniem.
+        # WAL, nie DELETE: czytelnik HTTP nie może czekać na zapis paczki,
+        # a ta baza nie ma backupu kopiowaniem pliku i leży na lokalnym
+        # dysku serwera — zakaz WAL dotyczy plików na SMB
+        # (project_master_journal_delete), nie tego przypadku.
+        sciezka_sub = self.config.get("baza_subiekt")
+        if sciezka_sub:
+            os.makedirs(os.path.dirname(sciezka_sub), exist_ok=True)
+            self.con_sub = sqlite3.connect(sciezka_sub, timeout=30,
+                                           check_same_thread=False)
+            self.con_sub.execute("PRAGMA journal_mode=WAL")
+            self.con_sub.execute("PRAGMA busy_timeout=5000")
+            for sql in ops.MIGRACJE_SUBIEKT_KOPIA:
+                self.con_sub.execute(sql)
+            self.con_sub.commit()
+            log("Kopia Subiekta: %s" % sciezka_sub)
+
     # ── wykonanie pojedynczego żądania (w wątku roboczym) ─────────────
     def _polaczenie(self, operacja):
         """Które połączenie obsługuje tę operację.
@@ -364,6 +393,7 @@ class Serwer:
         Prefiks `map-`  → subiekt_mapowania.sqlite,
         prefiks `rmm-`  → rm_manager.sqlite,
         prefiks `ksef-` → FV_KSEF.sqlite (archiwum faktur),
+        prefiks `sub-`  → subiekt_kopia.sqlite (kopia Subiekta dla makra),
         reszta → master RM_BAZA.
 
         Routing po nazwie, nie po tabeli: wołający nie musi wiedzieć,
@@ -378,6 +408,10 @@ class Serwer:
             if self.con_rmm is None:
                 raise ops.BladOperacji("baza RM_MANAGER nie jest skonfigurowana")
             return self.con_rmm
+        if nazwa.startswith("sub-"):
+            if self.con_sub is None:
+                raise ops.BladOperacji("kopia Subiekta nie jest skonfigurowana")
+            return self.con_sub
         if nazwa.startswith("ksef-"):
             if self.con_ksef is None:
                 raise ops.BladOperacji("baza KSEF nie jest skonfigurowana")
@@ -918,6 +952,19 @@ def uruchom(config):
 
     serwer = Serwer(config)
     threading.Thread(target=serwer.worker, name="worker", daemon=True).start()
+
+    # Serwer HTTP dla makra Inventora — sam odczyt, osobny port. Błąd tutaj
+    # NIE zatrzymuje RM_SERWER: 5060 obsługuje dziesięć stanowisk, makro
+    # jest dodatkiem (PLAN_MAKRO_MAGAZYN_3D.md, sekcja 3).
+    if config.get("port_makro"):
+        try:
+            import rm_makro_http
+            rm_makro_http.uruchom_w_tle(config.get("baza_subiekt"),
+                                        config.get("baza_mapowania"),
+                                        config["port_makro"], config["nasluch"],
+                                        log=log)
+        except Exception as e:
+            log("⚠️  makro HTTP nie wystartował: %s" % e)
 
     nasluch = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     nasluch.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

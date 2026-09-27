@@ -370,7 +370,47 @@ zapis, drugi przebieg pomija niezmienione IDW, wpis `reczny` przeżywa
   `C:\Biblioteka` (bez „RM") to INNY katalog — `016-100.05` wskazuje tam
   model, którego na `B:` nie ma, zgodnie z tym, co mówił użytkownik.
 
-**Do zrobienia przed etapem 2:** wdrożyć `rm_serwer_operacje.py` na
+## 6b. Etap 2 — zrobione (27.09.2026): kopia Subiekta + HTTP
+
+Zmiana względem sekcji 3: serwer HTTP **nie pyta mostu na żywo** — W2019S
+mostu nie ma (SDK Sfery i logowanie operatora są tylko na stacjach). Stacja
+odkłada kopię, serwer ją podaje:
+
+```
+stacja z mostem                          W2019S
+───────────────                          ──────
+subiekt_kopia_sync.py ── sub-* ────────► subiekt_kopia.sqlite  (kartoteki, stany, miniatury)
+  katalog 0,2 s + magazyn 0,8 s                   │
+  zdjecie 0,08 s / kartotekę                      ▼
+                                         rm_makro_http.py :5061 ◄── makro VBA (GET)
+                                           + subiekt_mapowania.sqlite (modele_3d)
+```
+
+* `rm_serwer.py`: piąta baza `subiekt_kopia.sqlite` (prefiks `sub-`, WAL —
+  lokalny dysk, czytelnik HTTP nie czeka na zapis), wątek HTTP na
+  `port_makro` (domyślnie 5061, 0 = wyłączony; błąd portu nie zatrzymuje 5060).
+* Adresy: `/makro/status`, `/makro/szukaj?q=`, `/makro/kartoteka?symbol=`,
+  `/makro/modele?symbol=`, `/makro/miniatura?symbol=`. `&format=tsv` —
+  tekst z TAB-ami dla VBA (VBA nie ma parsera JSON).
+* Kartoteki podmieniane kompletem w jednej transakcji (`kartoteki_nowe` →
+  `kartoteki`); pusty katalog z mostu NIE podmienia kopii.
+* Miniatury tylko dla nowych kartotek (kartoteka bez zdjęcia = pusty wpis);
+  `--miniatury-od-nowa` odświeża wszystkie.
+
+Sprawdzone na serwerze testowym (M-OLD, demo 1584 kartoteki): kartoteki +
+stany 0,7 s, miniatury 112 s (demo nie ma zdjęć — obrazek sprawdzony
+wpisem testowym), HTTP 3–15 ms.
+
+**Otwarte:** kto i jak często uruchamia synchronizację (zadanie
+harmonogramu na stacji? RM_BAZA przy starcie?); zdjęcia zmienione
+w Subiekcie wracają tylko z `--miniatury-od-nowa`.
+
+**Wdrożenie (do uzgodnienia):** `rm_serwer.py`, `rm_serwer_operacje.py`,
+`rm_makro_http.py` na W2019S przez WinRM + restart usługi RM_SERWER,
+**otworzyć port 5061 w zaporze** W2019S, potem `subiekt_kopia_sync.py`
+na stacji firmowej.
+
+**Do zrobienia przed etapem 2 (indeks modeli):** wdrożyć `rm_serwer_operacje.py` na
 W2019S (restart usługi — uzgodnić), potem `indeks_modeli_3d.py --zapisz`
 na stacji z Inventorem firmowym i przejrzeć raport (konflikty, PN ≠ numer).
 
