@@ -3796,6 +3796,86 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             self._szukaj_w_drzewku()
 
     # ── zapis ──────────────────────────────────────────────────────────────
+    def _wyslij_miniatury_dwf(self, wynik):
+        """Miniatury rysunków DWF do galerii zdjęć kartotek — w tle, po zasiewie.
+
+        Droga: numer rysunku -> plik .dwf (folder projektu na V:, potem
+        biblioteka B:) -> gotowy PNG z `dwf_thumb` (cache na dysku) -> tryb
+        `zdjecie` mostu. Wszystkie cztery odcinki istniały wcześniej; tu
+        tylko je spinamy.
+
+        ⚠️ NIE NADPISUJEMY (decyzja użytkownika 27.09.2026): kartoteka,
+        która ma już jakiekolwiek zdjęcie, jest pomijana. Inaczej przy każdym
+        ponownym zasiewie galeria rosłaby o kolejną kopię tego samego rysunku.
+
+        ⚠️ Bierzemy kartoteki ZAŁOŻONE I ISTNIEJĄCE — pierwszy przebieg na
+        starym projekcie uzupełni zaległości, kolejne będą szybkie, bo
+        wszystko odsieje warunek „ma już zdjęcie".
+
+        Cicho w razie kłopotu: to dodatek do zasiewu, nie jego część.
+        Raport idzie do paska stanu i do konsoli, nie w okno — zasiew ma
+        już swoje podsumowanie i nie chcemy go przykrywać drugim.
+        """
+        symbole = [(k.get("Symbol") or "").strip()
+                   for k in (wynik or {}).get("kroki", [])
+                   if k.get("Rodzaj") == "kartoteka"
+                   and k.get("Status") in ("zalozona", "istnieje")
+                   and (k.get("Symbol") or "").strip()]
+        if not symbole:
+            return
+        rodzic = self.master            # arkusz RM_BAZA — on zna ścieżki do DWF
+
+        def robota():
+            wyslane, pominiete, bez_rysunku, bledy = 0, 0, 0, []
+            try:
+                import subiekt_bridge
+            except Exception as e:
+                print("⚠️  Miniatury DWF: brak mostu (%s)" % e)
+                return
+            for symbol in symbole:
+                try:
+                    # Ścieżkę do miniatury zna arkusz (szuka w projekcie na V:,
+                    # potem w bibliotece na B:). Bez niego nie zgadniemy, gdzie
+                    # leży rysunek tej pozycji.
+                    sciezka = None
+                    if hasattr(rodzic, "_dwf_thumb_path_for_drawing"):
+                        sciezka = rodzic._dwf_thumb_path_for_drawing(symbol)
+                    if not sciezka:
+                        bez_rysunku += 1
+                        continue
+                    # Ma już zdjęcie? Nie dokładamy drugiego.
+                    stan = subiekt_bridge.call(
+                        "zdjecie", {"plan": {"akcja": "lista", "symbol": symbol},
+                                    "zapisz": False}, timeout=120, write=False)
+                    if (stan or {}).get("zdjecia"):
+                        pominiete += 1
+                        continue
+                    import base64, os as _os
+                    with open(sciezka, "rb") as f:
+                        dane = f.read()
+                    subiekt_bridge.call(
+                        "zdjecie", {"plan": {"akcja": "dodaj", "symbol": symbol,
+                                             "nazwa": "%s.png" % symbol,
+                                             "typ": "png",
+                                             "dane_b64": base64.b64encode(dane).decode("ascii")},
+                                    "zapisz": True}, timeout=300, write=True)
+                    wyslane += 1
+                except Exception as e:
+                    bledy.append("%s: %s" % (symbol, str(e)[:60]))
+            podsumowanie = ("Miniatury DWF: wysłano %d, pominięto %d (mają zdjęcie), "
+                            "bez rysunku %d" % (wyslane, pominiete, bez_rysunku))
+            if bledy:
+                podsumowanie += ", błędów %d" % len(bledy)
+                for b in bledy[:10]:
+                    print("⚠️  Miniatura DWF %s" % b)
+            print("\U0001f5bc️  " + podsumowanie)
+            try:
+                self.after(0, lambda: self.status.config(text=podsumowanie))
+            except Exception:
+                pass                     # okno mogło się już zamknąć
+
+        threading.Thread(target=robota, daemon=True).start()
+
     def _plan_do_zapisu(self):
         """Plan ograniczony do wybranych pozycji.
 
@@ -4430,6 +4510,12 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         # Trwały ślad w BOM-ie: te pozycje mają już kartotekę w Subiekcie,
         # więc arkusz zablokuje edycję ich klucza (numeru / nazwy).
         zasiane = zapisz_zasiew(self.project_id, wynik)
+
+        # MINIATURY DWF -> GALERIA KARTOTEK, W TLE (27.09.2026).
+        # Rysunek przy kartotece jest po to, żeby magazynier widział, czego
+        # szuka. Robimy to PO zapisie i w osobnym wątku: zasiew nie zwalnia
+        # ani o sekundę, a błąd miniatury nie ma prawa wywrócić zapisu.
+        self._wyslij_miniatury_dwf(wynik)
 
         # Co się stało z ZK — „utworzone" i „dopisano do istniejącego" to dwie
         # różne informacje, a użytkownik musi wiedzieć, którą dostał.
