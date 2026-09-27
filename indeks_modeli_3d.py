@@ -58,12 +58,26 @@ POMIJANE_KATALOGI = ("oldversions", "nieaktualne", "templates")
 #: Rozszerzenia modeli. IDW potrafi wskazywać też inne rysunki czy obrazki.
 MODELE = (".ipt", ".iam")
 
-#: Modele wstawiamy TYLKO z `B:` (ustalenie 27.09.2026). Referencja do
+#: Biblioteka = katalog, z którego skanujemy rysunki I z którego wolno
+#: wstawiać modele. W firmie (Mongo i każda inna stacja) to `B:`; na M-OLD
+#: (dom) `C:\Projekty` — tam nie ma firmowej biblioteki, a projekty są
+#: lokalnie (decyzja użytkownika 27.09.2026). Klucz = COMPUTERNAME.
+BIBLIOTEKA_WG_KOMPUTERA = {"M-OLD": "C:\\Projekty\\"}
+BIBLIOTEKA_DOMYSLNA = "B:\\"
+
+
+def biblioteka() -> str:
+    """Katalog biblioteki tej stacji, zakończony `\\`."""
+    komputer = (os.environ.get("COMPUTERNAME") or "").upper()
+    return BIBLIOTEKA_WG_KOMPUTERA.get(komputer, BIBLIOTEKA_DOMYSLNA)
+
+
+#: Modele wstawiamy TYLKO z biblioteki (ustalenie 27.09.2026). Referencja do
 #: `C:\Biblioteka\…` rozwiązuje się wyłącznie na stacji, która ma taką
 #: lokalną kopię — na innej makro wstawiłoby nieistniejący plik. Tak było
 #: z `016-100.05`: na M-OLD Apprentice znalazł model w `C:\Biblioteka`,
 #: a naprawdę rysunek modelu nie ma (potwierdzone przez usera).
-DOZWOLONE_DYSKI = ("B:\\",)
+DOZWOLONE_DYSKI = (biblioteka().upper(),)
 
 #: Ten sam katalog pod inną nazwą. `B:` to udział `BibliotekaRM`, a IDW
 #: pamiętają ścieżkę AUTORA — `C:\BibliotekaRM\…` — którą Apprentice
@@ -256,7 +270,8 @@ def _nazwy(modele) -> set:
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--root", default="B:\\", help="katalog do przeskanowania")
+    ap.add_argument("--root", default=biblioteka(),
+                    help="katalog do przeskanowania (domyślnie biblioteka tej stacji)")
     ap.add_argument("--zapisz", action="store_true",
                     help="zapis do serwera (bez tego suchy przebieg)")
     ap.add_argument("--pelny", action="store_true",
@@ -270,6 +285,7 @@ def main():
     print("=" * 72)
     print("INDEKS MODELI 3D  (numer rysunku -> .ipt/.iam)" +
           ("" if a.zapisz else "   [SUCHY PRZEBIEG — nic nie zapisuję]"))
+    print(f"biblioteka tej stacji ({os.environ.get('COMPUTERNAME', '?')}): {biblioteka()}")
     print("=" * 72)
 
     # 1. Dysk
@@ -383,7 +399,7 @@ def main():
         print(f"   jeden model       {wynik['jeden']:>5}  ({wynik['jeden'] / razem * 100:.0f}%)")
         print(f"   kilka modeli      {wynik['kilka']:>5}  ({wynik['kilka'] / razem * 100:.0f}%)")
         print(f"   BEZ MODELU        {wynik['brak']:>5}  ({wynik['brak'] / razem * 100:.0f}%)")
-    print(f"   model poza B:/brak{len(zepsute):>5}   (zapisuję jako bez modelu)")
+    print(f"   model poza bibl.  {len(zepsute):>5}   (zapisuję jako bez modelu)")
     print(f"   błąd odczytu      {len(bledy):>5}")
     print(f"   konflikt kopii    {len(konflikty):>5}   (wygrał nowszy IDW)")
     print(f"   Part Number ≠ nr  {len(pn_rozny):>5}   (zapisuję, do sprawdzenia)")
@@ -402,7 +418,7 @@ def main():
                             for nr, s1, m1, s2, m2 in konflikty]),
         ("PART NUMBER RÓŻNY OD NUMERU", [f"   {nr:20} PN={pn:20} {s}"
                                          for nr, s, pn in pn_rozny]),
-        ("ZEPSUTE REFERENCJE / MODEL POZA B:", [f"   {nr:20} {s}\n      brak: {z}"
+        ("ZEPSUTE REFERENCJE / MODEL POZA BIBLIOTEKĄ", [f"   {nr:20} {s}\n      brak: {z}"
                                 for nr, s, z in zepsute]),
         ("BŁĄD ODCZYTU", [f"   {nr:20} {s}  ({b})" for nr, s, b in bledy]),
     ]
