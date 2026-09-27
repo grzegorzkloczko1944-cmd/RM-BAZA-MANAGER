@@ -56,6 +56,16 @@ Jeśli MONGO nazywa się inaczej (np. „MONGO" to tylko nazwa konta) — **popr
 tę krotkę na faktyczną nazwę**, zacommituj (bez pusha — zapytaj) i powiedz
 Grzegorzowi. Bez tego MONGO i tak przejmie zlecenie, ale dopiero po 2 minutach.
 
+**Sprawdź ustawienie „Serwer projekty"** (`server_dir` w
+`C:\RMPAK_CLIENT\sync_config.json`, sekcja `paths`) — to korzeń folderów
+projektów, w którym RM_BAZA szuka rysunków DWF (miniatury w arkuszu, zdjęcia
+kartotek przy zasiewie, wyszukiwarka plików). Projekty leżą **bezpośrednio
+w `V:\`** (np. `V:³7 Feniks Z 25L`). Na M-OLD stało `V:/SERVER_PROJEKTY`
+i 28.09.2026 zasiew 2637 dostał miniatury tylko z biblioteki (74 z 348).
+Jeśli w firmie też wskazuje na nieistniejący folder — pokaż Grzegorzowi,
+popraw w RM_BAZA: Ustawienia → Konfiguracja ścieżek → „Serwer projekty"
+(nie edytuj pliku, gdy RM_BAZA chodzi — nadpisze go przy zapisie ustawień).
+
 ## Krok 1 — połączenie z serwerem (WinRM)
 
 Pełny opis: `NOW\DOKUMENTACJA\DOSTEP_SERWER.md`. W skrócie:
