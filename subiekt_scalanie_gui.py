@@ -164,6 +164,11 @@ class ScalanieWindow(tk.Toplevel):
         # inne elementy, wiec ma byc widoczny przy pozycji, nie na koncu.
         ("ilosc",    "Ilość BOM",              70, "e"),
         ("material", "Materiał",              110, "w"),
+        # Cena EWIDENCYJNA z kartoteki Subiekta (zyczenie uzytkownika
+        # 27.09.2026) — to samo zrodlo co kolumna SUBIEKT i pasek „Wybrano",
+        # wiec nie kosztuje dodatkowego pytania do Sfery. Zero pokazujemy
+        # jako puste: cena 0 nic nie znaczy (patrz `_cena_txt`).
+        ("cena",     "Cena netto",             85, "e"),
         ("subiekt",  "SUBIEKT (kartoteka)",   240, "w"),
         ("baza",     "Najczęściej w firmie",  170, "w"),
         ("podobne",  "Podobne w tym projekcie", 220, "w"),
@@ -209,7 +214,13 @@ class ScalanieWindow(tk.Toplevel):
             tytul += f" ({project_name})"
         self.title(tytul)
         self.transient(parent)
-        self._wysrodkuj(parent, 1100, 620)
+        # Szerokosc Z KOLUMN, nie wpisana na sztywno (27.09.2026): bylo 1100 px
+        # przy sumie kolumn 1344, a po dolozeniu „Cena netto" 1429 — dwie
+        # ostatnie kolumny wychodzily poza kadr i trzeba bylo scrollowac.
+        # +40 px na ramke, pasek przewijania i obramowanie Treeview.
+        _szer = min(sum(c[2] for c in self.COLS) + 40,
+                    max(900, parent.winfo_screenwidth() - 80))
+        self._wysrodkuj(parent, _szer, 620)
 
         self._build_ui()
         # ESC zamyka okno (zyczenie uzytkownika 25.09.2026).
@@ -376,9 +387,20 @@ class ScalanieWindow(tk.Toplevel):
         # opis, rodzaj, stan i cena znikaly w chwili kliknięcia i nie bylo jak
         # sprawdzic, czy trafilo sie w te kartoteke (zgloszone 25.09.2026).
         # Ten sam uklad kolumn co lista podpowiedzi i co arkusz.
-        self.lbl_wybrana = tk.Label(self, text="", anchor="w", padx=12,
-                                    font=("Segoe UI", 8), fg="#1e8449",
-                                    bg="#eafaf1", justify=tk.LEFT)
+        # DWA RAZY WIEKSZA i pogrubiona (27.09.2026): to jedyne miejsce, ktore
+        # mowi, DOKAD scalasz — przy czcionce 8 gubilo sie miedzy paskami
+        # pomocy. `pady` daje pasek odstepu, zeby odcinal sie od tla.
+        self.lbl_wybrana = tk.Label(self, text="", anchor="w", padx=12, pady=6,
+                                    font=("Segoe UI", 14, "bold"), fg="#145a32",
+                                    bg="#d4efdf", justify=tk.LEFT)
+        # ZAWIJANIE, nie ucinanie: przy czcionce 14 dluga nazwa + opis nie
+        # mieszcza sie w jednej linii, a Label bez `wraplength` po prostu
+        # obcina tekst na krawedzi okna (27.09.2026). `wraplength` liczy sie
+        # w PIKSELACH, wiec ustawiamy je pod biezaca szerokosc okna i
+        # aktualizujemy przy kazdej zmianie rozmiaru.
+        self.lbl_wybrana.bind(
+            "<Configure>",
+            lambda e: e.widget.configure(wraplength=max(200, e.width - 24)))
 
         # Gdy któraś z zaznaczonych pozycji ma już kartotekę, najlepszą nazwą
         # docelową jest ta z Subiekta — inaczej scalenie tworzy kolejny wariant
@@ -646,6 +668,21 @@ class ScalanieWindow(tk.Toplevel):
                 self._subiekt_stan += f"  (z {ile_kartotek} w Subiekcie)"
         self._refill()
 
+    def _cena_pozycji(self, p):
+        """Cena ewidencyjna kartoteki Subiekta dopasowanej do tej pozycji.
+
+        Szukamy tak samo jak `_opis_subiekt` — po kodzie i wariantach
+        pisowni — zeby obie kolumny mowily o TEJ SAMEJ kartotece.
+        Pusto, gdy katalogu nie wczytano albo pozycja nie ma kartoteki.
+        """
+        if not self._subiekt:
+            return ""
+        for kod in [p["kod"]] + p["identyczne"]:
+            poz = self._subiekt.get(kod)
+            if poz:
+                return self._cena_txt(poz.get("cena"))
+        return ""
+
     def _opis_subiekt(self, p):
         """Tekst do kolumny SUBIEKT dla jednej pozycji.
 
@@ -717,6 +754,7 @@ class ScalanieWindow(tk.Toplevel):
                 p.get("opis", ""),
                 f"{p['ilosc_bom']:g}",
                 p["material"],
+                self._cena_pozycji(p),
                 self._opis_subiekt(p),
                 naj,
                 "   ·   ".join(podobne),
@@ -1119,8 +1157,8 @@ class ScalanieWindow(tk.Toplevel):
             (poz.get("nazwa") or "").strip() or "—",
             (poz.get("opis") or "").strip() or "—",
             (poz.get("rodzaj") or "").strip() or "—",
-            "stan %s" % (self._stan_txt(poz) or "—"),
             "ilość %g szt." % ilosc if wybrane else "ilość —",
+            "stan %s" % (self._stan_txt(poz) or "—"),
             "cena %s" % (self._cena_txt(poz.get("cena")) or "—"),
         ]
         lbl.config(text="   ·   ".join(czesci))
