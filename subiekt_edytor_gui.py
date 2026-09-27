@@ -1077,9 +1077,14 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self._foto_symbol = None         # dla jakiej kartoteki jest podgląd
         pasek_foto = tk.Frame(ramka_foto, bg=TLO_SEKCJI)
         pasek_foto.pack(fill=tk.X, pady=(4, 0))
-        self.btn_foto_dodaj = tk.Button(pasek_foto, text="📷 Dodaj zdjęcie",
-                                        command=self._zdjecie_dodaj,
-                                        font=("Arial", 8), cursor="hand2")
+        self.btn_foto_dodaj = tk.Menubutton(pasek_foto, text="📷 Dodaj zdjęcie ▾",
+                                            font=("Arial", 8), cursor="hand2",
+                                            relief=tk.RAISED, bd=1)
+        _menu_foto = tk.Menu(self.btn_foto_dodaj, tearoff=0)
+        _menu_foto.add_command(label="Z pliku…", command=self._zdjecie_dodaj)
+        _menu_foto.add_command(label="Zaznacz fragment ekranu…",
+                               command=self._zdjecie_ze_screena)
+        self.btn_foto_dodaj.config(menu=_menu_foto)
         self.btn_foto_dodaj.pack(side=tk.LEFT)
         self.btn_foto_usun = tk.Button(pasek_foto, text="✕", width=3,
                                        command=self._zdjecie_usun,
@@ -4506,6 +4511,248 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         except Exception as e:
             print("⚠️  Miniatura nieodczytana: %s" % e)
 
+    def _zdjecie_ze_screena(self):
+        """Zaznacz myszą fragment ekranu i wyślij go jako zdjęcie kartoteki.
+
+        Po co: rysunek, zdjęcie od dostawcy albo kadr z Inventora są już
+        NA EKRANIE — zapisywanie ich do pliku tylko po to, żeby zaraz wybrać
+        go w oknie, to trzy kroki za dużo (życzenie użytkownika 27.09.2026).
+
+        ⚠️ `ImageGrab.grab(all_screens=True)` obejmuje CAŁY pulpit wirtualny
+        (tu 7680x1440, trzy monitory), a jego układ współrzędnych zaczyna się
+        w lewym górnym rogu tego prostokąta — NIE w (0,0) monitora głównego.
+        Przy monitorze po lewej `winfo_vrootx()` jest UJEMNY, więc pozycję
+        z Tk trzeba przesunąć o ten offset, inaczej wycinek pochodzi z innego
+        miejsca ekranu (pamiec/project_okna_trzy_monitory).
+        """
+        symbol, _k = self._symbol_w_subiekcie()
+        if not symbol:
+            messagebox.showinfo(
+                "Zdjęcie",
+                "Najpierw zapisz kartotekę do Subiekta — zdjęcie podpina się\n"
+                "do istniejącej kartoteki.", parent=self)
+            return
+        try:
+            from PIL import ImageGrab, ImageTk
+        except ImportError as e:
+            messagebox.showerror("Zrzut ekranu",
+                                 "Brak biblioteki Pillow:\n%s" % e, parent=self)
+            return
+
+        # Zrzut CAŁEGO pulpitu RAZ, zanim zasłonimy go nakładką — zaznaczanie
+        # odbywa się potem na nieruchomym obrazie, więc nic nie migocze.
+        try:
+            pulpit = ImageGrab.grab(all_screens=True)
+        except Exception as e:
+            messagebox.showerror("Zrzut ekranu",
+                                 "Nie udało się zrobić zrzutu:\n%s" % e, parent=self)
+            return
+
+        vx, vy = self.winfo_vrootx(), self.winfo_vrooty()
+        szer, wys = self.winfo_vrootwidth(), self.winfo_vrootheight()
+
+        nakladka = tk.Toplevel(self)
+        nakladka.overrideredirect(True)
+        nakladka.geometry("%dx%d+%d+%d" % (szer, wys, vx, vy))
+        nakladka.attributes("-topmost", True)
+        # Półprzezroczysta: user widzi, co zaznacza, a wie, że jest w trybie
+        # wycinania. Kursor krzyżykowy — jak w każdym narzędziu do zrzutów.
+        try:
+            nakladka.attributes("-alpha", 0.30)
+        except tk.TclError:
+            pass
+        nakladka.config(cursor="crosshair", bg="black")
+        plotno = tk.Canvas(nakladka, bg="black", highlightthickness=0,
+                           cursor="crosshair")
+        plotno.pack(fill=tk.BOTH, expand=True)
+        tk.Label(nakladka, text="Zaznacz fragment myszą  ·  Esc — anuluj",
+                 bg="#ffffe0", fg="black", font=("Arial", 11, "bold"),
+                 padx=10, pady=4).place(x=20, y=20)
+
+        stan = {"x0": 0, "y0": 0, "ramka": None}
+
+        def start(e):
+            stan["x0"], stan["y0"] = e.x, e.y
+            if stan["ramka"] is not None:
+                plotno.delete(stan["ramka"])
+            stan["ramka"] = plotno.create_rectangle(e.x, e.y, e.x, e.y,
+                                                    outline="#e74c3c", width=2)
+
+        def ciagnij(e):
+            if stan["ramka"] is not None:
+                plotno.coords(stan["ramka"], stan["x0"], stan["y0"], e.x, e.y)
+
+        def koniec(e):
+            x0, y0 = stan["x0"], stan["y0"]
+            x1, y1 = e.x, e.y
+            nakladka.destroy()
+            lewo, prawo = sorted((x0, x1))
+            gora, dol = sorted((y0, y1))
+            if prawo - lewo < 8 or dol - gora < 8:
+                return                    # przypadkowe kliknięcie, nie wycinek
+            try:
+                # Współrzędne Tk są WZGLĘDEM nakładki, a ta stoi w (vx, vy)
+                # pulpitu wirtualnego — obraz z ImageGrab ma własny układ
+                # zaczynający się w jego lewym górnym rogu.
+                wycinek = pulpit.crop((lewo, gora, prawo, dol))
+            except Exception as ex:
+                messagebox.showerror("Zrzut ekranu",
+                                     "Nie udało się wyciąć:\n%s" % ex, parent=self)
+                return
+            self._podglad_wycinka(symbol, wycinek)
+
+        def anuluj(_e=None):
+            nakladka.destroy()
+
+        plotno.bind("<ButtonPress-1>", start)
+        plotno.bind("<B1-Motion>", ciagnij)
+        plotno.bind("<ButtonRelease-1>", koniec)
+        nakladka.bind("<Escape>", anuluj)
+        nakladka.focus_force()
+        plotno.focus_set()
+
+    def _podglad_wycinka(self, symbol, obraz):
+        """Pokazuje wycinek i pyta, zanim cokolwiek pójdzie do Subiekta.
+
+        „Nic po cichu": zrzut ekranu łatwo zrobić nie ten, a zdjęcie
+        w Subiekcie widzą wszyscy.
+        """
+        import io as _io
+        from PIL import ImageTk
+
+        bufor = _io.BytesIO()
+        obraz.save(bufor, format="PNG")
+        dane = bufor.getvalue()
+
+        okno = tk.Toplevel(self)
+        okno.title("Wysłać ten wycinek?")
+        okno.transient(self)
+        okno.grab_set()
+        podglad = obraz.copy()
+        podglad.thumbnail((640, 480))
+        obrazek = ImageTk.PhotoImage(podglad)
+        tk.Label(okno, image=obrazek, bd=1, relief=tk.SOLID).pack(padx=10, pady=10)
+        okno._obrazek = obrazek           # referencja — inaczej Tk ją zwolni
+        tk.Label(okno, text="Kartoteka:  %s        %dx%d px,  %.1f kB"
+                            % (symbol, obraz.width, obraz.height, len(dane) / 1024),
+                 font=("Arial", 10)).pack(pady=(0, 6))
+        pasek = tk.Frame(okno)
+        pasek.pack(pady=(0, 10))
+        wynik = {"ok": False}
+
+        def wyslij():
+            wynik["ok"] = True
+            okno.destroy()
+
+        tk.Button(pasek, text="📷 Wyślij do Subiekta", command=wyslij,
+                  bg="#1e8449", fg="white", font=("Arial", 10, "bold"),
+                  padx=14, pady=5, cursor="hand2").pack(side=tk.LEFT, padx=6)
+        tk.Button(pasek, text="Anuluj", command=okno.destroy,
+                  font=("Arial", 10), padx=14, pady=5).pack(side=tk.LEFT, padx=6)
+        okno.bind("<Return>", lambda _e: wyslij())
+        okno.bind("<Escape>", lambda _e: okno.destroy())
+        self.wait_window(okno)
+        if not wynik["ok"]:
+            return
+
+        from datetime import datetime as _dt
+        nazwa = "zrzut_%s.png" % _dt.now().strftime("%Y%m%d_%H%M%S")
+        self._wyslij_zdjecie(symbol, nazwa, "png", dane)
+
+    #: Górny limit zdjęcia wysyłanego do Subiekta. ORYGINAŁ LĄDUJE W BAZIE
+    #: W CAŁOŚCI (sprawdzone 27.09.2026: ZK2.jpg 126,7 kB -> RozmiarBajty
+    #: 129 699), więc bez limitu zdjęcia z telefonu (3-8 MB) rozdęłyby bazę.
+    #: 200 kB w zupełności wystarcza, żeby rozpoznać detal.
+    FOTO_MAX_B = 200 * 1024
+
+    def _skompresuj(self, dane, nazwa, typ):
+        """(dane, nazwa, typ) zmieszczone w FOTO_MAX_B. Bez strat, gdy się mieści.
+
+        Najpierw zmniejszamy WYMIARY (to daje największy zysk), potem
+        schodzimy z jakością JPEG. PNG-i ze zrzutu ekranu przechodzą na JPEG
+        dopiero wtedy, gdy inaczej się nie da — zrzut tekstu/rysunku jest
+        czytelniejszy w PNG, ale 8 MB PNG w bazie to zła zamiana.
+
+        Gdy Pillow nie ma albo plik nie jest obrazem — oddajemy jak jest;
+        wysyłkę i tak rozstrzygnie Subiekt.
+        """
+        if len(dane) <= self.FOTO_MAX_B:
+            return dane, nazwa, typ
+        try:
+            import io as _io
+            from PIL import Image
+        except ImportError:
+            return dane, nazwa, typ
+        try:
+            obraz = Image.open(_io.BytesIO(dane))
+            obraz.load()
+        except Exception:
+            return dane, nazwa, typ
+
+        przezroczyste = obraz.mode in ("RGBA", "LA", "P")
+        for bok in (2000, 1600, 1200, 900, 700):
+            maly = obraz.copy()
+            maly.thumbnail((bok, bok))
+            # PNG bez straty jakości — próbujemy, dopóki obraz ma
+            # przezroczystość albo jest zrzutem (ostre krawędzie tekstu).
+            if przezroczyste:
+                buf = _io.BytesIO()
+                maly.save(buf, format="PNG", optimize=True)
+                if buf.tell() <= self.FOTO_MAX_B:
+                    return buf.getvalue(), nazwa, typ
+                maly = maly.convert("RGB")     # dalej już tylko JPEG
+            elif maly.mode != "RGB":
+                maly = maly.convert("RGB")
+            for jakosc in (85, 75, 65, 55):
+                buf = _io.BytesIO()
+                maly.save(buf, format="JPEG", quality=jakosc, optimize=True)
+                if buf.tell() <= self.FOTO_MAX_B:
+                    import os as _os
+                    return (buf.getvalue(),
+                            _os.path.splitext(nazwa)[0] + ".jpg", "jpg")
+        # Nie zeszło poniżej limitu — oddajemy najmniejsze, co wyszło.
+        buf = _io.BytesIO()
+        maly = obraz.copy()
+        maly.thumbnail((700, 700))
+        if maly.mode != "RGB":
+            maly = maly.convert("RGB")
+        maly.save(buf, format="JPEG", quality=55, optimize=True)
+        import os as _os
+        return buf.getvalue(), _os.path.splitext(nazwa)[0] + ".jpg", "jpg"
+
+    def _wyslij_zdjecie(self, symbol, nazwa, typ, dane):
+        """Wspólna wysyłka bajtów do galerii — dla pliku i dla zrzutu ekranu."""
+        import base64
+        # KOMPRESJA PRZED WYSŁANIEM — jedyna droga do Subiekta prowadzi tędy,
+        # więc limit obowiązuje tak samo plik z dysku i zrzut ekranu.
+        przed = len(dane)
+        dane, nazwa, typ = self._skompresuj(dane, nazwa, typ)
+        if len(dane) != przed:
+            # NIC PO CICHU: user ma wiedzieć, że wysyłamy co innego niż wybrał.
+            print("\u2139\ufe0f  Zdjęcie skompresowane: %.1f kB -> %.1f kB (%s)"
+                  % (przed / 1024, len(dane) / 1024, nazwa))
+            self.status.config(text="Zdjęcie skompresowane: %.1f kB → %.1f kB"
+                                    % (przed / 1024, len(dane) / 1024))
+        b64 = base64.b64encode(dane).decode("ascii")
+        self.config(cursor="watch")
+        self.status.config(text="Wysyłam zdjęcie do Subiekta…")
+        self.update_idletasks()
+
+        def robota():
+            wynik, blad = None, None
+            try:
+                import subiekt_bridge
+                wynik = subiekt_bridge.call(
+                    "zdjecie", {"plan": {"akcja": "dodaj", "symbol": symbol,
+                                         "nazwa": nazwa, "typ": typ,
+                                         "dane_b64": b64},
+                                "zapisz": True}, timeout=300, write=True)
+            except Exception as e:
+                blad = e
+            self.after(0, lambda: self._zdjecie_dodane(symbol, wynik, blad))
+
+        threading.Thread(target=robota, daemon=True).start()
+
     def _zdjecie_dodaj(self):
         """Wybór pliku i wysłanie go do galerii kartoteki (jako base64)."""
         symbol, _k = self._symbol_w_subiekcie()
@@ -4534,28 +4781,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             return
         try:
             with open(sciezka, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode("ascii")
+                dane = f.read()
         except Exception as e:
             messagebox.showerror("Zdjęcie", "Nie odczytano pliku:\n%s" % e, parent=self)
             return
-        self.config(cursor="watch")
-        self.status.config(text="Wysyłam zdjęcie do Subiekta…")
-        self.update_idletasks()
-
-        def robota():
-            wynik, blad = None, None
-            try:
-                import subiekt_bridge
-                wynik = subiekt_bridge.call(
-                    "zdjecie", {"plan": {"akcja": "dodaj", "symbol": symbol,
-                                         "nazwa": nazwa, "typ": typ,
-                                         "dane_b64": b64},
-                                "zapisz": True}, timeout=300, write=True)
-            except Exception as e:
-                blad = e
-            self.after(0, lambda: self._zdjecie_dodane(symbol, wynik, blad))
-
-        threading.Thread(target=robota, daemon=True).start()
+        self._wyslij_zdjecie(symbol, nazwa, typ, dane)
 
     def _zdjecie_dodane(self, symbol, wynik, blad):
         try:
