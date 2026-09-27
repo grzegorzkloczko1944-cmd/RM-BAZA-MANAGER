@@ -958,11 +958,24 @@ def uruchom(config):
     # jest dodatkiem (PLAN_MAG.md, sekcja 3).
     if config.get("port_mag"):
         try:
+            import uuid
             import rm_mag_http
+
+            def zlec(operacja, params):
+                # Zapis przez TEN SAM wątek roboczy co reszta — HTTP nie
+                # otwiera bazy do zapisu (jeden pisarz, PLAN_RM_SERWER §3).
+                odp = serwer.zleć({"cmd": "master-exec",
+                                   "args": {"operation": operacja, "params": params},
+                                   "request_id": str(uuid.uuid4()),
+                                   "kto": {"user": "MAG-HTTP", "host": "http"}})
+                if not odp.get("ok"):
+                    raise RuntimeError(odp.get("blad") or "zapis odrzucony")
+                return odp.get("data")
+
             rm_mag_http.uruchom_w_tle(config.get("baza_subiekt"),
-                                        config.get("baza_mapowania"),
-                                        config["port_mag"], config["nasluch"],
-                                        log=log)
+                                      config.get("baza_mapowania"),
+                                      config["port_mag"], config["nasluch"],
+                                      log=log, zlec=zlec)
         except Exception as e:
             log("⚠️  MAG HTTP nie wystartował: %s" % e)
 

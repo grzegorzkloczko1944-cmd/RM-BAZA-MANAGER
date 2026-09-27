@@ -29,7 +29,14 @@ stacja: subiekt_kopia_sync.py ── sub-* ──► W2019S: subiekt_kopia.sqlit
 Wdrożenie wymaga restartu usługi RM_SERWER (uzgodnić) i otwarcia portu
 5061 w zaporze W2019S. Adresy: `/mag/status|szukaj|kartoteka|modele|miniatura`, klucz konfiguracji `port_mag`.
 
-**Otwarte:** kto/jak często uruchamia synchronizację.
+**Synchronizacja (27.09.2026):** RĘCZNA, ale nie z jednej maszyny.
+Przycisk „Synchronizuj" w MAG → `POST /mag/synchronizuj` → zlecenie
+w `zlecenia_sync` → RM_BAZA na stacji z mostem pyta co 30 s
+(`subiekt_kopia_zlecenia.py`) i przejmuje atomowo. **MONGO** (firma, szybki,
+dobre łącze) i **M-OLD** (dom) biorą od razu, inne stacje po 2 min.
+Z miniaturami = od nowa (zdjęcia dodane do istniejących kartotek).
+Praca w RM_BAZA/Subiekcie w trakcie: bez przeszkód; na stacji
+wykonującej zapytania do Subiekta +~0,1 s (wspólna kolejka mostu).
 
 Plan: `PLAN_MAG.md`, sekcja 6b. Powiązane:
 [[project_indeks_modeli_3d]], [[project_subiekt_most_stan_serwera]],

@@ -3517,3 +3517,83 @@ ZAPIS.update({
         ["co", "ile", "sekund", "kto", "komputer", "kiedy"],
     ),
 })
+
+
+# ── ZLECENIA SYNCHRONIZACJI (subiekt_kopia.sqlite) ───────────────────────
+#
+# Synchronizację kopii ZLECA serwer (przycisk w MAG → POST /mag/synchronizuj),
+# a WYKONUJE dowolna stacja z działającym mostem Sfery — RM_BAZA co 30 s
+# pyta o oczekujące zlecenie (`subiekt_kopia_zlecenia.py`). Decyzja
+# 27.09.2026: synchronizacja ręczna, ale nie przywiązana do jednej maszyny.
+#
+# Przejęcie jest ATOMOWE: `UPDATE … WHERE status='nowe'` wykonuje jeden
+# wątek serwera, więc z dwóch stacji wygrywa jedna (rowcount 1), druga
+# dostaje 0 i odpuszcza. Zlecenie porzucone w trakcie (stacja zamknięta,
+# uśpiona) po 30 min może przejąć inna.
+#
+# Statusy: nowe → w_toku → gotowe | blad.
+MIGRACJE_SUBIEKT_KOPIA.extend([
+    """CREATE TABLE IF NOT EXISTS zlecenia_sync (
+           id          INTEGER PRIMARY KEY AUTOINCREMENT,
+           miniatury   INTEGER NOT NULL DEFAULT 0,
+           status      TEXT NOT NULL DEFAULT 'nowe',
+           zlecil      TEXT,
+           zlecono     TEXT NOT NULL,
+           wykonawca   TEXT,
+           przejeto    TEXT,
+           postep      TEXT,
+           zakonczono  TEXT,
+           wynik       TEXT
+       )""",
+])
+
+#: Po tylu minutach zlecenie `w_toku` uznajemy za porzucone.
+_PORZUCONE = "datetime('now', 'localtime', '-30 minutes')"
+_TERAZ = "strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')"
+
+ODCZYT.update({
+    # `wiek_s` liczy SERWER — stacja nie porównuje własnego zegara z cudzym.
+    # Po nim stacja spoza listy preferowanych decyduje, czy już jej kolej.
+    "sub-zlecenie-oczekujace": (
+        "SELECT *, CAST((julianday('now', 'localtime')"
+        "       - julianday(REPLACE(zlecono, 'T', ' '))) * 86400 AS INTEGER) AS wiek_s"
+        "  FROM zlecenia_sync"
+        " WHERE status = 'nowe'"
+        "    OR (status = 'w_toku' AND REPLACE(przejeto, 'T', ' ') < " + _PORZUCONE + ")"
+        " ORDER BY id LIMIT 1",
+        [],
+    ),
+    "sub-zlecenie-ostatnie": (
+        "SELECT * FROM zlecenia_sync ORDER BY id DESC LIMIT 1",
+        [],
+    ),
+})
+
+ZAPIS.update({
+    # Nie zakłada drugiego, gdy jedno czeka albo trwa — kilka kliknięć
+    # „Synchronizuj" to jedna synchronizacja. rowcount 0 = już jest.
+    "sub-zlecenie-dodaj": (
+        "INSERT INTO zlecenia_sync (miniatury, status, zlecil, zlecono)"
+        " SELECT ?, 'nowe', ?, " + _TERAZ +
+        " WHERE NOT EXISTS (SELECT 1 FROM zlecenia_sync"
+        "                   WHERE status IN ('nowe', 'w_toku'))",
+        ["miniatury", "zlecil"],
+    ),
+    "sub-zlecenie-przejmij": (
+        "UPDATE zlecenia_sync SET status = 'w_toku', wykonawca = ?,"
+        "       przejeto = " + _TERAZ + ", postep = 'start'"
+        " WHERE id = ? AND (status = 'nowe'"
+        "   OR (status = 'w_toku' AND REPLACE(przejeto, 'T', ' ') < " + _PORZUCONE + "))",
+        ["wykonawca", "id"],
+    ),
+    "sub-zlecenie-postep": (
+        "UPDATE zlecenia_sync SET postep = ?"
+        " WHERE id = ? AND wykonawca = ? AND status = 'w_toku'",
+        ["postep", "id", "wykonawca"],
+    ),
+    "sub-zlecenie-zakoncz": (
+        "UPDATE zlecenia_sync SET status = ?, wynik = ?, zakonczono = " + _TERAZ +
+        " WHERE id = ? AND wykonawca = ?",
+        ["status", "wynik", "id", "wykonawca"],
+    ),
+})

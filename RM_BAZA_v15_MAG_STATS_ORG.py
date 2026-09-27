@@ -1561,6 +1561,16 @@ class MainWindow(tk.Tk):
         except Exception:
             pass
 
+        # Wykonawca zleceń synchronizacji kopii Subiekta dla makra MAG:
+        # co 30 s pyta serwer, czy ktoś kliknął „Synchronizuj". Tylko na
+        # stacji z mostem; MONGO/M-OLD biorą zlecenie od razu, inne po 2 min
+        # (subiekt_kopia_zlecenia). Wątek-demon, nie dotyka Tk.
+        try:
+            import subiekt_kopia_zlecenia
+            subiekt_kopia_zlecenia.uruchom_w_tle()
+        except Exception as e:
+            print(f"ℹ️  Zlecenia synchronizacji MAG nie wystartowały: {e}")
+
         # Wybór użytkownika (po prawej)
         self.user_var = tk.StringVar()
         self.user_combo = ttk.Combobox(

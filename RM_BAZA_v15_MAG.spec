@@ -72,6 +72,9 @@ hiddenimports += [
     # warstwa danych Subiekta
     'subiekt_bridge', 'subiekt_konfig', 'subiekt_asortyment', 'subiekt_dostawcy',
     'subiekt_mapowania', 'subiekt_podobne', 'subiekt_scalanie',
+    # kopia Subiekta dla makra MAG — wykonawca zlecen startuje leniwie
+    # w __init__ RM_BAZA; sync siega po subiekt_magazyn_gui (pobierz_magazyn)
+    'subiekt_kopia_zlecenia', 'subiekt_kopia_sync',
     # KSeF
     'ksef_api_client', 'ksef_archiwum', 'ksef_invoice_parser',
     # reszta lokalnych, tez leniwa
@@ -138,6 +141,7 @@ datas += [(f'{m}.py', '.') for m in (
     'subiekt_wydanie_gui', 'subiekt_raport_duplikatow',
     'subiekt_asortyment', 'subiekt_dostawcy', 'subiekt_mapowania',
     'subiekt_podobne', 'subiekt_scalanie', 'rm_kreciolek',
+    'subiekt_kopia_zlecenia', 'subiekt_kopia_sync',
 )]
 
 

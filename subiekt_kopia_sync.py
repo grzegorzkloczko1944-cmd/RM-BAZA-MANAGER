@@ -36,8 +36,6 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-sys.stdout.reconfigure(encoding="utf-8")       # polska konsola, cp1250
-
 import rm_klient
 
 #: Wierszy kartotek w jednym `master-batch` (~300 B na wiersz).
@@ -169,7 +167,11 @@ def miniatura_kartoteki(symbol):
     return numer, _typ_obrazka(dane, glowne.get("Typ")), b64
 
 
-def synchronizuj_miniatury(kartoteki, od_nowa=False, limit=0):
+def _nic(_tekst):
+    pass
+
+
+def synchronizuj_miniatury(kartoteki, od_nowa=False, limit=0, postep=_nic):
     znane = set()
     if not od_nowa:
         znane = {w["id_subiekt"] for w in rm_klient.master_read(
@@ -200,6 +202,8 @@ def synchronizuj_miniatury(kartoteki, od_nowa=False, limit=0):
         if len(paczka) >= PACZKA_MINIATUR:
             rm_klient.master_batch(paczka, timeout=120)
             paczka = []
+        if i % 100 == 0:
+            postep(f"miniatury {i}/{len(do_zrobienia)}, z obrazkiem {z_obrazkiem}")
         if i % 200 == 0:
             print(f"   … {i}/{len(do_zrobienia)}  z obrazkiem {z_obrazkiem}"
                   f"  ({time.time() - t0:.0f}s)")
@@ -214,7 +218,45 @@ def synchronizuj_miniatury(kartoteki, od_nowa=False, limit=0):
     return z_obrazkiem, len(bledy)
 
 
+def synchronizuj(z_miniaturami=True, miniatury_od_nowa=False, limit_miniatur=0,
+                 postep=_nic):
+    """Cała synchronizacja. Zwraca jednolinijkowy opis wyniku.
+
+    Wołane z konsoli (`main`) i przez wykonawcę zleceń w RM_BAZA
+    (`subiekt_kopia_zlecenia`). `postep(tekst)` dostaje krótkie komunikaty
+    — wykonawca odsyła je na serwer, a MAG pokazuje na pasku.
+    Rzuca przy błędzie; pusty katalog z mostu to też błąd.
+    """
+    t0 = time.time()
+    postep("czytam katalog i stany z Subiekta")
+    kartoteki, ze_stanem = czytaj_kartoteki()
+    t_odczyt = time.time() - t0
+    print(f"\n1. Subiekt: {len(kartoteki)} kartotek, stany dla {ze_stanem}"
+          f"  ({t_odczyt:.1f}s)")
+    if not kartoteki:
+        # Pusty katalog to prawie na pewno awaria mostu, nie pusty Subiekt —
+        # podmiana wyczyściłaby kopię na serwerze.
+        raise RuntimeError("most zwrócił pusty katalog — kopii NIE podmieniono")
+
+    t1 = time.time()
+    postep(f"wysyłam {len(kartoteki)} kartotek na serwer")
+    wyslij_kartoteki(kartoteki, t_odczyt)
+    print(f"\n2. Serwer: kopia kartotek podmieniona  ({time.time() - t1:.1f}s)")
+    opis = f"kartotek {len(kartoteki)}"
+
+    if z_miniaturami:
+        z_obrazkiem, bledy = synchronizuj_miniatury(
+            kartoteki, miniatury_od_nowa, limit_miniatur, postep)
+        opis += f", miniatur z obrazkiem {z_obrazkiem}"
+        if bledy:
+            opis += f", błędów {bledy}"
+    opis += f" ({time.time() - t0:.0f} s)"
+    print(f"\nGotowe: {opis}")
+    return opis
+
+
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")       # polska konsola, cp1250
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--serwer", help="host:port RM_SERWER (domyślnie z sync_config.json)")
@@ -230,26 +272,11 @@ def main():
     print("KOPIA SUBIEKTA -> SERWER")
     print(f"   {rm_klient.opis()}")
     print("=" * 72)
-
-    t0 = time.time()
-    kartoteki, ze_stanem = czytaj_kartoteki()
-    t_odczyt = time.time() - t0
-    print(f"\n1. Subiekt: {len(kartoteki)} kartotek, stany dla {ze_stanem}"
-          f"  ({t_odczyt:.1f}s)")
-    if not kartoteki:
-        # Pusty katalog to prawie na pewno awaria mostu, nie pusty Subiekt —
-        # podmiana wyczyściłaby kopię na serwerze.
-        print("   ⛔ Most zwrócił pusty katalog — NIE podmieniam kopii.")
+    try:
+        synchronizuj(not a.bez_miniatur, a.miniatury_od_nowa, a.limit_miniatur)
+    except RuntimeError as e:
+        print(f"   ⛔ {e}")
         return 1
-
-    t1 = time.time()
-    wyslij_kartoteki(kartoteki, t_odczyt)
-    print(f"\n2. Serwer: kopia kartotek podmieniona  ({time.time() - t1:.1f}s)")
-
-    if not a.bez_miniatur:
-        synchronizuj_miniatury(kartoteki, a.miniatury_od_nowa, a.limit_miniatur)
-
-    print(f"\nGotowe w {time.time() - t0:.0f}s.")
     return 0
 
 

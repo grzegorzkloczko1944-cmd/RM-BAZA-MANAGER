@@ -9,9 +9,11 @@ czego w VBA praktycznie nie da się zrobić. `MSXML2.XMLHTTP` umie HTTP GET —
 stąd ten serwer (PLAN_MAG.md, sekcja 3; ustalenia: osobny port,
 bez uwierzytelniania, sieć lokalna, sam odczyt).
 
-⚠️ NIGDY ZAPISU. Bazy otwierane są `mode=ro`, a serwer zna tylko GET.
-Dane pisze wyłącznie wątek roboczy RM_SERWER (synchronizacja ze stacji —
-`subiekt_kopia_sync.py`, indeks modeli — `indeks_modeli_3d.py`).
+⚠️ HTTP NIE PISZE DO BAZ. Bazy otwierane są `mode=ro`. Jedyny wyjątek to
+`POST /mag/synchronizuj` — i on też nie pisze sam: przekazuje operację
+`sub-zlecenie-dodaj` do wątku roboczego RM_SERWER (jeden pisarz, jak
+wszystko inne). Dane kopii pisze stacja z mostem (`subiekt_kopia_sync.py`
+przez `subiekt_kopia_zlecenia.py`), indeks modeli — `indeks_modeli_3d.py`.
 
 ADRESY (wszystkie GET, odpowiedź JSON; `&format=tsv` = tekst dla VBA)
 
@@ -20,6 +22,8 @@ ADRESY (wszystkie GET, odpowiedź JSON; `&format=tsv` = tekst dla VBA)
     /mag/kartoteka?symbol=016-100.03
     /mag/modele?symbol=016-100.03   pliki .ipt/.iam do wstawienia
     /mag/miniatura?symbol=016-100.03   obrazek (image/png, image/jpeg…)
+    POST /mag/synchronizuj?miniatury=1&kto=GKI   zlecenie synchronizacji —
+                                      wykona stacja z mostem (MONGO pierwsza)
 
 TSV: pierwszy wiersz = nazwy kolumn, dalej po wierszu na rekord, pola
 rozdzielone TAB. Tabulatory i końce linii w danych zamieniane na spację —
@@ -242,10 +246,20 @@ def status(bazy):
             modeli = con.execute(
                 "SELECT COUNT(DISTINCT numer_rysunku) FROM map.modele_3d"
                 " WHERE sciezka != ''").fetchone()[0]
+        z = {}
+        try:
+            z = dict(con.execute("SELECT * FROM zlecenia_sync"
+                                 " ORDER BY id DESC LIMIT 1").fetchone() or {})
+        except sqlite3.Error:
+            pass                          # baza sprzed tabeli zleceń
         # Płasko, nie zagnieżdżone — TSV dla VBA nie niesie słowników.
         return {"kartotek": ile, "miniatur": mini, "rysunkow_z_modelem": modeli,
                 "kartoteki_z": ostatnie.get("kartoteki"),
-                "miniatury_z": ostatnie.get("miniatury")}
+                "miniatury_z": ostatnie.get("miniatury"),
+                "zlecenie_id": z.get("id"), "zlecenie_status": z.get("status"),
+                "zlecenie_wykonawca": z.get("wykonawca"),
+                "zlecenie_postep": z.get("postep"), "zlecenie_wynik": z.get("wynik"),
+                "zlecenie_zlecono": z.get("zlecono")}
     finally:
         con.close()
 
@@ -264,7 +278,7 @@ def _tsv(wiersze, kolumny):
     return "\n".join(linie) + "\n"
 
 
-def zbuduj_handler(bazy, log):
+def zbuduj_handler(bazy, log, zlec=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "RM_MAG/1.0"
 
@@ -291,6 +305,31 @@ def zbuduj_handler(bazy, log):
             else:
                 self._wyslij(kod, json.dumps(dane, ensure_ascii=False),
                              "application/json; charset=utf-8")
+
+        def do_POST(self):
+            url = urlparse(self.path)
+            p = {k: v[0] for k, v in parse_qs(url.query).items()}
+            tsv = p.get("format", "").lower() == "tsv"
+            if url.path.rstrip("/") != "/mag/synchronizuj":
+                self._dane(404, {"blad": "nieznany adres"}, tsv)
+                return
+            if zlec is None:
+                self._dane(503, {"blad": "serwer bez obsługi zleceń"}, tsv)
+                return
+            try:
+                kto = (p.get("kto") or "MAG").strip()[:40]
+                wynik = zlec("sub-zlecenie-dodaj", {
+                    "miniatury": 1 if p.get("miniatury") in ("1", "tak") else 0,
+                    "zlecil": "%s@%s" % (kto, self.client_address[0])})
+                nowe = bool((wynik or {}).get("rowcount"))
+                log("MAG: zlecenie synchronizacji od %s@%s — %s" % (
+                    kto, self.client_address[0], "nowe" if nowe else "już było"))
+                self._dane(200, {"zlecono": int(nowe),
+                                 "komunikat": "zlecono" if nowe else
+                                 "synchronizacja już czeka albo trwa"}, tsv)
+            except Exception as e:
+                log("⚠️  MAG HTTP POST %s: %s" % (self.path, e))
+                self._dane(500, {"blad": "%s: %s" % (type(e).__name__, e)}, tsv)
 
         def do_GET(self):
             t0 = time.time()
@@ -352,14 +391,15 @@ def zbuduj_handler(bazy, log):
     return Handler
 
 
-def uruchom_w_tle(kopia, mapowania, port, nasluch="0.0.0.0", log=_log_domyslny):
+def uruchom_w_tle(kopia, mapowania, port, nasluch="0.0.0.0", log=_log_domyslny,
+                  zlec=None):
     """Startuje serwer w wątku-demonie. Zwraca serwer albo None przy błędzie.
 
     Błąd portu NIE przewraca RM_SERWER — makro to dodatek, a 5060 ma działać.
     """
     try:
         srv = ThreadingHTTPServer((nasluch, port),
-                                  zbuduj_handler(Bazy(kopia, mapowania), log))
+                                  zbuduj_handler(Bazy(kopia, mapowania), log, zlec))
     except OSError as e:
         log("⛔ MAG HTTP: nie mogę zająć portu %d: %s" % (port, e))
         return None
