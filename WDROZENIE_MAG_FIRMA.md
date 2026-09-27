@@ -60,7 +60,7 @@ Grzegorzowi. Bez tego MONGO i tak przejmie zlecenie, ale dopiero po 2 minutach.
 `C:\RMPAK_CLIENT\sync_config.json`, sekcja `paths`) — to korzeń folderów
 projektów, w którym RM_BAZA szuka rysunków DWF (miniatury w arkuszu, zdjęcia
 kartotek przy zasiewie, wyszukiwarka plików). Projekty leżą **bezpośrednio
-w `V:\`** (np. `V:³7 Feniks Z 25L`). Na M-OLD stało `V:/SERVER_PROJEKTY`
+w `V:\`** (np. `V:\2637 Feniks Z 25L`). Na M-OLD stało `V:/SERVER_PROJEKTY`
 i 28.09.2026 zasiew 2637 dostał miniatury tylko z biblioteki (74 z 348).
 Jeśli w firmie też wskazuje na nieistniejący folder — pokaż Grzegorzowi,
 popraw w RM_BAZA: Ustawienia → Konfiguracja ścieżek → „Serwer projekty"
