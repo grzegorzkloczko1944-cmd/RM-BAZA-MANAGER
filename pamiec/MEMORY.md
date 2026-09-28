@@ -1,5 +1,6 @@
 # Memory Index
 
+- [⚠ FIRMA: lista po 29.09](project_firma_do_zrobienia_29_09.md) — serwer+MONGO+MAG.vba, oringi zasiew, zdjęcia oringów czekają na zgodę
 - [Linia Produkcyjna — implementacja](project_linia_feature.md) — lockowanie linii, propagacja etapów równoległych, multi-projekt integracja
 - [Optimizer Readiness — wskaźnik gotowości](project_optimizer_readiness.md) — ⚡ w selektorze, check_optimizer_readiness(), warunek: staff w stage_staff_assignments
 - [Ścieżki do bazy danych](reference_db_paths.md) — realnie z sync_config.json (Y:/RM_BAZA/), locki w Y:/RM_BAZA/locks/
