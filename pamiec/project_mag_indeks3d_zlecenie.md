@@ -30,3 +30,14 @@ skrypt na serwerze, serwer odpala, korzysta z działającego komputera usera"
 
 Powiązane: [[project_indeks_modeli_3d]], [[project_mag_kopia_subiekta_http]],
 [[project_mag_wdrozenie_firma_todo]]
+
+## Miniatury modeli 3D (28.09.2026)
+Kolumna „3D" w MAG pokazuje obrazek modelu (decyzja usera: zamiast napisu).
+Miniatura siedzi W PLIKU Inventora: właściwość 17 (VT_CF, CF_METAFILEPICT)
+w strumieniu `\x05Zrxrt4arFafyu34gYa3l3ohgHg`. Nowsze pliki: PNG wprost za
+8-bajtowym nagłówkiem; starsze: WMF z jednym rekordem DIBBITBLT (0x0940) →
+bitmapa → PNG. pywin32 nie czyta VT_CF (`ReadMultiple` rzuca) — parsujemy
+strumień ręcznie. Otwierać STGM_TRANSACTED|SHARE_DENY_NONE (bez TRANSACTED
+= „nieprawidłowa flaga"). Tabela `miniatury_3d` w KOPII (nie w mapowaniach —
+20 backupów × ~60 MB). Bez miniatury ~0,6% — pliki handlowe (user potwierdził),
+Windows też ich nie ma (WTS_E_FAILEDEXTRACTION); zostaje napis „3D".

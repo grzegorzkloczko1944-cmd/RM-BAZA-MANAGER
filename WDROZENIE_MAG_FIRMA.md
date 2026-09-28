@@ -269,6 +269,14 @@ Raport pokaż Grzegorzowi (konflikty kopii, Part Number ≠ numer), potem
 minut; kolejne tylko zmienione rysunki. Postęp widać na pasku MAG („3D: …").
 Szczegóły: `PLAN_MAG.md`, sekcja 6a; pamięć `project_mag_indeks3d_zlecenie`.
 
+**Miniatury modeli 3D** (krok 6 tego samego zlecenia): po indeksie skrypt
+czyta miniaturę z każdego .ipt/.iam (bez Inventora) do tabeli `miniatury_3d`
+w `subiekt_kopia.sqlite` (klucz = ścieżka modelu, `mtime` pliku). W MAG
+kolumna „3D" pokazuje wtedy obrazek modelu. Na M-OLD: 16 483 modele w 78 s,
+bez miniatury 0,6% (pliki handlowe — zostaje napis „3D"); drugi przebieg 1 s.
+W wyniku zlecenia szukaj końcówki `| miniatury 3D: modeli N, zapisano M…`.
+Na `B:` po sieci pierwszy przebieg potrwa dłużej — to normalne.
+
 ## Krok 10 — na koniec
 
 - Zapisz w `pamiec/` notatkę o przebiegu wdrożenia (co wyszło inaczej niż

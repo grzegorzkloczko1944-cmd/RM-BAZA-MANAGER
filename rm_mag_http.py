@@ -22,6 +22,7 @@ ADRESY (wszystkie GET, odpowiedź JSON; `&format=tsv` = tekst dla VBA)
     /mag/kartoteka?symbol=016-100.03
     /mag/modele?symbol=016-100.03   pliki .ipt/.iam do wstawienia
     /mag/miniatura?symbol=016-100.03   obrazek (image/png, image/jpeg…)
+    /mag/miniatura3d?symbol=016-100.03 miniatura MODELU 3D (z pliku .ipt/.iam)
     /mag/lozyska?q=600|688|20x42&d=&dz=&b=&seria=&na_stanie=1
                                       katalog łożysk kulkowych + stan w Subiekcie
     POST /mag/synchronizuj?miniatury=1&kto=GKI   zlecenie synchronizacji —
@@ -69,7 +70,7 @@ TYPY_OBRAZKOW = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
 #: Kolumny wyniku wyszukiwania — kolejność = kolejność w TSV.
 KOLUMNY_SZUKAJ = ["symbol", "nazwa", "opis", "rodzaj", "dostepne",
                   "zarezerwowane", "cena", "ma_miniature", "modeli",
-                  "bez_modelu", "id", "lozysko", "wymiary"]
+                  "bez_modelu", "ma_mini3d", "id", "lozysko", "wymiary"]
 
 #: Skrypty, które stacje pobierają z serwera i uruchamiają na zlecenie.
 SKRYPTY_DLA_STACJI = {"indeks_modeli_3d.py"}
@@ -201,13 +202,17 @@ def _modele_sql(ma_modele):
     a symbol kartoteki detalu RMPAK = numer rysunku.
     """
     if not ma_modele:
-        return "NULL AS modeli, NULL AS bez_modelu"
+        return "NULL AS modeli, NULL AS bez_modelu, 0 AS ma_mini3d"
     return ("(SELECT COUNT(*) FROM map.modele_3d m"
             "  WHERE m.numer_rysunku = UPPER(TRIM(k.symbol)) AND m.sciezka != '')"
             "   AS modeli,"
             " (SELECT COUNT(*) FROM map.modele_3d m"
             "  WHERE m.numer_rysunku = UPPER(TRIM(k.symbol)) AND m.sciezka = '')"
-            "   AS bez_modelu")
+            "   AS bez_modelu,"
+            " EXISTS (SELECT 1 FROM map.modele_3d m JOIN miniatury_3d t"
+            "         ON t.sciezka = m.sciezka"
+            "  WHERE m.numer_rysunku = UPPER(TRIM(k.symbol)) AND t.dane_b64 != '')"
+            "   AS ma_mini3d")
 
 
 def szukaj(bazy, q, limit):
@@ -377,6 +382,29 @@ def miniatura(bazy, symbol):
             "  JOIN kartoteki k ON k.id = z.id_subiekt"
             " WHERE k.symbol = ? COLLATE NOCASE AND z.dane_b64 != ''",
             (symbol.strip(),)).fetchone()
+        if w is None:
+            return None
+        typ = (w["typ"] or "png").lower().lstrip(".")
+        return base64.b64decode(w["dane_b64"]), TYPY_OBRAZKOW.get(typ, "image/png")
+    finally:
+        con.close()
+
+
+def miniatura3d(bazy, symbol):
+    """(bajty, content-type) miniatury modelu 3D kartoteki albo None.
+
+    Pierwszy model (wg `kolejnosc`), który ma miniaturę w `miniatury_3d`.
+    """
+    con, ma_modele = bazy.polacz()
+    try:
+        if not ma_modele:
+            return None
+        w = con.execute(
+            "SELECT t.typ, t.dane_b64 FROM map.modele_3d m"
+            "  JOIN miniatury_3d t ON t.sciezka = m.sciezka"
+            " WHERE m.numer_rysunku = ? AND t.dane_b64 != ''"
+            " ORDER BY m.kolejnosc, m.sciezka LIMIT 1",
+            (symbol.strip().upper(),)).fetchone()
         if w is None:
             return None
         typ = (w["typ"] or "png").lower().lstrip(".")
@@ -556,6 +584,12 @@ def zbuduj_handler(bazy, log, zlec=None):
                                      "text/plain; charset=utf-8")
                     else:
                         self._dane(200, d, False)
+                elif sciezka == "/mag/miniatura3d":
+                    m = miniatura3d(bazy, p.get("symbol", ""))
+                    if m is None:
+                        self._wyslij(404, b"", "text/plain")
+                    else:
+                        self._wyslij(200, m[0], m[1])
                 elif sciezka == "/mag/miniatura":
                     m = miniatura(bazy, p.get("symbol", ""))
                     if m is None:
@@ -567,7 +601,8 @@ def zbuduj_handler(bazy, log, zlec=None):
                                      "adresy": ["/mag/status", "/mag/szukaj?q=",
                                                 "/mag/kartoteka?symbol=",
                                                 "/mag/modele?symbol=",
-                                                "/mag/miniatura?symbol="]}, tsv)
+                                                "/mag/miniatura?symbol=",
+                                                "/mag/miniatura3d?symbol="]}, tsv)
             except FileNotFoundError as e:
                 self._dane(503, {"blad": str(e)}, tsv)
             except Exception as e:

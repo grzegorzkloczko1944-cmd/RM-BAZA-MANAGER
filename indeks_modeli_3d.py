@@ -48,9 +48,11 @@ Poprawka skryptu = podmiana tego pliku na serwerze, bez nowego .exe.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
+import struct
 import sys
 import time
 from datetime import datetime
@@ -311,6 +313,126 @@ def zapisz(grupy: list, pelny: bool) -> int:
     return zapisane
 
 
+# ── miniatury modeli ──────────────────────────────────────────────────────
+#
+# Inventor zapisuje miniaturę W PLIKU .ipt/.iam: właściwość 17 (Thumbnail)
+# w strumieniu właściwości OLE, typ VT_CF, format CF_METAFILEPICT (3).
+# Po 8-bajtowym nagłówku METAFILEPICT jest albo wprost PNG (nowsze pliki),
+# albo metaplik WMF z jedną bitmapą (rekord DIBBITBLT / STRETCHDIB) —
+# wyciągamy ją i zapisujemy jako PNG. Bez Inventora, sam odczyt pliku
+# (pomiar 28.09.2026: 511 modeli w 2,5 s, 96% z miniaturą).
+
+_PNG = b"\x89PNG\r\n\x1a\n"
+#: rekord WMF z bitmapą -> długość pól przed DIB (licząc od początku rekordu)
+_WMF_DIB = {0x0940: 22, 0x0B41: 26, 0x0F43: 28}
+
+#: Miniatur w jednym `master-batch` — każda to kilka–kilkanaście KB base64.
+PACZKA_MINIATUR = 40
+
+
+def _dib_na_png(dib: bytes) -> tuple:
+    """Bitmapa DIB (bez nagłówka pliku) -> ("png", bajty); bez Pillow -> BMP."""
+    bi_size, _w, _h, _pl, bity = struct.unpack_from("<IiiHH", dib, 0)
+    uzyte = struct.unpack_from("<I", dib, 32)[0] if bi_size >= 36 else 0
+    paleta = (uzyte or (1 << bity if bity <= 8 else 0)) * 4
+    bmp = (b"BM" + struct.pack("<IHHI", 14 + len(dib), 0, 0, 14 + bi_size + paleta)
+           + dib)
+    try:
+        import io
+        from PIL import Image
+        wyj = io.BytesIO()
+        Image.open(io.BytesIO(bmp)).save(wyj, "PNG", optimize=True)
+        return "png", wyj.getvalue()
+    except ImportError:
+        return "bmp", bmp
+
+
+def miniatura_modelu(sciezka: str) -> tuple:
+    """("png", bajty) — miniatura z pliku Inventora; ("", b"") gdy jej nie ma.
+
+    Wyjątek = pliku nie dało się przeczytać (zablokowany, uszkodzony) —
+    wtedy NIE zapisujemy „bez miniatury", następny przebieg spróbuje znowu.
+    """
+    import pythoncom
+    from win32com import storagecon as sc
+    # TRANSACTED + DENY_NONE: czytamy także plik otwarty w Inventorze.
+    stg = pythoncom.StgOpenStorage(
+        sciezka, None, sc.STGM_READ | sc.STGM_TRANSACTED | sc.STGM_SHARE_DENY_NONE, None, 0)
+    for nazwa, typ, rozmiar in (e[:3] for e in stg.EnumElements()):
+        if typ != 2 or not nazwa.startswith("\x05"):
+            continue
+        d = stg.OpenStream(nazwa, None, sc.STGM_READ | sc.STGM_SHARE_EXCLUSIVE, 0).Read(rozmiar)
+        if len(d) < 48:
+            continue
+        off = struct.unpack_from("<I", d, 44)[0]
+        n = struct.unpack_from("<I", d, off + 4)[0]
+        for i in range(n):
+            pid, po = struct.unpack_from("<II", d, off + 8 + 8 * i)
+            if pid != 17 or struct.unpack_from("<I", d, off + po)[0] != 0x47:
+                continue
+            ile = struct.unpack_from("<I", d, off + po + 4)[0]
+            dane = d[off + po + 16: off + po + 8 + ile]   # za znacznikiem formatu
+            k = dane.find(_PNG)
+            if k >= 0:
+                return "png", dane[k:]
+            wmf, poz = dane[8:], 18                        # za METAFILEPICT i nagł. WMF
+            while poz + 6 <= len(wmf):
+                dl, fn = struct.unpack_from("<IH", wmf, poz)
+                if dl == 0:
+                    break
+                if fn in _WMF_DIB:
+                    return _dib_na_png(wmf[poz + _WMF_DIB[fn]: poz + dl * 2])
+                poz += dl * 2
+            return "", b""
+    return "", b""
+
+
+def odswiez_miniatury(postep=lambda _t: None) -> str:
+    """Miniatury wszystkich modeli z indeksu -> `miniatury_3d` (kopia Subiekta).
+
+    Tylko nowe i zmienione pliki (po `mtime`) — drugi przebieg to same
+    `stat`-y. Zwraca jednolinijkowy opis.
+    """
+    sciezki = sorted({w["sciezka"] for w in
+                      rm_klient.master_read("map-model3d-wszystkie", timeout=120)
+                      if w["sciezka"]})
+    znane = {w["sciezka"]: w["mtime"] for w in
+             rm_klient.master_read("sub-mini3d-stan", timeout=120)}
+    kto, kiedy = os.environ.get("USERNAME") or "?", datetime.now().isoformat(timespec="seconds")
+    paczka, zapisane, bez, bledy, t0 = [], 0, 0, 0, time.time()
+    for i, s in enumerate(sciezki, 1):
+        if i % 500 == 0:
+            print(f"   … miniatury {i}/{len(sciezki)}  ({time.time() - t0:.0f}s)")
+            postep(f"miniatury 3D {i}/{len(sciezki)}")
+        try:
+            mtime = os.path.getmtime(s)
+        except OSError:
+            continue
+        if znane.get(s) == mtime:
+            continue
+        try:
+            typ, dane = miniatura_modelu(s)
+        except Exception:
+            bledy += 1
+            continue
+        bez += not dane
+        paczka.append({"operation": "sub-mini3d-zapisz", "params": {
+            "sciezka": s, "mtime": mtime, "typ": typ,
+            "dane_b64": base64.b64encode(dane).decode("ascii"),
+            "kto": kto, "kiedy": kiedy}})
+        if len(paczka) >= PACZKA_MINIATUR:
+            rm_klient.master_batch(paczka, timeout=120)
+            zapisane += len(paczka)
+            paczka = []
+    if paczka:
+        rm_klient.master_batch(paczka, timeout=120)
+        zapisane += len(paczka)
+    opis = ("miniatury 3D: modeli %d, zapisano %d (bez miniatury %d), nieczytelnych %d"
+            % (len(sciezki), zapisane, bez, bledy))
+    print(f"\n6. {opis}  ({time.time() - t0:.0f}s)")
+    return opis
+
+
 # ── raport ─────────────────────────────────────────────────────────────────
 
 def _nazwy(modele) -> set:
@@ -511,11 +633,20 @@ def przebieg(root, zapis=False, pelny=False, limit=0, raport=None, serwer=None,
             % (len(rysunki), bez_zmian, wynik["jeden"] + wynik["kilka"], wynik["brak"], len(bledy)))
     if not grupy and not pelny:
         print("\nNic do zapisania.")
-        return opis + " — nic nowego"
-    n = zapisz(grupy, pelny)
-    print(f"\n5. ZAPISANO: {n} wierszy dla {len(grupy)} rysunków"
-          f" -> subiekt_mapowania.sqlite / modele_3d")
-    return opis + ", zapisano %d" % len(grupy)
+        opis += " — nic nowego"
+    else:
+        n = zapisz(grupy, pelny)
+        print(f"\n5. ZAPISANO: {n} wierszy dla {len(grupy)} rysunków"
+              f" -> subiekt_mapowania.sqlite / modele_3d")
+        opis += ", zapisano %d" % len(grupy)
+    # 6. Miniatury — także gdy rysunki bez zmian: model zmienia się sam.
+    # Serwer bez tabeli miniatur (starsza wersja) nie psuje indeksu.
+    try:
+        opis += " | " + odswiez_miniatury(postep)
+    except rm_klient.BladSerwera as e:
+        print(f"\n6. ⚠️  miniatury 3D pominięte — serwer: {e}")
+        opis += " | miniatury 3D pominięte (serwer: %s)" % str(e)[:80]
+    return opis
 
 
 if __name__ == "__main__":

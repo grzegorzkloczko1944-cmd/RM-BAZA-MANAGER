@@ -50,3 +50,5 @@ krok awarii okna w `%TEMP%\MAG_okno_blad.txt` (`DebugListy()` w oknie).
 
 Powiązane: [[feedback_bez_hookow_vba]], [[feedback_makra_ivb_nazwa_mag]],
 [[project_mag_kopia_subiekta_http]]
+
+- MsgBox z okna MAG, gdy edytor VBA jest otwarty: po OK na wierzch wychodzi EDYTOR (okienko należy do niego) — wygląda jak „wywaliło do VBA", błędu brak. Dlatego „Synchronizuj 3D" bez pytania (28.09.2026); „Synchronizuj SUBIEKT" ma jeszcze MsgBox (TAK/NIE miniatury).

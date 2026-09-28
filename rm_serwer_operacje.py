@@ -3519,6 +3519,42 @@ ZAPIS.update({
 })
 
 
+# Miniatury MODELI 3D (.ipt/.iam) — dla kolumny „3D" w MAG (28.09.2026).
+# Klucz = ścieżka pliku modelu, dokładnie jak w `modele_3d.sciezka`
+# (subiekt_mapowania) — jeden model bywa wskazany przez kilka rysunków.
+# Obrazek siedzi W PLIKU Inventora (właściwość „Thumbnail"), czyta go skrypt
+# indeksu na stacji (`indeks_modeli_3d.odswiez_miniatury`) — bez Inventora.
+# `mtime` pliku: zmieniony model = nowa miniatura przy następnym indeksie.
+# Tu, nie w bazie mapowań: da się ją zawsze odtworzyć z plików, a mapowania
+# mają 20 backupów (~60 MB miniatur x 20).
+MIGRACJE_SUBIEKT_KOPIA.extend([
+    """CREATE TABLE IF NOT EXISTS miniatury_3d (
+           sciezka   TEXT PRIMARY KEY,
+           mtime     REAL,
+           typ       TEXT,
+           dane_b64  TEXT,          -- '' = plik BEZ miniatury
+           kto       TEXT,
+           kiedy     TEXT NOT NULL
+       )""",
+])
+
+ODCZYT.update({
+    "sub-mini3d-stan": (
+        "SELECT sciezka, mtime FROM miniatury_3d",
+        [],
+    ),
+})
+
+ZAPIS.update({
+    "sub-mini3d-zapisz": (
+        "INSERT OR REPLACE INTO miniatury_3d"
+        " (sciezka, mtime, typ, dane_b64, kto, kiedy)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        ["sciezka", "mtime", "typ", "dane_b64", "kto", "kiedy"],
+    ),
+})
+
+
 # ── ZLECENIA SYNCHRONIZACJI (subiekt_kopia.sqlite) ───────────────────────
 #
 # Synchronizację kopii ZLECA serwer (przycisk w MAG → POST /mag/synchronizuj),
