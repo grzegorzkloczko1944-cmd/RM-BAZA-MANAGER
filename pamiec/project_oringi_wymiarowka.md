@@ -57,9 +57,22 @@ Wysłane mailem na 98k@wp.pl (Outlook, `Display(False)` — user wysłał ręczn
   istniejącej kartoteki nie da się zmienić przez most, a scalanie byłoby
   nieproporcjonalne do literówki.
 
-## Co dalej (gdy będą modele)
+## Modele 3D — ZROBIONE (29.09.2026, M-OLD, Inventor 2013)
 
-Ta sama ścieżka co łożyska ([[project_lozyska_katalog_28_09]]): modele do
-biblioteki → `indeks_lozyska_zasiew.py` (przerobiony na katalog oringów,
-`zrodlo='reczny'`) → `odswiez_miniatury()` → synchronizacja kopii.
-Dziś oringi nie mają ani modeli 3D, ani zdjęć kartotek.
+`katalog_oringow/generuj_modele.py --zapisz` → **205 modeli** w
+`B:\Znormalizowane\Oringi\` (model na KARTOTEKĘ, nie na wymiar — materiał
+= kolor gumy). Metoda TOOLS++ „funkcja 18" (Module4 `TOOLS_CreateOring`):
+pierścień ID/OD=ID+2×przekrój, wysokość = przekrój, zaokrąglenie 0,4×przekrój.
+Kopia szablonu → Open(False) → Save (2013: Add+SaveAs pada err 5).
+Materiały usera: `EPDM`, `NBR-` (z myślnikiem!), `VITON`, `SILIKON`;
+FKM/FPM→VITON, VMQ/VQM→SILIKON, `OR-90X6` bez materiału → EPDM.
+Part Number = symbol kartoteki; plik = symbol z „/"→„x".
+Biały render 300×300 → `miniatury\`, lista `oringi_modele.csv`.
+⚠️ Zapis kopii szablonu zostawia `OldVersions\<plik>.0001.ipt` — generator
+je kasuje. Przerwany przebieg zostawia PUSTY plik otwarty niewidocznie
+w Inventorze — zamknąć `Close(True)` i usunąć (tak było z OR-25X6 VITON).
+
+`indeks_oringi_zasiew.py --zapisz` → 205 przypisań `zrodlo='reczny'` +
+205 białych miniatur (`mtime=-1`). Zrobione na serwerze DOMOWYM;
+**w firmie: skopiować `B:\Znormalizowane\Oringi` (jeśli dom≠firma) i odpalić
+zasiew tam.** Zdjęcia do SUBIEKTA — NIE wgrywane (osobna zgoda).
