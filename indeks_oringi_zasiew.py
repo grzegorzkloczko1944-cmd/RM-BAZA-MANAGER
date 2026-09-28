@@ -3,6 +3,8 @@
 
     python indeks_oringi_zasiew.py            # suchy przebieg — NIC nie zapisuje
     python indeks_oringi_zasiew.py --zapisz   # realny zapis (mapowania + miniatury MAG)
+    python indeks_oringi_zasiew.py --katalog "B:\\Znormalizowane\\Łożyska w oprawach" --lista lozyska_oprawy_modele.csv
+                                              # to samo dla łożysk w oprawach (katalog_opraw/)
 
 Po co (29.09.2026): modele oringów zrobił `katalog_oringow/generuj_modele.py`
 w `B:\\Znormalizowane\\Oringi` (205 plików, Part Number = symbol kartoteki).
@@ -38,9 +40,11 @@ def main():
     ap.add_argument("--zapisz", action="store_true", help="realny zapis (bez tego suchy przebieg)")
     ap.add_argument("--katalog", default=KATALOG)
     ap.add_argument("--serwer", help="host:port RM_SERWER (domyślnie z sync_config.json)")
+    ap.add_argument("--lista", default="oringi_modele.csv",
+                    help="lista w katalogu (np. lozyska_oprawy_modele.csv dla opraw)")
     a = ap.parse_args()
 
-    lista = os.path.join(a.katalog, "oringi_modele.csv")
+    lista = a.lista if os.path.isabs(a.lista) else os.path.join(a.katalog, a.lista)
     if not os.path.exists(lista):
         print("⛔ Brak listy %s — najpierw katalog_oringow/generuj_modele.py" % lista)
         return 1

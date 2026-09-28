@@ -163,3 +163,5 @@
 - [Wstaw z Subiekta w „Dodaj pozycję ręcznie"](project_wstaw_z_subiekta_recznie.md) — przycisk F4, szuka po symbolu/nazwie/OPISIE; osobne okno bez zapisu, filtr NIE w Indeks.szukaj
 - [Wymiarówka oringów](project_oringi_wymiarowka.md) — 205 żywych kartotek (28.09.2026, usunięto 8 martwych duplikatów); CSV w C:\iLogic; VITON=FKM=FPM to synonimy, nie błędy
 - [MAG: wstaw dwuklikiem + przypisz 3D](project_mag_wstaw_i_przypisz.md) — etap 4: „Umieść komponent” przez VBS (IE11 bez GetObject), ręczne przypisanie modelu, kFileNameEvent=6657
+- [Biblioteka: pytaj przed hurtem](feedback_biblioteka_pytaj_przed_hurtem.md) — hurtowe zmiany plików już w B: tylko po zgodzie; OldVersions kasować po potwierdzeniu
+- [Łożyska w oprawach z matis.sk](project_lozyska_w_oprawach.md) — 55 modeli UCP/UCF/UCFL/UCPA/BPFT; STEP import tylko w osobnym ukrytym Inventorze (wywracał sesję usera)
