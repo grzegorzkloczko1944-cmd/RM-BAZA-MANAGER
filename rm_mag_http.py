@@ -26,6 +26,9 @@ ADRESY (wszystkie GET, odpowiedź JSON; `&format=tsv` = tekst dla VBA)
                                       katalog łożysk kulkowych + stan w Subiekcie
     POST /mag/synchronizuj?miniatury=1&kto=GKI   zlecenie synchronizacji —
                                       wykona stacja z mostem (MONGO pierwsza)
+    POST /mag/synchronizuj3d?kto=GKI  zlecenie indeksu modeli 3D — wykona
+                                      dowolna stacja z Inventorem
+    /mag/skrypt/indeks_modeli_3d.py   skrypt dla stacji (biała lista)
 
 TSV: pierwszy wiersz = nazwy kolumn, dalej po wierszu na rekord, pola
 rozdzielone TAB. Tabulatory i końce linii w danych zamieniane na spację —
@@ -67,6 +70,9 @@ TYPY_OBRAZKOW = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
 KOLUMNY_SZUKAJ = ["symbol", "nazwa", "opis", "rodzaj", "dostepne",
                   "zarezerwowane", "cena", "ma_miniature", "modeli",
                   "bez_modelu", "id", "lozysko", "wymiary"]
+
+#: Skrypty, które stacje pobierają z serwera i uruchamiają na zlecenie.
+SKRYPTY_DLA_STACJI = {"indeks_modeli_3d.py"}
 
 #: Kolumny katalogu łożysk (/mag/lozyska) — kolejność = kolejność w TSV.
 KOLUMNY_LOZYSKA = ["oznaczenie", "seria", "d", "dz", "b", "wymiary", "cr_kn",
@@ -394,12 +400,16 @@ def status(bazy):
             modeli = con.execute(
                 "SELECT COUNT(DISTINCT numer_rysunku) FROM map.modele_3d"
                 " WHERE sciezka != ''").fetchone()[0]
-        z = {}
+        z, z3 = {}, {}
         try:
             z = dict(con.execute("SELECT * FROM zlecenia_sync"
+                                 " WHERE COALESCE(rodzaj, 'kopia') = 'kopia'"
                                  " ORDER BY id DESC LIMIT 1").fetchone() or {})
+            z3 = dict(con.execute("SELECT * FROM zlecenia_sync"
+                                  " WHERE rodzaj = 'indeks3d'"
+                                  " ORDER BY id DESC LIMIT 1").fetchone() or {})
         except sqlite3.Error:
-            pass                          # baza sprzed tabeli zleceń
+            pass                          # baza sprzed tabeli zleceń / kolumny
         # Płasko, nie zagnieżdżone — TSV dla VBA nie niesie słowników.
         return {"kartotek": ile, "miniatur": mini, "rysunkow_z_modelem": modeli,
                 "kartoteki_z": ostatnie.get("kartoteki"),
@@ -407,7 +417,10 @@ def status(bazy):
                 "zlecenie_id": z.get("id"), "zlecenie_status": z.get("status"),
                 "zlecenie_wykonawca": z.get("wykonawca"),
                 "zlecenie_postep": z.get("postep"), "zlecenie_wynik": z.get("wynik"),
-                "zlecenie_zlecono": z.get("zlecono")}
+                "zlecenie_zlecono": z.get("zlecono"),
+                "indeks_status": z3.get("status"), "indeks_wykonawca": z3.get("wykonawca"),
+                "indeks_postep": z3.get("postep"), "indeks_wynik": z3.get("wynik"),
+                "indeks_zlecono": z3.get("zlecono"), "indeks_zakonczono": z3.get("zakonczono")}
     finally:
         con.close()
 
@@ -458,20 +471,28 @@ def zbuduj_handler(bazy, log, zlec=None):
             url = urlparse(self.path)
             p = {k: v[0] for k, v in parse_qs(url.query).items()}
             tsv = p.get("format", "").lower() == "tsv"
-            if url.path.rstrip("/") != "/mag/synchronizuj":
+            sciezka = url.path.rstrip("/")
+            if sciezka not in ("/mag/synchronizuj", "/mag/synchronizuj3d"):
                 self._dane(404, {"blad": "nieznany adres"}, tsv)
                 return
+            indeks3d = sciezka == "/mag/synchronizuj3d"
             if zlec is None:
                 self._dane(503, {"blad": "serwer bez obsługi zleceń"}, tsv)
                 return
             try:
                 kto = (p.get("kto") or "MAG").strip()[:40]
-                wynik = zlec("sub-zlecenie-dodaj", {
-                    "miniatury": 1 if p.get("miniatury") in ("1", "tak") else 0,
-                    "zlecil": "%s@%s" % (kto, self.client_address[0])})
+                if indeks3d:
+                    wynik = zlec("sub-zlecenie-dodaj-rodzaj", {
+                        "miniatury": 0, "rodzaj": "indeks3d",
+                        "zlecil": "%s@%s" % (kto, self.client_address[0])})
+                else:
+                    wynik = zlec("sub-zlecenie-dodaj", {
+                        "miniatury": 1 if p.get("miniatury") in ("1", "tak") else 0,
+                        "zlecil": "%s@%s" % (kto, self.client_address[0])})
                 nowe = bool((wynik or {}).get("rowcount"))
-                log("MAG: zlecenie synchronizacji od %s@%s — %s" % (
-                    kto, self.client_address[0], "nowe" if nowe else "już było"))
+                log("MAG: zlecenie %s od %s@%s — %s" % (
+                    "indeks3d" if indeks3d else "synchronizacji", kto,
+                    self.client_address[0], "nowe" if nowe else "już było"))
                 self._dane(200, {"zlecono": int(nowe),
                                  "komunikat": "zlecono" if nowe else
                                  "synchronizacja już czeka albo trwa"}, tsv)
@@ -495,6 +516,17 @@ def zbuduj_handler(bazy, log, zlec=None):
                         limit = LIMIT_DOMYSLNY
                     self._dane(200, szukaj(bazy, p.get("q", ""), limit), tsv,
                                KOLUMNY_SZUKAJ)
+                elif sciezka.startswith("/mag/skrypt/"):
+                    # Skrypty wykonywane przez stacje na zlecenie serwera —
+                    # TYLKO z białej listy, z katalogu serwera. Stacja pobiera
+                    # je przy każdym zleceniu (decyzja usera 28.09.2026).
+                    nazwa = sciezka[len("/mag/skrypt/"):]
+                    plik = os.path.join(os.path.dirname(os.path.abspath(__file__)), nazwa)
+                    if nazwa not in SKRYPTY_DLA_STACJI or not os.path.isfile(plik):
+                        self._wyslij(404, b"", "text/plain")
+                    else:
+                        with open(plik, "rb") as f:
+                            self._wyslij(200, f.read(), "text/x-python; charset=utf-8")
                 elif sciezka == "/mag/lozyska":
                     def liczba(k):
                         try:

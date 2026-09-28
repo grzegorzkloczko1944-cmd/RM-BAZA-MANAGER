@@ -17,8 +17,17 @@ wyłączony, bez mostu). Z dwóch stacji naraz wygrywa jedna — przejęcie to
 `UPDATE … WHERE status='nowe'` na serwerze (rm_serwer_operacje, sekcja
 ZLECENIA SYNCHRONIZACJI).
 
-Wątek-demon, bez Tk. Stanowisko bez mostu (brak binarki albo konfiguracji
-Subiekta) — wątek w ogóle nie startuje. Błąd serwera albo mostu nie wychodzi
+INDEKS MODELI 3D (28.09.2026, decyzja usera): drugi rodzaj zlecenia,
+„indeks3d". Zakłada je serwer (co noc po 2:00) albo przycisk „Synchronizuj 3D"
+w MAG. Wykonuje DOWOLNA stacja z Inventorem — bez pierwszeństwa, żeby nie być
+przywiązanym do jednego komputera. Skrypt NIE jest częścią RM_BAZA: przy
+każdym zleceniu pobieramy aktualny `indeks_modeli_3d.py` z serwera
+(/mag/skrypt/...) do %TEMP%/RM_MAG i dopiero on decyduje (`moge_wykonac`),
+czy ta stacja się nadaje (biblioteka, wersja Inventora). Poprawka skryptu =
+podmiana pliku na serwerze, bez nowego .exe.
+
+Wątek-demon, bez Tk. Stanowisko bez mostu i bez Inventora — wątek w ogóle
+nie startuje. Błąd serwera albo mostu nie wychodzi
 do użytkownika: to praca w tle, a wynik (także błąd) trafia do zlecenia
 i widać go w MAG.
 """
@@ -64,6 +73,109 @@ def _jest_most():
         return False
 
 
+def _jest_inventor():
+    """Czy na tej stacji jest Inventor (zarejestrowany ApprenticeServer)."""
+    try:
+        import winreg
+        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, "Inventor.ApprenticeServer"))
+        return True
+    except Exception:
+        return False
+
+
+#: Port serwera HTTP MAG na tym samym hoście co RM_SERWER.
+PORT_MAG = 5061
+
+
+def pobierz_skrypt(nazwa="indeks_modeli_3d.py"):
+    """Świeży skrypt z serwera -> %TEMP%/RM_MAG/<nazwa> -> załadowany moduł.
+
+    Za KAŻDYM zleceniem od nowa (decyzja usera) — zawsze wersja z serwera.
+    importlib, nie runpy.run_path: funkcje modułu muszą mieć żywe globals
+    przez cały przebieg (moduł trzymamy w zwracanej referencji).
+    """
+    import importlib.util
+    import tempfile
+    import urllib.request
+    host = getattr(rm_klient, "_host", None) or rm_klient.DOMYSLNY_HOST
+    url = "http://%s:%d/mag/skrypt/%s" % (host, PORT_MAG, nazwa)
+    with urllib.request.urlopen(url, timeout=30) as r:
+        dane = r.read()
+    katalog = os.path.join(tempfile.gettempdir(), "RM_MAG")
+    os.makedirs(katalog, exist_ok=True)
+    plik = os.path.join(katalog, nazwa)
+    with open(plik, "wb") as f:
+        f.write(dane)
+    spec = importlib.util.spec_from_file_location("mag_" + nazwa[:-3], plik)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _postep_zlecenia(zlecenie, kto):
+    """Funkcja postępu odsyłająca krótkie komunikaty do zlecenia (co 5 s)."""
+    ostatnio = [0.0]
+
+    def postep(tekst):
+        if time.time() - ostatnio[0] < POSTEP_CO_S:
+            return
+        ostatnio[0] = time.time()
+        try:
+            rm_klient.master_exec("sub-zlecenie-postep", {
+                "postep": tekst, "id": zlecenie["id"], "wykonawca": kto})
+        except Exception:
+            pass                         # pasek w MAG — nie powód do przerwania
+    return postep
+
+
+def _zakoncz(zlecenie, kto, status, opis, co):
+    try:
+        rm_klient.master_exec("sub-zlecenie-zakoncz", {
+            "status": status, "wynik": opis[:500], "id": zlecenie["id"],
+            "wykonawca": kto})
+    except Exception as e:
+        print("⚠️  Zlecenie %s %s: nie odnotowano końca: %s" % (co, zlecenie["id"], e))
+    print("ℹ️  %s (zlecenie %s): %s — %s" % (co, zlecenie["id"], status, opis))
+
+
+_odmowy_3d = set()                        # id zleceń, których ta stacja nie weźmie
+
+
+def wykonaj_indeks3d(zlecenie, kto):
+    """Zlecenie „indeks3d": pobierz skrypt, zapytaj czy się nadajemy, przejmij, wykonaj."""
+    if zlecenie["id"] in _odmowy_3d:
+        return False
+    try:
+        mod = pobierz_skrypt("indeks_modeli_3d.py")
+    except Exception as e:
+        print("ℹ️  Indeks 3D: nie pobrano skryptu z serwera: %s" % e)
+        return False
+    try:
+        import pythoncom
+        pythoncom.CoInitialize()            # COM (Apprentice) w tym wątku
+    except Exception:
+        pass
+    ok, powod = mod.moge_wykonac()
+    if not ok:
+        # Nie przejmujemy — zlecenie zostaje dla stacji, która się nadaje.
+        _odmowy_3d.add(zlecenie["id"])
+        print("ℹ️  Indeks 3D (zlecenie %s): ta stacja się nie nadaje — %s" % (zlecenie["id"], powod))
+        return False
+    wynik = rm_klient.master_exec("sub-zlecenie-przejmij",
+                                  {"wykonawca": kto, "id": zlecenie["id"]})
+    if not (wynik or {}).get("rowcount"):
+        return False                     # ktoś był szybszy
+    try:
+        opis = "%s | %s" % (powod, mod.wykonaj_zlecenie(postep=_postep_zlecenia(zlecenie, kto)))
+        status = "gotowe"
+    except Exception as e:
+        opis = "%s: %s" % (type(e).__name__, e)
+        status = "blad"
+        traceback.print_exc()
+    _zakoncz(zlecenie, kto, status, opis, "Indeks modeli 3D")
+    return True
+
+
 def _most_zyje():
     try:
         import subiekt_bridge
@@ -81,18 +193,7 @@ def wykonaj(zlecenie, kto):
     if not (wynik or {}).get("rowcount"):
         return False                     # ktoś był szybszy
 
-    ostatnio = [0.0]
-
-    def postep(tekst):
-        if time.time() - ostatnio[0] < POSTEP_CO_S:
-            return
-        ostatnio[0] = time.time()
-        try:
-            rm_klient.master_exec("sub-zlecenie-postep", {
-                "postep": tekst, "id": zlecenie["id"], "wykonawca": kto})
-        except Exception:
-            pass                         # pasek w MAG — nie powód do przerwania
-
+    postep = _postep_zlecenia(zlecenie, kto)
     miniatury = bool(zlecenie.get("miniatury"))
     try:
         # Z miniaturami = OD NOWA: zdjęcia dodane do istniejących kartotek
@@ -104,32 +205,31 @@ def wykonaj(zlecenie, kto):
         opis = "%s: %s" % (type(e).__name__, e)
         status = "blad"
         traceback.print_exc()
-    try:
-        rm_klient.master_exec("sub-zlecenie-zakoncz", {
-            "status": status, "wynik": opis[:500], "id": zlecenie["id"],
-            "wykonawca": kto})
-    except Exception as e:
-        print("⚠️  Zlecenie synchronizacji %s: nie odnotowano końca: %s"
-              % (zlecenie["id"], e))
-    print("ℹ️  Synchronizacja kopii Subiekta (zlecenie %s): %s — %s"
-          % (zlecenie["id"], status, opis))
+    _zakoncz(zlecenie, kto, status, opis, "Synchronizacja kopii Subiekta")
     return True
 
 
-def _petla():
+def _petla(most, inventor):
     kto = wykonawca_id()
     preferowany = _komputer() in PREFEROWANE
     zgloszono_blad = False
     time.sleep(20)                       # po starcie RM_BAZA ma inne zajęcia
     while True:
         try:
-            oczekujace = rm_klient.master_read("sub-zlecenie-oczekujace")
+            if most:
+                oczekujace = rm_klient.master_read("sub-zlecenie-oczekujace")
+                if oczekujace:
+                    z = oczekujace[0]
+                    kolej = preferowany or (z.get("wiek_s") or 0) >= CZEKAJ_NA_PREFEROWANY_S
+                    if kolej and _most_zyje():
+                        wykonaj(z, kto)
+            if inventor:
+                # Indeks 3D: dowolna stacja z Inventorem, bez pierwszeństwa.
+                z3 = rm_klient.master_read("sub-zlecenie-oczekujace-rodzaj",
+                                           {"rodzaj": "indeks3d"})
+                if z3:
+                    wykonaj_indeks3d(z3[0], kto)
             zgloszono_blad = False
-            if oczekujace:
-                z = oczekujace[0]
-                kolej = preferowany or (z.get("wiek_s") or 0) >= CZEKAJ_NA_PREFEROWANY_S
-                if kolej and _most_zyje():
-                    wykonaj(z, kto)
         except Exception as e:
             # Stary serwer bez operacji `sub-*`, chwilowy brak sieci — raz
             # do konsoli, potem cisza aż do pierwszego udanego zapytania.
@@ -140,10 +240,13 @@ def _petla():
 
 
 def uruchom_w_tle():
-    """Start wątku wykonawcy — raz na proces, tylko na stacji z mostem."""
+    """Start wątku wykonawcy — raz na proces; stacja z mostem i/lub Inventorem."""
     global _watek
-    if _watek is not None or not _jest_most():
+    if _watek is not None:
         return
-    _watek = threading.Thread(target=_petla, name="kopia-subiekta-zlecenia",
-                              daemon=True)
+    most, inventor = _jest_most(), _jest_inventor()
+    if not (most or inventor):
+        return
+    _watek = threading.Thread(target=_petla, args=(most, inventor),
+                              name="mag-zlecenia", daemon=True)
     _watek.start()

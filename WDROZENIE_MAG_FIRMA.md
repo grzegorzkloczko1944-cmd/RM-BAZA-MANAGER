@@ -92,6 +92,13 @@ Pliki do wdrożenia (i tylko te):
 | `rm_serwer_operacje.py` | `C:\Apps\RM_SERWER\rm_serwer_operacje.py` |
 | `rm_mag_http.py` (NOWY) | `C:\Apps\RM_SERWER\rm_mag_http.py` |
 | `katalog_lozysk\lozyska_kulkowe.json` (NOWY) | `C:\Apps\RM_SERWER\katalog_lozysk\lozyska_kulkowe.json` |
+| `indeks_modeli_3d.py` (NOWY na serwerze) | `C:\Apps\RM_SERWER\indeks_modeli_3d.py` |
+
+`indeks_modeli_3d.py` NIE jest wykonywany na serwerze — serwer go tylko
+**wydaje** stacjom (`/mag/skrypt/indeks_modeli_3d.py`). Stacja z Inventorem
+i RM_BAZA pobiera go przy każdym zleceniu „indeks3d" (przycisk
+„Synchronizuj 3D" w MAG albo zlecenie nocne serwera po 2:00). Poprawka
+skryptu później = podmiana TEGO JEDNEGO pliku na serwerze.
 
 ```powershell
 $repo = "C:\RMPAK_CLIENT\Repozytoria\RM-BAZA-MANAGER"
@@ -137,6 +144,7 @@ Copy-Item "$repo\rm_serwer.py"                          "C:\Apps\RM_SERWER\rm_se
 Copy-Item "$repo\rm_serwer_operacje.py"                 "C:\Apps\RM_SERWER\rm_serwer_operacje.py" -ToSession $s -Force
 Copy-Item "$repo\rm_mag_http.py"                        "C:\Apps\RM_SERWER\rm_mag_http.py"        -ToSession $s -Force
 Copy-Item "$repo\katalog_lozysk\lozyska_kulkowe.json"   "C:\Apps\RM_SERWER\katalog_lozysk\lozyska_kulkowe.json" -ToSession $s -Force
+Copy-Item "$repo\indeks_modeli_3d.py"                   "C:\Apps\RM_SERWER\indeks_modeli_3d.py"  -ToSession $s -Force
 ```
 
 Sprawdź składnię NA SERWERZE (to nie restartuje usługi):
@@ -179,6 +187,7 @@ Oczekiwane w logu:
 - `Kopia Subiekta: C:\Apps\RM_SERWER\dane\subiekt_kopia.sqlite`
 - `+ katalog łożysk: 293 pozycji (…)`
 - `MAG HTTP: 0.0.0.0:5061 (tylko odczyt)`
+- (po 2:00, przy pierwszej bezczynności) `MAG: zlecenie nocne indeks3d`
 
 Jeśli brak `MAG HTTP` albo jest `⛔ … port 5061` — sprawdź, czy
 `rm_serwer_config.json` na serwerze nie ma `"port_mag": 0` / innego
@@ -240,16 +249,25 @@ i `pamiec/project_mag_katalog_lozysk.md`. Najczęstsze:
 - „Out of memory" przy zakładaniu okna → projekt za duży; MAG w osobnym `.ivb`.
 - Okno miga i znika → projekt się zresetował po zmianie kodu; uruchom MAG drugi raz.
 
-## Krok 9 (opcjonalny) — indeks modeli 3D
+## Krok 9 — indeks modeli 3D (zlecenie „Synchronizuj 3D")
 
-Na stacji z Inventorem firmowym (2015 — w domu 2013 nie czytał nowszych IDW):
+Od 28.09.2026 indeks robi się **zleceniem**: serwer zakłada je co noc po 2:00,
+a ręcznie — przycisk **„Synchronizuj 3D"** w MAG. Wykonuje DOWOLNA stacja
+z Inventorem i uruchomionym RM_BAZA (nowy kod): pobiera skrypt z serwera do
+`%TEMP%\RM_MAG\`, a skrypt sam sprawdza (`moge_wykonac`), czy stacja ma
+bibliotekę `B:` i Inventor ≥ 2015 (`WYMAGANY_INVENTOR_DOMYSLNIE = 19`).
+Stacja, która się nie nadaje, zlecenia NIE przejmuje.
+
+Pierwszy raz warto najpierw obejrzeć raport suchego przebiegu na MONGO
+(bez zapisu):
 ```powershell
 cd C:\RMPAK_CLIENT\Repozytoria\RM-BAZA-MANAGER
 python indeks_modeli_3d.py --raport indeks_raport.txt   # suchy przebieg, B:\
-python indeks_modeli_3d.py --zapisz                     # po akceptacji raportu
 ```
-Raport pokaż Grzegorzowi przed `--zapisz` (konflikty kopii, Part Number ≠ numer).
-Szczegóły: `PLAN_MAG.md`, sekcja 6a.
+Raport pokaż Grzegorzowi (konflikty kopii, Part Number ≠ numer), potem
+„Synchronizuj 3D" w MAG. Pierwszy pełny przebieg biblioteki: kilka–kilkanaście
+minut; kolejne tylko zmienione rysunki. Postęp widać na pasku MAG („3D: …").
+Szczegóły: `PLAN_MAG.md`, sekcja 6a; pamięć `project_mag_indeks3d_zlecenie`.
 
 ## Krok 10 — na koniec
 

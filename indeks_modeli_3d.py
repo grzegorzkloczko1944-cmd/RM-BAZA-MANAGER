@@ -36,6 +36,14 @@ TEN SAM NUMER W KILKU MIEJSCACH (203 numery na B:, 27.09.2026)
 
 RYSUNEK BEZ MODELU (19% biblioteki) dostaje wiersz z pustą ścieżką —
 to informacja dla makra („ten rysunek nie ma modelu 3D"), nie brak danych.
+
+ZLECENIE Z SERWERA (28.09.2026, decyzja usera: „skrypt na serwerze, serwer
+odpala, korzysta z działającego komputera usera"): RM_SERWER udostępnia ten
+plik pod /mag/skrypt/indeks_modeli_3d.py i zakłada zlecenie „indeks3d"
+(co noc + przycisk „Synchronizuj 3D" w MAG). RM_BAZA na DOWOLNEJ stacji
+z Inventorem pobiera aktualny skrypt do %TEMP%, pyta `moge_wykonac()`
+i dopiero wtedy przejmuje zlecenie i woła `wykonaj_zlecenie()`.
+Poprawka skryptu = podmiana tego pliku na serwerze, bez nowego .exe.
 """
 from __future__ import annotations
 
@@ -47,8 +55,6 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-
-sys.stdout.reconfigure(encoding="utf-8")       # polska konsola, cp1250
 
 import rm_klient
 
@@ -99,6 +105,45 @@ def na_dysk_b(sciezka: str) -> str:
             if os.path.isfile(kandydat):
                 return kandydat
     return sciezka
+
+#: Najstarszy Apprentice (SoftwareVersion.Major), który czyta rysunki
+#: biblioteki. 19 = Inventor 2015 (firma). Inventor 2013 (17) nie otwiera
+#: IDW zapisanych nowszym (33 z 61 w próbce B:\Czujniki RM) — ale na M-OLD
+#: czyta C:\Projekty bez błędu (15 575 rysunków, 0 błędów), stąd wyjątek.
+WYMAGANY_INVENTOR = {"M-OLD": 17}
+WYMAGANY_INVENTOR_DOMYSLNIE = 19
+
+
+def moge_wykonac():
+    """(True, opis) gdy ta stacja może zrobić indeks; inaczej (False, powód).
+
+    Wołane przez wykonawcę zleceń PRZED przejęciem zlecenia — stacja bez
+    biblioteki albo ze starym Inventorem nie może go zablokować innym.
+    """
+    bib = biblioteka()
+    if not os.path.isdir(bib):
+        return False, "brak biblioteki %s" % bib
+    try:
+        import win32com.client
+        app = win32com.client.Dispatch("Inventor.ApprenticeServer")
+        wersja = int(app.SoftwareVersion.Major)
+        nazwa = app.SoftwareVersion.DisplayVersion
+    except Exception as e:
+        return False, "brak Inventor.ApprenticeServer (%s)" % str(e)[:60]
+    wymagana = WYMAGANY_INVENTOR.get((os.environ.get("COMPUTERNAME") or "").upper(),
+                                     WYMAGANY_INVENTOR_DOMYSLNIE)
+    if wersja < wymagana:
+        return False, "Inventor %s (%d) — za stary, wymagany %d" % (nazwa, wersja, wymagana)
+    return True, "Inventor %s, biblioteka %s" % (nazwa, bib)
+
+
+def wykonaj_zlecenie(postep=print):
+    """Pełny przebieg z zapisem na serwer — dla zlecenia „indeks3d".
+
+    Zwraca jednolinijkowy opis wyniku; rzuca przy błędzie.
+    """
+    return przebieg(biblioteka(), zapis=True, postep=postep)
+
 
 #: Ile operacji w jednym `master-batch`. Grupy jednego rysunku nie są
 #: dzielone między paczki — „usuń stare + zapisz nowe" idzie jedną transakcją.
@@ -200,7 +245,12 @@ def skonfiguruj_serwer(adres=None):
     """Adres z `--serwer host:port` albo z `sync_config.json` (jak RM_BAZA).
 
     Brak pliku nie jest błędem: `rm_klient` ma adres firmowy na sztywno.
+    Wewnątrz RM_BAZA (zlecenie) klient jest już skonfigurowany — wtedy NIC
+    nie zmieniamy, także nazwy użytkownika: podpisywałaby wszystkie żądania
+    RM_BAZA jako INDEKS_MODELI_3D.
     """
+    if not adres and rm_klient.skonfigurowany():
+        return
     if adres:
         host, _, port = adres.partition(":")
         rm_klient.ustaw_serwer(host, int(port) if port else None)
@@ -281,33 +331,48 @@ def main():
     ap.add_argument("--raport", help="pełny raport do pliku tekstowego")
     ap.add_argument("--serwer", help="host:port RM_SERWER (domyślnie z sync_config.json)")
     a = ap.parse_args()
+    sys.stdout.reconfigure(encoding="utf-8")   # polska konsola, cp1250
+    try:
+        przebieg(a.root, a.zapisz, a.pelny, a.limit, a.raport, a.serwer)
+    except RuntimeError as e:
+        print(f"   ⛔ {e}")
+        return 1
+    return 0
+
+
+def przebieg(root, zapis=False, pelny=False, limit=0, raport=None, serwer=None,
+             postep=lambda _t: None):
+    """Cały przebieg: dysk -> serwer -> Apprentice -> raport -> zapis.
+
+    Wspólny dla konsoli (`main`) i zlecenia z serwera (`wykonaj_zlecenie`).
+    Zwraca jednolinijkowy opis; błąd serwera przy zapisie = RuntimeError.
+    """
 
     print("=" * 72)
     print("INDEKS MODELI 3D  (numer rysunku -> .ipt/.iam)" +
-          ("" if a.zapisz else "   [SUCHY PRZEBIEG — nic nie zapisuję]"))
+          ("" if zapis else "   [SUCHY PRZEBIEG — nic nie zapisuję]"))
     print(f"biblioteka tej stacji ({os.environ.get('COMPUTERNAME', '?')}): {biblioteka()}")
     print("=" * 72)
 
     # 1. Dysk
     t0 = time.time()
-    rysunki = zbierz_idw(a.root)
+    rysunki = zbierz_idw(root)
     plikow = sum(len(v) for v in rysunki.values())
-    print(f"\n1. {a.root}: {plikow} IDW z numerem, {len(rysunki)} unikalnych numerów"
+    print(f"\n1. {root}: {plikow} IDW z numerem, {len(rysunki)} unikalnych numerów"
           f"  ({time.time() - t0:.0f}s)")
     if not rysunki:
         print("   Nic do zrobienia.")
-        return 0
+        return "brak rysunków w %s" % root
 
     # 2. Serwer — co już wiemy
-    skonfiguruj_serwer(a.serwer)
+    skonfiguruj_serwer(serwer)
     print(f"\n2. {rm_klient.opis()}")
     try:
         znane = indeks_z_serwera()
         print(f"   w indeksie: {len(znane)} rysunków")
     except rm_klient.BladSerwera as e:
-        if a.zapisz:
-            print(f"   ⛔ serwer: {e}")
-            return 1
+        if zapis:
+            raise RuntimeError("serwer: %s" % e)
         # Suchy przebieg ma sens i bez serwera — pokaże, co jest na dysku.
         # Tabela może też jeszcze nie istnieć (serwer bez nowych migracji).
         print(f"   ⚠️  serwer: {e}\n   liczę tak, jakby indeks był pusty")
@@ -321,13 +386,13 @@ def main():
             reczne.append(nr)
             continue
         idw, mtime = rysunki[nr][0]
-        if (not a.pelny and wiersze
+        if (not pelny and wiersze
                 and all(w["idw"] == idw and w["idw_mtime"] == mtime for w in wiersze)):
             bez_zmian += 1
             continue
         do_skanu.append(nr)
-    if a.limit:
-        do_skanu = do_skanu[:a.limit]
+    if limit:
+        do_skanu = do_skanu[:limit]
     print(f"\n3. do skanu: {len(do_skanu)}   bez zmian: {bez_zmian}"
           f"   ręczne (nie ruszam): {len(reczne)}")
 
@@ -379,6 +444,7 @@ def main():
 
         if i % 200 == 0:
             print(f"   … {i}/{len(do_skanu)}  ({time.time() - t0:.0f}s)")
+            postep(f"rysunki {i}/{len(do_skanu)}")
 
     # Masowe błędy otwarcia to prawie zawsze za stary Inventor: Apprentice
     # 2013 (M-OLD) nie otwiera IDW zapisanych przez 2015 w firmie. Pomiar
@@ -422,12 +488,12 @@ def main():
                                 for nr, s, z in zepsute]),
         ("BŁĄD ODCZYTU", [f"   {nr:20} {s}  ({b})" for nr, s, b in bledy]),
     ]
-    if a.raport:
-        with open(a.raport, "w", encoding="utf-8") as f:
+    if raport:
+        with open(raport, "w", encoding="utf-8") as f:
             for tytul, bloki in sekcje:
                 f.write(f"\n--- {tytul} ({len(bloki)}) ---\n")
                 f.write("".join(b + "\n" for b in bloki))
-        print(f"\nPełny raport: {a.raport}")
+        print(f"\nPełny raport: {raport}")
     else:
         for tytul, bloki in sekcje:
             if bloki:
@@ -437,17 +503,19 @@ def main():
                     print(f"   … i {len(bloki) - 8} więcej (--raport plik.txt)")
 
     # 5. Zapis
-    if not a.zapisz:
+    if not zapis:
         print(f"\nSUCHY PRZEBIEG — do zapisu byłoby {len(grupy)} rysunków."
               f" Uruchom z --zapisz.")
-        return 0
-    if not grupy and not a.pelny:
+        return "suchy przebieg: do zapisu %d rysunków" % len(grupy)
+    opis = ("rysunków %d (bez zmian %d), z modelem %d, bez modelu %d, błędów odczytu %d"
+            % (len(rysunki), bez_zmian, wynik["jeden"] + wynik["kilka"], wynik["brak"], len(bledy)))
+    if not grupy and not pelny:
         print("\nNic do zapisania.")
-        return 0
-    n = zapisz(grupy, a.pelny)
+        return opis + " — nic nowego"
+    n = zapisz(grupy, pelny)
     print(f"\n5. ZAPISANO: {n} wierszy dla {len(grupy)} rysunków"
           f" -> subiekt_mapowania.sqlite / modele_3d")
-    return 0
+    return opis + ", zapisano %d" % len(grupy)
 
 
 if __name__ == "__main__":

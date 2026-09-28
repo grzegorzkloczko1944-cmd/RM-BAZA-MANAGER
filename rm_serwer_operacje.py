@@ -3532,6 +3532,11 @@ ZAPIS.update({
 # uśpiona) po 30 min może przejąć inna.
 #
 # Statusy: nowe → w_toku → gotowe | blad.
+#
+# RODZAJ (28.09.2026): 'kopia' (kopia Subiekta, wykonuje stacja z mostem)
+# albo 'indeks3d' (indeks modeli 3D z rysunków, wykonuje stacja z Inventorem,
+# skrypt pobiera z serwera). Stare operacje bez rodzaju działają TYLKO na
+# 'kopia' — niezaktualizowana RM_BAZA nie weźmie zlecenia 3D za kopię.
 MIGRACJE_SUBIEKT_KOPIA.extend([
     """CREATE TABLE IF NOT EXISTS zlecenia_sync (
            id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3558,14 +3563,29 @@ ODCZYT.update({
         "SELECT *, CAST((julianday('now', 'localtime')"
         "       - julianday(REPLACE(zlecono, 'T', ' '))) * 86400 AS INTEGER) AS wiek_s"
         "  FROM zlecenia_sync"
-        " WHERE status = 'nowe'"
-        "    OR (status = 'w_toku' AND REPLACE(przejeto, 'T', ' ') < " + _PORZUCONE + ")"
+        " WHERE COALESCE(rodzaj, 'kopia') = 'kopia' AND (status = 'nowe'"
+        "    OR (status = 'w_toku' AND REPLACE(przejeto, 'T', ' ') < " + _PORZUCONE + "))"
         " ORDER BY id LIMIT 1",
         [],
     ),
+    "sub-zlecenie-oczekujace-rodzaj": (
+        "SELECT *, CAST((julianday('now', 'localtime')"
+        "       - julianday(REPLACE(zlecono, 'T', ' '))) * 86400 AS INTEGER) AS wiek_s"
+        "  FROM zlecenia_sync"
+        " WHERE COALESCE(rodzaj, 'kopia') = ? AND (status = 'nowe'"
+        "    OR (status = 'w_toku' AND REPLACE(przejeto, 'T', ' ') < " + _PORZUCONE + "))"
+        " ORDER BY id LIMIT 1",
+        ["rodzaj"],
+    ),
     "sub-zlecenie-ostatnie": (
-        "SELECT * FROM zlecenia_sync ORDER BY id DESC LIMIT 1",
+        "SELECT * FROM zlecenia_sync WHERE COALESCE(rodzaj, 'kopia') = 'kopia'"
+        " ORDER BY id DESC LIMIT 1",
         [],
+    ),
+    "sub-zlecenie-ostatnie-rodzaj": (
+        "SELECT * FROM zlecenia_sync WHERE COALESCE(rodzaj, 'kopia') = ?"
+        " ORDER BY id DESC LIMIT 1",
+        ["rodzaj"],
     ),
 })
 
@@ -3573,11 +3593,20 @@ ZAPIS.update({
     # Nie zakłada drugiego, gdy jedno czeka albo trwa — kilka kliknięć
     # „Synchronizuj" to jedna synchronizacja. rowcount 0 = już jest.
     "sub-zlecenie-dodaj": (
-        "INSERT INTO zlecenia_sync (miniatury, status, zlecil, zlecono)"
-        " SELECT ?, 'nowe', ?, " + _TERAZ +
+        "INSERT INTO zlecenia_sync (miniatury, status, zlecil, zlecono, rodzaj)"
+        " SELECT ?, 'nowe', ?, " + _TERAZ + ", 'kopia'"
         " WHERE NOT EXISTS (SELECT 1 FROM zlecenia_sync"
-        "                   WHERE status IN ('nowe', 'w_toku'))",
+        "                   WHERE status IN ('nowe', 'w_toku')"
+        "                     AND COALESCE(rodzaj, 'kopia') = 'kopia')",
         ["miniatury", "zlecil"],
+    ),
+    "sub-zlecenie-dodaj-rodzaj": (
+        "INSERT INTO zlecenia_sync (miniatury, status, zlecil, zlecono, rodzaj)"
+        " SELECT ?, 'nowe', ?, " + _TERAZ + ", ?"
+        " WHERE NOT EXISTS (SELECT 1 FROM zlecenia_sync"
+        "                   WHERE status IN ('nowe', 'w_toku')"
+        "                     AND COALESCE(rodzaj, 'kopia') = ?)",
+        ["miniatury", "zlecil", "rodzaj", "rodzaj"],
     ),
     "sub-zlecenie-przejmij": (
         "UPDATE zlecenia_sync SET status = 'w_toku', wykonawca = ?,"
@@ -3632,6 +3661,40 @@ MIGRACJE_SUBIEKT_KOPIA.extend([
            wartosc TEXT
        )""",
 ])
+
+
+def napraw_zlecenia_rodzaj(con):
+    """Kolumna `rodzaj` w istniejącej tabeli zleceń (CREATE IF NOT EXISTS jej
+    nie doda). Zwraca opis do logu albo None."""
+    kolumny = {r[1] for r in con.execute("PRAGMA table_info(zlecenia_sync)")}
+    if not kolumny or "rodzaj" in kolumny:
+        return None
+    con.execute("ALTER TABLE zlecenia_sync ADD COLUMN rodzaj TEXT DEFAULT 'kopia'")
+    con.commit()
+    return "zlecenia_sync: dodano kolumnę rodzaj"
+
+
+def zlec_indeks_nocny(con, godzina=2):
+    """Raz na dobę, po `godzina`:00 — zlecenie „indeks3d" (serwer „odpala
+    skrypt" na działającym komputerze usera). Nie zakłada drugiego, gdy dziś
+    już było albo jakieś czeka/trwa. Zwraca opis albo None."""
+    from datetime import datetime as _dt
+    teraz = _dt.now()
+    if teraz.hour < godzina:
+        return None
+    dzis = teraz.strftime("%Y-%m-%d")
+    bylo = con.execute(
+        "SELECT 1 FROM zlecenia_sync WHERE COALESCE(rodzaj, 'kopia') = 'indeks3d'"
+        " AND (substr(zlecono, 1, 10) = ? OR status IN ('nowe', 'w_toku'))",
+        (dzis,)).fetchone()
+    if bylo:
+        return None
+    con.execute(
+        "INSERT INTO zlecenia_sync (miniatury, status, zlecil, zlecono, rodzaj)"
+        " VALUES (0, 'nowe', 'SERWER (noc)', ?, 'indeks3d')",
+        (teraz.strftime("%Y-%m-%dT%H:%M:%S"),))
+    con.commit()
+    return "zlecenie nocne indeks3d"
 
 
 def zaladuj_katalog_lozysk(con, sciezka):

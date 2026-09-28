@@ -384,6 +384,9 @@ class Serwer:
             for sql in ops.MIGRACJE_SUBIEKT_KOPIA:
                 self.con_sub.execute(sql)
             self.con_sub.commit()
+            naprawa = ops.napraw_zlecenia_rodzaj(self.con_sub)
+            if naprawa:
+                log("   + %s" % naprawa)
             log("Kopia Subiekta: %s" % sciezka_sub)
             # Katalog łożysk z pliku w repo — wczytywany tylko po zmianie pliku.
             try:
@@ -858,6 +861,15 @@ class Serwer:
                     % (ile, RETENCJA_DZIENNIKA_H))
         except Exception as e:
             log("⚠️  Sprzątanie dziennika: %s" % e)
+
+        # Nocny indeks modeli 3D (zlecenie; wykona stacja z Inventorem).
+        if self.con_sub is not None:
+            try:
+                opis = ops.zlec_indeks_nocny(self.con_sub)
+                if opis:
+                    log("MAG: %s" % opis)
+            except Exception as e:
+                log("⚠️  Zlecenie nocne indeks3d: %s" % e)
 
         # Backup raz na dobę — i tylko gdy coś się zapisało. Kopia bazy,
         # w której nic się nie zmieniło, to zajęte miejsce bez wartości.
