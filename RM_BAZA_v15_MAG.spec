@@ -60,6 +60,9 @@ hiddenimports += [
     # dopasowanie POJEDYNCZEGO wiersza (PPM w arkuszu) — import leniwy
     # w dopasuj_kartoteke_wiersza(), wiec statyczna analiza go NIE WIDZI
     'subiekt_dopasuj_wiersz_gui', 'subiekt_dopasuj_wiersz',
+    # „Wstaw z Subiekta" (F4) w „Dodaj pozycje recznie" — import leniwy
+    # w RM_BAZA (28.09.2026), statyczna analiza go NIE WIDZI
+    'subiekt_wybor_kartoteki_gui',
     # produkcja wlasna RMPAK (PW/RW) + okno zlozen projektu
     'subiekt_produkcja', 'subiekt_zlozenia_gui',
     # formularze dokumentow z Edytora kartotek (10-11.09.2026) — importowane
