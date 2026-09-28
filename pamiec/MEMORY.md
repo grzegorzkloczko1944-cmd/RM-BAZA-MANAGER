@@ -1,6 +1,5 @@
 # Memory Index
 
-- [⚠ JUTRO: wdrożenie MAG w firmie](project_mag_wdrozenie_firma_todo.md) — 29.09 na MONGO wg WDROZENIE_MAG_FIRMA.md; restart RM_SERWER tylko za zgodą
 - [Linia Produkcyjna — implementacja](project_linia_feature.md) — lockowanie linii, propagacja etapów równoległych, multi-projekt integracja
 - [Optimizer Readiness — wskaźnik gotowości](project_optimizer_readiness.md) — ⚡ w selektorze, check_optimizer_readiness(), warunek: staff w stage_staff_assignments
 - [Ścieżki do bazy danych](reference_db_paths.md) — realnie z sync_config.json (Y:/RM_BAZA/), locki w Y:/RM_BAZA/locks/
@@ -162,3 +161,4 @@
 - [Katalog łożysk w Subiekcie](project_lozyska_katalog_28_09.md) — 1127 kartotek + 1160 zdjęć (28.09.2026); PUNKT WZNOWIENIA: zasiew indeksu 3D czeka na dokończenie miniatur w .ipt; pułapki olefile/limit 500/kopia MAG
 - [Wstaw z Subiekta w „Dodaj pozycję ręcznie"](project_wstaw_z_subiekta_recznie.md) — przycisk F4, szuka po symbolu/nazwie/OPISIE; osobne okno bez zapisu, filtr NIE w Indeks.szukaj
 - [Wymiarówka oringów](project_oringi_wymiarowka.md) — 205 żywych kartotek (28.09.2026, usunięto 8 martwych duplikatów); CSV w C:\iLogic; VITON=FKM=FPM to synonimy, nie błędy
+- [MAG: wstaw dwuklikiem + przypisz 3D](project_mag_wstaw_i_przypisz.md) — etap 4: „Umieść komponent” przez VBS (IE11 bez GetObject), ręczne przypisanie modelu, kFileNameEvent=6657

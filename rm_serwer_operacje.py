@@ -3382,6 +3382,21 @@ ZAPIS.update({
         "DELETE FROM modele_3d WHERE zrodlo != 'reczny'",
         [],
     ),
+    # Ręczne przypisanie z okna MAG (29.09.2026) — usunięcie JEDNEGO
+    # ręcznego wiersza. Wiersze z automatu tą drogą nie znikają.
+    "map-model3d-usun-reczny": (
+        "DELETE FROM modele_3d"
+        " WHERE numer_rysunku = ? AND sciezka = ? AND zrodlo = 'reczny'",
+        ["numer_rysunku", "sciezka"],
+    ),
+    # Przy ręcznym przypisaniu: automatyczny wpis „rysunek bez modelu"
+    # (pusta ścieżka) przestaje być prawdą. Indeks pomija symbole z wpisem
+    # ręcznym, więc sam by go już nie poprawił.
+    "map-model3d-usun-pusty-auto": (
+        "DELETE FROM modele_3d"
+        " WHERE numer_rysunku = ? AND sciezka = '' AND zrodlo != 'reczny'",
+        ["numer_rysunku"],
+    ),
 })
 
 

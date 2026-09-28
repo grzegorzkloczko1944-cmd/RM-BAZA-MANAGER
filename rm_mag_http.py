@@ -27,6 +27,8 @@ ADRESY (wszystkie GET, odpowiedź JSON; `&format=tsv` = tekst dla VBA)
                                       katalog łożysk kulkowych + stan w Subiekcie
     POST /mag/synchronizuj?miniatury=1&kto=GKI   zlecenie synchronizacji —
                                       wykona stacja z mostem (MONGO pierwsza)
+    POST /mag/model3d/przypisz?symbol=&sciezka=&kto=   ręczne przypisanie
+    POST /mag/model3d/usun?symbol=&sciezka=            usunięcie ręcznego
     POST /mag/synchronizuj3d?kto=GKI  zlecenie indeksu modeli 3D — wykona
                                       dowolna stacja z Inventorem
     /mag/skrypt/indeks_modeli_3d.py   skrypt dla stacji (biała lista)
@@ -413,6 +415,65 @@ def miniatura3d(bazy, symbol):
         con.close()
 
 
+#: Ta sama biblioteka pod dwiema nazwami (firma) — jak TEN_SAM_KATALOG
+#: w indeks_modeli_3d.py. Indeks trzyma ścieżki przez B:.
+TEN_SAM_KATALOG = {"C:\\BIBLIOTEKARM\\": "B:\\"}
+MODELE_3D = (".ipt", ".iam")
+
+
+def _normuj_sciezke(sciezka):
+    s = (sciezka or "").strip().strip('"').replace("/", "\\")
+    for stara, nowa in TEN_SAM_KATALOG.items():
+        if s.upper().startswith(stara):
+            return nowa + s[len(stara):]
+    return s
+
+
+def przypisz_model(bazy, zlec, symbol, sciezka, kto):
+    """Ręczne przypisanie modelu 3D do kartoteki (okno MAG, 29.09.2026).
+
+    Wiersz `zrodlo='reczny'` w `modele_3d` — indeks z automatu go nie
+    nadpisze ani nie skasuje. Zwraca {"sciezka", "nowy", "modele"}.
+    """
+    symbol = (symbol or "").strip()
+    sciezka = _normuj_sciezke(sciezka)
+    if not symbol:
+        raise ValueError("brak symbolu")
+    if not sciezka.lower().endswith(MODELE_3D):
+        raise ValueError("to nie jest model Inventora (.ipt/.iam): %s" % sciezka)
+    klucz = symbol.upper()
+    con, ma_modele = bazy.polacz()
+    try:
+        if not ma_modele:
+            raise ValueError("serwer bez indeksu modeli (subiekt_mapowania)")
+        byl = con.execute(
+            "SELECT zrodlo FROM map.modele_3d WHERE numer_rysunku = ? AND sciezka = ?",
+            (klucz, sciezka)).fetchone()
+        kolejnosc = con.execute(
+            "SELECT COALESCE(MAX(kolejnosc) + 1, 0) FROM map.modele_3d"
+            " WHERE numer_rysunku = ?", (klucz,)).fetchone()[0]
+    finally:
+        con.close()
+    if byl is not None and byl[0] == "reczny":
+        return {"sciezka": sciezka, "nowy": 0, "komunikat": "już przypisany"}
+    zlec("map-model3d-usun-pusty-auto", {"numer_rysunku": klucz})
+    zlec("map-model3d-zapisz", {
+        "numer_rysunku": klucz, "sciezka": sciezka,
+        "kolejnosc": kolejnosc if byl is None else 0,
+        "part_number": None, "idw": None, "idw_mtime": None,
+        "zrodlo": "reczny", "kto": kto,
+        "kiedy": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    return {"sciezka": sciezka, "nowy": 1, "komunikat": "przypisano"}
+
+
+def usun_przypisanie(zlec, symbol, sciezka):
+    """Usuwa JEDEN ręczny wiersz. Automatycznych nie rusza."""
+    w = zlec("map-model3d-usun-reczny", {
+        "numer_rysunku": (symbol or "").strip().upper(),
+        "sciezka": _normuj_sciezke(sciezka)})
+    return {"usunieto": int((w or {}).get("rowcount") or 0)}
+
+
 def status(bazy):
     con, ma_modele = bazy.polacz()
     try:
@@ -500,6 +561,28 @@ def zbuduj_handler(bazy, log, zlec=None):
             p = {k: v[0] for k, v in parse_qs(url.query).items()}
             tsv = p.get("format", "").lower() == "tsv"
             sciezka = url.path.rstrip("/")
+            if sciezka in ("/mag/model3d/przypisz", "/mag/model3d/usun"):
+                if zlec is None:
+                    self._dane(503, {"blad": "serwer bez obsługi zleceń"}, tsv)
+                    return
+                kto = (p.get("kto") or "MAG").strip()[:40]
+                try:
+                    if sciezka.endswith("/przypisz"):
+                        wynik = przypisz_model(bazy, zlec, p.get("symbol", ""),
+                                               p.get("sciezka", ""), kto)
+                    else:
+                        wynik = usun_przypisanie(zlec, p.get("symbol", ""),
+                                                 p.get("sciezka", ""))
+                    log("MAG: %s %s <- %s (%s@%s) — %s" % (
+                        sciezka.rsplit("/", 1)[1], p.get("symbol"), p.get("sciezka"),
+                        kto, self.client_address[0], wynik))
+                    self._dane(200, wynik, tsv)
+                except ValueError as e:
+                    self._dane(400, {"blad": str(e)}, tsv)
+                except Exception as e:
+                    log("⚠️  MAG HTTP POST %s: %s" % (self.path, e))
+                    self._dane(500, {"blad": "%s: %s" % (type(e).__name__, e)}, tsv)
+                return
             if sciezka not in ("/mag/synchronizuj", "/mag/synchronizuj3d"):
                 self._dane(404, {"blad": "nieznany adres"}, tsv)
                 return
