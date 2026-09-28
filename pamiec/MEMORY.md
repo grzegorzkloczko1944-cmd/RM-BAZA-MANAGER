@@ -157,4 +157,4 @@
 - [MAG: indeks 3D zleceniem](project_mag_indeks3d_zlecenie.md) — serwer wydaje skrypt, dowolna stacja z Inventorem pobiera do TEMP; noc 2:00 + Synchronizuj 3D
 
 - [MAG wdrożony w firmie 28.09.2026](project_mag_wdrozenie_firma_wykonane.md) — kroki 0-6 zrobione (restart 12:22, przerwa kilka sekund); zostaje synchronizacja kopii + makro na VBA7; pułapki BOM/cp1250 w skryptach
-- [MAG na VBA7 64-bit — lista zapasowa](project_mag_vba7_lista_zapasowa.md) — Inventor 2015 NIE osadzi WebBrowser (brak „safe for scripting"); fallback Forms.ListBox; 3 hipotezy odrzucone; LLMNR/IPv6 dawał 21 s na zapytanie → wpis w hosts
+- [MAG na VBA7 64-bit — lista zapasowa](project_mag_vba7_lista_zapasowa.md) — Inventor 2015 NIE osadzi WebBrowser w UserFormie → okno MAG jako HTA (mshta), ten sam wygląd na 2013/2015; ListBox ODRZUCONY; 5 dźwigni rejestru bez skutku; LLMNR/IPv6 → hosts

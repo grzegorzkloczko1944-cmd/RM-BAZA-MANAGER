@@ -1,6 +1,6 @@
 ---
 name: project_mag_vba7_lista_zapasowa
-description: MAG na VBA7 64-bit (Inventor 2015) — WebBrowser nie da się osadzić, lista zapasowa Forms.ListBox; plus pułapka LLMNR/IPv6 dająca 21 s na zapytanie
+description: MAG na VBA7 64-bit (Inventor 2015) — WebBrowser nie da się osadzić w UserFormie, ROZWIĄZANIE = okno jako HTA (mshta); ListBox odrzucony; plus pułapka LLMNR/IPv6 (21 s na zapytanie)
 metadata:
   type: project
 ---
@@ -23,12 +23,31 @@ Sprawdzenie polityki: `CoInternetCreateSecurityManager` →
 `ProcessUrlAction` (slot 7 w vtable). `ACTIVEX_RUN` wychodzi ALLOW,
 `OVERRIDE_OBJECT_SAFETY` — DISALLOW.
 
-**Fix:** okno próbuje przeglądarkę, a gdy host odmówi, zakłada
-`Forms.ListBox` (7 kolumn, nagłówki osobnym Labelem). Bez sprawdzania
-wersji Inventora — liczy się wynik próby. Klik trafia do tego samego
-`Wybierz(i)` co klik w HTML. Różnica: brak miniatur W LIŚCIE, zdjęcie
-wybranej pozycji pokazuje prawy panel jak dotąd.
-`MSComctlLib.ListView` odpada — nie jest zarejestrowany w 64-bit.
+**Rozwiązanie (28.09.2026, po południu): okno MAG to HTA** — plik `.hta`
+uruchamiany przez `mshta.exe`, czyli ten sam silnik IE poza hostem VBA.
+Makro składa go z linii `'@h|` swojego modułu, zapisuje UTF-8 do
+`%TEMP%\RM_MAG\MAG.hta`, podstawia `MAG_SERWER`/limit/kto i uruchamia;
+`FindWindowW` po tytule + `singleinstance` = drugie uruchomienie wyciąga
+istniejące okno. Identyczny wygląd na 2013 i 2015+, kółko natywnie,
+miniatury w liście. VBA skurczył się do ~170 linii (HTTP/TSV/WIA/MSHTML
+i maszyneria VBIDE do zakładania okien — zbędne, HTA rozmawia z serwerem
+sam, JSON). Źródła: `NOW/MAKRA/MAG_zrodla/czesci/{modul.vba,okno.hta}`.
+
+⛔ **Lista zapasowa na `Forms.ListBox` (commity 747583d/7c5f931) była
+ślepą uliczką** — user odrzucił: bez miniatur, bez kółka (MSForms go nie
+obsługuje, hooki zakazane), „wygląda jak zbudowane niby tak samo, ale
+gorzej". Nie wracać do MSForms dla list z obrazkami.
+
+Pułapki HTA w komentarzu VBA (pilnuje `zloz_MAG.py`): linia kończąca się
+` _` = kontynuacja (max 24), limit ~1023 znaków/linia, znaki spoza cp1250
+(→ ← ✓) edytor zamienia na `?` — używać encji HTML. JS tylko ES5 (IE11).
+Test JS bez Inventora: wyciąć `<script>` i odpalić w `cscript //E:JScript`
+z atrapami DOM (plik UTF-16, bo cscript czyta ANSI; `JSON` dorobić evalem).
+
+Dodatkowo sprawdzone tego dnia i BEZ skutku dla WebBrowser w UserFormie:
+`HKCU\Software\Microsoft\VBA\Security\LoadControlsInForms` = 3 i = 1
+(z restartem Inventora), kategorie safe-for-scripting/initializing dla
+CLSID kontrolki w `HKCU\Software\Classes` — wszystko cofnięte.
 
 ## ⛔ Trzy hipotezy SPRAWDZONE I ODRZUCONE (nie powtarzać)
 
