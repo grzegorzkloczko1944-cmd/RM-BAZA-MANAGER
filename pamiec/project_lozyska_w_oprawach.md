@@ -39,5 +39,6 @@ W projektach (C:\Projekty / V:) skan po nazwach znalazł 53 symbole, m.in.
 UCFC 207–210, UCT 212, UCFL 212, UCPA 207–212, UCFB 203/205 — do zebrania
 skryptem skanującym w firmie (propozycja, nie zrobione).
 
+Źródło i format linków: [[reference_matis_cad]].
 Powiązane: [[project_oringi_wymiarowka]], [[feedback_biblioteka_pytaj_przed_hurtem]],
 [[project_mag_wstaw_i_przypisz]].
