@@ -66,5 +66,14 @@ kartoteka bez zdjęcia!). Sprawdzać kroki (`_blad_mostu`). Ten sam błąd
 siedzi w `subiekt_lozyska_zdjecia.py` (liczy brak kartoteki jako wysłane —
 dodaj na nieistniejącej kartotece też tylko zwraca krok blad, nic nie psuje).
 
+**iProperties modelu z Subiekta przy przypisaniu (29.09.2026):** NAZWA =
+`Title` (Summary), NUMER CZĘŚCI = `Part Number`, OPIS = `Description`
+(Design Tracking) — jak IAM_MACRO (Module3, dialog Nazwa/Materiał). Przed
+zapisem VBS `iprop-czytaj` → pytanie „było → będzie"; puste w Subiekcie =
+w pliku bez zmian. Zapis w tym samym otwarciu co render (`miniatura` +
+plik z wartościami UTF-16 — nie w linii poleceń, bo cudzysłowy w nazwach).
+Plik otwarty u usera z niezapisanymi zmianami (`Dirty`): ustawiamy, NIE
+zapisujemy za niego — komunikat „zapisz w Inventorze".
+
 Zobacz też: [[project_mag_vba7_lista_zapasowa]], [[project_mag_indeks3d_zlecenie]],
 [[project_lozyska_katalog_28_09]], [[feedback_nic_po_cichu]].
