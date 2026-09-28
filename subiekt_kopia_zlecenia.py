@@ -209,6 +209,76 @@ def wykonaj(zlecenie, kto):
     return True
 
 
+def _blad_mostu(odp):
+    """Opis pierwszego kroku „blad" z odpowiedzi trybu `zdjecie`, albo None.
+
+    ⚠️ Most NIE MA pola „istnieje": brak kartoteki zgłasza krokiem
+    {"Status": "blad", "Szczegoly": "nie ma takiej kartoteki"} i pustą listą
+    zdjęć — wygląda wtedy jak kartoteka BEZ zdjęcia (sprawdzone 29.09.2026).
+    """
+    if odp is None:
+        return "most nie odpowiedział"
+    for k in odp.get("kroki") or []:
+        if str(k.get("Status", "")).lower() == "blad":
+            return k.get("Szczegoly") or "błąd mostu"
+    return None
+
+
+def wykonaj_zdjecia(lista, kto):
+    """Zdjęcia kartotek z okna MAG → Subiekt (29.09.2026).
+
+    Miniatura modelu wyrenderowana przez Inventora usera przy ręcznym
+    przypisaniu. NIGDY nie nadpisujemy: kartoteka ze zdjęciem = „pominiete"
+    (zgoda na nadpisanie jest jednorazowa — pamięć feedback_nadpisywanie_pytaj).
+    Po wgraniu ten sam obrazek idzie do KOPII (tabela `miniatury`), żeby MAG
+    pokazał go od razu, bez pełnej synchronizacji.
+    """
+    import subiekt_bridge
+    for z in lista:
+        w = rm_klient.master_exec("sub-zdjecie-przejmij", {"wykonawca": kto, "id": z["id"]})
+        if not (w or {}).get("rowcount"):
+            continue                     # ktoś był szybszy
+        symbol = z["symbol"]
+        try:
+            stan = subiekt_bridge.call(
+                "zdjecie", {"plan": {"akcja": "lista", "symbol": symbol},
+                            "zapisz": False}, timeout=120, write=False)
+            blad = _blad_mostu(stan)
+            if blad:
+                status, opis = "blad", "%s: %s" % (symbol, blad)
+            elif stan.get("zdjecia"):
+                status, opis = "pominiete", "%s ma już zdjęcie — nie nadpisuję" % symbol
+            else:
+                odp = subiekt_bridge.call(
+                    "zdjecie", {"plan": {"akcja": "dodaj", "symbol": symbol,
+                                         "nazwa": "%s.png" % symbol, "typ": z.get("typ") or "png",
+                                         "dane_b64": z["dane_b64"]},
+                                "zapisz": True}, timeout=300, write=True)
+                blad = _blad_mostu(odp)
+                if blad or not (odp or {}).get("zmienione"):
+                    raise RuntimeError(blad or "most nie potwierdził dodania zdjęcia")
+                status, opis = "gotowe", "%s: zdjęcie dodane do Subiekta" % symbol
+                try:
+                    k = rm_klient.master_read("sub-kartoteka", {"symbol": symbol})
+                    if k:
+                        rm_klient.master_exec("sub-miniatura-zapisz", {
+                            "id_subiekt": k[0]["id"], "symbol": k[0]["symbol"],
+                            "numer_zdjecia": None, "typ": z.get("typ") or "png",
+                            "dane_b64": z["dane_b64"],
+                            "zsynchronizowano": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                except Exception as e:
+                    opis += " (kopia MAG zobaczy je po synchronizacji: %s)" % e
+        except Exception as e:
+            status, opis = "blad", "%s: %s" % (type(e).__name__, e)
+            traceback.print_exc()
+        try:
+            rm_klient.master_exec("sub-zdjecie-zakoncz", {
+                "status": status, "wynik": opis[:300], "id": z["id"], "wykonawca": kto})
+        except Exception as e:
+            print("⚠️  Zdjęcie %s: nie odnotowano końca: %s" % (z["id"], e))
+        print("ℹ️  Zdjęcie do Subiekta (zlecenie %s): %s — %s" % (z["id"], status, opis))
+
+
 def _petla(most, inventor):
     kto = wykonawca_id()
     preferowany = _komputer() in PREFEROWANE
@@ -223,6 +293,16 @@ def _petla(most, inventor):
                     kolej = preferowany or (z.get("wiek_s") or 0) >= CZEKAJ_NA_PREFEROWANY_S
                     if kolej and _most_zyje():
                         wykonaj(z, kto)
+                # Zdjęcia z okna MAG — osobny try: serwer bez tej kolejki
+                # (starsza wersja) nie może zatrzymać indeksu 3D niżej.
+                try:
+                    zd = rm_klient.master_read("sub-zdjecie-oczekujace")
+                except rm_klient.BladSerwera:
+                    zd = []
+                if zd:
+                    kolej = preferowany or (zd[0].get("wiek_s") or 0) >= CZEKAJ_NA_PREFEROWANY_S
+                    if kolej and _most_zyje():
+                        wykonaj_zdjecia(zd, kto)
             if inventor:
                 # Indeks 3D: dowolna stacja z Inventorem, bez pierwszeństwa.
                 z3 = rm_klient.master_read("sub-zlecenie-oczekujace-rodzaj",

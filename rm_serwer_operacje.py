@@ -3679,6 +3679,61 @@ ZAPIS.update({
 })
 
 
+# Zdjęcia kartotek do SUBIEKTA z okna MAG (29.09.2026, user: „ta sama
+# miniatura co 3D, w tym samym przebiegu"). Przy ręcznym przypisaniu modelu
+# Inventor usera renderuje miniaturę; gdy kartoteka nie ma zdjęcia i nie jest
+# rysunkiem RMPAK, ten sam PNG trafia tu. Wgrywa stacja z mostem Sfery
+# (`subiekt_kopia_zlecenia`) — NIGDY nie nadpisuje istniejącego zdjęcia.
+# `dane_b64` czyszczone po zakończeniu (tabela nie rośnie o obrazki).
+MIGRACJE_SUBIEKT_KOPIA.extend([
+    """CREATE TABLE IF NOT EXISTS zlecenia_zdjec (
+           id          INTEGER PRIMARY KEY AUTOINCREMENT,
+           symbol      TEXT NOT NULL,
+           typ         TEXT,
+           dane_b64    TEXT,
+           status      TEXT NOT NULL DEFAULT 'nowe',
+           zlecil      TEXT,
+           zlecono     TEXT NOT NULL,
+           wykonawca   TEXT,
+           przejeto    TEXT,
+           zakonczono  TEXT,
+           wynik       TEXT
+       )""",
+])
+
+ODCZYT.update({
+    "sub-zdjecie-oczekujace": (
+        "SELECT *, CAST((julianday('now', 'localtime')"
+        "       - julianday(REPLACE(zlecono, 'T', ' '))) * 86400 AS INTEGER) AS wiek_s"
+        "  FROM zlecenia_zdjec"
+        " WHERE status = 'nowe'"
+        "    OR (status = 'w_toku' AND REPLACE(przejeto, 'T', ' ') < " + _PORZUCONE + ")"
+        " ORDER BY id LIMIT 10",
+        [],
+    ),
+})
+
+ZAPIS.update({
+    "sub-zdjecie-zlec": (
+        "INSERT INTO zlecenia_zdjec (symbol, typ, dane_b64, status, zlecil, zlecono)"
+        " VALUES (?, ?, ?, 'nowe', ?, " + _TERAZ + ")",
+        ["symbol", "typ", "dane_b64", "zlecil"],
+    ),
+    "sub-zdjecie-przejmij": (
+        "UPDATE zlecenia_zdjec SET status = 'w_toku', wykonawca = ?, przejeto = " + _TERAZ +
+        " WHERE id = ? AND (status = 'nowe'"
+        "   OR (status = 'w_toku' AND REPLACE(przejeto, 'T', ' ') < " + _PORZUCONE + "))",
+        ["wykonawca", "id"],
+    ),
+    "sub-zdjecie-zakoncz": (
+        "UPDATE zlecenia_zdjec SET status = ?, wynik = ?, dane_b64 = '',"
+        "       zakonczono = " + _TERAZ +
+        " WHERE id = ? AND wykonawca = ?",
+        ["status", "wynik", "id", "wykonawca"],
+    ),
+})
+
+
 # ── KATALOG ŁOŻYSK (subiekt_kopia.sqlite) ────────────────────────────────
 #
 # Łożyska kulkowe zwykłe z katalogów producentów (Timken + FBJ, wymiary

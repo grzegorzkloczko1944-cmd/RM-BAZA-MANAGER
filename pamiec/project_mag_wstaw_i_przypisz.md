@@ -53,5 +53,18 @@ na obrazek. Wersja w `typ` = `png/biale`: stare `png` przerabiane RAZ
 (pierwszy przebieg po zmianie ~20 min na 16 tys. modeli). Półprzezroczyste
 części zostają z prześwitem — nie do naprawienia z obrazka.
 
+**Zdjęcie do Subiekta w tym samym przebiegu (29.09.2026):** przy ręcznym
+przypisaniu ten sam biały render idzie też jako zdjęcie kartoteki — gdy
+kartoteka NIE MA zdjęcia i symbol nie wygląda na rysunek RMPAK
+(`/^[A-Z0-9]{2,8}-\d+(\.\d+)+[A-Z]{0,3}$/i`). Kolejka `zlecenia_zdjec`
+(kopia), wykonuje stacja z mostem (`subiekt_kopia_zlecenia.wykonaj_zdjecia`,
+PREFEROWANE jak kopia); nigdy nie nadpisuje; po wgraniu wpis do kopii
+`miniatury` → MAG widzi od razu.
+⛔ Most w trybie `zdjecie` NIE MA pola „istnieje": brak kartoteki = krok
+`Status: blad, "nie ma takiej kartoteki"` + pusta lista zdjęć (wygląda jak
+kartoteka bez zdjęcia!). Sprawdzać kroki (`_blad_mostu`). Ten sam błąd
+siedzi w `subiekt_lozyska_zdjecia.py` (liczy brak kartoteki jako wysłane —
+dodaj na nieistniejącej kartotece też tylko zwraca krok blad, nic nie psuje).
+
 Zobacz też: [[project_mag_vba7_lista_zapasowa]], [[project_mag_indeks3d_zlecenie]],
 [[project_lozyska_katalog_28_09]], [[feedback_nic_po_cichu]].

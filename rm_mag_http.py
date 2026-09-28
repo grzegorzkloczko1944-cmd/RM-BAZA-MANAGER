@@ -29,7 +29,9 @@ ADRESY (wszystkie GET, odpowiedź JSON; `&format=tsv` = tekst dla VBA)
                                       wykona stacja z mostem (MONGO pierwsza)
     POST /mag/model3d/przypisz?symbol=&sciezka=&kto=   ręczne przypisanie
     POST /mag/model3d/usun?symbol=&sciezka=            usunięcie ręcznego
-    POST /mag/model3d/miniatura?sciezka=&typ=png|bmp   miniatura ze stacji (base64 w treści)
+    POST /mag/model3d/miniatura?sciezka=&typ=png|bmp[&subiekt=SYMBOL]
+                                  miniatura ze stacji (base64 w treści); z `subiekt`
+                                  także zdjęcie kartoteki w Subiekcie (zlecenie)
     POST /mag/synchronizuj3d?kto=GKI  zlecenie indeksu modeli 3D — wykona
                                       dowolna stacja z Inventorem
     /mag/skrypt/indeks_modeli_3d.py   skrypt dla stacji (biała lista)
@@ -472,7 +474,7 @@ SYGNATURY_MINIATUR = {"png": b"\x89PNG\r\n\x1a\n", "bmp": b"BM"}
 MINIATURA_MAX = 3 * 1024 * 1024
 
 
-def zapisz_miniature(zlec, sciezka, typ, dane_b64, kto):
+def zapisz_miniature(zlec, sciezka, typ, dane_b64, kto, do_subiekta=""):
     """Miniatura modelu wyjęta z pliku NA STACJI usera (okno MAG, 29.09.2026).
 
     Obrazek renderuje Inventor usera (izometria, BIAŁE tło) — lepszy niż
@@ -495,7 +497,15 @@ def zapisz_miniature(zlec, sciezka, typ, dane_b64, kto):
         "sciezka": sciezka, "mtime": -1, "typ": typ,
         "dane_b64": base64.b64encode(dane).decode("ascii"),
         "kto": kto, "kiedy": time.strftime("%Y-%m-%dT%H:%M:%S")})
-    return {"sciezka": sciezka, "zapisano": 1, "bajtow": len(dane)}
+    wynik = {"sciezka": sciezka, "zapisano": 1, "bajtow": len(dane), "subiekt": ""}
+    # Ta sama miniatura jako zdjęcie kartoteki w Subiekcie — zlecenie dla
+    # stacji z mostem (decyzja, czy wysyłać, zapada w oknie MAG).
+    if (do_subiekta or "").strip():
+        zlec("sub-zdjecie-zlec", {
+            "symbol": do_subiekta.strip(), "typ": typ,
+            "dane_b64": base64.b64encode(dane).decode("ascii"), "zlecil": kto})
+        wynik["subiekt"] = "zlecono"
+    return wynik
 
 
 def usun_przypisanie(zlec, symbol, sciezka):
@@ -531,6 +541,15 @@ def status(bazy):
                                   " ORDER BY id DESC LIMIT 1").fetchone() or {})
         except sqlite3.Error:
             pass                          # baza sprzed tabeli zleceń / kolumny
+        zd_czeka, zd = 0, {}
+        try:
+            zd_czeka = con.execute("SELECT COUNT(*) FROM zlecenia_zdjec"
+                                   " WHERE status IN ('nowe', 'w_toku')").fetchone()[0]
+            zd = dict(con.execute("SELECT symbol, status, wynik FROM zlecenia_zdjec"
+                                  " WHERE zakonczono IS NOT NULL"
+                                  " ORDER BY id DESC LIMIT 1").fetchone() or {})
+        except sqlite3.Error:
+            pass                          # serwer sprzed kolejki zdjęć
         # Płasko, nie zagnieżdżone — TSV dla VBA nie niesie słowników.
         return {"kartotek": ile, "miniatur": mini, "rysunkow_z_modelem": modeli,
                 "kartoteki_z": ostatnie.get("kartoteki"),
@@ -541,7 +560,9 @@ def status(bazy):
                 "zlecenie_zlecono": z.get("zlecono"),
                 "indeks_status": z3.get("status"), "indeks_wykonawca": z3.get("wykonawca"),
                 "indeks_postep": z3.get("postep"), "indeks_wynik": z3.get("wynik"),
-                "indeks_zlecono": z3.get("zlecono"), "indeks_zakonczono": z3.get("zakonczono")}
+                "indeks_zlecono": z3.get("zlecono"), "indeks_zakonczono": z3.get("zakonczono"),
+                "zdjecia_czeka": zd_czeka, "zdjecie_symbol": zd.get("symbol"),
+                "zdjecie_status": zd.get("status"), "zdjecie_wynik": zd.get("wynik")}
     finally:
         con.close()
 
@@ -606,7 +627,7 @@ def zbuduj_handler(bazy, log, zlec=None):
                             raise ValueError("miniatura: zły rozmiar (%d B)" % dl)
                         cialo = self.rfile.read(dl).decode("ascii", "replace")
                         wynik = zapisz_miniature(zlec, p.get("sciezka", ""), p.get("typ", ""),
-                                                 cialo, kto)
+                                                 cialo, kto, p.get("subiekt", ""))
                     elif sciezka.endswith("/przypisz"):
                         wynik = przypisz_model(bazy, zlec, p.get("symbol", ""),
                                                p.get("sciezka", ""), kto)
