@@ -103,8 +103,8 @@ def main():
     zapisane = 0
     for i in range(0, len(wiersze), PACZKA):
         paczka = wiersze[i:i + PACZKA]
-        rm_klient.wywolaj("master-batch", {"operations": [
-            {"operation": "map-model3d-zapisz", "params": w} for w in paczka]})
+        rm_klient.master_batch(
+            [{"operation": "map-model3d-zapisz", "params": w} for w in paczka])
         zapisane += len(paczka)
         print(f"   {zapisane}/{len(wiersze)}")
     print(f"\nZAPISANE: {zapisane} modeli łożysk w indeksie 3D.")
