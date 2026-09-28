@@ -29,6 +29,7 @@ ADRESY (wszystkie GET, odpowiedź JSON; `&format=tsv` = tekst dla VBA)
                                       wykona stacja z mostem (MONGO pierwsza)
     POST /mag/model3d/przypisz?symbol=&sciezka=&kto=   ręczne przypisanie
     POST /mag/model3d/usun?symbol=&sciezka=            usunięcie ręcznego
+    POST /mag/model3d/miniatura?sciezka=&typ=png|bmp   miniatura ze stacji (base64 w treści)
     POST /mag/synchronizuj3d?kto=GKI  zlecenie indeksu modeli 3D — wykona
                                       dowolna stacja z Inventorem
     /mag/skrypt/indeks_modeli_3d.py   skrypt dla stacji (biała lista)
@@ -66,7 +67,7 @@ _OGONKI_PL = str.maketrans("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ", "acelnoszzACE
 LIMIT_DOMYSLNY = 50
 LIMIT_MAX = 500
 
-TYPY_OBRAZKOW = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+TYPY_OBRAZKOW = {"png": "image/png", "png/biale": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
                  "bmp": "image/bmp", "gif": "image/gif"}
 
 #: Kolumny wyniku wyszukiwania — kolejność = kolejność w TSV.
@@ -466,6 +467,37 @@ def przypisz_model(bazy, zlec, symbol, sciezka, kto):
     return {"sciezka": sciezka, "nowy": 1, "komunikat": "przypisano"}
 
 
+#: Miniatura wysylana ze stacji usera przy przypisaniu — sygnatury formatow.
+SYGNATURY_MINIATUR = {"png": b"\x89PNG\r\n\x1a\n", "bmp": b"BM"}
+MINIATURA_MAX = 3 * 1024 * 1024
+
+
+def zapisz_miniature(zlec, sciezka, typ, dane_b64, kto):
+    """Miniatura modelu wyjęta z pliku NA STACJI usera (okno MAG, 29.09.2026).
+
+    Obrazek renderuje Inventor usera (izometria, BIAŁE tło) — lepszy niż
+    miniatura zapisana w pliku, więc `mtime = -1`: indeks go NIE nadpisuje
+    (`indeks_modeli_3d.MTIME_RENDER`). Nowy render = ponowne przypisanie.
+    """
+    typ = (typ or "").lower()
+    if typ not in SYGNATURY_MINIATUR:
+        raise ValueError("nieznany typ miniatury: %s" % typ)
+    try:
+        dane = base64.b64decode(dane_b64 or "", validate=False)
+    except Exception:
+        raise ValueError("miniatura: zły base64")
+    if not dane.startswith(SYGNATURY_MINIATUR[typ]):
+        raise ValueError("miniatura: to nie jest %s" % typ)
+    sciezka = _normuj_sciezke(sciezka)
+    if not sciezka.lower().endswith(MODELE_3D):
+        raise ValueError("to nie jest model Inventora (.ipt/.iam): %s" % sciezka)
+    zlec("sub-mini3d-zapisz", {
+        "sciezka": sciezka, "mtime": -1, "typ": typ,
+        "dane_b64": base64.b64encode(dane).decode("ascii"),
+        "kto": kto, "kiedy": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    return {"sciezka": sciezka, "zapisano": 1, "bajtow": len(dane)}
+
+
 def usun_przypisanie(zlec, symbol, sciezka):
     """Usuwa JEDEN ręczny wiersz. Automatycznych nie rusza."""
     w = zlec("map-model3d-usun-reczny", {
@@ -561,13 +593,21 @@ def zbuduj_handler(bazy, log, zlec=None):
             p = {k: v[0] for k, v in parse_qs(url.query).items()}
             tsv = p.get("format", "").lower() == "tsv"
             sciezka = url.path.rstrip("/")
-            if sciezka in ("/mag/model3d/przypisz", "/mag/model3d/usun"):
+            if sciezka in ("/mag/model3d/przypisz", "/mag/model3d/usun",
+                           "/mag/model3d/miniatura"):
                 if zlec is None:
                     self._dane(503, {"blad": "serwer bez obsługi zleceń"}, tsv)
                     return
                 kto = (p.get("kto") or "MAG").strip()[:40]
                 try:
-                    if sciezka.endswith("/przypisz"):
+                    if sciezka.endswith("/miniatura"):
+                        dl = int(self.headers.get("Content-Length") or 0)
+                        if dl <= 0 or dl > MINIATURA_MAX * 2:
+                            raise ValueError("miniatura: zły rozmiar (%d B)" % dl)
+                        cialo = self.rfile.read(dl).decode("ascii", "replace")
+                        wynik = zapisz_miniature(zlec, p.get("sciezka", ""), p.get("typ", ""),
+                                                 cialo, kto)
+                    elif sciezka.endswith("/przypisz"):
                         wynik = przypisz_model(bazy, zlec, p.get("symbol", ""),
                                                p.get("sciezka", ""), kto)
                     else:

@@ -37,5 +37,21 @@ Inventorze 2013; „wstaw" NIE testowany automatycznie (wstawiłby komponent
 w złożenie usera) — test ręczny u usera. Firma: wdrożyć `rm_serwer_operacje.py`
 i `rm_mag_http.py` na W2019S (restart za zgodą) + nowy MAG.vba.
 
+**Miniatura przy przypisaniu (29.09.2026, pomysł usera):** renderuje ją
+INVENTOR USERA, nie RM_BAZA — tryb VBS `miniatura`: `TransientObjects.
+CreateCamera`, `cam.SceneObject = ...` (BEZ `Set` — właściwość Let, z Set
+błąd 438), izometria 10759, `Fit`, `SaveAsBitmap(png, 300, 300, biały,
+biały)`; osie XYZ (`DisplayOptions.Show3DIndicator`) wyłączone tylko na
+czas renderu. Plik otwierany niewidocznie, zamykany bez zapisu. HTA czyta
+PNG (ADODB.Stream + XML bin.base64) → `POST /mag/model3d/miniatura`.
+Zapis z `mtime = -1` = indeks tego NIE nadpisuje.
+
+**Białe tło w indeksie:** miniatury zapisane w plikach mają tło widoku
+(u usera niebieski gradient). `indeks_modeli_3d.biale_tlo()` — zalewanie
+od brzegów + plamy tła w otworach (≥20 px) + rozjaśnienie krawędzi; ~60 ms
+na obrazek. Wersja w `typ` = `png/biale`: stare `png` przerabiane RAZ
+(pierwszy przebieg po zmianie ~20 min na 16 tys. modeli). Półprzezroczyste
+części zostają z prześwitem — nie do naprawienia z obrazka.
+
 Zobacz też: [[project_mag_vba7_lista_zapasowa]], [[project_mag_indeks3d_zlecenie]],
 [[project_lozyska_katalog_28_09]], [[feedback_nic_po_cichu]].

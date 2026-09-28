@@ -3555,7 +3555,7 @@ MIGRACJE_SUBIEKT_KOPIA.extend([
 
 ODCZYT.update({
     "sub-mini3d-stan": (
-        "SELECT sciezka, mtime FROM miniatury_3d",
+        "SELECT sciezka, mtime, typ FROM miniatury_3d",
         [],
     ),
 })

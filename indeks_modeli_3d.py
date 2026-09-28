@@ -329,6 +329,97 @@ _WMF_DIB = {0x0940: 22, 0x0B41: 26, 0x0F43: 28}
 #: Miniatur w jednym `master-batch` — każda to kilka–kilkanaście KB base64.
 PACZKA_MINIATUR = 40
 
+#: `typ` miniatury po wybieleniu tła. Wiersze ze starym `typ` ('png' —
+#: niebieskie tło sprzed 29.09.2026) indeks przerabia raz, sam.
+TYP_MINIATURY = "png/biale"
+#: `mtime` miniatury wyrenderowanej przez Inventora usera (okno MAG, przy
+#: ręcznym przypisaniu) — tej indeks NIE nadpisuje obrazkiem z pliku.
+MTIME_RENDER = -1
+
+
+def biale_tlo(png: bytes, tol=38, miekko=70) -> bytes:
+    """Tlo widoku Inventora (u usera niebieski gradient) -> biale.
+
+    Decyzja usera 29.09.2026: miniatury 3D na BIALYM tle. Zalewanie od
+    brzegow + plamy tla widziane przez otwory; krawedzie czesci
+    (antyaliasing z tlem) rozjasniane. ~60 ms na obrazek 180x180.
+    """
+    import io
+    from PIL import Image
+    img = Image.open(io.BytesIO(png)).convert("RGB")
+    w, h = img.size
+    px = img.load()
+    # Tlo widoku Inventora: gradient PIONOWY - wzorzec kazdego wiersza
+    # z lewej i prawej krawedzi (srednia).
+    wz = []
+    for y in range(h):
+        a, b = px[0, y], px[w - 1, y]
+        wz.append(tuple((a[k] + b[k]) // 2 for k in range(3)))
+
+    def odl(c, y):
+        r = wz[y]
+        return abs(c[0] - r[0]) + abs(c[1] - r[1]) + abs(c[2] - r[2])
+
+    tlo = bytearray(w * h)
+    stos = [(xx, yy) for xx in range(w) for yy in (0, h - 1)] + \
+           [(xx, yy) for yy in range(h) for xx in (0, w - 1)]
+    while stos:
+        xx, yy = stos.pop()
+        i = yy * w + xx
+        if tlo[i] or odl(px[xx, yy], yy) > tol:
+            continue
+        tlo[i] = 1
+        if xx > 0: stos.append((xx - 1, yy))
+        if xx < w - 1: stos.append((xx + 1, yy))
+        if yy > 0: stos.append((xx, yy - 1))
+        if yy < h - 1: stos.append((xx, yy + 1))
+    # Tlo widziane przez OTWORY (nie laczy sie z brzegiem): plamy w kolorze
+    # tla, scislejsza tolerancja, od 20 pikseli - drobnica zostaje.
+    ciasno = tol * 2 // 3
+    for y0 in range(h):
+        for x0 in range(w):
+            i0 = y0 * w + x0
+            if tlo[i0] or odl(px[x0, y0], y0) > ciasno:
+                continue
+            plama, stos2, wid = [], [(x0, y0)], {i0}
+            while stos2:
+                xx, yy = stos2.pop()
+                plama.append(yy * w + xx)
+                for nx, ny in ((xx - 1, yy), (xx + 1, yy), (xx, yy - 1), (xx, yy + 1)):
+                    if 0 <= nx < w and 0 <= ny < h:
+                        j = ny * w + nx
+                        if j not in wid and not tlo[j] and odl(px[nx, ny], ny) <= ciasno:
+                            wid.add(j); stos2.append((nx, ny))
+            if len(plama) >= 20:
+                for j in plama:
+                    tlo[j] = 1
+            else:
+                for j in plama:
+                    tlo[j] = 2          # juz ogladany, nie tlo
+    for i in range(w * h):
+        if tlo[i] == 2:
+            tlo[i] = 0
+    # Krawedzie czesci (antyaliasing z niebieskim): piksel graniczacy z tlem
+    # rozjasniamy proporcjonalnie do podobienstwa do tla.
+    for yy in range(h):
+        for xx in range(w):
+            i = yy * w + xx
+            if tlo[i]:
+                px[xx, yy] = (255, 255, 255)
+                continue
+            sasiad = ((xx > 0 and tlo[i - 1]) or (xx < w - 1 and tlo[i + 1]) or
+                      (yy > 0 and tlo[i - w]) or (yy < h - 1 and tlo[i + w]))
+            if sasiad:
+                d = odl(px[xx, yy], yy)
+                if d < miekko:
+                    t = 1 - (d - tol) / (miekko - tol) if d > tol else 1
+                    c, r = px[xx, yy], wz[yy]
+                    # usun domieszke tla, dodaj tyle samo bieli
+                    px[xx, yy] = tuple(max(0, min(255, int(c[k] + t * (255 - r[k])))) for k in range(3))
+    out = io.BytesIO()
+    img.save(out, "PNG", optimize=True)
+    return out.getvalue()
+
 
 def _dib_na_png(dib: bytes) -> tuple:
     """Bitmapa DIB (bez nagłówka pliku) -> ("png", bajty); bez Pillow -> BMP."""
@@ -342,7 +433,7 @@ def _dib_na_png(dib: bytes) -> tuple:
         from PIL import Image
         wyj = io.BytesIO()
         Image.open(io.BytesIO(bmp)).save(wyj, "PNG", optimize=True)
-        return "png", wyj.getvalue()
+        return "png", biale_tlo(wyj.getvalue())
     except ImportError:
         return "bmp", bmp
 
@@ -374,7 +465,10 @@ def miniatura_modelu(sciezka: str) -> tuple:
             dane = d[off + po + 16: off + po + 8 + ile]   # za znacznikiem formatu
             k = dane.find(_PNG)
             if k >= 0:
-                return "png", dane[k:]
+                try:
+                    return "png", biale_tlo(dane[k:])
+                except ImportError:
+                    return "png", dane[k:]
             wmf, poz = dane[8:], 18                        # za METAFILEPICT i nagł. WMF
             while poz + 6 <= len(wmf):
                 dl, fn = struct.unpack_from("<IH", wmf, poz)
@@ -396,7 +490,7 @@ def odswiez_miniatury(postep=lambda _t: None) -> str:
     sciezki = sorted({w["sciezka"] for w in
                       rm_klient.master_read("map-model3d-wszystkie", timeout=120)
                       if w["sciezka"]})
-    znane = {w["sciezka"]: w["mtime"] for w in
+    znane = {w["sciezka"]: (w["mtime"], w.get("typ")) for w in
              rm_klient.master_read("sub-mini3d-stan", timeout=120)}
     kto, kiedy = os.environ.get("USERNAME") or "?", datetime.now().isoformat(timespec="seconds")
     paczka, zapisane, bez, bledy, t0 = [], 0, 0, 0, time.time()
@@ -404,11 +498,14 @@ def odswiez_miniatury(postep=lambda _t: None) -> str:
         if i % 500 == 0:
             print(f"   … miniatury {i}/{len(sciezki)}  ({time.time() - t0:.0f}s)")
             postep(f"miniatury 3D {i}/{len(sciezki)}")
+        stare_mtime, stary_typ = znane.get(s, (None, None))
+        if stare_mtime == MTIME_RENDER:
+            continue                     # render z Inventora usera — zostaje
         try:
             mtime = os.path.getmtime(s)
         except OSError:
             continue
-        if znane.get(s) == mtime:
+        if stare_mtime == mtime and stary_typ == TYP_MINIATURY:
             continue
         try:
             typ, dane = miniatura_modelu(s)
@@ -417,7 +514,10 @@ def odswiez_miniatury(postep=lambda _t: None) -> str:
             continue
         bez += not dane
         paczka.append({"operation": "sub-mini3d-zapisz", "params": {
-            "sciezka": s, "mtime": mtime, "typ": typ,
+            "sciezka": s, "mtime": mtime,
+            # Wersja w `typ`: także „bez miniatury", inaczej czytalibyśmy
+            # taki plik przy każdym przebiegu. Obrazek i tak idzie jako PNG.
+            "typ": TYP_MINIATURY if typ in ("png", "") else typ,
             "dane_b64": base64.b64encode(dane).decode("ascii"),
             "kto": kto, "kiedy": kiedy}})
         if len(paczka) >= PACZKA_MINIATUR:
