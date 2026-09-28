@@ -2,8 +2,12 @@
 
 Stan: **etapy 1-3 napisane; etap 3 (okno MAG) DZIAŁA na M-OLD 28.09.2026** —
 lista w WebBrowser (kółko natywnie), 7 osobnych kolumn, klik przez MSHTML
-onclick, synchronizacja zleceniem z okna. Produkcja (W2019S/MONGO) wciąż
-nie wdrożona. Pułapki VBA: pamiec/project_mag_okno_przegladarka.
+onclick, synchronizacja zleceniem z okna. **Serwer produkcyjny (W2019S)
+wdrożony 28.09.2026** — kroki 0-6 instrukcji: pliki, zapora 5061, restart
+o 12:22, `/mag/lozyska` odpowiada (293 łożyska). Zostaje: pierwsza
+synchronizacja kopii Subiekta (kroki 7-9) i makro w Inventorze firmowym
+(VBA7 64-bit, nietestowane). Przebieg: pamiec/project_mag_wdrozenie_firma_wykonane.
+Pułapki VBA: pamiec/project_mag_okno_przegladarka.
 Spisany 27.09.2026 po rozpoznaniu na żywych danych. Wszystkie liczby niżej
 są **zmierzone**, nie szacowane. Przebieg etapu 1 — sekcja 6a.
 
