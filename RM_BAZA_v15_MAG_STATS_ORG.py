@@ -11794,7 +11794,7 @@ class MainWindow(tk.Tk):
         
         dlg = tk.Toplevel(self)
         dlg.title("➕ Dodaj pozycję ręcznie")
-        dlg.geometry("600x550")
+        dlg.geometry("700x560")
         dlg.transient(self)
         dlg.grab_set()
         dlg.resizable(False, False)
@@ -12812,9 +12812,80 @@ class MainWindow(tk.Tk):
                 import traceback
                 traceback.print_exc()
         
+        def wstaw_z_subiekta():
+            """Otwiera wyszukiwarkę kartotek Subiekta (symbol / nazwa / opis).
+
+            Wpisywanie symbolu z pamięci kończyło się literówką, której
+            zasiew projektu już nie rozpozna jako tej samej kartoteki
+            (zgłoszone 28.09.2026). Okno nic nie zapisuje — oddaje wybraną
+            kartotekę tutaj, a pola wypełniamy PO pokazaniu, co się zmieni.
+            """
+            def po_wyborze(poz):
+                if not dlg.winfo_exists():
+                    return
+                symbol = (poz.get("symbol") or "").strip()
+                nazwa = (poz.get("nazwa") or "").strip()
+                opis = (poz.get("opis") or "").strip()
+
+                # NIC PO CICHU: pokazujemy, co zostanie nadpisane. Pytamy
+                # tylko wtedy, gdy realnie jest co stracić — przy pustym
+                # formularzu (typowy przypadek) wstawiamy bez klikania.
+                do_nadpisania = []
+                if e_drawing.get().strip() and symbol:
+                    do_nadpisania.append(
+                        f"    Nr rysunku:  {e_drawing.get().strip()}  →  {symbol}")
+                if e_name.get().strip() and nazwa:
+                    do_nadpisania.append(
+                        f"    Nazwa:       {e_name.get().strip()}  →  {nazwa}")
+                if e_desc.get().strip() and opis:
+                    do_nadpisania.append(
+                        f"    Opis:        {e_desc.get().strip()}  →  {opis}")
+                if do_nadpisania and not messagebox.askyesno(
+                        "Nadpisać wypełnione pola?",
+                        "Wybrana kartoteka nadpisze to, co już jest "
+                        "w formularzu:\n\n" + "\n".join(do_nadpisania) +
+                        "\n\nPozostałe pola zostają bez zmian.", parent=dlg):
+                    return
+
+                if symbol:
+                    e_drawing.delete(0, tk.END)
+                    e_drawing.insert(0, symbol)
+                if nazwa:
+                    name_var.set(nazwa)
+                if opis:
+                    e_desc.delete(0, tk.END)
+                    e_desc.insert(0, opis)
+
+                # ⚠️ Typ / Materiał / Grubość / Dostawcę zostawiamy puste
+                # CELOWO — kartoteka Subiekta ich nie niesie w formie, którą
+                # da się tu wpisać bez zgadywania.
+                autofill_status.config(
+                    text=f"📦 Z Subiekta: {symbol} — uzupełnij Typ i ilość",
+                    fg="#2980b9")
+                drawing_found_label.config(text="")
+                name_found_label.config(text="")
+                e_type.focus()
+
+            try:
+                import subiekt_wybor_kartoteki_gui as _W
+            except Exception as e:
+                messagebox.showerror(
+                    "Wstaw z Subiekta",
+                    f"Nie udało się załadować wyszukiwarki kartotek:\n{e}",
+                    parent=dlg)
+                return
+
+            # Fraza startowa: to, co user już wpisał — zwykle właśnie tego
+            # szuka. Numer rysunku ma pierwszeństwo przed nazwą.
+            fraza = e_drawing.get().strip() or e_name.get().strip()
+            _W.open_window(dlg, po_wyborze, fraza=fraza)
+
         btn_frame = tk.Frame(main_frame, bg="#f0f0f0")
         btn_frame.grid(row=10, column=0, columnspan=2, pady=20)
-        
+
+        tk.Button(btn_frame, text="🔍 Z Subiekta…", command=wstaw_z_subiekta,
+                 width=14, bg="#8e44ad", fg="white",
+                 font=("Arial", 10)).pack(side=tk.LEFT, padx=8)
         tk.Button(btn_frame, text="✔ Dodaj", command=save, width=12,
                  bg="#27ae60", fg="white", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=8)
         tk.Button(btn_frame, text="🧹 Wyczyść", command=clear_all_fields, width=12,
@@ -12830,6 +12901,7 @@ class MainWindow(tk.Tk):
         e_qty.bind("<Return>", lambda e: e_type.focus())
         dlg.bind("<Escape>", lambda e: dlg.destroy())
         dlg.bind("<Control-w>", lambda e: clear_all_fields())  # Ctrl+W = wyczyść
+        dlg.bind("<F4>", lambda e: wstaw_z_subiekta())  # F4 = szukaj w Subiekcie
         
         e_drawing.focus()
     

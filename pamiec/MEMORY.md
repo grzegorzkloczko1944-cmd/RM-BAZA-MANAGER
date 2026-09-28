@@ -160,3 +160,4 @@
 - [MAG na VBA7 64-bit — lista zapasowa](project_mag_vba7_lista_zapasowa.md) — Inventor 2015 NIE osadzi WebBrowser w UserFormie → okno MAG jako HTA (mshta), ten sam wygląd na 2013/2015; ListBox ODRZUCONY; 5 dźwigni rejestru bez skutku; LLMNR/IPv6 → hosts
 - [Nadpisywanie — pytaj za każdym razem](feedback_nadpisywanie_pytaj.md) — zgoda na nadpisanie danych jest JEDNORAZOWA, nie stała regułą; domyślnie pomijamy to, co już ma obrazek
 - [Katalog łożysk w Subiekcie](project_lozyska_katalog_28_09.md) — 1127 kartotek + 1160 zdjęć (28.09.2026); PUNKT WZNOWIENIA: zasiew indeksu 3D czeka na dokończenie miniatur w .ipt; pułapki olefile/limit 500/kopia MAG
+- [Wstaw z Subiekta w „Dodaj pozycję ręcznie"](project_wstaw_z_subiekta_recznie.md) — przycisk F4, szuka po symbolu/nazwie/OPISIE; osobne okno bez zapisu, filtr NIE w Indeks.szukaj
