@@ -456,8 +456,14 @@ def read_hidden_drawings(project_id):
     n = len(nr_cols)
     for r in rows:                       # ta sama kolejność co przy czytaniu BOM-u
         nr = pierwsza(r[:n])
+        nazwa = pierwsza(r[n:])
         if nr:
-            ukryte[nr.upper()] = pierwsza(r[n:])
+            ukryte[nr.upper()] = nazwa
+        elif nazwa:
+            # Pozycja BEZ numeru rysunku (normalia z katalogu, np. „GN 615-M8-KN"):
+            # tożsamością jest nazwa. Do 28.09.2026 taka ukryta pozycja wypadała
+            # z tej funkcji zupełnie — okno nie miało jej jak pokazać.
+            ukryte[nazwa.upper()] = nazwa
     return ukryte
 
 
@@ -2056,7 +2062,8 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                 ("#d4e6f1", "złożenie (Z/ZZ), kartoteka jest — będzie komplet"),
                 ("#fdebd0", "BRAK kartoteki — zaznacz ✓, żeby założyć"),
                 ("#f5b041", "komplet BEZ SKŁADU — powstanie pusty"),
-                ("#fadbd8", "błąd — pozycja nie przejdzie")):
+                ("#fadbd8", "błąd — pozycja nie przejdzie"),
+                ("#c0392b", "UKRYTA w arkuszu — NIE idzie do Subiekta")):
             tk.Label(leg, text="   ", bg=kolor, relief=tk.SOLID, bd=1).pack(
                 side=tk.LEFT, padx=(8, 3), pady=(0, 4))
             tk.Label(leg, text=opis, bg="#ecf0f1", fg="#7f8c8d",
@@ -2134,6 +2141,13 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         # pusty i magazynier nie ma z czego go złożyć).
         self.tree.tag_configure("komplet-pusty", background="#f5b041",
                                 foreground="#7d4b12")
+        # UKRYTA W ARKUSZU — pozycja jest w drzewku Inventora, ale NIE pójdzie
+        # do Subiekta (build_plan czyta items z `is_hidden = 0`). Do 28.09.2026
+        # takiego wiersza w drzewku w ogóle nie było — znikał bez śladu i łatwo
+        # było wziąć brak za pomyłkę importu. Mocna czerwień z białym tekstem:
+        # to jedyny wiersz, który świadomie pomijamy, więc ma się rzucać w oczy
+        # mocniej niż błąd (#fadbd8) — ale bez ✓, bo nie ma czego zaznaczać.
+        self.tree.tag_configure("ukryta", background="#c0392b", foreground="white")
 
         bottom = tk.Frame(self)
         bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(0, 8))
@@ -3072,7 +3086,12 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
             for i in self.tree.get_children(node):
                 sym = (self.tree.set(i, "nr") or "").strip().upper()
                 if sym:
-                    if sym not in brakujace:
+                    if "ukryta" in self.tree.item(i, "tags"):
+                        # Wiersz ukrytej pozycji: „—" znaczyłoby „istnieje, nic
+                        # nie robimy", a tu jest odwrotnie — pozycja świadomie
+                        # wypada z zapisu. Krzyżyk, żeby nie mylić z ✓/☐.
+                        self.tree.set(i, "sel", "✖")
+                    elif sym not in brakujace:
                         self.tree.set(i, "sel", "—")     # istnieje, nic nie robimy
                     else:
                         self.tree.set(i, "sel", "✓" if sym in self.wybrane else "☐")
@@ -3719,12 +3738,32 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                 return dostawcy.get(p["symbol"].upper()) or "— RMPAK —"
             return dostawcy.get(p["symbol"].upper()) or ""
 
+        # Składniki UKRYTE w arkuszu, per rodzic. Są w drzewku Inventora, ale
+        # nie ma ich w BOM-ie, więc build_plan nie robi z nich pozycji i dotąd
+        # znikały z okna bez śladu (user: „chcę je widzieć na czerwono").
+        # Pokazujemy je jako wiersze pod rodzicem — bez ✓, bo nie ma czego
+        # zaznaczyć: żeby poszły do Subiekta, trzeba je odkryć w RM_BAZA.
+        ukryte_pod = {}
+        for rodzic, lst in (self.poza_bom or {}).items():
+            dzieci_ukryte = [(nr, nazwa) for nr, powod, nazwa in lst if powod == "ukryta"]
+            if dzieci_ukryte:
+                ukryte_pod[rodzic.strip().upper()] = dzieci_ukryte
+
+        def wstaw_ukryte(parent_id, symbol_rodzica):
+            for nr, nazwa in sorted(ukryte_pod.get(symbol_rodzica.strip().upper(), [])):
+                self.tree.insert(
+                    parent_id, "end", text=nr,
+                    values=("", nr, nazwa, "", "", "", "",
+                            "UKRYTA w arkuszu — nie idzie do Subiekta"),
+                    tags=("ukryta",))
+
         def wstaw(parent_id, p, glebokosc=0, sciezka=()):
             node = self.tree.insert(
                 parent_id, "end", text=p["symbol"],
                 values=("", p["symbol"], p["nazwa"], p.get("opis") or "",
                         p["typ"], f"{p['ilosc']:g}", dost(p), opis(p)),
                 open=(glebokosc < 1), tags=(tag(p),))
+            wstaw_ukryte(node, p["symbol"])
             # Drzewa bywają głębokie (realnie widziane 4 poziomy, firma mówi
             # o nawet 6), więc nie ucinamy po stałej głębokości — pilnujemy
             # tylko cyklu (ten sam symbol na własnej ścieżce), który zawiesiłby
@@ -3763,6 +3802,24 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
         for p in sorted(korzenie, key=lambda x: (x["typ"] != "ZZ", x["symbol"])):
             wstaw("", p)
 
+        # Ukryte, których NIE dało się powiesić pod rodzicem (drzewko nie ma
+        # takiej relacji albo ukryta jest cała gałąź) — osobna grupa, żeby
+        # nie zniknęły z okna zupełnie. Bez niej user widziałby czerwone
+        # wiersze tylko czasem, zależnie od tego, czy drzewko się wczytało.
+        # Czytamy je wprost z bazy projektu, nie z `poza_bom`: tam trafiają
+        # tylko te, które drzewko zgłosiło jako składniki złożeń, a ukryć
+        # można DOWOLNY wiersz arkusza (28.09.2026: w „3000 Testowy" ukryte
+        # ZP179-301.00Z nie było niczyim składnikiem i nie pojawiłoby się).
+        pokazane = {n.strip().upper()
+                    for lst in ukryte_pod.values() for n, _ in lst}
+        try:
+            wszystkie_ukryte = read_hidden_drawings(self.project_id)
+        except Exception as e:                      # brak bazy/kolumny — trudno
+            print("⚠️  Nie odczytano ukrytych pozycji: %s" % e)
+            wszystkie_ukryte = {}
+        osierocone = sorted((nr, nazwa) for nr, nazwa in wszystkie_ukryte.items()
+                            if nr.strip().upper() not in pokazane)
+
         luzne = [p for p in plan["pozycje"]
                  if p["symbol"].upper() not in dzieci and p not in korzenie]
         if luzne:
@@ -3771,6 +3828,19 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
                                              f"{len(luzne)} poz. bez złożenia"), open=False)
             for p in sorted(luzne, key=lambda x: x["symbol"]):
                 wstaw(grupa, p)
+
+        if osierocone:
+            grupa_u = self.tree.insert(
+                "", "end", text="Ukryte w arkuszu",
+                values=("", "", "", "", "", "",
+                        "", f"{len(osierocone)} poz. — NIE idą do Subiekta"),
+                open=False, tags=("ukryta",))
+            for nr, nazwa in osierocone:
+                self.tree.insert(
+                    grupa_u, "end", text=nr,
+                    values=("✖", nr, nazwa, "", "", "", "",
+                            "UKRYTA w arkuszu — nie idzie do Subiekta"),
+                    tags=("ukryta",))
 
         # Stan rozwinięcia po przebudowie:
         #   * kliknąłeś „Rozwiń wszystko" → zostaje rozwinięte, na stałe;
