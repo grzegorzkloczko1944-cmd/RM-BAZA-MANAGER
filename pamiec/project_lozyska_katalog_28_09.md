@@ -1,6 +1,6 @@
 ---
 name: project_lozyska_katalog_28_09
-description: Katalog łożysk w Subiekcie — 1127 kartotek + 1160 zdjęć wgranych 28.09.2026; PUNKT WZNOWIENIA: zasiew indeksu 3D czeka na dokończenie miniatur w modelach
+description: Katalog łożysk w Subiekcie 28.09.2026 — ZAKOŃCZONE: 1127 kartotek, 1160 zdjęć, 1172 modele 3D z miniaturami; pułapki olefile/limit 500/kopia MAG/symbol niezmienny
 metadata:
   type: project
 ---
@@ -37,28 +37,33 @@ Przy ujednolicaniu poprawione **dwa błędne wymiary w Subiekcie**:
 miniaturę. ⚠️ `--nadpisz` użyte za JEDNORAZOWĄ zgodą —
 [[feedback_nadpisywanie_pytaj]].
 
-## ⏸ PUNKT WZNOWIENIA — co zostało
+## Modele 3D — ZROBIONE (19:53–19:55)
 
-**1. Zasiew indeksu 3D** — `python indeks_lozyska_zasiew.py --zapisz`
-(suchy przebieg domyślny; ostatnia próba: 1172/1172 rozpoznane).
+Łożyska z Content Center **nie mają plików .idw**, a `indeks_modeli_3d.py`
+buduje mapę właśnie z nich — stąd pusta kolumna „3D" w MAG mimo 1172 modeli
+na `B:\Znormalizowane\Łożyska katalog\gotowe`.
 
-Dlaczego osobny skrypt: `indeks_modeli_3d.py` buduje mapę z plików
-**.idw**, a łożyska z Content Center rysunków NIE MAJĄ — stąd pusta
-kolumna „3D" w MAG mimo istniejących modeli. Zasiew wpisuje je jako
-`zrodlo='reczny'`; takie wiersze są CHRONIONE przed automatem
-(`map-model3d-zapisz` nie nadpisze, `map-model3d-usun-*` nie skasuje),
-więc nocny indeks może chodzić. **Żadnych zmian w indeksie ani na
-serwerze — mechanizm wpisów ręcznych już istniał.**
+Rozwiązanie bez zmian w indeksie ani na serwerze — **mechanizm wpisów
+ręcznych już istniał**:
 
-**2. Potem** „Synchronizuj 3D" (miniatury z .ipt) i „Synchronizuj
-SUBIEKT" (odświeżenie kopii dla MAG).
+1. **`indeks_lozyska_zasiew.py --zapisz`** → 1172 ścieżki jako
+   `zrodlo='reczny'`. Takie wiersze są CHRONIONE (`map-model3d-zapisz`
+   nie nadpisze, `map-model3d-usun-*` nie skasuje), więc nocny indeks
+   może chodzić bez obaw.
+2. **`indeks_modeli_3d.odswiez_miniatury()`** → 1172 zapisane, 0 bez
+   miniatury, 0 błędów (29 s). Czyta ścieżki wprost z indeksu, więc NIE
+   trzeba skanować całej biblioteki `--root`.
+3. **`subiekt_kopia_sync.py`** → odświeżenie kopii dla MAG.
 
-**⚠️ CZEKA NA:** generowanie miniatur w modelach przez API Inventora.
-Stan na 18:28 — **347/1172 (29%)**, ostatni `6020 ZZ 100x150x24`.
-Pliki sprzed ~18:00 mają miniaturę **przybliżoną na przekrój kulki**
-(wygląda jak śmieć), nowe pokazują całe łożysko. Krok 2 puścić DOPIERO
-po dokończeniu, inaczej indeks zapamięta złe kadry. Zasiew ścieżek
-(krok 1) jest od tego niezależny.
+Weryfikacja: **1172/1172** mają `modeli=1` i `ma_mini3d=1`.
+
+⚠️ Miniatury w plikach `.ipt` zrobione przez API Inventora (user, do 19:50).
+Te sprzed ~18:00 miały kadr przybliżony na przekrój kulki — dlatego zasiew
+czekał na komplet. Sprawdzenie przed startem: mtime plików + próbka przez
+`miniatura_modelu()`.
+
+⚠️ Po synchronizacji MAG potrzebuje chwili na dociągnięcie 1172 obrazków —
+pusta kolumna „3D" zaraz po odświeżeniu to normalne, nie błąd.
 
 ## ⛔ Pułapki (sprawdzone, nie powtarzać)
 
@@ -75,6 +80,12 @@ po dokończeniu, inaczej indeks zapamięta złe kadry. Zasiew ścieżek
   wariant spoza czwórki (pojedyncze `RS`). Prawdopodobnie duplikat
   `SS 6001 2RS`; do rozstrzygnięcia (tryb `scal`).
 * Pomijać `OldVersions` — inaczej jeden symbol dostaje dwie ścieżki.
+* **`rm_klient` NIE MA funkcji `wywolaj()`** — jest `master_batch(operacje)`,
+  a klucz to `operacje`, nie `operations`. Zgadnięcie nazwy kosztowało
+  nieudany przebieg (na szczęście padł przed zapisem).
+* **Symbolu istniejącej kartoteki NIE DA SIĘ zmienić** przez most — Sfera
+  traktuje go jako klucz, a cała infrastruktura scalania na tym polega
+  („Symbol jest kluczem", [[project_subiekt_scalanie_kartotek]]).
 
 Zobacz też: [[project_subiekt_scalanie_kartotek]],
 [[project_mag_indeks3d_zlecenie]], [[project_mag_katalog_lozysk]].

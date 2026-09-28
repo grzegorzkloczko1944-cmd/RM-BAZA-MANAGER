@@ -161,3 +161,4 @@
 - [Nadpisywanie — pytaj za każdym razem](feedback_nadpisywanie_pytaj.md) — zgoda na nadpisanie danych jest JEDNORAZOWA, nie stała regułą; domyślnie pomijamy to, co już ma obrazek
 - [Katalog łożysk w Subiekcie](project_lozyska_katalog_28_09.md) — 1127 kartotek + 1160 zdjęć (28.09.2026); PUNKT WZNOWIENIA: zasiew indeksu 3D czeka na dokończenie miniatur w .ipt; pułapki olefile/limit 500/kopia MAG
 - [Wstaw z Subiekta w „Dodaj pozycję ręcznie"](project_wstaw_z_subiekta_recznie.md) — przycisk F4, szuka po symbolu/nazwie/OPISIE; osobne okno bez zapisu, filtr NIE w Indeks.szukaj
+- [Wymiarówka oringów](project_oringi_wymiarowka.md) — 205 żywych kartotek (28.09.2026, usunięto 8 martwych duplikatów); CSV w C:\iLogic; VITON=FKM=FPM to synonimy, nie błędy
