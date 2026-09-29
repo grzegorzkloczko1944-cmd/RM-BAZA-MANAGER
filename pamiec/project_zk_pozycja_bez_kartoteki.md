@@ -46,17 +46,30 @@ przyczyna**. Przy okazji: pierwsza wersja tej poprawki raportowała
 raport mostu kłamał, wykryte dopiero odczytem z bazy. **Po każdym zapisie
 mostem weryfikować odczytem, nie raportem.**
 
-## Naprawa w moście (`4b2c55f`, wystawiona 29.09 15:26)
+## Naprawa w moście — docelowa (`c3bcd9b`, wystawiona 29.09 15:45)
 
-`Zapotrzebowanie.cs`: przed SDK własny przegląd encji otwartych ZK
-(`!Zamkniety` przez dynamic, odwrót po nazwie statusu). Zepsute pozycje →
-JSON `bledy` [{dokument, pozycja_id, ilosc, blad}], zapotrzebowanie liczone
-samodzielnie z `IloscDoRealizacji.PozostalaIlosc` (`tryb: "awaryjny"`;
-bez przeliczenia jednostek i dostawcy domyślnego — `DostawcaPodstawowy()`
-to rozszerzenie z `Asortymenty.dll`, której most nie referencuje). Brak
-zepsutych → SDK jak dotąd; jeśli mimo to padnie → ten sam fallback.
-Okno ZD (`subiekt_zamowienia.py`) pokazuje pasek + okienko z numerem ZK
-i Id pozycji — user naprawia w Subiekcie, okno wraca do trybu `sdk`.
+**Gwarancja: okno ZD nie pada i nie liczy gorzej niż Sfera, niezależnie od
+tego, co leży na ZK.** `Zapotrzebowanie.cs`:
+
+1. Przed SDK własny przegląd **encji** otwartych ZK (`!Zamkniety` przez
+   dynamic, odwrót po nazwie statusu). Pozycja z `AsortymentAktualny == null`
+   jest ROZPOZNANA przez `AsortymentWybrany` (wiersz `AsortymentyHistoria`):
+   nazwa, symbol, `Jednorazowy`. JSON `bledy`: `{dokument, pozycja_id, ilosc,
+   nazwa, symbol, rodzaj: jednorazowa|bez-kartoteki, blad}`.
+2. Są takie pozycje → liczymy sami (`tryb: "wlasny"`) — **replika**
+   `BudujPozycjeZapotrzebowaniaNaPodstawieGrupy` z SDK: ilość niezrealizowana
+   = `IloscDoRealizacji.PozostalaIlosc` (kolumna utrzymywana przez Subiekt),
+   jednostka wspólna albo bazowa z przeliczeniem proporcją
+   `IloscWJednostceBazowej/Ilosc`, dostawca domyślny =
+   `DaneAsortymentuDostawcyPodstawowego.Podmiot` (= `DostawcaPodstawowy()`).
+   Nie ma → SDK jak dotąd; gdyby mimo to padło → ten sam tryb własny.
+3. Okno ZD: jednorazowe → pasek informacyjny („Pominięto 1 pozycję
+   jednorazową: „Gasket" (ZK 2/09/2026)"), bez-kartoteki → ostrzeżenie
+   z nazwą/Id i prośbą o sprawdzenie dokumentu.
+
+⛔ **Kalkulator SDK (`IKalkulatorZapotrzebowania`) jako alternatywa NIE
+działa** spoza Subiekta — wymaga kontenera DI (`IInjectionScope`);
+`zapotrzebowanie-test` pokazuje to od dawna. Nie próbować ponownie.
 
 ## Jak czytać bazę Subiekta wprost (tylko SELECT)
 
