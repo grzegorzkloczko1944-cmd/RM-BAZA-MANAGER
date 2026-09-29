@@ -1,6 +1,6 @@
 ---
 name: project_mag_wdrozenie_firma_todo
-description: ⚠ DO ZROBIENIA 29.09.2026 w firmie — wdrożenie MAG na W2019S + MONGO wg WDROZENIE_MAG_FIRMA.md (restart RM_SERWER tylko za zgodą)
+description: HISTORIA — instrukcja na wdrożenie MAG w firmie 29.09.2026; WYKONANE (patrz project_mag_wdrozenie_firma_wykonane), bieżąca lista: project_firma_do_zrobienia_29_09
 metadata:
   type: project
 ---
