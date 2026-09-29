@@ -1,39 +1,37 @@
 ---
 name: project_backupy_tylko_przy_starcie
-description: "Backupy RM_BAZA i RM_MANAGER robią się TYLKO przy starcie programu — aplikacja chodząca tydzień nie robi ich wcale (świadomie zostawione 14.09.2026)"
+description: "NIEAKTUALNE od przeniesienia kopii na RM_SERWER — kopie baz robi serwer codziennie sam (sprawdza co godzinę); dawny problem „kopie tylko przy starcie programu” (14.09.2026) rozwiązany"
 metadata:
   type: project
 ---
 
-Codzienny backup w OBU programach odpala się **wyłącznie raz, przy starcie**:
-`self.root.after(3000, self.run_backup_in_background)` (`rm_manager_gui.py:802`)
-i `self.after(2000, ...)` (`RM_BAZA_v15_MAG_STATS_ORG.py:3426`). Logika „czy
-dziś już był" jest poprawna — brakuje wyłącznie powtórzenia wywołania.
+**Stan (sprawdzone 29.09.2026): kopie robi RM_SERWER, codziennie, sam.**
 
-**Skutek:** program chodzący bez restartu nie robi kopii ani razu. Liczby kopii
-per dzień (14.09.2026) odzwierciedlają nie ilość pracy, tylko to, kto tego dnia
-restartował aplikację:
+`rm_serwer.py`, `_sprzatanie()` → co godzinę `_trzeba_backupu()` → `_backup()`:
+* **bazy serwera**: `master.sqlite` i `subiekt_mapowania.sqlite` i `FV_KSEF.sqlite`
+  → `backup_RM_BAZA\master`, `rm_manager.sqlite` → `backup_RM_MANAGER\master`
+  (`sqlite3.backup`, rotacja `backup_ile`, domyślnie 20 kopii);
+* **pliki projektów** obu programów (`_backup_projektow`, rotacja `backup_dni`,
+  domyślnie 30 dni) — log pisze je tylko, gdy powstała nowa kopia.
+* „Czy dziś już była kopia” czyta z KATALOGU, nie z pamięci procesu — restart
+  usługi nie daje ani podwójnych kopii, ani dnia bez kopii.
 
-| dzień | RM_MANAGER | RM_BAZA |
-|---|---|---|
-| pon. 14.09 | 5 (starty testowe) | 0 |
-| sob. 12.09 | 32 | 3 |
-| pt. 11.09 | 4 | 26 |
-| czw. 10.09 | 40 | 6 |
+Log domowego serwera: `Backup: master_20260928_002706…`, `…_20260929_004956…`
+— 4 bazy dziennie, po 17 kopii każdej. Kopii plików projektów w logu wtedy
+nie było (zapis tylko przy zmianie) — potwierdzić w katalogu, gdyby padło
+pytanie.
 
-Drugi mechanizm RM_BAZA — backup przy zwalnianiu locka — jest na produkcji
-**WYŁĄCZONY** (`settings` → `backup_on_release = 0`), więc nie łata dziury.
+W klientach wywołanie przy starcie USUNIĘTE (w `RM_BAZA_v15_MAG_STATS_ORG.py`
+i `rm_manager_gui.py` został komentarz „Tutaj stało `…run_backup_in_background`”);
+ręczny backup z menu RM_BAZA działa nadal.
 
-**Why:** ryzyko nie leży w dniach bez pracy (wtedy nie ma czego kopiować —
-i to jest argument użytkownika za zostawieniem tak, jak jest), tylko w
-odwrotnym przypadku: stacja startuje w poniedziałek, user edytuje projekty
-cały tydzień bez restartu, a jedyna kopia jest z poniedziałku rano. Kopie
-na serwerze są rotowane, więc z czasem znika i ta.
+## Historia (dlaczego to zmieniono)
 
-**Decyzja użytkownika 14.09.2026: ZOSTAJE jak jest, nie dokładamy timera.**
-Wrócić do tematu, gdy ktoś zgłosi brak kopii z konkretnego dnia. Gotowe
-warianty: (1) timer w aplikacji — po wykonaniu planuj następny za 24 h,
-`after` co godzinę + sprawdzenie daty (przetrwa zmianę doby i uśpienie);
-(2) zadanie w Harmonogramie Windows na W2019S — kopie niezależne od tego,
-czy ktokolwiek pracuje, ale wymaga wdrożenia skryptu na serwerze.
-Patrz [[project_audyt_min_po_przenosinach]].
+14.09.2026: backup w RM_BAZA i RM_MANAGER odpalał się **tylko raz, przy starcie
+programu** — aplikacja chodząca tydzień bez restartu nie robiła kopii ani razu
+(14.09: RM_BAZA 0 kopii przy pięciu pracujących stacjach). User wtedy zdecydował
+„zostaje jak jest”, a rozwiązaniem okazało się przeniesienie kopii na serwer,
+który chodzi bez przerwy jako usługa. Backup przy zwalnianiu locka
+(`backup_on_release`) na produkcji nadal WYŁĄCZONY — już niepotrzebny.
+
+Patrz [[project_audyt_min_po_przenosinach]], [[project_rm_serwer_etap25_domkniecie]].
