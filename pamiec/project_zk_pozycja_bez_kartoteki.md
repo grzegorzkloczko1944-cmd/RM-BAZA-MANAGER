@@ -60,7 +60,7 @@ i Id pozycji — user naprawia w Subiekcie, okno wraca do trybu `sdk`.
 
 ## Jak czytać bazę Subiekta wprost (tylko SELECT)
 
-`sqlcmd` jest w `C:\Program Files\Microsoft SQL Server\Client SDK\ODBCx\Tools\Binn\`,
+`sqlcmd` jest w `C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\`,
 dane logowania w `C:\RMPAK_CLIENT\.nexo_sfera.json` (`sa`). Schemat
 `ModelDanychContainer`: `Dokumenty`, `PozycjeDokumentu` (90 kolumn:
 `AsortymentAktualnyId`→`Asortymenty`, `AsortymentWybranyId`→`AsortymentyHistoria`,
