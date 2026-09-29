@@ -14,6 +14,7 @@ pierwszej zmianie listy dostawców.
 """
 
 import os
+import re
 import sqlite3
 
 # Reguła Uwag/Tytułu jest WSPÓLNA dla wszystkich dokumentów — jedno miejsce,
@@ -446,6 +447,65 @@ def pw_do_rw(numer_projektu, timeout=600):
     if not zebrane:
         return [], numery, ("PW %s nie ma pozycji." % numery)
     return ([zebrane[k] for k in sorted(zebrane)], numery, None)
+
+
+_NUMER_PW = re.compile(r"\bPW\s+(\d+)/[A-Za-z0-9_\-]+(?:/[A-Za-z0-9_\-]+)*")
+
+
+def pw_w_uwagach(uwagi):
+    """{„PW 6/MASTER/2026", …} — źródłowe PW wpisane w Uwagi dokumentu RW.
+
+    RW z kalkulatora niesie źródło w drugim wierszu Uwag („PW: PW 6/MASTER/2026",
+    kilka łączonych „ + "); starsze RW miały „| PW: …". Szukamy samych numerów,
+    więc oba zapisy działają. „PW 6/" nie łapie się w „PW 16/" — numer stoi
+    zaraz po „PW ".
+    """
+    return {" ".join(m.group(0).split()).upper()
+            for m in _NUMER_PW.finditer(str(uwagi or ""))}
+
+
+def kolejka_rw(dok):
+    """PW projektu, które NIE MAJĄ jeszcze swojego RW — najstarsze pierwsze.
+
+    `dok` to wynik `dokumenty_produkcji`. PW jest różnicowe, więc projekt
+    ma ich kilka (niepełne zlecenie, dołożone sztuki). RW idzie 1:1 z PW:
+    suma wszystkich PW (stare `pw_do_rw`) wydałaby drugi raz to, co już
+    wydało wcześniejsze RW (29.09.2026).
+
+    RW bez numeru PW w Uwagach (np. z okna magazynu) niczego tu nie
+    „zamyka" — nie wiemy, z którego przyjęcia wydało.
+    """
+    pary, _ = pary_pw_rw(dok)
+    czeka = {pw for pw, rw in pary if rw is None}
+    return [d for d in sorted((dok or {}).get("PW") or [], key=_kolejnosc_pw)
+            if d.get("numer") in czeka and d.get("pozycje")]
+
+
+def _kolejnosc_pw(d):
+    """Data, potem numer jako LICZBA — „PW 10" po „PW 9", nie przed „PW 2"."""
+    m = re.search(r"\d+", d.get("numer") or "")
+    return (d.get("data") or "", int(m.group(0)) if m else 0)
+
+
+def pary_pw_rw(dok):
+    """([(numer_pw, numer_rw albo None)], [numery RW bez źródłowego PW]).
+
+    Do panelu kalkulatora: jeden wiersz na PW, obok jego RW albo „czeka".
+    RW bez numeru PW w Uwagach (np. z okna magazynu) idą osobną listą —
+    nie wiadomo, z którego przyjęcia wydały.
+    """
+    klucz = lambda n: " ".join(str(n or "").split()).upper()
+    rw_dla = {}
+    bez_pw = []
+    for r in sorted((dok or {}).get("RW") or [], key=_kolejnosc_pw):
+        zrodla = pw_w_uwagach(r.get("uwagi"))
+        if not zrodla:
+            bez_pw.append(r.get("numer") or "")
+        for z in zrodla:
+            rw_dla.setdefault(z, r.get("numer") or "")
+    pary = [(d.get("numer") or "", rw_dla.get(klucz(d.get("numer"))))
+            for d in sorted((dok or {}).get("PW") or [], key=_kolejnosc_pw)]
+    return pary, bez_pw
 
 
 def plan_rw(numer_projektu, pozycje, numer_pw, magazyn="MASTER"):
