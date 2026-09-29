@@ -14,8 +14,13 @@ padał `NullReferenceException` **wewnątrz SDK**:
 
 **Przyczyna (dekompilacja):** metoda grupuje pozycje otwartych ZK po
 `t.Item1.AsortymentAktualny.Id`. Ręczne **`ZK 2/09/2026` (SIA Kvadro)** ma
-pozycję **Id 124800, ilość 12, bez kartoteki** → null → pada CAŁE
-zestawienie, dla wszystkich projektów.
+pozycję **Id 124800: „Gasket", 12 szt × 25 zł, `Jednorazowy = 1`** — czyli
+**pozycja jednorazowa wpisana bez kartoteki** ([[project_usluga_jednorazowa_uj]]).
+`AsortymentAktualnyId = NULL`, `AsortymentWybranyId = 123970` → wiersz
+w `AsortymentyHistoria` (FK tej kolumny idzie do HISTORII, nie do
+`Asortymenty`!) z nazwą „Gasket" i pustym `Asortyment_Id`. Nikt niczego nie
+usunął — Sfera po prostu nie umie policzyć zapotrzebowania, gdy na otwartym
+ZK jest pozycja jednorazowa. To ograniczenie SDK, nie błąd danych.
 
 ## ⛔ Dlaczego z zewnątrz „wszystko wyglądało dobrze"
 
@@ -53,6 +58,17 @@ zepsutych → SDK jak dotąd; jeśli mimo to padnie → ten sam fallback.
 Okno ZD (`subiekt_zamowienia.py`) pokazuje pasek + okienko z numerem ZK
 i Id pozycji — user naprawia w Subiekcie, okno wraca do trybu `sdk`.
 
+## Jak czytać bazę Subiekta wprost (tylko SELECT)
+
+`sqlcmd` jest w `C:\Program Files\Microsoft SQL Server\Client SDK\ODBCx\Tools\Binn\`,
+dane logowania w `C:\RMPAK_CLIENT\.nexo_sfera.json` (`sa`). Schemat
+`ModelDanychContainer`: `Dokumenty`, `PozycjeDokumentu` (90 kolumn:
+`AsortymentAktualnyId`→`Asortymenty`, `AsortymentWybranyId`→`AsortymentyHistoria`,
+`Dokument_Id`, `Ilosc`, `Opis`), `Asortymenty` (Id 100007–111396),
+`AsortymentyHistoria` (Symbol, Nazwa, Jednorazowy, Asortyment_Id).
+Kolumna `timestamp` nie rzutuje się na NVARCHAR — pomijać. `-W` i `-y`
+w sqlcmd się wykluczają.
+
 ## Jak dekompilować SDK (działa)
 
 `dotnet tool install -g ilspycmd` → `~/.dotnet/tools/ilspycmd.exe -t
@@ -65,8 +81,11 @@ w katalogu projektu. Dokumentacja TSV (82k wpisów) NIE ma
 
 ## Do zrobienia (user)
 
-Usunąć/podmienić pozycję **Id 124800** na **`ZK 2/09/2026`** w Subiekcie —
-do tego czasu zapotrzebowanie liczy się awaryjnie. Podejrzewane przez usera
+Pozycja **Id 124800 „Gasket"** na **`ZK 2/09/2026`** to legalna sprzedaż
+jednorazowa — NIE trzeba jej usuwać. Dopóki jakikolwiek otwarty ZK ma pozycję
+jednorazową, zapotrzebowanie liczy się awaryjnie (bez przeliczania jednostek
+i dostawcy domyślnego). Jeśli to przeszkadza: podmienić na kartotekę
+(np. właściwy oring) albo zrealizować/zamknąć ZK. Podejrzewane przez usera
 `027-300.06Z` / `027-100.00ZZ` (błędy importu) są **w porządku** — obie
 w zapotrzebowaniu normalnie.
 
