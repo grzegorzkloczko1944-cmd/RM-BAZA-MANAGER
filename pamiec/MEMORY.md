@@ -167,3 +167,4 @@
 - [Łożyska w oprawach z matis.sk](project_lozyska_w_oprawach.md) — 55 modeli UCP/UCF/UCFL/UCPA/BPFT; STEP import tylko w osobnym ukrytym Inventorze (wywracał sesję usera)
 - [matis.sk — darmowe modele CAD](reference_matis_cad.md) — oprawy UC*, prowadnice, tuleje; bezpośrednie linki bez logowania i blokad
 - [Oringi — nomenklatura do poprawy](project_oringi_nomenklatura_do_poprawy.md) — 14 kartotek niezgodnych z OR-<D>X<p> <MAT>; user poprawia ręcznie w Subiekcie; silikon w 4 zapisach (VMQ/S/Silikon/VQM), SIL nie istnieje
+- [ZK z pozycją bez kartoteki → okno ZD padało](project_zk_pozycja_bez_kartoteki.md) — NRE w SDK ZapotrzebowanieNaAsortyment(); projekcja EF ukrywa zepsute pozycje; most od 4b2c55f raportuje `bledy` i liczy awaryjnie; ilspycmd do dekompilacji Sfery
