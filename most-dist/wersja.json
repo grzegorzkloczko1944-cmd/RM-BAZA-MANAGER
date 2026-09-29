@@ -1,6 +1,6 @@
 {
  "protokol": 1,
- "zbudowano": "2026-09-29 15:26",
- "sha": "4b2c55f",
- "uwaga": "zapotrzebowanie: przeglad encji otwartych ZK, pozycje bez kartoteki do `bledy`, tryb awaryjny zamiast NullReference z SDK; ZK z RM_BAZA dostaja magazyn MASTER"
+ "zbudowano": "2026-09-29 15:44",
+ "sha": "c3bcd9b",
+ "uwaga": "zapotrzebowanie: przy pozycji jednorazowej/bez kartoteki na otwartym ZK liczy samo z wiernoscia SDK (tryb wlasny), raportuje pozycje po nazwie; ZK z RM_BAZA dostaja magazyn MASTER"
 }
