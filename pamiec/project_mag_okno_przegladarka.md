@@ -52,3 +52,10 @@ Powiązane: [[feedback_bez_hookow_vba]], [[feedback_makra_ivb_nazwa_mag]],
 [[project_mag_kopia_subiekta_http]]
 
 - MsgBox z okna MAG, gdy edytor VBA jest otwarty: po OK na wierzch wychodzi EDYTOR (okienko należy do niego) — wygląda jak „wywaliło do VBA", błędu brak. Dlatego „Synchronizuj 3D" bez pytania (28.09.2026); „Synchronizuj SUBIEKT" ma jeszcze MsgBox (TAK/NIE miniatury).
+
+- **„Can't find project or library" z zaznaczonym `Environ`** przy starcie
+  MAG = ZERWANA referencja w Default.ivb (Tools → References, „MISSING:").
+  29.09.2026 wróciła referencja do starego `NOW\MAKRA\MAG.ivb`: jej usunięcie
+  nie było zapisane, a awaria Inventora wczytała stary Default.ivb. Naprawa:
+  usunąć zerwaną referencję + **zapisać Default.ivb (Ctrl+S)**. MAG w wersji
+  HTA nie potrzebuje żadnej referencji poza standardowymi.
