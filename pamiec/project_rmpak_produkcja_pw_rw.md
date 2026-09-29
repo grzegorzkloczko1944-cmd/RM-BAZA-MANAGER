@@ -29,3 +29,9 @@ Kod: `subiekt_produkcja.py` (cała reguła + PW/RW), sekcja w `rmpak_calculator.
 **Nierozstrzygnięte:** magazyn dla PW/RW (na sztywno MASTER), status `DAGAR + RMPAK`, migracja `RMPAK + materiał` → jeden dostawca.
 
 **How to apply:** przy zmianach trzymać wzorzec suchy przebieg → potwierdzenie → zapis → read-back po wierszach. Rebuild mostu: [[feedback_most_rebuild_release]]. Ceny na PW: [[project_cena_na_pozycji_pw]].
+
+**RW wróciło do kalkulatora (29.09.2026, na prośbę usera):** przycisk „📤 Wystaw RW z <PW>” pod „Wystaw PW”. Kolejka **1:1 PW → RW**, najstarsze PW bez RW pierwsze (`subiekt_produkcja.kolejka_rw` + `pw_w_uwagach`). Rozpoznanie „PW ma już RW” po numerze PW w Uwagach RW (`PW: PW 6/MASTER/2026`, stare `| PW: …` też). ⛔ NIE wracać do `pw_do_rw` (suma wszystkich PW) — przy PW różnicowym wydałoby drugi raz. RW z okna magazynu nie niesie numeru PW, więc kolejki nie zamyka — podwójne wydanie zatrzyma dopiero suchy przebieg (za mały stan).
+
+**Panel „Dokumenty produkcji” (29/30.09.2026):** tabelka par PW | RW (✔ / ⏳ czeka na RW, 3 ostatnie, RW bez PW osobno) zamiast numerów po przecinku; licznik „Do nowego PW: N / Już przyjęte: M” (z `do_pw`, nie wszystkie pozycje RMPAK — stary „2 poz. na PW” przy przyjętych wyglądał jak zaproszenie do ponownego PW); „Wystaw PW” szary, gdy nic nowego. Przyciski `side="bottom"` i `before=` pierwszego widżetu — panel ma stałą wysokość, a Tk daje miejsce w kolejności pakowania. Podgląd PW/RW otwiera się raz (`_jeden_podglad`): kliknięcia z kolejki przy mulącej RM_BAZA otwierały kilka okien.
+
+**Test okna Tk bez RM_BAZA:** wątek w tle woła `win.after` — działa tylko pod `mainloop()`, nie w pętli `update()` (tam wyjątek połykany, panel wisi na „Odczyt z Subiekta…”). Zrzut: `SetProcessDpiAwareness(1)` + okno `zoomed`, patrz [[project_zrzut_ekranu_dpi]].
