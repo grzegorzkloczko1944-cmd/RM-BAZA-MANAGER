@@ -104,8 +104,83 @@ internal static class Zapotrzebowanie
         }
         catch { /* bez stanow tryb dziala dalej, tyle ze z zerami */ }
 
+        // SDK ZapotrzebowanieNaAsortyment() PADA NullReferenceException, gdy na
+        // OTWARTYM ZK jest pozycja bez kartoteki: grupuje po
+        // `t.Item1.AsortymentAktualny.Id` (dekompilacja Logistyka.dll, 29.09.2026).
+        // Z zewnatrz baza wyglada na czysta, bo Dokumenty.cs czyta pozycje
+        // PROJEKCJA EF (INNER JOIN) i taka pozycje cicho gubi. Objaw w RM_BAZA:
+        // okno "Zamowienia do dostawcow" -> "Object reference not set..." i nic.
+        //
+        // Dlatego najpierw wlasny przeglad ENCJI: zepsute pozycje trafiaja do
+        // `bledy` (numer ZK, Id pozycji) - user widzi, CO naprawic w Subiekcie.
+        // Sa zepsute -> liczymy zapotrzebowanie sami, bez nich (tryb awaryjny:
+        // PozostalaIlosc per pozycja, bez przeliczania jednostek i bez dostawcy
+        // domyslnego). Nie ma -> SDK jak dotad, a gdyby i tak padlo, ten sam
+        // tryb awaryjny zamiast pustego okna.
+        var bledy = new List<object>();
+        var zepsute = new HashSet<int>();
+        var otwarteZk = new List<InsERT.Moria.ModelDanych.DokumentZK>();
+        try
+        {
+            foreach (var zk in zam.Dane.Wszystkie().ToList())
+            {
+                if (CzyZamkniety(zk)) continue;
+                otwarteZk.Add(zk);
+                var numer = Bezp(() => zk.NumerWewnetrzny?.PelnaSygnatura) ?? "?";
+                List<InsERT.Moria.ModelDanych.PozycjaDokumentu> pozZk;
+                try { pozZk = zk.Pozycje.ToList(); }
+                catch (Exception ex)
+                {
+                    bledy.Add(new { dokument = numer, blad = "nie da sie odczytac pozycji: " + ex.Message });
+                    continue;
+                }
+                foreach (var pz in pozZk)
+                {
+                    InsERT.Moria.ModelDanych.Asortyment? a = null;
+                    try { a = pz.AsortymentAktualny; } catch { }
+                    if (a != null) continue;
+                    zepsute.Add(pz.Id);
+                    bledy.Add(new
+                    {
+                        dokument = numer,
+                        pozycja_id = pz.Id,
+                        ilosc = pz.Ilosc,
+                        nazwa = Bezp(() => (string?)((dynamic)pz).NazwaAsortymentu) ?? "",
+                        blad = "pozycja bez kartoteki (AsortymentAktualny = null) - psuje zapotrzebowanie w Subiekcie",
+                    });
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            bledy.Add(new { blad = "przeglad ZK: " + ex.GetType().Name + ": " + ex.Message });
+        }
+
+        var trybAwaryjny = zepsute.Count > 0;
+        List<Potrzeba> potrzeby;
+        if (!trybAwaryjny)
+        {
+            try
+            {
+                potrzeby = zam.ZapotrzebowanieNaAsortyment()
+                    .Select(x => new Potrzeba(x.Asortyment, x.Ilosc, x.JednostkaMiary, x.Dostawca,
+                                              (x.PozycjeZK ?? Enumerable.Empty<InsERT.Moria.ModelDanych.PozycjaDokumentu>()).ToList()))
+                    .ToList();
+            }
+            catch (Exception ex)
+            {
+                bledy.Add(new { blad = "SDK ZapotrzebowanieNaAsortyment: " + ex.GetType().Name + ": " + ex.Message });
+                trybAwaryjny = true;
+                potrzeby = ZapotrzebowanieAwaryjne(otwarteZk, zepsute);
+            }
+        }
+        else
+        {
+            potrzeby = ZapotrzebowanieAwaryjne(otwarteZk, zepsute);
+        }
+
         var pozycje = new List<Poz>();
-        foreach (var p in zam.ZapotrzebowanieNaAsortyment())
+        foreach (var p in potrzeby)
         {
             // Numery ZK stojące za tą potrzebą — po nich RM_BAZA rozpozna projekt
             // (Uwagi na ZK to numer projektu, patrz SUBIEKT_PROJEKTY_WYDANIA.md).
@@ -241,7 +316,7 @@ internal static class Zapotrzebowanie
         }
         catch { /* brak dostępu do ZD nie może wywalić całego odczytu */ }
 
-        var json = JsonSerializer.Serialize(new { pozycje, podmioty, zamowione },
+        var json = JsonSerializer.Serialize(new { pozycje, podmioty, zamowione, bledy, tryb = trybAwaryjny ? "awaryjny" : "sdk" },
             new JsonSerializerOptions
             {
                 WriteIndented = false,
@@ -254,6 +329,66 @@ internal static class Zapotrzebowanie
     }
 
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
+
+    /// Zamkniety = zrealizowane/anulowane. Wlasciwosc SDK bywa niedostepna
+    /// w naszej referencji, stad dynamic z odwrotem po nazwie statusu.
+    static bool CzyZamkniety(InsERT.Moria.ModelDanych.DokumentZK zk)
+    {
+        try { return (bool)((dynamic)zk).Zamkniety; } catch { }
+        var st = Bezp(() => zk.StatusDokumentu?.Nazwa) ?? "";
+        return st.Equals("Zrealizowane", StringComparison.OrdinalIgnoreCase)
+            || st.Equals("Anulowane", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// Zapotrzebowanie liczone bez SDK: suma PozostalaIlosc po kartotece
+    /// (AsortymentAktualny.Id) z pozycji otwartych ZK, z pominieciem zepsutych.
+    /// Roznice wobec SDK: brak przeliczenia jednostek miedzy pozycjami i brak
+    /// dostawcy domyslnego (DostawcaPodstawowy() to rozszerzenie z Asortymenty.dll,
+    /// ktorej nie referencujemy) - okno i tak bierze dostawce z RM_BAZA.
+    static List<Potrzeba> ZapotrzebowanieAwaryjne(List<InsERT.Moria.ModelDanych.DokumentZK> otwarte, HashSet<int> zepsute)
+    {
+        var grupy = new Dictionary<int, Potrzeba>();
+        foreach (var zk in otwarte)
+        {
+            List<InsERT.Moria.ModelDanych.PozycjaDokumentu> pozZk;
+            try { pozZk = zk.Pozycje.ToList(); } catch { continue; }
+            foreach (var pz in pozZk)
+            {
+                if (zepsute.Contains(pz.Id)) continue;
+                InsERT.Moria.ModelDanych.Asortyment? a = null;
+                try { a = pz.AsortymentAktualny; } catch { }
+                if (a == null) continue;
+                decimal pozostalo;
+                try { pozostalo = pz.IloscDoRealizacji?.PozostalaIlosc ?? pz.Ilosc; }
+                catch { pozostalo = pz.Ilosc; }
+                if (pozostalo <= 0) continue;
+                if (!grupy.TryGetValue(a.Id, out var g))
+                {
+                    InsERT.Moria.ModelDanych.JednostkaMiaryAsortymentu? jm = null;
+                    try { jm = pz.JednostkaMiaryAs; } catch { }
+                    g = new Potrzeba(a, 0m, jm, null, new List<InsERT.Moria.ModelDanych.PozycjaDokumentu>());
+                    grupy[a.Id] = g;
+                }
+                g.Ilosc += pozostalo;
+                g.PozycjeZK.Add(pz);
+            }
+        }
+        return grupy.Values.ToList();
+    }
+
+    /// Jedna potrzeba zakupowa - te same nazwy pol co PozycjaZestawieniaZapotrzebowania
+    /// z SDK, zeby petla wyzej nie musiala wiedziec, skad dane pochodza.
+    internal sealed class Potrzeba
+    {
+        public InsERT.Moria.ModelDanych.Asortyment? Asortyment;
+        public decimal Ilosc;
+        public InsERT.Moria.ModelDanych.JednostkaMiaryAsortymentu? JednostkaMiary;
+        public InsERT.Moria.ModelDanych.Podmiot? Dostawca;
+        public List<InsERT.Moria.ModelDanych.PozycjaDokumentu> PozycjeZK;
+        public Potrzeba(InsERT.Moria.ModelDanych.Asortyment? a, decimal ilosc, InsERT.Moria.ModelDanych.JednostkaMiaryAsortymentu? jm,
+                        InsERT.Moria.ModelDanych.Podmiot? dostawca, List<InsERT.Moria.ModelDanych.PozycjaDokumentu> pozycje)
+        { Asortyment = a; Ilosc = ilosc; JednostkaMiary = jm; Dostawca = dostawca; PozycjeZK = pozycje; }
+    }
 
     internal record Zrodlo(string Numer, string Tytul, string Uwagi, decimal Ilosc);
     /// Numer ZK, który ta pozycja ZD realizuje.

@@ -121,7 +121,14 @@ def pobierz_zapotrzebowanie(timeout=TIMEOUT_S):
 
     # Podmioty przychodzą tym samym wywołaniem — okno potrzebuje ich do listy
     # wyboru dostawcy, a osobne uruchomienie mostu kosztowałoby drugie ~8 s.
-    return pozycje, data.get("podmioty", []), zamowione
+    # Ostrzeżenia mostu (od 29.09.2026): pozycje otwartych ZK BEZ kartoteki
+    # wywracają w Sferze ZapotrzebowanieNaAsortyment() (NullReference) —
+    # most je omija i liczy zapotrzebowanie sam („tryb awaryjny"), ale user
+    # MUSI o tym wiedzieć: to on naprawia dokument w Subiekcie, a liczby
+    # w trybie awaryjnym nie mają przeliczenia jednostek ani dostawcy
+    # domyślnego. Zasada „nic po cichu".
+    ostrzezenia = {"bledy": data.get("bledy") or [], "tryb": data.get("tryb") or "sdk"}
+    return pozycje, data.get("podmioty", []), zamowione, ostrzezenia
 
 
 def _zapotrzebowanie_cli(timeout):
@@ -1310,7 +1317,8 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
 
     def _load_worker(self):
         try:
-            zap, podmioty, zamowione = pobierz_zapotrzebowanie()
+            zap, podmioty, zamowione, ostrzezenia = pobierz_zapotrzebowanie()
+            self._ostrzezenia_subiekt = ostrzezenia
 
             # BOM-y wszystkich projektów, których dotyczy zapotrzebowanie —
             # nie tylko tego wybranego w RM_BAZA. Wcześniej okno otwarte bez
@@ -1356,6 +1364,45 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             err = str(e)
             self.after(0, lambda: self._load_done([], err, []))
 
+    def _pokaz_ostrzezenia_subiekta(self):
+        """Pozycje ZK bez kartoteki: okno działa (most liczy awaryjnie), ale
+        pokazujemy KTÓRY dokument i KTÓRA pozycja — bez tego objaw był goły
+        „Object reference not set…" i nie dało się dojść, co naprawić
+        (29.09.2026: ZK 2/09/2026, pozycja Id 124800)."""
+        info = getattr(self, "_ostrzezenia_subiekt", None) or {}
+        bledy = info.get("bledy") or []
+        if not bledy:
+            return
+        linie = []
+        for b in bledy:
+            dok = b.get("dokument") or "?"
+            pid = b.get("pozycja_id")
+            il = b.get("ilosc")
+            opis = b.get("blad") or ""
+            linie.append(f"• {dok}" + (f", pozycja Id {pid}" if pid else "")
+                         + (f", ilość {il:g}" if isinstance(il, (int, float)) else "")
+                         + f" — {opis}")
+        tekst = "\n".join(linie)
+        skrot = f"⚠ Subiekt: {len(bledy)} pozycja/e ZK bez kartoteki — zapotrzebowanie policzone AWARYJNIE"
+        try:
+            self.summary.config(text=skrot, fg="#a94442")
+        except Exception:
+            pass
+        # Okienko raz na życie okna — przy każdym „Odśwież" wystarczy pasek.
+        if getattr(self, "_ostrzezenie_pokazane", False):
+            return
+        self._ostrzezenie_pokazane = True
+        messagebox.showwarning(
+            "Subiekt — zapotrzebowanie policzone awaryjnie",
+            "Na otwartym ZK jest pozycja BEZ kartoteki asortymentu. Sfera nie umie\n"
+            "policzyć dla niej zapotrzebowania (błąd „Object reference not set…”),\n"
+            "więc most ją pominął i policzył resztę sam.\n\n"
+            + tekst +
+            "\n\nNapraw w Subiekcie: otwórz ten ZK, usuń tę pozycję albo podmień ją\n"
+            "na pozycję z kartoteką i zapisz. Po naprawie okno wróci do liczenia\n"
+            "przez Sferę (z przeliczeniem jednostek i dostawcą domyślnym).",
+            parent=self)
+
     def _load_done(self, wiersze, error, podmioty=()):
         self.stop_kreciolek()      # także przy błędzie — inaczej kręci się dalej
         self.zaznacz_odczyt(self.lbl_wiek)
@@ -1368,6 +1415,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
 
         self.wszystkie = wiersze
         self.podmioty = list(podmioty or [])
+        self._pokaz_ostrzezenia_subiekta()
         dostawcy = sorted({w["dostawca"] for w in wiersze if w["dostawca"]})
         self._dostawcy_wszyscy = [FILTR_WSZYSCY] + dostawcy + [FILTR_BRAK_DOSTAWCY]
         self.combo_dostawca["values"] = self._dostawcy_wszyscy

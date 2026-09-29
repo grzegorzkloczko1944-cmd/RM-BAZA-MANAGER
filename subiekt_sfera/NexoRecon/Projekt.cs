@@ -464,6 +464,49 @@ internal static class Projekt
                         // nie widział — wydruk tego pola nie pokazuje.
                         ob.Dane.Uwagi = Znacznik.Uwagi(plan.Projekt, plan.Uwagi);
                         ob.Dane.Tytul = Znacznik.Tytul(plan.Projekt);
+
+                        // MAGAZYN — bez niego ZapotrzebowanieNaAsortyment() w SDK
+                        // wywraca sie NullReferenceException (grupuje po magazynie,
+                        // a null nie jest kluczem). Objaw: okno "Zamowienia do
+                        // dostawcow" w RM_BAZA pokazuje "Object reference not set
+                        // to an instance of an object" i nie da sie go otworzyc,
+                        // dopoki takie ZK wisi w bazie (zgloszone 29.09.2026 -
+                        // ZK 1/09/2026 i ZK 3/09/2026 zalozone przez RM_BAZA).
+                        // Ten sam fallback "MASTER" co w Pw.cs, Rw.cs i Zd.cs.
+                        try
+                        {
+                            var magazyny = sfera.Magazyny().Dane.Wszystkie().ToList();
+                            var chcianyMag = (plan.Magazyn ?? "MASTER").Trim();
+                            ob.Dane.Magazyn = magazyny.FirstOrDefault(m =>
+                                    string.Equals((Bezp(() => m.Symbol) ?? "").Trim(), chcianyMag,
+                                                  StringComparison.OrdinalIgnoreCase))
+                                ?? magazyny.FirstOrDefault();
+                        }
+                        catch { /* bez magazynu ZK i tak powstanie - stary stan */ }
+                    }
+
+                    // ISTNIEJACE ZK bez magazynu tez naprawiamy - inaczej
+                    // dokument zalozony starsza wersja mostu psulby okno ZD
+                    // na zawsze (patrz komentarz wyzej).
+                    var magazynUzupelniony = false;
+                    if (istniejace != null)
+                    {
+                        try
+                        {
+                            if (ob.Dane.Magazyn == null)
+                            {
+                                var magazyny = sfera.Magazyny().Dane.Wszystkie().ToList();
+                                var chcianyMag = (plan.Magazyn ?? "MASTER").Trim();
+                                ob.Dane.Magazyn = magazyny.FirstOrDefault(m =>
+                                        string.Equals((Bezp(() => m.Symbol) ?? "").Trim(), chcianyMag,
+                                                      StringComparison.OrdinalIgnoreCase))
+                                    ?? magazyny.FirstOrDefault();
+                                magazynUzupelniony = true;
+                                kroki.Add(new Krok("zk", plan.Projekt ?? "", "magazyn-uzupelniony",
+                                                   "ZK nie mialo magazynu - ustawiono " + chcianyMag));
+                            }
+                        }
+                        catch { }
                     }
 
                     // Co już jest na dokumencie — nie dublujemy pozycji.
@@ -567,6 +610,16 @@ internal static class Projekt
 
                     if (dodane == 0 && zmienioneIlosci == 0 && istniejace != null)
                     {
+                        // Naprawa magazynu to JEDYNA zmiana - trzeba ja zapisac
+                        // osobno, bo ta galaz normalnie pomija Zapisz() (nic sie
+                        // nie zmienilo). Bez tego pole wracalo puste, a raport
+                        // klamal "magazyn-uzupelniony" (29.09.2026).
+                        if (magazynUzupelniony && zapisz)
+                        {
+                            if (!ob.Zapisz())
+                                kroki.Add(new Krok("zk", plan.Projekt ?? "", "blad",
+                                    "zapis magazynu: " + (Bezp(ob.PodajBledy) ?? "Zapisz() = false")));
+                        }
                         zkNumer = Bezp(() => ob.Dane.NumerWewnetrzny?.PelnaSygnatura);
                         // „Wszystko już jest” tylko wtedy, gdy naprawdę się
                         // zgadza. Przy rozjeździe ilości to byłby fałsz.
@@ -1062,6 +1115,6 @@ internal static class Projekt
                             // w ProdukcjaWlasna i filtr milczał (09.09.2026).
                             [property: JsonPropertyName("produkcja_wlasna")]
                             bool ProdukcjaWlasna = false);
-    internal record Plan(string? Projekt, string? Tytul, string? Podmiot, string? Uwagi, List<PozPlan>? Pozycje);
+    internal record Plan(string? Projekt, string? Tytul, string? Podmiot, string? Uwagi, List<PozPlan>? Pozycje, string? Magazyn = null);
     internal record Krok(string Rodzaj, string Symbol, string Status, string? Szczegoly);
 }
