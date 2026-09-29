@@ -1,6 +1,6 @@
 {
-  "protokol": 1,
-  "zbudowano": "2026-09-18 16:21",
-  "sha": "f4ff4ce",
-  "uwaga": "faktury: NIP kontrahenta (bez niego zapis powiazan byl zablokowany na KAZDEJ FZ); RodzajPozycji tylko do diagnostyki, BezKartoteki zamiast blednego Jednorazowa"
+ "protokol": 1,
+ "zbudowano": "2026-09-29 15:26",
+ "sha": "4b2c55f",
+ "uwaga": "zapotrzebowanie: przeglad encji otwartych ZK, pozycje bez kartoteki do `bledy`, tryb awaryjny zamiast NullReference z SDK; ZK z RM_BAZA dostaja magazyn MASTER"
 }
