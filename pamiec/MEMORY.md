@@ -166,3 +166,4 @@
 - [Biblioteka: pytaj przed hurtem](feedback_biblioteka_pytaj_przed_hurtem.md) — hurtowe zmiany plików już w B: tylko po zgodzie; OldVersions kasować po potwierdzeniu
 - [Łożyska w oprawach z matis.sk](project_lozyska_w_oprawach.md) — 55 modeli UCP/UCF/UCFL/UCPA/BPFT; STEP import tylko w osobnym ukrytym Inventorze (wywracał sesję usera)
 - [matis.sk — darmowe modele CAD](reference_matis_cad.md) — oprawy UC*, prowadnice, tuleje; bezpośrednie linki bez logowania i blokad
+- [Oringi — nomenklatura do poprawy](project_oringi_nomenklatura_do_poprawy.md) — 14 kartotek niezgodnych z OR-<D>X<p> <MAT>; user poprawia ręcznie w Subiekcie; silikon w 4 zapisach (VMQ/S/Silikon/VQM), SIL nie istnieje
