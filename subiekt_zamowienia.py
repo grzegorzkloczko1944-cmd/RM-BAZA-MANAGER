@@ -1365,42 +1365,57 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             self.after(0, lambda: self._load_done([], err, []))
 
     def _pokaz_ostrzezenia_subiekta(self):
-        """Pozycje ZK bez kartoteki: okno działa (most liczy awaryjnie), ale
-        pokazujemy KTÓRY dokument i KTÓRA pozycja — bez tego objaw był goły
-        „Object reference not set…" i nie dało się dojść, co naprawić
-        (29.09.2026: ZK 2/09/2026, pozycja Id 124800)."""
+        """Pozycje otwartych ZK, których Sfera nie umie policzyć.
+
+        Dwa rodzaje, celowo rozróżnione (29.09.2026):
+          * „jednorazowa" — sprzedaż bez kartoteki („Gasket", 12 szt na
+            ZK 2/09/2026). To NORMALNE; most ją pomija i liczy resztę sam,
+            z tą samą logiką co Sfera. Pokazujemy jako informację.
+          * „bez-kartoteki" — pozycja wskazuje kartotekę, której nie ma.
+            To błąd danych — ostrzeżenie z prośbą o sprawdzenie dokumentu.
+        Wcześniej oba szły jako „Object reference not set…" i nie dało się
+        dojść, co naprawić; potem jako „napraw w Subiekcie" — a jednorazowej
+        naprawiać nie trzeba."""
         info = getattr(self, "_ostrzezenia_subiekt", None) or {}
         bledy = info.get("bledy") or []
         if not bledy:
             return
-        linie = []
-        for b in bledy:
-            dok = b.get("dokument") or "?"
-            pid = b.get("pozycja_id")
+
+        def linia(b):
+            co = b.get("nazwa") or b.get("symbol") or f"pozycja Id {b.get('pozycja_id')}"
             il = b.get("ilosc")
-            opis = b.get("blad") or ""
-            linie.append(f"• {dok}" + (f", pozycja Id {pid}" if pid else "")
-                         + (f", ilość {il:g}" if isinstance(il, (int, float)) else "")
-                         + f" — {opis}")
-        tekst = "\n".join(linie)
-        skrot = f"⚠ Subiekt: {len(bledy)} pozycja/e ZK bez kartoteki — zapotrzebowanie policzone AWARYJNIE"
+            ile = f", {il:g} szt" if isinstance(il, (int, float)) else ""
+            return f"• {b.get('dokument') or '?'}: „{co}\"{ile}"
+
+        jednorazowe = [b for b in bledy if b.get("rodzaj") == "jednorazowa"]
+        zepsute = [b for b in bledy if b.get("rodzaj") != "jednorazowa"]
+
+        if zepsute:
+            skrot = (f"⚠ Subiekt: {len(zepsute)} pozycja/e ZK bez kartoteki (błąd danych)"
+                     + (f", {len(jednorazowe)} jednorazowe pominięte" if jednorazowe else ""))
+            kolor = "#a94442"
+        else:
+            skrot = (f"ℹ Pominięto {len(jednorazowe)} pozycję/e jednorazową/e na ZK: "
+                     + ", ".join(f"„{b.get('nazwa') or '?'}\" ({b.get('dokument')})" for b in jednorazowe))
+            kolor = "#8a6d3b"
         try:
-            self.summary.config(text=skrot, fg="#a94442")
+            self.summary.config(text=skrot, fg=kolor)
         except Exception:
             pass
-        # Okienko raz na życie okna — przy każdym „Odśwież" wystarczy pasek.
-        if getattr(self, "_ostrzezenie_pokazane", False):
+
+        # Okienko RAZ na życie okna i TYLKO dla błędów danych — informacja
+        # o jednorazowych zostaje na pasku, nie przerywa pracy.
+        if not zepsute or getattr(self, "_ostrzezenie_pokazane", False):
             return
         self._ostrzezenie_pokazane = True
         messagebox.showwarning(
-            "Subiekt — zapotrzebowanie policzone awaryjnie",
-            "Na otwartym ZK jest pozycja BEZ kartoteki asortymentu. Sfera nie umie\n"
-            "policzyć dla niej zapotrzebowania (błąd „Object reference not set…”),\n"
-            "więc most ją pominął i policzył resztę sam.\n\n"
-            + tekst +
-            "\n\nNapraw w Subiekcie: otwórz ten ZK, usuń tę pozycję albo podmień ją\n"
-            "na pozycję z kartoteką i zapisz. Po naprawie okno wróci do liczenia\n"
-            "przez Sferę (z przeliczeniem jednostek i dostawcą domyślnym).",
+            "Subiekt — pozycja ZK bez kartoteki",
+            "Na otwartym ZK jest pozycja wskazująca kartotekę, której nie ma.\n"
+            "Sfera nie umie dla niej policzyć zapotrzebowania, więc most ją pominął\n"
+            "i policzył resztę sam (ta sama logika co w Subiekcie).\n\n"
+            + "\n".join(linia(b) for b in zepsute) +
+            "\n\nSprawdź ten dokument w Subiekcie: usuń pozycję albo podmień ją\n"
+            "na pozycję z istniejącą kartoteką.",
             parent=self)
 
     def _load_done(self, wiersze, error, podmioty=()):

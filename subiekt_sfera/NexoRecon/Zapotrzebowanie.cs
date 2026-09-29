@@ -140,13 +140,37 @@ internal static class Zapotrzebowanie
                     try { a = pz.AsortymentAktualny; } catch { }
                     if (a != null) continue;
                     zepsute.Add(pz.Id);
+                    // Co to za pozycja? `AsortymentWybrany` to wiersz HISTORII kartotek
+                    // (FK AsortymentWybranyId -> AsortymentyHistoria) - dla pozycji
+                    // JEDNORAZOWEJ ("Gasket", 12 szt, ZK 2/09/2026) ma nazwe i
+                    // Jednorazowy = 1, a Asortyment_Id puste. To NORMALNA pozycja
+                    // (sprzedaz bez kartoteki), nie blad danych - SDK jej po prostu
+                    // nie umie policzyc. Bez nazwy w raporcie user szukal "usunietej
+                    // kartoteki", ktorej nigdy nie bylo (29.09.2026).
+                    string nazwa = "", symbolH = "";
+                    bool jednorazowa = false;
+                    try
+                    {
+                        var h = pz.AsortymentWybrany;
+                        if (h != null)
+                        {
+                            nazwa = (Bezp(() => h.Nazwa) ?? "").Trim();
+                            symbolH = (Bezp(() => h.Symbol) ?? "").Trim();
+                            try { jednorazowa = h.Jednorazowy; } catch { }
+                        }
+                    }
+                    catch { }
                     bledy.Add(new
                     {
                         dokument = numer,
                         pozycja_id = pz.Id,
                         ilosc = pz.Ilosc,
-                        nazwa = Bezp(() => (string?)((dynamic)pz).NazwaAsortymentu) ?? "",
-                        blad = "pozycja bez kartoteki (AsortymentAktualny = null) - psuje zapotrzebowanie w Subiekcie",
+                        nazwa,
+                        symbol = symbolH,
+                        rodzaj = jednorazowa ? "jednorazowa" : "bez-kartoteki",
+                        blad = jednorazowa
+                            ? "pozycja jednorazowa (bez kartoteki) - Subiekt nie liczy dla niej zapotrzebowania; pominieta"
+                            : "pozycja bez kartoteki (AsortymentAktualny = null) - blad danych, sprawdz dokument w Subiekcie",
                     });
                 }
             }
@@ -316,7 +340,7 @@ internal static class Zapotrzebowanie
         }
         catch { /* brak dostępu do ZD nie może wywalić całego odczytu */ }
 
-        var json = JsonSerializer.Serialize(new { pozycje, podmioty, zamowione, bledy, tryb = trybAwaryjny ? "awaryjny" : "sdk" },
+        var json = JsonSerializer.Serialize(new { pozycje, podmioty, zamowione, bledy, tryb = trybAwaryjny ? "wlasny" : "sdk" },
             new JsonSerializerOptions
             {
                 WriteIndented = false,
@@ -347,7 +371,19 @@ internal static class Zapotrzebowanie
     /// ktorej nie referencujemy) - okno i tak bierze dostawce z RM_BAZA.
     static List<Potrzeba> ZapotrzebowanieAwaryjne(List<InsERT.Moria.ModelDanych.DokumentZK> otwarte, HashSet<int> zepsute)
     {
-        var grupy = new Dictionary<int, Potrzeba>();
+        // Replika BudujPozycjeZapotrzebowaniaNaPodstawieGrupy z SDK (dekompilacja
+        // Logistyka.dll, 29.09.2026), zeby "tryb wlasny" liczyl TO SAMO co Sfera:
+        //  * ilosc niezrealizowana = IloscDoRealizacji.PozostalaIlosc (kolumna,
+        //    ktora Subiekt sam utrzymuje przy realizacji ZD/WZ/sprzedaza);
+        //  * jednostka: gdy wszystkie pozycje maja te sama -> ta; inaczej
+        //    jednostka bazowa kartoteki, a ilosci przeliczone proporcja
+        //    IloscWJednostceBazowej/Ilosc z KAZDEJ pozycji (SDK robi
+        //    PrzeliczIloscNaJednostke - rozszerzenie z Asortymenty.dll, ktorej
+        //    nie referencujemy; proporcja daje ten sam wynik);
+        //  * dostawca domyslny = DaneAsortymentuDostawcyPodstawowego.Podmiot
+        //    (to samo, co DostawcaPodstawowy() w SDK).
+        var grupy = new Dictionary<int, List<InsERT.Moria.ModelDanych.PozycjaDokumentu>>();
+        var kartoteki = new Dictionary<int, InsERT.Moria.ModelDanych.Asortyment>();
         foreach (var zk in otwarte)
         {
             List<InsERT.Moria.ModelDanych.PozycjaDokumentu> pozZk;
@@ -358,22 +394,53 @@ internal static class Zapotrzebowanie
                 InsERT.Moria.ModelDanych.Asortyment? a = null;
                 try { a = pz.AsortymentAktualny; } catch { }
                 if (a == null) continue;
-                decimal pozostalo;
-                try { pozostalo = pz.IloscDoRealizacji?.PozostalaIlosc ?? pz.Ilosc; }
-                catch { pozostalo = pz.Ilosc; }
-                if (pozostalo <= 0) continue;
-                if (!grupy.TryGetValue(a.Id, out var g))
+                if (Pozostalo(pz) <= 0) continue;
+                if (!grupy.TryGetValue(a.Id, out var lista))
                 {
-                    InsERT.Moria.ModelDanych.JednostkaMiaryAsortymentu? jm = null;
-                    try { jm = pz.JednostkaMiaryAs; } catch { }
-                    g = new Potrzeba(a, 0m, jm, null, new List<InsERT.Moria.ModelDanych.PozycjaDokumentu>());
-                    grupy[a.Id] = g;
+                    lista = new List<InsERT.Moria.ModelDanych.PozycjaDokumentu>();
+                    grupy[a.Id] = lista;
+                    kartoteki[a.Id] = a;
                 }
-                g.Ilosc += pozostalo;
-                g.PozycjeZK.Add(pz);
+                lista.Add(pz);
             }
         }
-        return grupy.Values.ToList();
+
+        var wynik = new List<Potrzeba>();
+        foreach (var (id, lista) in grupy)
+        {
+            var a = kartoteki[id];
+            var jmIds = new HashSet<int>();
+            foreach (var pz in lista)
+                try { jmIds.Add(pz.JednostkaMiaryAs.Id); } catch { }
+            InsERT.Moria.ModelDanych.JednostkaMiaryAsortymentu? jm = null;
+            decimal ilosc = 0m;
+            if (jmIds.Count == 1)
+            {
+                try { jm = lista[0].JednostkaMiaryAs; } catch { }
+                foreach (var pz in lista) ilosc += Pozostalo(pz);
+            }
+            else
+            {
+                try { jm = a.PodstawowaJednostkaMiaryAsortymentu; } catch { }
+                foreach (var pz in lista)
+                {
+                    var p = Pozostalo(pz);
+                    decimal wsp = 1m;
+                    try { if (pz.Ilosc != 0) wsp = pz.IloscWJednostceBazowej / pz.Ilosc; } catch { }
+                    ilosc += p * wsp;
+                }
+            }
+            InsERT.Moria.ModelDanych.Podmiot? dostawca = null;
+            try { dostawca = a.DaneAsortymentuDostawcyPodstawowego?.Podmiot; } catch { }
+            wynik.Add(new Potrzeba(a, ilosc, jm, dostawca, lista));
+        }
+        return wynik;
+    }
+
+    static decimal Pozostalo(InsERT.Moria.ModelDanych.PozycjaDokumentu pz)
+    {
+        try { return pz.IloscDoRealizacji?.PozostalaIlosc ?? pz.Ilosc; }
+        catch { return pz.Ilosc; }
     }
 
     /// Jedna potrzeba zakupowa - te same nazwy pol co PozycjaZestawieniaZapotrzebowania
