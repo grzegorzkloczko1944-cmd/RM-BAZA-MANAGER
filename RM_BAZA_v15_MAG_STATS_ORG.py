@@ -721,7 +721,16 @@ class MainWindow(tk.Tk):
     
     def __init__(self):
         super().__init__()
-        
+
+        # Przyciski w CAŁEJ aplikacji: ramka + podświetlenie pod myszą
+        # (30.09.2026). Przed budową okien — baza opcji Tk działa tylko na
+        # przyciski tworzone później. Wygląd nie może zablokować startu.
+        try:
+            import rm_przyciski
+            rm_przyciski.wlacz(self)
+        except Exception as e:
+            print(f"⚠️  Styl przycisków pominięty: {e}")
+
         self.title("RM_BAZA_v15_MAG_C_CHAT_STATS")
         self.geometry("1400x800")
 
@@ -2416,9 +2425,9 @@ class MainWindow(tk.Tk):
                                ("<F6>", "show_assembly_tree"),
                                # F7 = Scal kody handlowe (zyczenie usera
                                # 25.09.2026). Okno dotyczy CALEGO projektu,
-                               # nie zaznaczonego wiersza — `_skrot_arkusza`
-                               # tylko pilnuje, zeby klawisz nie dzialal
-                               # z wnetrza innego okna.
+                               # nie zaznaczonego wiersza — od 30.09.2026
+                               # dziala z KAZDEGO okna RM_BAZA (F8 tez),
+                               # patrz `_skrot_arkusza`.
                                ("<F7>", "open_subiekt_scalanie"),
                                # F8 = Edytor kartotek (zyczenie usera
                                # 25.09.2026). Jak F7: okno nie dotyczy
@@ -13097,10 +13106,25 @@ class MainWindow(tk.Tk):
         a F4 otwieralby kolejne okno dopasowania (24.09.2026).
 
         Po otwarciu okna ODDAJEMY MU FOKUS — patrz `_oddaj_fokus_nowemu`.
+
+        WYJATEK F7 / F8 (30.09.2026, zyczenie usera): Scal kody i Edytor
+        kartotek nie dzialaja na zaznaczonym wierszu, wiec otwieraja sie
+        z KAZDEGO okna RM_BAZA (kalkulator, karta pozycji, magazyn…).
+        Nie z wnetrza tego samego okna (drugi Edytor w Edytorze) i nie gdy
+        trwa okno modalne — nowe okno byloby za nim nieklikalne.
         """
+        globalne = {"open_subiekt_scalanie": "ScalanieWindow",
+                    "open_subiekt_edytor": "EdytorWindow"}
         try:
             if event is not None and getattr(event, "widget", None) is not None:
-                if event.widget.winfo_toplevel() is not self:
+                okno = event.widget.winfo_toplevel()
+                if nazwa_akcji in globalne:
+                    if type(okno).__name__ == globalne[nazwa_akcji]:
+                        return
+                    modalne = self.grab_current()
+                    if modalne is not None and modalne.winfo_toplevel() is not self:
+                        return
+                elif okno is not self:
                     return
         except Exception:
             pass            # nie potrafimy ustalic okna — nie blokujemy

@@ -43,6 +43,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
@@ -56,8 +57,10 @@ from subiekt_projekt import komunikat as komunikat_ed
 #: stały most z fallbackiem na CLI, więc nie duplikujemy tu obsługi protokołu.
 from subiekt_asortyment_gui import _uruchom
 
-TLO = "#ecf0f1"
-TLO_SEKCJI = "#ffffff"
+# Ciemniejsza paleta (30.09.2026, „za dużo białego tła"): białe zostają
+# tylko pola do wpisywania i tabele — tam biel niesie czytelność.
+TLO = "#c9d3dc"
+TLO_SEKCJI = "#e6ebf0"
 TEKST = "#2c3e50"
 TEKST_SZARY = "#7f8c8d"
 LINK = "#1f618d"
@@ -313,7 +316,11 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # stałą szerokość, więc reszta idzie do paneli 3/4. Przy 1760 px
         # wychodzi dokładnie 726. Zmieniając którąkolwiek, przelicz tę liczbę,
         # inaczej nadmiar znów urośnie po prawej.
-        self.geometry("1760x860")
+        # Wysokość 960 (30.09.2026): panel 2 (528 px) + panel 5 (325 px)
+        # nie mieściły się w 860 — dół panelu 5 był ucięty.
+        self.geometry("1760x960")
+        # Przyciski (ramka + podświetlenie pod myszą) ustawia dla całej
+        # aplikacji rm_przyciski.wlacz() przy starcie RM_BAZA (30.09.2026).
 
         # ── MODEL (graf, patrz docstring) ────────────────────────────────
         #: Callback „wstaw te kartoteke do wiersza arkusza" albo None.
@@ -729,9 +736,10 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # F5 = pobierz katalog Subiekta OD NOWA (25.09.2026).
         #
         # ⚠️ Dwa komunikaty tego okna odsylaly do „F5", a klawisza NIGDY tu
-        # nie bylo — obiecywaly cos, czego nie da sie zrobic. Skroty F2-F8
+        # nie bylo — obiecywaly cos, czego nie da sie zrobic. Skroty F2-F6
         # z arkusza sa CELOWO odfiltrowane w oknach Toplevel
         # (`_skrot_arkusza` w RM_BAZA), wiec potrzebny jest wlasny bind.
+        # (F7/F8 dzialaja wszedzie od 30.09.2026, F8 w tym oknie — nie.)
         self.bind("<F5>", self._na_f5)
 
         # Del kasuje zaznaczone — osobno w drzewie i w skladzie, bo to dwie
@@ -950,6 +958,12 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.tree.bind("<Button-1>", self._dnd_start, add="+")
         self.tree.bind("<B1-Motion>", self._dnd_ruch)
         self.tree.bind("<ButtonRelease-1>", self._dnd_koniec)
+        # Akcja USERA w drzewie (klik, klawisz) — odróżnia prawdziwy wybór
+        # od opóźnionego <<TreeviewSelect>> po przebudowie drzewa. Patrz
+        # straż na początku `_na_wybor_wezla` (30.09.2026).
+        self.tree.bind("<Button-1>", self._akcja_w_drzewie, add="+")
+        self.tree.bind("<KeyPress>", self._akcja_w_drzewie, add="+")
+        self.tree.bind("<ButtonRelease-1>", self._klik_w_drzewie_puszczony, add="+")
 
         # Kolory rodzajów — od razu widać komplet vs towar vs usługa.
         self.tree.tag_configure("komplet", foreground="#b9770e")
@@ -1014,10 +1028,14 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         kolumna = tk.Frame(rodzic, bg=TLO, width=510)
         kolumna.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=6)
         kolumna.pack_propagate(False)
+        # Panel 5 PAKOWANY PIERWSZY (30.09.2026): kolumna ma stałą wysokość,
+        # a Tk rozdaje miejsce w kolejności pakowania. Pakowany po panelu 2
+        # dostawał resztki i ucinał „Po scaleniu” razem z przyciskiem
+        # SCAL POZYCJE. Teraz ściska się panel 2 (zakładki), nie przyciski.
+        self._panel_scalanie(kolumna)
         ram = tk.LabelFrame(kolumna, text=" 2. Kartoteka — szczegóły ",
                             bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9, "bold"))
         ram.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        self._panel_scalanie(kolumna)
 
         self.karty = ttk.Notebook(ram)
         self.karty.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
@@ -2680,6 +2698,37 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         except Exception:
             pass
 
+    def _akcja_w_drzewie(self, e=None):
+        """Znacznik czasu klikniecia / klawisza w drzewie (panel 1)."""
+        self._akcja_drzewa_t = time.monotonic()
+        try:
+            self._akcja_drzewa_wiersz = (self.tree.identify_row(e.y)
+                                         if e is not None and e.type == tk.EventType.ButtonPress
+                                         else None)
+        except Exception:
+            self._akcja_drzewa_wiersz = None
+
+    def _swieza_akcja_w_drzewie(self):
+        return time.monotonic() - getattr(self, "_akcja_drzewa_t", 0.0) < 1.5
+
+    def _klik_w_drzewie_puszczony(self, e):
+        """Klik w wiersz, ktory JUZ byl zaznaczony, nie wysyla <<TreeviewSelect>>.
+
+        Po wyborze z listy 4 zaznaczenie w drzewie zostaje na starym wezle.
+        Klik w ten sam wezel nie zmienia zaznaczenia, wiec Tk milczy, a user
+        widzi dalej kartoteke z listy 4. Przekazujemy wybor recznie.
+        """
+        if not getattr(self, "_z_listy", False) or getattr(self, "_dnd_aktywny", False):
+            return
+        try:
+            wiersz = self.tree.identify_row(e.y)
+        except Exception:
+            return
+        if (wiersz and wiersz == getattr(self, "_akcja_drzewa_wiersz", None)
+                and wiersz in self.tree.selection()):
+            self._akcja_drzewa_t = time.monotonic()
+            self.after_idle(self._na_wybor_wezla)
+
     def _na_wybor_wezla(self, _e=None):
         # ⚠️ NAJPIERW domykamy opis POPRZEDNIEJ pozycji. Panel zaraz
         # przepisze pole z modelu, wiec cokolwiek zostalo w `tk.Text`
@@ -2696,9 +2745,18 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         #
         # Filtr nizej (`sym not in self.pozycje`) chronil juz panel przed
         # wyczyszczeniem, ale stal PO strazniku — pytanie padalo wczesniej.
+        #
+        # ⚠️ ALE TYLKO ZDARZENIE BEZ AKCJI USERA (30.09.2026). Wczesniej straz
+        # lapala tez prawdziwe klikniecie: po wyborze z listy 4 (ktory wklada
+        # kartoteke do `self.pozycje`) klik w drzewo nie przenosil pozycji do
+        # panelu 2 ani skladu kompletu do panelu 3 — zdarzenie ginelo tutaj.
+        # Opoznione zdarzenie po przebudowie drzewa przychodzi bez klikniecia
+        # i bez klawisza, wiec nadal jest odsiewane.
         if (getattr(self, "_z_listy", False)
-                and self._zaznaczony in self.pozycje):
+                and self._zaznaczony in self.pozycje
+                and not self._swieza_akcja_w_drzewie()):
             return
+        self._akcja_drzewa_t = 0.0      # zuzyta — nie przepuszcza nastepnych
         # Opuszczasz pozycje w trakcie edycji? Pytamy, zanim panel 2
         # pokaze co innego.
         if not self._czy_porzucic_edycje(self._symbol_wezla()):
