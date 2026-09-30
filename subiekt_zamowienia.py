@@ -395,6 +395,29 @@ def dane_z_bom(project_id, numer_projektu=None):
 MARKER = "RM_BAZA"
 
 
+def klucz_projektu(nazwa):
+    """Klucz sortowania projektów — TAKI SAM jak w górnej belce RM_BAZA.
+
+    Kolejność (za `sort_key` z RM_BAZA_v15_MAG_STATS_ORG):
+      1. numeryczne MALEJĄCO — najnowszy projekt na górze (2637 przed 2430),
+      2. potem literowe alfabetycznie, a w obrębie liter numer malejąco
+         (`ZP200` przed `ZP196`).
+
+    Zwykłe `sorted()` dawało 2430, 2457, 2518… czyli najstarsze na górze —
+    a szuka się zwykle tego, nad czym się właśnie pracuje (30.09.2026).
+    """
+    nazwa = str(nazwa or "").strip()
+    n = nazwa.lower()
+    if n and n[0].isdigit():
+        m = re.match(r"^(\d+)", n)
+        if m:
+            return (0, "", -int(m.group(1)), n)
+    m = re.match(r"^([a-z]+)(\d+)?", n)
+    if m:
+        return (1, m.group(1), -int(m.group(2)) if m.group(2) else 0, n)
+    return (2, n, 0, n)
+
+
 def znormalizowana(typ):
     """Czy to pozycja ZNORMALIZOWANA (łożysko, pasek, siłownik, złączka)?
 
@@ -1497,7 +1520,9 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         dostawcy = sorted({w["dostawca"] for w in wiersze if w["dostawca"]})
         self._dostawcy_wszyscy = [FILTR_WSZYSCY] + dostawcy + [FILTR_BRAK_DOSTAWCY]
         self.combo_dostawca["values"] = self._dostawcy_wszyscy
-        projekty = sorted({p for w in wiersze for p in w["projekty"].split(", ") if p})
+        # Kolejność jak w górnej belce arkusza — najnowsze numery na górze.
+        projekty = sorted({p for w in wiersze for p in w["projekty"].split(", ") if p},
+                          key=klucz_projektu)
         self.combo_projekt["values"] = [FILTR_WSZYSCY] + projekty
 
         # Numery ZD obecne na liście — sortowane od najnowszego (numer rośnie

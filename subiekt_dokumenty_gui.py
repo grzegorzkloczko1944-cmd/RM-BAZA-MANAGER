@@ -467,7 +467,12 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         # zapytanie), a odświeża się razem z listą, więc po wysłaniu maila
         # wystarczy „Odśwież”, żeby zobaczyć datę.
         self._wyslane = self._historia_wyslania()
-        projekty = sorted({d["projekt"] for d in dok if d["projekt"]})
+        # Kolejność jak w górnej belce arkusza RM_BAZA: najnowsze numery na
+        # górze (2637 przed 2430), potem literowe. Zwykłe `sorted()` dawało
+        # odwrotnie — 2430, 2457, 2518… (zgłoszone 30.09.2026).
+        from subiekt_zamowienia import klucz_projektu
+        projekty = sorted({d["projekt"] for d in dok if d["projekt"]},
+                          key=klucz_projektu)
         # MAGAZYN na poczatek listy: to nie numer projektu, a szuka sie go
         # czesto ("co zamowilem na sklad").
         if UWAGI_MAGAZYN in projekty:
