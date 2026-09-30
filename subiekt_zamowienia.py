@@ -782,9 +782,35 @@ def zbuduj_wiersze(zapotrzebowanie, bom, podmioty=(), tylko_projekt=None, zamowi
     for z in zamowione or ():
         wg_symbolu.setdefault(z["symbol"].strip().upper(), []).append(z)
 
-    juz = {w["symbol"].strip().upper() for w in wiersze}
+    # ⚠️ POZYCJA MOŻE BYĆ W OBU LISTACH NARAZ (30.09.2026).
+    #
+    # Dopóki ZD nie jest przyjęte, Subiekt nadal liczy pozycję jako brak —
+    # więc ten sam symbol wraca I w zapotrzebowaniu, I w `zamowione`. Dotąd
+    # `if sym in juz: continue` po prostu WYRZUCAŁO informację o ZD, a wiersz
+    # z zapotrzebowania ma na sztywno `"zd": ""`. Skutek: user widział „do
+    # zamówienia" dla pozycji, na które ZD już poszło (zgłoszone: „nie
+    # wyświetla mi się, że zostało wykonane ZD do MA-JA a zamówienia są" —
+    # ZD 67/09/2026, 6 pozycji). Grożiło to podwójnym zamówieniem.
+    #
+    # Teraz zamiast pomijać — DOPISUJEMY numery ZD do istniejącego wiersza.
+    wg_wierszy = {}
+    for w in wiersze:
+        wg_wierszy.setdefault(w["symbol"].strip().upper(), []).append(w)
+
+    juz = set(wg_wierszy)
     for sym, grupa in wg_symbolu.items():
         if sym in juz:
+            for w in wg_wierszy[sym]:
+                if w.get("zd"):
+                    continue                # numer już jest — nie dubluj
+                w["zd"] = _zd_z_iloscia(grupa)
+                w["zd_status"] = grupa[0].get("status", "")
+                w["zd_data"] = grupa[0].get("data", "")
+                w["zd_nasze"] = any(nasz_dokument(x.get("zd_tytul")) for x in grupa)
+                # Pozycja jest zamówiona, ale NIEZREALIZOWANA — stąd wisi
+                # dalej w zapotrzebowaniu. To nie jest „historyczne" ZD
+                # (tamto oznacza pozycję, której już w zapotrzebowaniu nie ma).
+                w["zk_historyczne"] = False
             continue
         z = grupa[0]
         b = bom.get(sym, {})
