@@ -1,0 +1,1196 @@
+{
+ "opis": "Oprawy łożyskowe: średnica wałka [mm] dla symbolu kartoteki (kolumna Wymiary w MAG). Wartości z tabeli serii wkładek UC (201=12, 202=15, 203=17, od 204 co 5 mm; 3xx od 305=25), KFL/KP 000=10…006=30. Wpisy 'do potwierdzenia' — zgadnięte po nazwie.",
+ "zrodlo": "30.09.2026, biblioteka modeli opraw (238 symboli)",
+ "oprawy": [
+  {
+   "symbol": "BPF201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPF202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPF203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPF204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPF205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPF206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPF207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPFL201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPFL202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPFL203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPFL204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPFL205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPFL206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPFL207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPFT202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPFT203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPFT204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPP201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPP202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPP203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPP204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPP205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPP206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "BPP207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "KFL000",
+   "walek_mm": 10.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "KFL001",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "KFL002",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "KFL003",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "KFL004",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "KFL005",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "KFL006",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "KFL08",
+   "walek_mm": 8.0,
+   "uwaga": "do potwierdzenia"
+  },
+  {
+   "symbol": "KP000",
+   "walek_mm": 10.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "KP001",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "KP002",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "KP003",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "KP004",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "KP005",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "KP006",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "KP08",
+   "walek_mm": 8.0,
+   "uwaga": "do potwierdzenia"
+  },
+  {
+   "symbol": "SS BPFL204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS BPFL205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS BPFL206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS BPFL207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCF201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCF202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCF203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCF204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCF205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCF206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCF207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCF208",
+   "walek_mm": 40.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCF209",
+   "walek_mm": 45.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCF210",
+   "walek_mm": 50.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCF211",
+   "walek_mm": 55.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCF212",
+   "walek_mm": 60.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFB201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFB202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFB203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFB204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFB205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFB206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFB207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFB208",
+   "walek_mm": 40.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFB209",
+   "walek_mm": 45.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFB210",
+   "walek_mm": 50.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFB211",
+   "walek_mm": 55.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFB212",
+   "walek_mm": 60.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFC201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFC202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFC203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFC204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFC205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFC206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFC207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFC208",
+   "walek_mm": 40.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFC209",
+   "walek_mm": 45.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFC210",
+   "walek_mm": 50.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFC211",
+   "walek_mm": 55.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFC212",
+   "walek_mm": 60.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFL201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFL202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFL203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFL204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFL205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFL206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFL207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFL208",
+   "walek_mm": 40.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFL209",
+   "walek_mm": 45.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFL210",
+   "walek_mm": 50.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFL211",
+   "walek_mm": 55.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCFL212",
+   "walek_mm": 60.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCP201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCP202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCP203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCP204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCP205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCP206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCP207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCP208",
+   "walek_mm": 40.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCP209",
+   "walek_mm": 45.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCP210",
+   "walek_mm": 50.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCP211",
+   "walek_mm": 55.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCP212",
+   "walek_mm": 60.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCPA201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCPA202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCPA203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCPA204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCPA205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCPA206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCPA207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCPA208",
+   "walek_mm": 40.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCPA209",
+   "walek_mm": 45.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCPA210",
+   "walek_mm": 50.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCPA211",
+   "walek_mm": 55.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCPA212",
+   "walek_mm": 60.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCT201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCT202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCT203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCT204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCT205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCT206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCT207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCT208",
+   "walek_mm": 40.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCT209",
+   "walek_mm": 45.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCT210",
+   "walek_mm": 50.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCT211",
+   "walek_mm": 55.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "SS UCT212",
+   "walek_mm": 60.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF208",
+   "walek_mm": 40.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF209",
+   "walek_mm": 45.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF210",
+   "walek_mm": 50.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF211",
+   "walek_mm": 55.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF212",
+   "walek_mm": 60.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF213",
+   "walek_mm": 65.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF214",
+   "walek_mm": 70.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF215",
+   "walek_mm": 75.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF217",
+   "walek_mm": 85.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF218",
+   "walek_mm": 90.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCF319",
+   "walek_mm": 95.0,
+   "uwaga": "do potwierdzenia"
+  },
+  {
+   "symbol": "UCFB201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFB202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFB203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFB204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFB205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFB206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFB207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFB208",
+   "walek_mm": 40.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFB209",
+   "walek_mm": 45.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFB210",
+   "walek_mm": 50.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFB211",
+   "walek_mm": 55.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFB212",
+   "walek_mm": 60.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFC201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFC202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFC203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFC204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFC205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFC206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFC207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFC208",
+   "walek_mm": 40.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFC209",
+   "walek_mm": 45.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFC210",
+   "walek_mm": 50.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFC211",
+   "walek_mm": 55.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFC212",
+   "walek_mm": 60.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFC215",
+   "walek_mm": 75.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFC216",
+   "walek_mm": 80.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFH201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFH202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFH203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFH204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFH205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFH206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFH207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFH208",
+   "walek_mm": 40.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFH209",
+   "walek_mm": 45.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFH210",
+   "walek_mm": 50.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFL201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFL201 Mini",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFL202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFL202 Mini",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFL203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFL204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFL205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFL206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFL207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFL208",
+   "walek_mm": 40.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFL209",
+   "walek_mm": 45.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFL210",
+   "walek_mm": 50.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFL211",
+   "walek_mm": 55.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFL212",
+   "walek_mm": 60.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCFL214",
+   "walek_mm": 70.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP208",
+   "walek_mm": 40.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP209",
+   "walek_mm": 45.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP210",
+   "walek_mm": 50.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP211",
+   "walek_mm": 55.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP212",
+   "walek_mm": 60.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP213",
+   "walek_mm": 65.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP214",
+   "walek_mm": 70.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP215",
+   "walek_mm": 75.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP216",
+   "walek_mm": 80.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCP218",
+   "walek_mm": 90.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCPA201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCPA202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCPA203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCPA204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCPA205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCPA206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCPA207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCPA208",
+   "walek_mm": 40.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCPA209",
+   "walek_mm": 45.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCPA210",
+   "walek_mm": 50.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCPA211",
+   "walek_mm": 55.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCPA212",
+   "walek_mm": 60.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCT201",
+   "walek_mm": 12.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCT202",
+   "walek_mm": 15.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCT203",
+   "walek_mm": 17.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCT204",
+   "walek_mm": 20.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCT205",
+   "walek_mm": 25.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCT206",
+   "walek_mm": 30.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCT207",
+   "walek_mm": 35.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCT208",
+   "walek_mm": 40.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCT209",
+   "walek_mm": 45.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCT210",
+   "walek_mm": 50.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCT211",
+   "walek_mm": 55.0,
+   "uwaga": ""
+  },
+  {
+   "symbol": "UCT212",
+   "walek_mm": 60.0,
+   "uwaga": ""
+  }
+ ]
+}

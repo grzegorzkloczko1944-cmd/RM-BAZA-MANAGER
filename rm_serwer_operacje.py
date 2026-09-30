@@ -3769,6 +3769,44 @@ MIGRACJE_SUBIEKT_KOPIA.extend([
 ])
 
 
+MIGRACJE_SUBIEKT_KOPIA.extend([
+    """CREATE TABLE IF NOT EXISTS oprawy (
+           symbol    TEXT PRIMARY KEY,   -- symbol kartoteki: UCP204, SS UCFL208, KFL003
+           walek_mm  REAL NOT NULL,      -- średnica wałka, mm (kolumna Wymiary w MAG)
+           uwaga     TEXT
+       )""",
+])
+
+
+def zaladuj_katalog_opraw(con, sciezka):
+    """Wczytuje `oprawy.json` (średnica wałka per symbol) do tabeli `oprawy`,
+    gdy plik się zmienił. Wersja w `lozyska_meta` ('wersja_opraw'). Zwraca opis
+    do logu albo None (bez zmian / brak pliku). Jedna transakcja."""
+    import json
+    import os
+    if not sciezka or not os.path.isfile(sciezka):
+        return None
+    st = os.stat(sciezka)
+    wersja = "%d:%d" % (st.st_size, int(st.st_mtime))
+    stara = con.execute("SELECT wartosc FROM lozyska_meta WHERE klucz = 'wersja_opraw'").fetchone()
+    if stara and stara[0] == wersja:
+        return None
+    with open(sciezka, encoding="utf-8") as f:
+        dane = json.load(f)
+    wiersze = [(r["symbol"].strip(), float(r["walek_mm"]), r.get("uwaga") or "")
+               for r in dane.get("oprawy", [])]
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        con.execute("DELETE FROM oprawy")
+        con.executemany("INSERT INTO oprawy VALUES (?,?,?)", wiersze)
+        con.execute("INSERT OR REPLACE INTO lozyska_meta VALUES ('wersja_opraw', ?)", (wersja,))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    return "oprawy łożyskowe: %d symboli (%s)" % (len(wiersze), wersja)
+
+
 def napraw_zlecenia_rodzaj(con):
     """Kolumna `rodzaj` w istniejącej tabeli zleceń (CREATE IF NOT EXISTS jej
     nie doda). Zwraca opis do logu albo None."""

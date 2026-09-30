@@ -133,6 +133,40 @@ def rozpoznaj_lozysko(symbol, po_nazwie):
     return po_nazwie.get(m.group(1)) if m else None
 
 
+# ── oprawy łożyskowe: średnica WAŁKA z katalogu (katalog_lozysk/oprawy.json) ──
+#
+# Kolumna „Wymiary" w MAG to dla łożysk d×D×B z katalogu. Oprawa (UCP, UCFL,
+# KFL…) nie ma wiersza w katalogu łożysk, a jej wymiarem jest średnica wałka
+# (user, 30.09.2026). Wartości są ZAPISANE w pliku `oprawy.json` w repo, nie
+# wyliczane z symbolu — RM_SERWER ładuje je do tabeli `oprawy` przy starcie
+# (jak katalog łożysk) i można je poprawić per symbol. Zapis „Ø20" odróżnia
+# wałek od „20x42x12" łożysk.
+_oprawy = {"wersja": None, "po_symbolu": {}}
+
+
+def katalog_opraw(con):
+    """{SYMBOL: wiersz} z tabeli `oprawy` — z pamięci, odświeżane po zmianie wersji."""
+    try:
+        w = con.execute("SELECT wartosc FROM lozyska_meta WHERE klucz = 'wersja_opraw'").fetchone()
+    except sqlite3.Error:
+        return {}                              # serwer bez tabeli opraw
+    wersja = w[0] if w else None
+    with _katalog_lock:
+        if wersja != _oprawy["wersja"]:
+            try:
+                po = {r["symbol"].upper(): dict(r) for r in con.execute("SELECT * FROM oprawy")}
+            except sqlite3.Error:
+                po = {}
+            _oprawy.update(wersja=wersja, po_symbolu=po)
+        return _oprawy["po_symbolu"]
+
+
+def wymiary_oprawy(symbol, po_symbolu):
+    """„Ø20" dla symbolu z katalogu opraw, inaczej ""."""
+    r = po_symbolu.get((symbol or "").strip().upper())
+    return "Ø%g" % r["walek_mm"] if r else ""
+
+
 # Wymiar w zapytaniu (user, 28.09.2026): „6x" = otwór 6, „12x30" = otwór
 # i średnica, „12x30x8" = komplet, „x30" = sama średnica zewnętrzna.
 # Pusta część = dowolna. Litera x MUSI być, żeby „6004" zostało oznaczeniem.
@@ -237,6 +271,7 @@ def szukaj(bazy, q, limit):
     con, ma_modele = bazy.polacz()
     try:
         po_nazwie = katalog_lozysk(con)
+        oprawy = katalog_opraw(con)
         warunki, parametry = [], []
         for w in slowa:
             wzor = "%" + w.replace("%", "").replace("_", "") + "%"
@@ -267,7 +302,7 @@ def szukaj(bazy, q, limit):
             if wym and not _pasuje_wymiar(r, wym):
                 continue
             w["lozysko"] = r["oznaczenie"] if r else ""
-            w["wymiary"] = r["wymiary"] if r else ""
+            w["wymiary"] = r["wymiary"] if r else wymiary_oprawy(w["symbol"], oprawy)
             wynik.append(w)
             if len(wynik) >= limit:
                 break
@@ -294,7 +329,7 @@ def kartoteka(bazy, symbol):
             d["magazyny"] = []
         r = rozpoznaj_lozysko(d["symbol"], katalog_lozysk(con))
         d["lozysko"] = r["oznaczenie"] if r else ""
-        d["wymiary"] = r["wymiary"] if r else ""
+        d["wymiary"] = r["wymiary"] if r else wymiary_oprawy(d["symbol"], oprawy)
         d["lozysko_cr_kn"] = r["cr_kn"] if r else None
         d["lozysko_n_smar"] = r["n_smar"] if r else None
         return d

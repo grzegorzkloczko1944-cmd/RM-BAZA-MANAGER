@@ -396,6 +396,13 @@ class Serwer:
                     log("   + %s" % opis)
             except Exception as e:
                 log("⚠️  Katalog łożysk nie wczytany: %s" % e)
+            try:
+                opis = ops.zaladuj_katalog_opraw(
+                    self.con_sub, os.path.join(KATALOG, "katalog_lozysk", "oprawy.json"))
+                if opis:
+                    log("   + %s" % opis)
+            except Exception as e:
+                log("⚠️  Katalog opraw nie wczytany: %s" % e)
 
     # ── wykonanie pojedynczego żądania (w wątku roboczym) ─────────────
     def _polaczenie(self, operacja):
