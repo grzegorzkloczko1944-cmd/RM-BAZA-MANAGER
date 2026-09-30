@@ -61,13 +61,34 @@ internal static class Zd
         // Świeże zestawienie — to z niego biorą się obiekty, które Sfera potrafi
         // powiązać z ZK. Plan z Pythona tylko WSKAZUJE, które z nich zamówić
         // i u kogo.
-        var zestawienie = zamowieniaZk.ZapotrzebowanieNaAsortyment();
-        var wgSymbolu = new Dictionary<string, PozycjaZestawieniaZapotrzebowania>(
-            StringComparer.OrdinalIgnoreCase);
-        foreach (var z in zestawienie)
+        // ⛔ NIE `zamowieniaZk.ZapotrzebowanieNaAsortyment()` WPROST.
+        //
+        // Ta metoda SDK pada NullReferenceException, gdy na otwartym ZK lezy
+        // pozycja jednorazowa (sprzedaz bez kartoteki, np. „Gasket" na
+        // ZK 2/09/2026) — grupuje po `AsortymentAktualny.Id`. Objaw w RM_BAZA:
+        // „Object reference not set to an instance of an object." przy
+        // KLIKNIECIU „Utworz ZD" (zgloszone 30.09.2026).
+        //
+        // 29.09 osłona powstala tylko w Zapotrzebowanie.cs, wiec LISTA w oknie
+        // ZD dzialala, a tworzenie ZD nadal padalo. Teraz oba tryby ida przez
+        // ten sam modul — patrz ZapotrzebowanieBezpieczne.cs.
+        var wynikZap = ZapotrzebowanieBezpieczne.Policz(sfera);
+        var wgSymbolu = new Dictionary<string, Potrzeba>(StringComparer.OrdinalIgnoreCase);
+        foreach (var z in wynikZap.Potrzeby)
         {
             var sym = Bezp(() => z.Asortyment?.Symbol)?.Trim();
             if (!string.IsNullOrEmpty(sym)) wgSymbolu[sym] = z;
+        }
+        // Pozycje, ktorych Sfera nie policzyla, ida do raportu — inaczej user
+        // widzi tylko „nie ma jej juz w zapotrzebowaniu" i nie wie dlaczego.
+        foreach (var b in wynikZap.Bledy)
+        {
+            var op = Wlasciwosc(b, "nazwa") ?? Wlasciwosc(b, "symbol") ?? "";
+            var dok = Wlasciwosc(b, "dokument") ?? "";
+            var rodzaj = Wlasciwosc(b, "rodzaj") ?? "";
+            kroki.Add(new Krok("zapotrzebowanie", op.Length > 0 ? op : dok,
+                rodzaj == "jednorazowa" ? "pominieta-jednorazowa" : "blad",
+                Wlasciwosc(b, "blad") ?? ""));
         }
 
         var doRealizacji = new List<PozycjaZestawieniaZapotrzebowania>();
@@ -313,6 +334,16 @@ internal static class Zd
 
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
     static int Bezp2(Func<int> f) { try { return f(); } catch { return 0; } }
+
+    /// Pole z anonimowego obiektu `bledy` (ZapotrzebowanieBezpieczne buduje je
+    /// jako `new { dokument, nazwa, rodzaj, blad, ... }`). Refleksja, bo typ
+    /// anonimowy nie da sie zadeklarowac po stronie wolajacego.
+    static string? Wlasciwosc(object? o, string nazwa)
+    {
+        if (o == null) return null;
+        try { return o.GetType().GetProperty(nazwa)?.GetValue(o)?.ToString(); }
+        catch { return null; }
+    }
 
     /// <summary>
     /// STALY SZABLON ADRESOWY ZAMOWIENIA: bez Odbiorcy, dostawa na nasz adres.

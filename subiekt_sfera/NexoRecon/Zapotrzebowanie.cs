@@ -104,104 +104,14 @@ internal static class Zapotrzebowanie
         }
         catch { /* bez stanow tryb dziala dalej, tyle ze z zerami */ }
 
-        // SDK ZapotrzebowanieNaAsortyment() PADA NullReferenceException, gdy na
-        // OTWARTYM ZK jest pozycja bez kartoteki: grupuje po
-        // `t.Item1.AsortymentAktualny.Id` (dekompilacja Logistyka.dll, 29.09.2026).
-        // Z zewnatrz baza wyglada na czysta, bo Dokumenty.cs czyta pozycje
-        // PROJEKCJA EF (INNER JOIN) i taka pozycje cicho gubi. Objaw w RM_BAZA:
-        // okno "Zamowienia do dostawcow" -> "Object reference not set..." i nic.
-        //
-        // Dlatego najpierw wlasny przeglad ENCJI: zepsute pozycje trafiaja do
-        // `bledy` (numer ZK, Id pozycji) - user widzi, CO naprawic w Subiekcie.
-        // Sa zepsute -> liczymy zapotrzebowanie sami, bez nich (tryb awaryjny:
-        // PozostalaIlosc per pozycja, bez przeliczania jednostek i bez dostawcy
-        // domyslnego). Nie ma -> SDK jak dotad, a gdyby i tak padlo, ten sam
-        // tryb awaryjny zamiast pustego okna.
-        var bledy = new List<object>();
-        var zepsute = new HashSet<int>();
-        var otwarteZk = new List<InsERT.Moria.ModelDanych.DokumentZK>();
-        try
-        {
-            foreach (var zk in zam.Dane.Wszystkie().ToList())
-            {
-                if (CzyZamkniety(zk)) continue;
-                otwarteZk.Add(zk);
-                var numer = Bezp(() => zk.NumerWewnetrzny?.PelnaSygnatura) ?? "?";
-                List<InsERT.Moria.ModelDanych.PozycjaDokumentu> pozZk;
-                try { pozZk = zk.Pozycje.ToList(); }
-                catch (Exception ex)
-                {
-                    bledy.Add(new { dokument = numer, blad = "nie da sie odczytac pozycji: " + ex.Message });
-                    continue;
-                }
-                foreach (var pz in pozZk)
-                {
-                    InsERT.Moria.ModelDanych.Asortyment? a = null;
-                    try { a = pz.AsortymentAktualny; } catch { }
-                    if (a != null) continue;
-                    zepsute.Add(pz.Id);
-                    // Co to za pozycja? `AsortymentWybrany` to wiersz HISTORII kartotek
-                    // (FK AsortymentWybranyId -> AsortymentyHistoria) - dla pozycji
-                    // JEDNORAZOWEJ ("Gasket", 12 szt, ZK 2/09/2026) ma nazwe i
-                    // Jednorazowy = 1, a Asortyment_Id puste. To NORMALNA pozycja
-                    // (sprzedaz bez kartoteki), nie blad danych - SDK jej po prostu
-                    // nie umie policzyc. Bez nazwy w raporcie user szukal "usunietej
-                    // kartoteki", ktorej nigdy nie bylo (29.09.2026).
-                    string nazwa = "", symbolH = "";
-                    bool jednorazowa = false;
-                    try
-                    {
-                        var h = pz.AsortymentWybrany;
-                        if (h != null)
-                        {
-                            nazwa = (Bezp(() => h.Nazwa) ?? "").Trim();
-                            symbolH = (Bezp(() => h.Symbol) ?? "").Trim();
-                            try { jednorazowa = h.Jednorazowy; } catch { }
-                        }
-                    }
-                    catch { }
-                    bledy.Add(new
-                    {
-                        dokument = numer,
-                        pozycja_id = pz.Id,
-                        ilosc = pz.Ilosc,
-                        nazwa,
-                        symbol = symbolH,
-                        rodzaj = jednorazowa ? "jednorazowa" : "bez-kartoteki",
-                        blad = jednorazowa
-                            ? "pozycja jednorazowa (bez kartoteki) - Subiekt nie liczy dla niej zapotrzebowania; pominieta"
-                            : "pozycja bez kartoteki (AsortymentAktualny = null) - blad danych, sprawdz dokument w Subiekcie",
-                    });
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            bledy.Add(new { blad = "przeglad ZK: " + ex.GetType().Name + ": " + ex.Message });
-        }
-
-        var trybAwaryjny = zepsute.Count > 0;
-        List<Potrzeba> potrzeby;
-        if (!trybAwaryjny)
-        {
-            try
-            {
-                potrzeby = zam.ZapotrzebowanieNaAsortyment()
-                    .Select(x => new Potrzeba(x.Asortyment, x.Ilosc, x.JednostkaMiary, x.Dostawca,
-                                              (x.PozycjeZK ?? Enumerable.Empty<InsERT.Moria.ModelDanych.PozycjaDokumentu>()).ToList()))
-                    .ToList();
-            }
-            catch (Exception ex)
-            {
-                bledy.Add(new { blad = "SDK ZapotrzebowanieNaAsortyment: " + ex.GetType().Name + ": " + ex.Message });
-                trybAwaryjny = true;
-                potrzeby = ZapotrzebowanieAwaryjne(otwarteZk, zepsute);
-            }
-        }
-        else
-        {
-            potrzeby = ZapotrzebowanieAwaryjne(otwarteZk, zepsute);
-        }
+        // Zapotrzebowanie liczy WSPOLNY modul — patrz ZapotrzebowanieBezpieczne.cs.
+        // ⛔ NIE wolac `zam.ZapotrzebowanieNaAsortyment()` wprost: pada
+        // NullReferenceException, gdy na otwartym ZK lezy pozycja jednorazowa
+        // (bez kartoteki). Osłona mieszka w jednym miejscu, bo gdy 29.09 siedziala
+        // tutaj, tworzenie ZD (Zd.cs) nadal padalo tym samym bledem.
+        var wynikZap = ZapotrzebowanieBezpieczne.Policz(sfera);
+        var potrzeby = wynikZap.Potrzeby;
+        var bledy = wynikZap.Bledy;
 
         var pozycje = new List<Poz>();
         foreach (var p in potrzeby)
@@ -340,7 +250,7 @@ internal static class Zapotrzebowanie
         }
         catch { /* brak dostępu do ZD nie może wywalić całego odczytu */ }
 
-        var json = JsonSerializer.Serialize(new { pozycje, podmioty, zamowione, bledy, tryb = trybAwaryjny ? "wlasny" : "sdk" },
+        var json = JsonSerializer.Serialize(new { pozycje, podmioty, zamowione, bledy, tryb = wynikZap.Tryb },
             new JsonSerializerOptions
             {
                 WriteIndented = false,
@@ -353,109 +263,6 @@ internal static class Zapotrzebowanie
     }
 
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
-
-    /// Zamkniety = zrealizowane/anulowane. Wlasciwosc SDK bywa niedostepna
-    /// w naszej referencji, stad dynamic z odwrotem po nazwie statusu.
-    static bool CzyZamkniety(InsERT.Moria.ModelDanych.DokumentZK zk)
-    {
-        try { return (bool)((dynamic)zk).Zamkniety; } catch { }
-        var st = Bezp(() => zk.StatusDokumentu?.Nazwa) ?? "";
-        return st.Equals("Zrealizowane", StringComparison.OrdinalIgnoreCase)
-            || st.Equals("Anulowane", StringComparison.OrdinalIgnoreCase);
-    }
-
-    /// Zapotrzebowanie liczone bez SDK: suma PozostalaIlosc po kartotece
-    /// (AsortymentAktualny.Id) z pozycji otwartych ZK, z pominieciem zepsutych.
-    /// Roznice wobec SDK: brak przeliczenia jednostek miedzy pozycjami i brak
-    /// dostawcy domyslnego (DostawcaPodstawowy() to rozszerzenie z Asortymenty.dll,
-    /// ktorej nie referencujemy) - okno i tak bierze dostawce z RM_BAZA.
-    static List<Potrzeba> ZapotrzebowanieAwaryjne(List<InsERT.Moria.ModelDanych.DokumentZK> otwarte, HashSet<int> zepsute)
-    {
-        // Replika BudujPozycjeZapotrzebowaniaNaPodstawieGrupy z SDK (dekompilacja
-        // Logistyka.dll, 29.09.2026), zeby "tryb wlasny" liczyl TO SAMO co Sfera:
-        //  * ilosc niezrealizowana = IloscDoRealizacji.PozostalaIlosc (kolumna,
-        //    ktora Subiekt sam utrzymuje przy realizacji ZD/WZ/sprzedaza);
-        //  * jednostka: gdy wszystkie pozycje maja te sama -> ta; inaczej
-        //    jednostka bazowa kartoteki, a ilosci przeliczone proporcja
-        //    IloscWJednostceBazowej/Ilosc z KAZDEJ pozycji (SDK robi
-        //    PrzeliczIloscNaJednostke - rozszerzenie z Asortymenty.dll, ktorej
-        //    nie referencujemy; proporcja daje ten sam wynik);
-        //  * dostawca domyslny = DaneAsortymentuDostawcyPodstawowego.Podmiot
-        //    (to samo, co DostawcaPodstawowy() w SDK).
-        var grupy = new Dictionary<int, List<InsERT.Moria.ModelDanych.PozycjaDokumentu>>();
-        var kartoteki = new Dictionary<int, InsERT.Moria.ModelDanych.Asortyment>();
-        foreach (var zk in otwarte)
-        {
-            List<InsERT.Moria.ModelDanych.PozycjaDokumentu> pozZk;
-            try { pozZk = zk.Pozycje.ToList(); } catch { continue; }
-            foreach (var pz in pozZk)
-            {
-                if (zepsute.Contains(pz.Id)) continue;
-                InsERT.Moria.ModelDanych.Asortyment? a = null;
-                try { a = pz.AsortymentAktualny; } catch { }
-                if (a == null) continue;
-                if (Pozostalo(pz) <= 0) continue;
-                if (!grupy.TryGetValue(a.Id, out var lista))
-                {
-                    lista = new List<InsERT.Moria.ModelDanych.PozycjaDokumentu>();
-                    grupy[a.Id] = lista;
-                    kartoteki[a.Id] = a;
-                }
-                lista.Add(pz);
-            }
-        }
-
-        var wynik = new List<Potrzeba>();
-        foreach (var (id, lista) in grupy)
-        {
-            var a = kartoteki[id];
-            var jmIds = new HashSet<int>();
-            foreach (var pz in lista)
-                try { jmIds.Add(pz.JednostkaMiaryAs.Id); } catch { }
-            InsERT.Moria.ModelDanych.JednostkaMiaryAsortymentu? jm = null;
-            decimal ilosc = 0m;
-            if (jmIds.Count == 1)
-            {
-                try { jm = lista[0].JednostkaMiaryAs; } catch { }
-                foreach (var pz in lista) ilosc += Pozostalo(pz);
-            }
-            else
-            {
-                try { jm = a.PodstawowaJednostkaMiaryAsortymentu; } catch { }
-                foreach (var pz in lista)
-                {
-                    var p = Pozostalo(pz);
-                    decimal wsp = 1m;
-                    try { if (pz.Ilosc != 0) wsp = pz.IloscWJednostceBazowej / pz.Ilosc; } catch { }
-                    ilosc += p * wsp;
-                }
-            }
-            InsERT.Moria.ModelDanych.Podmiot? dostawca = null;
-            try { dostawca = a.DaneAsortymentuDostawcyPodstawowego?.Podmiot; } catch { }
-            wynik.Add(new Potrzeba(a, ilosc, jm, dostawca, lista));
-        }
-        return wynik;
-    }
-
-    static decimal Pozostalo(InsERT.Moria.ModelDanych.PozycjaDokumentu pz)
-    {
-        try { return pz.IloscDoRealizacji?.PozostalaIlosc ?? pz.Ilosc; }
-        catch { return pz.Ilosc; }
-    }
-
-    /// Jedna potrzeba zakupowa - te same nazwy pol co PozycjaZestawieniaZapotrzebowania
-    /// z SDK, zeby petla wyzej nie musiala wiedziec, skad dane pochodza.
-    internal sealed class Potrzeba
-    {
-        public InsERT.Moria.ModelDanych.Asortyment? Asortyment;
-        public decimal Ilosc;
-        public InsERT.Moria.ModelDanych.JednostkaMiaryAsortymentu? JednostkaMiary;
-        public InsERT.Moria.ModelDanych.Podmiot? Dostawca;
-        public List<InsERT.Moria.ModelDanych.PozycjaDokumentu> PozycjeZK;
-        public Potrzeba(InsERT.Moria.ModelDanych.Asortyment? a, decimal ilosc, InsERT.Moria.ModelDanych.JednostkaMiaryAsortymentu? jm,
-                        InsERT.Moria.ModelDanych.Podmiot? dostawca, List<InsERT.Moria.ModelDanych.PozycjaDokumentu> pozycje)
-        { Asortyment = a; Ilosc = ilosc; JednostkaMiary = jm; Dostawca = dostawca; PozycjeZK = pozycje; }
-    }
 
     internal record Zrodlo(string Numer, string Tytul, string Uwagi, decimal Ilosc);
     /// Numer ZK, który ta pozycja ZD realizuje.

@@ -59,6 +59,33 @@ internal static class ZapotrzebowanieTest
             uwagi.Add($"ZapotrzebowanieNaAsortyment() nie zadzialalo: {e.GetType().Name}: {e.Message}");
         }
 
+        // ── A2. To, czego most UZYWA NAPRAWDE ─────────────────────────────
+        // Metoda A wola SDK WPROST — celowo, bo ten tryb ma pokazywac, czy
+        // sama Sfera dziala. Ale gdy pada (pozycja jednorazowa na otwartym ZK),
+        // raport wygladal, jakby zapotrzebowania w ogole nie bylo — a most
+        // liczy je wtedy wlasnym trybem i ma komplet. Stad druga pozycja
+        // w raporcie: co realnie dostaja tryby `zapotrzebowanie` i `zd`
+        // (30.09.2026).
+        var metodaA2 = new List<PozTest>();
+        string trybA2 = "?";
+        try
+        {
+            var w = ZapotrzebowanieBezpieczne.Policz(sfera);
+            trybA2 = w.Tryb;
+            foreach (var p in w.Potrzeby)
+            {
+                var sym = Bezp(() => p.Asortyment?.Symbol)?.Trim();
+                if (!string.IsNullOrWhiteSpace(sym))
+                    metodaA2.Add(new PozTest(sym!, p.Ilosc, RodzajKartoteki(sfera, sym!)));
+            }
+            foreach (var b in w.Bledy)
+                uwagi.Add("pominieta pozycja ZK: " + System.Text.Json.JsonSerializer.Serialize(b));
+        }
+        catch (Exception e)
+        {
+            uwagi.Add($"ZapotrzebowanieBezpieczne.Policz() nie zadzialalo: {e.GetType().Name}: {e.Message}");
+        }
+
         // ── B. Kalkulator z jawna obsluga kompletow ───────────────────────
         // Nazwy typow i wlasciwosci szukane REFLEKSJA, bo nie znamy z gory
         // dokladnej sygnatury w tej wersji Sfery — a chodzi o diagnostyke,
@@ -128,6 +155,14 @@ internal static class ZapotrzebowanieTest
             kompletow_w_wyniku = metodaA.Count(p => p.Rodzaj == "KOMPLET"),
             przyklady_kompletow = kompletyWA,
             probka = metodaA.Take(15),
+        };
+        // Co most liczy NAPRAWDE (SDK albo tryb wlasny) — patrz komentarz A2.
+        wynik["metoda_A2_most"] = new
+        {
+            tryb = trybA2,
+            pozycji = metodaA2.Count,
+            kompletow_w_wyniku = metodaA2.Count(p => p.Rodzaj == "KOMPLET"),
+            probka = metodaA2.Take(15),
         };
         wynik["metoda_B_kalkulator"] = metodaB.ToDictionary(
             kv => kv.Key,
