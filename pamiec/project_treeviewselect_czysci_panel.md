@@ -69,3 +69,19 @@ Testując wątki w Tk, używaj `root.mainloop()` + `root.after(...)`.
 
 Powiązane: [[project_subiekt_edytor_kartotek]], [[project_dopasuj_kartoteke_wiersza]],
 [[project_katalog_cache_odswiezanie]].
+
+## ⚠️ Druga strona tej samej straży (30.09.2026)
+
+Straż `_z_listy and _zaznaczony in self.pozycje` na początku `_na_wybor_wezla`
+łapała też **prawdziwe kliknięcie**. Wybór z listy 4 wkłada kartotekę do
+`self.pozycje`, więc od tej chwili KAŻDY klik w drzewo ginął: panel 2 zostawał
+na pozycji z listy 4, a panel 3 nie dostawał składu klikniętego kompletu.
+
+Rozwiązanie: straż odsiewa tylko zdarzenia **bez akcji usera** —
+`_akcja_w_drzewie` (Button-1 / KeyPress na drzewie) stawia znacznik czasu,
+`_swieza_akcja_w_drzewie()` przepuszcza przez 1,5 s, znacznik zużywa się po
+jednym przejściu. Klik w wiersz JUŻ zaznaczony nie wysyła `<<TreeviewSelect>>`
+wcale — obsługuje go `_klik_w_drzewie_puszczony` (ButtonRelease-1).
+Test na atrapach: stara wersja odtwarza błąd, nowa przepuszcza klik i dalej
+odsiewa zdarzenie z przebudowy drzewa. ⛔ Nie usuwać straży — wróci kasowanie
+formularza klona.
