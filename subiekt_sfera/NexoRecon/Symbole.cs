@@ -20,6 +20,12 @@
 // ⚠️ „stary" w planie jest WERYFIKOWANY przed zapisem. Jeśli kartoteka ma
 // dziś inny symbol (ktoś ją w międzyczasie poprawił), pozycja jest pomijana
 // — lepiej pominąć niż nadpisać cudzą zmianę.
+//
+// ⚠️ ODMOWA NA UŻYTEJ KARTOTECE (30.09.2026). Symbol zmieniamy TYLKO gdy
+// kartoteka nie stoi na żadnym dokumencie (`PozycjeDokumentu.Count() == 0`)
+// — inaczej historia dokumentów pokazywałaby inny symbol niż ten, pod jakim
+// pozycja została faktycznie zamówiona/wydana. Kartoteka użyta wraca jako
+// błąd „symbol NIE zmieniony", nie jest pomijana po cichu.
 
 using System.IO;
 using System.Text;
@@ -78,6 +84,36 @@ internal static class Symbole
             {
                 kroki.Add(new Krok(p.Id, p.Stary, p.Nowy, "blad",
                     $"symbol „{p.Nowy}” zajęty przez Id={Bezp2(() => zajety.Id)}"));
+                continue;
+            }
+
+            // ⚠️ ODMOWA NA UŻYTEJ KARTOTECE (30.09.2026).
+            //
+            // Symbol jest kluczem na dokumentach, kodach kreskowych i w BOM-ie
+            // RM_BAZA (patrz nagłówek pliku) — zmiana symbolu kartoteki, która
+            // już stoi na jakimś dokumencie, rozjeżdża historię: dokument
+            // wystawiony wczoraj nagle pokazywałby inny symbol niż wydrukowany
+            // na papierze. User (oringi, 30.09.2026): „można zmieniać symbole
+            // o ile nie były użyte w dokumentach Subiekta" — czyli wprost
+            // odwrotnie niż milczące dotąd zezwolenie na wszystko.
+            //
+            // `PozycjeDokumentu.Count()` to ta sama metoda, którą Katalog.cs
+            // liczy dla kolumny „Na dokumentach” (25.09.2026) — tam jako
+            // projekcja po stronie serwera; tu na pojedynczej już pobranej
+            // encji, więc to jedno dodatkowe zapytanie na pozycję planu,
+            // nie skan całego katalogu.
+            int naDokumentach;
+            try { naDokumentach = enc.PozycjeDokumentu.Count(); }
+            catch (Exception ex)
+            {
+                kroki.Add(new Krok(p.Id, p.Stary, p.Nowy, "blad",
+                    $"nie dało się sprawdzić użycia na dokumentach: {ex.GetType().Name}: {ex.Message}"));
+                continue;
+            }
+            if (naDokumentach > 0)
+            {
+                kroki.Add(new Krok(p.Id, p.Stary, p.Nowy, "blad",
+                    $"kartoteka jest użyta na {naDokumentach} pozycji dokumentów — symbol NIE zmieniony"));
                 continue;
             }
 
