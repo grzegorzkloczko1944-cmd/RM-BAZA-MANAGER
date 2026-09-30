@@ -702,58 +702,54 @@ class PanelSubiekt(tk.Toplevel):
         for klucz in self.kafle:
             ustaw(klucz, "…")
 
-        # Katalog idzie PIERWSZY, bo jest najtańszy z odczytów (~9 s bez
-        # stanów) — kafel dostaje liczbę, zanim magazyn dopyta o stany.
-        if self._przerwane:
-            return
-        try:
+        # Cztery odczyty puszczone równolegle (30.09.2026).
+        #
+        # ⚠️ POMIAR, ŻEBY NIKT SIĘ NIE NABRAŁ: to NIE jest znaczące
+        # przyspieszenie. Most obsługuje żądania PO KOLEI, więc cztery wątki
+        # ustawiają się w jego kolejce. Zmierzone na produkcji 30.09.2026:
+        #   sekwencyjnie 7,83 s  →  równolegle 7,56 s   (zysk 0,28 s)
+        # Realna różnica jest inna: kafel TANI zapala się od razu (asortyment
+        # po 0,05 s zamiast czekać w kolejce), zamiast wszystkich naraz na
+        # końcu. Gdyby kiedyś trzeba było tu naprawdę zejść z czasem, wąskim
+        # gardłem są `zapotrzebowanie` (4,3 s) i `dokumenty` (2,5 s) — czyli
+        # cache odczytów albo lżejsze zapytania po stronie mostu, nie wątki.
+        def licz_asortyment():
             import subiekt_asortyment_gui as ag
             kart = ag.pobierz_katalog()
             komplety = sum(1 for p in kart if ag._czy_komplet(p))
-            ustaw("asortyment", f"{len(kart)} kartotek"
-                                + (f" · {komplety} kompletów" if komplety else ""))
-        except Exception:
-            ustaw("asortyment", "")
+            return "asortyment", (f"{len(kart)} kartotek"
+                                  + (f" · {komplety} kompletów" if komplety else ""))
 
-        if self._przerwane:
-            return
-        try:
+        def licz_magazyn():
             import subiekt_magazyn_gui as mg
             poz = mg.pobierz_magazyn(tylko_niezerowe=True)
             ponizej = sum(1 for p in poz
                           if float(p.get("StanMinimalny") or 0) > 0
                           and float(p.get("Dostepne") or 0) < float(p.get("StanMinimalny") or 0))
-            ustaw("magazyn", f"{len(poz)} kartotek ze stanem"
-                             + (f" · {ponizej} poniżej minimum" if ponizej else ""))
-        except Exception:
-            ustaw("magazyn", "")
+            return "magazyn", (f"{len(poz)} kartotek ze stanem"
+                               + (f" · {ponizej} poniżej minimum" if ponizej else ""))
 
-        if self._przerwane:
-            return
-        try:
+        def licz_zapotrzebowanie():
             import subiekt_zamowienia as sz
-            pozycje, _podmioty, zamowione = sz.pobierz_zapotrzebowanie()
-            ustaw("zapotrzebowanie",
-                  f"{len(pozycje)} pozycji do zamówienia"
-                  + (f" · {len(zamowione)} już zamówionych" if zamowione else ""))
-        except Exception:
-            ustaw("zapotrzebowanie", "")
+            # Rozpakowanie z gwiazdką: 29.09.2026 doszedł czwarty element
+            # (`ostrzezenia`) i kafel „Zamówienia do dostawców" od tego dnia
+            # CICHO nie pokazywał liczby — ValueError wpadał w `except`.
+            pozycje, _podmioty, zamowione, *_ = sz.pobierz_zapotrzebowanie()
+            return "zapotrzebowanie", (f"{len(pozycje)} pozycji do zamówienia"
+                                       + (f" · {len(zamowione)} już zamówionych"
+                                          if zamowione else ""))
 
-        if self._przerwane:
-            return
-        try:
+        def licz_dokumenty():
             import subiekt_dokumenty_gui as dg
             dokumenty = dg.pobierz_dokumenty()
             zd_otwarte = sum(1 for d in dokumenty
                              if d.get("rodzaj") == "ZD"
                              and "realizacj" in (d.get("status") or "").lower())
-            ustaw("dokumenty", f"{len(dokumenty)} dokumentów"
-                               + (f" · {zd_otwarte} ZD do realizacji" if zd_otwarte else ""))
-        except Exception:
-            ustaw("dokumenty", "")
+            return "dokumenty", (f"{len(dokumenty)} dokumentów"
+                                 + (f" · {zd_otwarte} ZD do realizacji" if zd_otwarte else ""))
 
-        # „Stany projektu" liczymy z BOM-u, nie z Subiekta — bez otwartego
-        # projektu nie ma czego pokazać.
+        # „Stany projektu" liczymy z BOM-u, nie z Subiekta — to odczyt
+        # z pliku projektu, tani, więc leci od razu (bez wątku).
         try:
             pid = getattr(self.arkusz, "current_project_id", None)
             if pid:
@@ -763,6 +759,26 @@ class PanelSubiekt(tk.Toplevel):
                 ustaw("stany", "otwórz projekt w arkuszu")
         except Exception:
             ustaw("stany", "")
+
+        if self._przerwane:
+            return
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        zadania = (licz_asortyment, licz_magazyn, licz_zapotrzebowanie, licz_dokumenty)
+        with ThreadPoolExecutor(max_workers=len(zadania),
+                                thread_name_prefix="panel-licznik") as pula:
+            biegna = {pula.submit(z): z.__name__ for z in zadania}
+            for fut in as_completed(biegna):
+                if self._przerwane:
+                    break
+                try:
+                    klucz, tekst = fut.result()
+                    ustaw(klucz, tekst)
+                except Exception as e:
+                    # Kafel bez liczby to nie awaria panelu — ale niech
+                    # zostanie ślad w konsoli, bo cicha pustka na kaflu
+                    # ukrywała realnego buga przez dobę (patrz wyżej).
+                    print(f"⚠️  Licznik {biegna[fut]}: {type(e).__name__}: {e}")
 
         self._wyniki.put(lambda: self.status.config(text=""))
 
