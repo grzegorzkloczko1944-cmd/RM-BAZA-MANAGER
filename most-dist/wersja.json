@@ -1,6 +1,6 @@
 {
  "protokol": 1,
- "zbudowano": "2026-09-30 13:33",
- "sha": "6d9f876",
+ "zbudowano": "2026-09-30 15:59",
+ "sha": "248cb2d",
  "uwaga": "zapotrzebowanie liczy WSPOLNY modul ZapotrzebowanieBezpieczne - takze tryb 'zd'. Naprawa: tworzenie ZD padalo NullReference przy pozycji jednorazowej na otwartym ZK (oslona z 29.09 byla tylko w trybie 'zapotrzebowanie'). Raport nazywa pominieta pozycje."
 }
