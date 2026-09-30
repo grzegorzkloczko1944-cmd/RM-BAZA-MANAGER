@@ -1,11 +1,19 @@
 ---
 name: project_zk_pozycja_bez_kartoteki
-description: Okno ZD padało „Object reference not set" — pozycja otwartego ZK BEZ kartoteki wywraca SDK ZapotrzebowanieNaAsortyment(); most od 4b2c55f omija ją i raportuje; jak diagnozować NRE ze Sfery (ilspycmd), pułapka projekcji EF
+description: Pozycja jednorazowa na otwartym ZK wywraca SDK ZapotrzebowanieNaAsortyment(); osłona MUSI być w jednym miejscu (ZapotrzebowanieBezpieczne.cs) — łatanie jednego wywołania z kilku to naprawa pozorna; jak diagnozować NRE ze Sfery (ilspycmd), pułapka projekcji EF
 metadata:
   type: project
 ---
 
 # ZK z pozycją bez kartoteki → okno ZD padało (29.09.2026)
+
+> **⚠️ 30.09.2026 — naprawa z 29.09 była POZORNA.** Osłonę wstawiłem
+> *wewnątrz* `Zapotrzebowanie.cs`, a tę samą metodę SDK woła też `Zd.cs`.
+> Skutek: lista w oknie ZD działała, ale **„Utwórz ZD" nadal padało** tym
+> samym „Object reference not set…". Zgłoszone przez użytkownika słowami
+> „czy to nie jest to samo co wczoraj?" — i było. Sekcja
+> „Naprawa docelowa" niżej opisuje stan po poprawce; zachowany opis
+> przyczyny i diagnostyki jest nadal aktualny.
 
 **Objaw:** okno „Zamówienia do dostawców" w RM_BAZA: *Object reference not
 set to an instance of an object*, pusta tabela. Tryb mostu `zapotrzebowanie`
@@ -46,10 +54,26 @@ przyczyna**. Przy okazji: pierwsza wersja tej poprawki raportowała
 raport mostu kłamał, wykryte dopiero odczytem z bazy. **Po każdym zapisie
 mostem weryfikować odczytem, nie raportem.**
 
-## Naprawa w moście — docelowa (`c3bcd9b`, wystawiona 29.09 15:45)
+## ⛔ LEKCJA: osłona w JEDNYM miejscu, nie przy jednym objawie
 
-**Gwarancja: okno ZD nie pada i nie liczy gorzej niż Sfera, niezależnie od
-tego, co leży na ZK.** `Zapotrzebowanie.cs`:
+To najważniejsza część tej notatki. 29.09 naprawiłem **objaw, który user
+zgłosił** (nie otwierała się lista), nie sprawdzając, **kto jeszcze woła tę
+metodę**. `ZapotrzebowanieNaAsortyment()` wołało wtedy czterech, osłonę
+dostał jeden. Nazajutrz wróciło to jako „błąd przy tworzeniu ZD".
+
+**Zasada:** naprawiając padającą metodę SDK, najpierw
+`grep -l <NazwaMetody> *.cs` — i albo osłaniasz wszystkich, albo świadomie
+zapisujesz, dlaczego reszta może paść. Kopia logiki w drugim pliku to ta
+sama pułapka co dwie kopie reguły w Pythonie.
+
+## Naprawa docelowa (`6d9f876`, wystawiona 30.09 13:40)
+
+Logika mieszka w **`ZapotrzebowanieBezpieczne.cs`** — jeden moduł, jedno
+wejście:
+
+```csharp
+ZapotrzebowanieBezpieczne.Policz(sfera)  // -> { Potrzeby, Bledy, Tryb }
+```
 
 1. Przed SDK własny przegląd **encji** otwartych ZK (`!Zamkniety` przez
    dynamic, odwrót po nazwie statusu). Pozycja z `AsortymentAktualny == null`
@@ -66,6 +90,31 @@ tego, co leży na ZK.** `Zapotrzebowanie.cs`:
 3. Okno ZD: jednorazowe → pasek informacyjny („Pominięto 1 pozycję
    jednorazową: „Gasket" (ZK 2/09/2026)"), bez-kartoteki → ostrzeżenie
    z nazwą/Id i prośbą o sprawdzenie dokumentu.
+
+**Kto woła** (stan 30.09.2026): `Zapotrzebowanie.cs` (lista),
+`Zd.cs` (tworzenie ZD), `ZapotrzebowanieTest.cs` (diagnostyka).
+`Projekt.cs` NIE woła — ma tylko wzmiankę w komentarzu.
+⚠️ Dokładając tryb, który potrzebuje zapotrzebowania, wołaj `Policz()`,
+**NIE `ZapotrzebowanieNaAsortyment()` wprost**.
+
+`Zd.cs` dokłada pominięte pozycje do raportu jako krok
+`pominieta-jednorazowa` — inaczej user widział tylko „nie ma jej już
+w zapotrzebowaniu" i nie wiedział dlaczego.
+
+`Potrzeba` niesie **`PozycjeZK`** — to one wiążą ZD z zamówieniem klienta
+(`UtworzNaPodstawieZapotrzebowania`). Tryb własny przepisuje je z oryginałów.
+⚠️ Sprawdzone **tylko suchym przebiegiem** — przy pierwszym realnym ZD
+obejrzeć w Subiekcie, czy powiązanie z ZK jest.
+
+### Diagnostyka mówi teraz prawdę
+
+`zapotrzebowanie-test` ma dwie sekcje: `metoda_A_...` (SDK wprost — pokazuje,
+czy sama Sfera działa) i **`metoda_A2_most`** (co most liczy naprawdę, z polem
+`tryb`). Do 30.09 raport pokazywał samo „0 pozycji" i wyglądało, jakby
+zapotrzebowania nie było wcale — a most miał komplet.
+
+Pomiar 30.09 na produkcji: **SDK = 0** (NRE), **most = 292 pozycje**,
+tryb `wlasny`, pominięta 1 i nazwana.
 
 ⛔ **Kalkulator SDK (`IKalkulatorZapotrzebowania`) jako alternatywa NIE
 działa** spoza Subiekta — wymaga kontenera DI (`IInjectionScope`);
