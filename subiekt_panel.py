@@ -673,6 +673,9 @@ class PanelSubiekt(tk.Toplevel):
             return "Wersja: nieznana"
         if not w:
             return "Wersja: bez oznaczenia (stara)"
+        if w.get("niepewna"):
+            # Binarka nowsza niż znacznik — data z pliku .dll, bez sha.
+            return "Wersja: " + (w.get("zbudowano") or "?") + "  (z pliku)"
         return ("Wersja: " + (w.get("zbudowano") or "?")
                 + (f"  ({w['sha']})" if w.get("sha") else ""))
 

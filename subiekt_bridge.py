@@ -687,7 +687,34 @@ def wersja_lokalna():
     exe = _find_exe()
     if not exe:
         return None
-    return _wersja_zrodla(os.path.dirname(exe))
+    folder = os.path.dirname(exe)
+    w = _wersja_zrodla(folder)
+
+    # ⚠️ ZNACZNIK MUSI PASOWAĆ DO BINARKI OBOK (30.09.2026).
+    #
+    # `wersja.json` opisuje WYSTAWIONY zestaw. W `bin\Release` u budującego
+    # tworzy go dopiero skrypt stagingu, a `dotnet build` podmienia samo
+    # NexoRecon.dll — więc po zwykłym buildzie znacznik zostawał stary
+    # i panel pokazywał wersję sprzed tygodni obok świeżo zbudowanego mostu
+    # (zrzut z 30.09: „Most podmieniony, wersja z 2026-09-30 13:33" i zaraz
+    # niżej „Wersja: 2026-09-17 20:06"). Mylące bardziej niż brak wersji.
+    #
+    # Gdy DLL jest wyraźnie nowszy od znacznika, znacznika nie ma prawa
+    # opisywać tego, co leży — mówimy o tym wprost zamiast kłamać.
+    try:
+        dll = os.path.join(folder, "NexoRecon.dll")
+        if w and os.path.isfile(dll):
+            import datetime as _dt
+            stempel = (w.get("zbudowano") or "").strip()
+            if stempel:
+                kiedy = _dt.datetime.strptime(stempel, "%Y-%m-%d %H:%M")
+                zbud = _dt.datetime.fromtimestamp(os.path.getmtime(dll))
+                if (zbud - kiedy).total_seconds() > 3600:
+                    w = dict(w, zbudowano=zbud.strftime("%Y-%m-%d %H:%M"),
+                             sha="", niepewna=True)
+    except Exception:
+        pass                            # wersja to informacja, nie powód do awarii
+    return w
 
 
 def _czas_na_sprawdzenie():
@@ -814,10 +841,37 @@ def pobierz_most(uruchom_po=True):
     pliki = [n for n in os.listdir(zrodlo)
              if os.path.isfile(os.path.join(zrodlo, n))]
 
+    # ⚠️ KOPIUJEMY TYLKO TO, CO SIĘ RÓŻNI (30.09.2026).
+    #
+    # W folderze mostu leży 14 plików, ale 9 z nich to biblioteki InsERT-a
+    # i Stimulsoftu — TE SAME, które trzyma otwarte działający SUBIEKT NEXO.
+    # `zatrzymaj_most()` ubija tylko NexoRecon.exe i celowo NIE rusza Subiekta,
+    # więc przy otwartym Subiekcie kopiowanie Stimulsoft.Report.dll padało
+    # „[WinError 32] plik używany przez inny proces" — i CAŁA podmiana szła
+    # do kosza, mimo że NexoRecon.dll (jedyne, co realnie się zmieniło) dało
+    # się podmienić. Objaw u usera: „Nie udało się podmienić mostu… Zamknij
+    # pozostałe okna RM_BAZA" — rada myląca, bo winne było okno SUBIEKTA.
+    #
+    # Biblioteki InsERT-a zmieniają się raz na wersję Sfery, a nasza binarka
+    # przy każdym wystawieniu. Porównanie rozmiar+mtime zostawia je w spokoju.
+    def _rozny(nazwa):
+        z = os.path.join(zrodlo, nazwa)
+        d = os.path.join(DOCELOWY_KATALOG_MOSTU, nazwa)
+        try:
+            sz, sd = os.stat(z), os.stat(d)
+        except OSError:
+            return True                 # brak u nas = trzeba wziąć
+        return sz.st_size != sd.st_size or abs(sz.st_mtime - sd.st_mtime) > 2
+
+    pliki = [n for n in pliki if _rozny(n)]
+    if not pliki:
+        return True, "Most jest już aktualny — nic nie trzeba było kopiować."
+
     _pauza_startu = True
     try:
         skopiowane = 0
         ostatni_blad = None
+        zly_plik = ""
         for proba in range(4):
             zatrzymaj_most()
             time.sleep(2 if proba == 0 else 3)
@@ -825,6 +879,7 @@ def pobierz_most(uruchom_po=True):
                 os.makedirs(DOCELOWY_KATALOG_MOSTU, exist_ok=True)
                 skopiowane = 0
                 for nazwa in pliki:
+                    zly_plik = nazwa        # zapamiętaj, NA CZYM padło
                     shutil.copy2(os.path.join(zrodlo, nazwa),
                                  os.path.join(DOCELOWY_KATALOG_MOSTU, nazwa))
                     skopiowane += 1
@@ -833,10 +888,18 @@ def pobierz_most(uruchom_po=True):
             except OSError as e:
                 ostatni_blad = e
         if ostatni_blad is not None:
+            # NAZWA PLIKU W KOMUNIKACIE (30.09.2026). Bez niej user zgłaszał
+            # „nie da się podmienić mostu", a my zgadywaliśmy, kto trzyma —
+            # rada „zamknij okna RM_BAZA" bywa myląca, bo pliki InsERT-a
+            # i Stimulsoftu trzyma SUBIEKT, a nie RM_BAZA.
+            kto = ("Zamknij pozostałe okna RM_BAZA i spróbuj ponownie."
+                   if zly_plik.lower().startswith("nexorecon")
+                   else "Ten plik trzyma najpewniej otwarty SUBIEKT nexo\n"
+                        "(biblioteki InsERT/Stimulsoft są wspólne).\n"
+                        "Zamknij Subiekta i spróbuj ponownie.")
             return False, (
-                f"Nie udało się podmienić mostu:\n{ostatni_blad}\n\n"
-                "NexoRecon.exe jest czymś trzymany. Zamknij pozostałe okna\n"
-                "RM_BAZA i spróbuj ponownie.")
+                f"Nie udało się podmienić mostu.\n"
+                f"Plik: {zly_plik}\n{ostatni_blad}\n\n" + kto)
 
         _most_niedostepny = False
         _ostrzezono_o_buildzie = False
