@@ -1444,6 +1444,18 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             parent=self)
 
     def _load_done(self, wiersze, error, podmioty=()):
+        # Okno mogło zostać ZAMKNIĘTE, zanim odczyt w tle wrócił — wynik leci
+        # przez `after(0, ...)`, więc trafia w nieistniejące już widgety
+        # i leci `TclError: invalid command name ...!button` (30.09.2026).
+        # Sam odczyt się udał, psuł się tylko dopisek do GUI, ale w konsoli
+        # zostawał straszący traceback. Wychodzimy cicho — nie ma komu pokazać
+        # wyniku.
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+
         self.stop_kreciolek()      # także przy błędzie — inaczej kręci się dalej
         self.zaznacz_odczyt(self.lbl_wiek)
         self.btn_refresh.config(state=tk.NORMAL)
