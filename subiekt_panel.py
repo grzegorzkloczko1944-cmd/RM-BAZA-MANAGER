@@ -184,10 +184,15 @@ class Kafel(tk.Frame):
 
 
 def _etykieta_aktualizacji():
-    """„Pobierz" na stanowisku z .exe, „Zbuduj" u dewelopera."""
+    """„Sprawdź i zaktualizuj" na stanowisku z .exe, „Zbuduj" u dewelopera.
+
+    Przycisk jest widoczny ZAWSZE (30.09.2026), więc etykieta musi mówić, co
+    zrobi także wtedy, gdy nic nowego nie ma — „Pobierz most" sugerowało, że
+    pobranie jest konieczne.
+    """
     try:
         import subiekt_bridge as b
-        return "⬇  Pobierz most" if b.czy_z_binarki() else "🔨  Zbuduj teraz"
+        return "⬇  Sprawdź i zaktualizuj most" if b.czy_z_binarki() else "🔨  Zbuduj teraz"
     except Exception:
         return "🔨  Zbuduj teraz"
 
@@ -331,14 +336,22 @@ class PanelSubiekt(tk.Toplevel):
                                  fg=TEKST_SZARY, font=("Arial", 9), anchor="w",
                                  justify="left")
         self.lbl_most.pack(fill=tk.X, padx=12, pady=(0, 10))
-        # Przycisk budowania pokazujemy TYLKO, gdy binarka jest nieaktualna —
-        # widoczny zawsze kusiłby do klikania bez potrzeby.
+        # Przycisk ZAWSZE WIDOCZNY (30.09.2026).
+        #
+        # Dotad pokazywal sie TYLKO, gdy `dostepna_nowsza()` zwrocilo True —
+        # a ten odczyt jest bramkowany dobowo (SPRAWDZAJ_NOWSZY_CO_S). Zaraz
+        # po wystawieniu mostu przycisku wiec NIE BYLO, mimo ze na serwerze
+        # lezala nowsza binarka. User z bledem "Object reference not set"
+        # nie mial czym tego naprawic ani jak sprawdzic, co ma (zgloszone
+        # przez Talage 30.09: mial juz nowy .exe i start po wystawieniu,
+        # a most nadal stary). Teraz: klikam -> aktualizuje i mowi wersje.
         # Etykieta zalezy od tego, jak dziala RM_BAZA: ze zrodel most sie
         # BUDUJE, z .exe — POBIERA z serwera (nie ma tam ani zrodel, ani dotneta).
         self.btn_buduj = tk.Button(most, text=_etykieta_aktualizacji(),
                                    command=self._zbuduj, bg="#27ae60", fg="white",
                                    relief=tk.FLAT, font=("Arial", 9, "bold"),
                                    padx=12, pady=5, cursor="hand2")
+        self.btn_buduj.pack(padx=12, pady=(0, 12))
 
     def _sekcje(self):
         """Trzy obszary. Bez numeracji — to nie są kroki do wykonania po kolei."""
@@ -512,21 +525,54 @@ class PanelSubiekt(tk.Toplevel):
         return uruchom
 
     def _zbuduj(self):
+        """Klik = sprawdź serwer i zaktualizuj, z pominięciem bramki dobowej.
+
+        `dostepna_nowsza(wymuszone=True)` — bez tego klik zaraz po wystawieniu
+        mostu mógł nic nie zrobić, bo zwykły odczyt jest bramkowany raz na dobę
+        (`SPRAWDZAJ_NOWSZY_CO_S`). To była cała przyczyna zgłoszenia z 30.09.
+        """
         import subiekt_bridge as b
-        self.lbl_most.config(text="⏳  aktualizuję most…")
+        self.lbl_most.config(text="⏳  sprawdzam serwer…")
         self.update_idletasks()
 
         def w_tle():
+            try:
+                nowszy, opis = b.dostepna_nowsza(wymuszone=True)
+            except Exception:
+                nowszy, opis = True, ""      # nie wiemy — lepiej pobrać
+            if not nowszy and b.czy_z_binarki():
+                # Nie ma po co ruszać mostu: podmiana go RESTARTUJE, a user
+                # może być w środku operacji. Mówimy, co ma, i tyle.
+                self._wyniki.put(lambda: self._po_buildzie(
+                    True, "Most jest aktualny — na serwerze nie ma nowszego."))
+                return
+            self._wyniki.put(lambda: self._ustaw_etykiete("⏳  aktualizuję most…"))
             ok, komunikat = b.zaktualizuj_most()
             self._wyniki.put(lambda: self._po_buildzie(ok, komunikat))
         threading.Thread(target=w_tle, daemon=True).start()
 
+    def _ustaw_etykiete(self, tekst):
+        try:
+            self.lbl_most.config(text=tekst)
+        except tk.TclError:
+            pass                        # panel zamkniety w miedzyczasie
+
     def _po_buildzie(self, ok, komunikat):
+        """Wynik aktualizacji + WERSJA, która realnie leży na stanowisku.
+
+        Sam komunikat „zaktualizowano" nie wystarczy: user po naprawie błędu
+        chce wiedzieć, CO ma, i móc to porównać z tym, co powiedziano mu na
+        telefonie (30.09.2026). Wersję czytamy PO podmianie.
+        """
         from tkinter import messagebox
+        wersja = self._wersja_mostu_tekst()
         (messagebox.showinfo if ok else messagebox.showerror)(
-            "Budowanie mostu", komunikat, parent=self)
-        if ok:
-            self.btn_buduj.pack_forget()
+            "Most Subiekta",
+            (komunikat or "").strip() + "\n\n" + wersja,
+            parent=self)
+        # Przycisk ZOSTAJE — to teraz stałe narzędzie („sprawdź i zaktualizuj"),
+        # nie jednorazowa propozycja. Chowanie go po udanej aktualizacji
+        # odbierało jedyną drogę do wymuszenia pobrania (bramka dobowa).
         threading.Thread(target=self._policz_w_tle, daemon=True).start()
 
     def odswiez_stan_mostu(self):
@@ -604,12 +650,31 @@ class PanelSubiekt(tk.Toplevel):
     def _most_offline(self, binarka_aktualna):
         self.lbl_most.config(
             text=("🔴  Most Subiekta: OFFLINE\n"
+                  + self._wersja_mostu_tekst() + "\n"
                   + ("Binarka nieaktualna — zbuduj most."
                      if not binarka_aktualna else
                      "Wystartuje przy pierwszej operacji.")),
             fg="#c0392b")
-        if not binarka_aktualna:
-            self.btn_buduj.pack(padx=12, pady=(0, 12))
+        # Przycisk jest spakowany na stałe (patrz _skroty) — nie ma go
+        # po co pakować ponownie.
+
+    def _wersja_mostu_tekst(self):
+        """„Wersja: 2026-09-30 13:33 (6d9f876)" albo informacja o jej braku.
+
+        Bez tego panel mowil, ze most ONLINE, ale nie KTORY — a przy bledzie
+        naprawionym wczoraj to jedyna rzecz, ktora user chce wiedziec
+        (30.09.2026). Most bez `wersja.json` to wersja sprzed wprowadzenia
+        znacznika, czyli najstarsza z mozliwych — mowimy o tym wprost.
+        """
+        try:
+            import subiekt_bridge as b
+            w = b.wersja_lokalna() or {}
+        except Exception:
+            return "Wersja: nieznana"
+        if not w:
+            return "Wersja: bez oznaczenia (stara)"
+        return ("Wersja: " + (w.get("zbudowano") or "?")
+                + (f"  ({w['sha']})" if w.get("sha") else ""))
 
     def _most_online(self, s):
         logins = s.get("logins", "?")
@@ -619,6 +684,7 @@ class PanelSubiekt(tk.Toplevel):
         ostrzezenie = "  ⚠ sesja wstawała ponownie" if isinstance(logins, int) and logins > 1 else ""
         self.lbl_most.config(
             text=(f"🟢  Most Subiekta: ONLINE\n"
+                  f"{self._wersja_mostu_tekst()}\n"
                   f"Ostatnia operacja: {ms/1000:.1f} s\n"
                   f"Logowań do Sfery: {logins}{ostrzezenie}"),
             fg="#1e8449")
