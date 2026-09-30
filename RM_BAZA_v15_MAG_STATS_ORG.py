@@ -27985,15 +27985,92 @@ class MainWindow(tk.Tk):
                     "$RECYCLE.BIN", "System Volume Information", "@Recycle", "@recycle",
                     ".git", ".svn", "node_modules"}
 
+        # ⚠️ JEDNO PRZEJŚCIE PO DRZEWIE, NIE SZEŚĆ (30.09.2026).
+        #
+        # Dotąd stała tu pętla `for ext in RFQ_FILE_EXTENSIONS` wokół
+        # `_scan_directory_for_file`, a ta funkcja REKURENCYJNIE przechodzi
+        # cały katalog i dopiero w środku porównuje rozszerzenie. Efekt: to
+        # samo drzewo projektu mielone 6× (pdf, dxf, dwf, step, stp, stl),
+        # każde przejście to komplet zapytań SMB. Razy liczba pozycji ZD —
+        # przy 20 pozycjach i 2 katalogach robiło się 240 przejść zamiast 40.
+        # Zgłoszone: „Wyślij ZD bardzo długo szuka plików, za dużo operacji
+        # powtarzających się".
+        #
+        # Teraz jedno zejście zbiera OD RAZU wszystkie rozszerzenia.
         found = []
         for proj_dir in project_dirs:
-            for ext in self.RFQ_FILE_EXTENSIONS:
-                for f in self._scan_directory_for_file(proj_dir, drawing_no, ext, excluded):
-                    if f not in found:
-                        found.append(f)
+            for f in self._skanuj_katalog_wielorozszerzeniowo(
+                    proj_dir, drawing_no, self.RFQ_FILE_EXTENSIONS, excluded):
+                if f not in found:
+                    found.append(f)
         # Ten sam rysunek leży w kilku katalogach projektów — bierzemy tylko
         # najnowszą kopię każdej nazwy, inaczej do maila idą duplikaty.
         return tylko_najnowsze(found)
+
+    def _skanuj_katalog_wielorozszerzeniowo(self, directory: Path, drawing_no: str,
+                                            extensions, excluded_dirs: set,
+                                            cancelled=None) -> list:
+        """Jak `_scan_directory_for_file`, ale sprawdza WSZYSTKIE rozszerzenia
+        w jednym zejściu po drzewie.
+
+        Wynik jest taki sam jak suma wywołań per rozszerzenie — tylko bez
+        wielokrotnego chodzenia po tych samych katalogach po SMB.
+
+        Wyniki katalogu są PAMIĘTANE w obrębie jednego otwarcia okna
+        (`_cache_skanu`): pozycje jednego ZD leżą zwykle w tym samym katalogu
+        projektu, a dotąd każda pozycja skanowała go od zera. Cache trzyma
+        pełną listę plików pasujących rozszerzeniem — filtrowanie po numerze
+        rysunku jest już darmowe.
+        """
+        klucz = (str(directory).lower(), tuple(sorted(e.lower() for e in extensions)))
+        cache = getattr(self, "_cache_skanu", None)
+        if cache is None:
+            cache = self._cache_skanu = {}
+
+        pliki = cache.get(klucz)
+        if pliki is None:
+            pliki = []
+            self._zbierz_pliki_rekurencyjnie(directory, set(
+                f".{e.lower()}" for e in extensions), excluded_dirs, pliki, cancelled)
+            # Anulowany skan daje listę niepełną — nie wolno jej zapamiętać,
+            # bo kolejne pozycje dostałyby po cichu obcięty wynik.
+            if not (cancelled is not None and cancelled[0]):
+                cache[klucz] = pliki
+
+        igla = drawing_no.lower()
+        return [p for p in pliki if igla in p.stem.lower()]
+
+    def _zbierz_pliki_rekurencyjnie(self, directory: Path, sufiksy: set,
+                                    excluded_dirs: set, wynik: list, cancelled=None):
+        """Zbiera do `wynik` wszystkie pliki o podanych sufiksach. Bez filtra
+        nazwy — ten nakłada wołający, żeby dało się cache'ować cały katalog."""
+        if cancelled is not None and cancelled[0]:
+            return
+        try:
+            if not directory.is_dir():
+                return
+            for item in directory.iterdir():
+                if cancelled is not None and cancelled[0]:
+                    return
+                try:
+                    if item.is_dir():
+                        if item.name in excluded_dirs:
+                            continue
+                        self._zbierz_pliki_rekurencyjnie(
+                            item, sufiksy, excluded_dirs, wynik, cancelled)
+                    elif item.suffix.lower() in sufiksy:
+                        wynik.append(item)
+                except OSError:
+                    continue            # pojedynczy wpis nie może zabić skanu
+        except PermissionError:
+            pass
+        except Exception as e:
+            print(f"⚠️  Błąd skanowania {directory}: {e}")
+
+    def wyczysc_cache_skanu(self):
+        """Kasuje pamięć skanu katalogów. Woła to okno wysyłki przy otwarciu,
+        żeby pliki dołożone na serwerze w trakcie pracy były widoczne."""
+        self._cache_skanu = {}
 
     def _sciezka_zyje(self, root, parent=None, limit_s=5):
         """Czy katalog istnieje — BEZ ZAMRAŻANIA GUI na martwym dysku.

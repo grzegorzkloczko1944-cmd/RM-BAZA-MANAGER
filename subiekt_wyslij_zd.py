@@ -1052,6 +1052,19 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
 
     # ── zbieranie plików ───────────────────────────────────────────────────
     def _zbierz_async(self):
+        # Pamięć skanu katalogów żyje TYLKO na czas jednego zbierania (30.09.2026).
+        # Dzięki niej pozycje tego samego ZD nie skanują po kilka razy tego
+        # samego katalogu projektu; kasujemy ją na starcie, żeby pliki dołożone
+        # na serwerze w międzyczasie były widoczne po ponownym otwarciu okna.
+        for zrodlo in (getattr(self, "okno_glowne", None), self.master):
+            czysc = getattr(zrodlo, "wyczysc_cache_skanu", None)
+            if callable(czysc):
+                try:
+                    czysc()
+                except Exception:
+                    pass
+                break
+
         # Panel sam szuka rysunków (z paskiem postępu). W tle zostaje tylko
         # PDF zamówienia z Subiekta — to osobne, wolne wywołanie mostu.
         self.panel.start()
