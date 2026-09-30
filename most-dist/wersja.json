@@ -1,6 +1,6 @@
 {
  "protokol": 1,
- "zbudowano": "2026-09-30 15:59",
- "sha": "248cb2d",
- "uwaga": "zapotrzebowanie liczy WSPOLNY modul ZapotrzebowanieBezpieczne - takze tryb 'zd'. Naprawa: tworzenie ZD padalo NullReference przy pozycji jednorazowej na otwartym ZK (oslona z 29.09 byla tylko w trybie 'zapotrzebowanie'). Raport nazywa pominieta pozycje."
+ "zbudowano": "2026-09-30 16:38",
+ "sha": "399045d",
+ "uwaga": "tryb symbole odmawia zmiany symbolu na kartotece uzytej w dokumentach (PozycjeDokumentu > 0); zapotrzebowanie liczy wspolny modul ZapotrzebowanieBezpieczne - takze tryb zd. Kod mostu bez zmian wobec 248cb2d, przebudowa na zyczenie."
 }
