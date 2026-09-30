@@ -395,6 +395,21 @@ def dane_z_bom(project_id, numer_projektu=None):
 MARKER = "RM_BAZA"
 
 
+def znormalizowana(typ):
+    """Czy to pozycja ZNORMALIZOWANA (łożysko, pasek, siłownik, złączka)?
+
+    Kryterium takie samo jak w arkuszu głównym — KLASA z importu, nie kształt
+    symbolu (`database_manager`, ORDER BY). ⛔ NIE sprawdzać, czy numer
+    „wygląda na rysunek": ten test mylił się w obie strony i kosztował dzień
+    (patrz pamiec/project_normalia_po_klasie.md) — `6004 ZZ` ze spacją
+    uchodziło za opis, a `UCFL201` bez spacji za numer rysunku.
+
+    Przyjmuje obie pisownie, bo arkusz skraca `ZNORMALIZOWANE` → `ZNORM`
+    w kolumnie Typ, a to okno bierze klasę wprost z bazy projektu.
+    """
+    return str(typ or "").strip().upper() in ("ZNORMALIZOWANE", "ZNORM")
+
+
 #: Słowo dopisywane za numerem w pierwszym wierszu Uwag — żeby ktoś oglądający
 #: sam wydruk wiedział, co znaczy ta liczba. Kod go NIE czyta.
 OPIS_NUMERU = "Projekt"
@@ -817,7 +832,17 @@ def zbuduj_wiersze(zapotrzebowanie, bom, podmioty=(), tylko_projekt=None, zamowi
             "bom_ref": refy_bom(b, projekty_zk),
         })
 
-    wiersze.sort(key=lambda w: (bool(w.get("zd")), w["dostawca"] == "",
+    # Znormalia ZAWSZE na górze, rysunki RMPAK niżej — ta sama zasada
+    # i to samo kryterium co w arkuszu głównym (database_manager:
+    # `CASE WHEN klasa = 'ZNORMALIZOWANE' THEN 0 ELSE 1`). Klasa pochodzi
+    # z importu i jest niezależna od tego, jak kto zapisał symbol —
+    # ⛔ NIE rozpoznawać znormaliów po kształcie numeru (patrz
+    # pamiec/project_normalia_po_klasie.md: test po symbolu mylił się
+    # w obie strony, „6004 ZZ" ze spacją vs „UCFL201" bez).
+    # Grupa idzie PRZED dostawcą, żeby znormalia były na górze CAŁEJ listy,
+    # a nie osobno w każdej grupie dostawcy (zgłoszone 29.09.2026).
+    wiersze.sort(key=lambda w: (0 if znormalizowana(w.get("typ")) else 1,
+                                bool(w.get("zd")), w["dostawca"] == "",
                                 w["dostawca"], w["symbol"]))
     return wiersze
 
