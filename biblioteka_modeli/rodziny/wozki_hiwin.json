@@ -1,0 +1,22 @@
+{
+  "nazwa": "Wozki Hiwin HG/MGN",
+  "cel": "G:/Mój dysk/SUBIEKT/Wózki",
+  "przeszukaj": [
+    "B:/",
+    "C:/Projekty",
+    "V:/"
+  ],
+  "typy_regex": "(hg[hwl]\\d{2}(?:ca|ha|cc|hc)|mg[nw]0?\\d{1,2}[ch])",
+  "rozszerzenia_modeli": [
+    ".ipt",
+    ".stp",
+    ".step"
+  ],
+  "tryb": "oryginaly",
+  "odrzuc_regex": "_mir$|rail|szyn",
+  "zasady": [
+    "oryginaly = nazwy nadane przez Hiwina (np. HGW15CC 1 R 1000 Z0 H SS_FILE_1, ...No_Set..., biblioteka Wozek); przerobki z projektow pomijamy",
+    "identyczne pliki (nazwa+rozmiar) raz; podfolder na typ; _zrodla.csv ze sciezkami",
+    "szukamy tylko HG i MGN (inne serie: dopisac do typy_regex)"
+  ]
+}

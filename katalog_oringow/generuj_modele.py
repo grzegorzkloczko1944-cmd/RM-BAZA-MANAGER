@@ -44,7 +44,7 @@ CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "oringi_wymiarowk
 
 #: Materiał z CSV → nazwa materiału w Inventorze usera (kolor gumy).
 MATERIAL = {"EPDM": "EPDM", "NBR": "NBR-", "VITON": "VITON", "FKM": "VITON",
-            "FPM": "VITON", "VMQ": "SILIKON", "VQM": "SILIKON", "SILIKON": "SILIKON"}
+            "FPM": "VITON", "VMQ": "SILIKON", "VQM": "SILIKON", "SILIKON": "SILIKON", "SIL": "SILIKON"}
 MATERIAL_DOMYSLNY = "EPDM"
 
 # Stałe z RxInventor.tlb (2013) — sprawdzone, nie zgadywane.
@@ -64,7 +64,7 @@ def material_z(w):
     if m in MATERIAL:
         return MATERIAL[m], m
     tekst = (w["Symbol"] + " " + w.get("Nazwa", "")).upper()
-    for k in ("EPDM", "NBR", "VITON", "FKM", "FPM", "VMQ", "VQM", "SILIKON"):
+    for k in ("EPDM", "NBR", "VITON", "FKM", "FPM", "VMQ", "VQM", "SILIKON", "SIL"):
         if k in tekst:
             return MATERIAL[k], k + " (z symbolu)"
     return MATERIAL_DOMYSLNY, "brak — domyślnie " + MATERIAL_DOMYSLNY

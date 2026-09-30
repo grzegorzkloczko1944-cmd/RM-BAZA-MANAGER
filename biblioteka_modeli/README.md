@@ -1,0 +1,209 @@
+# Biblioteka modeli 3D — instrukcja DLA AGENTA
+
+**Przeczytaj to w całości, zanim cokolwiek zrobisz.** Użytkownik nie chce
+tłumaczyć za każdym razem, co i jak. Tu jest: co on robi, jakie ma zasady, jak
+to wykonać krok po kroku i gdzie się wykłada. Kod w `wzorce_kodu/` to
+**przykłady do adaptacji**, nie gotowe narzędzie (użytkownik: „skrypt zawsze
+się wykrzaczy, tu jest za dużo zawiłości") — pisz własny jednorazowy skrypt
+na bazie wzorca, sprawdzaj wynik. `biblioteka.py` obok to opcjonalny skrót, nie musisz go używać.
+
+---
+
+## 1. O co chodzi (cel użytkownika)
+
+Firma (RMPAK) używa Subiekta nexo (kartoteki towarów), Inventora (modele 3D)
+i własnego programu MAG/RM_BAZA (magazyn, wstawianie modelu do złożenia).
+Użytkownik buduje **biblioteki modeli 3D elementów handlowych**, tak żeby:
+
+* **każda kartoteka Subiekta miała dokładnie jeden model 3D** (i odwrotnie — bez sierot i dubli),
+* model miał **właściwe iProperties, natywną miniaturę na białym tle i PNG**,
+* MAG widział model (indeks) i kartoteka miała **zdjęcie** w Subiekcie,
+* opis/położenie w Subiekcie były uporządkowane.
+
+Rodziny zrobione do tej pory: **O-ringi**, **łożyska w oprawach**, **wózki Hiwin** (samo znalezienie i kopia).
+Kolejne będą podobne — ten sam schemat: *znajdź/zrób model → nazwij pod Subiekta → miniatury → indeks MAG → zdjęcia/opisy w Subiekcie*.
+
+## 2. Zasady bezwzględne
+
+1. **Najpierw suchy przebieg i liczby, potem zapis.** Pokaż użytkownikowi co i ile zrobisz.
+   Zapis do Subiekta/kasowanie/nadpisanie robisz, gdy użytkownik **w tej rozmowie** powiedział
+   „wgrywaj / nadpisuj / kasuj / zrób". Zgoda z poprzedniej partii **nie** przechodzi na następną.
+2. **Nie kasuj plików ani niczego w Subiekcie bez wyraźnego polecenia.** Zamiast kasować — przenieś do `_stare\` i zapytaj.
+3. **Nigdy nie wpisuj haseł** (użytkownik podaje je czasem w czacie — nie używaj, nie zapisuj; logowanie robi on sam).
+4. **Nie dotykaj sesji Inventora użytkownika** (pytania „Zapisz?" psują mu pracę). Zawsze **osobna instancja** (patrz 4.1).
+5. **Tylko istniejące na rynku warianty.** Nie zakładaj modeli „na zapas" (np. nierdzewnych wersji, których nikt nie sprzedaje). Wątpliwość → zapytaj albo pomiń.
+6. **Nie commituj i nie pushuj** bez wyraźnej zgody. Nie modyfikuj plików sync/hooków/.claude bez pytania.
+7. **Pisz po polsku, krótko, z liczbami.** Raport końcowy: co zrobione (liczby), co NIE zrobione, co wymaga decyzji. Nie twierdź „sprawdzone", jeśli nie sprawdzałeś.
+8. Format plików Inventora: patrz 4.2 (2013 vs 2015) — **sprawdź wersję przed zapisem do istniejących bibliotek**.
+
+## 3. Nomenklatura (Subiekt ↔ Inventor)
+
+| Pole | Wartość |
+|---|---|
+| Symbol kartoteki Subiekta | klucz; = nazwa pliku modelu |
+| **Part Number** (Design Tracking) | = symbol |
+| **Title** (Inventor Summary Information) | = symbol (łożyska) / „oring 20x3" (O-ringi, tak robi generator) |
+| **Description** (Design Tracking) | łożyska: „Zespół łożyskowy" / „Zespół łożyskowy nierdzewny" (SS); O-ringi: „Oring 20x3 EPDM" |
+| Opis w Subiekcie | łożyska j.w.; **O-ringi: „Oring"** |
+| Położenie (regał/półka) | **PoleWlasne1** w Subiekcie, format `R22/P5`. **NIE w Opisie.** |
+| Średnica wałka (łożyska) | **NIE w nazwie** — pójdzie do Subiekta jako wymiar przy mapowaniu |
+
+Symbol Subiekta użyty w dokumentach **nie da się zmienić** (most odmawia). Takie kartoteki-„widma"
+zostają bez modelu; model robimy dla kanonicznej kartoteki.
+
+## 4. Narzędzia i jak ich używać
+
+### 4.1 Inventor (COM, Python + pywin32)
+
+* **Osobna instancja:** `app = win32com.client.DispatchEx("Inventor.Application")`; czekaj na `app.Ready`;
+  `app.SilentOperation = True` (bez okien „Czy zapisać?"); `app.Visible = True` (potrzebne do natywnych miniatur).
+  PID okna: `GetWindowThreadProcessId(app.MainFrameHWND)`. Na końcu **`app.Quit()` + `taskkill /F /PID <pid>`** — tylko własny PID.
+  NIGDY `GetActiveObject`/`GetObject` (to sesja użytkownika). Wzorzec: `wzorce_kodu/konwertuj_stp.py`, `dodaj_iam.py`.
+* **Odczyt bez ryzyka:** `Dispatch("Inventor.ApprenticeServer")` — iProperties, geometria, referencje. **Nie zapisuje.** Wzorzec: `wzorce_kodu/pn.py`.
+* **Tło miniatur:** natywna miniatura bierze tło z aktywnego schematu kolorów. Na czas pracy: `ColorSchemes.Item("Prezentacja").Activate()`
+  (białe), potem przywróć poprzedni. Wyłącz `DisplayOptions.Show3DIndicator`, `GeneralOptions.EnablePrehighlight`
+  **i** `ColorSchemes.EnablePrehighlight` (inaczej czerwone podświetlenie na PNG); po pracy przywróć.
+* **Miniatura natywna (w pliku):** widoczny dokument, `SelectSet.Clear()`, kamera izometria `ViewOrientationType = 10759`,
+  `cam.Apply(); cam.Fit(); cam.Apply(); ActiveView.Update(); sleep(1); ActiveView.Update()`,
+  `doc.SetThumbnailSaveOption(79875, "")` (kActiveWindowOnSave), `doc.Dirty = True`, zapis. Ukryty Inventor daje poszarpane miniatury.
+* **PNG do `miniatury\`:** `cam.SaveAsBitmap(png, 600, 600, biały, biały)` — łożyska 600×600, O-ringi 300×300 (kamera przejściowa
+  `TransientObjects.CreateCamera()`, `cam.SceneObject = cd` — **bez `Set`**, właściwość Let). Rób PNG w **osobnym otwarciu** pliku.
+* **Zapis na dysk sieciowy G:/B:** pracuj na **kopii w katalogu roboczym**, na miejsce kopiuj tylko plik główny
+  (Inventor zostawia `OldVersions\`, a na G: nie chcemy śmieci). Po zapisie sprawdź Apprentice’em, że referencje IAM
+  wskazują na własny katalog (`ReferencedFileDescriptors`).
+* **Wygląd/kolor:** kolor to **Wygląd** (Appearance), nie materiał. `PartComponentDefinition.ClearAppearanceOverrides()`,
+  `PartDocument.AppearanceSourceType = 100614` (kolor z materiału), materiał z biblioteki
+  (`MaterialAssets.Item("304").CopyTo(doc, True)` gdy go nie ma w dokumencie). Dla IAM także `AssemblyComponentDefinition.ClearAppearanceOverrides()`.
+* **STEP → IPT:** `Documents.Open(step, False)`; jeśli wyszło złożenie (12291) — zapisz części osobno przed IAM, potem nowy IPT
+  z szablonu i `DerivedAssemblyComponents.CreateDefinition(iam)`, `DeriveStyle = 80643` (jako wiele brył), `.Add(def).BreakLinkToFile()`.
+  Jeśli STEP dał od razu część — zapisz i otwórz ponownie **widocznie**. Wzorzec: `konwertuj_stp.py`.
+* **Rysowanie od zera** (gdy brak modelu): `wzorce_kodu/rysuj_ucfl_mini.py` — pułapki: enumeracje bierz z typelib (nie zgaduj),
+  płaszczyzny robocze ukrywaj, kształty nakładające się rysuj w **osobnych szkicach**, trapezy łącz punktami (`EndSketchPoint`),
+  linia osi obrotu jako **zwykła** (nie konstrukcyjna) jeśli zamyka profil.
+* Okna modalne (VBA, Bitdefender) blokują COM — jeśli zawiesza się, sprawdź czy nie ma okna u użytkownika.
+
+### 4.2 Wersje Inventora (WAŻNE)
+
+* Biblioteka O-ringów `B:\Znormalizowane\Oringi` i większość starych modeli jest w formacie **2013**.
+* Komputer **Mongo (firma) ma tylko Inventora 2015** → zapis tu przeprowadza plik na **2015**, którego 2013 nie otworzy.
+* Sprawdź: `ApprenticeServerDocument.SoftwareVersionSaved.DisplayVersion` (co jest w pliku) i `app.SoftwareVersion.DisplayVersion` (czym zapisujesz).
+* Zasada: nowe modele do bibliotek — użytkownik świadomie zgodził się na 2015 dla 15 O-ringów (30.09.2026);
+  przy kolejnych **zapytaj**, czy 2015 jest OK. Łożyska w oprawach na G: są w 2015.
+* Szablon pliku (`GetTemplateFile`) pochodzi z **aktywnego projektu** użytkownika — sprawdź, że są w nim materiały gum
+  (EPDM, `NBR-` z myślnikiem, VITON, SILIKON) i że szablon nie jest specyficzny dla jednego projektu.
+
+### 4.3 Subiekt (przez „most") — `subiekt_bridge`
+
+```python
+import sys; sys.path.insert(0, r"C:\RMPAK_CLIENT\Repozytoria\RM-BAZA-MANAGER")
+import subiekt_bridge
+subiekt_bridge.call(TRYB, {"plan": {...}, "zapisz": True/False}, timeout=120, write=True/False)
+```
+Działa na komputerze firmowym (Mongo). `zapisz: False` = suchy przebieg (most opisuje co zmieni).
+
+| Cel | Tryb i plan |
+|---|---|
+| Odczyt kartotek + Opis + Położenie | `"magazyn"`, args `{"tylko_niezerowe": False}` → `["pozycje"]` z `Symbol, Nazwa, Opis, Polozenie, Rodzaj, Dostepne…` (**żywy Subiekt**) |
+| Zmiana Opisu/Nazwy | `"kartoteka-edytuj"`, `{"plan": {"pozycje": [{"symbol": S, "opis": "Oring"}]}, "zapisz": True}` (nigdy nie rusza symbolu) |
+| Położenie | `"pola-wlasne"`, `{"plan": {"pole": "PoleWlasne1", "pozycje": [{"symbol": S, "wartosc": "R6/P3"}]}, "zapisz": True}` |
+| Zdjęcia | `"zdjecie"`, `{"plan": {"akcja": "lista"/"dodaj"/"usun", "symbol": S, ...}}`; dodaj: `nazwa`, `typ:"png"`, `dane_b64` |
+| Usunięcie kartoteki | `"kartoteka-usun"` (Subiekt odmówi, gdy użyta) — tylko na polecenie |
+| Zmiana symbolu | tryb `"symbole"` — most odmówi dla użytych w dokumentach |
+
+* **Most `zdjecie` nie ma pola „istnieje"** — brak kartoteki to krok `{"Status": "blad", "Szczegoly": "nie ma takiej kartoteki"}`
+  i pusta lista zdjęć (wygląda jak kartoteka bez zdjęcia!). Zawsze sprawdzaj `kroki`.
+* **Zdjęć nie nadpisuj** — dodawaj tylko kartotekom bez zdjęcia (chyba że użytkownik kazał inaczej).
+* Kopia Subiekta w MAG (`http://W2019S:5061/mag/szukaj?q=…&limit=…`, tylko odczyt) **bywa nieaktualna** (stare symbole) —
+  do decyzji używaj żywego odczytu przez most.
+
+### 4.4 MAG (indeks 3D)
+
+* `python indeks_oringi_zasiew.py [--zapisz]` w `RM-BAZA-MANAGER` — z `<katalog>\oringi_modele.csv` (`symbol;plik;png;material`)
+  wpisuje przypisania modeli (`zrodlo='reczny'`) + białe miniatury na **RM_SERWER 192.168.100.84:5060**.
+  Dla innej rodziny: `--katalog <dir> --lista <plik.csv>` (tak robiono łożyska). **Zawsze najpierw bez `--zapisz`.**
+* Zasiew dopiero **po** ustaleniu ostatecznych nazw plików (inaczej utrwali stare).
+
+## 5. Przepisy
+
+### 5.A Nowa partia O-ringów
+
+1. Użytkownik zakłada/poprawia kartoteki `OR-<D>X<przekrój> <MATERIAŁ>` w Subiekcie (przecinek dziesiętny; materiał: EPDM, NBR, FPM/FKM/VITON, VMQ/SIL).
+2. **Stan:** odczytaj kartoteki `OR-*` (magazyn), porównaj z `B:\Znormalizowane\Oringi\*.ipt` po symbolu; sprawdź Part Number modeli (Apprentice, `pn.py`).
+   Raport: kartoteki bez modelu, sieroty, PN ≠ nazwa, Opis ≠ „Oring", brak położenia.
+3. **Budowa** brakujących: `RM-BAZA-MANAGER\katalog_oringow\generuj_modele.py` (funkcja `zbuduj`) — metoda z makra TOOLS++ „funkcja 18":
+   pierścień ID / OD=ID+2×przekrój na XY, wysokość = przekrój, zaokrąglenie 0,4×przekrój, Part Number = symbol,
+   materiał = kolor gumy (EPDM→EPDM, NBR→`NBR-`, FKM/FPM/VITON→VITON, VMQ/VQM/SIL→SILIKON), biały render 300×300. Wzorzec użycia z osobnym Inventorem: `wzorce_kodu/or_nadpisz.py`.
+   Buduj do katalogu roboczego, potem kopiuj do `B:` (nadpisanie za zgodą). Generator sam nie nadpisuje istniejących.
+4. Zaktualizuj `oringi_modele.csv` (symbol;plik;png;material), posprzątaj `OldVersions\`.
+5. Sieroty (modele bez kartoteki) i duble — **lista do zatwierdzenia**, kasowanie tylko na polecenie.
+6. `indeks_oringi_zasiew.py --zapisz` → zdjęcia (`wzorce_kodu/or_zdjecia.py`, tylko kartotekom bez zdjęcia) → Opis „Oring" (kartoteka-edytuj) → położenie z Opisu (`Reg 6.3` → `R6/P3`) do PoleWlasne1, jeśli PoleWlasne1 puste.
+7. Kartoteki-widma (użyte w dokumentach, np. `OR-13x1,5 EPDM 70`, `… S`/`… Silikon`) zostają bez modelu — nie rób dla nich pliku.
+
+### 5.B Łożyska w oprawach — biblioteka `G:\Mój dysk\SUBIEKT\Łożyska w oprawach`
+
+Układ: `<SYMBOL>\<SYMBOL>.ipt|.iam` (+ części IAM w tym katalogu), `miniatury\<SYMBOL>.png` (600×600),
+`lozyska_oprawy_modele.csv` (`symbol;plik;png;material` — SS: materiał 304; sortowanie musi znać sufiks „ Mini"), `_uzupelnienie_oprawy.csv` (pochodzenie).
+Zawartość: rodziny UCP, UCPA, UCF, UCFL, UCFC, UCFB, UCFH, UCT, KFL, KP, BP*, rozmiarówka 201–212 (UC — same wkładki — **nie**), wersje **SS** (nierdzewne, 304), UCFL201/202 Mini.
+
+Nowe łożysko:
+1. **Znajdź źródło** w kolejności: istniejące w `C:\Projekty`, `B:\`, `V:\` → plik od użytkownika → 3dfindit/sklep producenta
+   (logowanie robi użytkownik, **nigdy nie wpisuj jego hasła**; blokady pobierania konta ASKUBAL — nie obchodź).
+   **Reguła formatu: IPT > IAM > STEP; przy wielu IPT bierz największy plik.** Model IAM zastąp IPT, jeśli istnieje.
+2. **STEP → IPT** (wzorzec `konwertuj_stp.py <stp> <SYMBOL> --tytul --opis`), IAM kopiuj z częściami (`dodaj_iam.py`) i **sprawdź referencje**.
+3. **iProperties:** Part Number = Title = symbol; Description „Zespół łożyskowy" (SS: „…nierdzewny"); miniatura natywna biała; PNG 600×600.
+   Wzorce: `napraw_tytuly.py`, `png_izolowany.py`.
+4. **SS:** kopia wersji zwykłej, materiał 304 (kolor z materiału: `ClearAppearanceOverrides` + `AppearanceSourceType=100614`), symbol `SS <symbol>`. `ss_zaloz.py`.
+   Zakładaj tylko warianty istniejące na rynku (NTN/Transdev SUC 204–212, SUCFB 204–210; miniaturowe SS-KP/SS-KFL pominięte świadomie).
+5. Brak modelu i użytkownik poda wymiary → **rysuj od zera** (`rysuj_ucfl_mini.py`, jedna część, kilka brył: obudowa + wkładka + smarowniczka; kontroluj rozstaw otworów i gabaryt).
+6. Dopisz do CSV, zrób indeks MAG (`--katalog … --lista lozyska_oprawy_modele.csv`), zdjęcia do Subiekta (przy mapowaniu; osobna zgoda).
+7. **Decyzje użytkownika (nie wracaj bez prośby):** pomijamy UCFH211/212, rozmiary >212, miniaturowe SS, UCFL201 Slim. Mapowanie do Subiekta odłożone (wymiar = średnica wałka).
+
+### 5.C „Znajdź i skopiuj modele" (np. wózki Hiwin)
+
+1. Szukaj po **nazwach plików** w `B:\`, `C:\Projekty`, `V:\` (`os.walk`, pomiń `OldVersions`); V: trwa ~3 min. Rozszerzenia modeli: `.ipt .iam .stp .step`.
+2. Typ z nazwy regexem; **odrzuć** rysunki (`.idw/.dwf/.pdf`), szyny, `_MIR`, przeróbki z projektów.
+3. Zapytaj/ustal zakres: użytkownik zwykle chce **oryginały producenta** (nazwy nadane przez producenta), nie tysiące wariantów z projektów.
+   Wózki Hiwin 30.09.2026: 178 plików / 31 typów (HG/MGN), wzorzec `wzorce_kodu/hiw_orygin.py`; wyjściowo 1730 trafień → 554 różnych po rozmiarze.
+4. Kopiuj do wskazanego katalogu w podfolderach per typ + `_zrodla.csv` (typ; plik; rozmiar; źródło). Nie ruszaj oryginałów. Nie nadpisuj tego, co użytkownik już przeniósł.
+5. Wynik: podaj liczby i to, czego **nie** sprawdzałeś (geometria, serie spoza zakresu).
+
+## 6. Pułapki (znane, kosztowały czas)
+
+* **Heredoc/PowerShell zjada backslash** (`\\nic`, regexy `\d`, JSON) — pliki z regexami/UNC zapisuj narzędziem Write albo `json.dump`; Python widzi `/tmp` inaczej niż bash — używaj scratchpada.
+* **Kopia Subiekta w MAG nieaktualna** — decyzje na żywym odczycie przez most.
+* **Apprentice nie zapisuje**; zapis iProperties = pełny Inventor.
+* **Ukryty Inventor = złe miniatury**; **czerwone PNG** = prehighlight/zaznaczenie.
+* **Zaśmiecanie `Documents\Inventor`** przez Inventora (pliki `.htm`, `OldVersions`) — sprzątaj wąskimi wzorcami nazw i oknem czasu.
+* **Nie kasuj masowo w katalogach użytkownika** — zabezpieczenia to blokują; kasuj po wyraźnym „kasuj" i po obejrzeniu listy.
+* Zmiana symbolu kartoteki użytej w dokumentach niemożliwa (most odmówi) — sprawdzaj `NaDokumentach` zanim obiecasz zmianę.
+* Bitdefender potrafi blokować Inventora/VBA i PyInstaller — jeśli COM „stoi", to często to.
+* Kopia `.ipt` na G: (Google Drive) — bez `OldVersions`; pliki wewnątrz `G:` synchronizują się, nie dotykaj ich zbędnie.
+* Klucz `PoleWlasne1` = położenie; `null` = „nie ruszaj", nie „wyczyść".
+
+## 7. Definicja „zrobione" (checklista końcowa)
+
+Dla każdej partii przed raportem sprawdź i podaj liczby:
+
+- [ ] plik = symbol, Part Number = symbol (Apprentice, 0 rozbieżności),
+- [ ] Description/Title zgodne z rodziną, kolor = materiał,
+- [ ] natywna miniatura biała + PNG w `miniatury\`, wpis w CSV rodziny,
+- [ ] brak sierot i dubli (albo lista do decyzji),
+- [ ] indeks MAG zasiany (liczba przypisań),
+- [ ] zdjęcia w Subiekcie (wysłane / miały już / bez kartoteki),
+- [ ] Opis/Położenie w Subiekcie poprawione (odczyt kontrolny po zapisie),
+- [ ] wersja Inventora plików podana w raporcie,
+- [ ] pamięć projektu zaktualizowana (`project_*` w katalogu memory + wpis w `MEMORY.md`).
+
+## 8. Gdzie co leży
+
+| Co | Gdzie |
+|---|---|
+| Ta instrukcja i wzorce kodu | `C:\RMPAK_CLIENT\Repozytoria\RM-BAZA-MANAGER\biblioteka_modeli\` (`README.md`, `wzorce_kodu\`) |
+| Generator O-ringów, wymiarówka | `RM-BAZA-MANAGER\katalog_oringow\` (`generuj_modele.py`) |
+| Zasiew MAG | `RM-BAZA-MANAGER\indeks_oringi_zasiew.py`, `indeks_modeli_3d.py` |
+| Most Subiekta | `RM-BAZA-MANAGER\subiekt_bridge.py` (+ `MAGAZYN.md`: PoleWlasne1, tryby) |
+| Modele O-ringów | `B:\Znormalizowane\Oringi\` (+ `miniatury\`, `oringi_modele.csv`) |
+| Łożyska w oprawach | `G:\Mój dysk\SUBIEKT\Łożyska w oprawach\` |
+| Wózki (kopia) | `G:\Mój dysk\SUBIEKT\Wózki\<TYP>\` |
+| Pamięć użytkownika | `C:\Users\mongo\.claude\projects\C--RMPAK-CLIENT-Repozytoria-NOW\memory\` (`project_lozyska_w_oprawach_g`, `project-oringi-modele-b-stan`, `project_pipeline_biblioteka_modeli`) |
+| Notatki nomenklatury MAG | `RM-BAZA-MANAGER\pamiec\` (`project_lozyska_w_oprawach`, `project_mag_wstaw_i_przypisz`, `project_oringi_*`) |

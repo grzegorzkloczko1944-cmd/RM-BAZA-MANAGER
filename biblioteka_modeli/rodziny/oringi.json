@@ -1,0 +1,39 @@
+{
+  "nazwa": "O-ringi",
+  "katalog_modeli": "B:/Znormalizowane/Oringi",
+  "miniatury": "B:/Znormalizowane/Oringi/miniatury",
+  "lista_csv": "B:/Znormalizowane/Oringi/oringi_modele.csv",
+  "prefiks_symbolu": "OR-",
+  "opis_subiekta": "Oring",
+  "plik_z_symbolu": "symbol.ipt",
+  "wymiary_z_symbolu": "OR-<sr.wewn>X<przekroj> <MATERIAL>  (przecinek lub kropka dziesietna)",
+  "material": {
+    "EPDM": "EPDM",
+    "NBR": "NBR-",
+    "VITON": "VITON",
+    "FKM": "VITON",
+    "FPM": "VITON",
+    "VMQ": "SILIKON",
+    "VQM": "SILIKON",
+    "SILIKON": "SILIKON",
+    "SIL": "SILIKON"
+  },
+  "material_domyslny": "EPDM",
+  "inventor_wymagany": "2013",
+  "zasady": [
+    "1 model = 1 kartoteka Subiekta (plik = symbol, Part Number = symbol); sieroty i duble kasujemy",
+    "kolor = material gumy (biblioteka materialow usera: EPDM, NBR-, VITON, SILIKON)",
+    "zdjecia do Subiekta tylko kartotekom bez zdjecia (nie nadpisujemy)",
+    "opis w Subiekcie = 'Oring'; regal/polka w PoleWlasne1 (R<n>/P<n>), nie w opisie"
+  ],
+  "pomijaj_symbole": [
+    "OR-13x1,5 EPDM 70",
+    "OR-38X4 S",
+    "OR-38X4 Silikon",
+    "OR-40X3 S",
+    "OR-40X3 Silikon",
+    "OR-92X6 S",
+    "OR-92X6 Silikon"
+  ],
+  "pomijaj_uzasadnienie": "kartoteki-widma w Subiekcie (uzyte w dokumentach, nie da sie usunac); model robimy dla kanonicznej kartoteki (np. OR-13X1,5 EPDM, ... SIL)"
+}
