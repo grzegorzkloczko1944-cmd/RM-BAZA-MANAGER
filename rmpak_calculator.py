@@ -164,7 +164,7 @@ class RmpakCalculatorDialog:
                      borderwidth=1).pack(side="right", padx=(8, 2))
             tk.Label(legend_frame, text=_txt, font=("", 8)).pack(side="right")
 
-        tk.Button(legend_frame, text="Odśwież", command=self._load_items,
+        tk.Button(legend_frame, text="Odśwież", command=self._odswiez_przycisk,
                   bg="#2980b9", fg="white", font=("", 9, "bold")).pack(side="left", padx=(0, 12))
         for color, label in (("#90EE90", "Zrealizowano"), ("#FFFACD", "Zamówiono")):
             tk.Label(legend_frame, text="  ", bg=color, relief="solid", bd=1).pack(side="left", padx=(8, 2))
@@ -453,7 +453,7 @@ class RmpakCalculatorDialog:
         self._odswiez_status_pw()
 
     # ── Dokumenty produkcji (PW / RW) ────────────────────────────────────
-    def _pozycje_pw(self):
+    def _pozycje_pw(self, swiezo=False):
         """(pozycje, pominiete_komplety) z BAZY. (None, None) gdy się nie da.
 
         Pozycje mają dołożone `juz_pw`, `do_pw` i `nadmiar` — PW jest
@@ -464,6 +464,11 @@ class RmpakCalculatorDialog:
 
         Gdy Subiekt nie odpowie, `juz_pw` zostaje 0 — lepiej pokazać pełne
         ilości i dać userowi decyzję niż odmówić wystawienia PW.
+
+        `swiezo=True` (podgląd PW) czyta Subiekta TERAZ, synchronicznie —
+        dokument musi liczyć się z aktualnego stanu. Bez tego bierzemy
+        ostatni odczyt z tła (`_przyjete`), żeby otwarcie okna i filtry
+        nie czekały na most (30.09.2026).
         """
         try:
             import subiekt_produkcja
@@ -477,11 +482,15 @@ class RmpakCalculatorDialog:
         except Exception:
             return None, None
         self._pw_tylko_lokalnie = self._rozjazd_z_serwerem(pid, poz)
-        try:
-            przyjete = subiekt_produkcja.przyjete_na_pw(self.project_name)
-        except Exception as e:
-            print("PW: nie odczytano wcześniejszych PW: %s" % e)
-            przyjete = {}
+        if swiezo:
+            try:
+                dok = subiekt_produkcja.dokumenty_produkcji(self.project_name)
+                self._przyjete = subiekt_produkcja.przyjete_z_dokumentow(dok)
+                self._pokaz_numery(dok)
+                self._odswiez_znaczniki_pw()
+            except Exception as e:
+                print("PW: nie odczytano wcześniejszych PW: %s" % e)
+        przyjete = getattr(self, "_przyjete", None) or {}
         subiekt_produkcja.rozliczenie_pw(poz, przyjete)
         return poz, pom
 
@@ -515,8 +524,20 @@ class RmpakCalculatorDialog:
         zapis się nie udawał i dokument istniał w Subiekcie, o którym RM_BAZA
         nie wiedziała. Ten sam wzorzec co „Ilość (zam.)": Subiekt jest
         właścicielem, my odświeżamy.
+
+        To JEDYNY odczyt Subiekta przy otwarciu i „Odśwież" (30.09.2026):
+        z jednego wyniku liczymy pary PW/RW, znaczniki wierszy i licznik
+        „Do nowego PW". Odczyt trwa kilka sekund (dokumenty przez most),
+        więc nigdy nie w wątku okna. Jeden naraz — prośba w trakcie odczytu
+        zamawia jeszcze jeden po nim, zamiast odpalać równoległy.
         """
         import threading
+
+        if getattr(self, "_czyta_subiekta", False):
+            self._czytaj_ponownie = True
+            return
+        self._czyta_subiekta = True
+        self._czytaj_ponownie = False
 
         def worker():
             try:
@@ -525,11 +546,28 @@ class RmpakCalculatorDialog:
             except Exception:
                 dok = None
             try:
-                self.win.after(0, lambda: self._pokaz_numery(dok))
+                self.win.after(0, lambda: self._po_odczycie_subiekta(dok))
             except Exception:
                 pass                      # okno zamknięte w trakcie odczytu
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _po_odczycie_subiekta(self, dok):
+        """Wynik odczytu z tła → panel, kolory wierszy, licznik. Wątek okna."""
+        self._czyta_subiekta = False
+        try:
+            if not self.win.winfo_exists():
+                return
+        except Exception:
+            return
+        self._pokaz_numery(dok)
+        if dok is not None:
+            import subiekt_produkcja
+            self._przyjete = subiekt_produkcja.przyjete_z_dokumentow(dok)
+            self._odswiez_znaczniki_pw()
+            self._odswiez_status_pw(odczytaj=False)
+        if getattr(self, "_czytaj_ponownie", False):
+            self._odswiez_numery_dokumentow()
 
     def _pokaz_numery(self, dok):
         """Wynik odczytu na etykiety. None = nie udało się połączyć."""
@@ -602,12 +640,14 @@ class RmpakCalculatorDialog:
 
         Wolane po kazdym wczytaniu listy, wiec po „Odswiez" i po wystawieniu
         PW kolory same sie aktualizuja.
+
+        Z OSTATNIEGO ODCZYTU W TLE (`_przyjete`), nie z mostu: kazdy filtr
+        i „Odswiez" wolaja _load_items, a synchroniczny odczyt Subiekta
+        zamrazal okno na kilka sekund przy kazdym kliknieciu (30.09.2026).
+        Gdy odczytu jeszcze nie ma — nie kolorujemy; dojdzie po odczycie.
         """
-        try:
-            import subiekt_produkcja
-            przyjete = subiekt_produkcja.przyjete_na_pw(self.project_name)
-        except Exception as e:
-            print("Kalkulator: znaczniki PW pominiete (%s)" % e)
+        przyjete = getattr(self, "_przyjete", None)
+        if przyjete is None:
             return
 
         for iid in self.tree.get_children():
@@ -643,12 +683,15 @@ class RmpakCalculatorDialog:
                 pass
         self.grand_total_var.set(f"{suma:,.2f} PLN")
 
-    def _odswiez_status_pw(self):
+    def _odswiez_status_pw(self, odczytaj=True):
         """Podpis pod przyciskiem: ile pozycji i czego brakuje.
 
         Liczone z bazy przy każdym odświeżeniu listy, żeby po zapisaniu ceny
         licznik braków od razu malał — inaczej user poprawia i nie widzi
         efektu, dopóki nie kliknie „Wystaw PW".
+
+        `odczytaj=False` — bez nowego odczytu Subiekta (zapis ceny niczego
+        w Subiekcie nie zmienia, wystarczy ostatni odczyt z tła).
         """
         poz, pom = self._pozycje_pw()
         if poz is None:
@@ -661,7 +704,8 @@ class RmpakCalculatorDialog:
             # Numery PW/RW czytane z SUBIEKTA, nie trzymane lokalnie — ten sam
             # wzorzec co „Ilość (zam.)" i termin dostawy: Subiekt jest
             # właścicielem wystawionego dokumentu, RM_BAZA go tylko odświeża.
-            self._odswiez_numery_dokumentow()
+            if odczytaj:
+                self._odswiez_numery_dokumentow()
         except Exception:
             braki = []
         # Liczymy to, co ZOSTAŁO do przyjęcia (do_pw), nie wszystkie pozycje
@@ -669,8 +713,12 @@ class RmpakCalculatorDialog:
         # jak zaproszenie do wystawienia tego samego drugi raz (29.09.2026).
         nowe = [p for p in poz if p.get("do_pw", p.get("ilosc") or 0) > 0]
         przyjete = len(poz) - len(nowe)
-        opis = (f"Do nowego PW: {len(nowe)} poz." if nowe
-                else "Nic nowego do PW.")
+        if getattr(self, "_przyjete", None) is None:
+            # Odczyt z tła jeszcze nie wrócił — nie udajemy, że nic nie przyjęto.
+            opis = f"Pozycji RMPAK: {len(poz)} — sprawdzam w Subiekcie…"
+        else:
+            opis = (f"Do nowego PW: {len(nowe)} poz." if nowe
+                    else "Nic nowego do PW.")
         if przyjete:
             opis += f"\nJuż przyjęte na PW: {przyjete} poz."
         if pom:
@@ -688,6 +736,15 @@ class RmpakCalculatorDialog:
         self.btn_pw.config(state="normal" if aktywny else "disabled",
                            bg="#337ab7" if aktywny else "SystemButtonFace",
                            fg="white" if aktywny else "gray40")
+
+    def _odswiez_przycisk(self):
+        """„Odśwież": lista z bazy od razu, Subiekt w tle.
+
+        Filtry też wołają _load_items, ale tylko ten przycisk pyta Subiekta
+        na nowo — filtr niczego w Subiekcie nie zmienia.
+        """
+        self._load_items()
+        self._odswiez_status_pw()
 
     def _jeden_podglad(self, klucz, otworz):
         """Jedno okno podglądu PW / RW naraz, niezależnie od liczby kliknięć.
@@ -747,7 +804,7 @@ class RmpakCalculatorDialog:
         except Exception as e:
             print("Kalkulator: nie przeladowano listy przed PW: %s" % e)
 
-        poz, pom = self._pozycje_pw()
+        poz, pom = self._pozycje_pw(swiezo=True)
         if poz is None:
             messagebox.showerror("PW", "Nie udało się odczytać listy pozycji z bazy projektu.",
                                  parent=self.win)
@@ -1794,7 +1851,7 @@ class RmpakCalculatorDialog:
         # z chwili otwarcia okna, a podglad PW mowil co innego (15.09.2026).
         try:
             self._przelicz_sume()
-            self._odswiez_status_pw()
+            self._odswiez_status_pw(odczytaj=False)
         except Exception as e:
             print("Kalkulator: nie odswiezono podsumowania: %s" % e)
             self._rates[iid] = rate
@@ -1813,7 +1870,7 @@ class RmpakCalculatorDialog:
         # Licznik braków ma maleć NA OCZACH — inaczej user przelicza pozycje
         # i nie widzi, czy zbliża się do kompletu, dopóki nie otworzy podglądu.
         try:
-            self._odswiez_status_pw()
+            self._odswiez_status_pw(odczytaj=False)
         except Exception:
             pass
 

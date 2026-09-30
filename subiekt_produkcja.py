@@ -187,9 +187,18 @@ def przyjete_na_pw(numer_projektu, timeout=600):
     Zrodlem jest Subiekt, nie lokalny zapis: dokumenty moga powstac albo
     zniknac poza RM_BAZA, a licza sie faktyczne ruchy magazynowe.
     """
-    dok = dokumenty_produkcji(numer_projektu, timeout)
+    return przyjete_z_dokumentow(dokumenty_produkcji(numer_projektu, timeout))
+
+
+def przyjete_z_dokumentow(dok):
+    """{SYMBOL: ilosc} z już odczytanych dokumentów (wynik `dokumenty_produkcji`).
+
+    Osobno od `przyjete_na_pw`, żeby kalkulator robił JEDEN odczyt z Subiekta
+    na odświeżenie i liczył z niego i znaczniki, i licznik, i pary PW/RW
+    (wcześniej trzy odczyty, dwa blokujące okno — 30.09.2026).
+    """
     suma = {}
-    for d in dok.get("PW") or []:
+    for d in (dok or {}).get("PW") or []:
         for p in d.get("pozycje") or []:
             klucz = (p.get("symbol") or "").strip().upper()
             if klucz:
