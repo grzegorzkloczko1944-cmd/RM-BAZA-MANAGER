@@ -3401,6 +3401,86 @@ ZAPIS.update({
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# CECHY KARTOTEK — typ pozycji + wymiary  (subiekt_mapowania.sqlite)
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Filtr typów w oknie MAG (user, 30.09.2026): typy zakłada i przypisuje
+# user w MAG, wymiary liczy serwer z katalogów (`lozyska`, `oprawy` w kopii
+# Subiekta) — `odswiez_cechy_auto`. Tu, nie w kopii: kopię nadpisuje
+# synchronizacja, a przypisania to wiedza ludzi (backup razem z mapowaniami).
+#
+# Klucz `id_subiekt` (Id kartoteki), nie symbol — zmiana symbolu w Subiekcie
+# nie gubi typu. `symbol` tylko do podglądu.
+#
+# `auto_klucz` typu: typy, które przypisuje automat ('lozysko',
+# 'oprawa'). Nazwę user może zmienić, typu nie może usunąć (automat
+# i tak założyłby go od nowa). `typ_zrodlo = 'reczny'` — decyzja
+# człowieka, automat jej nie rusza (także „bez typu" ustawione ręcznie).
+MIGRACJE_MAPOWANIA.extend([
+    """CREATE TABLE IF NOT EXISTS typy_pozycji (
+           id          INTEGER PRIMARY KEY AUTOINCREMENT,
+           nazwa       TEXT NOT NULL UNIQUE COLLATE NOCASE,
+           auto_klucz  TEXT UNIQUE,
+           kto         TEXT,
+           kiedy       TEXT NOT NULL
+       )""",
+    """CREATE TABLE IF NOT EXISTS kartoteki_cechy (
+           id_subiekt      INTEGER PRIMARY KEY,
+           symbol          TEXT NOT NULL,
+           id_typu      INTEGER,
+           typ_zrodlo  TEXT,               -- auto | reczny | NULL
+           typ_kto     TEXT,
+           typ_kiedy   TEXT,
+           wymiary         TEXT,               -- do wyświetlenia: 20x42x12, Ø20
+           d               REAL,               -- mm; oprawa: średnica wałka
+           dz              REAL,
+           b               REAL,
+           lozysko         TEXT,               -- oznaczenie w `lozyska` (kopia)
+           odswiezono      TEXT
+       )""",
+    "CREATE INDEX IF NOT EXISTS idx_cechy_typ ON kartoteki_cechy(id_typu)",
+])
+
+ZAPIS.update({
+    "map-typ-dodaj": (
+        "INSERT INTO typy_pozycji (nazwa, kto, kiedy) VALUES (?, ?, ?)",
+        ["nazwa", "kto", "kiedy"],
+    ),
+    "map-typ-zmien": (
+        "UPDATE typy_pozycji SET nazwa = ?, kto = ?, kiedy = ? WHERE id = ?",
+        ["nazwa", "kto", "kiedy", "id"],
+    ),
+    # Usunięcie = batch: najpierw zdjęcie typu z kartotek, potem typ.
+    "map-typ-zdejmij": (
+        "UPDATE kartoteki_cechy SET id_typu = NULL, typ_zrodlo = NULL,"
+        "       typ_kto = ?, typ_kiedy = ?"
+        " WHERE id_typu = ?",
+        ["kto", "kiedy", "id"],
+    ),
+    "map-typ-usun": (
+        "DELETE FROM typy_pozycji WHERE id = ? AND auto_klucz IS NULL",
+        ["id"],
+    ),
+    # Przypisanie wielu kartotek naraz; lista_json = [[id_subiekt, symbol], …].
+    # `WHERE 1` — bez tego SQLite myli ON CONFLICT z JOIN ... ON.
+    "map-cechy-typ": (
+        "INSERT INTO kartoteki_cechy"
+        " (id_subiekt, symbol, id_typu, typ_zrodlo, typ_kto, typ_kiedy)"
+        " SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'),"
+        "        ?, 'reczny', ?, ?"
+        "   FROM json_each(?) WHERE 1"
+        " ON CONFLICT(id_subiekt) DO UPDATE SET"
+        "   symbol         = excluded.symbol,"
+        "   id_typu     = excluded.id_typu,"
+        "   typ_zrodlo = 'reczny',"
+        "   typ_kto    = excluded.typ_kto,"
+        "   typ_kiedy  = excluded.typ_kiedy",
+        ["id_typu", "kto", "kiedy", "lista_json"],
+    ),
+})
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # KOPIA SUBIEKTA — kartoteki, stany, miniatury  (subiekt_kopia.sqlite)
 # ═══════════════════════════════════════════════════════════════════════
 #
@@ -3874,3 +3954,122 @@ def zaladuj_katalog_lozysk(con, sciezka):
         con.rollback()
         raise
     return "katalog łożysk: %d pozycji (%s)" % (len(wiersze), wersja)
+
+
+# ── CECHY KARTOTEK: automat (wymiary + typy łożysk i opraw) ──────────────
+#
+# Symbol kartoteki łożyska to oznaczenie + wariant: „6004 ZZ", „6001ZZ",
+# „SS 6008 2RS" (nierdzewne), „16004ZZ", „688ZZ", „6004-2RS". Rozpoznajemy
+# TYLKO na początku symbolu i TYLKO oznaczenia obecne w katalogu (z aliasami
+# handlowymi 688 = 618/8, 6804 = 61804) — numer rysunku „013-100.03" czy
+# „2453-600.21" nie ma prawa zostać łożyskiem.
+import re as _re
+_OZN_W_SYMBOLU = _re.compile(r"^(?:S{1,2}[\s-]*)?(\d{3,5}(?:/\d+(?:\.\d+)?)?)(?=$|[\s\-A-Z])")
+
+#: auto_klucz -> nazwa zakładanego typu (user może go potem przemianować).
+AUTO_TYPY = {"lozysko": "ŁOŻYSKO", "oprawa": "OPRAWA"}
+
+
+def _liczba_tekst(x):
+    return "" if x is None else ("%g" % x)
+
+
+def podpis_cech_auto(con_sub, con_map):
+    """Tanie „czy coś się zmieniło": kopia kartotek, wersje katalogów i ręczne
+    decyzje (usunięty typ oddaje łożyska automatowi bez czekania na
+    synchronizację Subiekta)."""
+    k = con_sub.execute("SELECT COUNT(*), MAX(zsynchronizowano) FROM kartoteki").fetchone()
+    m = con_sub.execute("SELECT group_concat(klucz || '=' || wartosc, ';')"
+                        "  FROM (SELECT * FROM lozyska_meta ORDER BY klucz)").fetchone()
+    r = con_map.execute("SELECT COUNT(*), MAX(typ_kiedy) FROM kartoteki_cechy"
+                        " WHERE typ_kiedy IS NOT NULL").fetchone()
+    return "%s|%s|%s|%s|%s" % (k[0], k[1], m[0], r[0], r[1])
+
+
+def cechy_z_katalogow(con_sub):
+    """{id_subiekt: (symbol, auto_klucz|None, wymiary, d, dz, b, lozysko)}
+    dla KAŻDEJ kartoteki kopii — to, co wynika z katalogów łożysk i opraw."""
+    po_nazwie = {}
+    for oz, d, dz, b, aliasy in con_sub.execute(
+            "SELECT oznaczenie, d, dz, b, aliasy FROM lozyska"):
+        w = (oz, d, dz, b)
+        po_nazwie[oz.upper()] = w
+        for a in (aliasy or "").split():
+            po_nazwie.setdefault(a.upper(), w)
+    oprawy = {s.strip().upper(): walek for s, walek in
+              con_sub.execute("SELECT symbol, walek_mm FROM oprawy")}
+    wynik = {}
+    for id_, symbol in con_sub.execute("SELECT id, symbol FROM kartoteki"):
+        s = (symbol or "").strip().upper()
+        m = _OZN_W_SYMBOLU.match(s)
+        r = po_nazwie.get(m.group(1)) if m else None
+        if r:
+            oz, d, dz, b = r
+            wynik[id_] = (symbol, "lozysko", "%sx%sx%s" % (
+                _liczba_tekst(d), _liczba_tekst(dz), _liczba_tekst(b)), d, dz, b, oz)
+        elif s in oprawy:
+            wynik[id_] = (symbol, "oprawa", "Ø%g" % oprawy[s], oprawy[s], None, None, None)
+        else:
+            wynik[id_] = (symbol, None, None, None, None, None, None)
+    return wynik
+
+
+def odswiez_cechy_auto(con_map, con_sub, kiedy):
+    """Przelicza automatyczną część `kartoteki_cechy`: wymiary zawsze,
+    typ tylko tam, gdzie nie zdecydował człowiek. Pisze wyłącznie
+    wiersze, które się zmieniły. Wołane z wątku roboczego (jeden pisarz).
+    Zwraca opis do logu albo None, gdy nic się nie zmieniło."""
+    chce = cechy_z_katalogow(con_sub)
+    jest = {w[0]: w for w in con_map.execute(
+        "SELECT id_subiekt, symbol, id_typu, typ_zrodlo, wymiary, d, dz, b, lozysko"
+        "  FROM kartoteki_cechy")}
+    con_map.execute("BEGIN IMMEDIATE")
+    try:
+        for klucz, nazwa in AUTO_TYPY.items():
+            if not con_map.execute("SELECT 1 FROM typy_pozycji WHERE auto_klucz = ?",
+                                   (klucz,)).fetchone():
+                # Typ o tej nazwie założony wcześniej ręcznie — przejmujemy go.
+                if not con_map.execute(
+                        "UPDATE typy_pozycji SET auto_klucz = ?"
+                        " WHERE nazwa = ? AND auto_klucz IS NULL", (klucz, nazwa)).rowcount:
+                    con_map.execute("INSERT OR IGNORE INTO typy_pozycji (nazwa, auto_klucz, kto, kiedy)"
+                                    " VALUES (?, ?, 'SERWER', ?)", (nazwa, klucz, kiedy))
+        typ_auto = dict(con_map.execute(
+            "SELECT auto_klucz, id FROM typy_pozycji WHERE auto_klucz IS NOT NULL"))
+
+        zapis, usun = [], []
+        for id_, (symbol, klucz, wym, d, dz, b, oz) in chce.items():
+            stary = jest.get(id_)
+            if stary is not None and stary[3] == "reczny":
+                id_t, zrodlo = stary[2], "reczny"
+            else:
+                id_t = typ_auto.get(klucz) if klucz else None
+                zrodlo = "auto" if id_t else None
+            if zrodlo is None and wym is None:
+                if stary is not None:
+                    usun.append((id_,))
+                continue
+            nowy = (id_, symbol, id_t, zrodlo, wym, d, dz, b, oz)
+            if stary is None or tuple(stary) != nowy:
+                zapis.append(nowy + (kiedy,))
+        # Kartoteki, których już nie ma w kopii — ręcznych decyzji nie ruszamy.
+        usun += [(id_,) for id_, w in jest.items() if id_ not in chce and w[3] != "reczny"]
+
+        con_map.executemany(
+            "INSERT INTO kartoteki_cechy"
+            " (id_subiekt, symbol, id_typu, typ_zrodlo, wymiary, d, dz, b, lozysko, odswiezono)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(id_subiekt) DO UPDATE SET"
+            "   symbol = excluded.symbol, id_typu = excluded.id_typu,"
+            "   typ_zrodlo = excluded.typ_zrodlo, wymiary = excluded.wymiary,"
+            "   d = excluded.d, dz = excluded.dz, b = excluded.b,"
+            "   lozysko = excluded.lozysko, odswiezono = excluded.odswiezono", zapis)
+        con_map.executemany("DELETE FROM kartoteki_cechy WHERE id_subiekt = ?", usun)
+        con_map.commit()
+    except Exception:
+        con_map.rollback()
+        raise
+    if not zapis and not usun:
+        return None
+    return "cechy kartotek: %d zapisanych, %d usuniętych (kartotek w kopii: %d)" % (
+        len(zapis), len(usun), len(chce))

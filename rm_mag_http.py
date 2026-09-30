@@ -18,7 +18,9 @@ przez `subiekt_kopia_zlecenia.py`), indeks modeli — `indeks_modeli_3d.py`.
 ADRESY (wszystkie GET, odpowiedź JSON; `&format=tsv` = tekst dla VBA)
 
     /mag/status                     wiek kopii, liczba kartotek
-    /mag/szukaj?q=łożysko 6004      symbol, nazwa, opis, nazwa pliku 3D
+    /mag/szukaj?q=łożysko 6004[&typ=ID|-]   symbol, nazwa, opis, nazwa pliku 3D;
+                                      typ: filtr (- = bez typu); z typem q może być puste
+    /mag/typy                    typy pozycji + liczba kartotek
     /mag/kartoteka?symbol=016-100.03
     /mag/modele?symbol=016-100.03   pliki .ipt/.iam do wstawienia
     /mag/miniatura?symbol=016-100.03   obrazek (image/png, image/jpeg…)
@@ -32,6 +34,11 @@ ADRESY (wszystkie GET, odpowiedź JSON; `&format=tsv` = tekst dla VBA)
     POST /mag/model3d/miniatura?sciezka=&typ=png|bmp[&subiekt=SYMBOL]
                                   miniatura ze stacji (base64 w treści); z `subiekt`
                                   także zdjęcie kartoteki w Subiekcie (zlecenie)
+    POST /mag/typ/dodaj?nazwa=&kto=     nowy typ pozycji
+    POST /mag/typ/zmien?id=&nazwa=&kto= zmiana nazwy
+    POST /mag/typ/usun?id=&kto=         usunięcie (typ zdjęty z kartotek)
+    POST /mag/typ/przypisz?typ=ID|-&kto=   symbole w treści (linia =
+                                      symbol zakodowany jak w URL)
     POST /mag/synchronizuj3d?kto=GKI  zlecenie indeksu modeli 3D — wykona
                                       dowolna stacja z Inventorem
     /mag/skrypt/indeks_modeli_3d.py   skrypt dla stacji (biała lista)
@@ -59,7 +66,7 @@ import threading
 import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 #: Ogonki → bez ogonków, małe litery. Ta sama tablica co w `rm_serwer`
 #: i `ksef_archiwum.uprosc` — „lozysko" ma znaleźć „Łożysko".
@@ -75,7 +82,8 @@ TYPY_OBRAZKOW = {"png": "image/png", "png/biale": "image/png", "jpg": "image/jpe
 #: Kolumny wyniku wyszukiwania — kolejność = kolejność w TSV.
 KOLUMNY_SZUKAJ = ["symbol", "nazwa", "opis", "rodzaj", "dostepne",
                   "zarezerwowane", "cena", "ma_miniature", "modeli",
-                  "bez_modelu", "ma_mini3d", "id", "lozysko", "wymiary"]
+                  "bez_modelu", "ma_mini3d", "id", "lozysko", "wymiary",
+                  "typ", "typ_id"]
 
 #: Skrypty, które stacje pobierają z serwera i uruchamiają na zlecenie.
 SKRYPTY_DLA_STACJI = {"indeks_modeli_3d.py"}
@@ -85,17 +93,8 @@ KOLUMNY_LOZYSKA = ["oznaczenie", "seria", "d", "dz", "b", "wymiary", "cr_kn",
                    "c0r_kn", "n_smar", "n_olej", "masa_kg", "aliasy", "uwaga",
                    "zrodlo", "kartotek", "na_stanie", "symbole"]
 
-
-# ── katalog łożysk: rozpoznanie kartoteki po symbolu ───────────────────────
-#
-# Symbol kartoteki łożyska to oznaczenie + wariant: „6004 ZZ", „6001ZZ",
-# „SS 6008 2RS" (nierdzewne), „16004ZZ", „688ZZ", „6004-2RS". Rozpoznajemy
-# TYLKO na początku symbolu i TYLKO oznaczenia obecne w katalogu (z aliasami
-# handlowymi 688 = 618/8, 6804 = 61804) — numer rysunku „013-100.03" czy
-# „2453-600.21" nie ma prawa zostać łożyskiem.
-_OZN_W_SYMBOLU = re.compile(r"^(?:S{1,2}[\s-]*)?(\d{3,5}(?:/\d+(?:\.\d+)?)?)(?=$|[\s\-A-Z])")
-_katalog = {"wersja": None, "po_nazwie": {}, "wiersze": []}
-_katalog_lock = threading.Lock()
+#: Najdłuższa nazwa typu pozycji (lista w oknie MAG).
+TYP_MAX = 40
 
 
 def _liczba(x):
@@ -105,66 +104,6 @@ def _liczba(x):
 
 def wymiary_tekst(r):
     return "%sx%sx%s" % (_liczba(r["d"]), _liczba(r["dz"]), _liczba(r["b"]))
-
-
-def katalog_lozysk(con):
-    """{nazwa (oznaczenie i aliasy): wiersz} — z pamięci, odświeżane po zmianie wersji."""
-    try:
-        w = con.execute("SELECT wartosc FROM lozyska_meta WHERE klucz = 'wersja'").fetchone()
-    except sqlite3.Error:
-        return {}                              # serwer bez tabeli łożysk
-    wersja = w[0] if w else None
-    with _katalog_lock:
-        if wersja != _katalog["wersja"]:
-            wiersze = [dict(r) for r in con.execute("SELECT * FROM lozyska ORDER BY seria, d, dz")]
-            po = {}
-            for r in wiersze:
-                r["wymiary"] = wymiary_tekst(r)
-                po[r["oznaczenie"].upper()] = r
-                for a in (r.get("aliasy") or "").split():
-                    po.setdefault(a.upper(), r)
-            _katalog.update(wersja=wersja, po_nazwie=po, wiersze=wiersze)
-        return _katalog["po_nazwie"]
-
-
-def rozpoznaj_lozysko(symbol, po_nazwie):
-    """Wiersz katalogu dla symbolu kartoteki albo None."""
-    m = _OZN_W_SYMBOLU.match((symbol or "").strip().upper())
-    return po_nazwie.get(m.group(1)) if m else None
-
-
-# ── oprawy łożyskowe: średnica WAŁKA z katalogu (katalog_lozysk/oprawy.json) ──
-#
-# Kolumna „Wymiary" w MAG to dla łożysk d×D×B z katalogu. Oprawa (UCP, UCFL,
-# KFL…) nie ma wiersza w katalogu łożysk, a jej wymiarem jest średnica wałka
-# (user, 30.09.2026). Wartości są ZAPISANE w pliku `oprawy.json` w repo, nie
-# wyliczane z symbolu — RM_SERWER ładuje je do tabeli `oprawy` przy starcie
-# (jak katalog łożysk) i można je poprawić per symbol. Zapis „Ø20" odróżnia
-# wałek od „20x42x12" łożysk.
-_oprawy = {"wersja": None, "po_symbolu": {}}
-
-
-def katalog_opraw(con):
-    """{SYMBOL: wiersz} z tabeli `oprawy` — z pamięci, odświeżane po zmianie wersji."""
-    try:
-        w = con.execute("SELECT wartosc FROM lozyska_meta WHERE klucz = 'wersja_opraw'").fetchone()
-    except sqlite3.Error:
-        return {}                              # serwer bez tabeli opraw
-    wersja = w[0] if w else None
-    with _katalog_lock:
-        if wersja != _oprawy["wersja"]:
-            try:
-                po = {r["symbol"].upper(): dict(r) for r in con.execute("SELECT * FROM oprawy")}
-            except sqlite3.Error:
-                po = {}
-            _oprawy.update(wersja=wersja, po_symbolu=po)
-        return _oprawy["po_symbolu"]
-
-
-def wymiary_oprawy(symbol, po_symbolu):
-    """„Ø20" dla symbolu z katalogu opraw, inaczej ""."""
-    r = po_symbolu.get((symbol or "").strip().upper())
-    return "Ø%g" % r["walek_mm"] if r else ""
 
 
 # Wymiar w zapytaniu (user, 28.09.2026): „6x" = otwór 6, „12x30" = otwór
@@ -254,24 +193,49 @@ def _modele_sql(ma_modele):
             "   AS ma_mini3d")
 
 
-def szukaj(bazy, q, limit):
+def _ma_cechy(con):
+    """Czy w mapowaniach jest `kartoteki_cechy` (serwer po migracji 30.09.2026)."""
+    try:
+        con.execute("SELECT 1 FROM map.kartoteki_cechy LIMIT 1")
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def _cechy_sql(ma_cechy):
+    """(kolumny, JOIN) typu i wymiarów kartoteki `k`."""
+    if not ma_cechy:
+        return ("NULL AS wymiary, NULL AS lozysko, NULL AS typ_id, NULL AS typ,"
+                " NULL AS typ_zrodlo", "")
+    return ("c.wymiary, c.lozysko, c.id_typu AS typ_id, r.nazwa AS typ,"
+            " c.typ_zrodlo",
+            " LEFT JOIN map.kartoteki_cechy c ON c.id_subiekt = k.id"
+            " LEFT JOIN map.typy_pozycji r ON r.id = c.id_typu")
+
+
+def szukaj(bazy, q, limit, typ=""):
     """Kartoteki pasujące do WSZYSTKICH słów zapytania.
 
     Słowo pasuje, gdy siedzi w symbolu, nazwie, opisie albo w nazwie pliku
     modelu 3D (ustalenie 3 planu). Kolejność: trafienie dokładne w symbol,
     potem symbol od początku, potem reszta alfabetycznie.
+
+    typ: id typu pozycji, "-" = bez typu, "" = wszystkie. Z wybranym
+    typem puste zapytanie pokazuje cały typ.
     """
     slowa = [w for w in uprosc(q).split() if w]
-    if not slowa:
-        return []
-    # „20x42" / „20x42x12" = wymiar łożyska — filtr po katalogu, nie po tekście.
+    # „20x42" / „20x42x12" = wymiar — filtr po wymiarach kartoteki, nie po tekście.
     wymiary = [_wymiar_z_tokenu(w) for w in slowa]
     wym = next((x for x in wymiary if x), None)
     slowa = [w for w, x in zip(slowa, wymiary) if not x]
+    typ = (typ or "").strip()
+    if not slowa and not wym and not typ:
+        return []
     con, ma_modele = bazy.polacz()
     try:
-        po_nazwie = katalog_lozysk(con)
-        oprawy = katalog_opraw(con)
+        ma_cechy = _ma_cechy(con)
+        if (wym or typ) and not ma_cechy:
+            return []
         warunki, parametry = [], []
         for w in slowa:
             wzor = "%" + w.replace("%", "").replace("_", "") + "%"
@@ -284,29 +248,28 @@ def szukaj(bazy, q, limit):
                          "    AND UPROSC(m.sciezka) LIKE ?)")
                 parametry.append(wzor)
             warunki.append("(" + pola + ")")
+        if wym:
+            for kol, x in zip(("c.d", "c.dz", "c.b"), wym):
+                if x is not None:
+                    warunki.append(kol + " = ?")
+                    parametry.append(x)
+        if typ == "-":
+            warunki.append("c.id_typu IS NULL")
+        elif typ:
+            warunki.append("c.id_typu = ?")
+            parametry.append(int(typ))
+        kolumny, join = _cechy_sql(ma_cechy)
         calosc = uprosc(q).strip()
         sql = ("SELECT k.id, k.symbol, k.nazwa, k.opis, k.rodzaj, k.dostepne,"
-               "       k.zarezerwowane, k.cena,"
+               "       k.zarezerwowane, k.cena, " + kolumny + ","
                "       EXISTS (SELECT 1 FROM miniatury z WHERE z.id_subiekt = k.id"
                "               AND z.dane_b64 != '') AS ma_miniature, "
                + _modele_sql(ma_modele) +
-               "  FROM kartoteki k WHERE " + (" AND ".join(warunki) or "1") +
+               "  FROM kartoteki k" + join + " WHERE " + " AND ".join(warunki) +
                " ORDER BY (UPROSC(k.symbol) = ?) DESC,"
-               "          (UPROSC(k.symbol) LIKE ?) DESC, k.symbol")
-        parametry += [calosc, calosc + "%"]
-        wynik = []
-        # Bez LIMIT w SQL, gdy filtrujemy po wymiarze — limit liczy się PO filtrze.
-        for w in con.execute(sql + ("" if wym else " LIMIT %d" % int(limit)), parametry):
-            w = dict(w)
-            r = rozpoznaj_lozysko(w["symbol"], po_nazwie)
-            if wym and not _pasuje_wymiar(r, wym):
-                continue
-            w["lozysko"] = r["oznaczenie"] if r else ""
-            w["wymiary"] = r["wymiary"] if r else wymiary_oprawy(w["symbol"], oprawy)
-            wynik.append(w)
-            if len(wynik) >= limit:
-                break
-        return wynik
+               "          (UPROSC(k.symbol) LIKE ?) DESC, k.symbol LIMIT ?")
+        parametry += [calosc, calosc + "%", int(limit)]
+        return [dict(w) for w in con.execute(sql, parametry)]
     finally:
         con.close()
 
@@ -314,11 +277,14 @@ def szukaj(bazy, q, limit):
 def kartoteka(bazy, symbol):
     con, ma_modele = bazy.polacz()
     try:
+        ma_cechy = _ma_cechy(con)
+        kolumny, join = _cechy_sql(ma_cechy)
         w = con.execute(
-            "SELECT k.*, EXISTS (SELECT 1 FROM miniatury z WHERE z.id_subiekt = k.id"
+            "SELECT k.*, " + kolumny + ","
+            "       EXISTS (SELECT 1 FROM miniatury z WHERE z.id_subiekt = k.id"
             "         AND z.dane_b64 != '') AS ma_miniature, "
             + _modele_sql(ma_modele) +
-            "  FROM kartoteki k WHERE k.symbol = ? COLLATE NOCASE",
+            "  FROM kartoteki k" + join + " WHERE k.symbol = ? COLLATE NOCASE",
             (symbol.strip(),)).fetchone()
         if w is None:
             return None
@@ -327,9 +293,10 @@ def kartoteka(bazy, symbol):
             d["magazyny"] = json.loads(d.pop("magazyny_json") or "[]")
         except ValueError:
             d["magazyny"] = []
-        r = rozpoznaj_lozysko(d["symbol"], katalog_lozysk(con))
-        d["lozysko"] = r["oznaczenie"] if r else ""
-        d["wymiary"] = r["wymiary"] if r else wymiary_oprawy(d["symbol"], oprawy)
+        r = None
+        if d.get("lozysko"):
+            r = con.execute("SELECT cr_kn, n_smar FROM lozyska WHERE oznaczenie = ?",
+                            (d["lozysko"],)).fetchone()
         d["lozysko_cr_kn"] = r["cr_kn"] if r else None
         d["lozysko_n_smar"] = r["n_smar"] if r else None
         return d
@@ -370,17 +337,20 @@ def lozyska(bazy, q="", d=None, dz=None, b=None, seria="", tylko_na_stanie=False
     """
     con, _ = bazy.polacz()
     try:
-        po_nazwie = katalog_lozysk(con)
-        # Kartoteki -> łożyska: jeden przelot po kopii (~3,5 tys. symboli).
+        wiersze = [dict(r) for r in con.execute("SELECT * FROM lozyska ORDER BY seria, d, dz")]
+        for r in wiersze:
+            r["wymiary"] = wymiary_tekst(r)
+        # Kartoteki -> łożyska: rozpoznanie zrobił serwer (`kartoteki_cechy`).
         w_sub = {}
-        for k in con.execute("SELECT symbol, dostepne FROM kartoteki"):
-            r = rozpoznaj_lozysko(k["symbol"], po_nazwie)
-            if r:
-                x = w_sub.setdefault(r["oznaczenie"], {"kartotek": 0, "na_stanie": 0.0, "symbole": []})
+        if _ma_cechy(con):
+            for k in con.execute(
+                    "SELECT c.lozysko, k.symbol, k.dostepne FROM kartoteki k"
+                    "  JOIN map.kartoteki_cechy c ON c.id_subiekt = k.id"
+                    " WHERE c.lozysko IS NOT NULL"):
+                x = w_sub.setdefault(k["lozysko"], {"kartotek": 0, "na_stanie": 0.0, "symbole": []})
                 x["kartotek"] += 1
                 x["na_stanie"] += k["dostepne"] or 0
                 x["symbole"].append(k["symbol"])
-        wiersze = list(_katalog["wiersze"])
     finally:
         con.close()
 
@@ -551,6 +521,132 @@ def usun_przypisanie(zlec, symbol, sciezka):
     return {"usunieto": int((w or {}).get("rowcount") or 0)}
 
 
+# ── typy pozycji (filtr w oknie MAG, user 30.09.2026) ─────────────────────
+
+def _teraz():
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _nazwa_typu(nazwa):
+    n = " ".join((nazwa or "").split())
+    if not n:
+        raise ValueError("pusta nazwa typu")
+    if len(n) > TYP_MAX:
+        raise ValueError("nazwa typu dłuższa niż %d znaków" % TYP_MAX)
+    return n
+
+
+def _typy_tabela(con):
+    """{id: (nazwa, auto)} — ValueError, gdy serwer nie ma jeszcze tabeli."""
+    if not _ma_cechy(con):
+        raise ValueError("serwer bez tabeli typów — potrzebny restart RM_SERWER")
+    return {w[0]: (w[1], bool(w[2])) for w in con.execute(
+        "SELECT id, nazwa, auto_klucz IS NOT NULL FROM map.typy_pozycji")}
+
+
+def _zajeta_nazwa(tabela, nazwa, poza_id=None):
+    """Id typu o tej samej nazwie (bez względu na wielkość liter i ogonki)."""
+    klucz = uprosc(nazwa)
+    return next((i for i, (n, _) in tabela.items()
+                 if uprosc(n) == klucz and i != poza_id), None)
+
+
+def typy(bazy):
+    """[{id, nazwa, auto, kartotek}] — alfabetycznie, po polsku."""
+    con, _ = bazy.polacz()
+    try:
+        if not _ma_cechy(con):
+            return []
+        wynik = [dict(w) for w in con.execute(
+            "SELECT r.id, r.nazwa, r.auto_klucz IS NOT NULL AS auto,"
+            "       (SELECT COUNT(*) FROM map.kartoteki_cechy c"
+            "          JOIN kartoteki k ON k.id = c.id_subiekt"
+            "         WHERE c.id_typu = r.id) AS kartotek"
+            "  FROM map.typy_pozycji r")]
+    finally:
+        con.close()
+    return sorted(wynik, key=lambda w: uprosc(w["nazwa"]))
+
+
+def dodaj_typ(bazy, zlec, nazwa, kto):
+    n = _nazwa_typu(nazwa)
+    con, _ = bazy.polacz()
+    try:
+        jest = _zajeta_nazwa(_typy_tabela(con), n)
+    finally:
+        con.close()
+    if jest is not None:
+        return {"id": jest, "nowa": 0, "komunikat": "taki typ już jest"}
+    w = zlec("map-typ-dodaj", {"nazwa": n, "kto": kto, "kiedy": _teraz()})
+    return {"id": w["lastrowid"], "nowa": 1, "komunikat": "dodano typ " + n}
+
+
+def zmien_typ(bazy, zlec, id_, nazwa, kto):
+    n = _nazwa_typu(nazwa)
+    id_ = int(id_)
+    con, _ = bazy.polacz()
+    try:
+        tabela = _typy_tabela(con)
+    finally:
+        con.close()
+    if id_ not in tabela:
+        raise ValueError("nie ma takiego typu")
+    if _zajeta_nazwa(tabela, n, poza_id=id_) is not None:
+        raise ValueError("typ %s już jest" % n)
+    zlec("map-typ-zmien", {"nazwa": n, "kto": kto, "kiedy": _teraz(), "id": id_})
+    return {"id": id_, "komunikat": "%s -> %s" % (tabela[id_][0], n)}
+
+
+def usun_typ(bazy, zlec, id_, kto):
+    """Zdejmuje typ z kartotek i go usuwa — jedną transakcją."""
+    id_ = int(id_)
+    con, _ = bazy.polacz()
+    try:
+        tabela = _typy_tabela(con)
+    finally:
+        con.close()
+    if id_ not in tabela:
+        raise ValueError("nie ma takiego typu")
+    nazwa, auto = tabela[id_]
+    if auto:
+        raise ValueError("%s przypisuje automat z katalogu — można go tylko przemianować" % nazwa)
+    w = zlec([("map-typ-zdejmij", {"kto": kto, "kiedy": _teraz(), "id": id_}),
+              ("map-typ-usun", {"id": id_})])
+    zdjeto = int(w["wyniki"][0]["rowcount"] or 0)
+    return {"usunieto": 1, "zdjeto": zdjeto,
+            "komunikat": "usunięto typ %s (zdjęty z %d kartotek)" % (nazwa, zdjeto)}
+
+
+def przypisz_typ(bazy, zlec, typ, symbole, kto):
+    """Typ (id; "" / "-" = bez typu) dla listy symboli — decyzja
+    ręczna, automat jej potem nie zmienia."""
+    symbole = [s.strip() for s in symbole if s and s.strip()]
+    if not symbole:
+        raise ValueError("brak symboli")
+    if len(symbole) > LIMIT_MAX * 4:
+        raise ValueError("za dużo symboli naraz (%d)" % len(symbole))
+    id_t = None if (typ or "").strip() in ("", "-") else int(typ)
+    con, _ = bazy.polacz()
+    try:
+        tabela = _typy_tabela(con)
+        if id_t is not None and id_t not in tabela:
+            raise ValueError("nie ma takiego typu")
+        znalezione = [(w[0], w[1]) for w in con.execute(
+            "SELECT id, symbol FROM kartoteki"
+            " WHERE UPPER(symbol) IN (SELECT UPPER(value) FROM json_each(?))",
+            (json.dumps(symbole),))]
+    finally:
+        con.close()
+    znane = {s.upper() for _, s in znalezione}
+    brak = [s for s in symbole if s.upper() not in znane]
+    if znalezione:
+        zlec("map-cechy-typ", {"id_typu": id_t, "kto": kto, "kiedy": _teraz(),
+                                   "lista_json": json.dumps(znalezione)})
+    nazwa = tabela[id_t][0] if id_t is not None else "(bez typu)"
+    return {"przypisano": len(znalezione), "nie_znaleziono": brak,
+            "komunikat": "%s: %d kartotek" % (nazwa, len(znalezione))}
+
+
 def status(bazy):
     con, ma_modele = bazy.polacz()
     try:
@@ -649,6 +745,42 @@ def zbuduj_handler(bazy, log, zlec=None):
             p = {k: v[0] for k, v in parse_qs(url.query).items()}
             tsv = p.get("format", "").lower() == "tsv"
             sciezka = url.path.rstrip("/")
+            if sciezka.startswith("/mag/typ/"):
+                if zlec is None:
+                    self._dane(503, {"blad": "serwer bez obsługi zleceń"}, tsv)
+                    return
+                kto = (p.get("kto") or "MAG").strip()[:40]
+                akcja = sciezka[len("/mag/typ/"):]
+                try:
+                    if akcja == "dodaj":
+                        wynik = dodaj_typ(bazy, zlec, p.get("nazwa", ""), kto)
+                    elif akcja == "zmien":
+                        wynik = zmien_typ(bazy, zlec, p.get("id", ""), p.get("nazwa", ""), kto)
+                    elif akcja == "usun":
+                        wynik = usun_typ(bazy, zlec, p.get("id", ""), kto)
+                    elif akcja == "przypisz":
+                        # Symbole w treści, po jednym na linię, zakodowane jak w URL
+                        # (okno wysyła treść jako us-ascii).
+                        dl = int(self.headers.get("Content-Length") or 0)
+                        if dl < 0 or dl > 1024 * 1024:
+                            raise ValueError("zły rozmiar listy (%d B)" % dl)
+                        cialo = self.rfile.read(dl).decode("ascii", "replace") if dl else ""
+                        symbole = [unquote(x) for x in cialo.split("\n")]
+                        if p.get("symbol"):
+                            symbole.append(p["symbol"])
+                        wynik = przypisz_typ(bazy, zlec, p.get("typ", ""), symbole, kto)
+                    else:
+                        self._dane(404, {"blad": "nieznany adres"}, tsv)
+                        return
+                    log("MAG: typ %s (%s@%s) — %s" % (
+                        akcja, kto, self.client_address[0], wynik.get("komunikat")))
+                    self._dane(200, wynik, tsv)
+                except ValueError as e:
+                    self._dane(400, {"blad": str(e)}, tsv)
+                except Exception as e:
+                    log("⚠️  MAG HTTP POST %s: %s" % (self.path, e))
+                    self._dane(500, {"blad": "%s: %s" % (type(e).__name__, e)}, tsv)
+                return
             if sciezka in ("/mag/model3d/przypisz", "/mag/model3d/usun",
                            "/mag/model3d/miniatura"):
                 if zlec is None:
@@ -721,8 +853,10 @@ def zbuduj_handler(bazy, log, zlec=None):
                         limit = min(int(p.get("limit") or LIMIT_DOMYSLNY), LIMIT_MAX)
                     except ValueError:
                         limit = LIMIT_DOMYSLNY
-                    self._dane(200, szukaj(bazy, p.get("q", ""), limit), tsv,
-                               KOLUMNY_SZUKAJ)
+                    self._dane(200, szukaj(bazy, p.get("q", ""), limit, p.get("typ", "")),
+                               tsv, KOLUMNY_SZUKAJ)
+                elif sciezka == "/mag/typy":
+                    self._dane(200, typy(bazy), tsv, ["id", "nazwa", "auto", "kartotek"])
                 elif sciezka.startswith("/mag/skrypt/"):
                     # Skrypty wykonywane przez stacje na zlecenie serwera —
                     # TYLKO z białej listy, z katalogu serwera. Stacja pobiera
@@ -781,7 +915,8 @@ def zbuduj_handler(bazy, log, zlec=None):
                                                 "/mag/kartoteka?symbol=",
                                                 "/mag/modele?symbol=",
                                                 "/mag/miniatura?symbol=",
-                                                "/mag/miniatura3d?symbol="]}, tsv)
+                                                "/mag/miniatura3d?symbol=",
+                                                "/mag/typy"]}, tsv)
             except FileNotFoundError as e:
                 self._dane(503, {"blad": str(e)}, tsv)
             except Exception as e:

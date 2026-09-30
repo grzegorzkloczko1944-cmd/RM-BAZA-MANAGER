@@ -608,6 +608,7 @@ class Serwer:
                 zad = self.kolejka.get(timeout=1.0)
             except queue.Empty:
                 self._sprzatanie()
+                self._cechy_auto()
                 continue
             try:
                 zad.wynik = self._wykonaj(zad.zadanie)
@@ -855,6 +856,33 @@ class Serwer:
         korzen = os.path.dirname(self.baza)          # …\dane
         return os.path.join(korzen, "Projekty", "backup_RM_%s" % ktora, "master")
 
+    #: Cechy kartotek (MAG): kiedy ostatnio sprawdzone i dla jakiego stanu
+    #: kopii/katalogów policzone. Po restarcie liczone raz od nowa — zapis
+    #: i tak dotyka tylko zmienionych wierszy.
+    _cechy_czas = 0.0
+    _cechy_podpis = None
+
+    def _cechy_auto(self):
+        """Wymiary i typy łożysk/opraw z katalogów — po zmianie kopii
+        Subiekta albo katalogu. Sprawdzenie co 30 s, gdy kolejka stoi."""
+        if self.con_map is None or self.con_sub is None:
+            return
+        if time.time() - self._cechy_czas < 30:
+            return
+        self._cechy_czas = time.time()
+        try:
+            podpis = ops.podpis_cech_auto(self.con_sub, self.con_map)
+            if podpis == self._cechy_podpis:
+                return
+            # Podpis zapamiętany także przy błędzie — jeden wpis w logu, nie co 30 s.
+            self._cechy_podpis = podpis
+            opis = ops.odswiez_cechy_auto(self.con_map, self.con_sub,
+                                          datetime.now().strftime("%Y-%m-%dT%H:%M:%S"))
+            if opis:
+                log("MAG: %s" % opis)
+        except Exception as e:
+            log("⚠️  Cechy kartotek: %s" % e)
+
     def _sprzatanie(self):
         """Raz na dobę: czyszczenie dziennika. Robione w wątku roboczym,
         żeby nie dotykać połączenia z innego miejsca."""
@@ -988,11 +1016,16 @@ def uruchom(config):
             import uuid
             import rm_mag_http
 
-            def zlec(operacja, params):
+            def zlec(operacja, params=None):
                 # Zapis przez TEN SAM wątek roboczy co reszta — HTTP nie
                 # otwiera bazy do zapisu (jeden pisarz, PLAN_RM_SERWER §3).
-                odp = serwer.zleć({"cmd": "master-exec",
-                                   "args": {"operation": operacja, "params": params},
+                # Lista [(operacja, params), …] = jedna transakcja (batch).
+                if isinstance(operacja, list):
+                    cmd, args = "master-batch", {"operacje": [
+                        {"operation": o, "params": p} for o, p in operacja]}
+                else:
+                    cmd, args = "master-exec", {"operation": operacja, "params": params}
+                odp = serwer.zleć({"cmd": cmd, "args": args,
                                    "request_id": str(uuid.uuid4()),
                                    "kto": {"user": "MAG-HTTP", "host": "http"}})
                 if not odp.get("ok"):
