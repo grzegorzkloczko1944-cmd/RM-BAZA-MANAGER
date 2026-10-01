@@ -412,6 +412,8 @@ class OknoDokumentu(tk.Toplevel):
 
     def __init__(self, parent, pozycje, kontekst=None):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.kontekst = kontekst or {}
         self.title(f"Edytor kartotek — {self.TYTUL}")
         self.configure(bg=TLO)

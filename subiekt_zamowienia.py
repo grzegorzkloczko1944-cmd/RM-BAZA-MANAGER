@@ -273,12 +273,23 @@ def pracownik_rm_manager(login):
         return None            # brak kontaktu nie moze zablokowac wysylki ZD
 
 
+_DOSTAWCY_CACHE = {"kiedy": 0.0, "nazwy": {}}
+
+
 def _nazwy_dostawcow():
-    """{supplier_id: nazwa} z mastera RM_BAZA (przez serwer); {} przy błędzie."""
+    """{supplier_id: nazwa} z mastera RM_BAZA (przez serwer); {} przy błędzie.
+
+    Pamiętane przez minutę: `dane_z_bom` woła to dla KAŻDEGO projektu
+    z zapotrzebowania, a lista dostawców jest jedna (01.10.2026)."""
+    import time
+    if _DOSTAWCY_CACHE["nazwy"] and time.monotonic() - _DOSTAWCY_CACHE["kiedy"] < 60:
+        return _DOSTAWCY_CACHE["nazwy"]
     try:
-        return {w["supplier_id"]: w["name"] for w in _serwer().master_read("suppliers-list")}
+        nazwy = {w["supplier_id"]: w["name"] for w in _serwer().master_read("suppliers-list")}
     except Exception:
         return {}
+    _DOSTAWCY_CACHE.update(kiedy=time.monotonic(), nazwy=nazwy)
+    return nazwy
 
 
 def projekty_po_numerze(numery):
@@ -1082,6 +1093,8 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
 
     def __init__(self, parent, project_id=None, project_name=None):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.project_id = project_id
         self.project_name = project_name or (str(project_id) if project_id else "")
         self.wszystkie = []        # pełne dane z Subiekta (przed filtrem)
@@ -1130,7 +1143,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
 
         tk.Label(f, text="Szukaj:", bg="#ecf0f1", font=("Arial", 9)).pack(side=tk.LEFT, padx=(12, 3), pady=6)
         self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *_: self._refill())
+        self.search_var.trace_add("write", lambda *_: self._refill_po_wpisaniu())
         tk.Entry(f, textvariable=self.search_var, width=22, font=("Arial", 9)).pack(side=tk.LEFT, pady=6)
 
         tk.Label(f, text="Dostawca:", bg="#ecf0f1", font=("Arial", 9)).pack(side=tk.LEFT, padx=(14, 3), pady=6)
@@ -1391,7 +1404,10 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
 
     def _load_worker(self):
         try:
-            zap, podmioty, zamowione, ostrzezenia = pobierz_zapotrzebowanie()
+            import subiekt_panel
+            wynik = (subiekt_panel.odczyt_z_panelu("zapotrzebowanie")
+                     or pobierz_zapotrzebowanie())
+            zap, podmioty, zamowione, ostrzezenia = wynik
             self._ostrzezenia_subiekt = ostrzezenia
 
             # BOM-y wszystkich projektów, których dotyczy zapotrzebowanie —
@@ -1906,6 +1922,18 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         if not mn and not opt:
             return ""
         return f"{mn:g}/{opt:g}" if opt else f"{mn:g}/–"
+
+    def _refill_po_wpisaniu(self):
+        """Lista odświeża się po krótkiej przerwie w pisaniu, nie po każdym
+        znaku — przy kilkuset wierszach każde przerysowanie jest odczuwalne."""
+        zadanie = getattr(self, "_zadanie_szukaj", None)
+        if zadanie:
+            self.after_cancel(zadanie)
+        self._zadanie_szukaj = self.after(250, self._szukaj_teraz)
+
+    def _szukaj_teraz(self):
+        self._zadanie_szukaj = None
+        self._refill()
 
     def _refill(self):
         if not self.sheet:
@@ -2983,12 +3011,8 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         numery = _numery_zd(kolumna_zd)
         if not numery:
             return None
-        try:
-            nazwa = numery[0].replace("/", "-").replace("\\", "-").replace(" ", "_") + ".pdf"
-            sciezka = self._katalog_pdf() / nazwa
-            return sciezka if sciezka.exists() else None
-        except Exception:
-            return None        # brak dostępu do Y: nie może wywalić rysowania listy
+        import subiekt_wyslij_zd
+        return subiekt_wyslij_zd.gotowy_pdf(numery[0])
 
     def _podglad_pdf(self, wymus_nowy=False):
         """Wydruk ZD z wiersza pod kursorem — ten sam, który idzie mailem.

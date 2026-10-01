@@ -1844,6 +1844,8 @@ class SubiektProjektWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
 
     def __init__(self, parent, project_id, project_name=None, csv_path=None):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.project_id = project_id
         self.project_name = project_name or str(project_id)
         #: Sciezka BOM-u dla projektu SPOZA RM_BAZA (maly projekt z CSV).
@@ -4827,6 +4829,8 @@ class SubiektProjektCofnijWindow(tk.Toplevel, Kreciolek, MiksinNotatki):
 
     def __init__(self, parent, project_id, project_name=None):
         tk.Toplevel.__init__(self, parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         Kreciolek.__init__(self)
         self.project_id = project_id
         self.project_name = project_name or str(project_id)

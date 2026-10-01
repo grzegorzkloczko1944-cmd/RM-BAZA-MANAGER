@@ -87,6 +87,7 @@ def eksportuj_pdf(numery, katalog, timeout=TIMEOUT_S):
             bledy.append(f"{p.get('numer')}: {p.get('blad')}")
     if not wynik:
         raise RuntimeError("Nie udało się wyeksportować żadnego PDF-a.\n" + "\n".join(bledy))
+    _GOTOWE_PDF["kiedy"] = 0.0      # nowy plik w katalogu — lista nieaktualna
     return wynik, bledy
 
 
@@ -162,6 +163,40 @@ def _katalog_pdf_domyslny():
         zapasowy = Path(os.environ.get("TEMP", ".")) / "rm_baza_zd"
         zapasowy.mkdir(parents=True, exist_ok=True)
         return zapasowy
+
+
+#: Lista plików w katalogu wydruków, czytana RAZ na kilka sekund.
+#: Okna Zamówień i Przeglądu dokumentów pytały o PDF dla KAŻDEGO wiersza
+#: przy KAŻDYM odświeżeniu listy (też przy każdym znaku w „Szukaj"), a każde
+#: pytanie to `mkdir` + `exists()` na udziale serwera — dwa obiegi po sieci
+#: na wiersz, na wątku okna (01.10.2026). Jeden odczyt katalogu zamiast tego.
+_GOTOWE_PDF = {"kiedy": 0.0, "katalog": None, "nazwy": frozenset()}
+GOTOWE_PDF_WAZNOSC_S = 5
+
+
+def nazwa_pliku_pdf(numer):
+    """Nazwa pliku wydruku z numeru dokumentu — tak samo jak w moście."""
+    return numer.replace("/", "-").replace("\\", "-").replace(" ", "_") + ".pdf"
+
+
+def gotowy_pdf(numer):
+    """Ścieżka gotowego wydruku dokumentu albo None. Nie rzuca."""
+    import time
+    numer = (numer or "").strip()
+    if not numer:
+        return None
+    try:
+        if time.monotonic() - _GOTOWE_PDF["kiedy"] > GOTOWE_PDF_WAZNOSC_S:
+            katalog = _katalog_pdf_domyslny()
+            _GOTOWE_PDF["nazwy"] = frozenset(n.lower() for n in os.listdir(katalog))
+            _GOTOWE_PDF["katalog"] = katalog
+            _GOTOWE_PDF["kiedy"] = time.monotonic()
+        nazwa = nazwa_pliku_pdf(numer)
+        if nazwa.lower() in _GOTOWE_PDF["nazwy"]:
+            return _GOTOWE_PDF["katalog"] / nazwa
+    except Exception:
+        pass            # brak dostępu do udziału nie może wywalić rysowania listy
+    return None
 
 
 def zapisz_wyslanie(numer_zd, adresat, nadawca, zalacznikow, termin=None, tryb="",
@@ -736,6 +771,8 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
                  dozwolone_ext=None, blad_serwera=None, agent_portalu=None,
                  szukaj_hurtem=None, po_wyslaniu=None, dokument_id=None):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         # Okno MUSI trzymać się nad arkuszem. Bez transient() to zwykły
         # Toplevel: przy budowaniu listy plików (update_idletasks w pętli
         # panelu) chowało się pod RM_BAZA i wyglądało, jakby zniknęło —

@@ -373,6 +373,8 @@ class ZlozeniaWindow(tk.Toplevel, Kreciolek):
 
     def __init__(self, parent, project_id, project_name):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.project_id = project_id
         self.project_name = project_name or ""
         self.wiersze = []

@@ -20,7 +20,66 @@ import queue
 import threading
 import tkinter as tk
 
-from subiekt_stany import wysrodkuj
+from subiekt_stany import wysrodkuj, wysrodkuj_na_monitorze
+
+# ── odczyty panelu dla okien ────────────────────────────────────────────────
+# Panel liczy kafle z tych samych odczytów, od których zaczynają się okna
+# (magazyn, zapotrzebowanie, dokumenty). Most obsługuje żądania PO KOLEI,
+# więc okno otwarte kafelkiem stawało w kolejce ZA odczytami panelu i potem
+# pytało o to samo drugi raz — 2–4 s czekania (log mostu, 01.10.2026).
+# Teraz okno bierze wynik panelu (także jeszcze liczony). Jednorazowo:
+# „Odśwież" i odczyty po zapisie idą do mostu jak dawniej.
+from concurrent.futures import Future as _Future
+import copy as _copy
+import time as _time
+
+_ODCZYTY = {}                   # klucz -> (monotonic startu, Future)
+_ODCZYTY_LOCK = threading.Lock()
+WAZNOSC_ODCZYTU_S = 60
+
+
+def _wspolny_odczyt(klucz, funkcja):
+    """Wykonuje odczyt panelu i udostępnia wynik oknu pod `klucz`."""
+    fut = _Future()
+    with _ODCZYTY_LOCK:
+        _ODCZYTY[klucz] = (_time.monotonic(), fut)
+    try:
+        wynik = funkcja()
+    except BaseException as e:
+        fut.set_exception(e)
+        raise
+    fut.set_result(wynik)
+    return wynik
+
+
+#: Który odczyt panelu przyda się oknu otwieranemu danym kaflem.
+ODCZYT_DLA_OKNA = {
+    "open_subiekt_magazyn": "magazyn",
+    "open_subiekt_zamowienia": "zapotrzebowanie",
+    "open_subiekt_dokumenty": "dokumenty",
+}
+
+
+def _zostaw_tylko(klucz):
+    """Przy zamknięciu panelu: reszta odczytów przepada — okno otwarte
+    później z menu arkusza (np. po wystawieniu ZD) musi czytać świeżo."""
+    with _ODCZYTY_LOCK:
+        for k in [k for k in _ODCZYTY if k != klucz]:
+            del _ODCZYTY[k]
+
+
+def odczyt_z_panelu(klucz):
+    """Wynik odczytu panelu (czeka, gdy jeszcze trwa) albo None, gdy go nie
+    ma, jest starszy niż WAZNOSC_ODCZYTU_S albo się nie udał. Kopia — okno
+    może ją przerabiać, panel w tym czasie jeszcze liczy z oryginału."""
+    with _ODCZYTY_LOCK:
+        wpis = _ODCZYTY.pop(klucz, None)
+    if not wpis or _time.monotonic() - wpis[0] > WAZNOSC_ODCZYTU_S:
+        return None
+    try:
+        return _copy.deepcopy(wpis[1].result())
+    except Exception:
+        return None             # okno spyta most samo
 
 # ── paleta ──────────────────────────────────────────────────────────────────
 TLO = "#f4f6f8"
@@ -28,6 +87,9 @@ TLO_SEKCJI = "#ffffff"
 OBRAMOWANIE = "#dfe4ea"
 TEKST = "#2c3e50"
 TEKST_SZARY = "#7f8c8d"
+
+#: Szerokość licznika na kaflu w znakach — patrz PanelSubiekt.__init__.
+SZEROKOSC_LICZNIKA = 46
 
 #: Kolory kafla wg rodzaju operacji. Odczyt na chłodno, zapis cieplej,
 #: nieodwracalny wyraźnie — user ma to widzieć, nie czytać.
@@ -200,8 +262,15 @@ def _etykieta_aktualizacji():
 class PanelSubiekt(tk.Toplevel):
     """Okno z kaflami. Liczniki dociągane w tle, po otwarciu."""
 
+    def destroy(self):
+        self._przerwane = True      # zamknięcie krzyżykiem też: nie puszczaj nowych odczytów
+        _zostaw_tylko(getattr(self, "_odczyt_dla_okna", None))
+        super().destroy()
+
     def __init__(self, arkusz):
         super().__init__(arkusz)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.arkusz = arkusz
         self.title("Subiekt — narzędzia")
         self.configure(bg=TLO)
@@ -218,8 +287,15 @@ class PanelSubiekt(tk.Toplevel):
         self._sekcje()
         self._stopka()
 
+        # Miejsce na liczniki zarezerwowane OD RAZU (01.10.2026). Liczniki
+        # przychodzą po kolei i każdy dłuższy napis („495 pozycji do
+        # zamówienia · 120 już zamówionych") poszerzał kafle i okno na
+        # oczach usera. Szerokość = najdłuższy typowy licznik.
+        for k in self.kafle.values():
+            k.lbl_licznik.config(text="…", width=SZEROKOSC_LICZNIKA)
+
         self.update_idletasks()
-        wysrodkuj(self, arkusz)
+        wysrodkuj_na_monitorze(self, arkusz)
         # Okno nie moze zejsc ponizej tego, czego zada uklad kafli — inaczej
         # ostatni kafel w rzedzie wychodzi poza kadr i widac go w polowie.
         try:
@@ -520,6 +596,7 @@ class PanelSubiekt(tk.Toplevel):
             # w kolejce mostu i wygląda, jakby się nie ładowało
             # (zgłoszone 06.09.2026).
             self._przerwane = True
+            self._odczyt_dla_okna = ODCZYT_DLA_OKNA.get(nazwa_metody)
             self.destroy()
             self.arkusz.after(60, metoda)
         return uruchom
@@ -722,7 +799,7 @@ class PanelSubiekt(tk.Toplevel):
 
         def licz_magazyn():
             import subiekt_magazyn_gui as mg
-            poz = mg.pobierz_magazyn(tylko_niezerowe=True)
+            poz = _wspolny_odczyt("magazyn", lambda: mg.pobierz_magazyn(tylko_niezerowe=True))
             ponizej = sum(1 for p in poz
                           if float(p.get("StanMinimalny") or 0) > 0
                           and float(p.get("Dostepne") or 0) < float(p.get("StanMinimalny") or 0))
@@ -734,14 +811,15 @@ class PanelSubiekt(tk.Toplevel):
             # Rozpakowanie z gwiazdką: 29.09.2026 doszedł czwarty element
             # (`ostrzezenia`) i kafel „Zamówienia do dostawców" od tego dnia
             # CICHO nie pokazywał liczby — ValueError wpadał w `except`.
-            pozycje, _podmioty, zamowione, *_ = sz.pobierz_zapotrzebowanie()
+            pozycje, _podmioty, zamowione, *_ = _wspolny_odczyt(
+                "zapotrzebowanie", sz.pobierz_zapotrzebowanie)
             return "zapotrzebowanie", (f"{len(pozycje)} pozycji do zamówienia"
                                        + (f" · {len(zamowione)} już zamówionych"
                                           if zamowione else ""))
 
         def licz_dokumenty():
             import subiekt_dokumenty_gui as dg
-            dokumenty = dg.pobierz_dokumenty()
+            dokumenty = _wspolny_odczyt("dokumenty", dg.pobierz_dokumenty)
             zd_otwarte = sum(1 for d in dokumenty
                              if d.get("rodzaj") == "ZD"
                              and "realizacj" in (d.get("status") or "").lower())

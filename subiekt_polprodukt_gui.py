@@ -115,6 +115,8 @@ class InfoPolproduktWindow(tk.Toplevel):
 
     def __init__(self, parent, symbol, nazwa, gdzie, otworz_rysunek=None):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self._otworz_rysunek = otworz_rysunek
         self._rysunek = gdzie[0]["numer_rysunku"] if gdzie else None
         self._kartoteka = {}
@@ -292,6 +294,8 @@ class PolproduktWindow(tk.Toplevel):
     def __init__(self, parent, numer, opis="", po_zmianie=None,
                  projekt_info=None):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.numer = (numer or "").strip()
         # Wolane po KAZDEJ zmianie relacji — arkusz ma odswiezyc znacznik 🛒
         # w kolumnie Δ. Bez tego znacznik pojawia sie dopiero po recznym

@@ -53,6 +53,8 @@ class OknoDialog(tk.Toplevel):
 
     def __init__(self, parent, tytul, naglowek, ikona="ℹ", kolor="#2980b9"):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.wynik = False
         self.title(tytul)
         self.transient(parent)
@@ -176,6 +178,8 @@ class ScalanieWindow(tk.Toplevel):
 
     def __init__(self, parent, project_id, project_name=None):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.project_id = project_id
         self.pozycje = []
         self._zaznaczone = set()      # klucze zaznaczonych pozycji

@@ -233,6 +233,8 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
 
     def __init__(self, parent):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.dokumenty = []
         self.widoczne = []
         self.biezacy = None
@@ -289,7 +291,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         f.pack(side=tk.TOP, fill=tk.X)
         tk.Label(f, text="Szukaj:", bg="#ecf0f1", font=("Arial", 9)).pack(side=tk.LEFT, padx=(12, 3), pady=6)
         self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *_: self._refill())
+        self.search_var.trace_add("write", lambda *_: self._refill_po_wpisaniu())
         tk.Entry(f, textvariable=self.search_var, width=26, font=("Arial", 9)).pack(side=tk.LEFT, pady=6)
         tk.Label(f, text="(numer rysunku, nazwa, numer dokumentu)", bg="#ecf0f1",
                  fg="#7f8c8d", font=("Arial", 8)).pack(side=tk.LEFT, padx=(4, 0))
@@ -448,7 +450,10 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
 
     def _load_worker(self):
         try:
-            dok = pobierz_dokumenty()
+            import subiekt_panel
+            dok = subiekt_panel.odczyt_z_panelu("dokumenty")
+            if dok is None:
+                dok = pobierz_dokumenty()
             self.after(0, lambda: self._load_done(dok, None))
         except Exception as e:
             err = str(e)
@@ -506,6 +511,18 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         self.rodzaj_var.set(RODZ_WSZYSTKIE)
         self.projekt_var.set(PROJ_WSZYSTKIE)
         self.only_otwarte_var.set(0)
+        self._refill()
+
+    def _refill_po_wpisaniu(self):
+        """Lista odświeża się po krótkiej przerwie w pisaniu, nie po każdym
+        znaku — przy kilkuset wierszach każde przerysowanie jest odczuwalne."""
+        zadanie = getattr(self, "_zadanie_szukaj", None)
+        if zadanie:
+            self.after_cancel(zadanie)
+        self._zadanie_szukaj = self.after(250, self._szukaj_teraz)
+
+    def _szukaj_teraz(self):
+        self._zadanie_szukaj = None
         self._refill()
 
     def _refill(self):
@@ -676,12 +693,8 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         (ukośniki i spacje zamienione), więc nie trzeba niczego zapamiętywać
         — wystarczy sprawdzić, czy plik jest w katalogu wydruków.
         """
-        numer = (dok.get("numer") or "").strip()
-        if not numer:
-            return None
-        nazwa = numer.replace("/", "-").replace("\\", "-").replace(" ", "_") + ".pdf"
-        sciezka = self._katalog_pdf() / nazwa
-        return sciezka if sciezka.exists() else None
+        import subiekt_wyslij_zd
+        return subiekt_wyslij_zd.gotowy_pdf(dok.get("numer"))
 
     def _katalog_pdf(self):
         """Wspólny katalog wydruków na dysku Y:, nie lokalny %TEMP%."""

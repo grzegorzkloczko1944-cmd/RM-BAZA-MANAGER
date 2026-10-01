@@ -150,6 +150,8 @@ class OknoDostawa(tk.Toplevel, Kreciolek):
 
     def __init__(self, parent):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.parent_app = parent
         self.title("Przyjęcie dostawy — DOSTAWA → PZ w Subiekcie")
         self.geometry("1450x860")

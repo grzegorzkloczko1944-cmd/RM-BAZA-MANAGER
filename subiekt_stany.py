@@ -252,6 +252,140 @@ def _granice_pulpitu(okno):
     return 0, 0, okno.winfo_screenwidth(), okno.winfo_screenheight()
 
 
+def _prostokat_okna(okno):
+    """Rzeczywiste położenie ramki okna z WinAPI — Tk potrafi tu zgłaszać
+    współrzędne, których okno nie ma."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        r = wintypes.RECT()
+        h = ctypes.windll.user32.GetParent(okno.winfo_id())
+        ctypes.windll.user32.GetWindowRect(h, ctypes.byref(r))
+        return (r.left, r.top, r.right, r.bottom)
+    except Exception:
+        return (okno.winfo_rootx(), okno.winfo_rooty(),
+                okno.winfo_width(), okno.winfo_height())
+
+
+def ukryj_do_zbudowania(okno, min_ms=400, stabilnie_ms=250, max_ms=2000):
+    """Okno pokazane dopiero ZBUDOWANE i NIERUCHOME — wołać zaraz po
+    `super().__init__()`.
+
+    Bez tego user widział, jak paski, kafle i tabela dorysowują się po
+    kolei, a zmaksymalizowane okno najpierw stawało w zwykłym rozmiarze
+    (zgłoszone 01.10.2026). Zmierzone dziennikiem WinAPI w prawdziwej
+    RM_BAZA (nie na oko), stąd te kroki:
+
+    * `withdraw()` + przezroczystość 0 na czas budowy. Samo `withdraw()`
+      nie wystarcza: `state("zoomed")` wołane w __init__ okna ZNOWU je
+      mapuje i cała budowa była widoczna.
+    * Po pokazaniu okno zwykłe dostaje jeszcze raz pozycję z `wysrodkuj*`
+      (`_rm_pozycja`): Tk poprawia położenie dopiero po pierwszym
+      zmapowaniu (uczy się ramki) i panel SUBIEKT skakał o kilkadziesiąt px.
+    * Okno zmaksymalizowane Windows animuje, a Tk ~0,3 s po pokazaniu
+      potrafi je na chwilę przywrócić do zwykłego rozmiaru i zaraz znowu
+      zmaksymalizować (losowo, co 2–3 otwarcie). Dlatego odsłaniamy dopiero,
+      gdy ramka stoi nieruchomo `stabilnie_ms`, nie wcześniej niż `min_ms`
+      i nie później niż `max_ms` po pokazaniu.
+    * Pokazanie TIMEREM, nie after_idle: idle wykonuje się też
+      w update_idletasks() w trakcie budowy (np. przed wysrodkuj).
+    """
+    try:
+        okno.withdraw()
+    except tk.TclError:
+        return
+    try:
+        okno.attributes("-alpha", 0.0)
+        przezroczyste = True
+    except tk.TclError:
+        przezroczyste = False           # środowisko bez przezroczystości
+
+    def odslon():
+        try:
+            okno.attributes("-alpha", 1.0)
+        except tk.TclError:
+            pass                        # zamknięte, zanim się pokazało
+
+    def pokaz():
+        try:
+            zoom = okno.state() == "zoomed"
+            if zoom:
+                okno.state("zoomed")    # mapuje, zachowując maksymalizację
+            else:
+                okno.deiconify()
+            poz = getattr(okno, "_rm_pozycja", None)
+            if poz and not zoom:
+                okno.after(1, lambda: okno.geometry(f"+{poz[0]}+{poz[1]}"))
+        except tk.TclError:
+            return
+        if not przezroczyste:
+            return
+
+        import time
+        start = time.monotonic()
+        stan = {"rect": None, "od": start}
+
+        def czekaj():
+            try:
+                teraz = time.monotonic()
+                rect = _prostokat_okna(okno)
+                if rect != stan["rect"]:
+                    stan["rect"], stan["od"] = rect, teraz
+                minelo = (teraz - start) * 1000
+                if ((teraz - stan["od"]) * 1000 >= stabilnie_ms and minelo >= min_ms)                         or minelo >= max_ms:
+                    odslon()
+                else:
+                    okno.after(30, czekaj)
+            except tk.TclError:
+                pass                    # zamknięte, zanim się pokazało
+
+        okno.after(30, czekaj)
+
+    okno.after(1, pokaz)
+
+
+def _obszar_roboczy_monitora(okno):
+    """(lewo, góra, prawo, dół) obszaru roboczego monitora, na którym leży
+    `okno` (bez paska zadań) — WinAPI; None poza Windows."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+        h = ctypes.windll.user32.GetParent(okno.winfo_id()) or okno.winfo_id()
+        mon = ctypes.windll.user32.MonitorFromWindow(h, 2)     # MONITOR_DEFAULTTONEAREST
+        mi = MONITORINFO(); mi.cbSize = ctypes.sizeof(MONITORINFO)
+        if not ctypes.windll.user32.GetMonitorInfoW(mon, ctypes.byref(mi)):
+            return None
+        r = mi.rcWork
+        return (r.left, r.top, r.right, r.bottom)
+    except Exception:
+        return None
+
+
+def wysrodkuj_na_monitorze(okno, rodzic):
+    """Okno na środku MONITORA, na którym jest rodzic — nie na środku
+    rodzica. Dla panelu SUBIEKT: user ma RM_BAZA zmniejszoną i przesuniętą,
+    a panel szerszy niż ona — środkowanie na rodzicu stawiało go „z boku"
+    (01.10.2026). Dialogi wewnątrz okien dalej używają `wysrodkuj`."""
+    try:
+        okno.update_idletasks()
+        obszar = _obszar_roboczy_monitora(rodzic)
+        if not obszar:
+            return wysrodkuj(okno, rodzic)
+        w = okno.winfo_width() if okno.winfo_width() > 1 else okno.winfo_reqwidth()
+        h = okno.winfo_height() if okno.winfo_height() > 1 else okno.winfo_reqheight()
+        lewo, gora, prawo, dol = obszar
+        x = max(lewo, lewo + (prawo - lewo - w) // 2)
+        y = max(gora, gora + (dol - gora - h) // 2)
+        okno._rm_pozycja = (x, y)
+        okno.geometry(f"{w}x{h}+{x}+{y}" if w > 1 and h > 1 else f"+{x}+{y}")
+    except Exception:
+        pass          # pozycjonowanie nie może wywalić okna
+
+
 def wysrodkuj(okno, rodzic, szerokosc=None, wysokosc=None):
     """Ustawia okno na środku okna rodzica (nie ekranu).
 
@@ -286,6 +420,7 @@ def wysrodkuj(okno, rodzic, szerokosc=None, wysokosc=None):
         lewo, gora, prawo, dol = _granice_pulpitu(okno)
         x = max(lewo, min(x, prawo - w))
         y = max(gora, min(y, dol - h))
+        okno._rm_pozycja = (x, y)       # patrz ukryj_do_zbudowania
         if w > 1 and h > 1:
             okno.geometry(f"{w}x{h}+{x}+{y}")
         else:
@@ -583,6 +718,7 @@ class SubiektStanyWindow(tk.Toplevel, Kreciolek):
 
     def __init__(self, parent, project_id, only_drawings=None):
         super().__init__(parent)
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.project_id = project_id
         self.only_drawings = only_drawings
         self.rows = []

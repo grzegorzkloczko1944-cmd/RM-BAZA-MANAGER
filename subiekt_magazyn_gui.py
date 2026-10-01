@@ -238,6 +238,8 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
 
     def __init__(self, parent):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.pozycje = []
         self.widoczne = []
         self.kontrahenci = None         # lista z Subiekta, ładowana przy pierwszym wyborze
@@ -422,7 +424,10 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
 
     def _wczytaj_worker(self):
         try:
-            poz = pobierz_magazyn(tylko_niezerowe=True)
+            import subiekt_panel
+            poz = subiekt_panel.odczyt_z_panelu("magazyn")
+            if poz is None:
+                poz = pobierz_magazyn(tylko_niezerowe=True)
         except Exception as e:
             err = str(e)
             self.after(0, lambda: self._wczytaj_done(None, err))

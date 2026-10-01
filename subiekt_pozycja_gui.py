@@ -212,6 +212,8 @@ def _pierwsze(*wartosci):
 class KartaPozycji(tk.Toplevel, Kreciolek):
     def __init__(self, rodzic, nr, project_id=None, project_name=None):
         super().__init__(rodzic)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.project_id = project_id
         self.project_name = project_name
         if not self.project_name and project_id is not None:

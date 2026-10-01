@@ -61,6 +61,8 @@ class DostawcyWindow(tk.Toplevel, Kreciolek):
 
     def __init__(self, parent):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.wiersze = []
         self.widoczne = []
         self.kontrahenci = []

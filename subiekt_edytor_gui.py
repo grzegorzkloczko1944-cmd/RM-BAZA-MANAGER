@@ -301,6 +301,8 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
     def __init__(self, parent, symbol=None, nowa=None, do_arkusza=None,
                  po_zamknieciu=None):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.title("Edytor kartotek — Subiekt nexo PRO")
         self.configure(bg=TLO)
         # 1900, nie 1500: sekcja 4 ma dzis SIEDEM kolumn (doszly "Opis"

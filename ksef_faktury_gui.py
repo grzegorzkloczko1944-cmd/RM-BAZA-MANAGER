@@ -575,6 +575,8 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
 
     def __init__(self, parent, katalog, ksef_cfg=None):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.parent_app = parent
         self.arch = ArchiwumKsef(katalog)
         self.ksef_cfg = ksef_cfg or {}

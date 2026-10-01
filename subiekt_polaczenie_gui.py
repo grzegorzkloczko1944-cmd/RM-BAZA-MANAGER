@@ -36,6 +36,8 @@ class OknoPolaczenia(tk.Toplevel, Kreciolek):
 
     def __init__(self, rodzic):
         super().__init__(rodzic)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.title("Połączenie z Subiektem")
         self.configure(bg=TLO)
         self.transient(rodzic)

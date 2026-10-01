@@ -69,6 +69,8 @@ class WyborKartotekiWindow(tk.Toplevel):
 
     def __init__(self, parent, on_wybor, fraza=""):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.title("🔍 Wstaw z Subiekta")
         self.on_wybor = on_wybor
         self.katalog = []

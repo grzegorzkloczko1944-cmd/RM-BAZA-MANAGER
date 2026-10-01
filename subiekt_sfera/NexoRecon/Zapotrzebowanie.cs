@@ -34,6 +34,8 @@ internal static class Zapotrzebowanie
     public static int Uruchom(Uchwyt sfera, string? outPath)
     {
         var zam = sfera.ZamowieniaOdKlientow();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var czasy = new Dictionary<string, long>();
 
         // Lista podmiotów leci razem z zapotrzebowaniem, bo okno i tak jej
         // potrzebuje (wybór dostawcy z listy), a to oszczędza drugie
@@ -59,6 +61,7 @@ internal static class Zapotrzebowanie
         //
         // Klucz to SYMBOL, nie Id: Poz i tak identyfikuje kartoteke symbolem,
         // a symbol jest w Subiekcie unikalny.
+        czasy["podmioty"] = sw.ElapsedMilliseconds; sw.Restart();
         var stanySlownik = new Dictionary<string, decimal[]>(StringComparer.OrdinalIgnoreCase);
         try
         {
@@ -109,7 +112,10 @@ internal static class Zapotrzebowanie
         // NullReferenceException, gdy na otwartym ZK lezy pozycja jednorazowa
         // (bez kartoteki). Osłona mieszka w jednym miejscu, bo gdy 29.09 siedziala
         // tutaj, tworzenie ZD (Zd.cs) nadal padalo tym samym bledem.
-        var wynikZap = ZapotrzebowanieBezpieczne.Policz(sfera);
+        czasy["stany"] = sw.ElapsedMilliseconds;
+        var wynikZap = ZapotrzebowanieBezpieczne.Policz(sfera, tylkoOdczyt: true);
+        foreach (var (k, v) in wynikZap.Czasy) czasy[k] = v;
+        sw.Restart();
         var potrzeby = wynikZap.Potrzeby;
         var bledy = wynikZap.Bledy;
 
@@ -119,7 +125,10 @@ internal static class Zapotrzebowanie
             // Numery ZK stojące za tą potrzebą — po nich RM_BAZA rozpozna projekt
             // (Uwagi na ZK to numer projektu, patrz SUBIEKT_PROJEKTY_WYDANIA.md).
             var zrodla = new List<Zrodlo>();
-            try
+            var o = p.Opis;     // tryb wlasny: teksty gotowe z jednego zapytania
+            if (o != null)
+                foreach (var z in o.Zrodla) zrodla.Add(new Zrodlo(z.Numer, z.Tytul, z.Uwagi, z.Ilosc));
+            else try
             {
                 foreach (var poz in p.PozycjeZK ?? Enumerable.Empty<InsERT.Moria.ModelDanych.PozycjaDokumentu>())
                 {
@@ -147,7 +156,7 @@ internal static class Zapotrzebowanie
             // domawiamy; StanOptymalny = poziom, do którego uzupełniamy
             // (użytkownik zapisuje to jako „10/15"). Jedno i drugie policzone
             // wyżej, hurtem — patrz stanySlownik.
-            var symbol = (Bezp(() => p.Asortyment?.Symbol) ?? "").Trim();
+            var symbol = o?.Symbol ?? (Bezp(() => p.Asortyment?.Symbol) ?? "").Trim();
             decimal dostepne = 0, zadysponowane = 0, zarezerwowane = 0;
             decimal stanMin = 0, stanOpt = 0;
             if (symbol.Length > 0 && stanySlownik.TryGetValue(symbol, out var w))
@@ -161,7 +170,7 @@ internal static class Zapotrzebowanie
 
             pozycje.Add(new Poz(
                 symbol,
-                Bezp(() => p.Asortyment?.Nazwa) ?? "",
+                o?.Nazwa ?? Bezp(() => p.Asortyment?.Nazwa) ?? "",
                 p.Ilosc,
                 dostepne,
                 zadysponowane,
@@ -171,14 +180,15 @@ internal static class Zapotrzebowanie
                 // JednostkaMiary tu jest typu JednostkaMiaryAsortymentu, a symbol
                 // („szt") siedzi dopiero w jej zagnieżdżonej JednostkaMiary —
                 // ta sama ścieżka co w Stan.cs (p.JednostkaMiaryAs.JednostkaMiary.Symbol).
-                Bezp(() => p.JednostkaMiary?.JednostkaMiary?.Symbol) ?? "",
-                Bezp(() => p.Dostawca?.NazwaSkrocona),
+                o?.Jm ?? Bezp(() => p.JednostkaMiary?.JednostkaMiary?.Symbol) ?? "",
+                o != null ? o.Dostawca : Bezp(() => p.Dostawca?.NazwaSkrocona),
                 zrodla));
         }
 
         // Pozycje JUŻ ZAMÓWIONE — znikają z zapotrzebowania (bo są pokryte),
         // więc bez tego user nie widzi, co się z nimi stało. Bierzemy ZD
         // „do realizacji": zamówione u dostawcy, jeszcze nieprzyjęte.
+        czasy["pozycje"] = sw.ElapsedMilliseconds; sw.Restart();
         var zamowione = new List<PozZd>();
         try
         {
@@ -250,7 +260,8 @@ internal static class Zapotrzebowanie
         }
         catch { /* brak dostępu do ZD nie może wywalić całego odczytu */ }
 
-        var json = JsonSerializer.Serialize(new { pozycje, podmioty, zamowione, bledy, tryb = wynikZap.Tryb },
+        czasy["zd"] = sw.ElapsedMilliseconds;
+        var json = JsonSerializer.Serialize(new { pozycje, podmioty, zamowione, bledy, tryb = wynikZap.Tryb, czasy_ms = czasy },
             new JsonSerializerOptions
             {
                 WriteIndented = false,

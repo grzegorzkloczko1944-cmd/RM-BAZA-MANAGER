@@ -36,6 +36,8 @@ class DopasujWierszWindow(tk.Toplevel):
 
     def __init__(self, parent, con, item_id, on_zapisano=None):
         super().__init__(parent)
+        from subiekt_stany import ukryj_do_zbudowania
+        ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
         self.title("Dopasuj kartotekę Subiekta")
         self.con = con
         self.item_id = item_id
