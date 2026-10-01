@@ -221,10 +221,17 @@ pozycje występujące tylko w 1 projekcie → `_rzadkie\`. Skrypty wzorcowe: poz
 * **iProperties:** Part Number = **KOD produktu producenta** (np. `234046-C1`; kod bazowy z tabeli + indeks koloru),
   Title (NAZWA) = **samo oznaczenie** (np. `ERX.30 p-M6x40-C1`, BEZ opisu), Description (OPIS) = co to jest (ze strony producenta, np. „Rękojeść nastawna”).
 * **Typy bez kodu** (np. pozycje GN): Part Number = oznaczenie. **Sprawdź każdy TYP (rodzinę)** na elesa-ganter.pl, czy ma kolumnę „Kod”, zanim założysz PN.
-  Źródła kodów: tabele w PDF producenta (`elesa.com/siteassets/PDF/PDF_EN/<seria>.pdf`) i tabele na elesa-ganter.pl (wczytywane dynamicznie — czytaj w przeglądarce, nie WebFetchem). Cookies: odrzucaj.
+  Źródła kodów: tabele w PDF producenta (`elesa.com/siteassets/PDF/PDF_EN/<seria>.pdf`) i JSON-LD na stronie serii elesa-ganter.pl (patrz niżej). Tabele wariantów na stronie ładują się dynamicznie — WebFetch ich nie widzi; w przeglądarce odrzucaj cookies.
 * **Miniatura natywna** — biała tylko gdy w osobnej instancji aktywny schemat „Prezentacja”; kontrola z pliku: `IShellItemImageFactory` (tło piksela 255,255,255). Stary plik ze źródła bywa niebieski.
 * **IAM ze zgodnymi nazwami składowych co w `C:\Projekty`** — referencje wracają do projektu mimo `ReplaceReference`.
   Naprawa: zapisz IPT pod nowymi nazwami (`<SYMBOL>-N.ipt`) i **zbuduj IAM od nowa** (przenieś Transformation, Grounded=True), potem sprawdź Apprentice’em, że referencje są lokalne.
+**Zbieranie kandydatów (kolejność kroków, skrypty w `wzorce_kodu\`):**
+1. `elesa_szukaj.py` — przeszukanie B:, C:\Projekty, V: po nazwach plików (kody GN/ERX/EBP/CFM… i nazwy opisowe EN/DE; V: trwa ok. 3 min) → CSV trafień.
+2. `elesa_grupuj.py` — normalizacja do symbolu producenta, odrzucenie `_MIR`/workspace/Festo, wyłączenie składowych IAM, wybór reprezentanta (IPT > IAM z kompletem składowych > STEP; źródło B: > C: > V:, największy plik), odjęcie tego, co już w bibliotece.
+3. `elesa_kopiuj.py` — kopia do `Elesa\<symbol>\` (IAM z wszystkimi składowymi), lista CSV (typ, co to, zastosowanie, format, wersja Inventora, źródło).
+4. `elesa_czestosc.py` — w ilu różnych projektach występuje symbol; **pozycje z 1 projektu → `_rzadkie\`** (kryterium „bardzo rzadko” ustalił użytkownik; próg można zaostrzyć).
+5. `elesa_porzadki.py` — składowe/duble/wątpliwe do podkatalogów pomocniczych; potem `elesa_batch.py` (tam też słownik OPIS w liczbie pojedynczej wg rodzin).
+STEP bez IPT konwertuj `konwertuj_stp.py` (osobna instancja Inventora).
 * Opisy rodzin „do uzupełnienia” — z nazw na stronie producenta; oznaczaj jako do weryfikacji.
 * **Seryjne przetwarzanie** (wzorzec `elesa_batch.py`): sekwencyjnie, po każdej pozycji log do pliku; do 3 prób na pozycję (start Inventora bywa przejściowo nieudany
   z błędem „Wykonanie serwera nie powiodło się”); IAM zawsze przez przebudowę; składowe IAM, duble biblioteki i wątpliwe nazwy wcześniej do `_skladowe\`, `_juz_w_bibliotece\`, `_do_decyzji\`
