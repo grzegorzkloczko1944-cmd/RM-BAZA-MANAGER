@@ -1,6 +1,6 @@
 # Memory Index
 
-Pamięć projektu rozbita na obszary (01.10.2026) — 172 wpisy w jednym płaskim
+Pamięć projektu rozbita na obszary (01.10.2026) — 173 wpisy w jednym płaskim
 spisie przestały się nadawać do szukania.
 
 **Ten plik ładuje się automatycznie przy starcie sesji** (dowiązanie
@@ -8,7 +8,7 @@ spisie przestały się nadawać do szukania.
 obszarów. Szczegółowe wpisy są w plikach `INDEKS_*.md` — otwórz ten, który
 dotyczy obszaru, w którym pracujesz.
 
-- **[Zasady pracy z agentem](INDEKS_zasady.md)** (14) — jak mam pracować w tym repo, czego nie robić bez pytania
+- **[Zasady pracy z agentem](INDEKS_zasady.md)** (15) — jak mam pracować w tym repo, czego nie robić bez pytania
 - **[Subiekt — most i Sfera](INDEKS_subiekt_most.md)** (13) — most NexoRecon, SDK Sfery, tryby, zapotrzebowanie
 - **[Subiekt — okna, kartoteki, dokumenty](INDEKS_subiekt_okna.md)** (55) — okna RM_BAZA do Subiekta, kartoteki, ZK/ZD/PW/RW, oringi i łożyska
 - **[KSeF i faktury](INDEKS_ksef.md)** (8) — odbiór e-Faktur, archiwum, przyjęcia PZ, rozliczanie
