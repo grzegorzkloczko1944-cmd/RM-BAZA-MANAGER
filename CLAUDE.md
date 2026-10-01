@@ -1,5 +1,31 @@
 # RM-BAZA-MANAGER — instrukcje dla agenta
 
+## ⛔ KOMUNIKACJA: ODCZYT I ZAPIS W PAKIECIE, NIGDY POJEDYNCZO W PĘTLI
+
+Dotyczy **każdej** nowej i modyfikowanej funkcji, która rozmawia z czymś poza
+procesem: most Sfery (Subiekt), RM_SERWER (HTTP), SQLite na udziale, pliki na
+`\\W2019S\…`, NAS.
+
+- **Odczyt hurtem:** jedno zapytanie / jedno wywołanie zwraca wszystko, czego
+  potrzeba dla całej listy. Nie: pętla po wierszach, a w niej osobne
+  pytanie o każdy wiersz (N+1).
+- **Zapis hurtem:** jedna paczka (plan, lista pozycji, transakcja), nie seria
+  pojedynczych zapisów jeden po drugim.
+- **W moście (C#/EF):** projekcja kolumn w jednym `Select`, bez leniwego
+  doczytywania encji w pętli (`poz.Dokument`, `p.Asortyment` itp. po jednym
+  = osobne zapytanie SQL na każdy wiersz).
+- **W Pythonie:** to samo pytanie do serwera/mostu/dysku nie leci drugi raz
+  w tej samej operacji — pobierz raz, trzymaj w pamięci (cache na okno /
+  na operację); sprawdzanie plików — jeden odczyt katalogu, nie `exists()`
+  na wiersz.
+- Most obsługuje żądania **po kolei** — równoległe wątki tego nie naprawią.
+
+Dlaczego: 01.10.2026 okna Magazyn / Zamówienia ZD / Przegląd dokumentów
+traciły sekundy na właśnie takich pętlach (tryb własny zapotrzebowania
+1,5 s → 0,13 s po przejściu na jedno zapytanie; PDF-y `mkdir`+`exists` na
+każdy wiersz przy każdym znaku w „Szukaj"). Wcześniej to samo w Magazyn.cs
+(7 s → 0,3 s, 06.09). Szczegóły: `pamiec/project_zapotrzebowanie_szybkie.md`.
+
 ## ⚠️ NAJPIERW PRZECZYTAJ PAMIĘĆ PROJEKTU
 
 W katalogu [`pamiec/`](pamiec/) leżą notatki opisujące ten system: przyczyny
