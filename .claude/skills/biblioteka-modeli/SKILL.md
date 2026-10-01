@@ -1,6 +1,6 @@
 ---
 name: biblioteka-modeli
-description: Biblioteki modeli 3D elementów handlowych (O-ringi, łożyska w oprawach, wózki Hiwin i kolejne) — jeden model na kartotekę Subiekta, iProperties, miniatury, indeks MAG, zdjęcia i opisy w Subiekcie. Użyj, gdy użytkownik mówi o modelach 3D do Subiekta/MAG, o nowej partii O-ringów, łożysk, wózków lub o znajdowaniu i kopiowaniu modeli z B:, V:, C:\Projekty.
+description: Biblioteki modeli 3D elementów handlowych (O-ringi, łożyska w oprawach, wózki Hiwin, Elesa-Ganter i kolejne) — jeden model na kartotekę Subiekta, iProperties, miniatury, indeks MAG, zdjęcia i opisy w Subiekcie. Użyj, gdy użytkownik mówi o modelach 3D do Subiekta/MAG, o nowej partii O-ringów, łożysk, wózków lub o znajdowaniu i kopiowaniu modeli z B:, V:, C:\Projekty.
 ---
 
 # Biblioteka modeli 3D
@@ -20,7 +20,8 @@ Użytkownik uruchomił ten skill, bo chce, żebyś **bez tłumaczenia** wiedzia�
 
 3. Trzymaj się zasad z README, szczególnie:
    * **suchy przebieg i liczby przed zapisem**; zapis do Subiekta, nadpisanie i kasowanie tylko na wyraźne polecenie w tej rozmowie,
-   * osobna instancja Inventora (nigdy sesja użytkownika), **sprawdź wersję 2013/2015 przed zapisem do bibliotek**,
+   * osobna instancja Inventora (nigdy sesja użytkownika), zapis w formacie Inventora 2015 jest dozwolony (nie pytaj; podaj wersję w raporcie),
+   * przy starcie nowej instancji Inventora wyskakuje okno VBA („Module7… kontynuować?”) — uruchom `wzorce_kodu\watchdog_vba.py` (z PID-ami sesji użytkownika jako chronionymi), nie każ klikać „Tak”,
    * nigdy nie wpisuj haseł, nie commituj/pushuj bez zgody,
    * na końcu raport wg checklisty z README (co zrobione — liczby, czego nie sprawdzałeś, co wymaga decyzji)
      oraz aktualizacja pamięci projektu.

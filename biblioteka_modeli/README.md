@@ -34,7 +34,7 @@ Kolejne będą podobne — ten sam schemat: *znajdź/zrób model → nazwij pod 
 5. **Tylko istniejące na rynku warianty.** Nie zakładaj modeli „na zapas" (np. nierdzewnych wersji, których nikt nie sprzedaje). Wątpliwość → zapytaj albo pomiń.
 6. **Nie commituj i nie pushuj** bez wyraźnej zgody. Nie modyfikuj plików sync/hooków/.claude bez pytania.
 7. **Pisz po polsku, krótko, z liczbami.** Raport końcowy: co zrobione (liczby), co NIE zrobione, co wymaga decyzji. Nie twierdź „sprawdzone", jeśli nie sprawdzałeś.
-8. Format plików Inventora: patrz 4.2 (2013 vs 2015) — **sprawdź wersję przed zapisem do istniejących bibliotek**.
+8. Format plików Inventora: patrz 4.2 — **zapis w 2015 jest zawsze dozwolony** (decyzja użytkownika 01.10.2026); w raporcie podawaj wersję plików.
 
 ## 3. Nomenklatura (Subiekt ↔ Inventor)
 
@@ -81,14 +81,18 @@ zostają bez modelu; model robimy dla kanonicznej kartoteki.
   płaszczyzny robocze ukrywaj, kształty nakładające się rysuj w **osobnych szkicach**, trapezy łącz punktami (`EndSketchPoint`),
   linia osi obrotu jako **zwykła** (nie konstrukcyjna) jeśli zamyka profil.
 * Okna modalne (VBA, Bitdefender) blokują COM — jeśli zawiesza się, sprawdź czy nie ma okna u użytkownika.
+* **Okno „Microsoft Visual Basic for Applications — błąd ładowania ‘Module7’, kontynuować?”** pojawia się przy KAŻDYM starcie nowej instancji Inventora
+  (projekt VBA użytkownika). **Nie każ użytkownikowi klikać „Tak”** — przed seryjną pracą uruchom w tle `wzorce_kodu\watchdog_vba.py <PID_sesji_użytkownika> ...`
+  (PID-y istniejących Inventor.exe użytkownika, sprawdź `Get-Process Inventor` PRZED startem). Watchdog klika „Tak” tylko w oknach procesów Inventor.exe spoza listy chronionych.
+  Zatrzymaj go po zakończeniu pracy (TaskStop). Przyczyny (Module7) nie naprawiaj bez pytania.
 
 ### 4.2 Wersje Inventora (WAŻNE)
 
 * Biblioteka O-ringów `B:\Znormalizowane\Oringi` i większość starych modeli jest w formacie **2013**.
 * Komputer **Mongo (firma) ma tylko Inventora 2015** → zapis tu przeprowadza plik na **2015**, którego 2013 nie otworzy.
 * Sprawdź: `ApprenticeServerDocument.SoftwareVersionSaved.DisplayVersion` (co jest w pliku) i `app.SoftwareVersion.DisplayVersion` (czym zapisujesz).
-* Zasada: nowe modele do bibliotek — użytkownik świadomie zgodził się na 2015 dla 15 O-ringów (30.09.2026);
-  przy kolejnych **zapytaj**, czy 2015 jest OK. Łożyska w oprawach na G: są w 2015.
+* Zasada (decyzja użytkownika 01.10.2026): **pliki mogą być w formacie 2015** — dla wszystkich bibliotek (O-ringi, łożyska,
+  Elesa-Ganter i kolejne). **Nie pytaj** o zgodę na 2015; tylko podaj wersję w raporcie. Łożyska w oprawach na G: już są w 2015.
 * Szablon pliku (`GetTemplateFile`) pochodzi z **aktywnego projektu** użytkownika — sprawdź, że są w nim materiały gum
   (EPDM, `NBR-` z myślnikiem, VITON, SILIKON) i że szablon nie jest specyficzny dla jednego projektu.
 
@@ -207,3 +211,25 @@ Dla każdej partii przed raportem sprawdź i podaj liczby:
 | Wózki (kopia) | `G:\Mój dysk\SUBIEKT\Wózki\<TYP>\` |
 | Pamięć użytkownika | `C:\Users\mongo\.claude\projects\C--RMPAK-CLIENT-Repozytoria-NOW\memory\` (`project_lozyska_w_oprawach_g`, `project-oringi-modele-b-stan`, `project_pipeline_biblioteka_modeli`) |
 | Notatki nomenklatury MAG | `RM-BAZA-MANAGER\pamiec\` (`project_lozyska_w_oprawach`, `project_mag_wstaw_i_przypisz`, `project_oringi_*`) |
+
+## 9. Elesa-Ganter — `G:\Mój dysk\SUBIEKT\Elesa` (ustalone 01.10.2026)
+
+Kandydaci zebrani z B:, C:\Projekty, V: (nazwy plików: kody GN/ERX/EBP/CFM…), bez przeróbek projektowych (`_MIR` itp.);
+pozycje występujące tylko w 1 projekcie → `_rzadkie\`. Skrypty wzorcowe: pozycja IPT i pozycja IAM (patrz niżej).
+
+* **Układ:** `Elesa\<OZNACZENIE>\<SYMBOL>.ipt` (IAM: `<SYMBOL>.iam` + `<SYMBOL>-1.ipt`, `-2.ipt`…), `Elesa\miniatury\<OZNACZENIE>.png` (600×600, białe tło), stare pliki w `_stare\`.
+* **iProperties:** Part Number = **KOD produktu producenta** (np. `234046-C1`; kod bazowy z tabeli + indeks koloru),
+  Title (NAZWA) = **samo oznaczenie** (np. `ERX.30 p-M6x40-C1`, BEZ opisu), Description (OPIS) = co to jest (ze strony producenta, np. „Rękojeść nastawna”).
+* **Typy bez kodu** (np. pozycje GN): Part Number = oznaczenie. **Sprawdź każdy TYP (rodzinę)** na elesa-ganter.pl, czy ma kolumnę „Kod”, zanim założysz PN.
+  Źródła kodów: tabele w PDF producenta (`elesa.com/siteassets/PDF/PDF_EN/<seria>.pdf`) i tabele na elesa-ganter.pl (wczytywane dynamicznie — czytaj w przeglądarce, nie WebFetchem). Cookies: odrzucaj.
+* **Miniatura natywna** — biała tylko gdy w osobnej instancji aktywny schemat „Prezentacja”; kontrola z pliku: `IShellItemImageFactory` (tło piksela 255,255,255). Stary plik ze źródła bywa niebieski.
+* **IAM ze zgodnymi nazwami składowych co w `C:\Projekty`** — referencje wracają do projektu mimo `ReplaceReference`.
+  Naprawa: zapisz IPT pod nowymi nazwami (`<SYMBOL>-N.ipt`) i **zbuduj IAM od nowa** (przenieś Transformation, Grounded=True), potem sprawdź Apprentice’em, że referencje są lokalne.
+* Opisy rodzin „do uzupełnienia” — z nazw na stronie producenta; oznaczaj jako do weryfikacji.
+* **Seryjne przetwarzanie** (wzorzec `elesa_batch.py`): sekwencyjnie, po każdej pozycji log do pliku; do 3 prób na pozycję (start Inventora bywa przejściowo nieudany
+  z błędem „Wykonanie serwera nie powiodło się”); IAM zawsze przez przebudowę; składowe IAM, duble biblioteki i wątpliwe nazwy wcześniej do `_skladowe\`, `_juz_w_bibliotece\`, `_do_decyzji\`
+  (nigdy kasowanie). Wolne pozycje bez opisu rodziny — pomijaj i raportuj.
+* **Weryfikacja kodu/opisu na elesa-ganter.pl** (`elesa_typy_strona.py`): strona serii `/produkty/<dowolna-kategoria>/seria/<slug>` zawiera JSON-LD
+  (`brand` = ELESA → ma kod w `sku`; `brand` = GANTER → brak kodu, tylko Oznaczenie; `mpn` = seria; `description` po polsku). **Zawsze sprawdź, że `mpn` zgadza się z rodziną** (dopasowanie slugów jest rozmyte).
+  Mapę wszystkich serii (kategoria + typ po polsku) daje `static/sitemap/sitemap.B2BStorePOL.pl.catalog.products.xml.gz` (z robots.txt). Kody Elesa (np. ERX, CFM): tabele w PDF (`elesa.com/siteassets/PDF/PDF_EN|PDF_US/<seria>..pdf`, pary „kod-*” + oznaczenie).
+  Wyszukiwarka sklepu (`SearchDisplay`) nie działa bez JS — nie używaj.
