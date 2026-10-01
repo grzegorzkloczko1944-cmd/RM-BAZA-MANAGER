@@ -1,6 +1,6 @@
 {
  "protokol": 1,
- "zbudowano": "2026-09-30 16:38",
- "sha": "399045d",
- "uwaga": "tryb symbole odmawia zmiany symbolu na kartotece uzytej w dokumentach (PozycjeDokumentu > 0); zapotrzebowanie liczy wspolny modul ZapotrzebowanieBezpieczne - takze tryb zd. Kod mostu bez zmian wobec 248cb2d, przebudowa na zyczenie."
+ "zbudowano": "2026-10-01 12:48",
+ "sha": "481c460",
+ "uwaga": "zapotrzebowanie liczone jednym zapytaniem (szybkie wczytywanie okien); tryb symbole odmawia zmiany symbolu na kartotece uzytej w dokumentach; oslona ZapotrzebowanieBezpieczne takze dla trybu zd."
 }
