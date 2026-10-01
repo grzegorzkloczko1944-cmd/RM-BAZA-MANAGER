@@ -102,10 +102,29 @@ automatycznego ładowania przy starcie sesji.
 
 Zapisuj je w `pamiec/` (przez dowiązanie robi to się samo), jeden fakt na
 plik, z nagłówkiem YAML: `name`, `description`, `metadata.type`
-(`user` / `feedback` / `project` / `reference`). Po dodaniu pliku dopisz
-jedną linię do `pamiec/MEMORY.md` — to indeks ładowany do kontekstu.
+(`user` / `feedback` / `project` / `reference`).
 
-⚠️ `MEMORY.md` zapisuj **w UTF-8**. `Add-Content` z PowerShella potrafi
+**Po dodaniu pliku dopisz jedną linię do właściwego `pamiec/INDEKS_*.md`,
+NIE do `MEMORY.md`** (01.10.2026). Indeks był jedną płaską listą 172 wpisów
+i przestał się nadawać do szukania — rozbity na dziewięć obszarów:
+
+| plik | obszar |
+|---|---|
+| `INDEKS_zasady.md` | jak mam pracować — czego nie robić bez pytania |
+| `INDEKS_subiekt_most.md` | most NexoRecon, SDK Sfery, zapotrzebowanie |
+| `INDEKS_subiekt_okna.md` | okna do Subiekta, kartoteki, ZK/ZD/PW/RW |
+| `INDEKS_ksef.md` | e-Faktury, archiwum, przyjęcia PZ |
+| `INDEKS_mag.md` | makro MAG, indeks modeli 3D, biblioteki |
+| `INDEKS_serwer.md` | RM_SERWER, bazy, locki, udziały, NAS |
+| `INDEKS_build.md` | PyInstaller, bramka wersji, wystawianie |
+| `INDEKS_rm_manager.md` | projekty, kadry, optymalizator, RFQ |
+| `INDEKS_interfejs.md` | arkusz, tksheet, drzewka, wygląd okien |
+
+`MEMORY.md` zostaje **spisem obszarów** — to jego nazwy szuka mechanizm
+pamięci przy starcie sesji, więc nie wolno go skasować ani przemianować.
+Nowy obszar = nowy `INDEKS_*.md` plus jedna linia w `MEMORY.md`.
+
+⚠️ Pliki indeksu zapisuj **w UTF-8**. `Add-Content` z PowerShella potrafi
 zapisać w stronie kodowej systemu i rozwalić polskie znaki (zdarzyło się
 15.09.2026); używaj `Out-File -Encoding utf8` albo Pythona.
 

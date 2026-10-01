@@ -10,7 +10,7 @@ metadata:
 
 **ZROBIONE.** Plan z 05.09.2026 zrealizowany 06.09.2026, 36 commitów (`e3547ed..52d2296`), most jest w repo `RM-BAZA-MANAGER` na `main` (gałąź `most-server` trzyma w `most-dist/` kopię zapasową wystawionej binarki — 590 KB, żeby dało się odtworzyć, co dokładnie mieli userzy danego dnia).
 
-Pełny opis: [`SUBIEKT_ZMIANY_2026-09-06.md`](../../../c%3A/RMPAK_CLIENT/Repozytoria/RM-BAZA-MANAGER/SUBIEKT_ZMIANY_2026-09-06.md) w repo, architektura i decyzje: `SUBIEKT_STALY_MOST_PLAN.md`. Ten plik jest streszczeniem — szczegóły w repo.
+Pełny opis: [`SUBIEKT_ZMIANY_2026-09-06.md`](../SUBIEKT_ZMIANY_2026-09-06.md) w repo, architektura i decyzje: `SUBIEKT_STALY_MOST_PLAN.md`. Ten plik jest streszczeniem — szczegóły w repo.
 
 ## Wynik pomiarów (baza demo, 247 kartotek)
 
