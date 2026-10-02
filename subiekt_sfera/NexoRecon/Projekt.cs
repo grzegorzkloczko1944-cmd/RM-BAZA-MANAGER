@@ -1093,6 +1093,43 @@ internal static class Projekt
         return mapa;
     }
 
+    /// {symbol → (ilość, Id kartoteki)} — jak CzytajPozycjeZk, ale z Id.
+    ///
+    /// Id kartoteki to JEDYNA tożsamość, której nie rusza zmiana symbolu ani
+    /// nazwy w Subiekcie. RM_BAZA zapisuje je jako `subiekt_id` i dopasowuje
+    /// po nim w pierwszej kolejności — po symbolu tylko awaryjnie (02.10.2026,
+    /// po dublach w 2637 po ręcznej zmianie nazwy HGH15SO → HGH15SOK).
+    ///
+    /// Osobna funkcja, nie zmiana sygnatury CzytajPozycjeZk: tamtej używa też
+    /// zapis ZK (porównanie z BOM-em), któremu Id do niczego.
+    internal static Dictionary<string, (decimal Ilosc, int? Id)> CzytajPozycjeZkZId(
+        IEnumerable<PozycjaDokumentu> pozycje)
+    {
+        var mapa = new Dictionary<string, (decimal Ilosc, int? Id)>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var poz in pozycje)
+            {
+                string? s = null; int? id = null;
+                try
+                {
+                    var a = poz.AsortymentAktualny;
+                    s = a?.Symbol?.Trim();
+                    if (a != null) id = a.Id;
+                }
+                catch { }
+                if (string.IsNullOrEmpty(s)) continue;
+                decimal ile = 0m;
+                try { ile = poz.Ilosc; } catch { }
+                mapa[s!] = mapa.TryGetValue(s!, out var byla)
+                    ? (byla.Ilosc + ile, byla.Id ?? id)
+                    : (ile, id);
+            }
+        }
+        catch { }
+        return mapa;
+    }
+
     /// Ilość bez zbędnych zer — „4” zamiast „4,000”, ale „1,5” zostaje.
     /// Kropka dziesiętna niezależna od ustawień regionalnych, żeby raport
     /// czytało się tak samo na każdym stanowisku.

@@ -36,9 +36,11 @@ RM_BAZA, przy powtórzonym zapisie i po korekcie dokumentu w Subiekcie.
 from datetime import datetime
 
 
-def wydane_z_subiekta(numer_projektu, magazyn="MASTER", timeout=300):
-    """{SYMBOL: ilość} — suma RW tego projektu, prosto z Subiekta.
+def wydane_z_subiekta_z_id(numer_projektu, magazyn="MASTER", timeout=300):
+    """({SYMBOL: ilość}, {SYMBOL: Id kartoteki}) — suma RW projektu z Subiekta.
 
+    Id kartoteki to tożsamość, której nie rusza zmiana symbolu ani nazwy
+    (02.10.2026) — `zapisz` dopasowuje po nim w pierwszej kolejności.
     Tylko symbole, które Subiekt zna. Rzuca wyjątek, gdy most nie działa —
     wołający decyduje, czy to blokuje pracę.
     """
@@ -48,12 +50,19 @@ def wydane_z_subiekta(numer_projektu, magazyn="MASTER", timeout=300):
         "wydanie-stan",
         {"projekt": sam_numer(numer_projektu), "magazyn": magazyn},
         timeout=timeout, write=False) or {}
-    out = {}
+    out, idy = {}, {}
     for p in dane.get("pozycje") or ():
         symbol = (p.get("symbol") or "").strip()
         if symbol:
             out[symbol] = float(p.get("wydano") or 0)
-    return out
+            if p.get("id"):
+                idy[symbol] = int(p["id"])
+    return out, idy
+
+
+def wydane_z_subiekta(numer_projektu, magazyn="MASTER", timeout=300):
+    """{SYMBOL: ilość} — jak wyżej, bez Id. Zostaje dla starych wołających."""
+    return wydane_z_subiekta_z_id(numer_projektu, magazyn, timeout)[0]
 
 
 def _mapa_bom(con, project_id):
@@ -94,7 +103,20 @@ def _mapa_bom(con, project_id):
     return mapa
 
 
-def zapisz(con, project_id, wydane, log=None):
+def _mapa_bom_id(con, project_id):
+    """{subiekt_id: (item_id, delivered_qty)} — po Id kartoteki. Pusty słownik,
+    gdy baza nie ma jeszcze kolumny (projekt otwarty bez locka — migracja
+    nie poszła)."""
+    try:
+        return {int(sid): (item_id, None if dost is None else float(dost))
+                for item_id, sid, dost in con.execute(
+                    "SELECT id, subiekt_id, delivered_qty FROM items"
+                    " WHERE project_id = ? AND subiekt_id IS NOT NULL", (project_id,))}
+    except Exception:
+        return {}
+
+
+def zapisz(con, project_id, wydane, log=None, idy=None):
     """Wpisuje `wydane` do delivered_qty. Zwraca listę faktycznych zmian.
 
     Zwraca `[(item_id, symbol, przed, po)]` — tylko pozycje, w których
@@ -110,10 +132,16 @@ def zapisz(con, project_id, wydane, log=None):
         return []
     teraz = datetime.now().isoformat()
     mapa = _mapa_bom(con, project_id)          # JEDEN odczyt całego BOM-u
+    mapa_id = _mapa_bom_id(con, project_id)    # drugi, też jeden — po Id
+    idy = idy or {}
 
     zmiany, do_zapisu = [], []
     for symbol, ilosc in wydane.items():
-        trafienie = mapa.get((symbol or "").strip().upper())
+        # NAJPIERW PO ID KARTOTEKI — symbol mógł się zmienić w arkuszu albo
+        # w Subiekcie, Id nie (02.10.2026). Po symbolu tylko awaryjnie.
+        trafienie = mapa_id.get(idy.get(symbol)) if idy.get(symbol) else None
+        if not trafienie:
+            trafienie = mapa.get((symbol or "").strip().upper())
         if not trafienie:
             continue                    # pozycji nie ma w BOM-ie — nie ruszamy
         item_id, przed = trafienie
@@ -144,5 +172,5 @@ def odswiez(con, project_id, numer_projektu, magazyn="MASTER",
     Wyjątek mostu przepuszczamy w górę — wołający ma powiedzieć
     użytkownikowi, że dane są nieaktualne, zamiast po cichu pokazywać stare.
     """
-    return zapisz(con, project_id,
-                  wydane_z_subiekta(numer_projektu, magazyn, timeout), log)
+    wydane, idy = wydane_z_subiekta_z_id(numer_projektu, magazyn, timeout)
+    return zapisz(con, project_id, wydane, log, idy)

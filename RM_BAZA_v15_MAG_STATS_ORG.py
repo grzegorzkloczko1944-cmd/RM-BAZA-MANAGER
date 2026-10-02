@@ -7568,7 +7568,7 @@ class MainWindow(tk.Tk):
         if not self.current_project_id or not self.db_manager.project_con:
             return
         try:
-            from subiekt_projekt import pobierz_ilosci_zk
+            from subiekt_projekt import pobierz_ilosci_zk_z_id
             from subiekt_stany import _find_exe, CONFIG_PATH
         except Exception:
             return
@@ -7595,7 +7595,7 @@ class MainWindow(tk.Tk):
             # Krótki limit: to odświeżenie jest MIŁE, nie konieczne. Gdy most
             # akurat wstaje albo Subiekt nie odpowiada, lepiej zwolnić lock
             # z poprzednimi ilościami niż kazać czekać przy zamykaniu pracy.
-            ilosci, zk, blad = pobierz_ilosci_zk(nazwa, timeout=25)
+            ilosci, kart, zk, blad = pobierz_ilosci_zk_z_id(nazwa, timeout=25)
         except Exception as e:
             print(f"ℹ️  Ilości z Subiekta pominięte: {e}")
             return
@@ -7607,21 +7607,74 @@ class MainWindow(tk.Tk):
         con = self.db_manager.project_con
         zmienione = 0
         trafione = set()          # klucze z ZK, ktore maja juz wiersz
+        # ⚠️ DOPASOWANIE PO ID KARTOTEKI PRZED SYMBOLEM (02.10.2026).
+        #
+        # Symbol psuje każda zmiana nazwy — w arkuszu (HGH15SO → HGH15SOK
+        # w 2637 dało duble: stary wiersz trzymał stary symbol, ZK miało
+        # nowy, więc pozycja „nie miała wiersza" i dostała drugi) albo
+        # ręcznie w kartotece Subiekta (tego nie zatrzymuje nic). Id nie
+        # rusza ani jedno, ani drugie. Stąd trzy słowniki z `kart`:
+        #   sym_po_id  — Id → symbol AKTUALNY na ZK (do trafienia po Id)
+        #   id_po_sym  — symbol → Id (uzupełnienie wstecz wierszy bez Id)
+        #   pisownia   — symbol WIELKIMI → jak go pisze Subiekt
+        kart = kart or {}
+        sym_po_id = {k[0]: S for S, k in kart.items() if k and k[0]}
+        id_po_sym = {S: k[0] for S, k in kart.items() if k and k[0]}
+        pisownia = {S: (k[1] or S) for S, k in kart.items() if k}
+        ma_id = True
         try:
             wiersze = con.execute(
                 "SELECT id, COALESCE(NULLIF(TRIM(work_drawing_no), ''), "
                 "                    NULLIF(TRIM(norm_drawing_no), ''), "
                 "                    NULLIF(TRIM(src_drawing_no), '')), "
                 "       subiekt_symbol, order_qty, "
-                "       COALESCE(NULLIF(TRIM(work_name), ''), TRIM(src_name)) FROM items").fetchall()
+                "       COALESCE(NULLIF(TRIM(work_name), ''), TRIM(src_name)),"
+                "       subiekt_id, work_drawing_no FROM items").fetchall()
         except sqlite3.OperationalError:
-            return                    # baza sprzed migracji
+            # Baza sprzed migracji `subiekt_id` (otwarta bez locka, więc
+            # migracja nie poszła) — dopasowanie po samym symbolu, jak dotąd.
+            ma_id = False
+            try:
+                wiersze = [tuple(r) + (None, None) for r in con.execute(
+                    "SELECT id, COALESCE(NULLIF(TRIM(work_drawing_no), ''), "
+                    "                    NULLIF(TRIM(norm_drawing_no), ''), "
+                    "                    NULLIF(TRIM(src_drawing_no), '')), "
+                    "       subiekt_symbol, order_qty, "
+                    "       COALESCE(NULLIF(TRIM(work_name), ''), TRIM(src_name)) FROM items").fetchall()]
+            except sqlite3.OperationalError:
+                return                # baza sprzed migracji subiekt_symbol
         teraz = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         wyczyszczone = 0
-        for item_id, nr, sym_zasiew, stara, nazwa in wiersze:
+        uzupelnione_id = 0
+        przemianowane = []        # „stary → nowy" — symbol zmienił się w Subiekcie
+        for item_id, nr, sym_zasiew, stara, nazwa, sid, work_nr in wiersze:
             # Klucz: najpierw symbol, pod którym pozycja poszła do Subiekta,
             # a w razie jego braku numer rysunku (tak dopasowuje też most).
             klucz = (sym_zasiew or nr or "").strip().upper()
+
+            # TRAFIENIE PO ID: pozycja ma zapisane Id kartoteki i ta kartoteka
+            # stoi na ZK — niezależnie od tego, jak się dziś nazywa.
+            sym_na_zk = sym_po_id.get(sid) if sid else None
+            if sym_na_zk:
+                stary_sym = (sym_zasiew or "").strip().upper()
+                if stary_sym and sym_na_zk != stary_sym:
+                    # Symbol w Subiekcie się zmienił (ręcznie w kartotece
+                    # albo trybem `symbole`). Arkusz idzie ZA Subiektem:
+                    # `subiekt_symbol` zawsze; „Nr rysunku" tylko wtedy, gdy
+                    # był równy staremu symbolowi (pozycja z kartoteki, nie
+                    # z rysunku) — inaczej nadpisalibyśmy numer konstruktora.
+                    nowy = pisownia.get(sym_na_zk, sym_na_zk)
+                    if (work_nr or "").strip().upper() == stary_sym:
+                        con.execute(
+                            "UPDATE items SET subiekt_symbol = ?, work_drawing_no = ?"
+                            " WHERE id = ?", (nowy, nowy, item_id))
+                    else:
+                        con.execute(
+                            "UPDATE items SET subiekt_symbol = ? WHERE id = ?",
+                            (nowy, item_id))
+                    przemianowane.append("%s → %s" % (sym_zasiew, nowy))
+                    zmienione += 1
+                klucz = sym_na_zk
             # Pozycja BEZ numeru i BEZ zapisanego symbolu — znormalia z ZK
             # założonego, zanim zasiew zapisywał symbole (ZP196). Klucz z NAZWY,
             # tym samym generatorem, którym zasiew nadał symbol w Subiekcie;
@@ -7661,6 +7714,14 @@ class MainWindow(tk.Tk):
                 continue
 
             nowa = ilosci[klucz]
+            # Wiersz trafiony po SYMBOLU, a Id jeszcze nie ma — dopisujemy
+            # je teraz. To jest cała „migracja wstecz": projekt po projekcie,
+            # przy pierwszym odświeżeniu ilości pod lockiem, bez osobnego
+            # kroku. Od tej chwili ten wiersz trafia po Id.
+            if ma_id and sid is None and id_po_sym.get(klucz):
+                con.execute("UPDATE items SET subiekt_id = ? WHERE id = ?",
+                            (id_po_sym[klucz], item_id))
+                uzupelnione_id += 1
             try:
                 if (stara is not None and abs(float(stara) - nowa) < 1e-9
                         and not (symbol_z_nazwy_poz and not sym_zasiew)):
@@ -7676,13 +7737,30 @@ class MainWindow(tk.Tk):
                     "UPDATE items SET order_qty = ?, subiekt_zasiew_at = ? WHERE id = ?",
                     (nowa, teraz, item_id))
             zmienione += 1
-        dopisane = self._dopisz_pozycje_z_zk(con, ilosci, trafione, teraz)
-        if zmienione or wyczyszczone or dopisane:
+        dopisane = self._dopisz_pozycje_z_zk(con, ilosci, trafione, teraz,
+                                             kart if ma_id else None)
+        if zmienione or wyczyszczone or dopisane or uzupelnione_id:
             con.commit()
         print(f"✅ Ilości z {zk or 'ZK'}: zaktualizowano {zmienione} pozycji"
               + (f", wyczyszczono {wyczyszczone} (nie ma ich na ZK)"
                  if wyczyszczone else "")
-              + (f", DOPISANO {len(dopisane)} z ZK" if dopisane else ""))
+              + (f", DOPISANO {len(dopisane)} z ZK" if dopisane else "")
+              + (f", uzupełniono Id kartoteki w {uzupelnione_id}"
+                 if uzupelnione_id else ""))
+        if przemianowane:
+            # NIC PO CICHU: nazwy w arkuszu zmieniły się bez udziału usera,
+            # bo ktoś przemianował kartotekę w Subiekcie.
+            lista = (chr(10) + "    ").join(przemianowane[:15])
+            wiecej = (chr(10) + "    … i %d dalszych" % (len(przemianowane) - 15)
+                      if len(przemianowane) > 15 else "")
+            messagebox.showinfo(
+                "Symbole zmienione w Subiekcie",
+                ("Kartoteki tych pozycji mają w Subiekcie inny symbol niż"
+                 + chr(10) + "zapisany w arkuszu — arkusz poszedł za Subiektem (%d):"
+                 + chr(10) + chr(10) + "    %s%s" + chr(10) + chr(10)
+                 + "Rozpoznane po Id kartoteki, więc ilości i wydania"
+                 + chr(10) + "zostały przy właściwych wierszach.")
+                % (len(przemianowane), lista, wiecej))
         if dopisane:
             # NIC PO CICHU: wiersze pojawiaja sie same, wiec user musi
             # wiedziec, skad sie wziely i ze nie sa jego.
@@ -7697,7 +7775,7 @@ class MainWindow(tk.Tk):
                 "więc arkusz ich nie prowadzi."
                 % (zk or "ZK", len(dopisane), lista, wiecej))
 
-    def _dopisz_pozycje_z_zk(self, con, ilosci, trafione, teraz):
+    def _dopisz_pozycje_z_zk(self, con, ilosci, trafione, teraz, kart=None):
         """Pozycje z ZK bez wiersza w arkuszu → nowe wiersze. Lista opisow.
 
         ⚠️ TEGO MECHANIZMU NIE BYLO (14.09.2026). `_zapisz_ilosci_z_subiekta`
@@ -7730,16 +7808,31 @@ class MainWindow(tk.Tk):
         opisy = []
         for symbol, ile in sorted(brakujace.items()):
             nazwa = nazwy.get(symbol) or symbol
+            # Id kartoteki od razu — nowy wiersz ma trafiać po Id od pierwszego
+            # dnia. `kart` jest None, gdy baza nie ma jeszcze kolumny.
+            kid = (kart or {}).get(symbol)
+            kid = kid[0] if kid else None
             try:
-                con.execute(
-                    "INSERT INTO items (project_id, is_manual, is_hidden,"
-                    " src_drawing_no, src_name, src_qty,"
-                    " work_drawing_no, work_name, work_qty,"
-                    " order_qty, subiekt_symbol, subiekt_zasiew_at, notes,"
-                    " created_at, updated_at)"
-                    " VALUES (?, 1, 0, '', ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (self.current_project_id, nazwa, ile, nazwa, ile, ile,
-                     symbol, teraz, "z zamówienia ZK", teraz, teraz))
+                if kart is not None:
+                    con.execute(
+                        "INSERT INTO items (project_id, is_manual, is_hidden,"
+                        " src_drawing_no, src_name, src_qty,"
+                        " work_drawing_no, work_name, work_qty,"
+                        " order_qty, subiekt_symbol, subiekt_id, subiekt_zasiew_at,"
+                        " notes, created_at, updated_at)"
+                        " VALUES (?, 1, 0, '', ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (self.current_project_id, nazwa, ile, nazwa, ile, ile,
+                         symbol, kid, teraz, "z zamówienia ZK", teraz, teraz))
+                else:
+                    con.execute(
+                        "INSERT INTO items (project_id, is_manual, is_hidden,"
+                        " src_drawing_no, src_name, src_qty,"
+                        " work_drawing_no, work_name, work_qty,"
+                        " order_qty, subiekt_symbol, subiekt_zasiew_at, notes,"
+                        " created_at, updated_at)"
+                        " VALUES (?, 1, 0, '', ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (self.current_project_id, nazwa, ile, nazwa, ile, ile,
+                         symbol, teraz, "z zamówienia ZK", teraz, teraz))
             except Exception as e:
                 print(f"⚠️  Nie dopisano {symbol} z ZK: {e}")
                 continue
@@ -7970,7 +8063,15 @@ class MainWindow(tk.Tk):
                 # Stąd trwały ślad w bazie: sam słownik w pamięci znika po
                 # restarcie i nie byłoby z czego odtworzyć blokady.
                 'subiekt_symbol': 'TEXT',
-                'subiekt_zasiew_at': 'TEXT'
+                'subiekt_zasiew_at': 'TEXT',
+                # Id kartoteki w Subiekcie — TRWAŁA tożsamość pozycji.
+                # Symbol (wyżej) psuje każda zmiana nazwy: w arkuszu (02.10.2026,
+                # HGH15SO → HGH15SOK dało duble z ZK) albo ręcznie w Subiekcie
+                # (tego nie zatrzymuje nic). Id nie rusza ani jedno, ani drugie,
+                # więc dopasowanie ZK/RW ↔ arkusz idzie po nim w pierwszej
+                # kolejności, a po symbolu tylko awaryjnie. Wypełniane przy
+                # zasiewie i uzupełniane wstecz przy odświeżaniu ilości z ZK.
+                'subiekt_id': 'INTEGER'
             }
             
             # Dodaj brakujące kolumny

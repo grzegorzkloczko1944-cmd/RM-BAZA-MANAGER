@@ -95,6 +95,10 @@ internal static class Stan
                 ostCena, ostData, stany) with
                 {
                     Dopasowanie = dopasowanie,
+                    // Id kartoteki — JEDYNA tozsamosc, ktorej nie rusza zmiana
+                    // symbolu ani nazwy w Subiekcie. RM_BAZA zapisuje je jako
+                    // `subiekt_id` i po nim dopasowuje pozycje (02.10.2026).
+                    Id = enc.Id,
                     // Polozenie (regal/polka) — proste pole wlasne PoleWlasne1.
                     Polozenie = (Bezp(() => (string?)enc.PolaWlasne?.PoleWlasne1) ?? "").Trim(),
                     Opis = (Bezp(() => (string?)enc.Opis) ?? "").Trim(),
@@ -119,6 +123,11 @@ internal static class Stan
                         string? DataOstatniegoZakupu, List<StanMag> Magazyny)
     {
         public string Dopasowanie { get; init; } = "brak";
+
+        /// Id kartoteki w Subiekcie. null dla kartotek NIEISTNIEJACYCH.
+        /// Property, nie parametr konstruktora — z tego samego powodu co
+        /// Polozenie: Poz powstaje takze dla symboli bez kartoteki.
+        public int? Id { get; init; }
 
         /// Polozenie na magazynie (regal/polka) z pola wlasnego PoleWlasne1.
         /// Jako property z wartoscia domyslna, a nie parametr konstruktora —

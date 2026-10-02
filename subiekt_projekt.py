@@ -1502,6 +1502,27 @@ def zapisz_zasiew(project_id, wynik):
                     "UPDATE items SET subiekt_symbol = ?, subiekt_zasiew_at = ? WHERE id = ?",
                     (realny, teraz, item_id))
                 ile += 1
+
+            # 3) Id KARTOTEK — trwała tożsamość (02.10.2026). Symbol psuje
+            #    każda zmiana nazwy w arkuszu albo w Subiekcie; Id nie.
+            #    JEDNO zapytanie o wszystkie symbole (nie po jednym w pętli),
+            #    potem jeden executemany. Brak Id (stary most, awaria) nie
+            #    psuje zasiewu — dopasowanie pójdzie po symbolu, jak dotąd.
+            if "subiekt_id" in cols:
+                try:
+                    import subiekt_stany
+                    kart = subiekt_stany.query_stock(sorted(symbole), timeout=120) or {}
+                    pary = [(int(k["Id"]), sym.upper())
+                            for sym, k in kart.items()
+                            if k and k.get("Id") and sym]
+                    if pary:
+                        con.executemany(
+                            "UPDATE items SET subiekt_id = ? "
+                            "WHERE UPPER(TRIM(subiekt_symbol)) = ? AND subiekt_id IS NULL",
+                            pary)
+                except Exception as e:
+                    _log_techniczny(f"zapisz_zasiew({project_id}): Id kartotek "
+                                    f"nieuzupełnione: {type(e).__name__}: {e}")
             con.commit()
         finally:
             con.close()
@@ -1515,7 +1536,21 @@ def zapisz_zasiew(project_id, wynik):
 
 
 def pobierz_ilosci_zk(project_name, timeout=120):
-    """{symbol: ilość} z dokumentu ZK projektu. Sam odczyt.
+    """{symbol: ilość} z ZK — jak `pobierz_ilosci_zk_z_id`, bez Id kartotek.
+    Zostaje dla starych wołających. Zwraca (ilości, numer_ZK, błąd)."""
+    ilosci, _kart, zk, blad = pobierz_ilosci_zk_z_id(project_name, timeout)
+    return ilosci, zk, blad
+
+
+def pobierz_ilosci_zk_z_id(project_name, timeout=120):
+    """({SYMBOL: ilość}, {SYMBOL: (Id kartoteki, symbol jak pisze Subiekt)},
+    numer_ZK, błąd) z dokumentu ZK projektu. Sam odczyt.
+
+    Id kartoteki (02.10.2026) to tożsamość, której nie rusza zmiana symbolu
+    ani nazwy — RM_BAZA zapisuje je jako `subiekt_id` i dopasowuje po nim
+    w pierwszej kolejności. Most sprzed tej zmiany nie zwraca `Id` — wtedy
+    w słowniku jest `None` i dopasowanie idzie po symbolu, jak dotąd.
+
 
     Źródło „Ilość (zam.)" w arkuszu. Wołane przez RM_BAZA przy zwalnianiu
     locka — stanowisko z mostem odświeża wartości, zapisuje je do pliku
@@ -1527,9 +1562,9 @@ def pobierz_ilosci_zk(project_name, timeout=120):
     """
     numer = numer_projektu(project_name)
     if not numer:
-        return {}, None, "brak numeru projektu"
+        return {}, {}, None, "brak numeru projektu"
     if not os.path.isfile(CONFIG_PATH):
-        return {}, None, "brak konfiguracji połączenia"
+        return {}, {}, None, "brak konfiguracji połączenia"
 
     # STAŁY MOST przede wszystkim — osobny proces to ~10 s samego logowania
     # do Sfery, a ta funkcja chodzi przy ZWALNIANIU LOCKA, gdzie user czeka.
@@ -1541,21 +1576,27 @@ def pobierz_ilosci_zk(project_name, timeout=120):
     except ImportError:
         dane = _zk_ilosci_cli(numer, timeout)
     except Exception as e:
-        return {}, None, f"{type(e).__name__}: {e}"
+        return {}, {}, None, f"{type(e).__name__}: {e}"
     if not isinstance(dane, dict):
-        return {}, None, "most nie zwrócił wyniku"
+        return {}, {}, None, "most nie zwrócił wyniku"
 
     if dane.get("blad"):
-        return {}, dane.get("zk"), dane["blad"]
-    ilosci = {}
+        return {}, {}, dane.get("zk"), dane["blad"]
+    ilosci, kart = {}, {}
     for p in dane.get("pozycje", []):
         sym = (p.get("Symbol") or "").strip()
         if sym:
             try:
                 ilosci[sym.upper()] = float(p.get("Ilosc") or 0)
             except (TypeError, ValueError):
-                pass
-    return ilosci, dane.get("zk"), None
+                continue
+            kid = p.get("Id")
+            try:
+                kid = int(kid) if kid is not None else None
+            except (TypeError, ValueError):
+                kid = None
+            kart[sym.upper()] = (kid, sym)
+    return ilosci, kart, dane.get("zk"), None
 
 
 def _zk_ilosci_cli(numer, timeout):

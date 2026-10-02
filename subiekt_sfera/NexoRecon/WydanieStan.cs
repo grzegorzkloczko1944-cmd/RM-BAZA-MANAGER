@@ -110,6 +110,9 @@ internal static class WydanieStan
         // symbol -> numery RW, ktore go wydaly (kolejnosc jak w bazie, bez duplikatow)
         var rwNumery = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         var rwBezProjektu = new List<object>();
+        // symbol -> Id kartoteki (pierwszy napotkany). Id nie rusza zmiana
+        // symbolu ani nazwy w Subiekcie — RM_BAZA dopasowuje po nim (02.10.2026).
+        var idyKart = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         string? blad = null;
 
         try
@@ -145,6 +148,30 @@ internal static class WydanieStan
         foreach (var s in zZd.Keys) symbole.Add(s);
         foreach (var s in zRw.Keys) symbole.Add(s);
 
+        // Id kartotek JEDNYM zapytaniem po calym asortymencie — ten sam wzorzec
+        // co w Stan.cs (~2700 kartotek, pamiec bez znaczenia). NIE przez
+        // `p.AsortymentAktualny.Id` w zagniezdzonej projekcji wyzej: EF rzuca
+        // tam TargetInvocationException i caly tryb oddawal 0 pozycji
+        // (sprawdzone 02.10.2026). Blad tutaj nie psuje reszty — bez Id okno
+        // dopasowuje po symbolu, jak dotad.
+        if (blad is null && symbole.Count > 0)
+        {
+            try
+            {
+                foreach (var a in sfera.Asortymenty().Dane.Wszystkie()
+                                      .Select(a => new { a.Id, a.Symbol }).ToList())
+                {
+                    var k = (a.Symbol ?? "").Trim();
+                    if (k.Length > 0 && symbole.Contains(k) && !idyKart.ContainsKey(k))
+                        idyKart[k] = a.Id;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"(wydanie-stan) Id kartotek nieodczytane: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
         var pozycje = new List<object>();
         foreach (var s in symbole)
         {
@@ -179,6 +206,8 @@ internal static class WydanieStan
                 // pozycji i pozwala kliknac wprost do przegladu dokumentow
                 // (02.10.2026). Pusta lista, gdy nic nie wydano.
                 rw = rwNumery.TryGetValue(s, out var nry) ? nry : new List<string>(),
+                // Id kartoteki — trwala tozsamosc pozycji, niezalezna od symbolu.
+                id = idyKart.TryGetValue(s, out var kid) ? kid : (int?)null,
             });
         }
 

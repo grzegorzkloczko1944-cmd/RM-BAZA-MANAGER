@@ -17,3 +17,4 @@ Czesc pamieci projektu — spis wszystkich obszarow w [MEMORY.md](MEMORY.md).
 - [Bez limitu Take() na dokumentach](project_bez_limitu_take_dokumenty.md) — limit odcina starsze dokumenty projektu, ciche…
 - [Pozycja jednorazowa na ZK wywraca zapotrzebowanie](project_zk_pozycja_bez_kartoteki.md) — oslona MUSI byc w jednym miejscu (ZapotrzebowanieBezpieczne.cs): 29.09 zalatana tylko lista, tworzenie ZD padalo dalej
 - [Zapotrzebowanie przyspieszone](project_zapotrzebowanie_szybkie.md) — tryb własny ~0,13 s zamiast ~1,5 s (tylko lista, ZD na encjach); SDK vs własny: 4 pozycje różnicy sprzed zmiany; NEXORECON_ZAPOTRZEBOWANIE
+- [subiekt_id: tożsamość po Id kartoteki](project_subiekt_id_tozsamosc.md) — dopasowanie ZK/RW ↔ arkusz po Id, symbol awaryjnie; pułapka EF z Id w zagnieżdżonej projekcji

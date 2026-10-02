@@ -66,8 +66,10 @@ internal static class ZkIlosci
 
                     // Ta sama funkcja, ktorej uzywa zapis — sumuje powtorzony
                     // symbol, bo liczy sie laczna ilosc zamowiona.
-                    foreach (var kv in Projekt.CzytajPozycjeZk(zk.Pozycje))
-                        pozycje.Add(new PozIlosc(kv.Key, kv.Value));
+                    // Z Id kartoteki: RM_BAZA dopasowuje po nim w pierwszej
+                    // kolejnosci, bo zmiana symbolu w Subiekcie go nie rusza.
+                    foreach (var kv in Projekt.CzytajPozycjeZkZId(zk.Pozycje))
+                        pozycje.Add(new PozIlosc(kv.Key, kv.Value.Ilosc, kv.Value.Id));
                 }
             }
             catch (Exception e)
@@ -100,5 +102,5 @@ internal static class ZkIlosci
 
     static T? Bezp<T>(Func<T?> f) { try { return f(); } catch { return default; } }
 
-    internal record PozIlosc(string Symbol, decimal Ilosc);
+    internal record PozIlosc(string Symbol, decimal Ilosc, int? Id = null);
 }
