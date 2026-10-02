@@ -23,7 +23,7 @@ def opis(sym):
     if re.match(r"WSQ-|WS-", s): return "szyna pojedyncza"
     if re.match(r"WW-", s): return "kompletny wózek"
     if re.match(r"(WWP|WWPL|WWPV|WWC|WWS|WWBCX|WK|WEKA)", s): return "element prowadnicy drylin W"
-    if re.match(r"TS-", s): return "szyna prowadząca"
+    if re.match(r"(TS|NS)-", s): return "szyna prowadząca"
     if re.match(r"TW-", s): return "wózek liniowy"
     if re.match(r"TK-", s): return "element prowadnicy drylin T"
     if re.match(r"NW-", s): return "wózek prowadzący"
