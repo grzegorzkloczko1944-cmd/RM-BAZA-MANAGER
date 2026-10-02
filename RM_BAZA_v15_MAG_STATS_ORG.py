@@ -19048,7 +19048,9 @@ class MainWindow(tk.Tk):
                            class_manual,
                            work_modul,
                            is_hidden,
-                           dwf_biblioteka
+                           dwf_biblioteka,
+                           src_drawing_no,
+                           subiekt_symbol
                     FROM items
                     WHERE project_id = ?
                     """,
@@ -19068,7 +19070,9 @@ class MainWindow(tk.Tk):
                            supplier_id,
                            class_manual,
                            is_hidden,
-                           dwf_biblioteka
+                           dwf_biblioteka,
+                           src_drawing_no,
+                           subiekt_symbol
                     FROM items
                     WHERE project_id = ?
                     """,
@@ -19112,6 +19116,35 @@ class MainWindow(tk.Tk):
                     if dn_norm not in existing_items:
                         existing_items[dn_norm] = []
                     existing_items[dn_norm].append(item_data)
+                    # ⚠️ KLUCZ ZAPASOWY: numer SPRZED ręcznej zmiany nazwy.
+                    #
+                    # Zgłoszone 02.10.2026 (projekt 2637): user poprawił
+                    # w arkuszu HGH15SO → HGH15SOK, a aktualizacja BOM dopisała
+                    # te pozycje DRUGI RAZ. Dopasowanie szło po
+                    # COALESCE(work_drawing_no, src_drawing_no), czyli po nazwie
+                    # AKTUALNEJ — a plik XLSX wciąż miał starą, pod którą
+                    # w słowniku nic już nie stało.
+                    #
+                    # DWA aliasy, bo stara nazwa chowa się w dwóch miejscach:
+                    #   `src_drawing_no`  — oryginał z importu XLSX
+                    #   `subiekt_symbol`  — symbol z kartoteki Subiekta
+                    #
+                    # ⚠️ Ten drugi jest KONIECZNY. Pozycje dopisane wprost
+                    # z kartoteki (wózki Hiwin, łożyska, pasy) mają
+                    # `src_drawing_no` PUSTE — w projekcie 75 było tak w 70
+                    # z 331 wierszy. Dla nich `subiekt_symbol` to jedyny ślad
+                    # nazwy sprzed edycji, a przy tym powiązanie z kartoteką,
+                    # którego zmiana w arkuszu NIE rusza: dla Subiekta to
+                    # wciąż ten sam detal (uwaga użytkownika, 02.10.2026).
+                    #
+                    # Alias NIE nadpisuje klucza głównego: gdy pod starą nazwą
+                    # stoi już pozycja, która NAPRAWDĘ tak się teraz nazywa,
+                    # zostaje ona — dopisujemy się tylko obok.
+                    for alias in (src_dn_norm, sub_sym_norm):
+                        if alias and alias != dn_norm:
+                            existing_items.setdefault(alias, [])
+                            if item_data not in existing_items[alias]:
+                                existing_items[alias].append(item_data)
                 elif name_norm:  # Pozycje bez numeru (ZNORMALIZOWANE) - mapuj po nazwie
                     if name_norm not in existing_items_by_name:
                         existing_items_by_name[name_norm] = []
@@ -19569,6 +19602,20 @@ class MainWindow(tk.Tk):
                         edit_val = current_val
                     else:
                         edit_val = new_val
+            elif key == 'drawing_no':
+                # ⚠️ RĘCZNA ZMIANA NUMERU WYGRYWA Z PLIKIEM (02.10.2026).
+                #
+                # Pozycja trafia tu także wtedy, gdy dopasowała się przez
+                # KLUCZ ZAPASOWY `src_drawing_no` — czyli user przemianował ją
+                # w arkuszu (HGH15SO → HGH15SOK), a plik XLSX ma wciąż starą
+                # nazwę. Bez tego wyjątku aktualizacja cofałaby jego poprawkę
+                # przy każdym imporcie, a user poprawiałby ją w kółko.
+                #
+                # Zmiana nazwy jest świadomą decyzją człowieka (symbol z
+                # kartoteki Subiekta, poprawiona literówka); plik BOM-u opisuje
+                # to samo pole, ale nie wie o niej nic. Reszta kolumn —
+                # ilości, materiał, opis — idzie z pliku jak dotąd.
+                edit_val = current_val if str(current_val).strip() else new_val
             else:
                 if new_val == '' or new_val == '0':
                     edit_val = current_val
