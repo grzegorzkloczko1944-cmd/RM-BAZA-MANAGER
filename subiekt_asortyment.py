@@ -143,7 +143,11 @@ def okno_nowa_kartoteka(parent, symbol="", nazwa="", rodzaj="towar",
     dlg = tk.Toplevel(parent)
     dlg.title("Nowa kartoteka w Subiekcie")
     dlg.transient(parent)
-    dlg.grab_set()
+    # grab_set() DOPIERO na końcu: wołane tu pokazywało puste okno od razu,
+    # a Windows nie przyjmował potem rozmiaru z wysrodkuj — wychodziło
+    # wąskie i wysokie 341x654 zamiast 560x380 (02.10.2026).
+    from subiekt_stany import ukryj_do_zbudowania
+    ukryj_do_zbudowania(dlg)        # pokazane zbudowane, na miejscu i w rozmiarze
 
     tk.Label(dlg, text="➕ Dodaj asortyment do Subiekta", bg="#34495e", fg="white",
              font=("Arial", 10, "bold"), anchor="w", padx=12, pady=8).pack(fill=tk.X)
@@ -643,4 +647,6 @@ def okno_nowa_kartoteka(parent, symbol="", nazwa="", rodzaj="towar",
     # Tabela potrzebuje miejsca — okno rosnie tylko w trybie wsadowym.
     wysrodkuj(dlg, parent, 780 if tabela is not None else 560,
               680 if tabela is not None else 380)
+    dlg.grab_set()
+    ent_symbol.focus_set()
     return dlg

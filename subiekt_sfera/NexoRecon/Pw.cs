@@ -305,6 +305,9 @@ internal static class Pw
     ///
     /// Brutto zostawiamy Subiektowi — przelicza je sam ze stawki VAT
     /// kartoteki; wpisane ręcznie mogłoby się z tym wyliczeniem rozjechać.
+    /// Dla ZkIlosc (tryb „zk-cena") — ten sam, sprawdzony zapis ceny.
+    internal static string? UstawCenePozycjiPubl(object poz, decimal cena) => UstawCenePozycji(poz, cena);
+
     static string? UstawCenePozycji(object poz, decimal cena)
     {
         object? obCena = null;

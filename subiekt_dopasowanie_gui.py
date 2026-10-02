@@ -766,8 +766,13 @@ class DopasowanieWindow(tk.Toplevel):
         Po dowiazaniu w tym oknie w arkuszu zostaja dwie pozycje na jeden
         towar (2627: „WS-10 L240mm" 4 szt. i „WS-10 L240mm --- --" 20 szt.).
         Zostaje WAZNIEJSZA — ta z Subiekta — i przejmuje SUME sztuk;
-        pozostale znikaja. Ilosc na ZK poprawi sie przy najblizszym zapisie
-        projektu (most: „na ZK: 4 → ustawi 24").
+        pozostale znikaja.
+
+        ⛔ ILOSC NA ZK NIE POPRAWI SIE SAMA (02.10.2026). Dawniej tak bylo,
+        dzis Projekt/Aktualizacja bierze ilosc pozycji zasianej Z ZK, nie
+        z BOM-u (po zasiewie wlascicielem ilosci jest Subiekt). Dlatego przy
+        sklejaniu pozycji juz zasianych — czerwone okno z lista „BOM po
+        sklejeniu / na ZK" i informacja, ze ZK trzeba poprawic recznie.
 
         ⚠️ To KASUJE wiersze, wiec najpierw pokazujemy, co dokladnie
         zniknie, a zapis idzie przez baze projektu (wymaga locka).
@@ -824,6 +829,43 @@ class DopasowanieWindow(tk.Toplevel):
                 "NIE sa laczone — to moga byc rozne kartoteki.",
                 parent=self)
 
+        # ⛔ POZYCJE ZASIANE: sklejenie zmienia TYLKO arkusz. Ilosc na ZK
+        # zostaje, bo Projekt/Aktualizacja bierze ja z ZK (02.10.2026: user
+        # skleil 2x „6004" po 4 szt., BOM 8, ZK dalej 4 — i nie wiedzial,
+        # ze ma to poprawic sam). Wszystkie wiersze grupy maja ten sam
+        # symbol, wiec `order_qty` = ilosc tej jednej linii ZK.
+        kol = {k[1] for k in con.execute("PRAGMA table_info(items)")}
+        zas = "subiekt_zasiew_at" if "subiekt_zasiew_at" in kol else "NULL"
+        zasiane = []
+        for g in grupy:
+            ids = [g["zostaje"]["id"]] + [u["id"] for u in g["do_usuniecia"]]
+            na_zk, zasiana = con.execute(
+                "SELECT MAX(order_qty), MAX(%s IS NOT NULL OR order_qty IS NOT NULL)"
+                " FROM items WHERE id IN (%s)" % (zas, ",".join("?" * len(ids))),
+                ids).fetchone()
+            if zasiana:
+                zasiane.append((g["symbol"], g["suma"], na_zk))
+        if zasiane:
+            linie = ["   %-18s  BOM po sklejeniu: %s   na ZK: %s"
+                     % (sym, _ilo(suma), "—" if zk is None else _ilo(zk))
+                     for sym, suma, zk in zasiane[:12]]
+            if len(zasiane) > 12:
+                linie.append("   … i %d dalszych" % (len(zasiane) - 12))
+            from subiekt_projekt import komunikat
+            if not komunikat(
+                    self, "Sklej duplikaty — pozycje są już w Subiekcie",
+                    "Te pozycje są już na ZK w Subiekcie:\n\n"
+                    + "\n".join(linie)
+                    + "\n\nSklejenie zmieni TYLKO arkusz (BOM).\n"
+                      "Ilość na ZK NIE zmieni się sama — Projekt/Aktualizacja\n"
+                      "bierze ilość pozycji zasianej z ZK, nie z BOM-u.\n\n"
+                      "Po sklejeniu popraw ilość RĘCZNIE w Subiekcie\n"
+                      "(albo dwuklik „Ilość” w oknie Projekt/Aktualizacja).\n\n"
+                      "Kontynuować?",
+                    rodzaj="error", pytanie=True):
+                con.close()
+                return
+
         opis = []
         for g in grupy[:12]:
             z = g["zostaje"]
@@ -841,8 +883,8 @@ class DopasowanieWindow(tk.Toplevel):
                 zakres + " \u2014 wiersze o TYM SAMYM symbolu kartoteki.\n"
                 "Zostanie jedna pozycja z SUMA sztuk:\n\n"
                 + "\n".join(opis) + wiecej
-                + "\n\nIlosc na ZK poprawi sie przy najblizszym zapisie "
-                  "projektu.\nSkleic?",
+                + "\n\nIlość na ZK NIE zmieni się sama — po sklejeniu"
+                  "\npozycji zasianych popraw ją w Subiekcie.\nSkleić?",
                 icon="warning", default="no", parent=self):
             con.close()
             return

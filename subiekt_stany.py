@@ -306,6 +306,43 @@ def ukryj_do_zbudowania(okno, min_ms=400, stabilnie_ms=250, max_ms=2000):
         except tk.TclError:
             pass                        # zamknięte, zanim się pokazało
 
+    def na_miejscu(zoom):
+        """True, gdy okno stoi tam, gdzie ma; inaczej je poprawia i False.
+
+        ⚠️ Poprawiamy W PĘTLI, nie raz. Zmierzone 02.10.2026 (3 monitory,
+        wszystkie 96 DPI): ~0,3 s po pokazaniu Tk/Windows potrafi przestawić
+        okno jeszcze raz, za każdym razem gdzie indziej — panel SUBIEKT
+        lądował na środkowym monitorze, Magazyn na lewym, niezależnie od
+        tego, gdzie stała RM_BAZA. Jednorazowe ustawienie tego nie łapało.
+        """
+        poz = getattr(okno, "_rm_pozycja", None)
+        if poz and not zoom:
+            r = _prostokat_okna(okno)
+            rozm = getattr(okno, "_rm_rozmiar", None)
+            # Rozmiar też pilnujemy, gdy wysrodkuj dostał go wprost: okno
+            # „Nowa kartoteka" (560x380) wychodziło 341x654 — zawsze ten sam,
+            # obcy prostokąt, ustawiany poza Tk (02.10.2026).
+            zly_rozmiar = bool(rozm) and (okno.winfo_width(), okno.winfo_height()) != tuple(rozm)
+            if (r[0], r[1]) != (poz[0], poz[1]) or zly_rozmiar:
+                okno.geometry(f"{rozm[0]}x{rozm[1]}+{poz[0]}+{poz[1]}" if rozm
+                              else f"+{poz[0]}+{poz[1]}")
+                return False
+            return True
+        # Bez własnej pozycji (maksymalizowane albo bez wysrodkuj): ma stać
+        # na monitorze RODZICA — „wyskakuje na drugim monitorze zamiast na
+        # widoku aplikacji" (02.10.2026).
+        try:
+            rodzic = okno.master.winfo_toplevel() if okno.master else None
+        except tk.TclError:
+            rodzic = None
+        if rodzic is None or rodzic is okno:
+            return True
+        cel, teraz = _monitor_okna(rodzic), _monitor_okna(okno)
+        if cel and teraz and cel != teraz:
+            _na_monitor_rodzica(okno, zoom)
+            return False
+        return True
+
     def pokaz():
         try:
             zoom = okno.state() == "zoomed"
@@ -313,9 +350,7 @@ def ukryj_do_zbudowania(okno, min_ms=400, stabilnie_ms=250, max_ms=2000):
                 okno.state("zoomed")    # mapuje, zachowując maksymalizację
             else:
                 okno.deiconify()
-            poz = getattr(okno, "_rm_pozycja", None)
-            if poz and not zoom:
-                okno.after(1, lambda: okno.geometry(f"+{poz[0]}+{poz[1]}"))
+            na_miejscu(zoom)
         except tk.TclError:
             return
         if not przezroczyste:
@@ -328,11 +363,14 @@ def ukryj_do_zbudowania(okno, min_ms=400, stabilnie_ms=250, max_ms=2000):
         def czekaj():
             try:
                 teraz = time.monotonic()
+                if not na_miejscu(zoom):
+                    stan["rect"], stan["od"] = None, teraz   # od nowa
                 rect = _prostokat_okna(okno)
                 if rect != stan["rect"]:
                     stan["rect"], stan["od"] = rect, teraz
                 minelo = (teraz - start) * 1000
-                if ((teraz - stan["od"]) * 1000 >= stabilnie_ms and minelo >= min_ms)                         or minelo >= max_ms:
+                if (((teraz - stan["od"]) * 1000 >= stabilnie_ms and minelo >= min_ms)
+                        or minelo >= max_ms):
                     odslon()
                 else:
                     okno.after(30, czekaj)
@@ -363,6 +401,48 @@ def _obszar_roboczy_monitora(okno):
         return (r.left, r.top, r.right, r.bottom)
     except Exception:
         return None
+
+
+def _monitor_okna(okno):
+    """Uchwyt monitora (HMONITOR), na którym leży okno; None poza Windows."""
+    try:
+        import ctypes
+        h = ctypes.windll.user32.GetParent(okno.winfo_id()) or okno.winfo_id()
+        return ctypes.windll.user32.MonitorFromWindow(h, 2)   # NEAREST
+    except Exception:
+        return None
+
+
+def _na_monitor_rodzica(okno, zoom):
+    """Przenosi zmapowane okno na monitor jego rodzica, jeśli stoi gdzie
+    indziej. Zmaksymalizowane: przywróć → przesuń → zmaksymalizuj znowu
+    (Windows maksymalizuje na monitorze, na którym leży okno zwykłe)."""
+    try:
+        rodzic = okno.master.winfo_toplevel() if okno.master else None
+        if rodzic is None or rodzic is okno:
+            return
+        cel, teraz = _monitor_okna(rodzic), _monitor_okna(okno)
+        if not cel or not teraz or cel == teraz:
+            return
+        obszar = _obszar_roboczy_monitora(rodzic)
+        if not obszar:
+            return
+        lewo, gora, prawo, dol = obszar
+        if zoom:
+            okno.state("normal")
+        okno.update_idletasks()
+        w = min(okno.winfo_width() if okno.winfo_width() > 1 else okno.winfo_reqwidth(),
+                prawo - lewo)
+        h = min(okno.winfo_height() if okno.winfo_height() > 1 else okno.winfo_reqheight(),
+                dol - gora)
+        x = lewo + max(0, (prawo - lewo - w) // 2)
+        y = gora + max(0, (dol - gora - h) // 2)
+        okno.geometry(f"+{x}+{y}")
+        if zoom:
+            okno.update_idletasks()
+            okno.state("zoomed")
+    except Exception:
+        pass          # pozycjonowanie nie może wywalić okna
 
 
 def wysrodkuj_na_monitorze(okno, rodzic):
@@ -421,6 +501,8 @@ def wysrodkuj(okno, rodzic, szerokosc=None, wysokosc=None):
         x = max(lewo, min(x, prawo - w))
         y = max(gora, min(y, dol - h))
         okno._rm_pozycja = (x, y)       # patrz ukryj_do_zbudowania
+        if szerokosc or wysokosc:
+            okno._rm_rozmiar = (w, h)   # rozmiar zadany wprost — też pilnowany
         if w > 1 and h > 1:
             okno.geometry(f"{w}x{h}+{x}+{y}")
         else:

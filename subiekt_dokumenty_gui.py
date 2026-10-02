@@ -189,6 +189,11 @@ def _przelicz_dokumenty(data):
 #: Ta sama wartosc co subiekt_magazyn_gui.UWAGI_MAGAZYN.
 UWAGI_MAGAZYN = "MAGAZYN"
 
+
+def _numery_projektow(d):
+    """Numery projektow dokumentu — Uwagi ZD bywaja zbiorcze („2627,3500")."""
+    return [n.strip() for n in str(d.get("projekt") or "").split(",") if n.strip()]
+
 #: Domyślne nazwy typów, które Subiekt sam wstawia w pole Tytuł.
 #:
 #: Kolumna „Rodzaj" mówi już ZK / ZD / PW / RW / WZ, więc powtarzanie tego
@@ -248,7 +253,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
     RODZAJE_MAGAZYNOWE = ("PW", "RW", "WZ")
     NAGL_KOSZT = ("Koszt jedn.", "Wartość magazynowa")
 
-    def __init__(self, parent, szukaj=None):
+    def __init__(self, parent, szukaj=None, projekt=None):
         """`szukaj` — numer dokumentu do pokazania od razu po otwarciu.
 
         Uzywa tego okno wydania: klik w numer RW przy pozycji otwiera ten
@@ -261,6 +266,16 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         #: Numer do zaznaczenia po pierwszym wypelnieniu listy. Czyszczony
         #: po uzyciu, zeby kolejne „Odswiez" nie przeskakiwalo kursorem.
         self._do_zaznaczenia = (szukaj or "").strip() or None
+        #: Numer projektu wybranego w RM_BAZA — filtr „Projekt" ustawiany nim
+        #: przy PIERWSZYM wczytaniu (02.10.2026). Pomijany, gdy okno otwarto
+        #: na konkretny dokument (`szukaj`), bo ten moze byc z innego projektu.
+        self._projekt_startowy = (None if self._do_zaznaczenia
+                                  else ((projekt or "").strip().split(" ")[0] or None))
+        #: Kolejnosc pozycji jak w arkuszu RM_BAZA — {numer projektu: {KLUCZ: miejsce}}
+        #: i {numer: project_id}. Czytane RAZ na okno (pakietem), nie per klik.
+        self._kolejnosc_proj = {}
+        self._pid_po_numerze = None
+        self._poz_dok = None        # dokument pokazany w panelu pozycji
         self.dokumenty = []
         self.widoczne = []
         self.biezacy = None
@@ -305,7 +320,10 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         # ⚠️ ZD kasuj PRZED powiązanym ZK — inaczej Subiekt potrafi odmówić
         # usunięcia ZK. Okno potwierdzenia samo o tym przypomina, gdy w liście
         # są oba typy naraz.
-        tk.Button(top, text="🗑 Usuń zaznaczone", command=self._usun_zaznaczone,
+        # Nazwa mówi WPROST, że chodzi o całe dokumenty — „Usuń zaznaczone"
+        # myliło się z pozycjami (02.10.2026). Pozycję usuwa się prawym
+        # klikiem w panelu pozycji („Usuń pozycję z ZK…").
+        tk.Button(top, text="🗑 Usuń zaznaczone DOKUMENTY", command=self._usun_zaznaczone,
                   bg="#c0392b", fg="white", font=("Arial", 8),
                   padx=8, pady=2, relief=tk.RAISED, bd=1).pack(side=tk.RIGHT, padx=(0, 4), pady=8)
         # ⚠️ Przyciski dotyczące ZAZNACZONEGO dokumentu (Wyślij ZD, Podgląd PDF)
@@ -405,13 +423,30 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         paned.add(gora, weight=5)
         paned.add(dol, weight=3)
 
+        # Wagi rozdzielają tylko NADMIAR miejsca, a obie tabele żądają teraz
+        # małej szerokości — wyszłoby pół na pół. Lista dokumentów ma 60%.
+        def _podzial():
+            try:
+                szer = paned.winfo_width()
+                if szer > 100:
+                    paned.sashpos(0, int(szer * 0.6))
+                else:
+                    self.after(100, _podzial)
+            except tk.TclError:
+                pass
+        self.after(200, _podzial)
+
         if Sheet is None:
             tk.Label(gora, text="Brak biblioteki tksheet", fg="#c0392b").pack(pady=20)
             self.sheet = self.sheet_poz = None
             return
 
+        # width/height MAŁE celowo: bez tego Sheet żąda szerokości wszystkich
+        # kolumn naraz, wychodzi poza swój panel i chowa się pod panelem
+        # pozycji razem z paskiem przewijania (02.10.2026). Rozmiar i tak
+        # nadaje pack(fill, expand) w granicach panelu.
         self.sheet = Sheet(gora, headers=[k[1] for k in self.KOL_DOK],
-                           column_width=120, theme="light blue")
+                           column_width=120, theme="light blue", width=200, height=200)
         self.sheet.set_options(show_selected_cells_border=True,
                                enable_edit_cell_auto_resize=False,
                                empty_horizontal=0, empty_vertical=0)
@@ -444,9 +479,17 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
                        bg="#34495e", fg="white", selectcolor="#2c3e50",
                        activebackground="#34495e", activeforeground="white",
                        font=("Arial", 8)).pack(side=tk.RIGHT, padx=(6, 10))
+        # Szukanie W POZYCJACH pokazanego dokumentu (02.10.2026) — ZK projektu
+        # ma 169-301 pozycji, a gorne „Szukaj" filtruje DOKUMENTY.
+        self.szukaj_poz_var = tk.StringVar()
+        tk.Entry(pasek_poz, textvariable=self.szukaj_poz_var, width=18,
+                 font=("Arial", 9)).pack(side=tk.RIGHT, padx=(2, 8), pady=3)
+        tk.Label(pasek_poz, text="🔍 w pozycjach:", bg="#34495e", fg="white",
+                 font=("Arial", 8)).pack(side=tk.RIGHT)
+        self.szukaj_poz_var.trace_add("write", lambda *_: self._szukaj_poz_po_wpisaniu())
 
         self.sheet_poz = Sheet(dol, headers=[k[1] for k in self.KOL_POZ],
-                               column_width=120, theme="light green")
+                               column_width=120, theme="light green", width=200, height=200)
         self.sheet_poz.set_options(show_selected_cells_border=True,
                                    enable_edit_cell_auto_resize=False,
                                    empty_horizontal=0, empty_vertical=0)
@@ -459,9 +502,12 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
                             [k[2] for k in self.KOL_POZ])
         # Dwuklik w pozycje dokumentu -> karta pozycji. Z dokumentu (ZD/WZ/RW)
         # czesto trzeba sprawdzic, do jakiego zlozenia detal nalezy.
-        self.sheet_poz.bind("<Double-Button-1>", self._karta_pozycji, add="+")
+        # Dwuklik w „Ilość" pozycji ZK = zmiana ilości w Subiekcie (02.10.2026);
+        # w pozostałe kolumny — karta pozycji jak dotąd.
+        self.sheet_poz.bind("<Double-Button-1>", self._dwuklik_poz, add="+")
         self.sheet_poz.popup_menu_add_command("🔍 Karta pozycji (złożenie, BOM, Subiekt)",
                                               self._karta_pozycji)
+        self.sheet_poz.popup_menu_add_command("🗑 Usuń pozycję z ZK…", self._usun_pozycje_zk)
         self.sheet_poz.pack(fill=tk.BOTH, expand=True)
 
         self.status = tk.Label(self, text="", anchor="w", padx=12, pady=3,
@@ -502,13 +548,20 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         # górze (2637 przed 2430), potem literowe. Zwykłe `sorted()` dawało
         # odwrotnie — 2430, 2457, 2518… (zgłoszone 30.09.2026).
         from subiekt_zamowienia import klucz_projektu
-        projekty = sorted({d["projekt"] for d in dok if d["projekt"]},
+        # Pojedyncze numery, nie zlepki: ZD wspolne dla dwoch projektow ma
+        # w Uwagach „2627,3500" — na liscie byla osobna pozycja „2627,3500",
+        # a filtr „2627" takiego ZD nie pokazywal (02.10.2026).
+        projekty = sorted({n for d in dok for n in _numery_projektow(d)},
                           key=klucz_projektu)
         # MAGAZYN na poczatek listy: to nie numer projektu, a szuka sie go
         # czesto ("co zamowilem na sklad").
         if UWAGI_MAGAZYN in projekty:
             projekty = [UWAGI_MAGAZYN] + [p for p in projekty if p != UWAGI_MAGAZYN]
         self.cmb_proj["values"] = [PROJ_WSZYSTKIE] + projekty + [PROJ_BEZ]
+        if self._projekt_startowy:
+            if self._projekt_startowy in projekty:
+                self.projekt_var.set(self._projekt_startowy)
+            self._projekt_startowy = None      # tylko pierwszy odczyt
         self._refill()
         self._zaznacz_zadany()
         from datetime import datetime
@@ -567,7 +620,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
             if projekt == PROJ_BEZ:
                 if d["projekt"]:
                     continue
-            elif projekt != PROJ_WSZYSTKIE and d["projekt"] != projekt:
+            elif projekt != PROJ_WSZYSTKIE and projekt not in _numery_projektow(d):
                 continue
             if tylko_otw and ("zrealizowan" in d["status"].lower()
                               or "anulowan" in d["status"].lower()):
@@ -1097,6 +1150,323 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         import subiekt_pozycja_gui
         subiekt_pozycja_gui.otworz(self, symbol)
 
+    def _dwuklik_poz(self, event=None):
+        """Dwuklik w panelu pozycji: „Ilość" pozycji ZK → zmiana w Subiekcie,
+        reszta → karta pozycji."""
+        try:
+            biezacy = self.sheet_poz.get_currently_selected()
+            row = getattr(biezacy, "row", None)
+            col = getattr(biezacy, "column", None)
+        except Exception:
+            row = col = None
+        klucze = [k[0] for k in self.KOL_POZ]
+        pola = {klucze.index("ilosc"): "ilosc", klucze.index("cena"): "cena"}
+        d = getattr(self, "_poz_dok", None)
+        if (not self.wszystkie_poz_var.get() and d is not None and d.get("rodzaj") == "ZK"
+                and col in pola and row is not None
+                and 0 <= row < len(getattr(self, "_poz_widoczne", []))):
+            self._zmien_ilosc_zk(d, self._poz_widoczne[row], pole=pola[col])
+            return "break"
+        return self._karta_pozycji(event)
+
+    def _wybrana_pozycja(self):
+        """(dokument, pozycja) zaznaczona w panelu pozycji albo (None, None)."""
+        d = getattr(self, "_poz_dok", None)
+        if self.wszystkie_poz_var.get() or d is None:
+            return None, None
+        try:
+            biezacy = self.sheet_poz.get_currently_selected()
+            row = getattr(biezacy, "row", None)
+        except Exception:
+            row = None
+        poz = getattr(self, "_poz_widoczne", [])
+        if row is None or not (0 <= row < len(poz)):
+            return d, None
+        return d, poz[row]
+
+    def _usun_pozycje_zk(self):
+        """Usuwa zaznaczoną pozycję z ZK (tryb mostu `zk-poz-usun`, ZK po numerze).
+
+        Te same bezpieczniki co „Zdejmij z ZK" w arkuszu: pozycji, która
+        poszła na ZD, most nie usunie; dokumentu nie z RM_BAZA nie ruszy.
+        NIC PO CICHU: suchy przebieg → czerwone okno → zapis → odczyt.
+        """
+        from subiekt_projekt import komunikat
+        import subiekt_bridge
+        d, p = self._wybrana_pozycja()
+        if d is None or d.get("rodzaj") != "ZK":
+            komunikat(self, "Usuń z ZK", "Usuwać można tylko pozycje dokumentu ZK.\n"
+                      "Kliknij ZK na liście, potem pozycję.", rodzaj="warn")
+            return
+        if p is None:
+            komunikat(self, "Usuń z ZK", "Najpierw zaznacz pozycję.", rodzaj="warn")
+            return
+        sym = str(p.get("symbol") or "").strip()
+        plan = {"zk": d["numer"], "symbole": [sym]}
+        self.config(cursor="watch"); self.update_idletasks()
+        try:
+            suchy = subiekt_bridge.call("zk-poz-usun", {"plan": plan, "zapisz": False},
+                                        timeout=TIMEOUT_S, write=False)
+        except Exception as e:
+            self.config(cursor="")
+            komunikat(self, "Usuń z ZK", f"Most nie odpowiedział:\n\n{e}", rodzaj="error")
+            return
+        self.config(cursor="")
+        kroki = (suchy or {}).get("kroki", [])
+        k = next((x for x in kroki if x.get("Rodzaj") == "zk-poz"), None) \
+            or next(iter(kroki), {})
+        if not str(k.get("Status") or "").startswith("do-usuniecia"):
+            komunikat(self, "Usuń z ZK", f"{d['numer']} — {sym}\n\n{k.get('Szczegoly') or k.get('Status')}",
+                      rodzaj="error")
+            return
+        if not komunikat(
+                self, "Usuń pozycję z ZK — zapis do Subiekta",
+                f"{d['numer']}\n\n    {sym} — {p.get('nazwa', '')}\n    ({k.get('Szczegoly')})\n\n"
+                "Pozycja zniknie z ZK w Subiekcie.\n\n"
+                "⚠ Jeśli jest w BOM projektu, Projekt/Aktualizacja DODA JĄ Z POWROTEM.\n"
+                "Żeby zniknęła na stałe, ukryj ją też w arkuszu RM_BAZA.\n\n"
+                "Usunąć?", rodzaj="error", pytanie=True):
+            return
+        self.config(cursor="watch"); self.update_idletasks()
+        try:
+            wynik = subiekt_bridge.call("zk-poz-usun", {"plan": plan, "zapisz": True},
+                                        timeout=TIMEOUT_S, write=True)
+        except Exception as e:
+            self.config(cursor="")
+            komunikat(self, "Usuń z ZK", f"Most nie wykonał zapisu:\n\n{e}\n\nSprawdź ZK w Subiekcie.",
+                      rodzaj="error")
+            return
+        self.config(cursor="")
+        kroki = (wynik or {}).get("kroki", [])
+        zk = next((x for x in kroki if x.get("Rodzaj") == "zk" and x.get("Status") in ("zapisane", "blad")), {})
+        komunikat(self, "Usuń z ZK", f"{d['numer']} — {sym}\n\n{zk.get('Szczegoly') or 'brak potwierdzenia — sprawdź w Subiekcie'}",
+                  rodzaj="info" if zk.get("Status") == "zapisane" else "error")
+        self._do_zaznaczenia = d["numer"]
+        self._load_async()
+
+    def _okno_ilosci(self, d, p, pole="ilosc"):
+        """Okno wpisania nowej ilości pozycji ZK. Zwraca liczbę albo None.
+
+        Własne okno zamiast `simpledialog` (02.10.2026: „to okno ma być
+        ładne") — ten sam styl co `komunikat`: ciemny pasek, karta pozycji,
+        duże liczby „teraz → nowa", różnica liczona na żywo i walidacja
+        w oknie (0 i nie-liczba blokują „Dalej", zamiast osobnych błędów).
+        """
+        GRANAT, SZARY, JASNY, TLO = "#2c3e50", "#7f8c8d", "#bdc3c7", "#f4f6f8"
+        cena = pole == "cena"
+        teraz = float(p.get("cena") or 0) if cena else float(p.get("ilosc") or 0)
+        jm = "zł netto" if cena else str(p.get("jm") or "szt")
+        fmt = (lambda v: f"{v:.2f}") if cena else (lambda v: f"{v:g}")
+
+        okno = tk.Toplevel(self)
+        okno.title("Zmień cenę na ZK" if cena else "Zmień ilość na ZK")
+        okno.resizable(False, False)
+        okno.configure(bg="white")
+        try:
+            okno.transient(self)
+        except tk.TclError:
+            pass
+        wynik = {"ilosc": None}
+
+        # ── pasek ──
+        pasek = tk.Frame(okno, bg=GRANAT)
+        pasek.pack(fill=tk.X)
+        tk.Label(pasek, text="✏  Zmiana ceny na ZK" if cena else "✏  Zmiana ilości na ZK",
+                 bg=GRANAT, fg="white",
+                 font=("Arial", 12, "bold"), anchor="w", padx=16, pady=(10)
+                 ).pack(fill=tk.X)
+        tk.Label(pasek, text=d["numer"] + (f"   ·   projekt {d['projekt']}" if d.get("projekt") else ""),
+                 bg=GRANAT, fg=JASNY, font=("Arial", 9), anchor="w", padx=16
+                 ).pack(fill=tk.X, pady=(0, 10))
+
+        # ── pozycja ──
+        karta = tk.Frame(okno, bg="white")
+        karta.pack(fill=tk.X, padx=20, pady=(16, 4))
+        tk.Label(karta, text=str(p.get("symbol") or ""), bg="white", fg=GRANAT,
+                 font=("Arial", 13, "bold"), anchor="w").pack(fill=tk.X)
+        if p.get("nazwa"):
+            tk.Label(karta, text=p["nazwa"], bg="white", fg=SZARY, font=("Arial", 9),
+                     anchor="w", justify="left", wraplength=380).pack(fill=tk.X)
+
+        # ── teraz → nowa ──
+        rzad = tk.Frame(okno, bg="white")
+        rzad.pack(padx=20, pady=(14, 4))
+
+        def kafel(rodzic, napis):
+            f = tk.Frame(rodzic, bg=TLO, highlightthickness=1, highlightbackground="#dfe4ea")
+            tk.Label(f, text=napis, bg=TLO, fg=SZARY, font=("Arial", 8, "bold")
+                     ).pack(anchor="w", padx=12, pady=(8, 0))
+            return f
+
+        k1 = kafel(rzad, "CENA TERAZ" if cena else "NA ZK TERAZ")
+        k1.grid(row=0, column=0, sticky="ns")
+        tk.Label(k1, text=fmt(teraz), bg=TLO, fg=SZARY, font=("Arial", 24, "bold"),
+                 width=6 if cena else 5).pack(padx=12)
+        tk.Label(k1, text=jm, bg=TLO, fg=SZARY, font=("Arial", 9)).pack(pady=(0, 8))
+
+        tk.Label(rzad, text="→", bg="white", fg=JASNY, font=("Arial", 22, "bold")
+                 ).grid(row=0, column=1, padx=12)
+
+        k2 = kafel(rzad, "NOWA CENA" if cena else "NOWA ILOŚĆ")
+        k2.grid(row=0, column=2, sticky="ns")
+        k2.configure(highlightbackground="#3498db", highlightcolor="#3498db",
+                     highlightthickness=2)
+        wpis_rzad = tk.Frame(k2, bg=TLO)
+        wpis_rzad.pack(padx=8)
+        var = tk.StringVar(value=fmt(teraz))
+
+        def krok(o):
+            try:
+                v = float(var.get().replace(",", ".")) + o
+            except ValueError:
+                v = teraz
+            var.set(fmt(max(v, 0)))
+            wpis.icursor(tk.END)
+
+        tk.Button(wpis_rzad, text="−", width=2, font=("Arial", 12, "bold"),
+                  relief=tk.FLAT, bg="#dfe4ea", command=lambda: krok(-1)).pack(side=tk.LEFT)
+        wpis = tk.Entry(wpis_rzad, textvariable=var, width=8 if cena else 6, justify="center",
+                        font=("Arial", 24, "bold"), fg=GRANAT, relief=tk.FLAT, bg="white")
+        wpis.pack(side=tk.LEFT, padx=4, ipady=2)
+        tk.Button(wpis_rzad, text="+", width=2, font=("Arial", 12, "bold"),
+                  relief=tk.FLAT, bg="#dfe4ea", command=lambda: krok(+1)).pack(side=tk.LEFT)
+        tk.Label(k2, text=jm, bg=TLO, fg=SZARY, font=("Arial", 9)).pack(pady=(0, 8))
+
+        roznica = tk.Label(okno, text="", bg="white", font=("Arial", 10, "bold"))
+        roznica.pack(pady=(8, 0))
+        tk.Label(okno, text=("Cena netto za jednostkę. " if cena else "Ilość docelowa, nie różnica. ")
+                            + "Przed zapisem zobaczysz,\n"
+                            "co dokładnie zmieni się w Subiekcie.",
+                 bg="white", fg=SZARY, font=("Arial", 8), justify="center"
+                 ).pack(pady=(4, 14))
+
+        # ── stopka ──
+        stopka = tk.Frame(okno, bg=TLO)
+        stopka.pack(fill=tk.X)
+
+        def zamknij(ok):
+            if ok:
+                if btn_dalej["state"] == tk.DISABLED:
+                    return
+                wynik["ilosc"] = float(var.get().replace(",", "."))
+            okno.destroy()
+
+        btn_dalej = tk.Button(stopka, text="Dalej  →", width=12, font=("Arial", 10, "bold"),
+                              bg="#27ae60", fg="white", activebackground="#229954",
+                              activeforeground="white", relief=tk.FLAT,
+                              command=lambda: zamknij(True))
+        btn_dalej.pack(side=tk.RIGHT, padx=(6, 14), pady=10)
+        tk.Button(stopka, text="Anuluj", width=10, relief=tk.FLAT, bg="#dfe4ea",
+                  command=lambda: zamknij(False)).pack(side=tk.RIGHT, pady=10)
+
+        def odswiez(*_):
+            try:
+                v = float(var.get().replace(",", "."))
+            except ValueError:
+                roznica.config(text="To nie jest liczba", fg="#c0392b")
+                btn_dalej.config(state=tk.DISABLED, bg="#95a5a6")
+                return
+            if v < 0 or (v == 0 and not cena):
+                roznica.config(text="Cena nie może być ujemna" if cena
+                               else "0 nie — pozycję się usuwa, nie zeruje", fg="#c0392b")
+                btn_dalej.config(state=tk.DISABLED, bg="#95a5a6")
+                return
+            if v == teraz:
+                roznica.config(text="bez zmian", fg=SZARY)
+                btn_dalej.config(state=tk.DISABLED, bg="#95a5a6")
+                return
+            o = v - teraz
+            roznica.config(text=f"{'+' if o > 0 else '−'}{fmt(abs(o))} {jm}",
+                           fg="#27ae60" if o > 0 else "#d35400")
+            btn_dalej.config(state=tk.NORMAL, bg="#27ae60")
+
+        var.trace_add("write", odswiez)
+        odswiez()
+        okno.bind("<Return>", lambda e: zamknij(True))
+        okno.bind("<Escape>", lambda e: zamknij(False))
+        okno.bind("<Up>", lambda e: krok(+1))
+        okno.bind("<Down>", lambda e: krok(-1))
+
+        wysrodkuj(okno, self)
+        okno.grab_set()
+        wpis.focus_set()
+        wpis.select_range(0, tk.END)
+        self.wait_window(okno)
+        return wynik["ilosc"]
+
+    def _zmien_ilosc_zk(self, d, p, pole="ilosc"):
+        """Ilość pozycji na ZK — WPROST w Subiekcie (tryb mostu `zk-ilosc`).
+
+        Po zasiewie właścicielem ilości jest Subiekt, więc to jest właściwe
+        miejsce na zmianę; arkusz RM_BAZA pobierze nową wartość przy
+        następnym przejęciu locka. NIC PO CICHU: suchy przebieg → okno
+        z „na ZK X → ustawi Y" → zapis → wynik potwierdzony odczytem.
+        """
+        from subiekt_projekt import komunikat
+        import subiekt_bridge
+        sym = str(p.get("symbol") or "").strip()
+        if not sym:
+            return
+        nowa = self._okno_ilosci(d, p, pole)
+        if nowa is None:
+            return
+        tryb = "zk-cena" if pole == "cena" else "zk-ilosc"
+        tytul = "Zmień cenę na ZK" if pole == "cena" else "Zmień ilość na ZK"
+        plan = {"zk": d["numer"], "pozycje": [{"symbol": sym, pole: nowa}]}
+
+        def krok(wynik):
+            return next((k for k in (wynik or {}).get("kroki", [])
+                         if k.get("Rodzaj") == "zk-poz"
+                         and str(k.get("Symbol") or "").upper() == sym.upper()), None) \
+                or next((k for k in (wynik or {}).get("kroki", [])), None) or {}
+
+        self.config(cursor="watch"); self.update_idletasks()
+        try:
+            suchy = subiekt_bridge.call(tryb, {"plan": plan, "zapisz": False},
+                                        timeout=TIMEOUT_S, write=False)
+        except Exception as e:
+            self.config(cursor="")
+            komunikat(self, tytul, f"Most nie odpowiedział:\n\n{e}", rodzaj="error")
+            return
+        self.config(cursor="")
+        k = krok(suchy)
+        status = str(k.get("Status") or "")
+        if not status.startswith("do-zmiany"):
+            komunikat(self, tytul,
+                      f"{d['numer']} — {sym}\n\n{k.get('Szczegoly') or status or 'brak odpowiedzi mostu'}",
+                      rodzaj="info" if status == "bez-zmian" else "error")
+            return
+        if not komunikat(
+                self, tytul + " — zapis do Subiekta",
+                f"{d['numer']}\n\n    {sym}: {k.get('Szczegoly')}\n\n"
+                "Zmiana idzie WPROST do Subiekta.\n"
+                + ("" if pole == "cena" else
+                   "Arkusz RM_BAZA pobierze nową ilość przy następnym przejęciu locka.\n")
+                + "\n"
+                "Zapisać?", rodzaj="warn", pytanie=True):
+            return
+
+        self.config(cursor="watch"); self.update_idletasks()
+        try:
+            wynik = subiekt_bridge.call(tryb, {"plan": plan, "zapisz": True},
+                                        timeout=TIMEOUT_S, write=True)
+        except Exception as e:
+            self.config(cursor="")
+            komunikat(self, tytul,
+                      f"Most nie wykonał zapisu:\n\n{e}\n\nSprawdź ilość w Subiekcie.", rodzaj="error")
+            return
+        self.config(cursor="")
+        k = krok(wynik)
+        if k.get("Status") == "zmieniona":
+            komunikat(self, tytul, f"{d['numer']}\n\n    {sym}: {k.get('Szczegoly')}")
+        else:
+            komunikat(self, tytul,
+                      f"{d['numer']} — {sym}\n\n{k.get('Szczegoly') or k.get('Status') or 'nieznany wynik'}",
+                      rodzaj="error")
+        # Lista ma pokazać stan po zapisie — z powrotem na tym samym ZK.
+        self._do_zaznaczenia = d["numer"]
+        self._load_async()
+
     def _on_dwuklik(self, _event=None):
         """Dwuklik w kolumnie PDF → otwiera gotowy wydruk zaznaczonego dokumentu."""
         if not self.sheet:
@@ -1159,7 +1529,96 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
             # lista ma zostać taka, jaka jest, żeby nie gubić miejsca w szukaniu.
             return
 
+        self._pokaz_pozycje(d)
+
+    def _szukaj_poz_po_wpisaniu(self):
+        """Filtr pozycji po krotkiej przerwie w pisaniu, nie po kazdym znaku."""
+        zadanie = getattr(self, "_zadanie_szukaj_poz", None)
+        if zadanie:
+            self.after_cancel(zadanie)
+        self._zadanie_szukaj_poz = self.after(250, self._szukaj_poz_teraz)
+
+    def _szukaj_poz_teraz(self):
+        self._zadanie_szukaj_poz = None
+        if self.wszystkie_poz_var.get():
+            self._pokaz_wszystkie_pozycje()
+        elif self._poz_dok is not None:
+            self._pokaz_pozycje(self._poz_dok)
+
+    def _kolejnosc_arkusza(self, numer):
+        """{KLUCZ WIELKIMI: miejsce} — kolejnosc wierszy arkusza RM_BAZA.
+
+        To samo ORDER BY co arkusz (`database_manager.get_project_items`):
+        znormalizowane na gorze, potem numer rysunku, potem nazwa. Kluczem
+        jest symbol Subiekta, numer rysunku i nazwa wiersza — pozycja
+        dokumentu trafia po ktoremukolwiek. Odczyt RAZ na projekt i okno.
+        """
+        if numer in self._kolejnosc_proj:
+            return self._kolejnosc_proj[numer]
+        miejsca = {}
+        try:
+            if self._pid_po_numerze is None:
+                # Jedno zapytanie o wszystkie projekty z listy dokumentow.
+                from subiekt_zamowienia import projekty_po_numerze
+                nr = {n for d in self.dokumenty for n in _numery_projektow(d)}
+                self._pid_po_numerze = {
+                    (nazwa or "").strip().split(" ")[0]: pid
+                    for pid, nazwa in projekty_po_numerze(nr).items()}
+            pid = self._pid_po_numerze.get(numer)
+            if pid:
+                import os, sqlite3
+                from subiekt_stany import PROJECTS_DIR
+                sciezka = os.path.join(PROJECTS_DIR, f"project_{pid}.sqlite")
+                con = sqlite3.connect(f"file:{sciezka}?mode=ro", uri=True)
+                try:
+                    kol = {k[1] for k in con.execute("PRAGMA table_info(items)")}
+                    sym = "subiekt_symbol" if "subiekt_symbol" in kol else "NULL"
+                    klasa = ("COALESCE(class_manual, class_auto)"
+                             if {"class_manual", "class_auto"} <= kol else "NULL")
+                    wiersze = con.execute(f"""
+                        SELECT COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) AS dn,
+                               COALESCE(NULLIF(work_name, ''), src_name) AS nm, {sym}
+                        FROM items WHERE COALESCE(is_hidden, 0) = 0
+                        ORDER BY CASE WHEN {klasa} = 'ZNORMALIZOWANE' THEN 0 ELSE 1 END,
+                                 dn COLLATE NOCASE, nm COLLATE NOCASE, id""").fetchall()
+                finally:
+                    con.close()
+                for i, (dn, nm, sy) in enumerate(wiersze):
+                    for k in (sy, dn, nm):
+                        k = str(k or "").strip().upper()
+                        if k and k not in miejsca:
+                            miejsca[k] = i
+        except Exception as e:
+            print(f"⚠️  Kolejność arkusza dla {numer}: {e}")
+        self._kolejnosc_proj[numer] = miejsca
+        return miejsca
+
+    def _posortuj_jak_arkusz(self, d, pozycje):
+        """Pozycje w kolejnosci arkusza projektu; spoza arkusza — na koncu,
+        po symbolu. Dokument bez projektu (MAGAZYN) — po symbolu."""
+        miejsca = {}
+        for n in _numery_projektow(d):
+            for k, v in self._kolejnosc_arkusza(n).items():
+                miejsca.setdefault(k, v)
+
+        def klucz(p):
+            sym = str(p.get("symbol") or "").strip().upper()
+            naz = str(p.get("nazwa") or "").strip().upper()
+            m = miejsca.get(sym, miejsca.get(naz))
+            return (0, m, "") if m is not None else (1, 0, sym or naz)
+        return sorted(pozycje, key=klucz)
+
+    def _pokaz_pozycje(self, d):
+        """Pozycje jednego dokumentu: kolejnosc arkusza RM_BAZA + filtr."""
+        self._poz_dok = d
+        self._poz_widoczne = []     # pozycje w kolejnosci wierszy panelu
         szukaj = (self.search_var.get() or "").strip().lower()
+        filtr = (self.szukaj_poz_var.get() or "").strip().lower()
+        pozycje = self._posortuj_jak_arkusz(d, d["pozycje"])
+        if filtr:
+            pozycje = [p for p in pozycje
+                       if filtr in f"{p['symbol']} {p['nazwa']} {p.get('opis', '')}".lower()]
+        self._poz_widoczne = pozycje
         # Dokument magazynowy → koszt zamiast ceny netto, także w nagłówkach.
         mag = d["rodzaj"] in self.RODZAJE_MAGAZYNOWE
         naglowki = [k[1] for k in self.KOL_POZ]
@@ -1176,7 +1635,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
               else (f"{p['cena']:.2f}" if p["cena"] else ""),
               (f"{p['koszt']:.2f}" if p.get("koszt") else "") if mag
               else (f"{p['cena'] * p['ilosc']:.2f}" if p["cena"] else "")]
-             for p in d["pozycje"]], reset_col_positions=False, redraw=False)
+             for p in pozycje], reset_col_positions=False, redraw=False)
 
         # Podświetl pozycje pasujące do wyszukiwarki — po to się szukało.
         try:
@@ -1184,7 +1643,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         except Exception:
             pass
         if szukaj:
-            for i, p in enumerate(d["pozycje"]):
+            for i, p in enumerate(pozycje):
                 if szukaj in f"{p['symbol']} {p['nazwa']}".lower():
                     for c in range(len(self.KOL_POZ)):
                         self.sheet_poz.highlight_cells(row=i, column=c, bg="#fcf3cf")
@@ -1194,7 +1653,8 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         self.lbl_poz.config(
             text=f"{opis}   ·   {d['numer']}   ·   {d['podmiot']}"
                  + (f"   ·   projekt {d['projekt']}" if d["projekt"] else "")
-                 + f"   ·   {len(d['pozycje'])} poz."
+                 + (f"   ·   {len(pozycje)} z {len(d['pozycje'])} poz. (🔍 „{filtr}”)"
+                    if filtr else f"   ·   {len(d['pozycje'])} poz.")
                  + (f"   ·   {d['wartosc']:.2f} zł" if d["wartosc"] else ""))
 
 
@@ -1227,10 +1687,13 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         co użytkownik właśnie zawęził.
         """
         szukaj = (self.search_var.get() or "").strip().lower()
+        filtr = (self.szukaj_poz_var.get() or "").strip().lower()
         wiersze, trafienia = [], []
         for d in self.widoczne:
             for p in d["pozycje"]:
                 if szukaj and szukaj not in f"{p['symbol']} {p['nazwa']}".lower():
+                    continue
+                if filtr and filtr not in f"{p['symbol']} {p['nazwa']} {p.get('opis', '')}".lower():
                     continue
                 trafienia.append(bool(szukaj))
                 wiersze.append([
@@ -1284,13 +1747,15 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
                  + (f"   ·   {wart:,.2f} zł".replace(",", " ") if wart else ""))
 
 
-def open_window(parent, szukaj=None):
+def open_window(parent, szukaj=None, projekt=None):
     """Punkt wejścia dla RM_BAZA.
 
     `szukaj` — numer dokumentu, na którym okno ma się ustawić od razu
     (używa tego klik w numer RW w oknie wydania).
+    `projekt` — nazwa projektu wybranego w RM_BAZA; filtr „Projekt" startuje
+    na jego numerze.
     """
-    return DokumentyWindow(parent, szukaj=szukaj)
+    return DokumentyWindow(parent, szukaj=szukaj, projekt=projekt)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ metadata:
 **WDROŻONE i potwierdzone na żywych danych (2026-09-09, projekt 3500 / project_71).**
 
 Pozycja, która ma już kartotekę w Subiekcie, nie pozwala zmienić w arkuszu głównym swojego **klucza dopasowania**:
-- pozycja **rysunkowa** → zablokowany **numer rysunku** (kolumna 0); nazwa zostaje edytowalna, bo to tylko opis;
+- pozycja **rysunkowa** → zablokowany **numer rysunku** (kolumna 0); ~~nazwa zostaje edytowalna, bo to tylko opis~~ — **od 02.10.2026 NAZWA też zablokowana** (user zmienił nazwę 2609-450.01X, Projekt/Aktualizacja „przeszła”, a kartoteka w Subiekcie została ze starą nazwą bez słowa — nazw plan nie porównuje ani nie wysyła; nazwę zmienia się w Subiekcie, Edytor kartotek);
 - pozycja **znormalizowana** (bez numeru) → zablokowana **nazwa** (kolumna 1), bo z niej powstaje symbol (`symbol_z_nazwy`).
 
 Przy próbie edycji: `messagebox` z symbolem z Subiekta, datą zasiewu i wskazówką („cofnij projekt → popraw → zasiej ponownie"), potem `refresh_data()` cofa zmianę.

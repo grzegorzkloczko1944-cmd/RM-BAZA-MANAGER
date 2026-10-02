@@ -901,10 +901,47 @@ def zbuduj_wiersze(zapotrzebowanie, bom, podmioty=(), tylko_projekt=None, zamowi
     # w obie strony, „6004 ZZ" ze spacją vs „UCFL201" bez).
     # Grupa idzie PRZED dostawcą, żeby znormalia były na górze CAŁEJ listy,
     # a nie osobno w każdej grupie dostawcy (zgłoszone 29.09.2026).
-    wiersze.sort(key=lambda w: (0 if znormalizowana(w.get("typ")) else 1,
-                                bool(w.get("zd")), w["dostawca"] == "",
-                                w["dostawca"], w["symbol"]))
+    wiersze.sort(key=klucz_wiersza)
     return wiersze
+
+
+def do_zamowienia(w):
+    """Czy pozycja jest DO ZAMÓWIENIA — jedna reguła dla filtra i liczników.
+
+    Nie ma ZD i:
+      * trzeba coś dokupić (Kupić > 0), albo
+      * po zdjęciu z magazynu na projekt stan spadnie DO minimum z kartoteki
+        lub niżej (domówienie na skład; „10/15" = domawiaj przy 10 — ta sama
+        granica co podświetlenie kolumny Min/Opt).
+    Pozycja w całości pokryta ze stanu, bez naruszenia minimum, nie jest
+    do zamówienia — widać ją w filtrze „wszystkie" (02.10.2026: „nie powinne
+    się wyświetlać pozycje, które są na stanie i nie trzeba ich zamawiać").
+    Pozycja dodana ręcznie ma Kupić >= 1, więc zostaje.
+    """
+    if w.get("zd"):
+        return False
+    if float(w.get("ilosc") or 0) > 0:
+        return True
+    mn = float(w.get("stan_min") or 0)
+    if mn > 0:
+        po_zdjeciu = float(w.get("dostepne") or 0) - float(w.get("ze_stanu") or 0)
+        return po_zdjeciu <= mn
+    return False
+
+
+def klucz_wiersza(w):
+    """Kolejność listy ZD — JEDNA funkcja dla wczytania i każdego odświeżenia.
+
+    Do 02.10.2026 lista sortowała się tylko przy wczytaniu. Dostawca wskazany
+    później ręcznie zostawiał wiersz tam, gdzie stał jako „bez dostawcy":
+    filtr QUAY pokazywał WJ200…, WS-10…, WS-20…, a dopiero za nimi 018kW…
+    i DSNU…, choć po symbolu powinny iść pierwsze. Dostawca i symbol bez
+    względu na wielkość liter i białe znaki — jak NOCASE w arkuszu.
+    """
+    dost = " ".join(str(w.get("dostawca") or "").split()).casefold()
+    return (0 if znormalizowana(w.get("typ")) else 1,
+            bool(w.get("zd")), dost == "", dost,
+            str(w.get("symbol") or "").strip().casefold())
 
 
 # ── Zapis ZD ────────────────────────────────────────────────────────────────
@@ -1568,7 +1605,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         # Godzina odczytu — bez niej nie widać, czy „Odśwież" w ogóle zadziałał,
         # gdy dane się nie zmieniły.
         czas = datetime.now().strftime("%H:%M:%S")
-        do_zam = sum(1 for w in wiersze if not w.get("zd"))
+        do_zam = sum(1 for w in wiersze if do_zamowienia(w))
         zamow = sum(1 for w in wiersze if w.get("zd"))
         bez_dost = sum(1 for w in wiersze if not w["dostawca"] and not w.get("zd"))
 
@@ -1757,7 +1794,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         out = []
         for w in wiersze:
             # Nic nie znika samo — o widoczności decyduje wyłącznie ten filtr.
-            if stan == STAN_DO_ZAMOWIENIA and w.get("zd"):
+            if stan == STAN_DO_ZAMOWIENIA and not do_zamowienia(w):
                 continue
             if stan == STAN_ZAMOWIONE and not w.get("zd"):
                 continue
@@ -1939,6 +1976,9 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         if not self.sheet:
             return
         poprzednie = [id(w) for w in self.widoczne]
+        # Kolejność od nowa przy każdym odświeżeniu — wiersz z dostawcą
+        # wskazanym przed chwilą ma od razu stanąć na swoim miejscu.
+        self.wszystkie.sort(key=klucz_wiersza)
         self.widoczne = self._filtruj(self.wszystkie)
         # Kotwica Shift+klik wskazuje POZYCJĘ w widocznej liście, więc traci
         # sens dopiero wtedy, gdy zmieni się ZESTAW wierszy (filtr, odczyt) —
@@ -2077,7 +2117,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         bez_dost = [w for w in zazn if not w["dostawca"]]
         dostawcy = {w["dostawca"] for w in zazn if w["dostawca"]}
         zamowione = [w for w in self.wszystkie if w.get("zd")]
-        do_zam = len(self.wszystkie) - len(zamowione)
+        do_zam = sum(1 for w in self.wszystkie if do_zamowienia(w))
         # Ilu dostawców zgadł automat — te warto sprawdzić przed utworzeniem ZD.
         auto = sum(1 for w in self.wszystkie
                    if w.get("zrodlo_dostawcy") == "automat" and not w.get("zd"))

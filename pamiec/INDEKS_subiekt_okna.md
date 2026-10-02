@@ -62,3 +62,7 @@ Czesc pamieci projektu — spis wszystkich obszarow w [MEMORY.md](MEMORY.md).
 - [Wydanie: poza BOM i ZD jako potrzeba](project_wydanie_poza_bom_i_zd.md) — `poza BOM` znika z „Możliwe do wydania”; ZD zasila Potrzebę, gdy milczą ZK i PW
 - [Wydania do arkusza: klucz subiekt_symbol](project_wydane_do_arkusza_symbol.md) — pozycje handlowe nie mają numeru rysunku; bez tego „Ilość dostarczonych” zostawała pusta
 - [Okno wydania: kolumna RW](project_wydanie_kolumna_rw.md) — numer dokumentu przy pozycji, klik otwiera przegląd dokumentów na tym RW
+- [Kolizja powiązań → sumowanie ilości na ZK](project_powiazania_kolizja_ilosci.md) — 2637: dwa wiersze pod jednym subiekt_symbol; guard w planie + naprawa pod lockiem z oknem PRZED/PO
+- [Przegląd dokumentów — edycja ZK](project_przeglad_dokumentow_edycja_zk.md) — filtr na projekt z RM_BAZA, kolejność arkusza, szukanie w pozycjach, dwuklik ilość/cena ZK (most zk-ilosc/zk-cena), usuwanie pozycji prawym klikiem
+- [Ilość na ZK należy do Subiekta](project_ilosc_zk_wlasnosc_subiekta.md) — Projekt/Aktualizacja bierze ilość z ZK, sklejenie dubletów NIE podnosi ZK; czerwone okno przy sklejaniu; banner dubletów po numerze/symbolu/nazwie
+- [Okno ZD: sortowanie i „do zamówienia”](project_zd_okno_do_zamowienia.md) — klucz_wiersza przy każdym odświeżeniu; do_zamowienia = Kupić>0 albo stan po zdjęciu ≤ minimum; co znaczy kolumna ZK

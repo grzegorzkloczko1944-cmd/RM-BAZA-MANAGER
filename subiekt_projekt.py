@@ -236,6 +236,11 @@ def read_project_items(project_id):
 
     out, seen = [], set()
     uzyte_symbole = set()      # przycinanie nazw może dać dwa te same symbole
+    # Kto zajal ktory symbol (WIELKIMI) -> nazwa wiersza. Do wykrycia DWOCH
+    # wierszy z tym samym powiazaniem (02.10.2026: „6004 ZZ" i „6004ZZ" obie
+    # mialy subiekt_symbol=6004ZZ, plan wysylal je pod jednym symbolem,
+    # a most SUMOWAL ilosci: na ZK 4 -> „ustawi 17").
+    zajete_przez = {}
     for r in rows:
         nr = jedna_linia(first(r[0:3]))
         nazwa = jedna_linia(first(r[n0:q0]))
@@ -279,11 +284,22 @@ def read_project_items(project_id):
         # przez zasiew. Dla wierszy bez powiazania (jeszcze nie zasianych)
         # symbol = numer, jak dotad.
         sym_zas = (str(r[y0]).strip() if (sym_col and y0 < len(r) and r[y0]) else "")
+        konflikt = None
         if sym_zas and sym_zas.upper() != str(symbol).strip().upper():
-            symbol = sym_zas
-            uzyte_symbole.add(symbol)
+            if sym_zas.upper() in zajete_przez:
+                # Ta kartoteka jest JUZ wzieta przez inny wiersz tego planu.
+                # Wiersz zostaje przy wlasnym symbolu (unikalnym, z rozroznij),
+                # a okno dostaje ostrzezenie — nigdy ciche sumowanie ilosci.
+                konflikt = sym_zas
+            else:
+                symbol = sym_zas
+                uzyte_symbole.add(symbol)
+        zajete_przez.setdefault(str(symbol).strip().upper(), nazwa)
         out.append({
             "nr": symbol,
+            # Kartoteka z powiazania zajeta przez inny wiersz (patrz wyzej).
+            "konflikt_powiazania": konflikt,
+            "konflikt_z": zajete_przez.get(sym_zas.upper()) if konflikt else None,
             "bez_numeru": not nr,    # do rozpoznania przy zakładaniu kartotek
             "nazwa": nazwa,
             # Wycinek ZAWSZE do s0: za opisem stoja jeszcze supplier_id
@@ -790,6 +806,133 @@ def rozroznij_symbol(nazwa, uzyte):
     while f"{baza}-{i}".upper() in zajete:
         i += 1
     return f"{baza}-{i}"
+
+
+def planuj_naprawe_powiazan(con, kart=None):
+    """Wiersze BOM-u, ktore wskazuja TE SAMA kartoteke co inny wiersz -> akcje.
+
+    Tak powstal rozjazd ilosci w 2637 (02.10.2026): dopasowanie ilosci z ZK
+    szlo po `symbol_z_nazwy` BEZ `rozroznij_symbol`, wiec drugi wiersz
+    („6004ZZ" 13 szt.) dostal powiazanie z kartoteka PIERWSZEGO („6004 ZZ"
+    4 szt.) — a jego wlasna kartoteka (6004ZZ-2) wrocila z ZK jako osobny
+    wiersz „z zamowienia ZK". Plan sumowal 4+13 i chcial ustawic 17.
+
+    Dla kazdego nadmiarowego wiersza grupy (zostaje najstarszy):
+      1. wiersz „z zamowienia ZK" o TEJ SAMEJ nazwie z wolna kartoteka ->
+         przepiecie na nia + scalenie (tamten wiersz znika, jego ilosc
+         i dostawy przechodza tu);
+      2. inaczej symbol z `rozroznij_symbol` (tak zasiew nadal go w Subiekcie)
+         jesli stoi na ZK (`kart`) -> przepiecie;
+      3. inaczej odpiecie (bez powiazania plan wysle wlasny symbol).
+    Tylko PLAN — nic nie zapisuje. Idempotentne: po wykonaniu grupy znikaja.
+    """
+    kart = kart or {}
+    try:
+        rows = con.execute(
+            "SELECT id, COALESCE(is_manual, 0), COALESCE(notes, ''),"
+            " COALESCE(NULLIF(TRIM(work_name), ''), TRIM(src_name)),"
+            " subiekt_symbol, subiekt_id, order_qty, COALESCE(delivered_qty, 0)"
+            " FROM items WHERE COALESCE(is_hidden, 0) = 0").fetchall()
+    except sqlite3.OperationalError:
+        return []                       # baza sprzed migracji subiekt_id
+
+    def norm(n):
+        # Wielkosc liter i spacje nie roznia nazw; KROPKA juz tak —
+        # „Nakretka TR16x4" i „Nakretka TR16x4." dostaly w Subiekcie dwie
+        # kartoteki i obie stoja na ZK, wiec to dwa wiersze, nie jeden.
+        return " ".join(do_ascii(str(n or "")).upper().split())
+
+    def klucz(r):
+        return r[5] if r[5] else ((str(r[4] or "").strip().upper()) or None)
+
+    z_zk = [r for r in rows if r[1] == 1 and r[2] == "z zamówienia ZK"]
+    bom = [r for r in rows if not (r[1] == 1 and r[2] == "z zamówienia ZK")]
+    grupy = {}
+    for r in bom:
+        k = klucz(r)
+        if k:
+            grupy.setdefault(k, []).append(r)
+    zajete = {str(r[4] or "").strip().upper() for r in bom if r[4]}
+    zajete_id = {r[5] for r in bom if r[5]}
+    akcje = []
+    for k, lista in grupy.items():
+        if len(lista) < 2:
+            continue
+        lista.sort(key=lambda r: r[0])
+        pierwszy = lista[0]
+        for X in lista[1:]:
+            # Ta sama nazwa (rozna tylko wielkoscia liter) = ta sama rzecz
+            # z dwoch galezi drzewa; wspolna kartoteka jest POPRAWNA.
+            if norm(X[3]) == norm(pierwszy[3]):
+                continue
+            a = dict(id=X[0], nazwa=X[3], stary=X[4], nowy=None, nowy_id=None,
+                     ilosc=None, scal_id=None, dostarczone=0,
+                     zajete_przez=pierwszy[3])
+            m = next((M for M in z_zk
+                      if norm(M[3]) == norm(X[3])
+                      and str(M[4] or "").strip().upper() not in zajete
+                      and (M[5] is None or M[5] not in zajete_id)), None)
+            if m:
+                a.update(nowy=m[4], nowy_id=m[5], ilosc=m[6], scal_id=m[0],
+                         dostarczone=m[7])
+                a["opis"] = ("„%s” (id %s): wskazuje %s zajęte przez „%s” → przepnę na %s"
+                             " i scalę z wierszem „z zamówienia ZK” (%s szt.)"
+                             % (X[3], X[0], X[4], pierwszy[3], m[4], m[6]))
+                zajete.add(str(m[4]).strip().upper())
+                if m[5]:
+                    zajete_id.add(m[5])
+                z_zk.remove(m)
+            else:
+                kand = rozroznij_symbol(X[3] or "", zajete)
+                K = kand.strip().upper()
+                if K in kart:
+                    kk = kart[K]
+                    a.update(nowy=(kk[1] if kk and len(kk) > 1 and kk[1] else kand),
+                             nowy_id=(kk[0] if kk else None))
+                    a["opis"] = ("„%s” (id %s): wskazuje %s zajęte przez „%s” → przepnę na %s (jest na ZK)"
+                                 % (X[3], X[0], X[4], pierwszy[3], a["nowy"]))
+                    zajete.add(K)
+                else:
+                    a["opis"] = ("„%s” (id %s): wskazuje %s zajęte przez „%s” → ODEPNĘ"
+                                 " (brak kartoteki na ZK; zasiew nada własny symbol)"
+                                 % (X[3], X[0], X[4], pierwszy[3]))
+            akcje.append(a)
+    return akcje
+
+
+def wykonaj_naprawe_powiazan(con, akcje):
+    """Wykonuje plan z `planuj_naprawe_powiazan` na tym samym polaczeniu
+    (MUSI byc `db_manager.project_con`, pod lockiem). Bez commit — robi go
+    wolajacy. Zwraca (przepiete, scalone, odpiete)."""
+    teraz = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    przep = scal = odp = 0
+    for a in akcje:
+        if a["nowy"]:
+            if a["ilosc"] is not None:
+                con.execute(
+                    "UPDATE items SET subiekt_symbol = ?, subiekt_id = ?, order_qty = ?,"
+                    " subiekt_zasiew_at = COALESCE(subiekt_zasiew_at, ?), updated_at = ?"
+                    " WHERE id = ?",
+                    (a["nowy"], a["nowy_id"], a["ilosc"], teraz, teraz, a["id"]))
+            else:
+                con.execute(
+                    "UPDATE items SET subiekt_symbol = ?, subiekt_id = ?, updated_at = ?"
+                    " WHERE id = ?", (a["nowy"], a["nowy_id"], teraz, a["id"]))
+            przep += 1
+        else:
+            con.execute(
+                "UPDATE items SET subiekt_symbol = NULL, subiekt_id = NULL,"
+                " order_qty = NULL, subiekt_zasiew_at = NULL, updated_at = ?"
+                " WHERE id = ?", (teraz, a["id"]))
+            odp += 1
+        if a.get("scal_id"):
+            if a.get("dostarczone"):
+                con.execute(
+                    "UPDATE items SET delivered_qty = COALESCE(delivered_qty, 0) + ?"
+                    " WHERE id = ?", (a["dostarczone"], a["id"]))
+            con.execute("DELETE FROM items WHERE id = ?", (a["scal_id"],))
+            scal += 1
+    return przep, scal, odp
 
 
 def numer_projektu(project_name, project_id=None):
@@ -1353,6 +1496,17 @@ def build_plan(project_id, project_name, podmiot, tytul, csv_path=None,
     w_drzewku = {c[0].strip().upper() for lst in kids.values() for c in lst}
     ukryte_cale_galezie = sum(
         1 for nr in ukryte if nr in w_drzewku and nr not in poza_zgloszone)
+    konflikty = [it for it in items if it.get("konflikt_powiazania")]
+    if konflikty:
+        opis = "; ".join("„%s” (%s) wskazuje %s zajęte przez „%s”" % (
+            it["nazwa"], it["nr"], it["konflikt_powiazania"], it.get("konflikt_z") or "?")
+            for it in konflikty[:5])
+        if len(konflikty) > 5:
+            opis += "; … i %d dalszych" % (len(konflikty) - 5)
+        dop = ("%d poz. ma powiązanie z kartoteką zajętą przez inny wiersz — "
+               "idą pod własnym symbolem (naprawa: odśwież ilości z ZK pod lockiem): %s"
+               % (len(konflikty), opis))
+        warn = (warn + "\n" + dop) if warn else dop
     return plan, items, warn, poza_bom, ukryte_cale_galezie, biblioteczne_bez_skladu
 
 

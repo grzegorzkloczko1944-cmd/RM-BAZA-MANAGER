@@ -50,7 +50,7 @@ internal static class CommandDispatcher
     {
         "kartoteka", "kartoteka-usun", "kartoteka-edytuj", "projekt", "zd", "zd-usun",
         "dostawcy", "progi", "rw", "pw", "termin", "symbole", "komplet-napraw", "magazyn-zaloz",
-        "magazyn-usun", "projekt-cofnij", "kartoteki", "zk-poz-usun", "scal", "zk-nowe",
+        "magazyn-usun", "projekt-cofnij", "kartoteki", "zk-poz-usun", "zk-ilosc", "zk-cena", "scal", "zk-nowe",
         "migracja-uwagi", "symbole-dostawcy", "pz-utworz", "probe-pozycje",
         // "zdjecie" — akcje dodaj/usun/glowne zapisuja; sama "lista" nie,
         // ale plan jest zawsze, wiec rozroznia to CzyZapis ponizej.
@@ -79,7 +79,7 @@ internal static class CommandDispatcher
         "zd-usun", "wydruk-recon", "termin", "symbole", "rw", "kartoteka-usun",
         "progi", "wydruk", "projekt", "komplet", "komplet-napraw", "kartoteka-edytuj",
         "pola-wlasne", "magazyn-zaloz", "magazyn-usun", "pw", "projekt-cofnij",
-        "kartoteki", "zapotrzebowanie-test", "zk-ilosci", "zk-poz-usun", "scal", "zk-nowe",
+        "kartoteki", "zapotrzebowanie-test", "zk-ilosci", "zk-poz-usun", "zk-ilosc", "zk-cena", "scal", "zk-nowe",
         "migracja-uwagi", "wydanie-stan", "symbole-dostawcy", "pz-utworz",
         "efaktury", "zdjecie", "probe-pozycje",
     };
@@ -243,6 +243,12 @@ internal static class CommandDispatcher
             case "zk-poz-usun":
                 if (k.PlanPath is null) return Brak("zk-poz-usun: brak --plan=plik.json");
                 return ZkPozUsun.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
+
+            // Zmiana ilosci pozycji na wskazanym ZK (okno Przeglad dokumentow).
+            case "zk-ilosc":
+            case "zk-cena":   // ten sam modul; o polu decyduje plan (ilosc / cena)
+                if (k.PlanPath is null) return Brak(k.Tryb + ": brak --plan=plik.json");
+                return ZkIlosc.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
 
             // SONDA: jak usunac pozycje z ZK (ProbePozycje.cs). Zapis tylko na
             // projekcie TEST-USUN* — sam tryb tego pilnuje.

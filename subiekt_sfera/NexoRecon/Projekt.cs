@@ -947,6 +947,10 @@ internal static class Projekt
         return null;
     }
 
+    /// Dla ZkIlosc — ta sama reguła dopasowania symbolu co przy zapisie projektu.
+    internal static List<object> ZnajdzWszystkiePozycjePubl(IEnumerable<PozycjaDokumentu> pozycje, string symbol)
+        => ZnajdzWszystkiePozycje(pozycje, symbol);
+
     /// WSZYSTKIE wiersze dokumentu o danym symbolu, w kolejnosci na dokumencie.
     static List<object> ZnajdzWszystkiePozycje(IEnumerable<PozycjaDokumentu> pozycje, string symbol)
     {

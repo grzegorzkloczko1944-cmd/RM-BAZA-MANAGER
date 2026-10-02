@@ -6,6 +6,8 @@
 //
 // plan.json:
 //   { "projekt": "3500", "symbole": ["2627-100.22Z", "..."] }
+//   albo { "zk": "ZK 6/CENTRALA/2026", "symbole": [...] } — dokument wskazany
+//   wprost (okno Przegląd dokumentów, 02.10.2026); reszta zabezpieczeń ta sama.
 //
 // Po co: gdy pozycja zmienia dostawcę z realnego na RMPAK ("jednak robimy
 // u siebie"), wypada z planu ZK — ale tryb "projekt" jej NIE ZDEJMUJE
@@ -62,7 +64,20 @@ internal static class ZkPozUsun
             // przy zmianie formatu Uwag (10.09.2026: numer to pierwszy człon,
             // reszta należy do człowieka) kopia przestałaby cokolwiek znajdować,
             // a tryb po cichu mówiłby „nie ma czego usuwać".
-            var (dokument, duplikaty) = Projekt.ZnajdzZkProjektu(sfera, numerProjektu);
+            var numerZk = (plan.Zk ?? "").Trim();
+            InsERT.Moria.ModelDanych.DokumentZK? dokument;
+            List<InsERT.Moria.ModelDanych.DokumentZK> duplikaty;
+            if (numerZk.Length > 0)
+            {
+                // Dokument wskazany numerem — jedno zapytanie, bez zgadywania.
+                var lista = zamowienia.Dane.Wszystkie()
+                    .Where(d => d.NumerWewnetrzny.PelnaSygnatura == numerZk).ToList();
+                dokument = lista.FirstOrDefault();
+                duplikaty = lista.Skip(1).ToList();
+                numerProjektu = numerZk;
+            }
+            else
+                (dokument, duplikaty) = Projekt.ZnajdzZkProjektu(sfera, numerProjektu);
             if (dokument == null)
             {
                 kroki.Add(new Krok("zk", numerProjektu, "brak",
@@ -222,6 +237,9 @@ internal static class ZkPozUsun
 
     /// Numery ZD realizujących tę pozycję ZK. Pusta lista = nikt jej nie
     /// zamówił, więc można ją bezpiecznie zdjąć z dokumentu.
+    /// Dla ZkIlosc — to samo powiązanie ZK → ZD przy zmniejszaniu ilości.
+    internal static List<string> NumeryZdPubl(object poz) => NumeryZd(poz);
+
     static List<string> NumeryZd(object poz)
     {
         var out_ = new List<string>();
@@ -261,6 +279,6 @@ internal static class ZkPozUsun
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
     static decimal Bezp2(Func<decimal> f) { try { return f(); } catch { return 0m; } }
 
-    internal record Plan(string? Projekt, List<string>? Symbole);
+    internal record Plan(string? Projekt, List<string>? Symbole, string? Zk = null);
     internal record Krok(string Rodzaj, string Symbol, string Status, string? Szczegoly);
 }

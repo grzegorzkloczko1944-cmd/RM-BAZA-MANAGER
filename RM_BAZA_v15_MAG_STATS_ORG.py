@@ -7621,6 +7621,43 @@ class MainWindow(tk.Tk):
         sym_po_id = {k[0]: S for S, k in kart.items() if k and k[0]}
         id_po_sym = {S: k[0] for S, k in kart.items() if k and k[0]}
         pisownia = {S: (k[1] or S) for S, k in kart.items() if k}
+
+        # NAPRAWA powiazan wskazujacych te sama kartoteke z dwoch wierszy
+        # (02.10.2026, 2637: plan sumowal ilosci 4+13 -> „ustawi 17").
+        # Pod lockiem, na project_con, z oknem PRZED i raportem PO.
+        try:
+            from subiekt_projekt import planuj_naprawe_powiazan, wykonaj_naprawe_powiazan
+            akcje_pow = planuj_naprawe_powiazan(con, kart)
+        except Exception as e:
+            print(f"⚠️  Sprawdzenie powiązań nie poszło: {e}")
+            akcje_pow = []
+        if akcje_pow:
+            lista = (chr(10) + "  ").join(a["opis"] for a in akcje_pow[:12])
+            wiecej = (chr(10) + "  … i %d dalszych" % (len(akcje_pow) - 12)
+                      if len(akcje_pow) > 12 else "")
+            if messagebox.askyesno(
+                    "Powiązania z Subiektem — naprawa",
+                    ("%d wierszy arkusza wskazuje kartotekę zajętą już przez inny wiersz."
+                     + chr(10) + "Przy Projekt/Aktualizacja ich ilości SUMOWAŁYBY się na ZK."
+                     + chr(10) + chr(10) + "  %s%s" + chr(10) + chr(10) + "Naprawić teraz?")
+                    % (len(akcje_pow), lista, wiecej)):
+                try:
+                    przep, scal, odp = wykonaj_naprawe_powiazan(con, akcje_pow)
+                    for a in akcje_pow:
+                        self._log_item_change(a["id"], "POWIAZANIE_NAPRAWA",
+                                              "subiekt_symbol", a["stary"], a["nowy"])
+                    con.commit()
+                    # Odczyt kontrolny — raport ma mowic, co JEST, nie co mialo byc.
+                    zostalo = len(planuj_naprawe_powiazan(con, kart))
+                    messagebox.showinfo(
+                        "Powiązania naprawione",
+                        "Przepięto %d, scalono %d, odpięto %d." % (przep, scal, odp)
+                        + chr(10) + "Konfliktów po naprawie: %d." % zostalo)
+                except Exception as e:
+                    con.rollback()
+                    messagebox.showerror("Powiązania", "Naprawa nie powiodła się:" + chr(10) + str(e))
+            else:
+                print("ℹ️  Naprawa powiązań pominięta przez użytkownika")
         ma_id = True
         try:
             wiersze = con.execute(
@@ -7646,6 +7683,18 @@ class MainWindow(tk.Tk):
         teraz = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         wyczyszczone = 0
         uzupelnione_id = 0
+        # Symbol -> nazwa wiersza, ktory go juz ma — patrz rozroznij nizej.
+        # Ten sam symbol u DWOCH wierszy o tej samej nazwie (dwie galezie
+        # drzewa) jest w porzadku; problem to inna nazwa pod cudzym symbolem.
+        zajete_symbole = {str(w[2] or "").strip().upper(): (w[4] or "")
+                          for w in wiersze if w[2]}
+        try:
+            from subiekt_projekt import do_ascii as _do_ascii
+        except Exception:
+            _do_ascii = lambda t: t
+        def _ta_sama_nazwa(a, b):
+            n = lambda t: " ".join(_do_ascii(str(t or "")).upper().split())
+            return n(a) == n(b)
         przemianowane = []        # „stary → nowy" — symbol zmienił się w Subiekcie
         for item_id, nr, sym_zasiew, stara, nazwa, sid, work_nr in wiersze:
             # Klucz: najpierw symbol, pod którym pozycja poszła do Subiekta,
@@ -7682,9 +7731,23 @@ class MainWindow(tk.Tk):
             symbol_z_nazwy_poz = None
             if not klucz and nazwa:
                 try:
-                    from subiekt_projekt import symbol_z_nazwy
+                    from subiekt_projekt import symbol_z_nazwy, rozroznij_symbol
                     symbol_z_nazwy_poz = symbol_z_nazwy(nazwa)
                     klucz = (symbol_z_nazwy_poz or "").strip().upper()
+                    # Symbol z nazwy ZAJETY przez inny wiersz (nazwy rozniace
+                    # sie kropka/spacja daja ten sam symbol) -> zasiew nadal
+                    # temu wierszowi symbol z `rozroznij_symbol`; bierzemy
+                    # ten, o ile stoi na ZK. Bez tego drugi wiersz dostawal
+                    # powiazanie z CUDZA kartoteka (2637, 02.10.2026).
+                    if (klucz in zajete_symbole
+                            and not _ta_sama_nazwa(zajete_symbole[klucz], nazwa)):
+                        kand = rozroznij_symbol(nazwa, zajete_symbole)
+                        if kand.strip().upper() in ilosci:
+                            symbol_z_nazwy_poz = kand
+                            klucz = kand.strip().upper()
+                        else:
+                            symbol_z_nazwy_poz = None
+                            klucz = ""
                 except Exception:
                     klucz = ""
 
@@ -7732,6 +7795,7 @@ class MainWindow(tk.Tk):
                 con.execute(
                     "UPDATE items SET order_qty = ?, subiekt_zasiew_at = ?, subiekt_symbol = ?"
                     " WHERE id = ?", (nowa, teraz, symbol_z_nazwy_poz, item_id))
+                zajete_symbole.setdefault(klucz, nazwa)
             else:
                 con.execute(
                     "UPDATE items SET order_qty = ?, subiekt_zasiew_at = ? WHERE id = ?",
@@ -9219,19 +9283,35 @@ class MainWindow(tk.Tk):
             return
         
         try:
-            # Pobierz wszystkie drawing_no z projektu (pomijając puste i ukryte opcjonalnie)
-            rows = self.db_manager.project_con.execute("""
-                SELECT COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) AS drawing_no,
-                       COALESCE(NULLIF(work_name, ''), src_name) AS name
+            # Klucz pozycji: numer rysunku, a gdy go nie ma (znormalizowane —
+            # łożyska, nakrętki) SYMBOL z Subiekta, a przed zasiewem NAZWA.
+            # Do 02.10.2026 liczyliśmy tylko numery: dwa wiersze „6004" bez
+            # numeru (dwie gałęzie drzewa) nie świeciły wcale, choć plan
+            # Projekt/Aktualizacja wysyła z nich tylko pierwszy. Dawniej
+            # symbol lądował w kolumnie numeru i banner je łapał — od kiedy
+            # siedzi w `subiekt_symbol`, przestał („działało, a nie działa").
+            con = self.db_manager.project_con
+            kolumny = {r[1] for r in con.execute("PRAGMA table_info(items)")}
+            sym = ("NULLIF(TRIM(subiekt_symbol), '')"
+                   if "subiekt_symbol" in kolumny else "NULL")
+            rows = con.execute(f"""
+                SELECT COALESCE(NULLIF(TRIM(work_drawing_no), ''),
+                                NULLIF(TRIM(src_drawing_no), '')) AS drawing_no,
+                       {sym} AS symbol,
+                       COALESCE(NULLIF(TRIM(work_name), ''), TRIM(src_name)) AS name
                 FROM items
-                WHERE project_id = ?
-                  AND COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) IS NOT NULL
-                  AND COALESCE(NULLIF(work_drawing_no, ''), src_drawing_no) != ''
+                WHERE project_id = ? AND COALESCE(is_hidden, 0) = 0
             """, (self.current_project_id,)).fetchall()
             
             # Zlicz duplikaty
             from collections import Counter
-            drawing_counter = Counter(row[0] for row in rows)
+            # Bez względu na wielkość liter („Koło" / „KOŁO" to ten sam wiersz).
+            klucze = []
+            for dn, symbol, name in rows:
+                klucz = dn or symbol or name
+                if klucz:
+                    klucze.append(str(klucz).strip().upper())
+            drawing_counter = Counter(klucze)
             duplicates = {dn: count for dn, count in drawing_counter.items() if count > 1}
             
             if duplicates:
@@ -9240,7 +9320,7 @@ class MainWindow(tk.Tk):
                 dup_text = ", ".join([f"{dn} (×{count})" for dn, count in dup_list])
                 more_text = f" ... i {len(duplicates) - 10} więcej" if len(duplicates) > 10 else ""
                 
-                warning_text = f"⚠️⚠️⚠️ DUPLIKATY NUMERÓW RYSUNKÓW ({len(duplicates)} unikalnych): {dup_text}{more_text} ⚠️⚠️⚠️"
+                warning_text = f"⚠️⚠️⚠️ DUBLETY — numer rysunku / symbol / nazwa ({len(duplicates)}): {dup_text}{more_text} ⚠️⚠️⚠️"
                 self.warning_label.config(text=warning_text)
                 
                 # Pokaż banner jeśli nie jest widoczny
@@ -14930,15 +15010,32 @@ class MainWindow(tk.Tk):
                     self.refresh_data()
                     return
 
-                # Dla pozycji z numerem kluczem jest NUMER — nazwa to tylko opis
-                # i zostaje edytowalna. Dla znormalizowanych jest odwrotnie.
+                # Dla pozycji z numerem kluczem jest NUMER; dla znormalizowanych
+                # NAZWA (z niej powstaje symbol), a w kolumnie 0 stoi SYMBOL
+                # z Subiekta (od 11.09.2026) — nie numer rysunku.
                 ma_numer = not self._pozycja_bez_numeru(item_id)
-                # Znormalizowana: kluczem jest NAZWA, a w kolumnie 0 stoi SYMBOL
-                # z Subiekta (od 11.09.2026) — to nie numer rysunku i też nie
-                # podlega edycji: nadanie numeru zmieniłoby klucz tak samo jak
-                # zmiana nazwy. Dopóki komórka była pusta, nie było czego pilnować.
-                blokuj = (col == 0) if ma_numer else (col in (0, 1))
+                # NAZWA po zasiewie zablokowana TAKŻE dla pozycji z numerem
+                # (02.10.2026). Do tej pory była „tylko opisem" i dawała się
+                # edytować, ale Projekt/Aktualizacja nazw nie porównuje ani
+                # nie wysyła — user zmienił nazwę 2609-450.01X, zapis
+                # „przeszedł" i kartoteka w Subiekcie została ze starą nazwą,
+                # bez słowa. Jedno źródło prawdy: nazwę kartoteki zmienia się
+                # w Subiekcie.
+                blokuj = col in (0, 1)
                 if blokuj:
+                    if ma_numer and col == 1:
+                        messagebox.showwarning(
+                            "Nazwa — pozycja jest już w Subiekcie",
+                            f"Ta pozycja została założona w Subiekcie jako:\n\n"
+                            f"    {symbol}\n"
+                            f"    (zasiew: {kiedy or '—'})\n\n"
+                            f"Po zasiewie nazwę kartoteki prowadzi się w SUBIEKCIE\n"
+                            f"(Edytor kartotek). Projekt/Aktualizacja nazw NIE wysyła,\n"
+                            f"więc zmiana tutaj rozjechałaby arkusz z kartoteką\n"
+                            f"po cichu."
+                        )
+                        self.refresh_data()
+                        return
                     if ma_numer:
                         czego, powod = "Numer rysunku", "numer rysunku"
                     elif col == 1:
@@ -33284,7 +33381,15 @@ class MainWindow(tk.Tk):
                 f"Nie znaleziono modułu subiekt_dokumenty_gui.py\n\n{e}",
                 parent=self)
             return
-        subiekt_dokumenty_gui.open_window(self)
+        # Projekt wybrany w RM_BAZA — filtr „Projekt" startuje na nim.
+        project_name = None
+        if self.current_project_id:
+            try:
+                _w = self.db_manager.master_read("project-name", {"project_id": self.current_project_id})
+                project_name = _w[0]["name"] if _w else None
+            except Exception:
+                project_name = None
+        subiekt_dokumenty_gui.open_window(self, projekt=project_name)
 
     def open_subiekt_faktury(self):
         """Okno „Faktury z KSeF" (panel SUBIEKT).
