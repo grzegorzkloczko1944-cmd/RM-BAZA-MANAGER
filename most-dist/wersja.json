@@ -1,6 +1,6 @@
 {
  "protokol": 1,
- "zbudowano": "2026-10-02 13:47",
- "sha": "4dbffa1",
- "uwaga": "tryb wydanie-stan: ZD jako awaryjne zrodlo potrzeby (gdy milcza ZK i PW, bez wchodzenia do konfliktow) oraz nowe pole `rw` z numerami dokumentow RW przy kazdej pozycji; zd-usun rozpoznaje takze PZ (przyjecia zewnetrzne)."
+ "zbudowano": "2026-10-02 16:43",
+ "sha": "ca50ac9",
+ "uwaga": "tozsamosc po Id kartoteki: pola `Id`/`id` w trybach stan, zk-ilosci, wydanie-stan; zk-poz-usun naprawde usuwa pozycje z ZK (ob.Dane.Pozycje.Remove); sonda probe-pozycje (zapis tylko TEST-USUN*); csproj: Stimulsoft poza CopyLocal."
 }
