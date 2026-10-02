@@ -1,6 +1,6 @@
 {
  "protokol": 1,
- "zbudowano": "2026-10-01 12:48",
- "sha": "481c460",
- "uwaga": "zapotrzebowanie liczone jednym zapytaniem (szybkie wczytywanie okien); tryb symbole odmawia zmiany symbolu na kartotece uzytej w dokumentach; oslona ZapotrzebowanieBezpieczne takze dla trybu zd."
+ "zbudowano": "2026-10-02 13:47",
+ "sha": "4dbffa1",
+ "uwaga": "tryb wydanie-stan: ZD jako awaryjne zrodlo potrzeby (gdy milcza ZK i PW, bez wchodzenia do konfliktow) oraz nowe pole `rw` z numerami dokumentow RW przy kazdej pozycji; zd-usun rozpoznaje takze PZ (przyjecia zewnetrzne)."
 }
