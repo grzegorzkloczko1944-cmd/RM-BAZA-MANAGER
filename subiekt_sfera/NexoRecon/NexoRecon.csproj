@@ -50,8 +50,18 @@
   -->
   <Target Name="NieKopiujBibliotekInsERT" AfterTargets="ResolveAssemblyReferences">
     <ItemGroup>
+      <!--
+        Stimulsoft.* TEZ nie kopiujemy (02.10.2026). Te dwa pliki klade
+        DowiazBibliotekiWydruku jako HARDLINKI do binariow Subiekta — a
+        Subiekt ma je zaladowane, wiec sa zablokowane do zapisu. Zwykle
+        CopyLocal probowalo je nadpisac (odkad SDK w C:\iLogic jest nowsze
+        niz dowiazane pliki) i build konczyl sie MSB3021/MSB3027 „uzywany
+        przez inny proces" — kompilacja przechodzila, ale NexoRecon.dll
+        w bin/Release ZOSTAWALO STARE. Patrz pamiec:
+        project_build_release_stimulsoft_hardlink.
+      -->
       <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
-                               Condition="$([System.String]::Copy('%(Filename)').StartsWith('InsERT.'))" />
+                               Condition="$([System.String]::Copy('%(Filename)').StartsWith('InsERT.')) Or $([System.String]::Copy('%(Filename)').StartsWith('Stimulsoft.'))" />
     </ItemGroup>
   </Target>
 

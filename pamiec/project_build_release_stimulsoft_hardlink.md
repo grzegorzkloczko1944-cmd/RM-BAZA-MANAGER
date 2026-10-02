@@ -1,6 +1,6 @@
 ---
 name: project_build_release_stimulsoft_hardlink
-description: dotnet build do bin/Release pada na kopiowaniu Stimulsoft.*.dll - to hardlinki wspoldzielone z dzialajacym Subiektem; obejscie: build do swiezego katalogu i kopia 4 plikow mostu
+description: dotnet build do bin/Release padal na kopiowaniu Stimulsoft.*.dll (hardlinki wspoldzielone z dzialajacym Subiektem) - NAPRAWIONE w csproj 02.10.2026 (Stimulsoft poza CopyLocal); obejscie historyczne w tresci
 metadata:
   type: project
 ---
@@ -38,8 +38,16 @@ staging na serwer i tak bierze tylko 5 plików mostu, bez Stimulsofta. Po
 buildzie SPRAWDŹ, że `bin/Release/NexoRecon.dll` zawiera nową klasę (szukaj
 nazwy w bajtach DLL), zamiast wierzyć samemu „Liczba błędów".
 
-## Do zrobienia porządnie (nie dziś)
+## NAPRAWIONE w csproj (02.10.2026, ten sam dzień)
 
-`csproj` / `DowiazBibliotekiWydruku`: nie kopiować Stimulsoft.*.dll, gdy w
-katalogu wyjściowym jest już hardlink (albo zamykać Subiekta na czas builda).
-Patrz też [[project_zd_pdf_brakujace_dll]] — tam wprost: „csproj NIE poprawiony".
+Target `NieKopiujBibliotekInsERT` wyrzucał z CopyLocal tylko `InsERT.*`;
+Stimulsoft szedł zwykłą kopią NA hardlink trzymany przez Subiekta. Warunek
+rozszerzony o `StartsWith('Stimulsoft.')` — te dwa pliki i tak kładzie
+`DowiazBibliotekiWydruku` jako dowiązania.
+
+Dowód: dwa kolejne buildy do tego samego świeżego katalogu (pierwszy tworzy
+hardlinki, drugi w nie trafia) — oba „Liczba błędów: 0". Przed poprawką drugi
+padał. Obejście wyżej zostaje jako zapis historii; od teraz zwykły
+`dotnet build -c Release` do bin/Release znów działa (most z bin/Release musi
+być zatrzymany — to osobna, stara zasada).
+Patrz też [[project_zd_pdf_brakujace_dll]] — „csproj NIE poprawiony" jest już nieaktualne.
