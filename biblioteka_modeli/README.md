@@ -261,3 +261,17 @@ Gotowy wzorzec z Elesa-Ganter (`wzorce_kodu\decyzje_*`; stan: 272 pozycje, 4 zak
 
 **Pułapki:** podgląd `file://` w panelu przeglądarki bywa zablokowany — skład JS sprawdź `node --check` na wyciągniętym skrypcie; łańcuchy z `\r\n`/`\uFEFF` wstawiane z heredoca bash/Python tracą backslashe —
 fragmenty JS trzymaj w osobnych plikach (`patch_lokalny.js`) zapisanych narzędziem Write; dane JSON w `<script type="application/json">` zamieniaj `</` na `<\/`.
+
+## 11. IGUS — `V:\! HASIOK\IGUS` (02.10.2026)
+
+Tory jak w sekcji 9 (Elesa), ale kody IGUS parsuje się z nazw plików; **wcześniej zrób zrzut nazw wszystkich modeli** (`zrzut_modeli.py` → CSV, ~380 tys. plików z B:, C:\Projekty, V:) i iteruj regexami na CSV zamiast skanować dyski.
+
+* **Co jest kodem IGUS:** tuleje iglidur `[litera][SM|FM|TM|PM|UM]-d1d2-b` (np. `PSM-4550-30`; **w nazwach plików bywają podkreślniki i końcówka `_1`** — ujednolicaj separatory), wózki drylin `WJ200UM/UME/QM-01-10`, szyny `WS/WSQ/WSX/TS`, `NW/TW/TK`, `PRT-01-150-TO-AT10`, łańcuchy `E2…`. Fałszywe rodziny (nie IGUS): `DFM/DSM/HGPM` (Festo), `MGPM` (SMC), `CFM` (Elesa), `NS`, `RS`.
+* **Końcówki z Inventora** (`-2`, `-3`, `1`, `jj`, pojedyncza litera) to śmieci z ręcznej numeracji — **odcinaj do poprawnego symbolu** (`WJ200UM-01-101` → `WJ200UM-01-10`); zostają tylko wykonania (`-ES`, `-AL`) i dla PRT pełny kod (`-TO-AT10`, `-TO-HTD8M`) — to są **osobne pozycje**.
+* **Wybór reprezentanta:** IPT > IAM, **ale** gdy IPT jest składową IAM o tym samym kodzie (np. PRT) bierz IAM (≥2 składowe, nazwa zgodna z symbolem). IAM-opakowania z 1 częścią i złożenia projektowe → IPT. Zagnieżdżone IAM (IAM w IAM) → osobny katalog, ręcznie.
+* **Description** = nazwa produktu z igus.pl w skrócie (`igus_opis.py`): `oprawa stojakowa`; UME (litera E po UM/QM = „clearance infinitely adjustable”) → `oprawa stojakowa, kasowanie luzu`; `szyna pojedyncza`, `system prowadnicy liniowej`, `tuleja ślizgowa (z kołnierzem)`, `łożysko obrotowe (z uzębieniem AT10/HTD8M)`. QM nie ma regulacji luzu wg igus.com.
+* **Tuleje:** wymiary z kodu → własność użytkownika `Wymiar` = `Ø d1 × Ø d2 × b mm` (`igus_wymiar.py`) do mapowania w Subiekcie.
+* **Modele z sieci (igus-cad.com):** użytkownik loguje się sam w karcie przeglądarki aplikacji. Pobieranie sterowane przez DOM (ramki są same-origin): `window.frames[3]` = ccHandler; pole długości `ccAnswer9`, format `outputformat_3d`, przycisk `btCadDownload3D`, zamknięcie okna `btDownloadDlgClose`; **sprawdzaj, że „Numer zamówienia” kończy się na `-1000`, zanim klikniesz Pobierz** (zmiana długości bywa niezauważona). Adres `ArtNr=<pełny numer>` nie działa — otwieraj typ bazowy i ustawiaj długość polem. Centrum pobierania ma **limit 20 plików**.
+  ZIP: link `BinaryFileRedirector.ashx?PATH=tmp/Zip/…` w ramce `…frames[11].frames[12]` pobiera się wprost z Pythona (bez cookies). Zrzuty ekranu w tej przeglądarce często przekraczają limit czasu — stąd DOM.
+* **Szyny 1 m:** typ bazowy + długość 1000 → symbol `<kod> L1000` (STEP → IPT `konwertuj_stp.py`).
+* Strona wyboru dla zespołu: jak w sekcji 10 (`igus_strona.py` → `WYBOR_IGUS.html`).
