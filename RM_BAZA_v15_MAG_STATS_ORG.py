@@ -14678,6 +14678,98 @@ class MainWindow(tk.Tk):
             import traceback
             traceback.print_exc()
     
+    def _zapytaj_o_przepiecie_kartoteki(self, item_id, nowy_numer):
+        """Po zmianie „Nr rysunku": czy przepiąć powiązanie z kartoteką Subiekta?
+
+        Wiersz raz zasiany ma w `subiekt_symbol`/`subiekt_id` kartotekę, pod
+        którą stoi na ZK. Zmiana numeru w arkuszu tego NIE zmienia — i słusznie:
+        zasiew wysyła symbol POWIĄZANEJ kartoteki (`read_project_items`), więc
+        sama zmiana nazwy nie założy drugiej kartoteki ani nie zdubluje ZK
+        (tak powstały HGH15SO/HGW15SO 02.10.2026).
+
+        Ale czasem user zmienia numer właśnie po to, żeby wskazać INNĄ,
+        istniejącą kartotekę (HGH15SO → HGH15SOK, bo Subiekt używa SOK).
+        Wtedy powiązanie ma przejść za nim — i o to pytamy, gdy nowy numer
+        istnieje w Subiekcie jako kartoteka. Gdy nie istnieje, tylko
+        informujemy, co wyśle zasiew. NIC PO CICHU.
+
+        Stanowisko bez Subiekta albo most w awarii: wychodzimy bez słowa —
+        zmiana numeru nie może zależeć od tego, czy Sfera odpowiada.
+        """
+        nowy = (nowy_numer or "").strip()
+        if not nowy:
+            return
+        con = self.db_manager.project_con
+        try:
+            w = con.execute("SELECT subiekt_symbol, subiekt_id FROM items WHERE id = ?",
+                            (item_id,)).fetchone()
+            ma_id = True
+        except sqlite3.OperationalError:
+            try:
+                w = con.execute("SELECT subiekt_symbol, NULL FROM items WHERE id = ?",
+                                (item_id,)).fetchone()
+            except sqlite3.OperationalError:
+                return
+            ma_id = False
+        if not w or not (w[0] or "").strip():
+            return                          # wiersz bez powiązania — nie ma czego przepinać
+        stary = w[0].strip()
+        if stary.upper() == nowy.upper():
+            return                          # ten sam symbol, inna pisownia
+
+        try:
+            from subiekt_stany import _find_exe, CONFIG_PATH, query_stock
+            if not _find_exe() or not os.path.isfile(CONFIG_PATH):
+                return                      # stanowisko bez Subiekta
+            k = (query_stock([nowy], timeout=20) or {}).get(nowy) or {}
+        except Exception as e:
+            print(f"ℹ️  Powiązanie z kartoteką niesprawdzone (most): {e}")
+            return
+
+        istnieje = bool(k.get("Istnieje")) and (k.get("Dopasowanie") or "") == "dokladne"
+        if not istnieje:
+            messagebox.showinfo(
+                "Numer zmieniony, powiązanie zostaje",
+                "Ta pozycja jest powiązana z kartoteką Subiekta:\n\n"
+                "    %s\n\n"
+                "Nowy numer „%s” NIE istnieje w Subiekcie jako kartoteka, więc\n"
+                "powiązanie zostaje przy „%s” — zasiew i ilości z ZK dalej\n"
+                "dotyczą tej kartoteki. Arkusz pokazuje nowy numer.\n\n"
+                "Jeśli to ma być nowy detal w Subiekcie, załóż kartotekę\n"
+                "(Asortyment) i zmień numer jeszcze raz — wtedy zapytam o przepięcie."
+                % (stary, nowy, stary), parent=self)
+            return
+
+        symbol_sub = (k.get("Symbol") or nowy).strip()
+        nazwa_sub = (k.get("Nazwa") or "").strip()
+        if not messagebox.askyesno(
+                "Przepiąć powiązanie z kartoteką?",
+                "Ta pozycja jest powiązana z kartoteką Subiekta:\n\n"
+                "    %s\n\n"
+                "Nowy numer istnieje w Subiekcie jako kartoteka:\n\n"
+                "    %s — %s\n\n"
+                "TAK — przepiąć: ilości z ZK, wydania RW i zasiew będą dotyczyć „%s”.\n"
+                "NIE — zostawić: arkusz pokaże „%s”, ale na ZK dalej stoi „%s”."
+                % (stary, symbol_sub, nazwa_sub or "(bez nazwy)", symbol_sub, nowy, stary),
+                parent=self):
+            return
+
+        try:
+            if ma_id and k.get("Id") is not None:
+                con.execute("UPDATE items SET subiekt_symbol = ?, subiekt_id = ?, updated_at = ?"
+                            " WHERE id = ?", (symbol_sub, int(k["Id"]), datetime.now().isoformat(), item_id))
+            else:
+                con.execute("UPDATE items SET subiekt_symbol = ?, updated_at = ? WHERE id = ?",
+                            (symbol_sub, datetime.now().isoformat(), item_id))
+            con.commit()
+            try:
+                self._log_item_change(item_id, 'UPDATE', 'subiekt_symbol', stary, symbol_sub)
+            except Exception:
+                pass
+            print(f"✅ Powiązanie przepięte: {stary} → {symbol_sub} (Id {k.get('Id')})")
+        except Exception as e:
+            messagebox.showerror("Przepięcie nieudane", f"Nie zapisano powiązania:\n{e}", parent=self)
+
     def on_cell_edited(self, event=None):
         """Obsługa edycji komórki"""
         # Blokada podczas podglądu backupu
@@ -14936,6 +15028,13 @@ class MainWindow(tk.Tk):
                     )
                     self.refresh_data()  # Przywróć starą wartość
                     return
+
+                # ⚠️ POWIĄZANIE Z KARTOTEKĄ SUBIEKTA NIE PRZENOSI SIĘ SAMO.
+                # Zmiana numeru zostawia `subiekt_symbol`/`subiekt_id` przy
+                # starej kartotece — i tak ma być, dopóki user nie zdecyduje.
+                # Pytamy TYLKO wtedy, gdy nowy numer istnieje w Subiekcie jako
+                # kartoteka (02.10.2026, HGH15SO → HGH15SOK w 2637).
+                self._zapytaj_o_przepiecie_kartoteki(item_id, drawing_no)
             else:
                 # WYKASOWANIE wartości - dla pozycji ręcznych czyść OBA pola
                 cursor = self.db_manager.project_con.execute(

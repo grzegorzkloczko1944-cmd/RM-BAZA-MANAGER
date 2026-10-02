@@ -65,3 +65,32 @@ istniejących, null dla brakujących. Symulacja synchronizacji: 31/31 trafień,
 i poprawiony, 0 dubli. `zapisz` RW: wiersz z obcym symbolem trafiony po Id.
 
 Powiązane: [[project_aktualizacja_bom_zmiana_numeru]] [[project_wydane_do_arkusza_symbol]]
+
+## Domknięcie luki arkusz -> Subiekt (02.10.2026, drugi commit)
+
+Id chroniło kierunek Subiekt -> arkusz. Został kierunek odwrotny: plan zasiewu
+budował symbol z WYŚWIETLANEGO numeru (`"symbol": it["nr"]`), więc zmiana
+nazwy w arkuszu + zasiew = `Istnieje(nowa)` false -> NOWA kartoteka na ZK obok
+starej -> dubel przy zwolnieniu locka. Dokładnie tak powstały HGH15SO/HGW15SO.
+
+**(1) `read_project_items`**: gdy wiersz ma `subiekt_symbol`, do planu idzie
+TEN symbol, nie numer. Dla niezasianych wierszy bez zmian (symbol = numer).
+`subiekt_symbol` dołożony jako OSTATNIA kolumna SELECT-a; wycinek `opis`
+zawsze `r[d0:s0]` — inaczej nowa kolumna wpadłaby do opisu.
+Test na kopii 75: numer zmieniony na HGH15SOX, plan wysyła HGH15SOK.
+
+**(2) `on_cell_edited` -> `_zapytaj_o_przepiecie_kartoteki`**: po zmianie
+„Nr rysunku" wiersza z powiązaniem, gdy nowy numer ISTNIEJE w Subiekcie jako
+kartoteka (`query_stock`, dopasowanie dokładne) — pytanie TAK/NIE o przepięcie
+`subiekt_symbol`+`subiekt_id`. Gdy nie istnieje — tylko informacja, że
+powiązanie zostaje i zasiew wyśle starą kartotekę. Bez mostu/konfigu — cisza.
+
+Bez (1) samo pytanie nie wystarczy; bez (2) zasiew jest spójny, ale nie da się
+świadomie przepiąć detalu na inną kartotekę.
+
+## Co NADAL nie jest chronione (świadomie)
+
+* Id wypełnia się dopiero pod lockiem (pierwsze odświeżenie z ZK / zasiew) —
+  projekt nieprzejęty od 02.10 dopasowuje po symbolu jak dawniej.
+* ZK, które JUŻ ma dwie linie tego samego detalu, arkusz pokazuje wiernie —
+  to nie dubel arkusza; naprawa: `zk-poz-usun` (działa od `586241d`).

@@ -161,7 +161,11 @@ def read_project_items(project_id):
         # (RMPAK_PRODUKCJA_USTALENIA.md §9). Kolumny może nie być w starszych
         # bazach projektów, więc jak wszystkie pozostałe: opcjonalnie.
         sup_col = ["supplier_id"] if "supplier_id" in cols else []
-        sel = ["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols + qty_cols + bom_cols + cls_cols + bib_col + desc_cols + sup_col
+        # Symbol kartoteki, z ktora wiersz jest POWIAZANY — zawsze OSTATNIA
+        # kolumna, zeby nie ruszac indeksow nizej.
+        sym_col = ["subiekt_symbol"] if "subiekt_symbol" in cols else []
+        sel = (["work_drawing_no", "norm_drawing_no", "src_drawing_no"] + name_cols + qty_cols
+               + bom_cols + cls_cols + bib_col + desc_cols + sup_col + sym_col)
         # Ukryte pozycje (przycisk „Ukryj zaznaczone" w arkuszu) nie mają
         # trafiać do Subiekta — COALESCE bo starsze wiersze mogą mieć NULL
         # zamiast 0 (ten sam wzorzec co database_manager.get_project_items).
@@ -206,7 +210,8 @@ def read_project_items(project_id):
     c0 = b0 + len(bom_cols)
     c1 = c0 + len(cls_cols)     # koniec kolumn typu, przed dwf_biblioteka
     d0 = c1 + len(bib_col)      # początek kolumn opisu
-    s0 = d0 + len(desc_cols)    # supplier_id — ostatnia, jeśli w ogóle jest
+    s0 = d0 + len(desc_cols)    # supplier_id, jeśli w ogóle jest
+    y0 = s0 + len(sup_col)      # subiekt_symbol — ostatnia, jeśli w ogóle jest
 
     # Którzy dostawcy znaczą „robimy to u siebie". Czytane RAZ na projekt,
     # nie per wiersz: to zapytanie do master.sqlite, a ta bywa na dysku
@@ -259,11 +264,31 @@ def read_project_items(project_id):
         # Regułę (dostawca RMPAK ALBO złożenie bez dostawcy) trzyma
         # subiekt_produkcja, żeby nie rozjechała się między modułami.
         sup_id = r[s0] if (sup_col and s0 < len(r)) else None
+        # ⚠️ DO SUBIEKTA IDZIE SYMBOL POWIAZANEJ KARTOTEKI, NIE WYSWIETLANY NUMER.
+        #
+        # Wiersz raz zasiany ma w `subiekt_symbol` kartoteke, pod ktora
+        # naprawde stoi na ZK. Gdy user zmieni „Nr rysunku" w arkuszu
+        # (HGH15SO -> HGH15SOK, 02.10.2026), a plan wezmie nowa nazwe, most
+        # zapyta Istnieje(nowa) -> nie -> ZALOZY DRUGA KARTOTEKE i dopisze ja
+        # na ZK obok starej. Stara linia zostaje, ZK ma dwie, a przy zwolnieniu
+        # locka `_dopisz_pozycje_z_zk` wiernie dopisze dubla do arkusza.
+        # Tak powstaly kartoteki HGH15SO/HGW15SO z 14:48.
+        #
+        # Zmiane powiazania robi sie SWIADOMIE przy edycji numeru w arkuszu
+        # (pytanie „przepiac na istniejaca kartoteke?"), a nie przypadkiem
+        # przez zasiew. Dla wierszy bez powiazania (jeszcze nie zasianych)
+        # symbol = numer, jak dotad.
+        sym_zas = (str(r[y0]).strip() if (sym_col and y0 < len(r) and r[y0]) else "")
+        if sym_zas and sym_zas.upper() != str(symbol).strip().upper():
+            symbol = sym_zas
+            uzyte_symbole.add(symbol)
         out.append({
             "nr": symbol,
             "bez_numeru": not nr,    # do rozpoznania przy zakładaniu kartotek
             "nazwa": nazwa,
-            "opis": jedna_linia(first(r[d0:s0] if sup_col else r[d0:])) if d0 < len(r) else "",
+            # Wycinek ZAWSZE do s0: za opisem stoja jeszcze supplier_id
+            # i subiekt_symbol, ktore nie moga wpasc do opisu.
+            "opis": jedna_linia(first(r[d0:s0])) if d0 < len(r) else "",
             "qty": first(r[q0:b0]),
             # Ilosc z BOM-u (work_qty > src_qty), BEZ order_qty.
             "qty_bom": first(r[b0:c0]),
