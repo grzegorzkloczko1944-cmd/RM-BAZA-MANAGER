@@ -992,6 +992,36 @@ internal static class Projekt
             }
         }
         catch { }
+
+        // ⚠️ TO JEST DROGA, KTORA NAPRAWDE DZIALA (sonda ProbePozycje, 02.10.2026).
+        //
+        // `ob.Pozycje` (IPozycjeDokumentu) zwraca SAM obiekt biznesowy — ma tylko
+        // Dodaj*, zadnego Usun; petla wyzej nigdy nic nie znajdowala i kazda
+        // proba konczyla sie „usun recznie w Subiekcie". Usuwanie siedzi pietro
+        // nizej, na kolekcji EF `ob.Dane.Pozycje`
+        // (WrappedEntityCollection<PozycjaDokumentu>.Remove), a `ob.Zapisz()`
+        // utrwala to w bazie. Sprawdzone na ZK testowym z read-backiem:
+        // pozycja znika z dokumentu, dokument zostaje.
+        //
+        // Bierzemy Remove ZADEKLAROWANE NA KLASIE (nie duplikat z mapy
+        // interfejsu ICollection<T>) i wolamy je na SWIEZYM obiekcie —
+        // po nieudanym Zapisz() BO jest nieswiezy i kolejne zapisy padaja
+        // na OptimisticConcurrencyException (tak wygladala pierwsza runda sondy).
+        try
+        {
+            var dane = ob.GetType().GetProperty("Dane")?.GetValue(ob);
+            var danePoz = dane?.GetType().GetProperty("Pozycje")?.GetValue(dane);
+            if (danePoz == null) return false;
+            var remove = danePoz.GetType()
+                .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                            | System.Reflection.BindingFlags.Instance)
+                .FirstOrDefault(m => m.Name == "Remove" && m.GetParameters().Length == 1
+                                     && m.GetParameters()[0].ParameterType.IsInstanceOfType(poz));
+            if (remove == null) return false;
+            var r = remove.Invoke(danePoz, new[] { poz });
+            return r is not bool b || b;
+        }
+        catch { }
         return false;
     }
 

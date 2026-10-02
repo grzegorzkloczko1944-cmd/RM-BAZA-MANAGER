@@ -51,7 +51,7 @@ internal static class CommandDispatcher
         "kartoteka", "kartoteka-usun", "kartoteka-edytuj", "projekt", "zd", "zd-usun",
         "dostawcy", "progi", "rw", "pw", "termin", "symbole", "komplet-napraw", "magazyn-zaloz",
         "magazyn-usun", "projekt-cofnij", "kartoteki", "zk-poz-usun", "scal", "zk-nowe",
-        "migracja-uwagi", "symbole-dostawcy", "pz-utworz",
+        "migracja-uwagi", "symbole-dostawcy", "pz-utworz", "probe-pozycje",
         // "zdjecie" — akcje dodaj/usun/glowne zapisuja; sama "lista" nie,
         // ale plan jest zawsze, wiec rozroznia to CzyZapis ponizej.
         "zdjecie",
@@ -81,7 +81,7 @@ internal static class CommandDispatcher
         "pola-wlasne", "magazyn-zaloz", "magazyn-usun", "pw", "projekt-cofnij",
         "kartoteki", "zapotrzebowanie-test", "zk-ilosci", "zk-poz-usun", "scal", "zk-nowe",
         "migracja-uwagi", "wydanie-stan", "symbole-dostawcy", "pz-utworz",
-        "efaktury", "zdjecie",
+        "efaktury", "zdjecie", "probe-pozycje",
     };
 
     public static bool Zna(string tryb) => Tryby.Contains(tryb, StringComparer.OrdinalIgnoreCase);
@@ -243,6 +243,11 @@ internal static class CommandDispatcher
             case "zk-poz-usun":
                 if (k.PlanPath is null) return Brak("zk-poz-usun: brak --plan=plik.json");
                 return ZkPozUsun.Uruchom(sfera, k.PlanPath, k.OutPath, k.Zapisz);
+
+            // SONDA: jak usunac pozycje z ZK (ProbePozycje.cs). Zapis tylko na
+            // projekcie TEST-USUN* — sam tryb tego pilnuje.
+            case "probe-pozycje":
+                return ProbePozycje.Uruchom(sfera, k.Projekt, k.Numery, k.OutPath, k.Zapisz);
 
             // Jednorazowe przepisanie Uwag/Tytulu istniejacych dokumentow na
             // format z 10.09.2026. Jawna lista w planie — patrz Migracja.cs.

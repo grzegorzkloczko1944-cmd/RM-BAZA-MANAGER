@@ -138,17 +138,20 @@ internal static class ZkPozUsun
                     // pozycja znika z BOM-u i nie da się już zmienić jej
                     // dostawcy — a chodziło o coś odwrotnego (10.09.2026).
                     //
-                    // Sfera nie wystawia `Usun` na pozycjach ZK (ma je tylko
-                    // dla dokumentów księgowych i windykacyjnych), więc przy
-                    // niepowodzeniu mówimy wprost, że trzeba to zrobić ręcznie.
+                    // Sfera nie wystawia `Usun` na IPozycjeDokumentu (ma je tylko
+                    // dla dokumentów księgowych i windykacyjnych) — usuwanie idzie
+                    // przez kolekcję EF `ob.Dane.Pozycje.Remove` wewnątrz
+                    // Projekt.UsunPozycje (ustalone sondą 02.10.2026, wcześniej
+                    // ten tryb ZAWSZE kończył się „usuń ręcznie"). Niepowodzenie
+                    // nadal raportujemy wprost zamiast zerować ilość.
                     if (Projekt.UsunPozycjePubl(ob, poz)) usuniete++;
                     else
                     {
                         var sym = (Bezp(() => (string?)((dynamic)poz).AsortymentAktualny?.Symbol)
                                    ?? "").Trim();
                         kroki.Add(new Krok("zk-poz", sym, "nie-do-usuniecia",
-                            "Sfera nie pozwala usunąć pozycji z ZK — usuń ją ręcznie "
-                            + "w Subiekcie. NIE zerujemy ilości: zero wróciłoby do BOM-u."));
+                            "Nie udało się zdjąć pozycji z ZK (ani Usun, ani Dane.Pozycje.Remove) "
+                            + "— usuń ją ręcznie w Subiekcie. NIE zerujemy ilości: zero wróciłoby do BOM-u."));
                     }
                 }
                 try { ob.Przelicz(); } catch { }
