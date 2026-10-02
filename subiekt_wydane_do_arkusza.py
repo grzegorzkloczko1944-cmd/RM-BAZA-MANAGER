@@ -67,12 +67,25 @@ def _mapa_bom(con, project_id):
     (`COALESCE(NULLIF(work_…), src_…)`) — tak samo, jak numer widzi arkusz.
     Trzymamy oba warianty (roboczy i źródłowy), bo symbol z Subiekta może
     pasować do któregokolwiek.
+
+    ⚠️ `subiekt_symbol` JEST TRZECIM KANDYDATEM — I MUSI NIM ZOSTAĆ.
+    Pozycje handlowe dopisane z kartoteki Subiekta (łożyska, pasy, silniki)
+    NIE MAJĄ numeru rysunku: `work_drawing_no` i `src_drawing_no` są NULL,
+    a jedynym identyfikatorem jest właśnie `subiekt_symbol`. Bez tej gałęzi
+    nie dopasowywały się do niczego i ich „Ilość dostarczonych" zostawała
+    pusta, choć Subiekt miał je dawno wydane na RW (zgłoszone 02.10.2026:
+    ZP196 miał 7 takich pozycji — SKF-y, pasy T5, silnik, Elesa — a
+    synchronizacja raportowała 0 zmian przy 17 wydanych pozycjach).
+
+    Idzie JAKO OSTATNI, żeby nie ruszać pierwszeństwa numeru rysunku tam,
+    gdzie numer istnieje.
     """
     mapa = {}
-    for item_id, work, src, dost in con.execute(
-            "SELECT id, work_drawing_no, src_drawing_no, delivered_qty"
+    for item_id, work, src, symbol, dost in con.execute(
+            "SELECT id, work_drawing_no, src_drawing_no, subiekt_symbol,"
+            "       delivered_qty"
             "  FROM items WHERE project_id = ?", (project_id,)):
-        for kandydat in (work, src):
+        for kandydat in (work, src, symbol):
             k = (kandydat or "").strip().upper()
             # Pierwszy wygrywa: `work_drawing_no` idzie przed `src_`, tak jak
             # w COALESCE, więc nadpisanie zepsułoby pierwszeństwo.

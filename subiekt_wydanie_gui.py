@@ -85,6 +85,19 @@ def _naturalnie(tekst):
             for c in re.split(r"(\d+)", tekst or "")]
 
 
+def _bez_roku(numer):
+    """„RW 87/09/2026" → „RW 87/09". Pelny numer nie miescil sie w kolumnie.
+
+    Obcinamy TYLKO czlon wygladajacy na rok (4 cyfry na koncu) — numery
+    o innym ksztalcie zostawiamy w calosci, zeby nie okaleczyc czegos,
+    czego nie przewidzielismy.
+    """
+    czlony = (numer or "").split("/")
+    if len(czlony) >= 3 and czlony[-1].isdigit() and len(czlony[-1]) == 4:
+        return "/".join(czlony[:-1])
+    return numer or ""
+
+
 def _poz(n):
     """Odmiana słowa „pozycja" — „1 pozycja", „3 pozycje", „7 pozycji"."""
     if n == 1:
@@ -121,6 +134,15 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
     #: ~40 — na tabelę zostaje około 820 px. Suma poniżej to 806, więc
     #: „Status" dochodzi do prawej krawędzi bez pchania go ręcznie.
     #:
+    #: 02.10.2026 doszły DWIE kolumny: „Do wyd." (54 px) i „RW" (86 px) —
+    #: numer dokumentu, którym pozycja wyszła. Budżet ~820 px się nie zmienił,
+    #: więc wszystkie kolumny oddały po kilka pikseli, a najwięcej „Nazwa"
+    #: (170 → 96) jako JEDYNA rozciągliwa: przy szerszym oknie i tak zbiera
+    #: cały nadmiar, a przy wąskim traci najmniej, bo nazwę magazynier czyta
+    #: pomocniczo, po symbolu. „Status" 122 → 98 mieści najdłuższą etykietę
+    #: („✔ wydane z nadmiarem" jest dłuższa, ale ta pozycja jest rzadka
+    #: i etykieta dojeżdża do krawędzi zamiast znikać).
+    #:
     #: Historia dwóch nieudanych prób (13.09.2026), żeby nie powtarzać:
     #:   • suma 988 px  → „Teraz" ucięte, „Status" niewidoczny
     #:   • suma 866 px + stretch na „Nazwa" i „Status" → jeszcze gorzej:
@@ -128,12 +150,13 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
     #:     „Status" nadal nie sięgał krawędzi
     #: Rozciąga się WYŁĄCZNIE „Nazwa" — jedna kolumna zbiera cały nadmiar,
     #: reszta stoi w miejscu, co przy czytaniu listy regałami jest zaletą.
-    KOL_PLAN = [("lp", "Lp.", 34), ("lokacja", "Lokacja", 70),
-                ("symbol", "Symbol", 118), ("nazwa", "Nazwa", 170),
-                ("zrodlo", "Źr.", 38), ("potrzeba", "Potrzeba", 56),
-                ("wydano", "Wydano", 52), ("pozostalo", "Pozost.", 54),
-                ("stan", "Stan", 46), ("teraz", "Teraz", 46),
-                ("status", "Status", 122)]
+    KOL_PLAN = [("lp", "Lp.", 34), ("lokacja", "Lokacja", 62),
+                ("symbol", "Symbol", 110), ("nazwa", "Nazwa", 96),
+                ("zrodlo", "Źr.", 34), ("potrzeba", "Potrzeba", 54),
+                ("wydano", "Wydano", 50), ("pozostalo", "Pozost.", 52),
+                ("stan", "Stan", 44), ("do_wydania", "Do wyd.", 54),
+                ("teraz", "Teraz", 44),
+                ("status", "Status", 98), ("rw", "RW", 86)]
 
     #: Filtry listy kompletacyjnej: (klucz, etykieta, podpowiedz).
     #: Kolejnosc = kolejnosc zakladek. „mozliwe" jest domyslne, bo to
@@ -671,7 +694,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
             self.tab.column(klucz, width=szer, minwidth=36,
                             stretch=(klucz == "nazwa"),
                             anchor="w" if klucz in ("lokacja", "symbol", "nazwa",
-                                                    "zrodlo", "status")
+                                                    "zrodlo", "status", "rw")
                             else "e")
         sc = ttk.Scrollbar(wrap, orient="vertical", command=self.tab.yview)
         # Poziomy pasek — zabezpieczenie, nie codzienny sposób pracy: przy
@@ -691,7 +714,11 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         self.tab.tag_configure("czesciowo", background=UWAGA_TLO)
         self.tab.tag_configure("brak_stanu", background=BLAD_TLO)
         self.tab.tag_configure("poza_bom", background="#f4ecf7")
-        self.tab.bind("<Double-1>", lambda _e: self._popraw_ilosc())
+        self.tab.bind("<Double-1>", self._dwuklik_tabeli)
+        # Klik w kolumne RW otwiera przeglad dokumentow na tym RW. Kursor
+        # „reka" nad ta kolumna mowi, ze da sie w nia kliknac.
+        self.tab.bind("<Button-1>", self._klik_tabeli, add="+")
+        self.tab.bind("<Motion>", self._kursor_nad_rw, add="+")
         # Pojedynczy klik w trybie LISTA = „pokaz mi te pozycje". W trybie
         # SKANER nic nie robi, zeby nie kasowac tego, co wlasnie zeskanowano.
         self.tab.bind("<<TreeviewSelect>>", lambda _e: self._z_listy_biezacy())
@@ -989,6 +1016,9 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                 "pozostalo": pozostalo,
                 "stan": self._stan_w_magazynie(k) if k else 0.0,
                 "poza_bom": potrzeba is None,
+                # Numery RW, ktore ten symbol wydaly — z mostu. Klik w kolumne
+                # otwiera przeglad dokumentow na tym RW (02.10.2026).
+                "rw": list(p.get("rw") or ()),
             })
         self._odswiez_plan()
 
@@ -1159,7 +1189,9 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         return ("Typ: %s   |   Grubość: %s   |   Materiał: %s   |   %s: %s"
                 % (typ, grubosc, dostawca,
                    "Zamówiono (ZK)" if wpis.get("zrodlo") == "ZK"
-                   else "Przyjęto (PW)" if wpis.get("zrodlo") == "PW" else "Plan",
+                   else "Przyjęto (PW)" if wpis.get("zrodlo") == "PW"
+                   else "Zamówiono u dostawcy (ZD)" if wpis.get("zrodlo") == "ZD"
+                   else "Plan",
                    _ilo(zam) if zam is not None else "—"))
 
     def _projekt_con(self):
@@ -1481,8 +1513,10 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                 "—" if p["potrzeba"] is None else _ilo(p["potrzeba"]),
                 _ilo(p["wydano"]),
                 "—" if p["pozostalo"] is None else _ilo(p["pozostalo"]),
-                _ilo(p["stan"]), _ilo(teraz) if teraz else "0",
-                status), tags=(tag,) if tag else ())
+                _ilo(p["stan"]),
+                self._do_wydania_tekst(p, teraz),
+                _ilo(teraz) if teraz else "0",
+                status, self._rw_tekst(p)), tags=(tag,) if tag else ())
 
         # Dwa różne liczniki: plan dotyczy PROJEKTU, sesja tego, co magazynier
         # przygotował TERAZ. Wspólna liczba nie mówiła, czego dotyczy.
@@ -1527,18 +1561,56 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
             return teraz > 0
         if self.filtr == "brak":
             # Brak stanu ALBO za mało, żeby domknąć pozycję.
+            #
+            # ⚠️ Pozycja DOMKNIETA tu nie nalezy, choc ma stan 0: po wydaniu
+            # wszystkiego magazyn jest pusty i to normalne, a nie brak.
+            # Bez tego warunku „Brak stanu" liczylo 33 pozycje, w tym
+            # komplet 17 juz wydanych — ta sama kolejnosc warunkow, ktora
+            # psula kolumne Status (02.10.2026). Jedno zrodlo prawdy
+            # z `_status_wiersza`.
+            if p["poza_bom"]:
+                return False
+            if (_liczba(p["wydano"]) > 0
+                    and p["pozostalo"] is not None and p["pozostalo"] <= 0):
+                return False
             return (p["stan"] <= 0
                     or (p["pozostalo"] is not None
                         and p["pozostalo"] > p["stan"]))
         if self.filtr == "wydane":
             # Domkniete: cos wydano i nic juz nie zostalo. Ten sam warunek,
             # ktorego uzywa `_status_wiersza` — jedno zrodlo prawdy.
+            #
+            # `poza_bom` z wydaniem tez tu nalezy: material zszedl z magazynu
+            # i nic wiecej sie z nim nie dzieje. Bez tego pozycja wypadlaby
+            # ze WSZYSTKICH zakladek poza „Wszystkie" (02.10.2026).
+            if p["poza_bom"]:
+                return _liczba(p["wydano"]) > 0
             return (_liczba(p["wydano"]) > 0
                     and p["pozostalo"] is not None and p["pozostalo"] <= 0)
         if self.filtr == "czesciowe":
-            return _liczba(p["wydano"]) > 0 and (p["pozostalo"] is None
-                                                 or p["pozostalo"] > 0)
+            # ⚠️ `poza_bom` NIE jest „częściowo wydane". Bez potrzeby nie ma
+            # czego dokończyć — `pozostalo is None` znaczy „nie wiadomo ile",
+            # a nie „coś jeszcze zostało" (zgłoszone 02.10.2026).
+            if p["poza_bom"]:
+                return False
+            return (_liczba(p["wydano"]) > 0
+                    and (p["pozostalo"] is None or p["pozostalo"] > 0))
         # „mozliwe": jest co wydać i jest z czego.
+        #
+        # ⚠️ POZYCJA POZA BOM TU NIE NALEZY. Material wydany bez potrzeby
+        # (smar, elektrody, srub „z reki") ma `potrzeba = None`, wiec
+        # `pozostalo = None` — a stary warunek czytal to jako „cos jeszcze
+        # zostalo" i wrzucal taka pozycje do domyslnej zakladki magazyniera
+        # z PUSTYMI kolumnami Potrzeba i Pozostalo. Kolumna „Status" mowila
+        # „poza BOM", filtr twierdzil „do wydania" — sprzecznosc, przed ktora
+        # ostrzega naglowek tej metody (zgloszone 02.10.2026, symbol 419817
+        # na ZP196: zamowiony na ZD, wiec nigdy nie trafil na ZK projektu).
+        #
+        # Pozycja nie znika z okna — zostaje w „Wszystkie" i, gdy cos wydano,
+        # w „Wydane". Dowydanie „z reki" robi sie skanerem, ktory nie patrzy
+        # na filtr.
+        if p["poza_bom"]:
+            return False
         zostalo = p["pozostalo"] is None or p["pozostalo"] > 0
         return zostalo and p["stan"] > 0
 
@@ -1561,6 +1633,22 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                 return (w is None, _liczba(w))
             if k == "teraz":
                 return (False, self.sesja.get(p["symbol"].upper(), 0.0))
+            if k == "rw":
+                # Sortujemy po numerze pierwszego RW; pozycje bez wydania
+                # (pusta kolumna) na koniec, zeby nie rozbijaly listy.
+                rw = p.get("rw") or []
+                return (not rw, _naturalnie(rw[0] if rw else ""))
+            if k == "do_wydania":
+                # Kolumna wyliczana — nie ma jej w `plan`, wiec sortujemy po
+                # tej samej liczbie, ktora pokazuje `_do_wydania_tekst`.
+                # Bez tego klik w naglowek trafialby do galezi tekstowej
+                # i ustawial wiersze wedlug napisu („—" przed cyframi).
+                teraz = self.sesja.get(p["symbol"].upper(), 0.0)
+                poz = p.get("pozostalo")
+                if p["poza_bom"] or poz is None or poz <= 0:
+                    return (True, 0.0)
+                return (False, min(_liczba(poz),
+                                   _liczba(p["stan"]) - _liczba(teraz)))
             # Pozycje BEZ lokacji na koniec — magazynier i tak musi ich
             # szukać, więc nie mogą rozbijać trasy po regałach.
             wart = str(p.get(k) or "")
@@ -1619,16 +1707,195 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                 pass
             self._dymek_okno = None
 
+    def _kolumna_pod_myszka(self, zdarzenie):
+        """Klucz kolumny pod kursorem albo None (np. gdy to naglowek)."""
+        if self.tab.identify_region(zdarzenie.x, zdarzenie.y) != "cell":
+            return None
+        kol = self.tab.identify_column(zdarzenie.x)      # "#1", "#2", ...
+        try:
+            idx = int(kol.lstrip("#")) - 1
+        except ValueError:
+            return None
+        if 0 <= idx < len(self.KOL_PLAN):
+            return self.KOL_PLAN[idx][0]
+        return None
+
+    def _wiersz_planu(self, iid):
+        """Pozycja planu dla wiersza tabeli — po symbolu, nie po indeksie.
+
+        Indeks wiersza NIE jest indeksem w `self.plan`: lista jest filtrowana
+        i sortowana, wiec numeracja na ekranie zyje wlasnym zyciem.
+        """
+        wartosci = self.tab.item(iid, "values")
+        if not wartosci:
+            return None
+        symbol = (wartosci[2] or "").strip().upper()
+        for p in self.plan:
+            if (p["symbol"] or "").strip().upper() == symbol:
+                return p
+        return None
+
+    def _kursor_nad_rw(self, zdarzenie):
+        """Kursor „reka" nad klikalnym numerem RW — inaczej nikt nie zgadnie."""
+        kursor = ""
+        if self._kolumna_pod_myszka(zdarzenie) == "rw":
+            iid = self.tab.identify_row(zdarzenie.y)
+            if iid:
+                p = self._wiersz_planu(iid)
+                if p and p.get("rw"):
+                    kursor = "hand2"
+        try:
+            self.tab.config(cursor=kursor)
+        except tk.TclError:
+            pass
+
+    def _klik_tabeli(self, zdarzenie):
+        """Pojedynczy klik: tylko kolumna RW ma wlasne zachowanie."""
+        if self._kolumna_pod_myszka(zdarzenie) != "rw":
+            return
+        iid = self.tab.identify_row(zdarzenie.y)
+        if not iid:
+            return
+        p = self._wiersz_planu(iid)
+        if p and p.get("rw"):
+            self._otworz_rw(p)
+            return "break"          # nie zmieniaj zaznaczenia przy okazji
+
+    def _dwuklik_tabeli(self, zdarzenie):
+        """Dwuklik = „Popraw ilosc", ale NIE na kolumnie RW.
+
+        Bez tego wyjatku dwuklik w numer dokumentu otwieralby okienko
+        poprawiania ilosci tuz po tym, jak pierwszy klik otworzyl dokumenty.
+        """
+        if self._kolumna_pod_myszka(zdarzenie) == "rw":
+            return "break"
+        self._popraw_ilosc()
+
+    def _otworz_rw(self, p):
+        """Przeglad dokumentow Subiekta ustawiony na RW tej pozycji.
+
+        Gdy symbol wyszedl kilkoma RW, pytamy ktory — zgadywanie „pierwszy
+        z brzegu" przy dostawach czesciowych trafialoby w zly dokument.
+        """
+        rw = list(p.get("rw") or ())
+        if not rw:
+            return
+        numer = rw[0]
+        if len(rw) > 1:
+            numer = self._wybierz_rw(rw)
+            if not numer:
+                return
+        try:
+            import subiekt_dokumenty_gui
+        except ImportError as e:
+            messagebox.showerror("Dokumenty Subiekta",
+                                 "Brak modułu subiekt_dokumenty_gui:\n%s" % e,
+                                 parent=self)
+            return
+        try:
+            okno = subiekt_dokumenty_gui.open_window(self.master, szukaj=numer)
+        except TypeError:
+            # Starsza wersja okna bez parametru `szukaj` — otwieramy puste
+            # i dopisujemy numer do wyszukiwarki recznie, zeby klik dzialal
+            # takze na stanowisku z nieodswiezonym modulem.
+            okno = subiekt_dokumenty_gui.open_window(self.master)
+            try:
+                okno.search_var.set(numer)
+            except Exception:
+                pass
+        try:
+            okno.lift()
+            okno.focus_force()
+        except Exception:
+            pass
+
+    def _wybierz_rw(self, numery):
+        """Male okienko wyboru, gdy pozycja wyszla kilkoma RW."""
+        okno = tk.Toplevel(self)
+        okno.title("Który dokument?")
+        okno.transient(self)
+        okno.resizable(False, False)
+        tk.Label(okno, text="Ta pozycja wyszła kilkoma RW:",
+                 bg=TLO_OKNA, fg=TEKST, font=("Arial", 10, "bold"),
+                 padx=14, pady=(12)).pack(fill=tk.X)
+        wybor = {"numer": None}
+
+        def klik(n):
+            wybor["numer"] = n
+            okno.destroy()
+
+        ramka = tk.Frame(okno, bg=TLO_OKNA, padx=14, pady=10)
+        ramka.pack(fill=tk.BOTH, expand=True)
+        for n in numery:
+            tk.Button(ramka, text=n, font=("Arial", 10), width=22,
+                      relief=tk.FLAT, bg="#2980b9", fg="white",
+                      activebackground="#21618c", activeforeground="white",
+                      cursor="hand2", command=lambda x=n: klik(x)).pack(
+                          fill=tk.X, pady=2)
+        tk.Button(ramka, text="Anuluj", font=("Arial", 9), relief=tk.FLAT,
+                  bg="#bdc3c7", cursor="hand2",
+                  command=okno.destroy).pack(fill=tk.X, pady=(8, 0))
+        okno.grab_set()
+        self.wait_window(okno)
+        return wybor["numer"]
+
+    def _rw_tekst(self, p):
+        """Numery RW w jednej komorce: „RW 87/09" albo „RW 87/09 +1".
+
+        Rok obcinamy — magazynier i tak patrzy na dokumenty biezacego roku,
+        a pelne „RW 87/09/2026” nie miescilo sie w kolumnie. Gdy symbol
+        wyszedl kilkoma RW (dostawy czesciowe), pokazujemy pierwszy i licznik
+        reszty; wszystkie numery sa w dymku i w menu pod prawym klawiszem.
+        """
+        rw = p.get("rw") or []
+        if not rw:
+            return ""
+        pierwszy = _bez_roku(rw[0])
+        return pierwszy if len(rw) == 1 else "%s +%d" % (pierwszy, len(rw) - 1)
+
+    def _do_wydania_tekst(self, p, teraz):
+        """Ile REALNIE da sie wydac teraz: min(pozostalo, wolny stan).
+
+        Kolumny „Pozost." i „Stan" osobno nie odpowiadaly na pytanie, ktore
+        magazynier zadaje przy regale: ile moge wziac? Pozostalo 4 przy
+        stanie 1 znaczy, ze wezmie 1 — a zeby to wiedziec, musial porownac
+        dwie liczby w glowie, wiersz po wierszu (zgloszone 02.10.2026).
+
+        Od stanu odejmujemy to, co juz lezy w koszyku sesji (`teraz`) —
+        inaczej kolumna obiecywalaby towar odlozony przed chwila.
+        """
+        if p["poza_bom"]:
+            return "—"            # bez potrzeby nie ma czego wydawac
+        pozostalo = p["pozostalo"]
+        if pozostalo is None or pozostalo <= 0:
+            return "—"            # domkniete
+        wolny = _liczba(p["stan"]) - _liczba(teraz)
+        mozliwe = min(_liczba(pozostalo), wolny)
+        return _ilo(mozliwe) if mozliwe > 0 else "0"
+
     def _status_wiersza(self, p, teraz):
         """Status i kolor wiersza — czytelne bez wczytywania się w liczby."""
         if teraz > 0:
             return "🟢 przygotowane", "gotowe"
         if p["poza_bom"]:
             return "⬤ poza BOM", "poza_bom"
-        if p["stan"] <= 0:
-            return "⚠ brak na stanie", "brak_stanu"
-        if p["pozostalo"] is not None and p["pozostalo"] > p["stan"]:
-            return "⚠ za mały stan", "brak_stanu"
+        # ⚠️ DOMKNIETE SPRAWDZAMY PRZED STANEM — I NIE ODWRACAJ TEJ KOLEJNOSCI.
+        #
+        # Bylo odwrotnie i kazda w pelni wydana pozycja dostawala „brak na
+        # stanie", bo po wydaniu wszystkiego magazyn ma zero. Zakladka
+        # „Wydane" swiecila wtedy na czerwono 17 pozycji z Potrzeba=Wydano
+        # i Pozostalo=0, jakby czegos brakowalo — a nie brakowalo niczego
+        # (zgloszone 02.10.2026).
+        #
+        # Pusty magazyn jest problemem tylko wtedy, gdy COS JESZCZE ZOSTALO
+        # do wydania. Gdy nie zostalo nic, stan magazynu juz nie ma znaczenia.
+        domkniete = (_liczba(p["wydano"]) > 0
+                     and p["pozostalo"] is not None and p["pozostalo"] <= 0)
+        if not domkniete:
+            if p["stan"] <= 0:
+                return "⚠ brak na stanie", "brak_stanu"
+            if p["pozostalo"] is not None and p["pozostalo"] > p["stan"]:
+                return "⚠ za mały stan", "brak_stanu"
         if p["wydano"] > 0:
             # ⚠️ ROZROZNIAMY „czesciowo" od „w calosci". Wczesniej kazda
             # pozycja z jakimkolwiek wydaniem dostawala „czesciowo wydane",

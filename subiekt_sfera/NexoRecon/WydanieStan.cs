@@ -5,8 +5,8 @@
 // Zasila okno magazyniera „Wydanie z magazynu" (RM_BAZA_OKNO_WYDANIA_RW_PLAN.md).
 // Jedno wywolanie daje wszystko, co okno pokazuje na starcie:
 //
-//     POTRZEBA          ZK (zakupy) + PW (produkcja wlasna)
-//     WYDANO WCZESNIEJ  RW tego projektu
+//     POTRZEBA          ZK (zakupy) + PW (produkcja wlasna), awaryjnie ZD
+//     WYDANO WCZESNIEJ  RW tego projektu (z numerami w polu `rw`)
 //     POZOSTALO         potrzeba - wydano  (liczy juz okno)
 //
 // DLACZEGO OSOBNY TRYB, SKORO JEST "dokumenty"
@@ -27,6 +27,18 @@
 // u siebie. Sama ZK pokazalaby wiec tylko polowe tego, co magazynier wydaje.
 // BOM tez nie jest dobrym zrodlem: mowi, co konstruktor zaprojektowal, a nie
 // co realnie kupiono albo wyprodukowano.
+//
+// TRZECIE ZRODLO: ZD — TYLKO AWARYJNIE
+// ────────────────────────────────────
+// Dodane 02.10.2026. Towar kupiony z pominieciem ZK (zamowiony wprost na ZD
+// z numerem projektu w Uwagach) nie mial ZADNEJ potrzeby — okno pokazywalo go
+// jako „poza BOM" z pusta kolumna Potrzeba, choc numer projektu stal na ZD.
+//
+// ZD czytamy DOPIERO gdy milcza ZK i PW, i NIE wliczamy go do „konfliktow":
+// pozycja jednoczesnie na ZK i ZD to norma (zamowilismy u dostawcy to, co
+// klient zamowil u nas), a nie sprzecznosc wymagajaca decyzji czlowieka.
+// Pierwszenstwo ZK/PW zostaje nienaruszone — ZD nigdy nie nadpisuje potrzeby,
+// ktora juz skadsinad znamy.
 //
 // ⚠️ ZK I PW SIE NIE SUMUJA
 // Te drogi sa rozlaczne z zalozenia. Symbol wystepujacy w obu (stare dane,
@@ -93,7 +105,10 @@ internal static class WydanieStan
         // symbol -> ilosc, osobno dla kazdego zrodla
         var zZk = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
         var zPw = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        var zZd = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
         var zRw = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        // symbol -> numery RW, ktore go wydaly (kolejnosc jak w bazie, bez duplikatow)
+        var rwNumery = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         var rwBezProjektu = new List<object>();
         string? blad = null;
 
@@ -101,9 +116,11 @@ internal static class WydanieStan
         {
             Zbierz(() => sfera.ZamowieniaOdKlientow().Dane.Wszystkie(), szukany, zZk, null);
             Zbierz(() => sfera.PrzychodyWewnetrzne().Dane.Wszystkie(), szukany, zPw, null);
+            Zbierz(() => sfera.ZamowieniaDoDostawcow().Dane.Wszystkie(), szukany, zZd, null);
             // Tylko przy RW zbieramy odrzucone dokumenty: to one tlumacza
             // roznice miedzy stanem magazynu a licznikiem wydan.
-            Zbierz(() => sfera.RozchodyWewnetrzne().Dane.Wszystkie(), szukany, zRw, rwBezProjektu);
+            Zbierz(() => sfera.RozchodyWewnetrzne().Dane.Wszystkie(), szukany, zRw,
+                   rwBezProjektu, rwNumery);
         }
         catch (Exception ex)
         {
@@ -120,10 +137,12 @@ internal static class WydanieStan
 
         // Jedna lista: wszystko, co ma potrzebe ALBO zostalo juz wydane.
         // Pozycja wydana bez potrzeby (potrzeba: null) to material spoza
-        // planu — smar, elektrody, srub „z reki". Okno oznacza ja POZA BOM.
+        // planu — smar, elektrody, srub „z reki". Okno oznacza ja POZA BOM
+        // i NIE pokazuje jej w zakladce „Mozliwe do wydania" (02.10.2026).
         var symbole = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var s in zZk.Keys) symbole.Add(s);
         foreach (var s in zPw.Keys) symbole.Add(s);
+        foreach (var s in zZd.Keys) symbole.Add(s);
         foreach (var s in zRw.Keys) symbole.Add(s);
 
         var pozycje = new List<object>();
@@ -135,6 +154,20 @@ internal static class WydanieStan
             {
                 if (zZk.TryGetValue(s, out var ilZk)) { potrzeba = ilZk; zrodlo = "ZK"; }
                 else if (zPw.TryGetValue(s, out var ilPw)) { potrzeba = ilPw; zrodlo = "PW"; }
+                // ZD — DOPIERO GDY MILCZA ZK I PW (02.10.2026)
+                //
+                // ZD to zamowienie U DOSTAWCY, nie potrzeba projektu, wiec nie
+                // jest rownorzednym torem obok ZK/PW i NIE wchodzi do
+                // „konfliktow": gdy pozycja jest i na ZK, i na ZD, to normalna
+                // kolej rzeczy (zamowilismy u dostawcy to, co klient zamowil
+                // u nas) — nie anomalia do rozstrzygniecia przez czlowieka.
+                //
+                // Ale gdy towar kupiono WYLACZNIE na ZD, bez ZK i bez PW, to
+                // ZD jest JEDYNYM sladem, ile tego mialo wejsc na projekt.
+                // Bez tej galezi magazynier widzial pozycje „poza BOM" z pusta
+                // Potrzeba, choc numer projektu stal w Uwagach ZD (zgloszone
+                // 02.10.2026: symbol 419817 na ZP196, ZD 15/09/2026 na 3 szt.).
+                else if (zZd.TryGetValue(s, out var ilZd)) { potrzeba = ilZd; zrodlo = "ZD"; }
             }
             pozycje.Add(new
             {
@@ -142,6 +175,10 @@ internal static class WydanieStan
                 potrzeba,
                 zrodlo,
                 wydano = zRw.TryGetValue(s, out var w) ? w : 0m,
+                // Numery RW, ktore ten symbol wydaly — okno pokazuje je przy
+                // pozycji i pozwala kliknac wprost do przegladu dokumentow
+                // (02.10.2026). Pusta lista, gdy nic nie wydano.
+                rw = rwNumery.TryGetValue(s, out var nry) ? nry : new List<string>(),
             });
         }
 
@@ -163,7 +200,8 @@ internal static class WydanieStan
     /// po prostu pomijane.
     /// </summary>
     static void Zbierz(Func<IQueryable<Dokument>> zrodlo, string projekt,
-                       Dictionary<string, decimal> cel, List<object>? odrzucone)
+                       Dictionary<string, decimal> cel, List<object>? odrzucone,
+                       Dictionary<string, List<string>>? numery = null)
     {
         // Projekcja z zagniezdzona kolekcja idzie do bazy jako JEDNO zapytanie
         // z JOIN-ami. Materializacja dokumentow i siegniecie po AsortymentAktualny
@@ -207,6 +245,14 @@ internal static class WydanieStan
                 var s = (p.Symbol ?? "").Trim();
                 if (s.Length == 0) continue;
                 cel[s] = cel.TryGetValue(s, out var byla) ? byla + p.Ilosc : p.Ilosc;
+                if (numery != null)
+                {
+                    // Ten sam symbol moze wyjsc kilkoma RW (dostawy czesciowe),
+                    // a na JEDNYM RW moze stac w kilku wierszach — stad Contains.
+                    if (!numery.TryGetValue(s, out var lista))
+                        numery[s] = lista = new List<string>();
+                    if (!lista.Contains(d.Numer)) lista.Add(d.Numer);
+                }
             }
         }
     }

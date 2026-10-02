@@ -17,6 +17,10 @@
 // sprząta mieszaną listę. Nazwa trybu została "zd-usun" — zmiana zepsułaby
 // istniejące wywołania z RM_BAZA (subiekt_zamowienia.usun_zd).
 //
+// 02.10.2026 doszło PZ — przyjęcia zewnętrzne z trybu `pz-utworz`. Ta sama
+// historia co z PW: testowe przyjęcie zostawało w bazie, bo jego kolekcji
+// nie było na liście rodzajów.
+//
 // 10.09.2026 doszło PW — przychody wewnętrzne z kalkulatora RMPAK. Dotąd
 // wypadały z listy rodzajów i kasowanie kończyło się „nie znaleziono dokumentu
 // o tym numerze", choć dokument istniał i był widoczny w Przeglądzie.
@@ -53,7 +57,10 @@ internal static class ZdUsun
         // wszedzie poza kolekcja, w ktorej PW naprawde leza. Konczylo sie
         // komunikatem „nie znaleziono dokumentu o tym numerze", choc dokument
         // spokojnie istnial i byl widoczny w Przegladzie dokumentow.
-        var WSZYSTKIE = new[] { "ZK", "ZD", "RW", "WZ", "PW" };
+        // PZ doszlo 02.10.2026 — dokladnie z tego samego powodu co PW wyzej:
+        // przyjecie zewnetrzne wystawione testowo przez `pz-utworz` nie dalo
+        // sie skasowac, bo jego kolekcji nie bylo na tej liscie.
+        var WSZYSTKIE = new[] { "ZK", "ZD", "RW", "WZ", "PW", "PZ" };
         var rodzaje = WSZYSTKIE
             .Where(r => chciane.Any(n => n.StartsWith(r + " ", StringComparison.OrdinalIgnoreCase)
                                       || n.StartsWith(r + "/", StringComparison.OrdinalIgnoreCase)))
@@ -194,6 +201,7 @@ internal static class ZdUsun
         "RW" => sfera.RozchodyWewnetrzne(),
         "WZ" => sfera.WydaniaZewnetrzne(),
         "PW" => sfera.PrzychodyWewnetrzne(),
+        "PZ" => sfera.PrzyjeciaZewnetrzne(),
         _ => throw new ArgumentException($"nieznany rodzaj dokumentu: {rodzaj}")
     };
 

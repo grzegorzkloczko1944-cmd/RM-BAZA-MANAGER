@@ -221,20 +221,46 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
     #: zaraz za Nazwą, bo razem czyta się je jako jeden opis pozycji. Sama
     #: nazwa bywa za krótka, żeby rozpoznać detal przy zamawianiu (zgłoszone
     #: 15.09.2026: „dodaj kolumnę Opis, bardzo jej brakuje").
-    KOL_POZ = [("symbol", "Nr rysunku / symbol", 200), ("nazwa", "Nazwa", 330),
-               ("opis", "Opis", 260),
-               ("ilosc", "Ilość", 70), ("jm", "J.m.", 50),
-               ("cena", "Cena netto", 90), ("wartosc", "Wartość", 90)]
+    #: ⚠️ SUMA MUSI SIĘ MIEŚCIĆ W PRAWYM PANELU.
+    #:
+    #: Panel pozycji siedzi w PanedWindow z wagą 3 z 8, więc przy oknie
+    #: 1250 px dostaje ~460 px, a zmaksymalizowanym na FullHD ~700 px.
+    #: Suma 1090 px (do 02.10.2026) nie mieściła się NIGDY: „Cena netto"
+    #: i „Wartość" uciekały poza prawą krawędź i trzeba było przewijać
+    #: w bok, żeby zobaczyć kwoty — a to one są powodem, dla którego ktoś
+    #: otwiera pozycje dokumentu.
+    #:
+    #: Teraz 690 px: mieści się przy zmaksymalizowanym oknie w całości,
+    #: a przy wąskim zostaje do dojechania tylko „Wartość". Rozciąga się
+    #: WYŁĄCZNIE „Nazwa" (jak w oknie wydania — jedna kolumna zbiera cały
+    #: nadmiar, reszta stoi w miejscu).
+    #:
+    #: „Opis" jest w tych dokumentach prawie zawsze pusty (na zrzucie
+    #: z 02.10.2026 wszystkie trzy pozycje RW miały go pustego), więc to
+    #: on oddaje najwięcej: 260 → 90.
+    KOL_POZ = [("symbol", "Nr rysunku / symbol", 150), ("nazwa", "Nazwa", 190),
+               ("opis", "Opis", 90),
+               ("ilosc", "Ilość", 50), ("jm", "J.m.", 40),
+               ("cena", "Cena netto", 80), ("wartosc", "Wartość", 90)]
     #: Dokumenty MAGAZYNOWE: wartość niesie koszt magazynowy, nie cena netto
     #: (parametr handlowy, na PW/RW/WZ zwykle zerowy). Nagłówki zmieniają się
     #: razem z danymi, żeby kolumna nie kłamała o tym, co pokazuje.
     RODZAJE_MAGAZYNOWE = ("PW", "RW", "WZ")
     NAGL_KOSZT = ("Koszt jedn.", "Wartość magazynowa")
 
-    def __init__(self, parent):
+    def __init__(self, parent, szukaj=None):
+        """`szukaj` — numer dokumentu do pokazania od razu po otwarciu.
+
+        Uzywa tego okno wydania: klik w numer RW przy pozycji otwiera ten
+        przeglad juz odfiltrowany do tego dokumentu i podswietla go
+        (02.10.2026). Bez tego magazynier musial przepisywac numer recznie.
+        """
         super().__init__(parent)
         from subiekt_stany import ukryj_do_zbudowania
         ukryj_do_zbudowania(self)      # pokazane dopiero zbudowane
+        #: Numer do zaznaczenia po pierwszym wypelnieniu listy. Czyszczony
+        #: po uzyciu, zeby kolejne „Odswiez" nie przeskakiwalo kursorem.
+        self._do_zaznaczenia = (szukaj or "").strip() or None
         self.dokumenty = []
         self.widoczne = []
         self.biezacy = None
@@ -290,7 +316,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         f = tk.Frame(self, bg="#ecf0f1")
         f.pack(side=tk.TOP, fill=tk.X)
         tk.Label(f, text="Szukaj:", bg="#ecf0f1", font=("Arial", 9)).pack(side=tk.LEFT, padx=(12, 3), pady=6)
-        self.search_var = tk.StringVar()
+        self.search_var = tk.StringVar(value=self._do_zaznaczenia or "")
         self.search_var.trace_add("write", lambda *_: self._refill_po_wpisaniu())
         tk.Entry(f, textvariable=self.search_var, width=26, font=("Arial", 9)).pack(side=tk.LEFT, pady=6)
         tk.Label(f, text="(numer rysunku, nazwa, numer dokumentu)", bg="#ecf0f1",
@@ -484,6 +510,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
             projekty = [UWAGI_MAGAZYN] + [p for p in projekty if p != UWAGI_MAGAZYN]
         self.cmb_proj["values"] = [PROJ_WSZYSTKIE] + projekty + [PROJ_BEZ]
         self._refill()
+        self._zaznacz_zadany()
         from datetime import datetime
         self.status.config(text=f"Odczyt {datetime.now():%H:%M:%S}. "
                                 "Okno tylko czyta — nic nie zapisuje do Subiekta.")
@@ -1084,6 +1111,35 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
             return
         self._podglad_pdf()
 
+    def _zaznacz_zadany(self):
+        """Zaznacza i przewija do dokumentu podanego przy otwarciu okna.
+
+        Numer porownujemy po obcieciu bialych znakow i wielkosci liter —
+        okno wydania podaje go tak, jak zwrocil go most. Gdy dokumentu nie
+        ma na liscie (inny filtr, usuniety), nie robimy nic: wyszukiwarka
+        i tak zostala wypelniona, wiec user widzi, czego szukano.
+        """
+        numer = getattr(self, "_do_zaznaczenia", None)
+        if not numer or not self.sheet:
+            return
+        self._do_zaznaczenia = None          # jednorazowo, nie przy kazdym odswiezeniu
+        cel = numer.strip().upper()
+        for i, d in enumerate(self.widoczne):
+            if (d.get("numer") or "").strip().upper() != cel:
+                continue
+            try:
+                self.sheet.select_row(i)
+                self.sheet.see(row=i, column=0)
+            except Exception:
+                pass                          # starsze tksheet — zaznaczenie nieistotne
+            # Pozycje dokumentu w dolnej tabeli — bez tego klik z okna wydania
+            # pokazywalby pusty dol, choc dokument jest zaznaczony.
+            try:
+                self._on_wybor_dokumentu()
+            except Exception:
+                pass
+            break
+
     def _on_wybor_dokumentu(self, _event=None):
         if not self.sheet or not self.sheet_poz:
             return
@@ -1193,10 +1249,14 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
                                 "Ilość", "J.m.", "Cena / koszt jedn.",
                                 "Wartość", "Projekt"])
         self.sheet_poz.set_sheet_data(wiersze, reset_col_positions=False, redraw=False)
-        # Szerokości USTAWIANE JAWNIE: zapamiętane w JSON-ie dotyczą 6 kolumn
-        # trybu „jeden dokument", a tu jest 9 — bez tego trzy ostatnie miałyby
+        # Szerokości USTAWIANE JAWNIE: zapamiętane w JSON-ie dotyczą 7 kolumn
+        # trybu „jeden dokument", a tu jest 9 — bez tego dwie ostatnie miałyby
         # przypadkową szerokość.
-        for c, w in enumerate((130, 60, 190, 300, 70, 50, 90, 90, 80)):
+        #
+        # ⚠️ Suma zwężona 02.10.2026 (1060 → 700 px) z tego samego powodu co
+        # w KOL_POZ: panel pozycji dostaje ~460-700 px, więc „Wartość"
+        # i „Projekt" uciekały poza prawą krawędź.
+        for c, w in enumerate((110, 50, 130, 160, 50, 40, 80, 90, 70)):
             try:
                 self.sheet_poz.column_width(column=c, width=w, redraw=False)
             except Exception:
@@ -1224,9 +1284,13 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
                  + (f"   ·   {wart:,.2f} zł".replace(",", " ") if wart else ""))
 
 
-def open_window(parent):
-    """Punkt wejścia dla RM_BAZA."""
-    return DokumentyWindow(parent)
+def open_window(parent, szukaj=None):
+    """Punkt wejścia dla RM_BAZA.
+
+    `szukaj` — numer dokumentu, na którym okno ma się ustawić od razu
+    (używa tego klik w numer RW w oknie wydania).
+    """
+    return DokumentyWindow(parent, szukaj=szukaj)
 
 
 if __name__ == "__main__":

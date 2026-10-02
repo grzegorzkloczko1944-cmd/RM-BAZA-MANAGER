@@ -59,3 +59,6 @@ Czesc pamieci projektu — spis wszystkich obszarow w [MEMORY.md](MEMORY.md).
 - [Oringi — modele 3D, dopasowanie po poprawkach](project_oringi_modele_dopasowanie.md) — most zmienia symbol gdy 0 dokumentów; 8 modeli do przemianowania, 3 pary duplikatów SIL do decyzji
 - [Okno ZD: znormalia na gorze](project_zd_sortowanie_znormalia.md) — grupa PRZED dostawca; kryterium = klasa z importu, nie ksztalt symbolu; czego zmiana Typu NIE psuje (i co psuje)
 - [Kalkulator wycenia Z/ZZ poza PW](project_kalkulator_zz_poza_pw.md) — ODŁOŻONE 29.09: lista po dostawcy, PW tylko TW; montaż bez miejsca…
+- [Wydanie: poza BOM i ZD jako potrzeba](project_wydanie_poza_bom_i_zd.md) — `poza BOM` znika z „Możliwe do wydania”; ZD zasila Potrzebę, gdy milczą ZK i PW
+- [Wydania do arkusza: klucz subiekt_symbol](project_wydane_do_arkusza_symbol.md) — pozycje handlowe nie mają numeru rysunku; bez tego „Ilość dostarczonych” zostawała pusta
+- [Okno wydania: kolumna RW](project_wydanie_kolumna_rw.md) — numer dokumentu przy pozycji, klik otwiera przegląd dokumentów na tym RW
