@@ -1,11 +1,11 @@
 ---
 name: project_stan_prac_02_10_2026
-description: PUNKT WZNOWIENIA po sesji 01–03.10.2026 (M-OLD) — co niezacommitowane, co czeka na wdrożenie mostu w firmie, co sprawdzone tylko suchym przebiegiem, otwarte sprawy (Koło 12T ZK 16 vs BOM 8)
+description: PUNKT WZNOWIENIA po sesji 01–03.10.2026 (M-OLD) — commit 7ef3d0f niewypchnięty, co czeka na wdrożenie mostu w firmie, co sprawdzone tylko suchym przebiegiem, otwarte sprawy (Koło 12T ZK 16 vs BOM 8)
 metadata:
   type: project
 ---
 
-Stan na 03.10.2026, M-OLD. Commity wypchnięte w tej sesji: `67cbf04` (okna szybciej + pokazywane zbudowane + most zapotrzebowanie), `481c460` (CLAUDE.md: komunikacja w pakiecie). **Reszta pracy z 02–03.10 była NIEZACOMMITOWANA** w chwili zapisu (sprawdź `git status`).
+Stan na 03.10.2026, M-OLD. Commity wypchnięte w tej sesji: `67cbf04` (okna szybciej + pokazywane zbudowane + most zapotrzebowanie), `481c460` (CLAUDE.md: komunikacja w pakiecie). Reszta pracy z 02–03.10 — commit `7ef3d0f` (03.10.2026), **NIE wypchnięty** w chwili zapisu (sprawdź `git log origin/main..HEAD`).
 
 **Zmiany w tej paczce:** naprawa sumowania ilości (powiązania), blokada nazwy po zasiewie, banner dubletów, czerwone okno przy sklejaniu, okna na monitorze rodzica + pilnowanie rozmiaru, okno „Nowa kartoteka", Przegląd dokumentów (projekt startowy, kolejność arkusza, szukanie, ilość/cena/usuń na ZK), Zamówienia (sortowanie przy odświeżeniu, „do zamówienia"). Most: `ZkIlosc.cs` (nowy), `ZkPozUsun.cs` (`zk` w planie), `Projekt.cs`/`Pw.cs` (publiczne wrappery), `CommandDispatcher.cs`.
 

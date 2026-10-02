@@ -20,4 +20,4 @@ Czesc pamieci projektu — spis wszystkich obszarow w [MEMORY.md](MEMORY.md).
 - [Biblioteka: pytaj przed hurtem](feedback_biblioteka_pytaj_przed_hurtem.md) — hurtowe zmiany plików już w B: tylko po zgodzie…
 - [Porzadki 01.10 — co powtorzyc w domu](project_porzadki_01_10_do_powtorzenia_w_domu.md) — podzial MEMORY.md przychodzi z pull; AGENTS.md i .codex w NOW oraz serwis_port w config.json trzeba zrobic recznie (pliki poza gitem)
 - [Procedura dla usera i ładne okna](feedback_procedura_dla_usera_i_ladne_okna.md) — „jaka procedura” = kroki w RM_BAZA, nie kod; dialogi w stylu aplikacji, zrzut przed oddaniem
-- [⚠ PUNKT WZNOWIENIA 03.10.2026](project_stan_prac_02_10_2026.md) — niezacommitowana paczka 02–03.10, most do wystawienia w firmie, naprawa 2637 przy locku, otwarte sprawy
+- [⚠ PUNKT WZNOWIENIA 03.10.2026](project_stan_prac_02_10_2026.md) — paczka 02–03.10 w 7ef3d0f (niewypchnięta), most do wystawienia w firmie, naprawa 2637 przy locku, otwarte sprawy
