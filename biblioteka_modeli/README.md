@@ -212,7 +212,9 @@ Dla każdej partii przed raportem sprawdź i podaj liczby:
 | Pamięć użytkownika | `C:\Users\mongo\.claude\projects\C--RMPAK-CLIENT-Repozytoria-NOW\memory\` (`project_lozyska_w_oprawach_g`, `project-oringi-modele-b-stan`, `project_pipeline_biblioteka_modeli`) |
 | Notatki nomenklatury MAG | `RM-BAZA-MANAGER\pamiec\` (`project_lozyska_w_oprawach`, `project_mag_wstaw_i_przypisz`, `project_oringi_*`) |
 
-## 9. Elesa-Ganter — `G:\Mój dysk\SUBIEKT\Elesa` (ustalone 01.10.2026)
+## 9. Elesa-Ganter — `V:\! HASIOK\Elesa` (ustalone 01.10.2026; przeniesione z G: 02.10.2026)
+
+Skrypty wzorcowe mają w stałej ścieżkę `G:\Mój dysk\SUBIEKT\Elesa` — zmień `E` na `V:\! HASIOK\Elesa`. Strona wyboru dla zespołu: `WYBOR_Elesa-Ganter.html` w tym folderze (kod w `_narzedzia\strona_wybor\`), zaznaczenia zbierane z CSV w `wybory\`.
 
 Kandydaci zebrani z B:, C:\Projekty, V: (nazwy plików: kody GN/ERX/EBP/CFM…), bez przeróbek projektowych (`_MIR` itp.);
 pozycje występujące tylko w 1 projekcie → `_rzadkie\`. Skrypty wzorcowe: pozycja IPT i pozycja IAM (patrz niżej).
