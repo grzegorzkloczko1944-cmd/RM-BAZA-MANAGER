@@ -242,3 +242,22 @@ STEP bez IPT konwertuj `konwertuj_stp.py` (osobna instancja Inventora).
   (`brand` = ELESA → ma kod w `sku`; `brand` = GANTER → brak kodu, tylko Oznaczenie; `mpn` = seria; `description` po polsku). **Zawsze sprawdź, że `mpn` zgadza się z rodziną** (dopasowanie slugów jest rozmyte).
   Mapę wszystkich serii (kategoria + typ po polsku) daje `static/sitemap/sitemap.B2BStorePOL.pl.catalog.products.xml.gz` (z robots.txt). Kody Elesa (np. ERX, CFM): tabele w PDF (`elesa.com/siteassets/PDF/PDF_EN|PDF_US/<seria>..pdf`, pary „kod-*” + oznaczenie).
   Wyszukiwarka sklepu (`SearchDisplay`) nie działa bez JS — nie używaj.
+
+## 10. Strona HTML do podejmowania decyzji (lista pozycji z miniaturami i ptaszkami)
+
+Użytkownik chce pokazać zespołowi listę pozycji (np. kandydatów do biblioteki) i zebrać decyzje „tak/nie” (ptaszek „Do biblioteki”).
+Gotowy wzorzec z Elesa-Ganter (`wzorce_kodu\decyzje_*`; stan: 272 pozycje, 4 zakładki: Zrobione / Do decyzji / Już w bibliotece / Rzadkie).
+
+**Kroki:**
+1. **Miniatury i spis** — `decyzje_miniatury_lista.ps1` (PowerShell; plik zapisz z BOM UTF-8, inaczej polskie znaki w ścieżkach się psują): dla każdej pozycji
+   bierze miniaturę natywną z Eksploratora (`IShellItemImageFactory`) i zapisuje `manifest.csv`. Pliki źródłowe z projektów często **nie mają** osadzonej miniatury (u Elesy 120 z 272).
+2. **Brakujące miniatury** — `decyzje_render_brakujace.py`: osobna instancja Inventora (jak zwykle: watchdog okna VBA, PID-y użytkownika chronione, `app.Quit()` + `taskkill` własnego PID), otwiera plik BEZ zapisu
+   (`Documents.Open`, `Close(True)`), schemat „Prezentacja”, izometria, `SaveAsBitmap` 300×300 białe tło. ~10 s na pozycję. STEP też się renderuje.
+3. **Dane strony** — `decyzje_build_data.py`: scala metadane (kod, opis, format, wersja, projekt źródłowy, powód „do decyzji”) z miniaturami (JPEG 180 px, base64) w `items.json` (~1 MB na 270 pozycji).
+4. **Strona** — szablon `decyzje_szablon.html` (zakładki z licznikami, wyszukiwarka, filtr, „zaznacz/odznacz widoczne”, karty z checkboxem, kto i kiedy zmienił). Dwie wersje:
+   * **Artefakt claude.ai** (`Artifact` + `db`, `user`, `downloads`): wspólne zaznaczenia na żywo, ale odbiorcy muszą mieć dostęp do artefaktu — link jest prywatny, **udostępnienie robi użytkownik w menu „Udostępnij”**, uprawnienia współautora do zaznaczania. Przed pracą załaduj skille `artifact-design` i `artifact-capabilities`.
+   * **Plik samodzielny do sieci** (`decyzje_build_lokalny.py` + `decyzje_patch_lokalny.js`): zwykły HTML na dysku sieciowym (np. `V:\! HASIOK\...`), działa dwuklikiem; zaznaczenia w `localStorage` przeglądarki, imię + „Zapisz mój wybór (CSV)” → plik do folderu `wybory\`; wspólne zestawienie scalasz z CSV. To wersja, gdy użytkownik mówi „musi być po sieci”.
+5. Domyślnie zaznaczone tylko pozycje „zrobione” (propozycja); rozróżniaj „propozycja” od „decyzja” (zapis w bazie/CSV).
+
+**Pułapki:** podgląd `file://` w panelu przeglądarki bywa zablokowany — skład JS sprawdź `node --check` na wyciągniętym skrypcie; łańcuchy z `\r\n`/`\uFEFF` wstawiane z heredoca bash/Python tracą backslashe —
+fragmenty JS trzymaj w osobnych plikach (`patch_lokalny.js`) zapisanych narzędziem Write; dane JSON w `<script type="application/json">` zamieniaj `</` na `<\/`.

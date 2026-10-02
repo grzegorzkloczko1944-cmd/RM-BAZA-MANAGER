@@ -22,6 +22,7 @@ Użytkownik uruchomił ten skill, bo chce, żebyś **bez tłumaczenia** wiedzia�
    * **suchy przebieg i liczby przed zapisem**; zapis do Subiekta, nadpisanie i kasowanie tylko na wyraźne polecenie w tej rozmowie,
    * osobna instancja Inventora (nigdy sesja użytkownika), zapis w formacie Inventora 2015 jest dozwolony (nie pytaj; podaj wersję w raporcie),
    * przy starcie nowej instancji Inventora wyskakuje okno VBA („Module7… kontynuować?”) — uruchom `wzorce_kodu\watchdog_vba.py` (z PID-ami sesji użytkownika jako chronionymi), nie każ klikać „Tak”,
+   * gdy użytkownik chce pokazać zespołowi listę do zaakceptowania (ptaszki tak/nie) — patrz README sekcja 10 (strona HTML z miniaturami, wzorce `decyzje_*`),
    * nigdy nie wpisuj haseł, nie commituj/pushuj bez zgody,
    * na końcu raport wg checklisty z README (co zrobione — liczby, czego nie sprawdzałeś, co wymaga decyzji)
      oraz aktualizacja pamięci projektu.

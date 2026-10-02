@@ -1,0 +1,282 @@
+<title>Wybór Elesa-Ganter</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Układ: lepka belka z licznikami i zakładkami nad siatką kart; karta = miniatura + oznaczenie + pole wyboru. */
+:root{
+  --bg:#F1F2F4; --surface:#FFFFFF; --ink:#14171C; --muted:#586070; --line:#D8DBE1;
+  --accent:#C8102E; --ok:#0E7A5C; --ok-bg:#E3F4EE; --warn:#8A5A00; --warn-bg:#FBF0D9;
+  --thumb:#FFFFFF; --shadow:0 1px 2px rgba(20,23,28,.06);
+  --f-head:"Barlow Semi Condensed","Arial Narrow",system-ui,sans-serif;
+  --f-body:"Barlow",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0F1216; --surface:#171B21; --ink:#E7E9ED; --muted:#98A1AF; --line:#29303A;
+  --accent:#FF5468; --ok:#44D1A2; --ok-bg:#12302A; --warn:#E7B24C; --warn-bg:#2E2511;
+  --thumb:#FFFFFF; --shadow:none; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0F1216; --surface:#171B21; --ink:#E7E9ED; --muted:#98A1AF; --line:#29303A;
+  --accent:#FF5468; --ok:#44D1A2; --ok-bg:#12302A; --warn:#E7B24C; --warn-bg:#2E2511;
+  --thumb:#FFFFFF; --shadow:none; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:15px;line-height:1.45;padding-inline:16px;padding-block:0 40px}
+.wrap{max-width:1280px;margin-inline:auto}
+header.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);padding-block:14px 10px;border-bottom:1px solid var(--line)}
+h1{font-family:var(--f-head);font-weight:700;font-size:1.7rem;letter-spacing:.01em;margin:0;display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap}
+h1 small{font-size:.95rem;font-weight:500;color:var(--muted);letter-spacing:0}
+.lead{margin:.3rem 0 0;color:var(--muted);max-width:68ch}
+.bar{display:flex;gap:10px 16px;flex-wrap:wrap;align-items:center;margin-top:12px}
+.tabs{display:flex;gap:6px;flex-wrap:wrap}
+.tab{font-family:var(--f-head);font-weight:600;font-size:1rem;letter-spacing:.02em;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:7px 12px;cursor:pointer;display:flex;gap:8px;align-items:baseline}
+.tab .c{font-family:var(--f-mono);font-size:.78rem;color:var(--muted);font-weight:400}
+.tab[aria-selected="true"]{border-color:var(--accent);box-shadow:inset 0 -3px 0 var(--accent)}
+.tab:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.tools input[type=search],.tools select{font:inherit;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:7px 10px;min-width:0}
+.tools input[type=search]{flex:1 1 220px;max-width:340px}
+.btn{font:inherit;font-weight:500;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:7px 11px;cursor:pointer}
+.btn:hover{border-color:var(--muted)}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+.stat{margin-left:auto;font-family:var(--f-mono);font-size:.84rem;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+.stat b{color:var(--ink);font-weight:500}
+.note{margin:12px 0 0;padding:9px 12px;border-radius:6px;background:var(--warn-bg);color:var(--warn);font-size:.92rem}
+.desc{margin:16px 0 4px;color:var(--muted);max-width:80ch}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,210px),1fr));gap:12px;margin-top:12px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow);display:flex;flex-direction:column;min-width:0;overflow:hidden}
+.card.on{border-color:var(--ok)}
+.pic{background:var(--thumb);aspect-ratio:1/1;display:flex;align-items:center;justify-content:center;position:relative;border-bottom:1px solid var(--line)}
+.pic img{width:100%;height:100%;object-fit:contain;display:block}
+.pic .none{font-family:var(--f-mono);font-size:.72rem;color:#6b7280;text-align:center;padding:8px}
+.body{padding:10px 12px 12px;display:flex;flex-direction:column;gap:6px;flex:1;min-width:0}
+.name{font-family:var(--f-mono);font-weight:500;font-size:.92rem;overflow-wrap:anywhere;line-height:1.3}
+.kod{font-family:var(--f-mono);font-size:.78rem;color:var(--muted);overflow-wrap:anywhere}
+.what{font-weight:500}
+.what.empty{color:var(--muted);font-weight:400}
+.meta{display:flex;gap:5px;flex-wrap:wrap}
+.chip{font-family:var(--f-mono);font-size:.7rem;border:1px solid var(--line);border-radius:4px;padding:1px 6px;color:var(--muted);overflow-wrap:anywhere}
+.info{font-size:.82rem;color:var(--warn);background:var(--warn-bg);border-radius:4px;padding:5px 8px}
+.pick{margin-top:auto;padding-top:6px;display:flex;align-items:center;gap:10px;border-top:1px dashed var(--line)}
+.pick label{display:flex;align-items:center;gap:9px;cursor:pointer;font-family:var(--f-head);font-weight:600;font-size:1.02rem;flex:1;min-width:0}
+.pick input{appearance:none;-webkit-appearance:none;width:26px;height:26px;border:2px solid var(--muted);border-radius:6px;background:var(--surface);cursor:pointer;display:grid;place-content:center;flex:none;margin:0}
+.pick input:checked{background:var(--ok);border-color:var(--ok)}
+.pick input:checked::after{content:"";width:6px;height:12px;border:solid #fff;border-width:0 3px 3px 0;transform:rotate(45deg) translate(-1px,-1px)}
+.pick input[disabled]{opacity:.55;cursor:not-allowed}
+.who{font-size:.74rem;color:var(--muted);padding:0 12px 10px;min-height:1.1em}
+.empty-state{padding:40px 0;color:var(--muted);text-align:center}
+@media (max-width:520px){h1{font-size:1.4rem}.stat{margin-left:0}}
+@media (prefers-reduced-motion:no-preference){.card{transition:border-color .12s}}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <h1>Wybór Elesa-Ganter <small>modele 3D do biblioteki</small></h1>
+    <p class="lead">Zaznacz pole „Do biblioteki” przy każdym modelu, który ma trafić do biblioteki. Odznaczony model zostaje poza biblioteką. Zmiany zapisują się od razu i widzą je wszyscy.</p>
+    <div class="bar">
+      <div class="tabs" role="tablist" id="tabs"></div>
+    </div>
+    <div class="tools">
+      <input type="search" id="q" placeholder="Szukaj: oznaczenie, kod, opis" aria-label="Szukaj">
+      <select id="flt" aria-label="Pokaż">
+        <option value="all">Wszystkie</option>
+        <option value="on">Tylko zaznaczone</option>
+        <option value="off">Tylko niezaznaczone</option>
+      </select>
+      <button class="btn" id="allon" type="button">Zaznacz widoczne</button>
+      <button class="btn" id="alloff" type="button">Odznacz widoczne</button>
+      <button class="btn" id="csv" type="button" hidden>Zapisz listę CSV</button>
+      <div class="stat" id="stat"></div>
+    </div>
+    <div id="notice"></div>
+  </header>
+  <p class="desc" id="desc"></p>
+  <div class="grid" id="grid"></div>
+  <div class="empty-state" id="empty" hidden>Brak pozycji dla tego filtra.</div>
+</div>
+
+<script type="application/json" id="data">/*DATA*/</script>
+<script>
+(function(){
+  var ITEMS = JSON.parse(document.getElementById('data').textContent);
+  var GROUPS = [
+    {k:'zrobione', t:'Zrobione', d:'Gotowe modele z numerem katalogowym, białą miniaturą i opisem. Domyślna propozycja: wszystkie trafiają do biblioteki.', def:true},
+    {k:'do_decyzji', t:'Do decyzji', d:'Pozycje z niepewną nazwą. Nie są dopracowane. Zdecyduj, czy mamy je poprawić i dodać.', def:false},
+    {k:'w_bibliotece', t:'Już w bibliotece', d:'Te modele są już w bibliotece Elesa-Ganter na B:. Zaznacz tylko, jeśli nasza kopia ma ją zastąpić.', def:false},
+    {k:'rzadkie', t:'Rzadkie', d:'Modele z jednego projektu. Miniatury wyrenderowane ze źródła, bez numeru katalogowego. Zaznacz te, które warto dopracować i dodać.', def:false}
+  ];
+  var state = {tab:'zrobione', q:'', flt:'all'};
+  var votes = {};          // id -> {on, by, t}
+  var names = {};          // user id -> nazwa
+  var db = null, userCap = null, canWrite = true, myId = null, local = false;
+  var $ = function(id){return document.getElementById(id)};
+  var by = {}; ITEMS.forEach(function(i){by[i.id]=i});
+  var gdef = {}; GROUPS.forEach(function(g){gdef[g.k]=g.def});
+
+  function isOn(it){ var v = votes[it.id]; return v ? !!v.on : gdef[it.g]; }
+  function decided(it){ return !!votes[it.id]; }
+  function lsGet(){ try{ return JSON.parse(localStorage.getItem('wybor-elesa')||'{}'); }catch(e){ return {}; } }
+  function lsSet(o){ try{ localStorage.setItem('wybor-elesa', JSON.stringify(o)); }catch(e){} }
+
+  function counts(){
+    var c = {}; GROUPS.forEach(function(g){c[g.k]={n:0,on:0}});
+    ITEMS.forEach(function(it){ c[it.g].n++; if(isOn(it)) c[it.g].on++; });
+    return c;
+  }
+  function renderTabs(){
+    var c = counts(), h = '';
+    GROUPS.forEach(function(g){
+      h += '<button class="tab" role="tab" type="button" data-k="'+g.k+'" aria-selected="'+(state.tab===g.k)+'">'+g.t+' <span class="c">'+c[g.k].on+'/'+c[g.k].n+'</span></button>';
+    });
+    $('tabs').innerHTML = h;
+    var tot = 0, on = 0; GROUPS.forEach(function(g){tot += c[g.k].n; on += c[g.k].on});
+    $('stat').innerHTML = '<span>Do biblioteki: <b>'+on+'</b> z '+tot+'</span>';
+  }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, function(m){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]}); }
+  function visible(){
+    var q = state.q.trim().toLowerCase();
+    return ITEMS.filter(function(it){
+      if(it.g !== state.tab) return false;
+      var on = isOn(it);
+      if(state.flt==='on' && !on) return false;
+      if(state.flt==='off' && on) return false;
+      if(q && (it.n+' '+it.kod+' '+it.opis+' '+it.proj).toLowerCase().indexOf(q) < 0) return false;
+      return true;
+    });
+  }
+  function whoText(it){
+    var v = votes[it.id];
+    if(!v) return gdef[it.g] ? 'Propozycja, jeszcze nikt nie zmieniał' : 'Bez decyzji';
+    var d = v.t ? new Date(v.t) : null;
+    var when = d ? d.toLocaleDateString('pl-PL',{day:'numeric',month:'short'})+' '+d.toLocaleTimeString('pl-PL',{hour:'2-digit',minute:'2-digit'}) : '';
+    var who = v.by ? (names[v.by] || 'ktoś') : 'ktoś';
+    return 'Zmienił: '+esc(who)+(when?', '+when:'');
+  }
+  function card(it){
+    var on = isOn(it), dis = (!canWrite && !local) ? ' disabled' : '';
+    var meta = '';
+    if(it.fmt) meta += '<span class="chip">'+esc(it.fmt)+'</span>';
+    if(it.ver) meta += '<span class="chip">Inventor '+esc(it.ver)+'</span>';
+    if(it.proj) meta += '<span class="chip" title="Projekt źródłowy">'+esc(it.proj)+'</span>';
+    var pic = it.img ? '<img src="'+it.img+'" alt="Miniatura '+esc(it.n)+'" loading="lazy" width="180" height="180">' : '<div class="none">brak podglądu<br>(tylko plik STEP)</div>';
+    return '<article class="card'+(on?' on':'')+'" data-id="'+it.id+'">'+
+      '<div class="pic">'+pic+'</div>'+
+      '<div class="body">'+
+        '<div class="name">'+esc(it.n)+'</div>'+
+        (it.kod && it.kod!==it.n ? '<div class="kod">Kod: '+esc(it.kod)+'</div>' : '')+
+        '<div class="what'+(it.opis?'':' empty')+'">'+(it.opis?esc(it.opis):'opis do uzupełnienia')+'</div>'+
+        (meta?'<div class="meta">'+meta+'</div>':'')+
+        (it.info?'<div class="info">'+esc(it.info)+'</div>':'')+
+        '<div class="pick"><label><input type="checkbox" data-id="'+it.id+'"'+(on?' checked':'')+dis+'><span>Do biblioteki</span></label></div>'+
+      '</div>'+
+      '<div class="who" data-who="'+it.id+'">'+whoText(it)+'</div>'+
+    '</article>';
+  }
+  function renderGrid(){
+    var g = GROUPS.filter(function(x){return x.k===state.tab})[0];
+    $('desc').textContent = g.d;
+    var list = visible();
+    $('grid').innerHTML = list.map(card).join('');
+    $('empty').hidden = list.length > 0;
+  }
+  function renderAll(){ renderTabs(); renderGrid(); }
+  function refreshCard(id){
+    var it = by[id], el = document.querySelector('.card[data-id="'+id+'"]');
+    if(!el){ renderTabs(); return; }
+    var on = isOn(it);
+    el.classList.toggle('on', on);
+    var cb = el.querySelector('input'); if(cb) cb.checked = on;
+    var w = el.querySelector('.who'); if(w) w.textContent = whoText(it);
+    renderTabs();
+  }
+  async function resolveNames(){
+    if(!userCap || !userCap.profiles) return;
+    var ids = {}; Object.keys(votes).forEach(function(k){ var b = votes[k].by; if(b && !(b in names)) ids[b]=1; });
+    var list = Object.keys(ids); if(!list.length) return;
+    try{
+      var ps = await userCap.profiles(list);
+      list.forEach(function(id){ names[id] = (ps[id] && ps[id].name) || 'ktoś'; });
+      document.querySelectorAll('.who[data-who]').forEach(function(el){ el.textContent = whoText(by[el.getAttribute('data-who')]); });
+    }catch(e){}
+  }
+  var pending = {};
+  async function setVote(id, on){
+    var rec = {on:on, by:myId||'', t:Date.now()};
+    var prev = votes[id];
+    votes[id] = rec; refreshCard(id);
+    if(local){ var o = lsGet(); o[id] = rec; lsSet(o); return; }
+    try{
+      while(pending[id]) { await pending[id]; }
+      pending[id] = db.doc('wybor/'+id).set(rec);
+      await pending[id];
+    }catch(e){
+      if(prev) votes[id] = prev; else delete votes[id];
+      refreshCard(id);
+      showNotice('Nie udało się zapisać zmiany ('+(e && e.code ? e.code : 'błąd')+'). Spróbuj ponownie.');
+    } finally { pending[id] = null; }
+  }
+  function showNotice(t){ $('notice').innerHTML = t ? '<div class="note" role="status">'+esc(t)+'</div>' : ''; }
+
+  $('tabs').addEventListener('click', function(e){
+    var b = e.target.closest('.tab'); if(!b) return;
+    state.tab = b.getAttribute('data-k'); renderAll();
+  });
+  $('q').addEventListener('input', function(e){ state.q = e.target.value; renderGrid(); });
+  $('flt').addEventListener('change', function(e){ state.flt = e.target.value; renderGrid(); });
+  $('grid').addEventListener('change', function(e){
+    var cb = e.target; if(!cb || cb.type!=='checkbox') return;
+    setVote(cb.getAttribute('data-id'), cb.checked);
+  });
+  async function bulk(on){
+    if(!canWrite && !local) return;
+    var list = visible().filter(function(it){ return isOn(it) !== on; });
+    for(var i=0;i<list.length;i++){ await setVote(list[i].id, on); }
+  }
+  $('allon').addEventListener('click', function(){ bulk(true); });
+  $('alloff').addEventListener('click', function(){ bulk(false); });
+
+  async function initCsv(){
+    try{
+      var dl = await claude.use('downloads'); if(!dl) return;
+      $('csv').hidden = false;
+      $('csv').addEventListener('click', async function(){
+        var gname = {}; GROUPS.forEach(function(g){gname[g.k]=g.t});
+        var rows = [['Grupa','Oznaczenie','Kod','Opis','Do biblioteki','Status decyzji']];
+        ITEMS.forEach(function(it){ rows.push([gname[it.g], it.n, it.kod, it.opis, isOn(it)?'TAK':'NIE', decided(it)?'decyzja':'propozycja']); });
+        var txt = '﻿' + rows.map(function(r){ return r.map(function(c){ return '"'+String(c==null?'':c).replace(/"/g,'""')+'"'; }).join(';'); }).join('\r\n');
+        try{ await dl.save({filename:'wybor_elesa_ganter.csv', data:txt}); }
+        catch(e){ if(!e || e.code!=='declined') showNotice('Nie udało się zapisać pliku CSV.'); }
+      });
+    }catch(e){}
+  }
+
+  async function init(){
+    renderAll();
+    try{ userCap = await claude.use('user'); }catch(e){ userCap = null; }
+    try{ db = await claude.use('db'); }catch(e){ db = null; }
+    if(userCap){
+      try{ myId = await userCap.id(); }catch(e){}
+      try{ var cw = userCap.can ? userCap.can('data.write') : null; if(cw && cw.then) cw = await cw; if(cw === false) canWrite = false; }catch(e){}
+    }
+    if(!db){
+      local = true; votes = lsGet();
+      showNotice('Zapisywanie wspólne jest niedostępne. Zmiany zostają tylko w tej przeglądarce.');
+      renderAll(); initCsv(); return;
+    }
+    if(!canWrite) showNotice('Masz dostęp tylko do podglądu. Aby zaznaczać pozycje, potrzebujesz uprawnień współautora.');
+    db.collection('wybor').onSnapshot(function(snap){
+      var next = {};
+      snap.docs.forEach(function(d){ var v = d.data(); if(v) next[d.id] = v; });
+      votes = next;
+      var act = document.activeElement; var keep = act && act.type==='checkbox' ? act.getAttribute('data-id') : null;
+      renderAll();
+      if(keep){ var el = document.querySelector('input[data-id="'+keep+'"]'); if(el) el.focus(); }
+      resolveNames();
+    }, function(err){
+      showNotice('Nie udało się wczytać wspólnych zaznaczeń ('+(err && err.code ? err.code : 'błąd')+').');
+    });
+    initCsv();
+  }
+  init();
+})();
+</script>
