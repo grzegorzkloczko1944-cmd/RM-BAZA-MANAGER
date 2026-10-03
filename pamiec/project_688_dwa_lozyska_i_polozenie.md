@@ -80,7 +80,8 @@ Usuniete:
 WROCILBY przy pierwszej przebudowie katalogu, bo w PDF-ach Timkena jest
 norma. Lista dziala tez na aliasach.
 
-⚠️ ZOSTALY cztery stare rendery `688*8x16x4.png` w `C:\iLogic\LOZYSKAminiatury` (to INNY katalog niz `B:\...\miniatury`). Stamtad czyta
+⚠️ ZOSTALY cztery stare rendery `688*8x16x4.png` w katalogu renderow
+`C:/iLogic/LOZYSKA/miniatury` (to INNY katalog niz `B:/.../miniatury`). Stamtad czyta
 `subiekt_lozyska_zdjecia.py`, wiec jego uruchomienie wgraloby stare zdjecia
 4 mm pod symbole 688. Do usuniecia przy okazji.
 
