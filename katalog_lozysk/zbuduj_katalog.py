@@ -191,6 +191,32 @@ def main():
         # (688 = 8x16x4, 688ZZ = 8x16x5) — B w katalogu dotyczy wersji otwartej.
         r["uwaga"] = ("B dla wersji otwartej; ZZ/2RS bywa szersze"
                       if re.match(r"^61[89]/", r["oznaczenie"]) else "")
+    # ── WPISY WLASNE (nie z PDF-ow producentow) ──────────────────────────
+    #
+    # Dla serii miniaturowych B w katalogu dotyczy wersji OTWARTEJ, a wersja
+    # ZZ/2RS bywa szersza (uwaga wyzej). Dla 688 obie wersje realnie
+    # wystepuja w obrocie i OBIE mamy na magazynie, wiec „688" dostaje
+    # wlasny wpis z B=5 — inaczej makro MAG pokazywaloby przy kartotece
+    # „688 ZZ 8x16x5" wymiary 8x16x4 z aliasu 618/8 (03.10.2026).
+    #
+    # ⚠️ Alias „688" znika z 618/8, zeby jeden symbol nie mial dwoch zrodel
+    # wymiarow. 618/8 zostaje bez zmian jako wersja otwarta 8x16x4.
+    WLASNE = [
+        dict(oznaczenie="688", d=8.0, D=16.0, B=5.0, r_min=0.2,
+             Cr_kN=None, C0r_kN=None, n_smar=None, n_olej=None, masa_kg=None,
+             zrodlo="EZO (wersja ZZ/2RS)", koszyk_mosiezny=False),
+    ]
+    wlasne_ozn = {w["oznaczenie"] for w in WLASNE}
+    for w in WLASNE:
+        w["seria"] = seria(w["oznaczenie"])
+        w["aliasy"] = []
+        w["uwaga"] = "wersja uszczelniona ZZ/2RS; otwarta 618/8 ma B=4"
+        kat[w["oznaczenie"]] = w
+    # Alias przejety przez wpis wlasny nie moze zostac przy bazowym.
+    for r in kat.values():
+        if r.get("aliasy"):
+            r["aliasy"] = [a for a in r["aliasy"] if a not in wlasne_ozn]
+
     wynik = sorted(kat.values(), key=lambda r: (r["seria"], r["d"], r["D"]))
     with open(WYNIK, "w", encoding="utf-8") as f:
         json.dump({"zrodla": ZRODLA, "opis": "Łożyska kulkowe zwykłe (z głębokim rowkiem), "

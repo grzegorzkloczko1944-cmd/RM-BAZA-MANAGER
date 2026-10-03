@@ -1167,9 +1167,39 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # w dwóch miejscach, więc wpis widać od razu w obu.
         tk.Label(pod, text="Położenie:", bg=TLO_SEKCJI, fg=TEKST, font=("Arial", 9),
                  anchor="w", width=12).grid(row=6, column=0, sticky="w", padx=8, pady=6)
+        # ⚠️ `var_polozenie` ZOSTAJE jedynym zrodlem prawdy („R5/P4").
+        # Czyta ja zapis (`_pole_zmienione`), karta Magazyn i 10 innych miejsc —
+        # nie podmieniamy jej. Dwa pola ponizej to tylko NAKLADKA: user wpisuje
+        # same liczby, a one skladaja tekst w jedna strone i rozkladaja
+        # w druga (03.10.2026 — „zeby nie wpisywac R i P").
         self.var_polozenie = tk.StringVar()
-        tk.Entry(pod, textvariable=self.var_polozenie, font=("Arial", 9),
-                 width=20).grid(row=6, column=1, sticky="w", padx=4, pady=6)
+        self.var_regal = tk.StringVar()
+        self.var_polka = tk.StringVar()
+        ramka_pol = tk.Frame(pod, bg=TLO_SEKCJI)
+        ramka_pol.grid(row=6, column=1, sticky="w", padx=4, pady=6)
+        tk.Label(ramka_pol, text="R", bg=TLO_SEKCJI, fg=TEKST,
+                 font=("Arial", 10, "bold")).pack(side=tk.LEFT)
+        e_regal = tk.Entry(ramka_pol, textvariable=self.var_regal,
+                           font=("Arial", 10), width=4, justify="center")
+        e_regal.pack(side=tk.LEFT, padx=(2, 0))
+        tk.Label(ramka_pol, text="/P", bg=TLO_SEKCJI, fg=TEKST,
+                 font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=(2, 0))
+        e_polka = tk.Entry(ramka_pol, textvariable=self.var_polka,
+                           font=("Arial", 10), width=4, justify="center")
+        e_polka.pack(side=tk.LEFT, padx=(2, 0))
+        # Klik zaznacza zawartosc — magazynier nadpisuje numer jednym wpisem,
+        # bez kasowania starego (03.10.2026). `after_idle`, bo Tk ustawia
+        # kursor i czysci zaznaczenie PO obsludze <FocusIn>.
+        for _e in (e_regal, e_polka):
+            _e.bind("<FocusIn>",
+                    lambda zd: zd.widget.after_idle(
+                        lambda w=zd.widget: (w.select_range(0, "end"),
+                                             w.icursor("end"))))
+        self.var_regal.trace_add("write", lambda *_a: self._zloz_polozenie())
+        self.var_polka.trace_add("write", lambda *_a: self._zloz_polozenie())
+        # Rozklad w druga strone: kazde ustawienie var_polozenie (wybor
+        # kartoteki, czyszczenie panelu) ma wypelnic oba pola.
+        self.var_polozenie.trace_add("write", lambda *_a: self._rozloz_polozenie())
         self.var_polozenie.trace_add(
             "write", lambda *_a: self._pole_zmienione("polozenie"))
         tk.Label(pod, text="regał / półka", bg=TLO_SEKCJI, fg=TEKST_SZARY,
@@ -1967,6 +1997,12 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # zeby nic nie wypadalo poza krawedz i zeby poziomy pasek nie byl
         # potrzebny. "✓" zostaje staly — to ikonka, nie tekst.
         self.tab_lista.bind("<Configure>", self._dopasuj_kolumny_listy)
+        # Puszczenie separatora kolumn — Treeview nie wysyla wtedy <Configure>,
+        # wiec bez tego tabela zostawala wezsza od ramki (03.10.2026).
+        # `after_idle`, bo w chwili ButtonRelease Tk nie zapisal jeszcze nowej
+        # szerokosci; `identify_region` odsiewa kliki w wiersze.
+        self.tab_lista.bind("<ButtonRelease-1>", self._po_przeciagnieciu_kolumny,
+                            add="+")
         self.tab_lista.bind("<Double-1>", lambda _e: self._dodaj_istniejaca())
         self.tab_lista.bind("<<TreeviewSelect>>", self._na_wybor_z_listy)
         tk.Label(dol, text="Dwuklik = dodaj jako składnik zaznaczonego kompletu   •   "
@@ -2121,6 +2157,22 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                 f"{float(k.get('CenaEwidencyjna') or 0):g}"),
                 tags=tagi)
 
+    def _po_przeciagnieciu_kolumny(self, zdarzenie):
+        """Po puszczeniu separatora: zapamietaj reczny uklad i doklej do ramki.
+
+        Treeview nie wysyla <Configure> przy zmianie szerokosci kolumny, wiec
+        samo przeliczenie trzeba wywolac stad. Od tej chwili
+        `_dopasuj_kolumny_listy` liczy od szerokosci BIEZACYCH, zeby nie
+        cofac tego, co user ustawil.
+        """
+        try:
+            if self.tab_lista.identify_region(zdarzenie.x, zdarzenie.y) != "separator":
+                return
+        except Exception:
+            return
+        self._kolumny_recznie = True
+        self.tab_lista.after_idle(self._dopasuj_kolumny_listy)
+
     def _dopasuj_kolumny_listy(self, _e=None):
         """Rozciaga kolumny sekcji 4 na cala szerokosc widoku.
 
@@ -2134,13 +2186,50 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         if szer <= 1:                      # widget jeszcze niezmapowany
             return
         staly = KOL_LISTA_STALE            # "✓" ma stala szerokosc
+        # ⚠️ I PILNUJEMY JEJ JAWNIE. Tk rozciaga „✓" przy przeciaganiu
+        # sasiednich kolumn (zmierzone: 28 -> 51 px), a ta funkcja jej nie
+        # ustawiala — zabrane piksele znikaly z puli i tabela nie dochodzila
+        # do prawej krawedzi (03.10.2026).
+        try:
+            if int(self.tab_lista.column("w", "width")) != staly:
+                self.tab_lista.column("w", width=staly)
+        except Exception:
+            pass
         elastyczne = [(k, w) for k, _n, w in self.KOL_LISTA if k != "w"]
         suma = sum(w for _k, w in elastyczne) or 1
         # -4 px na obramowanie: bez tego ostatnia kolumna wystaje o wlos
         # i pasek poziomy pojawia sie mimo wszystko.
         dostepne = max(szer - staly - 4, suma // 2)
-        for klucz, waga in elastyczne:
-            self.tab_lista.column(klucz, width=max(int(dostepne * waga / suma), 40))
+
+        # ⚠️ PO RECZNYM PRZECIAGNIECIU liczymy od SZEROKOSCI BIEZACYCH, nie od
+        # wag z KOL_LISTA (03.10.2026). Wczesniej kazde przeliczenie wracalo
+        # do proporcji domyslnych — a poniewaz lecialo tylko przy <Configure>,
+        # po puszczeniu separatora tabela zostawala wezsza od ramki z pustym
+        # pasem po prawej („nie przykleja sie do ramki").
+        #
+        # Zasada: rezultat uzytkownika zostaje, a roznice do krawedzi
+        # rozdzielamy PROPORCJONALNIE miedzy kolumny. Rozciagana jest kazda,
+        # wiec nic nie ucieka za krawedz i nic nie zostaje puste.
+        if getattr(self, "_kolumny_recznie", False):
+            biezace = []
+            for klucz, _w in elastyczne:
+                try:
+                    biezace.append((klucz, max(int(self.tab_lista.column(klucz, "width")), 1)))
+                except Exception:
+                    biezace.append((klucz, 40))
+            elastyczne = biezace
+            suma = sum(w for _k, w in elastyczne) or 1
+
+        rozdane = 0
+        for i, (klucz, waga) in enumerate(elastyczne):
+            if i == len(elastyczne) - 1:
+                # Ostatnia dostaje RESZTE — zaokraglenia nie moga zostawic
+                # szpary przy prawej krawedzi.
+                nowa = max(dostepne - rozdane, 40)
+            else:
+                nowa = max(int(dostepne * waga / suma), 40)
+                rozdane += nowa
+            self.tab_lista.column(klucz, width=nowa)
 
     def _oznacz_w_liscie(self):
         """Aktualizuje TYLKO fajki i szarosc na liscie 4, bez przebudowy.
@@ -2883,9 +2972,25 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         wyb = self.tab_lista.selection()
         if not wyb:
             return
-        try:
-            _w, sym, naz, opis, rodzaj, _stan, cena = self.tab_lista.item(wyb[0], "values")
-        except ValueError:
+        # ⚠️ ROZPAKOWANIE PO KLUCZACH `KOL_LISTA`, NIE NA SZTYWNO.
+        #
+        # Bylo tu `_w, sym, naz, opis, rodzaj, _stan, cena = ...` — siedem
+        # zmiennych. Dolozenie kolumny „Polozenie" (03.10.2026) dalo osiem
+        # wartosci, `ValueError` i ciche `return`: klik w sekcje 4 przestal
+        # wkladac cokolwiek do panelu 2 („jest gluche po dodaniu regalu").
+        # Przez indeksy klik dziala dalej po kazdej zmianie ukladu kolumn.
+        wart = self.tab_lista.item(wyb[0], "values")
+        klucze = [k for k, _n, _w in self.KOL_LISTA]
+        if len(wart) < len(klucze):
+            return
+        dane_w = dict(zip(klucze, wart))
+        sym = str(dane_w.get("symbol") or "").strip()
+        naz = str(dane_w.get("nazwa") or "").strip()
+        opis = dane_w.get("opis")
+        polozenie = dane_w.get("polozenie")
+        rodzaj = dane_w.get("rodzaj")
+        cena = dane_w.get("cena")
+        if not sym:
             return
         rodzaj_n = ("komplet" if "omplet" in str(rodzaj) else
                     "usluga" if "sług" in str(rodzaj) or "slug" in str(rodzaj)
@@ -2899,9 +3004,20 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         # drzewa) zostaje nietknieta — inaczej podmiana skasowalaby jego
         # zmiany samym klinieciem na liste.
         if sym not in self.pozycje:
-            self.pozycje[sym] = Kartoteka(
+            k_nowa = Kartoteka(
                 sym, naz, rodzaj_n, "kpl" if rodzaj_n == "komplet" else "szt",
                 cena=cena_f, opis=str(opis or "").strip(), w_subiekcie=True)
+            # Polozenie (regal/polka) — z kolumny listy 4. Bez tego pole
+            # „Polozenie" w panelu 2 stalo puste dla kazdej kartoteki
+            # wybranej z listy, choc regal byl widoczny obok w sekcji 4
+            # (03.10.2026).
+            #
+            # ⚠️ Pusty tekst zostawiamy jako None, NIE "". `do_slownika`
+            # wysyla klucz „polozenie" tylko gdy nie jest None, a most
+            # traktuje jego brak jako „nie ruszaj". Wpisanie "" kasowaloby
+            # regal przy kazdym zapisie kartoteki, ktora go ma.
+            k_nowa.polozenie = str(polozenie or "").strip() or None
+            self.pozycje[sym] = k_nowa
         self._zaznaczony = sym
         self._z_listy = True
         k = self.pozycje[sym]
@@ -3061,6 +3177,65 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             k.opis = tresc
             self._zmienione = True
             self._edytowana = self._zaznaczony
+
+    def _zloz_polozenie(self):
+        """Pola R i P → `var_polozenie` („5", „4" → „R5/P4").
+
+        Sam regał bez półki jest dozwolony („R17") — tak wygląda 58 kartotek
+        po migracji z Opisu. Puste oba pola = puste położenie, czyli dla
+        `_pole_zmienione` None („nie ruszaj"), nie "" (kasowanie regału).
+
+        ⚠️ `_skladam` chroni przed pętlą: `var_polozenie` ma własny trace,
+        który woła `_rozloz_polozenie` i wpisywałby z powrotem do R/P,
+        kasując cyfrę w trakcie pisania.
+        """
+        if getattr(self, "_rozkladam", False):
+            return
+        tylko_cyfry = lambda v: "".join(c for c in (v or "") if c.isdigit())
+        r, pk = tylko_cyfry(self.var_regal.get()), tylko_cyfry(self.var_polka.get())
+        # Litera wpisana przez pomyłkę nie ma zostać w polu.
+        # Odsiew liter: ustawiamy oczyszczoną wartość i LECIMY DALEJ.
+        # Wcześniej był tu `return` („ten set wywoła nas ponownie") — ale
+        # `var_regal.set()` wchodzi w ten sam trace, który zastaje już
+        # oczyszczoną wartość, więc składanie nigdy nie dochodziło do skutku
+        # i położenie zostawało puste.
+        if r != self.var_regal.get():
+            self.var_regal.set(r)
+        if pk != self.var_polka.get():
+            self.var_polka.set(pk)
+        if not r:
+            nowe = "P%s" % pk if pk else ""
+        else:
+            nowe = "R%s/P%s" % (r, pk) if pk else "R%s" % r
+        self._skladam = True
+        try:
+            if self.var_polozenie.get() != nowe:
+                self.var_polozenie.set(nowe)
+        finally:
+            self._skladam = False
+
+    def _rozloz_polozenie(self):
+        """`var_polozenie` → pola R i P („R5/P4" → „5", „4").
+
+        Woła się przy każdym ustawieniu położenia z zewnątrz: wybór kartoteki
+        z drzewa albo z listy 4, czyszczenie panelu, klon. Formaty spoza
+        konwencji („Reg 4.3", „12") rozkładamy po samych liczbach, żeby
+        stare wpisy też dało się poprawić w tych polach.
+        """
+        if getattr(self, "_skladam", False):
+            return
+        import re as _re
+        liczby = _re.findall(r"\d+", self.var_polozenie.get() or "")
+        r = liczby[0] if liczby else ""
+        pk = liczby[1] if len(liczby) > 1 else ""
+        self._rozkladam = True
+        try:
+            if self.var_regal.get() != r:
+                self.var_regal.set(r)
+            if self.var_polka.get() != pk:
+                self.var_polka.set(pk)
+        finally:
+            self._rozkladam = False
 
     def _pole_zmienione(self, klucz):
         if self._blokada or not self._zaznaczony:
@@ -3837,7 +4012,21 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         if not wyb:
             messagebox.showinfo("Edytor", "Zaznacz kartotekę na liście (sekcja 4).", parent=self)
             return
-        _w, sym, naz, opis, rodzaj, _stan, cena = self.tab_lista.item(wyb[0], "values")
+        # Po kluczach KOL_LISTA — nie na sztywno. Patrz komentarz
+        # w `_na_wybor_z_listy`: dolozenie kolumny lamalo rozpakowanie
+        # i dwuklik („+ Istniejaca") przestawal dzialac (03.10.2026).
+        wart = self.tab_lista.item(wyb[0], "values")
+        klucze = [k for k, _n, _w in self.KOL_LISTA]
+        if len(wart) < len(klucze):
+            return
+        dane_w = dict(zip(klucze, wart))
+        sym = str(dane_w.get("symbol") or "").strip()
+        naz = str(dane_w.get("nazwa") or "").strip()
+        opis = dane_w.get("opis")
+        rodzaj = str(dane_w.get("rodzaj") or "")
+        cena = dane_w.get("cena")
+        if not sym:
+            return
         rodzaj_n = ("komplet" if "omplet" in rodzaj else
                     "usluga" if "sług" in rodzaj or "slug" in rodzaj else "towar")
         if sym not in self.pozycje:

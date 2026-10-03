@@ -1321,9 +1321,7 @@
    "zrodlo": "Timken",
    "koszyk_mosiezny": false,
    "seria": "618",
-   "aliasy": [
-    "688"
-   ],
+   "aliasy": [],
    "uwaga": "B dla wersji otwartej; ZZ/2RS bywa szersze"
   },
   {
@@ -4768,6 +4766,23 @@
    "seria": "64",
    "aliasy": [],
    "uwaga": ""
+  },
+  {
+   "oznaczenie": "688",
+   "d": 8.0,
+   "D": 16.0,
+   "B": 5.0,
+   "r_min": 0.2,
+   "Cr_kN": null,
+   "C0r_kN": null,
+   "n_smar": null,
+   "n_olej": null,
+   "masa_kg": null,
+   "zrodlo": "EZO (wersja ZZ/2RS)",
+   "koszyk_mosiezny": false,
+   "seria": "68",
+   "aliasy": [],
+   "uwaga": "wersja uszczelniona ZZ/2RS; otwarta 618/8 ma B=4"
   },
   {
    "oznaczenie": "603",
