@@ -63,6 +63,30 @@ z NAZWY PLIKU, a „618/8" ma ukośnik, którego w nazwie pliku być nie może
 (`618-8 ZZ 8x16x4.png` → symbol „618-8 ZZ" ≠ „618/8 ZZ"). Użyty jednorazowy
 skrypt z JAWNYM mapowaniem plik→symbol.
 
+## AKTUALIZACJA 03.10.2026 wieczorem: 618/8 USUNIETE CALKOWICIE
+
+Decyzja uzytkownika: **zostaje wylacznie 688 = 8x16x5**. Wersja otwarta
+8x16x4 nie jest w obrocie, a dublowanie oznaczenia tylko mylilo.
+
+Usuniete:
+* 4 kartoteki `618/8 ZZ`, `618/8 2RS`, `SS 618/8 ZZ`, `SS 618/8 2RS`
+  (`kartoteka-usun`; byly nieuzywane — 0 dokumentow, 0 kompletow);
+* wpis `618/8` z katalogu lozysk (294 -> 293) + alias;
+* 4 powiazania modeli 3D (`/mag/model3d/usun`);
+* 4 rendery `618-8*.png` z `C:\iLogic\LOZYSKA\miniatury`;
+* 4 pliki `.ipt` 8x16x4 z `B:\...\gotowe` i 4 miniatury z `B:\...\miniatury`.
+
+⚠️ `zbuduj_katalog.py` ma teraz `POMIJAJ = {"618/8"}` — bez tego wpis
+WROCILBY przy pierwszej przebudowie katalogu, bo w PDF-ach Timkena jest
+norma. Lista dziala tez na aliasach.
+
+⚠️ ZOSTALY cztery stare rendery `688*8x16x4.png` w `C:\iLogic\LOZYSKAminiatury` (to INNY katalog niz `B:\...\miniatury`). Stamtad czyta
+`subiekt_lozyska_zdjecia.py`, wiec jego uruchomienie wgraloby stare zdjecia
+4 mm pod symbole 688. Do usuniecia przy okazji.
+
+Stan koncowy: na `B:` tylko `688 ZZ 8x16x5.ipt`, w katalogu jeden wpis
+`688` = 8x16x5, w MAG zero kartotek z 8x16x4.
+
 ## Czego NIE zrobiono
 
 * `SS 688.ZZ` ma puste `Wymiary` — kropka w symbolu nie pasuje do wzorca

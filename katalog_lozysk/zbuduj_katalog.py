@@ -206,6 +206,14 @@ def main():
              Cr_kN=None, C0r_kN=None, n_smar=None, n_olej=None, masa_kg=None,
              zrodlo="EZO (wersja ZZ/2RS)", koszyk_mosiezny=False),
     ]
+    # Oznaczenia POMIJANE mimo obecnosci w PDF-ach producentow. „618/8" to
+    # wersja OTWARTA (8x16x4) — w obrocie mamy wylacznie uszczelniona „688"
+    # (8x16x5), wiec wpis normowy tylko mylil kolumne Wymiary w MAG
+    # (decyzja uzytkownika 03.10.2026, kartoteki 618/8 usuniete z Subiekta).
+    POMIJAJ = {"618/8"}
+    for o in POMIJAJ:
+        kat.pop(o, None)
+
     wlasne_ozn = {w["oznaczenie"] for w in WLASNE}
     for w in WLASNE:
         w["seria"] = seria(w["oznaczenie"])
@@ -215,7 +223,8 @@ def main():
     # Alias przejety przez wpis wlasny nie moze zostac przy bazowym.
     for r in kat.values():
         if r.get("aliasy"):
-            r["aliasy"] = [a for a in r["aliasy"] if a not in wlasne_ozn]
+            r["aliasy"] = [a for a in r["aliasy"]
+                           if a not in wlasne_ozn and a not in POMIJAJ]
 
     wynik = sorted(kat.values(), key=lambda r: (r["seria"], r["d"], r["D"]))
     with open(WYNIK, "w", encoding="utf-8") as f:
