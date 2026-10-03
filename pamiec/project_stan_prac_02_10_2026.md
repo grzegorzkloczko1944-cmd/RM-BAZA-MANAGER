@@ -5,7 +5,9 @@ metadata:
   type: project
 ---
 
-Stan na 03.10.2026, M-OLD. Commity wypchnięte w tej sesji: `67cbf04` (okna szybciej + pokazywane zbudowane + most zapotrzebowanie), `481c460` (CLAUDE.md: komunikacja w pakiecie). Reszta pracy z 02–03.10 — commit `7ef3d0f` (03.10.2026), **NIE wypchnięty** w chwili zapisu (sprawdź `git log origin/main..HEAD`).
+**Aktualizacja 03.10.2026 03:05:** wszystko wypchnięte — `7ef3d0f`, `90bd480` i nocna paczka `16bc21e` (kolumna SUBIEKT po projekcie z „(stan potrzeba/stan)”, ostrzeżenie przed 2× wysyłką ZD, most `stan-pozycji` jednym zapytaniem, leniwe wczytanie, okno szczegółów z odnośnikami, bufor odczytów panelu; szczegóły w [[project_zd_powtorka_i_kolumna_subiekt]]). Do wystawienia w firmie doszły: **restart RM_SERWER** (nowe operacje `zd-wyslane-ostatnia`, `zd-zamowione-dodaj-zachowaj`) i most po buildzie (`StanPozycji.cs`, `Zapotrzebowanie.cs`). Niezacommitowany został tylko `sync_agent_run.example.bat` (zmiana komentarzy sprzed sesji — do decyzji usera). Otwarte na później: wiersze testowe w 2627 na M-OLD (214, 220, 221, 225, 228, 229) i zmiana nazwy GN-614-5-NI → GN-614-5 NI bez wpisu w historii (04–05.09). Klik w numer ZK/ZD w oknie szczegółów — user zgłosił „nie otwiera”, po poprawce (otwórz → zamknij, błąd w okienku, lift) niesprawdzone.
+
+Stan na 03.10.2026, M-OLD. Commity wypchnięte w tej sesji: `67cbf04` (okna szybciej + pokazywane zbudowane + most zapotrzebowanie), `481c460` (CLAUDE.md: komunikacja w pakiecie). Reszta pracy z 02–03.10 — commit `7ef3d0f` (03.10.2026), wypchnięty 03.10 w nocy razem z `16bc21e`.
 
 **Zmiany w tej paczce:** naprawa sumowania ilości (powiązania), blokada nazwy po zasiewie, banner dubletów, czerwone okno przy sklejaniu, okna na monitorze rodzica + pilnowanie rozmiaru, okno „Nowa kartoteka", Przegląd dokumentów (projekt startowy, kolejność arkusza, szukanie, ilość/cena/usuń na ZK), Zamówienia (sortowanie przy odświeżeniu, „do zamówienia"). Most: `ZkIlosc.cs` (nowy), `ZkPozUsun.cs` (`zk` w planie), `Projekt.cs`/`Pw.cs` (publiczne wrappery), `CommandDispatcher.cs`.
 
