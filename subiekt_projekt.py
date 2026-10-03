@@ -69,6 +69,9 @@ def komunikat(rodzic, tytul, tresc, rodzaj="info", pytanie=False):
     okno = tk.Toplevel(rodzic)
     okno.title(tytul)
     okno.resizable(False, False)
+    # Szerzej niż wynika z treści — komunikaty Subiekta z numerami dokumentów
+    # i listami pozycji zawijały się po kilka razy (user 03.10.2026).
+    okno.minsize(640, 0)
     try:
         okno.transient(rodzic)
     except tk.TclError:
@@ -81,7 +84,7 @@ def komunikat(rodzic, tytul, tresc, rodzaj="info", pytanie=False):
              anchor="w", padx=14, pady=8).pack(fill=tk.X)
 
     tk.Label(okno, text=tresc, justify="left", anchor="w", padx=16, pady=14,
-             font=("Arial", 9), wraplength=560).pack(fill=tk.BOTH, expand=True)
+             font=("Arial", 9), wraplength=720).pack(fill=tk.BOTH, expand=True)
 
     stopka = tk.Frame(okno)
     stopka.pack(fill=tk.X, padx=12, pady=(0, 12))

@@ -38,10 +38,29 @@ _ODCZYTY_LOCK = threading.Lock()
 WAZNOSC_ODCZYTU_S = 60
 
 
+#: Ostatni UDANY wynik każdego odczytu — przeżywa `odczyt_z_panelu` (które
+#: zdejmuje wpis z `_ODCZYTY`) i zamknięcie panelu. Z niego korzystają:
+#: liczniki panelu przy ponownym otwarciu (bez odpytywania mostu, gdy wynik
+#: ma mniej niż WAZNOSC_ODCZYTU_S) i kolumna SUBIEKT (`podejrzyj_odczyt`).
+#: Dziennik mostu 03.10.2026: 69× `dokumenty` jednego wieczoru — każde
+#: otwarcie panelu czytało cztery tryby od nowa (~3,5 s w kolejce mostu),
+#: a „Sprawdź w Subiekcie" zaraz potem czytało `dokumenty` piąty raz.
+#: Każdy ZAPIS przez most unieważnia całość (`uniewaznij_odczyty`).
+_OSTATNIE = {}
+
+
 def _wspolny_odczyt(klucz, funkcja):
-    """Wykonuje odczyt panelu i udostępnia wynik oknu pod `klucz`."""
+    """Wykonuje odczyt panelu i udostępnia wynik oknu pod `klucz`.
+
+    Świeży wynik z `_OSTATNIE` (młodszy niż WAZNOSC_ODCZYTU_S) wraca bez
+    pytania mostu — tylko rejestruje się ponownie dla okna."""
     fut = _Future()
     with _ODCZYTY_LOCK:
+        stare = _OSTATNIE.get(klucz)
+        if stare and _time.monotonic() - stare[0] <= WAZNOSC_ODCZYTU_S:
+            fut.set_result(stare[1])
+            _ODCZYTY[klucz] = (stare[0], fut)
+            return stare[1]
         _ODCZYTY[klucz] = (_time.monotonic(), fut)
     try:
         wynik = funkcja()
@@ -49,7 +68,52 @@ def _wspolny_odczyt(klucz, funkcja):
         fut.set_exception(e)
         raise
     fut.set_result(wynik)
+    with _ODCZYTY_LOCK:
+        _OSTATNIE[klucz] = (_time.monotonic(), wynik)
     return wynik
+
+
+def podejrzyj_odczyt(klucz):
+    """Kopia świeżego wyniku BEZ zdejmowania go z kolejki dla okna.
+
+    Dla operacji, które tylko dokładają informację (kolumna SUBIEKT) —
+    `odczyt_z_panelu` by go zużyło i Przegląd dokumentów otwarty chwilę
+    później musiałby czytać most od nowa."""
+    with _ODCZYTY_LOCK:
+        wpis = _OSTATNIE.get(klucz)
+    if not wpis or _time.monotonic() - wpis[0] > WAZNOSC_ODCZYTU_S:
+        return None
+    try:
+        return _copy.deepcopy(wpis[1])
+    except Exception:
+        return None
+
+
+#: Kto chce wiedzieć, że stan Subiekta się zmienił (arkusz RM_BAZA — kolumna
+#: SUBIEKT przelicza się sama po wysłaniu/założeniu/usunięciu ZD, PW, zmianie
+#: ZK). Wołane z wątku roboczego — słuchacz musi sam przejść na wątek Tk.
+_SLUCHACZE = []
+
+
+def po_zmianie_subiekta(funkcja):
+    """Rejestruje funkcję wołaną po każdym zapisie do Subiekta / wysyłce ZD."""
+    if callable(funkcja) and funkcja not in _SLUCHACZE:
+        _SLUCHACZE.append(funkcja)
+
+
+def uniewaznij_odczyty():
+    """Po KAŻDYM zapisie przez most i po wysyłce ZD: nic z bufora nie jest
+    już prawdą (nowe ZD, zmieniona ilość na ZK, PW na stan). Woła
+    `subiekt_bridge` (zapisy) i `subiekt_wyslij_zd` (wysyłka to zapis na
+    serwerze RM_BAZA, nie w Subiekcie — most o niej nie wie)."""
+    with _ODCZYTY_LOCK:
+        _OSTATNIE.clear()
+        _ODCZYTY.clear()
+    for f in list(_SLUCHACZE):
+        try:
+            f()
+        except Exception as e:
+            print(f"⚠️  Słuchacz zmiany Subiekta: {e}")
 
 
 #: Który odczyt panelu przyda się oknu otwieranemu danym kaflem.

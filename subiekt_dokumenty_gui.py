@@ -104,7 +104,8 @@ def _pobierz_dokumenty_cli(limit, timeout):
 def _przelicz_dokumenty(data):
     """Surowa odpowiedź mostu -> format okna przeglądu dokumentów."""
     # Jedna reguła czytania Uwag dla całego programu — patrz docstring tam.
-    from subiekt_zamowienia import numer_projektu_z_uwag, uwagi_czlowieka
+    from subiekt_zamowienia import (numer_projektu_z_uwag, uwagi_czlowieka,
+                                    numery_projektow_z_pozycji_zd)
     wynik = [{
         "rodzaj": d.get("Rodzaj") or "",
         "numer": d.get("Numer") or "",
@@ -143,7 +144,10 @@ def _przelicz_dokumenty(data):
             "koszt": float(p.get("Koszt") or 0),
             # Projekt pozycji z Uwag ZK, którą realizuje — „2632, 3000" gdy
             # jedno ZD zbiera detale z kilku projektów. Tylko przy ZD.
-            "projekt": p.get("Projekt") or "",
+            # Same numery — stary most oddaje tu całe Uwagi ZK (patrz
+            # numery_projektow_z_pozycji_zd), a od tego pola zależą adresy
+            # „Zamówiono" i kolumna Projekt.
+            "projekt": ", ".join(numery_projektow_z_pozycji_zd(p.get("Projekt"))),
             # Id pozycji i ilość DO REALIZACJI — dla okna przyjęcia dostawy,
             # które wskazuje Sferze konkretne pozycje ZD do przyjęcia
             # (WypelnijNaPodstawieZD). Stare mosty ich nie zwracają → 0.
@@ -539,7 +543,13 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
             self.status.config(text="Błąd.")
             messagebox.showerror("Subiekt", error, parent=self)
             return
-        self.dokumenty = dok
+        # Najnowszy na górze, wszystkie rodzaje razem. Most oddaje dokumenty
+        # GRUPAMI (ZK, potem ZD, RW, PW, WZ — najnowsze tylko wewnątrz grupy),
+        # więc świeże ZD stało pod całą listą ZK (03.10.2026). Data ma sam
+        # dzień, w jego obrębie rozstrzyga Id Subiekta — rośnie z każdym
+        # nowym dokumentem, numer nie (wraca do obiegu po usunięciu).
+        self.dokumenty = sorted(dok, key=lambda d: (d["data"], d.get("Id") or 0),
+                                reverse=True)
         # Ślad wysyłki z RM_BAZA — do kolumny „Wysłano”. Odczyt tanio (jedno
         # zapytanie), a odświeża się razem z listą, więc po wysłaniu maila
         # wystarczy „Odśwież”, żeby zobaczyć datę.

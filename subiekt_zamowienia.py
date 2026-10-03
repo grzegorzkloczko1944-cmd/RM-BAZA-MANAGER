@@ -222,22 +222,188 @@ def _stan_pozycji_cli(symbole, projekt, timeout):
         return json.load(f)
 
 
+def krotki_numer(numer):
+    """„ZD 4/CENTRALA/2026" → „ZD 4" (rok dopisany tylko, gdy nie bieżący).
+
+    Środkowy człon to symbol magazynu z numeracji Subiekta (CENTRALA na
+    demo, MASTER w firmie) — do niczego w RM_BAZA niepotrzebny, a zjadał
+    pół kolumny (pytanie usera 03.10.2026). Do mostu ZAWSZE idzie pełny
+    numer; to tylko postać dla oka.
+    """
+    m = re.match(r"\s*([A-Za-z]+)\s*(\d+)\s*/\s*[^/]*?/\s*(\d{4})\s*$", str(numer or ""))
+    if not m:
+        return str(numer or "").strip()
+    rodzaj, nr, rok = m.groups()
+    biezacy = str(datetime.now().year)
+    return f"{rodzaj} {nr}" + ("" if rok == biezacy else f"/{rok}")
+
+
+def _norm_symbol(s):
+    """Klucz porównania symboli: bez białych znaków, wielkie litery — tak samo
+    luźno jak most (symbole ze spacją na końcu, a/A)."""
+    return "".join(str(s or "").split()).upper()
+
+
+def dopasuj_zd_do_projektu(stany, projekt, dokumenty, wyslane=None):
+    """Poprawia pole „zd" w wyniku stan_pozycji() tak, by mówiło o TYM projekcie.
+
+    Most (tryb stan-pozycji) dopasowuje ZD po samym symbolu, bez projektu:
+    na 3300 TEST kolumna pokazywała „🛒 ZD 2" dla płyty, którą ZD 2 zamawia
+    na 2627 i 3500 — 3300 nie ma jej na żadnej ZK (03.10.2026). Tryb
+    `dokumenty` zna przy każdej pozycji ZD projekty, których dotyczy
+    (z Uwag ZK, które realizuje), więc rozstrzygamy tutaj, bez mostu.
+
+    Po dopasowaniu w `info`:
+      zd         — numery ZD z pozycją dla `projekt` (pełne, do mostu),
+      zd_id      — Id tych dokumentów,
+      ilosc_zd   — suma ilości z tych pozycji (cały ZD, nie tylko ten projekt),
+      zd_wyslane — True, gdy KAŻDY z tych ZD ma ślad wysyłki (Id w dzienniku),
+      zd_inne    — {numer ZD: „2627, 3500"} dla ZD z tym symbolem, ale dla
+                   innych projektów — informacja, nie „zamówione",
+      zd_podzial — {projekt: ilość z ZK} dla projektów, które obejmuje ZD
+                   (na 2627 okienko mówiło „96", choć 2627 zamawia 8),
+      zd_do_przyjecia — ile z tych ZD jeszcze nie przyjęto,
+      stan_pokrywa — True, gdy NIEPRZYJĘTE ZD wisi, a stan magazynu już
+                   pokrywa potrzebę jego projektów (200 na stanie, ZD na 96).
+    `wyslane` — {dokument_id: …} z historia_wyslania(); None = nie wiadomo.
+    """
+    projekt = str(projekt or "").strip()
+    po_symbolu = {}
+    # Potrzeba per (symbol, projekt) z ZK — tym samym podziałem okno ZD liczy
+    # „Potrzebę" (ZK 1 → 3500: 88, ZK 2 → 2627: 8). Ta sama lista dokumentów,
+    # bez dodatkowego pytania mostu.
+    zk_ilosci = {}
+    for d in dokumenty or ():
+        if d.get("rodzaj") == "ZK":
+            pr = str(d.get("projekt") or "").strip()
+            if not pr:
+                continue
+            for p in d.get("pozycje") or ():
+                k = (_norm_symbol(p.get("symbol")), pr)
+                zk_ilosci[k] = zk_ilosci.get(k, 0.0) + float(p.get("ilosc") or 0)
+            continue
+        if d.get("rodzaj") != "ZD":
+            continue
+        for p in d.get("pozycje") or ():
+            po_symbolu.setdefault(_norm_symbol(p.get("symbol")), []).append((d, p))
+    for klucz, info in (stany or {}).items():
+        sym = _norm_symbol(klucz)
+        trafienia = po_symbolu.get(sym) or []
+        moje, inne = {}, {}
+        projekty_zd = []
+        do_przyjecia = 0.0
+        zamkniete = 0
+        for d, p in trafienia:
+            projekty = [x.strip() for x in str(p.get("projekt") or "").split(",") if x.strip()]
+            # ZD na skład (MAGAZYN) i ZD bez projektu — nie są „dla projektu".
+            if projekt and projekt in projekty:
+                w = moje.setdefault(d["numer"], {"id": d.get("Id"), "ilosc": 0.0,
+                                                 "dostawca": d.get("podmiot") or "",
+                                                 "status": d.get("status") or ""})
+                w["ilosc"] += float(p.get("ilosc") or 0)
+                do_przyjecia += float(p.get("do_realizacji") or 0)
+                projekty_zd += [x for x in projekty if x not in projekty_zd]
+            else:
+                # Tylko OTWARTE cudze ZD. Zrealizowane i anulowane to historia —
+                # przy częstym detalu (łożysko w 20 projektach) okienko puchło
+                # od każdego ZD z roku (user 03.10.2026). Po STATUSIE, nie po
+                # DoRealizacji: stary most w firmie tego pola nie zwraca (0).
+                st = str(d.get("status") or "").lower()
+                if "zrealizowan" in st or "anulowan" in st:
+                    zamkniete += 1
+                    continue
+                inne[d["numer"]] = ", ".join(projekty) or (d.get("projekt") or "")
+        info["zd_inne"] = inne
+        info["zd_inne_zamkniete"] = zamkniete
+        info["zd_podzial"] = {}
+        info["zd_do_przyjecia"] = 0.0
+        info["stan_pokrywa"] = False
+        if not moje:
+            # Most mógł wpisać ZD po symbolu — dla tego projektu to nie jest
+            # zamówienie, więc kasujemy; zostaje w zd_inne.
+            if info.get("zd") and inne:
+                info["zd"] = ""
+                info["ilosc_zd"] = 0.0
+            info["zd_id"] = []
+            info["zd_wyslane"] = None
+            continue
+        info["zd_podzial"] = {pr: zk_ilosci[(sym, pr)] for pr in projekty_zd
+                              if zk_ilosci.get((sym, pr))}
+        info["zd_do_przyjecia"] = do_przyjecia
+        # Ostrzeżenie TYLKO dla ZD jeszcze nieprzyjętego: po dostawie stan
+        # rośnie właśnie z tego ZD i „pokrywa" byłoby fałszywym alarmem.
+        # Stan to dostępne na wszystkich magazynach — część może być pod
+        # inne projekty, więc to sygnał do sprawdzenia, nie wniosek.
+        potrzeba = sum(info["zd_podzial"].values())
+        info["stan_pokrywa"] = bool(do_przyjecia > 0 and potrzeba > 0
+                                    and float(info.get("stan") or 0) >= potrzeba)
+        numery = sorted(moje, key=_klucz_zd)
+        info["zd"] = ", ".join(numery)
+        info["zd_id"] = [moje[n]["id"] for n in numery if moje[n]["id"]]
+        info["ilosc_zd"] = sum(moje[n]["ilosc"] for n in numery)
+        info["dostawca"] = moje[numery[-1]]["dostawca"] or info.get("dostawca", "")
+        info["status_zd"] = moje[numery[-1]]["status"] or info.get("status_zd", "")
+        info["zd_wyslane"] = (None if wyslane is None else
+                              all(i in wyslane for i in info["zd_id"]) and bool(info["zd_id"]))
+    return stany
+
+
 def opis_stanu(info):
     """Krótki prefiks do kolumny SUBIEKT — wzorzec kolumny WYCENA z RFQ.
 
     Kolejność od najdalszego etapu: zamówione bije „jest w ZK", a to bije
     „istnieje kartoteka" — pokazujemy najświeższą informację o pozycji.
+
+    „Zamówione" = WYSŁANE do dostawcy (decyzja usera 03.10.2026): ZD założone,
+    ale niewysłane, to ostrzeżenie (🛒 · niewysłane), nie zamówienie. ZD z tym
+    symbolem dla INNYCH projektów idzie na końcu jako dopisek — żeby na 3300
+    nie wyglądało, że płyta jest zamówiona, gdy zamawia ją 2627.
     """
+    # ⚠️ IKONY TYLKO Z PODSTAWOWEGO ZAKRESU UNICODE (BMP). Emoji 📋 🛒 📇
+    # Tk rysuje czcionką zastępczą (Segoe UI Emoji) osobno dla każdej
+    # komórki — zmierzone 03.10.2026: +25 ms na KAŻDE przerysowanie arkusza
+    # (92 vs 67 ms), a arkusz przerysowuje się przy każdym ticku kółka.
+    # User: „scroll tak wolno działa, gdy mam dane w kolumnie SUBIEKT".
+    # ✉ ⚠ ⧗ ☰ ❏ ⬜ są w BMP i kosztują tyle co litery.
     if not info:
         return ""
+    # „(potrzeba/stan)" przy KAŻDEJ pozycji (user 03.10.2026: „stan powinno
+    # pokazywać ilość potrzebnych / ilość na stanie, np. (2/10)"). Potrzeba
+    # = ilość z ZK tego projektu, a bez ZK — ilość z BOM-u (arkusz wpisuje
+    # ją w `potrzeba` przed formatowaniem). Bez kartoteki stan to „—".
+    potrzeba = info.get("potrzeba")
+    if potrzeba is None and info.get("zk"):
+        potrzeba = info.get("ilosc_zk")
+    stan_txt = f"{float(info.get('stan') or 0):g}" if info.get("kartoteka") else "—"
+    para = f" (stan {float(potrzeba):g}/{stan_txt})" if potrzeba is not None else ""
     if info.get("zd"):
-        return f"🛒 {info['zd']}"
-    if info.get("zk"):
-        return f"📋 {info['zk']}"
-    if info.get("kartoteka"):
-        stan = info.get("stan") or 0
-        return "📇 kartoteka" + (f" (stan {stan:g})" if stan else "")
-    return "⬜ brak"
+        zd = ", ".join(krotki_numer(n) for n in _numery_zd(info["zd"]))
+        if info.get("zd_wyslane") is False:
+            txt = f"⧗ {zd}{para} · niewysłane"
+        elif info.get("zd_wyslane"):
+            txt = f"✉ {zd}{para}"
+        else:
+            txt = f"⧗ {zd}{para}"
+        # ⚠ NA POCZĄTKU — kolor komórki idzie po pierwszym znaku, a to ma
+        # rzucić się w oczy mocniej niż spokojne zielone „✉ ZD 4".
+        if info.get("stan_pokrywa"):
+            txt = f"⚠ {txt} · stan pokrywa potrzebę"
+    elif info.get("zk"):
+        txt = f"☰ {krotki_numer(info['zk'])}{para}"
+    elif info.get("kartoteka"):
+        txt = f"❏ kartoteka{para}"
+    else:
+        txt = f"⬜ brak{para}"
+    inne = info.get("zd_inne") or {}
+    if inne:
+        # Tylko NAJNOWSZE cudze ZD; reszta jako „+N" — komórka ma być krótka,
+        # komplet jest w okienku szczegółów.
+        numery = sorted(inne, key=_klucz_zd, reverse=True)
+        n = numery[0]
+        txt += f" · {krotki_numer(n)} dla {inne[n] or '?'}"
+        if len(numery) > 1:
+            txt += f" +{len(numery) - 1}"
+    return txt
 
 
 def _serwer():
@@ -499,6 +665,34 @@ def numery_projektow_z_uwag(uwagi):
     """
     pierwszy = numer_projektu_z_uwag(uwagi)
     return [n.strip() for n in pierwszy.split(",") if n.strip()]
+
+
+def numery_projektow_z_pozycji_zd(tekst):
+    """Numery projektów z pola „projekt" POZYCJI ZD (most, `ProjektZk`).
+
+    Most sprzed 03.10.2026 oddaje tam CAŁE Uwagi każdej ZK, sklejone
+    przecinkiem — „3500 Projekt\\ndupal, 2627 Projekt\\n2627 Your Candle" —
+    zamiast samych numerów. Porównanie z numerem projektu nie przechodziło,
+    a przy symbolu obecnym w dwóch BOM-ach program (słusznie) nie zgadywał
+    i „Zamówiono" nie trafiało nigdzie — tak zginęły ptaszki ZD 5.
+
+    Bierzemy to, co stoi przed słowem „Projekt" (może być lista
+    „2627,3500"). Gdy słowa nie ma — nowy most oddaje czyste numery
+    („2632, 3000") — dzielimy po przecinku. Uwagi człowieka (drugi wiersz,
+    bywają w nich przecinki) nie trafiają do wyniku.
+    """
+    t = str(tekst or "")
+    if not t.strip():
+        return []
+    out = []
+    znalezione = re.findall(r"(\S+)\s+" + re.escape(OPIS_NUMERU) + r"\b", t)
+    kandydaci = ([n for z in znalezione for n in z.split(",")] if znalezione
+                 else t.replace("\n", ",").split(","))
+    for n in kandydaci:
+        n = n.strip()
+        if n and n not in out:
+            out.append(n)
+    return out
 
 
 def zloz_uwagi_wiele_projektow(projekty, uwagi=None):
@@ -851,9 +1045,10 @@ def zbuduj_wiersze(zapotrzebowanie, bom, podmioty=(), tylko_projekt=None, zamowi
         # Projekt z UWAG ZK (przez most), BOM tylko awaryjnie: symbol bywa
         # w kilku BOM-ach (kopia testowa 3000 ma rysunki Feniksa 2632)
         # i BOM wskazywał zły projekt (zgłoszone 05.09.2026).
-        projekt = (next((x.get("projekt") for x in grupa if x.get("projekt")), "")
-                   or (b.get("projekt", "") if b else ""))
-        projekty_zk = [p.strip() for p in projekt.split(",") if p.strip()]
+        projekty_zk = numery_projektow_z_pozycji_zd(
+            next((x.get("projekt") for x in grupa if x.get("projekt")), "")
+            or (b.get("projekt", "") if b else ""))
+        projekt = ", ".join(projekty_zk)
         if tylko_projekt and tylko_projekt not in projekty_zk:
             continue
         wiersze.append({
@@ -1458,8 +1653,8 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             # w zapotrzebowaniu, więc bez tego BOM ich projektu się nie
             # wczytywał i adres „Zamówiono" szedł do innego projektu z tym
             # samym symbolem (zgłoszone 05.09.2026).
-            numery |= {p.strip() for z in zamowione
-                       for p in (z.get("projekt") or "").split(",") if p.strip()}
+            numery |= {p for z in zamowione
+                       for p in numery_projektow_z_pozycji_zd(z.get("projekt"))}
             if self.project_name:
                 numery.add(self.project_name.strip().split(" ")[0])
             bom = {}
@@ -2292,7 +2487,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sv.pack(side=tk.RIGHT, fill=tk.Y)
 
-        numery = sorted(zd.keys())
+        numery = sorted(zd, key=_klucz_zd, reverse=True)   # najnowsze na górze
         for nr in numery:
             d = zd[nr]
             lb.insert(tk.END, f"{nr:16} {d['dostawca'][:32]:34} {len(d['poz'])} poz.")
@@ -2322,8 +2517,16 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         Zwraca None, gdy mostu nie ma albo numeru nie znaleziono — wysyłka
         wtedy działa, tylko bez śladu w dzienniku.
         """
+        klucz = " ".join(str(numer_zd or "").split()).upper()
+        # Cache żyje z oknem, a ZD powstają W TYM oknie — numer założony po
+        # pierwszym odczycie nie miał Id i wysyłka szła bez powiązania
+        # (ZD 4, 02.10.2026). Przy pudle czytamy listę jeszcze raz, ale
+        # tylko RAZ na numer: dokumentu może naprawdę nie być.
         mapa = getattr(self, "_cache_id_dok", None)
-        if mapa is None:
+        sprawdzone = getattr(self, "_cache_id_dok_pudla", None)
+        if sprawdzone is None:
+            sprawdzone = self._cache_id_dok_pudla = set()
+        if mapa is None or (klucz not in mapa and klucz not in sprawdzone):
             mapa = {}
             try:
                 import subiekt_bridge
@@ -2335,7 +2538,9 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             except Exception as e:
                 print(f"⚠️  Nie pobrano Id dokumentów: {e}")
             self._cache_id_dok = mapa
-        return mapa.get(" ".join(str(numer_zd or "").split()).upper())
+            if klucz not in mapa:
+                sprawdzone.add(klucz)
+        return mapa.get(klucz)
 
     def _wyslij_dokument(self, numer_zd, dane):
         """Otwiera okno wysyłki dla jednego ZD."""
@@ -2603,7 +2808,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
             pass
 
         zmienne = {}
-        for nr in sorted(zk):
+        for nr in sorted(zk, key=_klucz_zd, reverse=True):   # najnowsze na górze
             info = zk[nr]
             v = tk.IntVar(value=1 if nr in wstepne else 0)
             zmienne[nr] = v
@@ -2705,7 +2910,7 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         sb.pack(side=tk.RIGHT, fill=tk.Y)
 
         zmienne = {}
-        for nr in sorted(zd):
+        for nr in sorted(zd, key=_klucz_zd, reverse=True):   # najnowsze na górze
             info = zd[nr]
             v = tk.IntVar(value=1 if nr in wstepne else 0)
             zmienne[nr] = v
@@ -2777,6 +2982,9 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
         usuniete = [k for k in kroki if k.get("Status") == "usuniete"]
         bledy = [k for k in kroki if k.get("Status") == "blad"]
         zapisz_log(wynik, rodzaj="dokument-usun")   # osobny rodzaj — to kasowanie, nie zakup
+        # Numer usuniętego ZD wróci do obiegu z NOWYM Id — stara mapa by kłamała.
+        self._cache_id_dok = None
+        self._cache_id_dok_pudla = None
 
         lines = [f"Usunięte dokumenty: {len(usuniete)}"]
         lines += [f"  • {k['Numer']} — {k.get('Szczegoly') or ''}" for k in usuniete[:12]]
@@ -3439,6 +3647,9 @@ class ZamowieniaWindow(tk.Toplevel, Kreciolek):
 
         utworzone = wynik.get("zd", [])
         bledy = [k for k in wynik.get("kroki", []) if k.get("Status") == "blad"]
+        # Nowe dokumenty = nieaktualna mapa numer→Id dla wysyłki.
+        self._cache_id_dok = None
+        self._cache_id_dok_pudla = None
         # Numery projektów z zaznaczonych wierszy — dokument ZD w Subiekcie ich
         # nie niesie, a bez nich cofanie projektu musi zgadywać po symbolach.
         projekty = sorted({p for w in self.wszystkie if w.get("sel")

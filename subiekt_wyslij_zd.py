@@ -307,14 +307,26 @@ def odloz_zamowienia(bom_refy, termin, numer_zd, supplier_id=None):
         teraz = datetime.now().isoformat(timespec="seconds")
         granica = (datetime.now() - timedelta(days=DNI_WAZNOSCI_ZAMOWIEN)
                    ).isoformat(timespec="seconds")
-        operacje = [{"operation": "zd-zamowione-dodaj", "params": {
-            "project_id": pid, "item_id": iid,
-            "termin": str(termin) if termin else None, "numer_zd": numer_zd,
-            "kiedy": teraz, "supplier_id": supplier_id}} for pid, iid in refy]
-        operacje += [{"operation": "zd-cofniete-usun-pozycja",
-                      "params": {"project_id": pid, "item_id": iid}} for pid, iid in refy]
-        operacje.append({"operation": "zd-zamowione-wygas", "params": {"granica": granica}})
-        wyniki = _serwer().master_batch(operacje)
+        def paczka(operacja):
+            ops = [{"operation": operacja, "params": {
+                "project_id": pid, "item_id": iid,
+                "termin": str(termin) if termin else None, "numer_zd": numer_zd,
+                "kiedy": teraz, "supplier_id": supplier_id}} for pid, iid in refy]
+            ops += [{"operation": "zd-cofniete-usun-pozycja",
+                     "params": {"project_id": pid, "item_id": iid}} for pid, iid in refy]
+            ops.append({"operation": "zd-zamowione-wygas", "params": {"granica": granica}})
+            return ops
+        # Wariant „zachowaj": PONOWNA wysyłka tego samego ZD nie przestawia
+        # daty zamówienia i nie kasuje terminu pustym polem (03.10.2026).
+        # Serwer sprzed tej daty go nie zna — wtedy stary INSERT OR REPLACE.
+        try:
+            wyniki = _serwer().master_batch(paczka("zd-zamowione-dodaj-zachowaj"))
+        except Exception as e:
+            if "nieznana operacja" not in str(e):
+                raise
+            print("ℹ️  Serwer bez „zd-zamowione-dodaj-zachowaj” — zapis starym trybem "
+                  "(ponowna wysyłka przestawi datę zamówienia)")
+            wyniki = _serwer().master_batch(paczka("zd-zamowione-dodaj"))
         stare = ((wyniki or [{}])[-1] or {}).get("rowcount") or 0
         if stare:
             print(f"🧹 Wygasło {stare} wpisów „Zamówiono” starszych niż "
@@ -519,7 +531,13 @@ def naloz_zamowienia(project_con, project_id, log=None):
                 " FROM items WHERE id=?", (item_id,)).fetchone()
             if stare is None:
                 continue                # pozycja usunięta z BOM-u po wysyłce
-            data_zam = (kiedy or teraz)[:10]
+            # Pozycja JUŻ zamówiona trzyma swoją datę — ponowna wysyłka
+            # (przypomnienie dostawcy po tygodniu) to nie nowe zamówienie,
+            # a „Zamówiono 03.10" zmieniało się na „10.10" (03.10.2026).
+            if int(stare[0] or 0) and stare[1]:
+                data_zam = stare[1]
+            else:
+                data_zam = (kiedy or teraz)[:10]
             if termin:
                 project_con.execute(
                     "UPDATE items SET ordered_flag=1, ordered_at=?, deadline_date=?,"
@@ -602,6 +620,30 @@ def historia_wyslania(numery=None):
     chciane = {int(n) for n in numery if n} if numery else None
     return {w["dokument_id"]: (w["kiedy"], w["ile"]) for w in wiersze
             if not chciane or w["dokument_id"] in chciane}
+
+
+def ostatnia_wysylka(dokument_id):
+    """Ostatnia wysyłka dokumentu: {adresat, nadawca, termin, tryb, kiedy, ile}
+    albo None, gdy jeszcze nie szło. Okno wysyłki pyta o to PRZED powtórką.
+
+    Po Id dokumentu — numer wraca do obiegu po usunięciu ZD. Serwer sprzed
+    03.10.2026 nie zna `zd-wyslane-ostatnia`; wtedy to samo, tylko bez
+    adresata, z `zd-wyslane-historia` (ostrzeżenie dalej działa).
+    """
+    if not dokument_id:
+        return None
+    try:
+        w = _serwer().master_read("zd-wyslane-ostatnia", {"dokument_id": int(dokument_id)})
+        return w[0] if w else None
+    except Exception as e:
+        if "nieznana operacja" not in str(e):
+            print(f"⚠️  Nie odczytano ostatniej wysyłki dokumentu {dokument_id}: {e}")
+            return None
+    hist = historia_wyslania([dokument_id]).get(int(dokument_id))
+    if not hist:
+        return None
+    return {"adresat": "", "nadawca": "", "termin": None, "tryb": "",
+            "kiedy": hist[0], "ile": hist[1]}
 
 
 #: Tryby wysyłki rysunków — treść pola „Rysunki" w stopce okna.
@@ -786,6 +828,11 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
         #: Numer sie nie nadaje: Subiekt uzywa go ponownie po usunieciu
         #: dokumentu (patrz _zapewnij_kolumne_id).
         self.dokument_id = dokument_id
+        #: Poprzednia wysyłka TEGO dokumentu (z dziennika) albo None. Gdy jest,
+        #: okno ostrzega przed powtórką i podpisuje mail „PONOWNIE" — ZD 5
+        #: poszło 03.10.2026 dwa razy, a dostawca mógłby to wziąć za dwa
+        #: zamówienia. Odczyt z serwera, nie z Subiekta — nie kosztuje mostu.
+        self._poprzednia = ostatnia_wysylka(dokument_id)
         self.dostawca = dostawca
         self.projekt = projekt
         self.pozycje = pozycje              # [(symbol, nazwa, ilosc, jm)]
@@ -843,6 +890,13 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
         tk.Label(top, text=f"📧 Wyślij zamówienie {self.numer_zd}", bg="#34495e",
                  fg="white", font=("Arial", 11, "bold")).pack(side=tk.LEFT, padx=12)
 
+        # Ten dokument już poszedł — mówimy o tym od razu, nie dopiero przy
+        # kliknięciu „Wyślij". Pasek zostaje na wierzchu okna przez cały czas.
+        if self._poprzednia:
+            tk.Label(self, text=self._opis_poprzedniej(), bg="#f5b041", fg="#7d3c00",
+                     anchor="w", justify=tk.LEFT, padx=12, pady=5,
+                     font=("Arial", 9, "bold")).pack(side=tk.TOP, fill=tk.X)
+
         f = tk.Frame(self, bg="#ecf0f1")
         f.pack(side=tk.TOP, fill=tk.X, padx=0, pady=0)
         tk.Label(f, text="Do:", bg="#ecf0f1", font=("Arial", 8, "bold")).grid(
@@ -856,6 +910,9 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
         tk.Label(f, text="Temat:", bg="#ecf0f1", font=("Arial", 8, "bold")).grid(
             row=1, column=0, sticky="e", padx=(12, 4), pady=(0, 6))
         temat = f"Zamówienie {self.numer_zd}" + (f" — projekt {self.projekt}" if self.projekt else "")
+        if self._poprzednia:
+            # Dostawca ma widzieć, że to TO SAMO zamówienie, nie drugie.
+            temat = "PONOWNIE: " + temat
         self.var_temat = tk.StringVar(value=temat)
         tk.Entry(f, textvariable=self.var_temat, width=68, font=("Arial", 9)).grid(
             row=1, column=1, columnspan=2, sticky="w", pady=(0, 6))
@@ -1344,8 +1401,15 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
             # idzie też mailem, w którym nadawca jest widoczny.
             kontakt = kontakt_prowadzacego(getattr(self.master, "master", None))
 
+            # Klucz zamówienia w portalu = numer ZD + Id dokumentu. Sam numer
+            # wraca do obiegu po usunięciu ZD — nowe „ZD 5" wpadłoby do
+            # zamówienia starego ZD 5 i dostawca widziałby zlepek pozycji
+            # obu (03.10.2026). Ponowna wysyłka TEGO SAMEGO dokumentu dalej
+            # aktualizuje jedno zamówienie, bo Id się nie zmienia.
+            kod = (f"{self.numer_zd} #{self.dokument_id}" if self.dokument_id
+                   else self.numer_zd)
             zam = agent.create_order(
-                code=self.numer_zd,
+                code=kod,
                 title=f"Zamówienie {self.numer_zd}",
                 project_number=self.projekt or None,
                 supplier_name=self.dostawca or None,
@@ -1399,7 +1463,48 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
                                     "można wysłać załącznikami.")
             return None
 
+    def _opis_poprzedniej(self):
+        """„Wysłano już 03.10 00:29 (×2) na adres …” — do paska i pytania."""
+        p = self._poprzednia or {}
+        kiedy = str(p.get("kiedy") or "")[:16].replace("T", " ")
+        ile = int(p.get("ile") or 1)
+        tekst = f"⚠ To ZD wysłano już {kiedy}" + (f" (×{ile})" if ile > 1 else "")
+        if p.get("adresat"):
+            tekst += f" na adres {p['adresat']}"
+        if p.get("termin"):
+            tekst += f", termin {str(p['termin'])[:10]}"
+        return tekst + "."
+
     def _wyslij(self):
+        # ── Zabezpieczenia PRZED czymkolwiek: powtórka i brak Id ─────────────
+        # Powtórka jest dozwolona (przypomnienie, poprawiony rysunek), ale
+        # świadomie: domyślna odpowiedź to NIE. ZD 5 poszło 03.10.2026 dwa
+        # razy, bo okno o nic nie pytało.
+        if self._poprzednia and not messagebox.askyesno(
+                "Ponowna wysyłka",
+                self._opis_poprzedniej() + "\n\n"
+                "Wysłać to zamówienie JESZCZE RAZ?\n\n"
+                "Temat dostanie dopisek „PONOWNIE”. Data zamówienia w arkuszu\n"
+                "zostaje z pierwszej wysyłki; termin zmieni się tylko wtedy,\n"
+                "gdy wpiszesz nowy.",
+                parent=self, icon="warning", default="no"):
+            return
+        # Bez Id dokumentu wysyłka nie powiąże się z ZD: Przegląd dokumentów
+        # pokaże je jako NIEWYSŁANE, a następna wysyłka nie zostanie wykryta
+        # jako powtórka. Tak zginął ślad ZD 4 (02.10.2026) — okno wysłało
+        # i nic nie powiedziało.
+        if not self.dokument_id and not messagebox.askyesno(
+                "Brak Id dokumentu",
+                f"Nie udało się ustalić Id dokumentu {self.numer_zd} w Subiekcie\n"
+                "(most nie odpowiedział albo lista dokumentów była nieaktualna).\n\n"
+                "Wysyłka NIE zostanie powiązana z dokumentem:\n"
+                "  • Przegląd dokumentów pokaże to ZD jako niewysłane,\n"
+                "  • ponowna wysyłka nie zostanie wykryta jako powtórka.\n\n"
+                "Lepiej: zamknij to okno, kliknij „Odśwież” i spróbuj znów.\n\n"
+                "Wysłać mimo to?",
+                parent=self, icon="warning", default="no"):
+            return
+
         do = self.var_do.get().strip()
         if not do:
             if not messagebox.askyesno(
@@ -1547,8 +1652,22 @@ class OknoWysylki(tk.Toplevel, Kreciolek):
         except ValueError:
             termin = None
         zapisz_wyslanie(self.numer_zd, do, self.nadawca, ile_zalacznikow,
-                        termin, self.var_tryb.get(),
+                        termin, self.var_tryb.get()
+                        + (" · ponownie" if self._poprzednia else ""),
                         dokument_id=getattr(self, 'dokument_id', None))
+        # Od tej chwili każda kolejna wysyłka z TEGO okna to już powtórka —
+        # pytanie „Czy wysłano?” przyjęte dwa razy robiło dwa wpisy bez słowa.
+        if not self._poprzednia:
+            self._poprzednia = {"adresat": do, "kiedy": datetime.now().isoformat(
+                timespec="minutes"), "ile": 1, "termin": termin}
+        # Wysyłka to zapis na serwerze RM_BAZA, nie w Subiekcie — most o niej
+        # nie wie, więc sami mówimy arkuszowi, że kolumna SUBIEKT (✉ / ⧗) się
+        # zdezaktualizowała (user 03.10.2026: „wyślę ZD — zaktualizuje się?").
+        try:
+            import subiekt_panel
+            subiekt_panel.uniewaznij_odczyty()
+        except Exception:
+            pass
 
         # „Zamówiono" + termin → do master; arkusz nałoży to na projekt przy
         # najbliższym locku. Gdy projekt jest przejęty TERAZ u nas, nakładamy

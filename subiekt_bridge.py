@@ -1175,6 +1175,17 @@ def call(command, args=None, timeout=TIMEOUT_S, write=False, fallback=None):
         raise BridgeError(_komunikat_bledu(odp),
                           code=err.get("code"),
                           retryable=bool(err.get("retryable")))
+    if write:
+        # Po zapisie bufor odczytów panelu (dokumenty, zapotrzebowanie,
+        # magazyn) przestaje być prawdą — nowe ZD, PW na stan, zmieniona
+        # ilość na ZK. Bez tego licznik kafla i kolumna SUBIEKT przez minutę
+        # pokazywałyby stan sprzed zapisu. Import leniwy: ten moduł działa
+        # też w skryptach bez GUI.
+        try:
+            import subiekt_panel
+            subiekt_panel.uniewaznij_odczyty()
+        except Exception:
+            pass
     return odp.get("data") or {}
 
 

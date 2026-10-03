@@ -173,14 +173,107 @@ def _pilnuj_okien_na_ekranie():
     _oryginalna = tk.Wm.wm_geometry
     _wzor = _re.compile(r"^(?:(\d+)x(\d+))?\+(-?\d+)\+(-?\d+)$")
 
+    _rozmiar = _re.compile(r"^(\d+)x(\d+)")
+    # Tk zapisuje ujemną współrzędną jako „+-2560" (monitor po lewej) —
+    # bez `-?` wzorzec nie łapał okien na lewym monitorze i pilnowanie
+    # po cichu tam nie działało.
+    _pelna = _re.compile(r"^(\d+)x(\d+)\+(-?\d+)\+(-?\d+)$")
+
+    def _pilnuj_geometrii(okno, w=None, h=None, x=None, y=None):
+        """Przez 1,5 s od POKAZANIA okno trzyma rozmiar I POZYCJĘ z geometry().
+
+        ⛔ PO CO: losowo (co kilka otwarć) ~0,3–0,8 s po pokazaniu coś spoza
+        Tk ściska okno do obcego prostokąta — „Szukaj w bazie" 1400x700
+        wychodziło ~665x693, Nowa kartoteka 341x654. Zmierzone 03.10.2026
+        GetWindowRect w CZYSTYM Tk, bez kodu RM_BAZA: okno dostawało
+        prostokąt poprzednio otwartego okna Tk albo domyślny Windows.
+        Przyczyna nieustalona (żaden menedżer okien nie działa, hook
+        WinEvent nie złapał sprawcy w 8 próbach bez skoku). Okna Subiekta
+        miały to obejście już w ukryj_do_zbudowania — tu dla wszystkich.
+
+        Pilnujemy TYLKO tego, co program zadał wprost (rozmiar i/lub
+        pozycję), i tylko okna w stanie „normal" — zmaksymalizowane
+        i dopasowujące się do treści zostają w spokoju. Każde kolejne
+        geometry() przesuwa cel, więc program może okno zmieniać; po 1,5 s od
+        pokazania user ma pełną swobodę (to nie jest blokada).
+
+        ⚠️ POZYCJA TEŻ, nie sam rozmiar (03.10.2026, „otwiera się po dwa razy
+        i nie centralnie"): ściśnięcie przestawia okno w (893,451); pierwsza
+        wersja przywracała 1400x700, ale zostawiała je tam — user widział
+        „dwa otwarcia" i okno poza środkiem.
+        """
+        import time as _t
+        cel = getattr(okno, "_rm_cel", None) or {}
+        if w and h:
+            cel["w"], cel["h"] = w, h
+        if x is not None and y is not None:
+            cel["x"], cel["y"] = x, y
+        okno._rm_cel = cel
+        if getattr(okno, "_rm_pilnuje", False):
+            return
+        okno._rm_pilnuje = True
+        stan = {"od": None, "zglosz": True}
+
+        def tik():
+            try:
+                if not okno.winfo_exists():
+                    return
+                if not okno.winfo_viewable():
+                    okno.after(50, tik)          # jeszcze niepokazane
+                    return
+                teraz = _t.monotonic()
+                if stan["od"] is None:
+                    stan["od"] = teraz
+                c = okno._rm_cel
+                m = _pelna.match(_oryginalna(okno))       # bieżąca "WxH+X+Y"
+                if okno.state() == "normal" and m:
+                    cw, ch, cx, cy = (int(v) for v in m.groups())
+                    zly_rozm = "w" in c and (cw, ch) != (c["w"], c["h"])
+                    zla_poz = "x" in c and (cx, cy) != (c["x"], c["y"])
+                    if zly_rozm or zla_poz:
+                        rozm = f"{c['w']}x{c['h']}" if "w" in c else ""
+                        poz = f"+{c['x']}+{c['y']}" if "x" in c else ""
+                        if stan["zglosz"]:
+                            print(f"↔️  Okno „{okno.title()}” przestawione na "
+                                  f"{cw}x{ch}+{cx}+{cy} — przywracam {rozm}{poz}")
+                            stan["zglosz"] = False
+                        _oryginalna(okno, rozm + poz)
+                if teraz - stan["od"] < 1.5:
+                    okno.after(40, tik)
+                else:
+                    okno._rm_pilnuje = False
+            except Exception:
+                try:
+                    okno._rm_pilnuje = False
+                except Exception:
+                    pass
+
+        try:
+            okno.after(40, tik)
+        except Exception:
+            okno._rm_pilnuje = False
+
     def _geometry(self, newGeometry=None):
         if not newGeometry:
             return _oryginalna(self, newGeometry)
+        cel_w = cel_h = None
+        try:
+            r = _rozmiar.match(newGeometry)
+            if r and int(r.group(1)) > 1 and int(r.group(2)) > 1:
+                cel_w, cel_h = int(r.group(1)), int(r.group(2))
+        except Exception:
+            pass
         dopasowanie = _wzor.match(newGeometry)
         if not dopasowanie:
-            return _oryginalna(self, newGeometry)      # np. samo "800x600"
+            if cel_w:
+                try:
+                    _pilnuj_geometrii(self, cel_w, cel_h)   # samo "800x600"
+                except Exception:
+                    pass        # pilnowanie nie może zablokować geometry()
+            return _oryginalna(self, newGeometry)
         szer_txt, wys_txt, x, y = dopasowanie.groups()
         x, y = int(x), int(y)
+        nx, ny = x, y
         try:
             # Cały pulpit, ze wszystkimi monitorami. vrootx/y bywa ujemne.
             lewo = self.winfo_vrootx()
@@ -201,6 +294,12 @@ def _pilnuj_okien_na_ekranie():
                               + f"+{nx}+{ny}"
         except Exception:
             pass            # nigdy nie blokuj otwarcia okna przez tę kontrolę
+        try:
+            # Cel = pozycja PO korekcie „poza ekranem", inaczej pilnowanie
+            # ciągnęłoby okno z powrotem poza pulpit.
+            _pilnuj_geometrii(self, cel_w, cel_h, nx, ny)
+        except Exception:
+            pass            # pilnowanie nie może zablokować geometry()
         return _oryginalna(self, newGeometry)
 
     tk.Wm.wm_geometry = _geometry
@@ -795,6 +894,13 @@ class MainWindow(tk.Tk):
         self._role_pozycji_pid = None
         self._current_project_name_for_roles = None
         self._subiekt_szczegoly = {}
+        # Kolumna SUBIEKT przelicza się sama po każdym zapisie do Subiekta
+        # i po wysyłce ZD (patrz _subiekt_zmiana_z_zewnatrz).
+        try:
+            import subiekt_panel
+            subiekt_panel.po_zmianie_subiekta(self._subiekt_zmiana_z_zewnatrz)
+        except Exception as e:
+            print(f"ℹ️  Bez automatycznego odświeżania kolumny SUBIEKT: {e}")
         self.filter_supplier_var = tk.StringVar(value=FILTER_SUPPLIER_ALL)
         self.search_var = tk.StringVar(value="")  # Filtr tekstowy (szukaj)
         self._refresh_after_id = None  # debounce dla auto-odświeżania
@@ -5720,6 +5826,20 @@ class MainWindow(tk.Tk):
         except Exception:
             pass
 
+        # === SUBIEKT: kolor wg etapu (✉ / 🛒 / 📋 / 📇 / ⬜) ===
+        # Z tego samego powodu co WYCENA: dehighlight_cells wyżej zdejmuje tło
+        # całego wiersza przy każdym kliknięciu, a kolumna SUBIEKT była
+        # malowana tylko raz, w _pokaz_kolumne_subiekt — kolor znikał po
+        # zaznaczeniu i odznaczeniu wiersza (zgłoszone 03.10.2026).
+        try:
+            txt = str(self.sheet.get_cell_data(row_idx, self.SUBIEKT_COL) or "")
+            bg = self.KOLORY_SUBIEKT.get(txt[:1]) if txt else None
+            if bg:
+                self.sheet.highlight_cells(row=row_idx, column=self.SUBIEKT_COL, bg=bg)
+                self._cells_special_bg.add((row_idx, self.SUBIEKT_COL))
+        except Exception:
+            pass
+
         # === SZARE TŁO BOM ===
         overridden = self._sheet_overridden[row_idx] if row_idx < len(self._sheet_overridden) else set()
         for col in [0, 1, 2, 3, 7, 8, 9, 18]:
@@ -9387,6 +9507,19 @@ class MainWindow(tk.Tk):
         # arkusza byłby odczuwalny; unieważnia je zmiana projektu.
         self._odswiez_role_pozycji()
 
+        # Kolumna SUBIEKT jest liczona dla JEDNEGO projektu. Po przełączeniu
+        # wynik zostawał w pamięci i wspólne symbole dostawały cudze ZK/ZD
+        # (na 3500 wisiały wpisy Feniksa 2637, 03.10.2026).
+        if self._subiekt_stany and \
+                getattr(self, "_subiekt_stany_pid", None) != self.current_project_id:
+            self._subiekt_stany = {}
+            self._subiekt_szczegoly = {}
+        # Leniwe wczytanie kolumny SUBIEKT — TYLKO przy zmianie projektu,
+        # nie przy każdym odświeżeniu (filtr, zaznaczenie też tu wchodzą).
+        if getattr(self, "_subiekt_auto_pid", None) != self.current_project_id:
+            self._subiekt_auto_pid = self.current_project_id
+            self._zaplanuj_sprawdzenie_subiekta()
+
         try:
             # Pobierz items (z filtrowaniem is_hidden)
             show_hidden = self.show_hidden_var.get()
@@ -10147,6 +10280,13 @@ class MainWindow(tk.Tk):
             top = anchor.winfo_rooty() - self.winfo_rooty()
             bottom = filters.winfo_rooty() - self.winfo_rooty()
             box = (bottom - top - 4) * self.DWF_PREVIEW_SCALE
+            # Dolna krawędź NIGDY poniżej paska filtrów. Miniatura stoi od
+            # y = top − OFFSET_Y, więc mieści się, gdy box ≤ (bottom − top)
+            # + OFFSET_Y. Gdy świeci banner dubletów (od 02.10 liczony też po
+            # symbolu i nazwie, więc prawie zawsze), odległość top→bottom
+            # rośnie o jego wysokość, a ×1,7 wypychało obrazek na filtry
+            # (user 03.10.2026: „miniatury się powiększyły, włażą na filtry").
+            box = min(box, (bottom - top) + self.DWF_PREVIEW_OFFSET_Y - 6)
             return max(24, int(box))
         except Exception:
             return 44
@@ -26271,6 +26411,16 @@ class MainWindow(tk.Tk):
     # Trzy stany: kartoteka / w ZK projektu / zamówione u dostawcy (ZD).
     # Wypełniana NA ŻĄDANIE (przycisk w menu SUBIEKT), bo odczyt trwa ~10 s.
     SUBIEKT_COL = 20
+    #: Tło kolumny SUBIEKT po pierwszym znaku wpisu. ✉ wysłane = zielone
+    #: (zamówione naprawdę), 🛒 niewysłane = żółte ostrzeżenie — te same
+    #: znaczenia co w oknie Zamówień. Jedno źródło dla malowania całej
+    #: kolumny i dla przemalowania wiersza przy kliknięciu.
+    #: ⚠️ Tylko symbole z BMP (patrz subiekt_zamowienia.opis_stanu) — emoji
+    #: 📋 🛒 📇 kosztowały +25 ms na każde przerysowanie arkusza.
+    KOLORY_SUBIEKT = {"✉": "#d5f5e3", "⧗": "#f9e79f", "☰": "#d6eaf8",
+                      "❏": "#fdebd0", "⬜": "#eaecee",
+                      # ⚠ zamówienie wisi, a stan już pokrywa potrzebę
+                      "⚠": "#f5b041"}
     CASTING_COL = 21
 
     # Etykiety statusów RFQ — w bazie portal trzyma angielskie klucze,
@@ -33115,25 +33265,114 @@ class MainWindow(tk.Tk):
 
         subiekt_zamowienia.open_window(self, self.current_project_id, project_name)
 
-    def sprawdz_w_subiekcie(self):
+    #: Po ilu sekundach od wybrania projektu kolumna SUBIEKT wczytuje się
+    #: sama (user 03.10.2026: „leniwe wczytywanie, 10–15 s po wybraniu").
+    #: Zmiana projektu przed upływem tego czasu kasuje odliczanie.
+    SUBIEKT_AUTO_PO_S = 12
+
+    #: Po ilu sekundach od zapisu do Subiekta / wysyłki ZD kolumna SUBIEKT
+    #: przelicza się ponownie. Kilka zapisów pod rząd (ZD per dostawca,
+    #: PW + RW) zlewa się w jedno przeliczenie.
+    SUBIEKT_PO_ZMIANIE_S = 3
+
+    def _subiekt_zmiana_z_zewnatrz(self):
+        """Słuchacz `subiekt_panel.po_zmianie_subiekta` — wołany z WĄTKU
+        roboczego mostu albo okna wysyłki, więc tylko przerzuca robotę na
+        wątek Tk. Przelicza kolumnę, gdy projekt jest otwarty i kolumna była
+        już policzona (inaczej nie ma czego aktualizować — zrobi to leniwe
+        wczytanie przy następnej zmianie projektu)."""
+        def na_watku_tk():
+            zadanie = getattr(self, "_subiekt_zmiana_zadanie", None)
+            if zadanie:
+                try:
+                    self.after_cancel(zadanie)
+                except Exception:
+                    pass
+
+            def odpal():
+                self._subiekt_zmiana_zadanie = None
+                if not self.current_project_id or not self._subiekt_stany:
+                    return
+                if getattr(self, "_subiekt_sprawdzanie_trwa", False):
+                    # Trwa poprzednie — spróbuj za chwilę, nie gub zmiany.
+                    self._subiekt_zmiana_zadanie = self.after(2000, odpal)
+                    return
+                self.sprawdz_w_subiekcie(cichy=True)
+
+            self._subiekt_zmiana_zadanie = self.after(self.SUBIEKT_PO_ZMIANIE_S * 1000, odpal)
+        try:
+            self.after(0, na_watku_tk)
+        except Exception:
+            pass                        # okno już zamknięte
+
+    def _zaplanuj_sprawdzenie_subiekta(self):
+        """Leniwe „Sprawdź w Subiekcie" po zmianie projektu — w tle, cicho.
+
+        Nie od razu przy otwarciu: odczyt (most, ~0,2–1,5 s, przy zimnym
+        moście ~15 s logowania) spowalniałby każde przełączanie projektów
+        „na przeglądnięcie". Odliczanie startuje od nowa przy każdej zmianie
+        projektu, więc szybkie klikanie po liście nic nie czyta. Stanowisko
+        bez mostu — nic nie planujemy.
+        """
+        pid = self.current_project_id
+        zadanie = getattr(self, "_subiekt_auto_zadanie", None)
+        if zadanie:
+            try:
+                self.after_cancel(zadanie)
+            except Exception:
+                pass
+            self._subiekt_auto_zadanie = None
+        if not pid or getattr(self, "viewing_master_backup", False):
+            return
+        try:
+            from subiekt_stany import _find_exe, CONFIG_PATH
+            if not _find_exe() or not os.path.isfile(CONFIG_PATH):
+                return
+        except Exception:
+            return
+
+        def odpal():
+            self._subiekt_auto_zadanie = None
+            # Projekt zmieniony w międzyczasie albo kolumna już policzona
+            # (user kliknął „Sprawdź" sam) — nic do roboty.
+            if (self.current_project_id != pid
+                    or (self._subiekt_stany
+                        and getattr(self, "_subiekt_stany_pid", None) == pid)):
+                return
+            self.sprawdz_w_subiekcie(cichy=True)
+
+        self._subiekt_auto_zadanie = self.after(self.SUBIEKT_AUTO_PO_S * 1000, odpal)
+
+    def sprawdz_w_subiekcie(self, cichy=False):
         """Wypełnia kolumnę SUBIEKT dla bieżącego projektu.
 
-        NA ŻĄDANIE, nie przy otwarciu projektu — odczyt z Subiekta trwa ~10 s
-        i spowalniałby każde przełączenie projektu. Wynik żyje w pamięci do
-        zamknięcia programu; „Sprawdź" ponownie odświeża.
+        Z menu — z okienkiem podsumowania; `cichy=True` (automat po wybraniu
+        projektu, patrz _zaplanuj_sprawdzenie_subiekta) — bez żadnych
+        okienek: kolumna po prostu się wypełnia, a błąd idzie do konsoli.
+        Wynik żyje w pamięci do zmiany projektu; „Sprawdź" ponownie odświeża.
         """
         if not self.current_project_id:
-            messagebox.showwarning("Subiekt", "Najpierw wybierz projekt.", parent=self)
+            if not cichy:
+                messagebox.showwarning("Subiekt", "Najpierw wybierz projekt.", parent=self)
+            return
+        # Drugi klik w trakcie odczytu ustawiał w kolejce mostu drugi komplet
+        # tych samych zapytań (dziennik 03.10.2026: stan-pozycji ×2 w sekundę).
+        if getattr(self, "_subiekt_sprawdzanie_trwa", False):
+            print("ℹ️  Sprawdzanie w Subiekcie już trwa — drugi klik pominięty")
             return
         try:
             import subiekt_zamowienia
         except ImportError as e:
-            messagebox.showerror("Subiekt", f"Brak modułu subiekt_zamowienia.py\n\n{e}",
-                                 parent=self)
+            if not cichy:
+                messagebox.showerror("Subiekt", f"Brak modułu subiekt_zamowienia.py\n\n{e}",
+                                     parent=self)
             return
 
         # Kolumna 1 arkusza to Nazwa — potrzebna, gdy numeru rysunku nie ma.
+        # Kolumna 3 to „Ilość BOM" — potrzeba na projekt do „(potrzeba/stan)"
+        # w komórce, gdy pozycji nie ma na ZK (wtedy liczy się ilość z ZK).
         numery = []
+        potrzeby = {}
         for r in range(self.sheet.get_total_rows()):
             try:
                 nr = str(self.sheet.get_cell_data(r, 0) or "").strip()
@@ -33143,8 +33382,15 @@ class MainWindow(tk.Tk):
             klucz = self._klucz_subiekt(nr, nazwa)
             if klucz:
                 numery.append(klucz)
+                try:
+                    bom = str(self.sheet.get_cell_data(r, 3) or "").strip().replace(",", ".")
+                    if bom:
+                        potrzeby[klucz] = float(bom.split()[0])
+                except Exception:
+                    pass
         if not numery:
-            messagebox.showinfo("Subiekt", "Arkusz jest pusty.", parent=self)
+            if not cichy:
+                messagebox.showinfo("Subiekt", "Arkusz jest pusty.", parent=self)
             return
 
         projekt = None
@@ -33161,18 +33407,49 @@ class MainWindow(tk.Tk):
         def worker():
             try:
                 dane = subiekt_zamowienia.stan_pozycji(numery, projekt)
+                # ZD po PROJEKCIE, nie po samym symbolu, i czy wysłane —
+                # jeden odczyt listy dokumentów (z bufora panelu, gdy świeży)
+                # + jeden odczyt dziennika wysyłek; nic per pozycja.
+                try:
+                    import subiekt_panel, subiekt_dokumenty_gui, subiekt_wyslij_zd
+                    # podejrzyj_, nie odczyt_z_panelu: tamto ZDEJMUJE wpis
+                    # i Przegląd dokumentów otwarty za chwilę czytał most
+                    # od nowa (dziennik mostu 03.10.2026).
+                    dok = (subiekt_panel.podejrzyj_odczyt("dokumenty")
+                           or subiekt_dokumenty_gui.pobierz_dokumenty())
+                    try:
+                        wyslane = subiekt_wyslij_zd.historia_wyslania()
+                    except Exception:
+                        wyslane = None
+                    subiekt_zamowienia.dopasuj_zd_do_projektu(dane, projekt, dok, wyslane)
+                except Exception as e:
+                    print(f"⚠️  SUBIEKT: ZD bez dopasowania do projektu: {e}")
+                # Potrzeba na projekt: z ZK, a gdy pozycji na ZK nie ma — z BOM-u.
+                for k, v in dane.items():
+                    if v.get("zk") and v.get("ilosc_zk"):
+                        v["potrzeba"] = float(v["ilosc_zk"])
+                    elif k in potrzeby:
+                        v["potrzeba"] = potrzeby[k]
                 self.after(0, lambda: gotowe(dane, None))
             except Exception as e:
                 err = str(e)
                 self.after(0, lambda: gotowe(None, err))
 
         def gotowe(dane, blad):
+            self._subiekt_sprawdzanie_trwa = False
             if blad:
-                messagebox.showerror("Subiekt", blad, parent=self)
+                if cichy:
+                    print(f"⚠️  SUBIEKT (automat): {blad}")
+                else:
+                    messagebox.showerror("Subiekt", blad, parent=self)
                 return
             self._subiekt_szczegoly = dane
             self._subiekt_stany = {k: subiekt_zamowienia.opis_stanu(v)
                                    for k, v in dane.items()}
+            # Dla KTÓREGO projektu to policzono — refresh_data kasuje wynik
+            # po zmianie projektu (na 3500 wisiały ZK Feniksa, 03.10.2026).
+            self._subiekt_stany_pid = self.current_project_id
+            self._subiekt_projekt_nr = projekt or ""
             self._pokaz_kolumne_subiekt()
             # Ślad w logu: ile wierszy arkusza dostało wpis. Gdy most zwraca
             # komplet, a wierszy jest mniej — klucz wiersza (numer rysunku /
@@ -33185,20 +33462,28 @@ class MainWindow(tk.Tk):
                       f"wypełniono {trafione}/{razem} wierszy")
             except Exception as e:
                 print(f"📦 SUBIEKT: nie policzono wypełnienia: {e}")
-            n_zd = sum(1 for v in dane.values() if v.get("zd"))
+            if cichy:
+                return                      # automat: kolumna wystarczy, bez okienka
+            n_wysl = sum(1 for v in dane.values() if v.get("zd") and v.get("zd_wyslane"))
+            n_zd = sum(1 for v in dane.values() if v.get("zd") and not v.get("zd_wyslane"))
             n_zk = sum(1 for v in dane.values() if v.get("zk") and not v.get("zd"))
             n_kart = sum(1 for v in dane.values()
                          if v.get("kartoteka") and not v.get("zk") and not v.get("zd"))
             n_brak = sum(1 for v in dane.values() if not v.get("kartoteka"))
+            n_inne = sum(1 for v in dane.values() if v.get("zd_inne"))
             messagebox.showinfo(
                 "Sprawdzono w Subiekcie",
                 f"Pozycji: {len(dane)}\n\n"
-                f"🛒 zamówione (ZD): {n_zd}\n"
-                f"📋 w ZK projektu: {n_zk}\n"
-                f"📇 ma kartotekę: {n_kart}\n"
-                f"⬜ brak w Subiekcie: {n_brak}",
+                f"✉ zamówione i WYSŁANE do dostawcy: {n_wysl}\n"
+                f"⧗ ZD założone, niewysłane: {n_zd}\n"
+                f"☰ w ZK projektu: {n_zk}\n"
+                f"❏ ma kartotekę: {n_kart}\n"
+                f"⬜ brak w Subiekcie: {n_brak}"
+                + (f"\n\nℹ {n_inne} poz. ma ZD dla INNYCH projektów — to nie jest "
+                   "zamówienie na ten projekt (dopisek „dla …”)." if n_inne else ""),
                 parent=self)
 
+        self._subiekt_sprawdzanie_trwa = True
         threading.Thread(target=worker, daemon=True).start()
 
     def _symbol_zastepczy_wiersza(self, row_idx):
@@ -33248,29 +33533,244 @@ class MainWindow(tk.Tk):
                 parent=self)
             return
 
-        linie = [f"Nr rysunku:  {nr}"]
-        if info.get("nazwa"):
-            linie.append(f"Nazwa w Subiekcie:  {info['nazwa']}")
-        linie.append("")
-        linie.append("Kartoteka:  " + ("jest" if info.get("kartoteka") else "BRAK"))
+        self._okno_szczegolow_subiekt(nr, info)
+
+    def _okno_szczegolow_subiekt(self, nr, info):
+        """Własne okno zamiast messagebox: nagłówek z plakietką stanu, sekcje
+        w siatce etykieta–wartość, ostrzeżenie w osobnej ramce.
+
+        Systemowy showinfo kleił wszystko w jeden blok tekstu z wcięciami
+        spacjami — nieczytelne przy ZD na kilka projektów (user 03.10.2026:
+        „zrób te okna ładne, przejrzyste i czytelne"). Do tego showinfo sam
+        ustala pozycję względem monitora głównego, a to okno ma stać na
+        monitorze arkusza (wysrodkuj + ukryj_do_zbudowania, jak okna Subiekta).
+        """
+        from subiekt_stany import ukryj_do_zbudowania, wysrodkuj
+        import subiekt_zamowienia
+
+        TLO, KARTA, RAMKA = "#f4f6f8", "#ffffff", "#dfe4ea"
+        TEKST, SZARY, NAGLOWEK = "#2c3e50", "#7f8c8d", "#34495e"
+        F, FB, FS = ("Arial", 9), ("Arial", 9, "bold"), ("Arial", 8)
+
+        okno = tk.Toplevel(self)
+        ukryj_do_zbudowania(okno)      # pokazane dopiero zbudowane, na miejscu
+        okno.title(f"Subiekt — {nr}")
+        okno.configure(bg=TLO)
+        okno.resizable(False, False)
+        # Szerzej niż wynika z treści (user 03.10.2026: „szerokości tych okien
+        # powiększ") — pełne numery dokumentów i podział na projekty mają
+        # mieścić się w jednym wierszu, bez zawijania.
+        SZER = 760
+        okno.minsize(SZER, 0)
+        try:
+            okno.transient(self)
+        except tk.TclError:
+            pass
+
+        # ── nagłówek: numer, nazwa, plakietka stanu (ten sam kolor co komórka)
+        gora = tk.Frame(okno, bg=NAGLOWEK)
+        gora.pack(fill=tk.X)
+        lewa = tk.Frame(gora, bg=NAGLOWEK)
+        lewa.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=14, pady=10)
+        tk.Label(lewa, text=f"📦 {nr}", bg=NAGLOWEK, fg="white",
+                 font=("Arial", 12, "bold"), anchor="w").pack(fill=tk.X)
+        if info.get("nazwa") and info["nazwa"].strip() != nr:
+            tk.Label(lewa, text=info["nazwa"], bg=NAGLOWEK, fg="#bdc3c7",
+                     font=F, anchor="w").pack(fill=tk.X)
+        # Plakietka bez dopisku „· ZD 9 dla 2637" — cudze ZD mają własną
+        # sekcję niżej, a w nagłówku robiły z plakietki długi wąż.
+        stan_txt = subiekt_zamowienia.opis_stanu({**info, "zd_inne": {}})
+        if stan_txt:
+            tk.Label(gora, text=stan_txt, bg=self.KOLORY_SUBIEKT.get(stan_txt[:1], "#eaecee"),
+                     fg=TEKST, font=FB, padx=10, pady=4).pack(side=tk.RIGHT, padx=14)
+
+        tresc = tk.Frame(okno, bg=TLO)
+        tresc.pack(fill=tk.BOTH, expand=True, padx=14, pady=(12, 4))
+
+        def karta(tytul, tlo=KARTA, ramka=RAMKA):
+            zew = tk.Frame(tresc, bg=ramka, padx=1, pady=1)
+            zew.pack(fill=tk.X, pady=(0, 8))
+            k = tk.Frame(zew, bg=tlo, padx=12, pady=8)
+            k.pack(fill=tk.X)
+            tk.Label(k, text=tytul.upper(), bg=tlo, fg=SZARY, font=("Arial", 7, "bold"),
+                     anchor="w").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+            k.columnconfigure(1, weight=1)
+            k._wiersz = 1
+            return k
+
+        def wiersz(k, etykieta, wartosc, fg=TEKST, bold=False, wciecie=0):
+            r = k._wiersz
+            tlo = k.cget("bg")
+            tk.Label(k, text=etykieta, bg=tlo, fg=SZARY, font=F, anchor="e",
+                     width=18).grid(row=r, column=0, sticky="ne", padx=(wciecie, 10), pady=1)
+            tk.Label(k, text=wartosc, bg=tlo, fg=fg, font=(FB if bold else F),
+                     anchor="w", justify="left", wraplength=SZER - 240).grid(
+                         row=r, column=1, sticky="w", pady=1)
+            k._wiersz = r + 1
+
+        def otworz_dokument(numer):
+            """Klik w numer → Przegląd dokumentów ustawiony na tym dokumencie.
+            Okno szczegółów zamykamy — Przegląd pokazuje więcej (pozycje,
+            wysyłkę, PDF), a dwa okna o tym samym myliłyby się.
+
+            NAJPIERW otwieramy, POTEM zamykamy: gdy otwarcie się wywali,
+            user widzi błąd w okienku, a nie pusty ekran (03.10.2026: „klikam
+            ZK2 i nie otwiera" — przyczyna niewidoczna, bo szła do konsoli).
+            """
+            try:
+                import subiekt_dokumenty_gui
+                project_name = None
+                if self.current_project_id:
+                    try:
+                        _w = self.db_manager.master_read(
+                            "project-name", {"project_id": self.current_project_id})
+                        project_name = _w[0]["name"] if _w else None
+                    except Exception:
+                        project_name = None
+                nowe = subiekt_dokumenty_gui.open_window(self, szukaj=numer, projekt=project_name)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                messagebox.showerror("Przegląd dokumentów",
+                                     f"Nie udało się otworzyć dokumentu {numer}:\n\n{e}",
+                                     parent=okno)
+                return
+            try:
+                okno.destroy()
+            except Exception:
+                pass
+            # Jak w oknie wydania: nowe okno na wierzch, bo po zamknięciu
+            # dialogu fokus wraca do arkusza i Przegląd potrafi stanąć pod nim.
+            def na_wierzch():
+                try:
+                    nowe.lift()
+                    nowe.focus_force()
+                except Exception:
+                    pass
+            self.after(700, na_wierzch)
+
+        def linki(k, etykieta, numery, dopisek="", fg=TEKST, bold=True):
+            """Wiersz z numerami dokumentów jako odnośnikami (user 03.10.2026:
+            „jak kliknę na ZD lub ZK, to mnie przeniesie?"). Każdy numer
+            osobną etykietą — ZD bywa kilka naraz."""
+            r = k._wiersz
+            tlo = k.cget("bg")
+            tk.Label(k, text=etykieta, bg=tlo, fg=SZARY, font=F, anchor="e",
+                     width=18).grid(row=r, column=0, sticky="ne", padx=(0, 10), pady=1)
+            ramka = tk.Frame(k, bg=tlo)
+            ramka.grid(row=r, column=1, sticky="w", pady=1)
+            for i, n in enumerate(numery):
+                if i:
+                    tk.Label(ramka, text=",", bg=tlo, fg=fg, font=F).pack(side=tk.LEFT)
+                lnk = tk.Label(ramka, text=n, bg=tlo, fg="#1a5276", cursor="hand2",
+                               font=(("Arial", 9, "bold", "underline") if bold
+                                     else ("Arial", 9, "underline")))
+                lnk.pack(side=tk.LEFT, padx=(0, 2))
+                lnk.bind("<Button-1>", lambda _e, nr=n: otworz_dokument(nr))
+            if dopisek:
+                tk.Label(ramka, text=dopisek, bg=tlo, fg=SZARY, font=F).pack(side=tk.LEFT, padx=(6, 0))
+            k._wiersz = r + 1
+
+        # ── kartoteka
+        k = karta("Kartoteka w Subiekcie")
         if info.get("kartoteka"):
-            linie.append(f"Stan magazynowy:  {info.get('stan', 0):g}")
-        linie.append("")
-        linie.append("Na liście projektu (ZK):  " +
-                     (f"{info['zk']}   ilość {info.get('ilosc_zk', 0):g}"
-                      if info.get("zk") else "nie"))
-        if info.get("zd"):
-            linie.append(f"Zamówione u dostawcy:  {info['zd']}")
-            linie.append(f"   dostawca:  {info.get('dostawca') or '—'}")
-            linie.append(f"   ilość:  {info.get('ilosc_zd', 0):g}")
-            linie.append(f"   status:  {info.get('status_zd') or '—'}")
+            wiersz(k, "Kartoteka:", "jest", fg="#1e8449")
+            wiersz(k, "Stan magazynowy:", f"{info.get('stan', 0):g}", bold=True)
         else:
-            linie.append("Zamówione u dostawcy:  nie")
-        messagebox.showinfo("Subiekt — szczegóły pozycji", "\n".join(linie), parent=self)
+            wiersz(k, "Kartoteka:", "BRAK — pozycji nie ma w Subiekcie", fg="#c0392b", bold=True)
+        if info.get("potrzeba") is not None:
+            p, s = float(info["potrzeba"]), float(info.get("stan") or 0)
+            zrodlo = "z ZK" if info.get("zk") and info.get("ilosc_zk") else "z BOM-u"
+            brak = p - s if info.get("kartoteka") else p
+            wiersz(k, "Potrzeba na projekt:",
+                   f"{p:g} ({zrodlo})" + (f"   —   brakuje {brak:g}" if brak > 0 else "   —   stan wystarcza"),
+                   fg=("#b9770e" if brak > 0 else "#1e8449"), bold=True)
+
+        # ── ZK
+        k = karta("Zamówienie klienta (ZK) — ten projekt")
+        if info.get("zk"):
+            linki(k, "Dokument:", [info["zk"]])
+            wiersz(k, "Ilość na ZK:", f"{info.get('ilosc_zk', 0):g}")
+        else:
+            wiersz(k, "Dokument:", "nie ma na ZK tego projektu", fg=SZARY)
+
+        # ── ZD
+        k = karta("Zamówienie do dostawcy (ZD)")
+        podzial = info.get("zd_podzial") or {}
+        if info.get("zd"):
+            linki(k, "Dokument:", subiekt_zamowienia._numery_zd(info["zd"]))
+            wiersz(k, "Dostawca:", info.get("dostawca") or "—")
+            wiersz(k, "Ilość na ZD:", f"{info.get('ilosc_zd', 0):g}", bold=True)
+            # Podział wg ZK: ZD z zapotrzebowania zbiera kilka projektów naraz,
+            # a sama suma sugerowała, że cała idzie na projekt otwarty
+            # w arkuszu (2627 widziało „96", zamawia 8 — 03.10.2026).
+            if len(podzial) > 1 or (podzial and sum(podzial.values()) != info.get("ilosc_zd", 0)):
+                biezacy = getattr(self, "_subiekt_projekt_nr", "") or ""
+                kolejnosc = sorted(podzial, key=lambda p: (p != biezacy, p))
+                for i, p in enumerate(kolejnosc):
+                    tu = p == biezacy
+                    wiersz(k, "z tego wg ZK:" if i == 0 else "",
+                           f"{'► ' if tu else '   '}projekt {p}:  {podzial[p]:g}"
+                           + ("   (ten projekt)" if tu else ""),
+                           fg=TEKST if tu else SZARY, bold=tu)
+            if info.get("zd_do_przyjecia"):
+                wiersz(k, "Do przyjęcia:", f"{info['zd_do_przyjecia']:g}")
+            wiersz(k, "Status:", info.get("status_zd") or "—")
+            w = info.get("zd_wyslane")
+            if w:
+                wiersz(k, "Wysłane do dostawcy:", "TAK", fg="#1e8449", bold=True)
+            elif w is False:
+                wiersz(k, "Wysłane do dostawcy:", "NIE — dostawca o nim nie wie",
+                       fg="#b9770e", bold=True)
+            else:
+                wiersz(k, "Wysłane do dostawcy:", "nie wiadomo (brak dziennika wysyłek)", fg=SZARY)
+        else:
+            wiersz(k, "Dokument:", "nie zamówione dla tego projektu", fg=SZARY)
+
+        # ── ostrzeżenie: stan już pokrywa potrzebę
+        if info.get("stan_pokrywa"):
+            k = karta("⚠ Zamówienie może być zbędne", tlo="#fdebd0", ramka="#f5b041")
+            tk.Label(k, bg="#fdebd0", fg="#7d3c00", font=F, justify="left", anchor="w",
+                     wraplength=SZER - 90,
+                     text=(f"Na stanie jest {info.get('stan', 0):g} szt., a potrzeba projektów "
+                           f"z tego ZD to {sum(podzial.values()):g} szt.\n"
+                           "Zanim odwołasz zamówienie u dostawcy, sprawdź, czy stan nie jest "
+                           "zarezerwowany pod inne projekty.")).grid(
+                               row=k._wiersz, column=0, columnspan=2, sticky="w")
+
+        # ── ZD tego symbolu dla innych projektów
+        inne = info.get("zd_inne") or {}
+        zamkniete = int(info.get("zd_inne_zamkniete") or 0)
+        if inne or zamkniete:
+            k = karta("ZD z tym symbolem dla INNYCH projektów — nie na ten")
+            # Najnowsze na górze, najwyżej trzy — przy częstym detalu lista
+            # rosłaby z każdym projektem (user 03.10.2026: „okienko będzie
+            # puchnąć?"). Reszta jedną linią; zrealizowane w ogóle nie
+            # wchodzą na listę (filtr w dopasuj_zd_do_projektu).
+            numery = sorted(inne, key=subiekt_zamowienia._klucz_zd, reverse=True)
+            for n in numery[:3]:
+                linki(k, "", [n], dopisek=f"projekt {inne[n] or '?'}", bold=False)
+            reszta = len(numery) - 3
+            dopiski = []
+            if reszta > 0:
+                dopiski.append(f"… i {reszta} starszych otwartych")
+            if zamkniete:
+                dopiski.append(f"{zamkniete} zrealizowanych/anulowanych pominięto")
+            if dopiski:
+                wiersz(k, "", ", ".join(dopiski), fg=SZARY)
+
+        stopka = tk.Frame(okno, bg=TLO)
+        stopka.pack(fill=tk.X, padx=14, pady=(0, 12))
+        tk.Button(stopka, text="OK", width=12, font=("Arial", 10, "bold"),
+                  command=okno.destroy).pack(side=tk.RIGHT)
+        okno.bind("<Return>", lambda _e: okno.destroy())
+        okno.bind("<Escape>", lambda _e: okno.destroy())
+        wysrodkuj(okno, self)
+        okno.focus_set()
 
     def _pokaz_kolumne_subiekt(self):
         """Wpisuje stany do kolumny SUBIEKT + koloruje, jak kolumna WYCENA."""
-        kolory = {"🛒": "#d5f5e3", "📋": "#d6eaf8", "📇": "#fdebd0", "⬜": "#eaecee"}
+        kolory = self.KOLORY_SUBIEKT
         for r in range(self.sheet.get_total_rows()):
             try:
                 nr = str(self.sheet.get_cell_data(r, 0) or "").strip()
@@ -33366,12 +33866,14 @@ class MainWindow(tk.Tk):
             self, symbol=pierwsza.get("symbol", ""),
             nazwa=pierwsza.get("nazwa", ""))
 
-    def open_subiekt_dokumenty(self):
+    def open_subiekt_dokumenty(self, szukaj=None):
         """Okno „Przegląd dokumentów" (menu 📦 SUBIEKT).
 
         Lista ZK/ZD/RW/WZ z pozycjami — jedyne miejsce, gdzie widać, co w
         Subiekcie realnie jest. Tylko odczyt; zapis idzie przez pozostałe okna.
         Nie wymaga wybranego projektu — pokazuje wszystko, z filtrem po numerze.
+        `szukaj` — numer dokumentu, na którym okno ma stanąć od razu (klik
+        w numer ZK/ZD w oknie szczegółów pozycji).
         """
         try:
             import subiekt_dokumenty_gui
@@ -33389,7 +33891,7 @@ class MainWindow(tk.Tk):
                 project_name = _w[0]["name"] if _w else None
             except Exception:
                 project_name = None
-        subiekt_dokumenty_gui.open_window(self, projekt=project_name)
+        subiekt_dokumenty_gui.open_window(self, szukaj=szukaj, projekt=project_name)
 
     def open_subiekt_faktury(self):
         """Okno „Faktury z KSeF" (panel SUBIEKT).

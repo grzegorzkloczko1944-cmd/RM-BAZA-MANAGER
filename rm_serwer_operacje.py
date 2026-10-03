@@ -906,6 +906,15 @@ ODCZYT = {
         " WHERE dokument_id IS NOT NULL GROUP BY numer_zd",
         [],
     ),
+    # Ostatnia wysyłka JEDNEGO dokumentu — ostrzeżenie przed powtórką
+    # w oknie wysyłki (03.10.2026: ZD 5 poszło dwa razy bez pytania).
+    # Po Id dokumentu, nie po numerze: numer wraca do obiegu po usunięciu.
+    "zd-wyslane-ostatnia": (
+        "SELECT adresat, nadawca, termin, tryb, kiedy,"
+        " (SELECT COUNT(*) FROM zd_wyslane w2 WHERE w2.dokument_id = w1.dokument_id) AS ile"
+        " FROM zd_wyslane w1 WHERE dokument_id = ? ORDER BY id DESC LIMIT 1",
+        ["dokument_id"],
+    ),
     "zd-zamowione-ile": (
         "SELECT COUNT(*) AS n FROM zd_zamowione_pozycje WHERE project_id = ?",
         ["project_id"],
@@ -2081,6 +2090,23 @@ ZAPIS = {
         "INSERT OR REPLACE INTO zd_zamowione_pozycje"
         " (project_id, item_id, termin, numer_zd, kiedy, supplier_id)"
         " VALUES (?, ?, ?, ?, ?, ?)",
+        ["project_id", "item_id", "termin", "numer_zd", "kiedy", "supplier_id"],
+    ),
+    # To samo co wyżej, ale PONOWNA wysyłka tego samego ZD nie przestawia
+    # daty zamówienia (kiedy) i nie kasuje terminu ani dostawcy pustym polem.
+    # Inny numer ZD na tej samej pozycji (stare usunięte, nowe założone)
+    # to nowe zamówienie — wtedy data idzie od nowa. Zastępuje
+    # INSERT OR REPLACE w nowszych klientach (03.10.2026).
+    "zd-zamowione-dodaj-zachowaj": (
+        "INSERT INTO zd_zamowione_pozycje"
+        " (project_id, item_id, termin, numer_zd, kiedy, supplier_id)"
+        " VALUES (?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(project_id, item_id) DO UPDATE SET"
+        "   termin = COALESCE(excluded.termin, termin),"
+        "   supplier_id = COALESCE(excluded.supplier_id, supplier_id),"
+        "   kiedy = CASE WHEN numer_zd = excluded.numer_zd THEN kiedy"
+        "                ELSE excluded.kiedy END,"
+        "   numer_zd = excluded.numer_zd",
         ["project_id", "item_id", "termin", "numer_zd", "kiedy", "supplier_id"],
     ),
     "zd-zamowione-usun-po-numerach": (

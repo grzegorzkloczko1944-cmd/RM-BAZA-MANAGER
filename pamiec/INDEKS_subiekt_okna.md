@@ -66,3 +66,4 @@ Czesc pamieci projektu — spis wszystkich obszarow w [MEMORY.md](MEMORY.md).
 - [Przegląd dokumentów — edycja ZK](project_przeglad_dokumentow_edycja_zk.md) — filtr na projekt z RM_BAZA, kolejność arkusza, szukanie w pozycjach, dwuklik ilość/cena ZK (most zk-ilosc/zk-cena), usuwanie pozycji prawym klikiem
 - [Ilość na ZK należy do Subiekta](project_ilosc_zk_wlasnosc_subiekta.md) — Projekt/Aktualizacja bierze ilość z ZK, sklejenie dubletów NIE podnosi ZK; czerwone okno przy sklejaniu; banner dubletów po numerze/symbolu/nazwie
 - [Okno ZD: sortowanie i „do zamówienia”](project_zd_okno_do_zamowienia.md) — klucz_wiersza przy każdym odświeżeniu; do_zamowienia = Kupić>0 albo stan po zdjęciu ≤ minimum; co znaczy kolumna ZK
+- [ZD: powtórka wysyłki, numer projektu z mostu, kolumna SUBIEKT po projekcie](project_zd_powtorka_i_kolumna_subiekt.md) — 03.10: ostrzeżenie przed 2× wysyłką, upsert „zachowaj”, most oddawał całe Uwagi, „ZD 4” bez CENTRALA; co wystawić w firmie

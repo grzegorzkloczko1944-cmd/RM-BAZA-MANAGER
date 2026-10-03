@@ -313,7 +313,10 @@ internal static class Zapotrzebowanie
         var projekty = new List<string>();
         foreach (var dok in DokumentyZk(poz))
         {
-            var u = Wlasc(dok, "Uwagi")?.ToString()?.Trim();
+            // SAM NUMER, nie całe Uwagi. Do 03.10.2026 szło tu „3500 Projekt
+            // \ndupal" — RM_BAZA porównywała to z „3500", nie trafiała, a przy
+            // symbolu w dwóch BOM-ach nie oznaczała „Zamówiono" nigdzie.
+            var u = Znacznik.NumerProjektu(Wlasc(dok, "Uwagi")?.ToString());
             if (!string.IsNullOrWhiteSpace(u) && !projekty.Contains(u!))
                 projekty.Add(u!);
         }
