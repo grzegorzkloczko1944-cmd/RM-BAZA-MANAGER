@@ -3665,6 +3665,8 @@ class MainWindow(tk.Tk):
             self._start_heartbeat_timer()
             # Heartbeat sesji (client_sessions w masterze) — po autologinie
             self.after(5000, self._session_heartbeat_async)
+            # Stan agenta RFQ co minutę (kolumna WYCENA bez ręcznego Odśwież)
+            self._start_rfq_status_watch()
             return
 
         # Błąd - przywróć kursor
@@ -8405,22 +8407,9 @@ class MainWindow(tk.Tk):
                                                  {"key": "rfq_last_contact"})
                 last_contact = (_w[0]["value"],) if _w else None
                 self._rfq_last_contact = str(last_contact[0]) if (last_contact and last_contact[0]) else None
-                if self._rfq_last_contact:
-                    try:
-                        import datetime as _dt
-                        delta = _dt.datetime.now() - _dt.datetime.fromisoformat(self._rfq_last_contact)
-                        # 15 min, nie godzina: agent chodzi CO MINUTĘ, więc realna
-                        # awaria jest wykrywalna po kilku minutach. Przy progu 1h
-                        # kolumna WYCENA przez pierwszą godzinę awarii wyglądała
-                        # na w pełni aktualną — najgorszy możliwy stan, bo user
-                        # podejmuje decyzje na nieaktualnych danych, nic nie widząc.
-                        # 15 min = margines na chwilowy timeout albo restart serwera.
-                        self._rfq_data_stale = delta.total_seconds() > 900
-                    except Exception:
-                        pass
-                else:
-                    # agent nigdy nie zapisał kontaktu — integracja nie działa
-                    self._rfq_data_stale = True
+                _st = self._rfq_stale_z_kontaktu(self._rfq_last_contact)
+                if _st is not None:
+                    self._rfq_data_stale = _st
 
                 # Ostatni błąd agenta (zapisywany przez rm_sync_agent, bo chodzi
                 # bez okna konsoli i stderr przepada). Dzięki temu user widzi
@@ -9559,6 +9548,106 @@ class MainWindow(tk.Tk):
     # Sprawdzenie jest ODROCZONE (~4 s) i biegnie w wątku daemon — okno działa
     # od razu. Wynik wraca do Tkinter przez self.after(0, ...).
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Czuwanie nad stanem agenta RFQ (znacznik „⚠ brak danych" w WYCENA)
+    #
+    # Ocena „dane RFQ nieaktualne" (_rfq_data_stale) zapadała TYLKO przy
+    # wczytaniu arkusza. Skutki (03.10.2026): agent wrócił po awarii, a otwarta
+    # RM_BAZA dalej pokazywała „⚠ brak danych" — pomogło dopiero przejęcie
+    # i zwolnienie locka. Odwrotnie gorzej: agent pada przy otwartym oknie,
+    # a komórki wyglądają na aktualne aż do najbliższego przeładowania.
+    #
+    # Co minutę (agent chodzi co minutę) czytamy w WĄTKU rfq_last_contact
+    # i przeładowujemy arkusz TYLKO gdy ocena się zmieniła — w spokojnym
+    # stanie timer nie dotyka GUI wcale.
+    # ------------------------------------------------------------------
+
+    RFQ_STAN_CO_MS = 60_000
+
+    @staticmethod
+    def _rfq_stale_z_kontaktu(last_contact):
+        """True = dane RFQ nieaktualne, False = aktualne, None = nie da się
+        ocenić (zły format daty — wtedy zostawiamy poprzednią ocenę)."""
+        if not last_contact:
+            # agent nigdy nie zapisał kontaktu — integracja nie działa
+            return True
+        try:
+            import datetime as _dt
+            delta = _dt.datetime.now() - _dt.datetime.fromisoformat(str(last_contact))
+        except Exception:
+            return None
+        # 5 min, nie godzina: agent chodzi CO MINUTĘ, więc realna
+        # awaria jest wykrywalna po kilku minutach. Przy progu 1h
+        # kolumna WYCENA przez pierwszą godzinę awarii wyglądała
+        # na w pełni aktualną — najgorszy możliwy stan, bo user
+        # podejmuje decyzje na nieaktualnych danych, nic nie widząc.
+        # 5 min = kilka nieudanych cykli z rzędu, czyli już awaria, a nie
+        # chwilowy timeout portalu (30 s). Niżej nie schodzić: przy
+        # pojedynczym zrywie „⚠" migałoby, a każda zmiana stanu przeładowuje
+        # arkusz (_rfq_status_apply). Było 15 min (do 03.10.2026).
+        return delta.total_seconds() > 300
+
+    def _start_rfq_status_watch(self):
+        """Startuje cykliczne sprawdzanie (raz, po inicjalizacji)."""
+        if getattr(self, '_rfq_status_watch_on', False):
+            return
+        self._rfq_status_watch_on = True
+        self.after(self.RFQ_STAN_CO_MS, self._rfq_status_tick)
+
+    def _rfq_status_tick(self):
+        try:
+            # Jeden odczyt naraz — przy wiszącym RM_SERWER (timeout) nie
+            # nabijamy kolejnych wątków co minutę.
+            t = getattr(self, '_rfq_status_thread', None)
+            if (self.db_manager and self.current_project_id
+                    and not (t is not None and t.is_alive())):
+                self._rfq_status_thread = threading.Thread(
+                    target=self._rfq_status_check_bg, daemon=True)
+                self._rfq_status_thread.start()
+        except Exception:
+            pass
+        finally:
+            try:
+                self.after(self.RFQ_STAN_CO_MS, self._rfq_status_tick)
+            except Exception:
+                pass   # okno zamknięte
+
+    def _rfq_status_check_bg(self):
+        """Wątek: tylko odczyt z mastera, bez dotykania Tkinter."""
+        try:
+            _w = self.db_manager.master_read("settings-get",
+                                             {"key": "rfq_last_contact"})
+        except Exception:
+            # RM_SERWER niedostępny — to nie jest informacja o agencie RFQ,
+            # a przeładowanie arkusza i tak by się nie udało (popup co minutę).
+            return
+        kontakt = _w[0]["value"] if _w else None
+        stale = self._rfq_stale_z_kontaktu(kontakt)
+        if stale is None:
+            return
+        try:
+            self.after(0, self._rfq_status_apply, stale)
+        except Exception:
+            pass
+
+    def _rfq_status_apply(self, stale):
+        """Wątek GUI: przeładuj arkusz, jeśli ocena aktualności się zmieniła."""
+        if stale == bool(getattr(self, '_rfq_data_stale', False)):
+            return
+        if not self.current_project_id:
+            return
+        # Nie przeładowujemy pod ręką usera, który akurat wpisuje wartość
+        # w komórkę — następny takt (za minutę) spróbuje ponownie, bo ocena
+        # w _rfq_data_stale nadal jest stara.
+        try:
+            if self.sheet.MT.text_editor.open:
+                return
+        except Exception:
+            pass
+        print(f"🔄 RFQ: dane {'NIEAKTUALNE' if stale else 'znów aktualne'} "
+              f"— przeładowuję arkusz")
+        self.refresh_data()
 
     # drawing_number → {'status','changed_files','missing_files'} z ost. sprawdzenia
     _rfq_freshness = {}
