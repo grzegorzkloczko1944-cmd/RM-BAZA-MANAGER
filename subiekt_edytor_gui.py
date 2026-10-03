@@ -293,8 +293,12 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
                  ("stan", "Stan", 42), ("cena", "Cena", 54)]
     #: Opis miedzy Nazwa a Rodzaj (10.09.2026) — sam symbol i nazwa nie
     #: wystarczaly, zeby odroznic warianty tej samej czesci na liscie.
+    #: „Położenie" (regał/półka = PoleWlasne1) obok Opisu — 03.10.2026.
+    #: Oba pola widać teraz naraz, więc od razu widać pozycje, którym regał
+    #: siedzi w Opisie zamiast w Położeniu (349 takich, patrz
+    #: narzedzia_regal_z_opisu.py). Wąska, bo treść to „R6/P4".
     KOL_LISTA = [("w", "✓", KOL_LISTA_STALE), ("symbol", "Symbol", 130), ("nazwa", "Nazwa", 190),
-                 ("opis", "Opis", 160),
+                 ("opis", "Opis", 160), ("polozenie", "Położenie", 80),
                  ("rodzaj", "Rodzaj", 75), ("stan", "Stan", 55),
                  ("cena", "Cena netto", 75)]
 
@@ -2111,6 +2115,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
             self.tab_lista.insert("", "end", values=(
                 "✓" if w_drzewie else "", sym, naz,
                 str(k.get("Opis") or "").strip(),
+                str(k.get("Polozenie") or "").strip(),
                 k.get("Rodzaj") or "",
                 self._stan_txt(self._stany.get(sym.upper())),
                 f"{float(k.get('CenaEwidencyjna') or 0):g}"),

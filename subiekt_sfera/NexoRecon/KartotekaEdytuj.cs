@@ -10,6 +10,7 @@
 //         "nazwa":"Katownik separatora",  // pola opcjonalne: brak = bez zmiany
 //         "cena": 12.50,
 //         "opis":"...",
+//         "polozenie":"R6/P4",           // regal/polka = PoleWlasne1
 //         "sklad":[{"symbol":"012-100.11","ilosc":2}]   // tylko dla kompletow
 //       } ] }
 //
@@ -98,6 +99,38 @@ internal static class KartotekaEdytuj
                 }
 
                 // Sklad kompletu — tylko gdy pole jest w planie (null = nie ruszaj).
+                // Polozenie magazynowe (regal/polka) = PoleWlasne1.
+                //
+                // ⚠️ Doszlo 03.10.2026. Edytor kartotek wysylal klucz
+                // „polozenie" od poczatku, ale TEN tryb go nie czytal — pole
+                // w oknie bylo aktywne, dalo sie w nie pisac, a zapis przechodzil
+                // bez skutku i bez bledu (user: „brak mozliwosci edycji
+                // Polozenie"). Tryb „kartoteki" (zasiew) obsluguje je od dawna
+                // przez UstawPolozenie — tu ta sama zasada.
+                //
+                // ⚠️ null = „nie ruszaj", NIE „wyczysc". Inaczej zapis kartoteki
+                // z pustym formularzem skasowalby regaly wgrane przy migracji
+                // magazynu nr 2 (1367 pozycji, patrz MAGAZYN.md).
+                if (p.Polozenie != null)
+                {
+                    object? pw = null;
+                    try { pw = ob.Dane.PolaWlasne; } catch { }
+                    var prop = pw?.GetType().GetProperty("PoleWlasne1");
+                    if (pw is null || prop is null || !prop.CanWrite)
+                    {
+                        zmiany.Add("polozenie: brak zapisywalnego PoleWlasne1");
+                    }
+                    else
+                    {
+                        var stare = (Bezp(() => prop.GetValue(pw) as string) ?? "").Trim();
+                        var nowe = p.Polozenie.Trim();
+                        if (stare != nowe)
+                        {
+                            zmiany.Add($"polozenie: „{stare}” → „{nowe}”");
+                            if (zapisz) try { prop.SetValue(pw, nowe); } catch { }
+                        }
+                    }
+                }
                 if (p.Sklad != null)
                 {
                     var opisSkladu = Sklad(ob, p.Sklad, zapisz);
@@ -236,6 +269,7 @@ internal static class KartotekaEdytuj
 
     internal record SkladPlan(string? Symbol, decimal Ilosc);
     internal record PozPlan(string? Symbol, string? Nazwa, decimal? Cena, string? Opis,
+                            string? Polozenie,
                             List<SkladPlan>? Sklad);
     internal record Plan(List<PozPlan>? Pozycje);
     internal record Krok(string Symbol, string Status, string? Szczegoly);

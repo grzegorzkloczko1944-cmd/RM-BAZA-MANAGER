@@ -96,6 +96,13 @@ internal static class Katalog
                 // odroznic warianty tej samej czesci. To pole tekstowe
                 // W TEJ SAMEJ projekcji — bez drugiego przelotu po bazie.
                 a.Opis,
+                // Polozenie magazynowe (regal/polka) = PoleWlasne1 — kolumna
+                // "Polozenie" w edytorze kartotek (03.10.2026). W TEJ SAMEJ
+                // projekcji, jak Opis: bez drugiego przelotu po bazie.
+                // Po co obok Opisu: 349 kartotek ma regal wpisany w OPIS
+                // zamiast tutaj (narzedzia_regal_z_opisu.py) — majac oba pola
+                // naraz widac, ktore to.
+                Polozenie = a.PolaWlasne.PoleWlasne1,
                 a.CenaEwidencyjna,
                 Rodzaj = a.Rodzaj.Nazwa,
                 WKompletach = a.SkladnikiWKompletach.Count(),
@@ -123,6 +130,7 @@ internal static class Katalog
                 (a.Symbol ?? "").Trim(),
                 (a.Nazwa ?? "").Trim(),
                 (a.Opis ?? "").Trim(),
+                (a.Polozenie ?? "").Trim(),
                 decimal.Round(a.CenaEwidencyjna, 2),
                 (a.Rodzaj ?? "").Trim(),
                 a.WKompletach,
@@ -147,7 +155,7 @@ internal static class Katalog
     // jednoznacznie wskazać pozycję w Subiekcie (symbole bywają zapisane
     // różnie, Id nie).
     internal record Kart(int Id, string Symbol, string Nazwa, string Opis,
-                         decimal CenaEwidencyjna,
+                         string Polozenie, decimal CenaEwidencyjna,
                          string Rodzaj, int WKompletach, int Skladnikow,
                          int NaDokumentach);
 }

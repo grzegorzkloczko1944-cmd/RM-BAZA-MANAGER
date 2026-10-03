@@ -433,22 +433,26 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
             kafle.grid_columnconfigure(i, weight=1)
 
         # ── ilość i lokacja ──────────────────────────────────────────
+        # ⚠️ TO JEST NAJWAZNIEJSZY WIERSZ TEGO OKNA (powiekszony 03.10.2026).
+        # Magazynier wpisuje tu ilosc i odczytuje regal, czesto stojac przy
+        # stole, nie przy monitorze. Wczesniej mial te sama wielkosc co
+        # podpisy pomocnicze i ginal miedzy kaflami.
         dol = tk.Frame(ram, bg=TLO_SEKCJI)
-        dol.pack(fill=tk.X, padx=10, pady=(12, 0))
+        dol.pack(fill=tk.X, padx=10, pady=(16, 4))
         tk.Label(dol, text="Ilość wydawana teraz:", bg=TLO_SEKCJI, fg=TEKST,
-                 font=("Arial", 9, "bold")).pack(side=tk.LEFT)
+                 font=("Arial", 12, "bold")).pack(side=tk.LEFT, pady=6)
         self.var_ilosc = tk.StringVar()
         self.spin_ilosc = tk.Spinbox(dol, textvariable=self.var_ilosc, from_=0,
-                                     to=999999, width=10, font=("Arial", 12),
+                                     to=999999, width=8, font=("Arial", 18, "bold"),
                                      justify="right")
-        self.spin_ilosc.pack(side=tk.LEFT, padx=(8, 20))
+        self.spin_ilosc.pack(side=tk.LEFT, padx=(10, 26), ipady=4)
         self.spin_ilosc.bind("<Return>", lambda _e: self._dodaj_do_sesji())
 
         tk.Label(dol, text="Lokacja:", bg=TLO_SEKCJI, fg=TEKST_SZARY,
-                 font=("Arial", 9)).pack(side=tk.LEFT)
+                 font=("Arial", 12)).pack(side=tk.LEFT, pady=6)
         self.var_lokacja = tk.StringVar(value="—")
         tk.Label(dol, textvariable=self.var_lokacja, bg=TLO_SEKCJI, fg=TEKST,
-                 font=("Arial", 11, "bold")).pack(side=tk.LEFT, padx=(6, 0))
+                 font=("Arial", 18, "bold")).pack(side=tk.LEFT, padx=(8, 0), pady=6)
 
         # Metadane pozycji — kontekst, po którym magazynier poznaje, czy
         # trzyma w ręku to co trzeba. Jedna linia, żeby nie zabierać miejsca.
