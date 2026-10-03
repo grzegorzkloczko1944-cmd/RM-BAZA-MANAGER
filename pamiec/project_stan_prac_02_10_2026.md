@@ -1,11 +1,20 @@
 ---
 name: project_stan_prac_02_10_2026
-description: PUNKT WZNOWIENIA po sesji 01–03.10.2026 (M-OLD) — commit 7ef3d0f niewypchnięty, co czeka na wdrożenie mostu w firmie, co sprawdzone tylko suchym przebiegiem, otwarte sprawy (Koło 12T ZK 16 vs BOM 8)
+description: PUNKT WZNOWIENIA po sesji 01–03.10.2026 (M-OLD) — agent RFQ w firmie (pull + skopiować sync_agent_run.bat), co czeka na wdrożenie mostu w firmie, co sprawdzone tylko suchym przebiegiem, otwarte sprawy (Koło 12T ZK 16 vs BOM 8)
 metadata:
   type: project
 ---
 
-**Aktualizacja 03.10.2026 03:05:** wszystko wypchnięte — `7ef3d0f`, `90bd480` i nocna paczka `16bc21e` (kolumna SUBIEKT po projekcie z „(stan potrzeba/stan)”, ostrzeżenie przed 2× wysyłką ZD, most `stan-pozycji` jednym zapytaniem, leniwe wczytanie, okno szczegółów z odnośnikami, bufor odczytów panelu; szczegóły w [[project_zd_powtorka_i_kolumna_subiekt]]). Do wystawienia w firmie doszły: **restart RM_SERWER** (nowe operacje `zd-wyslane-ostatnia`, `zd-zamowione-dodaj-zachowaj`) i most po buildzie (`StanPozycji.cs`, `Zapotrzebowanie.cs`). Niezacommitowany został tylko `sync_agent_run.example.bat` (zmiana komentarzy sprzed sesji — do decyzji usera). Otwarte na później: wiersze testowe w 2627 na M-OLD (214, 220, 221, 225, 228, 229) i zmiana nazwy GN-614-5-NI → GN-614-5 NI bez wpisu w historii (04–05.09). Klik w numer ZK/ZD w oknie szczegółów — user zgłosił „nie otwiera”, po poprawce (otwórz → zamknij, błąd w okienku, lift) niesprawdzone.
+**Aktualizacja 03.10.2026 03:05:** wszystko wypchnięte — `7ef3d0f`, `90bd480` i nocna paczka `16bc21e` (kolumna SUBIEKT po projekcie z „(stan potrzeba/stan)”, ostrzeżenie przed 2× wysyłką ZD, most `stan-pozycji` jednym zapytaniem, leniwe wczytanie, okno szczegółów z odnośnikami, bufor odczytów panelu; szczegóły w [[project_zd_powtorka_i_kolumna_subiekt]]). Do wystawienia w firmie doszły: **restart RM_SERWER** (nowe operacje `zd-wyslane-ostatnia`, `zd-zamowione-dodaj-zachowaj`) i most po buildzie (`StanPozycji.cs`, `Zapotrzebowanie.cs`). ~~Niezacommitowany został tylko `sync_agent_run.example.bat`~~ — scommitowany 03:40 jako `5548d9b` (patrz niżej). Otwarte na później: wiersze testowe w 2627 na M-OLD (214, 220, 221, 225, 228, 229) i zmiana nazwy GN-614-5-NI → GN-614-5 NI bez wpisu w historii (04–05.09). Klik w numer ZK/ZD w oknie szczegółów — user zgłosił „nie otwiera”, po poprawce (otwórz → zamknij, błąd w okienku, lift) niesprawdzone.
+
+**Aktualizacja 03.10.2026 03:40 — agent RFQ (kolumna WYCENA):** wypchnięte `5548d9b` (`sync_agent_run.example.bat` bez `--master` — od 40a02c5 agent go nie przyjmuje i padał co minutę z „unrecognized arguments”, WYCENA = „⚠ brak danych”; ten sam bat w domu i w firmie, adres RM_SERWER z `sync_config.json`) i `3ab23bc` (RM_BAZA co minutę sprawdza `rfq_last_contact` i sama przeładowuje arkusz przy zmianie stanu; próg nieaktualności 15 → 5 min). Przetestowane w domu: wyłączony agent → „⚠” po 5 min, włączony → „⚠” znika samo.
+
+**Do zrobienia w FIRMIE (agent RFQ) — bez tego WYCENA w firmie dalej „⚠ brak danych”:**
+1. W2019S: `git pull` w RM-BAZA-MANAGER.
+2. Skopiować `sync_agent_run.example.bat` → `sync_agent_run.bat` (lokalny bat jest w .gitignore, pull go nie ruszy; stary ma `--master`).
+3. Sprawdzić, że `C:\RMPAK_CLIENT\sync_config.json` na W2019S ma `"rm_serwer": {"host": ..., "port": 5060}` — bez tego bat zapisze „BRAK sync_config.json” do `sync_agent.log`.
+4. Po minucie zajrzeć do `sync_agent.log` (ma być „Kooperanci wyslani / Wyniki pobrane”, bez błędu).
+5. Nowa RM_BAZA (auto-odświeżanie WYCENA) na stanowiskach dopiero po przebudowaniu i rozesłaniu `.exe`.
 
 Stan na 03.10.2026, M-OLD. Commity wypchnięte w tej sesji: `67cbf04` (okna szybciej + pokazywane zbudowane + most zapotrzebowanie), `481c460` (CLAUDE.md: komunikacja w pakiecie). Reszta pracy z 02–03.10 — commit `7ef3d0f` (03.10.2026), wypchnięty 03.10 w nocy razem z `16bc21e`.
 
