@@ -143,9 +143,16 @@ internal static class ZkNowe
             // w Subiekcie — ta sama pułapka co przy ZD i RW. Pole nazywa się
             // DataWydaniaWystawienia i siedzi na klasie bazowej Dokument
             // (DokumentZK ma z dat tylko DataSprzedazy).
+            //
+            // ⚠️ Pole jest DateTime? — puste to NULL, nie default(DateTime).
+            // Do 03.10.2026 było tu `(DateTime)pole == default`: przy null
+            // rzutowanie rzucało wyjątek, `catch {}` go połykał i data NIE
+            // była ustawiana — zabezpieczenie nie działało dokładnie w tym
+            // przypadku, przed którym chroniło (ostrzeżenie kompilatora CS8629).
             try
             {
-                if ((DateTime)ob.Dane.DataWydaniaWystawienia == default(DateTime))
+                var dw = (DateTime?)ob.Dane.DataWydaniaWystawienia;
+                if (dw is null || dw.Value == default)
                     ob.Dane.DataWydaniaWystawienia = DateTime.Today;
             }
             catch { }

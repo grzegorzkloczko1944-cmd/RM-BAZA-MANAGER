@@ -124,6 +124,28 @@ porównane JSON-em). Zbudowane w domu do `bin/Release` (most ubity za
 zgodą usera, wstał sam przy pierwszym wywołaniu). ⚠️ W firmie nadal
 trzeba `git pull` → `dotnet build -c Release` → wystawić.
 
+**Tryb `stan` (okno wydań, karta pozycji, ceny w ZD) — 03.10 popołudnie:**
+`Stan.cs` przepisany tak samo: projekcja tylko PYTANYCH symboli (`IN`
+w SQL — semantyka SQL Servera = dawne „dokładne": bez wielkości liter
+i spacji na końcu), pełny przelot tylko gdy coś nie trafiło (luźne
+dopasowanie); ostatni zakup FZ jednym zapytaniem dla trafionych Id.
+Okno wydań 2637 (301 symboli) 1,18 s → 0,06 s, karta pozycji 0,10 →
+0,03 s. Porównane JSON-em ze starym mostem: 0 różnic na 511 pozycjach
+(stany per magazyn, położenie, ceny FZ, małe litery, spacje, brakujące).
+Pułapka złapana testem: pierwsza wersja dawała „kfl001" jako `luzne`,
+stary jako `dokladne` — WyszukajPoSymbolu porównuje jak SQL.
+
+**Data wystawienia przy zapisie ZK / PW / RW:** `(DateTime)pole == default`
+na polu `DateTime?` — przy NULL rzutowanie rzucało, `catch {}` połykał
+i data NIE była ustawiana (ostrzeżenie CS8629 w ZkNowe.cs). Poprawione
+w `ZkNowe.cs`, `Pw.cs`, `Rw.cs` na `(DateTime?)… is null || == default`.
+Dziś Sfera wypełnia pole sama, więc błąd się nie ujawniał. Realny zapis
+po poprawce sprawdzony na demo 03.10.2026 13:20: PW 11/MASTER/2026 (+1
+WJ200UME-01-1) i RW 28/MASTER/2026 (−1, Uwagi „MAGAZYN: test…\nPW: PW 11")
+— oba z read-backiem OK, data 2026-10-03, stan 200 → 201 → 200. To też
+pierwszy realny zapis RW z [[project_formularze_dokumentow_test_demo]].
+ZK po poprawce realnym zapisem niesprawdzone.
+
 ## Przegląd dokumentów / okno ZD
 
 Najnowszy na górze: most oddaje dokumenty grupami (ZK, ZD, RW, PW, WZ) —

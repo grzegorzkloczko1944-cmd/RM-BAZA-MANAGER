@@ -9,6 +9,17 @@
 // Dopasowanie symbolu — zgodnie z ustaleniami z rozpoznania (plan, sekcja 12.2):
 // dokładnie, a jeśli nie ma, to po TRIM + bez rozróżniania wielkości liter
 // (w bazie są symbole ze spacją na końcu i różnicą a/A).
+//
+// ⚠️ DWIE PROJEKCJE, ZERO NAWIGACJI W PĘTLI (03.10.2026). Do tej pory dla
+// KAŻDEGO pytanego symbolu szło WyszukajPoSymbolu, potem StanyMagazynowe,
+// s.Magazyn, Rodzaj, PolaWlasne i PozycjeDokumentu z FZ — kilka zapytań SQL
+// na wiersz. Okno wydań pyta o 170–300 symboli → 1,0–1,2 s na demo, w firmie
+// przez sieć wielokrotnie więcej. Teraz:
+//   1. wszystkie kartoteki z polami i stanami — jedno zapytanie (wzorzec
+//      Magazyn.cs), dopasowanie w pamięci,
+//   2. ostatni zakup (FZ) tylko dla trafionych Id — drugie zapytanie.
+// Wynik ma być IDENTYCZNY ze starym trybem — porównany JSON-em na trzech
+// projektach przed wdrożeniem.
 
 using System.Globalization;
 using System.IO;
@@ -25,72 +36,103 @@ internal static class Stan
     {
         var asort = sfera.Asortymenty();
 
-        // Jeden przelot po kartotekach — mapa do dopasowania luźnego.
-        // 2745 kartotek, więc trzymanie tego w pamięci jest bez znaczenia,
-        // a oszczędza zapytanie na każdy pytany symbol.
-        var wszystkie = asort.Dane.Wszystkie().Select(a => new { a.Id, a.Symbol }).ToList();
-        var luzne = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var a in wszystkie)
+        // ── 1. Kartoteki z tym, co oddajemy — projekcja.
+        // Najpierw tylko PYTANE symbole (`IN` w SQL — porównanie SQL Servera
+        // ignoruje wielkość liter i spacje na końcu, czyli dokładnie dawne
+        // dopasowanie „dokładne"). Karta jednej pozycji nie płaci za przelot
+        // przez ~2000 kartotek (0,1 s zamiast 0,37 s). Pełny przelot tylko,
+        // gdy coś nie trafiło — wtedy potrzebne dopasowanie luźne (spacja
+        // z przodu symbolu w bazie), a nieistniejące symbole i tak go wymagają.
+        var szukane = symbole.Select(s => (s ?? "").Trim()).Where(s => s.Length > 0)
+                             .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var dane = Projekcja(asort.Dane.Wszystkie().Where(a => szukane.Contains(a.Symbol)));
+        var znalezione = new HashSet<string>(dane.Select(d => (d.Symbol ?? "").TrimEnd()),
+                                             StringComparer.OrdinalIgnoreCase);
+        if (szukane.Any(s => !znalezione.Contains(s)))
+            dane = Projekcja(asort.Dane.Wszystkie());
+
+        // Dopasowanie jak dotąd: najpierw „DOKŁADNE” — tak, jak dopasowywało
+        // WyszukajPoSymbolu, czyli porównanie SQL Servera: BEZ wielkości liter
+        // i bez spacji na KOŃCU (sprawdzone 03.10.2026: „kfl001" stary tryb
+        // dawał jako dokładne). Potem LUŹNE (pełny TRIM — spacja z przodu).
+        // Luźna mapa — „ostatni wygrywa", tak samo jak w starej wersji.
+        var dokladne = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var luzne = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < dane.Count; i++)
         {
-            var k = (a.Symbol ?? "").Trim();
-            if (k.Length > 0) luzne[k] = a.Symbol!;   // ostatni wygrywa, wystarczy
+            var s = dane[i].Symbol ?? "";
+            var bezKonca = s.TrimEnd();
+            if (bezKonca.Length > 0 && !dokladne.ContainsKey(bezKonca)) dokladne[bezKonca] = i;
+            var k = s.Trim();
+            if (k.Length > 0) luzne[k] = i;
         }
 
-        var wynik = new List<Poz>();
+        var trafione = new List<(string Pytany, int Idx, string Dopasowanie)>();
         foreach (var pytany in symbole)
         {
             var szukany = (pytany ?? "").Trim();
             if (szukany.Length == 0) continue;
+            if (dokladne.TryGetValue(szukany, out var idx))
+                trafione.Add((pytany!, idx, "dokladne"));
+            else if (luzne.TryGetValue(szukany, out idx))
+                trafione.Add((pytany!, idx, "luzne"));
+            else
+                trafione.Add((pytany!, -1, "brak"));
+        }
 
-            var enc = asort.Dane.WyszukajPoSymbolu(szukany);
-            var dopasowanie = "dokladne";
-            if (enc == null && luzne.TryGetValue(szukany, out var realny))
+        // ── 2. Ostatni zakup (FZ) — tylko dla trafionych kartotek, jednym
+        // zapytaniem z podzapytaniem (OUTER APPLY), nie PozycjeDokumentu per
+        // kartoteka. Cena netto po rabacie = to, co faktycznie zapłacono.
+        var ostatni = new Dictionary<int, (DateTime Data, decimal Cena)>();
+        try
+        {
+            var idy = trafione.Where(t => t.Idx >= 0).Select(t => dane[t.Idx].Id).Distinct().ToList();
+            if (idy.Count > 0)
             {
-                enc = asort.Dane.WyszukajPoSymbolu(realny);
-                dopasowanie = "luzne";
+                var zakupy = asort.Dane.Wszystkie()
+                    .Where(a => idy.Contains(a.Id))
+                    .Select(a => new
+                    {
+                        a.Id,
+                        Ost = a.PozycjeDokumentu
+                            .Where(p => p.Dokument != null && p.Dokument.Symbol == "FZ" && p.Ilosc > 0)
+                            .OrderByDescending(p => p.Dokument.DataWprowadzenia)
+                            .Select(p => new { p.Dokument.DataWprowadzenia, Cena = p.Cena.NettoPoRabacie })
+                            .FirstOrDefault(),
+                    })
+                    .ToList();
+                foreach (var z in zakupy)
+                    if (z.Ost != null)
+                        ostatni[z.Id] = (z.Ost.DataWprowadzenia, z.Ost.Cena);
             }
-            if (enc == null)
+        }
+        catch { /* pola opcjonalne — brak ceny nie jest błędem */ }
+
+        // ── 3. Złożenie wyniku w pamięci.
+        var wynik = new List<Poz>();
+        foreach (var (pytany, idx, dopasowanie) in trafione)
+        {
+            if (idx < 0)
             {
-                wynik.Add(new Poz(pytany!, null, false, null, null, 0, 0, null, null, new List<StanMag>()));
+                wynik.Add(new Poz(pytany, null, false, null, null, 0, 0, null, null, new List<StanMag>()));
                 continue;
             }
+            var k = dane[idx];
 
-            var stany = new List<StanMag>();
-            decimal dostepne = 0, zadysponowane = 0;
-            try
-            {
-                foreach (var s in enc.StanyMagazynowe)
-                {
-                    var mag = Bezp(() => s.Magazyn?.Symbol) ?? "?";
-                    stany.Add(new StanMag(mag, s.IloscDostepna, s.IloscZadysponowana,
-                                          s.IloscZarezerwowanaIlosciowo, s.IloscZarezerwowanaDostawowo));
-                    dostepne += s.IloscDostepna;
-                    zadysponowane += s.IloscZadysponowana;
-                }
-            }
-            catch { /* brak stanów = kartoteka bez ruchu */ }
+            // Stany są już StanMag (Projekcja); sumy jak dotąd.
+            var stany = k.Stany;
+            var dostepne = stany.Sum(s => s.Dostepne);
+            var zadysponowane = stany.Sum(s => s.Zadysponowane);
 
-            // Ostatni zakup: pozycje dokumentów zakupu tej kartoteki.
             decimal? ostCena = null; string? ostData = null;
-            try
+            if (ostatni.TryGetValue(k.Id, out var oz))
             {
-                var poz = enc.PozycjeDokumentu
-                    .Where(p => p.Dokument != null && p.Dokument.Symbol == "FZ" && p.Ilosc > 0)
-                    .OrderByDescending(p => p.Dokument.DataWprowadzenia)
-                    .Take(1).ToList();
-                if (poz.Count > 0)
-                {
-                    var p = poz[0];
-                    ostData = p.Dokument.DataWprowadzenia.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-                    // Cena jednostkowa netto po rabacie — to, co faktycznie zaplacono za sztuke.
-                    ostCena = decimal.Round(p.Cena.NettoPoRabacie, 2);
-                }
+                ostData = oz.Data.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                ostCena = decimal.Round(oz.Cena, 2);
             }
-            catch { /* pola opcjonalne — brak ceny nie jest błędem */ }
 
             wynik.Add(new Poz(
-                pytany!, enc.Symbol, true, enc.Nazwa,
-                Bezp(() => enc.Rodzaj?.Nazwa),
+                pytany, k.Symbol, true, k.Nazwa, k.Rodzaj,
                 dostepne, zadysponowane,
                 ostCena, ostData, stany) with
                 {
@@ -98,10 +140,9 @@ internal static class Stan
                     // Id kartoteki — JEDYNA tozsamosc, ktorej nie rusza zmiana
                     // symbolu ani nazwy w Subiekcie. RM_BAZA zapisuje je jako
                     // `subiekt_id` i po nim dopasowuje pozycje (02.10.2026).
-                    Id = enc.Id,
-                    // Polozenie (regal/polka) — proste pole wlasne PoleWlasne1.
-                    Polozenie = (Bezp(() => (string?)enc.PolaWlasne?.PoleWlasne1) ?? "").Trim(),
-                    Opis = (Bezp(() => (string?)enc.Opis) ?? "").Trim(),
+                    Id = k.Id,
+                    Polozenie = (k.Polozenie ?? "").Trim(),
+                    Opis = (k.Opis ?? "").Trim(),
                 });
         }
 
@@ -112,6 +153,38 @@ internal static class Stan
         else File.WriteAllText(outPath, json, new UTF8Encoding(false));
         return 0;
     }
+
+    /// Jedna projekcja SQL: kartoteka + rodzaj + położenie + stany per magazyn.
+    /// Wszystkie pola w jednym Select — nawigacje po materializacji to
+    /// osobne zapytania na każdy wiersz (zasada z CLAUDE.md).
+    static List<Kart> Projekcja(IQueryable<Asortyment> zrodlo) =>
+        zrodlo.Select(a => new
+            {
+                a.Id,
+                a.Symbol,
+                a.Nazwa,
+                Rodzaj = a.Rodzaj.Nazwa,
+                a.Opis,
+                // Polozenie (regal/polka) — proste pole wlasne PoleWlasne1.
+                Polozenie = a.PolaWlasne.PoleWlasne1,
+                Stany = a.StanyMagazynowe.Select(s => new
+                {
+                    Magazyn = s.Magazyn.Symbol,
+                    s.IloscDostepna,
+                    s.IloscZadysponowana,
+                    s.IloscZarezerwowanaIlosciowo,
+                    s.IloscZarezerwowanaDostawowo,
+                }),
+            })
+            .ToList()
+            .Select(a => new Kart(a.Id, a.Symbol, a.Nazwa, a.Rodzaj, a.Opis, a.Polozenie,
+                a.Stany.Select(s => new StanMag(s.Magazyn ?? "?", s.IloscDostepna,
+                    s.IloscZadysponowana, s.IloscZarezerwowanaIlosciowo,
+                    s.IloscZarezerwowanaDostawowo)).ToList()))
+            .ToList();
+
+    internal record Kart(int Id, string? Symbol, string? Nazwa, string? Rodzaj, string? Opis,
+                         string? Polozenie, List<StanMag> Stany);
 
     static string? Bezp(Func<string?> f) { try { return f(); } catch { return null; } }
 

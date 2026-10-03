@@ -111,8 +111,11 @@ internal static class Rw
                 try
                 {
                     // `rw` jest dynamic (Utworz z konfiguracją znalezioną refleksją),
-                    // więc porównanie z gołym `default` nie ma typu — stąd DateTime.
-                    if ((DateTime)rw.Dane.DataWydaniaWystawienia == default(DateTime))
+                    // więc porównanie z gołym `default` nie ma typu — stąd jawny
+                    // DateTime?. NIE `(DateTime)`: puste pole to NULL, rzutowanie
+                    // rzucało, `catch {}` połykał i data nie była ustawiana.
+                    var dw = (DateTime?)rw.Dane.DataWydaniaWystawienia;
+                    if (dw is null || dw.Value == default)
                         rw.Dane.DataWydaniaWystawienia = DateTime.Today;
                 }
                 catch { }

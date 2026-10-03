@@ -126,7 +126,10 @@ internal static class Pw
                 // i magazynu dokument jest w bazie, ale nie widać go na listach.
                 try
                 {
-                    if ((DateTime)pw.Dane.DataWydaniaWystawienia == default(DateTime))
+                    // Puste pole to NULL — `(DateTime)null` rzucał, `catch {}`
+                    // połykał i data nie była ustawiana (patrz ZkNowe.cs).
+                    var dw = (DateTime?)pw.Dane.DataWydaniaWystawienia;
+                    if (dw is null || dw.Value == default)
                         pw.Dane.DataWydaniaWystawienia = DateTime.Today;
                 }
                 catch { }
