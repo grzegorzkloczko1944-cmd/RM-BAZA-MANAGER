@@ -1,6 +1,6 @@
 {
  "protokol": 1,
- "zbudowano": "2026-10-02 16:43",
- "sha": "ca50ac9",
- "uwaga": "tozsamosc po Id kartoteki: pola `Id`/`id` w trybach stan, zk-ilosci, wydanie-stan; zk-poz-usun naprawde usuwa pozycje z ZK (ob.Dane.Pozycje.Remove); sonda probe-pozycje (zapis tylko TEST-USUN*); csproj: Stimulsoft poza CopyLocal."
+ "zbudowano": "2026-10-03 14:11",
+ "sha": "ac072b0",
+ "uwaga": "tryb stan jednym zapytaniem (okno wydan 1,2 s -> 0,06 s) i data wystawienia ZK/PW/RW; stan-pozycji jednym zapytaniem; nowy tryb zk-ilosc (ilosc/cena na ZK); zk-poz-usun przyjmuje numer ZK w planie; zachowane z ca50ac9: Id kartoteki w stan/zk-ilosci/wydanie-stan, usuwanie pozycji przez Dane.Pozycje.Remove."
 }
