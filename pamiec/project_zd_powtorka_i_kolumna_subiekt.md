@@ -86,8 +86,12 @@ wpadnie do zamówienia starego ZD 5).
   (`_zaplanuj_sprawdzenie_subiekta` z `refresh_data`, tylko gdy pid się
   zmienił; zmiana projektu przed upływem kasuje odliczanie; stanowisko bez
   mostu nic nie planuje). `sprawdz_w_subiekcie(cichy=True)` — bez okienek,
-  błąd do konsoli; z menu jak dotąd, z podsumowaniem. Stan trwały na
-  serwerze (widoczny bez mostu) — nadal otwarte.
+  błąd do konsoli; z menu jak dotąd, z podsumowaniem.
+- **Kolumna SUBIEKT tylko na stanowiskach z mostem** — wynik żyje
+  w pamięci RM_BAZA, nigdzie nie zapisywany; stanowisko bez mostu widzi
+  pustą kolumnę. Zaproponowany zapis migawki na serwer (stanowisko z mostem
+  zapisuje, reszta czyta z „stan z 10:42 (kto)") — **user 04.10.2026:
+  „nie robimy na razie"**. Nie wracać z tym bez jego inicjatywy.
 - **Samo się odświeża po zmianie**: `subiekt_panel.po_zmianie_subiekta(fn)`
   + `uniewaznij_odczyty()` woła słuchaczy; wołane z `subiekt_bridge.call
   (write=True)` (każdy zapis do Subiekta) i z `_odnotuj_wyslanie` (wysyłka
