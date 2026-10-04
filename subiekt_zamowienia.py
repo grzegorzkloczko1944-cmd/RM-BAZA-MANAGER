@@ -184,6 +184,11 @@ def stan_pozycji(symbole, projekt=None, timeout=TIMEOUT_S):
 
     return {p["Pytany"]: {
         "kartoteka": bool(p.get("MaKartoteke")),
+        # Symbol POD KTORYM pozycja stoi na dokumentach Subiekta. Dla detali
+        # RMPAK rowny numerowi rysunku, dla handlowych (lozyska, pasy) juz
+        # nie — RM_BAZA podswietla po nim wiersz w Przegladzie dokumentow.
+        # Starszy most go nie zwraca: wtedy zostaje pytany numer.
+        "symbol_kartoteki": (p.get("SymbolKartoteki") or p.get("Pytany") or "").strip(),
         "nazwa": p.get("Nazwa") or "",
         "stan": float(p.get("Stan") or 0),
         "zk": p.get("Zk") or "",

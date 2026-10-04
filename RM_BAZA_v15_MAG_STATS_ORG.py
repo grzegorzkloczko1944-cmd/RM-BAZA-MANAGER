@@ -33716,7 +33716,16 @@ class MainWindow(tk.Tk):
                         project_name = _w[0]["name"] if _w else None
                     except Exception:
                         project_name = None
-                nowe = subiekt_dokumenty_gui.open_window(self, szukaj=numer, projekt=project_name)
+                # `pozycja=nr` — Przeglad podswietli TEN detal w dolnej tabeli
+                # dokumentu. Bez tego user po klinieciu w „ZD 8/09/2026"
+                # szukal swojego symbolu wzrokiem wsrod kilkudziesieciu
+                # wierszy zamowienia (03.10.2026).
+                # Symbol Z KARTOTEKI, nie numer rysunku z arkusza — na
+                # dokumencie Subiekta stoi wlasnie on (dla pozycji handlowych
+                # oba sie roznia). Gdy most go nie zwrocil, zostaje `nr`.
+                sym_dok = (info.get("symbol_kartoteki") or nr or "").strip()
+                nowe = subiekt_dokumenty_gui.open_window(
+                    self, szukaj=numer, projekt=project_name, pozycja=sym_dok)
             except Exception as e:
                 import traceback
                 traceback.print_exc()

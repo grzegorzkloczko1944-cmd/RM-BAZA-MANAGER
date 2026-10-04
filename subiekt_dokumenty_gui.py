@@ -257,7 +257,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
     RODZAJE_MAGAZYNOWE = ("PW", "RW", "WZ")
     NAGL_KOSZT = ("Koszt jedn.", "Wartość magazynowa")
 
-    def __init__(self, parent, szukaj=None, projekt=None):
+    def __init__(self, parent, szukaj=None, projekt=None, pozycja=None):
         """`szukaj` — numer dokumentu do pokazania od razu po otwarciu.
 
         Uzywa tego okno wydania: klik w numer RW przy pozycji otwiera ten
@@ -270,6 +270,11 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
         #: Numer do zaznaczenia po pierwszym wypelnieniu listy. Czyszczony
         #: po uzyciu, zeby kolejne „Odswiez" nie przeskakiwalo kursorem.
         self._do_zaznaczenia = (szukaj or "").strip() or None
+        #: Symbol pozycji do podswietlenia w DOLNEJ tabeli po otwarciu.
+        #: Karta szczegolow („Dokument: ZD 8/09/2026") wie, o ktory detal
+        #: chodzi — bez tego user po klinieciu szukal go wzrokiem wsrod
+        #: kilkudziesieciu wierszy dokumentu (03.10.2026).
+        self._poz_do_zaznaczenia = (pozycja or "").strip() or None
         #: Numer projektu wybranego w RM_BAZA — filtr „Projekt" ustawiany nim
         #: przy PIERWSZYM wczytaniu (02.10.2026). Pomijany, gdy okno otwarto
         #: na konkretny dokument (`szukaj`), bo ten moze byc z innego projektu.
@@ -1518,7 +1523,31 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
                 self._on_wybor_dokumentu()
             except Exception:
                 pass
+            self._zaznacz_pozycje_zadana()
             break
+
+    def _zaznacz_pozycje_zadana(self):
+        """Podswietla w dolnej tabeli pozycje o podanym symbolu.
+
+        Wolane raz, zaraz po wypelnieniu pozycji dokumentu. Symbol
+        porownujemy po obcieciu bialych znakow i wielkosci liter — karta
+        szczegolow podaje go tak, jak stoi w arkuszu. Gdy pozycji nie ma
+        (inny dokument, filtr), nie robimy nic.
+        """
+        sym = getattr(self, "_poz_do_zaznaczenia", None)
+        if not sym or not self.sheet_poz:
+            return
+        self._poz_do_zaznaczenia = None        # jednorazowo
+        cel = sym.strip().upper()
+        try:
+            i_sym = [k for k, _n, _w in self.KOL_POZ].index("symbol")
+            for i, w in enumerate(self.sheet_poz.get_sheet_data()):
+                if len(w) > i_sym and str(w[i_sym]).strip().upper() == cel:
+                    self.sheet_poz.select_row(i)
+                    self.sheet_poz.see(row=i, column=0)
+                    break
+        except Exception:
+            pass                               # starsze tksheet — nieistotne
 
     def _on_wybor_dokumentu(self, _event=None):
         if not self.sheet or not self.sheet_poz:
@@ -1757,7 +1786,7 @@ class DokumentyWindow(tk.Toplevel, Kreciolek):
                  + (f"   ·   {wart:,.2f} zł".replace(",", " ") if wart else ""))
 
 
-def open_window(parent, szukaj=None, projekt=None):
+def open_window(parent, szukaj=None, projekt=None, pozycja=None):
     """Punkt wejścia dla RM_BAZA.
 
     `szukaj` — numer dokumentu, na którym okno ma się ustawić od razu
@@ -1765,7 +1794,7 @@ def open_window(parent, szukaj=None, projekt=None):
     `projekt` — nazwa projektu wybranego w RM_BAZA; filtr „Projekt" startuje
     na jego numerze.
     """
-    return DokumentyWindow(parent, szukaj=szukaj, projekt=projekt)
+    return DokumentyWindow(parent, szukaj=szukaj, projekt=projekt, pozycja=pozycja)
 
 
 if __name__ == "__main__":

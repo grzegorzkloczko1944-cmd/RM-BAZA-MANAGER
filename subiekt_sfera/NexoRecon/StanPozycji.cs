@@ -148,6 +148,11 @@ internal static class StanPozycji
 
             wynik.Add(new Poz(
                 pytany!, jest, jest ? k.Nazwa : null, jest ? k.Stan : 0,
+                // Symbol, pod ktorym pozycja stoi NA DOKUMENCIE — dla detali
+                // RMPAK rowny numerowi rysunku, ale dla pozycji handlowych
+                // (lozyska, pasy) juz nie. RM_BAZA podswietla po nim wiersz
+                // w Przegladzie dokumentow (03.10.2026).
+                symbolReal,
                 zk.Numer ?? "", zk.Ilosc,
                 zd.Numer ?? "", zd.Dostawca ?? "", zd.Ilosc, zd.Status ?? ""));
         }
@@ -164,6 +169,7 @@ internal static class StanPozycji
     }
 
     internal record Poz(string Pytany, bool MaKartoteke, string? Nazwa, decimal Stan,
+                        string SymbolKartoteki,
                         string Zk, decimal IloscZk,
                         string Zd, string Dostawca, decimal IloscZd, string StatusZd);
 }
