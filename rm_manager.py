@@ -4658,6 +4658,57 @@ def check_optimizer_readiness(project_db_path: str, project_id: int) -> Dict:
     }
 
 
+def podsumowanie_projektu_lekkie(rm_db_path: str, project_id: int) -> Dict:
+    """Tylko to, czego potrzebuje selektor projektów (Multi-projekt):
+    {is_paused, status, overall_variance_days, completion_forecast} —
+    JEDNO otwarcie bazy projektu.
+
+    `get_project_status_summary` + osobne `is_project_paused` otwierały bazę
+    każdego projektu 5 razy (prognoza, aktywne etapy, pauza ×2, lista pauz),
+    a selektor robi to dla wszystkich ~60 projektów przy każdym otwarciu —
+    w firmie każde otwarcie idzie przez udział sieciowy (04.10.2026).
+    Ocena terminów ta sama funkcja co w pełnym podsumowaniu."""
+    con = _open_rm_connection(rm_db_path)
+    try:
+        paused = con.execute(
+            "SELECT id FROM project_pauses WHERE project_id = ? AND end_at IS NULL",
+            (project_id,)).fetchone() is not None
+        forecast = _recalculate_forecast_with_con(con, project_id)
+    finally:
+        con.close()
+    status, total_variance, completion_forecast = _ocena_terminow(forecast)
+    return {"is_paused": paused, "status": status,
+            "overall_variance_days": total_variance,
+            "completion_forecast": completion_forecast}
+
+
+def _ocena_terminow(forecast: Dict):
+    """(status, odchylenie_dni, prognoza_konca) z przeliczonej prognozy —
+    wspólne dla get_project_status_summary i podsumowania lekkiego."""
+    def _to_dt(v):
+        return datetime.fromisoformat(v) if isinstance(v, str) else v
+
+    forecast_end_dates = [_to_dt(fc['forecast_end']) for fc in forecast.values()
+                          if fc.get('forecast_end')]
+    template_end_dates = [_to_dt(fc['template_end']) for fc in forecast.values()
+                          if fc.get('template_end')]
+    completion_forecast_dt = max(forecast_end_dates) if forecast_end_dates else None
+    planned_end_dt = max(template_end_dates) if template_end_dates else None
+    if completion_forecast_dt and planned_end_dt:
+        total_variance = (completion_forecast_dt - planned_end_dt).days
+    else:
+        total_variance = 0
+    if total_variance > 10:
+        status = "DELAYED"
+    elif total_variance > 5:
+        status = "AT_RISK"
+    else:
+        status = "ON_TRACK"
+    completion_dates = [fc['forecast_end'] for fc in forecast.values() if fc.get('forecast_end')]
+    completion_forecast = max(completion_dates) if completion_dates else None
+    return status, total_variance, completion_forecast
+
+
 def get_project_status_summary(rm_db_path: str, project_id: int) -> Dict:
     """Generuje podsumowanie dla dashboard"""
     forecast = recalculate_forecast(rm_db_path, project_id)
@@ -5628,6 +5679,119 @@ def remove_staff_from_stage(project_db_path: str, project_id: int,
         
     finally:
         con.close()
+
+
+def id_pracownikow_etapow(con: sqlite3.Connection, project_id: int) -> Dict[str, set]:
+    """{stage_code: zbiór employee_id} — tylko numery, BEZ pytania serwera
+    o nazwiska. Te same dwa źródła co get_stage_assigned_staff (JSON
+    w project_stages + stage_staff_assignments), na już otwartym połączeniu.
+
+    Dla planu serwisantów, który i tak przecina numery z listą serwisantów —
+    nazwiska do niczego mu nie służą, a pytanie o nie per projekt to 60
+    zapytań przy każdym przeliczeniu (04.10.2026)."""
+    import json
+    wynik, po_id = {}, {}
+    for r in con.execute("SELECT id, stage_code, assigned_staff FROM project_stages"
+                         " WHERE project_id = ?", (project_id,)).fetchall():
+        if r['stage_code'] in wynik:
+            continue                      # pierwszy wiersz etapu — jak fetchone()
+        try:
+            js = json.loads(r['assigned_staff'] or '[]')
+        except (json.JSONDecodeError, TypeError):
+            js = []
+        wynik[r['stage_code']] = {s['employee_id'] for s in js
+                                  if isinstance(s, dict) and 'employee_id' in s}
+        po_id[r['id']] = r['stage_code']
+    try:
+        for r in con.execute("SELECT project_stage_id, employee_id FROM stage_staff_assignments"):
+            sc = po_id.get(r['project_stage_id'])
+            if sc is not None:
+                wynik[sc].add(r['employee_id'])
+    except Exception:
+        pass                              # stara baza bez tabeli
+    return wynik
+
+
+def get_stage_assigned_staff_wszystkie(project_db_path: str, project_id: int,
+                                       con: sqlite3.Connection = None) -> Dict[str, List[Dict]]:
+    """{stage_code: lista} — DOKŁADNIE to, co get_stage_assigned_staff dla
+    każdego etapu, ale w pakiecie: jedno otwarcie bazy projektu, dwa zapytania
+    SQL i jeden odczyt nazwisk z serwera dla całego projektu.
+
+    Oś czasu pytała etap po etapie (~25 otwarć pliku na udziale + 25 zapytań
+    o nazwiska przy każdym odświeżeniu, 04.10.2026). Kolejność i zawartość
+    list zgodna z wersją pojedynczą — sprawdzone na wszystkich projektach.
+
+    `con` — już otwarte połączenie (np. Gantt multi-projekt czyta z tej samej
+    bazy także oś czasu); wtedy nie otwieramy i nie zamykamy pliku drugi raz."""
+    import json
+    wlasne = con is None
+    if wlasne:
+        con = _open_rm_connection(project_db_path)
+    etapy = {}            # stage_code -> (json_staff, table_eids)
+    try:
+        wiersze = con.execute("""
+            SELECT id, stage_code, assigned_staff
+            FROM project_stages WHERE project_id = ?
+        """, (project_id,)).fetchall()
+        po_id = {}
+        for r in wiersze:
+            # Pierwszy wiersz danego etapu — jak fetchone() w wersji pojedynczej.
+            if r['stage_code'] in etapy:
+                continue
+            try:
+                js = json.loads(r['assigned_staff'] or '[]')
+            except (json.JSONDecodeError, TypeError):
+                js = []
+            etapy[r['stage_code']] = (js, set())
+            po_id[r['id']] = r['stage_code']
+        try:
+            for r in con.execute("SELECT project_stage_id, employee_id FROM stage_staff_assignments"):
+                sc = po_id.get(r['project_stage_id'])
+                if sc is not None:
+                    etapy[sc][1].add(r['employee_id'])
+        except Exception:
+            pass  # stara baza bez tabeli
+    finally:
+        if wlasne:
+            con.close()
+
+    wszystkie = set()
+    for js, te in etapy.values():
+        wszystkie |= {s['employee_id'] for s in js if isinstance(s, dict) and 'employee_id' in s}
+        wszystkie |= te
+    employee_map = {}
+    if wszystkie:
+        employee_map = {e['id']: {'name': e['name'], 'category': e['category']}
+                        for e in rmm_read("rmm-employees-po-idach",
+                                          {"idy_json": json.dumps(sorted(wszystkie))})}
+    wynik = {}
+    for sc, (json_staff, table_eids) in etapy.items():
+        lista, seen = [], set()
+        for staff in json_staff:
+            if not isinstance(staff, dict) or 'employee_id' not in staff:
+                continue
+            emp_id = staff['employee_id']
+            if emp_id in employee_map and emp_id not in seen:
+                seen.add(emp_id)
+                lista.append({
+                    'employee_id': emp_id,
+                    'employee_name': employee_map[emp_id]['name'],
+                    'category': employee_map[emp_id]['category'],
+                    'assigned_at': staff.get('assigned_at'),
+                    'assigned_by': staff.get('assigned_by'),
+                })
+        for eid in sorted(table_eids - seen):
+            if eid in employee_map:
+                lista.append({
+                    'employee_id': eid,
+                    'employee_name': employee_map[eid]['name'],
+                    'category': employee_map[eid]['category'],
+                    'assigned_at': None,
+                    'assigned_by': None,
+                })
+        wynik[sc] = lista
+    return wynik
 
 
 def get_stage_assigned_staff(project_db_path: str, rm_master_db_path: str = None,
@@ -8113,10 +8277,141 @@ ABSENCE_TYPES = [
     {'code': 'L4',              'label': 'L4 (chorobowe)',     'counts_as_vacation': False, 'annual_limit': None},
     {'code': 'DELEGACJA',       'label': 'Delegacja',          'counts_as_vacation': False, 'annual_limit': None},
     {'code': 'SZKOLENIE',       'label': 'Szkolenie',          'counts_as_vacation': False, 'annual_limit': None},
+    # Pół dnia / kilka godzin — NIE schodzi z żadnej puli, tylko „wisi" na
+    # saldzie godzin pracownika, dopóki nie zostanie odpracowane albo, po
+    # nazbieraniu 8 h, rozliczone dniem urlopu (decyzja usera 04.10.2026).
+    # Patrz get_saldo_godzin / dodaj_rozliczenie_godzin.
+    {'code': 'GODZINY',         'label': 'Godziny (saldo)',    'counts_as_vacation': False, 'annual_limit': None},
     {'code': 'INNE',            'label': 'Inne',               'counts_as_vacation': False, 'annual_limit': None},
 ]
 ABSENCE_TYPE_CODES = [t['code'] for t in ABSENCE_TYPES]
 ABSENCE_TYPE_BY_CODE = {t['code']: t for t in ABSENCE_TYPES}
+
+# ── SALDO GODZIN ────────────────────────────────────────────────────────────
+GODZINY_NA_DZIEN = 8.0      # tyle godzin salda = 1 dzień urlopu
+ROZLICZENIE_ODPRACOWANIE = 'ODPRACOWANIE'
+ROZLICZENIE_URLOP = 'URLOP'
+
+
+def godziny_wpisu(a: Dict) -> float:
+    """Ile godzin trwa wpis nieobecności: z pól od–do, a bez nich 8 h × dni
+    kalendarzowe (typ GODZINY wymaga godzin, więc to tylko zabezpieczenie)."""
+    tf, tt = a.get('time_from'), a.get('time_to')
+    if tf and tt:
+        try:
+            h = (datetime.strptime(tt, "%H:%M") - datetime.strptime(tf, "%H:%M")).seconds / 3600.0
+            if h > 0:
+                return round(h, 2)
+        except ValueError:
+            pass
+    try:
+        d0 = datetime.strptime(a['date_from'][:10], "%Y-%m-%d").date()
+        d1 = datetime.strptime(a['date_to'][:10], "%Y-%m-%d").date()
+        return GODZINY_NA_DZIEN * max(1, (d1 - d0).days + 1)
+    except (KeyError, ValueError, TypeError):
+        return 0.0
+
+
+def get_godziny_rozliczenia(rm_master_db_path: str = None,
+                            employee_id: int = None) -> List[Dict]:
+    """Rozliczenia salda godzin (odpracowania i „8 h urlopem"), najnowsze
+    pierwsze. Jeden odczyt serwera; filtr po pracowniku w pamięci. Serwer
+    sprzed 04.10.2026 nie zna operacji — wtedy pusta lista, nie wyjątek."""
+    try:
+        wiersze = rmm_read("rmm-godziny-rozliczenia-wszystkie")
+    except Exception as e:
+        if "nieznana operacja" in str(e):
+            return []
+        raise
+    return [dict(w) for w in wiersze
+            if employee_id is None or w.get('employee_id') == employee_id]
+
+
+def get_saldo_godzin(rm_master_db_path: str = None, avail: List[Dict] = None,
+                     rozliczenia: List[Dict] = None) -> Dict[int, Dict]:
+    """Saldo wiszących godzin per pracownik — CAŁA historia, bez roku
+    (rozliczane w dowolnym terminie).
+
+    {employee_id: {'nieobecnosci_h', 'odpracowane_h', 'urlopem_h', 'saldo_h'}}
+    saldo_h > 0 = pracownik „wisi" firmie tyle godzin.
+    Liczone z DWÓCH odczytów dla całego zespołu (nieobecności i rozliczenia);
+    wołający może podać już pobrane listy, żeby nie pytać serwera drugi raz.
+    """
+    if avail is None:
+        avail = get_employee_availability(rm_master_db_path)
+    if rozliczenia is None:
+        rozliczenia = get_godziny_rozliczenia(rm_master_db_path)
+    out: Dict[int, Dict] = {}
+
+    def rec(eid):
+        return out.setdefault(eid, {'nieobecnosci_h': 0.0, 'odpracowane_h': 0.0,
+                                    'urlopem_h': 0.0, 'saldo_h': 0.0})
+    for a in avail:
+        if (a.get('reason') or '').upper() != 'GODZINY':
+            continue
+        if (a.get('status') or 'ZATWIERDZONY').upper() == 'ODRZUCONY':
+            continue
+        rec(a['employee_id'])['nieobecnosci_h'] += godziny_wpisu(a)
+    for r in rozliczenia:
+        klucz = 'urlopem_h' if (r.get('rodzaj') or '').upper() == ROZLICZENIE_URLOP else 'odpracowane_h'
+        rec(r['employee_id'])[klucz] += float(r.get('hours') or 0)
+    for v in out.values():
+        v['saldo_h'] = round(v['nieobecnosci_h'] - v['odpracowane_h'] - v['urlopem_h'], 2)
+        for k in ('nieobecnosci_h', 'odpracowane_h', 'urlopem_h'):
+            v[k] = round(v[k], 2)
+    return out
+
+
+def dodaj_rozliczenie_godzin(rm_master_db_path: str = None, employee_id: int = 0,
+                             date: str = "", hours: float = 0.0, rodzaj: str = ROZLICZENIE_ODPRACOWANIE,
+                             notes: str = None, user: str = None) -> int:
+    """Zdejmuje godziny z salda: ODPRACOWANIE (dowolna liczba godzin) albo
+    URLOP (8 h = 1 dzień z puli urlopu w roku `date`). Jeden batch z audytem."""
+    rodzaj = (rodzaj or ROZLICZENIE_ODPRACOWANIE).upper()
+    if rodzaj not in (ROZLICZENIE_ODPRACOWANIE, ROZLICZENIE_URLOP):
+        raise ValueError(f"nieznany rodzaj rozliczenia: {rodzaj}")
+    hours = float(hours)
+    if hours <= 0:
+        raise ValueError("liczba godzin musi być większa od 0")
+    wynik = rmm_exec("rmm-godziny-rozliczenie-dodaj", {
+        "employee_id": employee_id, "date": date, "hours": hours,
+        "rodzaj": rodzaj, "notes": notes, "created_by": user})
+    nowe_id = int((wynik or {}).get("lastrowid") or 0)
+    log_audit(None, 'godziny', 'ADD', employee_id=employee_id, entity_id=nowe_id,
+              field=rodzaj, new_value=f"{date} {hours:g} h", user=user)
+    return nowe_id
+
+
+def usun_rozliczenie_godzin(rm_master_db_path: str = None, rozliczenie_id: int = 0,
+                            employee_id: int = None, opis: str = "", user: str = None):
+    """Usuwa rozliczenie (godziny wracają na saldo) + wpis audytu, jednym batchem."""
+    operacje = [{"operation": "rmm-godziny-rozliczenie-usun-po-id",
+                 "params": {"id": rozliczenie_id}}]
+    if employee_id:
+        operacje.append({"operation": "rmm-audit-log-dodaj", "params": _wpis_audytu(
+            'godziny', 'DELETE', employee_id, rozliczenie_id, 'rozliczenie',
+            opis, None, None, user)})
+    rmm_batch(operacje)
+
+
+def fmt_dni_godz(dni: float) -> str:
+    """12.5 → „12 dni 4 h", 0.25 → „2 h", 3 → „3 dni". Ujemne z minusem."""
+    try:
+        dni = float(dni)
+    except (TypeError, ValueError):
+        return str(dni)
+    znak = "−" if dni < 0 else ""
+    dni = abs(dni)
+    cale = int(dni + 1e-9)
+    godz = round((dni - cale) * GODZINY_NA_DZIEN, 1)
+    if godz >= GODZINY_NA_DZIEN:
+        cale, godz = cale + 1, 0.0
+    czesci = []
+    if cale:
+        czesci.append(f"{cale} {'dzień' if cale == 1 else 'dni'}")
+    if godz:
+        czesci.append(f"{godz:g} h")
+    return znak + (" ".join(czesci) if czesci else "0")
 # Statusy wniosku / wpisu.
 ABSENCE_STATUSES = ['OCZEKUJE', 'ZATWIERDZONY', 'ODRZUCONY']
 
@@ -8363,6 +8658,26 @@ def set_vacation_base(rm_master_db_path: str = None, employee_id: int = 0,
     ])
 
 
+def get_pule_urlopowe(rm_master_db_path: str = None):
+    """Pule WSZYSTKICH pracowników dwoma odczytami: ({eid: bazowa},
+    {(eid, rok): korekta}). None, gdy serwer nie zna operacji zbiorczych
+    (sprzed 04.10.2026) — wołający wraca wtedy do pytań per pracownik.
+
+    Zakładka „Pula urlopu" pytała 4× na osobę (bazowa, czy jest korekta,
+    korekta, znów bazowa) — ~144 zapytania przy każdym wejściu.
+    """
+    try:
+        bazy = {w['employee_id']: float(w['days'])
+                for w in rmm_read("rmm-employee-vacation-base-wszystkie")}
+        korekty = {(w['employee_id'], int(w['year'])): w['days']
+                   for w in rmm_read("rmm-employee-vacation-quota-wszystkie")}
+    except Exception as e:
+        if "nieznana operacja" in str(e):
+            return None
+        raise
+    return bazy, korekty
+
+
 def has_vacation_quota_for_year(rm_master_db_path: str = None, employee_id: int = 0,
                                 year: int = 0) -> bool:
     """Czy na dany rok jest jawna korekta puli."""
@@ -8541,12 +8856,26 @@ def _count_absence_days(date_from: str, date_to: str, time_from: str = None,
     return float(day_span)
 
 
-def _used_urlop_in_year(rm_master_db_path: str, employee_id: int, year: int) -> float:
-    """Suma dni URLOP wykorzystanych przez pracownika w danym roku (8h=1d)."""
+def _urlop_z_godzin(rozliczenia: List[Dict], employee_id: int, year: int) -> float:
+    """Dni urlopu wydane z salda godzin w danym roku (rozliczenia „URLOP")."""
+    rok = str(year)
+    return sum(float(r.get('hours') or 0) for r in rozliczenia
+               if r.get('employee_id') == employee_id
+               and (r.get('rodzaj') or '').upper() == ROZLICZENIE_URLOP
+               and str(r.get('date') or '')[:4] == rok) / GODZINY_NA_DZIEN
+
+
+def _used_urlop_in_year(rm_master_db_path: str, employee_id: int, year: int,
+                        rozliczenia: List[Dict] = None) -> float:
+    """Suma dni URLOP wykorzystanych przez pracownika w danym roku (8h=1d)
+    + dni wydane z salda godzin („8 h urlopem"). `rozliczenia` — już
+    pobrana lista, żeby raport nie pytał serwera per pracownik."""
     y_from, y_to = f"{year}-01-01", f"{year}-12-31"
     avail = get_employee_availability(rm_master_db_path, employee_id=employee_id,
                                       date_from=y_from, date_to=y_to)
-    total = 0.0
+    if rozliczenia is None:
+        rozliczenia = get_godziny_rozliczenia(rm_master_db_path)
+    total = _urlop_z_godzin(rozliczenia, employee_id, year)
     for a in avail:
         if (a.get('status') or 'ZATWIERDZONY').upper() == 'ODRZUCONY':
             continue  # odrzucone wnioski nie liczą się do wykorzystanego urlopu
@@ -8558,7 +8887,183 @@ def _used_urlop_in_year(rm_master_db_path: str, employee_id: int, year: int) -> 
     return total
 
 
-def get_vacation_report(rm_master_db_path: str, year: int) -> List[Dict]:
+def kalendarz_firmy_mapa(rm_master_db_path: str = None) -> Dict[str, str]:
+    """{data ISO: day_type} całego kalendarza firmowego — jeden odczyt.
+    Dla miejsc, które liczą dni robocze dla wielu zakresów naraz."""
+    return {r['date']: r['day_type'] for r in rmm_read("rmm-company-calendar-wszystkie")}
+
+
+def dni_robocze_lista(kal: Dict[str, str], date_from: str, date_to: str) -> List[str]:
+    """To samo co get_working_days(...), ale z mapy kalendarza w pamięci."""
+    try:
+        d = datetime.fromisoformat(date_from[:10]).date()
+        end = datetime.fromisoformat(date_to[:10]).date()
+    except (ValueError, TypeError):
+        return []
+    out = []
+    while d <= end:
+        iso = d.isoformat()
+        typ = kal.get(iso)
+        if (typ == 'SATURDAY_WORK') if typ is not None else (d.weekday() < 5):
+            out.append(iso)
+        d += timedelta(days=1)
+    return out
+
+
+def _dni_robocze_w_pamieci(kal: Dict[str, str], date_from: str, date_to: str) -> float:
+    """To samo co len(get_working_days(...)), ale z kalendarza już w pamięci.
+    Pon–pt bez wpisu = roboczy; SATURDAY_WORK = roboczy; HOLIDAY / dzień
+    wolny = wolny."""
+    try:
+        d = datetime.fromisoformat(date_from[:10]).date()
+        end = datetime.fromisoformat(date_to[:10]).date()
+    except (ValueError, TypeError):
+        return 0.0
+    n = 0
+    while d <= end:
+        typ = kal.get(d.isoformat())
+        if typ is not None:
+            if typ == 'SATURDAY_WORK':
+                n += 1
+        elif d.weekday() < 5:
+            n += 1
+        d += timedelta(days=1)
+    return float(n)
+
+
+def _dni_wpisu_w_pamieci(a: Dict, kal: Dict[str, str]) -> float:
+    """_count_absence_days(..., rm_master_db_path=…) bez pytania serwera:
+    ręczny override → wpis godzinowy (8 h = 1 dzień) → dni robocze."""
+    ov = a.get('days_override')
+    if ov is not None:
+        try:
+            if float(ov) > 0:
+                return float(ov)
+        except (TypeError, ValueError):
+            pass
+    tf, tt = a.get('time_from'), a.get('time_to')
+    if tf and tt and (a.get('date_from') or '')[:10] == (a.get('date_to') or '')[:10]:
+        try:
+            h = (datetime.strptime(tt, "%H:%M") - datetime.strptime(tf, "%H:%M")).seconds / 3600.0
+            if h > 0:
+                return round(h / 8.0, 2)
+        except ValueError:
+            pass
+    return _dni_robocze_w_pamieci(kal, a['date_from'], a['date_to'])
+
+
+def dni_nieobecnosci_hurtem(rm_master_db_path: str, wpisy: List[Dict]) -> Dict[int, float]:
+    """{id wpisu: dni robocze} dla całej listy — JEDEN odczyt kalendarza.
+
+    Zastępuje _count_absence_days(..., rm_master_db_path=…) w pętli, które
+    pytało serwer dwa razy NA KAŻDY wpis (dni robocze + opis kalendarza).
+    Wynik identyczny (ta sama reguła, _dni_wpisu_w_pamieci)."""
+    if not wpisy:
+        return {}
+    kal = {r['date']: r['day_type'] for r in rmm_read("rmm-company-calendar-wszystkie")}
+    return {a.get('id'): _dni_wpisu_w_pamieci(a, kal) for a in wpisy}
+
+
+def get_vacation_report(rm_master_db_path: str, year: int,
+                        employee_id: int = None) -> List[Dict]:
+    """Rozliczenie urlopów per pracownik — KOMPLET DANYCH W PAKIECIE.
+
+    Siedem odczytów serwera na cały raport (pracownicy, nieobecności,
+    rozliczenia godzin, pule bazowe, korekty roczne, zaległe, kalendarz),
+    dni robocze liczone w pamięci. Wcześniej (`_get_vacation_report_seryjnie`)
+    każdy pracownik i każda nieobecność to były osobne zapytania: 218 zapytań
+    i 3,4 s dla 36 osób, a karta pracownika liczyła cały raport dla jednej
+    osoby (user 04.10.2026: „strasznie długo się ładuje kartoteka pracownika").
+    Wynik ma być IDENTYCZNY z wersją seryjną — porównany na żywych danych.
+
+    `employee_id` — tylko ta osoba (karta pracownika); odczyty i tak zbiorcze.
+    Serwer bez operacji zbiorczych (sprzed 04.10.2026) → wersja seryjna.
+    """
+    try:
+        bazy = {w['employee_id']: float(w['days'])
+                for w in rmm_read("rmm-employee-vacation-base-wszystkie")}
+        korekty = {(w['employee_id'], int(w['year'])): float(w['days'])
+                   for w in rmm_read("rmm-employee-vacation-quota-wszystkie")}
+        zalegle = {(w['employee_id'], int(w['year'])): float(w['days'])
+                   for w in rmm_read("rmm-carryover-wszystkie")}
+    except Exception as e:
+        if "nieznana operacja" not in str(e):
+            raise
+        wynik = _get_vacation_report_seryjnie(rm_master_db_path, year)
+        return [r for r in wynik if employee_id is None or r['employee_id'] == employee_id]
+
+    employees = get_employees(rm_master_db_path, active_only=False)
+    if employee_id is not None:
+        employees = [e for e in employees if e['id'] == employee_id]
+    wszystkie = get_employee_availability(rm_master_db_path)
+    rozliczenia = get_godziny_rozliczenia(rm_master_db_path)
+    saldo = get_saldo_godzin(rm_master_db_path, avail=wszystkie, rozliczenia=rozliczenia)
+    kal = {r['date']: r['day_type'] for r in rmm_read("rmm-company-calendar-wszystkie")}
+
+    def pula(eid, rok):
+        if (eid, rok) in korekty:
+            return korekty[(eid, rok)]
+        return bazy.get(eid, float(DEFAULT_VACATION_DAYS))
+
+    def w_roku(a, rok):
+        # te same porównania co get_employee_availability(date_from, date_to)
+        return (a.get('date_to') or '') >= f"{rok}-01-01" and (a.get('date_from') or '') <= f"{rok}-12-31"
+
+    def odrzucony(a):
+        return (a.get('status') or 'ZATWIERDZONY').upper() == 'ODRZUCONY'
+
+    def urlop_w_roku(eid, rok):
+        # = _used_urlop_in_year: TYLKO 'URLOP' (bez „na żądanie") + dni z salda
+        # godzin. Tak liczy zaległy od zawsze — zachowane 1:1.
+        suma = _urlop_z_godzin(rozliczenia, eid, rok)
+        for a in wszystkie:
+            if (a.get('employee_id') == eid and w_roku(a, rok) and not odrzucony(a)
+                    and (a.get('reason') or '').upper() == 'URLOP'):
+                suma += _dni_wpisu_w_pamieci(a, kal)
+        return suma
+
+    per_emp: Dict[int, Dict] = {}
+    for e in employees:
+        quota = pula(e['id'], year)
+        if (e['id'], year) in zalegle:
+            carryover = zalegle[(e['id'], year)]
+        else:
+            carryover = max(0.0, pula(e['id'], year - 1) - urlop_w_roku(e['id'], year - 1))
+        per_emp[e['id']] = {
+            'employee_id': e['id'], 'name': e['name'],
+            'category': e.get('category', ''), 'podmiot': e.get('podmiot') or '',
+            'quota': quota, 'carryover': round(carryover, 2),
+            'available': round(carryover + quota, 2),
+            'by_reason': {}, 'total_days': 0.0,
+            'saldo_h': (saldo.get(e['id']) or {}).get('saldo_h', 0.0),
+        }
+
+    for a in wszystkie:
+        eid = a['employee_id']
+        if eid not in per_emp or not w_roku(a, year) or odrzucony(a):
+            continue
+        days = _dni_wpisu_w_pamieci(a, kal)
+        reason = (a.get('reason') or 'INNE').upper()
+        rec = per_emp[eid]
+        rec['by_reason'][reason] = rec['by_reason'].get(reason, 0.0) + days
+        rec['total_days'] += days
+
+    result = []
+    for eid, rec in per_emp.items():
+        z_godzin = _urlop_z_godzin(rozliczenia, eid, year)
+        if z_godzin:
+            rec['by_reason']['URLOP_Z_GODZIN'] = round(z_godzin, 2)
+        used = sum(rec['by_reason'].get(t['code'], 0.0)
+                   for t in ABSENCE_TYPES if t['counts_as_vacation']) + z_godzin
+        rec['used_urlop'] = round(used, 2)
+        rec['remaining'] = round(rec['available'] - used, 2)
+        rec['total_days'] = round(rec['total_days'], 2)
+        result.append(rec)
+    result.sort(key=lambda r: r['name'].lower())
+    return result
+
+
+def _get_vacation_report_seryjnie(rm_master_db_path: str, year: int) -> List[Dict]:
     """Rozliczenie urlopów/nieobecności per pracownik za dany rok.
 
     Zwraca listę: {employee_id, name, category, quota, carryover, available,
@@ -8571,6 +9076,9 @@ def get_vacation_report(rm_master_db_path: str, year: int) -> List[Dict]:
     employees = get_employees(rm_master_db_path, active_only=False)
     y_from, y_to = f"{year}-01-01", f"{year}-12-31"
     avail = get_employee_availability(rm_master_db_path, date_from=y_from, date_to=y_to)
+    # Saldo godzin (cała historia) i rozliczenia — RAZ dla całego zespołu.
+    rozliczenia = get_godziny_rozliczenia(rm_master_db_path)
+    saldo = get_saldo_godzin(rm_master_db_path, rozliczenia=rozliczenia)
 
     per_emp: Dict[int, Dict] = {}
     for e in employees:
@@ -8582,7 +9090,8 @@ def get_vacation_report(rm_master_db_path: str, year: int) -> List[Dict]:
             carryover = override
         else:
             prev_quota = get_vacation_quota(rm_master_db_path, e['id'], year - 1)
-            prev_used = _used_urlop_in_year(rm_master_db_path, e['id'], year - 1)
+            prev_used = _used_urlop_in_year(rm_master_db_path, e['id'], year - 1,
+                                            rozliczenia=rozliczenia)
             carryover = max(0.0, prev_quota - prev_used)
         per_emp[e['id']] = {
             'employee_id': e['id'],
@@ -8594,6 +9103,8 @@ def get_vacation_report(rm_master_db_path: str, year: int) -> List[Dict]:
             'available': round(carryover + quota, 2),
             'by_reason': {},
             'total_days': 0.0,
+            # Saldo wiszących godzin (cała historia, nie tylko ten rok).
+            'saldo_h': (saldo.get(e['id']) or {}).get('saldo_h', 0.0),
         }
 
     for a in avail:
@@ -8612,11 +9123,17 @@ def get_vacation_report(rm_master_db_path: str, year: int) -> List[Dict]:
 
     result = []
     for eid, rec in per_emp.items():
-        # Wykorzystany urlop = wszystkie typy odejmowane od puli (URLOP + na żądanie).
+        # Dni urlopu wydane z salda godzin w tym roku — osobna pozycja, żeby
+        # w Rozliczeniu było widać, skąd się wzięły.
+        z_godzin = _urlop_z_godzin(rozliczenia, eid, year)
+        if z_godzin:
+            rec['by_reason']['URLOP_Z_GODZIN'] = round(z_godzin, 2)
+        # Wykorzystany urlop = wszystkie typy odejmowane od puli (URLOP + na żądanie)
+        # + dni wydane z salda godzin.
         used = sum(
             rec['by_reason'].get(t['code'], 0.0)
             for t in ABSENCE_TYPES if t['counts_as_vacation']
-        )
+        ) + z_godzin
         rec['used_urlop'] = round(used, 2)
         rec['remaining'] = round(rec['available'] - used, 2)
         rec['total_days'] = round(rec['total_days'], 2)
@@ -8642,12 +9159,10 @@ def get_vacation_entries(rm_master_db_path: str, year: int = None,
     rows = get_employee_availability(rm_master_db_path, date_from=d_from, date_to=d_to)
     emp_podmiot = {e['id']: (e.get('podmiot') or '') for e in
                    get_employees(rm_master_db_path)}
+    dni = dni_nieobecnosci_hurtem(rm_master_db_path, rows)   # jeden odczyt kalendarza
     out = []
     for a in rows:
-        days = _count_absence_days(a['date_from'], a['date_to'],
-                                   a.get('time_from'), a.get('time_to'),
-                                   rm_master_db_path=rm_master_db_path,
-                                   days_override=a.get('days_override'))
+        days = dni.get(a.get('id'), 0.0)
         code = (a.get('reason') or 'INNE').upper()
         tinfo = ABSENCE_TYPE_BY_CODE.get(code, {})
         out.append({

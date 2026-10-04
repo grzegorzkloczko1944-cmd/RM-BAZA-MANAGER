@@ -408,9 +408,32 @@ ODCZYT = {
         " WHERE employee_id = ? AND year = ?",
         ["employee_id", "year"],
     ),
+    # Raport urlopowy w PAKIECIE (04.10.2026): pule, korekty roczne i zaległe
+    # dla WSZYSTKICH pracowników naraz. Wcześniej get_vacation_report pytał
+    # o każdą osobę osobno — 218 zapytań i 3,4 s na 36 osób, a karta
+    # pracownika liczyła cały raport, żeby pokazać jedną.
+    "rmm-employee-vacation-base-wszystkie": (
+        "SELECT employee_id, days FROM employee_vacation_base",
+        [],
+    ),
+    "rmm-employee-vacation-quota-wszystkie": (
+        "SELECT employee_id, year, days FROM employee_vacation_quota",
+        [],
+    ),
+    "rmm-carryover-wszystkie": (
+        "SELECT employee_id, year, days FROM employee_carryover_override",
+        [],
+    ),
     "rmm-employee-vacation-base-po-employee-id": (
         "SELECT days FROM employee_vacation_base WHERE employee_id = ?",
         ['employee_id'],
+    ),
+    # Rozliczenia salda godzin — WSZYSTKIE naraz (saldo liczy się jednym
+    # odczytem dla całego zespołu, nie pytaniem per pracownik — CLAUDE.md).
+    "rmm-godziny-rozliczenia-wszystkie": (
+        "SELECT id, employee_id, date, hours, rodzaj, notes, created_at, created_by"
+        " FROM employee_godziny_rozliczenia ORDER BY date DESC, id DESC",
+        [],
     ),
     "rmm-employee-vacation-quota-po-employee-id-year": (
         "SELECT days FROM employee_vacation_quota WHERE employee_id = ?"
@@ -712,6 +735,13 @@ ODCZYT = {
         "SELECT status FROM project_statuses WHERE project_id = ?"
         " ORDER BY set_at ASC",
         ["project_id"],
+    ),
+    # Statusy WSZYSTKICH projektów jednym zapytaniem — lista projektów
+    # w RM_MANAGER pytała o każdy projekt osobno (04.10.2026).
+    "statusy-projektow-wszystkie": (
+        "SELECT project_id, status FROM project_statuses"
+        " ORDER BY project_id, set_at ASC",
+        [],
     ),
     "status-historia": (
         "SELECT id, old_status, new_status, changed_at, changed_by, notes"
@@ -1542,6 +1572,15 @@ ZAPIS = {
     ),
     "rmm-service-trips-usun-po-id": (
         "DELETE FROM service_trips WHERE id = ?",
+        ['id'],
+    ),
+    "rmm-godziny-rozliczenie-dodaj": (
+        "INSERT INTO employee_godziny_rozliczenia (employee_id, date, hours,"
+        " rodzaj, notes, created_by) VALUES (?, ?, ?, ?, ?, ?)",
+        ['employee_id', 'date', 'hours', 'rodzaj', 'notes', 'created_by'],
+    ),
+    "rmm-godziny-rozliczenie-usun-po-id": (
+        "DELETE FROM employee_godziny_rozliczenia WHERE id = ?",
         ['id'],
     ),
     "rmm-employee-vacation-base-dodaj": (
@@ -2600,6 +2639,23 @@ MIGRACJE_RM_MANAGER = [
     ("CREATE INDEX IF NOT EXISTS idx_service_trips_employee ON service_trips(employee_id)", None),
     ("CREATE INDEX IF NOT EXISTS idx_sync_log_date ON sync_log(sync_date)", None),
     ("CREATE INDEX IF NOT EXISTS idx_transports_active ON transports(is_active)", None),
+    # Rozliczenia SALDA GODZIN (decyzja usera 04.10.2026). Nieobecność
+    # godzinowa (typ GODZINY — pół dnia, kilka godzin) NIE schodzi z żadnej
+    # puli, tylko „wisi" na saldzie pracownika. Saldo zdejmuje się w dowolnym
+    # terminie na dwa sposoby:
+    #   ODPRACOWANIE — przepracowane godziny (hours dowolne),
+    #   URLOP        — gdy nazbiera się cały dzień: 8 h z salda = 1 dzień
+    #                  z puli urlopu w roku `date`.
+    # Osobna tabela, NIE wpis w employee_availability: to nie nieobecność —
+    # kalendarz, optymalizator i konflikty obsady by ją źle czytały.
+    ("CREATE TABLE IF NOT EXISTS employee_godziny_rozliczenia ( id INTEGER PRIMARY KEY AUTOINCREMENT,"
+     " employee_id INTEGER NOT NULL, date DATE NOT NULL,"
+     " hours REAL NOT NULL CHECK (hours > 0),"
+     " rodzaj TEXT NOT NULL CHECK (rodzaj IN ('ODPRACOWANIE', 'URLOP')),"
+     " notes TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, created_by TEXT,"
+     " FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE )", None),
+    ("CREATE INDEX IF NOT EXISTS idx_godziny_rozliczenia_employee"
+     " ON employee_godziny_rozliczenia(employee_id)", None),
 ]
 
 # ═══════════════════════════════════════════════════════════════════════

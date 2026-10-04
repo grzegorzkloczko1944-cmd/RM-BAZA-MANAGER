@@ -8060,7 +8060,33 @@ class RMManagerGUI:
                 return stage_order.get(stage_code, 999)
             
             sorted_stages = sorted(forecast.keys(), key=get_stage_sort_key)
-            
+
+            # ── Dane wspólne dla wszystkich wierszy — RAZ, przed pętlą ─────
+            # Pracownicy etapów: wcześniej każdy wiersz otwierał bazę projektu
+            # i pytał serwer o nazwiska (~25 etapów = 25 otwarć pliku na
+            # udziale + 25 zapytań przy każdym odświeżeniu, 04.10.2026).
+            # Transze: etap ZAKONCZONY pytał o nie do trzech razy.
+            try:
+                _staff_etapow = rmm.get_stage_assigned_staff_wszystkie(
+                    self.get_project_db_path(self.selected_project_id), self.selected_project_id)
+            except Exception:
+                _staff_etapow = None          # wiersze zapytają po staremu
+
+            def _staff_etapu(sc):
+                if _staff_etapow is not None:
+                    return list(_staff_etapow.get(sc, []))
+                return rmm.get_stage_assigned_staff(
+                    self.get_project_db_path(self.selected_project_id),
+                    self.rm_master_db_path, self.selected_project_id, sc)
+
+            _transze_cache = {}
+
+            def _transze_projektu():
+                if 'v' not in _transze_cache:
+                    _transze_cache['v'] = rmm.get_payment_milestones(
+                        self.rm_master_db_path, self.selected_project_id)
+                return _transze_cache['v']
+
             # Dla każdego etapu utwórz wiersz z edytowalnymi polami
             for idx, stage_code in enumerate(sorted_stages):
                 # Pomiń child milestones - renderowane wewnątrz ramki parent stage
@@ -8072,46 +8098,10 @@ class RMManagerGUI:
                 display_name = stage_info['display_name']
                 is_milestone = stage_info['is_milestone']
                 
-                # DEBUG: Wypisz dane dla PROJEKT
-                if stage_code == 'PROJEKT':
-                    print(f"🎯 DEBUG refresh_timeline PROJEKT:")
-                    print(f"    forecast data: {fc}")
-                    print(f"    template_start: {fc.get('template_start')}")
-                    print(f"    template_end: {fc.get('template_end')}")
-                    print(f"    forecast_start: {fc.get('forecast_start')}")
-                    print(f"    forecast_end: {fc.get('forecast_end')}")
-                    print(f"    is_milestone: {is_milestone}")
-                    print(f"    is_actual: {fc.get('is_actual')}")
-                    print(f"    actual_periods: {fc.get('actual_periods')}")
-                    
-                    # DEBUGGING: Sprawdź dane w bazie
-                    try:
-                        con_debug = rmm._open_rm_connection(self.get_project_db_path(self.selected_project_id))
-                        
-                        # Actual periods
-                        cursor = con_debug.execute('''
-                            SELECT sap.started_at, sap.ended_at
-                            FROM stage_actual_periods sap
-                            JOIN project_stages ps ON sap.project_stage_id = ps.id
-                            WHERE ps.project_id = ? AND ps.stage_code = ?
-                        ''', (self.selected_project_id, 'PROJEKT'))
-                        actual_rows = cursor.fetchall()
-                        print(f"    🔍 ACTUAL PERIODS z bazy: {[dict(r) for r in actual_rows]}")
-                        
-                        con_debug.close()
-                    except Exception as e:
-                        print(f"    ❌ Error checking DB: {e}")
-
-                # DEBUG: Etapy które mogą nie mieć template
-                if stage_code in ['ODBIORY', 'FAT', 'TRANSPORT']:
-                    print(f"📋 DEBUG etap {stage_code}:")
-                    print(f"    template_start: '{fc.get('template_start')}'")
-                    print(f"    template_end: '{fc.get('template_end')}'") 
-                    print(f"    forecast_start: '{fc.get('forecast_start')}'")
-                    print(f"    forecast_end: '{fc.get('forecast_end')}'")
-                    print(f"    is_milestone: {is_milestone}")
-                    print(f"    is_actual: {fc.get('is_actual')}")
-                
+                # (Usunięte 04.10.2026: blok DEBUG dla PROJEKT/ODBIORY/FAT/TRANSPORT —
+                # przy KAŻDYM odświeżeniu osi czasu otwierał bazę projektu tylko po
+                # to, żeby wypisać dane do konsoli. Na udziale sieciowym to zbędne
+                # otwarcie pliku przy każdym kliknięciu.)
                 status_icon = "🟢" if fc.get('is_active') else "⏺️"
                 actual_icon = "✔️" if fc.get('is_actual') else "📋"
                 variance = fc.get('variance_days', 0)
@@ -8123,8 +8113,7 @@ class RMManagerGUI:
                     if stage_code == 'ZAKONCZONY':
                         # ZAKONCZONY (Zapłacony) ustawiony — sprawdź sumę transz
                         try:
-                            _ms_list = rmm.get_payment_milestones(
-                                self.rm_master_db_path, self.selected_project_id)
+                            _ms_list = _transze_projektu()
                             _pay_sum = sum(m['percentage'] for m in _ms_list)
                             _has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in _ms_list)
                             bg_color = "#00ee44" if (_pay_sum >= 100 or _has_umorzony) else "#ff2222"
@@ -8137,8 +8126,7 @@ class RMManagerGUI:
                 elif stage_code == 'ZAKONCZONY':
                     # Podświetlenie zależne od sumy transz i daty
                     try:
-                        _ms_list = rmm.get_payment_milestones(
-                            self.rm_master_db_path, self.selected_project_id)
+                        _ms_list = _transze_projektu()
                         _pay_sum = sum(m['percentage'] for m in _ms_list)
                         _has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in _ms_list)
                         if _pay_sum >= 100 or _has_umorzony:
@@ -8370,12 +8358,7 @@ class RMManagerGUI:
                     # Przycisk Sprzedaż — tylko dla PRZYJETY
                     if stage_code == 'PRZYJETY':
                         try:
-                            _sprzedaz_staff = rmm.get_stage_assigned_staff(
-                                self.get_project_db_path(self.selected_project_id),
-                                self.rm_master_db_path,
-                                self.selected_project_id,
-                                'PRZYJETY'
-                            )
+                            _sprzedaz_staff = _staff_etapu('PRZYJETY')
                             sprzedaz_count = len(_sprzedaz_staff)
                             sprzedaz_btn_text = f"💼 Sprzedaż ({sprzedaz_count})" if sprzedaz_count > 0 else "💼 Sprzedaż"
                             sprzedaz_btn_bg = self.COLOR_GREEN if sprzedaz_count > 0 else "#95a5a6"
@@ -8474,7 +8457,7 @@ class RMManagerGUI:
                         # ── Badge % transz płatności (tylko dla ZAKONCZONY — milestone "Zapłacony") ──
                         if stage_code == 'ZAKONCZONY':
                             try:
-                                _pay_milestones = rmm.get_payment_milestones(self.rm_master_db_path, self.selected_project_id)
+                                _pay_milestones = _transze_projektu()
                                 _pay_count = len(_pay_milestones)
                                 _pay_sum = sum(m['percentage'] for m in _pay_milestones)
                                 _pay_text = f"💰 {_pay_sum}% ({_pay_count})"
@@ -8603,12 +8586,7 @@ class RMManagerGUI:
                 
                 # Przycisk pracowników
                 try:
-                    assigned_staff = rmm.get_stage_assigned_staff(
-                        self.get_project_db_path(self.selected_project_id),
-                        self.rm_master_db_path,
-                        self.selected_project_id,
-                        stage_code
-                    )
+                    assigned_staff = _staff_etapu(stage_code)
                     staff_count = len(assigned_staff)
                     staff_btn_text = f"👷 Pracownicy ({staff_count})" if staff_count > 0 else "👷 Pracownicy"
                     staff_btn_bg = self.COLOR_GREEN if staff_count > 0 else "#95a5a6"
@@ -8770,11 +8748,7 @@ class RMManagerGUI:
                     # Pobierz pracowników ODBIORY raz (wyświetlani przy FAT/ODBIOR_*)
                     odbiory_staff_names = []
                     try:
-                        odbiory_staff = rmm.get_stage_assigned_staff(
-                            self.get_project_db_path(self.selected_project_id),
-                            self.rm_master_db_path,
-                            self.selected_project_id, 'ODBIORY'
-                        )
+                        odbiory_staff = _staff_etapu('ODBIORY')
                         odbiory_staff_names = [s['employee_name'] for s in odbiory_staff]
                     except Exception:
                         pass
@@ -10957,6 +10931,36 @@ class RMManagerGUI:
 
                 rows_sorted = sorted(rows, key=_sort_key_projects)
 
+                # ── Dane dla WSZYSTKICH projektów naraz, PRZED pętlą ──────────
+                # Wcześniej każdy wiersz pytał serwer 5–6 razy (statusy, status
+                # procesu, lock, transze, suma transz) — przy ~60 projektach
+                # kilkaset zapytań po kolei (04.10.2026, „RM_MANAGER czyta
+                # bardzo nieoptymalnie"). Gdy serwer nie zna zbiorczej
+                # operacji, dany słownik zostaje None i wiersz pyta jak dawniej.
+                try:
+                    statusy_wsz = {}
+                    for w in rmm._master().master_read("statusy-projektow-wszystkie"):
+                        statusy_wsz.setdefault(w["project_id"], []).append(w["status"])
+                except Exception:
+                    statusy_wsz = None
+                try:
+                    status_procesu_wsz = rmm.get_all_project_statuses(self.master_db_path) or None
+                except Exception:
+                    status_procesu_wsz = None
+                locki_wsz = None
+                if not getattr(self.lock_manager, '_STUB', False) and \
+                        hasattr(self.lock_manager, 'get_all_lock_owners'):
+                    try:
+                        locki_wsz = self.lock_manager.get_all_lock_owners()
+                    except Exception:
+                        locki_wsz = None
+                try:
+                    transze_wsz = {}
+                    for w in rmm.rmm_read("rmm-payment-milestones-wszystkie"):
+                        transze_wsz.setdefault(w["project_id"], []).append(dict(w))
+                except Exception:
+                    transze_wsz = None
+
                 for row in rows_sorted:
                     idx = 0
                     pid = row[idx]; idx += 1
@@ -11001,8 +11005,9 @@ class RMManagerGUI:
                     except Exception:
                         pass
 
-                    # Statusy multi-select (NOWY SYSTEM)
-                    status_list = get_project_statuses(con, pid)
+                    # Statusy multi-select (NOWY SYSTEM) — ze słownika zbiorczego.
+                    status_list = (list(statusy_wsz.get(pid, [])) if statusy_wsz is not None
+                                   else get_project_statuses(con, pid))
                     
                     # 🔄 FALLBACK: Jeśli brak statusów w nowej tabeli, sprawdź starą kolumnę 'status'
                     if not status_list:
@@ -11019,7 +11024,9 @@ class RMManagerGUI:
                     # bo on ma priorytet nadrzędny nad multi-status
                     old_proj_status = None
                     try:
-                        old_proj_status = rmm.get_project_status(self.master_db_path, pid)
+                        old_proj_status = (status_procesu_wsz.get(pid, ProjectStatus.NEW)
+                                           if status_procesu_wsz is not None
+                                           else rmm.get_project_status(self.master_db_path, pid))
                     except Exception:
                         pass
 
@@ -11042,7 +11049,8 @@ class RMManagerGUI:
                     # Lock
                     locked_by = ""
                     if not getattr(self.lock_manager, '_STUB', False):
-                        lock_info = self.lock_manager.get_project_lock_owner(pid)
+                        lock_info = (locki_wsz.get(pid) if locki_wsz is not None
+                                     else self.lock_manager.get_project_lock_owner(pid))
                         if lock_info and lock_info.get('user'):
                             locked_by = self._get_user_display_name(lock_info['user'])
                     
@@ -11072,9 +11080,13 @@ class RMManagerGUI:
 
                     # 💰 Procent zapłaconych płatności (UMORZONY = traktowany jak 100%)
                     try:
-                        _ms_pay = rmm.get_payment_milestones(self.rm_master_db_path, pid)
+                        if transze_wsz is not None:
+                            _ms_pay = transze_wsz.get(pid, [])
+                            pay_pct = float(sum(float(m.get('percentage') or 0) for m in _ms_pay))
+                        else:
+                            _ms_pay = rmm.get_payment_milestones(self.rm_master_db_path, pid)
+                            pay_pct = rmm.get_payment_total_percentage(self.rm_master_db_path, pid)
                         _has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in _ms_pay)
-                        pay_pct = rmm.get_payment_total_percentage(self.rm_master_db_path, pid)
                         if _has_umorzony:
                             paid = "UMORZONY"
                         elif pay_pct >= 100:
@@ -15889,7 +15901,17 @@ class RMManagerGUI:
         🏁 = zakończony, 🔄 = w trakcie, ⏸ = wstrzymany, 🆕 = nowy/przyjęty
         """
         try:
-            status = rmm.get_project_status(self.master_db_path, project_id)
+            # Statusy WSZYSTKICH projektów jednym odczytem, ważne 5 s — wykresy
+            # wołają to per projekt w pętli (60 projektów = 60 zapytań przy
+            # każdym rysowaniu, 04.10.2026). Krótki bufor, bo status zmienia się
+            # rzadko, a po zmianie i tak przerysowujemy po chwili.
+            import time as _t
+            _c = getattr(self, '_statusy_ikon_cache', None)
+            if not _c or _t.monotonic() - _c[0] > 5:
+                _c = (_t.monotonic(), rmm.get_all_project_statuses(self.master_db_path))
+                self._statusy_ikon_cache = _c
+            status = (_c[1].get(project_id, ProjectStatus.NEW) if _c[1]
+                      else rmm.get_project_status(self.master_db_path, project_id))
             if status == ProjectStatus.DONE:
                 return '🏁'
             elif status == ProjectStatus.IN_PROGRESS:
@@ -16413,24 +16435,39 @@ class RMManagerGUI:
             ]
             
             gantt_data = []
-            
+            _emp_map_mp = None      # pracownicy — wczytani przy pierwszej potrzebie
+
             for proj_idx, project_id in enumerate(selected_projects):
                 color = project_colors[proj_idx % len(project_colors)]
                 
-                # Pobierz dane dla projektu
-                project_db = self.get_project_db_path(project_id) 
-                timeline = rmm.get_stage_timeline(project_db, project_id)
-                
-                # Pobierz nazwy etapów
+                # Dane projektu z JEDNEGO otwarcia bazy: oś czasu, nazwy etapów,
+                # pracownicy ODBIORY i serwisant SAT. Było 4 otwarcia pliku na
+                # projekt (w firmie — przez udział sieciowy), 04.10.2026.
+                project_db = self.get_project_db_path(project_id)
                 con = rmm._open_rm_connection(project_db)
-                stage_names = {}
-                stage_milestones = {}
-                cursor = con.execute("SELECT code, display_name, is_milestone FROM stage_definitions")
-                for row in cursor.fetchall():
-                    stage_names[row['code']] = row['display_name']
-                    stage_milestones[row['code']] = bool(row['is_milestone'])
-                
-                con.close()
+                try:
+                    timeline = rmm._get_stage_timeline_with_con(con, project_id)
+                    stage_names = {}
+                    stage_milestones = {}
+                    cursor = con.execute("SELECT code, display_name, is_milestone FROM stage_definitions")
+                    for row in cursor.fetchall():
+                        stage_names[row['code']] = row['display_name']
+                        stage_milestones[row['code']] = bool(row['is_milestone'])
+                    try:
+                        _staff_mp = rmm.get_stage_assigned_staff_wszystkie(project_db, project_id, con=con)
+                    except Exception:
+                        _staff_mp = {}
+                    try:
+                        _sat_row = con.execute("""
+                            SELECT ss.employee_id FROM stage_schedule ss
+                            JOIN project_stages ps ON ss.project_stage_id = ps.id
+                            WHERE ps.project_id = ? AND ps.stage_code = ?
+                        """, (project_id, 'URUCHOMIENIE_U_KLIENTA')).fetchone()
+                        _sat_eid = _sat_row['employee_id'] if _sat_row and _sat_row['employee_id'] else None
+                    except Exception:
+                        _sat_eid = None
+                finally:
+                    con.close()
 
                 project_name = self.project_names.get(project_id, f"Projekt {project_id}")
                 status_icon = self._get_project_status_icon(project_id)
@@ -16440,9 +16477,7 @@ class RMManagerGUI:
                 _mp_odbiory_ms = {'FAT', 'ODBIOR_1', 'ODBIOR_2', 'ODBIOR_3'}
                 _mp_worker_suffix = {}
                 try:
-                    odbiory_staff = rmm.get_stage_assigned_staff(
-                        project_db, self.rm_master_db_path, project_id, 'ODBIORY'
-                    )
+                    odbiory_staff = _staff_mp.get('ODBIORY', [])
                     if odbiory_staff:
                         sfx = ' (' + ', '.join(s['employee_name'] for s in odbiory_staff) + ')'
                         for sc in _mp_odbiory_ms:
@@ -16450,11 +16485,13 @@ class RMManagerGUI:
                 except Exception:
                     pass
                 try:
-                    sat_eid = rmm.get_stage_employee_id(project_db, project_id, 'URUCHOMIENIE_U_KLIENTA')
+                    sat_eid = _sat_eid
                     if sat_eid:
-                        _emp_map = {e['id']: e['name'] for e in
-                                    rmm.get_employees(self.rm_master_db_path, active_only=False)}
-                        sat_name = _emp_map.get(sat_eid, '')
+                        # Lista pracowników RAZ na wykres, nie per projekt.
+                        if _emp_map_mp is None:
+                            _emp_map_mp = {e['id']: e['name'] for e in
+                                           rmm.get_employees(self.rm_master_db_path, active_only=False)}
+                        sat_name = _emp_map_mp.get(sat_eid, '')
                         if sat_name:
                             _mp_worker_suffix['URUCHOMIENIE_U_KLIENTA'] = f' ({sat_name})'
                 except Exception:
@@ -17627,6 +17664,13 @@ class RMManagerGUI:
         
         # ===== Zbierz dane o projektach (jednorazowo) =====
         proj_info = {}  # pid -> {name, status, health, variance, forecast_end, is_paused, is_finished}
+        # Status procesu WSZYSTKICH projektów jednym zapytaniem — wcześniej
+        # pytanie per projekt: 62 projekty = 1,6 s samego czekania na serwer
+        # przy każdym otwarciu Multi-projekt (04.10.2026).
+        try:
+            _statusy_wsz = rmm.get_all_project_statuses(self.master_db_path) or None
+        except Exception:
+            _statusy_wsz = None
         for pid in self.projects:
             pname = self.project_names.get(pid, f"Projekt {pid}")
             info = {'name': pname, 'status': 'UNKNOWN', 'health': 'UNKNOWN',
@@ -17636,17 +17680,20 @@ class RMManagerGUI:
                 pdb = self.get_project_db_path(pid)
                 if os.path.exists(pdb):
                     info['has_db'] = True
-                    ps = rmm.get_project_status(self.master_db_path, pid)
+                    ps = (_statusy_wsz.get(pid, ProjectStatus.NEW) if _statusy_wsz is not None
+                          else rmm.get_project_status(self.master_db_path, pid))
                     info['status'] = ps  # ProjectStatus enum
                     info['is_finished'] = (ps == ProjectStatus.DONE)
-                    info['is_paused'] = rmm.is_project_paused(pdb, pid)
+                    # Pauza + ocena terminów jednym otwarciem bazy projektu
+                    # (było 5 otwarć na projekt — 04.10.2026).
                     try:
-                        summary = rmm.get_project_status_summary(pdb, pid)
+                        summary = rmm.podsumowanie_projektu_lekkie(pdb, pid)
+                        info['is_paused'] = summary['is_paused']
                         info['health'] = summary.get('status', 'UNKNOWN')  # DELAYED/AT_RISK/ON_TRACK
                         info['variance'] = summary.get('overall_variance_days', 0)
                         info['forecast_end'] = summary.get('completion_forecast')
                     except Exception:
-                        pass
+                        info['is_paused'] = rmm.is_project_paused(pdb, pid)
             except Exception:
                 pass
             proj_info[pid] = info
@@ -18876,6 +18923,22 @@ class RMManagerGUI:
                 # --- Kolor efektywny (override dla ZAKONCZONY) ---
                 effective_color = stage_color
                 if stage_code == 'ZAKONCZONY':
+                    if pid not in payment_sums and not payment_sums.get('_zbiorczo'):
+                        # Transze WSZYSTKICH projektów jednym odczytem, przy
+                        # pierwszym zakończonym projekcie — nie zapytanie per
+                        # projekt (04.10.2026).
+                        payment_sums['_zbiorczo'] = True
+                        try:
+                            for _w in rmm.rmm_read("rmm-payment-milestones-wszystkie"):
+                                _p = payment_sums.setdefault(_w['project_id'],
+                                                             {'total': 0, 'has_umorzony': False})
+                                _p['total'] += float(_w.get('percentage') or 0)
+                                _p['has_umorzony'] |= (_w.get('payment_type') == 'UMORZONY')
+                            payment_sums['_ok'] = True
+                        except Exception:
+                            pass
+                    if pid not in payment_sums and payment_sums.get('_ok'):
+                        payment_sums[pid] = {'total': 0, 'has_umorzony': False}   # brak transz
                     if pid not in payment_sums:
                         try:
                             _ms = rmm.get_payment_milestones(self.rm_master_db_path, pid)
@@ -30539,8 +30602,11 @@ Kod: {unlock_code}
         'OKOLICZNOSCIOWY': 'Okolicznościowy', 'OPIEKA_188': 'Opieka (art. 188)',
         'BEZPLATNY': 'Bezpłatny', 'MACIERZYNSKI': 'Macierzyński/rodz.',
         'L4': 'L4 (chorobowe)', 'DELEGACJA': 'Delegacja',
-        'SZKOLENIE': 'Szkolenie', 'INNE': 'Inne',
+        'SZKOLENIE': 'Szkolenie', 'GODZINY': 'Godziny (saldo)', 'INNE': 'Inne',
     }
+    #: Dzień pracy dla przycisków „½ dnia" w formularzu nieobecności.
+    #: Pół dnia = 4 h (GODZINY_NA_DZIEN / 2) od początku albo do końca dnia.
+    DZIEN_PRACY_OD, DZIEN_PRACY_DO, POL_DNIA_GODZ = "07:00", "15:00", "11:00"
 
     # Statusy wniosku — etykieta, kolor tła wiersza, ikona.
     STATUS_LABELS = {
@@ -30555,7 +30621,10 @@ Kod: {unlock_code}
         'URLOP': '#4caf50', 'URLOP_ZADANIE': '#8bc34a', 'OKOLICZNOSCIOWY': '#00bcd4',
         'OPIEKA_188': '#009688', 'BEZPLATNY': '#9e9e9e', 'MACIERZYNSKI': '#e91e63',
         'L4': '#f44336', 'DELEGACJA': '#3f51b5', 'SZKOLENIE': '#ff9800', 'INNE': '#795548',
+        'GODZINY': '#607d8b',
     }
+    #: Dzień odpracowania w kalendarzu zespołu — górna połowa kratki.
+    KOLOR_ODPRACOWANIA = '#26a69a'
 
     # ================================================================
     # STATYSTYKI — Podsumowanie / Status projektów (port z RM_STATS)
@@ -31183,7 +31252,9 @@ Kod: {unlock_code}
         dlg.title("🏖 Kadry — urlopy i nieobecności")
         dlg.transient(self.root)
         self._register_window('vacation', dlg)
-        self._center_window(dlg, 1180, 680)
+        # Szerzej (było 1180) — pasek kategorii i legenda ucinały się na końcu
+        # (04.10.2026). Nie szerzej niż ekran.
+        self._center_window(dlg, min(1500, self.root.winfo_screenwidth() - 40), 760)
 
         # Górny pasek z przyciskiem pełnego ekranu (maksymalizacja; F11 / Esc).
         # dlg.transient() ukrywa natywny przycisk maksymalizacji Windows —
@@ -31195,49 +31266,53 @@ Kod: {unlock_code}
         notebook = ttk.Notebook(dlg)
         notebook.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
-        tab_cal = tk.Frame(notebook)
-        notebook.add(tab_cal, text="  📆  Kalendarz zespołu  ")
-        cal_refresh = self._vacation_build_team_calendar_tab(tab_cal, dlg)
+        # Zakładki budowane LENIWIE — przy pierwszym wejściu, nie wszystkie
+        # siedem przy otwarciu okna (04.10.2026, „Kadry długo się ładują":
+        # każda zakładka przy budowie czytała swoje dane, także te, których
+        # user w ogóle nie otworzył). Kalendarz — pierwsza zakładka — od razu.
+        zakladki = [
+            ('📆', "  📆  Kalendarz zespołu  ", self._vacation_build_team_calendar_tab),
+            ('👥', "  👥  Pracownicy  ", self._vacation_build_employees_tab),
+            ('📋', "  📋  Wnioski / Nieobecności  ", self._vacation_build_absences_tab),
+            ('📊', "  📊  Pula urlopu  ", self._vacation_build_quota_tab),
+            ('🧾', "  🧾  Rozliczenie  ", self._vacation_build_report_tab),
+            ('📍', "  📍  Stan obecny  ", self._vacation_build_now_tab),
+            ('🚫', "  🚫  Parser  ", self._vacation_build_parser_tab),
+        ]
+        ramki, budowniczy, _tab_refresh = {}, {}, {}
+        for ikona, tytul, buduj in zakladki:
+            ramki[ikona] = tk.Frame(notebook)
+            budowniczy[ikona] = buduj
+            notebook.add(ramki[ikona], text=tytul)
 
-        tab_emp = tk.Frame(notebook)
-        notebook.add(tab_emp, text="  👥  Pracownicy  ")
-        emp_refresh = self._vacation_build_employees_tab(tab_emp, dlg)
+        def _zbuduj(ikona):
+            """Buduje zakładkę (ładuje przy tym swoje dane). True = właśnie
+            zbudowana, więc odświeżanie przy tym wejściu jest zbędne."""
+            if ikona in _tab_refresh or ikona not in budowniczy:
+                return False
+            _tab_refresh[ikona] = budowniczy[ikona](ramki[ikona], dlg)
+            return True
 
-        tab_abs = tk.Frame(notebook)
-        notebook.add(tab_abs, text="  📋  Wnioski / Nieobecności  ")
-        abs_refresh = self._vacation_build_absences_tab(tab_abs, dlg)
+        _zbuduj('📆')
 
-        tab_quota = tk.Frame(notebook)
-        notebook.add(tab_quota, text="  📊  Pula urlopu  ")
-        quota_refresh = self._vacation_build_quota_tab(tab_quota, dlg)
-
-        tab_report = tk.Frame(notebook)
-        notebook.add(tab_report, text="  🧾  Rozliczenie  ")
-        report_refresh = self._vacation_build_report_tab(tab_report, dlg)
-
-        tab_now = tk.Frame(notebook)
-        notebook.add(tab_now, text="  📍  Stan obecny  ")
-        now_refresh = self._vacation_build_now_tab(tab_now, dlg)
-
-        tab_parser = tk.Frame(notebook)
-        notebook.add(tab_parser, text="  🚫  Parser  ")
-        parser_refresh = self._vacation_build_parser_tab(tab_parser, dlg)
-
-        # Auto-odśwież KAŻDĄ zakładkę przy wejściu na nią — zmiany zrobione w
-        # innej zakładce (dodanie wniosku, edycja pracownika, pula) są od razu
-        # widoczne, bez ręcznego odświeżania. Mapujemy po ikonie w tytule.
-        _tab_refresh = {'📍': now_refresh, '📆': cal_refresh, '👥': emp_refresh, '📋': abs_refresh,
-                        '📊': quota_refresh, '🧾': report_refresh, '🚫': parser_refresh}
-
+        # Wejście na zakładkę: pierwsze — budowa; kolejne — odświeżenie, żeby
+        # zmiany zrobione w innej zakładce (wniosek, pracownik, pula) były od
+        # razu widoczne. Mapujemy po ikonie w tytule.
         def _on_vac_tab_changed(_e=None):
             try:
-                txt = notebook.tab(notebook.select(), "text").strip()
-                fn = _tab_refresh.get(txt[:1])
+                ikona = notebook.tab(notebook.select(), "text").strip()[:1]
+                if _zbuduj(ikona):
+                    return
+                fn = _tab_refresh.get(ikona)
                 if fn:
                     fn()
             except Exception:
                 pass
-        notebook.bind("<<NotebookTabChanged>>", _on_vac_tab_changed)
+
+        # Zdarzenie „zmiana zakładki" przychodzi też zaraz po otwarciu, dla
+        # pierwszej zakładki — kalendarz ładowałby się drugi raz. Podpinamy
+        # obsługę dopiero po tym pierwszym zdarzeniu.
+        dlg.after_idle(lambda: notebook.bind("<<NotebookTabChanged>>", _on_vac_tab_changed))
 
     def _vacation_build_parser_tab(self, parent, dlg):
         """Zakładka „Parser" — grupy pracowników, którzy nie mogą być na
@@ -31808,6 +31883,20 @@ Kod: {unlock_code}
         tk.Entry(hour_frame, textvariable=tf_var, width=7).pack(side=tk.LEFT)
         tk.Label(hour_frame, text=" – ").pack(side=tk.LEFT)
         tk.Entry(hour_frame, textvariable=tt_var, width=7).pack(side=tk.LEFT)
+
+        # Pół dnia jednym kliknięciem — typ przestawia się na „Godziny (saldo)",
+        # bo część dnia NIE schodzi z puli urlopu, tylko wisi na saldzie
+        # (decyzja usera 04.10.2026).
+        def _pol_dnia(od, do):
+            tf_var.set(od)
+            tt_var.set(do)
+            reason_label_var.set(_code_to_label.get('GODZINY', reason_label_var.get()))
+        tk.Button(hour_frame, text="½ rano", font=self.FONT_SMALL, padx=4,
+                  command=lambda: _pol_dnia(self.DZIEN_PRACY_OD, self.POL_DNIA_GODZ)
+                  ).pack(side=tk.LEFT, padx=(8, 2))
+        tk.Button(hour_frame, text="½ po południu", font=self.FONT_SMALL, padx=4,
+                  command=lambda: _pol_dnia(self.POL_DNIA_GODZ, self.DZIEN_PRACY_DO)
+                  ).pack(side=tk.LEFT, padx=2)
         tk.Label(hour_frame, text="  (HH:MM, puste = cały dzień)",
                  font=self.FONT_SMALL, fg="#888").pack(side=tk.LEFT)
 
@@ -31945,6 +32034,26 @@ Kod: {unlock_code}
                     days_override = entered
 
             reason_code = _label_to_code.get(reason_label_var.get(), 'URLOP')
+
+            # Część dnia NIE schodzi z puli urlopu — trafia na saldo godzin
+            # i dopiero po nazbieraniu 8 h kadrowa wydaje z niego dzień urlopu
+            # (decyzja usera 04.10.2026). Godziny przy typie urlopowym to więc
+            # w praktyce „Godziny (saldo)" — mówimy o tym i przestawiamy.
+            if tf and tt and rmm.ABSENCE_TYPE_BY_CODE.get(reason_code, {}).get('counts_as_vacation'):
+                if not messagebox.askokcancel(
+                        "Część dnia → saldo godzin",
+                        "Nieobecność na część dnia NIE schodzi z puli urlopu.\n\n"
+                        "Zapiszę ją jako „Godziny (saldo)” — godziny dopiszą się do salda\n"
+                        "pracownika. Gdy nazbiera się 8 h, rozliczysz je dniem urlopu\n"
+                        "albo odpracowaniem (Rozliczenie → ⏱ Saldo godzin).",
+                        parent=ed):
+                    return
+                reason_code = 'GODZINY'
+            if reason_code == 'GODZINY' and not (tf and tt):
+                messagebox.showwarning(
+                    "Uwaga", "„Godziny (saldo)” wymagają godzin od–do\n"
+                             "(albo przycisku ½ rano / ½ po południu).", parent=ed)
+                return
 
             # Kontrola limitów ustawowych (na żądanie = 4 dni, art.188 = 2 dni/rok).
             tinfo = rmm.ABSENCE_TYPE_BY_CODE.get(reason_code, {})
@@ -32124,11 +32233,20 @@ Kod: {unlock_code}
             tree.delete(*tree.get_children())
             _year_col_label()
             yr = _year()
+            # Pule całego zespołu dwoma odczytami (było 4 zapytania na osobę).
+            pule = rmm.get_pule_urlopowe(self.rm_master_db_path)
             for e in rmm.get_employees(self.rm_master_db_path, active_only=True,
                                         podmiot=_podmiot_filter()):
-                base = rmm.get_vacation_base(self.rm_master_db_path, e['id'])
-                has_year = rmm.has_vacation_quota_for_year(self.rm_master_db_path, e['id'], yr)
-                eff = rmm.get_vacation_quota(self.rm_master_db_path, e['id'], yr)
+                if pule is not None:
+                    bazy, korekty = pule
+                    base = bazy.get(e['id'], float(rmm.DEFAULT_VACATION_DAYS))
+                    kor = korekty.get((e['id'], yr))
+                    has_year = kor is not None
+                    eff = float(kor) if has_year else base
+                else:                                   # stary serwer
+                    base = rmm.get_vacation_base(self.rm_master_db_path, e['id'])
+                    has_year = rmm.has_vacation_quota_for_year(self.rm_master_db_path, e['id'], yr)
+                    eff = rmm.get_vacation_quota(self.rm_master_db_path, e['id'], yr)
                 year_txt = f"{eff:g}" if has_year else f"{eff:g}  (bazowa)"
                 tag = () if has_year else ('inherited',)
                 tree.insert('', tk.END, iid=str(e['id']), values=(
@@ -32215,6 +32333,10 @@ Kod: {unlock_code}
 
         tk.Button(toolbar, text="🔍 Przelicz", command=lambda: refresh(),
                   font=self.FONT_SMALL, padx=8).pack(side=tk.LEFT, padx=4)
+        # ZARAZ za „Przelicz", nie na końcu paska — na końcu wypadał poza
+        # okno i user go nie widział (04.10.2026: „gdzie jest to saldo?").
+        tk.Button(toolbar, text="⏱ Saldo godzin", command=lambda: _saldo_godzin(),
+                  bg="#607d8b", fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=4)
         tk.Button(toolbar, text="📥 CSV", command=lambda: _export(),
                   bg=self.COLOR_GREEN, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=4)
         tk.Button(toolbar, text="📄 PDF (zestawienie)", command=lambda: _export_pdf(),
@@ -32229,14 +32351,18 @@ Kod: {unlock_code}
                  font=self.FONT_SMALL, fg="#1e7e34").pack(side=tk.LEFT, padx=(10, 0))
 
         cols = ('employee', 'category', 'carryover', 'quota', 'available', 'urlop',
-                'zadanie', 'remaining', 'l4', 'delegacja', 'szkolenie', 'inne', 'total')
+                'zadanie', 'z_godzin', 'remaining', 'saldo', 'l4', 'delegacja',
+                'szkolenie', 'inne', 'total')
         tree = ttk.Treeview(parent, columns=cols, show='headings', height=18)
-        # Kolumny 'urlop' i 'zadanie' liczą się do puli → oznaczone 🟢 w nagłówku
-        # (+ legenda w toolbarze). Pozostałe typy nie ruszają salda urlopu.
+        # Kolumny 'urlop', 'zadanie' i 'z_godzin' liczą się do puli → 🟢.
+        # 'saldo' = wiszące godziny (część dnia), NIE z puli — rozlicza się
+        # odpracowaniem albo dniem urlopu po nazbieraniu 8 h (04.10.2026).
         headers = [
             ('employee', 'Pracownik', 150), ('category', 'Kategoria', 95),
             ('carryover', 'Zaległy', 58), ('quota', 'Pula', 48), ('available', 'Dostępne', 66),
-            ('urlop', '🟢 Urlop', 62), ('zadanie', '🟢 Na żąd.', 68), ('remaining', 'Pozostało', 72),
+            ('urlop', '🟢 Urlop', 62), ('zadanie', '🟢 Na żąd.', 68),
+            ('z_godzin', '🟢 Z godzin', 72), ('remaining', 'Pozostało', 92),
+            ('saldo', 'Saldo godz.', 78),
             ('l4', 'L4', 46), ('delegacja', 'Deleg.', 52), ('szkolenie', 'Szkol.', 52),
             ('inne', 'Inne', 46), ('total', 'Razem', 56),
         ]
@@ -32248,6 +32374,8 @@ Kod: {unlock_code}
         tree.pack(fill=tk.BOTH, expand=True, padx=8, side=tk.LEFT)
         vsb.pack(fill=tk.Y, side=tk.RIGHT, padx=(0, 8))
         tree.tag_configure('over', background='#f9d6d5')  # przekroczony urlop
+        # Saldo ≥ 8 h — jest z czego wydać dzień urlopu albo trzeba odpracować.
+        tree.tag_configure('saldo_dzien', background='#ffe0b2')
 
         _report_cache = {'rows': [], 'year': None}
 
@@ -32274,16 +32402,33 @@ Kod: {unlock_code}
             _report_cache['year'] = yr
             for r in rows:
                 br = r['by_reason']
-                tag = ('over',) if r['remaining'] < 0 else ()
+                saldo_h = float(r.get('saldo_h') or 0)
+                if r['remaining'] < 0:
+                    tag = ('over',)
+                elif saldo_h >= rmm.GODZINY_NA_DZIEN:
+                    tag = ('saldo_dzien',)
+                else:
+                    tag = ()
                 tree.insert('', tk.END, iid=str(r['employee_id']), values=(
                     r['name'], r['category'],
                     f"{r['carryover']:g}", f"{r['quota']:g}", f"{r['available']:g}",
                     f"{br.get('URLOP', 0):g}", f"{br.get('URLOP_ZADANIE', 0):g}",
-                    f"{r['remaining']:g}",
+                    f"{br.get('URLOP_Z_GODZIN', 0):g}",
+                    # Pozostały urlop w dniach + godzinach („12 dni 4 h").
+                    rmm.fmt_dni_godz(r['remaining']),
+                    (f"{saldo_h:g} h" if saldo_h else ""),
                     f"{br.get('L4', 0):g}", f"{br.get('DELEGACJA', 0):g}",
                     f"{br.get('SZKOLENIE', 0):g}", f"{br.get('INNE', 0):g}",
                     f"{r['total_days']:g}",
                 ), tags=tag)
+
+        def _saldo_godzin():
+            """Okno salda godzin wybranego pracownika."""
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("Saldo godzin", "Zaznacz pracownika w tabeli.", parent=dlg)
+                return
+            self._vacation_saldo_godzin(dlg, int(sel[0]), on_change=refresh)
 
         def _export():
             rows = _report_cache['rows']
@@ -32302,13 +32447,15 @@ Kod: {unlock_code}
                     w = csv.writer(fh, delimiter=';')
                     w.writerow(['Pracownik', 'Kategoria', 'Zaległy z ub. roku', 'Pula',
                                 'Dostępne razem', 'Urlop wykorzystany', 'Na żądanie',
-                                'Urlop pozostały', 'L4', 'Delegacja', 'Szkolenie',
+                                'Urlop z salda godzin', 'Urlop pozostały',
+                                'Saldo godzin [h]', 'L4', 'Delegacja', 'Szkolenie',
                                 'Inne', 'Razem dni'])
                     for r in rows:
                         br = r['by_reason']
                         w.writerow([r['name'], r['category'], r['carryover'], r['quota'],
                                     r['available'], br.get('URLOP', 0), br.get('URLOP_ZADANIE', 0),
-                                    r['remaining'], br.get('L4', 0), br.get('DELEGACJA', 0),
+                                    br.get('URLOP_Z_GODZIN', 0), r['remaining'],
+                                    r.get('saldo_h', 0), br.get('L4', 0), br.get('DELEGACJA', 0),
                                     br.get('SZKOLENIE', 0), br.get('INNE', 0), r['total_days']])
                 messagebox.showinfo("Eksport", f"Zapisano:\n{path}", parent=dlg)
             except Exception as ex:
@@ -32410,13 +32557,16 @@ Kod: {unlock_code}
             iid = tree.identify_row(event.y)
             if not iid:
                 return
-            if tree.identify_column(event.x) == '#3':  # kolumna 'Zaległy'
+            kol = tree.identify_column(event.x)
+            if kol == '#3':  # kolumna 'Zaległy'
                 _edit_carryover(iid)
+            elif kol == f"#{cols.index('saldo') + 1}":   # 'Saldo godz.'
+                self._vacation_saldo_godzin(dlg, int(iid), on_change=refresh)
             else:
                 self._vacation_show_employee_history(dlg, int(iid))
 
         tree.bind("<Double-1>", _on_double)
-        tk.Label(toolbar, text="  (dwuklik 'Zaległy' = edytuj)",
+        tk.Label(toolbar, text="  (dwuklik 'Zaległy' = edytuj, 'Saldo godz.' = rozlicz)",
                  font=self.FONT_SMALL, fg="#888").pack(side=tk.LEFT)
         tk.Button(toolbar, text="📖 Historia pracownika", command=_open_history,
                   bg=self.COLOR_PURPLE, fg="white", font=self.FONT_BOLD, padx=10).pack(side=tk.LEFT, padx=8)
@@ -32424,6 +32574,216 @@ Kod: {unlock_code}
         podmiot_var.trace_add('write', lambda *_: refresh())
         refresh()
         return refresh
+
+    def _vacation_saldo_godzin(self, parent_dlg, employee_id, on_change=None):
+        """Saldo godzin pracownika w OSOBNYM oknie (Urlopy → Rozliczenie).
+        Treść buduje `_saldo_godzin_widok` — ten sam widok siedzi jako
+        zakładka w karcie pracownika."""
+        emp = next((e for e in rmm.get_employees(self.rm_master_db_path, active_only=False)
+                    if e['id'] == employee_id), None)
+        nazwa = emp['name'] if emp else f"#{employee_id}"
+        win = tk.Toplevel(parent_dlg)
+        win.title(f"⏱ Saldo godzin — {nazwa}")
+        win.transient(parent_dlg)
+        self._center_window(win, 820, 560)
+        self._saldo_godzin_widok(win, employee_id, on_change=on_change,
+                                 zamknij=win.destroy, nazwa=nazwa)
+
+    def _saldo_godzin_widok(self, win, employee_id, on_change=None, zamknij=None, nazwa=None):
+        """Saldo godzin pracownika: godziny wzięte (typ GODZINY), rozliczenia
+        (odpracowania i „8 h urlopem") i saldo. Rozliczane w dowolnym terminie.
+
+        Decyzja usera 04.10.2026: część dnia NIE schodzi z żadnej puli, tylko
+        wisi; po nazbieraniu 8 h kadrowa wydaje z salda dzień urlopu, albo
+        pracownik godziny odpracowuje (odejmuje się z salda).
+        Dane: dwa odczyty serwera na cały widok (nieobecności + rozliczenia).
+
+        `win` — kontener (okno albo ramka zakładki karty pracownika).
+        `zamknij` — gdy podane, widok ma przycisk „Zamknij" i Esc.
+        Zwraca funkcję odświeżającą (karta woła ją przy wejściu na zakładkę).
+        """
+        if nazwa is None:
+            emp = next((e for e in rmm.get_employees(self.rm_master_db_path, active_only=False)
+                        if e['id'] == employee_id), None)
+            nazwa = emp['name'] if emp else f"#{employee_id}"
+        uzytkownik = getattr(self, 'current_user', None)
+        H = rmm.GODZINY_NA_DZIEN
+
+        top = tk.Frame(win, bg="#607d8b")
+        top.pack(fill=tk.X)
+        tk.Label(top, text=f"⏱ {nazwa}", bg="#607d8b", fg="white",
+                 font=("Segoe UI", 12, "bold"), padx=12, pady=8).pack(side=tk.LEFT)
+        lbl_saldo = tk.Label(top, text="", bg="#607d8b", fg="white",
+                             font=("Segoe UI", 12, "bold"), padx=12)
+        lbl_saldo.pack(side=tk.RIGHT)
+
+        tk.Label(win, text="Część dnia nie schodzi z puli urlopu — godziny wiszą na saldzie. "
+                           "Zdejmuje je odpracowanie albo, po nazbieraniu 8 h, dzień urlopu.",
+                 font=self.FONT_SMALL, fg="#555", anchor='w', padx=12, pady=6).pack(fill=tk.X)
+
+        body = tk.Frame(win, padx=10)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        def _lista(rodzic, tytul, kolumny):
+            ramka = tk.LabelFrame(rodzic, text=tytul, font=self.FONT_BOLD, padx=4, pady=4)
+            ramka.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4)
+            t = ttk.Treeview(ramka, columns=[k for k, _, _ in kolumny], show='headings', height=14)
+            for k, txt, w in kolumny:
+                t.heading(k, text=txt)
+                t.column(k, width=w, stretch=(k == kolumny[-1][0]))
+            t.pack(fill=tk.BOTH, expand=True)
+            return t
+
+        t_wziete = _lista(body, "Godziny wzięte (+)", [
+            ('data', 'Data', 82), ('godz', 'Od–do', 90), ('h', 'Godz.', 50), ('st', 'Status', 90)])
+        t_rozl = _lista(body, "Rozliczenia (−)", [
+            ('data', 'Data', 82), ('rodzaj', 'Rodzaj', 110), ('h', 'Godz.', 50), ('uwagi', 'Uwagi', 140)])
+
+        stan = {'saldo': 0.0}
+
+        def odswiez():
+            t_wziete.delete(*t_wziete.get_children())
+            t_rozl.delete(*t_rozl.get_children())
+            avail = [a for a in rmm.get_employee_availability(self.rm_master_db_path, employee_id=employee_id)
+                     if (a.get('reason') or '').upper() == 'GODZINY']
+            rozl = rmm.get_godziny_rozliczenia(self.rm_master_db_path, employee_id=employee_id)
+            for a in sorted(avail, key=lambda a: a['date_from'], reverse=True):
+                st = (a.get('status') or 'ZATWIERDZONY').upper()
+                t_wziete.insert('', tk.END, values=(
+                    self.format_date_ddmmyyyy(a['date_from']),
+                    f"{a.get('time_from') or ''}–{a.get('time_to') or ''}",
+                    f"{rmm.godziny_wpisu(a):g}",
+                    f"{self.STATUS_ICONS.get(st, '')} {self.STATUS_LABELS.get(st, st)}"),
+                    tags=(('odrz',) if st == 'ODRZUCONY' else ()))
+            for r in rozl:
+                rodzaj = ("🏖 Dzień urlopu" if (r.get('rodzaj') or '').upper() == rmm.ROZLICZENIE_URLOP
+                          else "🔧 Odpracowanie")
+                t_rozl.insert('', tk.END, iid=str(r['id']), values=(
+                    self.format_date_ddmmyyyy(r['date']), rodzaj,
+                    f"{float(r['hours']):g}", r.get('notes') or ''))
+            t_wziete.tag_configure('odrz', foreground="#999")
+            s = (rmm.get_saldo_godzin(self.rm_master_db_path, avail=avail, rozliczenia=rozl)
+                 .get(employee_id) or {}).get('saldo_h', 0.0)
+            stan['saldo'] = s
+            lbl_saldo.config(text=(f"Saldo: {s:g} h" + (" — można wydać dzień urlopu" if s >= H else "")
+                                   if s > 0 else (f"Saldo: {s:g} h (nadpracowane)" if s < 0
+                                                  else "Saldo: 0 h — rozliczone")))
+            btn_urlop.config(state=(tk.NORMAL if s >= H else tk.DISABLED))
+
+        def _formularz(tytul, godziny_domyslne, rodzaj):
+            """Mały formularz: data + godziny + uwagi. Zwraca nic — zapisuje sam."""
+            f = tk.Toplevel(win)
+            # Ukryte od razu — pokazane dopiero zbudowane i wyśrodkowane
+            # (_center_window robi deiconify po zbudowaniu). Wcześniej grab_set
+            # szedł PRZED wyśrodkowaniem i okno „skakało" (user 04.10.2026).
+            f.withdraw()
+            f.title(tytul)
+            f.transient(win.winfo_toplevel())
+            frm = tk.Frame(f, padx=14, pady=10)
+            frm.pack(fill=tk.BOTH, expand=True)
+            tk.Label(frm, text="Data (DD-MM-YYYY):", font=self.FONT_BOLD).grid(row=0, column=0, sticky='w', pady=3)
+            v_data = tk.StringVar(value=datetime.now().strftime('%d-%m-%Y'))
+            ramka_daty = tk.Frame(frm)
+            ramka_daty.grid(row=0, column=1, sticky='w')
+            e_data = tk.Entry(ramka_daty, textvariable=v_data, width=12)
+            e_data.pack(side=tk.LEFT)
+            # Kalendarzyk — ten sam co w innych oknach RM_MANAGER.
+            tk.Button(ramka_daty, text="📅", font=self.FONT_SMALL, padx=4,
+                      command=lambda: self.open_calendar_picker(e_data, v_data.get())
+                      ).pack(side=tk.LEFT, padx=(4, 0))
+            tk.Label(frm, text="Godziny:", font=self.FONT_BOLD).grid(row=1, column=0, sticky='w', pady=3)
+            v_h = tk.StringVar(value=f"{godziny_domyslne:g}")
+            e_h = tk.Entry(frm, textvariable=v_h, width=6)
+            e_h.grid(row=1, column=1, sticky='w')
+            if rodzaj == rmm.ROZLICZENIE_URLOP:
+                e_h.config(state='readonly')        # zawsze pełny dzień = 8 h
+            tk.Label(frm, text="Uwagi:", font=self.FONT_BOLD).grid(row=2, column=0, sticky='w', pady=3)
+            v_uw = tk.StringVar()
+            tk.Entry(frm, textvariable=v_uw, width=28).grid(row=2, column=1, sticky='w')
+
+            def zapisz():
+                try:
+                    d_iso = self.parse_date_ddmmyyyy(v_data.get()).strftime('%Y-%m-%d')
+                    h = float(v_h.get().replace(',', '.'))
+                except (ValueError, AttributeError) as ex:
+                    messagebox.showwarning("Uwaga", f"Sprawdź datę i godziny.\n{ex}", parent=f)
+                    return
+                if h <= 0:
+                    messagebox.showwarning("Uwaga", "Godziny muszą być większe od 0.", parent=f)
+                    return
+                if rodzaj == rmm.ROZLICZENIE_ODPRACOWANIE and h > stan['saldo'] > 0:
+                    if not messagebox.askyesno(
+                            "Więcej niż saldo",
+                            f"Saldo to {stan['saldo']:g} h, a wpisujesz {h:g} h odpracowania.\n"
+                            f"Nadwyżka zostanie na plusie pracownika. Zapisać?", parent=f):
+                        return
+                try:
+                    rmm.dodaj_rozliczenie_godzin(self.rm_master_db_path, employee_id, d_iso, h,
+                                                 rodzaj, v_uw.get().strip() or None, uzytkownik)
+                except Exception as ex:
+                    messagebox.showerror("Błąd zapisu", str(ex), parent=f)
+                    return
+                f.destroy()
+                odswiez()
+                if callable(on_change):
+                    on_change()
+            tk.Button(frm, text="💾 Zapisz", command=zapisz, bg=self.COLOR_GREEN, fg="white",
+                      font=self.FONT_BOLD, padx=12).grid(row=3, column=1, sticky='e', pady=(10, 0))
+            f.bind("<Return>", lambda _e: zapisz())
+            f.bind("<Escape>", lambda _e: f.destroy())
+            # Wyśrodkowanie PO zbudowaniu, blokada okna dopiero gdy widoczne.
+            self._center_window(f, 420, 210, parent=win.winfo_toplevel())
+
+            def _blokuj():
+                try:
+                    if f.winfo_exists() and f.winfo_viewable():
+                        f.grab_set()
+                        e_h.focus_set()
+                    elif f.winfo_exists():
+                        f.after(30, _blokuj)
+                except tk.TclError:
+                    pass
+            f.after(30, _blokuj)
+
+        def usun():
+            sel = t_rozl.selection()
+            if not sel:
+                messagebox.showinfo("Usuń", "Zaznacz rozliczenie po prawej.", parent=win)
+                return
+            vals = t_rozl.item(sel[0], 'values')
+            if not messagebox.askyesno(
+                    "Usuń rozliczenie",
+                    f"Usunąć „{vals[1]}” z {vals[0]} ({vals[2]} h)?\n"
+                    "Godziny wrócą na saldo pracownika.", parent=win):
+                return
+            try:
+                rmm.usun_rozliczenie_godzin(self.rm_master_db_path, int(sel[0]), employee_id,
+                                            f"{vals[0]} {vals[1]} {vals[2]} h", uzytkownik)
+            except Exception as ex:
+                messagebox.showerror("Błąd", str(ex), parent=win)
+                return
+            odswiez()
+            if callable(on_change):
+                on_change()
+
+        dol = tk.Frame(win, padx=10, pady=8)
+        dol.pack(fill=tk.X)
+        tk.Button(dol, text="🔧 Odpracowanie", font=self.FONT_BOLD, padx=10,
+                  command=lambda: _formularz("Odpracowanie godzin",
+                                             max(0.5, min(stan['saldo'], H)) if stan['saldo'] > 0 else 1,
+                                             rmm.ROZLICZENIE_ODPRACOWANIE)).pack(side=tk.LEFT, padx=4)
+        btn_urlop = tk.Button(dol, text=f"🏖 Rozlicz {H:g} h dniem urlopu", font=self.FONT_BOLD, padx=10,
+                              command=lambda: _formularz("Dzień urlopu z salda godzin", H,
+                                                         rmm.ROZLICZENIE_URLOP))
+        btn_urlop.pack(side=tk.LEFT, padx=4)
+        tk.Button(dol, text="🗑 Usuń rozliczenie", font=self.FONT_SMALL, padx=8,
+                  command=usun).pack(side=tk.LEFT, padx=4)
+        if callable(zamknij):
+            tk.Button(dol, text="Zamknij", font=self.FONT_SMALL, padx=10,
+                      command=zamknij).pack(side=tk.RIGHT)
+            win.bind("<Escape>", lambda _e: zamknij())
+        odswiez()
+        return odswiez
 
     def _vacation_build_employees_tab(self, parent, dlg):
         """Lista pracowników w oknie Kadry. Dodaj/Edytuj/Usuń + dwuklik = karta."""
@@ -32569,18 +32929,28 @@ Kod: {unlock_code}
         nb.add(tab_rep, text="  🧾  Rozliczenie  ")
         self._emp_card_report_tab(tab_rep, win, employee_id)
 
+        # ── Zakładka: Saldo godzin ── (user 04.10.2026: „dodaj saldo godzin
+        # do karty pracownika"). Ten sam widok co okno z Urlopy → Rozliczenie.
+        tab_saldo = tk.Frame(nb)
+        nb.add(tab_saldo, text="  ⏱  Saldo godzin  ")
+        saldo_reload = self._saldo_godzin_widok(tab_saldo, employee_id, on_change=on_change,
+                                                nazwa=name)
+
         # ── Zakładka: Historia zmian (audyt) ──
         tab_aud = tk.Frame(nb)
         nb.add(tab_aud, text="  📜  Historia zmian  ")
         audit_reload = self._emp_card_audit_tab(tab_aud, win, employee_id)
 
-        # Odśwież historię przy każdym wejściu na jej zakładkę — dzięki temu
-        # zmiany zrobione w innych zakładkach (pule, dane, decyzje) są od razu
-        # widoczne bez zamykania okna.
+        # Odśwież historię i saldo przy każdym wejściu na ich zakładkę —
+        # zmiany zrobione w innych zakładkach (pule, dane, decyzje, nowe
+        # godziny w Nieobecnościach) są od razu widoczne bez zamykania okna.
         def _on_card_tab(_e=None):
             try:
-                if nb.tab(nb.select(), "text").strip().startswith("📜"):
+                tytul = nb.tab(nb.select(), "text").strip()
+                if tytul.startswith("📜"):
                     audit_reload()
+                elif tytul.startswith("⏱"):
+                    saldo_reload()
             except Exception:
                 pass
         nb.bind("<<NotebookTabChanged>>", _on_card_tab)
@@ -32692,16 +33062,15 @@ Kod: {unlock_code}
             wanted = {'Oczekuje': 'OCZEKUJE', 'Zatwierdzony': 'ZATWIERDZONY',
                       'Odrzucony': 'ODRZUCONY'}.get(card_status_var.get())
             summ = {}
+            # Dni wszystkich wpisów jednym odczytem kalendarza (nie 2 zapytania/wpis).
+            dni = rmm.dni_nieobecnosci_hurtem(self.rm_master_db_path, rows)
             for r in rows:
                 st = (r.get('status') or 'ZATWIERDZONY').upper()
                 if wanted and st != wanted:
                     continue
                 tf, tt = r.get('time_from'), r.get('time_to')
                 hours = f"{tf}–{tt}" if tf and tt else "cały dzień"
-                days = rmm._count_absence_days(
-                    r['date_from'], r['date_to'], tf, tt,
-                    rm_master_db_path=self.rm_master_db_path,
-                    days_override=r.get('days_override'))
+                days = dni.get(r.get('id'), 0.0)
                 rsn = (r.get('reason') or 'INNE').upper()
                 if st != 'ODRZUCONY':
                     summ[rsn] = summ.get(rsn, 0.0) + days
@@ -32769,6 +33138,10 @@ Kod: {unlock_code}
         tk.Entry(bar, textvariable=year_var, width=6, font=self.FONT_SMALL).pack(side=tk.LEFT)
         tk.Button(bar, text="🔍 Przelicz", command=lambda: _refresh(),
                   font=self.FONT_SMALL, padx=8).pack(side=tk.LEFT, padx=4)
+        # Saldo godzin z karty pracownika — tu kadrowa i tak patrzy na urlop.
+        tk.Button(bar, text="⏱ Saldo godzin", bg="#607d8b", fg="white", font=self.FONT_BOLD,
+                  padx=10, command=lambda: self._vacation_saldo_godzin(
+                      win, employee_id, on_change=_refresh)).pack(side=tk.LEFT, padx=4)
 
         def _year():
             try:
@@ -32837,7 +33210,9 @@ Kod: {unlock_code}
                 yr = int(year_var.get())
             except ValueError:
                 yr = datetime.now().year
-            rep = rmm.get_vacation_report(self.rm_master_db_path, yr)
+            # Tylko ten pracownik — raport i tak czyta w pakiecie, ale nie
+            # liczy 35 innych osób, żeby pokazać jedną (04.10.2026).
+            rep = rmm.get_vacation_report(self.rm_master_db_path, yr, employee_id=employee_id)
             rec = next((r for r in rep if r['employee_id'] == employee_id), None)
             txt.delete('1.0', tk.END)
             if not rec:
@@ -32851,10 +33226,16 @@ Kod: {unlock_code}
                 f"Pula na {yr}:            {rec['quota']:g} dni",
                 f"Dostępne razem:          {rec['available']:g} dni",
                 f"Wykorzystano (urlop):    {rec['used_urlop']:g} dni",
-                f"POZOSTAŁO:               {rec['remaining']:g} dni",
+                f"POZOSTAŁO:               {rmm.fmt_dni_godz(rec['remaining'])}",
+                "",
+                f"SALDO GODZIN:            {float(rec.get('saldo_h') or 0):g} h"
+                + ("   ← można wydać dzień urlopu (⏱ Saldo godzin)"
+                   if float(rec.get('saldo_h') or 0) >= rmm.GODZINY_NA_DZIEN else ""),
                 "",
                 "Wg typu nieobecności:",
             ]
+            if br.get('URLOP_Z_GODZIN'):
+                lines.append(f"  • Dzień urlopu z salda godzin: {br['URLOP_Z_GODZIN']:g} dni")
             for t in rmm.ABSENCE_TYPES:
                 d = br.get(t['code'], 0)
                 if d:
@@ -32956,13 +33337,12 @@ Kod: {unlock_code}
             rows = rmm.get_employee_availability(self.rm_master_db_path, employee_id=employee_id)
             rows.sort(key=lambda r: r['date_from'], reverse=True)
             summary = {}
+            # Dni wszystkich wpisów jednym odczytem kalendarza (nie 2 zapytania/wpis).
+            dni = rmm.dni_nieobecnosci_hurtem(self.rm_master_db_path, rows)
             for r in rows:
                 tf, tt = r.get('time_from'), r.get('time_to')
                 hours = f"{tf}–{tt}" if tf and tt else "cały dzień"
-                days = rmm._count_absence_days(
-                    r['date_from'], r['date_to'], tf, tt,
-                    rm_master_db_path=self.rm_master_db_path,
-                    days_override=r.get('days_override'))
+                days = dni.get(r.get('id'), 0.0)
                 rsn = (r.get('reason') or 'INNE').upper()
                 summary[rsn] = summary.get(rsn, 0.0) + days
                 tree.insert('', tk.END, iid=str(r['id']), values=(
@@ -33050,11 +33430,34 @@ Kod: {unlock_code}
                     progress_cb(i + 1, len(pids))
                 except Exception:
                     pass
+            # JEDNO otwarcie bazy projektu: prognoza, numery pracowników
+            # wszystkich etapów i serwisant SAT. Było: prognoza + otwarcie
+            # i zapytanie o nazwiska na KAŻDY etap serwisowy (8 kodów) — przy
+            # ~60 projektach setki otwarć pliku na udziale (04.10.2026,
+            # „przeliczanie planu serwisantów trwa długie sekundy"). Nazwisk
+            # tu nie trzeba: numery i tak przecinamy z listą serwisantów.
             try:
                 pdb = self.get_project_db_path(pid)
                 if not os.path.exists(pdb):
                     continue
-                forecast = rmm.recalculate_forecast(pdb, pid)
+                _con = rmm._open_rm_connection(pdb)
+                try:
+                    forecast = rmm._recalculate_forecast_with_con(_con, pid)
+                    try:
+                        _ids_etapow = rmm.id_pracownikow_etapow(_con, pid)
+                    except Exception:
+                        _ids_etapow = {}
+                    try:
+                        _r = _con.execute("""
+                            SELECT ss.employee_id FROM stage_schedule ss
+                            JOIN project_stages ps ON ss.project_stage_id = ps.id
+                            WHERE ps.project_id = ? AND ps.stage_code = 'URUCHOMIENIE_U_KLIENTA'
+                        """, (pid,)).fetchone()
+                        _sat_eid = _r['employee_id'] if _r and _r['employee_id'] else None
+                    except Exception:
+                        _sat_eid = None
+                finally:
+                    _con.close()
             except Exception:
                 continue
             pname = self.project_names.get(pid, f"Projekt {pid}")
@@ -33067,28 +33470,14 @@ Kod: {unlock_code}
                 # reszta — przypisania stage_staff_assignments.
                 emp_ids = set()
                 if stage_code == 'URUCHOMIENIE_U_KLIENTA':
-                    try:
-                        eid = rmm.get_stage_employee_id(pdb, pid, stage_code)
-                        if eid:
-                            emp_ids.add(eid)
-                    except Exception:
-                        pass
+                    if _sat_eid:
+                        emp_ids.add(_sat_eid)
                     # Brak własnego przypisania (SAT) → pokaż u serwisanta
                     # przypisanego do rodzica ODBIORY.
                     if not emp_ids:
-                        try:
-                            staff = rmm.get_stage_assigned_staff(
-                                pdb, self.rm_master_db_path, pid, 'ODBIORY')
-                            emp_ids = {s['employee_id'] for s in staff}
-                        except Exception:
-                            pass
+                        emp_ids = set(_ids_etapow.get('ODBIORY', ()))
                 else:
-                    try:
-                        staff = rmm.get_stage_assigned_staff(
-                            pdb, self.rm_master_db_path, pid, stage_code)
-                        emp_ids = {s['employee_id'] for s in staff}
-                    except Exception:
-                        pass
+                    emp_ids = set(_ids_etapow.get(stage_code, ()))
                 # Zostaw tylko serwisantów (jeśli lista serwisantów znana).
                 if serwisanci:
                     emp_ids &= serwisanci
@@ -34869,9 +35258,11 @@ Kod: {unlock_code}
                            font=self.FONT_SMALL,
                            command=lambda: _full_reset()).pack(side=tk.LEFT)
 
-        tk.Label(catbar, text="   Podmiot:", font=self.FONT_SMALL).pack(side=tk.LEFT, padx=(10, 2))
+        # Podmiot w wierszu STATUSÓW, nie kategorii — za dziewięcioma
+        # kategoriami pole było ściśnięte do „Wszystk" (04.10.2026).
+        tk.Label(filterbar, text="      Podmiot:", font=self.FONT_SMALL).pack(side=tk.LEFT, padx=(10, 2))
         podmiot_var = tk.StringVar(value="Wszystkie")
-        ttk.Combobox(catbar, textvariable=podmiot_var, state='readonly', width=16,
+        ttk.Combobox(filterbar, textvariable=podmiot_var, state='readonly', width=18,
                      values=["Wszystkie"] + rmm.EMPLOYEE_PODMIOTY + ["(bez przypisania)"],
                      font=self.FONT_SMALL).pack(side=tk.LEFT)
         podmiot_var.trace_add('write', lambda *a: _full_reset())
@@ -34943,6 +35334,21 @@ Kod: {unlock_code}
             box.pack(side=tk.LEFT, padx=4)
             tk.Label(box, text="  ", bg=c).pack(side=tk.LEFT)
             tk.Label(box, text=t['label'], font=self.FONT_SMALL).pack(side=tk.LEFT)
+        # Część dnia = dolna połowa kratki, odpracowanie = górna połowa.
+        # DRUGI wiersz legendy — w pierwszym 11 typów i tak ledwo się mieści,
+        # dopisane na końcu ucinało się nawet na szerokim oknie (04.10.2026).
+        legend2 = tk.Frame(parent, padx=8, pady=0)
+        legend2.pack(fill=tk.X)
+        tk.Label(legend2, text="Kratka:", font=self.FONT_SMALL, fg="#666").pack(side=tk.LEFT, padx=(4, 6))
+        box = tk.Frame(legend2)
+        box.pack(side=tk.LEFT, padx=4)
+        tk.Label(box, text="▀", fg=self.KOLOR_ODPRACOWANIA, font=("Segoe UI", 11)).pack(side=tk.LEFT)
+        tk.Label(box, text="górna połowa = odpracowanie", font=self.FONT_SMALL).pack(side=tk.LEFT)
+        box = tk.Frame(legend2)
+        box.pack(side=tk.LEFT, padx=(14, 4))
+        tk.Label(box, text="▄", fg=self.ABSENCE_CAL_COLORS['GODZINY'], font=("Segoe UI", 11)).pack(side=tk.LEFT)
+        tk.Label(box, text="dolna połowa = nieobecność przez część dnia (godziny)",
+                 font=self.FONT_SMALL).pack(side=tk.LEFT)
 
         # Układ: zamrożona kolumna nazwisk (lewy canvas) + przewijalny pas dni.
         # Pas dni to CIĄGŁA oś czasu (kolejne miesiące jeden za drugim) — scroll
@@ -35138,16 +35544,24 @@ Kod: {unlock_code}
             ndays = __cal.monthrange(midx_year, midx_month)[1]
             first_idx = (date(midx_year, midx_month, 1) - base_date).days
 
-            # Dane nieobecności dla tego miesiąca
+            # Dane nieobecności dla tego miesiąca — z listy przeczytanej RAZ na
+            # odświeżenie (cal['avail_all']), filtr w pamięci. Wcześniej każdy
+            # rysowany miesiąc czytał wszystkie nieobecności i dni robocze od
+            # nowa: 4 miesiące na start = 8 zapytań, każdy scroll w bok kolejne
+            # (04.10.2026, „Kadry długo się ładują").
             d_from = f"{midx_year:04d}-{midx_month:02d}-01"
             d_to = f"{midx_year:04d}-{midx_month:02d}-{ndays:02d}"
-            avail = rmm.get_employee_availability(
-                self.rm_master_db_path, date_from=d_from, date_to=d_to)
+            if cal.get('avail_all') is None:
+                cal['avail_all'] = rmm.get_employee_availability(self.rm_master_db_path)
+            avail = [a for a in cal['avail_all']
+                     if (a.get('date_to') or '') >= d_from and (a.get('date_from') or '') <= d_to]
             # Dni robocze miesiąca (wg kalendarza firmowego) — tylko one liczą się
             # do urlopu, więc tylko one malujemy kolorem nieobecności. Weekendy i
             # święta zostają szare, nawet jeśli mieszczą się w zakresie urlopu.
             try:
-                _workdays = set(rmm.get_working_days(self.rm_master_db_path, d_from, d_to))
+                if cal.get('kal') is None:
+                    cal['kal'] = rmm.kalendarz_firmy_mapa(self.rm_master_db_path)
+                _workdays = set(rmm.dni_robocze_lista(cal['kal'], d_from, d_to))
             except Exception:
                 _workdays = None  # fallback: maluj wszystko (jak dawniej)
             # Filtr statusów wg zaznaczonych checkboxów (domyślnie wszystkie).
@@ -35162,6 +35576,13 @@ Kod: {unlock_code}
             for a in avail:
                 st = (a.get('status') or 'ZATWIERDZONY').upper()
                 code = (a.get('reason') or 'INNE').upper()
+                # Część dnia (wpis godzinowy, krótszy niż pełny dzień) — kratka
+                # świeci się DO POŁOWY (user 04.10.2026: „gdy wziął godzinę
+                # w górę, świeci się do połowy"). Trzeci element komórki =
+                # opis godzin do dymka, None = cały dzień.
+                _h = rmm.godziny_wpisu(a) if (a.get('time_from') and a.get('time_to')) else None
+                czesc = (f"{a['time_from']}–{a['time_to']} ({_h:g} h)"
+                         if _h is not None and _h < rmm.GODZINY_NA_DZIEN else None)
                 try:
                     df = datetime.strptime(a['date_from'][:10], "%Y-%m-%d").date()
                     dt = datetime.strptime(a['date_to'][:10], "%Y-%m-%d").date()
@@ -35173,9 +35594,12 @@ Kod: {unlock_code}
                         gi = first_idx + (dd - 1)
                         cell = by_emp.setdefault(a['employee_id'], {})
                         prev = cell.get(gi)
-                        # nadpisz tylko gdy nowy wpis ma >= priorytet statusu
-                        if prev is None or _ST_PRIO.get(st, 0) >= _ST_PRIO.get(prev[1], 0):
-                            cell[gi] = (code, st)
+                        # nadpisz tylko gdy nowy wpis ma >= priorytet statusu;
+                        # przy równym — cały dzień wygrywa z częścią dnia.
+                        if (prev is None or _ST_PRIO.get(st, 0) > _ST_PRIO.get(prev[1], 0)
+                                or (_ST_PRIO.get(st, 0) == _ST_PRIO.get(prev[1], 0)
+                                    and not (czesc and not prev[2]))):
+                            cell[gi] = (code, st, czesc)
                         # Odrzucone nie liczą się do konfliktów obsady.
                         if st != 'ODRZUCONY':
                             cat = a.get('employee_category') or ''
@@ -35213,7 +35637,7 @@ Kod: {unlock_code}
                     if cell and not _is_workday:
                         cell = None
                     if cell:
-                        code, st = cell
+                        code, st, czesc = cell
                         c = self.ABSENCE_CAL_COLORS.get(code, '#999')
                         # Kolor komórki wg statusu: oczekujące = żółte,
                         # odrzucone = wyszarzone + przekreślone, zatwierdzone =
@@ -35224,8 +35648,17 @@ Kod: {unlock_code}
                             fill_c = "#d0d0d0"   # szary
                         else:
                             fill_c = c
-                        grid.create_rectangle(x0, y0, x0 + CELL_W, y0 + ROW_H,
-                                              fill=fill_c, outline="#bdc3c7", tags=mtag)
+                        if czesc:
+                            # Część dnia: tło jak zwykły dzień, kolor tylko
+                            # w DOLNEJ połowie kratki.
+                            cbg = "#dfe4ea" if wd >= 5 else "white"
+                            grid.create_rectangle(x0, y0, x0 + CELL_W, y0 + ROW_H,
+                                                  fill=cbg, outline="#bdc3c7", tags=mtag)
+                            grid.create_rectangle(x0, y0 + ROW_H / 2, x0 + CELL_W, y0 + ROW_H,
+                                                  fill=fill_c, outline="", tags=mtag)
+                        else:
+                            grid.create_rectangle(x0, y0, x0 + CELL_W, y0 + ROW_H,
+                                                  fill=fill_c, outline="#bdc3c7", tags=mtag)
                         if st == 'ODRZUCONY':
                             grid.create_line(x0 + 2, y0 + 2, x0 + CELL_W - 2, y0 + ROW_H - 2,
                                              fill="#c0392b", tags=mtag)
@@ -35235,7 +35668,8 @@ Kod: {unlock_code}
                                              font=("Segoe UI", 7), tags=mtag)
                         cal['tips'][(gi, ri)] = (
                             f"{e['name']}\n{self.REASON_LABELS.get(code, code)}"
-                            f"\nStatus: {self.STATUS_LABELS.get(st, st)}\n"
+                            + (f"\nCzęść dnia: {czesc}" if czesc else "")
+                            + f"\nStatus: {self.STATUS_LABELS.get(st, st)}\n"
                             f"{dd:02d}-{midx_month:02d}-{midx_year}")
                     else:
                         cbg = "#dfe4ea" if wd >= 5 else "white"
@@ -35248,6 +35682,35 @@ Kod: {unlock_code}
                 xt = gi_today * CELL_W
                 grid.create_rectangle(xt, 0, xt + CELL_W, len(cal['emps']) * ROW_H,
                                       outline="#e67e22", width=2, fill='', tags=('today', mtag))
+
+            # Dni ODPRACOWANIA — górna połowa kratki (user 04.10.2026), żeby
+            # odróżniało się od nieobecności godzinowej (dolna połowa). Lista
+            # rozliczeń czytana RAZ na odświeżenie kalendarza, nie na miesiąc.
+            if cal.get('odpr') is None:
+                try:
+                    cal['odpr'] = [r for r in rmm.get_godziny_rozliczenia(self.rm_master_db_path)
+                                   if (r.get('rodzaj') or '').upper() == rmm.ROZLICZENIE_ODPRACOWANIE]
+                except Exception:
+                    cal['odpr'] = []
+            wiersz_emp = {e['id']: ri for ri, e in enumerate(cal['emps'])}
+            odpr_dnia = {}
+            for r in cal['odpr']:
+                d = str(r.get('date') or '')[:10]
+                if d[:7] != f"{midx_year:04d}-{midx_month:02d}" or r['employee_id'] not in wiersz_emp:
+                    continue
+                k = (r['employee_id'], int(d[8:10]))
+                odpr_dnia[k] = odpr_dnia.get(k, 0.0) + float(r.get('hours') or 0)
+            for (eid, dd), godz in odpr_dnia.items():
+                ri = wiersz_emp[eid]
+                gi = first_idx + (dd - 1)
+                x0, y0 = gi * CELL_W, ri * ROW_H
+                grid.create_rectangle(x0 + 1, y0 + 1, x0 + CELL_W - 1, y0 + ROW_H / 2,
+                                      fill=self.KOLOR_ODPRACOWANIA, outline="", tags=mtag)
+                emp_nazwa = cal['emps'][ri]['name']
+                poprz = cal['tips'].get((gi, ri))
+                cal['tips'][(gi, ri)] = ((poprz + "\n") if poprz else
+                                         f"{emp_nazwa}\n{dd:02d}-{midx_month:02d}-{midx_year}\n") \
+                    + f"🔧 Odpracowanie: {godz:g} h"
 
             cal['lo'] = min(cal['lo'], first_idx)
             cal['hi'] = max(cal['hi'], first_idx + ndays)
@@ -35439,6 +35902,9 @@ Kod: {unlock_code}
                 cal['ext_job'] = None
             grid.delete('all'); header.delete('all')
             cal['tips'] = {}; cal['conflicts'] = {}; cal['months_drawn'] = set()
+            cal['odpr'] = None      # odpracowania przeczytane od nowa przy rysowaniu
+            cal['avail_all'] = None  # nieobecności i kalendarz firmy — też od nowa,
+            cal['kal'] = None        # RAZ na odświeżenie, nie na każdy miesiąc
             cal['lo'] = 0; cal['hi'] = 0
             cal['sel_row'] = None  # filtr zmienia listę → zdejmij podświetlenie
             _load_emps()
@@ -35712,11 +36178,9 @@ Kod: {unlock_code}
         entries.sort(key=lambda a: a['date_from'])
 
         rows_tbl = []
+        dni = rmm.dni_nieobecnosci_hurtem(self.rm_master_db_path, entries)   # jeden odczyt kalendarza
         for a in entries:
-            days = rmm._count_absence_days(a['date_from'], a['date_to'],
-                                           a.get('time_from'), a.get('time_to'),
-                                           rm_master_db_path=self.rm_master_db_path,
-                                           days_override=a.get('days_override'))
+            days = dni.get(a.get('id'), 0.0)
             st = (a.get('status') or 'ZATWIERDZONY').upper()
             rows_tbl.append([
                 self.format_date_ddmmyyyy(a['date_from']),
