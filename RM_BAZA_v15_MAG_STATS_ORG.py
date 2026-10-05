@@ -10862,14 +10862,14 @@ class MainWindow(tk.Tk):
             if row is None or col is None or row < 0 or col < 0:
                 return
             
+            # KONWERSJA INDEKSU widok -> dane PRZED sprawdzeniem kolumny —
+            # ukryte kolumny (menu „Kolumny") przesuwają numerację.
+            col = self._kolumna_danych(col)
+
             # Tylko dla kolumn BOM: 0, 1, 2, 3, 7, 8, 9
             bom_columns = [0, 1, 2, 3, 7, 8, 9]
             if col not in bom_columns:
                 return
-            
-            # KONWERSJA INDEKSU: Kolumna 16 jest ukryta
-            if col >= 16:
-                col += 1
             
             if row >= len(self._sheet_row_ids):
                 return
@@ -15137,10 +15137,10 @@ class MainWindow(tk.Tk):
         
         row, col = selection[0], selection[1]
         
-        # KONWERSJA INDEKSU: Kolumna 16 jest ukryta, więc visual != physical
-        # Jeśli col >= 16 (visual), to fizycznie jest to col+1
-        if col >= 16:
-            col += 1
+        # KONWERSJA INDEKSU: widok -> dane. Nie sztywne `col >= 16 -> +1`:
+        # menu „Kolumny" pozwala ukryć dowolne, a z ukrytym ALARM wpis
+        # w ODEBRANE lądował w Uwagach (05.10.2026).
+        col = self._kolumna_danych(col)
         
         # Pobierz ID item z listy (NIE z kolumny!)
         if row >= len(self._sheet_row_ids):
@@ -17124,10 +17124,10 @@ class MainWindow(tk.Tk):
         
         row, col = selection[0], selection[1]
         
-        # KONWERSJA INDEKSU: Kolumna 16 jest ukryta, więc visual != physical
-        # Jeśli col >= 16 (visual), to fizycznie jest to col+1
-        if col >= 16:
-            col += 1
+        # KONWERSJA INDEKSU: widok -> dane. Nie sztywne `col >= 16 -> +1`:
+        # menu „Kolumny" pozwala ukryć dowolne, a z ukrytym ALARM wpis
+        # w ODEBRANE lądował w Uwagach (05.10.2026).
+        col = self._kolumna_danych(col)
         
         # Sprawdź czy to kolumna BOM (0,1,2,3,7,8,9,18)
         BOM_COLS = {

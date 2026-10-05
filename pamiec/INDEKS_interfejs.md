@@ -19,3 +19,4 @@ Czesc pamieci projektu — spis wszystkich obszarow w [MEMORY.md](MEMORY.md).
 - [Przyciski — styl globalny](project_przyciski_styl_globalny.md) — rm_przyciski.wlacz przed budową okien; groove nie solid (czarne), hover przez bind_class…
 - [Okna pokazane dopiero zbudowane](project_okna_pokazane_zbudowane.md) — ukryj_do_zbudowania we wszystkich oknach Subiekta; panel na środku MONITORA; pułapki zoomed/alpha/after_idle zmierzone WinAPI
 - [ODEBRANE: ilość jako notatka](project_odebrane_notatka_ilosc.md) — osobna kolumna `odebrane_notatka` obok kropki; migracja tylko pod lockiem, pole musi być w `allowed_fields`
+- [Edycja a ukryte kolumny](project_edycja_ukryte_kolumny.md) — sztywne `col >= 16 -> +1` wysyłało wpis z ODEBRANE do Uwag; zawsze `_kolumna_danych`

@@ -29,3 +29,5 @@ w arkuszu). Sama nazwa i czas startu tego nie rozstrzygają.
 - Restart RM_SERWER też: 15.09 user napisał „z restartem serwera poczekaj
   aż powiem" już PO tym, jak restart poszedł. Przy zmianach na produkcji
   pytać przed, nie informować po.
+- WYJĄTEK (05.10.2026): instancja RM_BAZA z Pythona po mojej edycji kodu —
+  restartuję sam, patrz [[feedback_restart_po_edycji]].
