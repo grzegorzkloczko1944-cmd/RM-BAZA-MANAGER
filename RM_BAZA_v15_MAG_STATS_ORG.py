@@ -8257,7 +8257,13 @@ class MainWindow(tk.Tk):
                 # więc dopasowanie ZK/RW ↔ arkusz idzie po nim w pierwszej
                 # kolejności, a po symbolu tylko awaryjnie. Wypełniane przy
                 # zasiewie i uzupełniane wstecz przy odświeżaniu ilości z ZK.
-                'subiekt_id': 'INTEGER'
+                'subiekt_id': 'INTEGER',
+                # NOTATKA w kolumnie ODEBRANE — ilość odebrana wpisywana
+                # ręcznie przez usera (05.10.2026). NIE jest to to samo co
+                # `delivered_qty`: tamto liczy się z RW w Subiekcie, a tu
+                # user notuje, ile fizycznie odebrał. Kropka ● obok liczy
+                # się dalej z delivered_qty >= order_qty i zostaje bez zmian.
+                'odebrane_notatka': 'TEXT'
             }
             
             # Dodaj brakujące kolumny
@@ -8856,7 +8862,14 @@ class MainWindow(tk.Tk):
             except:
                 price_disp = ""
             
-            # ODEBRANE: ● jeśli dostarczone >= zamówione (kompletne)
+            # ODEBRANE: [ilość odebrana] ●
+            #
+            # Dwie niezależne rzeczy w jednej komórce (05.10.2026):
+            #   • LICZBA  — notatka usera (`odebrane_notatka`), ile fizycznie
+            #     odebrał; wpisywana ręcznie, NIE liczona z niczego,
+            #   • KROPKA ● — jak dotąd: delivered_qty >= order_qty, czyli
+            #     „zamówienie domknięte" wg Subiekta. Bez zmian.
+            # Kolejność: najpierw ilość, potem kropka.
             received_flag = ""
             try:
                 if item['delivered_qty'] is not None and order_qty is not None:
@@ -8864,6 +8877,13 @@ class MainWindow(tk.Tk):
                         received_flag = "●"
             except:
                 received_flag = ""
+            try:
+                _odn = item['odebrane_notatka']
+            except (KeyError, IndexError, TypeError):
+                _odn = None          # baza sprzed migracji — sama kropka
+            _odn = ("" if _odn is None else str(_odn)).strip()
+            if _odn:
+                received_flag = ("%s %s" % (_odn, received_flag)).strip()
             
             # Typ: skróć ZNORMALIZOWANE → ZNORM
             class_eff = item['class_effective'] or ""
@@ -9062,11 +9082,14 @@ class MainWindow(tk.Tk):
             except Exception as e:
                 print(f"⚠️  Nie udało się ustawić szerokości kolumny LP: {e}")
         
-        # Ustaw kolumny 7, 8, 9, 18 jako edytowalne (Typ, Materiał, Grubość, Moduł)
-        # Czasem tksheet blokuje edycję jeśli format jest "dziwny"
+        # Ustaw kolumny 7, 8, 9, 17, 18 jako edytowalne
+        # (Typ, Materiał, Grubość, ODEBRANE, Moduł)
+        # Czasem tksheet blokuje edycję jeśli format jest "dziwny".
+        # 17 doszlo 05.10.2026 — notatka „ile odebrano"; wczesniej kolumna
+        # byla wylacznie wyliczana (sama kropka ●).
         try:
             # Force editable dla tych kolumn
-            for col_idx in [7, 8, 9, 18]:
+            for col_idx in [7, 8, 9, 17, 18]:
                 self.sheet.readonly_columns(columns=[col_idx], readonly=False)
         except Exception as e:
             print(f"⚠️  Nie udało się ustawić kolumn jako edytowalne: {e}")
@@ -15132,7 +15155,8 @@ class MainWindow(tk.Tk):
         # 4: Ilość (zam.), 5: Δ (read-only), 6: Ilość dostarczonych, 
         # 7: Typ*, 8: Materiał*, 9: Grubość*, 10: Dostawca (dropdown), 
         # 11: Cena PLN, 12: Zamówiono (data lub checkbox), 13: Termin dostawy (data), 
-        # 14: ALARM (offset+unit), 15: Uwagi, 16: DWF_BIB, 17: ODEBRANE (read-only)
+        # 14: ALARM (offset+unit), 15: Uwagi, 16: DWF_BIB,
+        # 17: ODEBRANE (NOTATKA usera — ile odebral; kropka ● liczy sie osobno)
         # * = Kolumny BOM (nadpisywalne work_* override src_*)
         
         col_map = {
@@ -15152,6 +15176,7 @@ class MainWindow(tk.Tk):
             14: ('alarm', 'alarm'),                  # ALARM (specjalne)
             15: ('notes', 'text'),                   # Uwagi
             16: ('dwf_biblioteka', 'int'),           # DWF_BIB
+            17: ('odebrane_notatka', 'ilosc_notatka'),  # ODEBRANE — notatka usera
             18: ('work_modul', 'text')               # Moduł* (BOM)
         }
         
@@ -15721,6 +15746,34 @@ class MainWindow(tk.Tk):
             else:
                 new_value = None
         
+        # --- ILOSC_NOTATKA (kolumna ODEBRANE) ---
+        #
+        # Notatka usera: ILE fizycznie odebral. Nie liczy sie z niczego —
+        # `delivered_qty` idzie z RW Subiekta i zostaje osobno (05.10.2026).
+        #
+        # Wyswietlanie: liczby CALKOWITE bez przecinka i zer („5", nie „5,0"),
+        # ale ulamek wolno wpisac przecinkiem („2,5") — wtedy zostaje.
+        # Kropka ● dopisuje sie przy rysowaniu komorki, wiec tutaj ja
+        # odcinamy: user moze zaznaczyc komorke z „3 ●" i nadpisac samo „4".
+        if field_type == 'ilosc_notatka':
+            val = str(new_value or "").replace("●", "").strip()
+            if not val:
+                new_value = None
+            else:
+                try:
+                    f = float(val.replace(",", "."))
+                    # Calkowita -> bez czesci dziesietnej; ulamek -> przecinek,
+                    # bez koncowych zer („2,50" -> „2,5").
+                    new_value = (str(int(f)) if f == int(f)
+                                 else ("%.3f" % f).rstrip("0").rstrip(".").replace(".", ","))
+                except ValueError:
+                    messagebox.showwarning(
+                        "Odebrane",
+                        "Podaj ilość, np. 5 albo 2,5.\n\nWpisano: '%s'" % val)
+
+                    self.refresh_data()
+                    return
+
         # --- TEXT (domyślnie) ---
         # Nic nie rób, new_value jest OK
         
