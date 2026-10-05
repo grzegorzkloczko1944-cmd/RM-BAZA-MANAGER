@@ -68,3 +68,4 @@ Czesc pamieci projektu — spis wszystkich obszarow w [MEMORY.md](MEMORY.md).
 - [Okno ZD: sortowanie i „do zamówienia”](project_zd_okno_do_zamowienia.md) — klucz_wiersza przy każdym odświeżeniu; do_zamowienia = Kupić>0 albo stan po zdjęciu ≤ minimum; co znaczy kolumna ZK
 - [ZD: powtórka wysyłki, numer projektu z mostu, kolumna SUBIEKT po projekcie](project_zd_powtorka_i_kolumna_subiekt.md) — 03.10: ostrzeżenie przed 2× wysyłką, upsert „zachowaj”, most oddawał całe Uwagi, „ZD 4” bez CENTRALA; co wystawić w firmie
 - [Regał z Opisu → Położenie (349 kartotek)](project_regal_z_opisu_migracja.md) — konwencja RX/PX obowiązuje; kolumna Położenie w Edytorze, tryb katalog zwraca PoleWlasne1
+- [Magazyn: klik w ZD + filtr „pokaż wszystko"](project_magazyn_zd_klik_i_filtr.md) — klik w ZD otwiera listę zamówień i Przegląd dokumentów; pułapki Tk: pady jako krotka, połknięty wyjątek, okno w tle
