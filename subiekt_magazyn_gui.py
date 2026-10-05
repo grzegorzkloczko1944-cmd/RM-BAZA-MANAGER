@@ -28,6 +28,7 @@ sama: gdy stan ≤ min, kupić = opt − stan; da się nadpisać ręcznie.
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -217,6 +218,17 @@ def _f(x):
     return f"{x:g}"
 
 
+def _sam_numer(tekst):
+    """„ZD 68/09/2026 (4)" -> „ZD 68/09/2026".
+
+    Most dokleja do numeru zamowiona ILOSC (`Magazyn.cs`:
+    `$"{numer} ({poz.Ilosc:0.##})"`). Dla usera to cenna informacja, wiec
+    na przycisku zostaje — ale do wyszukiwarki dokumentow musi pojsc sam
+    numer, inaczej nie znajdzie nic.
+    """
+    return re.sub(r"\s*\([^)]*\)\s*$", "", str(tekst or "")).strip()
+
+
 class MagazynWindow(tk.Toplevel, Kreciolek):
     #: Kolejność Nazwa → Opis → Położenie: magazynier czyta „co to jest"
     #: (symbol + wymiar), „jakiego rodzaju" (opis) i „gdzie leży" (regał/półka).
@@ -295,6 +307,25 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
             command=self._odswiez_liste, bg="#ecf0f1", font=("Arial", 9, "bold"),
             fg="#a04000", activebackground="#ecf0f1")
         self.chk_ponizej.pack(side=tk.LEFT, padx=(16, 0), pady=6)
+
+        # „Pokaż wszystko" — także kartoteki BEZ stanu i bez progu.
+        #
+        # Wczesniej okno zawsze wolalo most z `--tylko-niezerowe`, wiec
+        # kartoteki bez ruchu po prostu nie istnialy (user 05.10.2026:
+        # „pokazuje tylko ze stanami powyzej zera"). Dawny komentarz w tym
+        # miejscu mowil, ze przelacznika NIE MA swiadomie, bo most pytal
+        # o stany OSOBNO dla kazdej kartoteki i przy 3442 okno wisialo
+        # minutami. To juz nieaktualne: Magazyn.cs czyta wszystko JEDNYM
+        # zapytaniem — zmierzone 05.10.2026: 5275 kartotek w 13 s.
+        #
+        # Domyslnie WYLACZONE: 3779 z 5275 kartotek nie ma ani stanu, ani
+        # progu, wiec na co dzien tylko zasmiecalyby liste.
+        self.var_wszystko = tk.IntVar(value=0)
+        self.chk_wszystko = tk.Checkbutton(
+            f, text="pokaż wszystko (także bez stanu)", variable=self.var_wszystko,
+            command=self._przelacz_wszystko, bg="#ecf0f1", font=("Arial", 9),
+            fg="#2c3e50", activebackground="#ecf0f1")
+        self.chk_wszystko.pack(side=tk.LEFT, padx=(12, 0), pady=6)
 
         # ⚠️ ŚWIADOMIE BEZ przełącznika „pokaż też bez stanu". Most pyta Subiekta
         # o stany, zakresy i dostawców OSOBNO dla każdej kartoteki — przy 794
@@ -416,18 +447,35 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
                             [k[2] for k in self.KOL_MAG])
         self.sheet_mag.pack(fill=tk.BOTH, expand=True)
 
+    def _przelacz_wszystko(self):
+        """„Pokaż wszystko" — przeladowuje dane, bo zmienia sie ZAKRES odczytu.
+
+        Pozostale filtry (szukaj, „ponizej progu") dzialaja na juz wczytanej
+        liscie i wystarcza im `_odswiez_liste`. Tutaj most musi pojsc do
+        Subiekta jeszcze raz: kartotek bez stanu po prostu NIE MA w buforze.
+        Pelny odczyt to ~13 s (5275 kartotek), stad pasek postepu.
+        """
+        self._wszystko = self.var_wszystko.get()
+        self._wczytaj_async()
+
     # ── wczytywanie ────────────────────────────────────────────────────────
     def _wczytaj_async(self):
         self.btn_refresh.config(state=tk.DISABLED)
-        self.start_kreciolek("Czytam stany, progi i otwarte ZD z Subiekta")
+        self.start_kreciolek(
+            "Czytam WSZYSTKIE kartoteki (tez bez stanu) — to potrwa ~15 s"
+            if getattr(self, "_wszystko", 0) else
+            "Czytam stany, progi i otwarte ZD z Subiekta")
         threading.Thread(target=self._wczytaj_worker, daemon=True).start()
 
     def _wczytaj_worker(self):
         try:
             import subiekt_panel
-            poz = subiekt_panel.odczyt_z_panelu("magazyn")
+            # Bufor panelu trzyma wynik BEZ kartotek bez stanu, wiec przy
+            # „pokaz wszystko" pytamy most wprost.
+            wszystko = bool(getattr(self, "_wszystko", 0))
+            poz = None if wszystko else subiekt_panel.odczyt_z_panelu("magazyn")
             if poz is None:
-                poz = pobierz_magazyn(tylko_niezerowe=True)
+                poz = pobierz_magazyn(tylko_niezerowe=not wszystko)
         except Exception as e:
             err = str(e)
             self.after(0, lambda: self._wczytaj_done(None, err))
@@ -627,6 +675,21 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
             c = self.sheet.identify_column(event, allow_end=False)
         except Exception:
             return
+        # Klik w ZD — lista otwartych zamowien tej pozycji (05.10.2026).
+        # Tylko gdy komorka NIE jest pusta: inaczej kazdy klik w te kolumne
+        # (takze taki, ktorym user chce po prostu trafic w wiersz) otwieralby
+        # okienko. Puste ZD = zachowanie jak dotad.
+        if (c == self.COL_ZD and r is not None and 0 <= r < len(self.widoczne)
+                and str(self.widoczne[r].get("zd") or "").strip()):
+            try:
+                self._okno_zd(self.widoczne[r])
+            except Exception as e:
+                # Tk POLYKA wyjatki z handlerow: bez tego klik „nic nie robi",
+                # a pythonw nie ma konsoli, zeby to pokazac. Kosztowalo to
+                # dwie rundy zgloszen „nie dziala" (05.10.2026).
+                messagebox.showerror("ZD", "Nie udało się otworzyć listy:" + chr(10)
+                                     + str(e), parent=self)
+            return
         if r is None or c != self.COL_SEL or not (0 <= r < len(self.widoczne)):
             return
         if shift and self._ostatni_klik is not None:
@@ -638,6 +701,106 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
             self.widoczne[r]["sel"] = not self.widoczne[r]["sel"]
         self._ostatni_klik = r
         self._odswiez_liste()
+
+    def _okno_zd(self, poz):
+        """Lista otwartych ZD tej pozycji — klik otwiera Przeglad dokumentow.
+
+        Numery przychodza z mostu w polu `Zd` (tryb „magazyn"), po przecinku,
+        posortowane od NAJNOWSZEGO: `Magazyn.cs` czyta zamowienia
+        `OrderByDescending(DataWprowadzenia)`, wiec kolejnosc zachowujemy
+        tak, jak ja dostajemy — nie sortujemy po numerze, bo „ZD 9" bylby
+        wtedy przed „ZD 10".
+        """
+        numery = [x.strip() for x in str(poz.get("zd") or "").split(",") if x.strip()]
+        # Klucz z mostu to „Symbol" z WIELKIEJ litery (tak buduje wiersz
+        # `_wczytaj`); `poz.get("symbol")` dawalo pusty naglowek.
+        sym = str(poz.get("Symbol") or "").strip()
+        if not numery:
+            return
+
+        okno = tk.Toplevel(self)
+        okno.title("Otwarte ZD — %s" % sym)
+        okno.transient(self)
+        okno.resizable(False, False)
+        tk.Label(okno, text=sym, font=("Arial", 11, "bold"), bg="#34495e", fg="white",
+                 anchor="w", padx=12, pady=8).pack(fill=tk.X)
+        # `pady` jako KROTKA to opcja pack()/grid(), nie widzetu — tk.Label
+        # rzucal „bad screen distance", a Tk polykal wyjatek z handlera, wiec
+        # klik w ZD wygladal, jakby nic nie robil (05.10.2026).
+        tk.Label(okno, text="%d otwarte zamówienie%s — kliknij, żeby zobaczyć dokument"
+                 % (len(numery), "" if len(numery) == 1 else "/-nia"),
+                 font=("Arial", 8), fg="#7f8c8d", anchor="w",
+                 padx=12).pack(fill=tk.X, pady=(6, 2))
+
+        def _zamknij():
+            # Grab trzeba zwolnic JAWNIE przed zniszczeniem okna: inaczej
+            # Windows potrafi nie oddac fokusu nowo otwartemu Przegladowi
+            # dokumentow i wychodzi on w tle.
+            try:
+                okno.grab_release()
+            except Exception:
+                pass
+            try:
+                okno.destroy()
+            except Exception:
+                pass
+
+        ramka = tk.Frame(okno, padx=12, pady=8)
+        ramka.pack(fill=tk.BOTH, expand=True)
+        for nr in numery:
+            tk.Button(ramka, text=nr, font=("Arial", 10, "bold"), width=24,
+                      relief=tk.FLAT, bg="#2980b9", fg="white",
+                      activebackground="#21618c", activeforeground="white",
+                      cursor="hand2", pady=4,
+                      command=lambda n=nr: (_zamknij(), self._pokaz_dokument(_sam_numer(n), sym))
+                      ).pack(fill=tk.X, pady=2)
+        tk.Button(ramka, text="Zamknij", font=("Arial", 9), relief=tk.FLAT,
+                  bg="#bdc3c7", cursor="hand2", command=_zamknij).pack(fill=tk.X, pady=(8, 0))
+        wysrodkuj(okno, self)
+        okno.grab_set()
+
+    def _pokaz_dokument(self, numer, symbol=None):
+        """Przeglad dokumentow ustawiony na tym ZD, z podswietlona pozycja."""
+        try:
+            import subiekt_dokumenty_gui
+        except ImportError as e:
+            messagebox.showerror("Dokumenty Subiekta", "Brak modułu:" + chr(10) + str(e),
+                                 parent=self)
+            return
+        try:
+            okno = subiekt_dokumenty_gui.open_window(self.master, szukaj=numer,
+                                                     pozycja=symbol)
+        except TypeError:
+            # Starszy modul bez `pozycja` — otwieramy sam dokument.
+            okno = subiekt_dokumenty_gui.open_window(self.master, szukaj=numer)
+        # Samo lift() tuz po utworzeniu NIE wystarcza: DokumentyWindow czyta
+        # dokumenty asynchronicznie (`after(100, _load_async)`), a pozniejszy
+        # `_load_done` + podzial paneli + przewiniecie do szukanego numeru
+        # przerysowuja okno i fokus wraca do Magazynu — okno wychodzilo w tle
+        # (zgloszenie usera 05.10.2026). Dlatego podnosimy je JESZCZE RAZ po
+        # zaladowaniu, z zapasem na `after(200, _podzial)` w tamtym oknie.
+        def _na_wierzch():
+            try:
+                if not okno.winfo_exists():
+                    return
+                okno.deiconify()
+                okno.lift()
+                okno.focus_force()
+                # `-topmost` na chwile przebija sie nad okno rodzica takze
+                # wtedy, gdy Windows blokuje zmiane aktywnego okna; zdejmujemy
+                # je zaraz potem, zeby nie wisialo nad wszystkim.
+                okno.attributes("-topmost", True)
+                okno.after(300, lambda: okno.winfo_exists()
+                           and okno.attributes("-topmost", False))
+            except Exception:
+                pass
+
+        _na_wierzch()
+        for opoznienie in (150, 400, 700):
+            try:
+                okno.after(opoznienie, _na_wierzch)
+            except Exception:
+                pass
 
     def _on_dblclick(self, event):
         """Dwuklik w Dostawcę → wybór z listy podmiotów Subiekta."""
@@ -652,6 +815,13 @@ class MagazynWindow(tk.Toplevel, Kreciolek):
             return
         if c == self.COL_DOSTAWCA:
             self._wybierz_dostawce([self.widoczne[r]])
+            return
+        # ZD z numerami obsluzyl juz pojedynczy klik (lista zamowien). Bez tego
+        # wyjatku dwuklik otwieral JEDNO I DRUGIE: Tk przy dwukliku wysyla
+        # najpierw <ButtonRelease-1>, a zaraz potem <Double-Button-1>, wiec
+        # karta pozycji wychodzila na wierzch i przykrywala okienko ZD
+        # (zgloszenie usera 05.10.2026).
+        if c == self.COL_ZD and str(self.widoczne[r].get("zd") or "").strip():
             return
         # Kazda inna kolumna: karta pozycji. Magazyn nie zna projektu (to widok
         # calego magazynu), wiec karta sama go znajdzie - pokaze wszystkie
