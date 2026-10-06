@@ -11,7 +11,9 @@ User zmienia komputer i Windowsa. Cel: oba repo (RM-BAZA-MANAGER, NOW)
 w stanie 1:1 i działające **domowe środowisko testowe** RM_BAZA_MANAGER.
 
 Inwentaryzacja zrobiona 07.10 na starym M-OLD (Lenovo 10TV0024PB, i5-8400,
-Win10 Pro 19045). **W gicie jest tylko kod** — całe środowisko (udawany
+Win10 Pro 19045, sieć domowa `192.168.68.x`). **Dotyczy TYLKO domu** —
+firma (W2019S, `192.168.100.x`, NAS NIC) ma osobną listę:
+[[project_wdrozenie_firma_04_10_2026]]. **W gicie jest tylko kod** — całe środowisko (udawany
 serwer, Subiekt demo, klucze, bazy, konfiguracje) jest poza gitem.
 
 ## ⚠ Tylko na tym dysku — przepadnie bez kopii
@@ -124,8 +126,11 @@ New-SmbShare -Name RMPAK_CLIENT -Path C:\RMPAK_CLIENT -FullAccess 'Wszyscy'
 7. **Zadania:** `schtasks /Create /TN "RM_SYNC_AGENT" /XML zadanie_RM_SYNC_AGENT.xml`
    (i dwa pozostałe).
 8. **Poświadczenia** — Windows ich nie przeniesie: logowanie do GitHuba
-   (pierwszy `git fetch`), NAS i udziały `192.168.100.x`, `NIC`, `ss2`
-   (`cmdkey` / pierwsze otwarcie udziału).
+   (pierwszy `git fetch`). Nic więcej dla środowiska domowego.
+   ⚠ W Menedżerze poświadczeń starego M-OLD wiszą wpisy `192.168.100.x`,
+   `NIC`, `ss2` — to **sieć FIRMOWA** (dom = `192.168.68.x`, z domu
+   nieosiągalne, sprawdzone 07.10). NIE są częścią środowiska domowego,
+   nie odtwarzać (pomyłka w pierwszej wersji procedury, wytknięta przez usera).
 9. **Test:** `git status` w każdym repo = to samo co przed kopią;
    start `rm_serwer.py` → `RM_BAZA_v15_MAG_STATS_ORG.py` → `rm_manager_gui.py`;
    most Subiekta (`subiekt_sfera/bridge_test.py`).
