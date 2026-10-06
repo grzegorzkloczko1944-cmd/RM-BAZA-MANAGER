@@ -3562,6 +3562,44 @@ ZAPIS.update({
 })
 
 
+# ── „DO USUNIĘCIA" — kartoteki oznaczone w oknie MAG (30.09–06.10.2026) ──────
+#
+# User zaznacza kartoteki, które mają zniknąć z Subiekta (zła nomenklatura,
+# duble), i opcjonalnie podaje ZAMIENNIK — symbol kartoteki, na którą trzeba
+# przepisać stan. MAG podświetla je jasnoczerwono. To TYLKO znacznik: nic nie
+# kasuje ani nie rusza stanów (RW/PW i dezaktywacja zostają ręczne).
+MIGRACJE_MAPOWANIA.extend([
+    """CREATE TABLE IF NOT EXISTS kartoteki_usun (
+           id_subiekt  INTEGER PRIMARY KEY,
+           symbol      TEXT NOT NULL,
+           zamiennik   TEXT,               -- symbol kartoteki docelowej (może być puste)
+           kto         TEXT,
+           kiedy       TEXT NOT NULL
+       )""",
+])
+
+ZAPIS.update({
+    # lista_json = [[id_subiekt, symbol, zamiennik], …]
+    "map-usun-oznacz": (
+        "INSERT INTO kartoteki_usun (id_subiekt, symbol, zamiennik, kto, kiedy)"
+        " SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'),"
+        "        json_extract(value, '$[2]'), ?, ?"
+        "   FROM json_each(?) WHERE 1"
+        " ON CONFLICT(id_subiekt) DO UPDATE SET"
+        "   symbol    = excluded.symbol,"
+        "   zamiennik = excluded.zamiennik,"
+        "   kto       = excluded.kto,"
+        "   kiedy     = excluded.kiedy",
+        ["kto", "kiedy", "lista_json"],
+    ),
+    # lista_json = [id_subiekt, …]
+    "map-usun-odznacz": (
+        "DELETE FROM kartoteki_usun WHERE id_subiekt IN (SELECT value FROM json_each(?))",
+        ["lista_json"],
+    ),
+})
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # KOPIA SUBIEKTA — kartoteki, stany, miniatury  (subiekt_kopia.sqlite)
 # ═══════════════════════════════════════════════════════════════════════
