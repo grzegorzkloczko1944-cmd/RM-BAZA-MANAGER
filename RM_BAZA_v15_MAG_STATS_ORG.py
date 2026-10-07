@@ -14468,10 +14468,20 @@ class MainWindow(tk.Tk):
         search_timer = None
         
         def find_item_by_drawing(drawing_no):
-            """Znajdź item po numerze rysunku"""
+            """Znajdź item po numerze rysunku — `drawing_no` to CAŁY tekst z pola.
+
+            Pole po auto-uzupełnieniu ma „numer nazwa”, a numery części
+            znormalizowanych mają spacje („SKF 6904ZZ”, „ISO 4762 M6x20”).
+            Wcześniej brane było pierwsze słowo (split()[0]) i ze „SKF 6904ZZ”
+            zostawało „SKF” — dostawy takiej pozycji nie dało się przyjąć
+            (08.10.2026). Teraz: numer równy całemu tekstowi albo NAJDŁUŻSZY
+            numer, którym tekst się zaczyna (po nim spacja i nazwa) — jedno
+            zapytanie.
+            """
+            drawing_no = " ".join(str(drawing_no or "").split())
             if not drawing_no:
                 return None
-            
+
             # Szukaj w work_drawing_no lub src_drawing_no
             cursor = self.db_manager.project_con.execute("""
                 SELECT 
@@ -14489,10 +14499,14 @@ class MainWindow(tk.Tk):
                     ordered_flag,
                     ordered_at
                 FROM items
-                WHERE LOWER(COALESCE(work_drawing_no, src_drawing_no)) = LOWER(?)
-                  AND is_hidden = 0
+                WHERE is_hidden = 0
+                  AND TRIM(COALESCE(work_drawing_no, src_drawing_no, '')) <> ''
+                  AND (LOWER(TRIM(COALESCE(work_drawing_no, src_drawing_no))) = LOWER(?1)
+                       OR substr(LOWER(?1), 1, length(TRIM(COALESCE(work_drawing_no, src_drawing_no))) + 1)
+                          = LOWER(TRIM(COALESCE(work_drawing_no, src_drawing_no))) || ' ')
+                ORDER BY length(TRIM(COALESCE(work_drawing_no, src_drawing_no))) DESC
                 LIMIT 1
-            """, (drawing_no.strip(),))
+            """, (drawing_no,))
             
             row = cursor.fetchone()
             if row:
@@ -14562,9 +14576,10 @@ class MainWindow(tk.Tk):
             """Wykonaj wyszukiwanie pozycji (wywoływane po debouncing)"""
             drawing_no_raw = entry_drawing.get().strip()
 
-            # Wyciągnij tylko numer (pierwsze słowo, przed spacją z nazwą)
-            # Jeśli był auto-uzupełniony to ma format: "ABC123 Nazwa pozycji"
-            drawing_no = drawing_no_raw.split()[0] if drawing_no_raw else ""
+            # Cały tekst — numer wyłuskuje find_item_by_drawing (pole po
+            # auto-uzupełnieniu ma „numer nazwa”, a numer bywa ze spacją:
+            # „SKF 6904ZZ”; split()[0] dawał „SKF”, 08.10.2026)
+            drawing_no = drawing_no_raw
 
             if not drawing_no:
                 lbl_info.config(text="TYP | MATERIAŁ | GRUBOŚĆ | DOSTAWCA | ZAMÓWIONO", fg="#7f8c8d")
@@ -14675,8 +14690,8 @@ class MainWindow(tk.Tk):
             drawing_no_raw = entry_drawing.get().strip()
             qty_str = entry_qty.get().strip()
             
-            # Wyciągnij tylko numer (pierwsze słowo)
-            drawing_no = drawing_no_raw.split()[0] if drawing_no_raw else ""
+            # Cały tekst — numer wyłuskuje find_item_by_drawing (jak w perform_search)
+            drawing_no = drawing_no_raw
             
             if not drawing_no:
                 messagebox.showwarning("Błąd", "Zeskanuj lub wpisz numer rysunku!", parent=scanner_win)
@@ -19659,13 +19674,18 @@ class MainWindow(tk.Tk):
                 ).fetchall()
             
             for row in rows:
+                # +2 kolumny na końcu (src_drawing_no, subiekt_symbol) — klucze zapasowe
+                # z 02.10.2026 (niżej). Commit 423c964 dodał je do zapytania, ale nie tutaj:
+                # „too many values to unpack” przy KAŻDEJ aktualizacji BOM do 08.10.2026.
                 if has_modul_columns:
-                    item_id, dn, name, desc, qty, order_qty, mat, sup_id, cls, modul, hidden, bib = row
+                    item_id, dn, name, desc, qty, order_qty, mat, sup_id, cls, modul, hidden, bib, src_dn, sub_sym = row
                 else:
-                    item_id, dn, name, desc, qty, order_qty, mat, sup_id, cls, hidden, bib = row
+                    item_id, dn, name, desc, qty, order_qty, mat, sup_id, cls, hidden, bib, src_dn, sub_sym = row
                     modul = None  # Starsze projekty nie mają tej kolumny
                 dn_norm = norm(dn) if dn else ""
                 name_norm = norm(name) if name else ""
+                src_dn_norm = norm(src_dn) if src_dn else ""
+                sub_sym_norm = norm(sub_sym) if sub_sym else ""
                 
                 # Oblicz DELTA (tak jak w głównym widoku: order_qty - qty)
                 delta = None
