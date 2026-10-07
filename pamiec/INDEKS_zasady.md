@@ -23,3 +23,4 @@ Czesc pamieci projektu — spis wszystkich obszarow w [MEMORY.md](MEMORY.md).
 - [Procedura dla usera i ładne okna](feedback_procedura_dla_usera_i_ladne_okna.md) — „jaka procedura” = kroki w RM_BAZA, nie kod; dialogi w stylu aplikacji, zrzut przed oddaniem
 - [⚠ PUNKT WZNOWIENIA 03.10.2026](project_stan_prac_02_10_2026.md) — paczka 02–03.10 w 7ef3d0f (niewypchnięta), most do wystawienia w firmie, naprawa 2637 przy locku, otwarte sprawy
 - [Inventor usera: szybko do roboty](feedback_inventor_szybko_do_roboty.md) — model na prośbę: jedno zdanie założeń → budowa; klient_usera.py, wstawiaj do iam głównego; błędy z 07.10 (korek)
+- [Produkcja: czytelność, nie wygląd](feedback_produkcja_czytelnosc_nie_wyglad.md) — bez przeróbek wizualnych „dla urody”; zysk vs praca (RM_BAZA w szacie RM_GUMA odrzucona 08.10)
