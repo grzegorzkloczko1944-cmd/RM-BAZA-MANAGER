@@ -1,6 +1,6 @@
 ---
 name: feedback_produkcja_czytelnosc_nie_wyglad
-description: Programy RMpak są na produkcję — przejrzystość i czytelność, nie wygląd; przeróbek wizualnych (motywy, szata) nie proponować, chyba że poprawiają czytelność, a zysk jest wart pracy
+description: Programy RMpak są na produkcję — w istniejących czytelność, nie przeróbki wyglądu (zysk vs praca); NOWE od zera robić ładnie od początku
 metadata:
   type: feedback
 ---
@@ -13,8 +13,13 @@ oglądania. Ma być przejrzyste i czytelne”**.
 przeglądu (~110 okien, kolory przestawiane w trakcie pracy, np. przyciski locków). Zmiana samego
 wyglądu nie daje pracy żadnego zysku.
 
+**ALE nowe od zera — ładne** (user, ten sam dzień: „jak robimy nowe, od zera to starajmy się,
+aby było ładne”). Nowy program / nowe okno: od początku porządny wygląd (wzorzec RM_GUMA /
+RM_KRZYWKA / RM_IMPORT: palety, styl clam, karty, ciemny nagłówek; w RM_BAZA — styl RM_BAZA),
+bo wtedy kosztuje to niewiele. Granica: przerabianie ISTNIEJĄCEGO dla samego wyglądu — nie.
+
 **How to apply:**
-- nie proponować przeróbek wyglądu „dla urody”; przy zmianach GUI kryterium = czy łatwiej coś
+- nie proponować przeróbek wyglądu „dla urody” w tym, co już działa; przy zmianach GUI kryterium = czy łatwiej coś
   odczytać / nie pomylić (kontrast, wielkość, układ, jednoznaczne kolory znaczeniowe);
 - przy szacunku zawsze stawiać obok siebie zysk i koszt (jak przy RM_BAZA: kilka dni pracy za wygląd → nie);
 - RM_IMPORT dostał nową szatę 08.10 tylko dlatego, że była gotowa (wariant Darkness) — połączenie
