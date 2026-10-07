@@ -34,7 +34,63 @@ serwer, Subiekt demo, klucze, bazy, konfiguracje) jest poza gitem.
 Gałąź `kadry-wip-backup` (ca5cc40) — **skasowana 07.10 na polecenie usera**
 („niepotrzebne"), na GitHubie jej nie było.
 
-## Etap 1 — stary komputer
+## ✅ WARIANT WYBRANY (07.10): stary dysk jako D: w nowym komputerze
+
+User podepnie stary NVMe do nowego komputera jako **D:**, a agent na nowym
+komputerze kopiuje z D: na C:. Kopia na dysk zewnętrzny (Etap 1 niżej)
+**odpada** — stary dysk sam jest źródłem.
+
+**Przygotowane na starym dysku 07.10** w `C:\RMPAK_CLIENT\_przeprowadzka\`
+(na nowym: `D:\RMPAK_CLIENT\_przeprowadzka\`):
+* `pip_freeze.txt` — 158 pakietów Pythona,
+* `zadanie_RM_SYNC_AGENT.xml`, `zadanie_RM_RFQ_BACKUP.xml`,
+  `zadanie_ClaudeMemorySync.xml`.
+
+Bazy Subiekta zbackupowane 07.10 02:04 (`COPY_ONLY`) do katalogu instancji:
+`D:\Program Files\Microsoft SQL Server\MSSQL15.INSERTNEXO\MSSQL\Backup\`
+`Nexo_RMPRODUKCJA.bak` (373 MB), `InsERT_Launcher.bak` (598 MB). Do tego
+katalogu zwykły user nie ma dostępu — czytać jako admin.
+
+**Sprawdzone przed wyłączeniem:** BitLocker na C: **wyłączony** (dysk
+czytelny bez klucza odzyskiwania). Szybkie uruchamianie: w rejestrze
+`HiberbootEnabled=1`, ale `hiberfil.sys` brak → nieaktywne; i tak wyłączyć
+**pełnym zamknięciem** (`shutdown /s /t 0`), żeby NTFS był czysty.
+
+**Fizycznie:** nowy komputer potrzebuje wolnego slotu M.2 NVMe (albo
+obudowy USB-NVMe). Stary dysk ma własny Windows i partycję EFI —
+w BIOS-ie start z **NOWEGO** dysku. Literę D: nadać w Zarządzaniu dyskami.
+
+**Kopiowanie na nowym komputerze** (PowerShell **jako administrator**):
+
+```powershell
+$o = '/E','/XJ','/B','/COPY:DAT','/R:1','/W:1','/NFL','/NDL'
+robocopy D:\RMPAK_CLIENT  C:\RMPAK_CLIENT  @o
+robocopy D:\iLogic        C:\iLogic        @o
+robocopy D:\BibliotekaRM  C:\BibliotekaRM  @o
+robocopy D:\Biblioteka    C:\Biblioteka    @o
+robocopy D:\test          C:\test          @o
+robocopy D:\Projekty      C:\Projekty      @o
+robocopy D:\Users\herrm\.claude "$env:USERPROFILE\.claude" @o
+robocopy "D:\Program Files\Microsoft SQL Server\MSSQL15.INSERTNEXO\MSSQL\Backup" C:\RMPAK_CLIENT\_przeprowadzka *.bak /B
+Copy-Item D:\Users\herrm\Downloads\InsERT_nexo.exe C:\RMPAK_CLIENT\_przeprowadzka\
+```
+
+* `/B` (tryb kopii zapasowej, wymaga admina) — pliki na D: mają
+  uprawnienia **starego** użytkownika (inny SID na nowym Windowsie,
+  zwłaszcza `D:\Users\herrm`); bez `/B` będzie „odmowa dostępu".
+* `/COPY:DAT` **bez** właściciela i ACL — kopie należą do nowego usera,
+  więc git nie zgłosi „detected dubious ownership".
+* `/XJ` — junctiony odtworzyć ręcznie (krok 4 Etapu 2); wskazują na
+  `C:\RMPAK_CLIENT\...`, więc po kopii na C: będą znów poprawne.
+
+Potem **Etap 2 od kroku 1** (instalacje → udziały/hosts/rejestr/junctiony
+→ Subiekt → zadania → test). Zadania importować z `_przeprowadzka\*.xml`,
+bazy przywracać z `_przeprowadzka\*.bak`.
+
+Stary dysk **zostawić nietknięty** do czasu, aż na nowym przejdzie test
+z kroku 9 — to jedyna pełna kopia (Recorder nie ma remote).
+
+## Etap 1 — stary komputer (wariant z dyskiem zewnętrznym — NIEUŻYWANY)
 
 Zamknąć RM_BAZA, RM_MANAGER, rm_serwer, Subiekta, Inventora (spójne SQLite).
 Wyłączyć zadanie `RM_SYNC_AGENT` na czas kopii.
