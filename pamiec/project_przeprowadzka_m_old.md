@@ -37,6 +37,11 @@ Gałąź `kadry-wip-backup` (ca5cc40) — **skasowana 07.10 na polecenie usera**
 
 ## ✅ WARIANT WYBRANY (07.10): stary dysk jako D: w nowym komputerze
 
+> ⚠ **Litera D: jest zajęta** przez zewnętrzny USB WD Elements (udziały
+> `Maszyny`, `projekty …` wskazują na `D:\…`). Stary NVMe podpiąć pod
+> **inną literę (np. E:)** i w poleceniach niżej czytać `E:` zamiast `D:`
+> — inaczej po przeprowadzce udziały z WD Elements trafią w pustkę.
+
 User podepnie stary NVMe do nowego komputera jako **D:**, a agent na nowym
 komputerze kopiuje z D: na C:. Kopia na dysk zewnętrzny (Etap 1 niżej)
 **odpada** — stary dysk sam jest źródłem.
@@ -201,8 +206,11 @@ New-SmbShare -Name RMPAK_CLIENT -Path C:\RMPAK_CLIENT -FullAccess 'Wszyscy'
    mapowania (jako zwykły user, nie admin):
    `net use B: \\M-OLD\BibliotekaRM /persistent:yes` i
    `net use V: \\M-OLD\test /persistent:yes`.
-   Udziałów na `D:\` (Maszyny, projekty morfeusz/pietryna/mono) NIE
-   odtwarzać — dysku D: już nie było, były martwe.
+   Udziały na `D:\` (`Maszyny`, `projekty morfeusz`, `projekty pietryna`,
+   `projekty2` → `D:\projekty mono\projekty`) **są prawdziwe** — D: to
+   zewnętrzny USB **WD Elements 1,4 TB**, który bywa odłączony (07.10 rano
+   go nie było i błędnie uznałem te udziały za martwe). Odtworzyć je, gdy
+   WD Elements jest podłączony jako D:.
 5. **Pamięć Claude** — junction wg `CLAUDE.md` (sekcja „Ustawienie na
    nowej maszynie"). Robocopy z `/XJ` go nie przeniósł.
 6. **Subiekt:** przywrócić bazy (`RESTORE DATABASE ... WITH REPLACE`) albo
