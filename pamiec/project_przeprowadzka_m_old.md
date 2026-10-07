@@ -83,6 +83,35 @@ Copy-Item D:\Users\herrm\Downloads\InsERT_nexo.exe C:\RMPAK_CLIENT\_przeprowadzk
 * `/XJ` — junctiony odtworzyć ręcznie (krok 4 Etapu 2); wskazują na
   `C:\RMPAK_CLIENT\...`, więc po kopii na C: będą znów poprawne.
 
+**Uprawnienia NTFS na starym dysku (sprawdzone 07.10)** — nowy Windows
+nie zna starego konta `M-OLD\herrm` (inny SID), ale grupy wbudowane mają
+ten sam SID wszędzie:
+
+| folder | ACL | z nowego Windowsa |
+|---|---|---|
+| `RMPAK_CLIENT`, `BibliotekaRM` | Wszyscy: pełne | odczyt i zapis |
+| `iLogic` | Użytkownicy uwierzytelnieni: modyfikacja | odczyt i zapis |
+| `Projekty`, `test` | Wszyscy: odczyt | tylko odczyt — do kopii wystarczy |
+| `Users\herrm\.claude` | herrm + Administratorzy + SYSTEM | tylko jako admin (`/B`) |
+
+`Projekty` i `test` **celowo NIE otwierane** na zapis dla Wszystkich —
+to udziały sieciowe, pełne NTFS dla Wszystkich = zapis dla każdego z LAN.
+
+**Git — „detected dubious ownership"**: właścicielem plików na D: jest
+stary SID, a git odmawia pracy z repo innego właściciela. Zgody **nie da
+się zapisać w repo** (git ignoruje `safe.directory` z `.git/config`
+celowo, ze względów bezpieczeństwa) — tylko na maszynie, raz:
+
+```powershell
+git config --global --add safe.directory "*"
+```
+
+Po kopii na C: z `/COPY:DAT` niepotrzebne (kopie należą do nowego usera),
+ale konieczne, gdy pracuje się z repo prosto na D:. Praca prosto z D:
+wymaga też junctiona `C:\RMPAK_CLIENT` → `D:\RMPAK_CLIENT` — ścieżka
+`C:\RMPAK_CLIENT` jest na sztywno w 35 plikach RM-BAZA-MANAGER i 11 w NOW
+(m.in. `DEFAULT_LOCAL_DIR`). Wybrany wariant to kopia, nie praca z D:.
+
 Potem **Etap 2 od kroku 1** (instalacje → udziały/hosts/rejestr/junctiony
 → Subiekt → zadania → test). Zadania importować z `_przeprowadzka\*.xml`,
 bazy przywracać z `_przeprowadzka\*.bak`.
