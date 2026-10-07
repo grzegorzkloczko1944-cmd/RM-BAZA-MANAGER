@@ -21,7 +21,7 @@ serwer, Subiekt demo, klucze, bazy, konfiguracje) jest poza gitem.
 | co | gdzie | stan 07.10 |
 |---|---|---|
 | repo **Recorder** | `Repozytoria\Recorder` | **brak remote** — cała historia tylko lokalnie; decyzja usera otwarta (GitHub albo `git bundle`) |
-| zmiany RM_ZJAZD (4 pliki) | NOW | niezacommitowane |
+| ~~zmiany RM_ZJAZD (4 pliki)~~ | NOW | ✅ zacommitowane i wypchnięte 07.10 (1cd9a6e i wcześniejsze) |
 | keystore Androida `rm_mail.jks` + `keystore.properties` | `NOW\RM_NOTATKA_ANDROID` | bez nich nie da się wydać aktualizacji aplikacji |
 | klucze `.ai_api_key`, `master.sqlite`, `rm_serwer_config.json`, `sync_agent_run.bat` | RM-BAZA-MANAGER (gitignore) | |
 | `config.json` + bazy RM_RFQ / RM_VIDEO / RM_STATS / RM_ARCHIWUM / RM_DWF / RM_PRINT | NOW (gitignore) | sekrety + dane |
@@ -30,6 +30,7 @@ serwer, Subiekt demo, klucze, bazy, konfiguracje) jest poza gitem.
 | instalator `InsERT_nexo.exe` | `Downloads` | wersja MUSI = SDK = firma (61.1.0.9431); ze strony może przyjść nowsza |
 | bazy SQL `Nexo_RMPRODUKCJA`, `InsERT_Launcher` | instancja `.\INSERTNEXO` | dane testowe Subiekta |
 | `C:\Users\herrm\.claude` (734 MB) | profil | historia rozmów, ustawienia, mail-mcp, skrypty sync |
+| `C:\Users\herrm\.claude.json` | profil, **obok** katalogu `.claude` | rejestracje serwerów MCP: `mail` i `inventor` (most do Inventora z 07.10, `NOW/RM_INVENTOR_MCP`); bez niego `claude mcp add` od nowa — komendy w README mostu |
 
 Gałąź `kadry-wip-backup` (ca5cc40) — **skasowana 07.10 na polecenie usera**
 („niepotrzebne"), na GitHubie jej nie było.
@@ -71,6 +72,7 @@ robocopy D:\Biblioteka    C:\Biblioteka    @o
 robocopy D:\test          C:\test          @o
 robocopy D:\Projekty      C:\Projekty      @o
 robocopy D:\Users\herrm\.claude "$env:USERPROFILE\.claude" @o
+Copy-Item D:\Users\herrm\.claude.json "$env:USERPROFILE\.claude.json"   # rejestracje MCP: mail, inventor
 robocopy "D:\Program Files\Microsoft SQL Server\MSSQL15.INSERTNEXO\MSSQL\Backup" C:\RMPAK_CLIENT\_przeprowadzka *.bak /B
 Copy-Item D:\Users\herrm\Downloads\InsERT_nexo.exe C:\RMPAK_CLIENT\_przeprowadzka\
 ```
