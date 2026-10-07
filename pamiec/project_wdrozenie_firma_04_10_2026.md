@@ -83,6 +83,25 @@ Przebudować i rozesłać oba ([[INDEKS_build]], bramka wersji
   szybkie Kadry, lista projektów, Multi-projekt, oś czasu, plan serwisantów
   ([[project_rm_manager_czytanie_w_pakiecie]]).
 
+## Krok 5a — repo NOW: przekompilować RM_KRZYWKA (dopisane 07.10.2026)
+
+Na stanowisku, gdzie user ma `C:\iLogic\RM_KRZYWKA` (to inne repo — **NOW**, nie
+RM-BAZA-MANAGER). Od `f5777e8` skrypt budowy krzywki ma bezpiecznik: przerywa, gdy
+`DispatchEx` podłączy się do działającego Inventora usera — stary exe w takiej sytuacji
+**ukryłby go i zabił po PID** (utrata niezapisanej pracy). Exe ma skrypt w środku, więc bez
+przebudowy bezpiecznika NIE MA.
+
+```
+cd <repo NOW> && git pull origin main          # ma być f5777e8 albo nowszy
+cd RM_KRZYWKA                                  # RM_KRZYWKA.exe ZAMKNIĘTY (zapytaj usera)
+python -m PyInstaller --noconfirm --clean RM_KRZYWKA.spec
+```
+
+`--noconfirm` kasuje cały `C:\iLogic\RM_KRZYWKA` (ustawienia są w `%APPDATA%`, nic nie ginie).
+Sprawdzenie bez okna edytora: `RM_KRZYWKA.exe --buduj <słupki.xlsx> <wynik.ipt> --log <plik>`
+— w domu 166 s, nowy PID Inventora, Inventor usera nietknięty. Przy tym samym pullu: reszta
+z `NOW/DOKUMENTACJA/TODO.md` (RM_GUMA, ReTab, most RM_INVENTOR_MCP na Inventorze 2015).
+
 ## Krok 6 — testy po wdrożeniu (z userem)
 
 - [ ] RM_MANAGER → Kadry otwiera się od razu; Rozliczenie i Pula < 1 s

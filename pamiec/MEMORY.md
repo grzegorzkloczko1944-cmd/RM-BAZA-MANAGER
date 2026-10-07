@@ -9,7 +9,7 @@ obszarów. Szczegółowe wpisy są w plikach `INDEKS_*.md` — otwórz ten, któ
 dotyczy obszaru, w którym pracujesz.
 
 - **⚠ [PRZEPROWADZKA M-OLD na nowy komputer (07.10.2026)](project_przeprowadzka_m_old.md)** — przed formatem: kopia rzeczy spoza gita; po: odtworzenie udawanego W2019S, Subiekta demo, junctionów
-- **⚠ [WDROŻENIE W FIRMIE — lista kroków 04.10.2026](project_wdrozenie_firma_04_10_2026.md)** — git pull, restart RM_SERWER, agent RFQ, most, .exe RM_BAZA i RM_MANAGER, testy; historia: [punkt wznowienia 03.10](project_stan_prac_02_10_2026.md)
+- **⚠ [WDROŻENIE W FIRMIE — lista kroków 04.10.2026](project_wdrozenie_firma_04_10_2026.md)** — git pull, restart RM_SERWER, agent RFQ, most, .exe RM_BAZA i RM_MANAGER, **przekompilować RM_KRZYWKA (repo NOW)**, testy; historia: [punkt wznowienia 03.10](project_stan_prac_02_10_2026.md)
 - **[Zasady pracy z agentem](INDEKS_zasady.md)** (15) — jak mam pracować w tym repo, czego nie robić bez pytania
 - **[Subiekt — most i Sfera](INDEKS_subiekt_most.md)** (13) — most NexoRecon, SDK Sfery, tryby, zapotrzebowanie
 - **[Subiekt — okna, kartoteki, dokumenty](INDEKS_subiekt_okna.md)** (55) — okna RM_BAZA do Subiekta, kartoteki, ZK/ZD/PW/RW, oringi i łożyska
