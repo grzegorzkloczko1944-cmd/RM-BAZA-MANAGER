@@ -57,6 +57,8 @@ hiddenimports += [
     'subiekt_edytor_gui', 'subiekt_historia',
     # dopasowanie znormalizowanych do kartotek (okno z menu SUBIEKT)
     'subiekt_dopasowanie_gui', 'subiekt_dopasowanie',
+    # Porządki w kartotekach — kolory z MAG, PW→RW na zamiennik (08.10.2026)
+    'subiekt_porzadki_kartotek',
     # dopasowanie POJEDYNCZEGO wiersza (PPM w arkuszu) — import leniwy
     # w dopasuj_kartoteke_wiersza(), wiec statyczna analiza go NIE WIDZI
     'subiekt_dopasuj_wiersz_gui', 'subiekt_dopasuj_wiersz',
