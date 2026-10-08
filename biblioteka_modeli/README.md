@@ -35,6 +35,7 @@ Kolejne będą podobne — ten sam schemat: *znajdź/zrób model → nazwij pod 
 6. **Nie commituj i nie pushuj** bez wyraźnej zgody. Nie modyfikuj plików sync/hooków/.claude bez pytania.
 7. **Pisz po polsku, krótko, z liczbami.** Raport końcowy: co zrobione (liczby), co NIE zrobione, co wymaga decyzji. Nie twierdź „sprawdzone", jeśli nie sprawdzałeś.
 8. Format plików Inventora: patrz 4.2 — **zapis w 2015 jest zawsze dozwolony** (decyzja użytkownika 01.10.2026); w raporcie podawaj wersję plików.
+9. **ZASIEWANE ZAWSZE IDĄ Z MINIATURĄ DO SUBIEKTA (zasada usera 08.10.2026, wszystkie katalogi: O-ringi, łożyska, tuleje, HIWIN, IGUS, ELESA, kolejne).** Zdjęcie kartoteki w Subiekcie = PNG z `miniatury\` biblioteki; to część zasiewu, NIE wymaga osobnej zgody. Robi to `indeks_oringi_zasiew.py --zapisz` (moduł `zdjecia_do_subiekta.py`; tylko kartotekom bez zdjęcia; `--bez-zdjec` wyłącza) albo osobno `python zdjecia_do_subiekta.py --katalog … --lista … --zapisz`. Zasiew bez zdjęć = partia niedokończona. Kolejność: pliki w B: → natywne miniatury w plikach → kartoteki → sync kopii → zasiew MAG → **zdjęcia** → oceny Rekomendowane (ADMIN).
 
 ## 3. Nomenklatura (Subiekt ↔ Inventor)
 
@@ -159,7 +160,7 @@ Nowe łożysko:
 4. **SS:** kopia wersji zwykłej, materiał 304 (kolor z materiału: `ClearAppearanceOverrides` + `AppearanceSourceType=100614`), symbol `SS <symbol>`. `ss_zaloz.py`.
    Zakładaj tylko warianty istniejące na rynku (NTN/Transdev SUC 204–212, SUCFB 204–210; miniaturowe SS-KP/SS-KFL pominięte świadomie).
 5. Brak modelu i użytkownik poda wymiary → **rysuj od zera** (`rysuj_ucfl_mini.py`, jedna część, kilka brył: obudowa + wkładka + smarowniczka; kontroluj rozstaw otworów i gabaryt).
-6. Dopisz do CSV, zrób indeks MAG (`--katalog … --lista lozyska_oprawy_modele.csv`), zdjęcia do Subiekta (przy mapowaniu; osobna zgoda).
+6. Dopisz do CSV, zrób indeks MAG (`--katalog … --lista lozyska_oprawy_modele.csv`), **zdjęcia do Subiekta — zawsze w ramach zasiewu, bez osobnej zgody** (reguła 9 w §2).
 7. **Decyzje użytkownika (nie wracaj bez prośby):** pomijamy UCFH211/212, rozmiary >212, miniaturowe SS, UCFL201 Slim. Mapowanie do Subiekta odłożone (wymiar = średnica wałka).
 
 ### 5.C „Znajdź i skopiuj modele" (np. wózki Hiwin)
@@ -193,7 +194,8 @@ Dla każdej partii przed raportem sprawdź i podaj liczby:
 - [ ] natywna miniatura biała + PNG w `miniatury\`, wpis w CSV rodziny,
 - [ ] brak sierot i dubli (albo lista do decyzji),
 - [ ] indeks MAG zasiany (liczba przypisań),
-- [ ] zdjęcia w Subiekcie (wysłane / miały już / bez kartoteki),
+- [ ] **zdjęcia w Subiekcie dla KAŻDEJ zasianej pozycji** (wysłane / miały już / bez kartoteki; audyt: lista zdjęć przez most = 100 %) — zasiew bez zdjęć to niedokończona partia,
+- [ ] **oceny MAG: „Rekomendowane” z automatu** dla każdej pozycji **zasiewanej z biblioteki** (model w `B:\Znormalizowane\<katalog>`, zasiew MAG `reczny`, z miniaturą; nie dla modeli z automatycznego skanu/IDW) (autor **ADMIN**; `POST /mag/ocena/oznacz?ocena=rekomendowane&kto=ADMIN`, symbole w treści, ≤400 naraz, po `subiekt_kopia_sync.py`; nie nadpisuj Zastrzeżeń ani „do usunięcia”) — dotyczy też HIWIN, IGUS, ELESA i kolejnych katalogów (decyzja usera 08.10.2026),
 - [ ] Opis/Położenie w Subiekcie poprawione (odczyt kontrolny po zapisie),
 - [ ] wersja Inventora plików podana w raporcie,
 - [ ] pamięć projektu zaktualizowana (`project_*` w katalogu memory + wpis w `MEMORY.md`).

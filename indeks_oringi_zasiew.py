@@ -16,7 +16,8 @@ jak łożyska ([[project_lozyska_katalog_28_09]], `indeks_lozyska_zasiew.py`).
    automatyczny wpis „bez modelu" (pusta ścieżka) dla symbolu jest usuwany.
 2. Biały render z generatora → `sub-mini3d-zapisz` z `mtime = -1` (render
    z Inventora — indeks nie nadpisze go obrazkiem z pliku).
-Zdjęć do SUBIEKTA ten skrypt NIE wgrywa (to zapis do Subiekta — osobna zgoda).
+3. ZDJĘCIA do Subiekta (zasada usera 08.10.2026: zasiewane ZAWSZE idą z miniaturą) — `zdjecia_do_subiekta.wgraj`
+   z PNG z listy, tylko kartotekom bez zdjęcia; wyłączenie: `--bez-zdjec`. Po zasiewie: oceny Rekomendowane (autor ADMIN).
 """
 import argparse
 import base64
@@ -38,6 +39,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--zapisz", action="store_true", help="realny zapis (bez tego suchy przebieg)")
+    ap.add_argument("--bez-zdjec", action="store_true", help="NIE wgrywaj zdjęć do Subiekta (domyślnie wgrywa przy --zapisz)")
     ap.add_argument("--katalog", default=KATALOG)
     ap.add_argument("--serwer", help="host:port RM_SERWER (domyślnie z sync_config.json)")
     ap.add_argument("--lista", default="oringi_modele.csv",
@@ -74,7 +76,7 @@ def main():
         return 0
 
     kiedy = time.strftime("%Y-%m-%dT%H:%M:%S")
-    kto = "%s@%s" % (os.environ.get("USERNAME", "?"), os.environ.get("COMPUTERNAME", "?"))
+    kto = "ADMIN"   # zasada usera 08.10.2026: autor zapisu = ADMIN (nie nazwa maszyny/agenta)
     ops = []
     for w in wiersze:
         klucz = w["symbol"].upper()
@@ -105,6 +107,14 @@ def main():
         mini += len(paczka)
     print("   miniatury 3D (białe, render): %d" % mini)
     print("\nGOTOWE. MAG pokaże modele od razu (kolumna 3D).")
+    if not a.bez_zdjec:
+        print("\n4. Zdjęcia do Subiekta (obowiązkowo przy zasiewie):")
+        try:
+            import zdjecia_do_subiekta
+            zdjecia_do_subiekta.wgraj(a.katalog, lista, zapisz=True)
+        except Exception as e:
+            print("   ⛔ zdjęcia NIE wgrane (%s) — uruchom osobno: python zdjecia_do_subiekta.py "
+                  "--katalog ... --lista ... --zapisz" % e)
     return 0
 
 

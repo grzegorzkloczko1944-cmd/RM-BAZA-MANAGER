@@ -492,7 +492,7 @@ def odswiez_miniatury(postep=lambda _t: None) -> str:
                       if w["sciezka"]})
     znane = {w["sciezka"]: (w["mtime"], w.get("typ")) for w in
              rm_klient.master_read("sub-mini3d-stan", timeout=120)}
-    kto, kiedy = os.environ.get("USERNAME") or "?", datetime.now().isoformat(timespec="seconds")
+    kto, kiedy = "ADMIN", datetime.now().isoformat(timespec="seconds")   # zasada usera 08.10.2026: autor = ADMIN
     paczka, zapisane, bez, bledy, t0 = [], 0, 0, 0, time.time()
     for i, s in enumerate(sciezki, 1):
         if i % 500 == 0:
@@ -622,7 +622,7 @@ def przebieg(root, zapis=False, pelny=False, limit=0, raport=None, serwer=None,
     import win32com.client
     app = win32com.client.Dispatch("Inventor.ApprenticeServer")
     t0 = time.time()
-    kto, kiedy = os.environ.get("USERNAME") or "?", datetime.now().isoformat(timespec="seconds")
+    kto, kiedy = "ADMIN", datetime.now().isoformat(timespec="seconds")   # zasada usera 08.10.2026: autor = ADMIN
     grupy = []
     wynik = {"jeden": 0, "kilka": 0, "brak": 0}
     nowe, zmienione, identyczne = [], [], 0
