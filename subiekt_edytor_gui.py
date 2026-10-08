@@ -1975,21 +1975,22 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.tab_lista.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sc_l.pack(side=tk.RIGHT, fill=tk.Y)
         self.tab_lista.tag_configure("w_drzewie", foreground=TEKST_SZARY)
-        # NIEUZYWANE (bez stanu, poza kompletami) na jasnoczerwonym tle —
+        # NIEUZYWANE (bez stanu, poza kompletami) na jasnopomaranczowym tle —
         # zyczenie uzytkownika 25.09.2026, ma byc widac ZAWSZE, nie tylko
         # po wlaczeniu filtra. Te kartoteki wolno skasowac i wolno im zmienic
         # symbol; reszta jest w uzyciu.
         #
-        # ⚠️ Odcien ten sam co tlo „brak kartoteki" w Karcie pozycji (#fdeaea)
-        # i nieobecnosci na grafiku serwisu — jasnoczerwony w tej aplikacji
-        # znaczy „nie ma / nie uzywane", nie „blad".
+        # ⚠️ POMARANCZOWY, nie czerwony (08.10.2026): od okna „Porzadki”
+        # i makra MAG czerwien znaczy „do usuniecia” — kartoteka nieuzywana
+        # myliła się z oznaczona. Odcien inny niz zolte „zastrzezenia”
+        # (#fdebd0), zeby trzy kolory dalo sie odroznic.
         #
         # Wariant „w drzewie I nieuzywane" musi byc OSOBNYM tagiem: Treeview
         # bierze pierwszy tag, ktory ustawia dana wlasciwosc, wiec dwa tagi
         # naraz dalyby szary tekst BEZ tla albo tlo bez szarosci, zaleznie
         # od kolejnosci.
-        self.tab_lista.tag_configure("nieuzywana", background="#fdeaea")
-        self.tab_lista.tag_configure("nieuzywana_w_drzewie", background="#fdeaea",
+        self.tab_lista.tag_configure("nieuzywana", background="#fad7a0")
+        self.tab_lista.tag_configure("nieuzywana_w_drzewie", background="#fad7a0",
                                      foreground=TEKST_SZARY)
         # WSZYSTKIE KOLUMNY ZAWSZE WIDOCZNE (10.09.2026): szerokosci z KOL_LISTA
         # to tylko proporcje startowe. Przy kazdej zmianie rozmiaru panelu
@@ -2006,7 +2007,7 @@ class EdytorWindow(tk.Toplevel, Kreciolek):
         self.tab_lista.bind("<Double-1>", lambda _e: self._dodaj_istniejaca())
         self.tab_lista.bind("<<TreeviewSelect>>", self._na_wybor_z_listy)
         tk.Label(dol, text="Dwuklik = dodaj jako składnik zaznaczonego kompletu   •   "
-                           "czerwone tło = nieużywana (można skasować / zmienić symbol)",
+                           "pomarańczowe tło = nieużywana (można skasować / zmienić symbol)",
                  bg=TLO_SEKCJI, fg=TEKST_SZARY, font=("Arial", 8), anchor="w").pack(
             fill=tk.X, padx=6, pady=(0, 6))
 
