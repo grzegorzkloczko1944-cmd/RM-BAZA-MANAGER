@@ -38,6 +38,7 @@ STAN: punkt 2 planu — szkielet z danymi z mostu. Sesja wydania i wystawianie
 RW dochodzą w punktach 3-4.
 """
 
+import os
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -67,6 +68,46 @@ PRZYCISK = "#d9dfe6"
 PRZYCISK_H = "#ccd3dc"
 POLE = "#dbe0e7"
 CZCIONKA = "Segoe UI"
+
+
+#: Ustawienia okna na tym stanowisku (szerokości kolumn). OSOBNY plik, nie
+#: sync_config.json: główne okno RM_BAZA zapisuje tamten w całości i dwa okna
+#: nadpisywałyby sobie nawzajem zmiany.
+WYDANIE_USTAWIENIA = os.path.join(
+    "C:/RMPAK_CLIENT" if os.path.isdir("C:/RMPAK_CLIENT")
+    else os.path.join(os.environ.get("APPDATA", "."), "RM_BAZA"), "wydanie_okno.json")
+
+
+def _ustawienia():
+    try:
+        import json
+        with open(WYDANIE_USTAWIENIA, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _ustawienia_zapisz(sciezka, wartosc):
+    """Zapis jednego klucza (np. („kolumny”, „do_wydania”)); None = usuń. Bez wyjątków —
+    brak zapisu ustawień nie może przeszkodzić w wydawaniu."""
+    try:
+        import json
+        d = _ustawienia()
+        w = d
+        for k in sciezka[:-1]:
+            w = w.setdefault(k, {})
+        if wartosc is None:
+            w.pop(sciezka[-1], None)
+        else:
+            w[sciezka[-1]] = wartosc
+        os.makedirs(os.path.dirname(WYDANIE_USTAWIENIA), exist_ok=True)
+        tmp = WYDANIE_USTAWIENIA + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, WYDANIE_USTAWIENIA)
+    except Exception as e:
+        print("⚠️  Wydanie: nie zapisano ustawień okna: %s" % e)
 
 
 def _plaski(b, tlo=PRZYCISK, tekst=TEKST, hover=PRZYCISK_H, ramka=RAMKA):
@@ -206,13 +247,16 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
     #:     „Status" nadal nie sięgał krawędzi
     #: Rozciąga się WYŁĄCZNIE „Nazwa" — jedna kolumna zbiera cały nadmiar,
     #: reszta stoi w miejscu, co przy czytaniu listy regałami jest zaletą.
-    KOL_PLAN = [("lp", "Lp.", 34), ("lokacja", "Lokacja", 62),
-                ("symbol", "Symbol", 110), ("nazwa", "Nazwa", 96),
-                ("zrodlo", "Źr.", 34), ("potrzeba", "Potrzeba", 62),
+    #: Domyślne szerokości (08.10.2026): przy oknie 1500 px tabela mieści się
+    #: bez przewijania w bok; „Nazwa” wypełnia resztę (stretch). Szerokości
+    #: ustawione przez usera — zapamiętane w WYDANIE_USTAWIENIA.
+    KOL_PLAN = [("lp", "Lp.", 30), ("lokacja", "Lokacja", 58),
+                ("symbol", "Symbol", 100), ("nazwa", "Nazwa", 92),
+                ("zrodlo", "Źr.", 28), ("potrzeba", "Potrzeba", 60),
                 ("wydano", "Wydano", 56), ("pozostalo", "Pozost.", 52),
-                ("stan", "Stan", 44), ("do_wydania", "Do wyd.", 54),
-                ("teraz", "Teraz", 44),
-                ("status", "Status", 98), ("rw", "RW", 86)]
+                ("stan", "Stan", 40), ("do_wydania", "Do wyd.", 54),
+                ("teraz", "Teraz", 40),
+                ("status", "Status", 118), ("rw", "RW", 74)]
 
     #: Filtry listy kompletacyjnej: (klucz, etykieta, podpowiedz).
     #: Kolejnosc = kolejnosc zakladek. „mozliwe" jest domyslne, bo to
@@ -291,6 +335,10 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         # Odczyt startuje po pokazaniu okna: user widzi układ od razu,
         # a nie po kilku sekundach patrzenia w szare tło.
         self.after(80, self._odswiez)
+        # ⚡ Rozgrzewka miniatur w tle, RAZEM z odczytem z Subiekta: import
+        # import_bom (ciągnie openpyxl, ~0,5 s) i indeks DWF projektu na V:.
+        # Inaczej płaciło za to pierwsze kliknięcie w wiersz (pomiar 08.10.2026).
+        self.after(150, self._rozgrzej_miniatury)
 
     # ── budowa okna ─────────────────────────────────────────────────────
 
@@ -844,7 +892,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         for klucz, naglowek, szer in self.KOL_PLAN:
             self.tab.heading(klucz, text=naglowek,
                              command=lambda k=klucz: self._sortuj(k))
-            self.tab.column(klucz, width=szer, minwidth=36,
+            self.tab.column(klucz, width=szer, minwidth=90 if klucz == "nazwa" else 28,
                             stretch=(klucz == "nazwa"),
                             anchor="w" if klucz in ("lokacja", "symbol", "nazwa",
                                                     "zrodlo", "status", "rw")
@@ -854,6 +902,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         # domyślnym oknie kolumny mieszczą się w całości (806 z 808 px), ale
         # po zwężeniu okna magazynier ma jak dojechać do „Statusu" zamiast
         # patrzeć na ucięty tekst.
+        self._kolumny_pamietaj(self.tab, "do_wydania", self.KOL_PLAN)
         sc_x = ttk.Scrollbar(wrap, orient="horizontal", command=self.tab.xview)
         self.tab.configure(yscrollcommand=sc.set, xscrollcommand=sc_x.set)
         sc_x.pack(side=tk.BOTTOM, fill=tk.X)
@@ -920,9 +969,10 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                                      show="headings", height=5, style="Wyd.Treeview")
         for klucz, naglowek, szer in self.KOL_HIST:
             self.tab_hist.heading(klucz, text=naglowek)
-            self.tab_hist.column(klucz, width=szer, minwidth=50,
+            self.tab_hist.column(klucz, width=szer, minwidth=90 if klucz == "nazwa" else 36,
                                  stretch=(klucz == "nazwa"),
                                  anchor="e" if klucz in ("ilosc", "stan") else "w")
+        self._kolumny_pamietaj(self.tab_hist, "historia", self.KOL_HIST)
         sc = ttk.Scrollbar(wrap, orient="vertical", command=self.tab_hist.yview)
         self.tab_hist.configure(yscrollcommand=sc.set)
         self.tab_hist.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1494,39 +1544,101 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         return self._con
 
     def _pokaz_rysunek(self, symbol):
-        """Miniatura DWF — ten sam cache co arkusz główny RM_BAZA."""
+        """Miniatura DWF — ten sam cache co arkusz główny RM_BAZA.
+
+        ⚡ W TLE (08.10.2026, pomiar): szukanie DWF budowało co 60 s od nowa
+        indeks folderu projektu na V: (setki `is_dir` na dysku sieciowym)
+        w wątku okna — każde wskazanie pozycji, zmiana zakładki czy filtra
+        stawało, przewijanie się cięło. Teraz: krótka zwłoka (przy szybkim
+        przechodzeniu strzałkami liczy się tylko OSTATNIA pozycja), szukanie
+        i obróbka obrazka w wątku, wynik w oknie — tylko jeśli to wciąż ta
+        sama pozycja. Raz znaleziona miniatura zostaje w pamięci okna.
+        """
         self._foto = None
         self._sciezka_rysunku = None
-        self.lbl_rysunek.config(image="", text="—", cursor="")
+        self._rys_nr = getattr(self, "_rys_nr", 0) + 1
+        nr = self._rys_nr
+        if not hasattr(self, "_rys_cache"):
+            self._rys_cache = {}
+        if symbol in self._rys_cache:
+            self._rysunek_gotowy(nr, symbol, *self._rys_cache[symbol])
+            return
+        self.lbl_rysunek.config(image="", text="…", cursor="")
+        if getattr(self, "_rys_after", None):
+            try:
+                self.after_cancel(self._rys_after)
+            except Exception:
+                pass
+        self._rys_after = self.after(120, lambda: self._rysunek_w_tle(nr, symbol))
+
+    def _rozgrzej_miniatury(self):
+        projekt = self.project_name
+
+        def praca():
+            try:
+                from pathlib import Path
+                import dwf_thumb  # noqa: F401
+                from PIL import Image, ImageChops  # noqa: F401
+                from import_bom import find_dwf_for_drawing
+                find_dwf_for_drawing(Path("V:/"), projekt, "-")   # buduje indeks projektu
+            except Exception:
+                pass
+
+        threading.Thread(target=praca, daemon=True, name="wydanie-miniatury").start()
+
+    def _rysunek_w_tle(self, nr, symbol):
+        self._rys_after = None
+        if nr != self._rys_nr:
+            return                              # w międzyczasie wskazano inną pozycję
+        rozmiar = (self.MINI_W - 6, self.MINI_H - 6)
+        projekt = self.project_name
+
+        def praca():
+            thumb, im = None, None
+            try:
+                from pathlib import Path
+                from import_bom import find_dwf_for_drawing, find_dwf_in_library
+                import dwf_thumb
+                from PIL import Image, ImageChops
+                sciezka = (find_dwf_for_drawing(Path("V:/"), projekt, symbol)
+                           or find_dwf_in_library(symbol, "B:/"))
+                if sciezka:
+                    thumb = dwf_thumb.get_cached_thumb_path(str(sciezka))
+                    im = Image.open(thumb).convert("RGB")
+                    # Cache trzyma rysunek wpasowany w kwadrat, więc pionowy detal ma
+                    # po bokach puste tło — przycinamy je, żeby cała ramka szła na
+                    # sam rysunek (ten sam zabieg co w arkuszu głównym RM_BAZA).
+                    tlo = im.getpixel((0, 0))
+                    bbox = ImageChops.difference(im, Image.new("RGB", im.size, tlo)).getbbox()
+                    if bbox:
+                        im = im.crop(bbox)
+                    im.thumbnail(rozmiar, Image.LANCZOS)
+            except Exception:
+                thumb, im = None, None          # brak rysunku nie przeszkadza w wydaniu
+            try:
+                self.after(0, lambda: self._rysunek_gotowy(nr, symbol, thumb, im, True))
+            except Exception:
+                pass                            # okno zamknięte w trakcie
+
+        threading.Thread(target=praca, daemon=True).start()
+
+    def _rysunek_gotowy(self, nr, symbol, thumb, im, z_tla=False):
+        """Wynik w oknie (wątek główny — PhotoImage tylko tutaj)."""
+        if z_tla:
+            self._rys_cache[symbol] = (thumb, im)
+        if nr != self._rys_nr:
+            return                              # nieaktualne — pokazano już inną pozycję
         try:
-            from pathlib import Path
-            from import_bom import find_dwf_for_drawing, find_dwf_in_library
-            import dwf_thumb
-            from PIL import Image, ImageTk
-            sciezka = (find_dwf_for_drawing(Path("V:/"), self.project_name, symbol)
-                       or find_dwf_in_library(symbol, "B:/"))
-            if not sciezka:
-                self.lbl_rysunek.config(text="brak\nrysunku")
+            if im is None:
+                self.lbl_rysunek.config(image="", text="brak\nrysunku", cursor="")
                 return
-            thumb = dwf_thumb.get_cached_thumb_path(str(sciezka))
-            im = Image.open(thumb).convert("RGB")
-            # Cache trzyma rysunek wpasowany w kwadrat, więc pionowy detal ma
-            # po bokach puste tło — przycinamy je, żeby cała ramka szła na
-            # sam rysunek (ten sam zabieg co w arkuszu głównym RM_BAZA).
-            from PIL import ImageChops
-            tlo = im.getpixel((0, 0))
-            bbox = ImageChops.difference(
-                im, Image.new("RGB", im.size, tlo)).getbbox()
-            if bbox:
-                im = im.crop(bbox)
-            im.thumbnail((self.MINI_W - 6, self.MINI_H - 6), Image.LANCZOS)
+            from PIL import ImageTk
             self._foto = ImageTk.PhotoImage(im)
             self._sciezka_rysunku = thumb
             # Kursor „rączka" mówi, że w rysunek da się kliknąć.
             self.lbl_rysunek.config(image=self._foto, text="", cursor="hand2")
         except Exception:
-            # Brak rysunku nie może przeszkodzić w wydaniu — to tylko pomoc.
-            self.lbl_rysunek.config(text="brak\nrysunku")
+            self.lbl_rysunek.config(image="", text="brak\nrysunku", cursor="")
 
     def _uwaga(self, tekst, tlo=None):
         self.lbl_uwaga.config(text=tekst, bg=tlo or TLO_SEKCJI)
@@ -1557,6 +1669,8 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         self.lbl_rysunek.config(image="", text="—", cursor="")
         self._foto = None
         self._sciezka_rysunku = None
+        # spóźniona miniatura z tła nie może wrócić na wyczyszczony panel
+        self._rys_nr = getattr(self, "_rys_nr", 0) + 1
         if not zostaw_uwage:
             self._uwaga("")
         self.btn_dodaj.config(state=tk.DISABLED)
@@ -2108,10 +2222,54 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                 p = self._wiersz_planu(iid)
                 if p and p.get("rw"):
                     kursor = "hand2"
+        # ⚡ Tylko przy ZMIANIE: config() przerysowuje całą tabelę (~30 ms),
+        # a <Motion> leci przy każdym ruchu myszy — tabela „ciągnęła się”
+        # pod kursorem (pomiar 08.10.2026: 40 ruchów = 1,2 s).
+        if kursor == getattr(self, "_kursor_tab", None):
+            return
+        self._kursor_tab = kursor
         try:
             self.tab.config(cursor=kursor)
         except tk.TclError:
             pass
+
+    # ── szerokości kolumn: zapamiętane per stanowisko ───────────────────
+    def _kolumny_pamietaj(self, tab, klucz, kolumny):
+        """Przywraca zapamiętane szerokości i pilnuje zapisu po przeciągnięciu
+        krawędzi kolumny. Prawy klik w nagłówek — powrót do domyślnych."""
+        zapisane = (_ustawienia().get("kolumny") or {}).get(klucz) or {}
+        for k, _n, _szer in kolumny:
+            if isinstance(zapisane.get(k), (int, float)) and zapisane[k] >= 20:
+                tab.column(k, width=int(zapisane[k]))
+        stan = {"ostatnie": self._szerokosci(tab, kolumny)}
+
+        def po_puszczeniu(_e=None):
+            teraz = self._szerokosci(tab, kolumny)
+            if teraz != stan["ostatnie"]:
+                stan["ostatnie"] = teraz
+                _ustawienia_zapisz(("kolumny", klucz), teraz)
+
+        def menu(e):
+            if tab.identify_region(e.x, e.y) != "heading":
+                return
+            m = tk.Menu(self, tearoff=0)
+
+            def domyslne():
+                for k, _n, szer in kolumny:
+                    tab.column(k, width=szer)
+                stan["ostatnie"] = self._szerokosci(tab, kolumny)
+                _ustawienia_zapisz(("kolumny", klucz), None)
+
+            m.add_command(label="Przywróć domyślne szerokości kolumn", command=domyslne)
+            m.tk_popup(e.x_root, e.y_root)
+            return "break"
+
+        tab.bind("<ButtonRelease-1>", po_puszczeniu, add="+")
+        tab.bind("<Button-3>", menu, add="+")
+
+    @staticmethod
+    def _szerokosci(tab, kolumny):
+        return {k: int(tab.column(k, "width")) for k, _n, _s in kolumny}
 
     def _klik_tabeli(self, zdarzenie):
         """Pojedynczy klik: tylko kolumna RW ma wlasne zachowanie."""
