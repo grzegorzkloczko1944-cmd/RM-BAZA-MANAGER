@@ -1492,6 +1492,8 @@ class MainWindow(tk.Tk):
                                  command=self.open_subiekt_scalanie)
         subiekt_menu.add_command(label="🔎 Dopasowanie kartotek Subiekta…",
                                  command=self.open_subiekt_dopasowanie)
+        subiekt_menu.add_command(label="🚦 Porządki w kartotekach — czerwone / żółte / zielone…",
+                                 command=self.open_subiekt_porzadki)
         # Menu pod PRAWYM klawiszem — lewy otwiera panel z kaflami.
         #
         # ⚠️ Menu NIE jest przypisane przez btn_subiekt["menu"]: Menubutton
@@ -34355,6 +34357,31 @@ class MainWindow(tk.Tk):
             project_name = None
 
         subiekt_scalanie_gui.open_window(self, self.current_project_id, project_name)
+
+    def open_subiekt_porzadki(self):
+        """Okno „Porządki w kartotekach" (menu 📦 SUBIEKT, 08.10.2026).
+
+        Kolory z makra MAG (🔴 do usunięcia / 🟡 zastrzeżenia / 🟢 rekomendowane)
+        nadawane i zdejmowane z RM_BAZA tymi samymi adresami HTTP co w MAG,
+        przeniesienie stanu na zamiennik (jedno PW + jedno RW) i wiązanie
+        starej kartoteki z zamiennikiem. Bez projektu — to porządki w całym
+        asortymencie. Logika i okno: subiekt_porzadki_kartotek.py.
+        """
+        try:
+            import subiekt_porzadki_kartotek
+        except ImportError as e:
+            messagebox.showerror(
+                "Porządki w kartotekach",
+                f"Nie znaleziono modułu subiekt_porzadki_kartotek.py\n\n{e}",
+                parent=self)
+            return
+        try:
+            subiekt_porzadki_kartotek.open_window(self)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Porządki w kartotekach", f"Nie udało się otworzyć okna:\n{e}",
+                                 parent=self)
 
     def open_subiekt_dopasowanie(self):
         """Okno „Dopasowanie kartotek Subiekta" (menu 📦 SUBIEKT).

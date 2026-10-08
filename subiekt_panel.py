@@ -548,6 +548,10 @@ class PanelSubiekt(tk.Toplevel):
                  "zapis", "open_subiekt_scalanie", None),
                 ("🔎", "Dopasowanie kartotek", "znormalizowane → Subiekt",
                  "zapis", "open_subiekt_dopasowanie", None),
+                # Kolory z makra MAG + przeniesienie stanu na zamiennik (PW/RW).
+                # Dokumenty magazynowe są nieodwracalne — stąd trójkąt.
+                ("🚦", "Porządki w kartotekach", "czerwone / żółte / zielone, PW→RW",
+                 "nieodwracalny", "open_subiekt_porzadki", None),
             ]),
         ]
         for tytul, podtytul, kafle in uklad:
