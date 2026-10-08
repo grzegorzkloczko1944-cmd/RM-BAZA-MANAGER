@@ -250,6 +250,7 @@ DOST_WSZYSCY = "— wszyscy —"
 #: najpierw trzeba ustalić, czy Sfera w ogóle wystawia tę kolejkę.
 ZR_ARCHIWUM = "archiwum"
 ZR_SUBIEKT = "subiekt"
+ZR_DP_NOWE = "dp_bez_flagi"
 ZR_DP_REALIZUJE = "dp_zielona"
 ZR_DP_OCZEKUJE = "dp_czerwona"
 ZR_DP_POMARANCZ = "dp_pomarancz"
@@ -268,6 +269,11 @@ FLAGA_POMARANCZOWA = ("pomarańczowa", "#FFFFA500")
 ZRODLA = {
     ZR_ARCHIWUM: ("Faktury w archiwum", "pobrane z KSeF do bazy RM_BAZA"),
     ZR_SUBIEKT: ("Przetworzone w Subiekcie", "FZ z numerem KSeF"),
+    # ⚠️ Nowa e-Faktura wpada do kolejki BEZ flagi — flagę nadaje człowiek
+    # w Subiekcie. Trzy widoki po fladze nie pokazywały takich faktur nigdzie
+    # (08.10.2026: 7 „do przetworzenia", w tym 2 QUAY z tego dnia, wszystkie
+    # bez flagi — „nie ma świeżych faktur"). Stąd osobny widok.
+    ZR_DP_NOWE: ("Do przetworzenia — nowe (bez flagi)", "kolejka KSeF, bez flagi"),
     ZR_DP_REALIZUJE: ("Do przetworzenia — realizuje", "kolejka KSeF, flaga zielona"),
     ZR_DP_OCZEKUJE: ("Do przetworzenia — oczekująca", "kolejka KSeF, flaga czerwona"),
     ZR_DP_POMARANCZ: ("Do przetworzenia — oczekująca (pomarańczowa)",
@@ -277,6 +283,7 @@ ZRODLA = {
 #: Ktory tryb filtruje po ktorej fladze — jedno miejsce, zeby nie rozjechalo sie
 #: miedzy budowaniem listy a etykietami.
 ZRODLA_FLAGI = {
+    ZR_DP_NOWE: None,                 # brak flagi = nikt jeszcze nie ruszył
     ZR_DP_REALIZUJE: FLAGA_ZIELONA,
     ZR_DP_OCZEKUJE: FLAGA_CZERWONA,
     ZR_DP_POMARANCZ: FLAGA_POMARANCZOWA,
@@ -1038,7 +1045,8 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         self.ent_kart.grid(row=0, column=0, sticky="ew")
         self.ent_kart.bind("<KeyRelease>", lambda _e: self._szukaj_kartoteki())
         self.ent_kart.bind("<Return>", lambda _e: self._wybierz_pierwsza())
-        self.ent_kart.bind("<Down>", lambda _e: self.lb_kart.focus_set())
+        self.ent_kart.bind("<Down>", lambda _e: (
+            self.sheet_kart if self.sheet_kart is not None else self.lb_kart).focus_set())
         tk.Button(sz, text="✕", command=self._wyczysc_kartoteke, font=FONT_S,
                   bg=SZARY, fg=TEKST, relief=tk.RAISED, bd=1, cursor="hand2", padx=6
                   ).grid(row=0, column=1, padx=(4, 0))
@@ -1351,7 +1359,7 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
         uzytkownika i da sie go zmienic w Subiekcie. Kolor zostaje jako
         rozpoznanie zapasowe, gdyby flage przemianowano.
         """
-        nazwa_f, kolor_f = ZRODLA_FLAGI[kod]
+        flaga = ZRODLA_FLAGI[kod]
         wynik = []
         szuk = (szukaj or "").strip().lower()
         for x in self._efaktury or []:
@@ -1359,8 +1367,14 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
                 continue
             nazwa = (x.get("FlagaNazwa") or "").strip().lower()
             kolor = (x.get("FlagaKolor") or "").strip().upper()
-            if not (nazwa == nazwa_f or (not nazwa and kolor == kolor_f.upper())):
-                continue
+            if flaga is None:
+                # Widok „nowe": tylko faktury, których nikt nie oflagował.
+                if nazwa or kolor:
+                    continue
+            else:
+                nazwa_f, kolor_f = flaga
+                if not (nazwa == nazwa_f or (not nazwa and kolor == kolor_f.upper())):
+                    continue
             numer = (x.get("NumerDokumentu") or "").strip()
             sprzedawca = (x.get("Sprzedawca") or "").strip()
             nip = (x.get("Nip") or "").strip()
@@ -2057,7 +2071,13 @@ class OknoFaktury(tk.Toplevel, Kreciolek):
             v.set("")
         self.lbl_zrodlo_id.config(text="")
         self._wyczysc_kartoteke()
-        self.lb_kart.delete(0, tk.END)
+        # Lista kandydatów to tksheet ALBO Listbox (`lb_kart` jest None, gdy
+        # jest tksheet) — czyścimy przez `_pokaz_kandydatow`, które zna oba.
+        # Wcześniej `lb_kart.delete` wywalało AttributeError przy każdym
+        # kliknięciu faktury i panel decyzji zostawał z danymi poprzedniej
+        # pozycji (zgłoszone 08.10.2026 jako „dubluje komórki z wiersza").
+        self._kandydaci_kart = []
+        self._pokaz_kandydatow()
         self.btn_zapisz.config(state=tk.DISABLED)
         self.btn_nowa.config(state=tk.DISABLED)
         self.btn_wyczysc.config(state=tk.DISABLED)
