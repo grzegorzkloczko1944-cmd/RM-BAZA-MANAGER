@@ -19,3 +19,4 @@ Czesc pamieci projektu — spis wszystkich obszarow w [MEMORY.md](MEMORY.md).
 - [Szukanie części: OLX/eBay/Allegro](reference_szukanie_czesci_marketplace.md) — OLX publiczne API, eBay Browse API z kluczem, Allegro listing tylko zweryfikowane; printing-press bez PL
 - [688: dwa łożyska pod jednym oznaczeniem](project_688_dwa_lozyska_i_polozenie.md) — 8x16x5 (EZO) i 8x16x4 (618/8); katalog, modele 3D, miniatury, rendery Inventorem
 - [⚠ BŁĄD: MAG wstawia poprzedni detal](project_mag_wstaw_poprzedni_detal.md) — zgłoszone 08.10, do poprawy: 1. klik na drugim detalu wstawia pierwszy, drugi dopiero po 2 kliknięciach
+- [Tuleje zaciskowe BK/RCK → IPT](project_tuleje_zaciskowe_bk.md) — 202 STEP w do_SUBIEKT-MAG (08.10), symbol „BK13 100x145”, Stal; Subiekt/MAG jeszcze nie ruszone
