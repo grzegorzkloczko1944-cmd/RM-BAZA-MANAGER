@@ -24,3 +24,10 @@ niezmapowane. Zero kartotek `BK…`.
 i `Materials` dokumentu; start nowego Inventora bywa nieudany („Wykonanie serwera nie powiodło się”) — ponów.
 Skrypt seryjny: wzorzec `biblioteka_modeli\wzorce_kodu\konwertuj_stp.py` rozszerzony o pętlę, 3 próby na pozycję.
 Powiązane: [[project_mag_wstaw_i_przypisz]], [[feedback_biblioteka_pytaj_przed_hurtem]].
+
+**Aktualizacja 08.10.2026 wieczór (firma, wg wpisów w G:\Mój dysk\KODY\COWORK_WSPOLNE\FIRMA_do_DOMU.md):**
+Subiekt i MAG ZROBIONE: kopia modeli na `B:\Znormalizowane\Tuleje zaciskowe\` (natywne miniatury, pliki w formacie 2015), 200 nowych kartotek
+(Opis „Tuleja zaciskowa", Położenie R8/P3, zdjęcia z PNG), 2 istniejące RCK55 tylko ze zdjęciem i modelem, 202 przypisania MAG, ocena „Rekomendowane" (autor ADMIN).
+Dodatkowo 19 nowych STEP (BK25 ×14 = Sati KLFC, BK80 ×5) skonwertowane w firmie; usunięte warianty `BK15 …_F10` (3 szt., prawie duble); razem 216 kartotek tulei.
+Kopia na G: `do_SUBIEKT-MAG` = stan domowy (202 szt., Inventor 2013, z F10, bez 19 nowych). Otwarte: 39 modeli z gabarytem > D (BK26 7, BK80 27, RCK55 5)
+mają Rekomendowane — user przejrzy sam w firmie. Obieg dom↔firma: skrzynka `G:\Mój dysk\KODY\COWORK_WSPOLNE\` (`ZASADY.md`, `STAN.md`).
