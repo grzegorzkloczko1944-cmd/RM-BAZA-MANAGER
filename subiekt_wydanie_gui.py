@@ -607,8 +607,11 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
             self._uwaga("")
         self.btn_dodaj.config(
             state=tk.NORMAL if _liczba(p["stan"]) > 0 else tk.DISABLED)
-        self.spin_ilosc.focus_set()
-        self.spin_ilosc.selection_range(0, tk.END)
+        # Przy zaznaczaniu WIELU wierszy (Ctrl / Shift) fokus zostaje na liście —
+        # inaczej Ctrl+A i strzałki szły do pola ilości.
+        if len(self.tab.selection()) <= 1:
+            self.spin_ilosc.focus_set()
+            self.spin_ilosc.selection_range(0, tk.END)
         return True
 
     def _nastepna_pozycja(self):
@@ -698,6 +701,17 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         akcje.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(0, 4))
         # „Usuń z wydania" zeruje kolumnę Teraz — NIE usuwa pozycji z planu
         # projektu. Plan wynika z ZK/PW i nie jest naszą własnością.
+        # Zaznaczone (Ctrl / Shift) -> do sesji i „Ostatnie skany” tyle, ile
+        # zostało, najwyżej stan (brak = częściowo). Subiekt dopiero po „Zakończ”.
+        self.btn_wydaj_zaznaczone = tk.Button(
+            akcje, text="📤 Wydaj zaznaczone", command=self._wydaj_zaznaczone,
+            font=("Arial", 8, "bold"), bg=AKCENT, fg="white", activebackground=AKCENT,
+            activeforeground="white", padx=8)
+        self.btn_wydaj_zaznaczone.pack(side=tk.LEFT, padx=(0, 10))
+        self._dymek(self.btn_wydaj_zaznaczone,
+                    "Zaznacz pozycje (Ctrl / Shift + klik, Ctrl+A): każda trafia do wydania i do\n"
+                    "„Ostatnie skany” — po tyle, ile zostało, ale nie więcej niż jest na stanie\n"
+                    "(jak brakuje — częściowo). RW w Subiekcie dopiero po „Zakończ wydanie”.")
         tk.Button(akcje, text="🗑 Usuń z wydania", command=self._usun_z_sesji,
                   font=("Arial", 8)).pack(side=tk.LEFT)
         tk.Button(akcje, text="✏ Popraw ilość", command=self._popraw_ilosc,
@@ -726,7 +740,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         wrap = tk.Frame(ram, bg=TLO_SEKCJI)
         wrap.pack(fill=tk.BOTH, expand=True, padx=10, pady=(4, 0))
         self.tab = ttk.Treeview(wrap, columns=[k[0] for k in self.KOL_PLAN],
-                                show="headings", selectmode="browse")
+                                show="headings", selectmode="extended")
         for klucz, naglowek, szer in self.KOL_PLAN:
             self.tab.heading(klucz, text=naglowek,
                              command=lambda k=klucz: self._sortuj(k))
@@ -761,6 +775,10 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         # Pojedynczy klik w trybie LISTA = „pokaz mi te pozycje". W trybie
         # SKANER nic nie robi, zeby nie kasowac tego, co wlasnie zeskanowano.
         self.tab.bind("<<TreeviewSelect>>", lambda _e: self._z_listy_biezacy())
+        # Wiele wierszy: Ctrl / Shift + klik (selectmode="extended"), Ctrl+A —
+        # pod „Wydaj zaznaczone” (user 08.10.2026).
+        self.tab.bind("<Control-a>", lambda _e: (self.tab.selection_set(self.tab.get_children()), "break")[1])
+        self.tab.bind("<Control-A>", lambda _e: (self.tab.selection_set(self.tab.get_children()), "break")[1])
         self.tab.bind("<Delete>", lambda _e: self._usun_z_sesji())
 
     #: Kolumny historii skanów: (klucz, nagłówek, szerokość)
@@ -1474,10 +1492,15 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         Jedna pozycja na symbol: ten sam detal zeskanowany kilka razy ma
         pójść na dokument jako JEDEN wiersz z sumą.
         """
-        out = []
-        for p in self._widoczne_wiersze():
-            ile = self.sesja.get(p["symbol"].upper(), 0.0)
-            if ile > 0:
+        # ⚠️ CAŁA sesja, nie tylko widoczne wiersze: przygotowana pozycja
+        # schowana filtrem (zakładka, Typ, Dostawca) wypadała z RW po cichu
+        # (08.10.2026). Najpierw kolejność z tabeli, potem reszta z planu.
+        out, byly = [], set()
+        for p in self._widoczne_wiersze() + list(self.plan):
+            klucz = p["symbol"].upper()
+            ile = self.sesja.get(klucz, 0.0)
+            if ile > 0 and klucz not in byly:
+                byly.add(klucz)
                 out.append(dict(p, ilosc=ile))
         return out
 
@@ -1538,6 +1561,78 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         widoczne = self._widoczne_wiersze()
         idx = self.tab.index(sel[0])
         return widoczne[idx] if 0 <= idx < len(widoczne) else None
+
+    def _zaznaczone(self):
+        """Wszystkie wiersze planu zaznaczone w tabeli (Ctrl / Shift)."""
+        widoczne = self._widoczne_wiersze()
+        out = []
+        for iid in self.tab.selection():
+            idx = self.tab.index(iid)
+            if 0 <= idx < len(widoczne):
+                out.append(widoczne[idx])
+        return out
+
+    def _wydaj_zaznaczone(self):
+        """Zaznaczone pozycje do SESJI i do „Ostatnie skany” — jak skan każdej.
+
+        ⛔ NIC nie idzie do Subiekta: RW powstaje dopiero po „Zakończ wydanie”
+        (user 08.10.2026: „to wrzucenie do listy Ostatnie skany, a nie od razu
+        zapis do Subiekta”).
+
+        Każda po tyle, ile ZOSTAŁO do wydania, ale najwyżej tyle, ile jest
+        na stanie (minus to, co już leży w sesji) — brak stanu = wydanie
+        częściowe, bez pytania. Pomijane: brak stanu, nic nie zostało, poza
+        BOM (nie wiadomo, ile wydać — skanerem / „Popraw ilość”).
+        """
+        if not self.polaczony:
+            return self._uwaga("⛔ Brak połączenia z Subiektem — "
+                               "kliknij „Odśwież”.", BLAD_TLO)
+        wiersze = self._zaznaczone()
+        if not wiersze:
+            messagebox.showinfo("Wydaj zaznaczone",
+                                "Zaznacz pozycje na liście (Ctrl / Shift + klik, Ctrl+A).",
+                                parent=self)
+            return
+        pelne, czesciowe, pominiete = [], [], []
+        for p in wiersze:
+            klucz = p["symbol"].upper()
+            w_sesji = self.sesja.get(klucz, 0.0)
+            if p["poza_bom"] or p["pozostalo"] is None:
+                pominiete.append("%s — poza BOM" % p["symbol"])
+                continue
+            zostalo = max(0.0, _liczba(p["pozostalo"]) - w_sesji)
+            wolne = max(0.0, _liczba(p["stan"]) - w_sesji)
+            if zostalo <= 0:
+                pominiete.append("%s — nic nie zostało" % p["symbol"])
+                continue
+            if wolne <= 0:
+                pominiete.append("%s — brak na stanie" % p["symbol"])
+                continue
+            ile = min(zostalo, wolne)
+            self.sesja[klucz] = w_sesji + ile
+            (pelne if ile >= zostalo else czesciowe).append(
+                (p["symbol"], ile, zostalo))
+            self._dopisz_historie(p["symbol"], p.get("nazwa"), ile, p["stan"], p.get("lokacja"))
+        self._odswiez_plan()
+        if not pelne and not czesciowe:
+            messagebox.showinfo(
+                "Wydaj zaznaczone",
+                "Z zaznaczonych nic nie da się wydać:\n\n" + "\n".join(pominiete[:25])
+                + ("\n…" if len(pominiete) > 25 else ""), parent=self)
+            return
+        opis = "Dodano do wydania: %d w całości" % len(pelne)
+        if czesciowe:
+            opis += ", %d częściowo (brak stanu)" % len(czesciowe)
+        if pominiete:
+            opis += ", pominięto %d" % len(pominiete)
+        self.var_status.set(opis + " — RW dopiero po „Zakończ wydanie”")
+        if czesciowe or pominiete:
+            linie = ["%s: %s z %s szt." % (s, _ilo(i), _ilo(z)) for s, i, z in czesciowe]
+            self._uwaga("⚠ Częściowo: " + "; ".join(linie[:6]) + ("…" if len(linie) > 6 else "")
+                        if linie else "⚠ Pominięto %d pozycji (brak stanu / nic nie zostało)."
+                        % len(pominiete), UWAGA_TLO)
+        else:
+            self._uwaga("")
 
     def _usun_z_sesji(self):
         """Zeruje „Teraz" — pozycja ZOSTAJE w planie projektu.
