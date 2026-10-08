@@ -18,7 +18,7 @@ przez `subiekt_kopia_zlecenia.py`), indeks modeli — `indeks_modeli_3d.py`.
 ADRESY (wszystkie GET, odpowiedź JSON; `&format=tsv` = tekst dla VBA)
 
     /mag/status                     wiek kopii, liczba kartotek
-    /mag/szukaj?q=łożysko 6004[&typ=ID|-|!]   symbol, nazwa, opis, nazwa pliku 3D;
+    /mag/szukaj?q=łożysko 6004[&typ=ID|-|!|!z|!r]   symbol, nazwa, opis, nazwa pliku 3D;
                                       typ: filtr (- = bez typu); z typem q może być puste
     /mag/typy                    typy pozycji + liczba kartotek
     /mag/kartoteka?symbol=016-100.03
@@ -38,6 +38,10 @@ ADRESY (wszystkie GET, odpowiedź JSON; `&format=tsv` = tekst dla VBA)
     POST /mag/usun/oznacz?kto=[&zamiennik=]   symbole w treści (linia = symbol albo
                                       symbol|zamiennik, każda część zakodowana jak w URL)
     POST /mag/usun/odznacz?kto=         zdjęcie znacznika (symbole w treści)
+    /mag/oceny                   kartoteki z oceną: zastrzezenia (żółte) / rekomendowane (zielone)
+    POST /mag/ocena/oznacz?ocena=zastrzezenia|rekomendowane&kto=[&uwaga=]
+                                      symbole w treści; jedna ocena na kartotekę (nadpisuje)
+    POST /mag/ocena/odznacz?kto=        zdjęcie oceny (symbole w treści)
     POST /mag/typ/dodaj?nazwa=&kto=     nowy typ pozycji
     POST /mag/typ/zmien?id=&nazwa=&kto= zmiana nazwy
     POST /mag/typ/usun?id=&kto=         usunięcie (typ zdjęty z kartotek)
@@ -87,7 +91,7 @@ TYPY_OBRAZKOW = {"png": "image/png", "png/biale": "image/png", "jpg": "image/jpe
 KOLUMNY_SZUKAJ = ["symbol", "nazwa", "opis", "rodzaj", "dostepne",
                   "zarezerwowane", "cena", "ma_miniature", "modeli",
                   "bez_modelu", "ma_mini3d", "id", "lozysko", "wymiary",
-                  "typ", "typ_id", "do_usuniecia", "zamiennik"]
+                  "typ", "typ_id", "do_usuniecia", "zamiennik", "ocena", "ocena_uwaga"]
 
 #: Skrypty, które stacje pobierają z serwera i uruchamiają na zlecenie.
 SKRYPTY_DLA_STACJI = {"indeks_modeli_3d.py"}
@@ -215,14 +219,34 @@ def _ma_usun(con):
         return False
 
 
-def _cechy_sql(ma_cechy, ma_usun=False):
-    """(kolumny, JOIN) typu, wymiarów i znacznika „do usunięcia" kartoteki `k`."""
+#: Oceny kartotek w oknie MAG (08.10.2026): żółte „zastrzeżenia”, zielone „rekomendowane”.
+OCENY = ("zastrzezenia", "rekomendowane")
+#: Filtr typu w /mag/szukaj -> ocena.
+FILTRY_OCEN = {"!z": "zastrzezenia", "!r": "rekomendowane"}
+
+
+def _ma_ocena(con):
+    """Czy w mapowaniach jest `kartoteki_ocena` (żółte / zielone oznaczenie)."""
+    try:
+        con.execute("SELECT 1 FROM map.kartoteki_ocena LIMIT 1")
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def _cechy_sql(ma_cechy, ma_usun=False, ma_ocena=False):
+    """(kolumny, JOIN) typu, wymiarów, znacznika „do usunięcia" i oceny kartoteki `k`."""
     if ma_usun:
         kol_u = " (u.id_subiekt IS NOT NULL) AS do_usuniecia, u.zamiennik AS zamiennik"
         join_u = " LEFT JOIN map.kartoteki_usun u ON u.id_subiekt = k.id"
     else:
         kol_u = " 0 AS do_usuniecia, NULL AS zamiennik"
         join_u = ""
+    if ma_ocena:
+        kol_u += ", o.ocena AS ocena, o.uwaga AS ocena_uwaga, o.kto AS ocena_kto, o.kiedy AS ocena_kiedy"
+        join_u += " LEFT JOIN map.kartoteki_ocena o ON o.id_subiekt = k.id"
+    else:
+        kol_u += ", NULL AS ocena, NULL AS ocena_uwaga, NULL AS ocena_kto, NULL AS ocena_kiedy"
     if not ma_cechy:
         return ("NULL AS wymiary, NULL AS lozysko, NULL AS typ_id, NULL AS typ,"
                 " NULL AS typ_zrodlo," + kol_u, join_u)
@@ -253,10 +277,12 @@ def szukaj(bazy, q, limit, typ=""):
     con, ma_modele = bazy.polacz()
     try:
         ma_cechy = _ma_cechy(con)
-        if (wym or (typ and typ != "!")) and not ma_cechy:
+        if (wym or (typ and not typ.startswith("!"))) and not ma_cechy:
             return []
         if typ == "!" and not _ma_usun(con):
             return []          # serwer bez znacznika „do usunięcia"
+        if typ in FILTRY_OCEN and not _ma_ocena(con):
+            return []          # serwer bez ocen (przed restartem)
         warunki, parametry = [], []
         for w in slowa:
             wzor = "%" + w.replace("%", "").replace("_", "") + "%"
@@ -278,10 +304,15 @@ def szukaj(bazy, q, limit, typ=""):
             warunki.append("c.id_typu IS NULL")
         elif typ == "!":
             warunki.append("u.id_subiekt IS NOT NULL")
+        elif typ in FILTRY_OCEN:
+            warunki.append("o.ocena = ?")
+            parametry.append(FILTRY_OCEN[typ])
+        elif typ.startswith("!"):
+            return []          # nieznany filtr specjalny
         elif typ:
             warunki.append("c.id_typu = ?")
             parametry.append(int(typ))
-        kolumny, join = _cechy_sql(ma_cechy, _ma_usun(con))
+        kolumny, join = _cechy_sql(ma_cechy, _ma_usun(con), _ma_ocena(con))
         calosc = uprosc(q).strip()
         sql = ("SELECT k.id, k.symbol, k.nazwa, k.opis, k.rodzaj, k.dostepne,"
                "       k.zarezerwowane, k.cena, " + kolumny + ","
@@ -301,7 +332,7 @@ def kartoteka(bazy, symbol):
     con, ma_modele = bazy.polacz()
     try:
         ma_cechy = _ma_cechy(con)
-        kolumny, join = _cechy_sql(ma_cechy, _ma_usun(con))
+        kolumny, join = _cechy_sql(ma_cechy, _ma_usun(con), _ma_ocena(con))
         w = con.execute(
             "SELECT k.*, " + kolumny + ","
             "       EXISTS (SELECT 1 FROM miniatury z WHERE z.id_subiekt = k.id"
@@ -749,6 +780,69 @@ def do_usuniecia(bazy):
         con.close()
 
 
+def oznacz_ocene(bazy, zlec, symbole, ocena, kto, uwaga=""):
+    """Żółta „zastrzezenia” / zielona „rekomendowane” — JEDNA ocena na kartotekę (nowa nadpisuje
+    poprzednią). Osobno od „do usunięcia”: czerwony znacznik zostaje i w oknie ma pierwszeństwo."""
+    if ocena not in OCENY:
+        raise ValueError("ocena: %s" % " / ".join(OCENY))
+    symbole = sorted({s.strip() for s in symbole if s and s.strip()})
+    if not symbole:
+        raise ValueError("brak symboli")
+    if len(symbole) > LIMIT_MAX:
+        raise ValueError("za dużo symboli naraz (%d)" % len(symbole))
+    con, _ = bazy.polacz()
+    try:
+        if not _ma_ocena(con):
+            raise ValueError("serwer bez tabeli ocen — potrzebny restart RM_SERWER")
+        znane = {w[1].upper(): (w[0], w[1]) for w in con.execute(
+            "SELECT id, symbol FROM kartoteki"
+            " WHERE UPPER(symbol) IN (SELECT UPPER(value) FROM json_each(?))",
+            (json.dumps(symbole),))}
+    finally:
+        con.close()
+    lista = [[znane[s.upper()][0], znane[s.upper()][1]] for s in symbole if s.upper() in znane]
+    brak = [s for s in symbole if s.upper() not in znane]
+    if lista:
+        zlec("map-ocena-oznacz", {"ocena": ocena, "uwaga": (uwaga or "").strip()[:200],
+                                  "kto": kto, "kiedy": _teraz(), "lista_json": json.dumps(lista)})
+    nazwa = "zastrzeżenia" if ocena == "zastrzezenia" else "rekomendowane"
+    return {"oznaczono": len(lista), "nie_znaleziono": brak,
+            "komunikat": "%s: %d kartotek" % (nazwa, len(lista))}
+
+
+def odznacz_ocene(bazy, zlec, symbole, kto):
+    symbole = [s.strip() for s in symbole if s and s.strip()]
+    if not symbole:
+        raise ValueError("brak symboli")
+    con, _ = bazy.polacz()
+    try:
+        if not _ma_ocena(con):
+            raise ValueError("serwer bez tabeli ocen — potrzebny restart RM_SERWER")
+        ids = [w[0] for w in con.execute(
+            "SELECT id FROM kartoteki"
+            " WHERE UPPER(symbol) IN (SELECT UPPER(value) FROM json_each(?))",
+            (json.dumps(symbole),))]
+    finally:
+        con.close()
+    if ids:
+        zlec("map-ocena-odznacz", {"lista_json": json.dumps(ids)})
+    return {"odznaczono": len(ids), "komunikat": "zdjęto ocenę: %d kartotek" % len(ids)}
+
+
+def oceny(bazy):
+    """[{symbol, nazwa, dostepne, ocena, uwaga, kto, kiedy}]."""
+    con, _ = bazy.polacz()
+    try:
+        if not _ma_ocena(con):
+            return []
+        return [dict(w) for w in con.execute(
+            "SELECT k.symbol, k.nazwa, k.dostepne, o.ocena, o.uwaga, o.kto, o.kiedy"
+            "  FROM map.kartoteki_ocena o JOIN kartoteki k ON k.id = o.id_subiekt"
+            " ORDER BY o.ocena, k.symbol")]
+    finally:
+        con.close()
+
+
 def status(bazy):
     con, ma_modele = bazy.polacz()
     try:
@@ -881,6 +975,37 @@ def zbuduj_handler(bazy, log, zlec=None):
                     log("⚠️  MAG HTTP POST %s: %s" % (self.path, e))
                     self._dane(500, {"blad": "%s: %s" % (type(e).__name__, e)}, tsv)
                 return
+            if sciezka.startswith("/mag/ocena/"):
+                if zlec is None:
+                    self._dane(503, {"blad": "serwer bez obsługi zleceń"}, tsv)
+                    return
+                kto = (p.get("kto") or "MAG").strip()[:40]
+                akcja = sciezka[len("/mag/ocena/"):]
+                try:
+                    dl = int(self.headers.get("Content-Length") or 0)
+                    if dl < 0 or dl > 1024 * 1024:
+                        raise ValueError("zły rozmiar listy (%d B)" % dl)
+                    cialo = self.rfile.read(dl).decode("ascii", "replace") if dl else ""
+                    symbole = [unquote(x).strip() for x in cialo.split("\n") if x.strip()]
+                    if p.get("symbol"):
+                        symbole.append(p["symbol"])
+                    if akcja == "oznacz":
+                        wynik = oznacz_ocene(bazy, zlec, symbole, (p.get("ocena") or "").strip(),
+                                             kto, p.get("uwaga", ""))
+                    elif akcja == "odznacz":
+                        wynik = odznacz_ocene(bazy, zlec, symbole, kto)
+                    else:
+                        self._dane(404, {"blad": "nieznany adres"}, tsv)
+                        return
+                    log("MAG: ocena %s (%s@%s) — %s" % (
+                        akcja, kto, self.client_address[0], wynik.get("komunikat")))
+                    self._dane(200, wynik, tsv)
+                except ValueError as e:
+                    self._dane(400, {"blad": str(e)}, tsv)
+                except Exception as e:
+                    log("⚠️  MAG HTTP POST %s: %s" % (self.path, e))
+                    self._dane(500, {"blad": "%s: %s" % (type(e).__name__, e)}, tsv)
+                return
             if sciezka.startswith("/mag/typ/"):
                 if zlec is None:
                     self._dane(503, {"blad": "serwer bez obsługi zleceń"}, tsv)
@@ -991,6 +1116,9 @@ def zbuduj_handler(bazy, log, zlec=None):
                         limit = LIMIT_DOMYSLNY
                     self._dane(200, szukaj(bazy, p.get("q", ""), limit, p.get("typ", "")),
                                tsv, KOLUMNY_SZUKAJ)
+                elif sciezka == "/mag/oceny":
+                    self._dane(200, oceny(bazy), tsv,
+                               ["symbol", "nazwa", "dostepne", "ocena", "uwaga", "kto", "kiedy"])
                 elif sciezka == "/mag/do_usuniecia":
                     self._dane(200, do_usuniecia(bazy), tsv,
                                ["symbol", "nazwa", "dostepne", "zamiennik", "zamiennik_dostepne", "kto", "kiedy"])

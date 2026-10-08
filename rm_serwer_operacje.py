@@ -3600,6 +3600,45 @@ ZAPIS.update({
 })
 
 
+# ── OCENY KARTOTEK w oknie MAG (08.10.2026) ───────────────────────────────
+#
+# Obok czerwonego „do usunięcia” dwa kolejne znaczniki: ŻÓŁTE „zastrzeżenia”
+# (z opcjonalnym powodem) i ZIELONE „rekomendowane”. Jedna ocena na kartotekę
+# (nowa nadpisuje). Osobna tabela, żeby nie ruszać działającego „do usunięcia”
+# — kartoteka może mieć oba, w oknie czerwony wygrywa. Tylko znacznik.
+MIGRACJE_MAPOWANIA.extend([
+    """CREATE TABLE IF NOT EXISTS kartoteki_ocena (
+           id_subiekt  INTEGER PRIMARY KEY,
+           symbol      TEXT NOT NULL,
+           ocena       TEXT NOT NULL CHECK (ocena IN ('zastrzezenia', 'rekomendowane')),
+           uwaga       TEXT,               -- powód zastrzeżeń (może być puste)
+           kto         TEXT,
+           kiedy       TEXT NOT NULL
+       )""",
+])
+
+ZAPIS.update({
+    # lista_json = [[id_subiekt, symbol], …]
+    "map-ocena-oznacz": (
+        "INSERT INTO kartoteki_ocena (id_subiekt, symbol, ocena, uwaga, kto, kiedy)"
+        " SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), ?, ?, ?, ?"
+        "   FROM json_each(?) WHERE 1"
+        " ON CONFLICT(id_subiekt) DO UPDATE SET"
+        "   symbol = excluded.symbol,"
+        "   ocena  = excluded.ocena,"
+        "   uwaga  = excluded.uwaga,"
+        "   kto    = excluded.kto,"
+        "   kiedy  = excluded.kiedy",
+        ["ocena", "uwaga", "kto", "kiedy", "lista_json"],
+    ),
+    # lista_json = [id_subiekt, …]
+    "map-ocena-odznacz": (
+        "DELETE FROM kartoteki_ocena WHERE id_subiekt IN (SELECT value FROM json_each(?))",
+        ["lista_json"],
+    ),
+})
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # KOPIA SUBIEKTA — kartoteki, stany, miniatury  (subiekt_kopia.sqlite)
 # ═══════════════════════════════════════════════════════════════════════
