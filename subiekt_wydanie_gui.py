@@ -1293,8 +1293,15 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                     wpis = (wiersz[4] or "", dostawcy.get(wiersz[5], "") if wiersz[5] is not None else "")
                     for klucz in wiersz[:4]:
                         klucz = (klucz or "").strip().upper()
-                        if klucz:
-                            meta.setdefault(klucz, wpis)
+                        if not klucz:
+                            continue
+                        # Ten sam numer w kilku wierszach: wygrywa wiersz z dostawcą
+                        # (potem z typem), nie pierwszy z brzegu — inaczej pusty
+                        # duplikat chował dostawcę przed filtrem.
+                        stary = meta.get(klucz)
+                        if (stary is None or (not stary[1] and wpis[1])
+                                or (not stary[0] and wpis[0] and stary[1] == wpis[1])):
+                            meta[klucz] = wpis
         except Exception as e:
             print("⚠️  Wydanie: typ/dostawca z bazy projektu: %s" % e)
         self._meta = meta
