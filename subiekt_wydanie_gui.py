@@ -189,6 +189,11 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         #: {symbol, nazwa, lokacja, zrodlo, potrzeba, wydano, pozostalo,
         #:  stan, teraz, poza_bom}
         self.plan = []
+        #: Filtry Typ (lista + kafelek ✚) i Dostawca — jak w głównej belce
+        #: RM_BAZA (user 08.10.2026). Typ i dostawca pozycji z bazy projektu,
+        #: JEDNYM zapytaniem na okno (`_meta_projektu`), nie per wiersz.
+        self._meta = None
+        self.filtr_typ_tryby = {}
         #: {SYMBOL: ilość} — ile magazynier przygotował w TEJ sesji.
         #: Trzymane osobno od planu, żeby odświeżenie z Subiekta (które
         #: przebudowuje plan) nie skasowało pracy magazyniera.
@@ -291,11 +296,13 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         # DWIE OSOBY: kto wydaje z magazynu i kto odbiera. RW zdejmuje towar
         # ze stanu, więc przy sporze „gdzie się podział ten detal" potrzebne
         # są obie strony, nie jedna.
+        # „Wydał” = osoba ZALOGOWANA w RM_BAZA, bez wyboru (user 08.10.2026:
+        # „wydaje osoba zalogowana”). Dalej trafia do Uwag RW („WYDAŁ: …”).
+        # Wcześniej lista dopasowywała login Windows i często zostawał ADMIN.
         s = sekcja("🔑", "Wydał:")
         self.var_wydal = tk.StringVar()
-        self.combo_wydal = ttk.Combobox(s, textvariable=self.var_wydal,
-                                        width=20, state="readonly",
-                                        font=("Arial", 10))
+        self.combo_wydal = tk.Label(s, textvariable=self.var_wydal, bg=TLO_SEKCJI,
+                                    fg=TEKST, font=("Arial", 11, "bold"), anchor="w")
         self.combo_wydal.pack(anchor="w", pady=(2, 0))
 
         s = sekcja("👤", "Pobiera:")
@@ -318,6 +325,34 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                  font=("Arial", 11, "bold"), anchor="w").pack(anchor="w")
         tk.Label(s, text="Po zakończeniu sesji", bg=TLO_SEKCJI, fg=TEKST_SZARY,
                  font=("Arial", 8), anchor="w").pack(anchor="w")
+
+        # Filtry listy „Do wydania” — Typ (lista + kafelek ✚) i Dostawca, te
+        # same reguły co główna belka RM_BAZA. W górnym pasku, za „Tworzymy”
+        # (user 08.10.2026), nie nad listą.
+        import filtr_typu
+        s = sekcja("🔎", "Typ:")
+        wiersz = tk.Frame(s, bg=TLO_SEKCJI)
+        wiersz.pack(anchor="w", pady=(2, 0))
+        self.var_filtr_typ = tk.StringVar(value=filtr_typu.WSZYSTKO)
+        self.cmb_filtr_typ = ttk.Combobox(
+            wiersz, textvariable=self.var_filtr_typ, state="readonly", width=18,
+            font=("Arial", 10), values=filtr_typu.FILTER_CLASS_VALUES)
+        self.cmb_filtr_typ.pack(side=tk.LEFT)
+        self.cmb_filtr_typ.bind("<<ComboboxSelected>>", lambda _e: self._po_zmianie_listy_typu())
+        self.btn_filtr_typ = tk.Button(wiersz, text="✚", bg="#7f8c8d", fg="white",
+                                       font=("Arial", 8), width=3, relief=tk.RAISED, bd=1)
+        self.btn_filtr_typ.pack(side=tk.LEFT, fill=tk.Y)
+        self._popup_typu = filtr_typu.PopupTypu(self, self.btn_filtr_typ, self.filtr_typ_tryby,
+                                                self._po_zmianie_kafelka)
+        self.btn_filtr_typ.config(command=self._popup_typu.przelacz)
+
+        s = sekcja("🏢", "Dostawca:")
+        self.var_filtr_dostawca = tk.StringVar(value=filtr_typu.FILTER_SUPPLIER_ALL)
+        self.cmb_filtr_dostawca = ttk.Combobox(
+            s, textvariable=self.var_filtr_dostawca, state="readonly", width=22,
+            font=("Arial", 10), values=[filtr_typu.FILTER_SUPPLIER_ALL])
+        self.cmb_filtr_dostawca.pack(anchor="w", pady=(2, 0))
+        self.cmb_filtr_dostawca.bind("<<ComboboxSelected>>", lambda _e: self._po_zmianie_filtra())
 
         tk.Button(pasek, text="Odśwież", command=self._odswiez,
                   font=("Arial", 8)).pack(side=tk.RIGHT, padx=14)
@@ -796,24 +831,34 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
     def _wczytaj_osoby(self):
         """Lista osób (aktywni użytkownicy RM_BAZA) do pól „pobiera"/„wydał"."""
         osoby = []
+        wiersze_osob = []
         try:
             import rm_klient
+            wiersze_osob = rm_klient.master_read("users-list") or []
             osoby = sorted({((r.get("display_name") or "").strip() or r.get("username") or "")
-                            for r in rm_klient.master_read("users-list")
+                            for r in wiersze_osob
                             if r.get("is_active") is None or r.get("is_active")} - {""})
         except Exception as e:
             print("⚠️  Nie wczytano listy osób: %s" % e)
         self.combo_pobiera["values"] = osoby
-        self.combo_wydal["values"] = osoby
+        # Zalogowany w RM_BAZA (MainWindow.current_user = login) -> nazwa
+        # wyświetlana z listy użytkowników; bez RM_BAZA (start testowy) -
+        # login Windows jak dawniej.
         import os
-        ja = (os.environ.get("USERNAME") or "").strip().upper()
-        for o in osoby:
-            if o.strip().upper() == ja:
-                self.var_wydal.set(o)
-                break
+        login = (getattr(self.master, "current_user", None) or "").strip()
+        nazwy = {}
+        try:
+            for r in (wiersze_osob or []):
+                if r.get("username"):
+                    nazwy[r["username"].strip().upper()] = ((r.get("display_name") or "").strip()
+                                                            or r["username"].strip())
+        except Exception:
+            pass
+        if login:
+            self.var_wydal.set(nazwy.get(login.upper(), login))
         else:
-            if osoby:
-                self.var_wydal.set(osoby[0])
+            ja = (os.environ.get("USERNAME") or "").strip().upper()
+            self.var_wydal.set(nazwy.get(ja, os.environ.get("USERNAME") or ""))
 
     def _odswiez(self):
         """Stan z Subiekta w tle — okno zostaje responsywne."""
@@ -1003,9 +1048,11 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         kompletacji kasowałby to, co magazynier zdążył przygotować.
         """
         self.plan = []
+        meta = self._meta_projektu()
         for klucz, p in self.stan.items():
             symbol = (p.get("symbol") or "").strip()
             k = kartoteki.get(symbol) or {}
+            typ, dostawca = meta.get(symbol.upper(), ("", ""))
             potrzeba = p.get("potrzeba")
             wydano = _liczba(p.get("wydano"))
             pozostalo = (None if potrzeba is None
@@ -1023,7 +1070,10 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                 # Numery RW, ktore ten symbol wydaly — z mostu. Klik w kolumne
                 # otwiera przeglad dokumentow na tym RW (02.10.2026).
                 "rw": list(p.get("rw") or ()),
+                "typ": typ,
+                "dostawca": dostawca,
             })
+        self._odswiez_dostawcow()
         self._odswiez_plan()
 
     def _sortuj(self, kolumna):
@@ -1197,6 +1247,76 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                    else "Zamówiono u dostawcy (ZD)" if wpis.get("zrodlo") == "ZD"
                    else "Plan",
                    _ilo(zam) if zam is not None else "—"))
+
+    def _meta_projektu(self):
+        """{SYMBOL: (typ, dostawca)} z bazy projektu — JEDNO zapytanie na okno.
+
+        Wiersze planu to symbole z Subiekta; pozycja projektu pasuje po
+        `subiekt_symbol` (znormalizowane, dopisane z kartoteki) albo po numerze
+        rysunku. Typ jak w głównej belce: class_effective / manual / auto.
+        Dostawca = nazwa z mapy dostawców RM_BAZA (MainWindow.suppliers_map).
+        """
+        if self._meta is not None:
+            return self._meta
+        meta = {}
+        try:
+            con = self._projekt_con()
+            if con is not None:
+                kol = {r[1] for r in con.execute("PRAGMA table_info(items)")}
+                k = lambda n: n if n in kol else "NULL"          # noqa: E731
+                dostawcy = getattr(self.master, "suppliers_map", None) or {}
+                for wiersz in con.execute(
+                        "SELECT %s, %s, %s, %s,"
+                        "       COALESCE(NULLIF(%s,''), NULLIF(%s,''), NULLIF(%s,''), ''), %s"
+                        "  FROM items WHERE COALESCE(%s, 0) = 0"
+                        % (k("subiekt_symbol"), k("work_drawing_no"), k("norm_drawing_no"),
+                           k("src_drawing_no"), k("class_effective"), k("class_manual"),
+                           k("class_auto"), k("supplier_id"), k("is_hidden"))):
+                    wpis = (wiersz[4] or "", dostawcy.get(wiersz[5], "") if wiersz[5] is not None else "")
+                    for klucz in wiersz[:4]:
+                        klucz = (klucz or "").strip().upper()
+                        if klucz:
+                            meta.setdefault(klucz, wpis)
+        except Exception as e:
+            print("⚠️  Wydanie: typ/dostawca z bazy projektu: %s" % e)
+        self._meta = meta
+        return meta
+
+    def _pasuje_typ_dostawca(self, p):
+        import filtr_typu
+        if not hasattr(self, "var_filtr_dostawca"):      # przed zbudowaniem paska filtrów
+            return True
+        if not filtr_typu.pasuje(p.get("typ"), self.var_filtr_typ.get(), self.filtr_typ_tryby):
+            return False
+        d = self.var_filtr_dostawca.get()
+        return not d or d == filtr_typu.FILTER_SUPPLIER_ALL or p.get("dostawca") == d
+
+    def _odswiez_dostawcow(self):
+        """Lista „Dostawca:” — tylko dostawcy pozycji z tego planu (jak w głównej
+        belce: dostawcy bieżącego projektu)."""
+        import filtr_typu
+        nazwy = sorted({p.get("dostawca") for p in self.plan if p.get("dostawca")}, key=str.lower)
+        self.cmb_filtr_dostawca["values"] = [filtr_typu.FILTER_SUPPLIER_ALL] + nazwy
+        if self.var_filtr_dostawca.get() not in self.cmb_filtr_dostawca["values"]:
+            self.var_filtr_dostawca.set(filtr_typu.FILTER_SUPPLIER_ALL)
+
+    def _po_zmianie_filtra(self):
+        self._odswiez_plan()
+        if getattr(self, "tryb", "skaner") == "lista":
+            self._nastepna_pozycja()
+
+    def _po_zmianie_listy_typu(self):
+        """Zmiana listy „Typ:” czyści kafelek ✚ (jak w głównej belce — lista ma priorytet)."""
+        import filtr_typu
+        self.filtr_typ_tryby.clear()
+        filtr_typu.wyglad_kafelka(self.btn_filtr_typ, self.filtr_typ_tryby)
+        self._popup_typu.zamknij()
+        self._po_zmianie_filtra()
+
+    def _po_zmianie_kafelka(self):
+        import filtr_typu
+        filtr_typu.wyglad_kafelka(self.btn_filtr_typ, self.filtr_typ_tryby)
+        self._po_zmianie_filtra()
 
     def _projekt_con(self):
         """Połączenie read-only do bazy projektu — do metadanych z BOM-u."""
@@ -1627,7 +1747,8 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
             wiersze = [p for p in wiersze
                        if (p["pozostalo"] is None or p["pozostalo"] > 0
                            or self.sesja.get(p["symbol"].upper(), 0) > 0)]
-        wiersze = [p for p in wiersze if self._pasuje_do_filtra(p)]
+        wiersze = [p for p in wiersze
+                   if self._pasuje_typ_dostawca(p) and self._pasuje_do_filtra(p)]
 
         k = self._sort_kolumna
 
@@ -1676,7 +1797,8 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         try:
             for klucz, etykieta, _p in self.FILTRY:
                 self.filtr = klucz
-                ile = sum(1 for p in self.plan if self._pasuje_do_filtra(p))
+                ile = sum(1 for p in self.plan
+                          if self._pasuje_typ_dostawca(p) and self._pasuje_do_filtra(p))
                 aktywna = klucz == biezacy
                 self.btn_filtry[klucz].config(
                     text="%s  %d" % (etykieta, ile),
