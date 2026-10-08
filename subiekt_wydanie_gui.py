@@ -45,17 +45,73 @@ from tkinter import ttk, messagebox
 from rm_kreciolek import Kreciolek
 from subiekt_stany import wysrodkuj
 
-TLO = "#ecf0f1"
-TLO_SEKCJI = "#ffffff"
+# Wygląd jak RM_ZJAZD / RM_GUMA w trybie jasnym (user 08.10.2026): jasne tło,
+# białe karty z cienką ramką, ciemny nagłówek, płaskie przyciski, Segoe UI.
+# Kolory STATUSÓW (wiersze listy, kafle liczb) bez zmian — niosą znaczenie.
+TLO = "#c8d0da"
+TLO_SEKCJI = "#e8ecf1"
 TLO_PASKA = "#34495e"
-TEKST = "#2c3e50"
-TEKST_SZARY = "#7f8c8d"
-OK_ZIELONY = "#1e8449"
+TEKST = "#1f2933"
+TEKST_SZARY = "#667085"
+OK_ZIELONY = "#2e7d32"
 UWAGA_TLO = "#fcf3cf"
 BLAD_TLO = "#f2dede"
-SKAN_TLO = "#eaf2f8"
-#: Tlo aktywnego przycisku trybu LISTA/SKANER.
-AKCENT = "#2471a3"
+SKAN_TLO = "#eef4ff"
+#: Tlo aktywnego przycisku trybu LISTA/SKANER i akcji głównych.
+AKCENT = "#1f6feb"
+AKCENT_H = "#1858c4"
+RAMKA = "#b4bcc8"
+NAGLOWEK = "#1b2533"
+PODTYTUL = "#aeb8c6"
+PRZYCISK = "#d9dfe6"
+PRZYCISK_H = "#ccd3dc"
+POLE = "#dbe0e7"
+CZCIONKA = "Segoe UI"
+
+
+def _plaski(b, tlo=PRZYCISK, tekst=TEKST, hover=PRZYCISK_H, ramka=RAMKA):
+    """Płaski przycisk jak w RM_ZJAZD: bez wypukłości, cienka ramka, kolor po najechaniu."""
+    b.configure(relief=tk.FLAT, bd=0, bg=tlo, fg=tekst, activebackground=hover,
+                activeforeground=tekst, highlightthickness=1, highlightbackground=ramka,
+                highlightcolor=ramka, cursor="hand2", disabledforeground="#a0a7b1")
+
+
+def _styl_ttk(okno):
+    """Style ttk TYLKO dla tego okna (własne nazwy „Wyd.*”) — motyw całej RM_BAZA
+    zostaje nietknięty (ttk.Style jest wspólny dla całego programu)."""
+    st = ttk.Style(okno)
+    try:
+        # nagłówek tabeli z elementu motywu clam — w motywie Windows (vista)
+        # tło nagłówka nie daje się zmienić
+        st.element_create("Wyd.Treeheading.cell", "from", "clam")
+    except tk.TclError:
+        pass                                     # już utworzony (drugie okno)
+    st.layout("Wyd.Treeview.Heading", [
+        ("Wyd.Treeheading.cell", {"sticky": "nswe"}),
+        ("Treeheading.border", {"sticky": "nswe", "children": [
+            ("Treeheading.padding", {"sticky": "nswe", "children": [
+                ("Treeheading.image", {"side": "right", "sticky": ""}),
+                ("Treeheading.text", {"sticky": "we"})]})]})])
+    st.configure("Wyd.Treeview", background="#f0f2f5", fieldbackground="#f0f2f5",
+                 foreground=TEKST, rowheight=26, borderwidth=0, font=(CZCIONKA, 9))
+    # Zaznaczenie WYRAŹNE (user 08.10.2026: „ledwo go widać”): pełny niebieski
+    # z białym tekstem, jak standardowe zaznaczenie Windows.
+    st.map("Wyd.Treeview", background=[("selected", AKCENT)],
+           foreground=[("selected", "white")])
+    st.configure("Wyd.Treeview.Heading", background=POLE, foreground=TEKST_SZARY,
+                 font=(CZCIONKA, 9), relief=tk.FLAT, borderwidth=1,
+                 bordercolor=RAMKA, lightcolor=POLE, darkcolor=RAMKA, padding=(2, 5))
+    st.map("Wyd.Treeview.Heading", background=[("active", PRZYCISK_H)])
+
+
+def _karta(rodzic, tytul, **pack):
+    """Biała karta z cienką ramką i niebieskim nagłówkiem WIELKIMI literami."""
+    ram = tk.Frame(rodzic, bg=TLO_SEKCJI, highlightthickness=1,
+                   highlightbackground=RAMKA, highlightcolor=RAMKA)
+    if tytul:
+        tk.Label(ram, text=tytul.upper(), bg=TLO_SEKCJI, fg=AKCENT,
+                 font=(CZCIONKA, 9, "bold"), anchor="w").pack(fill=tk.X, padx=12, pady=(8, 0))
+    return ram
 
 #: Magazyn, z którego wydajemy. Ten sam domyślny co w produkcji RMPAK.
 MAGAZYN = "MASTER"
@@ -112,7 +168,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
 
     #: Rozmiar miniatury rysunku w PIKSELACH. Magazynier ma po niej poznać
     #: detal, którego nie zna z numeru — znaczek 100×60 tego nie da.
-    MINI_W, MINI_H = 260, 200
+    MINI_W, MINI_H = 190, 140
 
     #: Kolumny listy kompletacyjnej: (klucz, nagłówek, szerokość)
     #:
@@ -152,8 +208,8 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
     #: reszta stoi w miejscu, co przy czytaniu listy regałami jest zaletą.
     KOL_PLAN = [("lp", "Lp.", 34), ("lokacja", "Lokacja", 62),
                 ("symbol", "Symbol", 110), ("nazwa", "Nazwa", 96),
-                ("zrodlo", "Źr.", 34), ("potrzeba", "Potrzeba", 54),
-                ("wydano", "Wydano", 50), ("pozostalo", "Pozost.", 52),
+                ("zrodlo", "Źr.", 34), ("potrzeba", "Potrzeba", 62),
+                ("wydano", "Wydano", 56), ("pozostalo", "Pozost.", 52),
                 ("stan", "Stan", 44), ("do_wydania", "Do wyd.", 54),
                 ("teraz", "Teraz", 44),
                 ("status", "Status", 98), ("rw", "RW", 86)]
@@ -226,7 +282,9 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         self.geometry("1500x860")
         self.minsize(1150, 700)
         self.configure(bg=TLO)
-        self.transient(parent)
+        # BEZ transient(parent): okno przyczepione do RM_BAZA Windows pokazuje
+        # tylko z krzyżykiem — user chce minimalizuj / pełny ekran (08.10.2026).
+        # Tak samo jak okno Magazyn.
 
         self._buduj()
         wysrodkuj(self, parent)
@@ -237,6 +295,8 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
     # ── budowa okna ─────────────────────────────────────────────────────
 
     def _buduj(self):
+        _styl_ttk(self)
+        self._naglowek()
         self._pasek_gorny()
         self._belka_awarii()
 
@@ -256,41 +316,68 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         prawa.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._panel_sesji(prawa)
 
+        self._splaszcz_przyciski(self)
         self._ustaw_tryb("lista")
+
+    def _naglowek(self):
+        """Ciemny pasek z tytułem — jak w RM_ZJAZD / RM_GUMA."""
+        nag = tk.Frame(self, bg=NAGLOWEK)
+        nag.pack(fill=tk.X)
+        tk.Label(nag, text="WYDANIE Z MAGAZYNU", bg=NAGLOWEK, fg="white",
+                 font=(CZCIONKA, 13, "bold")).pack(side=tk.LEFT, padx=(16, 10), pady=5)
+        tk.Label(nag, text="RW z listy kompletacyjnej projektu  ·  %s" % self.project_name,
+                 bg=NAGLOWEK, fg=PODTYTUL, font=(CZCIONKA, 10)).pack(side=tk.LEFT, pady=(4, 0))
+        b = tk.Button(nag, text="⟳  Odśwież", command=self._odswiez, font=(CZCIONKA, 9),
+                      padx=12, pady=3)
+        _plaski(b, tlo=NAGLOWEK, tekst="#d7dde6", hover="#26303d", ramka="#3a4555")
+        b.pack(side=tk.RIGHT, padx=14)
+        b._styl = True
+
+    def _splaszcz_przyciski(self, w):
+        """Wszystkie przyciski okna płaskie: kolorowe zostają w swoim kolorze
+        (akcja główna), reszta neutralna. Bez ruszania tych, które mają już styl."""
+        for c in w.winfo_children():
+            if isinstance(c, tk.Button) and not getattr(c, "_styl", False):
+                tlo = str(c.cget("bg")).lower()
+                if tlo.startswith("system") or tlo in ("#f0f0f0", PRZYCISK):
+                    _plaski(c)
+                else:
+                    _plaski(c, tlo=tlo, tekst=str(c.cget("fg")) or "white", hover=tlo, ramka=tlo)
+            self._splaszcz_przyciski(c)
 
     def _pasek_gorny(self):
         """Nagłówek: projekt, magazyn, kto pobiera, data, co powstanie."""
         # Zapamiętany, bo belka awarii wpina się zaraz POD nagłówkiem.
-        pasek = self.pasek_gorny = tk.Frame(self, bg=TLO_SEKCJI, height=76)
+        pasek = self.pasek_gorny = tk.Frame(self, bg=TLO_SEKCJI, height=74)
         pasek.pack(fill=tk.X)
         pasek.pack_propagate(False)
-        tk.Frame(self, bg="#d5dbdb", height=1).pack(fill=tk.X)
+        tk.Frame(self, bg=RAMKA, height=1).pack(fill=tk.X)
 
         def sekcja(ikona, tytul, kolumna_startowa=False):
             ram = tk.Frame(pasek, bg=TLO_SEKCJI)
             ram.pack(side=tk.LEFT, padx=(14 if kolumna_startowa else 22, 0),
-                     pady=10)
+                     pady=6)
             gora = tk.Frame(ram, bg=TLO_SEKCJI)
             gora.pack(anchor="w")
             tk.Label(gora, text=ikona, bg=TLO_SEKCJI, fg=TEKST_SZARY,
-                     font=("Arial", 11)).pack(side=tk.LEFT, padx=(0, 6))
-            tk.Label(gora, text=tytul, bg=TLO_SEKCJI, fg=TEKST_SZARY,
-                     font=("Arial", 9)).pack(side=tk.LEFT)
+                     font=(CZCIONKA, 10)).pack(side=tk.LEFT, padx=(0, 5))
+            tk.Label(gora, text=tytul.rstrip(":").upper(), bg=TLO_SEKCJI, fg=TEKST_SZARY,
+                     font=(CZCIONKA, 8, "bold")).pack(side=tk.LEFT)
             return ram
 
         # PROJEKT — tylko do odczytu. Magazynier go nie wybiera: przychodzi
         # jako kontekst z RM_BAZA (specyfikacja użytkownika).
         s = sekcja("⚙", "Projekt:", kolumna_startowa=True)
         tk.Label(s, text=self.project_name, bg=TLO_SEKCJI, fg=TEKST,
-                 font=("Arial", 13, "bold"), anchor="w").pack(anchor="w")
+                 font=(CZCIONKA, 13, "bold"), anchor="w").pack(anchor="w")
         self.var_kontekst = tk.StringVar(value="")
         tk.Label(s, textvariable=self.var_kontekst, bg=TLO_SEKCJI,
-                 fg=TEKST_SZARY, font=("Arial", 8), anchor="w").pack(anchor="w")
+                 fg=TEKST_SZARY, font=(CZCIONKA, 8), anchor="w").pack(anchor="w")
 
         s = sekcja("🏠", "Magazyn:")
         self.var_magazyn = tk.StringVar(value=MAGAZYN)
         ttk.Combobox(s, textvariable=self.var_magazyn, width=14,
-                     state="readonly", font=("Arial", 10),
+                     state="readonly", font=(CZCIONKA, 10),
                      values=[MAGAZYN]).pack(anchor="w", pady=(2, 0))
 
         # DWIE OSOBY: kto wydaje z magazynu i kto odbiera. RW zdejmuje towar
@@ -302,29 +389,29 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         s = sekcja("🔑", "Wydał:")
         self.var_wydal = tk.StringVar()
         self.combo_wydal = tk.Label(s, textvariable=self.var_wydal, bg=TLO_SEKCJI,
-                                    fg=TEKST, font=("Arial", 11, "bold"), anchor="w")
+                                    fg=TEKST, font=(CZCIONKA, 11, "bold"), anchor="w")
         self.combo_wydal.pack(anchor="w", pady=(2, 0))
 
         s = sekcja("👤", "Pobiera:")
         self.var_pobiera = tk.StringVar()
         self.combo_pobiera = ttk.Combobox(s, textvariable=self.var_pobiera,
                                           width=20, state="readonly",
-                                          font=("Arial", 10))
+                                          font=(CZCIONKA, 10))
         self.combo_pobiera.pack(anchor="w", pady=(2, 0))
         self._wczytaj_osoby()
 
         s = sekcja("📅", "Data:")
         from datetime import datetime
         tk.Label(s, text=datetime.now().strftime("%d.%m.%Y"), bg=TLO_SEKCJI,
-                 fg=TEKST, font=("Arial", 11), anchor="w").pack(anchor="w",
+                 fg=TEKST, font=(CZCIONKA, 11), anchor="w").pack(anchor="w",
                                                                 pady=(2, 0))
 
         # Co powstanie — żeby nikt nie musiał zgadywać, czym kończy się sesja.
         s = sekcja("📄", "Tworzymy:")
         tk.Label(s, text="RW (magazynowy)", bg=TLO_SEKCJI, fg=TEKST,
-                 font=("Arial", 11, "bold"), anchor="w").pack(anchor="w")
+                 font=(CZCIONKA, 11, "bold"), anchor="w").pack(anchor="w")
         tk.Label(s, text="Po zakończeniu sesji", bg=TLO_SEKCJI, fg=TEKST_SZARY,
-                 font=("Arial", 8), anchor="w").pack(anchor="w")
+                 font=(CZCIONKA, 8), anchor="w").pack(anchor="w")
 
         # Filtry listy „Do wydania” — Typ (lista + kafelek ✚) i Dostawca, te
         # same reguły co główna belka RM_BAZA. W górnym pasku, za „Tworzymy”
@@ -336,11 +423,11 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         self.var_filtr_typ = tk.StringVar(value=filtr_typu.WSZYSTKO)
         self.cmb_filtr_typ = ttk.Combobox(
             wiersz, textvariable=self.var_filtr_typ, state="readonly", width=18,
-            font=("Arial", 10), values=filtr_typu.FILTER_CLASS_VALUES)
+            font=(CZCIONKA, 10), values=filtr_typu.FILTER_CLASS_VALUES)
         self.cmb_filtr_typ.pack(side=tk.LEFT)
         self.cmb_filtr_typ.bind("<<ComboboxSelected>>", lambda _e: self._po_zmianie_listy_typu())
         self.btn_filtr_typ = tk.Button(wiersz, text="✚", bg="#7f8c8d", fg="white",
-                                       font=("Arial", 8), width=3, relief=tk.RAISED, bd=1)
+                                       font=(CZCIONKA, 8), width=3, relief=tk.RAISED, bd=1)
         self.btn_filtr_typ.pack(side=tk.LEFT, fill=tk.Y)
         self._popup_typu = filtr_typu.PopupTypu(self, self.btn_filtr_typ, self.filtr_typ_tryby,
                                                 self._po_zmianie_kafelka)
@@ -350,33 +437,34 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         self.var_filtr_dostawca = tk.StringVar(value=filtr_typu.FILTER_SUPPLIER_ALL)
         self.cmb_filtr_dostawca = ttk.Combobox(
             s, textvariable=self.var_filtr_dostawca, state="readonly", width=22,
-            font=("Arial", 10), values=[filtr_typu.FILTER_SUPPLIER_ALL])
+            font=(CZCIONKA, 10), values=[filtr_typu.FILTER_SUPPLIER_ALL])
         self.cmb_filtr_dostawca.pack(anchor="w", pady=(2, 0))
         self.cmb_filtr_dostawca.bind("<<ComboboxSelected>>", lambda _e: self._po_zmianie_filtra())
 
-        tk.Button(pasek, text="Odśwież", command=self._odswiez,
-                  font=("Arial", 8)).pack(side=tk.RIGHT, padx=14)
 
 
     def _panel_skanera(self, rodzic):
-        ram = tk.LabelFrame(rodzic, text=" Wydawanie ", bg=TLO_SEKCJI, fg=TEKST,
-                            font=("Arial", 9, "bold"), width=640)
+        ram = _karta(rodzic, "Wydawanie")
         ram.pack(fill=tk.BOTH, expand=True)
-        ram.pack_propagate(False)
+        # Szerokość 640 px przez rozpórkę, a NIE pack_propagate(False): przy
+        # wyłączonym propagate okno nie wiedziało, ile wysokości potrzebuje
+        # panel, i ucinało dół — „Ilość wydawana teraz” i przycisk WYDAJ
+        # wypadały poza okno (widoczne po dołożeniu nagłówka, 08.10.2026).
+        tk.Frame(ram, bg=TLO_SEKCJI, width=640, height=0).pack()
 
         # ── przelacznik trybu ────────────────────────────────────────
         # Domyslnie LISTA, bo dziala ZAWSZE. Skaner jest przyspieszeniem,
         # a nie warunkiem pracy: detal bez kodu kreskowego byl wczesniej
         # nie do wydania (zgloszone 16.09.2026).
         tryby = tk.Frame(ram, bg=TLO_SEKCJI)
-        tryby.pack(fill=tk.X, padx=8, pady=(8, 0))
+        tryby.pack(fill=tk.X, padx=8, pady=(6, 0))
         self.btn_tryb_lista = tk.Button(
             tryby, text="☰  Z LISTY", command=lambda: self._ustaw_tryb("lista"),
-            font=("Arial", 11, "bold"), relief=tk.FLAT, cursor="hand2", pady=8)
+            font=(CZCIONKA, 11, "bold"), relief=tk.FLAT, cursor="hand2", pady=5)
         self.btn_tryb_lista.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.btn_tryb_skaner = tk.Button(
             tryby, text="▌▌▌  SKANER", command=lambda: self._ustaw_tryb("skaner"),
-            font=("Arial", 11, "bold"), relief=tk.FLAT, cursor="hand2", pady=8)
+            font=(CZCIONKA, 11, "bold"), relief=tk.FLAT, cursor="hand2", pady=5)
         self.btn_tryb_skaner.pack(side=tk.LEFT, fill=tk.X, expand=True,
                                   padx=(8, 0))
 
@@ -385,14 +473,16 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         #: Ramka skanera — w trybie LISTA chowana przez `_ustaw_tryb`.
         self.ramka_skanera = naglowek
         tk.Label(naglowek, text="▌▌▌  SKANUJ KOD KRESKOWY", bg=SKAN_TLO,
-                 fg=TEKST, font=("Arial", 13, "bold")).pack(pady=(8, 0))
+                 fg=TEKST, font=(CZCIONKA, 13, "bold")).pack(pady=(8, 0))
         tk.Label(naglowek,
                  text="Zeskanuj kod albo wpisz SYMBOL / numer rysunku ręcznie",
-                 bg=SKAN_TLO, fg=TEKST_SZARY, font=("Arial", 8)).pack(pady=(0, 6))
+                 bg=SKAN_TLO, fg=TEKST_SZARY, font=(CZCIONKA, 8)).pack(pady=(0, 6))
 
         self.var_kod = tk.StringVar()
         self.ent_kod = tk.Entry(naglowek, textvariable=self.var_kod,
-                                font=("Arial", 14), justify="center")
+                                font=(CZCIONKA, 14), justify="center", relief=tk.FLAT,
+                                highlightthickness=1, highlightbackground=RAMKA,
+                                highlightcolor=AKCENT)
         self.ent_kod.pack(fill=tk.X, padx=10, pady=(0, 10), ipady=6)
         # Czytnik kodów kończy transmisję Enterem — to jest cała jego obsługa.
         self.ent_kod.bind("<Return>", lambda _e: self._skanuj())
@@ -402,24 +492,25 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         # opisuje pozycje, ktora wlasnie zeskanowano.
         self.lbl_naglowek_poz = tk.Label(
             ram, text="", bg=TLO_SEKCJI, fg="#1a5276",
-            font=("Arial", 10, "bold"), anchor="w")
-        self.lbl_naglowek_poz.pack(fill=tk.X, padx=10, pady=(10, 0))
+            font=(CZCIONKA, 10, "bold"), anchor="w")
+        self.lbl_naglowek_poz.pack(fill=tk.X, padx=10, pady=(6, 0))
 
         # ── dane pozycji + miniatura rysunku ─────────────────────────
         dane = tk.Frame(ram, bg=TLO_SEKCJI)
-        dane.pack(fill=tk.X, padx=10, pady=(10, 0))
+        dane.pack(fill=tk.X, padx=10, pady=(6, 0))
 
         siatka = tk.Frame(dane, bg=TLO_SEKCJI)
-        siatka.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # anchor n: pola przy górze, a nie wyśrodkowane na wysokość miniatury
+        siatka.pack(side=tk.LEFT, fill=tk.X, expand=True, anchor="n")
         self.var_symbol = tk.StringVar(value="—")
         self.var_nazwa = tk.StringVar(value="—")
         for i, (etykieta, zmienna) in enumerate((("Symbol:", self.var_symbol),
                                                  ("Nazwa:", self.var_nazwa))):
             tk.Label(siatka, text=etykieta, bg=TLO_SEKCJI, fg=TEKST_SZARY,
-                     font=("Arial", 9), anchor="w", width=8).grid(
+                     font=(CZCIONKA, 9), anchor="w", width=8).grid(
                 row=i, column=0, sticky="w", pady=3)
-            tk.Label(siatka, textvariable=zmienna, bg="#f4f6f7", fg=TEKST,
-                     font=("Arial", 11, "bold"), anchor="w", padx=8,
+            tk.Label(siatka, textvariable=zmienna, bg=POLE, fg=TEKST,
+                     font=(CZCIONKA, 11, "bold"), anchor="w", padx=8,
                      pady=5).grid(row=i, column=1, sticky="we", pady=3)
         siatka.grid_columnconfigure(1, weight=1)
 
@@ -438,7 +529,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         mini.pack(side=tk.LEFT, padx=(10, 0))
         mini.pack_propagate(False)
         self.lbl_rysunek = tk.Label(mini, bg=TLO_SEKCJI, text="—",
-                                    fg=TEKST_SZARY, font=("Arial", 8))
+                                    fg=TEKST_SZARY, font=(CZCIONKA, 8))
         self.lbl_rysunek.pack(fill=tk.BOTH, expand=True)
         self.lbl_rysunek.bind("<Button-1>", lambda _e: self._podglad_rysunku())
         #: Referencja na PhotoImage — bez niej obrazek znika po GC.
@@ -448,7 +539,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         # Cztery liczby, po których magazynier decyduje. Każda ma własne tło,
         # żeby dało się je rozróżnić bez czytania etykiet.
         kafle = tk.Frame(ram, bg=TLO_SEKCJI)
-        kafle.pack(fill=tk.X, padx=10, pady=(14, 0))
+        kafle.pack(fill=tk.X, padx=10, pady=(8, 0))
         self.var_potrzeba = tk.StringVar(value="—")
         self.var_wydano = tk.StringVar(value="—")
         self.var_pozostalo = tk.StringVar(value="—")
@@ -461,10 +552,10 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
             kol = tk.Frame(kafle, bg=TLO_SEKCJI)
             kol.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 8, 0))
             tk.Label(kol, text=tytul, bg=TLO_SEKCJI, fg=TEKST,
-                     font=("Arial", 8), anchor="w").pack(anchor="w")
+                     font=(CZCIONKA, 8), anchor="w").pack(anchor="w")
             tk.Label(kol, textvariable=zmienna, bg=tlo, fg=kolor,
-                     font=("Arial", 16, "bold"), anchor="w", padx=10,
-                     pady=6).pack(fill=tk.X, pady=(3, 0))
+                     font=(CZCIONKA, 15, "bold"), anchor="w", padx=10,
+                     pady=2).pack(fill=tk.X, pady=(2, 0))
             kafle.grid_columnconfigure(i, weight=1)
 
         # ── ilość i lokacja ──────────────────────────────────────────
@@ -473,52 +564,55 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         # stole, nie przy monitorze. Wczesniej mial te sama wielkosc co
         # podpisy pomocnicze i ginal miedzy kaflami.
         dol = tk.Frame(ram, bg=TLO_SEKCJI)
-        dol.pack(fill=tk.X, padx=10, pady=(16, 4))
+        dol.pack(fill=tk.X, padx=10, pady=(8, 2))
         tk.Label(dol, text="Ilość wydawana teraz:", bg=TLO_SEKCJI, fg=TEKST,
-                 font=("Arial", 12, "bold")).pack(side=tk.LEFT, pady=6)
+                 font=(CZCIONKA, 12, "bold")).pack(side=tk.LEFT, pady=6)
         self.var_ilosc = tk.StringVar()
         self.spin_ilosc = tk.Spinbox(dol, textvariable=self.var_ilosc, from_=0,
-                                     to=999999, width=8, font=("Arial", 18, "bold"),
-                                     justify="right")
+                                     to=999999, width=8, font=(CZCIONKA, 18, "bold"),
+                                     justify="right", relief=tk.FLAT, highlightthickness=1,
+                                     highlightbackground=RAMKA, highlightcolor=AKCENT)
         self.spin_ilosc.pack(side=tk.LEFT, padx=(10, 26), ipady=4)
         self.spin_ilosc.bind("<Return>", lambda _e: self._dodaj_do_sesji())
 
         tk.Label(dol, text="Lokacja:", bg=TLO_SEKCJI, fg=TEKST_SZARY,
-                 font=("Arial", 12)).pack(side=tk.LEFT, pady=6)
+                 font=(CZCIONKA, 12)).pack(side=tk.LEFT, pady=6)
         self.var_lokacja = tk.StringVar(value="—")
         tk.Label(dol, textvariable=self.var_lokacja, bg=TLO_SEKCJI, fg=TEKST,
-                 font=("Arial", 18, "bold")).pack(side=tk.LEFT, padx=(8, 0), pady=6)
+                 font=(CZCIONKA, 18, "bold")).pack(side=tk.LEFT, padx=(8, 0), pady=6)
 
         # Metadane pozycji — kontekst, po którym magazynier poznaje, czy
         # trzyma w ręku to co trzeba. Jedna linia, żeby nie zabierać miejsca.
         self.var_meta = tk.StringVar(
             value="Typ: —   |   Grubość: —   |   Dostawca: —   |   Zamówiono: —")
-        tk.Label(ram, textvariable=self.var_meta, bg="#f4f6f7", fg=TEKST_SZARY,
-                 font=("Arial", 8), anchor="w", padx=10, pady=6).pack(
-            fill=tk.X, padx=10, pady=(12, 0))
+        tk.Label(ram, textvariable=self.var_meta, bg=POLE, fg=TEKST_SZARY,
+                 font=(CZCIONKA, 8), anchor="w", padx=10, pady=4).pack(
+            fill=tk.X, padx=10, pady=(6, 0))
 
         # Miejsce na ostrzeżenia: ponad potrzebę / poza BOM / ponad stan.
         self.lbl_uwaga = tk.Label(ram, text="", bg=TLO_SEKCJI, fg=TEKST,
-                                  font=("Arial", 9), anchor="w",
+                                  font=(CZCIONKA, 9), anchor="w",
                                   justify="left", wraplength=520)
-        self.lbl_uwaga.pack(fill=tk.X, padx=10, pady=(8, 0))
+        self.lbl_uwaga.pack(fill=tk.X, padx=10, pady=(4, 0))
 
         przyciski = tk.Frame(ram, bg=TLO_SEKCJI)
-        przyciski.pack(fill=tk.X, padx=10, pady=12)
+        przyciski.pack(fill=tk.X, padx=10, pady=(6, 10))
         self.btn_dodaj = tk.Button(przyciski, text="✔ Dodaj do wydania (Enter)",
-                                   command=self._dodaj_do_sesji, bg=OK_ZIELONY,
-                                   fg="white", font=("Arial", 10, "bold"),
-                                   state=tk.DISABLED)
+                                   command=self._dodaj_do_sesji, bg=AKCENT,
+                                   fg="white", font=(CZCIONKA, 11, "bold"),
+                                   state=tk.DISABLED, pady=6)
+        _plaski(self.btn_dodaj, tlo=AKCENT, tekst="white", hover=AKCENT_H, ramka=AKCENT)
+        self.btn_dodaj._styl = True
         self.btn_dodaj.pack(side=tk.LEFT, fill=tk.X, expand=True)
         # W trybie LISTA magazynier musi moc ominac pozycje, ktorej nie ma
         # na polce — bez tego utknalby na pierwszym braku.
         self.btn_nastepna = tk.Button(
             przyciski, text="»  Pomiń / następna", command=self._nastepna_pozycja,
-            font=("Arial", 9, "bold"))
+            font=(CZCIONKA, 9, "bold"))
         self.btn_nastepna.pack(side=tk.LEFT, padx=(8, 0))
         self.btn_wyczysc = tk.Button(
             przyciski, text="Wyczyść (ESC)", command=self._wyczysc_pozycje,
-            font=("Arial", 9))
+            font=(CZCIONKA, 9))
         self.btn_wyczysc.pack(side=tk.LEFT, padx=(8, 0))
 
     # ── tryb pracy: LISTA / SKANER ─────────────────────────────────────
@@ -529,8 +623,10 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         w tym oknie nie dało się wcześniej wydać (zgłoszone 16.09.2026).
         """
         self.tryb = tryb
-        aktywny = dict(bg=AKCENT, fg="white")
-        bierny = dict(bg="#d5dbdb", fg=TEKST)
+        aktywny = dict(bg=AKCENT, fg="white", activebackground=AKCENT_H,
+                       activeforeground="white")
+        bierny = dict(bg=PRZYCISK_H, fg=TEKST, activebackground="#bfc7d2",
+                      activeforeground=TEKST)
         self.btn_tryb_lista.config(**(aktywny if tryb == "lista" else bierny))
         self.btn_tryb_skaner.config(**(aktywny if tryb == "skaner" else bierny))
 
@@ -649,19 +745,19 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         self._wyczysc_pozycje()
 
     def _panel_sesji(self, rodzic):
-        ram = tk.Frame(rodzic, bg=TLO_SEKCJI, bd=1, relief=tk.SOLID)
+        ram = _karta(rodzic, None)
         ram.pack(fill=tk.BOTH, expand=True)
 
         naglowek = tk.Frame(ram, bg=TLO_SEKCJI)
-        naglowek.pack(fill=tk.X, padx=10, pady=(8, 0))
-        tk.Label(naglowek, text="☰  Do wydania w projekcie", bg=TLO_SEKCJI,
-                 fg=TEKST, font=("Arial", 12, "bold")).pack(side=tk.LEFT)
+        naglowek.pack(fill=tk.X, padx=12, pady=(8, 0))
+        tk.Label(naglowek, text="DO WYDANIA W PROJEKCIE", bg=TLO_SEKCJI,
+                 fg=AKCENT, font=(CZCIONKA, 9, "bold")).pack(side=tk.LEFT)
         self.var_licznik = tk.StringVar(value="0 pozycji")
         tk.Label(naglowek, textvariable=self.var_licznik, bg=TLO_SEKCJI,
-                 fg=TEKST_SZARY, font=("Arial", 9)).pack(side=tk.RIGHT)
+                 fg=TEKST_SZARY, font=(CZCIONKA, 9)).pack(side=tk.RIGHT)
         tk.Label(ram, text="Pozycje, które pozostały do wydania dla projektu %s"
                  % self.project_name, bg=TLO_SEKCJI, fg=TEKST_SZARY,
-                 font=("Arial", 8), anchor="w").pack(fill=tk.X, padx=10,
+                 font=(CZCIONKA, 8), anchor="w").pack(fill=tk.X, padx=10,
                                                      pady=(0, 4))
 
         # STOPKA PRZED TABELĄ — tabela z expand=True zjadłaby wysokość
@@ -672,29 +768,31 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         # Kafel z sumami. Rozdzielone świadomie: „Do wydania" dotyczy CAŁEGO
         # projektu, „Przygotowano teraz" tylko tej sesji. Wspólna liczba
         # („łącznie pozycji: 37") myliła, bo nie było wiadomo, czego dotyczy.
-        kafel = tk.Frame(stopka, bg="#f4f6f7", bd=1, relief=tk.SOLID)
+        kafel = tk.Frame(stopka, bg=POLE, highlightthickness=1, highlightbackground=RAMKA)
         kafel.pack(side=tk.LEFT, padx=(0, 10))
         self.var_do_wydania = tk.StringVar(value="0 pozycji")
         self.var_przygotowano = tk.StringVar(value="0 pozycji / 0 szt.")
         for i, (tytul, zmienna, kolor) in enumerate((
                 ("Do wydania:", self.var_do_wydania, TEKST),
                 ("Przygotowano teraz:", self.var_przygotowano, OK_ZIELONY))):
-            tk.Label(kafel, text=tytul, bg="#f4f6f7", fg=TEKST,
-                     font=("Arial", 9, "bold"), anchor="w").grid(
+            tk.Label(kafel, text=tytul, bg=POLE, fg=TEKST,
+                     font=(CZCIONKA, 9, "bold"), anchor="w").grid(
                 row=i, column=0, sticky="w", padx=(10, 16),
                 pady=(6 if i == 0 else 0, 6))
-            tk.Label(kafel, textvariable=zmienna, bg="#f4f6f7", fg=kolor,
-                     font=("Arial", 11, "bold"), anchor="e").grid(
+            tk.Label(kafel, textvariable=zmienna, bg=POLE, fg=kolor,
+                     font=(CZCIONKA, 11, "bold"), anchor="e").grid(
                 row=i, column=1, sticky="e", padx=(0, 12))
 
         self.btn_zakoncz = tk.Button(
             stopka, text="Zakończ wydanie\nUtwórz RW w Subiekcie",
-            command=self._zakoncz, bg="#2980b9", fg="white",
-            font=("Arial", 10, "bold"), padx=14, state=tk.DISABLED)
+            command=self._zakoncz, bg=OK_ZIELONY, fg="white",
+            font=(CZCIONKA, 10, "bold"), padx=16, pady=4, state=tk.DISABLED)
+        _plaski(self.btn_zakoncz, tlo=OK_ZIELONY, tekst="white", hover="#256b29", ramka=OK_ZIELONY)
+        self.btn_zakoncz._styl = True
         self.btn_zakoncz.pack(side=tk.RIGHT)
         self.btn_podglad_rw = tk.Button(
             stopka, text="📄 Podgląd RW", command=self._podglad_rw,
-            font=("Arial", 9), padx=12, state=tk.DISABLED)
+            font=(CZCIONKA, 9), padx=12, state=tk.DISABLED)
         self.btn_podglad_rw.pack(side=tk.RIGHT, padx=(0, 8))
 
         akcje = tk.Frame(ram, bg=TLO_SEKCJI)
@@ -705,19 +803,21 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         # zostało, najwyżej stan (brak = częściowo). Subiekt dopiero po „Zakończ”.
         self.btn_wydaj_zaznaczone = tk.Button(
             akcje, text="📤 Wydaj zaznaczone", command=self._wydaj_zaznaczone,
-            font=("Arial", 8, "bold"), bg=AKCENT, fg="white", activebackground=AKCENT,
-            activeforeground="white", padx=8)
+            font=(CZCIONKA, 8, "bold"), bg=AKCENT, fg="white", activebackground=AKCENT,
+            activeforeground="white", padx=10, pady=2)
+        _plaski(self.btn_wydaj_zaznaczone, tlo=AKCENT, tekst="white", hover=AKCENT_H, ramka=AKCENT)
+        self.btn_wydaj_zaznaczone._styl = True
         self.btn_wydaj_zaznaczone.pack(side=tk.LEFT, padx=(0, 10))
         self._dymek(self.btn_wydaj_zaznaczone,
                     "Zaznacz pozycje (Ctrl / Shift + klik, Ctrl+A): każda trafia do wydania i do\n"
                     "„Ostatnie skany” — po tyle, ile zostało, ale nie więcej niż jest na stanie\n"
                     "(jak brakuje — częściowo). RW w Subiekcie dopiero po „Zakończ wydanie”.")
         tk.Button(akcje, text="🗑 Usuń z wydania", command=self._usun_z_sesji,
-                  font=("Arial", 8)).pack(side=tk.LEFT)
+                  font=(CZCIONKA, 8)).pack(side=tk.LEFT)
         tk.Button(akcje, text="✏ Popraw ilość", command=self._popraw_ilosc,
-                  font=("Arial", 8)).pack(side=tk.LEFT, padx=6)
+                  font=(CZCIONKA, 8)).pack(side=tk.LEFT, padx=6)
         tk.Button(akcje, text="✖ Wyczyść sesję", command=self._wyczysc_sesje,
-                  font=("Arial", 8)).pack(side=tk.LEFT)
+                  font=(CZCIONKA, 8)).pack(side=tk.LEFT)
         # Zostaje dla zgodnosci: `_widoczne_wiersze` i stary kod czytaja
         # te zmienna. Filtr „wszystkie" ja zeruje.
         self.var_tylko_do_wydania = tk.IntVar(value=1)
@@ -726,12 +826,12 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         filtry = tk.Frame(ram, bg=TLO_SEKCJI)
         filtry.pack(fill=tk.X, padx=10, pady=(6, 0))
         tk.Label(filtry, text="POKAŻ:", bg=TLO_SEKCJI, fg=TEKST,
-                 font=("Arial", 8, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+                 font=(CZCIONKA, 8, "bold")).pack(side=tk.LEFT, padx=(0, 6))
         self.filtr = "mozliwe"
         self.btn_filtry = {}
         for klucz, etykieta, podpowiedz in self.FILTRY:
             b = tk.Button(filtry, text=etykieta, relief=tk.FLAT,
-                          font=("Arial", 8), padx=10, pady=4, cursor="hand2",
+                          font=(CZCIONKA, 8), padx=10, pady=4, cursor="hand2",
                           command=lambda k=klucz: self._ustaw_filtr(k))
             b.pack(side=tk.LEFT, padx=(0, 4))
             self._dymek(b, podpowiedz)
@@ -740,7 +840,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         wrap = tk.Frame(ram, bg=TLO_SEKCJI)
         wrap.pack(fill=tk.BOTH, expand=True, padx=10, pady=(4, 0))
         self.tab = ttk.Treeview(wrap, columns=[k[0] for k in self.KOL_PLAN],
-                                show="headings", selectmode="extended")
+                                show="headings", selectmode="extended", style="Wyd.Treeview")
         for klucz, naglowek, szer in self.KOL_PLAN:
             self.tab.heading(klucz, text=naglowek,
                              command=lambda k=klucz: self._sortuj(k))
@@ -793,18 +893,31 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         poprawkach i usunięciach), tutaj KOLEJNOŚĆ ZDARZEŃ. Przy sporze
         „skanowałem to czy nie" liczy się drugie.
         """
-        ram = tk.Frame(self, bg=TLO_SEKCJI, bd=1, relief=tk.SOLID, height=190)
+        ram = _karta(self, None)
+        ram.configure(height=self.HIST_WYS)
         ram.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(6, 6))
         ram.pack_propagate(False)
+        self._hist_ram = ram
+        self._hist_duzy = False
 
-        tk.Label(ram, text="🕘  Ostatnie skany (historia sesji)", bg=TLO_SEKCJI,
-                 fg=TEKST, font=("Arial", 10, "bold"), anchor="w").pack(
-            fill=tk.X, padx=10, pady=(6, 4))
+        # Nagłówek z przełącznikiem: powiększenie do 2/3 okna, żeby dało się
+        # czytelnie przejrzeć historię (user 08.10.2026), i powrót.
+        nag = tk.Frame(ram, bg=TLO_SEKCJI)
+        nag.pack(fill=tk.X, padx=12, pady=(8, 4))
+        lbl = tk.Label(nag, text="OSTATNIE SKANY (HISTORIA SESJI)", bg=TLO_SEKCJI, fg=AKCENT,
+                       font=(CZCIONKA, 9, "bold"), anchor="w", cursor="hand2")
+        lbl.pack(side=tk.LEFT)
+        lbl.bind("<Double-Button-1>", lambda _e: self._przelacz_historie())
+        self.btn_hist = tk.Button(nag, text="⤢  Powiększ", command=self._przelacz_historie,
+                                  font=(CZCIONKA, 8), padx=10)
+        self.btn_hist.pack(side=tk.RIGHT)
+        self._dymek(self.btn_hist, "Powiększ historię do 2/3 okna — kliknij ponownie, żeby wrócić")
+        self.bind("<Configure>", self._pilnuj_historii, add="+")
 
         wrap = tk.Frame(ram, bg=TLO_SEKCJI)
         wrap.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
         self.tab_hist = ttk.Treeview(wrap, columns=[k[0] for k in self.KOL_HIST],
-                                     show="headings", height=5)
+                                     show="headings", height=5, style="Wyd.Treeview")
         for klucz, naglowek, szer in self.KOL_HIST:
             self.tab_hist.heading(klucz, text=naglowek)
             self.tab_hist.column(klucz, width=szer, minwidth=50,
@@ -815,33 +928,54 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         self.tab_hist.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sc.pack(side=tk.RIGHT, fill=tk.Y)
 
+    #: Zwykła wysokość karty „Ostatnie skany” (px).
+    HIST_WYS = 150
+
+    def _przelacz_historie(self):
+        """Karta „Ostatnie skany”: zwykła wysokość <-> 2/3 okna (rośnie do góry)."""
+        self._hist_duzy = not self._hist_duzy
+        self.btn_hist.config(text="⤡  Zmniejsz" if self._hist_duzy else "⤢  Powiększ")
+        self._pilnuj_historii()
+
+    def _pilnuj_historii(self, e=None):
+        """Wysokość karty historii — przy powiększeniu 2/3 BIEŻĄCEJ wysokości okna
+        (także po zmianie rozmiaru / pełnym ekranie)."""
+        if e is not None and e.widget is not self:
+            return
+        ram = getattr(self, "_hist_ram", None)
+        if ram is None:
+            return
+        cel = max(self.HIST_WYS, int(self.winfo_height() * 2 / 3)) if self._hist_duzy else self.HIST_WYS
+        if int(ram.cget("height")) != cel:
+            ram.configure(height=cel)
+
     def _pasek_stanu(self):
-        pas = tk.Frame(self, bg="#e5e8e8", height=26)
+        pas = tk.Frame(self, bg="#c9d0da", height=26)
         pas.pack(side=tk.BOTTOM, fill=tk.X)
         pas.pack_propagate(False)
 
         self.var_polaczenie = tk.StringVar(value="● Łączenie z Subiektem…")
         self.lbl_polaczenie = tk.Label(pas, textvariable=self.var_polaczenie,
-                                       bg="#e5e8e8", fg=TEKST_SZARY,
-                                       font=("Arial", 8), anchor="w")
+                                       bg="#c9d0da", fg=TEKST_SZARY,
+                                       font=(CZCIONKA, 8), anchor="w")
         self.lbl_polaczenie.pack(side=tk.LEFT, padx=10)
 
         self.var_status = tk.StringVar(value="Wczytywanie stanu…")
-        tk.Label(pas, textvariable=self.var_status, bg="#e5e8e8",
-                 fg=TEKST_SZARY, font=("Arial", 8), anchor="w").pack(
+        tk.Label(pas, textvariable=self.var_status, bg="#c9d0da",
+                 fg=TEKST_SZARY, font=(CZCIONKA, 8), anchor="w").pack(
             side=tk.LEFT, padx=(14, 0))
 
         # Klikalne: pokazuje, KTÓRE RW zostały pominięte. Bez tego różnica
         # „stan spadł, a licznik nie" zostaje bez wyjaśnienia (§8 planu).
-        self.lbl_pominiete = tk.Label(pas, text="", bg="#e5e8e8", fg="#8e6b1f",
-                                      font=("Arial", 8, "underline"),
+        self.lbl_pominiete = tk.Label(pas, text="", bg="#c9d0da", fg="#8e6b1f",
+                                      font=(CZCIONKA, 8, "underline"),
                                       cursor="hand2", anchor="w")
         self.lbl_pominiete.pack(side=tk.LEFT, padx=(14, 0))
         self.lbl_pominiete.bind("<Button-1>", lambda _e: self._pokaz_pominiete())
 
         import os
         tk.Label(pas, text="Użytkownik: %s" % (os.environ.get("USERNAME") or "?"),
-                 bg="#e5e8e8", fg=TEKST_SZARY, font=("Arial", 8)).pack(
+                 bg="#c9d0da", fg=TEKST_SZARY, font=(CZCIONKA, 8)).pack(
             side=tk.RIGHT, padx=10)
 
     # ── dane ────────────────────────────────────────────────────────────
@@ -947,7 +1081,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         self.var_awaria = tk.StringVar(value="")
         self.lbl_awaria = tk.Label(
             self.ram_awaria, textvariable=self.var_awaria, bg="#c0392b",
-            fg="white", font=("Arial", 13, "bold"))
+            fg="white", font=(CZCIONKA, 13, "bold"))
         self.lbl_awaria.pack(expand=True)
         # Nie pakujemy ramki — pojawia się dopiero w _ustaw_blokade_awarii.
 
@@ -995,20 +1129,20 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         o.resizable(False, False)
 
         tk.Label(o, text="⛔", bg="#c0392b", fg="white",
-                 font=("Arial", 52)).pack(pady=(18, 0))
+                 font=(CZCIONKA, 52)).pack(pady=(18, 0))
         tk.Label(o, text="BRAK POŁĄCZENIA Z SUBIEKTEM", bg="#c0392b",
-                 fg="white", font=("Arial", 20, "bold")).pack(padx=40, pady=(6, 2))
+                 fg="white", font=(CZCIONKA, 20, "bold")).pack(padx=40, pady=(6, 2))
         tk.Label(o, text="WYDANIE WSTRZYMANE", bg="#c0392b", fg="#ffe08a",
-                 font=("Arial", 15, "bold")).pack(pady=(0, 10))
-        tk.Label(o, text=powod, bg="#c0392b", fg="white", font=("Arial", 9),
+                 font=(CZCIONKA, 15, "bold")).pack(pady=(0, 10))
+        tk.Label(o, text=powod, bg="#c0392b", fg="white", font=(CZCIONKA, 9),
                  wraplength=520, justify="center").pack(padx=30)
-        tk.Label(o, bg="#c0392b", fg="white", font=("Arial", 11),
+        tk.Label(o, bg="#c0392b", fg="white", font=(CZCIONKA, 11),
                  wraplength=520, justify="center",
                  text=("\nNie skanuj dalej — nic nie zostanie zapisane.\n"
                        "Przygotowane pozycje NIE przepadły.\n\n"
                        "Zawołaj kogoś od RM_BAZA, a gdy połączenie wróci —\n"
                        "kliknij „Odśwież” w oknie wydania.")).pack(padx=30)
-        tk.Button(o, text="Rozumiem", command=o.destroy, font=("Arial", 12, "bold"),
+        tk.Button(o, text="Rozumiem", command=o.destroy, font=(CZCIONKA, 12, "bold"),
                   bg="white", fg="#c0392b", padx=30, pady=8,
                   relief=tk.FLAT, cursor="hand2").pack(pady=20)
 
@@ -1528,10 +1662,10 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         okno.transient(self)
         okno.resizable(False, False)
         tk.Label(okno, text="⛔ Brak wystarczającego stanu", bg="#c0392b",
-                 fg="white", font=("Arial", 11, "bold"), anchor="w",
+                 fg="white", font=(CZCIONKA, 11, "bold"), anchor="w",
                  padx=14, pady=8).pack(fill=tk.X)
         tk.Label(okno, padx=16, pady=12, justify="left", anchor="w",
-                 font=("Arial", 10),
+                 font=(CZCIONKA, 10),
                  text=("%s\n\nStan magazynu: %s szt.\nPróba wydania: %s szt."
                        % (p["symbol"], _ilo(wolne), _ilo(chciane))
                        + ("\n\n(w tej sesji masz już %s szt. tej pozycji)"
@@ -1681,15 +1815,15 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         # widget przyjmuje pojedyncza odleglosc, a krotka wywalala cale
         # okno (TclError: bad screen distance) — zostawala pusta ramka.
         tk.Label(okno, text="%s\n%s" % (p["symbol"], p.get("nazwa") or ""),
-                 font=("Arial", 10, "bold"), padx=16,
+                 font=(CZCIONKA, 10, "bold"), padx=16,
                  justify="left").pack(anchor="w", pady=(12, 4))
-        tk.Label(okno, padx=16, fg=TEKST_SZARY, font=("Arial", 8),
+        tk.Label(okno, padx=16, fg=TEKST_SZARY, font=(CZCIONKA, 8),
                  justify="left", anchor="w",
                  text="pozostało: %s      stan magazynu: %s"
                       % ("—" if p["pozostalo"] is None else _ilo(p["pozostalo"]),
                          _ilo(p["stan"]))).pack(anchor="w")
         var = tk.StringVar(value=_ilo(self.sesja.get(klucz, 0.0)))
-        ent = tk.Entry(okno, textvariable=var, font=("Arial", 13),
+        ent = tk.Entry(okno, textvariable=var, font=(CZCIONKA, 13),
                        justify="right", width=12)
         ent.pack(padx=16, pady=10)
         ent.focus_set()
@@ -1904,9 +2038,11 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
                 aktywna = klucz == biezacy
                 self.btn_filtry[klucz].config(
                     text="%s  %d" % (etykieta, ile),
-                    bg=AKCENT if aktywna else "#eaeded",
+                    bg=AKCENT if aktywna else PRZYCISK,
+                    activebackground=AKCENT_H if aktywna else PRZYCISK_H,
+                    activeforeground="white" if aktywna else TEKST,
                     fg="white" if aktywna else TEKST,
-                    font=("Arial", 8, "bold" if aktywna else "normal"))
+                    font=(CZCIONKA, 8, "bold" if aktywna else "normal"))
         finally:
             self.filtr = biezacy
 
@@ -1920,7 +2056,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
             self._dymek_okno.wm_overrideredirect(True)
             self._dymek_okno.wm_geometry("+%d+%d" % (x, y))
             tk.Label(self._dymek_okno, text=tekst, bg="#fdf6d8", fg=TEKST,
-                     font=("Arial", 8), bd=1, relief=tk.SOLID,
+                     font=(CZCIONKA, 8), bd=1, relief=tk.SOLID,
                      padx=6, pady=3).pack()
 
         widget.bind("<Enter>", pokaz)
@@ -2044,7 +2180,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         okno.transient(self)
         okno.resizable(False, False)
         tk.Label(okno, text="Ta pozycja wyszła kilkoma RW:",
-                 bg=TLO_OKNA, fg=TEKST, font=("Arial", 10, "bold"),
+                 bg=TLO_OKNA, fg=TEKST, font=(CZCIONKA, 10, "bold"),
                  padx=14, pady=(12)).pack(fill=tk.X)
         wybor = {"numer": None}
 
@@ -2055,12 +2191,12 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         ramka = tk.Frame(okno, bg=TLO_OKNA, padx=14, pady=10)
         ramka.pack(fill=tk.BOTH, expand=True)
         for n in numery:
-            tk.Button(ramka, text=n, font=("Arial", 10), width=22,
+            tk.Button(ramka, text=n, font=(CZCIONKA, 10), width=22,
                       relief=tk.FLAT, bg="#2980b9", fg="white",
                       activebackground="#21618c", activeforeground="white",
                       cursor="hand2", command=lambda x=n: klik(x)).pack(
                           fill=tk.X, pady=2)
-        tk.Button(ramka, text="Anuluj", font=("Arial", 9), relief=tk.FLAT,
+        tk.Button(ramka, text="Anuluj", font=(CZCIONKA, 9), relief=tk.FLAT,
                   bg="#bdc3c7", cursor="hand2",
                   command=okno.destroy).pack(fill=tk.X, pady=(8, 0))
         okno.grab_set()
@@ -2176,7 +2312,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
         lbl.pack(padx=6, pady=6)
         tk.Label(okno, text="%s   %s   —   kliknij albo Esc, aby zamknąć"
                  % (self.var_symbol.get(), self.var_nazwa.get()),
-                 bg="#2c3e50", fg="white", font=("Arial", 9)).pack(pady=(0, 6))
+                 bg="#2c3e50", fg="white", font=(CZCIONKA, 9)).pack(pady=(0, 6))
         for zdarzenie in ("<Button-1>", "<Escape>"):
             okno.bind(zdarzenie, lambda _e: okno.destroy())
         lbl.bind("<Button-1>", lambda _e: okno.destroy())
@@ -2197,7 +2333,7 @@ class WydanieWindow(tk.Toplevel, Kreciolek):
 
         tk.Label(okno, text="ZOSTANIE UTWORZONY DOKUMENT RW — %s"
                  % self.project_name, bg="#2980b9", fg="white",
-                 font=("Arial", 10, "bold"), anchor="w", padx=12,
+                 font=(CZCIONKA, 10, "bold"), anchor="w", padx=12,
                  pady=8).pack(fill=tk.X)
 
         stopka = tk.Frame(okno, padx=12, pady=10)
