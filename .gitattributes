@@ -1,0 +1,3 @@
+# Hooki gita uruchamia sh - musza miec konce linii LF (CRLF = "bad interpreter",
+# zablokowany KAZDY commit). Patrz CLAUDE.md, WSPOLNE PLIKI Z DRUGIM REPO.
+.githooks/* text eol=lf
