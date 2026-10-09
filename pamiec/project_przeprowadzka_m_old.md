@@ -229,6 +229,20 @@ New-SmbShare -Name RMPAK_CLIENT -Path C:\RMPAK_CLIENT -FullAccess 'Wszyscy'
 9. **Test:** `git status` w każdym repo = to samo co przed kopią;
    start `rm_serwer.py` → `RM_BAZA_v15_MAG_STATS_ORG.py` → `rm_manager_gui.py`;
    most Subiekta (`subiekt_sfera/bridge_test.py`).
+10. **Wygląd jak Windows 10** (nowy komputer ma Windows 11; user 09.10.2026 —
+    „dopisz”). Bez instalacji:
+    - pasek zadań / Start do lewej: Ustawienia → Personalizacja → Pasek zadań →
+      Zachowania paska zadań → Wyrównanie: do lewej; tam też schować Widżety,
+      Czat, Widok zadań;
+    - klasyczne menu pod prawym przyciskiem (bez „Pokaż więcej opcji”), potem
+      wylogowanie albo restart Eksploratora:
+      `reg add "HKCU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" /f /ve`
+      (powrót: `reg delete "HKCU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}" /f`).
+    Pełny wygląd Win10 (Start, pasek zadań, Eksplorator ze wstążką) — program:
+    **StartAllBack** (zalecany: najstabilniejszy, ok. 5 USD, 100 dni próby);
+    alternatywy ExplorerPatcher (darmowy, psują go aktualizacje Windows, Defender
+    bywa podejrzliwy) albo Open-Shell (tylko menu Start). Zapytać usera, czy
+    instalować — to program spoza repo.
 
 Powiązane: [[project_srodowisko_domowe_m_old]] [[project_subiekt_integracja_m_old]]
 [[project_porzadki_01_10_do_powtorzenia_w_domu]] [[feedback_most_rebuild_release]]
