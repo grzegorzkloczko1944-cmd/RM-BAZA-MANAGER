@@ -3578,16 +3578,23 @@ MIGRACJE_MAPOWANIA.extend([
        )""",
 ])
 
+# Notatka do znacznika (user 09.10.2026: okno MAG = wymiana informacji, zapis bez
+# warunków). ALTER nie jest idempotentny — pętla migracji pomija „duplicate column”.
+MIGRACJE_MAPOWANIA.append("ALTER TABLE kartoteki_usun ADD COLUMN uwaga TEXT")
+
 ZAPIS.update({
-    # lista_json = [[id_subiekt, symbol, zamiennik], …]
+    # lista_json = [[id_subiekt, symbol, zamiennik, uwaga], …]
+    # NULL = „nie ruszaj”: MAG wysyła tylko notatkę (zamiennik NULL), Porządki
+    # kartotek tylko zamiennik (uwaga NULL) — jedno nie kasuje drugiego.
     "map-usun-oznacz": (
-        "INSERT INTO kartoteki_usun (id_subiekt, symbol, zamiennik, kto, kiedy)"
+        "INSERT INTO kartoteki_usun (id_subiekt, symbol, zamiennik, uwaga, kto, kiedy)"
         " SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'),"
-        "        json_extract(value, '$[2]'), ?, ?"
+        "        json_extract(value, '$[2]'), json_extract(value, '$[3]'), ?, ?"
         "   FROM json_each(?) WHERE 1"
         " ON CONFLICT(id_subiekt) DO UPDATE SET"
         "   symbol    = excluded.symbol,"
-        "   zamiennik = excluded.zamiennik,"
+        "   zamiennik = COALESCE(excluded.zamiennik, kartoteki_usun.zamiennik),"
+        "   uwaga     = COALESCE(excluded.uwaga, kartoteki_usun.uwaga),"
         "   kto       = excluded.kto,"
         "   kiedy     = excluded.kiedy",
         ["kto", "kiedy", "lista_json"],

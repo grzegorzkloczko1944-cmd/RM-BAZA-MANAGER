@@ -324,7 +324,12 @@ class Serwer:
             if naprawa:
                 log("   ! %s" % naprawa)
             for sql in ops.MIGRACJE_MAPOWANIA:
-                self.con_map.execute(sql)
+                try:
+                    self.con_map.execute(sql)
+                except sqlite3.OperationalError as e:
+                    # ALTER … ADD COLUMN przy kolejnym starcie: kolumna już jest.
+                    if "duplicate column" not in str(e).lower():
+                        raise
             self.con_map.commit()
             log("Mapowania: %s" % sciezka_map)
 

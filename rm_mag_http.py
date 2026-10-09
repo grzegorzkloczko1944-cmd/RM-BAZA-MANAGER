@@ -237,10 +237,11 @@ def _ma_ocena(con):
 def _cechy_sql(ma_cechy, ma_usun=False, ma_ocena=False):
     """(kolumny, JOIN) typu, wymiarów, znacznika „do usunięcia" i oceny kartoteki `k`."""
     if ma_usun:
-        kol_u = " (u.id_subiekt IS NOT NULL) AS do_usuniecia, u.zamiennik AS zamiennik"
+        kol_u = (" (u.id_subiekt IS NOT NULL) AS do_usuniecia, u.zamiennik AS zamiennik,"
+                 " u.uwaga AS usun_uwaga, u.kto AS usun_kto")
         join_u = " LEFT JOIN map.kartoteki_usun u ON u.id_subiekt = k.id"
     else:
-        kol_u = " 0 AS do_usuniecia, NULL AS zamiennik"
+        kol_u = " 0 AS do_usuniecia, NULL AS zamiennik, NULL AS usun_uwaga, NULL AS usun_kto"
         join_u = ""
     if ma_ocena:
         kol_u += ", o.ocena AS ocena, o.uwaga AS ocena_uwaga, o.kto AS ocena_kto, o.kiedy AS ocena_kiedy"
@@ -267,17 +268,16 @@ def szukaj(bazy, q, limit, typ=""):
     typem puste zapytanie pokazuje cały typ.
     """
     slowa = [w for w in uprosc(q).split() if w]
-    # „20x42" / „20x42x12" = wymiar — filtr po wymiarach kartoteki, nie po tekście.
-    wymiary = [_wymiar_z_tokenu(w) for w in slowa]
-    wym = next((x for x in wymiary if x), None)
-    slowa = [w for w, x in zip(slowa, wymiary) if not x]
+    # BEZ filtra wymiarów (user 09.10.2026): „6x” / „20x42” to zwykły tekst szukany
+    # w symbolu, nazwie i opisie — wcześniej szukało po średnicy łożysk. Wymiary
+    # łożysk zostają w katalogu łożysk (/mag/lozyska).
     typ = (typ or "").strip()
-    if not slowa and not wym and not typ:
+    if not slowa and not typ:
         return []
     con, ma_modele = bazy.polacz()
     try:
         ma_cechy = _ma_cechy(con)
-        if (wym or (typ and not typ.startswith("!"))) and not ma_cechy:
+        if typ and not typ.startswith("!") and not ma_cechy:
             return []
         if typ == "!" and not _ma_usun(con):
             return []          # serwer bez znacznika „do usunięcia"
@@ -295,11 +295,6 @@ def szukaj(bazy, q, limit, typ=""):
                          "    AND UPROSC(m.sciezka) LIKE ?)")
                 parametry.append(wzor)
             warunki.append("(" + pola + ")")
-        if wym:
-            for kol, x in zip(("c.d", "c.dz", "c.b"), wym):
-                if x is not None:
-                    warunki.append(kol + " = ?")
-                    parametry.append(x)
         if typ == "-":
             warunki.append("c.id_typu IS NULL")
         elif typ == "!":
@@ -581,6 +576,13 @@ def _teraz():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def _kto(p):
+    """Autor wpisu (parametr kto=user@stacja). mongo@MONGO to konto
+    administracyjne - w bazie zapisujemy ADMIN (user 09.10.2026)."""
+    k = (p.get("kto") or "MAG").strip()[:40]
+    return "ADMIN" if k.lower() == "mongo@mongo" else k
+
+
 def _nazwa_typu(nazwa):
     n = " ".join((nazwa or "").split())
     if not n:
@@ -707,9 +709,16 @@ def _wpis_usuniecia(linia):
     return unquote(sym).strip(), unquote(zam).strip()
 
 
-def oznacz_usuniecie(bazy, zlec, wpisy, kto, zamiennik=""):
+def oznacz_usuniecie(bazy, zlec, wpisy, kto, zamiennik="", uwaga=None):
     """Oznacza kartoteki jako „do usunięcia" (wpisy = [(symbol, zamiennik)]).
-    Zamiennik nie może być tą samą kartoteką i musi istnieć w Subiekcie."""
+
+    uwaga=None  — Porządki kartotek (RM_BAZA): zamiennik musi istnieć w Subiekcie
+                  i nie może być tą samą kartoteką; notatka zostaje, jaka była.
+    uwaga=tekst — okno MAG: znacznik + DOWOLNA notatka, BEZ żadnych warunków
+                  (user 09.10.2026); zamiennika nie rusza."""
+    if uwaga is not None:
+        wpisy = [(s, "") for s, _ in wpisy]
+        zamiennik = ""
     wpisy = [(s.strip(), (z or zamiennik or "").strip()) for s, z in wpisy if s and s.strip()]
     if not wpisy:
         raise ValueError("brak symboli")
@@ -738,7 +747,10 @@ def oznacz_usuniecie(bazy, zlec, wpisy, kto, zamiennik=""):
         if zam and zam.upper() not in znane:
             zle_zam.append("%s -> %s (brak zamiennika w Subiekcie)" % (sym, zam))
             continue
-        lista.append([k[0], k[1], znane[zam.upper()][1] if zam else ""])
+        if uwaga is not None:
+            lista.append([k[0], k[1], None, uwaga.strip()[:500]])
+            continue
+        lista.append([k[0], k[1], znane[zam.upper()][1] if zam else "", None])
     if lista:
         zlec("map-usun-oznacz", {"kto": kto, "kiedy": _teraz(), "lista_json": json.dumps(lista)})
     return {"oznaczono": len(lista), "nie_znaleziono": brak, "zly_zamiennik": zle_zam,
@@ -765,7 +777,7 @@ def odznacz_usuniecie(bazy, zlec, symbole, kto):
 
 
 def do_usuniecia(bazy):
-    """[{symbol, nazwa, dostepne, zamiennik, zamiennik_dostepne, kto, kiedy}]."""
+    """[{symbol, nazwa, dostepne, zamiennik, zamiennik_dostepne, uwaga, kto, kiedy}]."""
     con, _ = bazy.polacz()
     try:
         if not _ma_usun(con):
@@ -773,7 +785,7 @@ def do_usuniecia(bazy):
         return [dict(w) for w in con.execute(
             "SELECT k.symbol, k.nazwa, k.dostepne, u.zamiennik,"
             "       (SELECT z.dostepne FROM kartoteki z WHERE UPPER(z.symbol) = UPPER(u.zamiennik))"
-            "         AS zamiennik_dostepne, u.kto, u.kiedy"
+            "         AS zamiennik_dostepne, u.uwaga, u.kto, u.kiedy"
             "  FROM map.kartoteki_usun u JOIN kartoteki k ON k.id = u.id_subiekt"
             " ORDER BY k.symbol")]
     finally:
@@ -945,7 +957,7 @@ def zbuduj_handler(bazy, log, zlec=None):
                 if zlec is None:
                     self._dane(503, {"blad": "serwer bez obsługi zleceń"}, tsv)
                     return
-                kto = (p.get("kto") or "MAG").strip()[:40]
+                kto = _kto(p)
                 akcja = sciezka[len("/mag/usun/"):]
                 try:
                     dl = int(self.headers.get("Content-Length") or 0)
@@ -957,7 +969,9 @@ def zbuduj_handler(bazy, log, zlec=None):
                         wpisy = [_wpis_usuniecia(x) for x in linie]
                         if p.get("symbol"):
                             wpisy.append((p["symbol"], ""))
-                        wynik = oznacz_usuniecie(bazy, zlec, wpisy, kto, p.get("zamiennik", ""))
+                        # notatka=1 → okno MAG: dowolna notatka (uwaga może być pusta)
+                        wynik = oznacz_usuniecie(bazy, zlec, wpisy, kto, p.get("zamiennik", ""),
+                                                 p.get("uwaga", "") if p.get("notatka") else None)
                     elif akcja == "odznacz":
                         symbole = [_wpis_usuniecia(x)[0] for x in linie]
                         if p.get("symbol"):
@@ -979,7 +993,7 @@ def zbuduj_handler(bazy, log, zlec=None):
                 if zlec is None:
                     self._dane(503, {"blad": "serwer bez obsługi zleceń"}, tsv)
                     return
-                kto = (p.get("kto") or "MAG").strip()[:40]
+                kto = _kto(p)
                 akcja = sciezka[len("/mag/ocena/"):]
                 try:
                     dl = int(self.headers.get("Content-Length") or 0)
@@ -1010,7 +1024,7 @@ def zbuduj_handler(bazy, log, zlec=None):
                 if zlec is None:
                     self._dane(503, {"blad": "serwer bez obsługi zleceń"}, tsv)
                     return
-                kto = (p.get("kto") or "MAG").strip()[:40]
+                kto = _kto(p)
                 akcja = sciezka[len("/mag/typ/"):]
                 try:
                     if akcja == "dodaj":
@@ -1047,7 +1061,7 @@ def zbuduj_handler(bazy, log, zlec=None):
                 if zlec is None:
                     self._dane(503, {"blad": "serwer bez obsługi zleceń"}, tsv)
                     return
-                kto = (p.get("kto") or "MAG").strip()[:40]
+                kto = _kto(p)
                 try:
                     if sciezka.endswith("/miniatura"):
                         dl = int(self.headers.get("Content-Length") or 0)
@@ -1080,7 +1094,7 @@ def zbuduj_handler(bazy, log, zlec=None):
                 self._dane(503, {"blad": "serwer bez obsługi zleceń"}, tsv)
                 return
             try:
-                kto = (p.get("kto") or "MAG").strip()[:40]
+                kto = _kto(p)
                 if indeks3d:
                     wynik = zlec("sub-zlecenie-dodaj-rodzaj", {
                         "miniatury": 0, "rodzaj": "indeks3d",
