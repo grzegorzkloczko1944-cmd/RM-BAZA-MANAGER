@@ -86,6 +86,8 @@ Dom dołożył:
 
 **Audyt wszystkich pięciu `.spec` jest teraz czysty.** `RM_KOD.spec`
 i oba `RM_Tray_Organizer.spec` nie mają leniwych importów.
+(10.10.2026: `RM_Tray_Organizer.pyw` i oba jego `.spec` USUNIĘTE z tego repo —
+porzucona kopia z maja; aktualny program żyje w NOW/RM_TRAY_ORGANIZER.)
 
 ### ⚠️ `schedule` — NIE dopisywać, mimo że audyt go wskazuje
 
