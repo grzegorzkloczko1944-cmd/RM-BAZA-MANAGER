@@ -26,6 +26,51 @@ traciły sekundy na właśnie takich pętlach (tryb własny zapotrzebowania
 każdy wiersz przy każdym znaku w „Szukaj"). Wcześniej to samo w Magazyn.cs
 (7 s → 0,3 s, 06.09). Szczegóły: `pamiec/project_zapotrzebowanie_szybkie.md`.
 
+## ⛔ WSPÓLNE PLIKI Z DRUGIM REPO (NOW ↔ RM-BAZA-MANAGER) — BEZ MIXÓW
+
+Dwa repo, **jedno miejsce na każdy kod**. Nie kopiuj modułu z jednego repo do drugiego
+„bo tak szybciej” — kopia rozjeżdża się po cichu i potem nikt nie wie, która wersja jest
+prawdziwa (10.10.2026: patrz historia niżej).
+
+- Kod potrzebny w obu repo → **zostaje tam, gdzie żyje**; drugie repo z niego korzysta
+  (ścieżka, import z katalogu drugiego repo) albo dostaje **zarejestrowaną kopię**.
+- Kopia, która MUSI być, stoi na liście **`kopie_miedzy_repo.json`** (w obu repo, identyczny)
+  z trybem: `identyczne` / `identyczne_poza` (dozwolone linie) / `rozne_z_zalozenia`
+  i powodem. Zmiana zarejestrowanej kopii → **ten sam commit idzie do OBU repo**.
+- Program przeniesiony do drugiego repo → **stary katalog usuwamy** (git trzyma historię)
+  i wpisujemy do `usuniete` w `kopie_miedzy_repo.json`. Żadnych „-COPY”, „_stary”, „v2” obok.
+- **Strażnik:** `sprawdz_kopie.py` (identyczny w obu repo) + hook `.githooks/pre-commit`.
+  Zatrzymuje commit, gdy zarejestrowana kopia różni się od drugiego repo albo gdy dodajesz
+  plik `.py`, którego nazwa jest już w drugim repo. **Nie obchodzić `--no-verify`** —
+  naprawić przyczynę (skopiować plik / użyć tego z drugiego repo / dopisać do listy).
+  Pełny raport ręcznie: `python sprawdz_kopie.py`.
+- **Włączenie hooka — raz na każdym klonie** (dom, firma, nowy komputer):
+  `git config core.hooksPath .githooks` (w obu repo). Bez drugiego repo obok (np. serwer)
+  strażnik tylko informuje i przepuszcza.
+
+### Stan wspólnych plików (10.10.2026)
+
+| NOW | RM-BAZA-MANAGER | tryb | uwagi |
+|---|---|---|---|
+| `RM_STATS/stats_status.py` | `stats_status.py` | identyczne | okno „Status projektów” w RM_MANAGER; źródło: RM_STATS |
+| `RM_STATS/stats_project_summary.py` | `stats_project_summary.py` | identyczne | okno „Podsumowanie” w RM_MANAGER |
+| `RM_STATS/db.py` | `db.py` | różne z założenia | w RM-BAZA łącznik przez RM_SERWER; brakującą metodę przenosić 1:1 |
+| `RM_DWF/dwf_thumb.py` | `dwf_thumb.py` | identyczne poza `THUMB_CACHE_DIR` | każdy program ma swój cache miniatur |
+| `sprawdz_kopie.py`, `kopie_miedzy_repo.json` | to samo | identyczne | strażnik i lista |
+
+### Historia — żeby nie szukać plików
+
+- **10.10.2026 — `RM_Tray_Organizer` USUNIĘTY z RM-BAZA-MANAGER** (`RM_Tray_Organizer.pyw`,
+  `RM_Tray_Organizer.spec`, `RM_Tray_Organizer-COPY.spec` z katalogu głównego). To była
+  porzucona kopia z maja; **aktualny program jest w `NOW/RM_TRAY_ORGANIZER/`**. Stara wersja
+  w historii gita RM-BAZA-MANAGER (commit `5335670`).
+- **10.10.2026 — statystyki RM_MANAGER zsynchronizowane z RM_STATS** (commit `33417f3`
+  w RM-BAZA-MANAGER): `stats_*.py` były z 19.07 i nie miały poprawek z sierpnia (opóźnienia
+  etapów od prognozy, pauza projektu, karta maszyny). Do łącznika `db.py` dopisane 1:1
+  `project_sort_key`, `stage_attachments`, `stage_topics`.
+- **10.10.2026 — strażnik kopii** (`sprawdz_kopie.py`, `kopie_miedzy_repo.json`, `.githooks/`)
+  w obu repo.
+
 ## ⚠️ NAJPIERW PRZECZYTAJ PAMIĘĆ PROJEKTU
 
 W katalogu [`pamiec/`](pamiec/) leżą notatki opisujące ten system: przyczyny

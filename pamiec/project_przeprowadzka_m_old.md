@@ -229,6 +229,9 @@ New-SmbShare -Name RMPAK_CLIENT -Path C:\RMPAK_CLIENT -FullAccess 'Wszyscy'
 9. **Test:** `git status` w każdym repo = to samo co przed kopią;
    start `rm_serwer.py` → `RM_BAZA_v15_MAG_STATS_ORG.py` → `rm_manager_gui.py`;
    most Subiekta (`subiekt_sfera/bridge_test.py`).
+10a. **Strażnik kopii między repo** (od 10.10.2026) — w OBU repo raz:
+    `git config core.hooksPath .githooks`, potem `python sprawdz_kopie.py` = „zgodnych”.
+    Szczegóły: CLAUDE.md → „WSPÓLNE PLIKI Z DRUGIM REPO”.
 10. **Wygląd jak Windows 10** (nowy komputer ma Windows 11; user 09.10.2026 —
     „dopisz”). Bez instalacji:
     - pasek zadań / Start do lewej: Ustawienia → Personalizacja → Pasek zadań →

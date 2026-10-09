@@ -1,0 +1,65 @@
+{
+  "_opis": "Pliki wspolne dla repo NOW i RM-BAZA-MANAGER. Ten plik i sprawdz_kopie.py sa IDENTYCZNE w obu repo. Sprawdza je sprawdz_kopie.py (hook pre-commit). Zasada: kod ma JEDNO miejsce; kopia tylko gdy musi byc i tylko z wpisem tutaj. Historia: CLAUDE.md, sekcja 'Wspolne pliki z drugim repo'.",
+  "repozytoria": {
+    "NOW": {"znacznik": "RM_STATS/app.py", "katalog": "NOW"},
+    "RM-BAZA-MANAGER": {"znacznik": "RM_BAZA_v15_MAG_STATS_ORG.py", "katalog": "RM-BAZA-MANAGER"}
+  },
+  "kopie": [
+    {
+      "NOW": "RM_STATS/stats_status.py",
+      "RM-BAZA-MANAGER": "stats_status.py",
+      "tryb": "identyczne",
+      "zrodlo": "NOW",
+      "dlaczego": "okno Status projektow w RM_MANAGER = widok RM_STATS; rozni sie tylko db.py"
+    },
+    {
+      "NOW": "RM_STATS/stats_project_summary.py",
+      "RM-BAZA-MANAGER": "stats_project_summary.py",
+      "tryb": "identyczne",
+      "zrodlo": "NOW",
+      "dlaczego": "okno Podsumowanie w RM_MANAGER = widok RM_STATS"
+    },
+    {
+      "NOW": "RM_STATS/db.py",
+      "RM-BAZA-MANAGER": "db.py",
+      "tryb": "rozne_z_zalozenia",
+      "zrodlo": "-",
+      "dlaczego": "w RM-BAZA lacznik RMStatsDB przez RM_SERWER (podzbior metod); nowa metoda potrzebna stats_*.py -> przeniesc 1:1 z RM_STATS/db.py"
+    },
+    {
+      "NOW": "RM_DWF/dwf_thumb.py",
+      "RM-BAZA-MANAGER": "dwf_thumb.py",
+      "tryb": "identyczne_poza",
+      "ignoruj_linie": ["^THUMB_CACHE_DIR\\s*=", "^Skopiowane z RM_DWF", "^\\s*$"],
+      "zrodlo": "NOW",
+      "dlaczego": "miniatury DWF; kazdy program trzyma cache w swoim katalogu (THUMB_CACHE_DIR)"
+    },
+    {
+      "NOW": "sprawdz_kopie.py",
+      "RM-BAZA-MANAGER": "sprawdz_kopie.py",
+      "tryb": "identyczne",
+      "zrodlo": "oba",
+      "dlaczego": "straznik kopii - ten sam w obu repo"
+    },
+    {
+      "NOW": "kopie_miedzy_repo.json",
+      "RM-BAZA-MANAGER": "kopie_miedzy_repo.json",
+      "tryb": "identyczne",
+      "zrodlo": "oba",
+      "dlaczego": "ta lista - ta sama w obu repo"
+    }
+  ],
+  "ta_sama_nazwa_inny_plik": {
+    "_opis": "Nazwy .py wystepujace w obu repo, ktore NIE sa kopiami (inny kod) - nie zglaszac.",
+    "nazwy": ["__init__.py"]
+  },
+  "usuniete": [
+    {
+      "data": "2026-10-10",
+      "repo": "RM-BAZA-MANAGER",
+      "pliki": ["RM_Tray_Organizer.pyw", "RM_Tray_Organizer.spec", "RM_Tray_Organizer-COPY.spec"],
+      "gdzie_teraz": "NOW/RM_TRAY_ORGANIZER/",
+      "dlaczego": "porzucona kopia z maja 2026; aktualny program tylko w NOW"
+    }
+  ]
+}

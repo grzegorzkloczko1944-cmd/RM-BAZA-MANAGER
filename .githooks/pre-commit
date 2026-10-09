@@ -1,0 +1,10 @@
+#!/bin/sh
+# Strażnik kopii między repo NOW i RM-BAZA-MANAGER (sprawdz_kopie.py, CLAUDE.md).
+# Włączenie raz na klon:  git config core.hooksPath .githooks
+KORZEN="$(git rev-parse --show-toplevel)"
+PY="$(command -v python || command -v py || command -v python3)"
+if [ -z "$PY" ]; then
+    echo "sprawdz_kopie: brak Pythona w PATH - kopii nie sprawdzam (commit przechodzi)."
+    exit 0
+fi
+"$PY" "$KORZEN/sprawdz_kopie.py" --hook || exit 1

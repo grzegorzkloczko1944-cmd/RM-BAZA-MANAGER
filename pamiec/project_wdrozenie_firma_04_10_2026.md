@@ -102,6 +102,14 @@ Sprawdzenie bez okna edytora: `RM_KRZYWKA.exe --buduj <słupki.xlsx> <wynik.ipt>
 — w domu 166 s, nowy PID Inventora, Inventor usera nietknięty. Przy tym samym pullu: reszta
 z `NOW/DOKUMENTACJA/TODO.md` (RM_GUMA, ReTab, most RM_INVENTOR_MCP na Inventorze 2015).
 
+## Krok 5b — strażnik kopii między repo (dopisane 10.10.2026)
+
+Na każdym stanowisku, gdzie są OBA repo (NOW i RM-BAZA-MANAGER obok siebie), w każdym raz:
+`git config core.hooksPath .githooks`; sprawdzenie: `python sprawdz_kopie.py` → „zgodnych”.
+Hook zatrzymuje commit, gdy zarejestrowana kopia (stats_*.py, dwf_thumb.py…) różni się od
+drugiego repo albo gdy dochodzi nowy dubel nazwy .py. Na W2019S (tylko RM-BAZA) tylko informuje.
+Przy tym samym pullu: RM_MANAGER — statystyki zsynchronizowane z RM_STATS (przebudować exe).
+
 ## Krok 6 — testy po wdrożeniu (z userem)
 
 - [ ] RM_MANAGER → Kadry otwiera się od razu; Rozliczenie i Pula < 1 s
