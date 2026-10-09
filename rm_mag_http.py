@@ -47,6 +47,9 @@ ADRESY (wszystkie GET, odpowiedź JSON; `&format=tsv` = tekst dla VBA)
     POST /mag/typ/usun?id=&kto=         usunięcie (typ zdjęty z kartotek)
     POST /mag/typ/przypisz?typ=ID|-&kto=   symbole w treści (linia =
                                       symbol zakodowany jak w URL)
+    POST /mag/istnieja              numery w treści (linia = numer zakodowany jak w URL)
+                                      -> {"symbole": [te, które mają kartotekę]} - jedno
+                                      zapytanie na całą tabelę RM_GIT (filtr „Subiekt”)
     POST /mag/synchronizuj3d?kto=GKI  zlecenie indeksu modeli 3D — wykona
                                       dowolna stacja z Inventorem
     /mag/skrypt/indeks_modeli_3d.py   skrypt dla stacji (biała lista)
@@ -351,6 +354,28 @@ def kartoteka(bazy, symbol):
         return d
     finally:
         con.close()
+
+
+def istnieja(bazy, numery):
+    """Które z `numery` mają kartotekę (symbol bez względu na wielkość liter i spacje na brzegach).
+    Zwraca numery w postaci PODANEJ (klucz dla klienta), bez powtórzeń. Limit 5000 na zapytanie."""
+    numery = [n.strip() for n in numery if n and n.strip()][:5000]
+    if not numery:
+        return []
+    con, _ = bazy.polacz()
+    try:
+        jest = {w[0] for w in con.execute(
+            "SELECT UPPER(TRIM(symbol)) FROM kartoteki"
+            " WHERE UPPER(TRIM(symbol)) IN (SELECT UPPER(value) FROM json_each(?))",
+            (json.dumps(numery),))}
+    finally:
+        con.close()
+    out, byly = [], set()
+    for n in numery:
+        if n.upper() in jest and n.upper() not in byly:
+            byly.add(n.upper())
+            out.append(n)
+    return out
 
 
 def modele(bazy, symbol):
@@ -1082,6 +1107,17 @@ def zbuduj_handler(bazy, log, zlec=None):
                     self._dane(200, wynik, tsv)
                 except ValueError as e:
                     self._dane(400, {"blad": str(e)}, tsv)
+                except Exception as e:
+                    log("⚠️  MAG HTTP POST %s: %s" % (self.path, e))
+                    self._dane(500, {"blad": "%s: %s" % (type(e).__name__, e)}, tsv)
+                return
+            if sciezka == "/mag/istnieja":            # tylko odczyt - bez zleceń
+                try:
+                    dl = int(self.headers.get("Content-Length") or 0)
+                    if dl < 0 or dl > 1024 * 1024:
+                        raise ValueError("zły rozmiar listy (%d B)" % dl)
+                    cialo = self.rfile.read(dl).decode("ascii", "replace") if dl else ""
+                    self._dane(200, {"symbole": istnieja(bazy, [unquote(x) for x in cialo.split("\n")])}, tsv)
                 except Exception as e:
                     log("⚠️  MAG HTTP POST %s: %s" % (self.path, e))
                     self._dane(500, {"blad": "%s: %s" % (type(e).__name__, e)}, tsv)
