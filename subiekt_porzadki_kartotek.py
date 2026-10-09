@@ -520,9 +520,12 @@ class OknoPorzadki(tk.Toplevel, Kreciolek):
     # ── odczyt listy ───────────────────────────────────────────────────
     def _wczytaj_praca(self):
         """Cztery GET-y hurtem (nie per wiersz) + katalog z cache."""
-        czerw = mag_get("/mag/szukaj", typ="!", limit=500)
-        zolte = mag_get("/mag/szukaj", typ="!z", limit=500)
-        ziel = mag_get("/mag/szukaj", typ="!r", limit=500)
+        # limit=100000 = „wszystkie": serwer od e9ea8ed (wdrożony 09.10.2026 12:49) z filtrem oddaje całość,
+        # starszy przycina do LIMIT_MAX = 500. Było limit=500 — przy 1847 zielonych lista ucinała się.
+        # NIE limit=0: stary serwer zrobiłby z tego LIMIT 0 = pusta lista.
+        czerw = mag_get("/mag/szukaj", typ="!", limit=100000)
+        zolte = mag_get("/mag/szukaj", typ="!z", limit=100000)
+        ziel = mag_get("/mag/szukaj", typ="!r", limit=100000)
         usun = {u.get("symbol", "").strip().upper(): u for u in mag_get("/mag/do_usuniecia")}
         oceny = {o.get("symbol", "").strip().upper(): o for o in mag_get("/mag/oceny")}
         wiersze, widziane = [], set()
