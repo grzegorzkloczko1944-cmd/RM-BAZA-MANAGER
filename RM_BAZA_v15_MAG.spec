@@ -59,6 +59,13 @@ hiddenimports += [
     'subiekt_dopasowanie_gui', 'subiekt_dopasowanie',
     # Porządki w kartotekach — kolory z MAG, PW→RW na zamiennik (08.10.2026)
     'subiekt_porzadki_kartotek',
+    # Filtr Typ (+ kafelek) w oknie wydania z magazynu — import leniwy
+    # w subiekt_wydanie_gui (09.10.2026); bez wpisu okno wydania pada u usera.
+    'filtr_typu',
+    # Ramka i podswietlenie przyciskow w calej aplikacji (30.09.2026) — import
+    # w __init__ RM_BAZA w try/except, wiec brak w .exe NIE wywalal startu,
+    # tylko po cichu gubil wyglad. Brakowalo od 30.09 do 09.10.2026.
+    'rm_przyciski',
     # dopasowanie POJEDYNCZEGO wiersza (PPM w arkuszu) — import leniwy
     # w dopasuj_kartoteke_wiersza(), wiec statyczna analiza go NIE WIDZI
     'subiekt_dopasuj_wiersz_gui', 'subiekt_dopasuj_wiersz',

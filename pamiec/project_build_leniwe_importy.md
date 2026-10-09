@@ -54,6 +54,17 @@ sprawdzić punkt 2 — obecność modułów w archiwum. Patrz
 
 ---
 
+## 09.10.2026 — czwarty raz: `filtr_typu` i `rm_przyciski`
+Audyt AST przed buildem (domknięcie: start + `.spec` → importy z góry pliku;
+potem leniwe importy z każdego modułu w zasięgu) znalazł dwa braki:
+* `filtr_typu` — nowy moduł z 09.10 (okno wydania z magazynu); padłby u usera.
+* `rm_przyciski` — **od 30.09** (ramka/podświetlenie przycisków). Import w
+  `__init__` RM_BAZA w `try/except`, więc brak NIE wywalał startu — `.exe`
+  przez 9 dni po cichu działał bez tego wyglądu. `try/except` wokół leniwego
+  importu ukrywa tę pułapkę całkowicie; audyt jest jedyną kontrolą.
+Oba dopisane do `RM_BAZA_v15_MAG.spec`. Audyt przed każdym buildem — skrypt
+łatwo odtworzyć z opisu wyżej (ast.walk, `id(węzła)` z poziomu modułu = góra).
+
 ## Stan po audycie 23.09.2026 — WSZYSTKIE `.spec` domknięte
 
 Pułapka wróciła po raz trzeci, bo okna z 17–18.09 nie zostały dopisane.
