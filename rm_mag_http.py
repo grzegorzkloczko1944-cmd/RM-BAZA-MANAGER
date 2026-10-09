@@ -1111,9 +1111,16 @@ def zbuduj_handler(bazy, log, zlec=None):
                     self._dane(200, status(bazy), tsv)
                 elif sciezka == "/mag/szukaj":
                     try:
-                        limit = min(int(p.get("limit") or LIMIT_DOMYSLNY), LIMIT_MAX)
+                        limit = int(p.get("limit") or LIMIT_DOMYSLNY)
                     except ValueError:
                         limit = LIMIT_DOMYSLNY
+                    # Z filtrem (typ / do usunięcia / ocena) BEZ limitu (user 09.10.2026: filtr
+                    # „Rekomendowane” pokazywał same łożyska - 1847 zielonych, a lista ucięta).
+                    # Zwykłe szukanie bez filtra - jak dotąd, najwyżej LIMIT_MAX.
+                    if (p.get("typ") or "").strip():
+                        limit = -1 if limit <= 0 or limit > LIMIT_MAX else limit
+                    else:
+                        limit = min(limit, LIMIT_MAX)
                     self._dane(200, szukaj(bazy, p.get("q", ""), limit, p.get("typ", "")),
                                tsv, KOLUMNY_SZUKAJ)
                 elif sciezka == "/mag/oceny":
