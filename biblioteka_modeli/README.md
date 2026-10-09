@@ -194,6 +194,7 @@ Dla każdej partii przed raportem sprawdź i podaj liczby:
 - [ ] natywna miniatura biała + PNG w `miniatury\`, wpis w CSV rodziny,
 - [ ] brak sierot i dubli (albo lista do decyzji),
 - [ ] indeks MAG zasiany (liczba przypisań),
+- [ ] **TYP w MAG** dla nowego katalogu: `POST /mag/typ/dodaj?nazwa=…&kto=ADMIN` + `POST /mag/typ/przypisz?typ=ID&kto=ADMIN` (symbole w treści) — filtr „Wszystkie typy” ma pokazywać rodzinę (np. TULEJA ZACISKOWA),
 - [ ] **zdjęcia w Subiekcie dla KAŻDEJ zasianej pozycji** (wysłane / miały już / bez kartoteki; audyt: lista zdjęć przez most = 100 %) — zasiew bez zdjęć to niedokończona partia,
 - [ ] **oceny MAG: „Rekomendowane” z automatu** dla każdej pozycji **zasiewanej z biblioteki** (model w `B:\Znormalizowane\<katalog>`, zasiew MAG `reczny`, z miniaturą; nie dla modeli z automatycznego skanu/IDW) (autor **ADMIN**; `POST /mag/ocena/oznacz?ocena=rekomendowane&kto=ADMIN`, symbole w treści, ≤400 naraz, po `subiekt_kopia_sync.py`; nie nadpisuj Zastrzeżeń ani „do usunięcia”) — dotyczy też HIWIN, IGUS, ELESA i kolejnych katalogów (decyzja usera 08.10.2026),
 - [ ] Opis/Położenie w Subiekcie poprawione (odczyt kontrolny po zapisie),
