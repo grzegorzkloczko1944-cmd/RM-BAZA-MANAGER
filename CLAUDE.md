@@ -57,6 +57,8 @@ prawdziwa (10.10.2026: patrz historia niżej).
 | `RM_STATS/db.py` | `db.py` | różne z założenia | w RM-BAZA łącznik przez RM_SERWER; brakującą metodę przenosić 1:1 |
 | `RM_DWF/dwf_thumb.py` | `dwf_thumb.py` | identyczne poza `THUMB_CACHE_DIR` | każdy program ma swój cache miniatur |
 | `sprawdz_kopie.py`, `kopie_miedzy_repo.json` | to samo | identyczne | strażnik i lista |
+| `AGENTS.md` | `AGENTS.md` | identyczne | dla Codex / Cowork / innych agentów — odsyła tutaj + twarde reguły |
+| `.github/copilot-instructions.md` | to samo (blok „Zasady wspólne…”) | — | Copilot; własne zasady każdego repo zostają |
 
 ### Historia — żeby nie szukać plików
 

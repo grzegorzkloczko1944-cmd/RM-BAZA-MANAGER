@@ -31,9 +31,13 @@ Te pliki nigdy nie były w gicie, więc `git pull` ich nie usunie.
 
 ```bash
 cd <ścieżka>/NOW
-rm -f AGENTS.md              # nieaktualny duplikat CLAUDE.md
+rm -f AGENTS.md              # nieaktualny duplikat CLAUDE.md   ⚠ NIEAKTUALNE od 10.10.2026 — patrz niżej
 rm -rf .codex                # konfiguracja subagenta Codex (14.09)
 ```
+
+**⚠ 10.10.2026: `AGENTS.md` w NOW (i w RM-BAZA-MANAGER) to NOWY plik w gicie** — krótki
+odsyłacz do `CLAUDE.md` + twarde reguły dla innych agentów, identyczny w obu repo (pilnuje
+`sprawdz_kopie.py`). **NIE kasować.** Poniższe dotyczyło starego, nieśledzonego pliku z 14.09.
 
 **Dlaczego `AGENTS.md` leci:** powstał 14.09, `CLAUDE.md` z 28.09 go zastąpił,
 a stary zdążył się rozjechać z rzeczywistością — podawał **RM_PRINT na porcie

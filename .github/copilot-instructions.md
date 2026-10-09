@@ -20,3 +20,11 @@
 - Nie używaj właściwości API które nie są potwierdzone dla Inventor 2013
 - Przed dodaniem nowej właściwości obiektu Inventor — sprawdź czy istnieje w tej wersji
 - Preferuj minimalne zmiany (surgical fix) zamiast refaktoringu całej funkcji
+
+
+## Zasady wspólne dla wszystkich agentów (dom i firma)
+
+**Przeczytaj [`AGENTS.md`](../AGENTS.md) i [`CLAUDE.md`](../CLAUDE.md) przed pracą.** Najważniejsze:
+bez mixów między repo NOW ↔ RM-BAZA-MANAGER (kod w jednym miejscu, kopie tylko z listy
+`kopie_miedzy_repo.json`), hook `.githooks/pre-commit` nie do obchodzenia (`--no-verify` zakazane),
+bez pushu bez zgody usera, cudzych niezacommitowanych zmian nie ruszać.
