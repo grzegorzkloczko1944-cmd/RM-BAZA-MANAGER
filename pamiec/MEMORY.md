@@ -17,7 +17,7 @@ dotyczy obszaru, w którym pracujesz.
 - **[MAG i modele 3D](INDEKS_mag.md)** (13) — makro MAG w Inventorze, indeks modeli, biblioteki części
 - **[Serwer, bazy i sieć](INDEKS_serwer.md)** (25) — RM_SERWER, bazy SQLite, locki, udziały, NAS, backupy
 - **[Build, .exe i wdrożenia](INDEKS_build.md)** (9) — PyInstaller, bramka wersji, wystawianie na Y: i na serwer
-- **[RM_MANAGER: projekty, kadry, optymalizator](INDEKS_rm_manager.md)** (22) — linia produkcyjna, etapy, urlopy, serwis, AI, statystyki, RFQ
+- **[RM_MANAGER: projekty, kadry, optymalizator](INDEKS_rm_manager.md)** (23) — linia produkcyjna, etapy, urlopy, serwis, AI, statystyki, RFQ
 - **[Arkusz, okna i interfejs](INDEKS_interfejs.md)** (14) — arkusz główny, tksheet, drzewka, wygląd okien
 
 Zasada zapisu bez zmian: jeden fakt na plik `project_*.md` / `feedback_*.md` /

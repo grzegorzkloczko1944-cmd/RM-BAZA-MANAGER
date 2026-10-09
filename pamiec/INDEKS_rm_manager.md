@@ -29,3 +29,4 @@ Czesc pamieci projektu — spis wszystkich obszarow w [MEMORY.md](MEMORY.md).
 - [Aktualizacja BOM a zmiana numeru](project_aktualizacja_bom_zmiana_numeru.md) — dopasowanie też po `src_drawing_no`; ręczna nazwa wygrywa z plikiem
 - [Urlopy — saldo godzin](project_urlopy_saldo_godzin.md) — część dnia nie z puli, wisi na saldzie; odpracowanie albo 8 h = dzień urlopu; kratka do połowy (04.10.2026)
 - [Czytanie w pakiecie — przegląd 04.10](project_rm_manager_czytanie_w_pakiecie.md) — Kadry, lista projektów, Multi-projekt, oś czasu: seryjne → zbiorcze, zmierzone; skaner AST; co zostało
+- [Statystyki = kopie z RM_STATS](project_statystyki_kopie_rm_stats.md) — stats_status/stats_project_summary identyczne z NOW/RM_STATS, różni się tylko db.py; zsynchronizowane 10.10 (opóźnienia od prognozy, pauza)

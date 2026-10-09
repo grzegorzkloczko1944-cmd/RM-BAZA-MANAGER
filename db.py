@@ -13,13 +13,16 @@ Master RM_BAZA (projects) i główna baza RM_MANAGER (płatności) idą przez
 RM_SERWER — patrz _rmm(); pliki otwieramy tylko dla baz projektowych.
 
 Zawiera tylko metody używane przez oba widoki (Podsumowanie, Status projektów):
-list_projects, project_stage_status, project_forecast_inputs, payment_milestones.
+list_projects, project_stage_status, project_forecast_inputs, payment_milestones,
+stage_attachments, stage_topics + funkcja project_sort_key (10.10.2026: stats_*.py
+zsynchronizowane z RM_STATS — tamte już ich wymagały; stage_* przeniesione 1:1).
 Pełny db.py z RM_STATS ma więcej metod (materiały, pracownicy, urlopy) — dołóż
 gdy zajdzie potrzeba przeniesienia kolejnych widoków.
 """
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -38,6 +41,35 @@ def open_ro(path: str) -> sqlite3.Connection:
     con = sqlite3.connect(f'file:{uri}?mode=ro', uri=True)
     con.row_factory = sqlite3.Row
     return con
+
+
+def project_sort_key(name: str):
+    """Port 1:1 sort_key() z rm_manager_gui.py (lista rozwijana PROJEKT: w
+    glownym oknie) - [SYM] zawsze na gorze, potem projekty z numerem na
+    poczatku nazwy malejaco (numer wyciagniety regexem z name, NIE
+    project_id), na koncu projekty z prefiksem literowym (FH01, ZP171)
+    alfabetycznie po literach i numerycznie malejaco w ramach tej samej
+    litery. Uzywane wszedzie gdzie RM_STATS pokazuje liste projektow, zeby
+    kolejnosc byla identyczna jak w RM_MANAGER."""
+    name_lower = (name or '').lower()
+
+    if '[sym]' in name_lower:
+        clean_name = name_lower.replace('[sym]', '').strip()
+        return (-1, clean_name, 0, '')
+
+    match = re.match(r'^(\d+)', name_lower)
+    if match:
+        return (0, -int(match.group(1)), name_lower, '')
+
+    match2 = re.match(r'^([a-z]+)(\d+)?', name_lower)
+    if match2:
+        letter_part = match2.group(1)
+        num_part = match2.group(2)
+        if num_part:
+            return (1, letter_part, -int(num_part), name_lower)
+        return (1, letter_part, 0, name_lower)
+
+    return (1, name_lower, 0, '')
 
 
 def _rmm():
@@ -292,3 +324,92 @@ class RMStatsDB:
             rows = m.master_read('rmm-payment-milestones-wszystkie')
         return [{k: r.get(k) for k in ('project_id', 'percentage', 'payment_date', 'payment_type')}
                 for r in rows]
+
+    def stage_topics(self, project_id: int, stage_code: Optional[str] = None) -> List[Dict]:
+        """Tematy (stage_topics) + tresc notatek (stage_notes) dla etapu -
+        port rm_manager.py::get_topics, rozszerzony o pelna tresc notatek
+        (oryginal w RM_MANAGER zwraca tylko note_count, notatki dociaga
+        osobno przy rozwinieciu tematu w GUI). RM_STATS laduje od razu
+        wszystko, bo tu nie ma interakcji rozwijania - karta serwisanta
+        pokazuje notatki od razu."""
+        db_path = self.project_events_db_path(project_id)
+        if not db_path:
+            return []
+        con = open_ro(str(db_path))
+        try:
+            sql = (
+                'SELECT id, project_id, stage_code, topic_number, title, priority, color, created_by '
+                'FROM stage_topics WHERE project_id = ?'
+            )
+            params: List = [project_id]
+            if stage_code:
+                sql += ' AND stage_code = ?'
+                params.append(stage_code)
+            sql += ' ORDER BY stage_code, topic_number'
+            topic_rows = con.execute(sql, params).fetchall()
+            topics = [dict(r) for r in topic_rows]
+
+            if not topics:
+                return []
+            topic_ids = [t['id'] for t in topics]
+            placeholders = ','.join('?' * len(topic_ids))
+            note_rows = con.execute(
+                f'SELECT id, topic_id, note_text, created_by, created_at FROM stage_notes '
+                f'WHERE topic_id IN ({placeholders}) ORDER BY topic_id, sort_order, id',
+                topic_ids,
+            ).fetchall()
+            notes = [dict(r) for r in note_rows]
+
+            note_ids = [n['id'] for n in notes]
+            attachments_by_note: Dict[int, List[Dict]] = {}
+            if note_ids:
+                att_placeholders = ','.join('?' * len(note_ids))
+                att_rows = con.execute(
+                    f'SELECT id, note_id, filename, file_size, mime_type FROM stage_note_attachments '
+                    f'WHERE note_id IN ({att_placeholders}) ORDER BY id',
+                    note_ids,
+                ).fetchall()
+                for r in att_rows:
+                    attachments_by_note.setdefault(r['note_id'], []).append(dict(r))
+
+            notes_by_topic: Dict[int, List[Dict]] = {}
+            for n in notes:
+                n['attachments'] = attachments_by_note.get(n['id'], [])
+                notes_by_topic.setdefault(n['topic_id'], []).append(n)
+
+            for t in topics:
+                t['notes'] = notes_by_topic.get(t['id'], [])
+            return topics
+        except sqlite3.OperationalError:
+            return []
+        finally:
+            con.close()
+
+    def stage_attachments(self, project_id: int, stage_code: Optional[str] = None) -> List[Dict]:
+        """Zalaczniki przypiete bezposrednio do etapu (nie do notatki) -
+        "Karta maszyny" (etap PRZYJETY) / "Protokol" w RM_MANAGER, port
+        get_stage_attachments (bez BLOB, tylko metadane). stage_code=None
+        zwraca zalaczniki ze WSZYSTKICH etapow projektu (widok zbiorczy)."""
+        db_path = self.project_events_db_path(project_id)
+        if not db_path:
+            return []
+        con = open_ro(str(db_path))
+        try:
+            sql = (
+                'SELECT sa.id, sa.filename, sa.file_size, sa.mime_type, sa.uploaded_at, sa.uploaded_by, '
+                'ps.stage_code '
+                'FROM stage_attachments sa '
+                'JOIN project_stages ps ON sa.project_stage_id = ps.id '
+                'WHERE ps.project_id = ?'
+            )
+            params: List = [project_id]
+            if stage_code:
+                sql += ' AND ps.stage_code = ?'
+                params.append(stage_code)
+            sql += ' ORDER BY sa.uploaded_at'
+            rows = con.execute(sql, params).fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.OperationalError:
+            return []
+        finally:
+            con.close()

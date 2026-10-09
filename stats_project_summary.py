@@ -322,6 +322,20 @@ def build_project_summary(db: RMStatsDB, project: Dict) -> Dict:
 
     status_info = _project_status_label(project.get('project_status'), variance_status)
 
+    # Projekt W PAUZIE (project_pauses, otwarty wpis) nie jest realnym alarmem -
+    # zostal swiadomie wstrzymany, wiec "opoznienie" nie narasta z jego winy.
+    # Degradujemy status_code z DELAYED/AT_RISK na neutralny PAUSED, zeby:
+    #  - wypadl z kafla "Opoznione"/"Zagrozone" w Podsumowaniu,
+    #  - sortowal sie jak zgodny z planem (nie na gorze listy),
+    #  - is_delayed w stats_status.py bylo False.
+    # Zachowujemy pierwotny status i odchylenie (underlying_*), zeby UI moglo
+    # pokazac "WSTRZYMANY (opoznienie +Xd)". ZAKONCZONY (DONE) zostaje bez zmian.
+    is_paused = inputs.get('is_paused', False)
+    underlying_status_code = status_info['code']
+    underlying_status_label = status_info['label']
+    if is_paused and status_info['code'] in ('DELAYED', 'AT_RISK'):
+        status_info = {'code': 'PAUSED', 'label': 'WSTRZYMANY', 'icon': 'paused'}
+
     completion_dates = [fc['forecast_end'] for fc in forecast.values() if fc.get('forecast_end')]
     completion_forecast = max(completion_dates) if completion_dates else None
 
@@ -365,6 +379,10 @@ def build_project_summary(db: RMStatsDB, project: Dict) -> Dict:
         'name': project.get('name'),
         'status_code': status_info['code'],
         'status_label': status_info['label'],
+        # Pierwotny status przed degradacja przez pauze - do wyswietlenia
+        # "WSTRZYMANY (opoznienie +Xd)" gdy status_code=='PAUSED'.
+        'underlying_status_code': underlying_status_code,
+        'underlying_status_label': underlying_status_label,
         'overall_variance_days': total_variance,
         'completion_forecast': (completion_forecast or '')[:10] or None,
         'active_stages': active_stages,
@@ -384,6 +402,117 @@ def build_project_summary(db: RMStatsDB, project: Dict) -> Dict:
         # total_rows = wszystkie nie-ukryte pozycje w arkuszu (wliczajac ZZ) -
         # to samo "M" co w badge'u RM_MANAGER "📦 NN% (M)".
         'bom_completion_total': completion['total_rows'] if completion else None,
+    }
+
+
+def _stage_staff_list(assignments_by_stage: Dict[str, List[Dict]], employees_by_id: Dict[int, Dict], stage_code: str) -> List[Dict]:
+    result = []
+    for a in assignments_by_stage.get(stage_code, []):
+        emp = employees_by_id.get(a['employee_id'])
+        result.append({
+            'employee_id': a['employee_id'],
+            'name': emp.get('name') if emp else f"ID:{a['employee_id']}",
+            'category': emp.get('category') if emp else None,
+            'role': a.get('role'),
+        })
+    return result
+
+
+def build_project_timeline(db: RMStatsDB, project: Dict) -> Dict:
+    """Odpowiednik zakladki "Oś czasu" z RM_MANAGER (refresh_timeline) - lista
+    etapow projektu w kolejnosci sequence, kazdy z: template/forecast daty,
+    odchylenie (variance_days), przypisani pracownicy (stage_staff_assignments
+    + stage_employee_id dla milestone'ow), stan platnosci (milestone
+    ZAKONCZONY). Czysto read-only - agreguje istniejace cegielki
+    (recalculate_forecast/stage_definitions/employee_assignments/
+    payment_milestones), bez nowej logiki domenowej."""
+    pid = project['project_id']
+    inputs = db.project_forecast_inputs(pid)
+    if inputs.get('error'):
+        return {'project_id': pid, 'name': project.get('name'), 'error': inputs['error']}
+
+    forecast = recalculate_forecast(inputs)
+    definitions = db.stage_definitions(pid)
+
+    # Kolejnosc etapow = sequence z bazy (project_stage_status juz sortuje
+    # po tym polu), ograniczona do etapow faktycznie obecnych w forecast
+    # (project_forecast_inputs pomija WSTRZYMANY).
+    stage_status = db.project_stage_status(pid)
+    ordered_codes = [s['stage_code'] for s in stage_status.get('stages', []) if s['stage_code'] in forecast]
+    # Etapy w forecast a nieobecne w project_stage_status (nie powinno sie
+    # zdarzyc, ale nie gubimy danych) - doklejamy na koncu.
+    ordered_codes += [c for c in forecast if c not in ordered_codes]
+
+    raw_assignments = db.employee_assignments(pid)
+    assignments_by_stage: Dict[str, List[Dict]] = {}
+    for a in raw_assignments:
+        assignments_by_stage.setdefault(a['stage_code'], []).append(a)
+
+    employees_by_id = {e['id']: e for e in db.list_employees(only_active=False)}
+
+    milestones_payment = db.payment_milestones(project_id=pid)
+    total_paid_pct = sum(m['percentage'] for m in milestones_payment)
+    has_umorzony = any(m.get('payment_type') == 'UMORZONY' for m in milestones_payment)
+
+    stages_view = []
+    for code in ordered_codes:
+        fc = forecast[code]
+        definition = definitions.get(code, {})
+        is_milestone = definition.get('is_milestone', inputs['is_milestone'].get(code, False))
+
+        staff = _stage_staff_list(assignments_by_stage, employees_by_id, code)
+        # Milestone'y z pojedynczym przypisanym pracownikiem (np.
+        # URUCHOMIENIE_U_KLIENTA/SAT) uzywaja stage_schedule.employee_id,
+        # osobny mechanizm niz stage_staff_assignments (port
+        # get_stage_employee_id) - dokladamy go do listy jesli nie ma go juz
+        # tam (unikamy duplikatu gdyby oba mechanizmy wskazywaly te sama osobe).
+        if is_milestone:
+            emp_id = db.stage_employee_id(pid, code)
+            if emp_id and not any(s['employee_id'] == emp_id for s in staff):
+                emp = employees_by_id.get(emp_id)
+                staff.append({
+                    'employee_id': emp_id,
+                    'name': emp.get('name') if emp else f'ID:{emp_id}',
+                    'category': emp.get('category') if emp else None,
+                    'role': None,
+                })
+
+        # Transze platnosci - pokazywane bezposrednio przy milestone ZAKONCZONY
+        # (w RM_MANAGER opisywany jako "Zapłacony": suma transz >=100% lub
+        # UMORZONY podnosi ten milestone), zeby nie trzeba bylo przelaczac
+        # sie do osobnej zakladki Platnosci.
+        payments = None
+        if code == 'ZAKONCZONY':
+            payments = [
+                {'percentage': m['percentage'], 'payment_date': m.get('payment_date'), 'payment_type': m.get('payment_type')}
+                for m in milestones_payment
+            ]
+
+        stages_view.append({
+            'stage_code': code,
+            'display_name': definition.get('display_name') or code,
+            'is_milestone': is_milestone,
+            'is_sub_milestone': code in CHILD_MILESTONE_CODES,
+            'template_start': (fc.get('template_start') or '')[:10] or None,
+            'template_end': (fc.get('template_end') or '')[:10] or None,
+            'forecast_start': (fc.get('forecast_start') or '')[:10] or None,
+            'forecast_end': (fc.get('forecast_end') or '')[:10] or None,
+            'variance_days': fc.get('variance_days', 0),
+            'is_active': fc.get('is_active', False),
+            'is_actual': fc.get('is_actual', False),
+            'actual_periods': fc.get('actual_periods', []),
+            'staff': staff,
+            'payments': payments,
+        })
+
+    return {
+        'project_id': pid,
+        'name': project.get('name'),
+        'stages': stages_view,
+        'payment_total_paid_pct': total_paid_pct,
+        'payment_has_umorzony': has_umorzony,
+        'payment_transze_count': len(milestones_payment),
+        'is_paused': inputs.get('is_paused', False),
     }
 
 

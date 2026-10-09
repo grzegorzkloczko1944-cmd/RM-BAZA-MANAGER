@@ -9,8 +9,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Dict, List
 
-from db import RMStatsDB
-from stats_project_summary import build_project_summary
+from db import RMStatsDB, project_sort_key
+from stats_project_summary import build_project_summary, recalculate_forecast
 
 # Kolejnosc statusow zgodna z nomenklatura RM_MANAGER (kolumna projects.status
 # w master.sqlite, wypelniana przez GUI RM_MANAGER - patrz checkboxy
@@ -76,7 +76,18 @@ def _parse_date(value: str):
         return None
 
 
-def _project_delays(db: RMStatsDB, pid: int, today: date, current_status: str) -> List[Dict]:
+def _project_delays(
+    db: RMStatsDB, pid: int, today: date, current_status: str, forecast: Dict | None = None,
+) -> List[Dict]:
+    """`forecast` (z recalculate_forecast, patrz stats_project_summary.py) -
+    gdy podany, overrun_days liczy sie wzgledem forecast_end (przeliczona
+    prognoza z uwzglednieniem zaleznosci/opoznien poprzednich etapow), TA SAMA
+    miara co "Odchylenie" w RM_MANAGER/zakladka Podsumowanie. Bez tego liczylo
+    sie naiwnie (dzisiaj - planned_end z surowego szablonu bazowego) - dawalo
+    zupelnie inna (i myląco wieksza) liczbe niz RM_MANAGER dla etapow po
+    poslizgu wczesniejszych faz, bo nie uwzgledniało przesuniecia w lancuchu
+    zaleznosci (np. Uruchomienie z planem sprzed 70 dni, ale realny poczatek
+    przesuniety przez opoznienia Kompletacji/Montazu - naprawione 2026-08-26)."""
     stage_data = db.project_stage_status(pid)
     stages = stage_data.get('stages', [])
 
@@ -94,27 +105,37 @@ def _project_delays(db: RMStatsDB, pid: int, today: date, current_status: str) -
         # zamkniete po zaplanowanej dacie, to nie jest opoznienie realizacji.
         # TRANSPORT nie jest etapem z czasem trwania - to punktowe zdarzenie
         # (wyslano/odebrano), nie ma sensu liczyc go jako "opozniony etap".
-        if stage.get('stage_code') in ('PRZYJETY', 'TRANSPORT'):
+        stage_code = stage.get('stage_code')
+        if stage_code in ('PRZYJETY', 'TRANSPORT'):
             continue
 
-        stage_status = _normalize_status(stage.get('stage_code'))
+        stage_status = _normalize_status(stage_code)
         if _status_sort_key(stage_status) < current_idx:
             continue
 
-        planned_end = _parse_date(stage.get('planned_end'))
         actual_end = _parse_date(stage.get('actual_end'))
         actual_start = _parse_date(stage.get('actual_start'))
+
+        # Preferujemy forecast_end (CPM/prognoza, spojna z RM_MANAGER) - fallback
+        # na surowy planned_end tylko gdy forecast niedostepny (np. blad danych).
+        fc = (forecast or {}).get(stage_code)
+        if fc and fc.get('forecast_end'):
+            reference_end = _parse_date(fc['forecast_end'])
+            reference_end_raw = fc['forecast_end']
+        else:
+            reference_end = _parse_date(stage.get('planned_end'))
+            reference_end_raw = stage.get('planned_end')
 
         # Tylko etapy WCIAZ OTWARTE z minietym terminem licza sie jako
         # opoznienie - to realny, biezacy problem wymagajacy akcji teraz.
         # Etap juz zamkniety po terminie (nawet jesli zakonczyl sie pozniej
         # niz planowano) to zamknieta historia, nie wplywa juz na nic - lista
         # ma pokazywac co trzeba dogonic TERAZ, nie kronike przeszlosci.
-        if planned_end and not actual_end and planned_end < today:
+        if reference_end and not actual_end and reference_end < today:
             project_delays.append({
-                'stage_code': stage['stage_code'],
-                'planned_end': stage.get('planned_end'),
-                'overrun_days': (today - planned_end).days,
+                'stage_code': stage_code,
+                'planned_end': reference_end_raw,
+                'overrun_days': (today - reference_end).days,
                 'in_progress': bool(actual_start),
             })
     return project_delays
@@ -201,13 +222,37 @@ def build_status_overview(db: RMStatsDB) -> Dict:
         # nie byc na sciezce krytycznej). Do KLASYFIKACJI projektu jako
         # "opozniony" uzywamy wiec CPM/forecast (overall_variance_days) -
         # tej samej miary co zakladka Podsumowanie, zeby obie byly spojne.
-        project_delays = [] if skip_delays else _project_delays(db, pid, today, status)
+        # Overrun_days per etap liczymy TEZ wzgledem forecast (nie surowego
+        # planu bazowego) - inaczej etap po poslizgu wczesniejszych faz
+        # pokazywal myląco duzy overrun niezgodny z Odchyleniem w RM_MANAGER
+        # (patrz docstring _project_delays).
+        stage_forecast = None
+        if not skip_delays:
+            try:
+                forecast_inputs = db.project_forecast_inputs(pid)
+                if not forecast_inputs.get('error'):
+                    stage_forecast = recalculate_forecast(forecast_inputs)
+            except Exception:
+                stage_forecast = None
+        project_delays = [] if skip_delays else _project_delays(db, pid, today, status, stage_forecast)
 
+        # is_paused pochodzi z tabeli project_pauses (otwarty wpis) i jest
+        # NIEZALEZNE od statusu tekstowego 'Wstrzymany' - projekt moze byc w
+        # pauzie majac status np. 'Przyjety'. Taki projekt tez nie jest realnym
+        # alarmem, wiec traktujemy pauze jak skip_delays (is_delayed=False).
+        is_paused = False
+        underlying_variance = 0
         if skip_delays:
             is_delayed = False
         else:
             summary = build_project_summary(db, proj)
-            is_delayed = not summary.get('error') and summary.get('overall_variance_days', 0) > 5
+            is_paused = bool(summary.get('is_paused'))
+            underlying_variance = summary.get('overall_variance_days', 0)
+            is_delayed = (
+                not summary.get('error')
+                and not is_paused
+                and underlying_variance > 5
+            )
 
         # Przeterminowane milestone'y odbiorowe (FAT/ODBIOR_x/SAT) - osobna
         # kategoria, celowo NIEwliczana do is_delayed (patrz komentarz przy
@@ -228,6 +273,10 @@ def build_status_overview(db: RMStatsDB) -> Dict:
             'priority': proj.get('priority'),
             'status': status,
             'is_delayed': is_delayed,
+            # Pauza (project_pauses) + pierwotne odchylenie, zeby UI pokazalo
+            # "WSTRZYMANY (opoznienie +Xd)" zamiast czerwonego OPOZNIONY.
+            'is_paused': is_paused,
+            'underlying_variance_days': underlying_variance,
             'delays': project_delays,
             # Poprawki to normalny, zaplanowany etap (ma wlasny budzet czasu
             # w harmonogramie) - CPM slusznie NIE traktuje go jako opoznienie
@@ -235,6 +284,9 @@ def build_status_overview(db: RMStatsDB) -> Dict:
             # dodatkowy sygnal "wymaga uwagi" (cos wymagalo poprawy po
             # pierwszym odbiorze) - niezalezny od klasyfikacji is_delayed.
             'needs_attention': status == 'Poprawki',
+            # Karta maszyny (stage_attachments, etap PRZYJETY) - ta sama
+            # funkcja co przycisk "Karta maszyny" w Osi czasu RM_MANAGER.
+            'has_machine_card': bool(db.stage_attachments(pid, 'PRZYJETY')),
         }
         all_projects.append(row)
 
@@ -283,4 +335,38 @@ def build_status_overview(db: RMStatsDB) -> Dict:
         'overdue_milestone_count': len(overdue_milestone_projects),
         'overdue_milestone_projects': overdue_milestone_projects,
         'today': today.isoformat(),
+    }
+
+
+def build_project_list(db: RMStatsDB) -> Dict:
+    """Zakladka "Lista projektow" - wszystkie projekty w kolejnosci jak
+    lista rozwijana PROJEKT: w RM_MANAGER (project_sort_key, NIE
+    priorytet/opoznienia jak w Status projektow), z kolumnami: Karta
+    maszyny, Notatki i zalaczniki, Aktualny etap, Stan (zielony/czerwony/
+    ostrzezenie). Reuzywa te same dane co build_status_overview (all_projects
+    juz ma wszystkie potrzebne pola), tylko re-sortuje."""
+    overview = build_status_overview(db)
+    rows = list(overview['all_projects'])
+    rows.sort(key=lambda p: project_sort_key(p.get('name')))
+
+    overdue_milestones_by_pid = {
+        p['project_id']: len(p['milestones']) for p in overview['overdue_milestone_projects']
+    }
+
+    for row in rows:
+        pid = row['project_id']
+        # has_notes = to samo co pokazuje modal "Wszystkie notatki i
+        # zalaczniki" (bez etapu PRZYJETY - to osobna kolumna Karta maszyny):
+        # czy jest jakikolwiek temat z notatkami, lub zalacznik innego etapu.
+        topics = db.stage_topics(pid)
+        has_any_note = any(t.get('notes') for t in topics)
+        other_attachments = [a for a in db.stage_attachments(pid) if a.get('stage_code') != 'PRZYJETY']
+        row['has_notes'] = has_any_note or bool(other_attachments)
+        # Przeterminowane odbiory FAT/SAT - osobny sygnal ostrzegawczy,
+        # niezalezny od is_delayed/needs_attention (patrz _overdue_milestones).
+        row['overdue_milestones_count'] = overdue_milestones_by_pid.get(pid, 0)
+
+    return {
+        'rows': rows,
+        'today': overview['today'],
     }
